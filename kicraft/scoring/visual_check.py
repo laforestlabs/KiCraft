@@ -17,7 +17,6 @@ attaches image paths to the result for downstream consumption.
 """
 import os
 import subprocess
-import sys
 
 from .base import LayoutCheck, CheckResult, Issue
 

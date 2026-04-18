@@ -17,16 +17,15 @@ Pure Python, no pcbnew dependency.
 """
 from __future__ import annotations
 
-import copy
 import math
 import random
 from collections import defaultdict
 
 from .types import (
     Point, Component, Net, BoardState, Layer,
-    FunctionalGroup, GroupSet, PlacedGroup,
+    PlacedGroup,
 )
-from .graph import build_connectivity_graph, AdjacencyGraph
+from .graph import AdjacencyGraph
 
 
 class GroupPlacer:
@@ -275,7 +274,6 @@ class GroupPlacer:
         are pinned on their edge axis but can slide along it.
         """
         edge_locked = {lr: edge for lr, edge, _ in edge_groups}
-        margin = self.edge_margin
 
         damping = 1.0
         for _ in range(80):

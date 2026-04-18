@@ -11,7 +11,7 @@ def main():
     board = pcbnew.LoadBoard(sys.argv[1])
     board.BuildConnectivity()
 
-    nets = board.GetNetsByName()
+    board.GetNetsByName()
     net_pads = {}
 
     for pad in board.GetPads():

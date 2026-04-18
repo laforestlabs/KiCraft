@@ -115,7 +115,7 @@ def main():
                              "containing an 'ic_groups' key")
     args = parser.parse_args()
 
-    IC_GROUPS = load_ic_groups(args.config)
+    load_ic_groups(args.config)
     parse_schematic_groups(args.schematic)
 
 

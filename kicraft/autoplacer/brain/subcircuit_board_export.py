@@ -84,7 +84,7 @@ def render_subcircuit_board(
     lines.append("(kicad_pcb")
     lines.append(f"\t(version {KICAD_PCB_VERSION})")
     lines.append('\t(generator "' + KICAD_GENERATOR + '")')
-    lines.append(f'\t(generator_version "1.0")')
+    lines.append('\t(generator_version "1.0")')
     lines.append(
         '\t(uuid "' + _stable_uuid(layout.subcircuit_id.instance_path, "board") + '")'
     )
@@ -332,7 +332,7 @@ def _render_component_pads(component) -> list[str]:
                 f"\t\t\t(layers {pad_layer})",
                 f'\t\t\t(net 0 "{_escape(pad.net)}")',
                 f'\t\t\t(pinfunction "{_escape(pad.pad_id)}")',
-                f'\t\t\t(pintype "passive")',
+                '\t\t\t(pintype "passive")',
                 '\t\t\t(uuid "'
                 + _stable_uuid(component.ref, f"pad-{pad.pad_id}-{idx}")
                 + '")',
@@ -349,7 +349,7 @@ def _render_trace(trace) -> list[str]:
         f"\t\t(end {_fmt(trace.end.x)} {_fmt(trace.end.y)})",
         f"\t\t(width {_fmt(max(0.05, trace.width_mm or DEFAULT_SEGMENT_WIDTH_MM))})",
         f'\t\t(layer "{_layer_name(trace.layer)}")',
-        f"\t\t(net 0)",
+        "\t\t(net 0)",
         '\t\t(uuid "'
         + _stable_uuid(
             trace.net,

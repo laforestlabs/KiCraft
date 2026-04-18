@@ -22,7 +22,6 @@ import glob
 import json
 import os
 import sys
-from pathlib import Path
 
 
 def load_jsonl(path: str) -> list[dict]:

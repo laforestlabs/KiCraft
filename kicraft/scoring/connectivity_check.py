@@ -1,5 +1,4 @@
 """Net connectivity check."""
-import pcbnew
 from .base import LayoutCheck, CheckResult, Issue
 
 

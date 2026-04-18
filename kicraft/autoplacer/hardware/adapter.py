@@ -5,7 +5,6 @@ on pure-Python types from brain.types.
 """
 
 import json
-import math
 import os
 import site
 import subprocess

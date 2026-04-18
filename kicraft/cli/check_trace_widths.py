@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Find traces narrower than a minimum width."""
-import sys
 import argparse
 import pcbnew
 

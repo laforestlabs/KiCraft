@@ -26,7 +26,6 @@ Options:
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import os
 import re
@@ -34,7 +33,7 @@ import shutil
 import sys
 import uuid
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -697,11 +696,11 @@ def generate_sub_sheet(
         lines.append(f'\t{_shift_block_coords(nc.text, dx, dy)}\n')
 
     # --- Sheet instances ---
-    lines.append(f'\n\t(sheet_instances\n')
-    lines.append(f'\t\t(path "/"\n')
-    lines.append(f'\t\t\t(page "1")\n')
-    lines.append(f'\t\t)\n')
-    lines.append(f'\t)\n')
+    lines.append('\n\t(sheet_instances\n')
+    lines.append('\t\t(path "/"\n')
+    lines.append('\t\t\t(page "1")\n')
+    lines.append('\t\t)\n')
+    lines.append('\t)\n')
 
     lines.append('\t(embedded_fonts no)\n')
     lines.append(')\n')
@@ -775,37 +774,37 @@ def generate_root_sheet(
 
         actual_height = max(sheet_height, 5 + len(sheet_nets) * 3)
 
-        lines.append(f'\t(sheet\n')
+        lines.append('\t(sheet\n')
         lines.append(f'\t\t(at {x} {y})\n')
         lines.append(f'\t\t(size {sheet_width} {actual_height})\n')
-        lines.append(f'\t\t(fields_autoplaced yes)\n')
-        lines.append(f'\t\t(stroke\n')
-        lines.append(f'\t\t\t(width 0.2)\n')
-        lines.append(f'\t\t\t(type solid)\n')
-        lines.append(f'\t\t)\n')
-        lines.append(f'\t\t(fill\n')
-        lines.append(f'\t\t\t(color 255 255 194 1)\n')
-        lines.append(f'\t\t)\n')
+        lines.append('\t\t(fields_autoplaced yes)\n')
+        lines.append('\t\t(stroke\n')
+        lines.append('\t\t\t(width 0.2)\n')
+        lines.append('\t\t\t(type solid)\n')
+        lines.append('\t\t)\n')
+        lines.append('\t\t(fill\n')
+        lines.append('\t\t\t(color 255 255 194 1)\n')
+        lines.append('\t\t)\n')
         lines.append(f'\t\t(uuid "{s_uuid}")\n')
         lines.append(f'\t\t(property "Sheetname" "{name}"\n')
         lines.append(f'\t\t\t(at {x} {y - 1} 0)\n')
-        lines.append(f'\t\t\t(effects (font (size 1.27 1.27)) (justify left bottom))\n')
-        lines.append(f'\t\t)\n')
+        lines.append('\t\t\t(effects (font (size 1.27 1.27)) (justify left bottom))\n')
+        lines.append('\t\t)\n')
         lines.append(f'\t\t(property "Sheetfile" "{fname}"\n')
         lines.append(f'\t\t\t(at {x} {y + actual_height + 1} 0)\n')
-        lines.append(f'\t\t\t(effects (font (size 1.27 1.27)) (justify left top) (hide yes))\n')
-        lines.append(f'\t\t)\n')
+        lines.append('\t\t\t(effects (font (size 1.27 1.27)) (justify left top) (hide yes))\n')
+        lines.append('\t\t)\n')
 
         # Add hierarchical pins for cross-group nets
         for j, net_name in enumerate(sheet_nets):
             pin_y = y + 5 + j * 3
             lines.append(f'\t\t(pin "{net_name}" bidirectional\n')
             lines.append(f'\t\t\t(at {x + sheet_width} {pin_y} 0)\n')
-            lines.append(f'\t\t\t(effects (font (size 1.27 1.27)))\n')
+            lines.append('\t\t\t(effects (font (size 1.27 1.27)))\n')
             lines.append(f'\t\t\t(uuid "{_new_uuid()}")\n')
-            lines.append(f'\t\t)\n')
+            lines.append('\t\t)\n')
 
-        lines.append(f'\t)\n\n')
+        lines.append('\t)\n\n')
 
     # --- Wire connections between sheet pins sharing the same net ---
     # For each cross-group net, add labels on the root sheet to connect pins
@@ -815,23 +814,23 @@ def generate_root_sheet(
         ly = label_y
         lines.append(f'\t(label "{net_name}"\n')
         lines.append(f'\t\t(at {lx:.2f} {ly:.2f} 0)\n')
-        lines.append(f'\t\t(effects\n')
-        lines.append(f'\t\t\t(font (size 1.27 1.27))\n')
-        lines.append(f'\t\t)\n')
+        lines.append('\t\t(effects\n')
+        lines.append('\t\t\t(font (size 1.27 1.27))\n')
+        lines.append('\t\t)\n')
         lines.append(f'\t\t(uuid "{_new_uuid()}")\n')
-        lines.append(f'\t)\n')
+        lines.append('\t)\n')
 
     # --- Sheet instances ---
-    lines.append(f'\n\t(sheet_instances\n')
-    lines.append(f'\t\t(path "/"\n')
-    lines.append(f'\t\t\t(page "1")\n')
-    lines.append(f'\t\t)\n')
+    lines.append('\n\t(sheet_instances\n')
+    lines.append('\t\t(path "/"\n')
+    lines.append('\t\t\t(page "1")\n')
+    lines.append('\t\t)\n')
     for i, leader in enumerate(sorted_leaders):
         s_uuid = sheet_uuids[leader]
         lines.append(f'\t\t(path "/{s_uuid}"\n')
         lines.append(f'\t\t\t(page "{i + 2}")\n')
-        lines.append(f'\t\t)\n')
-    lines.append(f'\t)\n')
+        lines.append('\t\t)\n')
+    lines.append('\t)\n')
 
     lines.append('\t(embedded_fonts no)\n')
     lines.append(')\n')
@@ -849,7 +848,7 @@ def assign_labels_to_groups(
     ic_groups: dict,
 ) -> None:
     """Assign labels to groups based on spatial proximity to group components."""
-    ref_to_group = build_ref_to_group(ic_groups)
+    build_ref_to_group(ic_groups)
 
     # Build per-group component positions
     group_positions: dict[str, list[tuple[float, float]]] = defaultdict(list)

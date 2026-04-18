@@ -3,7 +3,6 @@
 import argparse
 import json
 import os
-import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
 
@@ -187,11 +186,11 @@ def main():
     visual = report.get("categories", {}).get("visual", {})
     render_paths = visual.get("metrics", {}).get("render_paths", {})
     if render_paths and args.review:
-        print(f"  === VISUAL REVIEW ===")
-        print(f"  The following renders are ready for visual inspection:")
+        print("  === VISUAL REVIEW ===")
+        print("  The following renders are ready for visual inspection:")
         for view, path in render_paths.items():
             print(f"    READ: {os.path.abspath(path)}")
-        print(f"  Use Claude's Read tool to view each PNG and evaluate the checklist.\n")
+        print("  Use Claude's Read tool to view each PNG and evaluate the checklist.\n")
 
     # Record iteration in session tracker
     if not args.no_track:

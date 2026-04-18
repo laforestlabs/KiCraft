@@ -68,7 +68,7 @@ class CompactnessCheck(LayoutCheck):
 
         total_cells = rows * cols
         occupied_cells = sum(sum(row) for row in grid)
-        empty_cells = total_cells - occupied_cells
+        total_cells - occupied_cells
         cell_fill = occupied_cells / total_cells if total_cells > 0 else 0
 
         issues = []

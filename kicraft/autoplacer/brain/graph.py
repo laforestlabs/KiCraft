@@ -5,9 +5,8 @@ Pure Python, no external dependencies.
 from __future__ import annotations
 import random
 from collections import defaultdict
-from math import hypot
 
-from .types import Net, Point, Component, BoardState
+from .types import Net, Point, BoardState
 
 
 class AdjacencyGraph:

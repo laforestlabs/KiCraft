@@ -124,10 +124,6 @@ from kicraft.autoplacer.brain.subcircuit_artifacts import (
     save_solved_layout_artifact,
     serialize_components,
 )
-from kicraft.autoplacer.brain.subcircuit_board_export import (
-    ExportOptions,
-    export_subcircuit_board,
-)
 from kicraft.autoplacer.brain.subcircuit_extractor import (
     ExtractedSubcircuitBoard,
     extract_leaf_board_state,
@@ -245,7 +241,6 @@ class SolvedLeafSubcircuit:
 
     def best_round_to_layout(self):
         from kicraft.autoplacer.brain.subcircuit_solver import infer_interface_anchors
-        from kicraft.autoplacer.brain.types import SubCircuitLayout
 
         anchors = infer_interface_anchors(
             self.extraction.interface_ports,
@@ -2021,7 +2016,7 @@ def _route_local_subcircuit(
     drc = validation.get("drc", {})
     drc_stdout = str(drc.get("stdout", ""))
     drc_stderr = str(drc.get("stderr", ""))
-    drc_report_text = "\n".join(
+    "\n".join(
         part for part in (drc_stdout, drc_stderr) if part.strip()
     )
 

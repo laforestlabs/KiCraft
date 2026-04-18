@@ -45,7 +45,7 @@ def parse_footprints(pcb_text: str) -> dict:
 
     # Match top-level footprint blocks and extract reference + position + layer
     # KiCad footprints start with (footprint "..." and contain property "Reference"
-    fp_pattern = re.compile(
+    re.compile(
         r'\(footprint\s+"[^"]*"'
         r'(?:\s+\(locked\))?'            # optional locked flag
         r'\s+\(layer\s+"([^"]+)"\)'       # layer

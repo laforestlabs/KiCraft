@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
-from ..db import Database, ExperimentRun
+from ..db import Database
 
 
 def import_jsonl(db: Database, jsonl_path: str | Path,

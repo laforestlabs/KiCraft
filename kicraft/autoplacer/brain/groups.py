@@ -9,8 +9,6 @@ Pure Python, no pcbnew dependency.
 """
 from __future__ import annotations
 
-import os
-import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -455,7 +453,7 @@ def _compute_inter_group_nets(group_set: GroupSet, nets: dict[str, Net]):
     A net is "inter-group" if it connects components from two or more
     different groups. GND is excluded.
     """
-    ref_to_group = group_set.ref_to_group()
+    group_set.ref_to_group()
 
     for group in group_set.groups:
         inter_nets = set()

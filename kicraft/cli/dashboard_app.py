@@ -11,11 +11,8 @@ Usage:
 from __future__ import annotations
 import argparse
 import json
-import os
 import subprocess
 import sys
-import threading
-import time
 from pathlib import Path
 
 # Flask is optional - show helpful error if missing
@@ -836,7 +833,7 @@ def main():
     
     print(f"Starting dashboard on http://{args.host}:{args.port}")
     print(f"Monitoring: {EXPERIMENTS_DIR.absolute()}")
-    print(f"Use --stop to signal a running experiment to stop gracefully")
+    print("Use --stop to signal a running experiment to stop gracefully")
     
     app.run(host=args.host, port=args.port, debug=False)
 

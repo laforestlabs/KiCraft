@@ -16,7 +16,6 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
 
 
 def load_round(rounds_dir: str, round_num: int) -> dict:

@@ -19,7 +19,6 @@ import sys
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 import numpy as np
 
 
@@ -85,10 +84,10 @@ def parse_pad_positions(pcb_path: str) -> dict[str, list[tuple[float, float]]]:
 
     # Find footprints and their pads with positions
     # This is a simplified parser — matches at(x y) and net assignment within pad blocks
-    fp_pattern = re.compile(
+    re.compile(
         r'\(footprint\b[^)]*\(at\s+([\d.\-]+)\s+([\d.\-]+)(?:\s+[\d.\-]+)?\)'
     )
-    pad_pattern = re.compile(
+    re.compile(
         r'\(pad\b[^)]*\(at\s+([\d.\-]+)\s+([\d.\-]+)[^)]*\)'
         r'.*?\(net\s+(\d+)\s+"[^"]*"\)',
         re.DOTALL,

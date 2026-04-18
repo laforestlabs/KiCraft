@@ -23,7 +23,6 @@ from .graph import (
     build_connectivity_graph,
     count_crossings,
     find_communities,
-    minimum_spanning_tree,
     total_ratsnest_length,
 )
 from .types import (
@@ -32,7 +31,6 @@ from .types import (
     FunctionalGroup,
     Layer,
     Net,
-    Pad,
     PlacedGroup,
     PlacementScore,
     Point,
@@ -2242,8 +2240,8 @@ class PlacementSolver:
                 continue
 
             # Compute cluster centroid
-            cx = sum(comps[r].pos.x for r in unlocked) / len(unlocked)
-            cy = sum(comps[r].pos.y for r in unlocked) / len(unlocked)
+            sum(comps[r].pos.x for r in unlocked) / len(unlocked)
+            sum(comps[r].pos.y for r in unlocked) / len(unlocked)
 
             # Mini force-directed loop: attract connected, repel overlapping
             damping = 1.0
@@ -2613,7 +2611,7 @@ class PlacementSolver:
                 forces[ref].y += f_mag * math.sin(angle)
 
         ref_list = list(comps.keys())
-        n = len(ref_list)
+        len(ref_list)
 
         pos_x = np.array([comps[r].pos.x for r in ref_list], dtype=np.float64)
         pos_y = np.array([comps[r].pos.y for r in ref_list], dtype=np.float64)
@@ -3457,7 +3455,6 @@ class PlacementSolver:
 
         # Cluster ungrouped passives by proximity (simple greedy clustering)
         if ungrouped:
-            clusters: list[list[str]] = []
             remaining = set(ungrouped)
             cluster_radius = 20.0  # mm
             while remaining:
