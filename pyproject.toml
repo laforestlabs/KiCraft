@@ -1,0 +1,93 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kicad-helper"
+version = "0.1.0"
+description = "KiCad PCB automation toolkit — placement, routing, scoring, and experiment management"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+gui = [
+    "nicegui>=1.4",
+    "sqlalchemy>=2.0",
+    "plotly>=5.0",
+]
+scoring = [
+    "Pillow>=10.0",
+]
+experiment = [
+    "matplotlib>=3.7",
+    "flask>=3.0",
+    "structlog>=23.0",
+]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.1",
+]
+
+[project.scripts]
+# Core pipeline
+solve-subcircuits = "kicad_helper.cli.solve_subcircuits:main"
+compose-subcircuits = "kicad_helper.cli.compose_subcircuits:main"
+solve-hierarchy = "kicad_helper.cli.solve_hierarchy:main"
+export-subcircuit-artifacts = "kicad_helper.cli.export_subcircuit_artifacts:main"
+run-hierarchical-pipeline = "kicad_helper.cli.run_hierarchical_pipeline:main"
+
+# Experiment management
+autoexperiment = "kicad_helper.cli.autoexperiment:main"
+clean-experiments = "kicad_helper.cli.clean_experiments:main"
+watch-status = "kicad_helper.cli.watch_status:main"
+
+# Scoring & rendering
+score-layout = "kicad_helper.cli.score_layout:main"
+render-pcb = "kicad_helper.cli.render_pcb:main"
+render-drc-overlay = "kicad_helper.cli.render_drc_overlay:main"
+render-failure-heatmap = "kicad_helper.cli.render_failure_heatmap:main"
+
+# Analysis
+diff-rounds = "kicad_helper.cli.diff_rounds:main"
+generate-report = "kicad_helper.cli.generate_report:main"
+plot-experiments = "kicad_helper.cli.plot_experiments:main"
+plot-scores = "kicad_helper.cli.plot_scores:main"
+
+# Board manipulation
+move-component = "kicad_helper.cli.move_component:main"
+align-components = "kicad_helper.cli.align_components:main"
+arrange-grid = "kicad_helper.cli.arrange_grid:main"
+add-gnd-zone = "kicad_helper.cli.add_gnd_zone:main"
+add-group-labels = "kicad_helper.cli.add_group_labels:main"
+cleanup-routing = "kicad_helper.cli.cleanup_routing:main"
+split-schematic = "kicad_helper.cli.split_schematic:main"
+
+# Inspection
+list-footprints = "kicad_helper.cli.list_footprints:main"
+check-trace-widths = "kicad_helper.cli.check_trace_widths:main"
+run-drc = "kicad_helper.cli.run_drc:main"
+net-report = "kicad_helper.cli.net_report:main"
+inspect-subcircuits = "kicad_helper.cli.inspect_subcircuits:main"
+inspect-solved-subcircuits = "kicad_helper.cli.inspect_solved_subcircuits:main"
+parse-schematic = "kicad_helper.cli.parse_schematic:main"
+
+# Session tracking
+layout-session = "kicad_helper.cli.layout_session:main"
+
+# Dashboard
+dashboard-app = "kicad_helper.cli.dashboard_app:main"
+
+[tool.setuptools.packages.find]
+include = ["kicad_helper*"]
+
+[tool.setuptools.package-data]
+"kicad_helper.cli" = ["program.md"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
