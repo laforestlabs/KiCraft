@@ -103,17 +103,17 @@ def _ensure_kicad_python_path() -> None:
 
 _ensure_kicad_python_path()
 
-from kicad_helper.autoplacer.brain.hierarchy_parser import (
+from kicraft.autoplacer.brain.hierarchy_parser import (
     HierarchyGraph,
     HierarchyNode,
     parse_hierarchy,
 )
-from kicad_helper.autoplacer.brain.placement import (
+from kicraft.autoplacer.brain.placement import (
     PlacementScorer,
     PlacementSolver,
     _update_pad_positions,
 )
-from kicad_helper.autoplacer.brain.subcircuit_artifacts import (
+from kicraft.autoplacer.brain.subcircuit_artifacts import (
     build_anchor_validation,
     build_artifact_metadata,
     build_leaf_extraction,
@@ -124,34 +124,34 @@ from kicad_helper.autoplacer.brain.subcircuit_artifacts import (
     save_solved_layout_artifact,
     serialize_components,
 )
-from kicad_helper.autoplacer.brain.subcircuit_board_export import (
+from kicraft.autoplacer.brain.subcircuit_board_export import (
     ExportOptions,
     export_subcircuit_board,
 )
-from kicad_helper.autoplacer.brain.subcircuit_extractor import (
+from kicraft.autoplacer.brain.subcircuit_extractor import (
     ExtractedSubcircuitBoard,
     extract_leaf_board_state,
     extraction_debug_dict,
     summarize_extraction,
 )
-from kicad_helper.autoplacer.brain.subcircuit_render_diagnostics import (
+from kicraft.autoplacer.brain.subcircuit_render_diagnostics import (
     generate_leaf_diagnostic_artifacts,
     generate_stage_diagnostic_artifacts,
 )
-from kicad_helper.autoplacer.brain.types import (
+from kicraft.autoplacer.brain.types import (
     BoardState,
     Component,
     PlacementScore,
     Point,
     SubCircuitLayout,
 )
-from kicad_helper.autoplacer.config import DEFAULT_CONFIG, load_project_config
-from kicad_helper.autoplacer.freerouting_runner import (
+from kicraft.autoplacer.config import DEFAULT_CONFIG, load_project_config
+from kicraft.autoplacer.freerouting_runner import (
     import_routed_copper,
     route_with_freerouting,
     validate_routed_board,
 )
-from kicad_helper.autoplacer.hardware.adapter import KiCadAdapter
+from kicraft.autoplacer.hardware.adapter import KiCadAdapter
 
 
 @dataclass(slots=True)
@@ -244,8 +244,8 @@ class SolvedLeafSubcircuit:
         return self.node.id.instance_path
 
     def best_round_to_layout(self):
-        from kicad_helper.autoplacer.brain.subcircuit_solver import infer_interface_anchors
-        from kicad_helper.autoplacer.brain.types import SubCircuitLayout
+        from kicraft.autoplacer.brain.subcircuit_solver import infer_interface_anchors
+        from kicraft.autoplacer.brain.types import SubCircuitLayout
 
         anchors = infer_interface_anchors(
             self.extraction.interface_ports,
@@ -328,7 +328,7 @@ def _load_config(
 
     # Auto-discover project-specific config if no explicit path given
     if not config_path and project_dir:
-        from kicad_helper.autoplacer.config import discover_project_config
+        from kicraft.autoplacer.config import discover_project_config
 
         discovered = discover_project_config(project_dir)
         if discovered:

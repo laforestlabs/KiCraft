@@ -1,4 +1,4 @@
-"""Entry point: python -m gui"""
+"""Entry point: python -m kicraft.gui"""
 # NiceGUI requires page definitions to exist before ui.run(),
 # and this module must not use an `if __name__` guard.
 from . import app  # noqa: F401 — registers @ui.page routes

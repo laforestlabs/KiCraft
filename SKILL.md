@@ -1,5 +1,5 @@
 ---
-name: kicad-helper
+name: KiCraft
 description: Use when the user asks to "check trace widths", "audit my layout", "list footprints", "rearrange footprints", "arrange LEDs in a grid", "move component", "run DRC", "check clearances", "align components", or discusses KiCad PCB layout automation. Provides Python scripts using the KiCad 9 pcbnew API to parse and modify .kicad_pcb files.
 ---
 

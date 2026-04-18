@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 import pcbnew
 
-from kicad_helper.scoring import ALL_CHECKS
+from kicraft.scoring import ALL_CHECKS
 
 DEFAULT_CONFIG = {
     "power_nets": ["VBUS", "VBAT", "5V", "3V3", "3.3V", "+5V", "+3V3", "GND"],

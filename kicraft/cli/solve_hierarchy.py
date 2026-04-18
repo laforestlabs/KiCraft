@@ -31,7 +31,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 
 def _load_config(project_dir: Path) -> dict:
     """Load project configuration, merging defaults with project-specific."""
-    from kicad_helper.autoplacer.config import (
+    from kicraft.autoplacer.config import (
         DEFAULT_CONFIG,
         discover_project_config,
         load_project_config,
@@ -259,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     print()
 
     # Find the root parent name from hierarchy
-    from kicad_helper.autoplacer.brain.hierarchy_parser import parse_hierarchy
+    from kicraft.autoplacer.brain.hierarchy_parser import parse_hierarchy
 
     hierarchy = parse_hierarchy(str(project_dir))
     parent_name = hierarchy.root.definition.id.sheet_name

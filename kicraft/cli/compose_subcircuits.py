@@ -40,15 +40,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from kicad_helper.autoplacer.brain.hierarchy_parser import parse_hierarchy
+from kicraft.autoplacer.brain.hierarchy_parser import parse_hierarchy
 
 
-from kicad_helper.autoplacer.brain.subcircuit_composer import (
+from kicraft.autoplacer.brain.subcircuit_composer import (
     ChildArtifactPlacement,
     ParentComposition,
     build_parent_composition,
 )
-from kicad_helper.autoplacer.brain.subcircuit_instances import (
+from kicraft.autoplacer.brain.subcircuit_instances import (
     artifact_debug_dict,
     artifact_summary,
     load_solved_artifacts,
@@ -56,7 +56,7 @@ from kicad_helper.autoplacer.brain.subcircuit_instances import (
     transformed_debug_dict,
     transformed_summary,
 )
-from kicad_helper.autoplacer.brain.types import Point, SubCircuitDefinition, SubCircuitId
+from kicraft.autoplacer.brain.types import Point, SubCircuitDefinition, SubCircuitId
 
 
 @dataclass(slots=True)
@@ -882,9 +882,9 @@ def _stamp_parent_board(
     import os
     import tempfile
 
-    from kicad_helper.autoplacer.brain.subcircuit_artifacts import slugify_subcircuit_id
-    from kicad_helper.autoplacer.brain.types import Layer
-    from kicad_helper.autoplacer.freerouting_runner import _run_pcbnew_script
+    from kicraft.autoplacer.brain.subcircuit_artifacts import slugify_subcircuit_id
+    from kicraft.autoplacer.brain.types import Layer
+    from kicraft.autoplacer.freerouting_runner import _run_pcbnew_script
 
     composition = state.composition
     if composition is None:
@@ -1117,7 +1117,7 @@ def _route_parent_board(
     4. Validate the routed board
     5. Return a result dict
     """
-    from kicad_helper.autoplacer.freerouting_runner import (
+    from kicraft.autoplacer.freerouting_runner import (
         import_routed_copper,
         route_with_freerouting,
         validate_routed_board,
@@ -1197,12 +1197,12 @@ def _persist_parent_artifact(
     3. Save metadata and debug payloads
     4. Return the artifact directory path
     """
-    from kicad_helper.autoplacer.brain.subcircuit_artifacts import (
+    from kicraft.autoplacer.brain.subcircuit_artifacts import (
         build_solved_layout_artifact,
         resolve_artifact_paths,
         save_solved_layout_artifact,
     )
-    from kicad_helper.autoplacer.brain.types import SubCircuitLayout
+    from kicraft.autoplacer.brain.types import SubCircuitLayout
 
     composition = state.composition
     if composition is None:
@@ -1629,7 +1629,7 @@ def main(argv: list[str] | None = None) -> int:
             cfg["freerouting_jar"] = args.jar
         else:
             # Try to load from project config
-            from kicad_helper.autoplacer.config import discover_project_config, load_project_config
+            from kicraft.autoplacer.config import discover_project_config, load_project_config
 
             proj_cfg_path = discover_project_config(str(project_dir))
             if proj_cfg_path:

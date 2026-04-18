@@ -23,7 +23,7 @@ import json
 import sys
 from pathlib import Path
 
-from kicad_helper.autoplacer.brain.hierarchy_parser import (
+from kicraft.autoplacer.brain.hierarchy_parser import (
     HierarchyGraph,
     HierarchyNode,
     hierarchy_debug_dict,

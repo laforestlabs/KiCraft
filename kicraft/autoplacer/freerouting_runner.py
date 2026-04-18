@@ -31,7 +31,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from kicad_helper.autoplacer.brain.types import Layer, Point, TraceSegment, Via
+from kicraft.autoplacer.brain.types import Layer, Point, TraceSegment, Via
 
 
 def _kicad_subprocess_env() -> dict:

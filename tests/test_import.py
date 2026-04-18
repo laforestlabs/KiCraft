@@ -4,14 +4,14 @@ import importlib
 
 
 def test_package_imports():
-    """Top-level kicad_helper package is importable."""
-    mod = importlib.import_module("kicad_helper")
+    """Top-level kicraft package is importable."""
+    mod = importlib.import_module("kicraft")
     assert hasattr(mod, "__version__")
 
 
 def test_autoplacer_config_imports():
     """Autoplacer config and defaults are importable."""
-    from kicad_helper.autoplacer.config import DEFAULT_CONFIG, load_project_config, discover_project_config
+    from kicraft.autoplacer.config import DEFAULT_CONFIG, load_project_config, discover_project_config
     assert isinstance(DEFAULT_CONFIG, dict)
     assert "placement_clearance_mm" in DEFAULT_CONFIG
     assert callable(load_project_config)
@@ -20,7 +20,7 @@ def test_autoplacer_config_imports():
 
 def test_autoplacer_types_imports():
     """Core types are importable without pcbnew."""
-    from kicad_helper.autoplacer.brain.types import (
+    from kicraft.autoplacer.brain.types import (
         BoardState, Component, Layer, Net, Pad, Point,
         SubCircuitLayout, PlacementScore, TraceSegment, Via,
     )
@@ -32,13 +32,13 @@ def test_autoplacer_types_imports():
 
 def test_hierarchy_parser_imports():
     """Hierarchy parser is importable without pcbnew."""
-    from kicad_helper.autoplacer.brain.hierarchy_parser import parse_hierarchy
+    from kicraft.autoplacer.brain.hierarchy_parser import parse_hierarchy
 
 
 def test_scoring_imports():
     """Scoring module is importable (may need pcbnew at runtime)."""
     try:
-        from kicad_helper.scoring import ALL_CHECKS
+        from kicraft.scoring import ALL_CHECKS
         assert isinstance(ALL_CHECKS, list)
         assert len(ALL_CHECKS) > 0
     except ImportError:
@@ -48,12 +48,12 @@ def test_scoring_imports():
 
 def test_logging_config_imports():
     """Logging configuration is importable."""
-    from kicad_helper.logging_config import get_logger, configure_logging
+    from kicraft.logging_config import get_logger, configure_logging
     assert callable(get_logger)
     assert callable(configure_logging)
 
 
 def test_cli_module_exists():
     """CLI package is importable."""
-    import kicad_helper.cli
-    assert kicad_helper.cli is not None
+    import kicraft.cli
+    assert kicraft.cli is not None

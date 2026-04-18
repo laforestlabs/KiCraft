@@ -56,9 +56,9 @@ def _detect_project_name():
 
 def _find_project_root() -> Path:
     """Find KiCad project root directory by locating a *.kicad_pro file."""
-    # Path structure: .../<project>/.claude/skills/kicad-helper/scripts/dashboard_app.py
+    # Path structure: .../<project>/.claude/skills/KiCraft/scripts/dashboard_app.py
     script_dir = Path(__file__).resolve().parent
-    # Up 4 levels: scripts -> kicad-helper -> skills -> .claude -> project root
+    # Up 4 levels: scripts -> KiCraft -> skills -> .claude -> project root
     project_root = script_dir.parent.parent.parent.parent
     if list(project_root.glob("*.kicad_pro")):
         return project_root

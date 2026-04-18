@@ -14,7 +14,7 @@ import tempfile
 
 import pcbnew
 
-from kicad_helper.autoplacer.brain.types import BoardState, Component, Layer, Net, Pad, Point, TraceSegment, Via
+from kicraft.autoplacer.brain.types import BoardState, Component, Layer, Net, Pad, Point, TraceSegment, Via
 
 # Generic power net names used as fallback when config doesn't specify power_nets.
 # Project-specific power nets should be listed in the project's autoplacer config.

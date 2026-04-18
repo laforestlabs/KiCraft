@@ -1,4 +1,4 @@
-# kicad-helper
+# KiCraft
 
 KiCad PCB automation toolkit — automated placement, routing, scoring, and
 experiment management for KiCad projects via the pcbnew Python API.
@@ -18,7 +18,7 @@ pip install -e ".[gui,scoring,experiment,dev]"
 
 ## Quick Start
 
-kicad-helper is project-agnostic. Create a `<project>_autoplacer.json` (or
+KiCraft is project-agnostic. Create a `<project>_autoplacer.json` (or
 `autoplacer.json`) in your KiCad project root to configure IC groups,
 component zones, signal flow, and other project-specific settings.
 
@@ -46,7 +46,7 @@ score-layout project.kicad_pcb
 ### Launch GUI
 
 ```bash
-python -m kicad_helper.gui
+python -m kicraft.gui
 ```
 
 ## CLI Commands
@@ -87,7 +87,7 @@ python -m kicad_helper.gui
 ## Package Structure
 
 ```
-kicad_helper/
+kicraft/
 ├── autoplacer/          # Placement and routing engine
 │   ├── config.py        # Default config + project config loader
 │   ├── freerouting_runner.py

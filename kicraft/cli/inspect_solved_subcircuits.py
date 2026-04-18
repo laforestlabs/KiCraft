@@ -30,7 +30,7 @@ import sys
 from pathlib import Path
 
 
-from kicad_helper.autoplacer.brain.subcircuit_instances import (
+from kicraft.autoplacer.brain.subcircuit_instances import (
     artifact_debug_dict,
     artifact_summary,
     load_solved_artifacts,
@@ -38,7 +38,7 @@ from kicad_helper.autoplacer.brain.subcircuit_instances import (
     transformed_debug_dict,
     transformed_summary,
 )
-from kicad_helper.autoplacer.brain.types import Point
+from kicraft.autoplacer.brain.types import Point
 
 
 def _discover_artifact_dirs(project_dir: Path) -> list[Path]:

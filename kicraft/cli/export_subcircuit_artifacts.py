@@ -90,12 +90,12 @@ import argparse
 import json
 from typing import Any
 
-from kicad_helper.autoplacer.brain.hierarchy_parser import (
+from kicraft.autoplacer.brain.hierarchy_parser import (
     HierarchyGraph,
     HierarchyNode,
     parse_hierarchy,
 )
-from kicad_helper.autoplacer.brain.subcircuit_artifacts import (
+from kicraft.autoplacer.brain.subcircuit_artifacts import (
     build_artifact_metadata,
     build_leaf_extraction,
     build_solved_layout_artifact,
@@ -104,18 +104,18 @@ from kicad_helper.autoplacer.brain.subcircuit_artifacts import (
     save_debug_payload,
     save_solved_layout_artifact,
 )
-from kicad_helper.autoplacer.brain.subcircuit_board_export import (
+from kicraft.autoplacer.brain.subcircuit_board_export import (
     ExportOptions,
     export_subcircuit_board,
 )
-from kicad_helper.autoplacer.brain.subcircuit_extractor import (
+from kicraft.autoplacer.brain.subcircuit_extractor import (
     extract_leaf_board_state,
     extraction_debug_dict,
     summarize_extraction,
 )
-from kicad_helper.autoplacer.brain.subcircuit_solver import solve_leaf_placement
-from kicad_helper.autoplacer.config import DEFAULT_CONFIG, discover_project_config, load_project_config
-from kicad_helper.autoplacer.hardware.adapter import KiCadAdapter
+from kicraft.autoplacer.brain.subcircuit_solver import solve_leaf_placement
+from kicraft.autoplacer.config import DEFAULT_CONFIG, discover_project_config, load_project_config
+from kicraft.autoplacer.hardware.adapter import KiCadAdapter
 
 
 def _iter_non_root_nodes(graph: HierarchyGraph):
