@@ -94,17 +94,8 @@ class TestCLIHelpAdditional:
         _skip_if_pcbnew_import_error(result, "compose-subcircuits")
         assert result.returncode == 0
 
-    def test_parse_schematic_help(self):
-        result = _run_cli_help("kicraft.cli.parse_schematic")
-        _skip_if_pcbnew_import_error(result, "parse-schematic")
-        assert result.returncode == 0
 
     def test_inspect_solved_subcircuits_help(self):
         result = _run_cli_help("kicraft.cli.inspect_solved_subcircuits")
         _skip_if_pcbnew_import_error(result, "inspect-solved-subcircuits")
-        assert result.returncode == 0
-
-    def test_export_subcircuit_artifacts_help(self):
-        result = _run_cli_help("kicraft.cli.export_subcircuit_artifacts")
-        _skip_if_pcbnew_import_error(result, "export-subcircuit-artifacts")
         assert result.returncode == 0

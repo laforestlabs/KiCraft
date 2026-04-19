@@ -1438,26 +1438,14 @@ def _build_visible_cmd(
 ) -> list[str]:
     cmd = [
         sys.executable,
-        str(SCRIPT_DIR / "run_hierarchical_pipeline.py"),
-        "--project",
-        str(project_dir),
-        "--schematic",
+        str(SCRIPT_DIR / "solve_hierarchy.py"),
         str(schematic),
         "--pcb",
         str(pcb),
-        "--parent",
-        parent,
-        "--output-dir",
-        str(output_dir),
         "--rounds",
         str(max(1, rounds)),
-        "--seed",
-        str(seed),
-        "--render-png",
-        "--json",
+        "--route",
     ]
-    if config:
-        cmd.extend(["--config", config])
     for selector in only:
         cmd.extend(["--only", selector])
     return cmd

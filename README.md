@@ -55,7 +55,6 @@ python -m kicraft.gui
 - `solve-subcircuits` — Hierarchical subcircuit placement and routing
 - `compose-subcircuits` — Assemble solved subcircuits into parent boards
 - `solve-hierarchy` — Full hierarchical solve (leaves → parents)
-- `export-subcircuit-artifacts` — Export subcircuit placement artifacts
 
 ### Experiment Management
 - `autoexperiment` — Automated experiment loop with parameter search

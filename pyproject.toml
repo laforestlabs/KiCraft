@@ -35,8 +35,6 @@ dev = [
 solve-subcircuits = "kicraft.cli.solve_subcircuits:main"
 compose-subcircuits = "kicraft.cli.compose_subcircuits:main"
 solve-hierarchy = "kicraft.cli.solve_hierarchy:main"
-export-subcircuit-artifacts = "kicraft.cli.export_subcircuit_artifacts:main"
-run-hierarchical-pipeline = "kicraft.cli.run_hierarchical_pipeline:main"
 
 # Experiment management
 autoexperiment = "kicraft.cli.autoexperiment:main"
@@ -71,7 +69,6 @@ run-drc = "kicraft.cli.run_drc:main"
 net-report = "kicraft.cli.net_report:main"
 inspect-subcircuits = "kicraft.cli.inspect_subcircuits:main"
 inspect-solved-subcircuits = "kicraft.cli.inspect_solved_subcircuits:main"
-parse-schematic = "kicraft.cli.parse_schematic:main"
 
 # Session tracking
 layout-session = "kicraft.cli.layout_session:main"
