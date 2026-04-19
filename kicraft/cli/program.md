@@ -22,11 +22,11 @@
     "parent_composition": 0.1,
     "parent_routed": 0.15
   },
-  "hierarchical_workers": 3,
+  "hierarchical_workers": 2,
   "schematic_file": "LLUPS.kicad_sch",
   "parent": "/",
   "only": [],
-  "leaf_rounds": 3,
+  "leaf_rounds": 1,
   "render_png": true,
   "save_round_details": true
 }
