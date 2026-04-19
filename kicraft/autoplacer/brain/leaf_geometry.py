@@ -82,12 +82,23 @@ def tight_leaf_geometry_bounds(
     extraction: ExtractedSubcircuitBoard,
     solved_components: dict[str, Component],
     routing: dict[str, Any],
+    *,
+    connector_pad_margin_mm: float = 0.0,
 ) -> dict[str, float]:
     """Compute a tight axis-aligned bounding box around all leaf geometry.
 
     Considers component bounding boxes, pad positions, trace segments
     (including half-widths), and vias (including radii).  Falls back to
     the extraction board outline when there is no geometry at all.
+
+    When *connector_pad_margin_mm* > 0, an extra margin is added around
+    each pad of connector-type components.  This compensates for the fact
+    that the ``Pad`` type stores only the pad center position, not the
+    physical copper extent.  Edge-pinned connectors (USB, barrel jacks,
+    etc.) often have pads whose copper extends well beyond the center
+    point, and without this margin the board outline can end up too close
+    to the physical copper, causing ``copper_edge_clearance`` DRC
+    violations after size reduction.
     """
     min_x = float("inf")
     min_y = float("inf")
@@ -100,11 +111,19 @@ def tight_leaf_geometry_bounds(
         min_y = min(min_y, tl.y)
         max_x = max(max_x, br.x)
         max_y = max(max_y, br.y)
+        # For connectors, expand pad contributions by connector_pad_margin_mm
+        # to account for physical pad copper extent beyond the center point.
+        pad_margin = (
+            connector_pad_margin_mm
+            if connector_pad_margin_mm > 0.0
+            and comp.kind == "connector"
+            else 0.0
+        )
         for pad in comp.pads:
-            min_x = min(min_x, pad.pos.x)
-            min_y = min(min_y, pad.pos.y)
-            max_x = max(max_x, pad.pos.x)
-            max_y = max(max_y, pad.pos.y)
+            min_x = min(min_x, pad.pos.x - pad_margin)
+            min_y = min(min_y, pad.pos.y - pad_margin)
+            max_x = max(max_x, pad.pos.x + pad_margin)
+            max_y = max(max_y, pad.pos.y + pad_margin)
 
     for trace in routing.get("_trace_segments", []):
         half_width = max(0.0, float(getattr(trace, "width_mm", 0.0)) / 2.0)

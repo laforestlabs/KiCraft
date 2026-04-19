@@ -59,6 +59,11 @@ DEFAULT_CONFIG = {
     # edge of the connector body.  0 = flush, positive = inset, negative =
     # overhang.  Only applies to edge-pinned connectors.
     "connector_edge_inset_mm": 1.0,
+    # Connector pad margin -- extra margin (mm) added around each pad of
+    # edge-pinned connectors when computing tight geometry bounds.
+    # Compensates for pad copper extent beyond the pad center point.
+    # Prevents copper_edge_clearance DRC violations after size reduction.
+    "connector_pad_margin_mm": 1.0,
     # Orderedness — how strongly passives are snapped into neat rows/columns.
     # 0.0 = organic/force-directed layout, 1.0 = full grid alignment.
     # Intermediate values blend proportionally.  Searchable by autoexperiment.
