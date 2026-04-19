@@ -69,12 +69,6 @@ net-report = "kicraft.cli.net_report:main"
 inspect-subcircuits = "kicraft.cli.inspect_subcircuits:main"
 inspect-solved-subcircuits = "kicraft.cli.inspect_solved_subcircuits:main"
 
-# Session tracking
-layout-session = "kicraft.cli.layout_session:main"
-
-# Dashboard
-dashboard-app = "kicraft.cli.dashboard_app:main"
-
 [tool.setuptools.packages.find]
 include = ["kicraft*"]
 

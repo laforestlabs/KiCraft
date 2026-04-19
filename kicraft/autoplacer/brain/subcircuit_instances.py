@@ -321,23 +321,15 @@ def _layout_from_artifact_payload(
 ) -> SubCircuitLayout:
     """Reconstruct a `SubCircuitLayout` from artifact payloads."""
     subcircuit_id = _subcircuit_id_from_metadata(metadata)
+    canonical = _normalize_to_canonical(metadata, debug, solved_layout)
 
-    if isinstance(solved_layout, dict) and solved_layout:
-        solved_components = _extract_solved_components_from_layout(solved_layout)
-        solved_traces = _extract_solved_traces_from_layout(solved_layout)
-        solved_vias = _extract_solved_vias_from_layout(solved_layout)
-        ports = _extract_interface_ports_from_layout(solved_layout)
-        interface_anchors = _extract_interface_anchors_from_layout(solved_layout)
-        bbox = _extract_layout_bbox_from_layout(solved_layout, solved_components)
-        score = _extract_layout_score_from_layout(solved_layout)
-    else:
-        solved_components = _extract_solved_components(debug)
-        solved_traces = _extract_solved_traces(debug)
-        solved_vias = _extract_solved_vias(debug)
-        ports = _extract_interface_ports(metadata)
-        interface_anchors = _extract_interface_anchors(debug)
-        bbox = _extract_layout_bbox(metadata, debug, solved_components)
-        score = _extract_layout_score(debug)
+    solved_components = _parse_components(canonical)
+    solved_traces = _parse_traces(canonical)
+    solved_vias = _parse_vias(canonical)
+    ports = _interface_ports_from_payload(canonical.get("ports", []))
+    interface_anchors = _parse_interface_anchors(canonical)
+    bbox = _parse_bbox(canonical, solved_components)
+    score = _parse_score(canonical.get("score"))
 
     artifact_paths = dict(metadata.get("artifact_paths", {}))
 
@@ -364,23 +356,93 @@ def _subcircuit_id_from_metadata(metadata: dict[str, Any]):
         sheet_file=sid.get("sheet_file", metadata.get("sheet_file", "")),
         instance_path=sid.get("instance_path", metadata.get("instance_path", "")),
         parent_instance_path=sid.get(
-            "parent_instance_path", metadata.get("parent_instance_path")
+            "parent_instance_path",
+            metadata.get("parent_instance_path"),
         ),
     )
 
 
-def _extract_interface_ports(metadata: dict[str, Any]) -> list[InterfacePort]:
-    """Extract logical interface ports from artifact metadata."""
+def _normalize_to_canonical(
+    metadata: dict[str, Any],
+    debug: dict[str, Any],
+    solved_layout: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Normalize artifact payloads into one canonical dict shape.
+
+    If *solved_layout* is present, it is already canonical -- return as-is.
+    Otherwise, remap the debug/metadata fallback dicts into the same
+    canonical key layout so downstream parsers never branch.
+    """
+    if isinstance(solved_layout, dict) and solved_layout:
+        return solved_layout
+
+    # --- components ---
+    components: Any = debug.get("solved_components")
+    if not isinstance(components, dict) or not components:
+        components = debug.get("extra", {}).get("solved_local_placement", {}).get("components", {})
+
+    # --- traces / vias ---
+    routing = debug.get("extra", {}).get("solved_local_routing", {})
+    traces = routing.get("traces", [])
+    vias = routing.get("vias", [])
+
+    # --- ports ---
     ports = metadata.get("interface_ports", [])
-    return _interface_ports_from_payload(ports)
 
+    # --- interface anchors (3-level fallback, then normalize flat x/y) ---
+    anchors: Any = (
+        debug.get("extra", {})
+        .get("solve_summary", {})
+        .get("placement_result", {})
+        .get("interface_anchors")
+    )
+    if not isinstance(anchors, list):
+        anchors = debug.get("extra", {}).get("placement_result", {}).get("interface_anchors")
+    if not isinstance(anchors, list):
+        anchors = debug.get("extra", {}).get("solve_summary", {}).get("interface_anchors")
+    if not isinstance(anchors, list):
+        anchors = []
 
-def _extract_interface_ports_from_layout(
-    solved_layout: dict[str, Any],
-) -> list[InterfacePort]:
-    """Extract logical interface ports from canonical solved layout payload."""
-    ports = solved_layout.get("ports", [])
-    return _interface_ports_from_payload(ports)
+    # Normalize flat x/y anchors to nested {pos: {x, y}} form
+    normalized_anchors = []
+    for a in anchors:
+        if not isinstance(a, dict):
+            continue
+        if "pos" not in a and ("x" in a or "y" in a):
+            a = dict(a)
+            a["pos"] = {"x": a.pop("x", 0.0), "y": a.pop("y", 0.0)}
+        normalized_anchors.append(a)
+
+    # --- bounding box ---
+    outline = metadata.get("local_board_outline", {})
+    if not (isinstance(outline, dict) and "width_mm" in outline):
+        outline = debug.get("leaf_extraction", {}).get("local_board_outline", {})
+    bbox: dict[str, Any] = {}
+    if isinstance(outline, dict) and "width_mm" in outline:
+        bbox = {
+            "width_mm": outline["width_mm"],
+            "height_mm": outline["height_mm"],
+        }
+
+    # --- score ---
+    score: Any = None
+    best_round = debug.get("extra", {}).get("best_round", {})
+    if isinstance(best_round, dict) and "score" in best_round:
+        score = best_round["score"]
+    else:
+        best_round = debug.get("extra", {}).get("solve_summary", {}).get("best_round", {})
+        if isinstance(best_round, dict) and "score" in best_round:
+            score = best_round["score"]
+
+    return {
+        "components": components if isinstance(components, dict) else {},
+        "traces": traces if isinstance(traces, list) else [],
+        "vias": vias if isinstance(vias, list) else [],
+        "ports": ports if isinstance(ports, list) else [],
+        "interface_anchors": normalized_anchors,
+        "bounding_box": bbox,
+        "score": score,
+    }
 
 
 def _interface_ports_from_payload(ports: Any) -> list[InterfacePort]:
@@ -412,37 +474,13 @@ def _interface_ports_from_payload(ports: Any) -> list[InterfacePort]:
     return extracted
 
 
-def _extract_solved_components(debug: dict[str, Any]) -> dict[str, Component]:
-    """Extract solved component geometry from debug payload."""
-    solved = debug.get("solved_components")
-    if isinstance(solved, dict) and solved:
-        return {
-            ref: _component_from_dict(comp_dict)
-            for ref, comp_dict in solved.items()
-            if isinstance(comp_dict, dict)
-        }
-
-    solved_local = debug.get("extra", {}).get("solved_local_placement", {})
-    components = solved_local.get("components")
-    if isinstance(components, dict) and components:
-        return {
-            ref: _component_from_dict(comp_dict)
-            for ref, comp_dict in components.items()
-            if isinstance(comp_dict, dict)
-        }
-
-    # Fallback: no solved geometry persisted yet
-    return {}
-
-
-def _extract_solved_components_from_layout(
-    solved_layout: dict[str, Any],
+def _parse_components(
+    canonical: dict[str, Any],
 ) -> dict[str, Component]:
-    """Extract solved component geometry from canonical solved layout payload."""
-    components = solved_layout.get("components")
+    """Parse solved component geometry from canonical payload."""
+    components = canonical.get("components")
     if not isinstance(components, dict):
         return {}
-
     return {
         ref: _component_from_dict(comp_dict)
         for ref, comp_dict in components.items()
@@ -450,11 +488,9 @@ def _extract_solved_components_from_layout(
     }
 
 
-def _extract_solved_traces(debug: dict[str, Any]) -> list[TraceSegment]:
-    """Extract solved traces from debug payload when present."""
-    traces_payload = (
-        debug.get("extra", {}).get("solved_local_routing", {}).get("traces", [])
-    )
+def _parse_traces(canonical: dict[str, Any]) -> list[TraceSegment]:
+    """Parse solved traces from canonical payload."""
+    traces_payload = canonical.get("traces", [])
     if not isinstance(traces_payload, list):
         return []
     traces: list[TraceSegment] = []
@@ -476,37 +512,9 @@ def _extract_solved_traces(debug: dict[str, Any]) -> list[TraceSegment]:
     return traces
 
 
-def _extract_solved_traces_from_layout(
-    solved_layout: dict[str, Any],
-) -> list[TraceSegment]:
-    """Extract solved traces from canonical solved layout payload."""
-    traces_payload = solved_layout.get("traces", [])
-    if not isinstance(traces_payload, list):
-        return []
-    traces: list[TraceSegment] = []
-    for item in traces_payload:
-        if not isinstance(item, dict):
-            continue
-        try:
-            traces.append(
-                TraceSegment(
-                    start=_point_from_dict(item.get("start")),
-                    end=_point_from_dict(item.get("end")),
-                    layer=_layer_from_value(item.get("layer")),
-                    net=str(item.get("net", "")),
-                    width_mm=float(item.get("width_mm", 0.127)),
-                )
-            )
-        except Exception:
-            continue
-    return traces
-
-
-def _extract_solved_vias(debug: dict[str, Any]) -> list[Via]:
-    """Extract solved vias from debug payload when present."""
-    vias_payload = (
-        debug.get("extra", {}).get("solved_local_routing", {}).get("vias", [])
-    )
+def _parse_vias(canonical: dict[str, Any]) -> list[Via]:
+    """Parse solved vias from canonical payload."""
+    vias_payload = canonical.get("vias", [])
     if not isinstance(vias_payload, list):
         return []
     vias: list[Via] = []
@@ -527,79 +535,13 @@ def _extract_solved_vias(debug: dict[str, Any]) -> list[Via]:
     return vias
 
 
-def _extract_solved_vias_from_layout(
-    solved_layout: dict[str, Any],
-) -> list[Via]:
-    """Extract solved vias from canonical solved layout payload."""
-    vias_payload = solved_layout.get("vias", [])
-    if not isinstance(vias_payload, list):
-        return []
-    vias: list[Via] = []
-    for item in vias_payload:
-        if not isinstance(item, dict):
-            continue
-        try:
-            vias.append(
-                Via(
-                    pos=_point_from_dict(item.get("pos")),
-                    net=str(item.get("net", "")),
-                    drill_mm=float(item.get("drill_mm", 0.3)),
-                    size_mm=float(item.get("size_mm", 0.6)),
-                )
-            )
-        except Exception:
-            continue
-    return vias
-
-
-def _extract_interface_anchors(debug: dict[str, Any]) -> list[InterfaceAnchor]:
-    """Extract interface anchors from solve debug payload."""
-    anchors_payload = (
-        debug.get("extra", {})
-        .get("solve_summary", {})
-        .get("placement_result", {})
-        .get("interface_anchors")
-    )
-    if not isinstance(anchors_payload, list):
-        anchors_payload = (
-            debug.get("extra", {}).get("placement_result", {}).get("interface_anchors")
-        )
-    if not isinstance(anchors_payload, list):
-        anchors_payload = (
-            debug.get("extra", {}).get("solve_summary", {}).get("interface_anchors")
-        )
-    if not isinstance(anchors_payload, list):
-        return []
-
-    anchors: list[InterfaceAnchor] = []
-    for item in anchors_payload:
-        if not isinstance(item, dict):
-            continue
-        pad_ref = item.get("pad_ref")
-        anchors.append(
-            InterfaceAnchor(
-                port_name=str(item.get("port_name", "")),
-                pos=Point(
-                    float(item.get("x", 0.0)),
-                    float(item.get("y", 0.0)),
-                ),
-                layer=_layer_from_value(item.get("layer")),
-                pad_ref=tuple(pad_ref)
-                if isinstance(pad_ref, list) and len(pad_ref) == 2
-                else None,
-            )
-        )
-    return anchors
-
-
-def _extract_interface_anchors_from_layout(
-    solved_layout: dict[str, Any],
+def _parse_interface_anchors(
+    canonical: dict[str, Any],
 ) -> list[InterfaceAnchor]:
-    """Extract interface anchors from canonical solved layout payload."""
-    anchors_payload = solved_layout.get("interface_anchors", [])
+    """Parse interface anchors from canonical payload."""
+    anchors_payload = canonical.get("interface_anchors", [])
     if not isinstance(anchors_payload, list):
         return []
-
     anchors: list[InterfaceAnchor] = []
     for item in anchors_payload:
         if not isinstance(item, dict):
@@ -610,87 +552,38 @@ def _extract_interface_anchors_from_layout(
                 port_name=str(item.get("port_name", "")),
                 pos=_point_from_dict(item.get("pos")),
                 layer=_layer_from_value(item.get("layer")),
-                pad_ref=tuple(pad_ref)
-                if isinstance(pad_ref, list) and len(pad_ref) == 2
-                else None,
+                pad_ref=tuple(pad_ref) if isinstance(pad_ref, list) and len(pad_ref) == 2 else None,
             )
         )
     return anchors
 
 
-def _extract_layout_bbox(
-    metadata: dict[str, Any],
-    debug: dict[str, Any],
+def _parse_bbox(
+    canonical: dict[str, Any],
     components: dict[str, Component],
 ) -> tuple[float, float]:
-    """Extract layout bbox from metadata/debug, falling back to geometry."""
-    outline = metadata.get("local_board_outline", {})
-    width = outline.get("width_mm")
-    height = outline.get("height_mm")
-    if width is not None and height is not None:
-        return (float(width), float(height))
-
-    leaf_outline = debug.get("leaf_extraction", {}).get("local_board_outline", {})
-    width = leaf_outline.get("width_mm")
-    height = leaf_outline.get("height_mm")
+    """Parse layout bounding box from canonical payload."""
+    bbox = canonical.get("bounding_box", {})
+    width = bbox.get("width_mm") if isinstance(bbox, dict) else None
+    height = bbox.get("height_mm") if isinstance(bbox, dict) else None
     if width is not None and height is not None:
         return (float(width), float(height))
 
     if components:
         tl, br = _compute_component_bbox(components)
-        return (max(0.0, br.x - tl.x), max(0.0, br.y - tl.y))
+        return (
+            max(0.0, br.x - tl.x),
+            max(0.0, br.y - tl.y),
+        )
 
     return (0.0, 0.0)
 
 
-def _extract_layout_bbox_from_layout(
-    solved_layout: dict[str, Any],
-    components: dict[str, Component],
-) -> tuple[float, float]:
-    """Extract layout bbox from canonical solved layout payload."""
-    bbox = solved_layout.get("bounding_box", {})
-    width = bbox.get("width_mm")
-    height = bbox.get("height_mm")
-    if width is not None and height is not None:
-        return (float(width), float(height))
-
-    if components:
-        tl, br = _compute_component_bbox(components)
-        return (max(0.0, br.x - tl.x), max(0.0, br.y - tl.y))
-
-    return (0.0, 0.0)
-
-
-def _extract_layout_score(debug: dict[str, Any]) -> float:
-    """Extract best solved score from debug payload."""
-    best_round = debug.get("extra", {}).get("best_round", {})
-    if isinstance(best_round, dict):
-        score = best_round.get("score")
-        if score is not None:
-            try:
-                return float(score)
-            except Exception:
-                pass
-
-    solve_summary = debug.get("extra", {}).get("solve_summary", {})
-    best_round = solve_summary.get("best_round", {})
-    if isinstance(best_round, dict):
-        score = best_round.get("score")
-        if score is not None:
-            try:
-                return float(score)
-            except Exception:
-                pass
-
-    return 0.0
-
-
-def _extract_layout_score_from_layout(solved_layout: dict[str, Any]) -> float:
-    """Extract solved score from canonical solved layout payload."""
-    score = solved_layout.get("score")
-    if score is not None:
+def _parse_score(value: Any) -> float:
+    """Parse a score value, returning 0.0 on failure."""
+    if value is not None:
         try:
-            return float(score)
+            return float(value)
         except Exception:
             pass
     return 0.0

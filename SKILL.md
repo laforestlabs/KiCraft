@@ -36,7 +36,6 @@ All scripts are in this skill's `scripts/` directory. Run them with `python3`.
 |--------|-------|-------------|
 | `score_layout.py` | `python3 scripts/score_layout.py <pcb> [--compare prev.json]` | Score layout quality (traces, DRC, connectivity, placement, vias, routing) |
 | `render_pcb.py` | `python3 scripts/render_pcb.py <pcb> [--views front_all back_copper]` | Render PCB layers to PNG for visual review |
-| `layout_session.py` | `python3 scripts/layout_session.py summary` | Track layout progress, token usage, and change classification across iterations |
 
 ### Observability & Analysis
 
@@ -46,8 +45,7 @@ All scripts are in this skill's `scripts/` directory. Run them with `python3`.
 | `render_failure_heatmap.py` | `python3 scripts/render_failure_heatmap.py <experiments_dir> <pcb> [-o heatmap.png]` | Board-space heatmap of routing failure hotspots across all rounds |
 | `diff_rounds.py` | `python3 scripts/diff_rounds.py <experiments_dir> <A> <B> [--format text\|json\|html]` | Side-by-side comparison of two experiment rounds (config, scores, nets, DRC) |
 | `generate_report.py` | `python3 scripts/generate_report.py <experiments_dir> [-o report.html]` | Self-contained interactive HTML report with score timeline, round browser, net failure analysis, shorts dashboard |
-| `plot_experiments.py` | `python3 scripts/plot_experiments.py [experiments.jsonl] [output.png]` | Static matplotlib dashboard: score trend, category breakdown, DRC bars, phase timing, config heatmap |
-| `dashboard_app.py` | `python3 scripts/dashboard_app.py [--port 5000]` | Live Flask dashboard for monitoring running experiments (auto-refreshing status, history, DRC counts) |
+| `plot_results.py` | `python3 scripts/plot_results.py [experiments.jsonl] [output.png]` | Static matplotlib dashboard: score trend, category breakdown, DRC bars, phase timing, config heatmap |
 
 The scoring framework automatically renders PCB images alongside JSON results.
 
@@ -67,17 +65,6 @@ After running `score_layout.py`, you MUST complete a visual review:
    - [ ] **Board utilization**: Components spread out efficiently, no wasted space
    - [ ] **Mechanical fit**: Mounting holes accessible, no components blocking board edges
 4. **Report findings**: Include specific component references and locations for any issues found.
-
-#### Session Tracking
-
-Each `score_layout.py` run automatically records a board state snapshot in `results/session.json`. This tracks:
-
-- **Change classification**: Each iteration is classified as `NO_CHANGE`, `MINOR_TWEAK`, `MODERATE_REWORK`, or `MAJOR_REDESIGN` based on component movement distances and counts.
-- **Token budget**: Cumulative token usage across all iterations, plus tokens-per-score-point efficiency.
-- **Stagnation detection**: If score spread is <1 point over 3 consecutive runs, a warning is printed suggesting a major redesign instead of continued tweaking.
-
-Use `python3 scripts/layout_session.py summary` to review the full session history. Use `--no-track` on `score_layout.py` to skip recording.
-
 #### Experiment Observability
 
 The autoexperiment system collects detailed per-round data for post-run analysis:
@@ -92,7 +79,6 @@ The autoexperiment system collects detailed per-round data for post-run analysis
 2. **Compare rounds**: `python3 scripts/diff_rounds.py .experiments/ 5 20` — shows config changes, score deltas, nets that changed routing status, DRC diff
 3. **DRC overlay**: `python3 scripts/render_drc_overlay.py board.kicad_pcb .experiments/rounds/round_0015.json` — highlights violations on board render
 4. **Failure heatmap**: `python3 scripts/render_failure_heatmap.py .experiments/ board.kicad_pcb` — shows where routing consistently fails
-5. **Live monitoring**: `python3 scripts/dashboard_app.py` — Flask dashboard with auto-refreshing status, history table (with shorts/DRC columns), stagnation warnings
 
 ## Important Rules
 

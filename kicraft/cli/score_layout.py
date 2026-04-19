@@ -157,7 +157,6 @@ def main():
     parser.add_argument("--compare", help="Path to previous result JSON for comparison")
     parser.add_argument("--no-save", action="store_true", help="Don't save JSON result")
     parser.add_argument("--no-render", action="store_true", help="Skip visual rendering")
-    parser.add_argument("--no-track", action="store_true", help="Don't record iteration in session tracker")
     parser.add_argument("--review", action="store_true", help="Print render paths for visual review by Claude")
     args = parser.parse_args()
 
@@ -191,49 +190,6 @@ def main():
         for view, path in render_paths.items():
             print(f"    READ: {os.path.abspath(path)}")
         print("  Use Claude's Read tool to view each PNG and evaluate the checklist.\n")
-
-    # Record iteration in session tracker
-    if not args.no_track:
-        try:
-            from layout_session import snapshot_board, load_session, save_session, diff_snapshots
-            session = load_session()
-            snapshot = snapshot_board(os.path.abspath(args.pcb))
-            iteration_num = len(session["iterations"])
-            prev_cumulative = session["iterations"][-1]["cumulative_tokens"] if session["iterations"] else 0
-            iter_tokens = report.get("token_usage", {}).get("total_tokens", 0)
-            cumulative = prev_cumulative + iter_tokens
-            change_info = None
-            if session["iterations"]:
-                change_info = diff_snapshots(session["iterations"][-1]["snapshot"], snapshot)
-            entry = {
-                "iteration": iteration_num,
-                "timestamp": report["timestamp"],
-                "snapshot": snapshot,
-                "score": report["overall_score"],
-                "token_usage": report.get("token_usage", {}),
-                "cumulative_tokens": cumulative,
-                "changes": change_info,
-            }
-            session["iterations"].append(entry)
-            save_session(session)
-
-            cls = change_info["classification"].replace("_", " ").upper() if change_info else "BASELINE"
-            print(f"  Session: iteration #{iteration_num} | {cls} | cumulative {cumulative:,} tokens")
-            if change_info and change_info["summary"]["components_moved"]:
-                cs = change_info["summary"]
-                print(f"    {cs['components_moved']} moved (max {cs['max_move_mm']:.0f}mm), "
-                      f"{cs['components_rotated']} rotated")
-
-            # Stagnation warning
-            scores = [it["score"] for it in session["iterations"] if it["score"] is not None]
-            if len(scores) >= 3:
-                recent = scores[-3:]
-                spread = max(recent) - min(recent)
-                if spread < 1.0:
-                    print(f"    STAGNANT: {spread:.1f} spread over last 3 runs — consider major redesign")
-            print()
-        except Exception as e:
-            print(f"  (session tracking failed: {e})\n")
 
     # Comparison
     if args.compare:
