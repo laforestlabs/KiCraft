@@ -78,12 +78,11 @@ class GeometryCheck(LayoutCheck):
 
         # Scoring
         # Efficiency: 40 pts
-        if avg_ratio <= 1.5:
-            efficiency_score = 40
-        elif avg_ratio <= 3.0:
-            efficiency_score = 40 * (1 - (avg_ratio - 1.5) / 1.5)
+        if avg_ratio <= 1.0:
+            efficiency_score = 40.0
         else:
-            efficiency_score = 0
+            # Smooth exponential decay: ratio 1.5 -> ~33, ratio 3.0 -> ~11, ratio 5.0 -> ~3
+            efficiency_score = 40.0 * math.exp(-0.6 * (avg_ratio - 1.0))
 
         # No orphaned segments (nets with traces but no pads): 30 pts
         orphaned = sum(1 for net in net_traces if net not in net_pads or len(net_pads.get(net, [])) == 0)
@@ -91,7 +90,7 @@ class GeometryCheck(LayoutCheck):
 
         # Total trace count reasonable: 30 pts
         total_segments = sum(d["segments"] for d in net_traces.values())
-        segment_score = 30 if total_segments > 0 else 0
+        segment_score = 30.0 * (1.0 - math.exp(-0.5 * total_segments))
 
         score = round(efficiency_score + orphan_score + segment_score, 1)
 

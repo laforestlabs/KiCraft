@@ -37,7 +37,14 @@ import sys
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+
+from kicraft.autoplacer.config import (
+    CONFIG_SEARCH_SPACE,
+    DEFAULT_CONFIG,
+    discover_project_config,
+    load_project_config,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parents[4]
@@ -1359,6 +1366,68 @@ def _select_preview_image(parent_output_dir: Path) -> Path | None:
     return pngs[0] if pngs else None
 
 
+def _mutate_config(
+    base_config: dict[str, Any],
+    search_space: Mapping[str, Mapping[str, Any]],
+    rng: random.Random,
+    mutation_rate: float = 0.3,
+    enable_board_size: bool = False,
+) -> dict[str, int | float]:
+    """Mutate numeric config parameters using Gaussian perturbation.
+
+    Each parameter in search_space has a mutation_rate chance of being
+    perturbed. Perturbation is Gaussian with the configured sigma, clamped
+    to [min, max]. Integer params are rounded after perturbation.
+
+    Returns a new dict with only the mutated keys (sparse overlay suitable
+    for writing as a JSON config file that merges with DEFAULT_CONFIG).
+    """
+    mutated = {}
+    for key, spec in search_space.items():
+        spec_min = float(spec["min"])
+        spec_max = float(spec["max"])
+        spec_sigma = float(spec["sigma"])
+        spec_type = str(spec["type"])
+        if not enable_board_size and key in {"board_width_mm", "board_height_mm"}:
+            continue
+        if rng.random() > mutation_rate:
+            continue
+        current = base_config.get(
+            key,
+            spec.get("default", (spec_min + spec_max) / 2),
+        )
+        if isinstance(current, set):
+            continue
+        current = float(current)
+        delta = rng.gauss(0.0, spec_sigma)
+        new_val = current + delta
+        new_val = max(spec_min, min(spec_max, new_val))
+        if spec_type == "int":
+            new_val = int(round(new_val))
+        else:
+            new_val = round(new_val, 4)
+        mutated[key] = new_val
+    return mutated
+
+
+def _jsonable_config_value(value: Any) -> Any:
+    if isinstance(value, set):
+        return sorted(value)
+    if isinstance(value, dict):
+        return {key: _jsonable_config_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_jsonable_config_value(item) for item in value]
+    return value
+
+
+def _config_overlay_from_defaults(config: Mapping[str, Any]) -> dict[str, Any]:
+    overlay: dict[str, Any] = {}
+    for key, value in config.items():
+        if key not in DEFAULT_CONFIG or DEFAULT_CONFIG[key] != value:
+            overlay[key] = value
+    return overlay
+
+
 def _build_solve_cmd(
     *,
     schematic: Path,
@@ -1610,6 +1679,14 @@ def main(argv: list[str] | None = None) -> int:
     baseline_score: float | None = None
     recent_scores: list[float] = []
     best_round: HierarchyRound | None = None
+    resolved_config_path = args.config
+    if not resolved_config_path:
+        discovered_config_path = discover_project_config(project_dir)
+        if discovered_config_path is not None:
+            resolved_config_path = str(discovered_config_path)
+    _base_project_config = load_project_config(resolved_config_path) if resolved_config_path else {}
+    _initial_config = {**DEFAULT_CONFIG, **_base_project_config}
+    _best_config = dict(_initial_config)
 
     _write_live_status(
         status_json_path,
@@ -1642,10 +1719,34 @@ def main(argv: list[str] | None = None) -> int:
             break
 
         round_seed = rng.randint(0, 2**31 - 1)
+        round_mutated: dict[str, int | float] = {}
         round_dir = hierarchy_dir / f"round_{round_num:04d}"
         parent_output_json = round_dir / "parent_pipeline.json"
         composition_json = round_dir / "parent_composition.json"
         round_dir.mkdir(parents=True, exist_ok=True)
+
+        round_candidate_config = dict(_best_config)
+        current_round_config = resolved_config_path
+        round_mutated = _mutate_config(
+            _best_config,
+            CONFIG_SEARCH_SPACE,
+            rng,
+            enable_board_size=bool(_best_config.get("enable_board_size_search", False)),
+        )
+        round_candidate_config.update(round_mutated)
+        if round_candidate_config != _initial_config:
+            round_config_file = round_dir / "round_config.json"
+            round_config_overlay = _config_overlay_from_defaults(round_candidate_config)
+            serializable = _jsonable_config_value(round_config_overlay)
+            with open(round_config_file, "w", encoding="utf-8") as f:
+                json.dump(serializable, f, indent=2)
+                f.write("\n")
+            current_round_config = str(round_config_file)
+        if round_mutated:
+            print(
+                f"  [mutate] {len(round_mutated)} params: "
+                f"{', '.join(f'{k}={v}' for k, v in sorted(round_mutated.items())[:5])}"
+            )
 
         _write_live_status(
             status_json_path,
@@ -1678,7 +1779,7 @@ def main(argv: list[str] | None = None) -> int:
                     pcb=pcb,
                     rounds=args.leaf_rounds,
                     seed=round_seed,
-                    config=args.config,
+                    config=current_round_config,
                     only=args.only,
                     workers=effective_workers,
                     fast_smoke=args.fast_smoke,
@@ -1715,7 +1816,7 @@ def main(argv: list[str] | None = None) -> int:
             pcb=pcb,
             rounds=args.leaf_rounds,
             seed=round_seed,
-            config=args.config,
+            config=current_round_config,
             only=args.only,
             workers=effective_workers,
             fast_smoke=args.fast_smoke,
@@ -1955,8 +2056,6 @@ def main(argv: list[str] | None = None) -> int:
                 "--output",
                 str(parent_output_json),
             ]
-            if args.config:
-                parent_route_cmd.extend(["--config", args.config])
             if args.jar:
                 parent_route_cmd.extend(["--jar", args.jar])
             for selector in args.only:
@@ -2179,6 +2278,7 @@ def main(argv: list[str] | None = None) -> int:
             best_score = score
             kept_count += 1
             best_round = round_result
+            _best_config = dict(round_candidate_config)
 
             best_summary = {
                 "round_num": round_num,

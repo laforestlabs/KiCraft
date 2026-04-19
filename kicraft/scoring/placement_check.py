@@ -86,8 +86,8 @@ class PlacementCheck(LayoutCheck):
         utilization = total_fp_area / board_area if board_area > 0 else 0
 
         # Scoring
-        overlap_score = 40 if overlaps == 0 else 0
-        bounds_score = 20 if out_of_bounds == 0 else 0
+        overlap_score = 40.0 * (1.0 / (1.0 + overlaps))
+        bounds_score = 20.0 * (1.0 / (1.0 + out_of_bounds))
 
         if util_range[0] <= utilization <= util_range[1]:
             util_score = 40

@@ -9,6 +9,7 @@ per-project JSON file (e.g. ``LLUPS_autoplacer.json``).  Use
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 DEFAULT_CONFIG = {
     # Trace widths (5 mil = 0.127mm)
@@ -28,6 +29,13 @@ DEFAULT_CONFIG = {
     "force_attract_k": 0.02,
     "force_repel_k": 200.0,
     "cooling_factor": 0.97,
+    "sa_refine_enabled": True,
+    "sa_refine_iterations": 1000,
+    "sa_refine_initial_temp": 5.0,
+    "sa_refine_cooling_rate": 0.995,
+    "sa_refine_move_radius_mm": 2.0,
+    "sa_refine_swap_probability": 0.3,
+    "sa_refine_rotation_probability": 0.2,
     # Placement solver iterations
     "max_placement_iterations": 300,
     "placement_convergence_threshold": 0.5,
@@ -163,7 +171,29 @@ DEFAULT_CONFIG = {
 }
 
 
-def load_project_config(config_path: str = None) -> dict:
+CONFIG_SEARCH_SPACE = {
+    "orderedness": {"min": 0.0, "max": 1.0, "sigma": 0.05, "type": "float"},
+    "reheat_strength": {"min": 0.0, "max": 0.4, "sigma": 0.05, "type": "float"},
+    "force_attract_k": {"min": 0.001, "max": 0.2, "sigma": 0.01, "type": "float"},
+    "force_repel_k": {"min": 50.0, "max": 1000.0, "sigma": 50.0, "type": "float"},
+    "placement_clearance_mm": {"min": 0.5, "max": 6.0, "sigma": 0.5, "type": "float"},
+    "cooling_factor": {"min": 0.80, "max": 0.999, "sigma": 0.02, "type": "float"},
+    "edge_margin_mm": {"min": 0.5, "max": 10.0, "sigma": 0.5, "type": "float"},
+    "courtyard_padding_mm": {"min": 0.0, "max": 2.0, "sigma": 0.1, "type": "float"},
+    "board_width_mm": {"min": 60.0, "max": 140.0, "sigma": 5.0, "type": "float"},
+    "board_height_mm": {"min": 40.0, "max": 100.0, "sigma": 5.0, "type": "float"},
+    "sa_refine_initial_temp": {"min": 0.5, "max": 20.0, "sigma": 2.0, "type": "float"},
+    "sa_refine_move_radius_mm": {"min": 0.5, "max": 5.0, "sigma": 0.5, "type": "float"},
+    "sa_refine_iterations": {"min": 200, "max": 5000, "sigma": 500, "type": "int"},
+    "connector_gap_mm": {"min": 0.0, "max": 6.0, "sigma": 0.5, "type": "float"},
+    "edge_jitter_mm": {"min": 0.0, "max": 12.0, "sigma": 1.0, "type": "float"},
+    "intra_cluster_iters": {"min": 10, "max": 500, "sigma": 20, "type": "int"},
+    "max_placement_iterations": {"min": 300, "max": 5000, "sigma": 300, "type": "int"},
+    "subcircuit_margin_mm": {"min": 2.0, "max": 10.0, "sigma": 1.0, "type": "float"},
+}
+
+
+def load_project_config(config_path: str | None = None) -> dict[str, Any]:
     """Load a project config from a JSON file.
 
     If config_path is None, looks for a *_config.json in the autoplacer

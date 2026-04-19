@@ -331,11 +331,14 @@ class ExperimentScore:
             + w_drc * drc_val
         )
 
-        # Hard score gates: cap score based on route completion
-        if route_pct <= 50.0:
-            self.total = min(self.total, 40.0)
-        elif route_pct < 90.0:
-            self.total = min(self.total, 70.0)
+        # Smooth score gating: continuous cap based on route completion
+        # Smoothly ramps from cap=40 at route_pct=50 to cap=100 at route_pct=95
+        if route_pct < 95.0:
+            t = max(0.0, min(1.0, (route_pct - 50.0) / 45.0))
+            # Smooth hermite interpolation (smoothstep)
+            smooth_t = t * t * (3.0 - 2.0 * t)
+            cap = 40.0 + smooth_t * 60.0
+            self.total = min(self.total, cap)
 
         # Area bonus: reward smaller boards (only when board size search is active)
         if board_area_mm2 is not None:

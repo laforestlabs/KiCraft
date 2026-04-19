@@ -134,9 +134,9 @@ def _infer_implicit_interface_ports(
         if net_name in declared_nets:
             continue
         net = net_partition.external[net_name]
-        # Determine role: power nets get POWER role, others get BIDIR
+        # Determine role: power nets get POWER_IN role, others get BIDIR
         if net.is_power:
-            role = InterfaceRole.POWER
+            role = InterfaceRole.POWER_IN
         else:
             role = InterfaceRole.BIDIR
 

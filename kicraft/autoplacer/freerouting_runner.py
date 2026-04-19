@@ -141,6 +141,17 @@ def clear_zones(kicad_pcb_path: str) -> None:
     )
 
 
+def _unlock_traces(kicad_pcb_path: str) -> None:
+    """Unlock all traces and vias in the board file."""
+    _run_pcbnew_script(
+        "import pcbnew\n"
+        f"board = pcbnew.LoadBoard({kicad_pcb_path!r})\n"
+        "for track in board.GetTracks():\n"
+        "    track.SetLocked(False)\n"
+        f"board.Save({kicad_pcb_path!r})\n"
+    )
+
+
 def prepare_board_for_placement(kicad_pcb_path: str) -> None:
     """Strip stale routing artifacts so placement starts from a clean board."""
     clear_traces(
@@ -184,16 +195,29 @@ def count_board_tracks(kicad_pcb_path: str) -> dict:
     return json.loads(result.stdout.strip())
 
 
-def export_dsn(kicad_pcb_path: str, dsn_path: str) -> None:
+def export_dsn(
+    kicad_pcb_path: str, dsn_path: str, lock_existing_traces: bool = False
+) -> None:
     """Export Specctra DSN from a KiCad PCB file using pcbnew API.
 
     Assumes copper zones have already been stripped so FreeRouting starts
     from a clean board containing only footprints, nets, and board geometry.
+
+    If lock_existing_traces is True, all existing tracks and vias are marked
+    as locked before export so FreeRouting treats them as fixed pre-routes.
     """
+    lock_script = ""
+    if lock_existing_traces:
+        lock_script = (
+            "# Lock all existing traces so FreeRouting treats them as fixed\n"
+            "for track in board.GetTracks():\n"
+            "    track.SetLocked(True)\n"
+        )
     _run_pcbnew_script(
         "import pcbnew\n"
         f"board = pcbnew.LoadBoard({kicad_pcb_path!r})\n"
-        "board.BuildConnectivity()\n"
+        + lock_script
+        + "board.BuildConnectivity()\n"
         f"board.Save({kicad_pcb_path!r})\n"
         f"pcbnew.ExportSpecctraDSN(board, {dsn_path!r})\n"
     )
@@ -417,7 +441,11 @@ def route_with_freerouting(
             dsn_path = os.path.join(tmpdir, "board.dsn")
             ses_path = os.path.join(tmpdir, "board.ses")
 
-            export_dsn(kicad_pcb_path, dsn_path)
+            export_dsn(
+                kicad_pcb_path,
+                dsn_path,
+                lock_existing_traces=preserve_existing_copper,
+            )
 
             passes = max_passes if attempt == 0 else max(10, max_passes // 2)
             stats = run_freerouting(
@@ -432,6 +460,8 @@ def route_with_freerouting(
 
             if os.path.exists(ses_path):
                 import_ses(kicad_pcb_path, ses_path, output_path)
+                if preserve_existing_copper:
+                    _unlock_traces(output_path)
                 return stats
 
             if attempt == 0:

@@ -751,6 +751,22 @@ class PlacementSolver:
                 )
                 break
 
+        # SA refinement: escape local minima after FD convergence
+        if self.cfg.get("sa_refine_enabled", True):
+            self._seen_force_states.clear()
+            work_state.components = best_comps
+            best_comps = self._sa_refine(
+                {r: copy.deepcopy(c) for r, c in best_comps.items()},
+                work_state,
+                scorer,
+                max_iters=int(self.cfg.get("sa_refine_iterations", 1000)),
+                init_temp=float(self.cfg.get("sa_refine_initial_temp", 5.0)),
+                cooling_rate=float(self.cfg.get("sa_refine_cooling_rate", 0.995)),
+                move_radius=float(self.cfg.get("sa_refine_move_radius_mm", 2.0)),
+                swap_prob=float(self.cfg.get("sa_refine_swap_probability", 0.3)),
+                rotation_prob=float(self.cfg.get("sa_refine_rotation_probability", 0.2)),
+            )
+
         # Step 7: Swap optimization — directly minimize crossovers
         comps = best_comps
         if enable_swap:
@@ -1729,6 +1745,156 @@ class PlacementSolver:
         self._post_step_clamp(comps, refs)
 
         return max_disp
+
+    def _sa_refine(
+        self,
+        comps: dict,
+        work_state,
+        scorer,
+        *,
+        max_iters: int = 1000,
+        init_temp: float = 5.0,
+        cooling_rate: float = 0.995,
+        move_radius: float = 2.0,
+        swap_prob: float = 0.3,
+        rotation_prob: float = 0.2,
+    ) -> dict:
+        """Simulated annealing refinement after force-directed placement.
+
+        Performs single-component moves, pairwise swaps, and rotation
+        perturbations with Metropolis acceptance criterion to escape
+        local minima found by the force-directed solver.
+        """
+        import copy
+        import math
+        import random
+
+        rng = random.Random(self.seed + 9999)
+
+        # Score current state
+        work_state.components = comps
+        current_score = scorer.score().total
+        best_score = current_score
+        best_comps = {r: copy.deepcopy(c) for r, c in comps.items()}
+
+        # Get unlocked component refs
+        unlocked = [r for r, c in comps.items() if not c.locked]
+        if not unlocked:
+            return best_comps
+
+        # Board bounds for clamping
+        tl = work_state.board_outline[0]
+        br = work_state.board_outline[1]
+
+        temp = init_temp
+        accepted = 0
+        improved = 0
+
+        for iteration in range(max_iters):
+            # Choose move type
+            roll = rng.random()
+            if roll < swap_prob and len(unlocked) >= 2:
+                # Pairwise swap
+                ref_a, ref_b = rng.sample(unlocked, 2)
+                comp_a = comps[ref_a]
+                comp_b = comps[ref_b]
+
+                # Save old positions
+                old_a = Point(comp_a.pos.x, comp_a.pos.y)
+                old_b = Point(comp_b.pos.x, comp_b.pos.y)
+
+                # Swap positions
+                comp_a.pos = Point(old_b.x, old_b.y)
+                comp_b.pos = Point(old_a.x, old_a.y)
+                _update_pad_positions(comp_a, old_a, comp_a.rotation)
+                _update_pad_positions(comp_b, old_b, comp_b.rotation)
+
+                # Evaluate
+                work_state.components = comps
+                new_score = scorer.score().total
+                delta = new_score - current_score
+
+                if delta > 0 or rng.random() < math.exp(delta / max(temp, 0.001)):
+                    current_score = new_score
+                    accepted += 1
+                    if new_score > best_score:
+                        best_score = new_score
+                        best_comps = {r: copy.deepcopy(c) for r, c in comps.items()}
+                        improved += 1
+                else:
+                    # Revert swap
+                    comp_a.pos = Point(old_a.x, old_a.y)
+                    comp_b.pos = Point(old_b.x, old_b.y)
+                    _update_pad_positions(comp_a, old_b, comp_a.rotation)
+                    _update_pad_positions(comp_b, old_a, comp_b.rotation)
+
+            elif roll < swap_prob + rotation_prob:
+                # Rotation perturbation
+                ref = rng.choice(unlocked)
+                comp = comps[ref]
+                old_rot = comp.rotation
+                # Try 90-degree rotation increments
+                new_rot = (old_rot + rng.choice([90.0, 180.0, 270.0])) % 360.0
+                old_pos = Point(comp.pos.x, comp.pos.y)
+                comp.rotation = new_rot
+                _update_pad_positions(comp, old_pos, old_rot)
+
+                work_state.components = comps
+                new_score = scorer.score().total
+                delta = new_score - current_score
+
+                if delta > 0 or rng.random() < math.exp(delta / max(temp, 0.001)):
+                    current_score = new_score
+                    accepted += 1
+                    if new_score > best_score:
+                        best_score = new_score
+                        best_comps = {r: copy.deepcopy(c) for r, c in comps.items()}
+                        improved += 1
+                else:
+                    # Revert rotation
+                    comp.rotation = old_rot
+                    _update_pad_positions(comp, old_pos, new_rot)
+
+            else:
+                # Single component displacement
+                ref = rng.choice(unlocked)
+                comp = comps[ref]
+                old_pos = Point(comp.pos.x, comp.pos.y)
+
+                # Random displacement within move_radius
+                dx = rng.gauss(0, move_radius * 0.5)
+                dy = rng.gauss(0, move_radius * 0.5)
+                new_x = max(tl.x, min(br.x, comp.pos.x + dx))
+                new_y = max(tl.y, min(br.y, comp.pos.y + dy))
+                comp.pos = Point(new_x, new_y)
+                _update_pad_positions(comp, old_pos, comp.rotation)
+
+                work_state.components = comps
+                new_score = scorer.score().total
+                delta = new_score - current_score
+
+                if delta > 0 or rng.random() < math.exp(delta / max(temp, 0.001)):
+                    current_score = new_score
+                    accepted += 1
+                    if new_score > best_score:
+                        best_score = new_score
+                        best_comps = {r: copy.deepcopy(c) for r, c in comps.items()}
+                        improved += 1
+                else:
+                    # Revert displacement
+                    comp.pos = Point(old_pos.x, old_pos.y)
+                    _update_pad_positions(comp, Point(new_x, new_y), comp.rotation)
+
+            # Cool down
+            temp *= cooling_rate
+
+        if improved > 0:
+            print(f"  SA refine: {improved} improvements, {accepted} accepted of {max_iters} "
+                  f"(best {best_score:.1f} vs initial {current_score:.1f})")
+        else:
+            print(f"  SA refine: no improvement after {max_iters} iterations")
+
+        return best_comps
 
     def _accumulate_attraction(
         self,
