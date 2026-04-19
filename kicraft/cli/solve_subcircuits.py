@@ -124,6 +124,10 @@ from kicraft.autoplacer.brain.subcircuit_artifacts import (
     save_solved_layout_artifact,
     serialize_components,
 )
+from kicraft.autoplacer.brain.leaf_acceptance import (
+    acceptance_config_from_dict,
+    evaluate_leaf_acceptance,
+)
 from kicraft.autoplacer.brain.subcircuit_extractor import (
     ExtractedSubcircuitBoard,
     extract_leaf_board_state,
@@ -2374,6 +2378,7 @@ def _solve_leaf_subcircuit(
     failure_rows: list[dict[str, Any]] = []
     accepted_round_count = 0
     failed_round_count = 0
+    acceptance_cfg = acceptance_config_from_dict(cfg)
 
     for round_index in range(effective_rounds):
         seed = rng.randint(0, 2**31 - 1)
@@ -2399,26 +2404,67 @@ def _solve_leaf_subcircuit(
 
         routing = result.routing or {}
         validation = routing.get("validation", {}) or {}
-        accepted = not (
-            route
-            and (
-                routing.get("failed", False)
-                or (
-                    not routing.get("routed_board_path")
-                    and routing.get("reason") != "no_internal_nets"
-                )
+
+        # -- Structured round acceptance via leaf_acceptance gates --
+        if not route:
+            # No routing requested -- placement-only round is always accepted
+            accepted = True
+            round_acceptance = None
+        elif routing.get("reason") == "no_internal_nets":
+            # Trivial pass -- nothing to route for this leaf
+            accepted = True
+            round_acceptance = None
+        elif routing.get("failed", False):
+            # Clear routing infrastructure failure -- reject without gate eval
+            accepted = False
+            round_acceptance = None
+        else:
+            # Normal routed result -- evaluate through structured acceptance
+            # gates.  Anchor validation is deferred to persist time; pass
+            # empty dict here so anchor gates are skipped for per-round eval.
+            round_acceptance = evaluate_leaf_acceptance(
+                validation=validation,
+                anchor_validation={},
+                config=acceptance_cfg,
             )
+            accepted = round_acceptance.accepted
+
+        # Stash the structured acceptance result on the routing dict for
+        # downstream persistence and debugging.
+        result.routing["_round_acceptance"] = (
+            {
+                "accepted": round_acceptance.accepted,
+                "rejection_reasons": list(round_acceptance.rejection_reasons),
+                "gate_results": dict(round_acceptance.gate_results),
+                "drc_summary": dict(round_acceptance.drc_summary),
+                "notes": list(round_acceptance.notes),
+            }
+            if round_acceptance is not None
+            else {
+                "accepted": accepted,
+                "rejection_reasons": [],
+                "gate_results": {},
+                "drc_summary": {},
+                "notes": [],
+            }
         )
+
         if accepted:
             accepted_round_count += 1
         else:
             failed_round_count += 1
-            reason = (
-                validation.get("rejection_stage")
-                or validation.get("rejection_message")
-                or routing.get("reason")
-                or "unknown_leaf_failure"
-            )
+            if round_acceptance is not None:
+                reason = (
+                    ",".join(round_acceptance.rejection_reasons)
+                    or "unknown_gate_failure"
+                )
+            else:
+                reason = (
+                    validation.get("rejection_stage")
+                    or validation.get("rejection_message")
+                    or routing.get("reason")
+                    or "unknown_leaf_failure"
+                )
             failure_reasons.append(str(reason))
             failure_rows.append(
                 {
@@ -2431,6 +2477,11 @@ def _solve_leaf_subcircuit(
                         routing.get("failed_internal_nets", []) or []
                     ),
                     "timing_breakdown": dict(result.timing_breakdown),
+                    "acceptance_gate_results": (
+                        dict(round_acceptance.gate_results)
+                        if round_acceptance
+                        else {}
+                    ),
                 }
             )
             continue
@@ -2545,6 +2596,23 @@ def _persist_solution(
             f"{len(missing)} unanchored required port(s): {missing}"
         )
     routing_validation = dict(solved.best_round.routing.get("validation", {}))
+
+    # -- Full acceptance evaluation with anchor validation --
+    persist_acceptance_cfg = acceptance_config_from_dict(cfg)
+    full_acceptance = evaluate_leaf_acceptance(
+        validation=routing_validation,
+        anchor_validation=anchor_validation,
+        config=persist_acceptance_cfg,
+    )
+    routing_validation["leaf_acceptance_result"] = {
+        "accepted": full_acceptance.accepted,
+        "rejection_reasons": list(full_acceptance.rejection_reasons),
+        "gate_results": dict(full_acceptance.gate_results),
+        "drc_summary": dict(full_acceptance.drc_summary),
+        "anchor_summary": dict(full_acceptance.anchor_summary),
+        "notes": list(full_acceptance.notes),
+    }
+
     canonical_layout = solved.canonical_layout_artifact(cfg)
     canonical_layout["validation"] = routing_validation
     canonical_layout["scheduling_metadata"] = dict(solved.scheduling_metadata or {})
@@ -2650,6 +2718,8 @@ def _persist_solution(
                 if not key.startswith("_")
             },
             "leaf_acceptance": routing_validation,
+            "leaf_acceptance_structured": routing_validation.get("leaf_acceptance_result", {}),
+            "round_acceptance": solved.best_round.routing.get("_round_acceptance", {}),
             "leaf_render_diagnostics": solved.best_round.routing.get(
                 "render_diagnostics", {}
             ),

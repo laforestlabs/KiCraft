@@ -43,6 +43,11 @@ from typing import Any
 from kicraft.autoplacer.brain.hierarchy_parser import parse_hierarchy
 
 
+from kicraft.autoplacer.brain.copper_accounting import (
+    CopperManifest,
+    build_copper_manifest,
+    verify_copper_preservation,
+)
 from kicraft.autoplacer.brain.subcircuit_composer import (
     ChildArtifactPlacement,
     ParentComposition,
@@ -130,6 +135,7 @@ class ParentCompositionState:
     score_notes: list[str] = field(default_factory=list)
     composition_notes: list[str] = field(default_factory=list)
     composition: ParentComposition | None = None
+    copper_manifest: CopperManifest | None = None
 
     @property
     def width_mm(self) -> float:
@@ -178,6 +184,7 @@ class ParentCompositionState:
                 "height_mm": self.height_mm,
             },
             "entries": [entry.to_dict() for entry in self.entries],
+            "copper_manifest": self.copper_manifest.to_dict() if self.copper_manifest else None,
         }
 
 
@@ -506,6 +513,11 @@ def _compose_artifacts(
         child_artifact_placements=child_artifact_placements,
     )
 
+    # Build copper manifest before the flat merge loses provenance
+    copper_manifest = build_copper_manifest(
+        composed_children=composition.composed_children,
+    )
+
     state = ParentCompositionState(
         project_dir=project_dir,
         mode=mode,
@@ -535,6 +547,7 @@ def _compose_artifacts(
         score_breakdown=dict(composition.score.breakdown) if composition.score else {},
         score_notes=list(composition.score.notes) if composition.score else [],
         composition_notes=list(composition.notes),
+        copper_manifest=copper_manifest,
         composition=composition,
     )
     return state, transformed_payloads
@@ -653,6 +666,25 @@ def _print_human_summary(
         print("score_breakdown:")
         for key, value in sorted(state.score_breakdown.items()):
             print(f"  - {key}: {value:.2f}")
+
+    # Copper accounting summary
+    if state.preserved_child_trace_count or state.added_parent_trace_count:
+        print()
+        print("copper_accounting:")
+        print(
+            f"  child_traces         : {state.preserved_child_trace_count}"
+            f" / {state.expected_preserved_child_trace_count} preserved"
+        )
+        print(
+            f"  child_vias           : {state.preserved_child_via_count}"
+            f" / {state.expected_preserved_child_via_count} preserved"
+        )
+        print(f"  parent_traces        : +{state.added_parent_trace_count} new")
+        print(f"  parent_vias          : +{state.added_parent_via_count} new")
+        print(
+            f"  total_routed         : {state.routed_total_trace_count} traces,"
+            f" {state.routed_total_via_count} vias"
+        )
         print()
 
     if state.score_notes:
@@ -1239,18 +1271,43 @@ def _persist_parent_artifact(
     )
 
     # Build notes for the artifact
-    expected_child_trace_count = int(state.trace_count)
-    expected_child_via_count = int(state.via_count)
+    # Use copper manifest for accurate child-only counts (state.trace_count
+    # includes parent interconnect traces, which inflates the expectation).
+    if state.copper_manifest is not None:
+        expected_child_trace_count = state.copper_manifest.total_child_traces
+        expected_child_via_count = state.copper_manifest.total_child_vias
+    else:
+        expected_child_trace_count = int(state.trace_count)
+        expected_child_via_count = int(state.via_count)
     routed_total_trace_count = len(all_traces)
     routed_total_via_count = len(all_vias)
-    preserved_child_trace_count = min(
-        expected_child_trace_count, routed_total_trace_count
-    )
-    preserved_child_via_count = min(expected_child_via_count, routed_total_via_count)
-    added_parent_trace_count = max(
-        0, routed_total_trace_count - preserved_child_trace_count
-    )
-    added_parent_via_count = max(0, routed_total_via_count - preserved_child_via_count)
+
+    # -- Real copper accounting via fingerprint matching --
+    if state.copper_manifest is not None:
+        copper_verification = verify_copper_preservation(
+            manifest=state.copper_manifest,
+            post_route_traces=all_traces,
+            post_route_vias=all_vias,
+        )
+        preserved_child_trace_count = copper_verification["matched_child_traces"]
+        preserved_child_via_count = copper_verification["matched_child_vias"]
+        added_parent_trace_count = copper_verification["new_route_traces"]
+        added_parent_via_count = copper_verification["new_route_vias"]
+    else:
+        # Fallback to count-based estimation (legacy path)
+        copper_verification = None
+        preserved_child_trace_count = min(
+            expected_child_trace_count, routed_total_trace_count
+        )
+        preserved_child_via_count = min(
+            expected_child_via_count, routed_total_via_count
+        )
+        added_parent_trace_count = max(
+            0, routed_total_trace_count - preserved_child_trace_count
+        )
+        added_parent_via_count = max(
+            0, routed_total_via_count - preserved_child_via_count
+        )
 
     state.expected_preserved_child_trace_count = expected_child_trace_count
     state.expected_preserved_child_via_count = expected_child_via_count
@@ -1276,6 +1333,18 @@ def _persist_parent_artifact(
         f"added_parent_traces={added_parent_trace_count}",
         f"added_parent_vias={added_parent_via_count}",
     ]
+    if copper_verification:
+        notes.append(f"copper_status={copper_verification['status']}")
+        notes.append(
+            f"copper_trace_preservation="
+            f"{copper_verification['matched_child_traces']}/"
+            f"{copper_verification['expected_child_traces']}"
+        )
+        notes.append(
+            f"copper_via_preservation="
+            f"{copper_verification['matched_child_vias']}/"
+            f"{copper_verification['expected_child_vias']}"
+        )
     validation = routing_result.get("validation", {})
     if validation:
         notes.append(f"validation_accepted={validation.get('accepted', False)}")
@@ -1326,6 +1395,7 @@ def _persist_parent_artifact(
         "added_parent_trace_count": state.added_parent_trace_count,
         "added_parent_via_count": state.added_parent_via_count,
         "score_total": state.score_total,
+        "copper_verification": copper_verification if copper_verification else {},
         "validation": validation,
         "artifact_paths": {
             "artifact_dir": str(artifact_dir),
@@ -1403,6 +1473,8 @@ def _persist_parent_artifact(
                 "added_parent_trace_count": state.added_parent_trace_count,
                 "added_parent_via_count": state.added_parent_via_count,
             },
+            "copper_verification": copper_verification,
+            "copper_manifest": state.copper_manifest.to_dict() if state.copper_manifest else None,
         },
         "validation": validation,
         "hierarchical_status": {

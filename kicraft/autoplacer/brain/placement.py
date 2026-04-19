@@ -1362,10 +1362,7 @@ class PlacementSolver:
                 stagnant = 0
                 self._seen_force_states.clear()
 
-            if _HAS_NUMPY:
-                max_disp = self._force_step_numpy(comps, conn_graph, damping)
-            else:
-                max_disp = self._force_step(comps, conn_graph, damping)
+            max_disp = self._force_step(comps, conn_graph, damping)
             self._resolve_overlaps(comps)
             self._clamp_pads_to_board(comps)
             # Periodic legalization during force simulation
@@ -2367,7 +2364,11 @@ class PlacementSolver:
     def _force_step(
         self, comps: dict[str, Component], conn_graph: AdjacencyGraph, damping: float
     ) -> float:
-        """One iteration of force-directed simulation. Returns max displacement."""
+        """One iteration of force-directed simulation. Returns max displacement.
+
+        Uses numpy-accelerated repulsion when available, otherwise falls back
+        to pure Python pairwise computation.
+        """
         # State dedup: skip if we've seen this exact layout before
         state_h = hash(
             tuple(
@@ -2383,7 +2384,31 @@ class PlacementSolver:
         forces: dict[str, Point] = {ref: Point(0, 0) for ref in comps}
         refs = [r for r in comps if not comps[r].locked]
 
-        # Attraction: pull connected components together
+        # Accumulate all force contributions
+        self._accumulate_attraction(comps, refs, forces, conn_graph)
+        if _HAS_NUMPY:
+            self._accumulate_repulsion_numpy(comps, forces)
+        else:
+            self._accumulate_repulsion_python(comps, forces)
+        self._accumulate_smt_opposite_tht_force(comps, refs, forces)
+        self._accumulate_boundary_force(comps, refs, forces, tl, br)
+        self._accumulate_center_attraction(comps, refs, forces, tl, br)
+        self._accumulate_alignment_force(comps, forces)
+
+        # Integrate and clamp
+        max_disp = self._apply_forces(comps, refs, forces, damping, tl, br)
+        self._post_step_clamp(comps, refs)
+
+        return max_disp
+
+    def _accumulate_attraction(
+        self,
+        comps: dict[str, Component],
+        refs: list[str],
+        forces: dict[str, Point],
+        conn_graph: AdjacencyGraph,
+    ) -> None:
+        """Attraction: pull connected components together."""
         for ref in refs:
             for nbr, weight in conn_graph.neighbors(ref).items():
                 if nbr not in comps:
@@ -2400,9 +2425,16 @@ class PlacementSolver:
                 forces[ref].x += f_mag * math.cos(angle)
                 forces[ref].y += f_mag * math.sin(angle)
 
-        # Repulsion: push overlapping/close components apart.
-        # Locked components (connectors, holes) act as repellers even though
-        # they don't move — this keeps unlocked parts from clustering against them.
+    def _accumulate_repulsion_python(
+        self,
+        comps: dict[str, Component],
+        forces: dict[str, Point],
+    ) -> None:
+        """Repulsion (pure Python): push overlapping/close components apart.
+
+        Locked components (connectors, holes) act as repellers even though
+        they don't move — this keeps unlocked parts from clustering against them.
+        """
         ref_list = list(comps.keys())
         for i in range(len(ref_list)):
             a = comps[ref_list[i]]
@@ -2429,189 +2461,17 @@ class PlacementSolver:
                     forces[ref_list[j]].x -= fx
                     forces[ref_list[j]].y -= fy
 
-        # SMT-opposite-THT attraction: pull unlocked SMT components toward
-        # the nearest point on the nearest back-layer THT bounding box.
-        # This distributes SMT across the available THT courtyard space
-        # rather than clustering them all at the centroid.
-        if self.cfg.get("smt_opposite_tht", True):
-            back_tht = [
-                c for c in comps.values() if c.is_through_hole and c.layer == Layer.BACK
-            ]
-            if back_tht:
-                smt_k = self.k_attract * 0.6
-                # Pre-compute back-THT bboxes
-                btht_bboxes = [
-                    (
-                        t.pos.x - t.width_mm / 2,
-                        t.pos.y - t.height_mm / 2,
-                        t.pos.x + t.width_mm / 2,
-                        t.pos.y + t.height_mm / 2,
-                    )
-                    for t in back_tht
-                ]
-                for ref in refs:
-                    c = comps[ref]
-                    if c.is_through_hole or c.layer == Layer.BACK:
-                        continue
-                    # Find nearest point on nearest back-THT bbox
-                    best_dist = float("inf")
-                    best_tx, best_ty = c.pos.x, c.pos.y
-                    for bx0, by0, bx1, by1 in btht_bboxes:
-                        # Clamp SMT center to THT bbox = nearest point on bbox
-                        nx = max(bx0, min(bx1, c.pos.x))
-                        ny = max(by0, min(by1, c.pos.y))
-                        nd = math.hypot(c.pos.x - nx, c.pos.y - ny)
-                        if nd < best_dist:
-                            best_dist = nd
-                            best_tx, best_ty = nx, ny
-                    if best_dist < 0.1:
-                        continue
-                    f_mag = smt_k * best_dist
-                    angle = math.atan2(best_ty - c.pos.y, best_tx - c.pos.x)
-                    forces[ref].x += f_mag * math.cos(angle)
-                    forces[ref].y += f_mag * math.sin(angle)
+    def _accumulate_repulsion_numpy(
+        self,
+        comps: dict[str, Component],
+        forces: dict[str, Point],
+    ) -> None:
+        """Repulsion (numpy-accelerated): push overlapping/close components apart.
 
-        # Boundary: strong spring force at edges (pad-aware extents)
-        margin = self.edge_margin + 2.0
-        k_boundary = 10.0
-        for ref in refs:
-            c = comps[ref]
-            hw, hh = _pad_half_extents(c)
-            if c.pos.x - hw < tl.x + margin:
-                forces[ref].x += k_boundary * (tl.x + margin - (c.pos.x - hw))
-            if c.pos.x + hw > br.x - margin:
-                forces[ref].x -= k_boundary * ((c.pos.x + hw) - (br.x - margin))
-            if c.pos.y - hh < tl.y + margin:
-                forces[ref].y += k_boundary * (tl.y + margin - (c.pos.y - hh))
-            if c.pos.y + hh > br.y - margin:
-                forces[ref].y -= k_boundary * ((c.pos.y + hh) - (br.y - margin))
-
-        # Center attraction: weak force pulling components toward board center
-        # to prevent edge-clumping bias
-        cx = (tl.x + br.x) / 2.0
-        cy = (tl.y + br.y) / 2.0
-        k_center = 0.02  # weak — just enough to break edge-clumping symmetry
-        for ref in refs:
-            c = comps[ref]
-            dx = cx - c.pos.x
-            dy = cy - c.pos.y
-            dist = max(0.1, (dx * dx + dy * dy) ** 0.5)
-            # Scale by distance from center — stronger pull for far-flung components
-            strength = k_center * dist / max(1.0, (br.x - tl.x))
-            forces[ref].x += strength * dx
-            forces[ref].y += strength * dy
-
-        # Large-pair alignment: keep paired components sharing an axis
-        if self._aligned_pairs:
-            for ref_a, ref_b, axis in self._aligned_pairs:
-                if ref_a not in comps or ref_b not in comps:
-                    continue
-                a, b = comps[ref_a], comps[ref_b]
-                if axis == "y":  # horizontal side-by-side: share Y
-                    mid_y = (a.pos.y + b.pos.y) / 2
-                    if ref_a in forces:
-                        forces[ref_a].y += 1.5 * (mid_y - a.pos.y)
-                    if ref_b in forces:
-                        forces[ref_b].y += 1.5 * (mid_y - b.pos.y)
-                else:  # vertical: share X
-                    mid_x = (a.pos.x + b.pos.x) / 2
-                    if ref_a in forces:
-                        forces[ref_a].x += 1.5 * (mid_x - a.pos.x)
-                    if ref_b in forces:
-                        forces[ref_b].x += 1.5 * (mid_x - b.pos.x)
-
-        # Apply forces
-        max_disp = 0.0
-        for ref in refs:
-            dx = forces[ref].x * damping
-            dy = forces[ref].y * damping
-            # Clamp max displacement per step
-            mag = math.hypot(dx, dy)
-            max_step = 2.0 * damping
-            if mag > max_step:
-                dx *= max_step / mag
-                dy *= max_step / mag
-                mag = max_step
-
-            old_pos = Point(comps[ref].pos.x, comps[ref].pos.y)
-            old_rot = comps[ref].rotation
-            comps[ref].pos.x += dx
-            comps[ref].pos.y += dy
-
-            # Hard clamp: pad-aware extents must stay inside board
-            c = comps[ref]
-            hw, hh = _pad_half_extents(c)
-            c.pos.x = max(tl.x + hw + 1.0, min(br.x - hw - 1.0, c.pos.x))
-            c.pos.y = max(tl.y + hh + 1.0, min(br.y - hh - 1.0, c.pos.y))
-
-            _update_pad_positions(comps[ref], old_pos, old_rot)
-
-            max_disp = max(max_disp, mag)
-
-        # Post-step: zone re-clamping — keep zone-constrained components
-        # within their designated zone bounds (prevents drift during
-        # force simulation)
-        zones_cfg = self.cfg.get("component_zones", {})
-        for ref in refs:
-            zone_cfg = zones_cfg.get(ref, {})
-            if "zone" not in zone_cfg:
-                continue
-            c = comps[ref]
-            zx0, zy0, zx1, zy1 = self._get_zone_bounds(zone_cfg["zone"])
-            hw, hh = _pad_half_extents(c)
-            clamped_x = max(zx0 + hw, min(zx1 - hw, c.pos.x))
-            clamped_y = max(zy0 + hh, min(zy1 - hh, c.pos.y))
-            if abs(clamped_x - c.pos.x) > 0.01 or abs(clamped_y - c.pos.y) > 0.01:
-                old_pos = Point(c.pos.x, c.pos.y)
-                c.pos.x = clamped_x
-                c.pos.y = clamped_y
-                _update_pad_positions(c, old_pos, c.rotation)
-
-        # Post-step: re-snap aligned pairs to shared coordinate
-        self._re_snap_aligned_pairs(comps)
-
-        return max_disp
-
-    def _force_step_numpy(
-        self, comps: dict[str, Component], conn_graph: AdjacencyGraph, damping: float
-    ) -> float:
-        """One iteration of force-directed simulation with numpy vectorization.
-        Returns max displacement."""
-        if not _HAS_NUMPY:
-            return self._force_step(comps, conn_graph, damping)
-
-        # State dedup: skip if we've seen this exact layout before
-        state_h = hash(
-            tuple(
-                (r, round(comps[r].pos.x, 2), round(comps[r].pos.y, 2))
-                for r in sorted(comps.keys())
-            )
-        )
-        if state_h in self._seen_force_states:
-            return 0.01
-        self._seen_force_states.add(state_h)
-
-        tl, br = self.state.board_outline
-        forces: dict[str, Point] = {ref: Point(0, 0) for ref in comps}
-        refs = [r for r in comps if not comps[r].locked]
-
-        for ref in refs:
-            for nbr, weight in conn_graph.neighbors(ref).items():
-                if nbr not in comps:
-                    continue
-                a = comps[ref]
-                b = comps[nbr]
-                d = a.pos.dist(b.pos)
-                if d < 0.1:
-                    continue
-                target = (a.width_mm + b.width_mm) / 2 + self.clearance
-                f_mag = self.k_attract * weight * (d - target)
-                angle = math.atan2(b.pos.y - a.pos.y, b.pos.x - a.pos.x)
-                forces[ref].x += f_mag * math.cos(angle)
-                forces[ref].y += f_mag * math.sin(angle)
-
+        Locked components (connectors, holes) act as repellers even though
+        they don't move — this keeps unlocked parts from clustering against them.
+        """
         ref_list = list(comps.keys())
-        len(ref_list)
 
         pos_x = np.array([comps[r].pos.x for r in ref_list], dtype=np.float64)
         pos_y = np.array([comps[r].pos.y for r in ref_list], dtype=np.float64)
@@ -2660,42 +2520,67 @@ class PlacementSolver:
                 forces[ref].x += float(fx_totals[i])
                 forces[ref].y += float(fy_totals[i])
 
-        # SMT-opposite-THT attraction (same logic as _force_step)
-        if self.cfg.get("smt_opposite_tht", True):
-            back_tht = [
-                c for c in comps.values() if c.is_through_hole and c.layer == Layer.BACK
-            ]
-            if back_tht:
-                smt_k = self.k_attract * 0.6
-                btht_bboxes = [
-                    (
-                        t.pos.x - t.width_mm / 2,
-                        t.pos.y - t.height_mm / 2,
-                        t.pos.x + t.width_mm / 2,
-                        t.pos.y + t.height_mm / 2,
-                    )
-                    for t in back_tht
-                ]
-                for ref in refs:
-                    c = comps[ref]
-                    if c.is_through_hole or c.layer == Layer.BACK:
-                        continue
-                    best_dist = float("inf")
-                    best_tx, best_ty = c.pos.x, c.pos.y
-                    for bx0, by0, bx1, by1 in btht_bboxes:
-                        nx = max(bx0, min(bx1, c.pos.x))
-                        ny = max(by0, min(by1, c.pos.y))
-                        nd = math.hypot(c.pos.x - nx, c.pos.y - ny)
-                        if nd < best_dist:
-                            best_dist = nd
-                            best_tx, best_ty = nx, ny
-                    if best_dist < 0.1:
-                        continue
-                    f_mag = smt_k * best_dist
-                    angle = math.atan2(best_ty - c.pos.y, best_tx - c.pos.x)
-                    forces[ref].x += f_mag * math.cos(angle)
-                    forces[ref].y += f_mag * math.sin(angle)
+    def _accumulate_smt_opposite_tht_force(
+        self,
+        comps: dict[str, Component],
+        refs: list[str],
+        forces: dict[str, Point],
+    ) -> None:
+        """SMT-opposite-THT attraction: pull unlocked SMT components toward
+        the nearest point on the nearest back-layer THT bounding box.
 
+        This distributes SMT across the available THT courtyard space
+        rather than clustering them all at the centroid.
+        """
+        if not self.cfg.get("smt_opposite_tht", True):
+            return
+        back_tht = [
+            c for c in comps.values() if c.is_through_hole and c.layer == Layer.BACK
+        ]
+        if not back_tht:
+            return
+        smt_k = self.k_attract * 0.6
+        # Pre-compute back-THT bboxes
+        btht_bboxes = [
+            (
+                t.pos.x - t.width_mm / 2,
+                t.pos.y - t.height_mm / 2,
+                t.pos.x + t.width_mm / 2,
+                t.pos.y + t.height_mm / 2,
+            )
+            for t in back_tht
+        ]
+        for ref in refs:
+            c = comps[ref]
+            if c.is_through_hole or c.layer == Layer.BACK:
+                continue
+            # Find nearest point on nearest back-THT bbox
+            best_dist = float("inf")
+            best_tx, best_ty = c.pos.x, c.pos.y
+            for bx0, by0, bx1, by1 in btht_bboxes:
+                # Clamp SMT center to THT bbox = nearest point on bbox
+                nx = max(bx0, min(bx1, c.pos.x))
+                ny = max(by0, min(by1, c.pos.y))
+                nd = math.hypot(c.pos.x - nx, c.pos.y - ny)
+                if nd < best_dist:
+                    best_dist = nd
+                    best_tx, best_ty = nx, ny
+            if best_dist < 0.1:
+                continue
+            f_mag = smt_k * best_dist
+            angle = math.atan2(best_ty - c.pos.y, best_tx - c.pos.x)
+            forces[ref].x += f_mag * math.cos(angle)
+            forces[ref].y += f_mag * math.sin(angle)
+
+    def _accumulate_boundary_force(
+        self,
+        comps: dict[str, Component],
+        refs: list[str],
+        forces: dict[str, Point],
+        tl: Point,
+        br: Point,
+    ) -> None:
+        """Boundary: strong spring force at edges (pad-aware extents)."""
         margin = self.edge_margin + 2.0
         k_boundary = 10.0
         for ref in refs:
@@ -2710,29 +2595,70 @@ class PlacementSolver:
             if c.pos.y + hh > br.y - margin:
                 forces[ref].y -= k_boundary * ((c.pos.y + hh) - (br.y - margin))
 
-        # Large-pair alignment (same logic as _force_step)
-        if self._aligned_pairs:
-            for ref_a, ref_b, axis in self._aligned_pairs:
-                if ref_a not in comps or ref_b not in comps:
-                    continue
-                a, b = comps[ref_a], comps[ref_b]
-                if axis == "y":
-                    mid_y = (a.pos.y + b.pos.y) / 2
-                    if ref_a in forces:
-                        forces[ref_a].y += 1.5 * (mid_y - a.pos.y)
-                    if ref_b in forces:
-                        forces[ref_b].y += 1.5 * (mid_y - b.pos.y)
-                else:
-                    mid_x = (a.pos.x + b.pos.x) / 2
-                    if ref_a in forces:
-                        forces[ref_a].x += 1.5 * (mid_x - a.pos.x)
-                    if ref_b in forces:
-                        forces[ref_b].x += 1.5 * (mid_x - b.pos.x)
+    def _accumulate_center_attraction(
+        self,
+        comps: dict[str, Component],
+        refs: list[str],
+        forces: dict[str, Point],
+        tl: Point,
+        br: Point,
+    ) -> None:
+        """Center attraction: weak force pulling components toward board center
+        to prevent edge-clumping bias."""
+        cx = (tl.x + br.x) / 2.0
+        cy = (tl.y + br.y) / 2.0
+        k_center = 0.02  # weak — just enough to break edge-clumping symmetry
+        for ref in refs:
+            c = comps[ref]
+            dx = cx - c.pos.x
+            dy = cy - c.pos.y
+            dist = max(0.1, (dx * dx + dy * dy) ** 0.5)
+            # Scale by distance from center — stronger pull for far-flung components
+            strength = k_center * dist / max(1.0, (br.x - tl.x))
+            forces[ref].x += strength * dx
+            forces[ref].y += strength * dy
 
+    def _accumulate_alignment_force(
+        self,
+        comps: dict[str, Component],
+        forces: dict[str, Point],
+    ) -> None:
+        """Large-pair alignment: keep paired components sharing an axis."""
+        if not self._aligned_pairs:
+            return
+        for ref_a, ref_b, axis in self._aligned_pairs:
+            if ref_a not in comps or ref_b not in comps:
+                continue
+            a, b = comps[ref_a], comps[ref_b]
+            if axis == "y":  # horizontal side-by-side: share Y
+                mid_y = (a.pos.y + b.pos.y) / 2
+                if ref_a in forces:
+                    forces[ref_a].y += 1.5 * (mid_y - a.pos.y)
+                if ref_b in forces:
+                    forces[ref_b].y += 1.5 * (mid_y - b.pos.y)
+            else:  # vertical: share X
+                mid_x = (a.pos.x + b.pos.x) / 2
+                if ref_a in forces:
+                    forces[ref_a].x += 1.5 * (mid_x - a.pos.x)
+                if ref_b in forces:
+                    forces[ref_b].x += 1.5 * (mid_x - b.pos.x)
+
+    def _apply_forces(
+        self,
+        comps: dict[str, Component],
+        refs: list[str],
+        forces: dict[str, Point],
+        damping: float,
+        tl: Point,
+        br: Point,
+    ) -> float:
+        """Apply accumulated forces with damping and displacement clamping.
+        Returns max displacement."""
         max_disp = 0.0
         for ref in refs:
             dx = forces[ref].x * damping
             dy = forces[ref].y * damping
+            # Clamp max displacement per step
             mag = math.hypot(dx, dy)
             max_step = 2.0 * damping
             if mag > max_step:
@@ -2745,6 +2671,7 @@ class PlacementSolver:
             comps[ref].pos.x += dx
             comps[ref].pos.y += dy
 
+            # Hard clamp: pad-aware extents must stay inside board
             c = comps[ref]
             hw, hh = _pad_half_extents(c)
             c.pos.x = max(tl.x + hw + 1.0, min(br.x - hw - 1.0, c.pos.x))
@@ -2754,7 +2681,18 @@ class PlacementSolver:
 
             max_disp = max(max_disp, mag)
 
-        # Post-step: zone re-clamping (same as _force_step)
+        return max_disp
+
+    def _post_step_clamp(
+        self,
+        comps: dict[str, Component],
+        refs: list[str],
+    ) -> None:
+        """Post-step: zone re-clamping and aligned-pair re-snapping.
+
+        Keep zone-constrained components within their designated zone bounds
+        (prevents drift during force simulation).
+        """
         zones_cfg = self.cfg.get("component_zones", {})
         for ref in refs:
             zone_cfg = zones_cfg.get(ref, {})
@@ -2771,10 +2709,8 @@ class PlacementSolver:
                 c.pos.y = clamped_y
                 _update_pad_positions(c, old_pos, c.rotation)
 
-        # Post-step: re-snap aligned pairs (same as _force_step)
+        # Post-step: re-snap aligned pairs to shared coordinate
         self._re_snap_aligned_pairs(comps)
-
-        return max_disp
 
     def _resolve_overlaps(self, comps: dict[str, Component]):
         """Push apart components until no bboxes overlap (including clearance gap).
