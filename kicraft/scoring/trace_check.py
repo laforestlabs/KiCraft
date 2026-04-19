@@ -6,7 +6,7 @@ from .base import LayoutCheck, CheckResult, Issue
 class TraceWidthCheck(LayoutCheck):
     name = "trace_widths"
     display_name = "Trace Width Compliance"
-    weight = 0.10
+    weight = 0.11
 
     def run(self, board, config: dict) -> CheckResult:
         power_nets = config.get("power_nets", [])

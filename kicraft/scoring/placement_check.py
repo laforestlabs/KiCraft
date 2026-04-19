@@ -6,7 +6,7 @@ from .base import LayoutCheck, CheckResult, Issue
 class PlacementCheck(LayoutCheck):
     name = "placement"
     display_name = "Component Placement"
-    weight = 0.20
+    weight = 0.22
 
     def run(self, board, config: dict) -> CheckResult:
         util_range = config.get("target_utilization_range", [0.30, 0.70])

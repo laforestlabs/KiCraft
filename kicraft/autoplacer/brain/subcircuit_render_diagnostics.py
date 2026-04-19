@@ -32,15 +32,13 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-_SCRIPT_DIR = Path(__file__).resolve().parents[2]
-
 try:
-    from render_drc_overlay import render_overlay
+    from kicraft.cli.render_drc_overlay import render_overlay
 except Exception:  # pragma: no cover - best-effort import
     render_overlay = None
 
 try:
-    from render_pcb import render_all
+    from kicraft.cli.render_pcb import render_all
 except Exception:  # pragma: no cover - best-effort import
     render_all = None
 

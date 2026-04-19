@@ -21,7 +21,7 @@ MINOR_TYPES = {"solder_mask_bridge", "silk_overlap", "silk_over_copper",
 class DRCCheck(LayoutCheck):
     name = "drc_markers"
     display_name = "DRC Violations"
-    weight = 0.35
+    weight = 0.39
 
     def run(self, board, config: dict) -> CheckResult:
         pcb_path = config.get("_pcb_path", "")

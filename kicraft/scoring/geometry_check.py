@@ -7,7 +7,7 @@ from .base import LayoutCheck, CheckResult, Issue
 class GeometryCheck(LayoutCheck):
     name = "geometry"
     display_name = "Routing Efficiency"
-    weight = 0.10
+    weight = 0.11
 
     def run(self, board, config: dict) -> CheckResult:
         power_nets = config.get("power_nets", [])

@@ -67,6 +67,11 @@ python -m kicraft.gui
 - `render-drc-overlay` — DRC violation overlay on PCB render
 - `render-failure-heatmap` — Routing failure heatmap
 
+### Analysis
+- `plot-results` — Plot experiment or scoring dashboards (auto-detects format)
+- `diff-rounds` — Diff between experiment rounds
+- `generate-report` — Generate scoring report
+
 ### Board Manipulation
 - `move-component` — Move a component to absolute position
 - `align-components` — Align components along an axis
