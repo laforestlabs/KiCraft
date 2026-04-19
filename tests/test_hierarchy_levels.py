@@ -5,13 +5,11 @@ All tests use synthetic/mock data only; no pcbnew dependency.
 
 from __future__ import annotations
 
-import pytest
 
 from kicraft.cli.solve_hierarchy import _compute_levels
 from kicraft.autoplacer.brain.types import (
     SubCircuitDefinition,
     SubCircuitId,
-    InterfacePort,
 )
 from kicraft.autoplacer.brain.hierarchy_parser import HierarchyNode, HierarchyGraph
 

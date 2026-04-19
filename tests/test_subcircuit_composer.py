@@ -9,34 +9,22 @@ import pytest
 
 from kicraft.autoplacer.brain.subcircuit_composer import (
     ChildPlacement,
-    ComposedChild,
     build_parent_composition,
     composition_summary,
-    _infer_parent_interconnect_nets,
-    _merge_child_geometry,
     _derive_board_outline,
-    _build_merged_nets,
-)
-from kicraft.autoplacer.brain.subcircuit_instances import (
-    instantiate_subcircuit,
-    transform_subcircuit_instance,
 )
 from kicraft.autoplacer.brain.types import (
-    BoardState,
     Component,
-    HierarchyLevelState,
     InterfaceAnchor,
     InterfaceDirection,
     InterfacePort,
     InterfaceRole,
     InterfaceSide,
     Layer,
-    Net,
     Pad,
     Point,
     SubCircuitDefinition,
     SubCircuitId,
-    SubCircuitInstance,
     SubCircuitLayout,
     SubcircuitAccessPolicy,
     TraceSegment,

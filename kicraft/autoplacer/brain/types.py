@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from math import atan2, hypot
-from typing import Optional
+from typing import Any, Optional
 
 
 class Layer(IntEnum):
@@ -162,7 +162,7 @@ class PlacementIterationSnapshot:
     stagnant_count: int = 0
     overlap_count: int = 0
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "iteration": self.iteration,
             "score": round(self.score, 2),
@@ -193,7 +193,7 @@ class PlacementScore:
         100.0  # 100 = topology-aware passive chains stay ordered around anchors
     )
 
-    def compute_total(self, weights: Optional[dict] = None) -> float:
+    def compute_total(self, weights: Optional[dict[str, float]] = None) -> float:
         w = weights or {
             "net_distance": 0.20,  # connected parts close together
             "crossover_score": 0.17,  # fewer crossings = easier routing
@@ -222,7 +222,7 @@ class DRCScore:
     courtyard: float = 100.0
 
     @staticmethod
-    def from_counts(drc_dict: dict) -> "DRCScore":
+    def from_counts(drc_dict: dict[str, Any]) -> "DRCScore":
         """Convert quick_drc() output dict to DRCScore on 0-100 scale."""
         import math
 
@@ -258,13 +258,13 @@ class ExperimentScore:
     routing_ms: float = 0.0
     failed_net_names: list[str] = field(default_factory=list)
     drc_score: DRCScore = field(default_factory=DRCScore)
-    pipeline_drc: dict = field(default_factory=dict)
+    pipeline_drc: dict[str, Any] = field(default_factory=dict)
     skipped_routing: bool = False
 
     def compute(
         self,
-        weights: Optional[dict] = None,
-        drc_dict: Optional[dict] = None,
+        weights: Optional[dict[str, float]] = None,
+        drc_dict: Optional[dict[str, Any]] = None,
         board_area_mm2: Optional[float] = None,
     ) -> float:
         """Compute unified score. Route completion dominates, then placement + DRC.
@@ -501,6 +501,75 @@ class SubCircuitLayout:
     @property
     def area(self) -> float:
         return self.bounding_box[0] * self.bounding_box[1]
+
+
+@dataclass(slots=True)
+class SolveRoundResult:
+    """One local placement-search round for a leaf subcircuit."""
+
+    round_index: int
+    seed: int
+    score: float
+    placement: PlacementScore
+    components: dict[str, Component] = field(default_factory=dict)
+    routing: dict[str, Any] = field(default_factory=dict)
+    routed: bool = False
+    timing_breakdown: dict[str, float] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        routing = {
+            key: value for key, value in self.routing.items() if not key.startswith("_")
+        }
+        return {
+            "round_index": self.round_index,
+            "seed": self.seed,
+            "score": self.score,
+            "routed": self.routed,
+            "placement": {
+                "total": self.placement.total,
+                "net_distance": self.placement.net_distance,
+                "crossover_count": self.placement.crossover_count,
+                "crossover_score": self.placement.crossover_score,
+                "compactness": self.placement.compactness,
+                "edge_compliance": self.placement.edge_compliance,
+                "rotation_score": self.placement.rotation_score,
+                "board_containment": self.placement.board_containment,
+                "courtyard_overlap": self.placement.courtyard_overlap,
+                "smt_opposite_tht": self.placement.smt_opposite_tht,
+                "group_coherence": self.placement.group_coherence,
+                "aspect_ratio": self.placement.aspect_ratio,
+            },
+            "routing": routing,
+            "timing_breakdown": dict(self.timing_breakdown),
+            "preview_paths": {
+                "pre_route_front": routing.get("round_preview_pre_route_front", ""),
+                "pre_route_back": routing.get("round_preview_pre_route_back", ""),
+                "pre_route_copper": routing.get("round_preview_pre_route_copper", ""),
+                "routed_front": routing.get("round_preview_routed_front", ""),
+                "routed_back": routing.get("round_preview_routed_back", ""),
+                "routed_copper": routing.get("round_preview_routed_copper", ""),
+            },
+            "board_paths": {
+                "illegal_pre_stamp": routing.get("round_board_illegal_pre_stamp", ""),
+                "pre_route": routing.get("round_board_pre_route", ""),
+                "routed": routing.get("round_board_routed", ""),
+            },
+            "log_summary": {
+                "router": routing.get("router", ""),
+                "reason": routing.get("reason", ""),
+                "failed": bool(routing.get("failed", False)),
+                "skipped": bool(routing.get("skipped", False)),
+                "traces": int(routing.get("traces", 0) or 0),
+                "vias": int(routing.get("vias", 0) or 0),
+                "total_length_mm": float(routing.get("total_length_mm", 0.0) or 0.0),
+                "failed_internal_nets": list(
+                    routing.get("failed_internal_nets", []) or []
+                ),
+                "routed_internal_nets": list(
+                    routing.get("routed_internal_nets", []) or []
+                ),
+            },
+        }
 
 
 @dataclass(slots=True)

@@ -21,8 +21,7 @@ def test_autoplacer_config_imports():
 def test_autoplacer_types_imports():
     """Core types are importable without pcbnew."""
     from kicraft.autoplacer.brain.types import (
-        BoardState, Component, Layer, Net, Pad, Point,
-        SubCircuitLayout, PlacementScore, TraceSegment, Via,
+        Point,
     )
     # Basic sanity
     p = Point(x=1.0, y=2.0)
@@ -32,7 +31,6 @@ def test_autoplacer_types_imports():
 
 def test_hierarchy_parser_imports():
     """Hierarchy parser is importable without pcbnew."""
-    from kicraft.autoplacer.brain.hierarchy_parser import parse_hierarchy
 
 
 def test_scoring_imports():

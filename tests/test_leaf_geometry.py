@@ -10,14 +10,12 @@ import pytest
 from kicraft.autoplacer.brain.leaf_geometry import tight_leaf_geometry_bounds
 from kicraft.autoplacer.brain.subcircuit_extractor import (
     ExtractedSubcircuitBoard,
-    LocalEnvelope,
     NetPartition,
 )
 from kicraft.autoplacer.brain.types import (
     BoardState,
     Component,
     Layer,
-    Net,
     Pad,
     Point,
     SubCircuitDefinition,

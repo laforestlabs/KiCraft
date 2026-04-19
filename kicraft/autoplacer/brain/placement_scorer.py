@@ -11,7 +11,7 @@ import math
 from collections import defaultdict
 
 from .graph import count_crossings, total_ratsnest_length
-from .types import BoardState, Component, Layer, PlacementScore, Point
+from .types import BoardState, Layer, PlacementScore, Point
 
 class PlacementScorer:
     """Scores a placement configuration to guide optimization.

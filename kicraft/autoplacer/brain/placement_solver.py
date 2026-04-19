@@ -10,7 +10,6 @@ from __future__ import annotations
 import copy
 import math
 import random
-from collections import defaultdict
 
 try:
     import numpy as np
@@ -27,7 +26,6 @@ from .graph import (
 )
 from .placement_scorer import PlacementScorer
 from .placement_utils import (
-    _bbox_overlap,
     _bbox_overlap_amount,
     _bbox_overlap_xy,
     _effective_bbox,
@@ -42,7 +40,6 @@ from .types import (
     Layer,
     Net,
     PlacedGroup,
-    PlacementScore,
     Point,
 )
 

@@ -11,8 +11,6 @@ import pytest
 
 from kicraft.autoplacer.brain.subcircuit_extractor import (
     ExtractedSubcircuitBoard,
-    LocalEnvelope,
-    NetPartition,
     extract_leaf_board_state,
     extraction_debug_dict,
     summarize_extraction,

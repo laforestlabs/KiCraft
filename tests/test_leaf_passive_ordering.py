@@ -5,7 +5,6 @@ All tests use synthetic/mock data only; no pcbnew dependency.
 
 from __future__ import annotations
 
-import pytest
 
 from kicraft.autoplacer.brain.leaf_passive_ordering import (
     component_adjacency_map,

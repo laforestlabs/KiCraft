@@ -7,11 +7,8 @@ import pytest
 from kicraft.autoplacer.brain.types import (
     Component,
     InterfaceAnchor,
-    InterfacePort,
     Layer,
-    Pad,
     Point,
-    SubCircuitLayout,
     TraceSegment,
     Via,
 )

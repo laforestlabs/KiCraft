@@ -8,7 +8,6 @@ from __future__ import annotations
 import pytest
 
 from kicraft.autoplacer.brain.copper_accounting import (
-    ChildCopperEntry,
     CopperManifest,
     build_copper_manifest,
     fingerprint_trace,
