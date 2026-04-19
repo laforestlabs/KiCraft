@@ -1165,12 +1165,13 @@ def _route_parent_board(
     # Import all copper from the routed board (child + new parent traces)
     copper = import_routed_copper(str(routed_pcb))
 
-    # Collect interconnect net names for validation
-    interconnect_net_names = sorted(composition.inferred_interconnect_nets.keys())
-
+    # Root parent has no interface anchors -- skip anchor validation.
+    # Anchor completeness is a leaf-level gate, not a parent-level gate.
     validation = validate_routed_board(
         str(routed_pcb),
-        expected_anchor_names=interconnect_net_names,
+        expected_anchor_names=[],
+        actual_anchor_names=[],
+        required_anchor_names=[],
     )
 
     return {

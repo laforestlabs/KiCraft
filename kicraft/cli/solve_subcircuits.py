@@ -2537,6 +2537,13 @@ def _persist_solution(
         solved_layout.ports,
         solved_layout.interface_anchors,
     )
+    # Warn about incomplete anchors
+    if not anchor_validation.get("all_required_anchored", True):
+        missing = anchor_validation.get("missing_required", [])
+        print(
+            f"  WARNING: leaf {solved.node.definition.id.sheet_name} has "
+            f"{len(missing)} unanchored required port(s): {missing}"
+        )
     routing_validation = dict(solved.best_round.routing.get("validation", {}))
     canonical_layout = solved.canonical_layout_artifact(cfg)
     canonical_layout["validation"] = routing_validation

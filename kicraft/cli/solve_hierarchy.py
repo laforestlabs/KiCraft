@@ -3,16 +3,19 @@
 
 Orchestrates the full bottom-up subcircuit pipeline:
 1. Parse the schematic hierarchy
-2. Solve all leaf subcircuits (placement + FreeRouting)
-3. Compose solved leaves into parent(s)
-4. Stamp parent board with preserved child copper
-5. Route parent interconnect nets via FreeRouting
-6. Persist the final routed parent artifact
+2. Compute bottom-up levels (leaves -> parents -> grandparents -> root)
+3. Solve all leaf subcircuits (placement + FreeRouting)
+4. For each subsequent level, compose children into parent(s)
+5. Stamp parent board with preserved child copper
+6. Route parent interconnect nets via FreeRouting
+7. Persist the final routed parent artifact
+
+Supports arbitrary N-level hierarchies, not just 2-level (leaves -> root).
 
 Usage:
-    python3 solve_hierarchy.py LLUPS.kicad_sch \\
-        --pcb LLUPS.kicad_pcb \\
-        --rounds 1 \\
+    python3 solve_hierarchy.py LLUPS.kicad_sch \
+        --pcb LLUPS.kicad_pcb \
+        --rounds 1 \
         --route
 """
 
@@ -22,10 +25,22 @@ import argparse
 import subprocess
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kicraft.autoplacer.brain.hierarchy_parser import (
+        HierarchyGraph,
+        HierarchyNode,
+    )
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _load_config(project_dir: Path) -> dict:
@@ -41,6 +56,38 @@ def _load_config(project_dir: Path) -> dict:
     if proj_cfg_path:
         cfg.update(load_project_config(str(proj_cfg_path)))
     return cfg
+
+
+def _compute_levels(hierarchy: HierarchyGraph) -> list[list[HierarchyNode]]:
+    """Return bottom-up levels: index 0 = leaves, 1 = their parents, etc.
+
+    Each node's level is defined as:
+      * 0 for leaf nodes (no children)
+      * max(child levels) + 1 for non-leaf nodes
+    """
+    level_cache: dict[int, int] = {}
+
+    def _level(node: HierarchyNode) -> int:
+        nid = id(node)
+        if nid not in level_cache:
+            if node.is_leaf:
+                level_cache[nid] = 0
+            else:
+                level_cache[nid] = max(_level(c) for c in node.children) + 1
+        return level_cache[nid]
+
+    groups: dict[int, list[HierarchyNode]] = defaultdict(list)
+    for node in hierarchy.iter_nodes():
+        groups[_level(node)].append(node)
+
+    if not groups:
+        return []
+    return [groups.get(i, []) for i in range(max(groups) + 1)]
+
+
+# ---------------------------------------------------------------------------
+# Phase runners (unchanged)
+# ---------------------------------------------------------------------------
 
 
 def _solve_leaves(
@@ -116,6 +163,11 @@ def _compose_and_route_parent(
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Artifact finders
+# ---------------------------------------------------------------------------
+
+
 def _count_leaf_artifacts(project_dir: Path) -> int:
     """Count the number of solved leaf artifacts."""
     artifacts_dir = project_dir / ".experiments" / "subcircuits"
@@ -141,6 +193,11 @@ def _find_parent_artifact(project_dir: Path) -> Path | None:
         if d.is_dir() and (d / "parent_pre_freerouting.kicad_pcb").exists():
             return d
     return None
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -202,6 +259,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+# ---------------------------------------------------------------------------
+# Main entry-point
+# ---------------------------------------------------------------------------
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
 
@@ -209,6 +271,12 @@ def main(argv: list[str] | None = None) -> int:
     cfg = _load_config(project_dir)
     if args.jar:
         cfg["freerouting_jar"] = args.jar
+
+    # --- Parse hierarchy and compute levels ---
+    from kicraft.autoplacer.brain.hierarchy_parser import parse_hierarchy
+
+    hierarchy = parse_hierarchy(str(project_dir))
+    levels = _compute_levels(hierarchy)
 
     print("=" * 60)
     print("HIERARCHICAL SUBCIRCUIT SOLVER")
@@ -220,75 +288,95 @@ def main(argv: list[str] | None = None) -> int:
     print(f"route       : {args.route}")
     print(f"mode        : {args.mode}")
     print(f"spacing_mm  : {args.spacing_mm}")
+    print(f"  hierarchy levels: {len(levels)}")
+    for i, level_nodes in enumerate(levels):
+        names = [n.definition.id.sheet_name for n in level_nodes]
+        print(f"    level {i}: {names}")
     print()
 
     t0 = time.time()
 
-    # --- Phase 1: Solve leaves ---
-    if not args.skip_leaves:
-        print("--- Phase 1: Solving leaf subcircuits ---")
-        print()
-        try:
-            _solve_leaves(
-                args.schematic,
-                args.pcb,
-                args.rounds,
-                args.route,
-                args.only,
-            )
-        except Exception as exc:
-            print(f"\nerror: leaf solving failed: {exc}", file=sys.stderr)
-            return 1
-        print()
-    else:
-        print("--- Phase 1: Skipping leaf solving (using existing artifacts) ---")
-        print()
+    # --- Level-by-level bottom-up solve ---
+    for level_idx, level_nodes in enumerate(levels):
+        if level_idx == 0:
+            # Level 0: solve leaf subcircuits
+            if not args.skip_leaves:
+                print(
+                    f"--- Level {level_idx}: Solving "
+                    f"{len(level_nodes)} leaf subcircuit(s) ---"
+                )
+                print()
+                try:
+                    _solve_leaves(
+                        args.schematic,
+                        args.pcb,
+                        args.rounds,
+                        args.route,
+                        args.only,
+                    )
+                except Exception as exc:
+                    print(
+                        f"\nerror: leaf solving failed: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                print()
+            else:
+                print(
+                    f"--- Level {level_idx}: Skipping leaf solving "
+                    f"(using existing artifacts) ---"
+                )
+                print()
 
-    leaf_count = _count_leaf_artifacts(project_dir)
-    print(f"  leaf artifacts found: {leaf_count}")
-    print()
+            leaf_count = _count_leaf_artifacts(project_dir)
+            print(f"  leaf artifacts found: {leaf_count}")
+            print()
 
-    if args.leaf_only:
-        elapsed = time.time() - t0
-        print(f"--- Done (--leaf-only) in {elapsed:.1f}s ---")
-        return 0
-
-    # --- Phase 2: Compose and route parent ---
-    print("--- Phase 2: Composing and routing parent ---")
-    print()
-
-    # Find the root parent name from hierarchy
-    from kicraft.autoplacer.brain.hierarchy_parser import parse_hierarchy
-
-    hierarchy = parse_hierarchy(str(project_dir))
-    parent_name = hierarchy.root.definition.id.sheet_name
-    print(f"  parent: {parent_name}")
-    print(f"  children: {len(hierarchy.root.children)}")
-    print()
-
-    try:
-        _compose_and_route_parent(
-            project_dir,
-            args.pcb,
-            parent_name,
-            cfg,
-            args.spacing_mm,
-            args.mode,
-            args.route,
-        )
-    except Exception as exc:
-        print(f"\nerror: parent composition/routing failed: {exc}", file=sys.stderr)
-        return 1
+            if args.leaf_only:
+                elapsed = time.time() - t0
+                print(f"--- Done (--leaf-only) in {elapsed:.1f}s ---")
+                return 0
+        else:
+            # Level 1+: compose each parent from its already-solved children
+            for node in level_nodes:
+                parent_name = node.definition.id.sheet_name
+                child_names = [
+                    c.definition.id.sheet_name for c in node.children
+                ]
+                print(
+                    f"--- Level {level_idx}: Composing parent "
+                    f"'{parent_name}' from {child_names} ---"
+                )
+                print()
+                try:
+                    _compose_and_route_parent(
+                        project_dir,
+                        args.pcb,
+                        parent_name,
+                        cfg,
+                        args.spacing_mm,
+                        args.mode,
+                        args.route,
+                    )
+                except Exception as exc:
+                    print(
+                        f"\nerror: composition/routing of '{parent_name}' "
+                        f"failed: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                print()
 
     # --- Summary ---
     elapsed = time.time() - t0
+    leaf_count = _count_leaf_artifacts(project_dir)
     parent_artifact = _find_parent_artifact(project_dir)
 
-    print()
     print("=" * 60)
     print("HIERARCHICAL SOLVE COMPLETE")
     print("=" * 60)
     print(f"  elapsed       : {elapsed:.1f}s")
+    print(f"  levels        : {len(levels)}")
     print(f"  leaf_artifacts: {leaf_count}")
     if parent_artifact:
         routed_pcb = parent_artifact / "parent_routed.kicad_pcb"
