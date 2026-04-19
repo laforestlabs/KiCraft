@@ -23,11 +23,15 @@ from dataclasses import dataclass, field
 from .types import (
     BoardState,
     Component,
+    InterfaceDirection,
     InterfacePort,
+    InterfaceRole,
+    InterfaceSide,
     Net,
     Pad,
     Point,
     SubCircuitDefinition,
+    SubcircuitAccessPolicy,
     TraceSegment,
     Via,
 )
@@ -103,6 +107,62 @@ class ExtractedSubcircuitBoard:
         return self.net_partition.ignored_names
 
 
+
+def _infer_implicit_interface_ports(
+    interface_ports: list[InterfacePort],
+    net_partition: NetPartition,
+) -> list[InterfacePort]:
+    """Add implicit interface ports for external nets without declared ports.
+
+    When a net crosses the subcircuit boundary (has both internal and
+    external component connections) but no schematic sheet pin declares it
+    as an interface port, it is "implicitly shared."  Power nets like GND
+    are the most common case -- they connect to every subcircuit but are
+    rarely declared as explicit sheet pins.
+
+    This function creates synthetic InterfacePort entries for such nets so
+    that the parent composition step can discover and route them.
+
+    Implicit ports are marked ``required=False`` (optional for anchor
+    completeness) and ``source_kind="implicit_external_net"`` to
+    distinguish them from schematic-declared ports.
+    """
+    declared_nets = {p.net_name for p in interface_ports}
+    augmented = list(interface_ports)
+
+    for net_name in sorted(net_partition.external.keys()):
+        if net_name in declared_nets:
+            continue
+        net = net_partition.external[net_name]
+        # Determine role: power nets get POWER role, others get BIDIR
+        if net.is_power:
+            role = InterfaceRole.POWER
+        else:
+            role = InterfaceRole.BIDIR
+
+        # Use the net name (without leading /) as the port name
+        port_name = net_name.lstrip("/")
+        augmented.append(
+            InterfacePort(
+                name=port_name,
+                net_name=net_name,
+                role=role,
+                direction=InterfaceDirection.UNKNOWN,
+                preferred_side=InterfaceSide.ANY,
+                access_policy=SubcircuitAccessPolicy.INTERFACE_ONLY,
+                cardinality=1,
+                bus_index=None,
+                required=False,
+                description="implicit interface port for external net without declared sheet pin",
+                raw_direction="",
+                source_uuid=None,
+                source_kind="implicit_external_net",
+            )
+        )
+
+    return augmented
+
+
 def extract_leaf_board_state(
     subcircuit: SubCircuitDefinition,
     full_state: BoardState,
@@ -158,6 +218,11 @@ def extract_leaf_board_state(
         include_power_externals=include_power_externals,
         ignored_nets=ignored,
     )
+
+    # Augment interface ports with implicit ports for external nets that
+    # have no declared schematic sheet pin.  This ensures power nets like
+    # GND appear as interface ports for parent composition.
+    interface_ports = _infer_implicit_interface_ports(interface_ports, net_partition)
 
     internal_traces = _extract_internal_traces(
         full_state.traces, net_partition.internal
