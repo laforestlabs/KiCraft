@@ -119,13 +119,30 @@ class ExperimentRunner:
             if leaf_rounds is not None:
                 cmd += ["--leaf-rounds", str(leaf_rounds)]
 
-            # Write placement config overlay as JSON and pass via --config
+            # Write config overlay merging project config + GUI overrides.
+            # This ensures project-specific settings (ic_groups, component_zones,
+            # power_nets, etc.) are preserved when GUI overrides are active.
             placement_cfg = extra_config.get("placement_config")
             if placement_cfg and isinstance(placement_cfg, dict):
+                from kicraft.autoplacer.config import (
+                    discover_project_config,
+                    load_project_config,
+                )
+
+                merged: dict[str, Any] = {}
+                discovered = discover_project_config(self.project_root)
+                if discovered:
+                    merged.update(load_project_config(str(discovered)))
+                merged.update(placement_cfg)
+
                 overlay_path = self.experiments_dir / "gui_config_overlay.json"
                 self.experiments_dir.mkdir(parents=True, exist_ok=True)
+                serializable = {
+                    k: list(v) if isinstance(v, set) else v
+                    for k, v in merged.items()
+                }
                 with open(overlay_path, "w", encoding="utf-8") as f:
-                    json.dump(placement_cfg, f, indent=2)
+                    json.dump(serializable, f, indent=2)
                     f.write("\n")
                 cmd += ["--config", str(overlay_path)]
 

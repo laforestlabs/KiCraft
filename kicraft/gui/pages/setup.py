@@ -178,6 +178,7 @@ def _placement_routing_panel(state):
         "SA Refinement": "local_fire_department",
         "Routing": "route",
         "Thermal": "thermostat",
+        "Net Classification": "category",
     }
 
     for group_name, params in groups.items():
@@ -190,15 +191,25 @@ def _placement_routing_panel(state):
 
 def _render_param_control(state, param: dict):
     key = param["key"]
-    is_bool = param.get("type") == "bool"
+    param_type = param.get("type", "number")
     current_value = state.placement_config.get(key, param["default"])
 
-    if is_bool:
+    if param_type == "bool":
         ui.switch(
             param["label"],
             value=bool(current_value),
             on_change=lambda e, k=key, p=param: _on_param_change(state, k, p, e.value),
         ).tooltip(param["description"])
+    elif param_type in ("text", "list"):
+        if param_type == "list" and isinstance(current_value, list):
+            display_value = ", ".join(str(v) for v in current_value)
+        else:
+            display_value = str(current_value) if current_value else ""
+        ui.input(
+            param["label"],
+            value=display_value,
+            on_change=lambda e, k=key, p=param: _on_param_change(state, k, p, e.value),
+        ).classes("w-full").tooltip(param["description"])
     else:
         ui.number(
             param["label"],
@@ -213,15 +224,29 @@ def _render_param_control(state, param: dict):
 def _on_param_change(state, key: str, param: dict, value):
     if value is None:
         return
-    is_bool = param.get("type") == "bool"
-    if is_bool:
+    param_type = param.get("type", "number")
+
+    if param_type == "bool":
         typed_value = bool(value)
+    elif param_type == "list":
+        typed_value = [item.strip() for item in str(value).split(",") if item.strip()]
+    elif param_type == "text":
+        typed_value = str(value).strip()
     elif isinstance(param["default"], int):
         typed_value = int(value)
     else:
         typed_value = float(value)
 
-    if typed_value == param["default"]:
+    default = param["default"]
+    if param_type == "list":
+        default_list = [item.strip() for item in str(default).split(",") if item.strip()]
+        is_default = typed_value == default_list
+    elif param_type == "text":
+        is_default = typed_value == str(default)
+    else:
+        is_default = typed_value == default
+
+    if is_default:
         state.placement_config.pop(key, None)
     else:
         state.placement_config[key] = typed_value

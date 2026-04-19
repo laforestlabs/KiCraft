@@ -184,16 +184,23 @@ PLACEMENT_PARAMS: list[dict[str, Any]] = [
     {"key": "sa_refine_swap_probability", "label": "SA swap probability", "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05, "group": "SA Refinement", "description": "Chance of swapping two components vs moving one"},
     {"key": "sa_refine_rotation_probability", "label": "SA rotation probability", "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05, "group": "SA Refinement", "description": "Chance of rotating a component during SA"},
     # -- Routing --
-    {"key": "signal_width_mm", "label": "Signal trace width (mm)", "default": 0.127, "min": 0.05, "max": 1.0, "step": 0.01, "group": "Routing", "description": "Width of signal traces (0.127 = 5 mil)"},
-    {"key": "power_width_mm", "label": "Power trace width (mm)", "default": 0.127, "min": 0.05, "max": 2.0, "step": 0.01, "group": "Routing", "description": "Width of power traces"},
-    {"key": "via_drill_mm", "label": "Via drill (mm)", "default": 0.3, "min": 0.1, "max": 1.0, "step": 0.05, "group": "Routing", "description": "Via drill hole diameter"},
-    {"key": "via_size_mm", "label": "Via size (mm)", "default": 0.6, "min": 0.2, "max": 1.5, "step": 0.05, "group": "Routing", "description": "Via annular ring outer diameter"},
+    {"key": "signal_width_mm", "label": "Signal trace width (mm)", "default": 0.127, "min": 0.05, "max": 2.0, "step": 0.01, "group": "Routing", "description": "Width of signal traces (0.127 = 5 mil)"},
+    {"key": "power_width_mm", "label": "Power trace width (mm)", "default": 0.127, "min": 0.05, "max": 5.0, "step": 0.01, "group": "Routing", "description": "Width of power traces (increase for high-current paths)"},
+    {"key": "via_drill_mm", "label": "Via drill (mm)", "default": 0.3, "min": 0.15, "max": 1.0, "step": 0.05, "group": "Routing", "description": "Via drill hole diameter (0.2 typical fab min)"},
+    {"key": "via_size_mm", "label": "Via size (mm)", "default": 0.6, "min": 0.3, "max": 1.5, "step": 0.05, "group": "Routing", "description": "Via annular ring outer diameter"},
     {"key": "freerouting_timeout_s", "label": "FreeRouting timeout (s)", "default": 60, "min": 10, "max": 600, "step": 10, "group": "Routing", "description": "Max seconds FreeRouting is allowed to run"},
     {"key": "freerouting_max_passes", "label": "FreeRouting max passes", "default": 40, "min": 5, "max": 200, "step": 5, "group": "Routing", "description": "Max routing passes for FreeRouting"},
     {"key": "skip_gnd_routing", "label": "Skip GND routing", "default": True, "min": None, "max": None, "step": None, "group": "Routing", "type": "bool", "description": "Skip GND net from trace routing (use copper zone fill instead)"},
     {"key": "gnd_zone_margin_mm", "label": "GND zone margin (mm)", "default": 0.5, "min": 0.1, "max": 2.0, "step": 0.1, "group": "Routing", "description": "Clearance margin for the automatic GND copper zone pour"},
+    {"key": "gnd_zone_net", "label": "GND zone net", "default": "GND", "min": None, "max": None, "step": None, "group": "Routing", "type": "text", "description": "Net name for automatic ground zone pour (empty to disable)"},
+    {"key": "gnd_zone_layer", "label": "GND zone layer", "default": "B.Cu", "min": None, "max": None, "step": None, "group": "Routing", "type": "text", "description": "Copper layer for GND zone (F.Cu or B.Cu)"},
+    {"key": "freerouting_ignore_nets", "label": "Ignore nets (routing)", "default": "GND", "min": None, "max": None, "step": None, "group": "Routing", "type": "list", "description": "Nets excluded from trace routing (comma-separated, use zones instead)"},
     # -- Thermal --
     {"key": "thermal_radius_mm", "label": "Thermal keepout radius (mm)", "default": 3.0, "min": 1.0, "max": 10.0, "step": 0.5, "group": "Thermal", "description": "Keep-away radius around thermal components for heat dissipation"},
+    {"key": "thermal_refs", "label": "Thermal components", "default": "", "min": None, "max": None, "step": None, "group": "Thermal", "type": "list", "description": "Component references with thermal keepout (comma-separated)"},
+    # -- Net Classification --
+    {"key": "power_nets", "label": "Power nets", "default": "", "min": None, "max": None, "step": None, "group": "Net Classification", "type": "list", "description": "Net names classified as power (comma-separated, get wider traces)"},
+    {"key": "ignorable_drc_patterns", "label": "Ignorable DRC patterns", "default": "", "min": None, "max": None, "step": None, "group": "Net Classification", "type": "list", "description": "Regex patterns for DRC violations to ignore (comma-separated)"},
 ]
 
 
