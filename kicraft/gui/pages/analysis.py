@@ -10,10 +10,6 @@ from typing import Any
 from nicegui import ui
 
 from ..components.experiment_table import create_experiment_table
-from ..components.param_sensitivity import (
-    build_correlation_matrix,
-    build_sensitivity_figure,
-)
 from ..components.progression_viewer import create_progression_viewer
 from ..components.score_chart import (
     build_leaf_timing_figure,
@@ -156,8 +152,6 @@ def _experiment_data_panel(state) -> None:
                 timing_tab = ui.tab("Timing", icon="schedule")
                 scheduling_tab = ui.tab("Scheduling", icon="alt_route")
                 table_tab = ui.tab("All Rounds", icon="table_chart")
-                sensitivity_tab = ui.tab("Sensitivity", icon="tune")
-                correlation_tab = ui.tab("Correlations", icon="grid_view")
                 convergence_tab = ui.tab("Convergence", icon="trending_up")
                 export_tab = ui.tab("Export", icon="download")
 
@@ -203,28 +197,6 @@ def _experiment_data_panel(state) -> None:
 
                 with ui.tab_panel(table_tab):
                     create_experiment_table(rounds)
-
-                with ui.tab_panel(sensitivity_tab):
-                    param_keys = _param_keys_from_rounds(rounds)
-                    fig_sens = build_sensitivity_figure(rounds, param_keys)
-                    if fig_sens:
-                        ui.plotly(fig_sens).classes("w-full")
-                    else:
-                        ui.label(
-                            "Not enough numeric variation for sensitivity analysis "
-                            "(need at least a few rounds with numeric config deltas)."
-                        ).classes("text-gray-500 italic")
-
-                with ui.tab_panel(correlation_tab):
-                    param_keys = _param_keys_from_rounds(rounds)
-                    fig_corr = build_correlation_matrix(rounds, param_keys)
-                    if fig_corr:
-                        ui.plotly(fig_corr).classes("w-full")
-                    else:
-                        ui.label(
-                            "Not enough data for correlation matrix "
-                            "(or optional scientific dependencies are unavailable)."
-                        ).classes("text-gray-500 italic")
 
                 with ui.tab_panel(convergence_tab):
                     _convergence_panel(rounds)
@@ -1602,16 +1574,6 @@ def _export_panel(rounds: list[dict[str, Any]], exp_id: int) -> None:
         ui.button("Download CSV", icon="download", on_click=_download_csv)
         ui.button("Download JSON", icon="download", on_click=_download_json)
 
-
-def _param_keys_from_rounds(rounds: list[dict[str, Any]]) -> list[str]:
-    keys: set[str] = set()
-    for r in rounds:
-        delta = r.get("config_delta", {})
-        if isinstance(delta, dict):
-            for key, value in delta.items():
-                if isinstance(value, (int, float)):
-                    keys.add(str(key))
-    return sorted(keys)
 
 
 def _stat_card(label: str, value: str) -> None:

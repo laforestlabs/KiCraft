@@ -119,25 +119,19 @@ DEFAULT_SCORE_WEIGHTS = {
 }
 
 DEFAULT_TOGGLES = {
-    "render_parent_png": True,
-    "preserve_existing_subcircuit_artifacts": True,
-    "show_only_accepted_frames": False,
-    "show_status_json": True,
     "show_leaf_artifacts": True,
-    "show_parent_progress": True,
     "track_composition_outputs": True,
-    "enable_progression_viewer": True,
-    "prefer_kept_frames": False,
+    "render_png": True,
+    "save_round_details": True,
+    "show_top_level_progress": True,
+    "import_best_as_preset": True,
 }
 
 
 
 DEFAULT_GUI_CLEANUP = {
     "show_analysis_tab": True,
-    "show_legacy_imports": False,
     "show_legacy_presets": False,
-    "show_raw_status_json": True,
-    "show_visuals_panel": False,
 }
 
 

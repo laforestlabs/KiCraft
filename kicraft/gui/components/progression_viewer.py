@@ -387,7 +387,7 @@ def _discover_parent_preview_sets(experiments_dir: Path) -> list[dict[str, Any]]
             {
                 "label": label,
                 "directory": str(directory),
-                "stamped_path": str(stamped) if stamped else "",
+                "preloaded_path": str(stamped) if stamped else "",
                 "routed_path": str(routed) if routed else "",
                 "parent_instance_path": str(parent.get("instance_path", "")),
                 "component_count": _coerce_int(composition.get("component_count", 0)),
