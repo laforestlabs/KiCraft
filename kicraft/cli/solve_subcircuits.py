@@ -109,7 +109,6 @@ from kicraft.autoplacer.brain.hierarchy_parser import (
     parse_hierarchy,
 )
 from kicraft.autoplacer.brain.placement import (
-    PlacementScorer,
     PlacementSolver,
     _update_pad_positions,
 )
@@ -127,6 +126,16 @@ from kicraft.autoplacer.brain.subcircuit_artifacts import (
 from kicraft.autoplacer.brain.leaf_acceptance import (
     acceptance_config_from_dict,
     evaluate_leaf_acceptance,
+)
+from kicraft.autoplacer.brain.leaf_geometry import (
+    build_reduced_leaf_extraction,
+    copy_components_with_translation,
+    copy_traces_with_translation,
+    copy_vias_with_translation,
+    leaf_size_reduction_candidates,
+    repair_leaf_placement_legality,
+    score_local_components,
+    tight_leaf_geometry_bounds,
 )
 from kicraft.autoplacer.brain.subcircuit_extractor import (
     ExtractedSubcircuitBoard,
@@ -557,44 +566,15 @@ def _copy_components_with_translation(
     components: dict[str, Component],
     delta: Point,
 ) -> dict[str, Component]:
-    translated: dict[str, Component] = {}
-    for ref, comp in components.items():
-        new_comp = copy.deepcopy(comp)
-        new_comp.pos = Point(new_comp.pos.x + delta.x, new_comp.pos.y + delta.y)
-        if new_comp.body_center is not None:
-            new_comp.body_center = Point(
-                new_comp.body_center.x + delta.x,
-                new_comp.body_center.y + delta.y,
-            )
-        for pad in new_comp.pads:
-            pad.pos = Point(pad.pos.x + delta.x, pad.pos.y + delta.y)
-        translated[ref] = new_comp
-    return translated
+    return copy_components_with_translation(components, delta)
 
 
 def _copy_traces_with_translation(traces: list[Any], delta: Point) -> list[Any]:
-    translated: list[Any] = []
-    for trace in traces:
-        new_trace = copy.deepcopy(trace)
-        new_trace.start = Point(
-            new_trace.start.x + delta.x,
-            new_trace.start.y + delta.y,
-        )
-        new_trace.end = Point(
-            new_trace.end.x + delta.x,
-            new_trace.end.y + delta.y,
-        )
-        translated.append(new_trace)
-    return translated
+    return copy_traces_with_translation(traces, delta)
 
 
 def _copy_vias_with_translation(vias: list[Any], delta: Point) -> list[Any]:
-    translated: list[Any] = []
-    for via in vias:
-        new_via = copy.deepcopy(via)
-        new_via.pos = Point(new_via.pos.x + delta.x, new_via.pos.y + delta.y)
-        translated.append(new_via)
-    return translated
+    return copy_vias_with_translation(vias, delta)
 
 
 def _component_net_degree_map(extraction: ExtractedSubcircuitBoard) -> dict[str, int]:
@@ -945,52 +925,7 @@ def _tight_leaf_geometry_bounds(
     solved_components: dict[str, Component],
     routing: dict[str, Any],
 ) -> dict[str, float]:
-    min_x = float("inf")
-    min_y = float("inf")
-    max_x = float("-inf")
-    max_y = float("-inf")
-
-    for comp in solved_components.values():
-        tl, br = comp.bbox()
-        min_x = min(min_x, tl.x)
-        min_y = min(min_y, tl.y)
-        max_x = max(max_x, br.x)
-        max_y = max(max_y, br.y)
-        for pad in comp.pads:
-            min_x = min(min_x, pad.pos.x)
-            min_y = min(min_y, pad.pos.y)
-            max_x = max(max_x, pad.pos.x)
-            max_y = max(max_y, pad.pos.y)
-
-    for trace in routing.get("_trace_segments", []):
-        half_width = max(0.0, float(getattr(trace, "width_mm", 0.0)) / 2.0)
-        min_x = min(min_x, trace.start.x - half_width, trace.end.x - half_width)
-        min_y = min(min_y, trace.start.y - half_width, trace.end.y - half_width)
-        max_x = max(max_x, trace.start.x + half_width, trace.end.x + half_width)
-        max_y = max(max_y, trace.start.y + half_width, trace.end.y + half_width)
-
-    for via in routing.get("_via_objects", []):
-        radius = max(0.0, float(getattr(via, "size_mm", 0.0)) / 2.0)
-        min_x = min(min_x, via.pos.x - radius)
-        min_y = min(min_y, via.pos.y - radius)
-        max_x = max(max_x, via.pos.x + radius)
-        max_y = max(max_y, via.pos.y + radius)
-
-    if min_x == float("inf"):
-        tl, br = extraction.local_state.board_outline
-        min_x = tl.x
-        min_y = tl.y
-        max_x = br.x
-        max_y = br.y
-
-    return {
-        "min_x": float(min_x),
-        "min_y": float(min_y),
-        "max_x": float(max_x),
-        "max_y": float(max_y),
-        "width_mm": float(max_x - min_x),
-        "height_mm": float(max_y - min_y),
-    }
+    return tight_leaf_geometry_bounds(extraction, solved_components, routing)
 
 
 def _build_reduced_leaf_extraction(
@@ -999,43 +934,9 @@ def _build_reduced_leaf_extraction(
     routing: dict[str, Any],
     outline: tuple[Point, Point],
 ) -> ExtractedSubcircuitBoard:
-    tl, br = outline
-    delta = Point(-tl.x, -tl.y)
-    local_state = copy.deepcopy(extraction.local_state)
-    local_state.components = _copy_components_with_translation(solved_components, delta)
-    local_state.traces = _copy_traces_with_translation(
-        routing.get("_trace_segments", []),
-        delta,
+    return build_reduced_leaf_extraction(
+        extraction, solved_components, routing, outline,
     )
-    local_state.vias = _copy_vias_with_translation(
-        routing.get("_via_objects", []),
-        delta,
-    )
-    local_state.board_outline = (
-        Point(0.0, 0.0),
-        Point(max(1.0, br.x - tl.x), max(1.0, br.y - tl.y)),
-    )
-
-    reduced = copy.deepcopy(extraction)
-    reduced.local_state = local_state
-    reduced.internal_traces = copy.deepcopy(local_state.traces)
-    reduced.internal_vias = copy.deepcopy(local_state.vias)
-    reduced.translation = Point(
-        extraction.translation.x + delta.x,
-        extraction.translation.y + delta.y,
-    )
-    if reduced.envelope is not None:
-        reduced.envelope.top_left = Point(0.0, 0.0)
-        reduced.envelope.bottom_right = Point(
-            local_state.board_width, local_state.board_height
-        )
-        reduced.envelope.width_mm = local_state.board_width
-        reduced.envelope.height_mm = local_state.board_height
-    reduced.notes = list(reduced.notes) + [
-        f"reduced_outline_width_mm={local_state.board_width:.3f}",
-        f"reduced_outline_height_mm={local_state.board_height:.3f}",
-    ]
-    return reduced
 
 
 def _leaf_size_reduction_candidates(
@@ -1044,40 +945,9 @@ def _leaf_size_reduction_candidates(
     min_width: float,
     min_height: float,
 ) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    seen: set[tuple[float, float]] = set()
-    coarse_steps = (2.0, 1.0, 0.5)
-    fine_steps = (0.25,)
-
-    def _add(width: float, height: float, axis: str, step_mm: float) -> None:
-        width = round(max(min_width, width), 4)
-        height = round(max(min_height, height), 4)
-        key = (width, height)
-        if key in seen:
-            return
-        if width >= current_width and height >= current_height:
-            return
-        seen.add(key)
-        candidates.append(
-            {
-                "axis": axis,
-                "step_mm": float(step_mm),
-                "width_mm": width,
-                "height_mm": height,
-            }
-        )
-
-    for step in coarse_steps:
-        _add(current_width - step, current_height, "width", step)
-        _add(current_width, current_height - step, "height", step)
-    for step in coarse_steps:
-        _add(current_width - step, current_height - step, "both", step)
-    for step in fine_steps:
-        _add(current_width - step, current_height, "width", step)
-        _add(current_width, current_height - step, "height", step)
-        _add(current_width - step, current_height - step, "both", step)
-
-    return candidates
+    return leaf_size_reduction_candidates(
+        current_width, current_height, min_width, min_height,
+    )
 
 
 def _attempt_leaf_size_reduction(
@@ -1396,38 +1266,7 @@ def _score_local_components(
     components: dict[str, Component],
     cfg: dict[str, Any],
 ) -> PlacementScore:
-    work_state = copy.copy(local_state)
-    work_state.components = components
-    score = PlacementScorer(work_state, cfg).score()
-
-    legalizer = PlacementSolver(work_state, cfg, seed=0)
-    raw_legality = legalizer.legality_diagnostics(components)
-    legality = raw_legality if isinstance(raw_legality, dict) else {}
-    raw_overlap_count = legality.get("overlap_count", 0)
-    raw_pad_outside_count = legality.get("pad_outside_count", 0)
-    overlap_count = (
-        int(raw_overlap_count)
-        if isinstance(raw_overlap_count, (int, float, str))
-        else 0
-    )
-    pad_outside_count = (
-        int(raw_pad_outside_count)
-        if isinstance(raw_pad_outside_count, (int, float, str))
-        else 0
-    )
-
-    if overlap_count or pad_outside_count:
-        score.courtyard_overlap = max(
-            0.0,
-            min(score.courtyard_overlap, 100.0 - 25.0 * overlap_count),
-        )
-        score.board_containment = max(
-            0.0,
-            min(score.board_containment, 100.0 - 40.0 * pad_outside_count),
-        )
-        score.compute_total()
-
-    return score
+    return score_local_components(local_state, components, cfg)
 
 
 def _repair_leaf_placement_legality(
@@ -1435,39 +1274,7 @@ def _repair_leaf_placement_legality(
     solved_components: dict[str, Component],
     cfg: dict[str, Any],
 ) -> tuple[dict[str, Component], dict[str, Any]]:
-    repaired = copy.deepcopy(solved_components)
-    local_state = copy.deepcopy(extraction.local_state)
-    local_state.components = repaired
-
-    legalizer = PlacementSolver(local_state, cfg, seed=0)
-    legalization = legalizer.legalize_components(
-        repaired,
-        max_passes=int(cfg.get("leaf_legality_repair_passes", 12)),
-    )
-    raw_diagnostics = legalization.get("diagnostics", {})
-    diagnostics = raw_diagnostics if isinstance(raw_diagnostics, dict) else {}
-
-    raw_moved_refs = legalization.get("moved_refs", [])
-    moved_refs = raw_moved_refs if isinstance(raw_moved_refs, list) else []
-
-    raw_overlaps = diagnostics.get("overlaps", [])
-    overlaps = raw_overlaps if isinstance(raw_overlaps, list) else []
-
-    raw_pads_outside = diagnostics.get("pads_outside_board", [])
-    pads_outside = raw_pads_outside if isinstance(raw_pads_outside, list) else []
-
-    raw_passes = legalization.get("passes", 0)
-    passes = int(raw_passes) if isinstance(raw_passes, (int, float, str)) else 0
-
-    return repaired, {
-        "attempted": True,
-        "passes": passes,
-        "moved_components": list(moved_refs),
-        "remaining_overlaps": list(overlaps),
-        "pads_outside_board": list(pads_outside),
-        "resolved": bool(legalization.get("resolved", False)),
-        "diagnostics": diagnostics,
-    }
+    return repair_leaf_placement_legality(extraction, solved_components, cfg)
 
 
 def _route_local_subcircuit(
