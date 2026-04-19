@@ -8,7 +8,7 @@ The GUI should default to a clean, balanced experiment workflow:
 Current baseline:
 - experiment rounds: 10
 - leaf solve rounds: 2
-- workers: 2
+- workers: 0 (auto)
 - plateau threshold: 2
 - compose spacing: 6 mm
 
@@ -102,7 +102,7 @@ _PROJECT_NAME, _DEFAULT_PCB, _DEFAULT_SCH = _detect_project_files(_PROJECT_ROOT)
 
 DEFAULT_STRATEGY = {
     "rounds": 10,
-    "workers": 2,
+    "workers": 0,
     "plateau_threshold": 2,
     "seed": 0,
     "pcb_file": _DEFAULT_PCB,

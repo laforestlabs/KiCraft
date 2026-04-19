@@ -71,16 +71,15 @@ def _strategy_panel(state):
 
         ui.number(
             "Leaf workers",
-            value=state.strategy.get("workers", 2),
-            min=1,
+            value=state.strategy.get("workers", 0),
+            min=0,
             max=64,
             step=1,
             on_change=lambda e: state.strategy.update({"workers": int(e.value)}),
         ).tooltip(
-            "Number of parallel workers used for leaf solving. This is no longer "
-            "just reserved: it directly controls leaf parallelism in hierarchical "
-            "runs. A balanced default is 2; try 1 for debugging or 4 on faster "
-            "machines if runtime matters more than log simplicity."
+            "Parallel workers for leaf solving. 0 = auto-select based on CPU "
+            "count and number of leaves. Use 1 for debugging or a fixed value "
+            "on machines where you want explicit control."
         )
 
         ui.number(
