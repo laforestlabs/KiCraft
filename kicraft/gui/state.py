@@ -135,6 +135,68 @@ DEFAULT_GUI_CLEANUP = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Placement & Routing parameter definitions exposed to the GUI.
+# Each entry defines the parameter key, display label, default value,
+# min/max bounds, step, and logical group for collapsible UI sections.
+# Only values that differ from their default are written to the config overlay.
+# ---------------------------------------------------------------------------
+
+PLACEMENT_PARAMS: list[dict[str, Any]] = [
+    # -- Placement Physics --
+    {"key": "orderedness", "label": "Orderedness", "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05, "group": "Placement Physics", "description": "How strongly passives snap into rows/columns (0 = organic, 1 = full grid)"},
+    {"key": "force_attract_k", "label": "Attraction strength", "default": 0.02, "min": 0.001, "max": 0.2, "step": 0.005, "group": "Placement Physics", "description": "Force pulling connected components together"},
+    {"key": "force_repel_k", "label": "Repulsion strength", "default": 200.0, "min": 50.0, "max": 1000.0, "step": 10.0, "group": "Placement Physics", "description": "Force pushing overlapping components apart"},
+    {"key": "cooling_factor", "label": "Cooling factor", "default": 0.97, "min": 0.80, "max": 0.999, "step": 0.005, "group": "Placement Physics", "description": "How fast the force-directed solver settles (lower = faster)"},
+    {"key": "reheat_strength", "label": "Reheat strength", "default": 0.1, "min": 0.0, "max": 0.4, "step": 0.02, "group": "Placement Physics", "description": "Random perturbation kick at 50% iterations to escape local minima"},
+    {"key": "max_placement_iterations", "label": "Max iterations", "default": 300, "min": 100, "max": 5000, "step": 50, "group": "Placement Physics", "description": "Total force-directed placement iterations"},
+    {"key": "intra_cluster_iters", "label": "Intra-cluster iterations", "default": 80, "min": 10, "max": 500, "step": 10, "group": "Placement Physics", "description": "Iterations for arranging components within a functional group"},
+    {"key": "placement_convergence_threshold", "label": "Convergence threshold", "default": 0.5, "min": 0.01, "max": 2.0, "step": 0.05, "group": "Placement Physics", "description": "Stop early if movement drops below this threshold"},
+    # -- Board Geometry --
+    {"key": "board_width_mm", "label": "Board width (mm)", "default": 90.0, "min": 30.0, "max": 200.0, "step": 1.0, "group": "Board Geometry", "description": "PCB width in millimeters"},
+    {"key": "board_height_mm", "label": "Board height (mm)", "default": 58.0, "min": 20.0, "max": 150.0, "step": 1.0, "group": "Board Geometry", "description": "PCB height in millimeters"},
+    {"key": "board_size_overhead_factor", "label": "Size overhead factor", "default": 2.0, "min": 1.2, "max": 5.0, "step": 0.1, "group": "Board Geometry", "description": "Min board area = component area * this factor"},
+    {"key": "edge_margin_mm", "label": "Edge margin (mm)", "default": 6.0, "min": 0.5, "max": 15.0, "step": 0.5, "group": "Board Geometry", "description": "Keep-out distance from board edges"},
+    {"key": "subcircuit_margin_mm", "label": "Subcircuit margin (mm)", "default": 5.0, "min": 1.0, "max": 15.0, "step": 0.5, "group": "Board Geometry", "description": "Extra space around leaf subcircuit bounding box"},
+    {"key": "placement_clearance_mm", "label": "Placement clearance (mm)", "default": 2.5, "min": 0.5, "max": 8.0, "step": 0.25, "group": "Board Geometry", "description": "Minimum gap between component bounding boxes"},
+    {"key": "placement_grid_mm", "label": "Placement grid (mm)", "default": 1.0, "min": 0.1, "max": 2.54, "step": 0.1, "group": "Board Geometry", "description": "Snap grid resolution for component placement"},
+    # -- Edge & Connectors --
+    {"key": "edge_jitter_mm", "label": "Edge jitter (mm)", "default": 5.0, "min": 0.0, "max": 15.0, "step": 0.5, "group": "Edge & Connectors", "description": "Random displacement along edge for edge-pinned parts"},
+    {"key": "connector_gap_mm", "label": "Connector gap (mm)", "default": 2.0, "min": 0.0, "max": 8.0, "step": 0.5, "group": "Edge & Connectors", "description": "Spacing between connectors on the same edge"},
+    {"key": "connector_edge_inset_mm", "label": "Connector inset (mm)", "default": 1.0, "min": -2.0, "max": 5.0, "step": 0.25, "group": "Edge & Connectors", "description": "Inset from board edge (0 = flush, negative = overhang)"},
+    {"key": "connector_pad_margin_mm", "label": "Connector pad margin (mm)", "default": 1.0, "min": 0.0, "max": 3.0, "step": 0.25, "group": "Edge & Connectors", "description": "Extra pad margin for DRC clearance on connectors"},
+    {"key": "courtyard_padding_mm", "label": "Courtyard padding (mm)", "default": 0.5, "min": 0.0, "max": 3.0, "step": 0.1, "group": "Edge & Connectors", "description": "Extra margin when scoring courtyard overlaps"},
+    {"key": "pad_inset_margin_mm", "label": "Pad inset margin (mm)", "default": 0.3, "min": 0.0, "max": 2.0, "step": 0.1, "group": "Edge & Connectors", "description": "Minimum distance pads must be inside Edge.Cuts boundary"},
+    # -- Component Behavior --
+    {"key": "tht_backside_min_area_mm2", "label": "THT backside threshold (mm2)", "default": 50.0, "min": 10.0, "max": 200.0, "step": 5.0, "group": "Component Behavior", "description": "THT parts above this area placed on back copper layer"},
+    {"key": "smt_opposite_tht", "label": "SMT opposite THT", "default": True, "min": None, "max": None, "step": None, "group": "Component Behavior", "type": "bool", "description": "Attract SMT to regions backed by THT on opposite side"},
+    {"key": "align_large_pairs", "label": "Align large pairs", "default": True, "min": None, "max": None, "step": None, "group": "Component Behavior", "type": "bool", "description": "Force large similar-footprint component pairs side-by-side"},
+    {"key": "hierarchical_placement", "label": "Hierarchical placement", "default": True, "min": None, "max": None, "step": None, "group": "Component Behavior", "type": "bool", "description": "Use group-based hierarchical placement (vs flat global)"},
+    {"key": "unlock_all_footprints", "label": "Unlock all footprints", "default": True, "min": None, "max": None, "step": None, "group": "Component Behavior", "type": "bool", "description": "Unlock batteries/connectors/mounting holes for placement"},
+    {"key": "enable_board_size_search", "label": "Board size search", "default": True, "min": None, "max": None, "step": None, "group": "Component Behavior", "type": "bool", "description": "Allow autoexperiment to vary board dimensions"},
+    {"key": "min_placement_score", "label": "Min placement score", "default": 20.0, "min": 0.0, "max": 80.0, "step": 1.0, "group": "Component Behavior", "description": "Skip routing if placement scores below this threshold"},
+    # -- SA Refinement --
+    {"key": "sa_refine_enabled", "label": "SA refinement enabled", "default": True, "min": None, "max": None, "step": None, "group": "SA Refinement", "type": "bool", "description": "Run simulated annealing refinement after force-directed pass"},
+    {"key": "sa_refine_iterations", "label": "SA iterations", "default": 1000, "min": 100, "max": 10000, "step": 100, "group": "SA Refinement", "description": "Number of simulated annealing steps"},
+    {"key": "sa_refine_initial_temp", "label": "SA initial temperature", "default": 5.0, "min": 0.5, "max": 30.0, "step": 0.5, "group": "SA Refinement", "description": "Starting temperature for SA"},
+    {"key": "sa_refine_cooling_rate", "label": "SA cooling rate", "default": 0.995, "min": 0.9, "max": 0.9999, "step": 0.001, "group": "SA Refinement", "description": "Temperature decay per SA step (higher = slower cooling)"},
+    {"key": "sa_refine_move_radius_mm", "label": "SA move radius (mm)", "default": 2.0, "min": 0.2, "max": 8.0, "step": 0.2, "group": "SA Refinement", "description": "Max random displacement per SA step"},
+    {"key": "sa_refine_swap_probability", "label": "SA swap probability", "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05, "group": "SA Refinement", "description": "Chance of swapping two components vs moving one"},
+    {"key": "sa_refine_rotation_probability", "label": "SA rotation probability", "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05, "group": "SA Refinement", "description": "Chance of rotating a component during SA"},
+    # -- Routing --
+    {"key": "signal_width_mm", "label": "Signal trace width (mm)", "default": 0.127, "min": 0.05, "max": 1.0, "step": 0.01, "group": "Routing", "description": "Width of signal traces (0.127 = 5 mil)"},
+    {"key": "power_width_mm", "label": "Power trace width (mm)", "default": 0.127, "min": 0.05, "max": 2.0, "step": 0.01, "group": "Routing", "description": "Width of power traces"},
+    {"key": "via_drill_mm", "label": "Via drill (mm)", "default": 0.3, "min": 0.1, "max": 1.0, "step": 0.05, "group": "Routing", "description": "Via drill hole diameter"},
+    {"key": "via_size_mm", "label": "Via size (mm)", "default": 0.6, "min": 0.2, "max": 1.5, "step": 0.05, "group": "Routing", "description": "Via annular ring outer diameter"},
+    {"key": "freerouting_timeout_s", "label": "FreeRouting timeout (s)", "default": 60, "min": 10, "max": 600, "step": 10, "group": "Routing", "description": "Max seconds FreeRouting is allowed to run"},
+    {"key": "freerouting_max_passes", "label": "FreeRouting max passes", "default": 40, "min": 5, "max": 200, "step": 5, "group": "Routing", "description": "Max routing passes for FreeRouting"},
+    {"key": "skip_gnd_routing", "label": "Skip GND routing", "default": True, "min": None, "max": None, "step": None, "group": "Routing", "type": "bool", "description": "Skip GND net from trace routing (use copper zone fill instead)"},
+    {"key": "gnd_zone_margin_mm", "label": "GND zone margin (mm)", "default": 0.5, "min": 0.1, "max": 2.0, "step": 0.1, "group": "Routing", "description": "Clearance margin for the automatic GND copper zone pour"},
+    # -- Thermal --
+    {"key": "thermal_radius_mm", "label": "Thermal keepout radius (mm)", "default": 3.0, "min": 1.0, "max": 10.0, "step": 0.5, "group": "Thermal", "description": "Keep-away radius around thermal components for heat dissipation"},
+]
+
+
 @dataclass
 class AppState:
     """Mutable singleton holding current GUI state."""
@@ -152,6 +214,7 @@ class AppState:
     )
     toggles: dict[str, Any] = field(default_factory=lambda: {**DEFAULT_TOGGLES})
     gui_cleanup: dict[str, Any] = field(default_factory=lambda: {**DEFAULT_GUI_CLEANUP})
+    placement_config: dict[str, Any] = field(default_factory=dict)
 
     active_experiment_id: int | None = None
     runner_pid: int | None = None
@@ -201,6 +264,7 @@ class AppState:
         config["_strategy"] = {**self.strategy}
         config["_score_weights"] = {**self.score_weights}
         config["_gui_cleanup"] = {**self.gui_cleanup}
+        config["_placement_config"] = {**self.placement_config}
         config.update(self.toggles)
         config["pipeline"] = "hierarchical_subcircuits"
         return config
@@ -227,6 +291,9 @@ class AppState:
 
         if "_gui_cleanup" in config and isinstance(config["_gui_cleanup"], dict):
             self.gui_cleanup.update(config["_gui_cleanup"])
+
+        if "_placement_config" in config and isinstance(config["_placement_config"], dict):
+            self.placement_config.update(config["_placement_config"])
 
         for key in DEFAULT_TOGGLES:
             if key in config:

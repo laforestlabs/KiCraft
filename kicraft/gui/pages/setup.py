@@ -1,10 +1,10 @@
-"""Setup page — hierarchical experiment configuration UI."""
+"""Setup page -- hierarchical experiment configuration UI."""
 
 from __future__ import annotations
 
 from nicegui import ui
 
-from ..state import get_state
+from ..state import PLACEMENT_PARAMS, get_state
 
 
 def setup_page():
@@ -20,12 +20,16 @@ def setup_page():
 
     with ui.tabs().classes("w-full") as tabs:
         strategy_tab = ui.tab("Run Strategy", icon="play_circle")
+        placement_tab = ui.tab("Placement & Routing", icon="tune")
         hierarchy_tab = ui.tab("Hierarchy Scope", icon="account_tree")
         presets_tab = ui.tab("Presets", icon="bookmark")
 
     with ui.tab_panels(tabs, value=strategy_tab).classes("w-full"):
         with ui.tab_panel(strategy_tab):
             _strategy_panel(state)
+
+        with ui.tab_panel(placement_tab):
+            _placement_routing_panel(state)
 
         with ui.tab_panel(hierarchy_tab):
             _hierarchy_panel(state)
@@ -151,6 +155,76 @@ def _strategy_panel(state):
                     {"save_round_details": bool(e.value)}
                 ),
             ).tooltip("Preserve round JSON and related metadata for later inspection.")
+
+
+def _placement_routing_panel(state):
+    ui.label("Placement & Routing Parameters").classes("text-lg font-bold mb-2")
+    ui.label(
+        "These parameters control the placement engine physics, board geometry, "
+        "connector behavior, simulated annealing refinement, and routing settings. "
+        "Only values you change from their defaults are written to the config overlay "
+        "passed to the solver. Reset a value to its default to remove it from the overlay."
+    ).classes("text-sm text-gray-400 mb-4")
+
+    groups: dict[str, list[dict]] = {}
+    for param in PLACEMENT_PARAMS:
+        groups.setdefault(param["group"], []).append(param)
+
+    group_icons = {
+        "Placement Physics": "science",
+        "Board Geometry": "straighten",
+        "Edge & Connectors": "electrical_services",
+        "Component Behavior": "memory",
+        "SA Refinement": "local_fire_department",
+        "Routing": "route",
+        "Thermal": "thermostat",
+    }
+
+    for group_name, params in groups.items():
+        icon = group_icons.get(group_name, "settings")
+        with ui.expansion(group_name, icon=icon).classes("w-full"):
+            with ui.grid(columns=2).classes("w-full gap-3 p-2"):
+                for param in params:
+                    _render_param_control(state, param)
+
+
+def _render_param_control(state, param: dict):
+    key = param["key"]
+    is_bool = param.get("type") == "bool"
+    current_value = state.placement_config.get(key, param["default"])
+
+    if is_bool:
+        ui.switch(
+            param["label"],
+            value=bool(current_value),
+            on_change=lambda e, k=key, p=param: _on_param_change(state, k, p, e.value),
+        ).tooltip(param["description"])
+    else:
+        ui.number(
+            param["label"],
+            value=float(current_value),
+            min=param["min"],
+            max=param["max"],
+            step=param["step"],
+            on_change=lambda e, k=key, p=param: _on_param_change(state, k, p, e.value),
+        ).tooltip(param["description"])
+
+
+def _on_param_change(state, key: str, param: dict, value):
+    if value is None:
+        return
+    is_bool = param.get("type") == "bool"
+    if is_bool:
+        typed_value = bool(value)
+    elif isinstance(param["default"], int):
+        typed_value = int(value)
+    else:
+        typed_value = float(value)
+
+    if typed_value == param["default"]:
+        state.placement_config.pop(key, None)
+    else:
+        state.placement_config[key] = typed_value
 
 
 def _hierarchy_panel(state):

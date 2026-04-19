@@ -119,6 +119,16 @@ class ExperimentRunner:
             if leaf_rounds is not None:
                 cmd += ["--leaf-rounds", str(leaf_rounds)]
 
+            # Write placement config overlay as JSON and pass via --config
+            placement_cfg = extra_config.get("placement_config")
+            if placement_cfg and isinstance(placement_cfg, dict):
+                overlay_path = self.experiments_dir / "gui_config_overlay.json"
+                self.experiments_dir.mkdir(parents=True, exist_ok=True)
+                with open(overlay_path, "w", encoding="utf-8") as f:
+                    json.dump(placement_cfg, f, indent=2)
+                    f.write("\n")
+                cmd += ["--config", str(overlay_path)]
+
         program_path = self.scripts_dir / "program.md"
         program_data: dict[str, Any] = {
             "param_ranges": param_ranges or {},
