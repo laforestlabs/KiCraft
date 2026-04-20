@@ -21,9 +21,6 @@ def local_solver_config(
 
     cfg["enable_board_size_search"] = False
     cfg["hierarchical_placement"] = False
-    cfg["subcircuit_route_internal_nets"] = bool(
-        base_cfg.get("subcircuit_route_internal_nets", False)
-    )
 
     local_component_zones: dict[str, Any] = {}
     source_outline = (

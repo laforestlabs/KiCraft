@@ -118,8 +118,6 @@ class ParentCompositionState:
     via_count: int = 0
     interconnect_net_count: int = 0
     inferred_interconnect_net_count: int = 0
-    routed_interconnect_net_count: int = 0
-    failed_interconnect_net_count: int = 0
     preserved_child_trace_count: int = 0
     preserved_child_via_count: int = 0
     expected_preserved_child_trace_count: int = 0
@@ -161,8 +159,6 @@ class ParentCompositionState:
             "via_count": self.via_count,
             "interconnect_net_count": self.interconnect_net_count,
             "inferred_interconnect_net_count": self.inferred_interconnect_net_count,
-            "routed_interconnect_net_count": self.routed_interconnect_net_count,
-            "failed_interconnect_net_count": self.failed_interconnect_net_count,
             "preserved_child_trace_count": self.preserved_child_trace_count,
             "preserved_child_via_count": self.preserved_child_via_count,
             "expected_preserved_child_trace_count": self.expected_preserved_child_trace_count,
@@ -200,7 +196,8 @@ def _discover_artifact_dirs(project_dir: Path) -> list[Path]:
             continue
         metadata = child / "metadata.json"
         debug = child / "debug.json"
-        if metadata.exists() and debug.exists():
+        solved_layout = child / "solved_layout.json"
+        if metadata.exists() and debug.exists() and solved_layout.exists():
             artifact_dirs.append(child)
     return artifact_dirs
 
@@ -225,7 +222,7 @@ def _resolve_artifact_dirs(
     return resolved
 
 
-def _filter_loaded_artifacts(loaded_artifacts, only: list[str]) -> list:
+def _filter_loaded_artifacts(loaded_artifacts, only: list[str]) -> list[Any]:
     """Filter loaded artifacts by sheet name, file name, or instance path."""
     if not only:
         return list(loaded_artifacts)
@@ -281,7 +278,7 @@ def _select_parent_definition(
 def _filter_artifacts_for_parent(
     loaded_artifacts,
     parent_definition: SubCircuitDefinition | None,
-) -> list:
+) -> list[Any]:
     """Restrict artifacts to direct children of the selected parent."""
     if parent_definition is None:
         return list(loaded_artifacts)
@@ -531,8 +528,6 @@ def _compose_artifacts(
         via_count=composition.via_count,
         interconnect_net_count=len(composition.hierarchy_state.interconnect_nets),
         inferred_interconnect_net_count=len(composition.inferred_interconnect_nets),
-        routed_interconnect_net_count=len(composition.routed_interconnect_nets),
-        failed_interconnect_net_count=len(composition.failed_interconnect_nets),
         preserved_child_trace_count=composition.trace_count,
         preserved_child_via_count=composition.via_count,
         expected_preserved_child_trace_count=composition.trace_count,
@@ -551,31 +546,6 @@ def _compose_artifacts(
         composition=composition,
     )
     return state, transformed_payloads
-
-
-def _entries_bbox(
-    entries: list[CompositionEntry],
-    *,
-    max_row_height: float = 0.0,
-    max_col_width: float = 0.0,
-) -> tuple[Point, Point]:
-    """Compute a simple composition bbox from entry origins and transformed sizes."""
-    if not entries:
-        return (Point(0.0, 0.0), Point(0.0, 0.0))
-
-    min_x = min(entry.origin.x for entry in entries)
-    min_y = min(entry.origin.y for entry in entries)
-    max_x = max(entry.origin.x + entry.transformed_bbox[0] for entry in entries)
-    max_y = max(entry.origin.y + entry.transformed_bbox[1] for entry in entries)
-
-    if max_row_height > 0.0:
-        max_y = max(max_y, min_y + max_row_height)
-    if max_col_width > 0.0:
-        max_x = max(max_x, min_x + max_col_width)
-
-    return (Point(min_x, min_y), Point(max_x, max_y))
-
-
 def _save_composition_snapshot(
     output_path: Path,
     state: ParentCompositionState,
@@ -606,8 +576,6 @@ def _save_composition_snapshot(
             "via_count": state.via_count,
             "interconnect_net_count": state.interconnect_net_count,
             "inferred_interconnect_net_count": state.inferred_interconnect_net_count,
-            "routed_interconnect_net_count": state.routed_interconnect_net_count,
-            "failed_interconnect_net_count": state.failed_interconnect_net_count,
             "score": {
                 "total": state.score_total,
                 "breakdown": dict(state.score_breakdown),
@@ -649,8 +617,6 @@ def _print_human_summary(
     print(f"vias                   : {state.via_count}")
     print(f"interconnect_nets      : {state.interconnect_net_count}")
     print(f"inferred_interconnects : {state.inferred_interconnect_net_count}")
-    print(f"routed_interconnects   : {state.routed_interconnect_net_count}")
-    print(f"failed_interconnects   : {state.failed_interconnect_net_count}")
     print(f"score_total            : {state.score_total:.2f}")
     if output_path:
         print(f"output_json            : {output_path}")
@@ -729,8 +695,6 @@ def _json_payload(
             "via_count": state.via_count,
             "interconnect_net_count": state.interconnect_net_count,
             "inferred_interconnect_net_count": state.inferred_interconnect_net_count,
-            "routed_interconnect_net_count": state.routed_interconnect_net_count,
-            "failed_interconnect_net_count": state.failed_interconnect_net_count,
             "score": {
                 "total": state.score_total,
                 "breakdown": dict(state.score_breakdown),
@@ -1111,6 +1075,23 @@ _zr = [z for z in board.Zones() if not z.GetIsRuleArea()]
 for _z in _zr:
     board.Remove(_z)
 
+# --- strip all non-outline drawings from the source/template board ---
+# The parent stamp rebuilds the board from scratch: tracks, zones, and
+# drawings are all cleared, then recreated from composed child geometry.
+# Only Edge_Cuts outlines survive (matching the leaf stamp in adapter.py).
+# Source-board silkscreen (group labels, boundary shapes) would otherwise
+# duplicate the composed child silkscreen stamped below.
+_draw_remove = []
+for _d in board.GetDrawings():
+    try:
+        if _d.GetLayer() == pcbnew.Edge_Cuts:
+            continue
+    except Exception:
+        pass
+    _draw_remove.append(_d)
+for _d in _draw_remove:
+    board.Remove(_d)
+
 # --- resolve net code ---
 _netinfo = board.GetNetInfo()
 
@@ -1346,7 +1327,7 @@ def _persist_parent_artifact(
         added_parent_trace_count = copper_verification["new_route_traces"]
         added_parent_via_count = copper_verification["new_route_vias"]
     else:
-        # Fallback to count-based estimation (legacy path)
+        # Fallback to count-based estimation when manifest unavailable
         copper_verification = None
         preserved_child_trace_count = min(
             expected_child_trace_count, routed_total_trace_count
@@ -1820,18 +1801,45 @@ def main(argv: list[str] | None = None) -> int:
                             f"parent_routed_png  : {stamped_render_dir / 'parent_routed.png'}"
                         )
 
-                    artifact_dir = _persist_parent_artifact(
-                        state, routing_result, project_dir, cfg
-                    )
-                    print(f"parent_artifact    : {artifact_dir}")
                     validation = routing_result.get("validation", {})
+
+                    # Apply post-routing DRC penalty to parent score.
+                    # Shorts tank the score to near-zero; clearance
+                    # violations apply proportional reduction.
+                    drc = validation.get("drc", {})
+                    shorts = drc.get("shorts", 0)
+                    clearance = drc.get("clearance", 0)
+                    if shorts > 0:
+                        state.score_total *= 0.01
+                        state.score_breakdown["drc_penalty"] = 0.01
+                        state.score_notes.append(
+                            f"DRC penalty: {shorts} short(s) -- score *= 0.01"
+                        )
+                    elif clearance > 0:
+                        penalty = min(0.9, clearance * 0.1)
+                        state.score_total *= (1.0 - penalty)
+                        state.score_breakdown["drc_penalty"] = 1.0 - penalty
+                        state.score_notes.append(
+                            f"DRC penalty: {clearance} clearance violation(s) -- score *= {1.0 - penalty:.3f}"
+                        )
+
                     if validation.get("accepted"):
+                        artifact_dir = _persist_parent_artifact(
+                            state, routing_result, project_dir, cfg
+                        )
+                        print(f"parent_artifact    : {artifact_dir}")
                         print("parent_status      : accepted")
                     else:
                         reasons = validation.get("rejection_reasons", [])
+                        reason_str = ', '.join(reasons) if reasons else 'unknown'
                         print(
-                            f"parent_status      : rejected ({', '.join(reasons) if reasons else 'unknown'})"
+                            f"parent_status      : rejected ({reason_str})"
                         )
+                        print(
+                            f"error: parent board rejected by acceptance gate: {reason_str}",
+                            file=sys.stderr,
+                        )
+                        return 1
                 else:
                     error_msg = routing_result.get("error", "unknown error")
                     print(

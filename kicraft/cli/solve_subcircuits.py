@@ -14,16 +14,14 @@ It performs the following steps:
 
 Current scope:
 - leaf-only solving
-- placement search with optional local routing
-- local routing currently uses the lightweight internal-net router from `subcircuit_solver.py`
-- no parent/composite composition yet
+- placement search with optional FreeRouting-based routing
+- routing is handled exclusively by FreeRouting (see leaf_routing.py)
+- parent/composite composition is handled by compose_subcircuits.py
 
-The goal is to establish a stable bottom-up local solve loop that can later
-be extended with:
-- local routing
+The goal is a stable bottom-up local solve loop extended with:
 - frozen subcircuit layout artifacts
-- parent-level rigid composition
-- final top-level assembly
+- parent-level rigid composition (compose_subcircuits.py)
+- final top-level assembly via FreeRouting
 
 Usage:
     python3 solve_subcircuits.py LLUPS.kicad_sch
@@ -119,22 +117,11 @@ from kicraft.autoplacer.brain.leaf_size_reduction import (
     local_solver_config,
 )
 from kicraft.autoplacer.brain.leaf_geometry import (
-    build_reduced_leaf_extraction,
-    copy_components_with_translation,
-    copy_traces_with_translation,
-    copy_vias_with_translation,
-    leaf_size_reduction_candidates,
     repair_leaf_placement_legality,
     score_local_components,
-    tight_leaf_geometry_bounds,
 )
 from kicraft.autoplacer.brain.leaf_passive_ordering import (
     apply_leaf_passive_ordering,
-    build_leaf_passive_topology_groups,
-    component_adjacency_map,
-    component_net_degree_map,
-    component_net_map,
-    component_primary_net_map,
 )
 from kicraft.autoplacer.brain.subcircuit_extractor import (
     ExtractedSubcircuitBoard,
@@ -338,93 +325,12 @@ def _local_solver_config(
     base_cfg: dict[str, Any], extraction: ExtractedSubcircuitBoard
 ) -> dict[str, Any]:
     return local_solver_config(base_cfg, extraction)
-
-
-def _copy_components_with_translation(
-    components: dict[str, Component],
-    delta: Point,
-) -> dict[str, Component]:
-    return copy_components_with_translation(components, delta)
-
-
-def _copy_traces_with_translation(traces: list[Any], delta: Point) -> list[Any]:
-    return copy_traces_with_translation(traces, delta)
-
-
-def _copy_vias_with_translation(vias: list[Any], delta: Point) -> list[Any]:
-    return copy_vias_with_translation(vias, delta)
-
-
-def _component_net_degree_map(extraction: ExtractedSubcircuitBoard) -> dict[str, int]:
-    return component_net_degree_map(extraction)
-
-
-def _component_primary_net_map(
-    extraction: ExtractedSubcircuitBoard,
-) -> dict[str, tuple[str, int]]:
-    return component_primary_net_map(extraction)
-
-
-def _component_net_map(
-    extraction: ExtractedSubcircuitBoard,
-) -> dict[str, set[str]]:
-    return component_net_map(extraction)
-
-
-def _component_adjacency_map(
-    extraction: ExtractedSubcircuitBoard,
-) -> dict[str, dict[str, int]]:
-    return component_adjacency_map(extraction)
-
-
-def _build_leaf_passive_topology_groups(
-    extraction: ExtractedSubcircuitBoard,
-    solved_components: dict[str, Component],
-) -> list[dict[str, Any]]:
-    return build_leaf_passive_topology_groups(extraction, solved_components)
-
-
 def _apply_leaf_passive_ordering(
     extraction: ExtractedSubcircuitBoard,
     solved_components: dict[str, Component],
     cfg: dict[str, Any],
 ) -> dict[str, Component]:
     return apply_leaf_passive_ordering(extraction, solved_components, cfg)
-
-
-def _tight_leaf_geometry_bounds(
-    extraction: ExtractedSubcircuitBoard,
-    solved_components: dict[str, Component],
-    routing: dict[str, Any],
-    *,
-    connector_pad_margin_mm: float = 0.0,
-) -> dict[str, float]:
-    return tight_leaf_geometry_bounds(
-        extraction, solved_components, routing,
-        connector_pad_margin_mm=connector_pad_margin_mm,
-    )
-
-
-def _build_reduced_leaf_extraction(
-    extraction: ExtractedSubcircuitBoard,
-    solved_components: dict[str, Component],
-    routing: dict[str, Any],
-    outline: tuple[Point, Point],
-) -> ExtractedSubcircuitBoard:
-    return build_reduced_leaf_extraction(
-        extraction, solved_components, routing, outline,
-    )
-
-
-def _leaf_size_reduction_candidates(
-    current_width: float,
-    current_height: float,
-    min_width: float,
-    min_height: float,
-) -> list[dict[str, Any]]:
-    return leaf_size_reduction_candidates(
-        current_width, current_height, min_width, min_height,
-    )
 
 
 def _attempt_leaf_size_reduction(
@@ -877,6 +783,8 @@ def _persist_solution(
         "anchor_summary": dict(full_acceptance.anchor_summary),
         "notes": list(full_acceptance.notes),
     }
+    # Propagate final acceptance verdict to top-level validation field
+    routing_validation["accepted"] = full_acceptance.accepted
 
     canonical_layout = solved.canonical_layout_artifact(cfg)
     canonical_layout["validation"] = routing_validation
@@ -934,10 +842,13 @@ def _persist_solution(
     if routed_board_path:
         metadata.artifact_paths["mini_pcb"] = routed_board_path
     elif solved.best_round.routing.get("reason") == "no_internal_nets":
-        # Leaves with no internal nets have no routed board — use the layout.kicad_pcb instead
+        # Leaves with no internal nets have no routed board -- use the layout.kicad_pcb instead
         layout_pcb = Path(metadata.artifact_paths.get("layout_pcb", ""))
         if layout_pcb.exists():
             metadata.artifact_paths["mini_pcb"] = str(layout_pcb)
+    elif not full_acceptance.accepted:
+        # Rejected leaf -- no routed board expected, skip solved_layout persistence below
+        pass
     else:
         raise RuntimeError(
             f"Accepted leaf artifact for {solved.instance_path} is missing routed_board_path"
@@ -947,8 +858,10 @@ def _persist_solution(
     canonical_layout["reduced_outline"] = reduced_outline
     canonical_layout["size_reduction"] = size_reduction
 
-    solved_layout_json = save_solved_layout_artifact(canonical_layout)
-    metadata.artifact_paths["solved_layout_json"] = solved_layout_json
+    solved_layout_json: str | None = None
+    if full_acceptance.accepted:
+        solved_layout_json = save_solved_layout_artifact(canonical_layout)
+        metadata.artifact_paths["solved_layout_json"] = solved_layout_json
 
     save_artifact_metadata(metadata)
     metadata.notes = list(metadata.notes) + [
@@ -973,7 +886,7 @@ def _persist_solution(
                 round_result.to_dict() for round_result in solved.all_rounds
             ],
             "leaf_board_state": extraction_debug_dict(solved.extraction),
-            "solved_local_placement": {
+            "solved_placement_summary": {
                 "component_count": len(solved.best_round.components),
                 "components": solved_geometry,
             },
@@ -994,7 +907,7 @@ def _persist_solution(
             "reduced_outline": reduced_outline,
             "size_reduction_validation": size_reduction.get("validation", {}),
             "canonical_solved_layout": canonical_layout,
-            "canonical_solved_layout_path": str(solved_layout_json),
+            "canonical_solved_layout_path": str(solved_layout_json or ""),
             "timing_breakdown": dict(solved.best_round.timing_breakdown),
             "scheduling_metadata": dict(solved.scheduling_metadata or {}),
             "failure_summary": dict(solved.failure_summary or {}),
@@ -1090,7 +1003,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--route",
         action="store_true",
-        help="Run optional local routing for internal leaf nets after placement",
+        help="Run FreeRouting after placement to route internal leaf nets",
     )
     parser.add_argument(
         "--workers",

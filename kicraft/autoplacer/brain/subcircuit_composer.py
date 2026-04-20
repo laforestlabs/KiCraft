@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
+from typing import Any
 
 from .subcircuit_instances import (
     LoadedSubcircuitArtifact,
@@ -45,7 +46,6 @@ from .types import (
     Component,
     HierarchyLevelState,
     InterfaceAnchor,
-    Layer,
     Net,
     Point,
     SilkscreenElement,
@@ -126,8 +126,6 @@ class ParentComposition:
         default_factory=dict
     )
     inferred_interconnect_nets: dict[str, Net] = field(default_factory=dict)
-    routed_interconnect_nets: list[str] = field(default_factory=list)
-    failed_interconnect_nets: list[str] = field(default_factory=list)
     score: ParentCompositionScore | None = None
     notes: list[str] = field(default_factory=list)
 
@@ -146,24 +144,6 @@ class ParentComposition:
     @property
     def via_count(self) -> int:
         return len(self.board_state.vias)
-
-
-@dataclass(slots=True)
-class ParentInterconnectRoutingResult:
-    """Result of parent-level interconnect routing."""
-
-    traces: list[TraceSegment] = field(default_factory=list)
-    vias: list[Via] = field(default_factory=list)
-    routed_net_names: list[str] = field(default_factory=list)
-    failed_net_names: list[str] = field(default_factory=list)
-
-    @property
-    def trace_count(self) -> int:
-        return len(self.traces)
-
-    @property
-    def via_count(self) -> int:
-        return len(self.vias)
 
 
 def build_parent_composition(
@@ -279,15 +259,6 @@ def build_parent_composition(
         child_anchor_maps,
     )
 
-    parent_routing = _route_parent_interconnect_nets(
-        combined_interconnect_nets,
-        merged_components,
-        child_anchor_maps,
-        outline,
-    )
-    merged_traces.extend(copy.deepcopy(trace) for trace in parent_routing.traces)
-    merged_vias.extend(copy.deepcopy(via) for via in parent_routing.vias)
-
     hierarchy_state = HierarchyLevelState(
         subcircuit=parent_subcircuit,
         child_instances=[child.instance for child in composed_children],
@@ -326,10 +297,6 @@ def build_parent_composition(
         f"via_count={len(merged_vias)}",
         f"inferred_interconnect_nets={len(inferred_interconnect_nets)}",
         f"interconnect_nets={len(combined_interconnect_nets)}",
-        f"routed_interconnect_nets={len(parent_routing.routed_net_names)}",
-        f"failed_interconnect_nets={len(parent_routing.failed_net_names)}",
-        f"parent_route_trace_count={parent_routing.trace_count}",
-        f"parent_route_via_count={parent_routing.via_count}",
         f"score_total={score.total:.3f}",
     ]
 
@@ -339,14 +306,12 @@ def build_parent_composition(
         composed_children=composed_children,
         child_anchor_maps=child_anchor_maps,
         inferred_interconnect_nets=inferred_interconnect_nets,
-        routed_interconnect_nets=list(parent_routing.routed_net_names),
-        failed_interconnect_nets=list(parent_routing.failed_net_names),
         score=score,
         notes=notes,
     )
 
 
-def composition_debug_dict(composition: ParentComposition) -> dict:
+def composition_debug_dict(composition: ParentComposition) -> dict[str, Any]:
     """Return a JSON-serializable debug view of a parent composition."""
     tl, br = composition.board_state.board_outline
     return {
@@ -405,8 +370,6 @@ def composition_debug_dict(composition: ParentComposition) -> dict:
             }
             for name, net in composition.inferred_interconnect_nets.items()
         },
-        "routed_interconnect_nets": list(composition.routed_interconnect_nets),
-        "failed_interconnect_nets": list(composition.failed_interconnect_nets),
         "score": {
             "total": composition.score.total if composition.score else 0.0,
             "breakdown": dict(composition.score.breakdown) if composition.score else {},
@@ -612,7 +575,7 @@ def _append_pad_ref(
         net.pad_refs.append(pad_ref)
 
 
-def _child_interface_ports(child: ComposedChild) -> list:
+def _child_interface_ports(child: ComposedChild) -> list[Any]:
     """Return logical interface ports for one composed child from its layout."""
     return list(child.transformed.layout.ports)
 
@@ -674,173 +637,6 @@ def _merge_interconnect_net_maps(
                 seen.add(pad_ref)
 
     return merged
-
-
-def _find_pad_by_ref(
-    components: dict[str, Component],
-    pad_ref: tuple[str, str],
-) -> object | None:
-    """Find one pad object by `(ref, pad_id)` in a merged component map."""
-    ref, pad_id = pad_ref
-    comp = components.get(ref)
-    if comp is None:
-        return None
-    for pad in comp.pads:
-        if pad.pad_id == pad_id:
-            return pad
-    return None
-
-
-def _route_anchor_net_manhattan(
-    net_name: str,
-    anchor_points: list[tuple[Point, Layer]],
-    width_mm: float,
-    board_outline: tuple[Point, Point],
-) -> tuple[list[TraceSegment], list[Via]]:
-    """Route one parent net between transformed anchor points."""
-    traces: list[TraceSegment] = []
-    vias: list[Via] = []
-
-    tl, br = board_outline
-    inset = max(width_mm * 0.5, 0.25)
-
-    def _clamp_point(point: Point) -> Point:
-        return Point(
-            min(max(point.x, tl.x + inset), br.x - inset),
-            min(max(point.y, tl.y + inset), br.y - inset),
-        )
-
-    root_pos_raw, root_layer = anchor_points[0]
-    root_pos = _clamp_point(root_pos_raw)
-
-    for target_pos_raw, target_layer in anchor_points[1:]:
-        target_pos = _clamp_point(target_pos_raw)
-        mid = _clamp_point(Point(target_pos.x, root_pos.y))
-
-        if root_layer == target_layer:
-            if root_pos.dist(mid) > 0:
-                traces.append(
-                    TraceSegment(
-                        start=Point(root_pos.x, root_pos.y),
-                        end=Point(mid.x, mid.y),
-                        layer=root_layer,
-                        net=net_name,
-                        width_mm=width_mm,
-                    )
-                )
-            if mid.dist(target_pos) > 0:
-                traces.append(
-                    TraceSegment(
-                        start=Point(mid.x, mid.y),
-                        end=Point(target_pos.x, target_pos.y),
-                        layer=root_layer,
-                        net=net_name,
-                        width_mm=width_mm,
-                    )
-                )
-            continue
-
-        via_pos = mid
-        if root_pos.dist(via_pos) > 0:
-            traces.append(
-                TraceSegment(
-                    start=Point(root_pos.x, root_pos.y),
-                    end=Point(via_pos.x, via_pos.y),
-                    layer=root_layer,
-                    net=net_name,
-                    width_mm=width_mm,
-                )
-            )
-        vias.append(
-            Via(
-                pos=Point(via_pos.x, via_pos.y),
-                net=net_name,
-            )
-        )
-        if via_pos.dist(target_pos) > 0:
-            traces.append(
-                TraceSegment(
-                    start=Point(via_pos.x, via_pos.y),
-                    end=Point(target_pos.x, target_pos.y),
-                    layer=target_layer,
-                    net=net_name,
-                    width_mm=width_mm,
-                )
-            )
-
-    return traces, vias
-
-
-def _route_parent_interconnect_nets(
-    interconnect_nets: dict[str, Net],
-    merged_components: dict[str, Component],
-    child_anchor_maps: dict[str, dict[str, InterfaceAnchor]],
-    board_outline: tuple[Point, Point],
-):
-    """Route parent-level interconnect nets from transformed anchor positions.
-
-    Parent interconnect routing should use the already-transformed physical
-    interface anchors as the source of truth for cross-subcircuit entry points.
-    This avoids depending on representative `pad_ref` resolution across rigidly
-    transformed child layouts.
-    """
-    anchor_points_by_net: dict[str, list[tuple[Point, Layer]]] = {}
-
-    for anchors in child_anchor_maps.values():
-        for anchor in anchors.values():
-            if anchor.pad_ref is None:
-                continue
-            pad = _find_pad_by_ref(merged_components, anchor.pad_ref)
-            if pad is None:
-                continue
-            pad_net = getattr(pad, "net", None)
-            if not isinstance(pad_net, str) or not pad_net:
-                continue
-            normalized_name = _normalize_net_name(pad_net)
-            anchor_points_by_net.setdefault(normalized_name, []).append(
-                (Point(anchor.pos.x, anchor.pos.y), anchor.layer)
-            )
-
-    traces: list[TraceSegment] = []
-    vias: list[Via] = []
-    routed_net_names: list[str] = []
-    failed_net_names: list[str] = []
-
-    for net in interconnect_nets.values():
-        normalized_name = _normalize_net_name(net.name)
-        anchor_points = anchor_points_by_net.get(normalized_name, [])
-        if len(anchor_points) < 2:
-            failed_net_names.append(net.name)
-            continue
-
-        width_mm = float(net.width_mm or 0.127)
-        try:
-            net_traces, net_vias = _route_anchor_net_manhattan(
-                net.name,
-                anchor_points,
-                width_mm,
-                board_outline,
-            )
-        except Exception:
-            failed_net_names.append(net.name)
-            continue
-
-        if not net_traces and not net_vias:
-            failed_net_names.append(net.name)
-            continue
-
-        traces.extend(net_traces)
-        vias.extend(net_vias)
-        routed_net_names.append(net.name)
-
-    return ParentInterconnectRoutingResult(
-        traces=traces,
-        vias=vias,
-        routed_net_names=routed_net_names,
-        failed_net_names=failed_net_names,
-    )
-
-
 def _score_parent_composition(
     parent_subcircuit: SubCircuitDefinition,
     composed_children: list[ComposedChild],

@@ -96,16 +96,10 @@ def load_solved_artifact(
 ) -> LoadedSubcircuitArtifact:
     """Load a solved subcircuit artifact bundle from disk.
 
-    Expected files:
+    Required files:
     - `metadata.json`
     - `debug.json`
-
-    Preferred file:
     - `solved_layout.json`
-
-    Canonical solved geometry is loaded from `solved_layout.json` when present.
-    The debug payload remains as a fallback for older artifacts that do not yet
-    persist the canonical solved layout file.
     """
     artifact_path = Path(artifact_dir)
     metadata_path = artifact_path / "metadata.json"
@@ -116,14 +110,12 @@ def load_solved_artifact(
         raise FileNotFoundError(f"Missing artifact metadata: {metadata_path}")
     if not debug_path.exists():
         raise FileNotFoundError(f"Missing artifact debug payload: {debug_path}")
+    if not solved_layout_path.exists():
+        raise FileNotFoundError(f"Missing solved layout artifact: {solved_layout_path}")
 
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     debug = json.loads(debug_path.read_text(encoding="utf-8"))
-    solved_layout = (
-        json.loads(solved_layout_path.read_text(encoding="utf-8"))
-        if solved_layout_path.exists()
-        else None
-    )
+    solved_layout = json.loads(solved_layout_path.read_text(encoding="utf-8"))
     layout = _layout_from_artifact_payload(metadata, debug, solved_layout)
 
     return LoadedSubcircuitArtifact(
@@ -388,12 +380,11 @@ def _normalize_to_canonical(
     # --- components ---
     components: Any = debug.get("solved_components")
     if not isinstance(components, dict) or not components:
-        components = debug.get("extra", {}).get("solved_local_placement", {}).get("components", {})
+        components = {}
 
     # --- traces / vias ---
-    routing = debug.get("extra", {}).get("solved_local_routing", {})
-    traces = routing.get("traces", [])
-    vias = routing.get("vias", [])
+    traces: list[Any] = []
+    vias: list[Any] = []
 
     # --- ports ---
     ports = metadata.get("interface_ports", [])

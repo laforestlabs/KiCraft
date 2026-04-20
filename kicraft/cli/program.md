@@ -178,7 +178,9 @@
     "placement_clearance_mm": 1.0,
     "edge_margin_mm": 2.0,
     "board_width_mm": 70.0,
-    "board_height_mm": 50.0
+    "board_height_mm": 50.0,
+    "intra_cluster_iters": 10,
+    "freerouting_max_passes": 20
   }
 }
 ```

@@ -114,46 +114,15 @@ class TestNormalizeToCanonical:
         result = _normalize_to_canonical({}, debug)
         assert "R1" in result["components"]
 
-    def test_components_fallback_to_solved_local_placement(self):
-        """Fallback to debug.extra.solved_local_placement.components."""
-        debug = {
-            "extra": {
-                "solved_local_placement": {
-                    "components": {"C1": _make_component_dict(ref="C1")}
-                }
-            }
-        }
-        result = _normalize_to_canonical({}, debug)
-        assert "C1" in result["components"]
-
     def test_components_invalid_type_gives_empty(self):
         """Non-dict solved_components produces empty dict."""
         debug = {"solved_components": "not a dict"}
         result = _normalize_to_canonical({}, debug)
         assert result["components"] == {}
 
-    def test_traces_from_solved_local_routing(self):
-        debug = {
-            "extra": {
-                "solved_local_routing": {
-                    "traces": [_make_trace_dict()],
-                    "vias": [_make_via_dict()],
-                }
-            }
-        }
-        result = _normalize_to_canonical({}, debug)
-        assert len(result["traces"]) == 1
-        assert len(result["vias"]) == 1
-
-    def test_traces_invalid_type_gives_empty(self):
-        debug = {
-            "extra": {
-                "solved_local_routing": {
-                    "traces": "bad",
-                    "vias": 42,
-                }
-            }
-        }
+    def test_traces_empty_without_solved_layout(self):
+        """Without solved_layout, traces and vias are empty."""
+        debug = {"extra": {}}
         result = _normalize_to_canonical({}, debug)
         assert result["traces"] == []
         assert result["vias"] == []

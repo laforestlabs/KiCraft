@@ -8,7 +8,7 @@ Routing pipeline:
 This module also provides:
 - lightweight routed-board validation helpers used by the subcircuits pipeline
 - canonical copper import from routed KiCad boards so solved leaf artifacts can
-  persist real routed traces/vias instead of heuristic placeholders
+  persist real routed traces/vias
 
 Verification note:
 - hierarchical/subcircuit changes should be verified by running the leaf

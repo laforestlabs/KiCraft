@@ -393,12 +393,6 @@ def _discover_parent_preview_sets(experiments_dir: Path) -> list[dict[str, Any]]
                 "component_count": _coerce_int(composition.get("component_count", 0)),
                 "trace_count": _coerce_int(composition.get("trace_count", 0)),
                 "via_count": _coerce_int(composition.get("via_count", 0)),
-                "routed_interconnect_net_count": _coerce_int(
-                    composition.get("routed_interconnect_net_count", 0)
-                ),
-                "failed_interconnect_net_count": _coerce_int(
-                    composition.get("failed_interconnect_net_count", 0)
-                ),
             }
         )
 
@@ -499,15 +493,6 @@ def create_progression_viewer(experiments_dir: Path):
                                     f"vias {preview_set['via_count']}",
                                     color="amber",
                                 )
-                                ui.badge(
-                                    f"routed interconnects {preview_set['routed_interconnect_net_count']}",
-                                    color="green",
-                                )
-                                if preview_set["failed_interconnect_net_count"] > 0:
-                                    ui.badge(
-                                        f"failed {preview_set['failed_interconnect_net_count']}",
-                                        color="red",
-                                    )
                             ui.label(
                                 "If FreeRouting appears to show only ratsnest or partial child copper, "
                                 "compare against the stamped/preloaded parent image and track counts above."

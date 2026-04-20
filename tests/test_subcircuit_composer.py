@@ -360,11 +360,5 @@ class TestParentRoutingAddsTraces:
             ],
         )
 
-        # If the routing succeeds, we should see routed interconnect nets
-        # and traces in the board state
-        if result.routed_interconnect_nets:
-            assert result.trace_count > 0
-        # Even if routing fails (anchors not matched), the composition itself
-        # should still be valid
         assert result.board_state is not None
         assert result.component_count == 2

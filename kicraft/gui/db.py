@@ -90,7 +90,7 @@ class Round(Base):
     courtyard_overlap = Column(Float)
     board_containment = Column(Float)
 
-    # DRC / legacy routing
+    # DRC
     drc_shorts = Column(Integer, default=0)
     drc_unconnected = Column(Integer, default=0)
     drc_clearance = Column(Integer, default=0)
