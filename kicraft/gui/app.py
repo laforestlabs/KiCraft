@@ -66,6 +66,7 @@ def _auto_import_on_startup() -> None:
         import_all_jsonl(state.db, state.experiments_dir)
 
     _import_hierarchical_best_preset()
+    state.restore_session_state()
 
 
 _auto_import_on_startup()

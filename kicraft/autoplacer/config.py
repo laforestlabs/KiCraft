@@ -92,9 +92,6 @@ DEFAULT_CONFIG = {
     # side-by-side (aligned on one axis).  Only applies to components
     # with area above tht_backside_min_area_mm2.
     "align_large_pairs": True,
-    # Minimum placement score to proceed to routing.
-    # Below this threshold routing is skipped (saves 15-30s on degenerate layouts).
-    "min_placement_score": 20.0,
     # Component zone constraints — per-reference placement rules.
     # Each key is a component reference; value is a dict with one of:
     #   {"edge": "left"|"right"|"top"|"bottom"}  — snap to named edge, lock
@@ -106,8 +103,6 @@ DEFAULT_CONFIG = {
     # Biases cluster centroids along the X-axis (left-to-right) during
     # initial placement.  Gives the layout a natural signal-flow direction.
     "signal_flow_order": [],
-    # Skip GND from net counting (routed as zones)
-    "skip_gnd_routing": True,
     # Net priority overrides (higher = routed earlier among same class)
     "net_priority": {},
     # Thermal
@@ -117,15 +112,15 @@ DEFAULT_CONFIG = {
     "freerouting_jar": os.path.expanduser("~/.local/lib/freerouting-1.9.0.jar"),
     "freerouting_timeout_s": 60,
     "freerouting_max_passes": 40,
-    # Nets excluded from trace routing (use copper zones instead).
-    # Add power nets that have zone fills (e.g. "GND") to reduce
-    # spurious "unconnected" DRC violations.
-    "freerouting_ignore_nets": ["GND"],
     # GND zone pour — automatically created/updated to cover full board.
     # Set gnd_zone_net to "" to disable automatic zone creation.
     "gnd_zone_net": "GND",
     "gnd_zone_layer": "B.Cu",
     "gnd_zone_margin_mm": 0.5,
+    "zone_clearance_mm": 0.3,
+    "zone_min_thickness_mm": 0.25,
+    "zone_thermal_gap_mm": 0.5,
+    "zone_thermal_spoke_mm": 0.5,
     # Ignorable DRC patterns — list of regex strings.  During post-route
     # DRC validation, if ALL significant violations match at least one
     # pattern (searched against the violation description text), they are
@@ -161,9 +156,6 @@ DEFAULT_CONFIG = {
     # Default board dimensions (mm) — overridden per-round when board size search is active.
     "board_width_mm": 90.0,
     "board_height_mm": 58.0,
-    # Board size overhead factor — minimum board area is estimated as
-    # total_component_area * overhead_factor.  Larger = more routing room.
-    "board_size_overhead_factor": 2.0,
     # Subcircuit margin — extra space (mm) added around the tight bounding
     # box of component positions when building a local subcircuit board.
     # Gives the solver room to rearrange components.
@@ -176,21 +168,111 @@ CONFIG_SEARCH_SPACE = {
     "reheat_strength": {"min": 0.0, "max": 0.4, "sigma": 0.05, "type": "float"},
     "force_attract_k": {"min": 0.001, "max": 0.2, "sigma": 0.01, "type": "float"},
     "force_repel_k": {"min": 50.0, "max": 1000.0, "sigma": 50.0, "type": "float"},
-    "placement_clearance_mm": {"min": 0.5, "max": 6.0, "sigma": 0.5, "type": "float"},
+    "placement_clearance_mm": {"min": 0.5, "max": 8.0, "sigma": 0.5, "type": "float"},
     "cooling_factor": {"min": 0.80, "max": 0.999, "sigma": 0.02, "type": "float"},
-    "edge_margin_mm": {"min": 0.5, "max": 10.0, "sigma": 0.5, "type": "float"},
-    "courtyard_padding_mm": {"min": 0.0, "max": 2.0, "sigma": 0.1, "type": "float"},
-    "board_width_mm": {"min": 60.0, "max": 140.0, "sigma": 5.0, "type": "float"},
-    "board_height_mm": {"min": 40.0, "max": 100.0, "sigma": 5.0, "type": "float"},
-    "sa_refine_initial_temp": {"min": 0.5, "max": 20.0, "sigma": 2.0, "type": "float"},
-    "sa_refine_move_radius_mm": {"min": 0.5, "max": 5.0, "sigma": 0.5, "type": "float"},
-    "sa_refine_iterations": {"min": 200, "max": 5000, "sigma": 500, "type": "int"},
-    "connector_gap_mm": {"min": 0.0, "max": 6.0, "sigma": 0.5, "type": "float"},
-    "edge_jitter_mm": {"min": 0.0, "max": 12.0, "sigma": 1.0, "type": "float"},
+    "edge_margin_mm": {"min": 0.5, "max": 15.0, "sigma": 0.5, "type": "float"},
+    "courtyard_padding_mm": {"min": 0.0, "max": 3.0, "sigma": 0.1, "type": "float"},
+    "board_width_mm": {"min": 30.0, "max": 200.0, "sigma": 5.0, "type": "float"},
+    "board_height_mm": {"min": 20.0, "max": 150.0, "sigma": 5.0, "type": "float"},
+    "sa_refine_initial_temp": {"min": 0.5, "max": 30.0, "sigma": 2.0, "type": "float"},
+    "sa_refine_move_radius_mm": {"min": 0.2, "max": 8.0, "sigma": 0.5, "type": "float"},
+    "sa_refine_iterations": {"min": 100, "max": 10000, "sigma": 500, "type": "int"},
+    "connector_gap_mm": {"min": 0.0, "max": 8.0, "sigma": 0.5, "type": "float"},
+    "edge_jitter_mm": {"min": 0.0, "max": 15.0, "sigma": 1.0, "type": "float"},
     "intra_cluster_iters": {"min": 10, "max": 500, "sigma": 20, "type": "int"},
-    "max_placement_iterations": {"min": 300, "max": 5000, "sigma": 300, "type": "int"},
-    "subcircuit_margin_mm": {"min": 2.0, "max": 10.0, "sigma": 1.0, "type": "float"},
+    "max_placement_iterations": {"min": 100, "max": 5000, "sigma": 300, "type": "int"},
+    "subcircuit_margin_mm": {"min": 1.0, "max": 15.0, "sigma": 1.0, "type": "float"},
+    "signal_width_mm": {"min": 0.05, "max": 2.0, "sigma": 0.02, "type": "float"},
+    "power_width_mm": {"min": 0.05, "max": 5.0, "sigma": 0.05, "type": "float"},
+    "via_drill_mm": {"min": 0.15, "max": 1.0, "sigma": 0.05, "type": "float"},
+    "via_size_mm": {"min": 0.3, "max": 1.5, "sigma": 0.05, "type": "float"},
+    "gnd_zone_margin_mm": {"min": 0.1, "max": 2.0, "sigma": 0.1, "type": "float"},
+    "connector_edge_inset_mm": {"min": -2.0, "max": 5.0, "sigma": 0.25, "type": "float"},
+    "connector_pad_margin_mm": {"min": 0.0, "max": 3.0, "sigma": 0.2, "type": "float"},
+    "thermal_radius_mm": {"min": 1.0, "max": 10.0, "sigma": 0.5, "type": "float"},
+    "sa_refine_cooling_rate": {"min": 0.9, "max": 0.9999, "sigma": 0.005, "type": "float"},
+    "sa_refine_swap_probability": {"min": 0.0, "max": 1.0, "sigma": 0.05, "type": "float"},
+    "sa_refine_rotation_probability": {"min": 0.0, "max": 1.0, "sigma": 0.05, "type": "float"},
+    "placement_convergence_threshold": {"min": 0.01, "max": 2.0, "sigma": 0.1, "type": "float"},
+
+    "placement_grid_mm": {"min": 0.1, "max": 2.54, "sigma": 0.1, "type": "float"},
+    "pad_inset_margin_mm": {"min": 0.0, "max": 2.0, "sigma": 0.1, "type": "float"},
+    "tht_backside_min_area_mm2": {"min": 10.0, "max": 200.0, "sigma": 10.0, "type": "float"},
+    "freerouting_timeout_s": {"min": 10, "max": 600, "sigma": 20, "type": "int"},
+    "freerouting_max_passes": {"min": 5, "max": 200, "sigma": 10, "type": "int"},
+    "zone_clearance_mm": {"min": 0.1, "max": 1.0, "sigma": 0.05, "type": "float"},
+    "zone_min_thickness_mm": {"min": 0.1, "max": 0.8, "sigma": 0.05, "type": "float"},
+    "zone_thermal_gap_mm": {"min": 0.2, "max": 1.5, "sigma": 0.1, "type": "float"},
+    "zone_thermal_spoke_mm": {"min": 0.2, "max": 1.5, "sigma": 0.1, "type": "float"},
 }
+
+
+def normalize_bounds(
+    key: str,
+    lo: float,
+    hi: float,
+    spec: dict[str, Any] | None = None,
+) -> tuple[float, float] | None:
+    """Clamp and validate a (lo, hi) bound pair against a CONFIG_SEARCH_SPACE spec.
+
+    Returns normalized (lo, hi) or None if the range is invalid (e.g. empty
+    integer range after rounding, or non-finite inputs like NaN/Infinity).
+    """
+    import math as _math
+
+    if spec is None:
+        spec = CONFIG_SEARCH_SPACE.get(key)
+    if spec is None:
+        return None
+
+    # Reject NaN/Infinity before any arithmetic (platform-dependent otherwise)
+    try:
+        lo, hi = float(lo), float(hi)
+    except (TypeError, ValueError):
+        return None
+    if not (_math.isfinite(lo) and _math.isfinite(hi)):
+        return None
+
+    spec_min = float(spec["min"])
+    spec_max = float(spec["max"])
+
+    lo = max(spec_min, min(spec_max, lo))
+    hi = max(spec_min, min(spec_max, hi))
+
+    if lo > hi:
+        lo, hi = hi, lo
+
+    if spec.get("type") == "int":
+        lo = _math.ceil(lo)
+        hi = _math.floor(hi)
+        if lo > hi:
+            return None
+
+    return (lo, hi)
+
+
+PARAM_CONSTRAINTS = [
+    ("via_drill_mm", "<", "via_size_mm"),
+]
+
+
+def enforce_param_constraints(config: dict[str, Any]) -> dict[str, Any]:
+    """Fix cross-parameter constraint violations in a config dict.
+
+    Modifies values in-place to ensure physical consistency:
+    - via_drill_mm must be < via_size_mm (annular ring requirement)
+
+    Returns the (possibly modified) config.
+    """
+    for key_a, op, key_b in PARAM_CONSTRAINTS:
+        if key_a not in config or key_b not in config:
+            continue
+        a, b = float(config[key_a]), float(config[key_b])
+        if op == "<" and a >= b:
+            config[key_a] = b * 0.5
+        elif op == "<=" and a > b:
+            config[key_b] = a
+    return config
 
 
 def load_project_config(config_path: str | None = None) -> dict[str, Any]:

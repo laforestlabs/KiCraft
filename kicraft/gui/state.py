@@ -21,6 +21,7 @@ The state in this module is intentionally conservative:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -135,6 +136,15 @@ DEFAULT_GUI_CLEANUP = {
 }
 
 
+def _default_mutation_bounds() -> dict[str, list[float | int]]:
+    from kicraft.autoplacer.config import CONFIG_SEARCH_SPACE
+
+    bounds: dict[str, list[float | int]] = {}
+    for key, spec in CONFIG_SEARCH_SPACE.items():
+        bounds[key] = [spec["min"], spec["max"]]
+    return bounds
+
+
 # ---------------------------------------------------------------------------
 # Placement & Routing parameter definitions exposed to the GUI.
 # Each entry defines the parameter key, display label, default value,
@@ -155,7 +165,6 @@ PLACEMENT_PARAMS: list[dict[str, Any]] = [
     # -- Board Geometry --
     {"key": "board_width_mm", "label": "Board width (mm)", "default": 90.0, "min": 30.0, "max": 200.0, "step": 1.0, "group": "Board Geometry", "description": "PCB width in millimeters"},
     {"key": "board_height_mm", "label": "Board height (mm)", "default": 58.0, "min": 20.0, "max": 150.0, "step": 1.0, "group": "Board Geometry", "description": "PCB height in millimeters"},
-    {"key": "board_size_overhead_factor", "label": "Size overhead factor", "default": 2.0, "min": 1.2, "max": 5.0, "step": 0.1, "group": "Board Geometry", "description": "Min board area = component area * this factor"},
     {"key": "edge_margin_mm", "label": "Edge margin (mm)", "default": 6.0, "min": 0.5, "max": 15.0, "step": 0.5, "group": "Board Geometry", "description": "Keep-out distance from board edges"},
     {"key": "subcircuit_margin_mm", "label": "Subcircuit margin (mm)", "default": 5.0, "min": 1.0, "max": 15.0, "step": 0.5, "group": "Board Geometry", "description": "Extra space around leaf subcircuit bounding box"},
     {"key": "placement_clearance_mm", "label": "Placement clearance (mm)", "default": 2.5, "min": 0.5, "max": 8.0, "step": 0.25, "group": "Board Geometry", "description": "Minimum gap between component bounding boxes"},
@@ -174,7 +183,6 @@ PLACEMENT_PARAMS: list[dict[str, Any]] = [
     {"key": "hierarchical_placement", "label": "Hierarchical placement", "default": True, "min": None, "max": None, "step": None, "group": "Component Behavior", "type": "bool", "description": "Use group-based hierarchical placement (vs flat global)"},
     {"key": "unlock_all_footprints", "label": "Unlock all footprints", "default": True, "min": None, "max": None, "step": None, "group": "Component Behavior", "type": "bool", "description": "Unlock batteries/connectors/mounting holes for placement"},
     {"key": "enable_board_size_search", "label": "Board size search", "default": True, "min": None, "max": None, "step": None, "group": "Component Behavior", "type": "bool", "description": "Allow autoexperiment to vary board dimensions"},
-    {"key": "min_placement_score", "label": "Min placement score", "default": 20.0, "min": 0.0, "max": 80.0, "step": 1.0, "group": "Component Behavior", "description": "Skip routing if placement scores below this threshold"},
     # -- SA Refinement --
     {"key": "sa_refine_enabled", "label": "SA refinement enabled", "default": True, "min": None, "max": None, "step": None, "group": "SA Refinement", "type": "bool", "description": "Run simulated annealing refinement after force-directed pass"},
     {"key": "sa_refine_iterations", "label": "SA iterations", "default": 1000, "min": 100, "max": 10000, "step": 100, "group": "SA Refinement", "description": "Number of simulated annealing steps"},
@@ -190,11 +198,14 @@ PLACEMENT_PARAMS: list[dict[str, Any]] = [
     {"key": "via_size_mm", "label": "Via size (mm)", "default": 0.6, "min": 0.3, "max": 1.5, "step": 0.05, "group": "Routing", "description": "Via annular ring outer diameter"},
     {"key": "freerouting_timeout_s", "label": "FreeRouting timeout (s)", "default": 60, "min": 10, "max": 600, "step": 10, "group": "Routing", "description": "Max seconds FreeRouting is allowed to run"},
     {"key": "freerouting_max_passes", "label": "FreeRouting max passes", "default": 40, "min": 5, "max": 200, "step": 5, "group": "Routing", "description": "Max routing passes for FreeRouting"},
-    {"key": "skip_gnd_routing", "label": "Skip GND routing", "default": True, "min": None, "max": None, "step": None, "group": "Routing", "type": "bool", "description": "Skip GND net from trace routing (use copper zone fill instead)"},
     {"key": "gnd_zone_margin_mm", "label": "GND zone margin (mm)", "default": 0.5, "min": 0.1, "max": 2.0, "step": 0.1, "group": "Routing", "description": "Clearance margin for the automatic GND copper zone pour"},
     {"key": "gnd_zone_net", "label": "GND zone net", "default": "GND", "min": None, "max": None, "step": None, "group": "Routing", "type": "text", "description": "Net name for automatic ground zone pour (empty to disable)"},
     {"key": "gnd_zone_layer", "label": "GND zone layer", "default": "B.Cu", "min": None, "max": None, "step": None, "group": "Routing", "type": "text", "description": "Copper layer for GND zone (F.Cu or B.Cu)"},
-    {"key": "freerouting_ignore_nets", "label": "Ignore nets (routing)", "default": "GND", "min": None, "max": None, "step": None, "group": "Routing", "type": "list", "description": "Nets excluded from trace routing (comma-separated, use zones instead)"},
+    # -- Zone Pour --
+    {"key": "zone_clearance_mm", "label": "Zone clearance (mm)", "default": 0.3, "min": 0.1, "max": 1.0, "step": 0.05, "group": "Zone Pour", "description": "Copper zone clearance from pads and traces"},
+    {"key": "zone_min_thickness_mm", "label": "Zone min thickness (mm)", "default": 0.25, "min": 0.1, "max": 0.8, "step": 0.05, "group": "Zone Pour", "description": "Minimum copper fill thickness for zone pour"},
+    {"key": "zone_thermal_gap_mm", "label": "Thermal relief gap (mm)", "default": 0.5, "min": 0.2, "max": 1.5, "step": 0.1, "group": "Zone Pour", "description": "Gap between pad and zone fill in thermal relief connections"},
+    {"key": "zone_thermal_spoke_mm", "label": "Thermal spoke width (mm)", "default": 0.5, "min": 0.2, "max": 1.5, "step": 0.1, "group": "Zone Pour", "description": "Width of thermal relief spoke connections to pads"},
     # -- Thermal --
     {"key": "thermal_radius_mm", "label": "Thermal keepout radius (mm)", "default": 3.0, "min": 1.0, "max": 10.0, "step": 0.5, "group": "Thermal", "description": "Keep-away radius around thermal components for heat dissipation"},
     {"key": "thermal_refs", "label": "Thermal components", "default": "", "min": None, "max": None, "step": None, "group": "Thermal", "type": "list", "description": "Component references with thermal keepout (comma-separated)"},
@@ -222,6 +233,9 @@ class AppState:
     toggles: dict[str, Any] = field(default_factory=lambda: {**DEFAULT_TOGGLES})
     gui_cleanup: dict[str, Any] = field(default_factory=lambda: {**DEFAULT_GUI_CLEANUP})
     placement_config: dict[str, Any] = field(default_factory=dict)
+    mutation_bounds: dict[str, list[float | int]] = field(
+        default_factory=_default_mutation_bounds
+    )
 
     active_experiment_id: int | None = None
     runner_pid: int | None = None
@@ -272,6 +286,7 @@ class AppState:
         config["_score_weights"] = {**self.score_weights}
         config["_gui_cleanup"] = {**self.gui_cleanup}
         config["_placement_config"] = {**self.placement_config}
+        config["_mutation_bounds"] = {k: list(v) for k, v in self.mutation_bounds.items()}
         config.update(self.toggles)
         config["pipeline"] = "hierarchical_subcircuits"
         return config
@@ -302,17 +317,58 @@ class AppState:
         if "_placement_config" in config and isinstance(config["_placement_config"], dict):
             self.placement_config.update(config["_placement_config"])
 
+        if "_mutation_bounds" in config and isinstance(config["_mutation_bounds"], dict):
+            from kicraft.autoplacer.config import CONFIG_SEARCH_SPACE, normalize_bounds
+
+            self.mutation_bounds = _default_mutation_bounds()
+            for key, bounds in config["_mutation_bounds"].items():
+                if key not in CONFIG_SEARCH_SPACE:
+                    continue
+                if not isinstance(bounds, list) or len(bounds) < 2:
+                    continue
+                try:
+                    lo, hi = float(bounds[0]), float(bounds[1])
+                except (TypeError, ValueError):
+                    continue
+                result = normalize_bounds(key, lo, hi)
+                if result is None:
+                    continue
+                self.mutation_bounds[key] = [result[0], result[1]]
+        else:
+            self.mutation_bounds = _default_mutation_bounds()
+
         for key in DEFAULT_TOGGLES:
             if key in config:
                 self.toggles[key] = config[key]
 
     def get_control_ranges(self) -> dict[str, list[float | int]]:
-        """Return enabled hierarchical control ranges."""
-        ranges: dict[str, list[float | int]] = {}
-        for control in self.hierarchical_controls:
-            if control.get("enabled", False):
-                ranges[control["key"]] = [control["min"], control["max"]]
-        return ranges
+        """Return user-specified mutation bounds for searchable parameters."""
+        return {k: list(v) for k, v in self.mutation_bounds.items()}
+
+    def save_session_state(self) -> None:
+        """Persist current mutation bounds to disk for cross-session restore."""
+        state_path = self.experiments_dir / "gui_session_state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {"_mutation_bounds": {k: list(v) for k, v in self.mutation_bounds.items()}}
+        try:
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+        except OSError:
+            pass
+
+    def restore_session_state(self) -> None:
+        """Restore mutation bounds from the last session if available."""
+        state_path = self.experiments_dir / "gui_session_state.json"
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(data, dict):
+            return
+        if "_mutation_bounds" in data:
+            self.load_from_config({"_mutation_bounds": data["_mutation_bounds"]})
 
     def get_enabled_controls(self) -> list[dict[str, Any]]:
         return [c for c in self.hierarchical_controls if c.get("enabled", False)]

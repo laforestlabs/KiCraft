@@ -237,6 +237,8 @@ def route_interconnect_nets(
     """
     cfg = dict(config or {})
     width_default = float(cfg.get("signal_width_mm", 0.127))
+    via_drill = float(cfg.get("via_drill_mm", 0.3))
+    via_size = float(cfg.get("via_size_mm", 0.6))
     traces: list[TraceSegment] = []
     vias: list[Via] = []
     routed_net_names: list[str] = []
@@ -254,7 +256,9 @@ def route_interconnect_nets(
 
         width_mm = float(net.width_mm or width_default)
         try:
-            net_traces, net_vias = _route_net_manhattan(net_name, pads, width_mm)
+            net_traces, net_vias = _route_net_manhattan(
+                net_name, pads, width_mm, via_drill, via_size
+            )
         except Exception:
             failed_net_names.append(net_name)
             continue
@@ -415,6 +419,8 @@ def _route_net_manhattan(
     net_name: str,
     pads: list[Pad],
     width_mm: float,
+    via_drill: float = 0.3,
+    via_size: float = 0.6,
 ) -> tuple[list[TraceSegment], list[Via]]:
     """Route one net with simple Manhattan segments and optional vias."""
     traces: list[TraceSegment] = []
@@ -427,6 +433,8 @@ def _route_net_manhattan(
             root,
             target,
             width_mm,
+            via_drill,
+            via_size,
         )
         traces.extend(net_traces)
         vias.extend(net_vias)
@@ -439,6 +447,8 @@ def _route_pad_pair_manhattan(
     start_pad: Pad,
     end_pad: Pad,
     width_mm: float,
+    via_drill: float = 0.3,
+    via_size: float = 0.6,
 ) -> tuple[list[TraceSegment], list[Via]]:
     """Route a pair of pads with a simple orthogonal path."""
     traces: list[TraceSegment] = []
@@ -486,6 +496,8 @@ def _route_pad_pair_manhattan(
         Via(
             pos=via_pos,
             net=net_name,
+            drill_mm=via_drill,
+            size_mm=via_size,
         )
     )
     if via_pos.dist(end) > 0:

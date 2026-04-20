@@ -146,6 +146,14 @@ class ExperimentRunner:
                     f.write("\n")
                 cmd += ["--config", str(overlay_path)]
 
+        if param_ranges:
+            ranges_path = self.experiments_dir / "gui_param_ranges.json"
+            self.experiments_dir.mkdir(parents=True, exist_ok=True)
+            with open(ranges_path, "w", encoding="utf-8") as f:
+                json.dump(param_ranges, f, indent=2)
+                f.write("\n")
+            cmd += ["--param-ranges", str(ranges_path)]
+
         program_path = self.scripts_dir / "program.md"
         program_data: dict[str, Any] = {
             "param_ranges": param_ranges or {},

@@ -43,7 +43,9 @@ from kicraft.autoplacer.config import (
     CONFIG_SEARCH_SPACE,
     DEFAULT_CONFIG,
     discover_project_config,
+    enforce_param_constraints,
     load_project_config,
+    normalize_bounds,
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -1472,6 +1474,7 @@ def _build_compose_cmd(
     parent: str,
     output_json: Path,
     only: list[str],
+    config: str | None = None,
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -1488,6 +1491,8 @@ def _build_compose_cmd(
         str(output_json),
         "--json",
     ]
+    if config:
+        cmd.extend(["--config", config])
     for selector in only:
         cmd.extend(["--only", selector])
     return cmd
@@ -1573,6 +1578,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--config",
         help="Optional project config path passed through to child commands",
+    )
+    parser.add_argument(
+        "--param-ranges",
+        help="JSON file with parameter min/max bounds to constrain mutation search space",
     )
     parser.add_argument(
         "--parent",
@@ -1688,6 +1697,66 @@ def main(argv: list[str] | None = None) -> int:
     _initial_config = {**DEFAULT_CONFIG, **_base_project_config}
     _best_config = dict(_initial_config)
 
+    effective_search_space = dict(CONFIG_SEARCH_SPACE)
+    param_ranges_path = args.param_ranges
+    if param_ranges_path:
+        try:
+            with open(param_ranges_path, "r", encoding="utf-8") as f:
+                user_ranges = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(
+                f"  [param-ranges] ERROR: failed to load {param_ranges_path}: {exc}",
+                file=sys.stderr,
+            )
+            user_ranges = {}
+        if not isinstance(user_ranges, dict):
+            print(
+                f"  [param-ranges] ERROR: expected JSON object at root, got {type(user_ranges).__name__}",
+                file=sys.stderr,
+            )
+            user_ranges = {}
+        applied_count = 0
+        skipped_keys: list[str] = []
+        for key, bounds in user_ranges.items():
+            if not isinstance(bounds, list) or len(bounds) < 2:
+                continue
+            if key not in effective_search_space:
+                skipped_keys.append(key)
+                continue
+            try:
+                lo, hi = float(bounds[0]), float(bounds[1])
+            except (TypeError, ValueError):
+                continue
+            result = normalize_bounds(key, lo, hi, effective_search_space[key])
+            if result is None:
+                print(
+                    f"  [param-ranges] WARNING: {key} range is empty after "
+                    f"normalization, skipping",
+                    file=sys.stderr,
+                )
+                continue
+            norm_lo, norm_hi = result
+            effective_search_space[key] = {
+                **effective_search_space[key],
+                "min": norm_lo,
+                "max": norm_hi,
+            }
+            applied_count += 1
+        if applied_count:
+            print(f"  [param-ranges] {applied_count} search-space bounds applied from {param_ranges_path}")
+        if skipped_keys:
+            print(
+                f"  [param-ranges] NOTE: {len(skipped_keys)} key(s) not in search space: "
+                f"{', '.join(skipped_keys[:5])}",
+                file=sys.stderr,
+            )
+        if not applied_count and not skipped_keys:
+            print(
+                f"  [param-ranges] WARNING: 0 bounds applied from {param_ranges_path} "
+                f"(keys may not match CONFIG_SEARCH_SPACE)",
+                file=sys.stderr,
+            )
+
     _write_live_status(
         status_json_path,
         status_txt_path,
@@ -1729,11 +1798,12 @@ def main(argv: list[str] | None = None) -> int:
         current_round_config = resolved_config_path
         round_mutated = _mutate_config(
             _best_config,
-            CONFIG_SEARCH_SPACE,
+            effective_search_space,
             rng,
             enable_board_size=bool(_best_config.get("enable_board_size_search", False)),
         )
         round_candidate_config.update(round_mutated)
+        enforce_param_constraints(round_candidate_config)
         if round_candidate_config != _initial_config:
             round_config_file = round_dir / "round_config.json"
             round_config_overlay = _config_overlay_from_defaults(round_candidate_config)
@@ -1942,6 +2012,7 @@ def main(argv: list[str] | None = None) -> int:
                     parent=args.parent,
                     output_json=composition_json,
                     only=args.only,
+                    config=current_round_config,
                 )
             ),
             preview_paths=_discover_live_preview_paths(project_dir),
@@ -1953,6 +2024,7 @@ def main(argv: list[str] | None = None) -> int:
             parent=args.parent,
             output_json=composition_json,
             only=args.only,
+            config=current_round_config,
         )
         _write_live_status(
             status_json_path,
@@ -2058,6 +2130,8 @@ def main(argv: list[str] | None = None) -> int:
             ]
             if args.jar:
                 parent_route_cmd.extend(["--jar", args.jar])
+            if current_round_config:
+                parent_route_cmd.extend(["--config", current_round_config])
             for selector in args.only:
                 parent_route_cmd.extend(["--only", selector])
 

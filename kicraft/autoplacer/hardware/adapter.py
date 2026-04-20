@@ -446,10 +446,12 @@ class KiCadAdapter:
         for net_name, pads in net_pads.items():
             power_nets = self.cfg.get("power_nets", set())
             is_power = net_name in power_nets or net_name.lstrip("/") in power_nets
+            pw = self.cfg.get("power_width_mm", POWER_WIDTH_MM)
+            sw = self.cfg.get("signal_width_mm", SIGNAL_WIDTH_MM)
             nets[net_name] = Net(
                 name=net_name,
                 pad_refs=pads,
-                width_mm=POWER_WIDTH_MM if is_power else SIGNAL_WIDTH_MM,
+                width_mm=pw if is_power else sw,
                 is_power=is_power,
             )
 
@@ -1062,11 +1064,11 @@ class KiCadAdapter:
             zone.SetDoNotAllowVias(False)
             zone.SetDoNotAllowPads(False)
             zone.SetDoNotAllowCopperPour(False)
-            zone.SetLocalClearance(pcbnew.FromMM(0.3))
-            zone.SetMinThickness(pcbnew.FromMM(0.25))
+            zone.SetLocalClearance(pcbnew.FromMM(self.cfg.get("zone_clearance_mm", 0.3)))
+            zone.SetMinThickness(pcbnew.FromMM(self.cfg.get("zone_min_thickness_mm", 0.25)))
             zone.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL)
-            zone.SetThermalReliefGap(pcbnew.FromMM(0.5))
-            zone.SetThermalReliefSpokeWidth(pcbnew.FromMM(0.5))
+            zone.SetThermalReliefGap(pcbnew.FromMM(self.cfg.get("zone_thermal_gap_mm", 0.5)))
+            zone.SetThermalReliefSpokeWidth(pcbnew.FromMM(self.cfg.get("zone_thermal_spoke_mm", 0.5)))
             zone.SetAssignedPriority(0)
             outline = zone.Outline()
             outline.NewOutline()

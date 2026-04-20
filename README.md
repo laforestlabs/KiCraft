@@ -49,6 +49,34 @@ score-layout project.kicad_pcb
 python -m kicraft.gui
 ```
 
+### Mutation Search Bounds
+
+The GUI Setup tab exposes 39 searchable parameters that the evolutionary
+optimizer mutates during `autoexperiment` runs. Users can narrow or widen
+the search range (min/max) for each parameter to focus exploration.
+
+Bounds persist across sessions automatically and flow to the optimizer via
+`gui_param_ranges.json`. A shared `normalize_bounds()` helper validates all
+bound inputs (rejects NaN/Infinity, clamps to spec domain, swaps inverted
+ranges). The only enforced cross-parameter constraint is physical:
+`via_drill_mm < via_size_mm` (annular ring requirement).
+
+**Parameter groups:**
+
+| Group | Params | Controls |
+|-------|--------|----------|
+| Placement Physics | 8 | Force strengths, cooling, iterations, convergence |
+| Board Geometry | 6 | Dimensions, margins, grid snap, clearances |
+| Edge & Connectors | 6 | Courtyard, connector gaps, insets, pad margins |
+| SA Refinement | 6 | Temperature, cooling, move radius, swap/rotation |
+| Routing | 7 | Trace widths, via dimensions, zone margin, FreeRouting |
+| Thermal | 1 | Keep-away radius around hot components |
+| Component Behavior | 1 | THT backside area threshold |
+| Zone Pour | 4 | Clearance, fill thickness, thermal relief |
+
+Run `autoexperiment` with `--param-ranges <file.json>` to override bounds
+from the command line.
+
 ## CLI Commands
 
 ### Core Pipeline

@@ -5,6 +5,7 @@ from __future__ import annotations
 from nicegui import ui
 
 from ..state import PLACEMENT_PARAMS, get_state
+from kicraft.autoplacer.config import CONFIG_SEARCH_SPACE, normalize_bounds
 
 
 def setup_page():
@@ -30,6 +31,8 @@ def setup_page():
 
         with ui.tab_panel(placement_tab):
             _placement_routing_panel(state)
+            ui.separator().classes("my-6")
+            _mutation_bounds_panel(state)
 
         with ui.tab_panel(hierarchy_tab):
             _hierarchy_panel(state)
@@ -250,6 +253,107 @@ def _on_param_change(state, key: str, param: dict, value):
         state.placement_config.pop(key, None)
     else:
         state.placement_config[key] = typed_value
+
+
+def _mutation_bounds_panel(state):
+    """Panel for editing mutation search bounds per searchable parameter."""
+    ui.label("Mutation Search Bounds").classes("text-lg font-bold mb-2")
+    ui.label(
+        "Set the min/max range for each parameter during the evolutionary search. "
+        "The optimizer mutates parameters within these bounds. Narrowing a range "
+        "focuses the search; widening it allows more exploration."
+    ).classes("text-sm text-gray-400 mb-4")
+
+    def _reset_all_bounds():
+        for k, spec in CONFIG_SEARCH_SPACE.items():
+            state.mutation_bounds[k] = [spec["min"], spec["max"]]
+        state.save_session_state()
+        ui.notify("All mutation bounds reset to defaults", type="info")
+        ui.navigate.reload()
+
+    ui.button(
+        "Reset All to Defaults", on_click=_reset_all_bounds, icon="restart_alt"
+    ).props("flat dense").classes("mb-3")
+
+    param_labels = {p["key"]: p["label"] for p in PLACEMENT_PARAMS}
+    param_groups = {p["key"]: p["group"] for p in PLACEMENT_PARAMS}
+    param_steps = {p["key"]: p["step"] for p in PLACEMENT_PARAMS if p.get("step") is not None}
+
+    grouped: dict[str, list[str]] = {}
+    for key in CONFIG_SEARCH_SPACE:
+        group = param_groups.get(key, "Other")
+        grouped.setdefault(group, []).append(key)
+
+    group_icons = {
+        "Placement Physics": "science",
+        "Board Geometry": "straighten",
+        "Edge & Connectors": "electrical_services",
+        "SA Refinement": "local_fire_department",
+        "Routing": "route",
+        "Thermal": "thermostat",
+        "Component Behavior": "memory",
+    }
+
+    for group_name, keys in grouped.items():
+        icon = group_icons.get(group_name, "tune")
+        with ui.expansion(f"{group_name} bounds", icon=icon).classes("w-full"):
+            with ui.grid(columns=3).classes("w-full gap-2 p-2"):
+                ui.label("Parameter").classes("font-bold text-xs")
+                ui.label("Min").classes("font-bold text-xs")
+                ui.label("Max").classes("font-bold text-xs")
+
+                for key in keys:
+                    label = param_labels.get(key, key.replace("_", " ").title())
+                    spec = CONFIG_SEARCH_SPACE[key]
+                    bounds = state.mutation_bounds.get(key, [spec["min"], spec["max"]])
+                    is_int = spec.get("type") == "int"
+                    step = param_steps.get(key, 1 if is_int else spec["sigma"])
+
+                    ui.label(label).classes("text-sm self-center")
+
+                    ui.number(
+                        label=f"{key} min",
+                        value=int(bounds[0]) if is_int else float(bounds[0]),
+                        min=spec["min"],
+                        max=spec["max"],
+                        step=step,
+                        on_change=lambda e, k=key, idx=0: _on_bounds_change(
+                            state, k, idx, e.value
+                        ),
+                    ).classes("w-full").props("dense")
+
+                    ui.number(
+                        label=f"{key} max",
+                        value=int(bounds[1]) if is_int else float(bounds[1]),
+                        min=spec["min"],
+                        max=spec["max"],
+                        step=step,
+                        on_change=lambda e, k=key, idx=1: _on_bounds_change(
+                            state, k, idx, e.value
+                        ),
+                    ).classes("w-full").props("dense")
+
+
+def _on_bounds_change(state, key: str, idx: int, value):
+    """Update a single bound (idx=0 for min, idx=1 for max) in state."""
+    if value is None:
+        return
+    spec = CONFIG_SEARCH_SPACE[key]
+    is_int = spec.get("type") == "int"
+    typed = int(value) if is_int else float(value)
+
+    if key not in state.mutation_bounds:
+        state.mutation_bounds[key] = [spec["min"], spec["max"]]
+    state.mutation_bounds[key][idx] = typed
+
+    lo, hi = state.mutation_bounds[key]
+    result = normalize_bounds(key, lo, hi, spec)
+    if result is None:
+        state.mutation_bounds[key] = [spec["min"], spec["max"]]
+    else:
+        state.mutation_bounds[key] = list(result)
+
+    state.save_session_state()
 
 
 def _hierarchy_panel(state):

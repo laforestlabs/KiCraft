@@ -1605,6 +1605,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=1,
         help="Number of placement rounds for parent composition (default: 1)",
     )
+    parser.add_argument(
+        "--config",
+        help="Optional JSON config file to merge on top of default/project config",
+    )
     return parser.parse_args(argv)
 
 
@@ -1696,17 +1700,17 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
-        # Build config
+        # Build config: project config -> --config overlay -> --jar override
+        from kicraft.autoplacer.config import discover_project_config, load_project_config
+
         cfg: dict[str, Any] = {"pcb_path": str(pcb_path)}
+        proj_cfg_path = discover_project_config(str(project_dir))
+        if proj_cfg_path:
+            cfg.update(load_project_config(str(proj_cfg_path)))
+        if args.config:
+            cfg.update(load_project_config(args.config))
         if args.jar:
             cfg["freerouting_jar"] = args.jar
-        else:
-            # Try to load from project config
-            from kicraft.autoplacer.config import discover_project_config, load_project_config
-
-            proj_cfg_path = discover_project_config(str(project_dir))
-            if proj_cfg_path:
-                cfg.update(load_project_config(str(proj_cfg_path)))
 
         try:
             geometry_validation = _validate_parent_geometry(state)
