@@ -38,6 +38,7 @@ from .types import (
     Layer,
     Pad,
     Point,
+    SilkscreenElement,
     SubCircuitInstance,
     SubCircuitLayout,
     TraceSegment,
@@ -73,6 +74,7 @@ class TransformedSubcircuit:
     transformed_components: dict[str, Component] = field(default_factory=dict)
     transformed_traces: list[TraceSegment] = field(default_factory=list)
     transformed_vias: list[Via] = field(default_factory=list)
+    transformed_silkscreen: list[SilkscreenElement] = field(default_factory=list)
     transformed_anchors: list[InterfaceAnchor] = field(default_factory=list)
     bounding_box: tuple[Point, Point] = field(
         default_factory=lambda: (Point(0.0, 0.0), Point(0.0, 0.0))
@@ -185,6 +187,10 @@ def transform_subcircuit_instance(
     transformed_vias = [
         _transform_via(via, instance.origin, instance.rotation) for via in layout.vias
     ]
+    transformed_silkscreen = [
+        _transform_silkscreen_element(elem, instance.origin, instance.rotation)
+        for elem in layout.silkscreen
+    ]
     transformed_anchors = [
         _transform_anchor(anchor, instance.origin, instance.rotation)
         for anchor in layout.interface_anchors
@@ -202,6 +208,7 @@ def transform_subcircuit_instance(
         transformed_components=transformed_components,
         transformed_traces=transformed_traces,
         transformed_vias=transformed_vias,
+        transformed_silkscreen=transformed_silkscreen,
         transformed_anchors=transformed_anchors,
         bounding_box=bounding_box,
     )
@@ -326,6 +333,7 @@ def _layout_from_artifact_payload(
     solved_components = _parse_components(canonical)
     solved_traces = _parse_traces(canonical)
     solved_vias = _parse_vias(canonical)
+    solved_silkscreen = _parse_silkscreen(canonical)
     ports = _interface_ports_from_payload(canonical.get("ports", []))
     interface_anchors = _parse_interface_anchors(canonical)
     bbox = _parse_bbox(canonical, solved_components)
@@ -338,6 +346,7 @@ def _layout_from_artifact_payload(
         components=solved_components,
         traces=solved_traces,
         vias=solved_vias,
+        silkscreen=solved_silkscreen,
         bounding_box=bbox,
         ports=ports,
         interface_anchors=interface_anchors,
@@ -438,6 +447,7 @@ def _normalize_to_canonical(
         "components": components if isinstance(components, dict) else {},
         "traces": traces if isinstance(traces, list) else [],
         "vias": vias if isinstance(vias, list) else [],
+        "silkscreen": [],
         "ports": ports if isinstance(ports, list) else [],
         "interface_anchors": normalized_anchors,
         "bounding_box": bbox,
@@ -533,6 +543,43 @@ def _parse_vias(canonical: dict[str, Any]) -> list[Via]:
         except Exception:
             continue
     return vias
+
+
+def _parse_silkscreen(canonical: dict[str, Any]) -> list[SilkscreenElement]:
+    """Parse silkscreen elements from canonical payload."""
+    payload = canonical.get("silkscreen", [])
+    if not isinstance(payload, list):
+        return []
+    elements: list[SilkscreenElement] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind", ""))
+        layer = str(item.get("layer", "F.SilkS"))
+        stroke_width = float(item.get("stroke_width", 0.15))
+        if kind == "poly":
+            points = [
+                _point_from_dict(p) for p in item.get("points", [])
+                if isinstance(p, dict)
+            ]
+            elements.append(SilkscreenElement(
+                kind="poly",
+                layer=layer,
+                points=points,
+                stroke_width=stroke_width,
+            ))
+        elif kind == "text":
+            elements.append(SilkscreenElement(
+                kind="text",
+                layer=layer,
+                text=str(item.get("text", "")),
+                pos=_point_from_dict(item.get("pos")),
+                font_height=float(item.get("font_height", 1.0)),
+                font_width=float(item.get("font_width", 1.0)),
+                font_thickness=float(item.get("font_thickness", 0.15)),
+                stroke_width=stroke_width,
+            ))
+    return elements
 
 
 def _parse_interface_anchors(
@@ -714,6 +761,21 @@ def _transform_anchor(
     new_anchor = copy.deepcopy(anchor)
     new_anchor.pos = _transform_point(anchor.pos, origin, rotation_deg)
     return new_anchor
+
+
+def _transform_silkscreen_element(
+    element: SilkscreenElement,
+    origin: Point,
+    rotation_deg: float,
+) -> SilkscreenElement:
+    new_elem = copy.deepcopy(element)
+    if element.kind == "poly":
+        new_elem.points = [
+            _transform_point(p, origin, rotation_deg) for p in element.points
+        ]
+    elif element.kind == "text":
+        new_elem.pos = _transform_point(element.pos, origin, rotation_deg)
+    return new_elem
 
 
 def _transform_point(

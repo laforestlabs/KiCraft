@@ -184,8 +184,12 @@ class SolvedLeafSubcircuit:
     def instance_path(self) -> str:
         return self.node.id.instance_path
 
-    def best_round_to_layout(self):
-        from kicraft.autoplacer.brain.subcircuit_solver import infer_interface_anchors
+    def best_round_to_layout(self, cfg: dict[str, Any] | None = None):
+        from kicraft.autoplacer.brain.subcircuit_solver import (
+            infer_interface_anchors,
+            _build_leaf_silkscreen,
+            _compute_component_bbox,
+        )
 
         anchors = infer_interface_anchors(
             self.extraction.interface_ports,
@@ -200,11 +204,19 @@ class SolvedLeafSubcircuit:
             for via in self.best_round.routing.get("_via_objects", [])
         ]
 
+        silkscreen = []
+        if cfg:
+            bbox = _compute_component_bbox(self.best_round.components)
+            silkscreen = _build_leaf_silkscreen(
+                self.best_round.components, bbox, self.extraction, cfg
+            )
+
         return SubCircuitLayout(
             subcircuit_id=self.node.definition.id,
             components=copy.deepcopy(self.best_round.components),
             traces=routed_traces,
             vias=routed_vias,
+            silkscreen=silkscreen,
             bounding_box=(
                 self.extraction.local_state.board_width,
                 self.extraction.local_state.board_height,
@@ -217,7 +229,7 @@ class SolvedLeafSubcircuit:
         )
 
     def canonical_layout_artifact(self, cfg: dict[str, Any]) -> dict[str, Any]:
-        layout = self.best_round_to_layout()
+        layout = self.best_round_to_layout(cfg=cfg)
         project_dir = Path(self.extraction.subcircuit.schematic_path).parent
         return build_solved_layout_artifact(
             layout,
@@ -835,7 +847,7 @@ def _persist_solution(
     cfg: dict[str, Any],
 ) -> dict[str, Any]:
     persist_start = time.monotonic()
-    solved_layout = solved.best_round_to_layout()
+    solved_layout = solved.best_round_to_layout(cfg=cfg)
     solved_geometry = serialize_components(solved.best_round.components)
     anchor_validation = build_anchor_validation(
         solved_layout.ports,

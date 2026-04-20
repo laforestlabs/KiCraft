@@ -48,6 +48,7 @@ from .types import (
     Layer,
     Net,
     Point,
+    SilkscreenElement,
     SubCircuitDefinition,
     SubCircuitInstance,
     SubCircuitLayout,
@@ -234,6 +235,7 @@ def build_parent_composition(
     merged_components: dict[str, Component] = {}
     merged_traces: list[TraceSegment] = []
     merged_vias: list[Via] = []
+    merged_silkscreen: list[SilkscreenElement] = []
     child_anchor_maps: dict[str, dict[str, InterfaceAnchor]] = {}
 
     for child in composed_children:
@@ -242,6 +244,7 @@ def build_parent_composition(
             merged_components,
             merged_traces,
             merged_vias,
+            merged_silkscreen,
             child_anchor_maps,
         )
 
@@ -303,6 +306,7 @@ def build_parent_composition(
         nets=merged_nets,
         traces=merged_traces,
         vias=merged_vias,
+        silkscreen=merged_silkscreen,
         board_outline=outline,
     )
 
@@ -454,6 +458,7 @@ def _merge_child_geometry(
     merged_components: dict[str, Component],
     merged_traces: list[TraceSegment],
     merged_vias: list[Via],
+    merged_silkscreen: list[SilkscreenElement],
     child_anchor_maps: dict[str, dict[str, InterfaceAnchor]],
 ) -> None:
     """Merge one transformed rigid child into the parent composition."""
@@ -468,6 +473,9 @@ def _merge_child_geometry(
         copy.deepcopy(trace) for trace in child.transformed.transformed_traces
     )
     merged_vias.extend(copy.deepcopy(via) for via in child.transformed.transformed_vias)
+    merged_silkscreen.extend(
+        copy.deepcopy(elem) for elem in child.transformed.transformed_silkscreen
+    )
 
     child_anchor_maps[child.instance_path] = {
         anchor.port_name: copy.deepcopy(anchor)

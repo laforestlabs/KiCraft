@@ -3,17 +3,161 @@
 ```json
 {
   "param_ranges": {
-    "leaf_rounds": [
-      1,
-      6
+    "orderedness": [
+      0.0,
+      1.0
     ],
-    "top_level_rounds": [
-      1,
-      3
+    "reheat_strength": [
+      0.0,
+      0.4
     ],
-    "compose_spacing_mm": [
-      4.0,
-      20.0
+    "force_attract_k": [
+      0.001,
+      0.2
+    ],
+    "force_repel_k": [
+      50.0,
+      1000.0
+    ],
+    "placement_clearance_mm": [
+      0.5,
+      8.0
+    ],
+    "cooling_factor": [
+      0.8,
+      0.999
+    ],
+    "edge_margin_mm": [
+      0.5,
+      15.0
+    ],
+    "courtyard_padding_mm": [
+      0.0,
+      3.0
+    ],
+    "board_width_mm": [
+      30.0,
+      200.0
+    ],
+    "board_height_mm": [
+      20.0,
+      150.0
+    ],
+    "sa_refine_initial_temp": [
+      0.5,
+      30.0
+    ],
+    "sa_refine_move_radius_mm": [
+      0.2,
+      8.0
+    ],
+    "sa_refine_iterations": [
+      100,
+      10000
+    ],
+    "connector_gap_mm": [
+      0.0,
+      8.0
+    ],
+    "edge_jitter_mm": [
+      0.0,
+      15.0
+    ],
+    "intra_cluster_iters": [
+      10,
+      500
+    ],
+    "max_placement_iterations": [
+      100,
+      5000
+    ],
+    "subcircuit_margin_mm": [
+      1.0,
+      15.0
+    ],
+    "signal_width_mm": [
+      0.05,
+      2.0
+    ],
+    "power_width_mm": [
+      0.05,
+      5.0
+    ],
+    "via_drill_mm": [
+      0.15,
+      1.0
+    ],
+    "via_size_mm": [
+      0.3,
+      1.5
+    ],
+    "gnd_zone_margin_mm": [
+      0.1,
+      2.0
+    ],
+    "connector_edge_inset_mm": [
+      -2.0,
+      5.0
+    ],
+    "connector_pad_margin_mm": [
+      0.0,
+      3.0
+    ],
+    "thermal_radius_mm": [
+      1.0,
+      10.0
+    ],
+    "sa_refine_cooling_rate": [
+      0.9,
+      0.9999
+    ],
+    "sa_refine_swap_probability": [
+      0.0,
+      1.0
+    ],
+    "sa_refine_rotation_probability": [
+      0.0,
+      1.0
+    ],
+    "placement_convergence_threshold": [
+      0.01,
+      2.0
+    ],
+    "placement_grid_mm": [
+      0.1,
+      2.54
+    ],
+    "pad_inset_margin_mm": [
+      0.0,
+      2.0
+    ],
+    "tht_backside_min_area_mm2": [
+      10.0,
+      200.0
+    ],
+    "freerouting_timeout_s": [
+      10,
+      600
+    ],
+    "freerouting_max_passes": [
+      5,
+      200
+    ],
+    "zone_clearance_mm": [
+      0.1,
+      1.0
+    ],
+    "zone_min_thickness_mm": [
+      0.1,
+      0.8
+    ],
+    "zone_thermal_gap_mm": [
+      0.2,
+      1.5
+    ],
+    "zone_thermal_spoke_mm": [
+      0.2,
+      1.5
     ]
   },
   "score_weights": {
@@ -22,12 +166,19 @@
     "parent_composition": 0.1,
     "parent_routed": 0.15
   },
-  "hierarchical_workers": 2,
+  "hierarchical_workers": 0,
   "schematic_file": "LLUPS.kicad_sch",
   "parent": "/",
   "only": [],
   "leaf_rounds": 1,
   "render_png": true,
-  "save_round_details": true
+  "save_round_details": true,
+  "placement_config": {
+    "subcircuit_margin_mm": 1.5,
+    "placement_clearance_mm": 1.0,
+    "edge_margin_mm": 2.0,
+    "board_width_mm": 70.0,
+    "board_height_mm": 50.0
+  }
 }
 ```

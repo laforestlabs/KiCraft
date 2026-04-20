@@ -126,14 +126,30 @@ class Via:
     size_mm: float = 0.6
 
 
+@dataclass(slots=True)
+class SilkscreenElement:
+    """A silkscreen graphic that travels with a subcircuit through composition."""
+
+    kind: str  # "poly" or "text"
+    layer: str  # "F.SilkS" or "B.SilkS"
+    points: list[Point] = field(default_factory=list)
+    stroke_width: float = 0.15
+    text: str = ""
+    pos: Point = field(default_factory=lambda: Point(0.0, 0.0))
+    font_height: float = 1.0
+    font_width: float = 1.0
+    font_thickness: float = 0.15
+
+
 @dataclass
 class BoardState:
-    """Complete snapshot — the interchange format between Brain and Hardware."""
+    """Complete snapshot -- the interchange format between Brain and Hardware."""
 
     components: dict[str, Component] = field(default_factory=dict)  # ref -> Component
     nets: dict[str, Net] = field(default_factory=dict)  # name -> Net
     traces: list[TraceSegment] = field(default_factory=list)
     vias: list[Via] = field(default_factory=list)
+    silkscreen: list[SilkscreenElement] = field(default_factory=list)
     board_outline: tuple[Point, Point] = field(
         default_factory=lambda: (Point(0, 0), Point(90, 58))
     )
@@ -483,6 +499,7 @@ class SubCircuitLayout:
     components: dict[str, Component] = field(default_factory=dict)
     traces: list[TraceSegment] = field(default_factory=list)
     vias: list[Via] = field(default_factory=list)
+    silkscreen: list[SilkscreenElement] = field(default_factory=list)
     bounding_box: tuple[float, float] = (0.0, 0.0)
     ports: list[InterfacePort] = field(default_factory=list)
     interface_anchors: list[InterfaceAnchor] = field(default_factory=list)

@@ -34,6 +34,7 @@ from .types import (
     InterfacePort,
     Layer,
     Point,
+    SilkscreenElement,
     SubcircuitAccessPolicy,
     SubCircuitDefinition,
     SubCircuitId,
@@ -227,6 +228,29 @@ def serialize_traces(traces: list[TraceSegment]) -> list[dict[str, Any]]:
 def serialize_vias(vias: list[Via]) -> list[dict[str, Any]]:
     """Serialize solved via geometry."""
     return [serialize_via(via) for via in vias]
+
+
+def serialize_silkscreen_element(element: SilkscreenElement) -> dict[str, Any]:
+    """Serialize one silkscreen element for artifact persistence."""
+    d: dict[str, Any] = {
+        "kind": element.kind,
+        "layer": element.layer,
+        "stroke_width": float(element.stroke_width),
+    }
+    if element.kind == "poly":
+        d["points"] = [serialize_point(p) for p in element.points]
+    elif element.kind == "text":
+        d["text"] = element.text
+        d["pos"] = serialize_point(element.pos)
+        d["font_height"] = float(element.font_height)
+        d["font_width"] = float(element.font_width)
+        d["font_thickness"] = float(element.font_thickness)
+    return d
+
+
+def serialize_silkscreen(elements: list[SilkscreenElement]) -> list[dict[str, Any]]:
+    """Serialize silkscreen elements list."""
+    return [serialize_silkscreen_element(e) for e in elements]
 
 
 def serialize_interface_anchors(
@@ -536,6 +560,7 @@ def build_solved_layout_artifact(
         "components": serialize_components(layout.components),
         "traces": serialize_traces(layout.traces),
         "vias": serialize_vias(layout.vias),
+        "silkscreen": serialize_silkscreen(layout.silkscreen),
         "ports": serialize_interface_ports(layout.ports),
         "interface_anchors": serialize_interface_anchors(layout.interface_anchors),
         "anchor_validation": anchor_validation,
@@ -670,6 +695,8 @@ __all__ = [
     "serialize_interface_anchors",
     "serialize_layer",
     "serialize_point",
+    "serialize_silkscreen",
+    "serialize_silkscreen_element",
     "serialize_trace",
     "serialize_traces",
     "serialize_via",

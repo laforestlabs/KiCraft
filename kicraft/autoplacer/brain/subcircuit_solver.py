@@ -29,6 +29,7 @@ Design notes:
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass, field
 
 from .placement import PlacementScorer, PlacementSolver
@@ -42,6 +43,7 @@ from .types import (
     Net,
     Pad,
     Point,
+    SilkscreenElement,
     SubCircuitLayout,
     TraceSegment,
     Via,
@@ -162,6 +164,10 @@ def solve_leaf_placement(
         solved_components,
     )
 
+    silkscreen = _build_leaf_silkscreen(
+        solved_components, bbox, extraction, cfg
+    )
+
     layout = SubCircuitLayout(
         subcircuit_id=extraction.subcircuit.id,
         components={
@@ -169,6 +175,7 @@ def solve_leaf_placement(
         },
         traces=[copy.deepcopy(trace) for trace in work_state.traces],
         vias=[copy.deepcopy(via) for via in work_state.vias],
+        silkscreen=silkscreen,
         bounding_box=(bbox["width_mm"], bbox["height_mm"]),
         interface_anchors=anchors,
         score=score.total,
@@ -385,6 +392,82 @@ def summarize_placement_result(result: LeafPlacementResult) -> str:
         f"routed={len(result.routed_internal_nets)} "
         f"failed={len(result.failed_internal_nets)}"
     )
+
+
+def _build_leaf_silkscreen(
+    solved_components: dict[str, Component],
+    bbox: dict[str, float],
+    extraction: ExtractedSubcircuitBoard,
+    config: dict,
+) -> list[SilkscreenElement]:
+    """Build silkscreen elements (rounded-rect outline + text label) for a leaf.
+
+    The label text is looked up from the project config `group_labels` mapping
+    (IC ref -> label text).  If no matching label is found, an empty list is
+    returned so unlabeled leaves pass through silently.
+    """
+    group_labels: dict[str, str] = config.get("group_labels", {})
+    if not group_labels:
+        return []
+
+    label_text = ""
+    for ref, label in group_labels.items():
+        if ref in solved_components:
+            label_text = label
+            break
+
+    if not label_text:
+        return []
+
+    margin = float(config.get("silkscreen_margin_mm", 0.5))
+    radius = float(config.get("silkscreen_corner_radius_mm", 1.0))
+    stroke_width = float(config.get("silkscreen_stroke_width_mm", 0.15))
+    font_height = float(config.get("silkscreen_font_height_mm", 0.8))
+    font_width = float(config.get("silkscreen_font_width_mm", 0.8))
+    font_thickness = float(config.get("silkscreen_font_thickness_mm", 0.15))
+    layer = "F.SilkS"
+
+    x0 = bbox["min_x"] - margin
+    y0 = bbox["min_y"] - margin
+    x1 = bbox["max_x"] + margin
+    y1 = bbox["max_y"] + margin
+
+    r = min(radius, (x1 - x0) / 2, (y1 - y0) / 2)
+    points: list[Point] = []
+    corners = [
+        (x0 + r, y0 + r, math.pi, math.pi / 2),       # top-left
+        (x1 - r, y0 + r, math.pi / 2, 0),              # top-right
+        (x1 - r, y1 - r, 0, -math.pi / 2),             # bottom-right
+        (x0 + r, y1 - r, -math.pi / 2, -math.pi),      # bottom-left
+    ]
+    n_arc = 8
+    for cx, cy, a_start, a_end in corners:
+        for i in range(n_arc):
+            t = a_start + (a_end - a_start) * i / (n_arc - 1)
+            px = cx + r * math.cos(t)
+            py = cy - r * math.sin(t)  # KiCad Y-down
+            points.append(Point(px, py))
+
+    poly_element = SilkscreenElement(
+        kind="poly",
+        layer=layer,
+        points=points,
+        stroke_width=stroke_width,
+    )
+
+    text_x = x0 + r + 0.3
+    text_y = y0 + font_height / 2 + 0.5
+    text_element = SilkscreenElement(
+        kind="text",
+        layer=layer,
+        text=label_text,
+        pos=Point(text_x, text_y),
+        font_height=font_height,
+        font_width=font_width,
+        font_thickness=font_thickness,
+    )
+
+    return [poly_element, text_element]
 
 
 def _deepcopy_board_state(state: BoardState) -> BoardState:

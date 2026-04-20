@@ -970,6 +970,26 @@ def _stamp_parent_board(
             }
         )
 
+    silkscreen_json = []
+    for elem in board_state.silkscreen or []:
+        if elem.kind == "poly":
+            silkscreen_json.append({
+                "kind": "poly",
+                "layer": elem.layer,
+                "points": [{"x": p.x, "y": p.y} for p in elem.points],
+                "stroke_width": elem.stroke_width,
+            })
+        elif elem.kind == "text":
+            silkscreen_json.append({
+                "kind": "text",
+                "layer": elem.layer,
+                "text": elem.text,
+                "pos": {"x": elem.pos.x, "y": elem.pos.y},
+                "font_height": elem.font_height,
+                "font_width": elem.font_width,
+                "font_thickness": elem.font_thickness,
+            })
+
     # Compute the board outline from the composition
     outline = board_state.board_outline
     outline_data = None
@@ -997,6 +1017,7 @@ def _stamp_parent_board(
         "components": components_json,
         "traces": traces_json,
         "vias": vias_json,
+        "silkscreen": silkscreen_json,
         "outline": outline_data,
     }
 
@@ -1028,6 +1049,7 @@ _out_path = _data["output_path"]
 _components = _data["components"]
 _traces = _data["traces"]
 _vias = _data["vias"]
+_silkscreen = _data.get("silkscreen", [])
 
 _LAYER_MAP = {0: pcbnew.F_Cu, 1: pcbnew.B_Cu}
 _LAYER_NAME_MAP = {"F.Cu": pcbnew.F_Cu, "B.Cu": pcbnew.B_Cu}
@@ -1128,6 +1150,36 @@ for _v in _vias:
     if _nc > 0:
         _tv.SetNetCode(_nc)
     board.Add(_tv)
+
+# --- stamp silkscreen graphics ---
+_SILK_LAYER_MAP = {"F.SilkS": pcbnew.F_SilkS, "B.SilkS": pcbnew.B_SilkS}
+
+for _silk in _silkscreen:
+    _slayer = _SILK_LAYER_MAP.get(_silk.get("layer", "F.SilkS"), pcbnew.F_SilkS)
+    if _silk["kind"] == "poly":
+        _shape = pcbnew.PCB_SHAPE(board)
+        _shape.SetShape(pcbnew.SHAPE_T_POLY)
+        _shape.SetLayer(_slayer)
+        _shape.SetFilled(False)
+        _shape.SetWidth(pcbnew.FromMM(_silk.get("stroke_width", 0.15)))
+        _poly = pcbnew.VECTOR_VECTOR2I()
+        for _pt in _silk.get("points", []):
+            _poly.append(pcbnew.VECTOR2I(pcbnew.FromMM(_pt["x"]), pcbnew.FromMM(_pt["y"])))
+        _shape.SetPolyPoints(_poly)
+        board.Add(_shape)
+    elif _silk["kind"] == "text":
+        _txt = pcbnew.PCB_TEXT(board)
+        _txt.SetText(_silk.get("text", ""))
+        _txt.SetLayer(_slayer)
+        _pos = _silk.get("pos", {"x": 0, "y": 0})
+        _txt.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(_pos["x"]), pcbnew.FromMM(_pos["y"])))
+        _txt.SetTextSize(pcbnew.VECTOR2I(
+            pcbnew.FromMM(_silk.get("font_width", 1.0)),
+            pcbnew.FromMM(_silk.get("font_height", 1.0)),
+        ))
+        _txt.SetTextThickness(pcbnew.FromMM(_silk.get("font_thickness", 0.15)))
+        _txt.SetHorizJustify(pcbnew.GR_TEXT_H_ALIGN_LEFT)
+        board.Add(_txt)
 
 board.BuildConnectivity()
 board.Save(_out_path)

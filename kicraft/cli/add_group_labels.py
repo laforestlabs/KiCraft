@@ -91,7 +91,14 @@ def parse_footprints(pcb_text: str) -> dict:
 
 
 def load_config_from_file(config_path: str) -> dict:
-    """Load DEFAULT_CONFIG from a Python config file."""
+    """Load config from a Python or JSON config file.
+
+    JSON files are loaded directly. Python files are exec'd and
+    DEFAULT_CONFIG is extracted from their namespace.
+    """
+    if config_path.endswith(".json"):
+        with open(config_path) as f:
+            return json.load(f)
     config_globals = {}
     with open(config_path) as f:
         exec(compile(f.read(), config_path, "exec"), config_globals)
@@ -331,10 +338,8 @@ def add_group_labels(pcb_path: str, ic_groups: dict, group_labels: dict,
             "uid": box_uid,
         })
 
-        # Position label centered on the top edge of the box
-        text_w = len(label_text) * fw * 0.7
-        lx = (bx0 + bx1) / 2 - text_w / 2  # left-justified from center
-        ly = by0  # on the top edge line
+        lx = bx0 + box_radius + 0.3
+        ly = by0 + fh / 2 + 0.5
 
         label_uid = f"{GROUP_LABEL_MARKER}{ic_ref.lower()}_{uuid.uuid4().hex[:8]}"
         labels_to_add.append({
@@ -393,12 +398,13 @@ def main():
     parser = argparse.ArgumentParser(
         description="Add silkscreen group labels to a KiCad PCB")
     parser.add_argument("pcb", help="Path to .kicad_pcb file")
-    parser.add_argument("--config", help="Python config file with DEFAULT_CONFIG")
+    parser.add_argument("--config",
+                        help="Config file (JSON or Python) with ic_groups/group_labels")
     parser.add_argument("--labels", help="JSON dict of {ic_ref: label_text} overrides")
-    parser.add_argument("--font-height", type=float, default=1.0,
-                        help="Label font height in mm (default: 1.0)")
-    parser.add_argument("--font-width", type=float, default=1.0,
-                        help="Label font width in mm (default: 1.0)")
+    parser.add_argument("--font-height", type=float, default=0.0,
+                        help="Label font height in mm (0 = auto-scale)")
+    parser.add_argument("--font-width", type=float, default=0.0,
+                        help="Label font width in mm (0 = auto-scale)")
     parser.add_argument("--font-thickness", type=float, default=0.15,
                         help="Stroke thickness in mm (default: 0.15)")
     parser.add_argument("--offset-y", type=float, default=1.5,
@@ -409,10 +415,19 @@ def main():
                         help="Print positions without modifying")
     args = parser.parse_args()
 
-    # Load config
     config = {}
     if args.config:
         config = load_config_from_file(args.config)
+    else:
+        pcb_dir = Path(args.pcb).resolve().parent
+        for candidate in [
+            pcb_dir / "autoplacer.json",
+            pcb_dir / f"{pcb_dir.name}_autoplacer.json",
+        ]:
+            if candidate.is_file():
+                config = load_config_from_file(str(candidate))
+                print(f"Auto-discovered config: {candidate}")
+                break
 
     ic_groups = config.get("ic_groups", {})
     group_labels = config.get("group_labels", {})
