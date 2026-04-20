@@ -243,14 +243,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--spacing-mm",
         type=float,
-        default=5.0,
-        help="Parent composition spacing in mm (default: 5.0)",
+        default=2.0,
+        help="Parent composition spacing in mm (default: 2.0)",
     )
     parser.add_argument(
         "--mode",
-        choices=("row", "column", "grid"),
-        default="grid",
-        help="Parent composition layout mode (default: grid)",
+        choices=("row", "column", "grid", "packed"),
+        default="packed",
+        help="Parent composition layout mode (default: packed)",
     )
     parser.add_argument(
         "--jar",

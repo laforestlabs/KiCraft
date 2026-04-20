@@ -694,10 +694,10 @@ def _score_parent_composition(
     utilization_component = max(0.0, min(100.0, area_utilization * 100.0))
 
     total = (
-        child_score_component * 0.45
-        + anchor_coverage_component * 0.25
+        child_score_component * 0.35
+        + anchor_coverage_component * 0.20
         + interconnect_component * 0.20
-        + utilization_component * 0.10
+        + utilization_component * 0.25
     )
 
     notes = [
@@ -757,6 +757,85 @@ def _looks_like_power_net(net_name: str) -> bool:
         or "3V3" in upper
         or "5V" in upper
         or "12V" in upper
+    )
+
+
+def estimate_parent_board_size(
+    child_bboxes: list[tuple[float, float]],
+    interconnect_net_count: int = 0,
+    routing_overhead_factor: float = 1.3,
+    margin_mm: float = 1.5,
+) -> tuple[float, float]:
+    """Estimate a reasonable parent board size from child bounding boxes.
+
+    Use this BEFORE packing to get a starting size for config/search bounds.
+    After packing, prefer ``packed_extents_outline()`` for exact dimensions.
+
+    Args:
+        child_bboxes: List of (width_mm, height_mm) for each child.
+        interconnect_net_count: Number of interconnect nets between children.
+        routing_overhead_factor: Multiplier on total child area for routing.
+        margin_mm: Edge margin around the packed children.
+
+    Returns:
+        (estimated_width_mm, estimated_height_mm).
+    """
+    import math
+
+    if not child_bboxes:
+        return (10.0, 10.0)
+
+    total_child_area = sum(
+        max(0.0, w) * max(0.0, h) for w, h in child_bboxes
+    )
+    max_child_width = max((max(0.0, w) for w, h in child_bboxes), default=0.0)
+    max_child_height = max((max(0.0, h) for w, h in child_bboxes), default=0.0)
+
+    net_overhead = min(0.3, interconnect_net_count * 0.01)
+    effective_overhead = routing_overhead_factor + net_overhead
+
+    estimated_area = total_child_area * effective_overhead
+
+    side = math.sqrt(estimated_area)
+    estimated_width = max(side, max_child_width) + 2.0 * margin_mm
+    estimated_height = (
+        max(
+            estimated_area / max(1.0, estimated_width - 2.0 * margin_mm),
+            max_child_height,
+        )
+        + 2.0 * margin_mm
+    )
+
+    return (round(estimated_width, 2), round(estimated_height, 2))
+
+
+def packed_extents_outline(
+    origins: list[tuple[float, float]],
+    bboxes: list[tuple[float, float]],
+    margin_mm: float = 1.5,
+) -> tuple[Point, Point]:
+    """Compute an exact board outline from already-packed child placements.
+
+    Args:
+        origins: List of (x, y) placement origins for each child.
+        bboxes: List of (width, height) transformed bounding boxes.
+        margin_mm: Edge clearance around outermost geometry.
+
+    Returns:
+        (top_left, bottom_right) ``Point`` pair for the board outline.
+    """
+    if not origins or not bboxes:
+        return (Point(0.0, 0.0), Point(10.0, 10.0))
+
+    max_x = 0.0
+    max_y = 0.0
+    for (ox, oy), (w, h) in zip(origins, bboxes):
+        max_x = max(max_x, ox + w)
+        max_y = max(max_y, oy + h)
+
+    return (
+        Point(-margin_mm, -margin_mm),
+        Point(max_x + margin_mm, max_y + margin_mm),
     )
 
 
@@ -824,4 +903,6 @@ __all__ = [
     "child_component_refs",
     "composition_debug_dict",
     "composition_summary",
+    "estimate_parent_board_size",
+    "packed_extents_outline",
 ]

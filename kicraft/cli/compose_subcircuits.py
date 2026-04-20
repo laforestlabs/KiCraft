@@ -52,6 +52,8 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
     ChildArtifactPlacement,
     ParentComposition,
     build_parent_composition,
+    estimate_parent_board_size,
+    packed_extents_outline,
 )
 from kicraft.autoplacer.brain.subcircuit_instances import (
     artifact_debug_dict,
@@ -420,9 +422,16 @@ def _compose_artifacts(
             (max(0.0, artifact.layout.width) for _, artifact in indexed_artifacts),
             default=0.0,
         )
+        child_bboxes = [
+            (max(0.0, artifact.layout.width), max(0.0, artifact.layout.height))
+            for _, artifact in indexed_artifacts
+        ]
+        estimated_w, _ = estimate_parent_board_size(
+            child_bboxes, margin_mm=spacing_mm
+        )
         target_row_width = max(
-            max_child_width,
-            math.sqrt(total_area) * 1.35 if total_area > 0.0 else max_child_width,
+            max_child_width + spacing_mm,
+            estimated_w if estimated_w > 0.0 else max_child_width,
         )
 
         row_count = 0
@@ -480,6 +489,14 @@ def _compose_artifacts(
     else:
         raise ValueError(f"Unsupported composition mode: {mode}")
 
+    child_bboxes = [e.transformed_bbox for e in entries]
+    child_origins = [(e.origin.x, e.origin.y) for e in entries]
+    exact_outline = packed_extents_outline(child_origins, child_bboxes)
+    outline_w = exact_outline[1].x - exact_outline[0].x
+    outline_h = exact_outline[1].y - exact_outline[0].y
+    packing_metadata["board_width_mm"] = round(outline_w, 2)
+    packing_metadata["board_height_mm"] = round(outline_h, 2)
+
     project_dir = (
         str(Path(loaded_artifacts[0].artifact_dir).resolve().parents[2])
         if loaded_artifacts
@@ -508,6 +525,7 @@ def _compose_artifacts(
     composition = build_parent_composition(
         parent_subcircuit,
         child_artifact_placements=child_artifact_placements,
+        board_outline=exact_outline,
     )
 
     # Build copper manifest before the flat merge loses provenance
@@ -1585,8 +1603,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         choices=("row", "column", "grid", "packed"),
-        default="row",
-        help="Initial rigid composition mode (default: row)",
+        default="packed",
+        help="Initial rigid composition mode (default: packed)",
     )
     parser.add_argument(
         "--parent",
@@ -1595,8 +1613,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--spacing-mm",
         type=float,
-        default=10.0,
-        help="Spacing between rigid child modules in mm (default: 10)",
+        default=2.0,
+        help="Spacing between rigid child modules in mm (default: 2)",
     )
     parser.add_argument(
         "--rotation-step-deg",

@@ -11,6 +11,8 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
     ChildPlacement,
     build_parent_composition,
     composition_summary,
+    estimate_parent_board_size,
+    packed_extents_outline,
     _derive_board_outline,
 )
 from kicraft.autoplacer.brain.types import (
@@ -362,3 +364,157 @@ class TestParentRoutingAddsTraces:
 
         assert result.board_state is not None
         assert result.component_count == 2
+
+
+class TestEstimateParentBoardSize:
+    def test_empty_children_returns_minimum(self):
+        w, h = estimate_parent_board_size([])
+        assert w == 10.0
+        assert h == 10.0
+
+    def test_single_child(self):
+        w, h = estimate_parent_board_size([(20.0, 10.0)])
+        assert w > 20.0
+        assert h > 10.0
+
+    def test_multiple_children_larger_than_single(self):
+        single_w, single_h = estimate_parent_board_size([(20.0, 10.0)])
+        multi_w, multi_h = estimate_parent_board_size(
+            [(20.0, 10.0), (15.0, 8.0), (10.0, 5.0)]
+        )
+        assert multi_w * multi_h > single_w * single_h
+
+    def test_routing_overhead_increases_size(self):
+        w_low, h_low = estimate_parent_board_size(
+            [(20.0, 10.0)], routing_overhead_factor=1.0
+        )
+        w_high, h_high = estimate_parent_board_size(
+            [(20.0, 10.0)], routing_overhead_factor=2.0
+        )
+        assert w_high * h_high > w_low * h_low
+
+    def test_margin_adds_clearance(self):
+        w_no, h_no = estimate_parent_board_size(
+            [(20.0, 10.0)], margin_mm=0.0
+        )
+        w_yes, h_yes = estimate_parent_board_size(
+            [(20.0, 10.0)], margin_mm=3.0
+        )
+        assert w_yes > w_no
+        assert h_yes > h_no
+
+    def test_zero_size_children_handled(self):
+        w, h = estimate_parent_board_size([(0.0, 0.0), (5.0, 3.0)])
+        assert w > 0.0
+        assert h > 0.0
+
+
+class TestPackedExtentsOutline:
+    def test_empty_returns_default(self):
+        tl, br = packed_extents_outline([], [])
+        assert tl.x == 0.0
+        assert br.x == 10.0
+
+    def test_single_child(self):
+        tl, br = packed_extents_outline(
+            [(0.0, 0.0)], [(20.0, 10.0)], margin_mm=1.0
+        )
+        assert tl.x == pytest.approx(-1.0)
+        assert tl.y == pytest.approx(-1.0)
+        assert br.x == pytest.approx(21.0)
+        assert br.y == pytest.approx(11.0)
+
+    def test_two_children_side_by_side(self):
+        tl, br = packed_extents_outline(
+            [(0.0, 0.0), (25.0, 0.0)],
+            [(20.0, 10.0), (15.0, 8.0)],
+            margin_mm=1.5,
+        )
+        assert br.x == pytest.approx(25.0 + 15.0 + 1.5)
+        assert br.y == pytest.approx(10.0 + 1.5)
+
+    def test_zero_margin(self):
+        tl, br = packed_extents_outline(
+            [(5.0, 3.0)], [(10.0, 8.0)], margin_mm=0.0
+        )
+        assert tl.x == pytest.approx(0.0)
+        assert tl.y == pytest.approx(0.0)
+        assert br.x == pytest.approx(15.0)
+        assert br.y == pytest.approx(11.0)
+
+
+class TestPackingSpacingAffectsBoardSize:
+    """Smaller inter-child spacing produces a smaller board outline."""
+
+    @staticmethod
+    def _pack_children(
+        child_sizes: list[tuple[float, float]], spacing_mm: float
+    ) -> tuple[float, float]:
+        """Simulate compose_subcircuits packed mode packing algorithm."""
+        if not child_sizes:
+            return (0.0, 0.0)
+
+        max_child_width = max(w for w, _ in child_sizes)
+        estimated_w, _ = estimate_parent_board_size(
+            child_sizes, margin_mm=spacing_mm
+        )
+        target_row_width = max(
+            max_child_width + spacing_mm,
+            estimated_w if estimated_w > 0.0 else max_child_width,
+        )
+
+        origins: list[tuple[float, float]] = []
+        row_y = 0.0
+        row_x = 0.0
+        row_height = 0.0
+        current_row_items = 0
+
+        for w, h in child_sizes:
+            should_wrap = (
+                current_row_items > 0
+                and row_x > 0.0
+                and (row_x + w) > target_row_width
+            )
+            if should_wrap:
+                row_y += row_height + spacing_mm
+                row_x = 0.0
+                row_height = 0.0
+                current_row_items = 0
+
+            origins.append((row_x, row_y))
+            row_x += w + spacing_mm
+            row_height = max(row_height, h)
+            current_row_items += 1
+
+        bboxes = child_sizes
+        outline = packed_extents_outline(origins, bboxes)
+        outline_w = outline[1].x - outline[0].x
+        outline_h = outline[1].y - outline[0].y
+        return (outline_w, outline_h)
+
+    def test_smaller_spacing_produces_smaller_board(self):
+        children = [(30.0, 10.0), (30.0, 10.0)]
+
+        w_tight, h_tight = self._pack_children(children, spacing_mm=1.0)
+        w_loose, h_loose = self._pack_children(children, spacing_mm=5.0)
+
+        area_tight = w_tight * h_tight
+        area_loose = w_loose * h_loose
+
+        assert area_tight < area_loose, (
+            f"Tight spacing (1mm) area={area_tight:.1f} should be less than "
+            f"loose spacing (5mm) area={area_loose:.1f}"
+        )
+
+    def test_spacing_range_monotonic(self):
+        children = [(30.0, 10.0), (30.0, 10.0), (30.0, 10.0)]
+        areas = []
+        for spacing in [0.5, 1.0, 2.0, 4.0, 6.0]:
+            w, h = self._pack_children(children, spacing_mm=spacing)
+            areas.append(w * h)
+
+        for i in range(len(areas) - 1):
+            assert areas[i] <= areas[i + 1], (
+                f"Board area should not decrease as spacing increases: "
+                f"spacing sequence produced areas {[round(a, 1) for a in areas]}"
+            )

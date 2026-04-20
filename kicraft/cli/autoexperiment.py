@@ -261,6 +261,8 @@ def _score_round(
     recent_scores: list[float],
     plateau_count: int,
     timing_breakdown: dict[str, float] | None = None,
+    parent_board_area_mm2: float = 0.0,
+    child_total_area_mm2: float = 0.0,
 ) -> tuple[float, dict[str, float], list[str], dict[str, float]]:
     leaf_total = len(all_leafs)
     leaf_accepted = len(accepted_leafs)
@@ -310,13 +312,13 @@ def _score_round(
         + added_parent_vias,
     )
 
-    leaf_acceptance_score = acceptance_ratio * 34.0
+    leaf_acceptance_score = acceptance_ratio * 30.0
     routed_copper_score = min(
         16.0,
         trace_coverage_ratio * 12.0 + via_coverage_ratio * 4.0,
     )
     parent_composition_score = 8.0 if composition_ok else 0.0
-    parent_routed_score = 15.0 if parent_routed else 0.0
+    parent_routed_score = 12.0 if parent_routed else 0.0
 
     parent_quality_score = min(
         14.0,
@@ -326,12 +328,21 @@ def _score_round(
         + min(1.0, parent_routed_copper_ratio) * 2.0,
     )
 
+    area_compactness_score = 0.0
+    area_utilization_ratio = 0.0
+    if parent_board_area_mm2 > 0.0 and child_total_area_mm2 > 0.0:
+        area_utilization_ratio = min(
+            1.0, child_total_area_mm2 / parent_board_area_mm2
+        )
+        area_compactness_score = min(9.0, area_utilization_ratio * 9.0)
+
     absolute_score = round(
         leaf_acceptance_score
         + routed_copper_score
         + parent_composition_score
         + parent_routed_score
-        + parent_quality_score,
+        + parent_quality_score
+        + area_compactness_score,
         3,
     )
 
@@ -363,6 +374,8 @@ def _score_round(
         "absolute_parent_composition": round(parent_composition_score, 3),
         "absolute_parent_routed": round(parent_routed_score, 3),
         "absolute_parent_quality": round(parent_quality_score, 3),
+        "absolute_area_compactness": round(area_compactness_score, 3),
+        "area_utilization_ratio": round(area_utilization_ratio, 3),
         "improvement_vs_baseline": round(baseline_improvement_score, 3),
         "improvement_vs_recent": round(recent_improvement_score, 3),
         "plateau_escape": plateau_escape_score,
@@ -390,10 +403,12 @@ def _score_round(
         f"improvement_vs_baseline={improvement_vs_baseline:.3f}",
         f"improvement_vs_recent={improvement_vs_recent:.3f}",
         f"plateau_count_in={plateau_count}",
+        f"area_utilization_ratio={area_utilization_ratio:.3f}",
+        f"parent_board_area_mm2={parent_board_area_mm2:.1f}",
+        f"child_total_area_mm2={child_total_area_mm2:.1f}",
+        f"area_compactness_score={area_compactness_score:.3f}",
         "score_architecture=absolute_plus_improvement_plus_plateau_escape",
         "score_scale=bounded_components_with_relative_rewards",
-        "board_size_reduction_plan=after_best_layout_run_iterative_outline_shrink_loop_at_leaf_and_parent_levels",
-        "board_size_reduction_loop=shrink_outline_then_revalidate_route_then_accept_smallest_passing_size",
     ]
     if timing_breakdown:
         score_notes.append(_format_timing_breakdown(timing_breakdown))
@@ -404,6 +419,8 @@ def _score_round(
         "improvement_score": improvement_score,
         "plateau_escape_score": plateau_escape_score,
         "parent_quality_score": round(parent_quality_score, 3),
+        "area_compactness_score": round(area_compactness_score, 3),
+        "area_utilization_ratio": round(area_utilization_ratio, 3),
         "baseline_score": round(effective_baseline, 3),
         "rolling_score": round(rolling_reference, 3),
         "improvement_vs_baseline": round(improvement_vs_baseline, 3),
@@ -844,6 +861,31 @@ def _extract_parent_copper_accounting(project_dir: Path) -> dict[str, int]:
                     return normalized
 
     return {}
+
+
+def _extract_parent_board_dimensions(
+    parent_output_json: Path,
+) -> tuple[float, float]:
+    """Return (width_mm, height_mm) of the parent board from pipeline JSON.
+
+    Falls back to (0.0, 0.0) if the file is missing or malformed.
+    """
+    try:
+        payload = _load_json(parent_output_json)
+    except Exception:
+        return (0.0, 0.0)
+    state = payload.get("state", {})
+    if not isinstance(state, dict):
+        return (0.0, 0.0)
+    bbox = state.get("bounding_box", {})
+    if not isinstance(bbox, dict):
+        return (0.0, 0.0)
+    try:
+        w = float(bbox.get("width_mm", 0.0) or 0.0)
+        h = float(bbox.get("height_mm", 0.0) or 0.0)
+    except (ValueError, TypeError):
+        return (0.0, 0.0)
+    return (max(0.0, w), max(0.0, h))
 
 
 def _discover_latest_parent_artifact_dir(project_dir: Path) -> Path | None:
@@ -1475,6 +1517,7 @@ def _build_compose_cmd(
     output_json: Path,
     only: list[str],
     config: str | None = None,
+    spacing_mm: float = 2.0,
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -1486,7 +1529,7 @@ def _build_compose_cmd(
         "--mode",
         "packed",
         "--spacing-mm",
-        "6",
+        str(spacing_mm),
         "--output",
         str(output_json),
         "--json",
@@ -2013,6 +2056,7 @@ def main(argv: list[str] | None = None) -> int:
                     output_json=composition_json,
                     only=args.only,
                     config=current_round_config,
+                    spacing_mm=round_candidate_config.get("parent_spacing_mm", 2.0),
                 )
             ),
             preview_paths=_discover_live_preview_paths(project_dir),
@@ -2025,6 +2069,7 @@ def main(argv: list[str] | None = None) -> int:
             output_json=composition_json,
             only=args.only,
             config=current_round_config,
+            spacing_mm=round_candidate_config.get("parent_spacing_mm", 2.0),
         )
         _write_live_status(
             status_json_path,
@@ -2121,7 +2166,7 @@ def main(argv: list[str] | None = None) -> int:
                 "--mode",
                 "packed",
                 "--spacing-mm",
-                "6",
+                str(round_candidate_config.get("parent_spacing_mm", 2.0)),
                 "--pcb",
                 str(pcb),
                 "--route",
@@ -2218,6 +2263,21 @@ def main(argv: list[str] | None = None) -> int:
 
         composition_ok = compose_rc == 0
         score_round_start_ts = _timing_now()
+
+        # Extract parent board dimensions for area compactness scoring
+        parent_w, parent_h = _extract_parent_board_dimensions(parent_output_json)
+        parent_board_area_mm2 = parent_w * parent_h
+
+        # Sum child leaf areas from solved_layout bounding boxes
+        child_total_area_mm2 = 0.0
+        for leaf in accepted_leafs:
+            sl = leaf.get("solved_layout", {})
+            bb = sl.get("bounding_box", {})
+            if isinstance(bb, dict):
+                lw = float(bb.get("width_mm", 0.0) or 0.0)
+                lh = float(bb.get("height_mm", 0.0) or 0.0)
+                child_total_area_mm2 += lw * lh
+
         score, score_breakdown, score_notes, score_context = _score_round(
             accepted_leafs=accepted_leafs,
             all_leafs=all_leafs,
@@ -2228,6 +2288,8 @@ def main(argv: list[str] | None = None) -> int:
             recent_scores=recent_scores,
             plateau_count=plateau_count,
             timing_breakdown=dict(round_timing_breakdown),
+            parent_board_area_mm2=parent_board_area_mm2,
+            child_total_area_mm2=child_total_area_mm2,
         )
         score_round_elapsed_s = _record_timing(
             round_timing_breakdown,

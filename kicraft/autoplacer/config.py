@@ -160,6 +160,9 @@ DEFAULT_CONFIG = {
     # box of component positions when building a local subcircuit board.
     # Gives the solver room to rearrange components.
     "subcircuit_margin_mm": 5.0,
+    # Parent spacing — gap (mm) between child subcircuit bounding boxes when
+    # composing them into the parent board.  Searchable by autoexperiment.
+    "parent_spacing_mm": 2.0,
 }
 
 
@@ -204,6 +207,7 @@ CONFIG_SEARCH_SPACE = {
     "zone_min_thickness_mm": {"min": 0.1, "max": 0.8, "sigma": 0.05, "type": "float"},
     "zone_thermal_gap_mm": {"min": 0.2, "max": 1.5, "sigma": 0.1, "type": "float"},
     "zone_thermal_spoke_mm": {"min": 0.2, "max": 1.5, "sigma": 0.1, "type": "float"},
+    "parent_spacing_mm": {"min": 0.5, "max": 6.0, "sigma": 0.5, "type": "float"},
 }
 
 
