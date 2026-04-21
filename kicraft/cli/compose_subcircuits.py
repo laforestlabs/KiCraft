@@ -711,6 +711,130 @@ def _compose_artifacts(
         composed_children=composition.composed_children,
     )
 
+    import itertools
+    from kicraft.autoplacer.brain.subcircuit_composer import can_overlap
+
+    edge_attachment_satisfied = {}
+    mounting_hole_keep_in_satisfied = {}
+
+    for c in constraints:
+        expected_x = None
+        expected_y = None
+        actual_x = None
+        actual_y = None
+        
+        min_pt, max_pt = exact_outline
+
+        if c.source == "child_artifact":
+            art_idx = c.child_index if c.child_index is not None else 0
+            art = loaded_artifacts[art_idx]
+            comp = art.layout.components.get(c.ref)
+            if not comp:
+                continue
+
+            center = comp.body_center if comp.body_center else comp.pos
+            rad = math.radians((art_idx * rotation_step_deg) % 360.0)
+            rx = center.x * math.cos(rad) - center.y * math.sin(rad)
+            ry = center.x * math.sin(rad) + center.y * math.cos(rad)
+
+            try:
+                origin = next(e.origin for e in entries if e.instance_path == art.instance_path)
+            except StopIteration:
+                continue
+
+            actual_x = origin.x + rx
+            actual_y = origin.y + ry
+        else:
+            comp = parent_local.get(c.ref)
+            if not comp:
+                continue
+            actual_x = comp.pos.x
+            actual_y = comp.pos.y
+
+        if c.target == "edge":
+            if c.value == "left":
+                expected_x = min_pt.x + c.inward_keep_in_mm - c.outward_overhang_mm
+            elif c.value == "right":
+                expected_x = max_pt.x - c.inward_keep_in_mm + c.outward_overhang_mm
+            elif c.value == "top":
+                expected_y = min_pt.y + c.inward_keep_in_mm - c.outward_overhang_mm
+            elif c.value == "bottom":
+                expected_y = max_pt.y - c.inward_keep_in_mm + c.outward_overhang_mm
+        elif c.target == "corner":
+            if c.value == "top-left":
+                expected_x = min_pt.x + c.inward_keep_in_mm - c.outward_overhang_mm
+                expected_y = min_pt.y + c.inward_keep_in_mm - c.outward_overhang_mm
+            elif c.value == "top-right":
+                expected_x = max_pt.x - c.inward_keep_in_mm + c.outward_overhang_mm
+                expected_y = min_pt.y + c.inward_keep_in_mm - c.outward_overhang_mm
+            elif c.value == "bottom-left":
+                expected_x = min_pt.x + c.inward_keep_in_mm - c.outward_overhang_mm
+                expected_y = max_pt.y - c.inward_keep_in_mm + c.outward_overhang_mm
+            elif c.value == "bottom-right":
+                expected_x = max_pt.x - c.inward_keep_in_mm + c.outward_overhang_mm
+                expected_y = max_pt.y - c.inward_keep_in_mm + c.outward_overhang_mm
+        elif c.target == "zone" and c.value == "bottom":
+            expected_y = max_pt.y - c.inward_keep_in_mm
+
+        ok_x = expected_x is None or abs(actual_x - expected_x) <= 1e-3
+        ok_y = expected_y is None or abs(actual_y - expected_y) <= 1e-3
+        ok = ok_x and ok_y
+
+        edge_attachment_satisfied[c.ref] = ok
+
+        is_hole = c.ref.startswith("H") or (c.inward_keep_in_mm > 0 and "hole" in c.ref.lower())
+        if is_hole:
+            mounting_hole_keep_in_satisfied[c.ref] = ok
+
+
+    def bbox_disjoint(a, b):
+        if a is None or b is None: return True
+        return a[1].x <= b[0].x or b[1].x <= a[0].x or a[1].y <= b[0].y or b[1].y <= a[0].y
+
+    same_side_overlap_conflicts = []
+    tht_keepout_violations = []
+
+    for i, j in itertools.combinations(range(len(placed_envelopes)), 2):
+        env_a = placed_envelopes[i]
+        env_b = placed_envelopes[j]
+        art_a = loaded_artifacts[i]
+        art_b = loaded_artifacts[j]
+
+        bbox_a = entries[i].transformed_bbox
+        origin_a = entries[i].origin
+        rect_a = (Point(origin_a.x, origin_a.y), Point(origin_a.x + bbox_a[0], origin_a.y + bbox_a[1]))
+
+        bbox_b = entries[j].transformed_bbox
+        origin_b = entries[j].origin
+        rect_b = (Point(origin_b.x, origin_b.y), Point(origin_b.x + bbox_b[0], origin_b.y + bbox_b[1]))
+
+        if not bbox_disjoint(rect_a, rect_b):
+            if not can_overlap(env_a, env_b):
+                a_label = getattr(art_a, "label", getattr(art_a, "slug", getattr(art_a, "sheet_name", f"child[{i}]")))
+                b_label = getattr(art_b, "label", getattr(art_b, "slug", getattr(art_b, "sheet_name", f"child[{j}]")))
+
+                a_front, a_back, a_tht = env_a
+                b_front, b_back, b_tht = env_b
+
+                if not bbox_disjoint(a_tht, b_front) or not bbox_disjoint(a_tht, b_back) or                    not bbox_disjoint(b_tht, a_front) or not bbox_disjoint(b_tht, a_back) or                    not bbox_disjoint(a_tht, b_tht):
+                    tht_keepout_violations.append((a_label, b_label))
+                elif not bbox_disjoint(a_front, b_front) or not bbox_disjoint(a_back, b_back):
+                    same_side_overlap_conflicts.append((a_label, b_label))
+
+    validation_data = {
+        "edge_attachment_satisfied": edge_attachment_satisfied,
+        "mounting_hole_keep_in_satisfied": mounting_hole_keep_in_satisfied,
+        "same_side_overlap_conflicts": same_side_overlap_conflicts,
+        "tht_keepout_violations": tht_keepout_violations,
+        "constraint_count": len(constraints),
+        "parent_local_count": len(parent_local),
+    }
+
+    unsatisfied_edges = sum(1 for ok in edge_attachment_satisfied.values() if not ok)
+    logger.info("composition: %d constraints, %d unsatisfied edges, %d overlap conflicts, %d THT violations", 
+        len(constraints), unsatisfied_edges, len(same_side_overlap_conflicts), len(tht_keepout_violations))
+
+
     state = ParentCompositionState(
         project_dir=project_dir,
         mode=mode,
@@ -733,7 +857,7 @@ def _compose_artifacts(
         added_parent_trace_count=0,
         added_parent_via_count=0,
         packing_metadata=packing_metadata,
-        geometry_validation={},
+        geometry_validation=validation_data,
         score_total=composition.score.total if composition.score else 0.0,
         score_breakdown=dict(composition.score.breakdown) if composition.score else {},
         score_notes=list(composition.score.notes) if composition.score else [],
