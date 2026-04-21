@@ -434,6 +434,39 @@ def _find_non_overlapping_origin(
     placed_envelopes,
     spacing_mm: float,
 ) -> Point:
+    candidates = list(
+        _candidate_positions(
+            proposed,
+            frame_min,
+            frame_max,
+            model.transformed.bounding_box,
+            spacing_mm,
+            scan_from_frame_origin=bool(placed_envelopes),
+        )
+    )
+
+    for require_overlap in (True, False):
+        for candidate in candidates:
+            candidate_bbox = _shift_bbox(model.transformed.bounding_box, candidate)
+            if not _bbox_inside_frame(candidate_bbox, frame_min, frame_max):
+                continue
+            candidate_envelopes = _shift_layer_envelopes(model.layer_envelopes, candidate)
+            collision = False
+            intersects_existing = False
+            for existing_bbox, existing_envelopes in zip(placed_bboxes, placed_envelopes):
+                if _bbox_disjoint(existing_bbox, candidate_bbox):
+                    continue
+                intersects_existing = True
+                if can_overlap(existing_envelopes, candidate_envelopes):
+                    continue
+                collision = True
+                break
+            if collision:
+                continue
+            if require_overlap and not intersects_existing:
+                continue
+            return candidate
+
     for candidate in _candidate_positions(
         proposed,
         frame_min,

@@ -735,3 +735,82 @@ class TestPackedPlacementOverlapScan:
         assert placed_front_bbox[1].x > 0.0
         assert placed_front_bbox[0].y < 20.0
         assert placed_front_bbox[1].y > 0.0
+
+    def test_opposite_side_leaves_prefer_meaningful_overlap(self):
+        back_model = PlacementModel(
+            rotation=0.0,
+            transformed=TransformedSubcircuit(
+                instance=SubCircuitInstance(
+                    layout_id=_make_subcircuit_id("BACK2"),
+                    origin=Point(0.0, 0.0),
+                    rotation=0.0,
+                    transformed_bbox=(20.0, 20.0),
+                ),
+                layout=_make_layout("BACK2", {}),
+                bounding_box=(Point(0.0, 0.0), Point(20.0, 20.0)),
+            ),
+            layer_envelopes=(None, (Point(0.0, 0.0), Point(20.0, 20.0)), None),
+            constraint_entries=[],
+        )
+        front_model = PlacementModel(
+            rotation=0.0,
+            transformed=TransformedSubcircuit(
+                instance=SubCircuitInstance(
+                    layout_id=_make_subcircuit_id("FRONT2"),
+                    origin=Point(0.0, 0.0),
+                    rotation=0.0,
+                    transformed_bbox=(12.0, 12.0),
+                ),
+                layout=_make_layout("FRONT2", {}),
+                bounding_box=(Point(0.0, 0.0), Point(12.0, 12.0)),
+            ),
+            layer_envelopes=((Point(0.0, 0.0), Point(12.0, 12.0)), None, None),
+            constraint_entries=[],
+        )
+
+        origin = _find_non_overlapping_origin(
+            proposed=Point(30.0, 0.0),
+            frame_min=Point(0.0, 0.0),
+            frame_max=Point(60.0, 40.0),
+            model=front_model,
+            placed_bboxes=[back_model.transformed.bounding_box],
+            placed_envelopes=[back_model.layer_envelopes],
+            spacing_mm=2.0,
+        )
+
+        overlap_w = max(0.0, min(origin.x + 12.0, 20.0) - max(origin.x, 0.0))
+        overlap_h = max(0.0, min(origin.y + 12.0, 20.0) - max(origin.y, 0.0))
+        assert overlap_w * overlap_h >= 5.0
+
+    def test_same_side_front_leaves_do_not_overlap(self):
+        placed_front_bbox = (Point(0.0, 0.0), Point(20.0, 20.0))
+        placed_front_envelopes = [
+            ((Point(0.0, 0.0), Point(20.0, 20.0)), None, None)
+        ]
+        front_model = PlacementModel(
+            rotation=0.0,
+            transformed=TransformedSubcircuit(
+                instance=SubCircuitInstance(
+                    layout_id=_make_subcircuit_id("FRONT3"),
+                    origin=Point(0.0, 0.0),
+                    rotation=0.0,
+                    transformed_bbox=(12.0, 12.0),
+                ),
+                layout=_make_layout("FRONT3", {}),
+                bounding_box=(Point(0.0, 0.0), Point(12.0, 12.0)),
+            ),
+            layer_envelopes=((Point(0.0, 0.0), Point(12.0, 12.0)), None, None),
+            constraint_entries=[],
+        )
+
+        origin = _find_non_overlapping_origin(
+            proposed=Point(30.0, 0.0),
+            frame_min=Point(0.0, 0.0),
+            frame_max=Point(60.0, 40.0),
+            model=front_model,
+            placed_bboxes=[placed_front_bbox],
+            placed_envelopes=placed_front_envelopes,
+            spacing_mm=2.0,
+        )
+
+        assert origin.x >= 20.0 or origin.y >= 20.0
