@@ -659,3 +659,53 @@ class TestParentLocalPlacement:
         bbox_min, _ = hole.bbox()
         assert bbox_min.x >= 2.5 - 1e-6
         assert bbox_min.y >= 2.5 - 1e-6
+
+
+class TestPackedPlacementOverlapScan:
+    def test_second_leaf_scans_from_frame_origin_for_layer_overlap(self):
+        back_model = PlacementModel(
+            rotation=0.0,
+            transformed=TransformedSubcircuit(
+                instance=SubCircuitInstance(
+                    layout_id=_make_subcircuit_id("BACK"),
+                    origin=Point(0.0, 0.0),
+                    rotation=0.0,
+                    transformed_bbox=(20.0, 20.0),
+                ),
+                layout=_make_layout("BACK", {}),
+                bounding_box=(Point(0.0, 0.0), Point(20.0, 20.0)),
+            ),
+            layer_envelopes=(None, (Point(0.0, 0.0), Point(20.0, 20.0)), None),
+            constraint_entries=[],
+        )
+        front_model = PlacementModel(
+            rotation=0.0,
+            transformed=TransformedSubcircuit(
+                instance=SubCircuitInstance(
+                    layout_id=_make_subcircuit_id("FRONT"),
+                    origin=Point(0.0, 0.0),
+                    rotation=0.0,
+                    transformed_bbox=(12.0, 12.0),
+                ),
+                layout=_make_layout("FRONT", {}),
+                bounding_box=(Point(0.0, 0.0), Point(12.0, 12.0)),
+            ),
+            layer_envelopes=((Point(0.0, 0.0), Point(12.0, 12.0)), None, None),
+            constraint_entries=[],
+        )
+
+        origin = _find_non_overlapping_origin(
+            proposed=Point(24.0, 0.0),
+            frame_min=Point(0.0, 0.0),
+            frame_max=Point(60.0, 40.0),
+            model=front_model,
+            placed_bboxes=[back_model.transformed.bounding_box],
+            placed_envelopes=[back_model.layer_envelopes],
+            spacing_mm=2.0,
+        )
+
+        placed_front_bbox = (origin, Point(origin.x + 12.0, origin.y + 12.0))
+        assert placed_front_bbox[0].x < 20.0
+        assert placed_front_bbox[1].x > 0.0
+        assert placed_front_bbox[0].y < 20.0
+        assert placed_front_bbox[1].y > 0.0

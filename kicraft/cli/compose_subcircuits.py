@@ -405,10 +405,16 @@ def _candidate_positions(
     frame_max: Point,
     bbox: tuple[Point, Point],
     spacing_mm: float,
+    *,
+    scan_from_frame_origin: bool = False,
 ):
     step = max(0.5, spacing_mm)
-    x_start = min(max(start.x, frame_min.x - bbox[0].x), frame_max.x - bbox[0].x + step * 4)
-    y_start = min(max(start.y, frame_min.y - bbox[0].y), frame_max.y - bbox[0].y + step * 4)
+    if scan_from_frame_origin:
+        x_start = frame_min.x - bbox[0].x
+        y_start = frame_min.y - bbox[0].y
+    else:
+        x_start = min(max(start.x, frame_min.x - bbox[0].x), frame_max.x - bbox[0].x + step * 4)
+        y_start = min(max(start.y, frame_min.y - bbox[0].y), frame_max.y - bbox[0].y + step * 4)
     y = y_start
     while y <= frame_max.y - bbox[0].y + step * 4:
         x = x_start if abs(y - y_start) < 1e-9 else frame_min.x - bbox[0].x
@@ -433,6 +439,7 @@ def _find_non_overlapping_origin(
         frame_max,
         model.transformed.bounding_box,
         spacing_mm,
+        scan_from_frame_origin=bool(placed_envelopes),
     ):
         candidate_bbox = _shift_bbox(model.transformed.bounding_box, candidate)
         if not _bbox_inside_frame(candidate_bbox, frame_min, frame_max):
