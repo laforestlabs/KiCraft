@@ -31,8 +31,9 @@ Those capabilities belong to later milestones.
 from __future__ import annotations
 
 import copy
+import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from .subcircuit_instances import (
     LoadedSubcircuitArtifact,
@@ -144,6 +145,133 @@ class ParentComposition:
     @property
     def via_count(self) -> int:
         return len(self.board_state.vias)
+
+
+@dataclass(frozen=True)
+class AttachmentConstraint:
+    ref: str
+    target: Literal["edge", "corner", "zone"]
+    value: str
+    inward_keep_in_mm: float
+    outward_overhang_mm: float
+    source: Literal["child_artifact", "parent_local"]
+    child_index: int | None
+
+
+def derive_attachment_constraints(
+    loaded_artifacts: list[Any],
+    parent_local_components: dict[str, Component],
+    component_zones: dict[str, str],
+    cfg: dict[str, Any],
+) -> list[AttachmentConstraint]:
+    constraints = []
+    for ref, zone_str in component_zones.items():
+        if ":" in zone_str:
+            target, value = zone_str.split(":", 1)
+        else:
+            target = "edge"
+            value = zone_str
+
+        if target not in ("edge", "corner", "zone"):
+            target = "zone"
+
+        source: Literal["child_artifact", "parent_local"] | None = None
+        child_idx: int | None = None
+        comp: Component | None = None
+
+        for i, artifact in enumerate(loaded_artifacts):
+            if ref in artifact.layout.components:
+                source = "child_artifact"
+                child_idx = i
+                comp = artifact.layout.components[ref]
+                break
+
+        if source is None:
+            if ref in parent_local_components:
+                source = "parent_local"
+                comp = parent_local_components[ref]
+
+        if source is None or comp is None:
+            logging.getLogger(__name__).warning(
+                f"Component {ref} constrained to {zone_str} but not found in any artifact or local components"
+            )
+            continue
+
+        is_hole = ref.startswith("H") or ("hole" in getattr(comp, "kind", "").lower())
+        is_conn = ref.startswith("J") or ("connector" in getattr(comp, "kind", "").lower())
+
+        if is_hole:
+            inward = cfg.get("mounting_hole_keep_in_mm", 2.5)
+            outward = 0.0
+        elif is_conn:
+            inset = cfg.get("connector_edge_inset_mm", 1.0)
+            per_ref_overhang = cfg.get("parent_overhang_mm", {}).get(ref, 0.0)
+            inward = max(0.0, inset)
+            outward = max(0.0, -inset) + per_ref_overhang
+        else:
+            inward = 0.0
+            outward = 0.0
+
+        constraints.append(
+            AttachmentConstraint(
+                ref=ref,
+                target=target,
+                value=value,
+                inward_keep_in_mm=inward,
+                outward_overhang_mm=outward,
+                source=source,
+                child_index=child_idx,
+            )
+        )
+    return constraints
+
+
+def constrained_child_offset(
+    artifact: Any,
+    constraint: AttachmentConstraint,
+    rotation_deg: float,
+    parent_outline_min: Point,
+    parent_outline_max: Point,
+) -> Point:
+    import math
+
+    comp = artifact.layout.components[constraint.ref]
+    center = comp.body_center if comp.body_center else comp.pos
+
+    rad = math.radians(rotation_deg)
+    rx = center.x * math.cos(rad) - center.y * math.sin(rad)
+    ry = center.x * math.sin(rad) + center.y * math.cos(rad)
+
+    target_x = rx
+    target_y = ry
+
+    if constraint.target == "edge":
+        if constraint.value == "left":
+            target_x = parent_outline_min.x + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
+        elif constraint.value == "right":
+            target_x = parent_outline_max.x - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
+        elif constraint.value == "top":
+            target_y = parent_outline_min.y + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
+        elif constraint.value == "bottom":
+            target_y = parent_outline_max.y - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
+    elif constraint.target == "corner":
+        if constraint.value == "top-left":
+            target_x = parent_outline_min.x + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
+            target_y = parent_outline_min.y + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
+        elif constraint.value == "top-right":
+            target_x = parent_outline_max.x - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
+            target_y = parent_outline_min.y + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
+        elif constraint.value == "bottom-left":
+            target_x = parent_outline_min.x + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
+            target_y = parent_outline_max.y - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
+        elif constraint.value == "bottom-right":
+            target_x = parent_outline_max.x - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
+            target_y = parent_outline_max.y - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
+    elif constraint.target == "zone":
+        if constraint.value == "bottom":
+            target_y = parent_outline_max.y - constraint.inward_keep_in_mm
+
+    return Point(target_x - rx, target_y - ry)
 
 
 def build_parent_composition(
@@ -760,6 +888,163 @@ def _looks_like_power_net(net_name: str) -> bool:
     )
 
 
+def child_layer_envelopes(
+    transformed: TransformedSubcircuit,
+) -> tuple[tuple[Point, Point] | None, tuple[Point, Point] | None, tuple[Point, Point] | None]:
+    """Compute layer-aware geometry envelopes for one transformed child artifact.
+
+    Returns:
+        (front_surface_bbox, back_surface_bbox, tht_keepout_bbox)
+        Each is either (min_pt, max_pt) or None if no geometry exists for that envelope.
+    """
+    front_pts = []
+    back_pts = []
+    tht_pts = []
+
+    for comp in transformed.board_state.components.values():
+        c_min, c_max = comp.bbox()
+        if comp.is_through_hole:
+            tht_pts.extend([c_min, c_max])
+            # THT also contributes to its placement layer's surface envelope
+            if comp.layer == 0:  # Layer.FRONT
+                front_pts.extend([c_min, c_max])
+            else:
+                back_pts.extend([c_min, c_max])
+        else:
+            if comp.layer == 0:  # Layer.FRONT
+                front_pts.extend([c_min, c_max])
+            else:
+                back_pts.extend([c_min, c_max])
+
+    def make_bbox(pts: list[Point]) -> tuple[Point, Point] | None:
+        if not pts:
+            return None
+        min_x = min(p.x for p in pts)
+        min_y = min(p.y for p in pts)
+        max_x = max(p.x for p in pts)
+        max_y = max(p.y for p in pts)
+        return (Point(min_x, min_y), Point(max_x, max_y))
+
+    return make_bbox(front_pts), make_bbox(back_pts), make_bbox(tht_pts)
+
+
+def _bbox_disjoint(a: tuple[Point, Point] | None, b: tuple[Point, Point] | None) -> bool:
+    """Return True if two bounding boxes are disjoint (do not overlap).
+
+    None is considered disjoint from everything.
+    """
+    if a is None or b is None:
+        return True
+    a_min, a_max = a
+    b_min, b_max = b
+
+    # One is entirely to the left/right
+    if a_max.x <= b_min.x or b_max.x <= a_min.x:
+        return True
+    # One is entirely above/below
+    if a_max.y <= b_min.y or b_max.y <= a_min.y:
+        return True
+    return False
+
+
+def can_overlap(
+    a_envelopes: tuple[tuple[Point, Point] | None, tuple[Point, Point] | None, tuple[Point, Point] | None],
+    b_envelopes: tuple[tuple[Point, Point] | None, tuple[Point, Point] | None, tuple[Point, Point] | None],
+) -> bool:
+    """Determine if two children can safely XY-overlap without geometric conflict.
+
+    Two children can overlap iff:
+    - Their front surfaces are disjoint
+    - Their back surfaces are disjoint
+    - Child A's THT keepout is disjoint from Child B's front and back surfaces
+    - Child B's THT keepout is disjoint from Child A's front and back surfaces
+    - Their THT keepouts are disjoint from each other
+    """
+    a_front, a_back, a_tht = a_envelopes
+    b_front, b_back, b_tht = b_envelopes
+
+    if not _bbox_disjoint(a_front, b_front):
+        return False
+    if not _bbox_disjoint(a_back, b_back):
+        return False
+
+    if not _bbox_disjoint(a_tht, b_tht):
+        return False
+
+    if not _bbox_disjoint(a_tht, b_front):
+        return False
+    if not _bbox_disjoint(a_tht, b_back):
+        return False
+
+    if not _bbox_disjoint(b_tht, a_front):
+        return False
+    if not _bbox_disjoint(b_tht, a_back):
+        return False
+
+    return True
+
+
+def constraint_aware_outline(
+    child_origins: list[Point],
+    child_bboxes: list[tuple[float, float]],
+    attachment_constraints: list[AttachmentConstraint],
+    constrained_ref_world_centers: dict[str, Point],
+    margin_mm: float = 1.5,
+) -> tuple[Point, Point]:
+    """Compute parent board outline respecting both geometry and constraint targets.
+
+    For unconstrained sides, uses the maximum geometry extent plus margin.
+    For constrained sides, uses the exact target coordinate derived from the
+    constrained component's world position and keep-in/overhang values.
+    """
+    if not child_origins:
+        return (Point(0.0, 0.0), Point(10.0, 10.0))
+
+    # Base geometry extents
+    min_geom_x = min(o.x for o in child_origins)
+    min_geom_y = min(o.y for o in child_origins)
+    max_geom_x = max(o.x + w for o, (w, h) in zip(child_origins, child_bboxes))
+    max_geom_y = max(o.y + h for o, (w, h) in zip(child_origins, child_bboxes))
+
+    out_min_x = min_geom_x - margin_mm
+    out_min_y = min_geom_y - margin_mm
+    out_max_x = max_geom_x + margin_mm
+    out_max_y = max_geom_y + margin_mm
+
+    # Override with constraint targets
+    left_edges = []
+    right_edges = []
+    top_edges = []
+    bottom_edges = []
+
+    for c in attachment_constraints:
+        if c.ref not in constrained_ref_world_centers:
+            continue
+        center = constrained_ref_world_centers[c.ref]
+
+        if c.target == "edge" or c.target == "corner":
+            v = c.value
+            if "left" in v:
+                left_edges.append(center.x - c.inward_keep_in_mm + c.outward_overhang_mm)
+            if "right" in v:
+                right_edges.append(center.x + c.inward_keep_in_mm - c.outward_overhang_mm)
+            if "top" in v:
+                top_edges.append(center.y - c.inward_keep_in_mm + c.outward_overhang_mm)
+            if "bottom" in v:
+                bottom_edges.append(center.y + c.inward_keep_in_mm - c.outward_overhang_mm)
+
+    if left_edges:
+        out_min_x = min(left_edges)
+    if right_edges:
+        out_max_x = max(right_edges)
+    if top_edges:
+        out_min_y = min(top_edges)
+    if bottom_edges:
+        out_max_y = max(bottom_edges)
+
+    return Point(out_min_x, out_min_y), Point(out_max_x, out_max_y)
+
+
 def estimate_parent_board_size(
     child_bboxes: list[tuple[float, float]],
     interconnect_net_count: int = 0,
@@ -893,6 +1178,7 @@ def _derive_board_outline(
 
 
 __all__ = [
+    "AttachmentConstraint",
     "ChildArtifactPlacement",
     "ChildPlacement",
     "ComposedChild",
@@ -903,6 +1189,11 @@ __all__ = [
     "child_component_refs",
     "composition_debug_dict",
     "composition_summary",
+    "constrained_child_offset",
+    "derive_attachment_constraints",
     "estimate_parent_board_size",
     "packed_extents_outline",
+    "child_layer_envelopes",
+    "can_overlap",
+    "constraint_aware_outline",
 ]

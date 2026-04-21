@@ -25,6 +25,9 @@ import argparse
 import subprocess
 import sys
 import time
+
+import logging
+logger = logging.getLogger(__name__)
 from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -131,6 +134,7 @@ def _compose_and_route_parent(
     route: bool,
 ) -> str:
     """Compose leaves into parent and optionally route via FreeRouting."""
+    # Log constraints
     cmd = [
         sys.executable,
         str(SCRIPTS_DIR / "compose_subcircuits.py"),

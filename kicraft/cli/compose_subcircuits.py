@@ -54,7 +54,13 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
     build_parent_composition,
     estimate_parent_board_size,
     packed_extents_outline,
+    derive_attachment_constraints,
+    constrained_child_offset,
+    child_layer_envelopes,
+    can_overlap,
+    constraint_aware_outline,
 )
+from kicraft.autoplacer.brain.subcircuit_extractor import extract_parent_local_components
 from kicraft.autoplacer.brain.subcircuit_instances import (
     artifact_debug_dict,
     artifact_summary,
@@ -300,6 +306,7 @@ def _compose_artifacts(
     spacing_mm: float,
     rotation_step_deg: float,
     parent_definition: SubCircuitDefinition | None = None,
+    pcb_path: Path | None = None,
 ) -> tuple[ParentCompositionState, list[dict[str, Any]]]:
     """Compose loaded artifacts into a parent composition snapshot."""
     entries: list[CompositionEntry] = []
@@ -307,7 +314,7 @@ def _compose_artifacts(
     child_artifact_placements: list[ChildArtifactPlacement] = []
     packing_metadata: dict[str, Any] = {}
 
-    def _append_entry(index: int, artifact, origin: Point) -> None:
+    def _append_entry(index: int, artifact, origin: Point):
         rotation = (index * rotation_step_deg) % 360.0
         transformed = transform_loaded_artifact(
             artifact,
@@ -342,15 +349,108 @@ def _compose_artifacts(
                 "summary": transformed_summary(transformed),
             }
         )
+        return transformed
+
+    from kicraft.autoplacer.config import load_project_config
+    import logging
+    logger = logging.getLogger(__name__)
+
+    cfg = {}
+    component_zones = {}
+    parent_local = {}
+
+    if pcb_path:
+        try:
+            cfg = load_project_config(str(pcb_path))
+            component_zones = cfg.get("component_zones", {})
+            parent_local = extract_parent_local_components(str(pcb_path), loaded_artifacts)
+        except Exception as e:
+            logger.warning(f"Could not load config/local components: {e}")
+
+    constraints = derive_attachment_constraints(loaded_artifacts, parent_local, component_zones, cfg)
+    logger.info("composition: %d attachment constraints derived", len(constraints))
+
+    child_constraints = [c for c in constraints if c.source == "child_artifact" and c.child_index is not None]
+    local_constraints = [c for c in constraints if c.source == "parent_local"]
+
+    constrained_indices = {c.child_index for c in child_constraints}
+    unconstrained_artifacts = [(i, art) for i, art in enumerate(loaded_artifacts) if i not in constrained_indices]
+
+    placed_envelopes = []
+
+    parent_min_x, parent_min_y = 0.0, 0.0
+    parent_max_x, parent_max_y = 0.0, 0.0
+
+    for c in child_constraints:
+        art_idx = int(c.child_index) if c.child_index is not None else 0
+        art = loaded_artifacts[art_idx]
+        rot = (art_idx * rotation_step_deg) % 360.0
+
+        origin = constrained_child_offset(
+            artifact=art,
+            constraint=c,
+            rotation_deg=rot,
+            parent_outline_min=Point(parent_min_x, parent_min_y),
+            parent_outline_max=Point(parent_max_x, parent_max_y),
+        )
+
+        transformed = _append_entry(art_idx, art, origin)
+        placed_envelopes.append(child_layer_envelopes(transformed))
+
+        w, h = transformed.instance.transformed_bbox
+        if parent_min_x == 0.0 and parent_max_x == 0.0 and parent_min_y == 0.0 and parent_max_y == 0.0:
+            parent_min_x = origin.x
+            parent_min_y = origin.y
+            parent_max_x = origin.x + w
+            parent_max_y = origin.y + h
+        else:
+            parent_min_x = min(parent_min_x, origin.x)
+            parent_min_y = min(parent_min_y, origin.y)
+            parent_max_x = max(parent_max_x, origin.x + w)
+            parent_max_y = max(parent_max_y, origin.y + h)
+
+    def find_non_overlapping_origin(start_x, start_y, transformed_art) -> Point:
+        cursor_x, cursor_y = start_x, start_y
+        w, h = transformed_art.instance.transformed_bbox
+        
+        while True:
+            env = child_layer_envelopes(transformed_art)
+            def shift_env(e):
+                if e is None:
+                    return None
+                return (Point(e[0].x + cursor_x, e[0].y + cursor_y), Point(e[1].x + cursor_x, e[1].y + cursor_y))
+            
+            shifted_env = (shift_env(env[0]), shift_env(env[1]), shift_env(env[2]))
+            
+            conflict = False
+            for pe in placed_envelopes:
+                if not can_overlap(pe, shifted_env):
+                    conflict = True
+                    break
+                    
+            if not conflict:
+                return Point(cursor_x, cursor_y)
+                
+            cursor_x += spacing_mm
+            if cursor_x > parent_max_x + spacing_mm:
+                cursor_x = 0.0
+                cursor_y += spacing_mm
+            if cursor_y > 1000.0:
+                return Point(start_x, start_y)
 
     if mode == "row":
         cursor_x = 0.0
         cursor_y = 0.0
 
-        for index, artifact in enumerate(loaded_artifacts):
-            origin = Point(cursor_x, cursor_y)
-            _append_entry(index, artifact, origin)
-            cursor_x += entries[-1].transformed_bbox[0] + spacing_mm
+        for index, artifact in unconstrained_artifacts:
+            rot = (index * rotation_step_deg) % 360.0
+            t_art = transform_loaded_artifact(artifact, origin=Point(0,0), rotation=rot)
+            
+            origin = find_non_overlapping_origin(cursor_x, cursor_y, t_art)
+            transformed = _append_entry(index, artifact, origin)
+            placed_envelopes.append(child_layer_envelopes(transformed))
+            
+            cursor_x = origin.x + entries[-1].transformed_bbox[0] + spacing_mm
 
         packing_metadata = {
             "strategy": "row",
@@ -362,10 +462,15 @@ def _compose_artifacts(
         cursor_x = 0.0
         cursor_y = 0.0
 
-        for index, artifact in enumerate(loaded_artifacts):
-            origin = Point(cursor_x, cursor_y)
-            _append_entry(index, artifact, origin)
-            cursor_y += entries[-1].transformed_bbox[1] + spacing_mm
+        for index, artifact in unconstrained_artifacts:
+            rot = (index * rotation_step_deg) % 360.0
+            t_art = transform_loaded_artifact(artifact, origin=Point(0,0), rotation=rot)
+            
+            origin = find_non_overlapping_origin(cursor_x, cursor_y, t_art)
+            transformed = _append_entry(index, artifact, origin)
+            placed_envelopes.append(child_layer_envelopes(transformed))
+            
+            cursor_y = origin.y + entries[-1].transformed_bbox[1] + spacing_mm
 
         packing_metadata = {
             "strategy": "column",
@@ -374,23 +479,30 @@ def _compose_artifacts(
         }
 
     elif mode == "grid":
-        count = len(loaded_artifacts)
+        count = len(unconstrained_artifacts)
         cols = max(1, math.ceil(math.sqrt(count)))
 
         max_width = 0.0
         max_height = 0.0
-        for artifact in loaded_artifacts:
+        for _, artifact in unconstrained_artifacts:
             max_width = max(max_width, artifact.layout.width)
             max_height = max(max_height, artifact.layout.height)
 
         cell_w = max_width + spacing_mm
         cell_h = max_height + spacing_mm
 
-        for index, artifact in enumerate(loaded_artifacts):
-            row = index // cols
-            col = index % cols
-            origin = Point(col * cell_w, row * cell_h)
-            _append_entry(index, artifact, origin)
+        for idx, (original_index, artifact) in enumerate(unconstrained_artifacts):
+            row = idx // cols
+            col = idx % cols
+            
+            rot = (original_index * rotation_step_deg) % 360.0
+            t_art = transform_loaded_artifact(artifact, origin=Point(0,0), rotation=rot)
+            
+            proposed = Point(col * cell_w, row * cell_h)
+            origin = find_non_overlapping_origin(proposed.x, proposed.y, t_art)
+            
+            transformed = _append_entry(original_index, artifact, origin)
+            placed_envelopes.append(child_layer_envelopes(transformed))
 
         packing_metadata = {
             "strategy": "grid",
@@ -404,7 +516,7 @@ def _compose_artifacts(
         }
 
     elif mode == "packed":
-        indexed_artifacts = list(enumerate(loaded_artifacts))
+        indexed_artifacts = list(unconstrained_artifacts)
         indexed_artifacts.sort(
             key=lambda item: (
                 -(item[1].layout.width * item[1].layout.height),
@@ -461,10 +573,16 @@ def _compose_artifacts(
                 row_height = 0.0
                 current_row_items = 0
 
-            origin = Point(row_x, row_y)
-            _append_entry(original_index, artifact, origin)
+            rot = (original_index * rotation_step_deg) % 360.0
+            t_art = transform_loaded_artifact(artifact, origin=Point(0,0), rotation=rot)
+            
+            proposed = Point(row_x, row_y)
+            origin = find_non_overlapping_origin(proposed.x, proposed.y, t_art)
+            
+            transformed = _append_entry(original_index, artifact, origin)
+            placed_envelopes.append(child_layer_envelopes(transformed))
 
-            row_x += entries[-1].transformed_bbox[0] + spacing_mm
+            row_x = origin.x + entries[-1].transformed_bbox[0] + spacing_mm
             row_height = max(row_height, entries[-1].transformed_bbox[1])
             current_row_items += 1
 
@@ -490,8 +608,67 @@ def _compose_artifacts(
         raise ValueError(f"Unsupported composition mode: {mode}")
 
     child_bboxes = [e.transformed_bbox for e in entries]
+    child_origins_pt = [e.origin for e in entries]
     child_origins = [(e.origin.x, e.origin.y) for e in entries]
-    exact_outline = packed_extents_outline(child_origins, child_bboxes)
+    
+    if constraints:
+        centers = {}
+        for c in child_constraints:
+            art_idx = int(c.child_index) if c.child_index is not None else 0
+            art = loaded_artifacts[art_idx]
+            comp = art.layout.components.get(c.ref)
+            if comp:
+                center = comp.body_center if comp.body_center else comp.pos
+                rad = math.radians((art_idx * rotation_step_deg) % 360.0)
+                rx = center.x * math.cos(rad) - center.y * math.sin(rad)
+                ry = center.x * math.sin(rad) + center.y * math.cos(rad)
+                origin = next(e.origin for e in entries if e.instance_path == art.instance_path)
+                centers[c.ref] = Point(origin.x + rx, origin.y + ry)
+                
+        exact_outline = constraint_aware_outline(
+            child_origins=child_origins_pt,
+            child_bboxes=child_bboxes,
+            attachment_constraints=constraints,
+            constrained_ref_world_centers=centers,
+            margin_mm=spacing_mm
+        )
+        
+        for c in local_constraints:
+            comp = parent_local.get(c.ref)
+            if not comp:
+                continue
+            
+            target_x = comp.pos.x
+            target_y = comp.pos.y
+            min_pt, max_pt = exact_outline
+            
+            if c.target == "corner":
+                if c.value == "top-left":
+                    target_x = min_pt.x + c.inward_keep_in_mm
+                    target_y = min_pt.y + c.inward_keep_in_mm
+                elif c.value == "top-right":
+                    target_x = max_pt.x - c.inward_keep_in_mm
+                    target_y = min_pt.y + c.inward_keep_in_mm
+                elif c.value == "bottom-left":
+                    target_x = min_pt.x + c.inward_keep_in_mm
+                    target_y = max_pt.y - c.inward_keep_in_mm
+                elif c.value == "bottom-right":
+                    target_x = max_pt.x - c.inward_keep_in_mm
+                    target_y = max_pt.y - c.inward_keep_in_mm
+            elif c.target == "edge":
+                if c.value == "left":
+                    target_x = min_pt.x + c.inward_keep_in_mm
+                elif c.value == "right":
+                    target_x = max_pt.x - c.inward_keep_in_mm
+                elif c.value == "top":
+                    target_y = min_pt.y + c.inward_keep_in_mm
+                elif c.value == "bottom":
+                    target_y = max_pt.y - c.inward_keep_in_mm
+
+            comp.body_center = Point(target_x, target_y)
+            comp.pos = Point(target_x, target_y)
+    else:
+        exact_outline = packed_extents_outline(child_origins, child_bboxes)
     outline_w = exact_outline[1].x - exact_outline[0].x
     outline_h = exact_outline[1].y - exact_outline[0].y
     packing_metadata["board_width_mm"] = round(outline_w, 2)
@@ -526,6 +703,7 @@ def _compose_artifacts(
         parent_subcircuit,
         child_artifact_placements=child_artifact_placements,
         board_outline=exact_outline,
+        local_components=parent_local,
     )
 
     # Build copper manifest before the flat merge loses provenance
@@ -1703,6 +1881,7 @@ def main(argv: list[str] | None = None) -> int:
             spacing_mm=max(0.0, args.spacing_mm),
             rotation_step_deg=args.rotation_step_deg,
             parent_definition=parent_definition,
+            pcb_path=Path(args.pcb) if args.pcb else None,
         )
 
         output_path = None

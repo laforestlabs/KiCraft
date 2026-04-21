@@ -67,6 +67,12 @@ DEFAULT_CONFIG = {
     # edge of the connector body.  0 = flush, positive = inset, negative =
     # overhang.  Only applies to edge-pinned connectors.
     "connector_edge_inset_mm": 1.0,
+    # Per-ref connector overhang -- overrides connector_edge_inset_mm.
+    # Positive values mean outward overhang. e.g. {"J1": 1.5}
+    "parent_overhang_mm": {},
+    # Mounting hole keep-in -- minimum distance (mm) from board edge to
+    # the center of a mounting hole.
+    "mounting_hole_keep_in_mm": 2.5,
     # Connector pad margin -- extra margin (mm) added around each pad of
     # edge-pinned connectors when computing tight geometry bounds.
     # Compensates for pad copper extent beyond the pad center point.

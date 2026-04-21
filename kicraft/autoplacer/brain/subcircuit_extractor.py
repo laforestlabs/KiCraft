@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
+from typing import Any
 
 from .types import (
     BoardState,
@@ -297,6 +298,27 @@ def summarize_extraction(extraction: ExtractedSubcircuitBoard) -> str:
     )
 
 
+def extract_parent_local_components(
+    pcb_path: str,
+    child_artifacts: list[Any],
+) -> dict[str, Component]:
+    from kicraft.autoplacer.hardware.adapter import KiCadAdapter
+
+    adapter = KiCadAdapter(pcb_path, config={})
+    full_state = adapter.load()
+    
+    child_refs = set().union(
+        *(set(art.layout.components.keys()) for art in child_artifacts)
+    )
+    
+    local_components = {}
+    for ref, comp in full_state.components.items():
+        if ref not in child_refs:
+            local_components[ref] = copy.deepcopy(comp)
+            
+    return local_components
+
+
 def extraction_debug_dict(extraction: ExtractedSubcircuitBoard) -> dict:
     """Return a JSON-serializable debug view of an extraction."""
     return {
@@ -555,6 +577,7 @@ __all__ = [
     "LocalEnvelope",
     "NetPartition",
     "extract_leaf_board_state",
+    "extract_parent_local_components",
     "extraction_debug_dict",
     "summarize_extraction",
 ]
