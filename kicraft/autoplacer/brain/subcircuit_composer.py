@@ -170,9 +170,9 @@ class PlacementModel:
     rotation: float
     transformed: TransformedSubcircuit
     layer_envelopes: tuple[
-        tuple[Point, Point] | None,
-        tuple[Point, Point] | None,
-        tuple[Point, Point] | None,
+        list[tuple[Point, Point]],
+        list[tuple[Point, Point]],
+        list[tuple[Point, Point]],
     ]
     constraint_entries: list[PlacementConstraintEntry] = field(default_factory=list)
 
@@ -1215,52 +1215,42 @@ def _looks_like_power_net(net_name: str) -> bool:
 
 def child_layer_envelopes(
     transformed: TransformedSubcircuit,
-) -> tuple[tuple[Point, Point] | None, tuple[Point, Point] | None, tuple[Point, Point] | None]:
+) -> tuple[list[tuple[Point, Point]], list[tuple[Point, Point]], list[tuple[Point, Point]]]:
     """Compute layer-aware geometry envelopes for one transformed child artifact.
 
     Returns:
-        (front_surface_bbox, back_surface_bbox, tht_keepout_bbox)
-        Each is either (min_pt, max_pt) or None if no geometry exists for that envelope.
+        (front_surface_rects, back_surface_rects, tht_keepout_rects)
     """
-    front_pts = []
-    back_pts = []
-    tht_pts = []
+    front_rects: list[tuple[Point, Point]] = []
+    back_rects: list[tuple[Point, Point]] = []
+    tht_rects: list[tuple[Point, Point]] = []
 
     for comp in transformed.transformed_components.values():
         c_min, c_max = comp.bbox()
         if comp.is_through_hole:
             if comp.pads:
-                pad_min_x = min(pad.pos.x for pad in comp.pads)
-                pad_min_y = min(pad.pos.y for pad in comp.pads)
-                pad_max_x = max(pad.pos.x for pad in comp.pads)
-                pad_max_y = max(pad.pos.y for pad in comp.pads)
-                tht_pts.extend([
-                    Point(pad_min_x, pad_min_y),
-                    Point(pad_max_x, pad_max_y),
-                ])
+                for pad in comp.pads:
+                    pad_half = 0.6
+                    tht_rects.append(
+                        (
+                            Point(pad.pos.x - pad_half, pad.pos.y - pad_half),
+                            Point(pad.pos.x + pad_half, pad.pos.y + pad_half),
+                        )
+                    )
             else:
-                tht_pts.extend([c_min, c_max])
+                tht_rects.append((c_min, c_max))
             # THT also contributes to its placement layer's surface envelope
             if comp.layer == 0:  # Layer.FRONT
-                front_pts.extend([c_min, c_max])
+                front_rects.append((c_min, c_max))
             else:
-                back_pts.extend([c_min, c_max])
+                back_rects.append((c_min, c_max))
         else:
             if comp.layer == 0:  # Layer.FRONT
-                front_pts.extend([c_min, c_max])
+                front_rects.append((c_min, c_max))
             else:
-                back_pts.extend([c_min, c_max])
+                back_rects.append((c_min, c_max))
 
-    def make_bbox(pts: list[Point]) -> tuple[Point, Point] | None:
-        if not pts:
-            return None
-        min_x = min(p.x for p in pts)
-        min_y = min(p.y for p in pts)
-        max_x = max(p.x for p in pts)
-        max_y = max(p.y for p in pts)
-        return (Point(min_x, min_y), Point(max_x, max_y))
-
-    return make_bbox(front_pts), make_bbox(back_pts), make_bbox(tht_pts)
+    return front_rects, back_rects, tht_rects
 
 
 def _bbox_disjoint(a: tuple[Point, Point] | None, b: tuple[Point, Point] | None) -> bool:
@@ -1283,8 +1273,8 @@ def _bbox_disjoint(a: tuple[Point, Point] | None, b: tuple[Point, Point] | None)
 
 
 def can_overlap(
-    a_envelopes: tuple[tuple[Point, Point] | None, tuple[Point, Point] | None, tuple[Point, Point] | None],
-    b_envelopes: tuple[tuple[Point, Point] | None, tuple[Point, Point] | None, tuple[Point, Point] | None],
+    a_envelopes: tuple[list[tuple[Point, Point]], list[tuple[Point, Point]], list[tuple[Point, Point]]],
+    b_envelopes: tuple[list[tuple[Point, Point]], list[tuple[Point, Point]], list[tuple[Point, Point]]],
 ) -> bool:
     """Determine if two children can safely XY-overlap without geometric conflict.
 
@@ -1298,23 +1288,31 @@ def can_overlap(
     a_front, a_back, a_tht = a_envelopes
     b_front, b_back, b_tht = b_envelopes
 
-    if not _bbox_disjoint(a_front, b_front):
-        return False
-    if not _bbox_disjoint(a_back, b_back):
-        return False
-
-    if not _bbox_disjoint(a_tht, b_tht):
-        return False
-
-    if not _bbox_disjoint(a_tht, b_front):
-        return False
-    if not _bbox_disjoint(a_tht, b_back):
-        return False
-
-    if not _bbox_disjoint(b_tht, a_front):
-        return False
-    if not _bbox_disjoint(b_tht, a_back):
-        return False
+    for rect_a in a_front:
+        for rect_b in b_front:
+            if not _bbox_disjoint(rect_a, rect_b):
+                return False
+    for rect_a in a_back:
+        for rect_b in b_back:
+            if not _bbox_disjoint(rect_a, rect_b):
+                return False
+    for rect_a in a_tht:
+        for rect_b in b_tht:
+            if not _bbox_disjoint(rect_a, rect_b):
+                return False
+        for rect_b in b_front:
+            if not _bbox_disjoint(rect_a, rect_b):
+                return False
+        for rect_b in b_back:
+            if not _bbox_disjoint(rect_a, rect_b):
+                return False
+    for rect_a in b_tht:
+        for rect_b in a_front:
+            if not _bbox_disjoint(rect_a, rect_b):
+                return False
+        for rect_b in a_back:
+            if not _bbox_disjoint(rect_a, rect_b):
+                return False
 
     return True
 
@@ -1438,9 +1436,9 @@ def estimate_parent_board_size(
 def estimate_layer_aware_parent_board_size(
     child_envelopes: list[
         tuple[
-            tuple[Point, Point] | None,
-            tuple[Point, Point] | None,
-            tuple[Point, Point] | None,
+            list[tuple[Point, Point]],
+            list[tuple[Point, Point]],
+            list[tuple[Point, Point]],
         ]
     ],
     interconnect_net_count: int = 0,
@@ -1455,36 +1453,26 @@ def estimate_layer_aware_parent_board_size(
     """
     import math
 
-    def bbox_area(bbox: tuple[Point, Point] | None) -> float:
-        if bbox is None:
+    def union_rect_area(rects: list[tuple[Point, Point]]) -> float:
+        if not rects:
             return 0.0
-        return max(0.0, bbox[1].x - bbox[0].x) * max(0.0, bbox[1].y - bbox[0].y)
-
-    def union_bbox(
-        a: tuple[Point, Point] | None,
-        b: tuple[Point, Point] | None,
-    ) -> tuple[Point, Point] | None:
-        if a is None:
-            return b
-        if b is None:
-            return a
-        return (
-            Point(min(a[0].x, b[0].x), min(a[0].y, b[0].y)),
-            Point(max(a[1].x, b[1].x), max(a[1].y, b[1].y)),
-        )
+        min_x = min(rect[0].x for rect in rects)
+        min_y = min(rect[0].y for rect in rects)
+        max_x = max(rect[1].x for rect in rects)
+        max_y = max(rect[1].y for rect in rects)
+        return max(0.0, max_x - min_x) * max(0.0, max_y - min_y)
 
     def envelope_span(
         envelope: tuple[
-            tuple[Point, Point] | None,
-            tuple[Point, Point] | None,
-            tuple[Point, Point] | None,
+            list[tuple[Point, Point]],
+            list[tuple[Point, Point]],
+            list[tuple[Point, Point]],
         ]
     ) -> tuple[float, float]:
         points: list[Point] = []
-        for bbox in envelope:
-            if bbox is None:
-                continue
-            points.extend([bbox[0], bbox[1]])
+        for rects in envelope:
+            for rect in rects:
+                points.extend([rect[0], rect[1]])
         if not points:
             return (0.0, 0.0)
         min_x = min(point.x for point in points)
@@ -1502,8 +1490,8 @@ def estimate_layer_aware_parent_board_size(
     max_child_height = 0.0
 
     for front_surface, back_surface, tht_keepout in child_envelopes:
-        front_sum += bbox_area(union_bbox(front_surface, tht_keepout))
-        back_sum += bbox_area(union_bbox(back_surface, tht_keepout))
+        front_sum += union_rect_area(front_surface + tht_keepout)
+        back_sum += union_rect_area(back_surface + tht_keepout)
         child_width, child_height = envelope_span(
             (front_surface, back_surface, tht_keepout)
         )

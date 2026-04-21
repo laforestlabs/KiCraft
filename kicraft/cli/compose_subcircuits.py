@@ -55,7 +55,6 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
     PlacementModel,
     build_parent_composition,
     estimate_layer_aware_parent_board_size,
-    estimate_parent_board_size,
     packed_extents_outline,
     derive_attachment_constraints,
     expand_rotation_candidates,
@@ -316,11 +315,9 @@ def _shift_bbox(bbox: tuple[Point, Point], origin: Point) -> tuple[Point, Point]
 
 
 def _shift_envelope(
-    envelope: tuple[Point, Point] | None,
+    envelope: tuple[Point, Point],
     origin: Point,
-) -> tuple[Point, Point] | None:
-    if envelope is None:
-        return None
+) -> tuple[Point, Point]:
     return (
         Point(envelope[0].x + origin.x, envelope[0].y + origin.y),
         Point(envelope[1].x + origin.x, envelope[1].y + origin.y),
@@ -329,20 +326,20 @@ def _shift_envelope(
 
 def _shift_layer_envelopes(
     envelopes: tuple[
-        tuple[Point, Point] | None,
-        tuple[Point, Point] | None,
-        tuple[Point, Point] | None,
+        list[tuple[Point, Point]],
+        list[tuple[Point, Point]],
+        list[tuple[Point, Point]],
     ],
     origin: Point,
 ) -> tuple[
-    tuple[Point, Point] | None,
-    tuple[Point, Point] | None,
-    tuple[Point, Point] | None,
+    list[tuple[Point, Point]],
+    list[tuple[Point, Point]],
+    list[tuple[Point, Point]],
 ]:
     return (
-        _shift_envelope(envelopes[0], origin),
-        _shift_envelope(envelopes[1], origin),
-        _shift_envelope(envelopes[2], origin),
+        [_shift_envelope(envelope, origin) for envelope in envelopes[0]],
+        [_shift_envelope(envelope, origin) for envelope in envelopes[1]],
+        [_shift_envelope(envelope, origin) for envelope in envelopes[2]],
     )
 
 
@@ -374,11 +371,24 @@ def _opposite_layer_overlap_area(candidate_envelopes, existing_envelopes) -> flo
     candidate_front, candidate_back, _ = candidate_envelopes
     existing_front, existing_back, _ = existing_envelopes
     overlap = 0.0
-    if candidate_front is not None and existing_back is not None:
-        overlap += _bbox_overlap_area(candidate_front, existing_back)
-    if candidate_back is not None and existing_front is not None:
-        overlap += _bbox_overlap_area(candidate_back, existing_front)
+    for rect_a in candidate_front:
+        for rect_b in existing_back:
+            overlap += _bbox_overlap_area(rect_a, rect_b)
+    for rect_a in candidate_back:
+        for rect_b in existing_front:
+            overlap += _bbox_overlap_area(rect_a, rect_b)
     return overlap
+
+
+def _rect_lists_disjoint(
+    rects_a: list[tuple[Point, Point]],
+    rects_b: list[tuple[Point, Point]],
+) -> bool:
+    for rect_a in rects_a:
+        for rect_b in rects_b:
+            if not _bbox_disjoint(rect_a, rect_b):
+                return False
+    return True
 
 
 def _bbox_inside_frame(
@@ -553,11 +563,11 @@ def _ordered_unconstrained_indices(mode: str, unconstrained_artifacts, spacing_m
             rotation=0.0,
         )
         front_surface, back_surface, tht_keepout = child_layer_envelopes(transformed)
-        front_blocker_area = _union_area(front_surface, tht_keepout)
-        back_blocker_area = _union_area(back_surface, tht_keepout)
+        front_blocker_area = sum(_union_area(rect, None) for rect in front_surface) + sum(_union_area(rect, None) for rect in tht_keepout)
+        back_blocker_area = sum(_union_area(rect, None) for rect in back_surface) + sum(_union_area(rect, None) for rect in tht_keepout)
         has_tht_or_dual = int(
-            tht_keepout is not None
-            or (front_surface is not None and back_surface is not None)
+            bool(tht_keepout)
+            or (bool(front_surface) and bool(back_surface))
         )
         total_bbox_area = max(0.0, artifact.layout.width) * max(0.0, artifact.layout.height)
         return (
@@ -1132,9 +1142,18 @@ def _compose_artifacts(
                 a_front, a_back, a_tht = env_a
                 b_front, b_back, b_tht = env_b
 
-                if not _bbox_disjoint(a_tht, b_front) or not _bbox_disjoint(a_tht, b_back) or not _bbox_disjoint(b_tht, a_front) or not _bbox_disjoint(b_tht, a_back) or not _bbox_disjoint(a_tht, b_tht):
+                if (
+                    not _rect_lists_disjoint(a_tht, b_front)
+                    or not _rect_lists_disjoint(a_tht, b_back)
+                    or not _rect_lists_disjoint(b_tht, a_front)
+                    or not _rect_lists_disjoint(b_tht, a_back)
+                    or not _rect_lists_disjoint(a_tht, b_tht)
+                ):
                     tht_keepout_violations.append((a_label, b_label))
-                elif not _bbox_disjoint(a_front, b_front) or not _bbox_disjoint(a_back, b_back):
+                elif (
+                    not _rect_lists_disjoint(a_front, b_front)
+                    or not _rect_lists_disjoint(a_back, b_back)
+                ):
                     same_side_overlap_conflicts.append((a_label, b_label))
 
     validation_data = {
