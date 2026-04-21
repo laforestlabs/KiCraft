@@ -370,6 +370,17 @@ def _bbox_overlap_area(a: tuple[Point, Point], b: tuple[Point, Point]) -> float:
     return overlap_w * overlap_h
 
 
+def _opposite_layer_overlap_area(candidate_envelopes, existing_envelopes) -> float:
+    candidate_front, candidate_back, _ = candidate_envelopes
+    existing_front, existing_back, _ = existing_envelopes
+    overlap = 0.0
+    if candidate_front is not None and existing_back is not None:
+        overlap += _bbox_overlap_area(candidate_front, existing_back)
+    if candidate_back is not None and existing_front is not None:
+        overlap += _bbox_overlap_area(candidate_back, existing_front)
+    return overlap
+
+
 def _bbox_inside_frame(
     bbox: tuple[Point, Point],
     frame_min: Point,
@@ -466,7 +477,10 @@ def _find_non_overlapping_origin(
                     continue
                 intersects_existing = True
                 if can_overlap(existing_envelopes, candidate_envelopes):
-                    overlap_area += _bbox_overlap_area(existing_bbox, candidate_bbox)
+                    overlap_area += _opposite_layer_overlap_area(
+                        candidate_envelopes,
+                        existing_envelopes,
+                    )
                     continue
                 collision = True
                 break
