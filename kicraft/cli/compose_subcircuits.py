@@ -54,6 +54,7 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
     ParentComposition,
     PlacementModel,
     build_parent_composition,
+    estimate_layer_aware_parent_board_size,
     estimate_parent_board_size,
     packed_extents_outline,
     derive_attachment_constraints,
@@ -638,8 +639,14 @@ def _compose_artifacts(
         _bbox_size(_make_unconstrained_model(index, artifact, rotation_step_deg).transformed.bounding_box)
         for index, artifact in unconstrained_artifacts
     ]
-    seed_width, seed_height = estimate_parent_board_size(
-        child_bbox_sizes,
+    seed_child_envelopes = [
+        child_layer_envelopes(
+            transform_loaded_artifact(artifact, origin=Point(0.0, 0.0), rotation=0.0)
+        )
+        for artifact in loaded_artifacts
+    ]
+    seed_width, seed_height = estimate_layer_aware_parent_board_size(
+        seed_child_envelopes,
         interconnect_net_count=0,
         margin_mm=spacing_mm,
     )
@@ -758,8 +765,17 @@ def _compose_artifacts(
                 (max(0.0, artifact.layout.width) for _, artifact in ordered_unconstrained),
                 default=0.0,
             )
-            est_width, _ = estimate_parent_board_size(
-                [_bbox_size(_make_unconstrained_model(index, artifact, rotation_step_deg).transformed.bounding_box) for index, artifact in ordered_unconstrained],
+            est_width, _ = estimate_layer_aware_parent_board_size(
+                [
+                    child_layer_envelopes(
+                        transform_loaded_artifact(
+                            artifact,
+                            origin=Point(0.0, 0.0),
+                            rotation=0.0,
+                        )
+                    )
+                    for index, artifact in ordered_unconstrained
+                ],
                 margin_mm=spacing_mm,
             )
             target_row_width = max(max_child_width + spacing_mm, est_width)
