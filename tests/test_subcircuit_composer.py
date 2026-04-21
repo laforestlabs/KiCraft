@@ -426,8 +426,8 @@ class TestEstimateLayerAwareParentBoardSize:
         layer_agnostic = estimate_parent_board_size([(20.0, 10.0), (20.0, 10.0)])
         layer_aware = estimate_layer_aware_parent_board_size(
             [
-                ((Point(0.0, 0.0), Point(20.0, 10.0)), None, None),
-                (None, (Point(0.0, 0.0), Point(20.0, 10.0)), None),
+                ([(Point(0.0, 0.0), Point(20.0, 10.0))], [], []),
+                ([], [(Point(0.0, 0.0), Point(20.0, 10.0))], []),
             ]
         )
         assert layer_aware[0] * layer_aware[1] < layer_agnostic[0] * layer_agnostic[1] * 0.7
@@ -437,9 +437,9 @@ class TestEstimateLayerAwareParentBoardSize:
         layer_aware = estimate_layer_aware_parent_board_size(
             [
                 (
-                    (Point(0.0, 0.0), Point(20.0, 10.0)),
-                    None,
-                    (Point(0.0, 0.0), Point(20.0, 10.0)),
+                    [(Point(0.0, 0.0), Point(20.0, 10.0))],
+                    [],
+                    [(Point(0.0, 0.0), Point(20.0, 10.0))],
                 )
             ]
         )
@@ -477,9 +477,12 @@ class TestChildLayerEnvelopes:
 
         front_surface, back_surface, tht_keepout = child_layer_envelopes(transformed)
 
-        assert front_surface is None
-        assert back_surface == (Point(5.0, 40.0), Point(75.0, 60.0))
-        assert tht_keepout == (Point(10.0, 50.0), Point(70.0, 50.0))
+        assert front_surface == []
+        assert back_surface == [(Point(5.0, 40.0), Point(75.0, 60.0))]
+        assert tht_keepout == [
+            (Point(9.4, 49.4), Point(10.6, 50.6)),
+            (Point(69.4, 49.4), Point(70.6, 50.6)),
+        ]
 
 
 class TestPackedExtentsOutline:
@@ -614,7 +617,7 @@ class TestConstraintPlacementGeometry:
         return PlacementModel(
             rotation=0.0,
             transformed=transformed,
-            layer_envelopes=(None, None, None),
+            layer_envelopes=([], [], []),
             constraint_entries=entries,
         )
 
@@ -738,7 +741,7 @@ class TestPackedPlacementOverlapScan:
                 layout=_make_layout("BACK", {}),
                 bounding_box=(Point(0.0, 0.0), Point(20.0, 20.0)),
             ),
-            layer_envelopes=(None, (Point(0.0, 0.0), Point(20.0, 20.0)), None),
+            layer_envelopes=([], [(Point(0.0, 0.0), Point(20.0, 20.0))], []),
             constraint_entries=[],
         )
         front_model = PlacementModel(
@@ -753,7 +756,7 @@ class TestPackedPlacementOverlapScan:
                 layout=_make_layout("FRONT", {}),
                 bounding_box=(Point(0.0, 0.0), Point(12.0, 12.0)),
             ),
-            layer_envelopes=((Point(0.0, 0.0), Point(12.0, 12.0)), None, None),
+            layer_envelopes=([(Point(0.0, 0.0), Point(12.0, 12.0))], [], []),
             constraint_entries=[],
         )
 
@@ -786,7 +789,7 @@ class TestPackedPlacementOverlapScan:
                 layout=_make_layout("BACK2", {}),
                 bounding_box=(Point(0.0, 0.0), Point(20.0, 20.0)),
             ),
-            layer_envelopes=(None, (Point(0.0, 0.0), Point(20.0, 20.0)), None),
+            layer_envelopes=([], [(Point(0.0, 0.0), Point(20.0, 20.0))], []),
             constraint_entries=[],
         )
         front_model = PlacementModel(
@@ -801,7 +804,7 @@ class TestPackedPlacementOverlapScan:
                 layout=_make_layout("FRONT2", {}),
                 bounding_box=(Point(0.0, 0.0), Point(12.0, 12.0)),
             ),
-            layer_envelopes=((Point(0.0, 0.0), Point(12.0, 12.0)), None, None),
+            layer_envelopes=([(Point(0.0, 0.0), Point(12.0, 12.0))], [], []),
             constraint_entries=[],
         )
 
@@ -822,7 +825,7 @@ class TestPackedPlacementOverlapScan:
     def test_same_side_front_leaves_do_not_overlap(self):
         placed_front_bbox = (Point(0.0, 0.0), Point(20.0, 20.0))
         placed_front_envelopes = [
-            ((Point(0.0, 0.0), Point(20.0, 20.0)), None, None)
+            ([(Point(0.0, 0.0), Point(20.0, 20.0))], [], [])
         ]
         front_model = PlacementModel(
             rotation=0.0,
@@ -836,7 +839,7 @@ class TestPackedPlacementOverlapScan:
                 layout=_make_layout("FRONT3", {}),
                 bounding_box=(Point(0.0, 0.0), Point(12.0, 12.0)),
             ),
-            layer_envelopes=((Point(0.0, 0.0), Point(12.0, 12.0)), None, None),
+            layer_envelopes=([(Point(0.0, 0.0), Point(12.0, 12.0))], [], []),
             constraint_entries=[],
         )
 

@@ -37,7 +37,7 @@ def _make_model(
     return PlacementModel(
         rotation=0.0,
         transformed=transformed,
-        layer_envelopes=(None, None, None),
+        layer_envelopes=([], [], []),
         constraint_entries=entries,
     )
 
