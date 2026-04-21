@@ -41,7 +41,6 @@ from kicraft.autoplacer.brain.types import (
     Via,
 )
 from kicraft.cli.compose_subcircuits import (
-    _choose_packed_unconstrained_placement,
     _find_non_overlapping_origin,
     _place_parent_local_components,
 )

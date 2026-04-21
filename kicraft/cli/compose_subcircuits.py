@@ -361,79 +361,6 @@ def _bbox_disjoint(a: tuple[Point, Point], b: tuple[Point, Point]) -> bool:
     return a[1].x <= b[0].x or b[1].x <= a[0].x or a[1].y <= b[0].y or b[1].y <= a[0].y
 
 
-def _bbox_overlap_area(a: tuple[Point, Point], b: tuple[Point, Point]) -> float:
-    overlap_w = max(0.0, min(a[1].x, b[1].x) - max(a[0].x, b[0].x))
-    overlap_h = max(0.0, min(a[1].y, b[1].y) - max(a[0].y, b[0].y))
-    return overlap_w * overlap_h
-
-
-def _opposite_layer_bbox_overlap_area(
-    candidate_bbox: tuple[Point, Point],
-    candidate_envelopes,
-    existing_bbox: tuple[Point, Point],
-    existing_envelopes,
-) -> float:
-    candidate_front, candidate_back, _ = candidate_envelopes
-    existing_front, existing_back, _ = existing_envelopes
-    has_opposite_side_pair = (bool(candidate_front) and bool(existing_back)) or (
-        bool(candidate_back) and bool(existing_front)
-    )
-    if not has_opposite_side_pair:
-        return 0.0
-    return _bbox_overlap_area(candidate_bbox, existing_bbox)
-
-
-def _candidate_overlap_metrics(
-    candidate_bbox: tuple[Point, Point],
-    candidate_envelopes,
-    placed_bboxes: list[tuple[Point, Point]],
-    placed_envelopes,
-) -> tuple[bool, bool, float, float]:
-    collision = False
-    intersects_existing = False
-    bbox_overlap_area = 0.0
-    overlap_area = 0.0
-    for existing_bbox, existing_envelopes in zip(placed_bboxes, placed_envelopes):
-        if _bbox_disjoint(existing_bbox, candidate_bbox):
-            continue
-        intersects_existing = True
-        if can_overlap(existing_envelopes, candidate_envelopes):
-            bbox_overlap_area += _opposite_layer_bbox_overlap_area(
-                candidate_bbox,
-                candidate_envelopes,
-                existing_bbox,
-                existing_envelopes,
-            )
-            overlap_area += _opposite_layer_overlap_area(
-                candidate_envelopes,
-                existing_envelopes,
-            )
-            continue
-        collision = True
-        break
-    return collision, intersects_existing, bbox_overlap_area, overlap_area
-
-
-def _packed_placement_score(
-    candidate_bbox: tuple[Point, Point],
-    candidate_envelopes,
-    placed_bboxes: list[tuple[Point, Point]],
-    placed_envelopes,
-) -> tuple[float, float, float, float]:
-    _, _, bbox_overlap_area, overlap_area = _candidate_overlap_metrics(
-        candidate_bbox,
-        candidate_envelopes,
-        placed_bboxes,
-        placed_envelopes,
-    )
-    return (
-        bbox_overlap_area,
-        overlap_area,
-        -candidate_bbox[1].y,
-        -candidate_bbox[1].x,
-    )
-
-
 def _rect_lists_disjoint(
     rects_a: list[tuple[Point, Point]],
     rects_b: list[tuple[Point, Point]],
@@ -477,73 +404,6 @@ def _make_unconstrained_model(index: int, artifact, rotation_step_deg: float) ->
         layer_envelopes=child_layer_envelopes(transformed),
         constraint_entries=[],
     )
-
-
-def _make_unconstrained_models(index: int, artifact, rotation_step_deg: float) -> list[PlacementModel]:
-    base_rotation = (index * rotation_step_deg) % 360.0
-    rotations = [base_rotation]
-    for delta in (90.0, 180.0, 270.0):
-        candidate = (base_rotation + delta) % 360.0
-        if candidate not in rotations:
-            rotations.append(candidate)
-
-    models: list[PlacementModel] = []
-    for rotation in rotations:
-        transformed = transform_loaded_artifact(
-            artifact,
-            origin=Point(0.0, 0.0),
-            rotation=rotation,
-        )
-        models.append(
-            PlacementModel(
-                rotation=rotation,
-                transformed=transformed,
-                layer_envelopes=child_layer_envelopes(transformed),
-                constraint_entries=[],
-            )
-        )
-    return models
-
-
-def _choose_packed_unconstrained_placement(
-    proposed: Point,
-    frame_min: Point,
-    frame_max: Point,
-    models: list[PlacementModel],
-    placed_bboxes: list[tuple[Point, Point]],
-    placed_envelopes,
-    spacing_mm: float,
-) -> tuple[PlacementModel, Point, tuple[Point, Point]]:
-    best_choice: tuple[
-        tuple[float, float, float, float],
-        PlacementModel,
-        Point,
-        tuple[Point, Point],
-    ] | None = None
-    for model in models:
-        origin = _find_non_overlapping_origin(
-            proposed,
-            frame_min,
-            frame_max,
-            model,
-            placed_bboxes,
-            placed_envelopes,
-            spacing_mm,
-        )
-        candidate_bbox = _shift_bbox(model.transformed.bounding_box, origin)
-        candidate_envelopes = _shift_layer_envelopes(model.layer_envelopes, origin)
-        score = _packed_placement_score(
-            candidate_bbox,
-            candidate_envelopes,
-            placed_bboxes,
-            placed_envelopes,
-        )
-        if best_choice is None or score > best_choice[0]:
-            best_choice = (score, model, origin, candidate_bbox)
-
-    if best_choice is None:
-        raise ValueError("Unable to choose packed unconstrained placement")
-    return best_choice[1], best_choice[2], best_choice[3]
 
 
 def _candidate_positions(
@@ -974,11 +834,8 @@ def _compose_artifacts(
             raise ValueError(f"Unsupported composition mode: {mode}")
 
         for ordinal, (index, artifact) in enumerate(ordered_unconstrained):
-            models = (
-                _make_unconstrained_models(index, artifact, rotation_step_deg)
-                if mode == "packed"
-                else [_make_unconstrained_model(index, artifact, rotation_step_deg)]
-            )
+            model = _make_unconstrained_model(index, artifact, rotation_step_deg)
+            final_models[index] = model
             if mode == "column":
                 proposed = Point(seed_frame_min.x + spacing_mm, row_y)
             elif mode == "grid":
@@ -994,11 +851,10 @@ def _compose_artifacts(
                 packing_metadata["cell_width_mm"] = cell_w
                 packing_metadata["cell_height_mm"] = cell_h
             else:
-                min_model_width = min(model.transformed.width_mm for model in models)
                 should_wrap = (
                     mode == "packed"
                     and current_row_items > 0
-                    and (row_x + min_model_width) > (seed_frame_min.x + target_row_width)
+                    and (row_x + model.transformed.width_mm) > (seed_frame_min.x + target_row_width)
                 )
                 if should_wrap:
                     row_widths.append(max(0.0, row_x - spacing_mm - seed_frame_min.x))
@@ -1011,30 +867,16 @@ def _compose_artifacts(
                     current_row_items = 0
                 proposed = Point(row_x, row_y)
 
-            if mode == "packed":
-                model, origin, placed_bbox = _choose_packed_unconstrained_placement(
-                    proposed,
-                    seed_frame_min,
-                    seed_frame_max,
-                    models,
-                    list(placed_child_bboxes.values()),
-                    placed_envelopes,
-                    spacing_mm,
-                )
-            else:
-                model = models[0]
-                origin = _find_non_overlapping_origin(
-                    proposed,
-                    seed_frame_min,
-                    seed_frame_max,
-                    model,
-                    list(placed_child_bboxes.values()),
-                    placed_envelopes,
-                    spacing_mm,
-                )
-                placed_bbox = _shift_bbox(model.transformed.bounding_box, origin)
-
-            final_models[index] = model
+            origin = _find_non_overlapping_origin(
+                proposed,
+                seed_frame_min,
+                seed_frame_max,
+                model,
+                list(placed_child_bboxes.values()),
+                placed_envelopes,
+                spacing_mm,
+            )
+            placed_bbox = _shift_bbox(model.transformed.bounding_box, origin)
             transformed = _append_entry(index, artifact, origin, model)
             placed_child_bboxes[index] = placed_bbox
             placed_envelopes.append(_shift_layer_envelopes(model.layer_envelopes, origin))
