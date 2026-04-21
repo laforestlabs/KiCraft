@@ -588,6 +588,7 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
         "shorts": 0,
         "unconnected": 0,
         "clearance": 0,
+        "copper_edge_clearance": 0,
         "courtyard": 0,
         "solder_mask_bridge": 0,
         "total": 0,
@@ -656,13 +657,14 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
                 counts["shorts"] += 1
             elif vtype == "unconnected_items":
                 counts["unconnected"] += 1
-            elif vtype in ("clearance", "hole_clearance", "copper_edge_clearance"):
+            elif vtype in ("clearance", "hole_clearance"):
                 counts["clearance"] += 1
+            elif vtype == "copper_edge_clearance":
+                counts["copper_edge_clearance"] += 1
             elif vtype == "courtyards_overlap":
                 counts["courtyard"] += 1
             elif vtype == "solder_mask_bridge":
                 counts["solder_mask_bridge"] += 1
-                counts["clearance"] += 1
     except subprocess.TimeoutExpired:
         counts["timed_out"] = True
     except FileNotFoundError:
@@ -776,6 +778,8 @@ def validate_routed_board(
             validation["footprint_internal_clearance_count"] = clearance_count
         else:
             validation["obviously_illegal_routed_geometry"] = True
+    if drc.get("copper_edge_clearance", 0) > 0:
+        validation["obviously_illegal_routed_geometry"] = True
     if drc.get("timed_out"):
         validation["rejection_reasons"].append("drc_timeout")
     if drc.get("missing_cli"):
