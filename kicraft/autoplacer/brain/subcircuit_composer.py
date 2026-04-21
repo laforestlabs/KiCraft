@@ -1426,6 +1426,8 @@ def _extract_blockers_from_pcb(
         return None
 
     board = pcbnew.LoadBoard(str(mini_pcb_path))
+    if board is None:
+        return None
     front_pads: list[tuple[Point, Point]] = []
     back_pads: list[tuple[Point, Point]] = []
     tht_drills: list[tuple[Point, Point]] = []
