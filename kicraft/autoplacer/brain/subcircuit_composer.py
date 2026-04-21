@@ -31,8 +31,11 @@ Those capabilities belong to later milestones.
 from __future__ import annotations
 
 import copy
+import importlib
 import logging
+import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from .subcircuit_instances import (
@@ -148,6 +151,16 @@ class ParentComposition:
 
 
 @dataclass(frozen=True)
+class LeafBlockerSet:
+    """Sparse per-feature keepouts for one leaf in local coordinates."""
+
+    front_pads: tuple[tuple[Point, Point], ...]
+    back_pads: tuple[tuple[Point, Point], ...]
+    tht_drills: tuple[tuple[Point, Point], ...]
+    leaf_outline: tuple[Point, Point]
+
+
+@dataclass(frozen=True)
 class AttachmentConstraint:
     ref: str
     target: Literal["edge", "corner", "zone"]
@@ -174,6 +187,7 @@ class PlacementModel:
         list[tuple[Point, Point]],
         list[tuple[Point, Point]],
     ]
+    blocker_set: LeafBlockerSet | None = None
     constraint_entries: list[PlacementConstraintEntry] = field(default_factory=list)
 
 
@@ -320,6 +334,7 @@ def _build_models_for_artifact(
         models[rotation] = PlacementModel(
             rotation=rotation,
             transformed=transformed,
+            blocker_set=extract_leaf_blocker_set(artifact),
             layer_envelopes=child_layer_envelopes(transformed),
             constraint_entries=[
                 PlacementConstraintEntry(
@@ -1213,6 +1228,373 @@ def _looks_like_power_net(net_name: str) -> bool:
     )
 
 
+def _rect_from_center(center: Point, half_w: float, half_h: float) -> tuple[Point, Point]:
+    return (
+        Point(center.x - half_w, center.y - half_h),
+        Point(center.x + half_w, center.y + half_h),
+    )
+
+
+def _rect_area(rect: tuple[Point, Point]) -> float:
+    return max(0.0, rect[1].x - rect[0].x) * max(0.0, rect[1].y - rect[0].y)
+
+
+def _transform_local_point(point: Point, origin: Point, rotation_deg: float) -> Point:
+    rotation = rotation_deg % 360.0
+    if abs(rotation - 0.0) < 1e-9:
+        return Point(point.x + origin.x, point.y + origin.y)
+    if abs(rotation - 90.0) < 1e-9:
+        return Point(-point.y + origin.x, point.x + origin.y)
+    if abs(rotation - 180.0) < 1e-9:
+        return Point(-point.x + origin.x, -point.y + origin.y)
+    if abs(rotation - 270.0) < 1e-9:
+        return Point(point.y + origin.x, -point.x + origin.y)
+    theta = math.radians(rotation)
+    cos_theta = math.cos(theta)
+    sin_theta = math.sin(theta)
+    return Point(
+        point.x * cos_theta - point.y * sin_theta + origin.x,
+        point.x * sin_theta + point.y * cos_theta + origin.y,
+    )
+
+
+def _points_bbox(points: list[Point]) -> tuple[Point, Point]:
+    min_x = min(point.x for point in points)
+    min_y = min(point.y for point in points)
+    max_x = max(point.x for point in points)
+    max_y = max(point.y for point in points)
+    return (Point(min_x, min_y), Point(max_x, max_y))
+
+
+def _transform_rect(
+    rect: tuple[Point, Point],
+    origin: Point,
+    rotation_deg: float,
+) -> tuple[Point, Point]:
+    min_point, max_point = rect
+    corners = [
+        Point(min_point.x, min_point.y),
+        Point(max_point.x, min_point.y),
+        Point(max_point.x, max_point.y),
+        Point(min_point.x, max_point.y),
+    ]
+    return _points_bbox(
+        [_transform_local_point(corner, origin, rotation_deg) for corner in corners]
+    )
+
+
+def _rects_intersect(a: tuple[Point, Point], b: tuple[Point, Point]) -> bool:
+    return not _bbox_disjoint(a, b)
+
+
+def _any_rect_overlap(
+    rects_a: tuple[tuple[Point, Point], ...],
+    origin_a: Point,
+    rotation_a: float,
+    rects_b: tuple[tuple[Point, Point], ...],
+    origin_b: Point,
+    rotation_b: float,
+) -> bool:
+    for rect_a in rects_a:
+        world_a = _transform_rect(rect_a, origin_a, rotation_a)
+        for rect_b in rects_b:
+            world_b = _transform_rect(rect_b, origin_b, rotation_b)
+            if _rects_intersect(world_a, world_b):
+                return True
+    return False
+
+
+def _component_local_bbox(comp: Component) -> tuple[Point, Point]:
+    bbox_min, bbox_max = comp.bbox()
+    min_x = bbox_min.x
+    min_y = bbox_min.y
+    max_x = bbox_max.x
+    max_y = bbox_max.y
+    for pad in comp.pads:
+        min_x = min(min_x, pad.pos.x)
+        min_y = min(min_y, pad.pos.y)
+        max_x = max(max_x, pad.pos.x)
+        max_y = max(max_y, pad.pos.y)
+    return (Point(min_x, min_y), Point(max_x, max_y))
+
+
+def _artifact_outline(artifact: LoadedSubcircuitArtifact) -> tuple[Point, Point]:
+    transformed = transform_loaded_artifact(
+        artifact,
+        origin=Point(0.0, 0.0),
+        rotation=0.0,
+    )
+    return transformed.bounding_box
+
+
+def _coalesce_rects(
+    rects: list[tuple[Point, Point]],
+    *,
+    max_rects: int = 200,
+) -> tuple[tuple[Point, Point], ...]:
+    if len(rects) <= max_rects:
+        return tuple(rects)
+    remaining = list(rects)
+    merged: list[tuple[Point, Point]] = []
+    while remaining:
+        current_min, current_max = remaining.pop(0)
+        changed = True
+        while changed:
+            changed = False
+            next_remaining: list[tuple[Point, Point]] = []
+            for other_min, other_max in remaining:
+                touches_x = other_min.x <= current_max.x and other_max.x >= current_min.x
+                touches_y = other_min.y <= current_max.y and other_max.y >= current_min.y
+                if touches_x and touches_y:
+                    current_min = Point(
+                        min(current_min.x, other_min.x),
+                        min(current_min.y, other_min.y),
+                    )
+                    current_max = Point(
+                        max(current_max.x, other_max.x),
+                        max(current_max.y, other_max.y),
+                    )
+                    changed = True
+                    continue
+                next_remaining.append((other_min, other_max))
+            remaining = next_remaining
+        merged.append((current_min, current_max))
+    return tuple(merged)
+
+
+def _extract_blockers_from_layout(
+    artifact: LoadedSubcircuitArtifact,
+    *,
+    pad_margin_mm: float,
+    drill_margin_mm: float,
+) -> LeafBlockerSet:
+    front_pads: list[tuple[Point, Point]] = []
+    back_pads: list[tuple[Point, Point]] = []
+    tht_drills: list[tuple[Point, Point]] = []
+
+    for component in artifact.layout.components.values():
+        component_bbox = _component_local_bbox(component)
+        body_width = max(0.6, component_bbox[1].x - component_bbox[0].x)
+        body_height = max(0.6, component_bbox[1].y - component_bbox[0].y)
+        pad_half_w = max(0.3, body_width * 0.1) + pad_margin_mm
+        pad_half_h = max(0.3, body_height * 0.1) + pad_margin_mm
+        drill_half_w = max(0.3, body_width * 0.08) + drill_margin_mm
+        drill_half_h = max(0.3, body_height * 0.08) + drill_margin_mm
+
+        for pad in component.pads:
+            pad_rect = _rect_from_center(pad.pos, pad_half_w, pad_half_h)
+            if component.is_through_hole:
+                front_pads.append(pad_rect)
+                back_pads.append(pad_rect)
+                tht_drills.append(
+                    _rect_from_center(pad.pos, drill_half_w, drill_half_h)
+                )
+            elif pad.layer == 0:
+                front_pads.append(pad_rect)
+            else:
+                back_pads.append(pad_rect)
+
+        if component.is_through_hole and not component.pads:
+            tht_drills.append(component_bbox)
+
+    return LeafBlockerSet(
+        front_pads=_coalesce_rects(front_pads),
+        back_pads=_coalesce_rects(back_pads),
+        tht_drills=_coalesce_rects(tht_drills),
+        leaf_outline=_artifact_outline(artifact),
+    )
+
+
+def _extract_blockers_from_pcb(
+    artifact: LoadedSubcircuitArtifact,
+    *,
+    pad_margin_mm: float,
+    drill_margin_mm: float,
+) -> LeafBlockerSet | None:
+    mini_pcb = artifact.source_files.get("mini_pcb") or artifact.metadata.get(
+        "artifact_paths", {}
+    ).get("mini_pcb", "")
+    if not mini_pcb:
+        return None
+    mini_pcb_path = Path(str(mini_pcb))
+    if not mini_pcb_path.exists():
+        return None
+
+    try:
+        pcbnew = importlib.import_module("pcbnew")
+    except Exception:
+        return None
+
+    board = pcbnew.LoadBoard(str(mini_pcb_path))
+    front_pads: list[tuple[Point, Point]] = []
+    back_pads: list[tuple[Point, Point]] = []
+    tht_drills: list[tuple[Point, Point]] = []
+    copper_layers = {
+        pcbnew.F_Cu: front_pads,
+        pcbnew.B_Cu: back_pads,
+    }
+
+    for footprint in board.GetFootprints():
+        for pad in footprint.Pads():
+            drill = pad.GetDrillSize()
+            drill_x_mm = drill.x / 1e6
+            drill_y_mm = drill.y / 1e6
+            is_through_hole = (
+                pad.GetAttribute() == pcbnew.PAD_ATTRIB_PTH
+                or drill_x_mm > 0.0
+                or drill_y_mm > 0.0
+            )
+            for layer_id, target in copper_layers.items():
+                if not pad.CanFlashLayer(layer_id):
+                    continue
+                bbox = pad.GetBoundingBox(layer_id)
+                target.append(
+                    (
+                        Point(
+                            bbox.GetLeft() / 1e6 - pad_margin_mm,
+                            bbox.GetTop() / 1e6 - pad_margin_mm,
+                        ),
+                        Point(
+                            bbox.GetRight() / 1e6 + pad_margin_mm,
+                            bbox.GetBottom() / 1e6 + pad_margin_mm,
+                        ),
+                    )
+                )
+            if is_through_hole:
+                position = pad.GetPosition()
+                tht_drills.append(
+                    _rect_from_center(
+                        Point(position.x / 1e6, position.y / 1e6),
+                        max(0.1, drill_x_mm / 2.0) + drill_margin_mm,
+                        max(0.1, drill_y_mm / 2.0) + drill_margin_mm,
+                    )
+                )
+
+    return LeafBlockerSet(
+        front_pads=_coalesce_rects(front_pads),
+        back_pads=_coalesce_rects(back_pads),
+        tht_drills=_coalesce_rects(tht_drills),
+        leaf_outline=_artifact_outline(artifact),
+    )
+
+
+def extract_leaf_blocker_set(
+    artifact: LoadedSubcircuitArtifact,
+    *,
+    pad_margin_mm: float = 0.2,
+    drill_margin_mm: float = 0.2,
+) -> LeafBlockerSet:
+    blocker_set = _extract_blockers_from_pcb(
+        artifact,
+        pad_margin_mm=pad_margin_mm,
+        drill_margin_mm=drill_margin_mm,
+    )
+    if blocker_set is not None:
+        return blocker_set
+    return _extract_blockers_from_layout(
+        artifact,
+        pad_margin_mm=pad_margin_mm,
+        drill_margin_mm=drill_margin_mm,
+    )
+
+
+def dominant_blocker_side(blocker_set: LeafBlockerSet) -> Literal["front", "back", "dual", "none"]:
+    front_area = sum(_rect_area(rect) for rect in blocker_set.front_pads)
+    back_area = sum(_rect_area(rect) for rect in blocker_set.back_pads)
+    if front_area <= 0.0 and back_area <= 0.0:
+        return "none"
+    if front_area > 0.0 and back_area <= 0.0:
+        return "front"
+    if back_area > 0.0 and front_area <= 0.0:
+        return "back"
+    if front_area >= back_area * 1.5:
+        return "front"
+    if back_area >= front_area * 1.5:
+        return "back"
+    return "dual"
+
+
+def can_overlap_sparse(
+    blocker_a: LeafBlockerSet,
+    origin_a: Point,
+    rotation_a: float,
+    blocker_b: LeafBlockerSet,
+    origin_b: Point,
+    rotation_b: float,
+) -> bool:
+    if _any_rect_overlap(
+        blocker_a.front_pads,
+        origin_a,
+        rotation_a,
+        blocker_b.front_pads,
+        origin_b,
+        rotation_b,
+    ):
+        return False
+    if _any_rect_overlap(
+        blocker_a.back_pads,
+        origin_a,
+        rotation_a,
+        blocker_b.back_pads,
+        origin_b,
+        rotation_b,
+    ):
+        return False
+    if _any_rect_overlap(
+        blocker_a.front_pads,
+        origin_a,
+        rotation_a,
+        blocker_b.tht_drills,
+        origin_b,
+        rotation_b,
+    ):
+        return False
+    if _any_rect_overlap(
+        blocker_a.tht_drills,
+        origin_a,
+        rotation_a,
+        blocker_b.front_pads,
+        origin_b,
+        rotation_b,
+    ):
+        return False
+    if _any_rect_overlap(
+        blocker_a.back_pads,
+        origin_a,
+        rotation_a,
+        blocker_b.tht_drills,
+        origin_b,
+        rotation_b,
+    ):
+        return False
+    if _any_rect_overlap(
+        blocker_a.tht_drills,
+        origin_a,
+        rotation_a,
+        blocker_b.back_pads,
+        origin_b,
+        rotation_b,
+    ):
+        return False
+    if _any_rect_overlap(
+        blocker_a.tht_drills,
+        origin_a,
+        rotation_a,
+        blocker_b.tht_drills,
+        origin_b,
+        rotation_b,
+    ):
+        return False
+
+    outline_a = _transform_rect(blocker_a.leaf_outline, origin_a, rotation_a)
+    outline_b = _transform_rect(blocker_b.leaf_outline, origin_b, rotation_b)
+    side_a = dominant_blocker_side(blocker_a)
+    side_b = dominant_blocker_side(blocker_b)
+    if side_a in {"front", "back"} and side_a == side_b and _rects_intersect(outline_a, outline_b):
+        return False
+    return True
+
+
 def child_layer_envelopes(
     transformed: TransformedSubcircuit,
 ) -> tuple[list[tuple[Point, Point]], list[tuple[Point, Point]], list[tuple[Point, Point]]]:
@@ -1598,17 +1980,21 @@ __all__ = [
     "ChildArtifactPlacement",
     "ChildPlacement",
     "ComposedChild",
+    "LeafBlockerSet",
     "ParentComposition",
     "ParentCompositionScore",
     "build_parent_composition",
+    "can_overlap_sparse",
     "child_anchor_map",
     "child_component_refs",
     "composition_debug_dict",
     "composition_summary",
     "constrained_child_offset",
     "derive_attachment_constraints",
+    "dominant_blocker_side",
     "estimate_parent_board_size",
     "estimate_layer_aware_parent_board_size",
+    "extract_leaf_blocker_set",
     "packed_extents_outline",
     "child_layer_envelopes",
     "can_overlap",
