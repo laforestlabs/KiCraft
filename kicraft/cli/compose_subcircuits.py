@@ -364,6 +364,12 @@ def _bbox_disjoint(a: tuple[Point, Point], b: tuple[Point, Point]) -> bool:
     return a[1].x <= b[0].x or b[1].x <= a[0].x or a[1].y <= b[0].y or b[1].y <= a[0].y
 
 
+def _bbox_overlap_area(a: tuple[Point, Point], b: tuple[Point, Point]) -> float:
+    overlap_w = max(0.0, min(a[1].x, b[1].x) - max(a[0].x, b[0].x))
+    overlap_h = max(0.0, min(a[1].y, b[1].y) - max(a[0].y, b[0].y))
+    return overlap_w * overlap_h
+
+
 def _bbox_inside_frame(
     bbox: tuple[Point, Point],
     frame_min: Point,
@@ -446,6 +452,7 @@ def _find_non_overlapping_origin(
     )
 
     for require_overlap in (True, False):
+        best_overlap_candidate: tuple[float, Point] | None = None
         for candidate in candidates:
             candidate_bbox = _shift_bbox(model.transformed.bounding_box, candidate)
             if not _bbox_inside_frame(candidate_bbox, frame_min, frame_max):
@@ -453,11 +460,13 @@ def _find_non_overlapping_origin(
             candidate_envelopes = _shift_layer_envelopes(model.layer_envelopes, candidate)
             collision = False
             intersects_existing = False
+            overlap_area = 0.0
             for existing_bbox, existing_envelopes in zip(placed_bboxes, placed_envelopes):
                 if _bbox_disjoint(existing_bbox, candidate_bbox):
                     continue
                 intersects_existing = True
                 if can_overlap(existing_envelopes, candidate_envelopes):
+                    overlap_area += _bbox_overlap_area(existing_bbox, candidate_bbox)
                     continue
                 collision = True
                 break
@@ -465,7 +474,14 @@ def _find_non_overlapping_origin(
                 continue
             if require_overlap and not intersects_existing:
                 continue
+            if require_overlap:
+                score = overlap_area
+                if best_overlap_candidate is None or score > best_overlap_candidate[0]:
+                    best_overlap_candidate = (score, candidate)
+                continue
             return candidate
+        if require_overlap and best_overlap_candidate is not None:
+            return best_overlap_candidate[1]
 
     for candidate in _candidate_positions(
         proposed,
