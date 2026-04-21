@@ -1425,6 +1425,98 @@ def estimate_parent_board_size(
     return (round(estimated_width, 2), round(estimated_height, 2))
 
 
+def estimate_layer_aware_parent_board_size(
+    child_envelopes: list[
+        tuple[
+            tuple[Point, Point] | None,
+            tuple[Point, Point] | None,
+            tuple[Point, Point] | None,
+        ]
+    ],
+    interconnect_net_count: int = 0,
+    routing_overhead_factor: float = 1.3,
+    margin_mm: float = 1.5,
+) -> tuple[float, float]:
+    """Estimate a parent board size using layer-aware shareable occupancy.
+
+    Front-only and back-only leaves can share XY area, but through-hole geometry
+    blocks both layers. This estimator approximates that by computing a blocker
+    area per layer and using the larger of the summed front/back blocker areas.
+    """
+    import math
+
+    def bbox_area(bbox: tuple[Point, Point] | None) -> float:
+        if bbox is None:
+            return 0.0
+        return max(0.0, bbox[1].x - bbox[0].x) * max(0.0, bbox[1].y - bbox[0].y)
+
+    def union_bbox(
+        a: tuple[Point, Point] | None,
+        b: tuple[Point, Point] | None,
+    ) -> tuple[Point, Point] | None:
+        if a is None:
+            return b
+        if b is None:
+            return a
+        return (
+            Point(min(a[0].x, b[0].x), min(a[0].y, b[0].y)),
+            Point(max(a[1].x, b[1].x), max(a[1].y, b[1].y)),
+        )
+
+    def envelope_span(
+        envelope: tuple[
+            tuple[Point, Point] | None,
+            tuple[Point, Point] | None,
+            tuple[Point, Point] | None,
+        ]
+    ) -> tuple[float, float]:
+        points: list[Point] = []
+        for bbox in envelope:
+            if bbox is None:
+                continue
+            points.extend([bbox[0], bbox[1]])
+        if not points:
+            return (0.0, 0.0)
+        min_x = min(point.x for point in points)
+        min_y = min(point.y for point in points)
+        max_x = max(point.x for point in points)
+        max_y = max(point.y for point in points)
+        return (max(0.0, max_x - min_x), max(0.0, max_y - min_y))
+
+    if not child_envelopes:
+        return (10.0, 10.0)
+
+    front_sum = 0.0
+    back_sum = 0.0
+    max_child_width = 0.0
+    max_child_height = 0.0
+
+    for front_surface, back_surface, tht_keepout in child_envelopes:
+        front_sum += bbox_area(union_bbox(front_surface, tht_keepout))
+        back_sum += bbox_area(union_bbox(back_surface, tht_keepout))
+        child_width, child_height = envelope_span(
+            (front_surface, back_surface, tht_keepout)
+        )
+        max_child_width = max(max_child_width, child_width)
+        max_child_height = max(max_child_height, child_height)
+
+    effective_area = max(front_sum, back_sum)
+    net_overhead = min(0.3, interconnect_net_count * 0.01)
+    effective_overhead = routing_overhead_factor + net_overhead
+    estimated_area = effective_area * effective_overhead
+
+    side = math.sqrt(estimated_area)
+    estimated_width = max(side, max_child_width) + 2.0 * margin_mm
+    estimated_height = (
+        max(
+            estimated_area / max(1.0, estimated_width - 2.0 * margin_mm),
+            max_child_height,
+        )
+        + 2.0 * margin_mm
+    )
+    return (round(estimated_width, 2), round(estimated_height, 2))
+
+
 def packed_extents_outline(
     placed_bboxes: list[tuple[Point, Point]],
     margin_mm: float = 1.5,
@@ -1518,6 +1610,7 @@ __all__ = [
     "constrained_child_offset",
     "derive_attachment_constraints",
     "estimate_parent_board_size",
+    "estimate_layer_aware_parent_board_size",
     "packed_extents_outline",
     "child_layer_envelopes",
     "can_overlap",

@@ -14,6 +14,7 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
     PlacementModel,
     build_parent_composition,
     composition_summary,
+    estimate_layer_aware_parent_board_size,
     estimate_parent_board_size,
     packed_extents_outline,
     place_constrained_child,
@@ -417,6 +418,31 @@ class TestEstimateParentBoardSize:
         w, h = estimate_parent_board_size([(0.0, 0.0), (5.0, 3.0)])
         assert w > 0.0
         assert h > 0.0
+
+
+class TestEstimateLayerAwareParentBoardSize:
+    def test_front_and_back_only_children_share_area(self):
+        layer_agnostic = estimate_parent_board_size([(20.0, 10.0), (20.0, 10.0)])
+        layer_aware = estimate_layer_aware_parent_board_size(
+            [
+                ((Point(0.0, 0.0), Point(20.0, 10.0)), None, None),
+                (None, (Point(0.0, 0.0), Point(20.0, 10.0)), None),
+            ]
+        )
+        assert layer_aware[0] * layer_aware[1] < layer_agnostic[0] * layer_agnostic[1] * 0.7
+
+    def test_tht_child_matches_layer_agnostic_area(self):
+        layer_agnostic = estimate_parent_board_size([(20.0, 10.0)])
+        layer_aware = estimate_layer_aware_parent_board_size(
+            [
+                (
+                    (Point(0.0, 0.0), Point(20.0, 10.0)),
+                    None,
+                    (Point(0.0, 0.0), Point(20.0, 10.0)),
+                )
+            ]
+        )
+        assert layer_aware == layer_agnostic
 
 
 class TestPackedExtentsOutline:
