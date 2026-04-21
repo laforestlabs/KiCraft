@@ -178,36 +178,50 @@ class SolvedLeafSubcircuit:
             _compute_component_bbox,
         )
 
+        routed_board_path = self.best_round.routing.get("routed_board_path")
+        if routed_board_path:
+            routed_state = _load_board_state(Path(routed_board_path), cfg or {})
+            solved_components = copy.deepcopy(routed_state.components)
+            routed_traces = copy.deepcopy(routed_state.traces)
+            routed_vias = copy.deepcopy(routed_state.vias)
+            bounding_box = (
+                routed_state.board_width,
+                routed_state.board_height,
+            )
+        else:
+            solved_components = copy.deepcopy(self.best_round.components)
+            routed_traces = [
+                copy.deepcopy(trace)
+                for trace in self.best_round.routing.get("_trace_segments", [])
+            ]
+            routed_vias = [
+                copy.deepcopy(via)
+                for via in self.best_round.routing.get("_via_objects", [])
+            ]
+            bounding_box = (
+                self.extraction.local_state.board_width,
+                self.extraction.local_state.board_height,
+            )
+
         anchors = infer_interface_anchors(
             self.extraction.interface_ports,
-            self.best_round.components,
+            solved_components,
         )
-        routed_traces = [
-            copy.deepcopy(trace)
-            for trace in self.best_round.routing.get("_trace_segments", [])
-        ]
-        routed_vias = [
-            copy.deepcopy(via)
-            for via in self.best_round.routing.get("_via_objects", [])
-        ]
 
         silkscreen = []
         if cfg:
-            bbox = _compute_component_bbox(self.best_round.components)
+            bbox = _compute_component_bbox(solved_components)
             silkscreen = _build_leaf_silkscreen(
-                self.best_round.components, bbox, self.extraction, cfg
+                solved_components, bbox, self.extraction, cfg
             )
 
         return SubCircuitLayout(
             subcircuit_id=self.node.definition.id,
-            components=copy.deepcopy(self.best_round.components),
+            components=solved_components,
             traces=routed_traces,
             vias=routed_vias,
             silkscreen=silkscreen,
-            bounding_box=(
-                self.extraction.local_state.board_width,
-                self.extraction.local_state.board_height,
-            ),
+            bounding_box=bounding_box,
             ports=[copy.deepcopy(port) for port in self.extraction.interface_ports],
             interface_anchors=anchors,
             score=self.best_round.score,
