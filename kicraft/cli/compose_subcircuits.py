@@ -379,6 +379,20 @@ def _compose_artifacts(
     constrained_indices = {c.child_index for c in child_constraints}
     unconstrained_artifacts = [(i, art) for i, art in enumerate(loaded_artifacts) if i not in constrained_indices]
 
+    seen_child_indices: set[int] = set()
+    deduped_child_constraints = []
+    for c in child_constraints:
+        idx = int(c.child_index)
+        if idx in seen_child_indices:
+            logger.info(
+                "composition: skipping duplicate placement constraint for child_index=%d ref=%s (already placed via earlier constraint)",
+                idx, c.ref,
+            )
+            continue
+        seen_child_indices.add(idx)
+        deduped_child_constraints.append(c)
+    child_constraints = deduped_child_constraints
+
     placed_envelopes = []
 
     parent_min_x, parent_min_y = 0.0, 0.0
