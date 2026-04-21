@@ -592,7 +592,6 @@ def _find_non_overlapping_origin(
     )
 
     for require_overlap in (True, False):
-        best_overlap_candidate: tuple[tuple[float, float], Point] | None = None
         for candidate in candidates:
             candidate_bbox = _shift_bbox(model.transformed.bounding_box, candidate)
             if not _bbox_inside_frame(candidate_bbox, frame_min, frame_max):
@@ -621,14 +620,7 @@ def _find_non_overlapping_origin(
                 continue
             if require_overlap and not intersects_existing:
                 continue
-            if require_overlap:
-                score = (bbox_overlap_area, overlap_area)
-                if best_overlap_candidate is None or score > best_overlap_candidate[0]:
-                    best_overlap_candidate = (score, candidate)
-                continue
             return candidate
-        if require_overlap and best_overlap_candidate is not None:
-            return best_overlap_candidate[1]
 
     for candidate in _candidate_positions(
         proposed,
