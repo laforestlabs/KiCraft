@@ -344,7 +344,7 @@ def _build_models_for_artifact(
                     local_anchor_offset=_compute_local_anchor_offset(
                         transformed,
                         constraint,
-                        rotation,
+                        constraints,
                     ),
                 )
                 for constraint in constraints
@@ -375,16 +375,52 @@ def _compute_mounting_hole_anchor(component: Component) -> Point:
     return component.body_center if component.body_center is not None else component.pos
 
 
+def _constrained_components_bbox(
+    transformed: TransformedSubcircuit,
+    constraints: list[AttachmentConstraint],
+    target: str,
+    value: str,
+) -> tuple[Point, Point] | None:
+    rects = [
+        _component_local_bbox(transformed.transformed_components[constraint.ref])
+        for constraint in constraints
+        if constraint.target == target and constraint.value == value
+    ]
+    if not rects:
+        return None
+    return (
+        Point(min(rect[0].x for rect in rects), min(rect[0].y for rect in rects)),
+        Point(max(rect[1].x for rect in rects), max(rect[1].y for rect in rects)),
+    )
+
+
 def _compute_local_anchor_offset(
     transformed: TransformedSubcircuit,
     constraint: AttachmentConstraint,
-    rotation_deg: float,
+    constraints: list[AttachmentConstraint],
 ) -> Point:
     component = transformed.transformed_components[constraint.ref]
-    bbox_min, bbox_max = transformed.bounding_box
+    bbox_min, bbox_max = _component_local_bbox(component)
 
     if constraint.ref.startswith("H") or "hole" in getattr(component, "kind", "").lower():
         return _compute_mounting_hole_anchor(component)
+
+    grouped_bbox = _constrained_components_bbox(
+        transformed,
+        constraints,
+        constraint.target,
+        constraint.value,
+    )
+    if grouped_bbox is not None and constraint.target == "edge":
+        group_min, group_max = grouped_bbox
+        if constraint.value == "left":
+            bbox_min = Point(group_min.x, bbox_min.y)
+        elif constraint.value == "right":
+            bbox_max = Point(group_max.x, bbox_max.y)
+        elif constraint.value == "top":
+            bbox_min = Point(bbox_min.x, group_min.y)
+        elif constraint.value == "bottom":
+            bbox_max = Point(bbox_max.x, group_max.y)
 
     anchor = Point(
         (bbox_min.x + bbox_max.x) / 2.0,

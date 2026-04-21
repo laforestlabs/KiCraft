@@ -13,6 +13,7 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
     LeafBlockerSet,
     PlacementConstraintEntry,
     PlacementModel,
+    _compute_local_anchor_offset,
     build_parent_composition,
     child_layer_envelopes,
     composition_summary,
@@ -622,6 +623,106 @@ class TestPackingSpacingAffectsBoardSize:
 
 
 class TestConstraintPlacementGeometry:
+    def test_edge_anchor_uses_component_bbox_not_child_bbox(self):
+        layout = _make_layout(
+            "EDGE",
+            {
+                "J1": _make_component("J1", 6.0, 5.0, w=4.0, h=2.0),
+                "R1": _make_component("R1", 20.0, 5.0, w=4.0, h=2.0),
+            },
+        )
+        transformed = TransformedSubcircuit(
+            instance=SubCircuitInstance(
+                layout_id=layout.subcircuit_id,
+                origin=Point(0.0, 0.0),
+                rotation=0.0,
+                transformed_bbox=(40.0, 20.0),
+            ),
+            layout=layout,
+            transformed_components=layout.components,
+            bounding_box=(Point(-10.0, -5.0), Point(30.0, 15.0)),
+        )
+
+        left_anchor = _compute_local_anchor_offset(
+            transformed,
+            AttachmentConstraint(
+                ref="J1",
+                target="edge",
+                value="left",
+                inward_keep_in_mm=0.0,
+                outward_overhang_mm=0.0,
+                source="child_artifact",
+                child_index=0,
+                strict=True,
+            ),
+            [],
+        )
+        right_anchor = _compute_local_anchor_offset(
+            transformed,
+            AttachmentConstraint(
+                ref="J1",
+                target="edge",
+                value="right",
+                inward_keep_in_mm=0.0,
+                outward_overhang_mm=0.0,
+                source="child_artifact",
+                child_index=0,
+                strict=True,
+            ),
+            [],
+        )
+
+        assert left_anchor.x == pytest.approx(4.0)
+        assert right_anchor.x == pytest.approx(8.0)
+
+    def test_same_side_edge_constraints_share_group_edge(self):
+        layout = _make_layout(
+            "EDGEPAIR",
+            {
+                "J2": _make_component("J2", 20.0, 4.0, w=4.0, h=2.0),
+                "J3": _make_component("J3", 24.0, 8.0, w=6.0, h=2.0),
+            },
+        )
+        transformed = TransformedSubcircuit(
+            instance=SubCircuitInstance(
+                layout_id=layout.subcircuit_id,
+                origin=Point(0.0, 0.0),
+                rotation=0.0,
+                transformed_bbox=(40.0, 20.0),
+            ),
+            layout=layout,
+            transformed_components=layout.components,
+            bounding_box=(Point(0.0, 0.0), Point(40.0, 20.0)),
+        )
+        constraints = [
+            AttachmentConstraint(
+                ref="J2",
+                target="edge",
+                value="right",
+                inward_keep_in_mm=0.0,
+                outward_overhang_mm=0.0,
+                source="child_artifact",
+                child_index=0,
+                strict=True,
+            ),
+            AttachmentConstraint(
+                ref="J3",
+                target="edge",
+                value="right",
+                inward_keep_in_mm=0.0,
+                outward_overhang_mm=0.0,
+                source="child_artifact",
+                child_index=0,
+                strict=True,
+            ),
+        ]
+
+        j2_anchor = _compute_local_anchor_offset(transformed, constraints[0], constraints)
+        j3_anchor = _compute_local_anchor_offset(transformed, constraints[1], constraints)
+
+        assert j2_anchor.x == pytest.approx(27.0)
+        assert j3_anchor.x == pytest.approx(27.0)
+
     def _model(self, bbox_min: Point, bbox_max: Point, entries: list[PlacementConstraintEntry]) -> PlacementModel:
         layout = _make_layout("NEG", {})
         transformed = TransformedSubcircuit(
