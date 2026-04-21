@@ -68,7 +68,7 @@ DEFAULT_CONFIG = {
     # overhang.  Only applies to edge-pinned connectors.
     "connector_edge_inset_mm": 1.0,
     # Per-ref connector overhang -- overrides connector_edge_inset_mm.
-    # Positive values mean outward overhang. e.g. {"J1": 1.5}
+    # Positive values mean outward overhang. e.g. {"<connector_ref>": 1.5}
     "parent_overhang_mm": {},
     # Mounting hole keep-in -- minimum distance (mm) from board edge to
     # the center of a mounting hole.
@@ -133,6 +133,9 @@ DEFAULT_CONFIG = {
     # treated as ignorable.  This is in addition to the automatic
     # footprint-baseline clearance heuristic.
     "ignorable_drc_patterns": [],
+    # Footprint refs whose internal clearance DRCs may be ignored when
+    # the report parser cannot reliably extract refs from every violation.
+    "ignorable_footprint_refs": [],
     # --- Functional group settings ---
     # Group source: how to discover functional groups.
     #   "auto"      — try schematic sheets first, fall back to netlist analysis

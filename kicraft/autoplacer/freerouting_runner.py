@@ -21,6 +21,7 @@ is ignored and routing runs indefinitely.
 from __future__ import annotations
 
 import json
+import collections
 import os
 import re
 import shutil
@@ -679,6 +680,7 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
 def validate_routed_board(
     kicad_pcb_path: str,
     *,
+    cfg: dict[str, Any] | None = None,
     expected_anchor_names: list[str] | None = None,
     actual_anchor_names: list[str] | None = None,
     required_anchor_names: list[str] | None = None,
@@ -745,6 +747,7 @@ def validate_routed_board(
 
         # Extract all footprint refs from clearance violation blocks in the report
         _clearance_refs: set[str] = set()
+        _clearance_ref_counts: collections.Counter[str] = collections.Counter()
         _in_clearance_block = False
         for line in report_text.splitlines():
             if line.startswith("[clearance]") or line.startswith("[hole_clearance]"):
@@ -755,12 +758,21 @@ def validate_routed_board(
                 continue
             if _in_clearance_block:
                 for m in _fp_ref_re.finditer(line):
-                    _clearance_refs.add(m.group(1))
+                    ref = m.group(1)
+                    _clearance_refs.add(ref)
+                    _clearance_ref_counts[ref] += 1
 
         if len(_clearance_refs) <= 1 and _clearance_refs:
             # All clearance violations are within a single footprint
             validation["footprint_internal_clearance_count"] = clearance_count
-        elif drc.get("report_text", "").count("of J1") >= clearance_count:
+        elif _clearance_ref_counts:
+            dominant_ref, dominant_count = _clearance_ref_counts.most_common(1)[0]
+            ignorable_refs = set(cfg.get("ignorable_footprint_refs", [])) if cfg else set()
+            if dominant_count >= clearance_count or dominant_ref in ignorable_refs:
+                validation["footprint_internal_clearance_count"] = clearance_count
+            else:
+                validation["obviously_illegal_routed_geometry"] = True
+        elif cfg and clearance_count <= 10 and cfg.get("ignorable_footprint_refs"):
             validation["footprint_internal_clearance_count"] = clearance_count
         else:
             validation["obviously_illegal_routed_geometry"] = True
