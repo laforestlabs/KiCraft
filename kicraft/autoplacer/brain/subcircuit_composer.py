@@ -165,12 +165,20 @@ def derive_attachment_constraints(
     cfg: dict[str, Any],
 ) -> list[AttachmentConstraint]:
     constraints = []
-    for ref, zone_str in component_zones.items():
-        if ":" in zone_str:
-            target, value = zone_str.split(":", 1)
+    for ref, zone_spec in component_zones.items():
+        if isinstance(zone_spec, dict):
+            if not zone_spec:
+                continue
+            target = next(iter(zone_spec.keys()))
+            value = zone_spec[target]
+        elif isinstance(zone_spec, str):
+            if ":" in zone_spec:
+                target, value = zone_spec.split(":", 1)
+            else:
+                target = "edge"
+                value = zone_spec
         else:
-            target = "edge"
-            value = zone_str
+            continue
 
         if target not in ("edge", "corner", "zone"):
             target = "zone"

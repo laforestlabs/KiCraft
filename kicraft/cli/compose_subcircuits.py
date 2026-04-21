@@ -361,7 +361,7 @@ def _compose_artifacts(
 
     if pcb_path:
         try:
-            project_dir = Path(pcb_path).parent
+            project_dir = Path(pcb_path).resolve().parent
             cfg_file = discover_project_config(project_dir)
             if cfg_file is not None:
                 cfg = load_project_config(str(cfg_file))
