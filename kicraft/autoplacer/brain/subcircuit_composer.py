@@ -901,7 +901,7 @@ def child_layer_envelopes(
     back_pts = []
     tht_pts = []
 
-    for comp in transformed.board_state.components.values():
+    for comp in transformed.transformed_components.values():
         c_min, c_max = comp.bbox()
         if comp.is_through_hole:
             tht_pts.extend([c_min, c_max])

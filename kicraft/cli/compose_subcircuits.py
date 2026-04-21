@@ -351,7 +351,7 @@ def _compose_artifacts(
         )
         return transformed
 
-    from kicraft.autoplacer.config import load_project_config
+    from kicraft.autoplacer.config import load_project_config, discover_project_config
     import logging
     logger = logging.getLogger(__name__)
 
@@ -361,8 +361,11 @@ def _compose_artifacts(
 
     if pcb_path:
         try:
-            cfg = load_project_config(str(pcb_path))
-            component_zones = cfg.get("component_zones", {})
+            project_dir = Path(pcb_path).parent
+            cfg_file = discover_project_config(project_dir)
+            if cfg_file is not None:
+                cfg = load_project_config(str(cfg_file))
+                component_zones = cfg.get("component_zones", {})
             parent_local = extract_parent_local_components(str(pcb_path), loaded_artifacts)
         except Exception as e:
             logger.warning(f"Could not load config/local components: {e}")
@@ -712,7 +715,6 @@ def _compose_artifacts(
     )
 
     import itertools
-    from kicraft.autoplacer.brain.subcircuit_composer import can_overlap
 
     edge_attachment_satisfied = {}
     mounting_hole_keep_in_satisfied = {}
