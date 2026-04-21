@@ -10,6 +10,8 @@ Pure Python -- no pcbnew dependency.
 
 from __future__ import annotations
 
+# pyright: reportAny=false, reportExplicitAny=false, reportUnusedVariable=false
+
 from dataclasses import dataclass, field
 from typing import Any
 

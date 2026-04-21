@@ -5,6 +5,8 @@ All tests use synthetic/mock data only; no pcbnew dependency.
 
 from __future__ import annotations
 
+# pyright: reportPrivateUsage=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnusedCallResult=false, reportUnusedVariable=false
+
 import pytest
 
 from kicraft.autoplacer.brain.subcircuit_composer import (

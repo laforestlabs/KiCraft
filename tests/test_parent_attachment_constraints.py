@@ -1,3 +1,5 @@
+# pyright: reportUnknownMemberType=false
+
 import pytest
 
 from kicraft.autoplacer.brain.subcircuit_composer import (

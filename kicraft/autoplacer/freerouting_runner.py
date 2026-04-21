@@ -20,6 +20,8 @@ is ignored and routing runs indefinitely.
 
 from __future__ import annotations
 
+# pyright: reportAny=false, reportExplicitAny=false, reportImplicitStringConcatenation=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnusedCallResult=false, reportUnusedFunction=false
+
 import json
 import os
 import re

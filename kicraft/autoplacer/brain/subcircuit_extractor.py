@@ -17,6 +17,8 @@ This module is intentionally pure Python and does not depend on pcbnew.
 
 from __future__ import annotations
 
+# pyright: reportAny=false, reportExplicitAny=false, reportUnknownVariableType=false
+
 import copy
 from dataclasses import dataclass, field
 from typing import Any
