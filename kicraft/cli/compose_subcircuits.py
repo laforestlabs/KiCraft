@@ -405,11 +405,18 @@ def _preview_parent_local_keep_in_rects(
     parent_local: dict[str, Any],
     local_constraints,
     outline: tuple[Point, Point],
+    occupied_rects: list[tuple[Point, Point]] | None = None,
 ) -> list[tuple[Point, Point]]:
     if not parent_local or not local_constraints:
         return []
     preview_parent_local = copy.deepcopy(parent_local)
     _place_parent_local_components(preview_parent_local, local_constraints, outline)
+    _reposition_parent_local_components(
+        preview_parent_local,
+        local_constraints,
+        outline,
+        occupied_rects or [],
+    )
     keep_in_rects: list[tuple[Point, Point]] = []
     for constraint in local_constraints:
         comp = preview_parent_local.get(constraint.ref)
@@ -482,14 +489,135 @@ def _keep_in_conflict(
 ) -> bool:
     if blocker_set is None:
         return False
-    outline = blocker_set.leaf_outline
-    transformed_outline = _shift_bbox(outline, origin)
-    if rotation % 360.0:
-        transformed_outline = outline
-        from kicraft.autoplacer.brain.subcircuit_composer import _transform_rect
+    from kicraft.autoplacer.brain.subcircuit_composer import _transform_rect
 
-        transformed_outline = _transform_rect(outline, origin, rotation)
-    return any(not _bbox_disjoint(transformed_outline, rect) for rect in keep_in_rects)
+    rects = [blocker_set.leaf_outline]
+    for rect in rects:
+        transformed_rect = _shift_bbox(rect, origin)
+        if rotation % 360.0:
+            transformed_rect = _transform_rect(rect, origin, rotation)
+        if any(not _bbox_disjoint(transformed_rect, keep_in_rect) for keep_in_rect in keep_in_rects):
+            return True
+    return False
+
+
+def _expand_rect(
+    rect: tuple[Point, Point],
+    margin_mm: float,
+) -> tuple[Point, Point]:
+    return (
+        Point(rect[0].x - margin_mm, rect[0].y - margin_mm),
+        Point(rect[1].x + margin_mm, rect[1].y + margin_mm),
+    )
+
+
+def _placed_item_blocker_rects(item: dict[str, Any]) -> list[tuple[Point, Point]]:
+    blocker_set = item.get("blocker_set")
+    if blocker_set is None:
+        return []
+    from kicraft.autoplacer.brain.subcircuit_composer import _transform_rect
+
+    world_rects: list[tuple[Point, Point]] = []
+    for rect in (
+        list(blocker_set.front_pads)
+        + list(blocker_set.back_pads)
+        + list(blocker_set.tht_drills)
+    ):
+        transformed_rect = _shift_bbox(rect, item["origin"])
+        if item["rotation"] % 360.0:
+            transformed_rect = _transform_rect(rect, item["origin"], item["rotation"])
+        world_rects.append(transformed_rect)
+    return world_rects
+
+
+def _constraint_target_sides(constraint) -> set[str]:
+    sides: set[str] = set()
+    if constraint.target not in {"edge", "corner", "zone"}:
+        return sides
+    value = constraint.value
+    for side in ("left", "right", "top", "bottom"):
+        if side in value:
+            sides.add(side)
+    return sides
+
+
+def _reposition_parent_local_components(
+    parent_local: dict[str, Any],
+    local_constraints,
+    outline: tuple[Point, Point],
+    occupied_rects: list[tuple[Point, Point]],
+    *,
+    step_mm: float = 0.5,
+) -> None:
+    if not occupied_rects:
+        return
+    outline_min, outline_max = outline
+    for constraint in local_constraints:
+        comp = parent_local.get(constraint.ref)
+        if comp is None:
+            continue
+
+        bbox_min, bbox_max = _component_geometry_bbox(comp)
+        width = bbox_max.x - bbox_min.x
+        height = bbox_max.y - bbox_min.y
+        sides = _constraint_target_sides(constraint)
+
+        min_x = outline_min.x + constraint.inward_keep_in_mm
+        max_x = outline_max.x - constraint.inward_keep_in_mm - width
+        min_y = outline_min.y + constraint.inward_keep_in_mm
+        max_y = outline_max.y - constraint.inward_keep_in_mm - height
+
+        if "left" in sides:
+            min_x = max(min_x, bbox_min.x)
+        if "right" in sides:
+            max_x = min(max_x, bbox_max.x - width)
+        if "top" in sides:
+            min_y = max(min_y, bbox_min.y)
+        if "bottom" in sides:
+            max_y = min(max_y, bbox_max.y - height)
+
+        x_candidates: list[float] = []
+        x = min_x
+        while x <= max_x + 1e-9:
+            x_candidates.append(round(x, 6))
+            x += step_mm
+        y_candidates: list[float] = []
+        y = min_y
+        while y <= max_y + 1e-9:
+            y_candidates.append(round(y, 6))
+            y += step_mm
+        current_x = bbox_min.x
+        current_y = bbox_min.y
+        candidates = sorted(
+            ((x, y) for x in x_candidates for y in y_candidates),
+            key=lambda candidate: (
+                abs(candidate[0] - current_x) + abs(candidate[1] - current_y),
+                abs(candidate[0] - current_x),
+                abs(candidate[1] - current_y),
+            ),
+        )
+        for candidate_x, candidate_y in candidates:
+            candidate_bbox = (
+                Point(candidate_x, candidate_y),
+                Point(candidate_x + width, candidate_y + height),
+            )
+            candidate_keep_in = _expand_rect(candidate_bbox, constraint.inward_keep_in_mm)
+            if any(
+                not _bbox_disjoint(candidate_keep_in, occupied_rect)
+                for occupied_rect in occupied_rects
+            ):
+                continue
+            delta = Point(candidate_x - bbox_min.x, candidate_y - bbox_min.y)
+            if abs(delta.x) > 1e-9 or abs(delta.y) > 1e-9:
+                _translate_component_geometry(comp, delta)
+            break
+
+
+def _occupied_pad_rects(placed_envelopes: list[dict[str, Any]]) -> list[tuple[Point, Point]]:
+    rects: list[tuple[Point, Point]] = []
+    for item in placed_envelopes:
+        rects.extend(_placed_item_blocker_rects(item))
+    return rects
 
 
 def _component_geometry_bbox(comp) -> tuple[Point, Point]:
@@ -862,11 +990,7 @@ def _compose_artifacts(
         placed_child_bboxes = {}
         child_anchor_positions = {}
         placed_envelopes = []
-        parent_local_keep_in_rects = _preview_parent_local_keep_in_rects(
-            parent_local,
-            derived_constraints.parent_local_constraints,
-            (seed_frame_min, seed_frame_max),
-        )
+        parent_local_keep_in_rects = []
 
         for child_index in sorted(derived_constraints.child_specs):
             spec = derived_constraints.child_specs[child_index]
@@ -887,13 +1011,6 @@ def _compose_artifacts(
                     continue
 
                 shifted_envelopes = _shift_layer_envelopes(model.layer_envelopes, origin)
-                if _keep_in_conflict(
-                    model.blocker_set,
-                    origin,
-                    model.rotation,
-                    parent_local_keep_in_rects,
-                ):
-                    continue
                 overlap_conflict = False
                 for existing_item in placed_envelopes:
                     if _placed_items_conflict(
@@ -928,13 +1045,6 @@ def _compose_artifacts(
                         except ValueError:
                             continue
                         shifted_envelopes = _shift_layer_envelopes(model.layer_envelopes, origin)
-                        if _keep_in_conflict(
-                            model.blocker_set,
-                            origin,
-                            model.rotation,
-                            parent_local_keep_in_rects,
-                        ):
-                            continue
                         overlap_conflict = False
                         for existing_item in placed_envelopes:
                             if _placed_items_conflict(
@@ -978,6 +1088,13 @@ def _compose_artifacts(
                     selected_origin.x + entry.local_anchor_offset.x,
                     selected_origin.y + entry.local_anchor_offset.y,
                 )
+
+        parent_local_keep_in_rects = _preview_parent_local_keep_in_rects(
+            parent_local,
+            derived_constraints.parent_local_constraints,
+            (seed_frame_min, seed_frame_max),
+            occupied_rects=_occupied_pad_rects(placed_envelopes),
+        )
 
         ordered_unconstrained = _ordered_unconstrained_indices(mode, unconstrained_artifacts, spacing_mm)
         row_count = 0
@@ -1142,6 +1259,12 @@ def _compose_artifacts(
         )
 
     _place_parent_local_components(parent_local, derived_constraints.parent_local_constraints, exact_outline)
+    _reposition_parent_local_components(
+        parent_local,
+        derived_constraints.parent_local_constraints,
+        exact_outline,
+        _occupied_pad_rects(final_placed_envelopes),
+    )
     parent_local_keep_in_rects = []
     for constraint in derived_constraints.parent_local_constraints:
         comp = parent_local.get(constraint.ref)
