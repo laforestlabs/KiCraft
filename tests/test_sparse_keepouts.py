@@ -4,6 +4,8 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
 )
 from kicraft.autoplacer.brain.types import Component, Layer, Point
 from kicraft.cli.compose_subcircuits import (
+    _PARENT_STAMP_SCRIPT,
+    _constraint_world_anchors,
     _keep_in_conflict,
     _find_non_overlapping_origin,
     _preview_parent_local_keep_in_rects,
@@ -45,6 +47,8 @@ def _blockers(
     *,
     front=(),
     back=(),
+    front_traces=(),
+    back_traces=(),
     tht=(),
     outline=((0.0, 0.0), (10.0, 10.0)),
 ) -> LeafBlockerSet:
@@ -56,6 +60,8 @@ def _blockers(
         back_pads=tuple(_rect(rect) for rect in back),
         tht_drills=tuple(_rect(rect) for rect in tht),
         leaf_outline=_rect(outline),
+        front_traces=tuple(_rect(rect) for rect in front_traces),
+        back_traces=tuple(_rect(rect) for rect in back_traces),
     )
 
 
@@ -120,6 +126,22 @@ def test_same_side_outline_overlap_is_forbidden_even_when_pads_do_not_touch():
         outline=((5.0, 5.0), (15.0, 15.0)),
     )
     assert can_overlap_sparse(a, Point(0.0, 0.0), 0.0, b, Point(0.0, 0.0), 0.0) is False
+
+
+def test_dual_side_leaf_cannot_overlap_front_only_leaf_when_traces_intersect():
+    dual = _blockers(
+        front=(((0.0, 0.0), (1.0, 1.0)),),
+        back=(((20.0, 20.0), (21.0, 21.0)),),
+        front_traces=(((5.0, 5.0), (9.0, 9.0)),),
+        outline=((0.0, 0.0), (10.0, 10.0)),
+    )
+    front_only = _blockers(
+        front=(((12.0, 12.0), (13.0, 13.0)),),
+        front_traces=(((6.0, 6.0), (7.0, 7.0)),),
+        outline=((5.0, 5.0), (15.0, 15.0)),
+    )
+
+    assert can_overlap_sparse(dual, Point(0.0, 0.0), 0.0, front_only, Point(0.0, 0.0), 0.0) is False
 
 
 def test_constrained_children_bypass_keep_in_conflict():
@@ -200,6 +222,56 @@ def test_parent_local_keep_ins_can_be_previewed_around_constrained_rects():
     keep_in = keep_ins[0]
     assert keep_in[0].x >= 12.0 or keep_in[0].y >= 12.0
     assert keep_in[0] != Point(-2.5, -2.5)
+
+
+def test_constraint_world_anchors_include_parent_local_components():
+    constraint = AttachmentConstraint(
+        ref="MH1",
+        target="corner",
+        value="top-left",
+        inward_keep_in_mm=2.5,
+        outward_overhang_mm=0.0,
+        source="parent_local",
+        child_index=None,
+        strict=True,
+    )
+    hole = Component(
+        ref="MH1",
+        value="",
+        pos=Point(5.0, 6.0),
+        rotation=0.0,
+        layer=Layer.FRONT,
+        width_mm=4.0,
+        height_mm=4.0,
+        pads=[],
+        body_center=Point(7.0, 8.0),
+    )
+
+    anchors = _constraint_world_anchors({}, {"MH1": hole}, [constraint])
+
+    assert anchors["MH1"] == Point(7.0, 8.0)
+
+
+def test_constraint_world_anchors_preserve_child_positions():
+    constraint = AttachmentConstraint(
+        ref="EDGE",
+        target="edge",
+        value="left",
+        inward_keep_in_mm=0.0,
+        outward_overhang_mm=0.0,
+        source="child_artifact",
+        child_index=0,
+        strict=True,
+    )
+
+    anchors = _constraint_world_anchors({"EDGE": Point(1.0, 2.0)}, {}, [constraint])
+
+    assert anchors == {"EDGE": Point(1.0, 2.0)}
+
+
+def test_parent_stamp_moves_locked_template_footprints():
+    assert "if _fp.IsLocked():" not in _PARENT_STAMP_SCRIPT
+    assert "_fp.SetPosition(" in _PARENT_STAMP_SCRIPT
 
 
 def test_unconstrained_keep_in_still_shifts_outline_clear():

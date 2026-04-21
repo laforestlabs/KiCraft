@@ -158,6 +158,8 @@ class LeafBlockerSet:
     back_pads: tuple[tuple[Point, Point], ...]
     tht_drills: tuple[tuple[Point, Point], ...]
     leaf_outline: tuple[Point, Point]
+    front_traces: tuple[tuple[Point, Point], ...] = ()
+    back_traces: tuple[tuple[Point, Point], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1362,6 +1364,30 @@ def _coalesce_rects(
     return tuple(merged)
 
 
+def _trace_local_bbox(trace: TraceSegment, margin_mm: float = 0.0) -> tuple[Point, Point]:
+    half_w = max(0.05, trace.width_mm / 2.0) + margin_mm
+    return (
+        Point(min(trace.start.x, trace.end.x) - half_w, min(trace.start.y, trace.end.y) - half_w),
+        Point(max(trace.start.x, trace.end.x) + half_w, max(trace.start.y, trace.end.y) + half_w),
+    )
+
+
+def _trace_blocker_rects(
+    traces: list[TraceSegment],
+    *,
+    margin_mm: float,
+) -> tuple[list[tuple[Point, Point]], list[tuple[Point, Point]]]:
+    front_rects: list[tuple[Point, Point]] = []
+    back_rects: list[tuple[Point, Point]] = []
+    for trace in traces:
+        rect = _trace_local_bbox(trace, margin_mm=margin_mm)
+        if trace.layer == 0:
+            front_rects.append(rect)
+        else:
+            back_rects.append(rect)
+    return front_rects, back_rects
+
+
 def _extract_blockers_from_layout(
     artifact: LoadedSubcircuitArtifact,
     *,
@@ -1371,6 +1397,10 @@ def _extract_blockers_from_layout(
     front_pads: list[tuple[Point, Point]] = []
     back_pads: list[tuple[Point, Point]] = []
     tht_drills: list[tuple[Point, Point]] = []
+    front_traces, back_traces = _trace_blocker_rects(
+        artifact.layout.traces,
+        margin_mm=pad_margin_mm,
+    )
 
     for component in artifact.layout.components.values():
         component_bbox = _component_local_bbox(component)
@@ -1402,6 +1432,8 @@ def _extract_blockers_from_layout(
         back_pads=_coalesce_rects(back_pads),
         tht_drills=_coalesce_rects(tht_drills),
         leaf_outline=_artifact_outline(artifact),
+        front_traces=_coalesce_rects(front_traces),
+        back_traces=_coalesce_rects(back_traces),
     )
 
 
@@ -1431,6 +1463,10 @@ def _extract_blockers_from_pcb(
     front_pads: list[tuple[Point, Point]] = []
     back_pads: list[tuple[Point, Point]] = []
     tht_drills: list[tuple[Point, Point]] = []
+    front_traces, back_traces = _trace_blocker_rects(
+        artifact.layout.traces,
+        margin_mm=pad_margin_mm,
+    )
     copper_layers = {
         pcbnew.F_Cu: front_pads,
         pcbnew.B_Cu: back_pads,
@@ -1477,6 +1513,8 @@ def _extract_blockers_from_pcb(
         back_pads=_coalesce_rects(back_pads),
         tht_drills=_coalesce_rects(tht_drills),
         leaf_outline=_artifact_outline(artifact),
+        front_traces=_coalesce_rects(front_traces),
+        back_traces=_coalesce_rects(back_traces),
     )
 
 
@@ -1501,8 +1539,12 @@ def extract_leaf_blocker_set(
 
 
 def dominant_blocker_side(blocker_set: LeafBlockerSet) -> Literal["front", "back", "dual", "none"]:
-    front_area = sum(_rect_area(rect) for rect in blocker_set.front_pads)
-    back_area = sum(_rect_area(rect) for rect in blocker_set.back_pads)
+    front_area = sum(_rect_area(rect) for rect in blocker_set.front_pads) + sum(
+        _rect_area(rect) for rect in blocker_set.front_traces
+    )
+    back_area = sum(_rect_area(rect) for rect in blocker_set.back_pads) + sum(
+        _rect_area(rect) for rect in blocker_set.back_traces
+    )
     if front_area <= 0.0 and back_area <= 0.0:
         return "none"
     if front_area > 0.0 and back_area <= 0.0:
@@ -1583,6 +1625,42 @@ def can_overlap_sparse(
         origin_a,
         rotation_a,
         blocker_b.tht_drills,
+        origin_b,
+        rotation_b,
+    ):
+        return False
+    if _any_rect_overlap(
+        blocker_a.front_traces,
+        origin_a,
+        rotation_a,
+        blocker_b.front_pads + blocker_b.front_traces,
+        origin_b,
+        rotation_b,
+    ):
+        return False
+    if _any_rect_overlap(
+        blocker_a.back_traces,
+        origin_a,
+        rotation_a,
+        blocker_b.back_pads + blocker_b.back_traces,
+        origin_b,
+        rotation_b,
+    ):
+        return False
+    if _any_rect_overlap(
+        blocker_a.front_pads,
+        origin_a,
+        rotation_a,
+        blocker_b.front_traces,
+        origin_b,
+        rotation_b,
+    ):
+        return False
+    if _any_rect_overlap(
+        blocker_a.back_pads,
+        origin_a,
+        rotation_a,
+        blocker_b.back_traces,
         origin_b,
         rotation_b,
     ):
