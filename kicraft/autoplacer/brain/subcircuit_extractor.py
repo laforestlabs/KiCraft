@@ -301,6 +301,8 @@ def summarize_extraction(extraction: ExtractedSubcircuitBoard) -> str:
 def extract_parent_local_components(
     pcb_path: str,
     child_artifacts: list[Any],
+    *,
+    allowlist: set[str] | None = None,
 ) -> dict[str, Component]:
     from kicraft.autoplacer.hardware.adapter import KiCadAdapter
 
@@ -311,15 +313,20 @@ def extract_parent_local_components(
         *(set(art.layout.components.keys()) for art in child_artifacts)
     )
     
+    allowed_refs = {ref.upper() for ref in (allowlist or set())}
     local_components = {}
     for ref, comp in full_state.components.items():
-        if ref not in child_refs:
+        if ref in child_refs:
+            continue
+        if allowed_refs and ref.upper() not in allowed_refs:
+            continue
+        if not allowed_refs or ref.upper() in allowed_refs:
             local_components[ref] = copy.deepcopy(comp)
             
     return local_components
 
 
-def extraction_debug_dict(extraction: ExtractedSubcircuitBoard) -> dict:
+def extraction_debug_dict(extraction: ExtractedSubcircuitBoard) -> dict[str, Any]:
     """Return a JSON-serializable debug view of an extraction."""
     return {
         "subcircuit": {

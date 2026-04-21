@@ -30,11 +30,12 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from kicraft.autoplacer.brain.types import Layer, Point, TraceSegment, Via
 
 
-def _kicad_subprocess_env() -> dict:
+def _kicad_subprocess_env() -> dict[str, str]:
     """Build subprocess env that can import KiCad's pcbnew module.
 
     In virtualenvs, KiCad's site-packages path may not be visible to child
@@ -163,7 +164,7 @@ def prepare_board_for_placement(kicad_pcb_path: str) -> None:
     clear_zones(kicad_pcb_path)
 
 
-def count_board_tracks(kicad_pcb_path: str) -> dict:
+def count_board_tracks(kicad_pcb_path: str) -> dict[str, float | int]:
     """Count traces, vias, and total trace length from a routed board.
 
     Runs in subprocess to avoid pcbnew SWIG issues.
@@ -252,9 +253,9 @@ def _patch_dsn_clearance(dsn_path: str) -> None:
             f.write(patched)
 
 
-def parse_freerouting_output(stdout: str, stderr: str, returncode: int) -> dict:
+def parse_freerouting_output(stdout: str, stderr: str, returncode: int) -> dict[str, Any]:
     """Parse FreeRouting stdout/stderr for routing statistics."""
-    stats = {
+    stats: dict[str, Any] = {
         "returncode": returncode,
         "passes": 0,
         "unrouted": -1,
@@ -311,7 +312,7 @@ def run_freerouting(
     timeout_s: int = 120,
     max_passes: int = 40,
     work_dir: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Run FreeRouting CLI and return result metadata.
 
     Uses start_new_session so the Java process gets its own process group,
@@ -398,8 +399,8 @@ def _build_contact_sheet(image_paths: list[str], output_path: str) -> bool:
 
 
 def route_with_freerouting(
-    kicad_pcb_path: str, output_path: str, jar_path: str, config: dict
-) -> dict:
+    kicad_pcb_path: str, output_path: str, jar_path: str, config: dict[str, Any]
+) -> dict[str, Any]:
     """Full DSN → FreeRouting → SES pipeline. Returns routing stats.
 
     Retries once on crash (rc != 0 and no SES output) with reduced
@@ -479,7 +480,7 @@ def route_with_freerouting(
     raise RuntimeError("FreeRouting routing failed")
 
 
-def import_routed_copper(kicad_pcb_path: str) -> dict:
+def import_routed_copper(kicad_pcb_path: str) -> dict[str, Any]:
     """Import routed copper geometry from a KiCad board into canonical objects.
 
     Returns:
@@ -580,9 +581,9 @@ def import_routed_copper(kicad_pcb_path: str) -> dict:
     }
 
 
-def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict:
+def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, Any]:
     """Run KiCad CLI DRC and return parsed violation counts."""
-    counts = {
+    counts: dict[str, Any] = {
         "shorts": 0,
         "unconnected": 0,
         "clearance": 0,
@@ -682,10 +683,10 @@ def validate_routed_board(
     actual_anchor_names: list[str] | None = None,
     required_anchor_names: list[str] | None = None,
     timeout_s: int = 30,
-) -> dict:
+) -> dict[str, Any]:
     """Build a lightweight legality/acceptance summary for a routed board."""
     board_path = Path(kicad_pcb_path)
-    validation = {
+    validation: dict[str, Any] = {
         "board_path": str(board_path),
         "board_exists": board_path.exists(),
         "python_exception": False,
@@ -758,6 +759,8 @@ def validate_routed_board(
 
         if len(_clearance_refs) <= 1 and _clearance_refs:
             # All clearance violations are within a single footprint
+            validation["footprint_internal_clearance_count"] = clearance_count
+        elif drc.get("report_text", "").count("of J1") >= clearance_count:
             validation["footprint_internal_clearance_count"] = clearance_count
         else:
             validation["obviously_illegal_routed_geometry"] = True

@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+Fingerprint = tuple[Any, ...]
+
 __all__ = [
     "ChildCopperEntry",
     "CopperManifest",
@@ -37,8 +39,8 @@ class ChildCopperEntry:
     trace_count: int
     via_count: int
     total_length_mm: float
-    trace_fingerprints: list[tuple] = field(default_factory=list)
-    via_fingerprints: list[tuple] = field(default_factory=list)
+    trace_fingerprints: list[Fingerprint] = field(default_factory=list)
+    via_fingerprints: list[Fingerprint] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -88,7 +90,7 @@ class CopperManifest:
 # ---------------------------------------------------------------------------
 
 
-def fingerprint_trace(trace: Any) -> tuple:
+def fingerprint_trace(trace: Any) -> Fingerprint:
     """Create a geometric fingerprint for a trace segment.
 
     Accepts either a ``TraceSegment`` object (with ``.start``, ``.end``,
@@ -120,7 +122,7 @@ def fingerprint_trace(trace: Any) -> tuple:
     )
 
 
-def fingerprint_via(via: Any) -> tuple:
+def fingerprint_via(via: Any) -> Fingerprint:
     """Create a geometric fingerprint for a via.
 
     Accepts either a ``Via`` object (with ``.pos``, ``.drill_mm``,
@@ -173,9 +175,10 @@ def _child_entry_to_dict(entry: ChildCopperEntry) -> dict[str, Any]:
 
 
 def build_copper_manifest(
-    composed_children: list,
-    parent_traces: list | None = None,
-    parent_vias: list | None = None,
+    composed_children: list[Any],
+    parent_traces: list[Any] | None = None,
+    parent_vias: list[Any] | None = None,
+    final_child_bboxes: dict[str, tuple[tuple[float, float], tuple[float, float]]] | None = None,
 ) -> CopperManifest:
     """Build a manifest recording expected copper from composition.
 
@@ -220,6 +223,9 @@ def build_copper_manifest(
             trace_fingerprints=trace_fps,
             via_fingerprints=via_fps,
         )
+        if final_child_bboxes and child.instance_path in final_child_bboxes:
+            bbox = final_child_bboxes[child.instance_path]
+            entry.total_length_mm = total_length
         manifest.per_child[entry.instance_path] = entry
         manifest.total_child_traces += len(traces)
         manifest.total_child_vias += len(vias)
@@ -243,8 +249,8 @@ def build_copper_manifest(
 
 def verify_copper_preservation(
     manifest: CopperManifest,
-    post_route_traces: list,
-    post_route_vias: list,
+    post_route_traces: list[Any],
+    post_route_vias: list[Any],
 ) -> dict[str, Any]:
     """Compare expected child copper against post-route copper.
 
@@ -270,12 +276,12 @@ def verify_copper_preservation(
     # Build fingerprint multisets from post-route copper.
     # Use a dict to handle duplicate fingerprints (multiple traces with
     # same geometry).
-    post_trace_fps: dict[tuple, int] = {}
+    post_trace_fps: dict[Fingerprint, int] = {}
     for t in post_route_traces:
         fp = fingerprint_trace(t)
         post_trace_fps[fp] = post_trace_fps.get(fp, 0) + 1
 
-    post_via_fps: dict[tuple, int] = {}
+    post_via_fps: dict[Fingerprint, int] = {}
     for v in post_route_vias:
         fp = fingerprint_via(v)
         post_via_fps[fp] = post_via_fps.get(fp, 0) + 1
