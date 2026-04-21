@@ -41,6 +41,7 @@ from kicraft.autoplacer.brain.types import (
     Via,
 )
 from kicraft.cli.compose_subcircuits import (
+    _choose_packed_unconstrained_placement,
     _find_non_overlapping_origin,
     _place_parent_local_components,
 )
@@ -899,3 +900,51 @@ class TestPackedPlacementOverlapScan:
         )
 
         assert origin == Point(6.0, 6.0)
+
+    def test_packed_choice_can_prefer_rotated_model_for_better_overlap(self):
+        placed_bbox = (Point(0.0, 0.0), Point(10.0, 40.0))
+        placed_envelopes = [([], [(Point(0.0, 0.0), Point(10.0, 40.0))], [])]
+        wide_model = PlacementModel(
+            rotation=0.0,
+            transformed=TransformedSubcircuit(
+                instance=SubCircuitInstance(
+                    layout_id=_make_subcircuit_id("WIDE"),
+                    origin=Point(0.0, 0.0),
+                    rotation=0.0,
+                    transformed_bbox=(30.0, 10.0),
+                ),
+                layout=_make_layout("WIDE", {}),
+                bounding_box=(Point(0.0, 0.0), Point(30.0, 10.0)),
+            ),
+            layer_envelopes=([(Point(0.0, 0.0), Point(30.0, 10.0))], [], []),
+            constraint_entries=[],
+        )
+        tall_model = PlacementModel(
+            rotation=90.0,
+            transformed=TransformedSubcircuit(
+                instance=SubCircuitInstance(
+                    layout_id=_make_subcircuit_id("TALL"),
+                    origin=Point(0.0, 0.0),
+                    rotation=90.0,
+                    transformed_bbox=(10.0, 30.0),
+                ),
+                layout=_make_layout("TALL", {}),
+                bounding_box=(Point(0.0, 0.0), Point(10.0, 30.0)),
+            ),
+            layer_envelopes=([(Point(0.0, 0.0), Point(10.0, 30.0))], [], []),
+            constraint_entries=[],
+        )
+
+        selected_model, origin, placed = _choose_packed_unconstrained_placement(
+            proposed=Point(30.0, 0.0),
+            frame_min=Point(0.0, 0.0),
+            frame_max=Point(40.0, 40.0),
+            models=[wide_model, tall_model],
+            placed_bboxes=[placed_bbox],
+            placed_envelopes=placed_envelopes,
+            spacing_mm=2.0,
+        )
+
+        assert selected_model.rotation == 90.0
+        assert origin == Point(0.0, 0.0)
+        assert placed == (Point(0.0, 0.0), Point(10.0, 30.0))
