@@ -10,6 +10,7 @@ import pytest
 from kicraft.autoplacer.brain.subcircuit_composer import (
     AttachmentConstraint,
     ChildPlacement,
+    LeafBlockerSet,
     PlacementConstraintEntry,
     PlacementModel,
     build_parent_composition,
@@ -99,6 +100,24 @@ def _make_component(
         width_mm=w,
         height_mm=h,
         pads=list(pads or []),
+    )
+
+
+def _make_blocker_set(
+    *,
+    front=(),
+    back=(),
+    tht=(),
+    outline=((0.0, 0.0), (10.0, 10.0)),
+) -> LeafBlockerSet:
+    def _rect(raw):
+        return (Point(raw[0][0], raw[0][1]), Point(raw[1][0], raw[1][1]))
+
+    return LeafBlockerSet(
+        front_pads=tuple(_rect(rect) for rect in front),
+        back_pads=tuple(_rect(rect) for rect in back),
+        tht_drills=tuple(_rect(rect) for rect in tht),
+        leaf_outline=_rect(outline),
     )
 
 
@@ -741,6 +760,7 @@ class TestPackedPlacementOverlapScan:
                 layout=_make_layout("BACK", {}),
                 bounding_box=(Point(0.0, 0.0), Point(20.0, 20.0)),
             ),
+            blocker_set=_make_blocker_set(back=(((0.0, 0.0), (20.0, 20.0)),), outline=((0.0, 0.0), (20.0, 20.0))),
             layer_envelopes=([], [(Point(0.0, 0.0), Point(20.0, 20.0))], []),
             constraint_entries=[],
         )
@@ -756,6 +776,7 @@ class TestPackedPlacementOverlapScan:
                 layout=_make_layout("FRONT", {}),
                 bounding_box=(Point(0.0, 0.0), Point(12.0, 12.0)),
             ),
+            blocker_set=_make_blocker_set(front=(((0.0, 0.0), (12.0, 12.0)),), outline=((0.0, 0.0), (12.0, 12.0))),
             layer_envelopes=([(Point(0.0, 0.0), Point(12.0, 12.0))], [], []),
             constraint_entries=[],
         )
@@ -766,7 +787,7 @@ class TestPackedPlacementOverlapScan:
             frame_max=Point(60.0, 40.0),
             model=front_model,
             placed_bboxes=[back_model.transformed.bounding_box],
-            placed_envelopes=[back_model.layer_envelopes],
+            placed_envelopes=[{"bbox": back_model.transformed.bounding_box, "envelopes": back_model.layer_envelopes, "blocker_set": back_model.blocker_set, "origin": Point(0.0, 0.0), "rotation": 0.0}],
             spacing_mm=2.0,
         )
 
@@ -789,6 +810,7 @@ class TestPackedPlacementOverlapScan:
                 layout=_make_layout("BACK2", {}),
                 bounding_box=(Point(0.0, 0.0), Point(20.0, 20.0)),
             ),
+            blocker_set=_make_blocker_set(back=(((0.0, 0.0), (20.0, 20.0)),), outline=((0.0, 0.0), (20.0, 20.0))),
             layer_envelopes=([], [(Point(0.0, 0.0), Point(20.0, 20.0))], []),
             constraint_entries=[],
         )
@@ -804,6 +826,7 @@ class TestPackedPlacementOverlapScan:
                 layout=_make_layout("FRONT2", {}),
                 bounding_box=(Point(0.0, 0.0), Point(12.0, 12.0)),
             ),
+            blocker_set=_make_blocker_set(front=(((0.0, 0.0), (12.0, 12.0)),), outline=((0.0, 0.0), (12.0, 12.0))),
             layer_envelopes=([(Point(0.0, 0.0), Point(12.0, 12.0))], [], []),
             constraint_entries=[],
         )
@@ -814,7 +837,7 @@ class TestPackedPlacementOverlapScan:
             frame_max=Point(60.0, 40.0),
             model=front_model,
             placed_bboxes=[back_model.transformed.bounding_box],
-            placed_envelopes=[back_model.layer_envelopes],
+            placed_envelopes=[{"bbox": back_model.transformed.bounding_box, "envelopes": back_model.layer_envelopes, "blocker_set": back_model.blocker_set, "origin": Point(0.0, 0.0), "rotation": 0.0}],
             spacing_mm=2.0,
         )
 
@@ -825,7 +848,7 @@ class TestPackedPlacementOverlapScan:
     def test_same_side_front_leaves_do_not_overlap(self):
         placed_front_bbox = (Point(0.0, 0.0), Point(20.0, 20.0))
         placed_front_envelopes = [
-            ([(Point(0.0, 0.0), Point(20.0, 20.0))], [], [])
+            {"bbox": placed_front_bbox, "envelopes": ([(Point(0.0, 0.0), Point(20.0, 20.0))], [], []), "blocker_set": _make_blocker_set(front=(((0.0, 0.0), (20.0, 20.0)),), outline=((0.0, 0.0), (20.0, 20.0))), "origin": Point(0.0, 0.0), "rotation": 0.0}
         ]
         front_model = PlacementModel(
             rotation=0.0,
@@ -839,6 +862,7 @@ class TestPackedPlacementOverlapScan:
                 layout=_make_layout("FRONT3", {}),
                 bounding_box=(Point(0.0, 0.0), Point(12.0, 12.0)),
             ),
+            blocker_set=_make_blocker_set(front=(((0.0, 0.0), (12.0, 12.0)),), outline=((0.0, 0.0), (12.0, 12.0))),
             layer_envelopes=([(Point(0.0, 0.0), Point(12.0, 12.0))], [], []),
             constraint_entries=[],
         )

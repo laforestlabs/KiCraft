@@ -51,16 +51,20 @@ from kicraft.autoplacer.brain.copper_accounting import (
 from kicraft.autoplacer.brain.subcircuit_composer import (
     ChildArtifactPlacement,
     DerivedAttachmentConstraints,
+    LeafBlockerSet,
     ParentComposition,
     PlacementModel,
     build_parent_composition,
+    dominant_blocker_side,
     estimate_layer_aware_parent_board_size,
     packed_extents_outline,
     derive_attachment_constraints,
     expand_rotation_candidates,
     child_layer_envelopes,
     can_overlap,
+    can_overlap_sparse,
     constraint_aware_outline,
+    extract_leaf_blocker_set,
     place_constrained_child,
     validate_child_constraints,
 )
@@ -343,6 +347,120 @@ def _shift_layer_envelopes(
     )
 
 
+def _shift_rect(rect: tuple[Point, Point], origin: Point) -> tuple[Point, Point]:
+    return (
+        Point(rect[0].x + origin.x, rect[0].y + origin.y),
+        Point(rect[1].x + origin.x, rect[1].y + origin.y),
+    )
+
+
+def _shift_rects(
+    rects: tuple[tuple[Point, Point], ...],
+    origin: Point,
+) -> list[tuple[Point, Point]]:
+    return [_shift_rect(rect, origin) for rect in rects]
+
+
+def _rect_area(rect: tuple[Point, Point]) -> float:
+    return max(0.0, rect[1].x - rect[0].x) * max(0.0, rect[1].y - rect[0].y)
+
+
+def _build_parent_local_blocker_set(comp) -> LeafBlockerSet:
+    bbox = _component_geometry_bbox(comp)
+    pad_rects = tuple(_shift_rect((pad.pos, pad.pos), Point(0.2, 0.2)) for pad in [])
+    front_rects: list[tuple[Point, Point]] = []
+    back_rects: list[tuple[Point, Point]] = []
+    tht_rects: list[tuple[Point, Point]] = []
+    if comp.pads:
+        for pad in comp.pads:
+            rect = (
+                Point(pad.pos.x - 0.2, pad.pos.y - 0.2),
+                Point(pad.pos.x + 0.2, pad.pos.y + 0.2),
+            )
+            if comp.is_through_hole:
+                front_rects.append(rect)
+                back_rects.append(rect)
+                tht_rects.append(rect)
+            elif comp.layer == 0:
+                front_rects.append(rect)
+            else:
+                back_rects.append(rect)
+    elif comp.is_through_hole:
+        tht_rects.append(bbox)
+    else:
+        if comp.layer == 0:
+            front_rects.append(bbox)
+        else:
+            back_rects.append(bbox)
+    return LeafBlockerSet(
+        front_pads=tuple(front_rects),
+        back_pads=tuple(back_rects),
+        tht_drills=tuple(tht_rects),
+        leaf_outline=bbox,
+    )
+
+
+def _make_placed_item(
+    *,
+    bbox: tuple[Point, Point],
+    envelopes,
+    blocker_set: LeafBlockerSet | None,
+    origin: Point,
+    rotation: float,
+    label: str,
+) -> dict[str, Any]:
+    return {
+        "bbox": bbox,
+        "envelopes": envelopes,
+        "blocker_set": blocker_set,
+        "origin": origin,
+        "rotation": rotation,
+        "label": label,
+    }
+
+
+def _placed_items_conflict(
+    existing_item: dict[str, Any],
+    candidate_bbox: tuple[Point, Point],
+    candidate_envelopes,
+    candidate_blocker_set: LeafBlockerSet | None,
+    candidate_origin: Point,
+    candidate_rotation: float,
+) -> bool:
+    existing_bbox = existing_item["bbox"]
+    if _bbox_disjoint(existing_bbox, candidate_bbox):
+        return False
+    existing_blocker_set = existing_item.get("blocker_set")
+    if existing_blocker_set is not None and candidate_blocker_set is not None:
+        return not can_overlap_sparse(
+            existing_blocker_set,
+            existing_item["origin"],
+            existing_item["rotation"],
+            candidate_blocker_set,
+            candidate_origin,
+            candidate_rotation,
+        )
+    return not can_overlap(existing_item["envelopes"], candidate_envelopes)
+
+
+def _keep_in_conflict(
+    blocker_set: LeafBlockerSet | None,
+    origin: Point,
+    rotation: float,
+    keep_in_rects: list[tuple[Point, Point]],
+) -> bool:
+    if blocker_set is None:
+        return False
+    outline = blocker_set.leaf_outline
+    transformed_outline = _shift_bbox(outline, origin)
+    if rotation % 360.0:
+        transformed_outline = outline
+        from kicraft.autoplacer.brain.subcircuit_composer import _transform_rect
+
+        transformed_outline = _transform_rect(outline, origin, rotation)
+    return any(not _bbox_disjoint(transformed_outline, rect) for rect in keep_in_rects)
+
+
 def _component_geometry_bbox(comp) -> tuple[Point, Point]:
     bbox_min, bbox_max = comp.bbox()
     min_x = bbox_min.x
@@ -401,6 +519,7 @@ def _make_unconstrained_model(index: int, artifact, rotation_step_deg: float) ->
     return PlacementModel(
         rotation=rotation,
         transformed=transformed,
+        blocker_set=extract_leaf_blocker_set(artifact),
         layer_envelopes=child_layer_envelopes(transformed),
         constraint_entries=[],
     )
@@ -439,7 +558,11 @@ def _find_non_overlapping_origin(
     placed_bboxes: list[tuple[Point, Point]],
     placed_envelopes,
     spacing_mm: float,
+    parent_local_keep_in_rects: list[tuple[Point, Point]] | None = None,
 ) -> Point:
+    parent_local_keep_in_rects = parent_local_keep_in_rects or []
+    legal_overlap_candidates: list[Point] = []
+    legal_empty_candidates: list[Point] = []
     for candidate in _candidate_positions(
         proposed,
         frame_min,
@@ -451,17 +574,38 @@ def _find_non_overlapping_origin(
         candidate_bbox = _shift_bbox(model.transformed.bounding_box, candidate)
         if not _bbox_inside_frame(candidate_bbox, frame_min, frame_max):
             continue
+        if _keep_in_conflict(
+            model.blocker_set,
+            candidate,
+            model.rotation,
+            parent_local_keep_in_rects,
+        ):
+            continue
         candidate_envelopes = _shift_layer_envelopes(model.layer_envelopes, candidate)
         collision = False
-        for existing_bbox, existing_envelopes in zip(placed_bboxes, placed_envelopes):
-            if _bbox_disjoint(existing_bbox, candidate_bbox):
-                continue
-            if can_overlap(existing_envelopes, candidate_envelopes):
-                continue
-            collision = True
-            break
+        has_real_overlap = False
+        for existing_item in placed_envelopes:
+            if not _bbox_disjoint(existing_item["bbox"], candidate_bbox):
+                has_real_overlap = True
+            if _placed_items_conflict(
+                existing_item,
+                candidate_bbox,
+                candidate_envelopes,
+                model.blocker_set,
+                candidate,
+                model.rotation,
+            ):
+                collision = True
+                break
         if not collision:
-            return candidate
+            if has_real_overlap:
+                legal_overlap_candidates.append(candidate)
+            else:
+                legal_empty_candidates.append(candidate)
+    if legal_overlap_candidates:
+        return legal_overlap_candidates[0]
+    if legal_empty_candidates:
+        return legal_empty_candidates[0]
     raise ValueError(
         "Unable to place unconstrained child inside composition frame "
         f"({frame_min.x:.3f},{frame_min.y:.3f})-({frame_max.x:.3f},{frame_max.y:.3f})"
@@ -477,30 +621,14 @@ def _ordered_unconstrained_indices(mode: str, unconstrained_artifacts, spacing_m
             return 0.0
         return max(0.0, bbox[1].x - bbox[0].x) * max(0.0, bbox[1].y - bbox[0].y)
 
-    def _union_area(a: tuple[Point, Point] | None, b: tuple[Point, Point] | None) -> float:
-        if a is None:
-            return _bbox_area(b)
-        if b is None:
-            return _bbox_area(a)
-        min_x = min(a[0].x, b[0].x)
-        min_y = min(a[0].y, b[0].y)
-        max_x = max(a[1].x, b[1].x)
-        max_y = max(a[1].y, b[1].y)
-        return max(0.0, max_x - min_x) * max(0.0, max_y - min_y)
-
     def _sort_metrics(item):
         index, artifact = item
-        transformed = transform_loaded_artifact(
-            artifact,
-            origin=Point(0.0, 0.0),
-            rotation=0.0,
-        )
-        front_surface, back_surface, tht_keepout = child_layer_envelopes(transformed)
-        front_blocker_area = sum(_union_area(rect, None) for rect in front_surface) + sum(_union_area(rect, None) for rect in tht_keepout)
-        back_blocker_area = sum(_union_area(rect, None) for rect in back_surface) + sum(_union_area(rect, None) for rect in tht_keepout)
+        blocker_set = extract_leaf_blocker_set(artifact)
+        front_blocker_area = sum(_rect_area(rect) for rect in blocker_set.front_pads) + sum(_rect_area(rect) for rect in blocker_set.tht_drills)
+        back_blocker_area = sum(_rect_area(rect) for rect in blocker_set.back_pads) + sum(_rect_area(rect) for rect in blocker_set.tht_drills)
         has_tht_or_dual = int(
-            bool(tht_keepout)
-            or (bool(front_surface) and bool(back_surface))
+            bool(blocker_set.tht_drills)
+            or dominant_blocker_side(blocker_set) == "dual"
         )
         total_bbox_area = max(0.0, artifact.layout.width) * max(0.0, artifact.layout.height)
         return (
@@ -594,6 +722,7 @@ def _compose_artifacts(
     final_models: dict[int, PlacementModel] = {}
     placed_child_bboxes: dict[int, tuple[Point, Point]] = {}
     child_anchor_positions: dict[str, Point] = {}
+    parent_local_keep_in_rects: list[tuple[Point, Point]] = []
 
     def _append_entry(index: int, artifact, origin: Point, model: PlacementModel):
         transformed = transform_loaded_artifact(
@@ -723,13 +852,17 @@ def _compose_artifacts(
 
                 shifted_envelopes = _shift_layer_envelopes(model.layer_envelopes, origin)
                 overlap_conflict = False
-                for existing_bbox, existing_envelopes in zip(placed_child_bboxes.values(), placed_envelopes):
-                    if _bbox_disjoint(existing_bbox, placed_bbox):
-                        continue
-                    if can_overlap(existing_envelopes, shifted_envelopes):
-                        continue
-                    overlap_conflict = True
-                    break
+                for existing_item in placed_envelopes:
+                    if _placed_items_conflict(
+                        existing_item,
+                        placed_bbox,
+                        shifted_envelopes,
+                        model.blocker_set,
+                        origin,
+                        model.rotation,
+                    ):
+                        overlap_conflict = True
+                        break
                 if overlap_conflict:
                     continue
 
@@ -753,13 +886,17 @@ def _compose_artifacts(
                             continue
                         shifted_envelopes = _shift_layer_envelopes(model.layer_envelopes, origin)
                         overlap_conflict = False
-                        for existing_bbox, existing_envelopes in zip(placed_child_bboxes.values(), placed_envelopes):
-                            if _bbox_disjoint(existing_bbox, placed_bbox):
-                                continue
-                            if can_overlap(existing_envelopes, shifted_envelopes):
-                                continue
-                            overlap_conflict = True
-                            break
+                        for existing_item in placed_envelopes:
+                            if _placed_items_conflict(
+                                existing_item,
+                                placed_bbox,
+                                shifted_envelopes,
+                                model.blocker_set,
+                                origin,
+                                model.rotation,
+                            ):
+                                overlap_conflict = True
+                                break
                         if overlap_conflict:
                             continue
                         selected_model = model
@@ -776,7 +913,16 @@ def _compose_artifacts(
             transformed = _append_entry(child_index, artifact, selected_origin, selected_model)
             final_models[child_index] = selected_model
             placed_child_bboxes[child_index] = selected_bbox
-            placed_envelopes.append(_shift_layer_envelopes(selected_model.layer_envelopes, selected_origin))
+            placed_envelopes.append(
+                _make_placed_item(
+                    bbox=selected_bbox,
+                    envelopes=_shift_layer_envelopes(selected_model.layer_envelopes, selected_origin),
+                    blocker_set=selected_model.blocker_set,
+                    origin=selected_origin,
+                    rotation=selected_model.rotation,
+                    label=artifact.sheet_name,
+                )
+            )
             for entry in selected_model.constraint_entries:
                 child_anchor_positions[entry.constraint.ref] = Point(
                     selected_origin.x + entry.local_anchor_offset.x,
@@ -875,11 +1021,21 @@ def _compose_artifacts(
                 list(placed_child_bboxes.values()),
                 placed_envelopes,
                 spacing_mm,
+                parent_local_keep_in_rects=parent_local_keep_in_rects,
             )
             placed_bbox = _shift_bbox(model.transformed.bounding_box, origin)
             transformed = _append_entry(index, artifact, origin, model)
             placed_child_bboxes[index] = placed_bbox
-            placed_envelopes.append(_shift_layer_envelopes(model.layer_envelopes, origin))
+            placed_envelopes.append(
+                _make_placed_item(
+                    bbox=placed_bbox,
+                    envelopes=_shift_layer_envelopes(model.layer_envelopes, origin),
+                    blocker_set=model.blocker_set,
+                    origin=origin,
+                    rotation=model.rotation,
+                    label=artifact.sheet_name,
+                )
+            )
 
             if mode == "column":
                 row_y = placed_bbox[1].y + spacing_mm
@@ -936,6 +1092,23 @@ def _compose_artifacts(
         )
 
     _place_parent_local_components(parent_local, derived_constraints.parent_local_constraints, exact_outline)
+    parent_local_keep_in_rects = []
+    for constraint in derived_constraints.parent_local_constraints:
+        comp = parent_local.get(constraint.ref)
+        if comp is None:
+            continue
+        bbox_min, bbox_max = _component_geometry_bbox(comp)
+        keep_in = (
+            Point(
+                bbox_min.x - constraint.inward_keep_in_mm,
+                bbox_min.y - constraint.inward_keep_in_mm,
+            ),
+            Point(
+                bbox_max.x + constraint.inward_keep_in_mm,
+                bbox_max.y + constraint.inward_keep_in_mm,
+            ),
+        )
+        parent_local_keep_in_rects.append(keep_in)
     outline_w = exact_outline[1].x - exact_outline[0].x
     outline_h = exact_outline[1].y - exact_outline[0].y
     packing_metadata["board_width_mm"] = round(outline_w, 2)
@@ -1060,15 +1233,30 @@ def _compose_artifacts(
         for entry in entries
     ]
     for i, j in itertools.combinations(range(len(final_placed_envelopes)), 2):
-        env_a = final_placed_envelopes[i]
-        env_b = final_placed_envelopes[j]
+        item_a = final_placed_envelopes[i]
+        item_b = final_placed_envelopes[j]
+        env_a = item_a["envelopes"]
+        env_b = item_b["envelopes"]
         art_a = loaded_artifacts[ordered_entry_indices[i]]
         art_b = loaded_artifacts[ordered_entry_indices[j]]
         rect_a = placed_child_bboxes[ordered_entry_indices[i]]
         rect_b = placed_child_bboxes[ordered_entry_indices[j]]
 
         if not _bbox_disjoint(rect_a, rect_b):
-            if not can_overlap(env_a, env_b):
+            blocker_a = item_a.get("blocker_set")
+            blocker_b = item_b.get("blocker_set")
+            if blocker_a is not None and blocker_b is not None:
+                overlap_ok = can_overlap_sparse(
+                    blocker_a,
+                    item_a["origin"],
+                    item_a["rotation"],
+                    blocker_b,
+                    item_b["origin"],
+                    item_b["rotation"],
+                )
+            else:
+                overlap_ok = can_overlap(env_a, env_b)
+            if not overlap_ok:
                 a_label = getattr(art_a, "label", getattr(art_a, "slug", getattr(art_a, "sheet_name", f"child[{i}]")))
                 b_label = getattr(art_b, "label", getattr(art_b, "slug", getattr(art_b, "sheet_name", f"child[{j}]")))
 
@@ -1086,6 +1274,12 @@ def _compose_artifacts(
                 elif (
                     not _rect_lists_disjoint(a_front, b_front)
                     or not _rect_lists_disjoint(a_back, b_back)
+                    or (
+                        blocker_a is not None
+                        and blocker_b is not None
+                        and dominant_blocker_side(blocker_a) in {"front", "back"}
+                        and dominant_blocker_side(blocker_a) == dominant_blocker_side(blocker_b)
+                    )
                 ):
                     same_side_overlap_conflicts.append((a_label, b_label))
 
