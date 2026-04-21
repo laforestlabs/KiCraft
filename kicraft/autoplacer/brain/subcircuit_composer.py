@@ -156,6 +156,42 @@ class AttachmentConstraint:
     outward_overhang_mm: float
     source: Literal["child_artifact", "parent_local"]
     child_index: int | None
+    strict: bool = True
+
+
+@dataclass(slots=True)
+class PlacementConstraintEntry:
+    constraint: AttachmentConstraint
+    local_anchor_offset: Point
+
+
+@dataclass(slots=True)
+class PlacementModel:
+    rotation: float
+    transformed: TransformedSubcircuit
+    layer_envelopes: tuple[
+        tuple[Point, Point] | None,
+        tuple[Point, Point] | None,
+        tuple[Point, Point] | None,
+    ]
+    constraint_entries: list[PlacementConstraintEntry] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class PlacementSpec:
+    child_index: int
+    instance_path: str
+    rotation_candidates: list[float]
+    all_rotation_candidates: list[float]
+    constraints: list[AttachmentConstraint] = field(default_factory=list)
+    models: dict[float, PlacementModel] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class DerivedAttachmentConstraints:
+    constraints: list[AttachmentConstraint] = field(default_factory=list)
+    child_specs: dict[int, PlacementSpec] = field(default_factory=dict)
+    parent_local_constraints: list[AttachmentConstraint] = field(default_factory=list)
 
 
 def derive_attachment_constraints(
@@ -163,8 +199,13 @@ def derive_attachment_constraints(
     parent_local_components: dict[str, Component],
     component_zones: dict[str, str],
     cfg: dict[str, Any],
-) -> list[AttachmentConstraint]:
-    constraints = []
+    *,
+    rotation_step_deg: float = 0.0,
+) -> DerivedAttachmentConstraints:
+    constraints: list[AttachmentConstraint] = []
+    child_constraints: dict[int, list[AttachmentConstraint]] = {}
+    logger = logging.getLogger(__name__)
+
     for ref, zone_spec in component_zones.items():
         if isinstance(zone_spec, dict):
             if not zone_spec:
@@ -200,8 +241,11 @@ def derive_attachment_constraints(
                 comp = parent_local_components[ref]
 
         if source is None or comp is None:
-            logging.getLogger(__name__).warning(
-                f"Component {ref} constrained to {zone_str} but not found in any artifact or local components"
+            logger.warning(
+                "Component %s constrained to %s:%s but not found in any artifact or local components",
+                ref,
+                target,
+                value,
             )
             continue
 
@@ -229,57 +273,330 @@ def derive_attachment_constraints(
                 outward_overhang_mm=outward,
                 source=source,
                 child_index=child_idx,
+                strict=target in ("edge", "corner"),
             )
         )
-    return constraints
+        constraint = constraints[-1]
+        if constraint.source == "child_artifact" and constraint.child_index is not None:
+            child_constraints.setdefault(int(constraint.child_index), []).append(constraint)
+
+    child_specs: dict[int, PlacementSpec] = {}
+    for child_index, grouped_constraints in child_constraints.items():
+        artifact = loaded_artifacts[child_index]
+        base_rotation = (child_index * rotation_step_deg) % 360.0
+        all_rotation_candidates = [
+            (base_rotation + delta) % 360.0 for delta in (0.0, 90.0, 180.0, 270.0)
+        ]
+        child_specs[child_index] = PlacementSpec(
+            child_index=child_index,
+            instance_path=artifact.instance_path,
+            rotation_candidates=[all_rotation_candidates[0]],
+            all_rotation_candidates=all_rotation_candidates,
+            constraints=list(grouped_constraints),
+            models=_build_models_for_artifact(artifact, grouped_constraints, all_rotation_candidates),
+        )
+
+    return DerivedAttachmentConstraints(
+        constraints=constraints,
+        child_specs=child_specs,
+        parent_local_constraints=[
+            constraint for constraint in constraints if constraint.source == "parent_local"
+        ],
+    )
+
+
+def _build_models_for_artifact(
+    artifact: Any,
+    constraints: list[AttachmentConstraint],
+    rotation_candidates: list[float],
+) -> dict[float, PlacementModel]:
+    models: dict[float, PlacementModel] = {}
+    for rotation in rotation_candidates:
+        transformed = transform_loaded_artifact(
+            artifact,
+            origin=Point(0.0, 0.0),
+            rotation=rotation,
+        )
+        models[rotation] = PlacementModel(
+            rotation=rotation,
+            transformed=transformed,
+            layer_envelopes=child_layer_envelopes(transformed),
+            constraint_entries=[
+                PlacementConstraintEntry(
+                    constraint=constraint,
+                    local_anchor_offset=_compute_local_anchor_offset(
+                        transformed,
+                        constraint,
+                        rotation,
+                    ),
+                )
+                for constraint in constraints
+            ],
+        )
+    return models
+
+
+def expand_rotation_candidates(spec: PlacementSpec) -> None:
+    spec.rotation_candidates = list(spec.all_rotation_candidates)
+
+
+def _constraint_sides(constraint: AttachmentConstraint) -> list[str]:
+    if constraint.target == "edge":
+        return [constraint.value]
+    if constraint.target == "corner":
+        return [side for side in constraint.value.split("-") if side]
+    if constraint.target == "zone" and constraint.value in {"left", "right", "top", "bottom"}:
+        return [constraint.value]
+    return []
+
+
+def _compute_mounting_hole_anchor(component: Component) -> Point:
+    if component.pads:
+        pad_x = sum(pad.pos.x for pad in component.pads) / len(component.pads)
+        pad_y = sum(pad.pos.y for pad in component.pads) / len(component.pads)
+        return Point(pad_x, pad_y)
+    return component.body_center if component.body_center is not None else component.pos
+
+
+def _compute_local_anchor_offset(
+    transformed: TransformedSubcircuit,
+    constraint: AttachmentConstraint,
+    rotation_deg: float,
+) -> Point:
+    component = transformed.transformed_components[constraint.ref]
+    bbox_min, bbox_max = transformed.bounding_box
+
+    if constraint.ref.startswith("H") or "hole" in getattr(component, "kind", "").lower():
+        return _compute_mounting_hole_anchor(component)
+
+    anchor = Point(
+        (bbox_min.x + bbox_max.x) / 2.0,
+        (bbox_min.y + bbox_max.y) / 2.0,
+    )
+    sides = _constraint_sides(constraint)
+
+    for side in sides:
+        if side == "left":
+            anchor.x = bbox_min.x
+        elif side == "right":
+            anchor.x = bbox_max.x
+        elif side == "top":
+            anchor.y = bbox_min.y
+        elif side == "bottom":
+            anchor.y = bbox_max.y
+
+    return anchor
 
 
 def constrained_child_offset(
-    artifact: Any,
-    constraint: AttachmentConstraint,
-    rotation_deg: float,
+    placement_model: PlacementModel,
     parent_outline_min: Point,
     parent_outline_max: Point,
 ) -> Point:
-    import math
+    origin, _ = place_constrained_child(
+        placement_model,
+        parent_outline_min=parent_outline_min,
+        parent_outline_max=parent_outline_max,
+    )
+    return origin
 
-    comp = artifact.layout.components[constraint.ref]
-    center = comp.body_center if comp.body_center else comp.pos
 
-    rad = math.radians(rotation_deg)
-    rx = center.x * math.cos(rad) - center.y * math.sin(rad)
-    ry = center.x * math.sin(rad) + center.y * math.cos(rad)
+def _exact_target_coordinate(
+    side: str,
+    constraint: AttachmentConstraint,
+    parent_outline_min: Point,
+    parent_outline_max: Point,
+) -> float:
+    if side == "left":
+        return parent_outline_min.x + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
+    if side == "right":
+        return parent_outline_max.x - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
+    if side == "top":
+        return parent_outline_min.y + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
+    if side == "bottom":
+        return parent_outline_max.y - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
+    raise ValueError(f"Unsupported constrained side: {side}")
 
-    target_x = rx
-    target_y = ry
 
-    if constraint.target == "edge":
-        if constraint.value == "left":
-            target_x = parent_outline_min.x + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
-        elif constraint.value == "right":
-            target_x = parent_outline_max.x - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
-        elif constraint.value == "top":
-            target_y = parent_outline_min.y + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
-        elif constraint.value == "bottom":
-            target_y = parent_outline_max.y - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
-    elif constraint.target == "corner":
-        if constraint.value == "top-left":
-            target_x = parent_outline_min.x + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
-            target_y = parent_outline_min.y + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
-        elif constraint.value == "top-right":
-            target_x = parent_outline_max.x - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
-            target_y = parent_outline_min.y + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
-        elif constraint.value == "bottom-left":
-            target_x = parent_outline_min.x + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
-            target_y = parent_outline_max.y - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
-        elif constraint.value == "bottom-right":
-            target_x = parent_outline_max.x - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
-            target_y = parent_outline_max.y - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
-    elif constraint.target == "zone":
-        if constraint.value == "bottom":
-            target_y = parent_outline_max.y - constraint.inward_keep_in_mm
+def _zone_band_interval(
+    side: str,
+    entry: PlacementConstraintEntry,
+    parent_outline_min: Point,
+    parent_outline_max: Point,
+) -> tuple[float, float]:
+    frame_width = max(0.0, parent_outline_max.x - parent_outline_min.x)
+    frame_height = max(0.0, parent_outline_max.y - parent_outline_min.y)
+    if side == "bottom":
+        band_min = parent_outline_min.y + frame_height * 0.5
+        band_max = parent_outline_max.y - entry.constraint.inward_keep_in_mm
+        return (
+            band_min - entry.local_anchor_offset.y,
+            band_max - entry.local_anchor_offset.y,
+        )
+    if side == "top":
+        band_min = parent_outline_min.y + entry.constraint.inward_keep_in_mm
+        band_max = parent_outline_min.y + frame_height * 0.5
+        return (
+            band_min - entry.local_anchor_offset.y,
+            band_max - entry.local_anchor_offset.y,
+        )
+    if side == "left":
+        band_min = parent_outline_min.x + entry.constraint.inward_keep_in_mm
+        band_max = parent_outline_min.x + frame_width * 0.5
+        return (
+            band_min - entry.local_anchor_offset.x,
+            band_max - entry.local_anchor_offset.x,
+        )
+    if side == "right":
+        band_min = parent_outline_min.x + frame_width * 0.5
+        band_max = parent_outline_max.x - entry.constraint.inward_keep_in_mm
+        return (
+            band_min - entry.local_anchor_offset.x,
+            band_max - entry.local_anchor_offset.x,
+        )
+    raise ValueError(f"Unsupported zone side: {side}")
 
-    return Point(target_x - rx, target_y - ry)
+
+def _resolve_exact_axis_origin(
+    axis: Literal["x", "y"],
+    entries: list[PlacementConstraintEntry],
+    parent_outline_min: Point,
+    parent_outline_max: Point,
+    tolerance_mm: float = 1e-3,
+) -> float | None:
+    exact_targets: list[tuple[str, float]] = []
+    zone_ranges: list[tuple[str, tuple[float, float]]] = []
+    for entry in entries:
+        for side in _constraint_sides(entry.constraint):
+            if axis == "x" and side not in {"left", "right"}:
+                continue
+            if axis == "y" and side not in {"top", "bottom"}:
+                continue
+            if entry.constraint.strict:
+                exact_targets.append(
+                    (
+                        entry.constraint.ref,
+                        _exact_target_coordinate(
+                            side,
+                            entry.constraint,
+                            parent_outline_min,
+                            parent_outline_max,
+                        )
+                        - (entry.local_anchor_offset.x if axis == "x" else entry.local_anchor_offset.y),
+                    )
+                )
+            else:
+                zone_ranges.append(
+                    (
+                        entry.constraint.ref,
+                        _zone_band_interval(
+                            side,
+                            entry,
+                            parent_outline_min,
+                            parent_outline_max,
+                        ),
+                    )
+                )
+
+    if exact_targets:
+        values = [value for _, value in exact_targets]
+        reference = values[0]
+        if any(abs(value - reference) > tolerance_mm for value in values[1:]):
+            detail = ", ".join(
+                f"{ref}={value:.3f}" for ref, value in exact_targets
+            )
+            axis_name = "x" if axis == "x" else "y"
+            raise ValueError(f"Conflicting attachment targets on {axis_name}-axis: {detail}")
+        return reference
+
+    if zone_ranges:
+        lower = max(interval[0] for _, interval in zone_ranges)
+        upper = min(interval[1] for _, interval in zone_ranges)
+        if lower > upper + tolerance_mm:
+            detail = ", ".join(
+                f"{ref}=[{interval[0]:.3f},{interval[1]:.3f}]"
+                for ref, interval in zone_ranges
+            )
+            axis_name = "x" if axis == "x" else "y"
+            raise ValueError(f"Infeasible zone attachment band on {axis_name}-axis: {detail}")
+        return upper
+
+    return None
+
+
+def place_constrained_child(
+    placement_model: PlacementModel,
+    *,
+    parent_outline_min: Point,
+    parent_outline_max: Point,
+) -> tuple[Point, tuple[Point, Point]]:
+    origin_x = _resolve_exact_axis_origin(
+        "x",
+        placement_model.constraint_entries,
+        parent_outline_min,
+        parent_outline_max,
+    )
+    origin_y = _resolve_exact_axis_origin(
+        "y",
+        placement_model.constraint_entries,
+        parent_outline_min,
+        parent_outline_max,
+    )
+
+    bbox_min, bbox_max = placement_model.transformed.bounding_box
+    if origin_x is None:
+        origin_x = parent_outline_min.x - bbox_min.x
+    if origin_y is None:
+        origin_y = parent_outline_min.y - bbox_min.y
+
+    placed_bbox = (
+        Point(origin_x + bbox_min.x, origin_y + bbox_min.y),
+        Point(origin_x + bbox_max.x, origin_y + bbox_max.y),
+    )
+    return Point(origin_x, origin_y), placed_bbox
+
+
+def validate_child_constraints(
+    placement_model: PlacementModel,
+    origin: Point,
+    parent_outline_min: Point,
+    parent_outline_max: Point,
+    *,
+    tolerance_mm: float = 1e-3,
+) -> None:
+    for entry in placement_model.constraint_entries:
+        world_anchor = Point(
+            origin.x + entry.local_anchor_offset.x,
+            origin.y + entry.local_anchor_offset.y,
+        )
+        for side in _constraint_sides(entry.constraint):
+            if entry.constraint.strict:
+                expected = _exact_target_coordinate(
+                    side,
+                    entry.constraint,
+                    parent_outline_min,
+                    parent_outline_max,
+                )
+                actual = world_anchor.x if side in {"left", "right"} else world_anchor.y
+                if abs(actual - expected) > tolerance_mm:
+                    raise ValueError(
+                        f"Constraint not satisfied for {entry.constraint.ref} on {side}: "
+                        f"expected {expected:.3f}, got {actual:.3f}"
+                    )
+                continue
+
+            lower, upper = _zone_band_interval(
+                side,
+                entry,
+                parent_outline_min,
+                parent_outline_max,
+            )
+            actual_origin = origin.x if side in {"left", "right"} else origin.y
+            if actual_origin < lower - tolerance_mm or actual_origin > upper + tolerance_mm:
+                raise ValueError(
+                    f"Zone constraint not satisfied for {entry.constraint.ref} on {side}: "
+                    f"expected origin in [{lower:.3f}, {upper:.3f}], got {actual_origin:.3f}"
+                )
 
 
 def build_parent_composition(
@@ -993,10 +1310,9 @@ def can_overlap(
 
 
 def constraint_aware_outline(
-    child_origins: list[Point],
-    child_bboxes: list[tuple[float, float]],
+    placed_bboxes: list[tuple[Point, Point]],
     attachment_constraints: list[AttachmentConstraint],
-    constrained_ref_world_centers: dict[str, Point],
+    constrained_ref_world_anchors: dict[str, Point],
     margin_mm: float = 1.5,
 ) -> tuple[Point, Point]:
     """Compute parent board outline respecting both geometry and constraint targets.
@@ -1005,19 +1321,18 @@ def constraint_aware_outline(
     For constrained sides, uses the exact target coordinate derived from the
     constrained component's world position and keep-in/overhang values.
     """
-    if not child_origins:
+    if not placed_bboxes:
         return (Point(0.0, 0.0), Point(10.0, 10.0))
 
-    # Base geometry extents
-    min_geom_x = min(o.x for o in child_origins)
-    min_geom_y = min(o.y for o in child_origins)
-    max_geom_x = max(o.x + w for o, (w, h) in zip(child_origins, child_bboxes))
-    max_geom_y = max(o.y + h for o, (w, h) in zip(child_origins, child_bboxes))
+    min_geom_x = min(bbox[0].x for bbox in placed_bboxes)
+    min_geom_y = min(bbox[0].y for bbox in placed_bboxes)
+    max_geom_x = max(bbox[1].x for bbox in placed_bboxes)
+    max_geom_y = max(bbox[1].y for bbox in placed_bboxes)
 
-    out_min_x = min_geom_x - margin_mm
-    out_min_y = min_geom_y - margin_mm
-    out_max_x = max_geom_x + margin_mm
-    out_max_y = max_geom_y + margin_mm
+    out_min_x = min_geom_x
+    out_min_y = min_geom_y
+    out_max_x = max_geom_x
+    out_max_y = max_geom_y
 
     # Override with constraint targets
     left_edges = []
@@ -1026,29 +1341,37 @@ def constraint_aware_outline(
     bottom_edges = []
 
     for c in attachment_constraints:
-        if c.ref not in constrained_ref_world_centers:
+        if c.ref not in constrained_ref_world_anchors:
             continue
-        center = constrained_ref_world_centers[c.ref]
+        anchor = constrained_ref_world_anchors[c.ref]
 
         if c.target == "edge" or c.target == "corner":
             v = c.value
             if "left" in v:
-                left_edges.append(center.x - c.inward_keep_in_mm + c.outward_overhang_mm)
+                left_edges.append(anchor.x - c.inward_keep_in_mm + c.outward_overhang_mm)
             if "right" in v:
-                right_edges.append(center.x + c.inward_keep_in_mm - c.outward_overhang_mm)
+                right_edges.append(anchor.x + c.inward_keep_in_mm - c.outward_overhang_mm)
             if "top" in v:
-                top_edges.append(center.y - c.inward_keep_in_mm + c.outward_overhang_mm)
+                top_edges.append(anchor.y - c.inward_keep_in_mm + c.outward_overhang_mm)
             if "bottom" in v:
-                bottom_edges.append(center.y + c.inward_keep_in_mm - c.outward_overhang_mm)
+                bottom_edges.append(anchor.y + c.inward_keep_in_mm - c.outward_overhang_mm)
 
     if left_edges:
-        out_min_x = min(left_edges)
+        out_min_x = min(min_geom_x, min(left_edges))
+    else:
+        out_min_x = min_geom_x - margin_mm
     if right_edges:
-        out_max_x = max(right_edges)
+        out_max_x = max(max_geom_x, max(right_edges))
+    else:
+        out_max_x = max_geom_x + margin_mm
     if top_edges:
-        out_min_y = min(top_edges)
+        out_min_y = min(min_geom_y, min(top_edges))
+    else:
+        out_min_y = min_geom_y - margin_mm
     if bottom_edges:
-        out_max_y = max(bottom_edges)
+        out_max_y = max(max_geom_y, max(bottom_edges))
+    else:
+        out_max_y = max_geom_y + margin_mm
 
     return Point(out_min_x, out_min_y), Point(out_max_x, out_max_y)
 
@@ -1103,8 +1426,7 @@ def estimate_parent_board_size(
 
 
 def packed_extents_outline(
-    origins: list[tuple[float, float]],
-    bboxes: list[tuple[float, float]],
+    placed_bboxes: list[tuple[Point, Point]],
     margin_mm: float = 1.5,
 ) -> tuple[Point, Point]:
     """Compute an exact board outline from already-packed child placements.
@@ -1117,19 +1439,15 @@ def packed_extents_outline(
     Returns:
         (top_left, bottom_right) ``Point`` pair for the board outline.
     """
-    if not origins or not bboxes:
+    if not placed_bboxes:
         return (Point(0.0, 0.0), Point(10.0, 10.0))
 
-    max_x = 0.0
-    max_y = 0.0
-    for (ox, oy), (w, h) in zip(origins, bboxes):
-        max_x = max(max_x, ox + w)
-        max_y = max(max_y, oy + h)
+    min_x = min(bbox[0].x for bbox in placed_bboxes)
+    min_y = min(bbox[0].y for bbox in placed_bboxes)
+    max_x = max(bbox[1].x for bbox in placed_bboxes)
+    max_y = max(bbox[1].y for bbox in placed_bboxes)
 
-    return (
-        Point(-margin_mm, -margin_mm),
-        Point(max_x + margin_mm, max_y + margin_mm),
-    )
+    return (Point(min_x - margin_mm, min_y - margin_mm), Point(max_x + margin_mm, max_y + margin_mm))
 
 
 def _derive_board_outline(
