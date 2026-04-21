@@ -345,6 +345,20 @@ def _shift_layer_envelopes(
     )
 
 
+def _component_geometry_bbox(comp) -> tuple[Point, Point]:
+    bbox_min, bbox_max = comp.bbox()
+    min_x = bbox_min.x
+    min_y = bbox_min.y
+    max_x = bbox_max.x
+    max_y = bbox_max.y
+    for pad in comp.pads:
+        min_x = min(min_x, pad.pos.x)
+        min_y = min(min_y, pad.pos.y)
+        max_x = max(max_x, pad.pos.x)
+        max_y = max(max_y, pad.pos.y)
+    return Point(min_x, min_y), Point(max_x, max_y)
+
+
 def _bbox_disjoint(a: tuple[Point, Point], b: tuple[Point, Point]) -> bool:
     return a[1].x <= b[0].x or b[1].x <= a[0].x or a[1].y <= b[0].y or b[1].y <= a[0].y
 
@@ -483,40 +497,38 @@ def _place_parent_local_components(
         if comp is None:
             continue
 
-        if comp.pads:
-            anchor = Point(
-                sum(pad.pos.x for pad in comp.pads) / len(comp.pads),
-                sum(pad.pos.y for pad in comp.pads) / len(comp.pads),
-            )
-        else:
-            anchor = comp.body_center if comp.body_center is not None else comp.pos
+        bbox_min, bbox_max = _component_geometry_bbox(comp)
+        delta_x = 0.0
+        delta_y = 0.0
+        left_target = min_pt.x + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
+        right_target = max_pt.x - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
+        top_target = min_pt.y + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
+        bottom_target = max_pt.y - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
 
-        target_x = anchor.x
-        target_y = anchor.y
         if constraint.target == "corner":
             if constraint.value == "top-left":
-                target_x = min_pt.x + constraint.inward_keep_in_mm
-                target_y = min_pt.y + constraint.inward_keep_in_mm
+                delta_x = left_target - bbox_min.x
+                delta_y = top_target - bbox_min.y
             elif constraint.value == "top-right":
-                target_x = max_pt.x - constraint.inward_keep_in_mm
-                target_y = min_pt.y + constraint.inward_keep_in_mm
+                delta_x = right_target - bbox_max.x
+                delta_y = top_target - bbox_min.y
             elif constraint.value == "bottom-left":
-                target_x = min_pt.x + constraint.inward_keep_in_mm
-                target_y = max_pt.y - constraint.inward_keep_in_mm
+                delta_x = left_target - bbox_min.x
+                delta_y = bottom_target - bbox_max.y
             elif constraint.value == "bottom-right":
-                target_x = max_pt.x - constraint.inward_keep_in_mm
-                target_y = max_pt.y - constraint.inward_keep_in_mm
+                delta_x = right_target - bbox_max.x
+                delta_y = bottom_target - bbox_max.y
         elif constraint.target == "edge":
             if constraint.value == "left":
-                target_x = min_pt.x + constraint.inward_keep_in_mm
+                delta_x = left_target - bbox_min.x
             elif constraint.value == "right":
-                target_x = max_pt.x - constraint.inward_keep_in_mm
+                delta_x = right_target - bbox_max.x
             elif constraint.value == "top":
-                target_y = min_pt.y + constraint.inward_keep_in_mm
+                delta_y = top_target - bbox_min.y
             elif constraint.value == "bottom":
-                target_y = max_pt.y - constraint.inward_keep_in_mm
+                delta_y = bottom_target - bbox_max.y
 
-        delta = Point(target_x - anchor.x, target_y - anchor.y)
+        delta = Point(delta_x, delta_y)
         _translate_component_geometry(comp, delta)
 
 

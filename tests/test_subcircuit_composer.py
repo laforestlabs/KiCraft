@@ -38,6 +38,10 @@ from kicraft.autoplacer.brain.types import (
     TraceSegment,
     Via,
 )
+from kicraft.cli.compose_subcircuits import (
+    _find_non_overlapping_origin,
+    _place_parent_local_components,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -621,3 +625,37 @@ class TestConstraintPlacementGeometry:
                 parent_outline_min=Point(0.0, 0.0),
                 parent_outline_max=Point(60.0, 40.0),
             )
+
+
+class TestParentLocalPlacement:
+    def test_mounting_hole_uses_bbox_edges_for_keep_in(self):
+        hole = Component(
+            ref="H4",
+            value="Hole",
+            pos=Point(2.5, 2.5),
+            rotation=0.0,
+            layer=Layer.FRONT,
+            width_mm=4.5,
+            height_mm=4.5,
+            body_center=Point(2.5, 2.5),
+        )
+        constraint = AttachmentConstraint(
+            ref="H4",
+            target="corner",
+            value="top-left",
+            inward_keep_in_mm=2.5,
+            outward_overhang_mm=0.0,
+            source="parent_local",
+            child_index=None,
+            strict=True,
+        )
+
+        _place_parent_local_components(
+            {"H4": hole},
+            [constraint],
+            (Point(0.0, 0.0), Point(80.0, 80.0)),
+        )
+
+        bbox_min, _ = hole.bbox()
+        assert bbox_min.x >= 2.5 - 1e-6
+        assert bbox_min.y >= 2.5 - 1e-6
