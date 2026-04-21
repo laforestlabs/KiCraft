@@ -148,3 +148,26 @@ def test_constraint_aware_outline_never_shrinks_below_geometry_union():
 
     assert min_pt.x == pytest.approx(-10.0)
     assert max_pt.x == pytest.approx(46.5)
+
+
+def test_constraint_aware_outline_uses_parent_local_anchor_when_provided():
+    constraint = AttachmentConstraint(
+        ref="H1",
+        target="corner",
+        value="bottom-right",
+        inward_keep_in_mm=2.5,
+        outward_overhang_mm=0.0,
+        source="parent_local",
+        child_index=None,
+        strict=True,
+    )
+
+    min_pt, max_pt = constraint_aware_outline(
+        placed_bboxes=[(Point(0.0, 0.0), Point(40.0, 20.0))],
+        attachment_constraints=[constraint],
+        constrained_ref_world_anchors={"H1": Point(77.5, 57.5)},
+        margin_mm=2.0,
+    )
+
+    assert max_pt.x == pytest.approx(80.0)
+    assert max_pt.y == pytest.approx(60.0)

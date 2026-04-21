@@ -620,6 +620,29 @@ def _occupied_pad_rects(placed_envelopes: list[dict[str, Any]]) -> list[tuple[Po
     return rects
 
 
+def _constraint_world_anchors(
+    child_anchor_positions: dict[str, Point],
+    parent_local: dict[str, Any],
+    constraints,
+) -> dict[str, Point]:
+    anchors = dict(child_anchor_positions)
+    for constraint in constraints:
+        if constraint.source != "parent_local":
+            continue
+        comp = parent_local.get(constraint.ref)
+        if comp is None:
+            continue
+        if comp.pads:
+            anchors[constraint.ref] = Point(
+                sum(pad.pos.x for pad in comp.pads) / len(comp.pads),
+                sum(pad.pos.y for pad in comp.pads) / len(comp.pads),
+            )
+        else:
+            anchor = comp.body_center if comp.body_center is not None else comp.pos
+            anchors[constraint.ref] = Point(anchor.x, anchor.y)
+    return anchors
+
+
 def _component_geometry_bbox(comp) -> tuple[Point, Point]:
     bbox_min, bbox_max = comp.bbox()
     min_x = bbox_min.x
@@ -1330,6 +1353,12 @@ def _compose_artifacts(
             for index, bbox in placed_child_bboxes.items()
         },
     )
+
+    for ref, comp in parent_local.items():
+        if ref in composition.board_state.components:
+            composition.board_state.components[ref] = copy.deepcopy(comp)
+        if ref in composition.hierarchy_state.local_components:
+            composition.hierarchy_state.local_components[ref] = copy.deepcopy(comp)
 
     import itertools
 
@@ -2044,8 +2073,6 @@ for _fp in board.Footprints():
     _ref = _fp.GetReferenceAsString()
     _comp = _comp_map.get(_ref)
     if _comp is None:
-        continue
-    if _fp.IsLocked():
         continue
     _cur_layer = 1 if _fp.GetLayer() == pcbnew.B_Cu else 0
     if _comp["layer"] != _cur_layer:
