@@ -303,6 +303,7 @@ def route_local_subcircuit(
     pre_route_validation_start = time.monotonic()
     pre_route_validation = validate_routed_board(
         str(pre_route_board),
+        cfg=cfg,
         expected_anchor_names=[port.name for port in extraction.interface_ports],
         actual_anchor_names=[port.name for port in extraction.interface_ports],
         required_anchor_names=[
@@ -430,6 +431,7 @@ def route_local_subcircuit(
     routed_validation_start = time.monotonic()
     validation = validate_routed_board(
         str(routed_board),
+        cfg=cfg,
         expected_anchor_names=[port.name for port in extraction.interface_ports],
         actual_anchor_names=[port.name for port in extraction.interface_ports],
         required_anchor_names=[

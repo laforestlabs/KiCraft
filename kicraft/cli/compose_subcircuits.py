@@ -2101,6 +2101,7 @@ def _route_parent_board(
     # Anchor completeness is a leaf-level gate, not a parent-level gate.
     validation = validate_routed_board(
         str(routed_pcb),
+        cfg=cfg,
         expected_anchor_names=[],
         actual_anchor_names=[],
         required_anchor_names=[],
