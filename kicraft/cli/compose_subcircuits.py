@@ -367,19 +367,6 @@ def _bbox_overlap_area(a: tuple[Point, Point], b: tuple[Point, Point]) -> float:
     return overlap_w * overlap_h
 
 
-def _opposite_layer_overlap_area(candidate_envelopes, existing_envelopes) -> float:
-    candidate_front, candidate_back, _ = candidate_envelopes
-    existing_front, existing_back, _ = existing_envelopes
-    overlap = 0.0
-    for rect_a in candidate_front:
-        for rect_b in existing_back:
-            overlap += _bbox_overlap_area(rect_a, rect_b)
-    for rect_a in candidate_back:
-        for rect_b in existing_front:
-            overlap += _bbox_overlap_area(rect_a, rect_b)
-    return overlap
-
-
 def _opposite_layer_bbox_overlap_area(
     candidate_bbox: tuple[Point, Point],
     candidate_envelopes,
@@ -456,8 +443,6 @@ def _rect_lists_disjoint(
             if not _bbox_disjoint(rect_a, rect_b):
                 return False
     return True
-
-
 def _bbox_inside_frame(
     bbox: tuple[Point, Point],
     frame_min: Point,
@@ -613,12 +598,25 @@ def _find_non_overlapping_origin(
             if not _bbox_inside_frame(candidate_bbox, frame_min, frame_max):
                 continue
             candidate_envelopes = _shift_layer_envelopes(model.layer_envelopes, candidate)
-            collision, intersects_existing, bbox_overlap_area, overlap_area = _candidate_overlap_metrics(
-                candidate_bbox,
-                candidate_envelopes,
-                placed_bboxes,
-                placed_envelopes,
-            )
+            collision = False
+            intersects_existing = False
+            bbox_overlap_area = 0.0
+            overlap_area = 0.0
+            for existing_bbox, existing_envelopes in zip(placed_bboxes, placed_envelopes):
+                if _bbox_disjoint(existing_bbox, candidate_bbox):
+                    continue
+                intersects_existing = True
+                if can_overlap(existing_envelopes, candidate_envelopes):
+                    bbox_overlap_area += _opposite_layer_bbox_overlap_area(
+                        candidate_bbox,
+                        candidate_envelopes,
+                        existing_bbox,
+                        existing_envelopes,
+                    )
+                    overlap_area += _bbox_overlap_area(existing_bbox, candidate_bbox)
+                    continue
+                collision = True
+                break
             if collision:
                 continue
             if require_overlap and not intersects_existing:
