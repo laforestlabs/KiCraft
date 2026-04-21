@@ -8,13 +8,18 @@ from __future__ import annotations
 import pytest
 
 from kicraft.autoplacer.brain.subcircuit_composer import (
+    AttachmentConstraint,
     ChildPlacement,
+    PlacementConstraintEntry,
+    PlacementModel,
     build_parent_composition,
     composition_summary,
     estimate_parent_board_size,
     packed_extents_outline,
+    place_constrained_child,
     _derive_board_outline,
 )
+from kicraft.autoplacer.brain.subcircuit_instances import TransformedSubcircuit
 from kicraft.autoplacer.brain.types import (
     Component,
     InterfaceAnchor,
@@ -27,6 +32,7 @@ from kicraft.autoplacer.brain.types import (
     Point,
     SubCircuitDefinition,
     SubCircuitId,
+    SubCircuitInstance,
     SubCircuitLayout,
     SubcircuitAccessPolicy,
     TraceSegment,
@@ -411,13 +417,13 @@ class TestEstimateParentBoardSize:
 
 class TestPackedExtentsOutline:
     def test_empty_returns_default(self):
-        tl, br = packed_extents_outline([], [])
+        tl, br = packed_extents_outline([])
         assert tl.x == 0.0
         assert br.x == 10.0
 
     def test_single_child(self):
         tl, br = packed_extents_outline(
-            [(0.0, 0.0)], [(20.0, 10.0)], margin_mm=1.0
+            [(Point(0.0, 0.0), Point(20.0, 10.0))], margin_mm=1.0
         )
         assert tl.x == pytest.approx(-1.0)
         assert tl.y == pytest.approx(-1.0)
@@ -426,8 +432,10 @@ class TestPackedExtentsOutline:
 
     def test_two_children_side_by_side(self):
         tl, br = packed_extents_outline(
-            [(0.0, 0.0), (25.0, 0.0)],
-            [(20.0, 10.0), (15.0, 8.0)],
+            [
+                (Point(0.0, 0.0), Point(20.0, 10.0)),
+                (Point(25.0, 0.0), Point(40.0, 8.0)),
+            ],
             margin_mm=1.5,
         )
         assert br.x == pytest.approx(25.0 + 15.0 + 1.5)
@@ -435,10 +443,10 @@ class TestPackedExtentsOutline:
 
     def test_zero_margin(self):
         tl, br = packed_extents_outline(
-            [(5.0, 3.0)], [(10.0, 8.0)], margin_mm=0.0
+            [(Point(5.0, 3.0), Point(15.0, 11.0))], margin_mm=0.0
         )
-        assert tl.x == pytest.approx(0.0)
-        assert tl.y == pytest.approx(0.0)
+        assert tl.x == pytest.approx(5.0)
+        assert tl.y == pytest.approx(3.0)
         assert br.x == pytest.approx(15.0)
         assert br.y == pytest.approx(11.0)
 
@@ -486,8 +494,11 @@ class TestPackingSpacingAffectsBoardSize:
             row_height = max(row_height, h)
             current_row_items += 1
 
-        bboxes = child_sizes
-        outline = packed_extents_outline(origins, bboxes)
+        placed_bboxes = [
+            (Point(x, y), Point(x + w, y + h))
+            for (x, y), (w, h) in zip(origins, child_sizes)
+        ]
+        outline = packed_extents_outline(placed_bboxes)
         outline_w = outline[1].x - outline[0].x
         outline_h = outline[1].y - outline[0].y
         return (outline_w, outline_h)
@@ -517,4 +528,96 @@ class TestPackingSpacingAffectsBoardSize:
             assert areas[i] <= areas[i + 1], (
                 f"Board area should not decrease as spacing increases: "
                 f"spacing sequence produced areas {[round(a, 1) for a in areas]}"
+            )
+
+
+class TestConstraintPlacementGeometry:
+    def _model(self, bbox_min: Point, bbox_max: Point, entries: list[PlacementConstraintEntry]) -> PlacementModel:
+        layout = _make_layout("NEG", {})
+        transformed = TransformedSubcircuit(
+            instance=SubCircuitInstance(
+                layout_id=layout.subcircuit_id,
+                origin=Point(0.0, 0.0),
+                rotation=0.0,
+                transformed_bbox=(bbox_max.x - bbox_min.x, bbox_max.y - bbox_min.y),
+            ),
+            layout=layout,
+            bounding_box=(bbox_min, bbox_max),
+        )
+        return PlacementModel(
+            rotation=0.0,
+            transformed=transformed,
+            layer_envelopes=(None, None, None),
+            constraint_entries=entries,
+        )
+
+    def test_negative_origin_children_are_supported(self):
+        model = self._model(
+            Point(-6.0, -4.0),
+            Point(8.0, 4.0),
+            [
+                PlacementConstraintEntry(
+                    constraint=AttachmentConstraint(
+                        ref="J1",
+                        target="edge",
+                        value="left",
+                        inward_keep_in_mm=0.0,
+                        outward_overhang_mm=0.0,
+                        source="child_artifact",
+                        child_index=0,
+                        strict=True,
+                    ),
+                    local_anchor_offset=Point(-6.0, 0.0),
+                )
+            ],
+        )
+
+        origin, bbox = place_constrained_child(
+            model,
+            parent_outline_min=Point(0.0, 0.0),
+            parent_outline_max=Point(100.0, 50.0),
+        )
+
+        assert origin.x == pytest.approx(6.0)
+        assert bbox[0].x == pytest.approx(0.0)
+
+    def test_infeasible_attachment_bands_raise_error(self):
+        model = self._model(
+            Point(-5.0, -5.0),
+            Point(5.0, 5.0),
+            [
+                PlacementConstraintEntry(
+                    constraint=AttachmentConstraint(
+                        ref="BT1",
+                        target="zone",
+                        value="bottom",
+                        inward_keep_in_mm=30.0,
+                        outward_overhang_mm=0.0,
+                        source="child_artifact",
+                        child_index=0,
+                        strict=False,
+                    ),
+                    local_anchor_offset=Point(0.0, 45.0),
+                ),
+                PlacementConstraintEntry(
+                    constraint=AttachmentConstraint(
+                        ref="BT2",
+                        target="zone",
+                        value="bottom",
+                        inward_keep_in_mm=30.0,
+                        outward_overhang_mm=0.0,
+                        source="child_artifact",
+                        child_index=0,
+                        strict=False,
+                    ),
+                    local_anchor_offset=Point(0.0, -10.0),
+                ),
+            ],
+        )
+
+        with pytest.raises(ValueError, match="Infeasible zone attachment band"):
+            _ = place_constrained_child(
+                model,
+                parent_outline_min=Point(0.0, 0.0),
+                parent_outline_max=Point(60.0, 40.0),
             )
