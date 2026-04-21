@@ -43,6 +43,7 @@ from kicraft.autoplacer.brain.types import (
 )
 from kicraft.cli.compose_subcircuits import (
     _find_non_overlapping_origin,
+    _preview_parent_local_keep_in_rects,
     _place_parent_local_components,
 )
 
@@ -745,6 +746,41 @@ class TestParentLocalPlacement:
         assert bbox_min.x >= 2.5 - 1e-6
         assert bbox_min.y >= 2.5 - 1e-6
 
+    def test_preview_keep_in_rects_match_shifted_mounting_hole(self):
+        hole = Component(
+            ref="MH1",
+            value="Hole",
+            pos=Point(2.0, 2.0),
+            rotation=0.0,
+            layer=Layer.FRONT,
+            width_mm=4.0,
+            height_mm=4.0,
+            body_center=Point(2.0, 2.0),
+        )
+        constraint = AttachmentConstraint(
+            ref="MH1",
+            target="corner",
+            value="top-left",
+            inward_keep_in_mm=2.5,
+            outward_overhang_mm=0.0,
+            source="parent_local",
+            child_index=None,
+            strict=True,
+        )
+
+        keep_in_rects = _preview_parent_local_keep_in_rects(
+            {"MH1": hole},
+            [constraint],
+            (Point(0.0, 0.0), Point(80.0, 80.0)),
+        )
+
+        assert len(keep_in_rects) == 1
+        keep_in_min, keep_in_max = keep_in_rects[0]
+        assert keep_in_min.x <= 0.0
+        assert keep_in_min.y <= 0.0
+        assert keep_in_max.x >= 9.0
+        assert keep_in_max.y >= 9.0
+
 
 class TestPackedPlacementOverlapScan:
     def test_second_leaf_scans_from_frame_origin_for_layer_overlap(self):
@@ -878,3 +914,37 @@ class TestPackedPlacementOverlapScan:
         )
 
         assert origin.x >= 20.0 or origin.y >= 20.0
+
+    def test_parent_local_keep_in_shifts_leaf_origin(self):
+        front_model = PlacementModel(
+            rotation=0.0,
+            transformed=TransformedSubcircuit(
+                instance=SubCircuitInstance(
+                    layout_id=_make_subcircuit_id("FRONT4"),
+                    origin=Point(0.0, 0.0),
+                    rotation=0.0,
+                    transformed_bbox=(12.0, 12.0),
+                ),
+                layout=_make_layout("FRONT4", {}),
+                bounding_box=(Point(0.0, 0.0), Point(12.0, 12.0)),
+            ),
+            layer_envelopes=([(Point(0.0, 0.0), Point(12.0, 12.0))], [], []),
+            blocker_set=_make_blocker_set(
+                front=(((0.0, 0.0), (12.0, 12.0)),),
+                outline=((0.0, 0.0), (12.0, 12.0)),
+            ),
+            constraint_entries=[],
+        )
+
+        origin = _find_non_overlapping_origin(
+            proposed=Point(0.0, 0.0),
+            frame_min=Point(0.0, 0.0),
+            frame_max=Point(60.0, 40.0),
+            model=front_model,
+            placed_bboxes=[],
+            placed_envelopes=[],
+            spacing_mm=2.0,
+            parent_local_keep_in_rects=[(Point(0.0, 0.0), Point(9.0, 9.0))],
+        )
+
+        assert origin.x >= 9.0 or origin.y >= 9.0

@@ -31,6 +31,7 @@ It is intended as a composition-side scaffold so later milestones can build:
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import shutil
@@ -398,6 +399,36 @@ def _build_parent_local_blocker_set(comp) -> LeafBlockerSet:
         tht_drills=tuple(tht_rects),
         leaf_outline=bbox,
     )
+
+
+def _preview_parent_local_keep_in_rects(
+    parent_local: dict[str, Any],
+    local_constraints,
+    outline: tuple[Point, Point],
+) -> list[tuple[Point, Point]]:
+    if not parent_local or not local_constraints:
+        return []
+    preview_parent_local = copy.deepcopy(parent_local)
+    _place_parent_local_components(preview_parent_local, local_constraints, outline)
+    keep_in_rects: list[tuple[Point, Point]] = []
+    for constraint in local_constraints:
+        comp = preview_parent_local.get(constraint.ref)
+        if comp is None:
+            continue
+        bbox_min, bbox_max = _component_geometry_bbox(comp)
+        keep_in_rects.append(
+            (
+                Point(
+                    bbox_min.x - constraint.inward_keep_in_mm,
+                    bbox_min.y - constraint.inward_keep_in_mm,
+                ),
+                Point(
+                    bbox_max.x + constraint.inward_keep_in_mm,
+                    bbox_max.y + constraint.inward_keep_in_mm,
+                ),
+            )
+        )
+    return keep_in_rects
 
 
 def _make_placed_item(
@@ -831,6 +862,11 @@ def _compose_artifacts(
         placed_child_bboxes = {}
         child_anchor_positions = {}
         placed_envelopes = []
+        parent_local_keep_in_rects = _preview_parent_local_keep_in_rects(
+            parent_local,
+            derived_constraints.parent_local_constraints,
+            (seed_frame_min, seed_frame_max),
+        )
 
         for child_index in sorted(derived_constraints.child_specs):
             spec = derived_constraints.child_specs[child_index]
@@ -851,6 +887,13 @@ def _compose_artifacts(
                     continue
 
                 shifted_envelopes = _shift_layer_envelopes(model.layer_envelopes, origin)
+                if _keep_in_conflict(
+                    model.blocker_set,
+                    origin,
+                    model.rotation,
+                    parent_local_keep_in_rects,
+                ):
+                    continue
                 overlap_conflict = False
                 for existing_item in placed_envelopes:
                     if _placed_items_conflict(
@@ -885,6 +928,13 @@ def _compose_artifacts(
                         except ValueError:
                             continue
                         shifted_envelopes = _shift_layer_envelopes(model.layer_envelopes, origin)
+                        if _keep_in_conflict(
+                            model.blocker_set,
+                            origin,
+                            model.rotation,
+                            parent_local_keep_in_rects,
+                        ):
+                            continue
                         overlap_conflict = False
                         for existing_item in placed_envelopes:
                             if _placed_items_conflict(
