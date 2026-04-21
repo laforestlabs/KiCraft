@@ -1229,7 +1229,17 @@ def child_layer_envelopes(
     for comp in transformed.transformed_components.values():
         c_min, c_max = comp.bbox()
         if comp.is_through_hole:
-            tht_pts.extend([c_min, c_max])
+            if comp.pads:
+                pad_min_x = min(pad.pos.x for pad in comp.pads)
+                pad_min_y = min(pad.pos.y for pad in comp.pads)
+                pad_max_x = max(pad.pos.x for pad in comp.pads)
+                pad_max_y = max(pad.pos.y for pad in comp.pads)
+                tht_pts.extend([
+                    Point(pad_min_x, pad_min_y),
+                    Point(pad_max_x, pad_max_y),
+                ])
+            else:
+                tht_pts.extend([c_min, c_max])
             # THT also contributes to its placement layer's surface envelope
             if comp.layer == 0:  # Layer.FRONT
                 front_pts.extend([c_min, c_max])

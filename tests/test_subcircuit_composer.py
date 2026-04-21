@@ -13,6 +13,7 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
     PlacementConstraintEntry,
     PlacementModel,
     build_parent_composition,
+    child_layer_envelopes,
     composition_summary,
     estimate_layer_aware_parent_board_size,
     estimate_parent_board_size,
@@ -443,6 +444,42 @@ class TestEstimateLayerAwareParentBoardSize:
             ]
         )
         assert layer_aware == layer_agnostic
+
+
+class TestChildLayerEnvelopes:
+    def test_tht_keepout_uses_pad_span_not_body_bbox(self):
+        battery = Component(
+            ref="BT1",
+            value="18650",
+            pos=Point(40.0, 50.0),
+            rotation=0.0,
+            layer=Layer.BACK,
+            width_mm=70.0,
+            height_mm=20.0,
+            body_center=Point(40.0, 50.0),
+            is_through_hole=True,
+            pads=[
+                Pad(ref="BT1", pad_id="1", pos=Point(10.0, 50.0), net="VBAT", layer=Layer.FRONT),
+                Pad(ref="BT1", pad_id="2", pos=Point(70.0, 50.0), net="GND", layer=Layer.FRONT),
+            ],
+        )
+        transformed = TransformedSubcircuit(
+            instance=SubCircuitInstance(
+                layout_id=_make_subcircuit_id("BAT"),
+                origin=Point(0.0, 0.0),
+                rotation=0.0,
+                transformed_bbox=(70.0, 20.0),
+            ),
+            layout=_make_layout("BAT", {"BT1": battery}),
+            transformed_components={"BT1": battery},
+            bounding_box=(Point(5.0, 40.0), Point(75.0, 60.0)),
+        )
+
+        front_surface, back_surface, tht_keepout = child_layer_envelopes(transformed)
+
+        assert front_surface is None
+        assert back_surface == (Point(5.0, 40.0), Point(75.0, 60.0))
+        assert tht_keepout == (Point(10.0, 50.0), Point(70.0, 50.0))
 
 
 class TestPackedExtentsOutline:
