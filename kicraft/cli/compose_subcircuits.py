@@ -466,15 +466,46 @@ def _ordered_unconstrained_indices(mode: str, unconstrained_artifacts, spacing_m
     if mode != "packed":
         return list(unconstrained_artifacts)
 
-    indexed_artifacts = list(unconstrained_artifacts)
-    indexed_artifacts.sort(
-        key=lambda item: (
-            -(item[1].layout.width * item[1].layout.height),
-            -item[1].layout.width,
-            -item[1].layout.height,
-            item[0],
+    def _bbox_area(bbox: tuple[Point, Point] | None) -> float:
+        if bbox is None:
+            return 0.0
+        return max(0.0, bbox[1].x - bbox[0].x) * max(0.0, bbox[1].y - bbox[0].y)
+
+    def _union_area(a: tuple[Point, Point] | None, b: tuple[Point, Point] | None) -> float:
+        if a is None:
+            return _bbox_area(b)
+        if b is None:
+            return _bbox_area(a)
+        min_x = min(a[0].x, b[0].x)
+        min_y = min(a[0].y, b[0].y)
+        max_x = max(a[1].x, b[1].x)
+        max_y = max(a[1].y, b[1].y)
+        return max(0.0, max_x - min_x) * max(0.0, max_y - min_y)
+
+    def _sort_metrics(item):
+        index, artifact = item
+        transformed = transform_loaded_artifact(
+            artifact,
+            origin=Point(0.0, 0.0),
+            rotation=0.0,
         )
-    )
+        front_surface, back_surface, tht_keepout = child_layer_envelopes(transformed)
+        front_blocker_area = _union_area(front_surface, tht_keepout)
+        back_blocker_area = _union_area(back_surface, tht_keepout)
+        has_tht_or_dual = int(
+            tht_keepout is not None
+            or (front_surface is not None and back_surface is not None)
+        )
+        total_bbox_area = max(0.0, artifact.layout.width) * max(0.0, artifact.layout.height)
+        return (
+            -max(front_blocker_area, back_blocker_area),
+            -has_tht_or_dual,
+            -total_bbox_area,
+            index,
+        )
+
+    indexed_artifacts = list(unconstrained_artifacts)
+    indexed_artifacts.sort(key=_sort_metrics)
     return indexed_artifacts
 
 
