@@ -235,6 +235,30 @@ const negUnknownInRequirements = goodSkeleton()
 negUnknownInRequirements.requirements.bom = []
 expectReject(negUnknownInRequirements, "unexpected key", "unknown key inside requirements")
 
+const negUnknownInClarification = goodSkeleton()
+negUnknownInClarification.user_spec.clarifications = [{ question: "q", answer: "a", extra: "nope" }]
+expectReject(negUnknownInClarification, "unexpected key", "unknown key inside clarification")
+
+const negBadElectricalType = goodSkeleton()
+negBadElectricalType.requirements.electrical = [123]
+expectReject(negBadElectricalType, "must be a string[]", "non-string in requirements.electrical")
+
+const negBadInterfacesType = goodSkeleton()
+negBadInterfacesType.requirements.interfaces = ["USB", 7]
+expectReject(negBadInterfacesType, "must be a string[]", "non-string in requirements.interfaces")
+
+const negBadCurrentType = goodSkeleton()
+negBadCurrentType.topology.power_tree = [{ rail: "5V", estimated_current_a: "lots" }]
+expectReject(negBadCurrentType, "estimated_current_a", "non-number in power_tree[].estimated_current_a")
+
+const negBadPriorities = goodSkeleton()
+negBadPriorities.next_layer_hints = { design_priorities: [123] }
+expectReject(negBadPriorities, "design_priorities", "non-string in next_layer_hints.design_priorities")
+
+const negBadVariant = goodSkeleton()
+negBadVariant.next_layer_hints = { preferred_topology_variant: 42 }
+expectReject(negBadVariant, "preferred_topology_variant", "non-string in next_layer_hints.preferred_topology_variant")
+
 // MPN false-positive guards: these strings must NOT trigger the heuristic.
 const okStrings = [
   "USB-C receptacle (16-pin, power-only acceptable)",

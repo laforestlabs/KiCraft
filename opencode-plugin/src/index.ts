@@ -178,6 +178,8 @@ const ALLOWED_USER_SPEC_KEYS = new Set([
   "clarifications",
 ])
 
+const ALLOWED_CLARIFICATION_KEYS = new Set(["question", "answer"])
+
 const ALLOWED_NEXT_LAYER_HINTS_KEYS = new Set([
   "preferred_topology_variant",
   "design_priorities",
@@ -315,6 +317,7 @@ export function validatePlan(plan: unknown): asserts plan is ProjectPlan {
     assert(Array.isArray(spec.clarifications), "user_spec.clarifications must be an array")
     for (const c of spec.clarifications as Array<Record<string, unknown>>) {
       assert(c && typeof c === "object", "user_spec.clarifications[] must be objects")
+      checkAllowedKeys(c, ALLOWED_CLARIFICATION_KEYS, "user_spec.clarifications[]")
       assert(typeof c.question === "string" && c.question.length > 0, "clarifications[].question required")
       assert(typeof c.answer === "string" && c.answer.length > 0, "clarifications[].answer required")
     }
@@ -327,6 +330,15 @@ export function validatePlan(plan: unknown): asserts plan is ProjectPlan {
     Array.isArray(req.functional) && req.functional.length > 0 && req.functional.every((s) => typeof s === "string"),
     "requirements.functional must be a non-empty string[]",
   )
+  for (const optKey of ["electrical", "mechanical", "environmental", "interfaces", "compliance", "explicitly_excluded"] as const) {
+    const v = req[optKey]
+    if (v !== undefined) {
+      assert(
+        Array.isArray(v) && (v as unknown[]).every((s) => typeof s === "string"),
+        `requirements.${optKey} must be a string[] when present`,
+      )
+    }
+  }
   if (req.must_use_parts !== undefined) {
     assert(Array.isArray(req.must_use_parts), "requirements.must_use_parts must be an array")
     for (const m of req.must_use_parts as Array<Record<string, unknown>>) {
@@ -387,6 +399,12 @@ export function validatePlan(plan: unknown): asserts plan is ProjectPlan {
           assert(typeof c === "string" && blockIds.has(c), `power_tree[].consumer_blocks[] must reference a block id, got ${JSON.stringify(c)}`)
         }
       }
+      if (r.estimated_current_a !== undefined) {
+        assert(
+          typeof r.estimated_current_a === "number" && Number.isFinite(r.estimated_current_a) && (r.estimated_current_a as number) >= 0,
+          `power_tree[].estimated_current_a must be a finite non-negative number when present, got ${JSON.stringify(r.estimated_current_a)}`,
+        )
+      }
     }
   }
 
@@ -414,6 +432,18 @@ export function validatePlan(plan: unknown): asserts plan is ProjectPlan {
   if (p.next_layer_hints !== undefined) {
     const h = p.next_layer_hints as Record<string, unknown>
     checkAllowedKeys(h, ALLOWED_NEXT_LAYER_HINTS_KEYS, "next_layer_hints")
+    if (h.preferred_topology_variant !== undefined) {
+      assert(
+        typeof h.preferred_topology_variant === "string",
+        "next_layer_hints.preferred_topology_variant must be a string when present",
+      )
+    }
+    if (h.design_priorities !== undefined) {
+      assert(
+        Array.isArray(h.design_priorities) && (h.design_priorities as unknown[]).every((s) => typeof s === "string"),
+        "next_layer_hints.design_priorities must be a string[] when present",
+      )
+    }
   }
 }
 
