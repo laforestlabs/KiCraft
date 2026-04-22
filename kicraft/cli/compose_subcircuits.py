@@ -742,6 +742,12 @@ def _candidate_positions(
         y += step
 
 
+def _bbox_overlap_area(a: tuple[Point, Point], b: tuple[Point, Point]) -> float:
+    dx = max(0.0, min(a[1].x, b[1].x) - max(a[0].x, b[0].x))
+    dy = max(0.0, min(a[1].y, b[1].y) - max(a[0].y, b[0].y))
+    return dx * dy
+
+
 def _find_non_overlapping_origin(
     proposed: Point,
     frame_min: Point,
@@ -753,8 +759,16 @@ def _find_non_overlapping_origin(
     parent_local_keep_in_rects: list[tuple[Point, Point]] | None = None,
 ) -> Point:
     parent_local_keep_in_rects = parent_local_keep_in_rects or []
-    legal_overlap_candidates: list[Point] = []
-    legal_empty_candidates: list[Point] = []
+    # Score each legal candidate by overlap area (preferred: maximum stacking)
+    # and by proximity to proposed (tiebreaker). Candidates with any legal
+    # overlap are always preferred over empty positions so SMT leaves stack
+    # onto the front-side area above back-dominant leaves like battery
+    # holders, which is what enables compact dual-sided packing.
+    best_overlap_candidate: Point | None = None
+    best_overlap_area = 0.0
+    best_overlap_dist = float("inf")
+    best_empty_candidate: Point | None = None
+    best_empty_dist = float("inf")
     for candidate in _candidate_positions(
         proposed,
         frame_min,
@@ -775,10 +789,11 @@ def _find_non_overlapping_origin(
             continue
         candidate_envelopes = _shift_layer_envelopes(model.layer_envelopes, candidate)
         collision = False
-        has_real_overlap = False
+        overlap_area = 0.0
         for existing_item in placed_envelopes:
-            if not _bbox_disjoint(existing_item["bbox"], candidate_bbox):
-                has_real_overlap = True
+            area = _bbox_overlap_area(existing_item["bbox"], candidate_bbox)
+            if area > 0.0:
+                overlap_area += area
             if _placed_items_conflict(
                 existing_item,
                 candidate_bbox,
@@ -789,15 +804,25 @@ def _find_non_overlapping_origin(
             ):
                 collision = True
                 break
-        if not collision:
-            if has_real_overlap:
-                legal_overlap_candidates.append(candidate)
-            else:
-                legal_empty_candidates.append(candidate)
-    if legal_overlap_candidates:
-        return legal_overlap_candidates[0]
-    if legal_empty_candidates:
-        return legal_empty_candidates[0]
+        if collision:
+            continue
+        dist = (candidate.x - proposed.x) ** 2 + (candidate.y - proposed.y) ** 2
+        if overlap_area > 0.0:
+            # Prefer more overlap; tiebreak by proximity to proposed point
+            if (
+                overlap_area > best_overlap_area
+                or (overlap_area == best_overlap_area and dist < best_overlap_dist)
+            ):
+                best_overlap_area = overlap_area
+                best_overlap_dist = dist
+                best_overlap_candidate = candidate
+        elif best_overlap_candidate is None and dist < best_empty_dist:
+            best_empty_dist = dist
+            best_empty_candidate = candidate
+    if best_overlap_candidate is not None:
+        return best_overlap_candidate
+    if best_empty_candidate is not None:
+        return best_empty_candidate
     raise ValueError(
         "Unable to place unconstrained child inside composition frame "
         f"({frame_min.x:.3f},{frame_min.y:.3f})-({frame_max.x:.3f},{frame_max.y:.3f})"
