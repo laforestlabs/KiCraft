@@ -151,6 +151,11 @@ class ParentCompositionState:
     composition_notes: list[str] = field(default_factory=list)
     composition: ParentComposition | None = None
     copper_manifest: CopperManifest | None = None
+    # Keep-in rects around parent-local locked components (e.g. mounting
+    # holes) that must be stamped onto the parent board as rule-area
+    # keep-outs so FreeRouting cannot route tracks or place vias through
+    # them. Units: mm, absolute parent-local coords.
+    parent_local_keep_in_rects: list[tuple[Point, Point]] = field(default_factory=list)
 
     @property
     def width_mm(self) -> float:
@@ -1528,6 +1533,7 @@ def _compose_artifacts(
         composition_notes=list(composition.notes),
         copper_manifest=copper_manifest,
         composition=composition,
+        parent_local_keep_in_rects=list(parent_local_keep_in_rects),
     )
     return state, transformed_payloads
 def _save_composition_snapshot(
@@ -1994,6 +2000,16 @@ def _stamp_parent_board(
             f"outside_vias={geometry_validation.get('outside_via_count', 0)}"
         )
 
+    keepout_json = [
+        {
+            "tl_x": rect[0].x,
+            "tl_y": rect[0].y,
+            "br_x": rect[1].x,
+            "br_y": rect[1].y,
+        }
+        for rect in (state.parent_local_keep_in_rects or [])
+    ]
+
     payload = {
         "pcb_path": str(output_pcb),
         "output_path": str(output_pcb),
@@ -2002,6 +2018,7 @@ def _stamp_parent_board(
         "vias": vias_json,
         "silkscreen": silkscreen_json,
         "outline": outline_data,
+        "keepouts": keepout_json,
     }
 
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="stamp_parent_")
@@ -2033,6 +2050,7 @@ _components = _data["components"]
 _traces = _data["traces"]
 _vias = _data["vias"]
 _silkscreen = _data.get("silkscreen", [])
+_keepouts = _data.get("keepouts", [])
 
 _LAYER_MAP = {0: pcbnew.F_Cu, 1: pcbnew.B_Cu}
 _LAYER_NAME_MAP = {"F.Cu": pcbnew.F_Cu, "B.Cu": pcbnew.B_Cu}
@@ -2178,6 +2196,32 @@ for _silk in _silkscreen:
         _txt.SetTextThickness(pcbnew.FromMM(_silk.get("font_thickness", 0.15)))
         _txt.SetHorizJustify(pcbnew.GR_TEXT_H_ALIGN_LEFT)
         board.Add(_txt)
+
+# --- stamp parent-local rule-area keepouts (mounting holes etc.) ---
+# These zones survive freerouting_runner.strip_zones() because that helper
+# preserves GetIsRuleArea()==True zones. The DSN export for FreeRouting
+# reads rule-area keepouts so no track or via can be placed inside them.
+_KEEPOUT_LAYERS = [pcbnew.F_Cu, pcbnew.B_Cu]
+for _ko in _keepouts:
+    for _layer in _KEEPOUT_LAYERS:
+        _zone = pcbnew.ZONE(board)
+        _zone.SetLayer(_layer)
+        _zone.SetIsRuleArea(True)
+        _zone.SetDoNotAllowTracks(True)
+        _zone.SetDoNotAllowVias(True)
+        _zone.SetDoNotAllowPads(True)
+        _zone.SetDoNotAllowCopperPour(True)
+        _outline = _zone.Outline()
+        _outline.NewOutline()
+        _x1 = pcbnew.FromMM(_ko["tl_x"])
+        _y1 = pcbnew.FromMM(_ko["tl_y"])
+        _x2 = pcbnew.FromMM(_ko["br_x"])
+        _y2 = pcbnew.FromMM(_ko["br_y"])
+        _outline.Append(_x1, _y1)
+        _outline.Append(_x2, _y1)
+        _outline.Append(_x2, _y2)
+        _outline.Append(_x1, _y2)
+        board.Add(_zone)
 
 board.BuildConnectivity()
 board.Save(_out_path)
