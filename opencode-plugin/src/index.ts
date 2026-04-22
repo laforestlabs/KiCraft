@@ -12,14 +12,21 @@
  *   - Produce a topology-level plan: functional blocks, signal flow,
  *     power tree, generic candidate part *classes* (e.g. "synchronous
  *     buck IC"), open questions.
- *   - NEVER pick exact part numbers.
+ *   - NEVER pick exact part numbers (MPNs).
  *   - NEVER produce a schematic, netlist, or PCB.
  *
  * Conversation orchestration (asking the user clarifying questions, doing
  * background reasoning) is handled by the host LLM running inside opencode,
- * driven by the `/kicraft-new` slash command (see ../command/kicraft-new.md).
- * This plugin only exposes deterministic, LLM-callable tools that read the
- * spec, validate the produced plan, and write artifacts to disk.
+ * driven by the `/kicraft-new` slash command. This plugin only exposes
+ * deterministic, LLM-callable tools that read the spec, validate the
+ * produced plan, and write artifacts to disk.
+ *
+ * Self-containment: this file MUST NOT depend on sibling files at runtime.
+ * The opencode plugin loader globs `{plugin,plugins}/*.{ts,js}` and loads
+ * each match as a single module; nested folders / relative reads are not
+ * supported. The example_plan.json used by the dev-time self-test is read
+ * relative to this source file in repo only when the file is run directly
+ * via `node --experimental-strip-types src/index.ts`.
  */
 
 import { type Plugin, tool } from "@opencode-ai/plugin"
@@ -99,7 +106,7 @@ type NextLayerHints = {
   design_priorities?: string[]
 }
 
-type ProjectPlan = {
+export type ProjectPlan = {
   schema_version: 1
   kicraft_layer: "start_new_project"
   name: string
@@ -118,6 +125,81 @@ function nowIso(): string {
 
 const SLUG_RE = /^[a-z0-9][a-z0-9_-]*$/
 const BLOCK_ID_RE = /^[a-z0-9_]+$/
+
+// Allowlist of top-level plan keys. Anything else is rejected so that the
+// "topology layer only" guarantee cannot be silently broken by accidentally
+// including schematic / netlist / PCB / parts data.
+const ALLOWED_TOP_KEYS = new Set([
+  "schema_version",
+  "kicraft_layer",
+  "name",
+  "summary",
+  "user_spec",
+  "requirements",
+  "topology",
+  "open_questions",
+  "research_notes",
+  "next_layer_hints",
+])
+
+const ALLOWED_REQUIREMENTS_KEYS = new Set([
+  "functional",
+  "electrical",
+  "mechanical",
+  "environmental",
+  "interfaces",
+  "compliance",
+  "must_use_parts",
+  "explicitly_excluded",
+])
+
+const ALLOWED_BLOCK_KEYS = new Set([
+  "id",
+  "role",
+  "description",
+  "rationale",
+  "candidate_part_classes",
+])
+
+const ALLOWED_EDGE_KEYS = new Set(["from", "to", "kind", "label"])
+
+const ALLOWED_RAIL_KEYS = new Set([
+  "rail",
+  "source_block",
+  "consumer_blocks",
+  "estimated_current_a",
+])
+
+const ALLOWED_TOPOLOGY_KEYS = new Set(["blocks", "signal_flow", "power_tree"])
+
+const ALLOWED_USER_SPEC_KEYS = new Set([
+  "raw_text",
+  "captured_at",
+  "clarifications",
+])
+
+const ALLOWED_NEXT_LAYER_HINTS_KEYS = new Set([
+  "preferred_topology_variant",
+  "design_priorities",
+])
+
+const ALLOWED_RESEARCH_NOTE_KEYS = new Set(["topic", "note", "source"])
+
+const ALLOWED_MUST_USE_PART_KEYS = new Set(["name", "reason"])
+
+// Forbidden top-level keys that signal scope creep from the topology layer
+// into later layers (formalize-design, select-parts, layout). Listed
+// explicitly for clearer error messages than a generic "unknown key".
+const FORBIDDEN_TOP_KEYS = new Set([
+  "schematic",
+  "netlist",
+  "pcb",
+  "layout",
+  "footprints",
+  "parts",
+  "bom",
+  "components",
+])
 
 function resolveProjectDir(directory: string, relOrAbs?: string): string {
   if (!relOrAbs || relOrAbs.trim() === "" || relOrAbs === ".") {
@@ -143,14 +225,78 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message)
 }
 
+function checkAllowedKeys(
+  obj: Record<string, unknown>,
+  allowed: Set<string>,
+  where: string,
+): void {
+  for (const key of Object.keys(obj)) {
+    if (!allowed.has(key)) {
+      throw new Error(
+        `${where}: unexpected key ${JSON.stringify(key)} -- allowed keys are: ${[...allowed].join(", ")}`,
+      )
+    }
+  }
+}
+
+/**
+ * Heuristic MPN (manufacturer part number) detector. Returns true if the
+ * string looks like a specific part number rather than a generic part class.
+ *
+ * Rules (any one matches => looks like an MPN):
+ *   - Contains a token that is >= 2 uppercase letters immediately followed
+ *     by >= 3 digits (e.g. "BQ24072", "TPS5430", "STM32F405", "AP2112K").
+ *   - Contains a token starting with >= 2 uppercase letters, then 2+ digits,
+ *     then a hyphen and more chars (e.g. "MAX17048-T").
+ *
+ * Common false positives explicitly NOT matched:
+ *   - "USB-C", "USB3", "RS-485", "I2C", "SPI", "0805", "0603", "1S2P",
+ *     "18650", "0.1uF", "3V3", "5V" -- all lack the "letters then digits"
+ *     adjacency or have too few of one or the other.
+ */
+export function looksLikeMPN(s: string): boolean {
+  // Primary rule: 2+ uppercase letters glued to 3+ digits.
+  // Catches: BQ24072, TPS5430, AP2112K, MAX17048, LM7805, AT89C52
+  if (/[A-Z]{2,}[0-9]{3,}/.test(s)) return true
+  // Secondary rule: alternating letters/digits with embedded family char,
+  // total 7+ chars and starting with 2+ uppercase letters. Catches part
+  // numbers like STM32F405 (STM + 32 + F + 405) where the digit run after
+  // the leading letters is too short for the primary rule but the overall
+  // shape (LL+D+L+D...) is unmistakably an MPN.
+  // The leading [A-Z]{2,} requirement and 7-char minimum keep benign
+  // strings like "USB3", "I2C", "0805", "1S2P", "RS-485", "3V3" out.
+  if (/[A-Z]{2,}[0-9]+[A-Z]+[0-9]+/.test(s)) return true
+  return false
+}
+
 /**
  * Validate a plan object as a defense-in-depth check. The LLM is asked to
  * produce schema-compliant JSON, but we still verify before writing it to
  * disk so the next KiCraft layer can rely on the contract.
+ *
+ * Rejects:
+ *   - Unknown top-level keys (closed world).
+ *   - Forbidden scope-creep keys (schematic, netlist, pcb, ...).
+ *   - candidate_part_classes entries that look like MPNs.
+ *   - Plans without research_notes (the LLM must have done research).
  */
-function validatePlan(plan: unknown): asserts plan is ProjectPlan {
+export function validatePlan(plan: unknown): asserts plan is ProjectPlan {
   assert(plan && typeof plan === "object", "plan must be an object")
   const p = plan as Record<string, unknown>
+
+  // Closed-world top-level keys.
+  for (const key of Object.keys(p)) {
+    if (FORBIDDEN_TOP_KEYS.has(key)) {
+      throw new Error(
+        `plan contains forbidden key ${JSON.stringify(key)} -- this layer is topology-only; ${key} belongs to a later KiCraft layer`,
+      )
+    }
+    if (!ALLOWED_TOP_KEYS.has(key)) {
+      throw new Error(
+        `plan contains unknown top-level key ${JSON.stringify(key)} -- allowed keys are: ${[...ALLOWED_TOP_KEYS].join(", ")}`,
+      )
+    }
+  }
 
   assert(p.schema_version === SCHEMA_VERSION, `schema_version must be ${SCHEMA_VERSION}`)
   assert(
@@ -162,21 +308,41 @@ function validatePlan(plan: unknown): asserts plan is ProjectPlan {
 
   const spec = p.user_spec as Record<string, unknown> | undefined
   assert(spec && typeof spec === "object", "user_spec required")
+  checkAllowedKeys(spec, ALLOWED_USER_SPEC_KEYS, "user_spec")
   assert(typeof spec.raw_text === "string" && spec.raw_text.length > 0, "user_spec.raw_text required")
   assert(typeof spec.captured_at === "string", "user_spec.captured_at required (ISO 8601)")
+  if (spec.clarifications !== undefined) {
+    assert(Array.isArray(spec.clarifications), "user_spec.clarifications must be an array")
+    for (const c of spec.clarifications as Array<Record<string, unknown>>) {
+      assert(c && typeof c === "object", "user_spec.clarifications[] must be objects")
+      assert(typeof c.question === "string" && c.question.length > 0, "clarifications[].question required")
+      assert(typeof c.answer === "string" && c.answer.length > 0, "clarifications[].answer required")
+    }
+  }
 
   const req = p.requirements as Record<string, unknown> | undefined
   assert(req && typeof req === "object", "requirements required")
+  checkAllowedKeys(req, ALLOWED_REQUIREMENTS_KEYS, "requirements")
   assert(
     Array.isArray(req.functional) && req.functional.length > 0 && req.functional.every((s) => typeof s === "string"),
     "requirements.functional must be a non-empty string[]",
   )
+  if (req.must_use_parts !== undefined) {
+    assert(Array.isArray(req.must_use_parts), "requirements.must_use_parts must be an array")
+    for (const m of req.must_use_parts as Array<Record<string, unknown>>) {
+      assert(m && typeof m === "object", "must_use_parts[] must be objects")
+      checkAllowedKeys(m, ALLOWED_MUST_USE_PART_KEYS, "must_use_parts[]")
+      assert(typeof m.name === "string" && (m.name as string).length > 0, "must_use_parts[].name required")
+    }
+  }
 
   const top = p.topology as Record<string, unknown> | undefined
   assert(top && typeof top === "object", "topology required")
+  checkAllowedKeys(top, ALLOWED_TOPOLOGY_KEYS, "topology")
   assert(Array.isArray(top.blocks) && top.blocks.length > 0, "topology.blocks must be a non-empty array")
   const blockIds = new Set<string>()
   for (const b of top.blocks as Array<Record<string, unknown>>) {
+    checkAllowedKeys(b, ALLOWED_BLOCK_KEYS, `topology.blocks[id=${JSON.stringify(b.id)}]`)
     assert(typeof b.id === "string" && BLOCK_ID_RE.test(b.id), `topology.blocks[].id must match /^[a-z0-9_]+$/, got ${JSON.stringify(b.id)}`)
     assert(!blockIds.has(b.id), `topology.blocks[].id must be unique, duplicate: ${b.id}`)
     blockIds.add(b.id)
@@ -186,12 +352,22 @@ function validatePlan(plan: unknown): asserts plan is ProjectPlan {
         Array.isArray(b.candidate_part_classes) && (b.candidate_part_classes as unknown[]).every((s) => typeof s === "string"),
         "candidate_part_classes must be string[] (generic classes only -- no specific part numbers)",
       )
+      for (const c of b.candidate_part_classes as string[]) {
+        if (looksLikeMPN(c)) {
+          throw new Error(
+            `topology.blocks[id=${b.id}].candidate_part_classes contains what looks like a specific part number: ${JSON.stringify(c)}. ` +
+              `This layer is topology-only -- describe the part by its generic class (e.g. "Li-ion charger IC with integrated power-path"). ` +
+              `If the user pinned a specific part by name, record it under requirements.must_use_parts instead.`,
+          )
+        }
+      }
     }
   }
 
   assert(Array.isArray(top.signal_flow), "topology.signal_flow must be an array")
   const validKinds = new Set(["power", "ground", "analog", "digital", "comm_bus", "rf", "control", "feedback"])
   for (const e of top.signal_flow as Array<Record<string, unknown>>) {
+    checkAllowedKeys(e, ALLOWED_EDGE_KEYS, "topology.signal_flow[]")
     assert(typeof e.from === "string" && blockIds.has(e.from), `signal_flow.from must reference a block id, got ${JSON.stringify(e.from)}`)
     assert(typeof e.to === "string" && blockIds.has(e.to), `signal_flow.to must reference a block id, got ${JSON.stringify(e.to)}`)
     assert(typeof e.kind === "string" && validKinds.has(e.kind as string), `signal_flow.kind invalid: ${JSON.stringify(e.kind)}`)
@@ -200,6 +376,7 @@ function validatePlan(plan: unknown): asserts plan is ProjectPlan {
   if (top.power_tree !== undefined) {
     assert(Array.isArray(top.power_tree), "topology.power_tree must be an array")
     for (const r of top.power_tree as Array<Record<string, unknown>>) {
+      checkAllowedKeys(r, ALLOWED_RAIL_KEYS, "topology.power_tree[]")
       assert(typeof r.rail === "string" && (r.rail as string).length > 0, "power_tree[].rail required")
       if (r.source_block !== undefined) {
         assert(typeof r.source_block === "string" && blockIds.has(r.source_block), `power_tree[].source_block must reference a block id, got ${JSON.stringify(r.source_block)}`)
@@ -217,9 +394,30 @@ function validatePlan(plan: unknown): asserts plan is ProjectPlan {
     assert(Array.isArray(p.open_questions) && (p.open_questions as unknown[]).every((s) => typeof s === "string"),
       "open_questions must be string[]")
   }
+
+  // research_notes is REQUIRED (non-empty) -- the LLM must have done at
+  // least one research step before producing a plan. This enforces the
+  // workflow rule from kicraft-new.md.
+  assert(
+    Array.isArray(p.research_notes) && (p.research_notes as unknown[]).length > 0,
+    "research_notes is required and must contain at least one entry -- do background research before drafting the plan",
+  )
+  for (const n of p.research_notes as Array<Record<string, unknown>>) {
+    checkAllowedKeys(n, ALLOWED_RESEARCH_NOTE_KEYS, "research_notes[]")
+    assert(typeof n.topic === "string" && (n.topic as string).length > 0, "research_notes[].topic required")
+    assert(typeof n.note === "string" && (n.note as string).length > 0, "research_notes[].note required")
+    if (n.source !== undefined) {
+      assert(typeof n.source === "string", "research_notes[].source must be a string when present")
+    }
+  }
+
+  if (p.next_layer_hints !== undefined) {
+    const h = p.next_layer_hints as Record<string, unknown>
+    checkAllowedKeys(h, ALLOWED_NEXT_LAYER_HINTS_KEYS, "next_layer_hints")
+  }
 }
 
-function renderPlanMarkdown(plan: ProjectPlan): string {
+export function renderPlanMarkdown(plan: ProjectPlan): string {
   const lines: string[] = []
   lines.push(`# ${plan.name}`)
   lines.push("")
@@ -408,8 +606,9 @@ export const KiCraftStartProjectPlugin: Plugin = async ({ directory, worktree, c
           return (
             `Saved verbatim user spec to ${specPath}.\n\n` +
             `Project directory: ${target}\n\n` +
-            `Next: ask the user clarifying questions until you have enough to draft a topology-level plan, ` +
-            `recording each Q/A pair via kicraft_record_clarification. Then call kicraft_save_plan with the full plan.`
+            `Next: do background research on the problem domain, then ask clarifying questions ` +
+            `(one at a time), recording each Q/A pair via kicraft_record_clarification. ` +
+            `Then call kicraft_save_plan with the full plan including research_notes.`
           )
         },
       }),
@@ -447,8 +646,9 @@ export const KiCraftStartProjectPlugin: Plugin = async ({ directory, worktree, c
           "Validate and persist the final topology-level project plan. Writes both project_plan.json " +
           "(machine-readable, schema v1) and project_plan.md (human-readable) into the project directory. " +
           "The plan MUST stay at the topology level: functional blocks, signal flow, power tree, generic " +
-          "candidate part *classes* (e.g. 'synchronous buck IC'). DO NOT include exact part numbers, " +
-          "schematics, netlists, or PCB data -- later KiCraft layers handle those. " +
+          "candidate part *classes* (e.g. 'synchronous buck IC'). The validator REJECTS any of: top-level " +
+          "schematic/netlist/pcb/layout/parts keys, candidate_part_classes entries that look like specific " +
+          "part numbers (e.g. 'BQ24072'), or plans with no research_notes. " +
           "If user_spec.raw_text or user_spec.clarifications is omitted in the input, the plugin will fill " +
           "them in from the previously captured .kicraft/spec.json.",
         args: {
@@ -456,8 +656,10 @@ export const KiCraftStartProjectPlugin: Plugin = async ({ directory, worktree, c
           plan: tool.schema
             .any()
             .describe(
-              "The full project plan object matching schema/project_plan.schema.json. " +
-                "schema_version MUST be 1 and kicraft_layer MUST be 'start_new_project'.",
+              "The full project plan object. schema_version MUST be 1 and kicraft_layer MUST be " +
+                "'start_new_project'. Allowed top-level keys: schema_version, kicraft_layer, name, summary, " +
+                "user_spec, requirements, topology, open_questions, research_notes (REQUIRED, non-empty), " +
+                "next_layer_hints. Any other top-level key is rejected.",
             ),
           overwrite: tool.schema
             .boolean()
@@ -510,7 +712,8 @@ export const KiCraftStartProjectPlugin: Plugin = async ({ directory, worktree, c
             `  - ${jsonPath}\n` +
             `  - ${mdPath}\n\n` +
             `Topology: ${plan.topology.blocks.length} block(s), ${plan.topology.signal_flow.length} signal-flow edge(s).\n` +
-            `Open questions: ${(plan.open_questions ?? []).length}.\n\n` +
+            `Open questions: ${(plan.open_questions ?? []).length}.\n` +
+            `Research notes: ${(plan.research_notes ?? []).length}.\n\n` +
             `This plan is the input to the (not-yet-implemented) formalize-design layer. ` +
             `No exact part numbers and no schematic were generated -- those belong to later layers.`
           )
@@ -520,8 +723,10 @@ export const KiCraftStartProjectPlugin: Plugin = async ({ directory, worktree, c
       kicraft_inspect_project: tool({
         description:
           "Inspect a project directory and report whether a KiCraft start-new-project artifact already " +
-          "exists there (spec.json and/or project_plan.json). Use this at the very start of /kicraft-new " +
-          "to decide whether to resume or to start fresh.",
+          "exists there (spec.json and/or project_plan.json). Returns presence flags and basic counts. " +
+          "Use this at the very start of /kicraft-new to decide whether to resume or to start fresh. " +
+          "If you need the full saved spec text or the full saved plan body to actually resume the " +
+          "conversation, follow this with kicraft_load_state.",
         args: {
           project_dir: tool.schema.string().describe('Project directory to inspect. Use "." for cwd.'),
         },
@@ -549,11 +754,85 @@ export const KiCraftStartProjectPlugin: Plugin = async ({ directory, worktree, c
           return summary
         },
       }),
+
+      kicraft_load_state: tool({
+        description:
+          "Load and return the FULL saved KiCraft state for a project directory: the verbatim user spec " +
+          "(raw_text, captured_at, every clarification Q/A pair) and, if present, the full saved project " +
+          "plan body. This is what you call to actually resume an interrupted /kicraft-new session -- " +
+          "kicraft_inspect_project only tells you presence, this returns the content. " +
+          "Returns a structured text block; the calling LLM should read it to understand where the prior " +
+          "session left off before asking any new questions.",
+        args: {
+          project_dir: tool.schema.string().describe('Project directory to load. Use "." for cwd.'),
+        },
+        async execute(args, ctx) {
+          const target = resolveProjectDir(directory, args.project_dir)
+          const specPath = join(target, STATE_DIRNAME, SPEC_FILENAME)
+          const planPath = join(target, `${PLAN_BASENAME}.json`)
+          const hasSpec = await pathExists(specPath)
+          const hasPlan = await pathExists(planPath)
+
+          const sections: string[] = []
+          sections.push(`KiCraft saved state for ${target}:`)
+          sections.push("")
+
+          if (hasSpec) {
+            const spec = JSON.parse(await readFile(specPath, "utf8")) as UserSpec
+            sections.push(`## .kicraft/spec.json`)
+            sections.push(`captured_at: ${spec.captured_at}`)
+            sections.push(``)
+            sections.push(`### raw user spec (verbatim)`)
+            sections.push(``)
+            sections.push("```")
+            sections.push(spec.raw_text)
+            sections.push("```")
+            sections.push(``)
+            const cl = spec.clarifications ?? []
+            sections.push(`### clarifications captured: ${cl.length}`)
+            sections.push(``)
+            for (let i = 0; i < cl.length; i++) {
+              sections.push(`${i + 1}. Q: ${cl[i].question}`)
+              sections.push(`   A: ${cl[i].answer}`)
+            }
+            sections.push(``)
+          } else {
+            sections.push(`## .kicraft/spec.json -- absent (no prior session)`)
+            sections.push(``)
+          }
+
+          if (hasPlan) {
+            const planRaw = await readFile(planPath, "utf8")
+            sections.push(`## project_plan.json`)
+            sections.push(``)
+            sections.push("```json")
+            sections.push(planRaw.trimEnd())
+            sections.push("```")
+            sections.push(``)
+          } else {
+            sections.push(`## project_plan.json -- absent (plan never saved)`)
+          }
+
+          ctx.metadata({
+            title: "kicraft: state loaded",
+            metadata: { project_dir: target, has_spec: hasSpec, has_plan: hasPlan },
+          })
+          return sections.join("\n")
+        },
+      }),
     },
   }
 }
 
 export default KiCraftStartProjectPlugin
+
+// ----------------------------------------------------------------------------
+// Dev-time self-test. Only runs when this file is executed directly via
+// `node --experimental-strip-types src/index.ts`. Loads the example plan
+// from the sibling schema/ folder; this path does NOT exist in installed
+// (flat) form, which is fine because the installed plugin never executes
+// the self-test (process.argv[1] is not this file when loaded as a plugin).
+// ----------------------------------------------------------------------------
 
 const isDirect =
   typeof process !== "undefined" &&

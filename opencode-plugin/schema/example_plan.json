@@ -81,7 +81,7 @@
         "description": "Charges the cell pack from the USB input while passing power through to the system load.",
         "rationale": "User-pinned BQ24072 family; topology block role abstracts the pinning so a substitute can be chosen if BQ24072 is unavailable.",
         "candidate_part_classes": [
-          "Li-ion charger IC with integrated power-path (BQ24072-class)"
+          "Li-ion charger IC with integrated power-path"
         ]
       },
       {
