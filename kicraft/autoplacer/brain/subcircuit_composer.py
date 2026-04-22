@@ -275,7 +275,11 @@ def derive_attachment_constraints(
         is_conn = ref.startswith("J") or ("connector" in getattr(comp, "kind", "").lower())
 
         if is_hole:
-            inward = cfg.get("mounting_hole_keep_in_mm", 2.5)
+            # 5mm gives M3 screw head + washer clearance (typical head
+            # ~6mm dia => 3mm radius; 2mm of slack for tolerance). 2.5mm
+            # was too tight -- left screws landing visibly inside
+            # neighbouring leaf silkscreen boxes.
+            inward = cfg.get("mounting_hole_keep_in_mm", 5.0)
             outward = 0.0
         elif is_conn:
             inset = cfg.get("connector_edge_inset_mm", 1.0)

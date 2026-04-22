@@ -528,11 +528,20 @@ def _placed_item_blocker_rects(item: dict[str, Any]) -> list[tuple[Point, Point]
     from kicraft.autoplacer.brain.subcircuit_composer import _transform_rect
 
     world_rects: list[tuple[Point, Point]] = []
-    for rect in (
+    # Pads + drills are the copper/drill keep-out; component_rects are the
+    # courtyard/body bboxes. Both matter for parent-local keep-ins: a
+    # mounting hole needs clearance not just from copper but from any
+    # component body (e.g. USB-C receptacle housing) that would block
+    # the screw head. Without the component rects the mounting hole can
+    # land visually inside a leaf silkscreen box even when no pad
+    # happens to sit at that exact position.
+    rects = (
         list(blocker_set.front_pads)
         + list(blocker_set.back_pads)
         + list(blocker_set.tht_drills)
-    ):
+        + list(blocker_set.component_rects.values())
+    )
+    for rect in rects:
         transformed_rect = _shift_bbox(rect, item["origin"])
         if item["rotation"] % 360.0:
             transformed_rect = _transform_rect(rect, item["origin"], item["rotation"])
