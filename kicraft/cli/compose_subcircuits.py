@@ -748,6 +748,26 @@ def _bbox_overlap_area(a: tuple[Point, Point], b: tuple[Point, Point]) -> float:
     return dx * dy
 
 
+def _opposite_side_overlap_weight(
+    candidate_side: str, placed_side: str
+) -> float:
+    """Weight bbox overlap by whether it represents efficient dual-side packing.
+
+    Opposite-side overlap (e.g. a front-dominant SMT leaf stacking over a
+    back-dominant THT leaf) is the goal -- both leaves get their own copper
+    area, halving XY usage. Same-side overlap is still legal when pad rects
+    miss, but it doesn't buy density, so score it much lower.
+    """
+    if candidate_side == "none" or placed_side == "none":
+        return 0.2
+    if candidate_side == "dual" or placed_side == "dual":
+        # Dual-side leaf is effectively both -- any overlap is partial win
+        return 0.5
+    if candidate_side != placed_side:
+        return 1.0  # true opposite-side stacking -- the target behavior
+    return 0.2  # same-side overlap -- legal by sparse check but not dense
+
+
 def _find_non_overlapping_origin(
     proposed: Point,
     frame_min: Point,
@@ -759,16 +779,23 @@ def _find_non_overlapping_origin(
     parent_local_keep_in_rects: list[tuple[Point, Point]] | None = None,
 ) -> Point:
     parent_local_keep_in_rects = parent_local_keep_in_rects or []
-    # Score each legal candidate by overlap area (preferred: maximum stacking)
-    # and by proximity to proposed (tiebreaker). Candidates with any legal
-    # overlap are always preferred over empty positions so SMT leaves stack
-    # onto the front-side area above back-dominant leaves like battery
-    # holders, which is what enables compact dual-sided packing.
+    # Score each legal candidate by opposite-side-weighted overlap area so
+    # front-dominant SMT leaves stack onto back-dominant leaves (battery
+    # holders) instead of onto each other. Same-side overlap is legal when
+    # individual pad rects miss, but it wastes density -- weight it lower so
+    # opposite-side candidates win when both exist.
+    candidate_side = dominant_blocker_side(model.blocker_set)
     best_overlap_candidate: Point | None = None
-    best_overlap_area = 0.0
+    best_overlap_score = 0.0
     best_overlap_dist = float("inf")
     best_empty_candidate: Point | None = None
     best_empty_dist = float("inf")
+    placed_sides = [
+        dominant_blocker_side(item["blocker_set"])
+        if item.get("blocker_set") is not None
+        else "none"
+        for item in placed_envelopes
+    ]
     for candidate in _candidate_positions(
         proposed,
         frame_min,
@@ -789,11 +816,12 @@ def _find_non_overlapping_origin(
             continue
         candidate_envelopes = _shift_layer_envelopes(model.layer_envelopes, candidate)
         collision = False
-        overlap_area = 0.0
-        for existing_item in placed_envelopes:
+        overlap_score = 0.0
+        for placed_side, existing_item in zip(placed_sides, placed_envelopes):
             area = _bbox_overlap_area(existing_item["bbox"], candidate_bbox)
             if area > 0.0:
-                overlap_area += area
+                weight = _opposite_side_overlap_weight(candidate_side, placed_side)
+                overlap_score += weight * area
             if _placed_items_conflict(
                 existing_item,
                 candidate_bbox,
@@ -807,13 +835,13 @@ def _find_non_overlapping_origin(
         if collision:
             continue
         dist = (candidate.x - proposed.x) ** 2 + (candidate.y - proposed.y) ** 2
-        if overlap_area > 0.0:
-            # Prefer more overlap; tiebreak by proximity to proposed point
+        if overlap_score > 0.0:
+            # Prefer more opposite-side overlap; tiebreak by proximity
             if (
-                overlap_area > best_overlap_area
-                or (overlap_area == best_overlap_area and dist < best_overlap_dist)
+                overlap_score > best_overlap_score
+                or (overlap_score == best_overlap_score and dist < best_overlap_dist)
             ):
-                best_overlap_area = overlap_area
+                best_overlap_score = overlap_score
                 best_overlap_dist = dist
                 best_overlap_candidate = candidate
         elif best_overlap_candidate is None and dist < best_empty_dist:
