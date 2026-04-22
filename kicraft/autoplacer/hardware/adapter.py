@@ -10,6 +10,7 @@ import site
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 import pcbnew
 
@@ -840,6 +841,8 @@ class KiCadAdapter:
         subprocess so that accumulated SWIG C++ objects from repeated calls
         cannot cause memory corruption or segfaults in the parent process.
         """
+        if output_path:
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         if self.use_subprocess:
             return self.stamp_subcircuit_board_subprocess(
                 state,
