@@ -1,8 +1,8 @@
-"""Regression tests for the atomic-save helper in the KiCad adapter.
+"""Regression tests for the durable-save helper in the KiCad adapter.
 
-These tests verify the four-step atomic save invariant
-(write -> fsync -> rename -> dir fsync) without requiring pcbnew, by
-using a fake board object that records its Save target.
+These tests verify that _atomic_save_board writes in place and fsyncs both
+the file and its containing directory, without requiring pcbnew, by using
+a fake board object that records its Save target.
 """
 
 import os
@@ -36,18 +36,14 @@ def test_atomic_save_writes_final_path_and_no_temp_left(tmp_path: Path):
     assert leftover == [], f"unexpected leftover files: {leftover}"
 
 
-def test_atomic_save_writes_to_temp_then_renames(tmp_path: Path):
+def test_atomic_save_writes_directly_to_final_path(tmp_path: Path):
     out = tmp_path / "leaf.kicad_pcb"
     board = _FakeBoard(b"PAYLOAD")
 
     adapter._atomic_save_board(board, str(out))
 
-    # board.Save was called against a sibling temp path, never the final path
     assert len(board.save_calls) == 1
-    save_target = board.save_calls[0]
-    assert save_target != str(out)
-    assert save_target.startswith(str(out) + ".stamp_tmp.")
-    assert os.path.dirname(save_target) == str(tmp_path)
+    assert board.save_calls[0] == str(out)
 
 
 def test_atomic_save_overwrites_existing_file(tmp_path: Path):
@@ -76,7 +72,6 @@ def test_atomic_save_calls_fsync_on_file_and_directory(
     board = _FakeBoard(b"X")
     adapter._atomic_save_board(board, str(out))
 
-    # Expect at least 2 fsync calls: one on the temp file, one on the dir.
     assert len(fsync_calls) >= 2
 
 

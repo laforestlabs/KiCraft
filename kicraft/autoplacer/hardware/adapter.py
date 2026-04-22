@@ -28,24 +28,26 @@ VIA_SIZE_MM = 0.6
 
 
 def _atomic_save_board(board, output_path: str) -> None:
-    """Save a pcbnew board to disk atomically and durably.
+    """Save a pcbnew board to disk durably.
 
-    Writes to a sibling temp file, fsyncs the file, atomically renames into
-    place, then fsyncs the containing directory.  This prevents a follow-up
-    pcbnew.LoadBoard() in another process from observing a partial write or
-    unsynced directory entry, which manifests as
-    "RuntimeError: Failed to load board: ...".
+    Saves in place, then fsyncs the file and its containing directory so a
+    follow-up pcbnew.LoadBoard() in another process cannot observe a partial
+    write or unsynced directory entry (which manifests as
+    "RuntimeError: Failed to load board: ...").
+
+    We do not write to a temp file and rename: pcbnew.Save() rewrites the
+    requested filename based on the .kicad_pcb extension and emits a sidecar
+    .kicad_pro keyed off the same basename, which makes a sibling temp +
+    os.replace pattern unreliable across KiCad versions.
     """
-    out_dir = os.path.dirname(output_path) or "."
-    tmp_path = f"{output_path}.stamp_tmp.{os.getpid()}"
-    board.Save(tmp_path)
+    board.Save(output_path)
     try:
-        with open(tmp_path, "rb") as tf:
+        with open(output_path, "rb") as tf:
             os.fsync(tf.fileno())
     except OSError:
         pass
-    os.replace(tmp_path, output_path)
     try:
+        out_dir = os.path.dirname(output_path) or "."
         dir_fd = os.open(out_dir, os.O_DIRECTORY)
         try:
             os.fsync(dir_fd)
@@ -358,22 +360,25 @@ for _v in _vias:
         _tv.SetNetCode(_nc)
     board.Add(_tv)
 
-board.BuildConnectivity()
+# Do NOT call board.BuildConnectivity() here: pcbnew Save() silently returns
+# False (no file written, no exception) on ~half of attempts when called after
+# BuildConnectivity on a heavily-mutated board. Consumers rebuild connectivity
+# on LoadBoard().
 
-# Atomic save: write -> fsync file -> atomic rename -> fsync directory.
-# Required so a follow-up pcbnew.LoadBoard() in another process never
-# observes a partial write or unsynced directory entry, which would raise
-# "Failed to load board: ...".
-_out_dir = os.path.dirname(_out_path) or "."
-_tmp_out = _out_path + ".stamp_tmp." + str(os.getpid())
-board.Save(_tmp_out)
+# Save the board, then flush file + directory so a follow-up pcbnew.LoadBoard()
+# in another process cannot observe a partial write or unsynced directory entry,
+# which would raise "Failed to load board: ...".
+# We do not use a temp + rename because pcbnew.Save() rewrites file extensions
+# and produces sidecar project files keyed off the basename, which makes atomic
+# renames brittle. Save in-place, then force durability.
+_save_status = board.Save(_out_path)
 try:
-    with open(_tmp_out, "rb") as _tf:
+    with open(_out_path, "rb") as _tf:
         os.fsync(_tf.fileno())
 except OSError:
     pass
-os.replace(_tmp_out, _out_path)
 try:
+    _out_dir = os.path.dirname(_out_path) or "."
     _dir_fd = os.open(_out_dir, os.O_DIRECTORY)
     try:
         os.fsync(_dir_fd)
@@ -381,6 +386,93 @@ try:
         os.close(_dir_fd)
 except OSError:
     pass
+
+# --- Self-load validator + failure capture ----------------------------------
+# pcbnew.LoadBoard() returns None instead of raising when the parser rejects a
+# file. Catch that here so we can preserve the bad artifact (which would
+# otherwise be overwritten by the next round) and exit non-zero with a
+# diagnostic dump. Without this, downstream LoadBoard failures only surface
+# in another subprocess after the evidence is gone.
+import hashlib as _hashlib
+import shutil as _shutil
+import time as _time
+import traceback as _traceback
+
+def _diag_dump(_path):
+    _info = {"path": _path, "exists": os.path.exists(_path)}
+    if not _info["exists"]:
+        return _info
+    try:
+        _info["size"] = os.path.getsize(_path)
+        _info["mtime_ns"] = os.stat(_path).st_mtime_ns
+        with open(_path, "rb") as _df:
+            _data = _df.read()
+        _info["sha256"] = _hashlib.sha256(_data).hexdigest()
+        _info["nul_bytes"] = _data.count(b"\x00")
+        try:
+            _text = _data.decode("utf-8", errors="replace")
+            _info["paren_balance"] = _text.count("(") - _text.count(")")
+            _info["has_nan"] = "nan" in _text.lower()
+            _info["has_inf"] = "inf" in _text.lower()
+            _lines = _text.splitlines()
+            _info["line_count"] = len(_lines)
+            _info["head"] = "\n".join(_lines[:5])
+            _info["tail"] = "\n".join(_lines[-5:])
+        except Exception as _de:
+            _info["decode_error"] = repr(_de)
+    except OSError as _oe:
+        _info["stat_error"] = repr(_oe)
+    return _info
+
+_self_load_ok = False
+_self_load_err = None
+try:
+    _verify = pcbnew.LoadBoard(_out_path)
+    _self_load_ok = _verify is not None
+except Exception as _se:
+    _self_load_err = "".join(_traceback.format_exception_only(type(_se), _se)).strip()
+
+if not _self_load_ok:
+    _capture_root = os.path.join(
+        os.path.dirname(_out_path) or ".",
+        ".failed_capture",
+    )
+    _stamp = _time.strftime("%Y%m%d_%H%M%S") + f"_{os.getpid()}"
+    _capture_dir = os.path.join(_capture_root, _stamp)
+    try:
+        os.makedirs(_capture_dir, exist_ok=True)
+        _base = os.path.splitext(_out_path)[0]
+        _diag = {
+            "save_status": repr(_save_status),
+            "self_load_ok": _self_load_ok,
+            "self_load_error": _self_load_err,
+            "out_path": _out_path,
+            "pcb_path": _pcb_path,
+            "captured_at": _stamp,
+            "files": {},
+        }
+        for _ext in (".kicad_pcb", ".kicad_pro", ".kicad_prl"):
+            _src = _base + _ext
+            _diag["files"][_ext] = _diag_dump(_src)
+            if os.path.exists(_src):
+                try:
+                    _shutil.copy2(_src, os.path.join(_capture_dir, "leaf" + _ext))
+                except OSError as _ce:
+                    _diag["files"][_ext]["copy_error"] = repr(_ce)
+        try:
+            _shutil.copy2("__JSON_PATH__", os.path.join(_capture_dir, "stamp_payload.json"))
+        except OSError as _je:
+            _diag["payload_copy_error"] = repr(_je)
+        with open(os.path.join(_capture_dir, "diagnostics.json"), "w") as _df:
+            json.dump(_diag, _df, indent=2, default=str)
+    except OSError as _ce:
+        print(f"DIAG_CAPTURE_FAILED {_ce!r}")
+    print(
+        f"SELF_LOAD_FAILED save_status={_save_status!r} "
+        f"capture_dir={_capture_dir} self_load_error={_self_load_err!r}"
+    )
+    raise SystemExit(2)
+
 print("OK")
 """
 
