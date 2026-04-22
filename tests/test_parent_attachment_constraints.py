@@ -2,6 +2,7 @@ import pytest
 
 from kicraft.autoplacer.brain.subcircuit_composer import (
     AttachmentConstraint,
+    LeafBlockerSet,
     PlacementConstraintEntry,
     PlacementModel,
     constraint_aware_outline,
@@ -171,3 +172,57 @@ def test_constraint_aware_outline_uses_parent_local_anchor_when_provided():
 
     assert max_pt.x == pytest.approx(80.0)
     assert max_pt.y == pytest.approx(60.0)
+
+
+def test_left_edge_constraint_anchors_outermost_pad_extent():
+    model = _make_model(
+        Point(-3.775, -0.205),
+        Point(7.215, 10.845),
+        [
+            PlacementConstraintEntry(
+                AttachmentConstraint(
+                    ref="J1",
+                    target="edge",
+                    value="left",
+                    inward_keep_in_mm=1.0,
+                    outward_overhang_mm=0.5,
+                    source="child_artifact",
+                    child_index=0,
+                    strict=True,
+                ),
+                Point(-3.775, 8.295),
+            )
+        ],
+    )
+
+    origin, placed_bbox = place_constrained_child(
+        model,
+        parent_outline_min=Point(0.0, 0.0),
+        parent_outline_max=Point(100.0, 60.0),
+    )
+
+    assert origin.x == pytest.approx(4.275)
+    assert placed_bbox[0].x == pytest.approx(0.5)
+
+
+def test_placement_model_outline_uses_real_leaf_outline_when_available():
+    model = _make_model(
+        Point(-3.0, -2.0),
+        Point(5.0, 4.0),
+        [PlacementConstraintEntry(_edge_constraint("J1", "left"), Point(-3.775, 0.0))],
+    )
+    model.blocker_set = LeafBlockerSet(
+        front_pads=(),
+        back_pads=(),
+        tht_drills=(),
+        leaf_outline=(Point(-3.775, -0.205), Point(7.215, 10.845)),
+        component_rects={"J1": (Point(-3.775, -0.205), Point(7.215, 10.845))},
+    )
+
+    _, placed_bbox = place_constrained_child(
+        model,
+        parent_outline_min=Point(0.0, 0.0),
+        parent_outline_max=Point(100.0, 60.0),
+    )
+
+    assert placed_bbox[0].x == pytest.approx(0.0)

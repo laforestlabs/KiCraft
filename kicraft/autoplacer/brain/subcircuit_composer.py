@@ -160,6 +160,7 @@ class LeafBlockerSet:
     leaf_outline: tuple[Point, Point]
     front_traces: tuple[tuple[Point, Point], ...] = ()
     back_traces: tuple[tuple[Point, Point], ...] = ()
+    component_rects: dict[str, tuple[Point, Point]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -327,6 +328,7 @@ def _build_models_for_artifact(
     rotation_candidates: list[float],
 ) -> dict[float, PlacementModel]:
     models: dict[float, PlacementModel] = {}
+    blocker_set = extract_leaf_blocker_set(artifact)
     for rotation in rotation_candidates:
         transformed = transform_loaded_artifact(
             artifact,
@@ -336,7 +338,7 @@ def _build_models_for_artifact(
         models[rotation] = PlacementModel(
             rotation=rotation,
             transformed=transformed,
-            blocker_set=extract_leaf_blocker_set(artifact),
+            blocker_set=blocker_set,
             layer_envelopes=child_layer_envelopes(transformed),
             constraint_entries=[
                 PlacementConstraintEntry(
@@ -345,6 +347,8 @@ def _build_models_for_artifact(
                         transformed,
                         constraint,
                         constraints,
+                        blocker_set,
+                        rotation,
                     ),
                 )
                 for constraint in constraints
@@ -380,9 +384,16 @@ def _constrained_components_bbox(
     constraints: list[AttachmentConstraint],
     target: str,
     value: str,
+    blocker_set: LeafBlockerSet | None,
+    rotation_deg: float,
 ) -> tuple[Point, Point] | None:
     rects = [
-        _component_local_bbox(transformed.transformed_components[constraint.ref])
+        _constraint_local_rect(
+            transformed,
+            constraint.ref,
+            blocker_set=blocker_set,
+            rotation_deg=rotation_deg,
+        )
         for constraint in constraints
         if constraint.target == target and constraint.value == value
     ]
@@ -398,9 +409,16 @@ def _compute_local_anchor_offset(
     transformed: TransformedSubcircuit,
     constraint: AttachmentConstraint,
     constraints: list[AttachmentConstraint],
+    blocker_set: LeafBlockerSet | None = None,
+    rotation_deg: float = 0.0,
 ) -> Point:
     component = transformed.transformed_components[constraint.ref]
-    bbox_min, bbox_max = _component_local_bbox(component)
+    bbox_min, bbox_max = _constraint_local_rect(
+        transformed,
+        constraint.ref,
+        blocker_set=blocker_set,
+        rotation_deg=rotation_deg,
+    )
 
     if constraint.ref.startswith("H") or "hole" in getattr(component, "kind", "").lower():
         return _compute_mounting_hole_anchor(component)
@@ -410,6 +428,8 @@ def _compute_local_anchor_offset(
         constraints,
         constraint.target,
         constraint.value,
+        blocker_set,
+        rotation_deg,
     )
     if grouped_bbox is not None and constraint.target == "edge":
         group_min, group_max = grouped_bbox
@@ -596,7 +616,7 @@ def place_constrained_child(
         parent_outline_max,
     )
 
-    bbox_min, bbox_max = placement_model.transformed.bounding_box
+    bbox_min, bbox_max = _placement_model_outline(placement_model)
     if origin_x is None:
         origin_x = parent_outline_min.x - bbox_min.x
     if origin_y is None:
@@ -1356,6 +1376,33 @@ def _component_local_bbox(comp: Component) -> tuple[Point, Point]:
     return (Point(min_x, min_y), Point(max_x, max_y))
 
 
+def _constraint_local_rect(
+    transformed: TransformedSubcircuit,
+    ref: str,
+    *,
+    blocker_set: LeafBlockerSet | None,
+    rotation_deg: float,
+) -> tuple[Point, Point]:
+    if blocker_set is not None:
+        rect = blocker_set.component_rects.get(ref)
+        if rect is not None:
+            return _transform_rect(rect, Point(0.0, 0.0), rotation_deg)
+    return _component_local_bbox(transformed.transformed_components[ref])
+
+
+def _placement_model_outline(
+    placement_model: PlacementModel,
+) -> tuple[Point, Point]:
+    blocker_set = placement_model.blocker_set
+    if blocker_set is not None:
+        return _transform_rect(
+            blocker_set.leaf_outline,
+            Point(0.0, 0.0),
+            placement_model.rotation,
+        )
+    return placement_model.transformed.bounding_box
+
+
 def _artifact_outline(artifact: LoadedSubcircuitArtifact) -> tuple[Point, Point]:
     transformed = transform_loaded_artifact(
         artifact,
@@ -1470,6 +1517,10 @@ def _extract_blockers_from_layout(
         leaf_outline=_artifact_outline(artifact),
         front_traces=_coalesce_rects(front_traces),
         back_traces=_coalesce_rects(back_traces),
+        component_rects={
+            ref: _component_local_bbox(component)
+            for ref, component in artifact.layout.components.items()
+        },
     )
 
 
@@ -1507,8 +1558,27 @@ def _extract_blockers_from_pcb(
         pcbnew.F_Cu: front_pads,
         pcbnew.B_Cu: back_pads,
     }
+    component_rects: dict[str, tuple[Point, Point]] = {}
+
+    def _bbox_to_rect(bbox) -> tuple[Point, Point]:
+        return (
+            Point(bbox.GetLeft() / 1e6, bbox.GetTop() / 1e6),
+            Point(bbox.GetRight() / 1e6, bbox.GetBottom() / 1e6),
+        )
 
     for footprint in board.GetFootprints():
+        body_bbox = None
+        try:
+            courtyard_layer = pcbnew.F_CrtYd if footprint.GetLayer() == pcbnew.F_Cu else pcbnew.B_CrtYd
+            courtyard = footprint.GetCourtyard(courtyard_layer)
+            body_bbox = courtyard.BBox()
+            if body_bbox.GetWidth() <= 0 or body_bbox.GetHeight() <= 0:
+                body_bbox = None
+        except Exception:
+            body_bbox = None
+        if body_bbox is None:
+            body_bbox = footprint.GetBoundingBox(False, False)
+        rect_min, rect_max = _bbox_to_rect(body_bbox)
         for pad in footprint.Pads():
             drill = pad.GetDrillSize()
             drill_x_mm = drill.x / 1e6
@@ -1543,14 +1613,23 @@ def _extract_blockers_from_pcb(
                         max(0.1, drill_y_mm / 2.0) + drill_margin_mm,
                     )
                 )
+            pad_bbox = pad.GetBoundingBox()
+            pad_min, pad_max = _bbox_to_rect(pad_bbox)
+            rect_min = Point(min(rect_min.x, pad_min.x), min(rect_min.y, pad_min.y))
+            rect_max = Point(max(rect_max.x, pad_max.x), max(rect_max.y, pad_max.y))
+
+        component_rects[footprint.GetReferenceAsString()] = (rect_min, rect_max)
+
+    board_edges = board.GetBoardEdgesBoundingBox()
 
     return LeafBlockerSet(
         front_pads=_coalesce_rects(front_pads),
         back_pads=_coalesce_rects(back_pads),
         tht_drills=_coalesce_rects(tht_drills),
-        leaf_outline=_artifact_outline(artifact),
+        leaf_outline=_bbox_to_rect(board_edges),
         front_traces=_coalesce_rects(front_traces),
         back_traces=_coalesce_rects(back_traces),
+        component_rects=component_rects,
     )
 
 
