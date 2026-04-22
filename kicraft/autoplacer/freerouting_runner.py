@@ -30,6 +30,7 @@ import site
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -82,16 +83,61 @@ def _kicad_subprocess_env() -> dict[str, str]:
 
 def _run_pcbnew_script(script: str) -> None:
     """Run a pcbnew script in a fresh subprocess to avoid SwigPyObject bugs."""
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        env=_kicad_subprocess_env(),
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"pcbnew subprocess failed (rc={result.returncode}):\n{result.stderr}"
+    attempts = 3
+    delays_s = (0.0, 0.1, 0.25)
+    last_result: subprocess.CompletedProcess[str] | None = None
+    for attempt in range(attempts):
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=_kicad_subprocess_env(),
         )
+        last_result = result
+        if result.returncode == 0:
+            return
+        stderr = result.stderr or ""
+        if "Failed to load board:" not in stderr or attempt == attempts - 1:
+            break
+        time.sleep(delays_s[min(attempt + 1, len(delays_s) - 1)])
+
+    assert last_result is not None
+    raise RuntimeError(
+        f"pcbnew subprocess failed (rc={last_result.returncode}):\n{last_result.stderr}"
+    )
+
+
+def _extract_violation_footprint_refs(
+    report_text: str,
+    violation_types: set[str],
+) -> collections.Counter[str]:
+    """Extract footprint refs mentioned inside selected DRC blocks."""
+    ref_pattern = re.compile(r"\bof\s+(\S+)")
+    ref_counts: collections.Counter[str] = collections.Counter()
+    active_block = False
+    for line in report_text.splitlines():
+        match = re.match(r"\[([^\]]+)\]", line)
+        if match:
+            active_block = match.group(1) in violation_types
+            continue
+        if line.startswith("[") and not line.startswith("    "):
+            active_block = False
+            continue
+        if not active_block:
+            continue
+        for match in ref_pattern.finditer(line):
+            ref_counts[match.group(1)] += 1
+    return ref_counts
+
+
+def _extract_clearance_footprint_refs(
+    report_text: str,
+) -> collections.Counter[str]:
+    """Extract footprint refs mentioned inside clearance DRC blocks."""
+    return _extract_violation_footprint_refs(
+        report_text,
+        {"clearance", "hole_clearance"},
+    )
 
 
 def clear_traces(
@@ -745,24 +791,9 @@ def validate_routed_board(
         # footprint, they are inherent to that footprint's pad spacing
         # (e.g. dense USB-C connectors) and not a routing problem.
         report_text = str(drc.get("report_text", ""))
-        _fp_ref_re = re.compile(r"\bof\s+(\S+)")
-
-        # Extract all footprint refs from clearance violation blocks in the report
-        _clearance_refs: set[str] = set()
-        _clearance_ref_counts: collections.Counter[str] = collections.Counter()
-        _in_clearance_block = False
-        for line in report_text.splitlines():
-            if line.startswith("[clearance]") or line.startswith("[hole_clearance]"):
-                _in_clearance_block = True
-                continue
-            elif line.startswith("[") and not line.startswith("    "):
-                _in_clearance_block = False
-                continue
-            if _in_clearance_block:
-                for m in _fp_ref_re.finditer(line):
-                    ref = m.group(1)
-                    _clearance_refs.add(ref)
-                    _clearance_ref_counts[ref] += 1
+        _clearance_ref_counts = _extract_clearance_footprint_refs(report_text)
+        _clearance_refs = set(_clearance_ref_counts)
+        drc["clearance_footprint_refs"] = sorted(_clearance_refs)
 
         if len(_clearance_refs) <= 1 and _clearance_refs:
             # All clearance violations are within a single footprint
@@ -779,7 +810,25 @@ def validate_routed_board(
         else:
             validation["obviously_illegal_routed_geometry"] = True
     if drc.get("copper_edge_clearance", 0) > 0:
-        validation["obviously_illegal_routed_geometry"] = True
+        report_text = str(drc.get("report_text", ""))
+        copper_edge_ref_counts = _extract_violation_footprint_refs(
+            report_text,
+            {"copper_edge_clearance"},
+        )
+        copper_edge_refs = set(copper_edge_ref_counts)
+        drc["copper_edge_footprint_refs"] = sorted(copper_edge_refs)
+        ignorable_refs = set(cfg.get("ignorable_footprint_refs", [])) if cfg else set()
+        edge_component_refs = {
+            ref
+            for ref, zone in (cfg.get("component_zones", {}) if cfg else {}).items()
+            if isinstance(zone, dict) and zone.get("edge")
+        }
+        if copper_edge_refs and copper_edge_refs <= (ignorable_refs | edge_component_refs):
+            validation["footprint_internal_copper_edge_count"] = int(
+                drc.get("copper_edge_clearance", 0)
+            )
+        else:
+            validation["obviously_illegal_routed_geometry"] = True
     if drc.get("timed_out"):
         validation["rejection_reasons"].append("drc_timeout")
     if drc.get("missing_cli"):
