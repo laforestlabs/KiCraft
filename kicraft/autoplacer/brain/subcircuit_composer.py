@@ -161,6 +161,11 @@ class LeafBlockerSet:
     front_traces: tuple[tuple[Point, Point], ...] = ()
     back_traces: tuple[tuple[Point, Point], ...] = ()
     component_rects: dict[str, tuple[Point, Point]] = field(default_factory=dict)
+    # Per-footprint "PCB Edge" reference marker in leaf-local coordinates.
+    # When a constrained component carries a marker, its coordinate overrides
+    # the pad/courtyard bbox edge on the constrained side so the attached
+    # parent edge aligns to the marker rather than the pad cluster.
+    edge_reference_points: dict[str, Point] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -448,15 +453,21 @@ def _compute_local_anchor_offset(
     )
     sides = _constraint_sides(constraint)
 
+    edge_marker: Point | None = None
+    if blocker_set is not None:
+        raw_marker = blocker_set.edge_reference_points.get(constraint.ref)
+        if raw_marker is not None:
+            edge_marker = _transform_local_point(raw_marker, Point(0.0, 0.0), rotation_deg)
+
     for side in sides:
         if side == "left":
-            anchor.x = bbox_min.x
+            anchor.x = edge_marker.x if edge_marker is not None else bbox_min.x
         elif side == "right":
-            anchor.x = bbox_max.x
+            anchor.x = edge_marker.x if edge_marker is not None else bbox_max.x
         elif side == "top":
-            anchor.y = bbox_min.y
+            anchor.y = edge_marker.y if edge_marker is not None else bbox_min.y
         elif side == "bottom":
-            anchor.y = bbox_max.y
+            anchor.y = edge_marker.y if edge_marker is not None else bbox_max.y
 
     return anchor
 
@@ -1559,12 +1570,54 @@ def _extract_blockers_from_pcb(
         pcbnew.B_Cu: back_pads,
     }
     component_rects: dict[str, tuple[Point, Point]] = {}
+    edge_reference_points: dict[str, Point] = {}
 
     def _bbox_to_rect(bbox) -> tuple[Point, Point]:
         return (
             Point(bbox.GetLeft() / 1e6, bbox.GetTop() / 1e6),
             Point(bbox.GetRight() / 1e6, bbox.GetBottom() / 1e6),
         )
+
+    def _find_edge_reference(footprint) -> Point | None:
+        """Return a 'PCB Edge' marker position in board coords, or None.
+
+        Scans fp_text and fp_line items on Dwgs.User; the first whose text
+        contains 'edge' (case-insensitive) or whose layer matches is used.
+        Supports both fp_text items (point position) and fp_line items
+        (midpoint of the segment).
+        """
+        for item in footprint.GraphicalItems():
+            try:
+                if item.GetLayer() != pcbnew.Dwgs_User:
+                    continue
+            except Exception:
+                continue
+            text = ""
+            try:
+                text = item.GetText()
+            except Exception:
+                text = ""
+            has_edge_text = bool(text) and "edge" in text.lower()
+            position = None
+            if has_edge_text:
+                try:
+                    pos = item.GetPosition()
+                    position = Point(pos.x / 1e6, pos.y / 1e6)
+                except Exception:
+                    position = None
+            else:
+                try:
+                    start = item.GetStart()
+                    end = item.GetEnd()
+                    position = Point(
+                        (start.x + end.x) / 2e6,
+                        (start.y + end.y) / 2e6,
+                    )
+                except Exception:
+                    position = None
+            if position is not None:
+                return position
+        return None
 
     for footprint in board.GetFootprints():
         body_bbox = None
@@ -1618,7 +1671,11 @@ def _extract_blockers_from_pcb(
             rect_min = Point(min(rect_min.x, pad_min.x), min(rect_min.y, pad_min.y))
             rect_max = Point(max(rect_max.x, pad_max.x), max(rect_max.y, pad_max.y))
 
-        component_rects[footprint.GetReferenceAsString()] = (rect_min, rect_max)
+        ref = footprint.GetReferenceAsString()
+        component_rects[ref] = (rect_min, rect_max)
+        edge_marker = _find_edge_reference(footprint)
+        if edge_marker is not None:
+            edge_reference_points[ref] = edge_marker
 
     board_edges = board.GetBoardEdgesBoundingBox()
 
@@ -1630,6 +1687,7 @@ def _extract_blockers_from_pcb(
         front_traces=_coalesce_rects(front_traces),
         back_traces=_coalesce_rects(back_traces),
         component_rects=component_rects,
+        edge_reference_points=edge_reference_points,
     )
 
 

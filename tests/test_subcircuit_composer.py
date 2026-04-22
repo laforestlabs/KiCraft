@@ -675,6 +675,105 @@ class TestConstraintPlacementGeometry:
         assert left_anchor.x == pytest.approx(4.0)
         assert right_anchor.x == pytest.approx(8.0)
 
+    def test_edge_anchor_uses_pcb_edge_marker_when_present(self):
+        """A 'PCB Edge' marker in the footprint overrides the pad bbox edge.
+
+        USB-style connectors declare the intended board-edge reference via an
+        fp_text/fp_line on Dwgs.User; the composer must anchor to that marker,
+        not the pad cluster, so the connector mouth sits outboard.
+        """
+        layout = _make_layout(
+            "EDGE_MARKER",
+            {
+                "J1": _make_component("J1", 6.0, 5.0, w=4.0, h=2.0),
+            },
+        )
+        transformed = TransformedSubcircuit(
+            instance=SubCircuitInstance(
+                layout_id=layout.subcircuit_id,
+                origin=Point(0.0, 0.0),
+                rotation=0.0,
+                transformed_bbox=(40.0, 20.0),
+            ),
+            layout=layout,
+            transformed_components=layout.components,
+            bounding_box=(Point(0.0, 0.0), Point(40.0, 20.0)),
+        )
+
+        # Pad bbox is x in [4.0, 8.0]; marker 1.5mm outboard of left pad.
+        blocker_set = LeafBlockerSet(
+            front_pads=(),
+            back_pads=(),
+            tht_drills=(),
+            leaf_outline=(Point(0.0, 0.0), Point(40.0, 20.0)),
+            component_rects={"J1": (Point(4.0, 4.0), Point(8.0, 6.0))},
+            edge_reference_points={"J1": Point(2.5, 5.0)},
+        )
+        constraint = AttachmentConstraint(
+            ref="J1",
+            target="edge",
+            value="left",
+            inward_keep_in_mm=0.0,
+            outward_overhang_mm=0.0,
+            source="child_artifact",
+            child_index=0,
+            strict=True,
+        )
+
+        anchor = _compute_local_anchor_offset(
+            transformed,
+            constraint,
+            [constraint],
+            blocker_set=blocker_set,
+        )
+
+        assert anchor.x == pytest.approx(2.5)
+
+    def test_edge_anchor_falls_back_to_pad_bbox_without_marker(self):
+        """Without a PCB Edge marker behaviour is unchanged: pad bbox edge."""
+        layout = _make_layout(
+            "EDGE_NOMARK",
+            {"J1": _make_component("J1", 6.0, 5.0, w=4.0, h=2.0)},
+        )
+        transformed = TransformedSubcircuit(
+            instance=SubCircuitInstance(
+                layout_id=layout.subcircuit_id,
+                origin=Point(0.0, 0.0),
+                rotation=0.0,
+                transformed_bbox=(40.0, 20.0),
+            ),
+            layout=layout,
+            transformed_components=layout.components,
+            bounding_box=(Point(0.0, 0.0), Point(40.0, 20.0)),
+        )
+
+        blocker_set = LeafBlockerSet(
+            front_pads=(),
+            back_pads=(),
+            tht_drills=(),
+            leaf_outline=(Point(0.0, 0.0), Point(40.0, 20.0)),
+            component_rects={"J1": (Point(4.0, 4.0), Point(8.0, 6.0))},
+        )
+        constraint = AttachmentConstraint(
+            ref="J1",
+            target="edge",
+            value="left",
+            inward_keep_in_mm=0.0,
+            outward_overhang_mm=0.0,
+            source="child_artifact",
+            child_index=0,
+            strict=True,
+        )
+
+        anchor = _compute_local_anchor_offset(
+            transformed,
+            constraint,
+            [constraint],
+            blocker_set=blocker_set,
+        )
+
+        assert anchor.x == pytest.approx(4.0)
+
     def test_same_side_edge_constraints_share_group_edge(self):
         layout = _make_layout(
             "EDGEPAIR",
