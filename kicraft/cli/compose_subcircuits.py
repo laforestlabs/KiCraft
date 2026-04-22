@@ -156,6 +156,11 @@ class ParentCompositionState:
     # keep-outs so FreeRouting cannot route tracks or place vias through
     # them. Units: mm, absolute parent-local coords.
     parent_local_keep_in_rects: list[tuple[Point, Point]] = field(default_factory=list)
+    # Refs whose components are pinned to a board edge/corner. After the
+    # "PCB Edge" marker is honoured as the anchor (D1), these refs' bodies
+    # are expected to extend beyond the board outline (e.g. USB-C shell);
+    # the geometry validator must only flag them when pads fall outside.
+    edge_constrained_refs: frozenset[str] = field(default_factory=frozenset)
 
     @property
     def width_mm(self) -> float:
@@ -1534,6 +1539,9 @@ def _compose_artifacts(
         copper_manifest=copper_manifest,
         composition=composition,
         parent_local_keep_in_rects=list(parent_local_keep_in_rects),
+        edge_constrained_refs=frozenset(
+            c.ref for c in all_constraints if c.target in ("edge", "corner")
+        ),
     )
     return state, transformed_payloads
 def _save_composition_snapshot(
@@ -1744,6 +1752,7 @@ def _validate_parent_geometry(
     outside_pads = 0
     outside_traces = 0
     outside_vias = 0
+    edge_constrained = set(state.edge_constrained_refs or ())
 
     for ref, comp in (composition.board_state.components or {}).items():
         bbox_tl, bbox_br = comp.bbox()
@@ -1754,12 +1763,19 @@ def _validate_parent_geometry(
         allowed_overhang = max(0.0, overhang_map.get(ref, 0.0))
         ref_min_x = min_x - allowed_overhang
         ref_max_x = max_x + allowed_overhang
-        component_outside = (
-            bbox_tl.x < ref_min_x
-            or bbox_tl.y < min_y
-            or bbox_br.x > ref_max_x
-            or bbox_br.y > max_y
-        )
+        if ref in edge_constrained:
+            # Edge-pinned connectors (e.g. USB-C) are allowed to have their
+            # body extend beyond the outline on the constrained side -- the
+            # PCB Edge marker (D1) anchors pads to the fab edge, so the
+            # shell naturally hangs off. We still verify pads are inside.
+            component_outside = False
+        else:
+            component_outside = (
+                bbox_tl.x < ref_min_x
+                or bbox_tl.y < min_y
+                or bbox_br.x > ref_max_x
+                or bbox_br.y > max_y
+            )
         pad_outside_count = 0
         for pad in comp.pads:
             if (
