@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "kicraft-opencode-plugin",
+  "version": "0.1.0",
+  "description": "KiCraft opencode plugin -- top-level project planning layer for KiCad designs (start-new-project flow).",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "main": "src/index.ts",
+  "files": [
+    "src",
+    "command",
+    "schema",
+    "install.sh",
+    "qa-e2e.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "selftest": "node --experimental-strip-types --no-warnings src/index.ts",
+    "qa": "node --experimental-strip-types --no-warnings qa-e2e.ts",
+    "test": "npm run typecheck && npm run selftest && npm run qa"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.4.6",
+    "@types/node": "22.13.9",
+    "typescript": "5.8.2"
+  }
+}

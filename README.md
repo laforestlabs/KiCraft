@@ -3,6 +3,19 @@
 KiCad PCB automation toolkit — automated placement, routing, scoring, and
 experiment management for KiCad projects via the pcbnew Python API.
 
+## Layers
+
+KiCraft is a multi-layer pipeline. Top-down:
+
+1. **start-new-project** (LLM-driven, opencode plugin) -- turns a natural-language
+   project description into a topology-level `project_plan.json`. See
+   [`opencode-plugin/`](opencode-plugin/).
+2. **formalize-design** -- not yet implemented. Will take a topology plan and
+   produce a concrete schematic-level design.
+3. **select-parts** -- not yet implemented. Will resolve generic part classes
+   to specific MPNs based on price and availability.
+4. **placement + routing + scoring** (Python, this repo) -- everything below.
+
 ## Installation
 
 ```bash

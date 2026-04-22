@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "kicraft_layer": "start_new_project",
+  "name": "llups_minimal_example",
+  "summary": "Compact 1S2P 18650 power module providing regulated 5V and 3.3V from USB-C charging input, suitable for a battery-backed embedded project. Topology-level plan only; exact part numbers and schematic are out of scope for this layer.",
+  "user_spec": {
+    "raw_text": "I want a small power supply board that runs off two 18650 cells in parallel, charges over USB-C, and gives me a regulated 5V and 3.3V output. It should keep working while charging and protect the cells from over-discharge. Roughly business-card sized.",
+    "captured_at": "2025-01-01T00:00:00.000Z",
+    "clarifications": [
+      {
+        "question": "What's the maximum continuous current you need on the 5V rail?",
+        "answer": "About 1A, briefly up to 1.5A."
+      },
+      {
+        "question": "Do you have a preferred charge controller IC family, or should I pick one?",
+        "answer": "I've used the BQ24072 before and like it. Use that family if it fits."
+      },
+      {
+        "question": "Any compliance constraints (FCC, CE)?",
+        "answer": "No, this is for personal/lab use only."
+      }
+    ]
+  },
+  "requirements": {
+    "functional": [
+      "Charge a 1S2P 18650 pack from USB-C input.",
+      "Provide a regulated 5V output rail at up to 1A continuous (1.5A peak).",
+      "Provide a regulated 3.3V output rail at up to 500mA.",
+      "Continue powering outputs from USB while charging (power-path).",
+      "Disconnect the load before the cells reach a damaging discharge voltage."
+    ],
+    "electrical": [
+      "USB-C input, default 5V (no PD negotiation required).",
+      "Battery operating range: 2.8V (cutoff) to 4.2V (full charge) per cell.",
+      "Quiescent current under load-disconnect should be sub-100uA."
+    ],
+    "mechanical": [
+      "Board outline approximately business-card sized (about 90mm x 58mm).",
+      "Two 18650 cells mounted on-board in 1S2P configuration."
+    ],
+    "environmental": [
+      "Indoor lab use; 0-40 C ambient."
+    ],
+    "interfaces": [
+      "USB-C receptacle for charge input.",
+      "Header pins or pads exposing VBAT_RAW, 5V, 3.3V, and GND."
+    ],
+    "compliance": [],
+    "must_use_parts": [
+      {
+        "name": "BQ24072",
+        "reason": "User has prior experience and prefers this charger family."
+      }
+    ],
+    "explicitly_excluded": [
+      "USB Power Delivery negotiation (not required, adds complexity)."
+    ]
+  },
+  "topology": {
+    "blocks": [
+      {
+        "id": "usb_input",
+        "role": "USB-C input and ESD protection",
+        "description": "USB-C receptacle providing the 5V charge source plus inline ESD/transient protection.",
+        "candidate_part_classes": [
+          "USB-C receptacle (16-pin, power-only acceptable)",
+          "USB ESD protection diode array"
+        ]
+      },
+      {
+        "id": "battery_pack",
+        "role": "1S2P 18650 cell pack",
+        "description": "Two protected or unprotected 18650 cells wired in parallel, single-cell voltage.",
+        "candidate_part_classes": [
+          "18650 cell holder (through-hole, 2x)"
+        ]
+      },
+      {
+        "id": "charger",
+        "role": "Linear Li-ion charger with power-path",
+        "description": "Charges the cell pack from the USB input while passing power through to the system load.",
+        "rationale": "User-pinned BQ24072 family; topology block role abstracts the pinning so a substitute can be chosen if BQ24072 is unavailable.",
+        "candidate_part_classes": [
+          "Li-ion charger IC with integrated power-path (BQ24072-class)"
+        ]
+      },
+      {
+        "id": "cell_protection",
+        "role": "Hardware over-discharge cutoff",
+        "description": "Disconnects the load when cell voltage falls below a safe threshold.",
+        "candidate_part_classes": [
+          "Single-cell Li-ion protection IC with low cutoff threshold (~2.8V)"
+        ]
+      },
+      {
+        "id": "supervisor_cutoff",
+        "role": "Soft operating-voltage cutoff",
+        "description": "Higher-threshold supervisor that gates downstream regulators before the hard protection trips, to keep the system in a defined state.",
+        "candidate_part_classes": [
+          "Voltage supervisor IC with threshold around 3.3V and load-switch output"
+        ]
+      },
+      {
+        "id": "boost_5v",
+        "role": "Boost regulator producing 5V",
+        "description": "Boosts the 2.8-4.2V battery rail to a regulated 5V at 1A continuous, 1.5A peak.",
+        "candidate_part_classes": [
+          "Synchronous boost converter IC (Vin >= 2.5V, Iout >= 1.5A)"
+        ]
+      },
+      {
+        "id": "ldo_3v3",
+        "role": "3.3V LDO",
+        "description": "Linear regulator providing a quiet 3.3V at up to 500mA, fed from VBAT or 5V rail.",
+        "candidate_part_classes": [
+          "Low-dropout linear regulator, 3.3V fixed, Iout >= 500mA"
+        ]
+      },
+      {
+        "id": "output_header",
+        "role": "User-accessible output pads",
+        "description": "Through-hole header or castellated pads exposing VBAT_RAW, 5V, 3.3V, GND.",
+        "candidate_part_classes": [
+          "0.1in pitch header pin strip"
+        ]
+      }
+    ],
+    "signal_flow": [
+      { "from": "usb_input",        "to": "charger",          "kind": "power",   "label": "VBUS 5V" },
+      { "from": "charger",          "to": "battery_pack",     "kind": "power",   "label": "charge current" },
+      { "from": "battery_pack",     "to": "cell_protection",  "kind": "power",   "label": "VBAT raw" },
+      { "from": "cell_protection",  "to": "supervisor_cutoff","kind": "power",   "label": "VBAT protected" },
+      { "from": "supervisor_cutoff","to": "boost_5v",         "kind": "power",   "label": "VBAT gated" },
+      { "from": "supervisor_cutoff","to": "ldo_3v3",          "kind": "power",   "label": "VBAT gated" },
+      { "from": "boost_5v",         "to": "output_header",    "kind": "power",   "label": "5V out" },
+      { "from": "ldo_3v3",          "to": "output_header",    "kind": "power",   "label": "3.3V out" },
+      { "from": "battery_pack",     "to": "output_header",    "kind": "power",   "label": "VBAT raw out" },
+      { "from": "supervisor_cutoff","to": "boost_5v",         "kind": "control", "label": "enable" },
+      { "from": "supervisor_cutoff","to": "ldo_3v3",          "kind": "control", "label": "enable" }
+    ],
+    "power_tree": [
+      {
+        "rail": "VBUS_5V",
+        "source_block": "usb_input",
+        "consumer_blocks": ["charger"],
+        "estimated_current_a": 1.5
+      },
+      {
+        "rail": "VBAT",
+        "source_block": "battery_pack",
+        "consumer_blocks": ["cell_protection", "output_header"],
+        "estimated_current_a": 2.0
+      },
+      {
+        "rail": "VBAT_GATED",
+        "source_block": "supervisor_cutoff",
+        "consumer_blocks": ["boost_5v", "ldo_3v3"],
+        "estimated_current_a": 2.0
+      },
+      {
+        "rail": "5V",
+        "source_block": "boost_5v",
+        "consumer_blocks": ["output_header"],
+        "estimated_current_a": 1.5
+      },
+      {
+        "rail": "3V3",
+        "source_block": "ldo_3v3",
+        "consumer_blocks": ["output_header"],
+        "estimated_current_a": 0.5
+      }
+    ]
+  },
+  "open_questions": [
+    "Should the 3.3V LDO be fed from the 5V boost (better PSRR, lower efficiency) or directly from VBAT (better efficiency, marginal headroom near cutoff)?",
+    "Is reverse-current protection on the USB-C VBUS pin needed if the host can be back-fed by the charger?",
+    "What is the desired charge rate (1A vs 2A)? Affects ISET resistor and thermal sizing of the charger block."
+  ],
+  "research_notes": [
+    {
+      "topic": "BQ24072 power-path",
+      "note": "BQ24072 family integrates dynamic power-path management so the system load can be powered from USB while the battery charges; this matches the 'continue powering outputs while charging' requirement."
+    }
+  ],
+  "next_layer_hints": {
+    "preferred_topology_variant": "linear charger + boost + LDO (no buck-boost), single-cell pack, hardware-only protection",
+    "design_priorities": ["safety", "simplicity", "board area", "efficiency"]
+  }
+}

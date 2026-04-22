@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kicraft.dev/schema/project_plan.v1.json",
+  "title": "KiCraftProjectPlan",
+  "description": "Topology-level plan for a greenfield KiCad project. Captures functional requirements and circuit topology only -- no exact part numbers, no schematic, no PCB. Produced by the kicraft-opencode-plugin start-new-project flow. Consumed by later KiCraft layers (formalize-design, select-parts).",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "kicraft_layer",
+    "name",
+    "summary",
+    "user_spec",
+    "requirements",
+    "topology"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Bumped on breaking changes to this schema."
+    },
+    "kicraft_layer": {
+      "const": "start_new_project",
+      "description": "Identifies which KiCraft layer produced this artifact."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short project slug, e.g. 'usb-c-pd-trigger'."
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One-paragraph human description of the project."
+    },
+    "user_spec": {
+      "type": "object",
+      "required": ["raw_text", "captured_at"],
+      "additionalProperties": false,
+      "properties": {
+        "raw_text": {
+          "type": "string",
+          "description": "Verbatim original user request, before any LLM rewriting."
+        },
+        "captured_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "clarifications": {
+          "type": "array",
+          "description": "Q/A pairs collected during the clarifying-questions phase.",
+          "items": {
+            "type": "object",
+            "required": ["question", "answer"],
+            "additionalProperties": false,
+            "properties": {
+              "question": { "type": "string" },
+              "answer": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "requirements": {
+      "type": "object",
+      "description": "Formalized functional and electrical requirements derived from the user spec.",
+      "additionalProperties": false,
+      "required": ["functional"],
+      "properties": {
+        "functional": {
+          "type": "array",
+          "description": "What the device must do, in plain language.",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        },
+        "electrical": {
+          "type": "array",
+          "description": "Voltage/current/frequency/impedance constraints. Plain text, e.g. 'Input: 5V USB, max 3A'.",
+          "items": { "type": "string" }
+        },
+        "mechanical": {
+          "type": "array",
+          "description": "Form factor, mounting, connector orientation, etc.",
+          "items": { "type": "string" }
+        },
+        "environmental": {
+          "type": "array",
+          "description": "Temperature range, IP rating, EMI, etc.",
+          "items": { "type": "string" }
+        },
+        "interfaces": {
+          "type": "array",
+          "description": "External-facing interfaces: USB-C, JST-PH, RJ45, etc.",
+          "items": { "type": "string" }
+        },
+        "compliance": {
+          "type": "array",
+          "description": "Regulatory/standards constraints (FCC, CE, UL).",
+          "items": { "type": "string" }
+        },
+        "must_use_parts": {
+          "type": "array",
+          "description": "Parts the user explicitly named (e.g. 'STM32F411', 'WS2812B'). These are pinned by name only -- exact part-number selection happens in a later layer.",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "reason": { "type": "string" }
+            }
+          }
+        },
+        "explicitly_excluded": {
+          "type": "array",
+          "description": "Things the user said they do NOT want (e.g. 'no wireless', 'no battery').",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "topology": {
+      "type": "object",
+      "description": "Circuit topology at the block-diagram level. NO exact part numbers, NO schematic.",
+      "required": ["blocks", "signal_flow"],
+      "additionalProperties": false,
+      "properties": {
+        "blocks": {
+          "type": "array",
+          "description": "Functional blocks of the design, e.g. 'USB-C input + protection', 'Buck converter 5V->3.3V', 'MCU', 'LED driver'.",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id", "role"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+              "role": { "type": "string", "description": "Functional role, e.g. 'input_protection', 'buck_regulator', 'mcu', 'sensor_frontend'." },
+              "description": { "type": "string" },
+              "rationale": { "type": "string", "description": "Why this block exists in the topology." },
+              "candidate_part_classes": {
+                "type": "array",
+                "description": "Generic part classes only -- e.g. 'TVS diode', 'synchronous buck IC', 'low-power MCU'. NEVER specific part numbers.",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        },
+        "signal_flow": {
+          "type": "array",
+          "description": "Directed edges between blocks describing power and signal flow.",
+          "items": {
+            "type": "object",
+            "required": ["from", "to", "kind"],
+            "additionalProperties": false,
+            "properties": {
+              "from": { "type": "string" },
+              "to": { "type": "string" },
+              "kind": {
+                "type": "string",
+                "enum": ["power", "ground", "analog", "digital", "comm_bus", "rf", "control", "feedback"]
+              },
+              "label": { "type": "string", "description": "Short label, e.g. '5V', 'I2C', 'PWM'." }
+            }
+          }
+        },
+        "power_tree": {
+          "type": "array",
+          "description": "Sequence of voltage rails and the blocks that produce/consume them.",
+          "items": {
+            "type": "object",
+            "required": ["rail"],
+            "additionalProperties": false,
+            "properties": {
+              "rail": { "type": "string", "description": "e.g. 'VBUS_5V', '3V3'." },
+              "source_block": { "type": "string" },
+              "consumer_blocks": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "estimated_current_a": { "type": "number" }
+            }
+          }
+        }
+      }
+    },
+    "open_questions": {
+      "type": "array",
+      "description": "Things the LLM still wasn't sure about and recommends resolving before the next layer.",
+      "items": { "type": "string" }
+    },
+    "research_notes": {
+      "type": "array",
+      "description": "Useful background the LLM gathered (datasheet refs, reference designs by NAME only). No copyrighted dumps.",
+      "items": {
+        "type": "object",
+        "required": ["topic", "note"],
+        "additionalProperties": false,
+        "properties": {
+          "topic": { "type": "string" },
+          "note": { "type": "string" },
+          "source": { "type": "string", "description": "URL or short citation if applicable." }
+        }
+      }
+    },
+    "next_layer_hints": {
+      "type": "object",
+      "description": "Hints for the not-yet-implemented 'formalize-design' layer.",
+      "additionalProperties": false,
+      "properties": {
+        "preferred_topology_variant": { "type": "string" },
+        "design_priorities": {
+          "type": "array",
+          "description": "Ordered priorities (cost, size, efficiency, BOM-count, etc.).",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}
