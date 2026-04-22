@@ -751,6 +751,176 @@ def _candidate_positions(
         y += step
 
 
+def _constraint_axes_used(model: PlacementModel) -> tuple[bool, bool]:
+    """Return (x_constrained, y_constrained) for a placed leaf."""
+    x_constrained = False
+    y_constrained = False
+    for entry in model.constraint_entries:
+        v = entry.constraint.value or ""
+        if "left" in v or "right" in v:
+            x_constrained = True
+        if "top" in v or "bottom" in v:
+            y_constrained = True
+    return x_constrained, y_constrained
+
+
+def _compact_free_axes(
+    *,
+    final_models: dict[int, PlacementModel],
+    entries: list[CompositionEntry],
+    loaded_artifacts,
+    placed_envelopes: list[dict[str, Any]],
+    placed_child_bboxes: dict[int, tuple[Point, Point]],
+    child_artifact_placements: list[Any],
+    transformed_payloads: list[dict[str, Any]],
+    spacing_mm: float,
+    all_constraints,
+    child_anchor_positions: dict[str, Point],
+) -> None:
+    """Shift each leaf along its non-constrained axes toward the cluster
+    centroid, stopping when another leaf or a child anchor would move.
+
+    Mutates ``entries``, ``placed_envelopes``, ``placed_child_bboxes``,
+    and ``child_anchor_positions`` in place.
+    """
+    if not final_models:
+        return
+    # Compute centroid of placed bboxes (targets to shift toward)
+    bboxes = list(placed_child_bboxes.values())
+    mid_x = sum((bb[0].x + bb[1].x) for bb in bboxes) / (2 * len(bboxes))
+    mid_y = sum((bb[0].y + bb[1].y) for bb in bboxes) / (2 * len(bboxes))
+
+    # Step sizes for binary search
+    max_step = 64.0
+    min_step = 0.5
+
+    entry_by_path = {e.instance_path: e for e in entries}
+
+    def _child_index_of(item):
+        path = item.get("label") or ""
+        # match via instance_path through loaded_artifacts
+        for idx, art in enumerate(loaded_artifacts):
+            if art.sheet_name == path:
+                return idx
+        return None
+
+    # Precompute which envelope corresponds to which child_index
+    env_child_index: dict[int, int] = {}
+    for env_i, item in enumerate(placed_envelopes):
+        label = item.get("label")
+        for idx, art in enumerate(loaded_artifacts):
+            if art.sheet_name == label:
+                env_child_index[env_i] = idx
+                break
+
+    # Iterate: each round shifts each leaf by up to max_step toward centroid
+    for _round in range(4):
+        any_moved = False
+        for child_index, model in final_models.items():
+            x_con, y_con = _constraint_axes_used(model)
+            if x_con and y_con:
+                continue
+            art = loaded_artifacts[child_index]
+            entry = entry_by_path.get(art.instance_path)
+            if entry is None:
+                continue
+            cur = entry.origin
+            # Locate this leaf's envelope index
+            env_idx = None
+            for env_i, idx in env_child_index.items():
+                if idx == child_index:
+                    env_idx = env_i
+                    break
+            if env_idx is None:
+                continue
+            item = placed_envelopes[env_idx]
+            bbox_local = (
+                Point(placed_child_bboxes[child_index][0].x - cur.x, placed_child_bboxes[child_index][0].y - cur.y),
+                Point(placed_child_bboxes[child_index][1].x - cur.x, placed_child_bboxes[child_index][1].y - cur.y),
+            )
+
+            def _try_move(new_origin: Point) -> bool:
+                new_bbox = _shift_bbox(bbox_local, new_origin)
+                for other_i, other_item in enumerate(placed_envelopes):
+                    if other_i == env_idx:
+                        continue
+                    if _bbox_disjoint(other_item["bbox"], new_bbox):
+                        continue
+                    # Bboxes overlap -- check sparse
+                    if _placed_items_conflict(
+                        other_item,
+                        new_bbox,
+                        _shift_layer_envelopes(model.layer_envelopes, new_origin),
+                        model.blocker_set,
+                        new_origin,
+                        model.rotation,
+                    ):
+                        return False
+                return True
+
+            dx_target = 0.0 if x_con else (mid_x - (cur.x + (bbox_local[0].x + bbox_local[1].x) / 2))
+            dy_target = 0.0 if y_con else (mid_y - (cur.y + (bbox_local[0].y + bbox_local[1].y) / 2))
+            if abs(dx_target) < min_step and abs(dy_target) < min_step:
+                continue
+
+            # Binary search for the max safe shift toward target
+            best_dx = 0.0
+            best_dy = 0.0
+            # Try progressively smaller shifts
+            step = min(max_step, max(abs(dx_target), abs(dy_target)))
+            while step >= min_step:
+                cand_dx = (dx_target / max(abs(dx_target), 1e-9)) * min(step, abs(dx_target)) if abs(dx_target) > min_step else 0.0
+                cand_dy = (dy_target / max(abs(dy_target), 1e-9)) * min(step, abs(dy_target)) if abs(dy_target) > min_step else 0.0
+                new_origin = Point(cur.x + best_dx + cand_dx, cur.y + best_dy + cand_dy)
+                if _try_move(new_origin):
+                    best_dx += cand_dx
+                    best_dy += cand_dy
+                step /= 2.0
+
+            if abs(best_dx) < min_step and abs(best_dy) < min_step:
+                continue
+
+            # Commit the shift
+            any_moved = True
+            new_origin = Point(cur.x + best_dx, cur.y + best_dy)
+            entry.origin = new_origin
+            new_bbox = _shift_bbox(bbox_local, new_origin)
+            placed_child_bboxes[child_index] = new_bbox
+            placed_envelopes[env_idx]["bbox"] = new_bbox
+            placed_envelopes[env_idx]["origin"] = new_origin
+            placed_envelopes[env_idx]["envelopes"] = _shift_layer_envelopes(
+                model.layer_envelopes, new_origin
+            )
+            # Update child anchor positions (world coords)
+            for centry in model.constraint_entries:
+                child_anchor_positions[centry.constraint.ref] = Point(
+                    new_origin.x + centry.local_anchor_offset.x,
+                    new_origin.y + centry.local_anchor_offset.y,
+                )
+            # Update the ChildArtifactPlacement (used for actual stamping)
+            # and the transformed debug payload. Both are keyed by
+            # instance_path.
+            for cap in child_artifact_placements:
+                if cap.artifact.instance_path == art.instance_path:
+                    cap.origin = new_origin
+                    break
+            for tp in transformed_payloads:
+                if tp.get("artifact", {}).get("instance_path") == art.instance_path:
+                    from kicraft.autoplacer.brain.subcircuit_instances import (
+                        transform_loaded_artifact,
+                        transformed_debug_dict,
+                        transformed_summary,
+                    )
+                    new_tr = transform_loaded_artifact(
+                        art, origin=new_origin, rotation=model.rotation
+                    )
+                    tp["transformed"] = transformed_debug_dict(new_tr)
+                    tp["summary"] = transformed_summary(new_tr)
+                    break
+        if not any_moved:
+            break
+
+
 def _bbox_overlap_area(a: tuple[Point, Point], b: tuple[Point, Point]) -> float:
     dx = max(0.0, min(a[1].x, b[1].x) - max(a[0].x, b[0].x))
     dy = max(0.0, min(a[1].y, b[1].y) - max(a[0].y, b[0].y))
@@ -1342,6 +1512,39 @@ def _compose_artifacts(
         seed_frame_min = Point(min(seed_frame_min.x, last_packed_extents[0].x - spacing_mm), min(seed_frame_min.y, last_packed_extents[0].y - spacing_mm))
         seed_frame_max = Point(max(seed_frame_max.x, last_packed_extents[1].x + spacing_mm), max(seed_frame_max.y, last_packed_extents[1].y + spacing_mm))
         final_placed_envelopes = placed_envelopes
+
+    # Post-iteration compaction: shift leaves along axes that have no
+    # explicit constraint toward the cluster centroid. Constrained axes
+    # (e.g. USB INPUT's x is pinned to the left edge, LDO 3.3V's x is
+    # pinned to the right edge) are left alone. This closes the empty
+    # top/bottom strips that appear because leaves default to the frame
+    # origin on their free axes -- without this pass USB INPUT and LDO
+    # 3.3V hug the top of the frame and force the board height to be
+    # much larger than the leaf cluster actually needs.
+    _compact_free_axes(
+        final_models=final_models,
+        entries=entries,
+        loaded_artifacts=loaded_artifacts,
+        placed_envelopes=final_placed_envelopes,
+        placed_child_bboxes=placed_child_bboxes,
+        child_artifact_placements=child_artifact_placements,
+        transformed_payloads=transformed_payloads,
+        spacing_mm=spacing_mm,
+        all_constraints=all_constraints,
+        child_anchor_positions=child_anchor_positions,
+    )
+
+    # Recompute outline now that leaves may have shifted inward
+    placed_bbox_list = [placed_child_bboxes[index] for index in sorted(placed_child_bboxes)]
+    if all_constraints:
+        last_outline = constraint_aware_outline(
+            placed_bboxes=placed_bbox_list,
+            attachment_constraints=all_constraints,
+            constrained_ref_world_anchors=child_anchor_positions,
+            margin_mm=spacing_mm,
+        )
+    else:
+        last_outline = packed_extents_outline(placed_bbox_list, margin_mm=spacing_mm)
 
     exact_outline = last_outline
     for child_index, model in final_models.items():
