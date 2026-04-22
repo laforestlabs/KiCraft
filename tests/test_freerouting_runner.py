@@ -152,3 +152,51 @@ def test_run_pcbnew_script_retries_transient_failed_to_load_board(
     freerouting_runner._run_pcbnew_script("print('ok')")
 
     assert len(calls) == 3
+
+
+def test_run_pcbnew_script_retries_up_to_six_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls: list[int] = []
+
+    def _fake_run(*args, **kwargs):
+        calls.append(1)
+        if len(calls) < 6:
+            return type(
+                "Result",
+                (),
+                {"returncode": 1, "stderr": "RuntimeError: Failed to load board: /tmp/foo.kicad_pcb\n"},
+            )()
+        return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+    monkeypatch.setattr(freerouting_runner.subprocess, "run", _fake_run)
+    monkeypatch.setattr(freerouting_runner.time, "sleep", lambda _s: None)
+
+    freerouting_runner._run_pcbnew_script("print('ok')")
+
+    assert len(calls) == 6
+
+
+def test_run_pcbnew_script_gives_up_after_six_failed_load_board(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls: list[int] = []
+
+    def _fake_run(*args, **kwargs):
+        calls.append(1)
+        return type(
+            "Result",
+            (),
+            {
+                "returncode": 1,
+                "stderr": "RuntimeError: Failed to load board: /tmp/foo.kicad_pcb\n",
+            },
+        )()
+
+    monkeypatch.setattr(freerouting_runner.subprocess, "run", _fake_run)
+    monkeypatch.setattr(freerouting_runner.time, "sleep", lambda _s: None)
+
+    with pytest.raises(RuntimeError, match="Failed to load board"):
+        freerouting_runner._run_pcbnew_script("print('ok')")
+
+    assert len(calls) == 6

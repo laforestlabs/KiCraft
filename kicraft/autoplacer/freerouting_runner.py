@@ -83,8 +83,8 @@ def _kicad_subprocess_env() -> dict[str, str]:
 
 def _run_pcbnew_script(script: str) -> None:
     """Run a pcbnew script in a fresh subprocess to avoid SwigPyObject bugs."""
-    attempts = 3
-    delays_s = (0.0, 0.1, 0.25)
+    attempts = 6
+    delays_s = (0.0, 0.05, 0.1, 0.25, 0.5, 1.0)
     last_result: subprocess.CompletedProcess[str] | None = None
     for attempt in range(attempts):
         result = subprocess.run(

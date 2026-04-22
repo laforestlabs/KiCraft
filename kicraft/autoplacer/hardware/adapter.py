@@ -27,6 +27,34 @@ VIA_DRILL_MM = 0.3
 VIA_SIZE_MM = 0.6
 
 
+def _atomic_save_board(board, output_path: str) -> None:
+    """Save a pcbnew board to disk atomically and durably.
+
+    Writes to a sibling temp file, fsyncs the file, atomically renames into
+    place, then fsyncs the containing directory.  This prevents a follow-up
+    pcbnew.LoadBoard() in another process from observing a partial write or
+    unsynced directory entry, which manifests as
+    "RuntimeError: Failed to load board: ...".
+    """
+    out_dir = os.path.dirname(output_path) or "."
+    tmp_path = f"{output_path}.stamp_tmp.{os.getpid()}"
+    board.Save(tmp_path)
+    try:
+        with open(tmp_path, "rb") as tf:
+            os.fsync(tf.fileno())
+    except OSError:
+        pass
+    os.replace(tmp_path, output_path)
+    try:
+        dir_fd = os.open(out_dir, os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
+
+
 def _pcbnew_subprocess_env() -> dict:
     """Build subprocess env that can import KiCad's pcbnew module.
 
@@ -200,7 +228,7 @@ def detect_opening_direction(fp) -> float | None:
 # stamp_subcircuit_board_subprocess().  The JSON path is injected at runtime.
 # ---------------------------------------------------------------------------
 _STAMP_SUBPROCESS_SCRIPT = r"""
-import json, pcbnew
+import json, os, pcbnew
 
 with open("__JSON_PATH__") as _f:
     _data = json.load(_f)
@@ -331,7 +359,28 @@ for _v in _vias:
     board.Add(_tv)
 
 board.BuildConnectivity()
-board.Save(_out_path)
+
+# Atomic save: write -> fsync file -> atomic rename -> fsync directory.
+# Required so a follow-up pcbnew.LoadBoard() in another process never
+# observes a partial write or unsynced directory entry, which would raise
+# "Failed to load board: ...".
+_out_dir = os.path.dirname(_out_path) or "."
+_tmp_out = _out_path + ".stamp_tmp." + str(os.getpid())
+board.Save(_tmp_out)
+try:
+    with open(_tmp_out, "rb") as _tf:
+        os.fsync(_tf.fileno())
+except OSError:
+    pass
+os.replace(_tmp_out, _out_path)
+try:
+    _dir_fd = os.open(_out_dir, os.O_DIRECTORY)
+    try:
+        os.fsync(_dir_fd)
+    finally:
+        os.close(_dir_fd)
+except OSError:
+    pass
 print("OK")
 """
 
@@ -532,7 +581,7 @@ class KiCadAdapter:
             fp.SetOrientationDegrees(comp.rotation)
 
         out = output_path or self.pcb_path
-        board.Save(out)
+        _atomic_save_board(board, out)
         print(f"Placement saved to {out}")
 
     def _stamp_subcircuit_board_inprocess(
@@ -678,7 +727,7 @@ class KiCadAdapter:
 
         board.BuildConnectivity()
         out = output_path or self.pcb_path
-        board.Save(out)
+        _atomic_save_board(board, out)
         print(f"Subcircuit board stamped to {out}")
 
     # ------ subprocess-safe stamping (default) ------
