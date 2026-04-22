@@ -226,8 +226,12 @@ class PlacementScorer:
 
         Measures the fraction of front-side SMT component area that overlaps
         (in XY projection) with back-side THT bounding boxes.  Higher overlap
-        means better board space utilization.  Returns 100 if all SMT is
-        over THT, 50 baseline when no THT exists.
+        means better board space utilization.  Returns 100 if all SMT sits
+        over backside THT (full shadow utilisation), 0 when no overlap --
+        this steep linear curve penalises leaves that ignore the available
+        backside shadow even though the sparse blocker model permits it.
+        Returns 100 when the feature is disabled, no backside THT exists,
+        or there is no front-side SMT (nothing to score).
         """
         if not self.cfg.get("smt_opposite_tht", True):
             return 100.0  # feature disabled — don't penalize
@@ -263,8 +267,8 @@ class PlacementScorer:
                 overlap_area += ox * oy
 
         overlap_frac = min(1.0, overlap_area / total_smt_area)
-        # 0% overlap → 50, 50% → 75, 100% → 100
-        return 50.0 + 50.0 * overlap_frac
+        # 0% overlap → 0, 50% → 50, 100% → 100
+        return max(0.0, 100.0 * overlap_frac)
 
     def _score_group_coherence(self) -> float:
         """Score how compact functional groups are.

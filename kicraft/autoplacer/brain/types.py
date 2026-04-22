@@ -213,14 +213,14 @@ class PlacementScore:
         w = weights or {
             "net_distance": 0.20,  # connected parts close together
             "crossover_score": 0.17,  # fewer crossings = easier routing
-            "compactness": 0.02,  # tighter layouts = smaller boards
+            "compactness": 0.01,  # tighter layouts = smaller boards
             "edge_compliance": 0.10,
-            "rotation_score": 0.01,
+            "rotation_score": 0.00,
             "board_containment": 0.12,
             "courtyard_overlap": 0.10,
-            "smt_opposite_tht": 0.10,  # SMT on opposite side of THT
+            "smt_opposite_tht": 0.15,  # SMT on opposite side of THT
             "group_coherence": 0.08,  # functional groups stay compact
-            "aspect_ratio": 0.05,  # penalize elongated board shapes
+            "aspect_ratio": 0.02,  # penalize elongated board shapes
             "topology_structure": 0.05,  # reward topology-aware passive ordering
         }
         self.total = sum(getattr(self, k) * v for k, v in w.items())
