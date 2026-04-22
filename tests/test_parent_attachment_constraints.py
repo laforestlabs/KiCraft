@@ -125,7 +125,7 @@ def test_conflicting_same_side_constraints_raise_error():
         )
 
 
-def test_constraint_aware_outline_never_shrinks_below_geometry_union():
+def test_constraint_aware_outline_pins_constrained_side_to_anchor_edge():
     constraint = AttachmentConstraint(
         ref="J1",
         target="edge",
@@ -147,7 +147,7 @@ def test_constraint_aware_outline_never_shrinks_below_geometry_union():
         margin_mm=1.5,
     )
 
-    assert min_pt.x == pytest.approx(-10.0)
+    assert min_pt.x == pytest.approx(-6.0)
     assert max_pt.x == pytest.approx(46.5)
 
 

@@ -1942,19 +1942,19 @@ def constraint_aware_outline(
                 bottom_edges.append(anchor.y + c.inward_keep_in_mm - c.outward_overhang_mm)
 
     if left_edges:
-        out_min_x = min(min_geom_x, min(left_edges))
+        out_min_x = min(left_edges)
     else:
         out_min_x = min_geom_x - margin_mm
     if right_edges:
-        out_max_x = max(max_geom_x, max(right_edges))
+        out_max_x = max(right_edges)
     else:
         out_max_x = max_geom_x + margin_mm
     if top_edges:
-        out_min_y = min(min_geom_y, min(top_edges))
+        out_min_y = min(top_edges)
     else:
         out_min_y = min_geom_y - margin_mm
     if bottom_edges:
-        out_max_y = max(max_geom_y, max(bottom_edges))
+        out_max_y = max(bottom_edges)
     else:
         out_max_y = max_geom_y + margin_mm
 
