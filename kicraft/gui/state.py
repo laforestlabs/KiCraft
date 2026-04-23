@@ -38,11 +38,11 @@ HIERARCHICAL_CONTROLS = [
         "label": "Leaf Solve Rounds",
         "default": 2,
         "min": 1,
-        "max": 6,
+        "max": None,
         "step": 1,
         "enabled": True,
         "group": "Leaf Solving",
-        "description": "Balanced default: 2. Increase only when extra leaf quality clearly justifies the runtime.",
+        "description": "How many local solve attempts each leaf gets. Higher is slower but more likely to find a legal placement.",
     },
     {
         "key": "top_level_rounds",

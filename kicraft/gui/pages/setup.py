@@ -65,7 +65,6 @@ def _strategy_panel(state):
             "Leaf solve rounds per experiment round",
             value=state.strategy.get("leaf_rounds", 2),
             min=1,
-            max=6,
             step=1,
             on_change=lambda e: state.strategy.update({"leaf_rounds": int(e.value)}),
         ).tooltip(
