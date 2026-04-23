@@ -234,6 +234,26 @@ def _all_leaf_artifacts(project_dir: Path) -> list[dict[str, Any]]:
             metadata = _load_json(metadata_path)
         except Exception:
             continue
+        # Skip parent-composition artifacts -- they write the same pair of
+        # JSON files as leaves but are the assembled parent, not a leaf.
+        # Without this skip, from R2 onward the parent dir gets counted as
+        # a 7th leaf and reports as not-accepted.
+        if (
+            isinstance(metadata, dict)
+            and (
+                metadata.get("parent_composition") is True
+                or metadata.get("schema_version") == "parent-compose-v1"
+            )
+        ):
+            continue
+        if (
+            isinstance(solved_layout, dict)
+            and (
+                solved_layout.get("parent_composition") is True
+                or solved_layout.get("schema_version") == "parent-compose-v1"
+            )
+        ):
+            continue
         artifacts.append(
             {
                 "artifact_dir": str(artifact_dir),
