@@ -328,7 +328,7 @@ def monitor_page():
                     "schematic_file": state.strategy["schematic_file"],
                     "parent": state.strategy.get("parent", "/"),
                     "only": state.strategy.get("only", []),
-                    "leaf_rounds": state.strategy.get("leaf_rounds", 1),
+                    "leaf_rounds": state.strategy.get("leaf_rounds", 2),
                     "render_png": state.toggles.get("render_png", True),
                     "save_round_details": state.toggles.get("save_round_details", True),
                     "placement_config": state.placement_config,

@@ -245,6 +245,12 @@ class AppState:
     def __post_init__(self) -> None:
         if self.db is None:
             self.db = Database()
+        # Seed strategy with hierarchical control defaults so leaf_rounds,
+        # top_level_rounds, compose_spacing_mm all have a value before a
+        # preset is loaded. Start and Setup then read the same source.
+        for control in self.hierarchical_controls:
+            key = control["key"]
+            self.strategy.setdefault(key, control["default"])
 
     @property
     def runner(self) -> ExperimentRunner:
@@ -298,6 +304,10 @@ class AppState:
             key = control["key"]
             if key in config:
                 control["default"] = config[key]
+                # Mirror the value into strategy so Start sees it. Without
+                # this, leaf_rounds (and similar) get stranded in
+                # control["default"] while the runner reads strategy.
+                self.strategy[key] = config[key]
             control_key = f"_control_{key}"
             if control_key in config and isinstance(config[control_key], dict):
                 meta = config[control_key]
