@@ -20,7 +20,6 @@ is ignored and routing runs indefinitely.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import collections
 import os
@@ -524,32 +523,6 @@ def route_with_freerouting(
     timeout_s = config.get("freerouting_timeout_s", 120)
     hide_window = bool(config.get("freerouting_hide_window", True))
 
-    # Disk cache for DSN -> SES. DSN bytes are deterministic from placement +
-    # config, so identical DSN content always yields identical optimal
-    # routing. Re-running FreeRouting on the same DSN is wasted time.
-    cache_dir_cfg = config.get("freerouting_cache_dir")
-    cache_enabled = bool(config.get("freerouting_cache_enabled", True))
-    cache_dir = None
-    if cache_enabled:
-        if cache_dir_cfg:
-            cache_dir = Path(os.path.expanduser(str(cache_dir_cfg)))
-        else:
-            pcb_parent = Path(kicad_pcb_path).resolve().parent
-            # Walk up to the experiments dir if we're inside it.
-            anchor = pcb_parent
-            for parent in [pcb_parent] + list(pcb_parent.parents):
-                if parent.name == ".experiments":
-                    anchor = parent
-                    break
-                if (parent / ".experiments").exists():
-                    anchor = parent / ".experiments"
-                    break
-            cache_dir = anchor / "fr_cache"
-        try:
-            cache_dir.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            cache_dir = None
-
     for attempt in range(2):
         with tempfile.TemporaryDirectory() as tmpdir:
             dsn_path = os.path.join(tmpdir, "board.dsn")
@@ -562,38 +535,6 @@ def route_with_freerouting(
             )
 
             passes = max_passes if attempt == 0 else max(10, max_passes // 2)
-
-            # Check disk cache before invoking Java. Cache key includes the
-            # max_passes value since a higher pass cap can produce a
-            # different (better-optimized) SES for the same DSN.
-            dsn_hash: str | None = None
-            cached_ses: Path | None = None
-            cached_stats: Path | None = None
-            if cache_dir is not None:
-                try:
-                    with open(dsn_path, "rb") as f:
-                        dsn_hash = hashlib.sha256(f.read()).hexdigest()
-                    key = f"{dsn_hash}_mp{passes}"
-                    cached_ses = cache_dir / f"{key}.ses"
-                    cached_stats = cache_dir / f"{key}.stats.json"
-                except OSError:
-                    dsn_hash = None
-
-            if dsn_hash and cached_ses and cached_ses.exists() and cached_stats and cached_stats.exists():
-                try:
-                    shutil.copy2(cached_ses, ses_path)
-                    stats = json.loads(cached_stats.read_text())
-                    stats["cache_hit"] = True
-                    stats["preserved_existing_copper"] = preserve_existing_copper
-                    stats["cleared_zones_before_export"] = clear_existing_zones
-                    import_ses(kicad_pcb_path, ses_path, output_path)
-                    if preserve_existing_copper:
-                        _unlock_traces(output_path)
-                    return stats
-                except (OSError, json.JSONDecodeError):
-                    # Cache corruption; fall through and re-route.
-                    pass
-
             stats = run_freerouting(
                 dsn_path,
                 ses_path,
@@ -604,22 +545,8 @@ def route_with_freerouting(
             )
             stats["preserved_existing_copper"] = preserve_existing_copper
             stats["cleared_zones_before_export"] = clear_existing_zones
-            stats["cache_hit"] = False
 
             if os.path.exists(ses_path):
-                # Populate the cache before importing so a crash during
-                # import doesn't prevent future hits.
-                if dsn_hash and cached_ses and cached_stats:
-                    try:
-                        shutil.copy2(ses_path, cached_ses)
-                        # Strip transient fields before persisting.
-                        persist_stats = {
-                            k: v for k, v in stats.items()
-                            if not k.startswith("_") and k != "cache_hit"
-                        }
-                        cached_stats.write_text(json.dumps(persist_stats))
-                    except OSError:
-                        pass
                 import_ses(kicad_pcb_path, ses_path, output_path)
                 if preserve_existing_copper:
                     _unlock_traces(output_path)
