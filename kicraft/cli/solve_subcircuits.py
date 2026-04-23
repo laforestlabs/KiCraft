@@ -134,6 +134,7 @@ from kicraft.autoplacer.brain.subcircuit_artifacts import (
     build_artifact_metadata,
     build_leaf_extraction,
     build_solved_layout_artifact,
+    resolve_artifact_paths,
     save_artifact_metadata,
     save_debug_payload,
     save_solved_layout_artifact,
@@ -162,6 +163,8 @@ class SolvedLeafSubcircuit:
     size_reduction: dict[str, Any] = field(default_factory=dict)
     scheduling_metadata: dict[str, Any] = field(default_factory=dict)
     failure_summary: dict[str, Any] = field(default_factory=dict)
+    experiment_round: int = 0
+    prior_rounds: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def sheet_name(self) -> str:
@@ -521,6 +524,7 @@ def _solve_leaf_subcircuit(
     rounds: int,
     base_seed: int,
     route: bool,
+    experiment_round: int = 0,
 ) -> SolvedLeafSubcircuit:
     leaf_total_start = time.monotonic()
 
@@ -544,6 +548,35 @@ def _solve_leaf_subcircuit(
     round_results: list[SolveRoundResult] = []
     best: SolveRoundResult | None = None
 
+    # Determine base round-index offset by reading any prior debug.json for
+    # this leaf. Prior rounds from earlier experiment rounds are preserved so
+    # the GUI can filter leaf rounds by parent round; to avoid render-filename
+    # collisions and keep indices monotonic, we start this run's round_index
+    # where the prior run left off.
+    base_offset = 0
+    prior_all_rounds: list[dict[str, Any]] = []
+    try:
+        paths = resolve_artifact_paths(
+            project_dir=str(Path(extraction.project_dir).resolve()),
+            subcircuit_id=node.definition.id,
+        )
+        debug_path = Path(paths.debug_json)
+        if debug_path.exists():
+            prior_payload = json.loads(debug_path.read_text(encoding="utf-8"))
+            prior_extra = prior_payload.get("extra", {}) if isinstance(prior_payload, dict) else {}
+            raw_prior = prior_extra.get("all_rounds", []) if isinstance(prior_extra, dict) else []
+            if isinstance(raw_prior, list):
+                prior_all_rounds = [r for r in raw_prior if isinstance(r, dict)]
+                if prior_all_rounds:
+                    max_idx = max(
+                        int(r.get("round_index", -1) or -1) for r in prior_all_rounds
+                    )
+                    if max_idx >= 0:
+                        base_offset = max_idx + 1
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        prior_all_rounds = []
+        base_offset = 0
+
     effective_rounds = rounds
     if route:
         if bool(local_cfg.get("subcircuit_fast_smoke_mode", False)):
@@ -565,17 +598,18 @@ def _solve_leaf_subcircuit(
     failed_round_count = 0
     acceptance_cfg = acceptance_config_from_dict(cfg)
 
-    for round_index in range(effective_rounds):
+    for local_round_index in range(effective_rounds):
+        round_index = base_offset + local_round_index
         seed = rng.randint(0, 2**31 - 1)
         round_cfg = dict(local_cfg)
         if route and not fast_smoke_mode:
-            if round_index % 3 == 1:
+            if local_round_index % 3 == 1:
                 round_cfg["randomize_group_layout"] = True
                 round_cfg["orderedness"] = max(
                     0.15,
                     float(round_cfg.get("orderedness", 0.25)) - 0.10,
                 )
-            elif round_index % 3 == 2:
+            elif local_round_index % 3 == 2:
                 round_cfg["randomize_group_layout"] = True
                 round_cfg["scatter_mode"] = "random"
                 round_cfg["orderedness"] = max(
@@ -740,6 +774,8 @@ def _solve_leaf_subcircuit(
         size_reduction=size_reduction,
         scheduling_metadata=scheduling_metadata,
         failure_summary=failure_summary,
+        experiment_round=experiment_round,
+        prior_rounds=prior_all_rounds,
     )
 
 
@@ -890,15 +926,31 @@ def _persist_solution(
     persist_elapsed_s = round(max(0.0, time.monotonic() - persist_start), 3)
     solved.best_round.timing_breakdown["persist_solution_s"] = persist_elapsed_s
 
+    # Stamp each new round record with the experiment_round it belongs to so
+    # the GUI can filter per-parent-round. Merge with any prior rounds
+    # recovered from an earlier experiment round (same leaf, same artifact dir).
+    new_round_dicts: list[dict[str, Any]] = []
+    for round_result in solved.all_rounds:
+        rec = round_result.to_dict()
+        rec["experiment_round"] = int(solved.experiment_round or 0)
+        new_round_dicts.append(rec)
+
+    new_indices = {int(r.get("round_index", -1) or -1) for r in new_round_dicts}
+    merged_rounds = [
+        r
+        for r in solved.prior_rounds
+        if int(r.get("round_index", -1) or -1) not in new_indices
+    ]
+    merged_rounds.extend(new_round_dicts)
+    merged_rounds.sort(key=lambda r: int(r.get("round_index", 0) or 0))
+
     save_debug_payload(
         extraction=extraction,
         metadata=metadata,
         extra={
             "solve_summary": solved.to_dict(),
             "best_round": solved.best_round.to_dict(),
-            "all_rounds": [
-                round_result.to_dict() for round_result in solved.all_rounds
-            ],
+            "all_rounds": merged_rounds,
             "leaf_board_state": extraction_debug_dict(solved.extraction),
             "solved_placement_summary": {
                 "component_count": len(solved.best_round.components),
@@ -1036,13 +1088,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Reduce nonessential render diagnostics for faster smoke-test verification while preserving canonical board artifacts",
     )
+    parser.add_argument(
+        "--experiment-round",
+        type=int,
+        default=0,
+        help="Autoexperiment parent round this solve run belongs to. Stamped onto each leaf round record so the GUI can filter per-parent-round. 0 = standalone/unknown.",
+    )
     return parser.parse_args(argv)
 
 
 def _solve_leaf_worker(
-    args: tuple[HierarchyNode, BoardState, dict[str, Any], int, int, bool],
+    args: tuple[HierarchyNode, BoardState, dict[str, Any], int, int, bool, int],
 ) -> tuple[str, SolvedLeafSubcircuit | None, dict[str, Any] | None]:
-    node, full_state, cfg, rounds, base_seed, route = args
+    node, full_state, cfg, rounds, base_seed, route, experiment_round = args
     try:
         solved = _solve_leaf_subcircuit(
             node=node,
@@ -1051,6 +1109,7 @@ def _solve_leaf_worker(
             rounds=rounds,
             base_seed=base_seed,
             route=route,
+            experiment_round=experiment_round,
         )
         return (node.id.instance_path, solved, None)
     except Exception as exc:
@@ -1123,6 +1182,8 @@ def main(argv: list[str] | None = None) -> int:
             worker_count = min(len(leaves), max(1, available_cpus - 1))
         rounds = max(1, args.rounds)
 
+        experiment_round = int(getattr(args, "experiment_round", 0) or 0)
+
         if worker_count == 1 or len(leaves) <= 1:
             for index, node in enumerate(leaves):
                 solved = _solve_leaf_subcircuit(
@@ -1132,6 +1193,7 @@ def main(argv: list[str] | None = None) -> int:
                     rounds=rounds,
                     base_seed=args.seed + index * 1009,
                     route=args.route,
+                    experiment_round=experiment_round,
                 )
                 solved_results.append(solved)
         else:
@@ -1144,6 +1206,7 @@ def main(argv: list[str] | None = None) -> int:
                     rounds,
                     args.seed + index * 1009,
                     args.route,
+                    experiment_round,
                 )
                 for index, node in enumerate(leaves)
             ]
@@ -1201,6 +1264,7 @@ def main(argv: list[str] | None = None) -> int:
                             rounds=rounds,
                             base_seed=args.seed + index * 1009,
                             route=args.route,
+                            experiment_round=experiment_round,
                         )
                         solved_by_path[solved.instance_path] = solved
                     except Exception as exc:

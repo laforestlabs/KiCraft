@@ -1483,6 +1483,7 @@ def _build_solve_cmd(
     workers: int,
     fast_smoke: bool = False,
     leaf_order: list[str] | None = None,
+    experiment_round: int = 0,
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -1498,6 +1499,8 @@ def _build_solve_cmd(
         "--json",
         "--workers",
         str(max(1, workers)),
+        "--experiment-round",
+        str(int(experiment_round)),
     ]
     if fast_smoke:
         cmd.append("--fast-smoke")
@@ -1897,6 +1900,7 @@ def main(argv: list[str] | None = None) -> int:
                     workers=effective_workers,
                     fast_smoke=args.fast_smoke,
                     leaf_order=[],
+                    experiment_round=round_num,
                 )
             ),
             preview_paths=_discover_live_preview_paths(project_dir),
@@ -1934,6 +1938,7 @@ def main(argv: list[str] | None = None) -> int:
             workers=effective_workers,
             fast_smoke=args.fast_smoke,
             leaf_order=previous_leaf_order,
+            experiment_round=round_num,
         )
         leaf_timing_summary: dict[str, Any] = {}
         _write_live_status(
