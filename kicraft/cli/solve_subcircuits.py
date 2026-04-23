@@ -555,27 +555,36 @@ def _solve_leaf_subcircuit(
     # where the prior run left off.
     base_offset = 0
     prior_all_rounds: list[dict[str, Any]] = []
-    try:
-        paths = resolve_artifact_paths(
-            project_dir=str(Path(extraction.project_dir).resolve()),
-            subcircuit_id=node.definition.id,
-        )
-        debug_path = Path(paths.debug_json)
-        if debug_path.exists():
-            prior_payload = json.loads(debug_path.read_text(encoding="utf-8"))
-            prior_extra = prior_payload.get("extra", {}) if isinstance(prior_payload, dict) else {}
-            raw_prior = prior_extra.get("all_rounds", []) if isinstance(prior_extra, dict) else []
-            if isinstance(raw_prior, list):
-                prior_all_rounds = [r for r in raw_prior if isinstance(r, dict)]
-                if prior_all_rounds:
-                    max_idx = max(
-                        int(r.get("round_index", -1) or -1) for r in prior_all_rounds
-                    )
-                    if max_idx >= 0:
-                        base_offset = max_idx + 1
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        prior_all_rounds = []
-        base_offset = 0
+    schematic_path = getattr(extraction.subcircuit, "schematic_path", None)
+    if schematic_path:
+        try:
+            paths = resolve_artifact_paths(
+                project_dir=Path(schematic_path).parent,
+                subcircuit_id=node.definition.id,
+            )
+            debug_path = Path(paths.debug_json)
+            if debug_path.exists():
+                prior_payload = json.loads(debug_path.read_text(encoding="utf-8"))
+                prior_extra = prior_payload.get("extra", {}) if isinstance(prior_payload, dict) else {}
+                raw_prior = prior_extra.get("all_rounds", []) if isinstance(prior_extra, dict) else []
+                if isinstance(raw_prior, list):
+                    # Drop legacy rounds that predate experiment_round
+                    # instrumentation; they confuse the GUI's round filter.
+                    prior_all_rounds = [
+                        r for r in raw_prior
+                        if isinstance(r, dict)
+                        and r.get("experiment_round") is not None
+                        and int(r.get("experiment_round", 0) or 0) > 0
+                    ]
+                    if prior_all_rounds:
+                        max_idx = max(
+                            int(r.get("round_index", -1) or -1) for r in prior_all_rounds
+                        )
+                        if max_idx >= 0:
+                            base_offset = max_idx + 1
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            prior_all_rounds = []
+            base_offset = 0
 
     effective_rounds = rounds
     if route:
@@ -585,10 +594,13 @@ def _solve_leaf_subcircuit(
                 int(local_cfg.get("leaf_fast_smoke_route_rounds", rounds)),
             )
         else:
-            effective_rounds = max(
-                rounds,
-                int(local_cfg.get("leaf_min_route_rounds", 8)),
-            )
+            # Honor the user-configured round count. A legacy floor of
+            # `leaf_min_route_rounds` (default 8) used to silently raise the
+            # effective count; it is only applied now if explicitly set in the
+            # config, so CLI/GUI values are authoritative by default.
+            configured_floor = local_cfg.get("leaf_min_route_rounds")
+            if configured_floor is not None:
+                effective_rounds = max(rounds, int(configured_floor))
 
     fast_smoke_mode = bool(local_cfg.get("subcircuit_fast_smoke_mode", False))
 

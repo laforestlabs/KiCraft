@@ -12,12 +12,18 @@ def node_detail_panel(
     node: NodeStatus,
 ) -> None:
     """Render the detail panel for a selected pipeline node."""
+    # Mutable container for the "maximized" image path so clicking a round
+    # thumbnail below can swap the big render above without rebuilding the
+    # whole panel.
+    maximized = {"src": node.best_render, "label": "Best round"}
+
     with ui.column().classes("w-full gap-3"):
         _header(node)
-        _main_render(node)
+        main_image_host = ui.column().classes("w-full")
+        _render_main_image(main_image_host, maximized)
         if node.is_leaf and node.rounds:
             _score_plot(node)
-            _round_timeline(node)
+            _round_timeline(node, main_image_host, maximized)
 
 
 def _header(node: NodeStatus) -> None:
@@ -38,16 +44,23 @@ def _header(node: NodeStatus) -> None:
             ui.label(f"Rounds: {node.total_rounds_run}")
 
 
-def _main_render(node: NodeStatus) -> None:
-    if node.best_render:
-        ui.image(node.best_render).classes(
-            "w-full max-h-[400px] object-contain rounded bg-slate-950 border border-slate-700"
-        )
-    else:
-        with ui.row().classes(
-            "w-full h-[200px] items-center justify-center bg-slate-950 rounded border border-slate-700"
-        ):
-            ui.label("No render available").classes("text-gray-500 italic")
+def _render_main_image(host, maximized: dict) -> None:
+    """(Re)render the large image area from the `maximized` dict in-place."""
+    host.clear()
+    with host:
+        src = maximized.get("src")
+        label = maximized.get("label", "")
+        if src:
+            if label:
+                ui.label(label).classes("text-xs text-gray-400")
+            ui.image(src).classes(
+                "w-full max-h-[400px] object-contain rounded bg-slate-950 border border-slate-700"
+            )
+        else:
+            with ui.row().classes(
+                "w-full h-[200px] items-center justify-center bg-slate-950 rounded border border-slate-700"
+            ):
+                ui.label("No render available").classes("text-gray-500 italic")
 
 
 def _score_plot(node: NodeStatus) -> None:
@@ -91,22 +104,38 @@ def _score_plot(node: NodeStatus) -> None:
     ui.plotly(fig).classes("w-full")
 
 
-def _round_timeline(node: NodeStatus) -> None:
+def _round_timeline(node: NodeStatus, main_image_host, maximized: dict) -> None:
     ui.label("Round Timeline").classes("text-sm font-medium text-gray-300 mt-2")
+    ui.label("Click a round to maximize its render above.").classes(
+        "text-[11px] text-gray-500"
+    )
 
     with ui.scroll_area().classes("w-full").style("max-height: 280px"):
         with ui.row().classes("gap-2 flex-wrap"):
             for r in node.rounds:
-                _round_thumbnail_card(r)
+                _round_thumbnail_card(r, main_image_host, maximized)
 
 
-def _round_thumbnail_card(r: RoundInfo) -> None:
+def _round_thumbnail_card(r: RoundInfo, main_image_host, maximized: dict) -> None:
     thumb = r.thumbnail or r.pre_route_thumbnail
     border_color = "border-green-500" if r.routed else "border-slate-600"
 
-    with ui.card().classes(
-        f"p-1 w-[120px] {border_color} border bg-slate-900/80 cursor-pointer"
-    ):
+    def _on_click():
+        if not thumb:
+            return
+        maximized["src"] = thumb
+        maximized["label"] = (
+            f"Round {r.index} — score {r.score:.2f}"
+            if r.score is not None
+            else f"Round {r.index}"
+        )
+        _render_main_image(main_image_host, maximized)
+
+    card = ui.card().classes(
+        f"p-1 w-[120px] {border_color} border bg-slate-900/80 cursor-pointer hover:border-blue-400"
+    )
+    card.on("click", lambda _e: _on_click())
+    with card:
         ui.label(f"R{r.index}").classes("text-[10px] text-gray-400 font-mono")
 
         if thumb:
