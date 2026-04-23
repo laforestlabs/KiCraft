@@ -32,6 +32,7 @@ class RoundInfo:
     routed: bool
     thumbnail: str | None = None  # path to round render PNG
     pre_route_thumbnail: str | None = None
+    experiment_round: int = 0  # parent round this solve belongs to (0 = unknown)
 
 
 @dataclass
@@ -191,6 +192,11 @@ def _build_rounds_from_debug(artifact_dir: Path, renders_dir: Path) -> list[Roun
             score = 0.0
         routed = bool(r.get("routed", False))
 
+        try:
+            exp_round = int(r.get("experiment_round", 0) or 0)
+        except (TypeError, ValueError):
+            exp_round = 0
+
         routed_thumb, pre_route_thumb = _find_round_renders(renders_dir, idx)
         rounds.append(RoundInfo(
             index=idx,
@@ -198,6 +204,7 @@ def _build_rounds_from_debug(artifact_dir: Path, renders_dir: Path) -> list[Roun
             routed=routed,
             thumbnail=routed_thumb,
             pre_route_thumbnail=pre_route_thumb,
+            experiment_round=exp_round,
         ))
     return rounds
 
@@ -207,6 +214,7 @@ def gather_pipeline_state(
     run_status: dict[str, Any],
     project_dir: Path | None = None,
     project_name: str | None = None,
+    selected_round: int | None = None,
 ) -> PipelineState:
     """Build full pipeline state from artifacts and run_status.
 
@@ -339,6 +347,27 @@ def gather_pipeline_state(
                     sheet_name = solved.get("sheet_name", sheet_name)
 
             rounds = _build_rounds_from_debug(artifact_dir, renders_dir)
+
+            # If the user has selected a specific parent round, narrow rounds
+            # and best_render to that round's data. Leaves with no rounds
+            # tagged for the selected round keep their last-known best_render
+            # so the flowchart still shows something meaningful.
+            if selected_round is not None:
+                filtered = [
+                    r for r in rounds
+                    if r.experiment_round == selected_round
+                ]
+                if filtered:
+                    rounds = filtered
+                    best_of_round = max(
+                        filtered,
+                        key=lambda r: (r.score if r.score is not None else float("-inf")),
+                    )
+                    best_render = (
+                        best_of_round.thumbnail
+                        or best_of_round.pre_route_thumbnail
+                        or best_render
+                    )
 
             node = NodeStatus(
                 name=sheet_name,

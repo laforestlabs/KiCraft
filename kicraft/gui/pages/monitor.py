@@ -7,6 +7,10 @@ import time
 from nicegui import ui
 
 from ..components.node_detail import node_detail_panel
+from ..components.parent_score_chart import (
+    parent_score_chart,
+    pick_best_round,
+)
 from ..components.pipeline_graph import (
     NodeStatus,
     PipelineState,
@@ -38,6 +42,10 @@ def monitor_page():
     latest_pipeline_state: dict = {"value": None}
     experiment_terminated = {"value": False}
 
+    # Parent-round selection: None = auto-track best; int = user pinned a round.
+    selected_parent_round: dict = {"value": None, "user_pinned": False}
+    prev_parent_score_fp: dict = {"value": ""}
+
     with ui.row().classes("w-full items-center gap-3 mb-2 px-2"):
         start_btn = ui.button("Start", icon="play_arrow", color="green").props("dense")
         stop_btn = ui.button("Stop", icon="stop", color="red").props("dense")
@@ -56,6 +64,19 @@ def monitor_page():
         ui.space()
         progress_label = ui.label("").classes("text-xs text-gray-400")
 
+    parent_chart_container = ui.column().classes("w-full mb-2")
+    with parent_chart_container:
+        with ui.row().classes("w-full items-center gap-3 px-2"):
+            parent_round_label = ui.label("Parent scores will appear here once rounds complete.").classes(
+                "text-xs text-gray-400"
+            )
+            ui.space()
+            reset_selection_btn = ui.button(
+                "Auto-track best", icon="auto_awesome"
+            ).props("flat dense")
+            reset_selection_btn.set_visibility(False)
+        parent_plot_host = ui.column().classes("w-full")
+
     with ui.row().classes("w-full gap-4 items-start min-h-[500px]"):
         graph_container = ui.column().classes("flex-1 min-w-[400px]")
         detail_container = ui.column().classes("flex-1 min-w-[350px] max-w-[600px]")
@@ -67,6 +88,54 @@ def monitor_page():
         if latest_pipeline_state["value"] is not None:
             _rebuild_graph(latest_pipeline_state["value"])
         _rebuild_detail()
+
+    def _on_parent_round_select(round_num: int) -> None:
+        if round_num <= 0:
+            return
+        selected_parent_round["value"] = round_num
+        selected_parent_round["user_pinned"] = True
+        reset_selection_btn.set_visibility(True)
+        prev_parent_score_fp["value"] = ""
+        prev_graph_fingerprint["value"] = ""
+        prev_detail_node_id["value"] = ""
+        _update_status()
+
+    def _reset_round_selection() -> None:
+        selected_parent_round["user_pinned"] = False
+        selected_parent_round["value"] = pick_best_round(live_rounds)
+        reset_selection_btn.set_visibility(False)
+        prev_parent_score_fp["value"] = ""
+        prev_graph_fingerprint["value"] = ""
+        prev_detail_node_id["value"] = ""
+        _update_status()
+
+    reset_selection_btn.on_click(_reset_round_selection)
+
+    def _rebuild_parent_chart() -> None:
+        parent_plot_host.clear()
+        with parent_plot_host:
+            if not live_rounds:
+                return
+            parent_score_chart(
+                live_rounds,
+                selected_round=selected_parent_round["value"],
+                on_select=_on_parent_round_select,
+            )
+        best = pick_best_round(live_rounds)
+        sel = selected_parent_round["value"]
+        if sel is None:
+            parent_round_label.set_text(
+                f"{len(live_rounds)} round(s) complete — best so far: R{best}" if best else ""
+            )
+        elif selected_parent_round["user_pinned"]:
+            suffix = f" (best is R{best})" if best and best != sel else ""
+            parent_round_label.set_text(
+                f"Viewing R{sel}{suffix}"
+            )
+        else:
+            parent_round_label.set_text(
+                f"Viewing best so far: R{sel}"
+            )
 
     def _rebuild_graph(pipeline_state: PipelineState) -> None:
         graph_container.clear()
@@ -108,6 +177,7 @@ def monitor_page():
             run_status,
             project_dir=state.project_root,
             project_name=state.project_name,
+            selected_round=selected_parent_round["value"],
         )
         latest_pipeline_state["value"] = pipeline_state
 
@@ -169,6 +239,20 @@ def monitor_page():
                     completed_rounds=len(live_rounds),
                     best_score=best_so_far,
                 )
+            # If the user hasn't pinned a round, follow the best. If they have
+            # pinned one, leave the selection alone.
+            if not selected_parent_round["user_pinned"]:
+                selected_parent_round["value"] = pick_best_round(live_rounds)
+
+        # Redraw the parent chart only when its contents changed (new rounds,
+        # selection flip, or pin state change).
+        parent_fp = (
+            f"{len(live_rounds)}|{last_round_seen['value']}|"
+            f"{selected_parent_round['value']}|{selected_parent_round['user_pinned']}"
+        )
+        if parent_fp != prev_parent_score_fp["value"]:
+            prev_parent_score_fp["value"] = parent_fp
+            _rebuild_parent_chart()
 
         if (
             prev_phase["value"] in ("running", "stopping")
