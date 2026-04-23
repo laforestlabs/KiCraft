@@ -15,7 +15,11 @@ def node_detail_panel(
     # Mutable container for the "maximized" image path so clicking a round
     # thumbnail below can swap the big render above without rebuilding the
     # whole panel.
-    maximized = {"src": node.best_render, "label": "Best round"}
+    if node.status == "routing_failed":
+        initial_label = "Pre-route (routing failed)"
+    else:
+        initial_label = "Best round"
+    maximized = {"src": node.best_render, "label": initial_label}
 
     with ui.column().classes("w-full gap-3"):
         _header(node)
@@ -29,7 +33,10 @@ def node_detail_panel(
 def _header(node: NodeStatus) -> None:
     with ui.row().classes("w-full items-center gap-3"):
         ui.label(node.name).classes("text-xl font-bold")
-        ui.badge(node.status.upper(), color=_status_color(node.status))
+        badge_text = (
+            "FAILED TO ROUTE" if node.status == "routing_failed" else node.status.upper()
+        )
+        ui.badge(badge_text, color=_status_color(node.status))
         ui.space()
         if node.score is not None:
             ui.label(f"Score: {node.score:.2f}").classes(
@@ -156,6 +163,7 @@ def _status_color(status: str) -> str:
         "routing": "orange",
         "accepted": "green",
         "failed": "red",
+        "routing_failed": "red",
         "composing": "amber",
         "done": "green",
     }

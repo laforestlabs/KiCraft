@@ -58,8 +58,12 @@ class PipelineState:
     """Full pipeline state for the monitor view."""
 
     root_name: str = "Project"
-    root_status: str = "pending"  # pending | composing | routing | done | failed
+    # pending | composing | routing | done | failed | routing_failed
+    root_status: str = "pending"
     root_render: str | None = None
+    # True if the currently-displayed round's parent was successfully routed,
+    # False if it composed but routing failed, None when unknown/not yet run.
+    root_routed: bool | None = None
     leaves: list[NodeStatus] = field(default_factory=list)
     phase: str = "idle"
     current_node: str | None = None
@@ -136,6 +140,36 @@ def _find_round_renders(renders_dir: Path, round_index: int) -> tuple[str | None
         str(routed) if routed.exists() else None,
         str(pre_route) if pre_route.exists() else None,
     )
+
+
+def _load_round_statuses(experiments_dir: Path) -> dict[int, dict[str, Any]]:
+    """Read experiments.jsonl and return per-round parent routing status."""
+    log = experiments_dir / "experiments.jsonl"
+    result: dict[int, dict[str, Any]] = {}
+    if not log.exists():
+        return result
+    try:
+        with open(log) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                rn = rec.get("round_num")
+                if isinstance(rn, int) and rn > 0:
+                    result[rn] = {
+                        "parent_composed": bool(rec.get("parent_composed", False)),
+                        "parent_routed": bool(rec.get("parent_routed", False)),
+                        "score": rec.get("score"),
+                        "leaf_accepted": rec.get("leaf_accepted"),
+                        "leaf_total": rec.get("leaf_total"),
+                    }
+    except OSError:
+        pass
+    return result
 
 
 def _determine_leaf_status(artifact_dir: Path) -> str:
@@ -295,16 +329,37 @@ def gather_pipeline_state(
     if not isinstance(preview_paths, dict):
         preview_paths = {}
 
-    # Per-round parent render takes precedence when the user has selected a
-    # specific experiment round. autoexperiment snapshots each round's
-    # parent_routed.png into hierarchical_autoexperiment/round_NNNN/.
+    round_statuses = _load_round_statuses(experiments_dir)
+
+    # Determine which round drives the parent render + status. For a user
+    # selection we use that round; otherwise we use the most recent completed
+    # round so the Monitor reflects reality, not an older best.
+    status_round: int | None = None
     if selected_round is not None and selected_round > 0:
+        status_round = selected_round
+    elif round_statuses:
+        status_round = max(round_statuses.keys())
+
+    round_parent_routed: bool | None = None
+    round_parent_composed: bool | None = None
+    if status_round is not None and status_round in round_statuses:
+        round_parent_routed = round_statuses[status_round]["parent_routed"]
+        round_parent_composed = round_statuses[status_round]["parent_composed"]
+
+    # Per-round parent render. When the round failed to route, prefer the
+    # pre-route (stamped) snapshot over the routed one -- the routed PNG may
+    # not exist, or may be the reject-candidate that misled the user.
+    if status_round is not None and status_round > 0:
         round_dir = (
             experiments_dir
             / "hierarchical_autoexperiment"
-            / f"round_{selected_round:04d}"
+            / f"round_{status_round:04d}"
         )
-        for name in ("parent_routed.png", "parent_stamped.png"):
+        if round_parent_routed is False:
+            preferred_names = ("parent_stamped.png", "parent_routed.png")
+        else:
+            preferred_names = ("parent_routed.png", "parent_stamped.png")
+        for name in preferred_names:
             p = round_dir / name
             if p.exists():
                 state.root_render = str(p)
@@ -313,11 +368,19 @@ def gather_pipeline_state(
     if state.root_render is None:
         parent_routed = preview_paths.get("parent_routed_preview")
         parent_stamped = preview_paths.get("parent_stamped_preview")
-        if parent_routed and Path(str(parent_routed)).exists():
-            state.root_render = str(parent_routed)
-        elif parent_stamped and Path(str(parent_stamped)).exists():
-            state.root_render = str(parent_stamped)
+        # When the round we're viewing failed to route, prefer the stamped
+        # preview path from run_status as well.
+        if round_parent_routed is False:
+            if parent_stamped and Path(str(parent_stamped)).exists():
+                state.root_render = str(parent_stamped)
+            elif parent_routed and Path(str(parent_routed)).exists():
+                state.root_render = str(parent_routed)
         else:
+            if parent_routed and Path(str(parent_routed)).exists():
+                state.root_render = str(parent_routed)
+            elif parent_stamped and Path(str(parent_stamped)).exists():
+                state.root_render = str(parent_stamped)
+        if state.root_render is None:
             hp = experiments_dir / "hierarchical_pipeline"
             for name in ("parent_routed.png", "parent_stamped.png"):
                 p = hp / name
@@ -334,10 +397,15 @@ def gather_pipeline_state(
         if sub_root.exists():
             best_mtime = -1.0
             best_path: str | None = None
+            probe_names = (
+                ("parent_stamped.png", "parent_routed.png")
+                if round_parent_routed is False
+                else ("parent_routed.png", "parent_stamped.png")
+            )
             for child in sub_root.iterdir():
                 if not child.is_dir():
                     continue
-                for name in ("parent_routed.png", "parent_stamped.png"):
+                for name in probe_names:
                     candidate = child / "renders" / name
                     if candidate.exists():
                         try:
@@ -349,6 +417,17 @@ def gather_pipeline_state(
                             best_path = str(candidate)
             if best_path:
                 state.root_render = best_path
+
+    # Override root_status and root_routed for the round being viewed so the
+    # UI shows "FAILED TO ROUTE" instead of a misleading "DONE" badge.
+    state.root_routed = round_parent_routed
+    if status_round is not None and status_round in round_statuses:
+        if round_parent_routed is False:
+            state.root_status = (
+                "routing_failed" if round_parent_composed else "failed"
+            )
+        elif round_parent_routed is True:
+            state.root_status = "done"
 
     sub_root = experiments_dir / "subcircuits"
     if sub_root.exists():
@@ -391,9 +470,7 @@ def gather_pipeline_state(
             rounds = _build_rounds_from_debug(artifact_dir, renders_dir)
 
             # If the user has selected a specific parent round, narrow rounds
-            # and best_render to that round's data. Leaves with no rounds
-            # tagged for the selected round keep their last-known best_render
-            # so the flowchart still shows something meaningful.
+            # and best_render to that round's data.
             if selected_round is not None:
                 filtered = [
                     r for r in rounds
@@ -401,15 +478,43 @@ def gather_pipeline_state(
                 ]
                 if filtered:
                     rounds = filtered
-                    best_of_round = max(
-                        filtered,
-                        key=lambda r: (r.score if r.score is not None else float("-inf")),
-                    )
-                    best_render = (
-                        best_of_round.thumbnail
-                        or best_of_round.pre_route_thumbnail
-                        or best_render
-                    )
+                    # Prefer the best *routed* round with a thumbnail. If no
+                    # routed round produced a render at all and any round
+                    # failed routing outright, mark the leaf as routing_failed
+                    # and show the pre-route preview. Trivial routes (leaves
+                    # with no internal nets) still count as successful even
+                    # though they produce no PNG.
+                    routed_w_render = [r for r in filtered if r.routed and r.thumbnail]
+                    any_failed = any(not r.routed for r in filtered)
+                    if routed_w_render:
+                        best_of_round = max(
+                            routed_w_render,
+                            key=lambda r: (r.score if r.score is not None else float("-inf")),
+                        )
+                        best_render = best_of_round.thumbnail or best_render
+                    elif any_failed:
+                        pre_candidates = [
+                            r for r in filtered if r.pre_route_thumbnail
+                        ]
+                        if pre_candidates:
+                            best_of_round = max(
+                                pre_candidates,
+                                key=lambda r: (r.score if r.score is not None else float("-inf")),
+                            )
+                            best_render = best_of_round.pre_route_thumbnail
+                        leaf_status = "routing_failed"
+                else:
+                    # No rounds for this leaf in the selected parent round.
+                    # Usually means that parent round's solve failed before
+                    # this leaf's artifact was persisted. Reflect that in the
+                    # UI instead of silently showing stale data from an
+                    # earlier round.
+                    rounds = []
+                    best_render = None
+                    leaf_status = "failed"
+                    score = None
+                    traces = 0
+                    vias = 0
 
             node = NodeStatus(
                 name=sheet_name,
@@ -459,6 +564,7 @@ _STATUS_COLORS = {
     "routing": "orange",
     "accepted": "green",
     "failed": "red",
+    "routing_failed": "red",
     "composing": "amber",
     "done": "green",
 }
@@ -469,8 +575,13 @@ _STATUS_ICONS = {
     "routing": "route",
     "accepted": "check_circle",
     "failed": "error",
+    "routing_failed": "wrong_location",
     "composing": "construction",
     "done": "check_circle",
+}
+
+_STATUS_LABELS = {
+    "routing_failed": "FAILED TO ROUTE",
 }
 
 
@@ -530,7 +641,8 @@ def _leaf_card(
         with ui.row().classes("items-center gap-2 w-full"):
             ui.icon(_STATUS_ICONS.get(node.status, "circle")).classes(f"text-{color}-400")
             ui.label(node.name).classes("font-medium text-sm truncate flex-1")
-            ui.badge(node.status.upper(), color=color).classes("text-[10px]")
+            badge_text = _STATUS_LABELS.get(node.status, node.status.upper())
+            ui.badge(badge_text, color=color).classes("text-[10px]")
 
         if node.best_render:
             ui.image(node.best_render).classes(
@@ -578,9 +690,15 @@ def _root_card(
                 f"text-{color}-400 text-lg"
             )
             ui.label(state.root_name).classes("font-bold text-base")
-            ui.badge(state.root_status.upper(), color=color).classes("text-[10px]")
+            root_badge = _STATUS_LABELS.get(state.root_status, state.root_status.upper())
+            ui.badge(root_badge, color=color).classes("text-[10px]")
 
-        ui.label("Parent Assembly").classes("text-xs text-gray-400")
+        if state.root_status == "routing_failed":
+            ui.label("Parent Assembly (pre-route shown)").classes(
+                "text-xs text-red-400"
+            )
+        else:
+            ui.label("Parent Assembly").classes("text-xs text-gray-400")
 
         if state.root_render:
             ui.image(state.root_render).classes(
