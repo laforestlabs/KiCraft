@@ -23,6 +23,8 @@ def node_detail_panel(
 
     with ui.column().classes("w-full gap-3"):
         _header(node)
+        if node.status == "routing_failed":
+            _rejection_reason_panel(node)
         main_image_host = ui.column().classes("w-full")
         _render_main_image(main_image_host, maximized)
         if node.is_leaf and node.rounds:
@@ -49,6 +51,38 @@ def _header(node: NodeStatus) -> None:
             ui.label(f"Traces: {node.traces}")
             ui.label(f"Vias: {node.vias}")
             ui.label(f"Rounds: {node.total_rounds_run}")
+
+
+def _rejection_reason_panel(node: NodeStatus) -> None:
+    """Banner explaining why the round(s) in view failed to route.
+
+    Counts how often each rejection reason appears across this leaf's
+    rounds in the current view. Shows the top 2 reasons so the user can
+    quickly tell whether a leaf is consistently hitting one failure mode
+    or churning through several.
+    """
+    reasons: dict[str, int] = {}
+    for r in node.rounds:
+        if r.rejection_reason:
+            reasons[r.rejection_reason] = reasons.get(r.rejection_reason, 0) + 1
+
+    with ui.card().classes("w-full bg-red-900/30 border border-red-700 p-2"):
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("warning", color="red-4").classes("text-red-400")
+            ui.label("Routing rejected").classes(
+                "text-sm font-medium text-red-300"
+            )
+        if not reasons:
+            ui.label(
+                "No rejection reason recorded. Check solve_subcircuits "
+                "stderr or the leaf's debug.json."
+            ).classes("text-xs text-red-200 mt-1")
+            return
+        sorted_reasons = sorted(reasons.items(), key=lambda kv: -kv[1])
+        for reason, count in sorted_reasons[:3]:
+            ui.label(f"{reason}  ({count}× in view)").classes(
+                "text-xs text-red-200 font-mono"
+            )
 
 
 def _render_main_image(host, maximized: dict) -> None:

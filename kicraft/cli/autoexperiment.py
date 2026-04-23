@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import re
@@ -1410,18 +1411,66 @@ def _select_preview_image(parent_output_dir: Path) -> Path | None:
     return pngs[0] if pngs else None
 
 
+def _leaf_feasible_min_board(
+    leaf_artifacts: list[dict[str, Any]] | None,
+    spacing_mm: float = 4.0,
+    edge_margin_mm: float = 4.0,
+) -> tuple[float, float] | None:
+    """Return (min_width, min_height) the parent board needs to hold its leaves.
+
+    Loose lower bound: each single leaf must fit inside the board (max
+    dimension wins), and there's enough total area for ~half the leaves
+    per side (two-layer stacking is typical). Returns None when no leaf
+    data is available so the caller can skip clamping on round 1.
+    """
+    if not leaf_artifacts:
+        return None
+    max_w = 0.0
+    max_h = 0.0
+    total_area = 0.0
+    count = 0
+    for leaf in leaf_artifacts:
+        sl = leaf.get("solved_layout", {}) if isinstance(leaf, dict) else {}
+        bb = sl.get("bounding_box", {}) if isinstance(sl, dict) else {}
+        try:
+            w = float(bb.get("width_mm") or 0.0)
+            h = float(bb.get("height_mm") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if w <= 0.0 or h <= 0.0:
+            continue
+        max_w = max(max_w, w)
+        max_h = max(max_h, h)
+        total_area += w * h
+        count += 1
+    if count == 0 or total_area <= 0.0:
+        return None
+    # Area budget assumes ~50% two-layer stacking and 10% packing overhead.
+    per_side_area = total_area * 0.55
+    slack = max(spacing_mm, 2.0) + max(edge_margin_mm, 1.0)
+    area_derived_w = math.sqrt(per_side_area)
+    min_w = max(max_w, area_derived_w) + 2 * slack
+    min_h = max(max_h, per_side_area / max(min_w, 1.0)) + 2 * slack
+    return (round(min_w, 2), round(min_h, 2))
+
+
 def _mutate_config(
     base_config: dict[str, Any],
     search_space: Mapping[str, Mapping[str, Any]],
     rng: random.Random,
     mutation_rate: float = 0.3,
     enable_board_size: bool = False,
+    min_board_wh: tuple[float, float] | None = None,
 ) -> dict[str, int | float]:
     """Mutate numeric config parameters using Gaussian perturbation.
 
     Each parameter in search_space has a mutation_rate chance of being
     perturbed. Perturbation is Gaussian with the configured sigma, clamped
     to [min, max]. Integer params are rounded after perturbation.
+
+    When `min_board_wh` is provided, board_width_mm / board_height_mm are
+    clamped to at least that floor so the mutator can't produce a board
+    too small to hold the currently-solved leaves.
 
     Returns a new dict with only the mutated keys (sparse overlay suitable
     for writing as a JSON config file that merges with DEFAULT_CONFIG).
@@ -1434,6 +1483,15 @@ def _mutate_config(
         spec_type = str(spec["type"])
         if not enable_board_size and key in {"board_width_mm", "board_height_mm"}:
             continue
+        if min_board_wh is not None:
+            if key == "board_width_mm":
+                spec_min = max(spec_min, float(min_board_wh[0]))
+                if spec_min > spec_max:
+                    spec_min = spec_max
+            elif key == "board_height_mm":
+                spec_min = max(spec_min, float(min_board_wh[1]))
+                if spec_min > spec_max:
+                    spec_min = spec_max
         if rng.random() > mutation_rate:
             continue
         current = base_config.get(
@@ -1842,14 +1900,38 @@ def main(argv: list[str] | None = None) -> int:
 
         round_candidate_config = dict(_best_config)
         current_round_config = resolved_config_path
+
+        # Compute a feasible lower bound for board dimensions based on the
+        # most-recent accepted leaves so board-size mutation can't shrink
+        # the board below what the current leaves require. Round 1 has no
+        # prior leaves on disk, so the floor falls back to the search-space
+        # minimum.
+        min_board_wh = _leaf_feasible_min_board(
+            _accepted_leaf_artifacts(project_dir),
+            spacing_mm=float(_best_config.get("parent_spacing_mm", 4.0) or 4.0),
+            edge_margin_mm=float(_best_config.get("edge_margin_mm", 4.0) or 4.0),
+        )
+
         round_mutated = _mutate_config(
             _best_config,
             effective_search_space,
             rng,
             enable_board_size=bool(_best_config.get("enable_board_size_search", False)),
+            min_board_wh=min_board_wh,
         )
         round_candidate_config.update(round_mutated)
         enforce_param_constraints(round_candidate_config)
+
+        # Also enforce the feasibility floor on the base (non-mutated) config
+        # so a too-small seed value isn't silently carried over when the
+        # parameter isn't selected for mutation this round.
+        if min_board_wh is not None:
+            bw = float(round_candidate_config.get("board_width_mm", 0.0) or 0.0)
+            bh = float(round_candidate_config.get("board_height_mm", 0.0) or 0.0)
+            if bw > 0 and bw < min_board_wh[0]:
+                round_candidate_config["board_width_mm"] = min_board_wh[0]
+            if bh > 0 and bh < min_board_wh[1]:
+                round_candidate_config["board_height_mm"] = min_board_wh[1]
         if round_candidate_config != _initial_config:
             round_config_file = round_dir / "round_config.json"
             round_config_overlay = _config_overlay_from_defaults(round_candidate_config)

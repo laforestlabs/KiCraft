@@ -422,6 +422,24 @@ def _solve_one_round(
         solved_components,
         cfg,
     )
+    # Adaptive retry: if the first pass used its full budget without
+    # converging, retry once with double the pass limit. Empirically this
+    # recovers a majority of "illegal_unrepaired_leaf_placement" failures on
+    # dense leaves, at the cost of one extra repair pass per leaf in the
+    # worst case.
+    if not ordering_legality.get("resolved", False):
+        base_passes = int(cfg.get("leaf_legality_repair_passes", 24) or 24)
+        retry_cfg = dict(cfg)
+        retry_cfg["leaf_legality_repair_passes"] = base_passes * 2
+        retry_components, retry_legality = _repair_leaf_placement_legality(
+            extraction,
+            solved_components,
+            retry_cfg,
+        )
+        round_timing["legality_repair_retry"] = True
+        if retry_legality.get("resolved", False):
+            repaired_components = retry_components
+            ordering_legality = retry_legality
     round_timing["post_ordering_legality_repair_s"] = round(
         max(0.0, time.monotonic() - ordering_legality_start), 3
     )
@@ -1185,6 +1203,7 @@ def main(argv: list[str] | None = None) -> int:
 
         solved_results: list[SolvedLeafSubcircuit] = []
         persisted: list[dict[str, Any]] = []
+        failed_by_path: dict[str, dict[str, Any]] = {}
 
         requested_workers = int(args.workers or 0)
         available_cpus = max(1, int(os.cpu_count() or 1))
@@ -1198,16 +1217,28 @@ def main(argv: list[str] | None = None) -> int:
 
         if worker_count == 1 or len(leaves) <= 1:
             for index, node in enumerate(leaves):
-                solved = _solve_leaf_subcircuit(
-                    node=node,
-                    full_state=board_state,
-                    cfg=cfg,
-                    rounds=rounds,
-                    base_seed=args.seed + index * 1009,
-                    route=args.route,
-                    experiment_round=experiment_round,
-                )
-                solved_results.append(solved)
+                try:
+                    solved = _solve_leaf_subcircuit(
+                        node=node,
+                        full_state=board_state,
+                        cfg=cfg,
+                        rounds=rounds,
+                        base_seed=args.seed + index * 1009,
+                        route=args.route,
+                        experiment_round=experiment_round,
+                    )
+                    solved_results.append(solved)
+                except Exception as exc:
+                    failed_by_path[node.id.instance_path] = {
+                        "sheet_name": node.id.sheet_name,
+                        "instance_path": node.id.instance_path,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    }
+                    print(
+                        f"warning: leaf solve failed for {node.id.instance_path}: {exc}",
+                        file=sys.stderr,
+                    )
         else:
             ctx = mp.get_context("spawn")
             worker_args = [
@@ -1223,7 +1254,6 @@ def main(argv: list[str] | None = None) -> int:
                 for index, node in enumerate(leaves)
             ]
             solved_by_path: dict[str, SolvedLeafSubcircuit] = {}
-            failed_by_path: dict[str, dict[str, Any]] = {}
             infrastructure_failure: Exception | None = None
             try:
                 with ProcessPoolExecutor(
@@ -1288,27 +1318,53 @@ def main(argv: list[str] | None = None) -> int:
                             "recovery_mode": "serial_after_parallel_infrastructure_failure",
                         }
 
-            if failed_by_path:
-                failure_lines = [
-                    f"{item.get('instance_path', path)}:{item.get('error', 'unknown_error')}"
-                    for path, item in sorted(failed_by_path.items())
-                ]
-                raise RuntimeError(
-                    "Leaf solve failures encountered after preserving successful parallel results: "
-                    + "; ".join(failure_lines)
-                )
-
             solved_results = [
                 solved_by_path[node.id.instance_path]
                 for node in leaves
                 if node.id.instance_path in solved_by_path
             ]
 
+        # Persist every leaf that completed, even when the round as a whole
+        # will be reported as failed. The Monitor tab needs per-leaf data to
+        # show which leaves succeeded vs. which failed; without this,
+        # partially-failed rounds appear as completely empty in the UI.
         for solved in solved_results:
-            persisted.append(_persist_solution(solved, cfg))
+            try:
+                persisted.append(_persist_solution(solved, cfg))
+            except Exception as exc:
+                failed_by_path[solved.instance_path] = {
+                    "sheet_name": solved.sheet_name,
+                    "instance_path": solved.instance_path,
+                    "error": f"persist failed: {exc}",
+                    "error_type": type(exc).__name__,
+                }
+                print(
+                    f"warning: leaf persist failed for {solved.instance_path}: {exc}",
+                    file=sys.stderr,
+                )
 
     except Exception as exc:
         print(f"error: failed to solve subcircuits: {exc}", file=sys.stderr)
+        return 1
+
+    if failed_by_path:
+        failure_lines = [
+            f"{item.get('instance_path', path)}:{item.get('error', 'unknown_error')}"
+            for path, item in sorted(failed_by_path.items())
+        ]
+        print(
+            "error: leaf solve failures (successful leaves persisted): "
+            + "; ".join(failure_lines),
+            file=sys.stderr,
+        )
+        # Still emit JSON summary so autoexperiment can ingest partial results.
+        if args.json:
+            payload = json.dumps(
+                _json_summary(solved_results, persisted), indent=2, default=str
+            )
+            print("===SOLVE_SUBCIRCUITS_JSON_START===")
+            print(payload)
+            print("===SOLVE_SUBCIRCUITS_JSON_END===")
         return 1
 
     if args.json:

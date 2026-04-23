@@ -33,6 +33,10 @@ class RoundInfo:
     thumbnail: str | None = None  # path to round render PNG
     pre_route_thumbnail: str | None = None
     experiment_round: int = 0  # parent round this solve belongs to (0 = unknown)
+    # Human-readable reason the round failed to route / was rejected, pulled
+    # from routing.reason, rejection_stage, or the first rejection_reasons
+    # entry when available. None when the round routed successfully.
+    rejection_reason: str | None = None
 
 
 @dataclass
@@ -231,6 +235,28 @@ def _build_rounds_from_debug(artifact_dir: Path, renders_dir: Path) -> list[Roun
         except (TypeError, ValueError):
             exp_round = 0
 
+        rejection_reason: str | None = None
+        if not routed:
+            routing = r.get("routing") or {}
+            if isinstance(routing, dict):
+                candidate = (
+                    routing.get("reason")
+                    or routing.get("rejection_stage")
+                )
+                if not candidate:
+                    reasons = routing.get("rejection_reasons") or []
+                    if isinstance(reasons, list) and reasons:
+                        candidate = str(reasons[0])
+                    else:
+                        validation = routing.get("validation") or {}
+                        if isinstance(validation, dict):
+                            candidate = (
+                                validation.get("rejection_stage")
+                                or validation.get("rejection_message")
+                            )
+                if candidate:
+                    rejection_reason = str(candidate)
+
         routed_thumb, pre_route_thumb = _find_round_renders(renders_dir, idx)
         rounds.append(RoundInfo(
             index=idx,
@@ -239,6 +265,7 @@ def _build_rounds_from_debug(artifact_dir: Path, renders_dir: Path) -> list[Roun
             thumbnail=routed_thumb,
             pre_route_thumbnail=pre_route_thumb,
             experiment_round=exp_round,
+            rejection_reason=rejection_reason,
         ))
     return rounds
 
