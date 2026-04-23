@@ -98,22 +98,6 @@ def _path_with_mtime(path: str | None) -> str:
         return path
 
 
-def image_src(path: str | None) -> str | None:
-    """Return `path?v=<mtime>` so the browser re-fetches when the file changes.
-
-    NiceGUI serves local paths directly; adding a query string breaks the
-    HTTP cache without affecting file resolution.
-    """
-    if not path:
-        return None
-    try:
-        mtime = int(os.path.getmtime(path))
-    except OSError:
-        return path
-    sep = "&" if "?" in path else "?"
-    return f"{path}{sep}v={mtime}"
-
-
 # ---------------------------------------------------------------------------
 # Data gathering -- scan artifacts + run_status to build PipelineState
 # ---------------------------------------------------------------------------
@@ -341,6 +325,31 @@ def gather_pipeline_state(
                     state.root_render = str(p)
                     break
 
+    # Last resort: when the parent composition's metadata/debug JSON is
+    # missing (acceptance gate rejection, truncated run, etc.) the discovery
+    # helpers return nothing. Probe subcircuits/*/renders/ directly so we
+    # still surface whatever parent render was produced.
+    if state.root_render is None:
+        sub_root = experiments_dir / "subcircuits"
+        if sub_root.exists():
+            best_mtime = -1.0
+            best_path: str | None = None
+            for child in sub_root.iterdir():
+                if not child.is_dir():
+                    continue
+                for name in ("parent_routed.png", "parent_stamped.png"):
+                    candidate = child / "renders" / name
+                    if candidate.exists():
+                        try:
+                            mt = candidate.stat().st_mtime
+                        except OSError:
+                            mt = 0.0
+                        if mt > best_mtime:
+                            best_mtime = mt
+                            best_path = str(candidate)
+            if best_path:
+                state.root_render = best_path
+
     sub_root = experiments_dir / "subcircuits"
     if sub_root.exists():
         for artifact_dir in sorted(sub_root.iterdir()):
@@ -524,7 +533,7 @@ def _leaf_card(
             ui.badge(node.status.upper(), color=color).classes("text-[10px]")
 
         if node.best_render:
-            ui.image(image_src(node.best_render)).classes(
+            ui.image(node.best_render).classes(
                 "w-full h-[80px] object-contain rounded mt-1 bg-slate-950"
             )
         else:
@@ -574,7 +583,7 @@ def _root_card(
         ui.label("Parent Assembly").classes("text-xs text-gray-400")
 
         if state.root_render:
-            ui.image(image_src(state.root_render)).classes(
+            ui.image(state.root_render).classes(
                 "w-full h-[120px] object-contain rounded mt-2 bg-slate-950"
             )
         else:

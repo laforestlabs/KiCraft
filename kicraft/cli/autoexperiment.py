@@ -2270,15 +2270,27 @@ def main(argv: list[str] | None = None) -> int:
 
         # Snapshot the parent render(s) into the round directory so the
         # monitor can show per-round parent renders after the shared
-        # artifacts are overwritten by the next round.
+        # artifacts are overwritten by the next round. _discover_live_preview_paths
+        # only populates parent previews when the metadata/debug JSON exists,
+        # which can be missing when the parent is rejected by an acceptance
+        # gate. Fall back to probing the shared render dirs directly so we
+        # still capture whatever render was produced.
         round_previews = _discover_live_preview_paths(project_dir)
+        sub_root = project_dir / ".experiments" / "subcircuits"
         for key, fname in (
             ("parent_routed_preview", "parent_routed.png"),
             ("parent_stamped_preview", "parent_stamped.png"),
         ):
-            src = round_previews.get(key)
-            if src:
-                _copy_if_exists(Path(src), round_dir / fname)
+            src_path = round_previews.get(key)
+            if not src_path:
+                if sub_root.exists():
+                    for child in sub_root.iterdir():
+                        candidate = child / "renders" / fname
+                        if candidate.exists():
+                            src_path = str(candidate)
+                            break
+            if src_path:
+                _copy_if_exists(Path(src_path), round_dir / fname)
 
         score_round_start_ts = _timing_now()
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import plotly.graph_objects as go
 from nicegui import ui
 
-from .pipeline_graph import NodeStatus, RoundInfo, image_src
+from .pipeline_graph import NodeStatus, RoundInfo
 
 
 def node_detail_panel(
@@ -53,7 +53,7 @@ def _render_main_image(host, maximized: dict) -> None:
         if src:
             if label:
                 ui.label(label).classes("text-xs text-gray-400")
-            ui.image(image_src(src)).classes(
+            ui.image(src).classes(
                 "w-full max-h-[400px] object-contain rounded bg-slate-950 border border-slate-700"
             )
         else:
@@ -139,7 +139,7 @@ def _round_thumbnail_card(r: RoundInfo, main_image_host, maximized: dict) -> Non
         ui.label(f"R{r.index}").classes("text-[10px] text-gray-400 font-mono")
 
         if thumb:
-            ui.image(image_src(thumb)).classes(
+            ui.image(thumb).classes(
                 "w-full h-[60px] object-contain rounded bg-slate-950"
             )
         else:
