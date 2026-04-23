@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -39,6 +40,36 @@ class ExperimentRunner:
                 self._cleanup_stale_state()
         return False
 
+    def _purge_prior_run_artifacts(self) -> None:
+        """Clear per-run outputs so the Monitor tab reflects the new run.
+
+        Removes leaf solve/render artifacts, per-round metadata, the
+        parent-round log, and the run-status files. Keeps user/config
+        files (presets DB, program.md, config overlays) intact.
+        """
+        exp = self.experiments_dir
+        if not exp.exists():
+            return
+
+        for sub in ("subcircuits", "rounds", "frames", "hierarchical_autoexperiment"):
+            path = exp / sub
+            if path.exists():
+                try:
+                    shutil.rmtree(path, ignore_errors=True)
+                except OSError:
+                    pass
+
+        for name in (
+            "experiments.jsonl",
+            "run_status.json",
+            "run_status.txt",
+            "parent_composition_routed.json",
+            "hierarchical_summary.json",
+        ):
+            (exp / name).unlink(missing_ok=True)
+
+        exp.mkdir(parents=True, exist_ok=True)
+
     def _cleanup_stale_state(self) -> None:
         """Remove stale PID/stop files and mark status as done."""
         self._pid_file.unlink(missing_ok=True)
@@ -72,6 +103,8 @@ class ExperimentRunner:
 
         stop_file = self.experiments_dir / "stop.now"
         stop_file.unlink(missing_ok=True)
+
+        self._purge_prior_run_artifacts()
 
         autoexp = self.scripts_dir / "autoexperiment.py"
         pcb_path = self.project_root / pcb_file

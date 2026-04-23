@@ -2267,6 +2267,19 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         composition_ok = compose_rc == 0
+
+        # Snapshot the parent render(s) into the round directory so the
+        # monitor can show per-round parent renders after the shared
+        # artifacts are overwritten by the next round.
+        round_previews = _discover_live_preview_paths(project_dir)
+        for key, fname in (
+            ("parent_routed_preview", "parent_routed.png"),
+            ("parent_stamped_preview", "parent_stamped.png"),
+        ):
+            src = round_previews.get(key)
+            if src:
+                _copy_if_exists(Path(src), round_dir / fname)
+
         score_round_start_ts = _timing_now()
 
         # Extract parent board dimensions for area compactness scoring

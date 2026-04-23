@@ -150,10 +150,10 @@ def local_solver_config(
         24,
         int(base_cfg.get("leaf_legality_repair_passes", 24)),
     )
-    cfg["leaf_min_route_rounds"] = max(
-        16,
-        int(base_cfg.get("leaf_min_route_rounds", 16)),
-    )
+    # Only forward an explicit floor from the project config; never force
+    # one here. The CLI/GUI leaf-round value is authoritative otherwise.
+    if base_cfg.get("leaf_min_route_rounds") is not None:
+        cfg["leaf_min_route_rounds"] = int(base_cfg["leaf_min_route_rounds"])
 
     # Encourage more structured passive rows around IC-heavy leaves.
     cfg["leaf_passive_ordering_enabled"] = bool(

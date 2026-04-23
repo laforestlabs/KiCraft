@@ -98,6 +98,22 @@ def _path_with_mtime(path: str | None) -> str:
         return path
 
 
+def image_src(path: str | None) -> str | None:
+    """Return `path?v=<mtime>` so the browser re-fetches when the file changes.
+
+    NiceGUI serves local paths directly; adding a query string breaks the
+    HTTP cache without affecting file resolution.
+    """
+    if not path:
+        return None
+    try:
+        mtime = int(os.path.getmtime(path))
+    except OSError:
+        return path
+    sep = "&" if "?" in path else "?"
+    return f"{path}{sep}v={mtime}"
+
+
 # ---------------------------------------------------------------------------
 # Data gathering -- scan artifacts + run_status to build PipelineState
 # ---------------------------------------------------------------------------
@@ -294,19 +310,36 @@ def gather_pipeline_state(
     preview_paths = run_status.get("preview_paths", {})
     if not isinstance(preview_paths, dict):
         preview_paths = {}
-    parent_routed = preview_paths.get("parent_routed_preview")
-    parent_stamped = preview_paths.get("parent_stamped_preview")
-    if parent_routed and Path(str(parent_routed)).exists():
-        state.root_render = str(parent_routed)
-    elif parent_stamped and Path(str(parent_stamped)).exists():
-        state.root_render = str(parent_stamped)
-    else:
-        hp = experiments_dir / "hierarchical_pipeline"
+
+    # Per-round parent render takes precedence when the user has selected a
+    # specific experiment round. autoexperiment snapshots each round's
+    # parent_routed.png into hierarchical_autoexperiment/round_NNNN/.
+    if selected_round is not None and selected_round > 0:
+        round_dir = (
+            experiments_dir
+            / "hierarchical_autoexperiment"
+            / f"round_{selected_round:04d}"
+        )
         for name in ("parent_routed.png", "parent_stamped.png"):
-            p = hp / name
+            p = round_dir / name
             if p.exists():
                 state.root_render = str(p)
                 break
+
+    if state.root_render is None:
+        parent_routed = preview_paths.get("parent_routed_preview")
+        parent_stamped = preview_paths.get("parent_stamped_preview")
+        if parent_routed and Path(str(parent_routed)).exists():
+            state.root_render = str(parent_routed)
+        elif parent_stamped and Path(str(parent_stamped)).exists():
+            state.root_render = str(parent_stamped)
+        else:
+            hp = experiments_dir / "hierarchical_pipeline"
+            for name in ("parent_routed.png", "parent_stamped.png"):
+                p = hp / name
+                if p.exists():
+                    state.root_render = str(p)
+                    break
 
     sub_root = experiments_dir / "subcircuits"
     if sub_root.exists():
@@ -491,7 +524,7 @@ def _leaf_card(
             ui.badge(node.status.upper(), color=color).classes("text-[10px]")
 
         if node.best_render:
-            ui.image(node.best_render).classes(
+            ui.image(image_src(node.best_render)).classes(
                 "w-full h-[80px] object-contain rounded mt-1 bg-slate-950"
             )
         else:
@@ -541,7 +574,7 @@ def _root_card(
         ui.label("Parent Assembly").classes("text-xs text-gray-400")
 
         if state.root_render:
-            ui.image(state.root_render).classes(
+            ui.image(image_src(state.root_render)).classes(
                 "w-full h-[120px] object-contain rounded mt-2 bg-slate-950"
             )
         else:
