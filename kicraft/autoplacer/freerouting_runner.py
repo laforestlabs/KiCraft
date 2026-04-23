@@ -20,6 +20,7 @@ is ignored and routing runs indefinitely.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import collections
 import os
@@ -352,6 +353,9 @@ def parse_freerouting_output(stdout: str, stderr: str, returncode: int) -> dict[
     return stats
 
 
+_XVFB_WARNED = False
+
+
 def run_freerouting(
     dsn_path: str,
     ses_path: str,
@@ -366,14 +370,17 @@ def run_freerouting(
     Uses start_new_session so the Java process gets its own process group,
     allowing clean kill via os.killpg() on timeout or stop request.
 
-    When `hide_window` is True and the jar looks like a 2.x release (the
-    filename contains "freerouting-2"), `--gui.enabled=false` is added so
-    FreeRouting runs headless with no Swing window. The 1.x jars do not
-    support that flag and still pop a window; the caller is expected to
-    fall back to xvfb or live with the window in that case.
+    When `hide_window` is True:
+      - FR 2.x: appends --gui.enabled=false + --router.max_passes=<N>.
+        The legacy -mp is ignored in 2.x CLI mode.
+      - FR 1.x: wraps the java invocation in `xvfb-run -a` so the Swing
+        window draws into a virtual framebuffer instead of the real
+        display. Requires xorg-x11-server-Xvfb; if xvfb-run isn't on
+        PATH, emits a one-time warning and falls back to showing the
+        window.
     """
     jar_path = os.path.expanduser(jar_path)
-    cmd = [
+    java_cmd = [
         "java",
         "-jar",
         jar_path,
@@ -391,11 +398,28 @@ def run_freerouting(
 
     jar_basename = os.path.basename(jar_path).lower()
     is_v2_plus = "freerouting-2" in jar_basename or "freerouting-3" in jar_basename
+    cmd = java_cmd
     if hide_window and is_v2_plus:
         cmd.append("--gui.enabled=false")
-        # In 2.x CLI mode the old -mp is ignored; use the new settings-style
-        # flag so the pass cap actually takes effect.
         cmd.append(f"--router.max_passes={int(max_passes)}")
+    elif hide_window and not is_v2_plus:
+        xvfb = shutil.which("xvfb-run")
+        if xvfb:
+            cmd = [
+                xvfb,
+                "-a",
+                "--server-args=-screen 0 1024x768x16",
+            ] + java_cmd
+        else:
+            global _XVFB_WARNED
+            if not _XVFB_WARNED:
+                print(
+                    "[freerouting] hide_window requested but xvfb-run not on "
+                    "PATH. Install xorg-x11-server-Xvfb to suppress the FR "
+                    "window on FR 1.x; falling back to windowed mode.",
+                    flush=True,
+                )
+                _XVFB_WARNED = True
 
     cwd = work_dir or os.path.dirname(dsn_path)
 
@@ -500,6 +524,32 @@ def route_with_freerouting(
     timeout_s = config.get("freerouting_timeout_s", 120)
     hide_window = bool(config.get("freerouting_hide_window", True))
 
+    # Disk cache for DSN -> SES. DSN bytes are deterministic from placement +
+    # config, so identical DSN content always yields identical optimal
+    # routing. Re-running FreeRouting on the same DSN is wasted time.
+    cache_dir_cfg = config.get("freerouting_cache_dir")
+    cache_enabled = bool(config.get("freerouting_cache_enabled", True))
+    cache_dir = None
+    if cache_enabled:
+        if cache_dir_cfg:
+            cache_dir = Path(os.path.expanduser(str(cache_dir_cfg)))
+        else:
+            pcb_parent = Path(kicad_pcb_path).resolve().parent
+            # Walk up to the experiments dir if we're inside it.
+            anchor = pcb_parent
+            for parent in [pcb_parent] + list(pcb_parent.parents):
+                if parent.name == ".experiments":
+                    anchor = parent
+                    break
+                if (parent / ".experiments").exists():
+                    anchor = parent / ".experiments"
+                    break
+            cache_dir = anchor / "fr_cache"
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            cache_dir = None
+
     for attempt in range(2):
         with tempfile.TemporaryDirectory() as tmpdir:
             dsn_path = os.path.join(tmpdir, "board.dsn")
@@ -512,6 +562,38 @@ def route_with_freerouting(
             )
 
             passes = max_passes if attempt == 0 else max(10, max_passes // 2)
+
+            # Check disk cache before invoking Java. Cache key includes the
+            # max_passes value since a higher pass cap can produce a
+            # different (better-optimized) SES for the same DSN.
+            dsn_hash: str | None = None
+            cached_ses: Path | None = None
+            cached_stats: Path | None = None
+            if cache_dir is not None:
+                try:
+                    with open(dsn_path, "rb") as f:
+                        dsn_hash = hashlib.sha256(f.read()).hexdigest()
+                    key = f"{dsn_hash}_mp{passes}"
+                    cached_ses = cache_dir / f"{key}.ses"
+                    cached_stats = cache_dir / f"{key}.stats.json"
+                except OSError:
+                    dsn_hash = None
+
+            if dsn_hash and cached_ses and cached_ses.exists() and cached_stats and cached_stats.exists():
+                try:
+                    shutil.copy2(cached_ses, ses_path)
+                    stats = json.loads(cached_stats.read_text())
+                    stats["cache_hit"] = True
+                    stats["preserved_existing_copper"] = preserve_existing_copper
+                    stats["cleared_zones_before_export"] = clear_existing_zones
+                    import_ses(kicad_pcb_path, ses_path, output_path)
+                    if preserve_existing_copper:
+                        _unlock_traces(output_path)
+                    return stats
+                except (OSError, json.JSONDecodeError):
+                    # Cache corruption; fall through and re-route.
+                    pass
+
             stats = run_freerouting(
                 dsn_path,
                 ses_path,
@@ -522,8 +604,22 @@ def route_with_freerouting(
             )
             stats["preserved_existing_copper"] = preserve_existing_copper
             stats["cleared_zones_before_export"] = clear_existing_zones
+            stats["cache_hit"] = False
 
             if os.path.exists(ses_path):
+                # Populate the cache before importing so a crash during
+                # import doesn't prevent future hits.
+                if dsn_hash and cached_ses and cached_stats:
+                    try:
+                        shutil.copy2(ses_path, cached_ses)
+                        # Strip transient fields before persisting.
+                        persist_stats = {
+                            k: v for k, v in stats.items()
+                            if not k.startswith("_") and k != "cache_hit"
+                        }
+                        cached_stats.write_text(json.dumps(persist_stats))
+                    except OSError:
+                        pass
                 import_ses(kicad_pcb_path, ses_path, output_path)
                 if preserve_existing_copper:
                     _unlock_traces(output_path)

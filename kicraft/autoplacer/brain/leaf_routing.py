@@ -286,15 +286,21 @@ def route_local_subcircuit(
         )
 
     freerouting_start = time.monotonic()
+    # Leaves can use a lower pass cap than the parent; fall back to the
+    # shared default if the leaf-specific knob isn't set.
+    leaf_routing_cfg = {
+        **cfg,
+        "pcb_path": str(source_pcb),
+        "freerouting_preserve_existing_copper": False,
+    }
+    leaf_passes = cfg.get("leaf_freerouting_max_passes")
+    if leaf_passes is not None:
+        leaf_routing_cfg["freerouting_max_passes"] = int(leaf_passes)
     freerouting_stats = route_with_freerouting(
         str(pre_route_board),
         str(routed_board),
         str(jar_path),
-        {
-            **cfg,
-            "pcb_path": str(source_pcb),
-            "freerouting_preserve_existing_copper": False,
-        },
+        leaf_routing_cfg,
     )
     route_timing["freerouting_s"] = round(
         max(0.0, time.monotonic() - freerouting_start), 3

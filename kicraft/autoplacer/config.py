@@ -115,11 +115,17 @@ DEFAULT_CONFIG = {
     "thermal_refs": [],
     "thermal_radius_mm": 3.0,
     # FreeRouting
-    "freerouting_jar": os.path.expanduser("~/.local/lib/freerouting-2.1.0.jar"),
+    "freerouting_jar": os.path.expanduser("~/.local/lib/freerouting-1.9.0.jar"),
     "freerouting_timeout_s": 60,
-    "freerouting_max_passes": 40,
-    # When True and the configured jar is 2.x, FreeRouting runs with
-    # --gui.enabled=false so no Swing window pops up. No effect on 1.x jars.
+    "freerouting_max_passes": 20,
+    # Separate pass cap for leaf routing. Leaves are smaller and need
+    # less optimization than the parent board, so we keep this lower by
+    # default. When unset, leaves fall back to freerouting_max_passes.
+    "leaf_freerouting_max_passes": 12,
+    # Hide the FreeRouting Swing window. For 2.x this is passed as
+    # --gui.enabled=false. For 1.x the runner wraps the invocation in
+    # xvfb-run when xvfb-run is on PATH (install xorg-x11-server-Xvfb).
+    # If neither path is available the window still appears.
     "freerouting_hide_window": True,
     # GND zone pour — automatically created/updated to cover full board.
     # Set gnd_zone_net to "" to disable automatic zone creation.
