@@ -31,8 +31,6 @@ def setup_page():
 
         with ui.tab_panel(placement_tab):
             _placement_routing_panel(state)
-            ui.separator().classes("my-6")
-            _mutation_bounds_panel(state)
 
         with ui.tab_panel(hierarchy_tab):
             _hierarchy_panel(state)
@@ -163,11 +161,21 @@ def _strategy_panel(state):
 def _placement_routing_panel(state):
     ui.label("Placement & Routing Parameters").classes("text-lg font-bold mb-2")
     ui.label(
-        "These parameters control the placement engine physics, board geometry, "
-        "connector behavior, simulated annealing refinement, and routing settings. "
-        "Only values you change from their defaults are written to the config overlay "
-        "passed to the solver. Reset a value to its default to remove it from the overlay."
-    ).classes("text-sm text-gray-400 mb-4")
+        "Each parameter has a start value (written to the config overlay when changed "
+        "from its default) and, where searchable, a min/max range used during mutation. "
+        "Narrowing a range focuses the evolutionary search; widening it allows more exploration."
+    ).classes("text-sm text-gray-400 mb-3")
+
+    def _reset_all_bounds():
+        for k, spec in CONFIG_SEARCH_SPACE.items():
+            state.mutation_bounds[k] = [spec["min"], spec["max"]]
+        state.save_session_state()
+        ui.notify("All mutation bounds reset to defaults", type="info")
+        ui.navigate.reload()
+
+    ui.button(
+        "Reset All Bounds to Defaults", on_click=_reset_all_bounds, icon="restart_alt"
+    ).props("flat dense").classes("mb-3")
 
     groups: dict[str, list[dict]] = {}
     for param in PLACEMENT_PARAMS:
@@ -182,46 +190,89 @@ def _placement_routing_panel(state):
         "Routing": "route",
         "Thermal": "thermostat",
         "Net Classification": "category",
+        "Zone Pour": "layers",
     }
 
     for group_name, params in groups.items():
         icon = group_icons.get(group_name, "settings")
         with ui.expansion(group_name, icon=icon).classes("w-full"):
-            with ui.grid(columns=2).classes("w-full gap-3 p-2"):
+            with ui.grid(columns="2fr 1.5fr 1.5fr 1.5fr").classes(
+                "w-full gap-2 p-2 items-center"
+            ):
+                ui.label("Parameter").classes("font-bold text-xs text-gray-300")
+                ui.label("Start").classes("font-bold text-xs text-gray-300")
+                ui.label("Min").classes("font-bold text-xs text-gray-300")
+                ui.label("Max").classes("font-bold text-xs text-gray-300")
+
                 for param in params:
-                    _render_param_control(state, param)
+                    _render_param_row(state, param)
 
 
-def _render_param_control(state, param: dict):
+def _render_param_row(state, param: dict) -> None:
+    """Render one parameter as a row in the unified 4-column table."""
     key = param["key"]
     param_type = param.get("type", "number")
     current_value = state.placement_config.get(key, param["default"])
+    label_el = ui.label(param["label"]).classes("text-sm self-center")
+    label_el.tooltip(param.get("description", ""))
 
+    # Start-value cell
     if param_type == "bool":
         ui.switch(
-            param["label"],
+            "",
             value=bool(current_value),
             on_change=lambda e, k=key, p=param: _on_param_change(state, k, p, e.value),
-        ).tooltip(param["description"])
+        ).tooltip(param["description"]).props("dense")
     elif param_type in ("text", "list"):
         if param_type == "list" and isinstance(current_value, list):
             display_value = ", ".join(str(v) for v in current_value)
         else:
             display_value = str(current_value) if current_value else ""
         ui.input(
-            param["label"],
+            "",
             value=display_value,
             on_change=lambda e, k=key, p=param: _on_param_change(state, k, p, e.value),
-        ).classes("w-full").tooltip(param["description"])
+        ).classes("w-full").props("dense").tooltip(param["description"])
     else:
         ui.number(
-            param["label"],
+            "",
             value=float(current_value),
             min=param["min"],
             max=param["max"],
             step=param["step"],
             on_change=lambda e, k=key, p=param: _on_param_change(state, k, p, e.value),
-        ).tooltip(param["description"])
+        ).classes("w-full").props("dense").tooltip(param["description"])
+
+    # Min / Max cells -- only meaningful for searchable numeric params
+    spec = CONFIG_SEARCH_SPACE.get(key)
+    if spec is None or param_type in ("bool", "text", "list"):
+        ui.label("—").classes("text-xs text-gray-500 text-center self-center")
+        ui.label("—").classes("text-xs text-gray-500 text-center self-center")
+        return
+
+    is_int = spec.get("type") == "int"
+    step = param.get("step") if param.get("step") is not None else (
+        1 if is_int else spec.get("sigma", 1)
+    )
+    bounds = state.mutation_bounds.get(key, [spec["min"], spec["max"]])
+
+    ui.number(
+        label="",
+        value=int(bounds[0]) if is_int else float(bounds[0]),
+        min=spec["min"],
+        max=spec["max"],
+        step=step,
+        on_change=lambda e, k=key, idx=0: _on_bounds_change(state, k, idx, e.value),
+    ).classes("w-full").props("dense")
+
+    ui.number(
+        label="",
+        value=int(bounds[1]) if is_int else float(bounds[1]),
+        min=spec["min"],
+        max=spec["max"],
+        step=step,
+        on_change=lambda e, k=key, idx=1: _on_bounds_change(state, k, idx, e.value),
+    ).classes("w-full").props("dense")
 
 
 def _on_param_change(state, key: str, param: dict, value):
@@ -253,85 +304,6 @@ def _on_param_change(state, key: str, param: dict, value):
         state.placement_config.pop(key, None)
     else:
         state.placement_config[key] = typed_value
-
-
-def _mutation_bounds_panel(state):
-    """Panel for editing mutation search bounds per searchable parameter."""
-    ui.label("Mutation Search Bounds").classes("text-lg font-bold mb-2")
-    ui.label(
-        "Set the min/max range for each parameter during the evolutionary search. "
-        "The optimizer mutates parameters within these bounds. Narrowing a range "
-        "focuses the search; widening it allows more exploration."
-    ).classes("text-sm text-gray-400 mb-4")
-
-    def _reset_all_bounds():
-        for k, spec in CONFIG_SEARCH_SPACE.items():
-            state.mutation_bounds[k] = [spec["min"], spec["max"]]
-        state.save_session_state()
-        ui.notify("All mutation bounds reset to defaults", type="info")
-        ui.navigate.reload()
-
-    ui.button(
-        "Reset All to Defaults", on_click=_reset_all_bounds, icon="restart_alt"
-    ).props("flat dense").classes("mb-3")
-
-    param_labels = {p["key"]: p["label"] for p in PLACEMENT_PARAMS}
-    param_groups = {p["key"]: p["group"] for p in PLACEMENT_PARAMS}
-    param_steps = {p["key"]: p["step"] for p in PLACEMENT_PARAMS if p.get("step") is not None}
-
-    grouped: dict[str, list[str]] = {}
-    for key in CONFIG_SEARCH_SPACE:
-        group = param_groups.get(key, "Other")
-        grouped.setdefault(group, []).append(key)
-
-    group_icons = {
-        "Placement Physics": "science",
-        "Board Geometry": "straighten",
-        "Edge & Connectors": "electrical_services",
-        "SA Refinement": "local_fire_department",
-        "Routing": "route",
-        "Thermal": "thermostat",
-        "Component Behavior": "memory",
-    }
-
-    for group_name, keys in grouped.items():
-        icon = group_icons.get(group_name, "tune")
-        with ui.expansion(f"{group_name} bounds", icon=icon).classes("w-full"):
-            with ui.grid(columns=3).classes("w-full gap-2 p-2"):
-                ui.label("Parameter").classes("font-bold text-xs")
-                ui.label("Min").classes("font-bold text-xs")
-                ui.label("Max").classes("font-bold text-xs")
-
-                for key in keys:
-                    label = param_labels.get(key, key.replace("_", " ").title())
-                    spec = CONFIG_SEARCH_SPACE[key]
-                    bounds = state.mutation_bounds.get(key, [spec["min"], spec["max"]])
-                    is_int = spec.get("type") == "int"
-                    step = param_steps.get(key, 1 if is_int else spec["sigma"])
-
-                    ui.label(label).classes("text-sm self-center")
-
-                    ui.number(
-                        label=f"{key} min",
-                        value=int(bounds[0]) if is_int else float(bounds[0]),
-                        min=spec["min"],
-                        max=spec["max"],
-                        step=step,
-                        on_change=lambda e, k=key, idx=0: _on_bounds_change(
-                            state, k, idx, e.value
-                        ),
-                    ).classes("w-full").props("dense")
-
-                    ui.number(
-                        label=f"{key} max",
-                        value=int(bounds[1]) if is_int else float(bounds[1]),
-                        min=spec["min"],
-                        max=spec["max"],
-                        step=step,
-                        on_change=lambda e, k=key, idx=1: _on_bounds_change(
-                            state, k, idx, e.value
-                        ),
-                    ).classes("w-full").props("dense")
 
 
 def _on_bounds_change(state, key: str, idx: int, value):
