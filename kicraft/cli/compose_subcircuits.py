@@ -3094,7 +3094,41 @@ def main(argv: list[str] | None = None) -> int:
                 state,
                 overhangs=cfg.get("parent_overhang_mm", {}),
             )
-            if not geometry_validation.get("accepted", False):
+            geometry_accepted = bool(geometry_validation.get("accepted", False))
+
+            # Always stamp + render, even when geometry validation fails.
+            # The PNG is the user's diagnostic for why composition was
+            # rejected, and the Monitor tab falls back to it when
+            # parent_routed.png is absent (failed routing).
+            try:
+                stamped_pcb = _stamp_parent_board(state, pcb_path, project_dir, cfg)
+                print(f"parent_stamped_pcb : {stamped_pcb}")
+
+                stamped_render_dir = stamped_pcb.parent / "renders"
+                stamped_renders = _render_parent_board_views(
+                    stamped_pcb,
+                    stamped_render_dir / ".tmp_parent_stamped_views",
+                )
+                if stamped_renders.get("front_all"):
+                    shutil.copy2(
+                        stamped_renders["front_all"],
+                        stamped_render_dir / "parent_stamped.png",
+                    )
+                    print(
+                        f"parent_stamped_png : {stamped_render_dir / 'parent_stamped.png'}"
+                    )
+            except Exception as stamp_exc:
+                if geometry_accepted:
+                    raise
+                # If geometry was already going to be rejected, a stamping
+                # failure here is secondary -- keep the original rejection
+                # as the reason but note the stamp problem.
+                print(
+                    f"warning: stamp/render failed after geometry rejection: {stamp_exc}",
+                    file=sys.stderr,
+                )
+
+            if not geometry_accepted:
                 print(
                     json.dumps(
                         {
@@ -3110,24 +3144,6 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 1
-
-            # Stamp
-            stamped_pcb = _stamp_parent_board(state, pcb_path, project_dir, cfg)
-            print(f"parent_stamped_pcb : {stamped_pcb}")
-
-            stamped_render_dir = stamped_pcb.parent / "renders"
-            stamped_renders = _render_parent_board_views(
-                stamped_pcb,
-                stamped_render_dir / ".tmp_parent_stamped_views",
-            )
-            if stamped_renders.get("front_all"):
-                shutil.copy2(
-                    stamped_renders["front_all"],
-                    stamped_render_dir / "parent_stamped.png",
-                )
-                print(
-                    f"parent_stamped_png : {stamped_render_dir / 'parent_stamped.png'}"
-                )
 
             if args.route:
                 routing_result = _route_parent_board(
