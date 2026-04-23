@@ -115,9 +115,12 @@ DEFAULT_CONFIG = {
     "thermal_refs": [],
     "thermal_radius_mm": 3.0,
     # FreeRouting
-    "freerouting_jar": os.path.expanduser("~/.local/lib/freerouting-1.9.0.jar"),
+    "freerouting_jar": os.path.expanduser("~/.local/lib/freerouting-2.1.0.jar"),
     "freerouting_timeout_s": 60,
     "freerouting_max_passes": 40,
+    # When True and the configured jar is 2.x, FreeRouting runs with
+    # --gui.enabled=false so no Swing window pops up. No effect on 1.x jars.
+    "freerouting_hide_window": True,
     # GND zone pour — automatically created/updated to cover full board.
     # Set gnd_zone_net to "" to disable automatic zone creation.
     "gnd_zone_net": "GND",

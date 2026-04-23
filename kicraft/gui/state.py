@@ -126,6 +126,7 @@ DEFAULT_TOGGLES = {
     "save_round_details": True,
     "show_top_level_progress": True,
     "import_best_as_preset": True,
+    "freerouting_hide_window": True,
 }
 
 

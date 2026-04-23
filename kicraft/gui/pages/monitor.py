@@ -331,7 +331,12 @@ def monitor_page():
                     "leaf_rounds": state.strategy.get("leaf_rounds", 2),
                     "render_png": state.toggles.get("render_png", True),
                     "save_round_details": state.toggles.get("save_round_details", True),
-                    "placement_config": state.placement_config,
+                    "placement_config": {
+                        **state.placement_config,
+                        "freerouting_hide_window": bool(
+                            state.toggles.get("freerouting_hide_window", True)
+                        ),
+                    },
                 },
             )
             exp = db.create_experiment(

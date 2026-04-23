@@ -156,6 +156,18 @@ def _strategy_panel(state):
                 ),
             ).tooltip("Preserve round JSON and related metadata for later inspection.")
 
+        with ui.column().classes("gap-2"):
+            ui.switch(
+                "Hide FreeRouting window",
+                value=state.toggles.get("freerouting_hide_window", True),
+                on_change=lambda e: state.toggles.update(
+                    {"freerouting_hide_window": bool(e.value)}
+                ),
+            ).tooltip(
+                "Run FreeRouting headless (--gui.enabled=false). Requires "
+                "FreeRouting 2.x; has no effect on 1.x jars."
+            )
+
 
 def _placement_routing_panel(state):
     ui.label("Placement & Routing Parameters").classes("text-lg font-bold mb-2")

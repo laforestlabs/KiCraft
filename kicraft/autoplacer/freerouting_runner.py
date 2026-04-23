@@ -359,11 +359,18 @@ def run_freerouting(
     timeout_s: int = 120,
     max_passes: int = 40,
     work_dir: str | None = None,
+    hide_window: bool = True,
 ) -> dict[str, Any]:
     """Run FreeRouting CLI and return result metadata.
 
     Uses start_new_session so the Java process gets its own process group,
     allowing clean kill via os.killpg() on timeout or stop request.
+
+    When `hide_window` is True and the jar looks like a 2.x release (the
+    filename contains "freerouting-2"), `--gui.enabled=false` is added so
+    FreeRouting runs headless with no Swing window. The 1.x jars do not
+    support that flag and still pop a window; the caller is expected to
+    fall back to xvfb or live with the window in that case.
     """
     jar_path = os.path.expanduser(jar_path)
     cmd = [
@@ -381,6 +388,14 @@ def run_freerouting(
         "-dct",
         "0",  # auto-dismiss dialogs immediately
     ]
+
+    jar_basename = os.path.basename(jar_path).lower()
+    is_v2_plus = "freerouting-2" in jar_basename or "freerouting-3" in jar_basename
+    if hide_window and is_v2_plus:
+        cmd.append("--gui.enabled=false")
+        # In 2.x CLI mode the old -mp is ignored; use the new settings-style
+        # flag so the pass cap actually takes effect.
+        cmd.append(f"--router.max_passes={int(max_passes)}")
 
     cwd = work_dir or os.path.dirname(dsn_path)
 
@@ -483,6 +498,7 @@ def route_with_freerouting(
 
     max_passes = config.get("freerouting_max_passes", 40)
     timeout_s = config.get("freerouting_timeout_s", 120)
+    hide_window = bool(config.get("freerouting_hide_window", True))
 
     for attempt in range(2):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -502,6 +518,7 @@ def route_with_freerouting(
                 jar_path,
                 timeout_s=timeout_s,
                 max_passes=passes,
+                hide_window=hide_window,
             )
             stats["preserved_existing_copper"] = preserve_existing_copper
             stats["cleared_zones_before_export"] = clear_existing_zones
