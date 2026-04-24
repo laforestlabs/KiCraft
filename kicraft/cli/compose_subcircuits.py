@@ -145,6 +145,11 @@ class ParentCompositionState:
     added_parent_via_count: int = 0
     packing_metadata: dict[str, Any] = field(default_factory=dict)
     geometry_validation: dict[str, Any] = field(default_factory=dict)
+    # Post-route acceptance summary: DRC categories, rejection reasons, etc.
+    # Populated after _route_parent_board returns. Persisted unconditionally
+    # so callers can diagnose why a routed board was rejected even when the
+    # run exits non-zero.
+    routed_validation: dict[str, Any] = field(default_factory=dict)
     score_total: float = 0.0
     score_breakdown: dict[str, float] = field(default_factory=dict)
     score_notes: list[str] = field(default_factory=list)
@@ -196,6 +201,7 @@ class ParentCompositionState:
             "added_parent_via_count": self.added_parent_via_count,
             "packing_metadata": dict(self.packing_metadata),
             "geometry_validation": dict(self.geometry_validation),
+            "routed_validation": dict(self.routed_validation),
             "score_total": self.score_total,
             "score_breakdown": dict(self.score_breakdown),
             "score_notes": list(self.score_notes),
@@ -1998,6 +2004,59 @@ def _json_payload(
 # ---------------------------------------------------------------------------
 
 
+def _compact_routed_validation(validation: dict[str, Any]) -> dict[str, Any]:
+    """Strip the ~100 KB DRC report_text, keep the diagnostic signal.
+
+    Preserved fields: accepted, rejection_reasons, obviously_illegal_routed_geometry,
+    DRC violation counts, first N violation excerpts (~1 KB), track/anchor
+    summaries. Callers that need the full report can still run
+    `validate_routed_board` themselves.
+    """
+    if not isinstance(validation, dict):
+        return {}
+    drc = validation.get("drc", {}) or {}
+    report_text = drc.get("report_text", "") or ""
+    drc_slim: dict[str, Any] = {
+        k: v for k, v in drc.items() if k != "report_text"
+    }
+    if report_text:
+        # Retain only the first few violation blocks for post-hoc analysis.
+        # A KiCad DRC report is line-oriented; "[category]" lines introduce
+        # each violation. Take the first 800 chars, which is usually enough
+        # to identify the dominant failure mode without bloating the JSON.
+        drc_slim["report_excerpt"] = report_text[:800]
+    out = {
+        "accepted": bool(validation.get("accepted", False)),
+        "rejection_reasons": list(validation.get("rejection_reasons", []) or []),
+        "obviously_illegal_routed_geometry": bool(
+            validation.get("obviously_illegal_routed_geometry", False)
+        ),
+        "malformed_board_geometry": bool(
+            validation.get("malformed_board_geometry", False)
+        ),
+        "track_summary": dict(validation.get("track_summary", {}) or {}),
+        "anchor_summary": {
+            k: v
+            for k, v in (validation.get("anchor_summary", {}) or {}).items()
+            if k
+            in {
+                "expected_count",
+                "actual_count",
+                "required_count",
+                "all_required_present",
+            }
+        },
+        "drc": drc_slim,
+    }
+    for k in (
+        "footprint_internal_clearance_count",
+        "footprint_internal_copper_edge_count",
+    ):
+        if k in validation:
+            out[k] = validation[k]
+    return out
+
+
 def _validate_parent_geometry(
     state: ParentCompositionState,
     overhangs: dict[str, float] | None = None,
@@ -3182,6 +3241,18 @@ def main(argv: list[str] | None = None) -> int:
                         )
 
                     validation = routing_result.get("validation", {})
+                    state.routed_validation = _compact_routed_validation(validation)
+                    if args.output:
+                        # Re-save the snapshot so the --output file reflects
+                        # the post-route DRC summary (rejection reasons, DRC
+                        # category counts). Necessary because the first save
+                        # ran before routing; otherwise the data is lost when
+                        # the run exits non-zero on rejection.
+                        _save_composition_snapshot(
+                            Path(args.output).resolve(),
+                            state,
+                            transformed_payloads,
+                        )
 
                     # Apply post-routing DRC penalty to parent score.
                     # Shorts tank the score to near-zero; clearance

@@ -821,6 +821,27 @@ def _extract_parent_board_dimensions(
     return (max(0.0, w), max(0.0, h))
 
 
+def _extract_parent_routed_validation(
+    parent_output_json: Path,
+) -> dict[str, Any]:
+    """Return the compact post-route DRC/acceptance summary, if present.
+
+    Empty dict when the stamp+route stage never ran or failed before
+    writing it.
+    """
+    try:
+        payload = _load_json(parent_output_json)
+    except Exception:
+        return {}
+    state = payload.get("state", {})
+    if not isinstance(state, dict):
+        return {}
+    validation = state.get("routed_validation", {})
+    if not isinstance(validation, dict):
+        return {}
+    return validation
+
+
 def _discover_latest_parent_artifact_dir(project_dir: Path) -> Path | None:
     root = project_dir / ".experiments" / "subcircuits"
     if not root.exists():
@@ -1222,6 +1243,7 @@ def _write_round_detail(
     parent_route_stdout: str,
     parent_route_stderr: str,
     parent_copper_accounting: dict[str, int] | None = None,
+    parent_routed_validation: dict[str, Any] | None = None,
     preview_paths: dict[str, str] | None = None,
 ) -> None:
     payload = {
@@ -1255,6 +1277,7 @@ def _write_round_detail(
             "artifact_root": round_result.artifact_root,
             "parent_output_json": round_result.parent_output_json,
             "parent_copper_accounting": dict(parent_copper_accounting or {}),
+            "parent_routed_validation": dict(parent_routed_validation or {}),
             "parent_board_paths": {
                 "parent_stamped_board": str(
                     (preview_paths or {}).get("parent_stamped_board", "") or ""
@@ -2119,6 +2142,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             parent_routed = parent_route_rc == 0
             parent_copper_accounting = _extract_parent_copper_accounting(project_dir)
+            parent_routed_validation = _extract_parent_routed_validation(
+                parent_output_json
+            )
             _write_live_status(
                 status_json_path,
                 status_txt_path,
@@ -2321,6 +2347,7 @@ def main(argv: list[str] | None = None) -> int:
             parent_route_stdout=parent_route_stdout,
             parent_route_stderr=parent_route_stderr,
             parent_copper_accounting=parent_copper_accounting,
+            parent_routed_validation=parent_routed_validation,
             preview_paths=_discover_live_preview_paths(project_dir),
         )
         _write_frame_metadata(frames_dir, round_result)
