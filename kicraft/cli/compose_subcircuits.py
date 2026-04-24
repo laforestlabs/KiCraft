@@ -776,9 +776,16 @@ def _compact_free_axes(
     spacing_mm: float,
     all_constraints,
     child_anchor_positions: dict[str, Point],
+    frame_bounds: tuple[Point, Point] | None = None,
 ) -> None:
     """Shift each leaf along its non-constrained axes toward the cluster
     centroid, stopping when another leaf or a child anchor would move.
+
+    ``frame_bounds`` is the board outline from the packing loop; candidate
+    moves that would push a leaf's bbox past it are rejected. Without this
+    check, centroid-driven shifts can slide a leaf past an edge-pinned
+    constraint target (e.g. BT1 drifting left of J1's left-edge target),
+    which later produces ``outside_components`` at stamp-time validation.
 
     Mutates ``entries``, ``placed_envelopes``, ``placed_child_bboxes``,
     and ``child_anchor_positions`` in place.
@@ -841,6 +848,15 @@ def _compact_free_axes(
 
             def _try_move(new_origin: Point) -> bool:
                 new_bbox = _shift_bbox(bbox_local, new_origin)
+                if frame_bounds is not None:
+                    fmin, fmax = frame_bounds
+                    if (
+                        new_bbox[0].x < fmin.x
+                        or new_bbox[0].y < fmin.y
+                        or new_bbox[1].x > fmax.x
+                        or new_bbox[1].y > fmax.y
+                    ):
+                        return False
                 for other_i, other_item in enumerate(placed_envelopes):
                     if other_i == env_idx:
                         continue
@@ -1532,6 +1548,7 @@ def _compose_artifacts(
         spacing_mm=spacing_mm,
         all_constraints=all_constraints,
         child_anchor_positions=child_anchor_positions,
+        frame_bounds=last_outline,
     )
 
     # Recompute outline now that leaves may have shifted inward

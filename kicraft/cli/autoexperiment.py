@@ -81,22 +81,15 @@ class HierarchyRound:
     latest_stage: str = ""
     details: str = ""
     artifact_root: str = ""
-    composition_json: str = ""
     parent_output_json: str = ""
     leaf_names: list[str] = field(default_factory=list)
     accepted_leaf_names: list[str] = field(default_factory=list)
     score_breakdown: dict[str, float] = field(default_factory=dict)
     score_notes: list[str] = field(default_factory=list)
-    absolute_score: float = 0.0
-    improvement_score: float = 0.0
-    plateau_escape_score: float = 0.0
-    parent_quality_score: float = 0.0
-    baseline_score: float = 0.0
-    rolling_score: float = 0.0
+    # Functional tier produced by _score_round:
+    #   "partial_leaves" | "not_routed" | "functional"
+    tier: str = ""
     improvement_vs_best: float = 0.0
-    improvement_vs_baseline: float = 0.0
-    improvement_vs_recent: float = 0.0
-    plateau_count: int = 0
     timing_breakdown: dict[str, float] = field(default_factory=dict)
     leaf_timing_summary: dict[str, Any] = field(default_factory=dict)
 
@@ -271,183 +264,102 @@ def _all_leaf_artifacts(project_dir: Path) -> list[dict[str, Any]]:
     return artifacts
 
 
+def _read_composer_quality_score(
+    parent_output_json: Path,
+) -> tuple[float, dict[str, float]]:
+    """Read the composer's 0-100 quality score and per-axis breakdown.
+
+    The composer already scores anchor_coverage, area_utilization,
+    child_layout_quality, and interconnect_compactness and applies a DRC
+    penalty after routing. That single number is the right quality signal
+    for a routed parent -- autoexperiment doesn't need a second weighted
+    scheme on top of it. Returns (0.0, {}) if the pipeline JSON is missing
+    or unparseable.
+    """
+    try:
+        payload = _load_json(parent_output_json)
+    except Exception:
+        return 0.0, {}
+    state = payload.get("state", {}) if isinstance(payload, dict) else {}
+    if not isinstance(state, dict):
+        return 0.0, {}
+    total = state.get("score_total")
+    breakdown_raw = state.get("score_breakdown") or {}
+    try:
+        total_f = float(total) if total is not None else 0.0
+    except (TypeError, ValueError):
+        total_f = 0.0
+    breakdown: dict[str, float] = {}
+    if isinstance(breakdown_raw, dict):
+        for key, value in breakdown_raw.items():
+            try:
+                breakdown[str(key)] = round(float(value), 3)
+            except (TypeError, ValueError):
+                continue
+    return max(0.0, min(100.0, total_f)), breakdown
+
+
 def _score_round(
     *,
-    accepted_leafs: list[dict[str, Any]],
-    all_leafs: list[dict[str, Any]],
-    composition_ok: bool,
+    leaf_accepted: int,
+    leaf_total: int,
     parent_routed: bool,
-    parent_copper_accounting: dict[str, int] | None,
-    baseline_score: float | None,
-    recent_scores: list[float],
-    plateau_count: int,
+    parent_output_json: Path,
     timing_breakdown: dict[str, float] | None = None,
-    parent_board_area_mm2: float = 0.0,
-    child_total_area_mm2: float = 0.0,
-) -> tuple[float, dict[str, float], list[str], dict[str, float]]:
-    leaf_total = len(all_leafs)
-    leaf_accepted = len(accepted_leafs)
-    acceptance_ratio = (leaf_accepted / leaf_total) if leaf_total > 0 else 0.0
+) -> tuple[float, dict[str, float], list[str], str]:
+    """Absolute score 0-100 with three functional tiers.
 
-    accepted_trace_count = sum(item.get("trace_count", 0) for item in accepted_leafs)
-    accepted_via_count = sum(item.get("via_count", 0) for item in accepted_leafs)
+    Single source of truth for quality is the composer's score_total, which
+    already combines anchor coverage, area utilization, child layout quality,
+    and interconnect compactness (and is DRC-penalized post-route).
 
-    all_trace_count = sum(item.get("trace_count", 0) for item in all_leafs)
-    all_via_count = sum(item.get("via_count", 0) for item in all_leafs)
+    Tiers:
+      - "partial_leaves": some leaves failed. Score = leaf_ratio * 15 (0-15).
+      - "not_routed": all leaves ok but parent failed to route. Score = 20.
+      - "functional": routed. Score = composer_score (realistic range ~50-90).
 
-    trace_coverage_ratio = (
-        accepted_trace_count / all_trace_count if all_trace_count > 0 else 0.0
-    )
-    via_coverage_ratio = (
-        accepted_via_count / all_via_count if all_via_count > 0 else 0.0
-    )
+    Returns (score, breakdown, notes, tier).
+    """
+    leaf_ratio = (leaf_accepted / leaf_total) if leaf_total > 0 else 0.0
 
-    copper = dict(parent_copper_accounting or {})
-    expected_child_traces = int(
-        copper.get("expected_preserved_child_trace_count", 0) or 0
-    )
-    expected_child_vias = int(copper.get("expected_preserved_child_via_count", 0) or 0)
-    preserved_child_traces = int(copper.get("preserved_child_trace_count", 0) or 0)
-    preserved_child_vias = int(copper.get("preserved_child_via_count", 0) or 0)
-    routed_total_traces = int(copper.get("routed_total_trace_count", 0) or 0)
-    routed_total_vias = int(copper.get("routed_total_via_count", 0) or 0)
-    added_parent_traces = int(copper.get("added_parent_trace_count", 0) or 0)
-    added_parent_vias = int(copper.get("added_parent_via_count", 0) or 0)
-
-    preserved_trace_ratio = (
-        preserved_child_traces / expected_child_traces
-        if expected_child_traces > 0
-        else 0.0
-    )
-    preserved_via_ratio = (
-        preserved_child_vias / expected_child_vias if expected_child_vias > 0 else 0.0
-    )
-    parent_added_copper_present = (
-        1.0 if (added_parent_traces + added_parent_vias) > 0 else 0.0
-    )
-    parent_routed_copper_ratio = (routed_total_traces + routed_total_vias) / max(
-        1,
-        expected_child_traces
-        + expected_child_vias
-        + added_parent_traces
-        + added_parent_vias,
-    )
-
-    leaf_acceptance_score = acceptance_ratio * 30.0
-    routed_copper_score = min(
-        16.0,
-        trace_coverage_ratio * 12.0 + via_coverage_ratio * 4.0,
-    )
-    parent_composition_score = 8.0 if composition_ok else 0.0
-    parent_routed_score = 12.0 if parent_routed else 0.0
-
-    parent_quality_score = min(
-        14.0,
-        preserved_trace_ratio * 7.0
-        + preserved_via_ratio * 3.0
-        + parent_added_copper_present * 2.0
-        + min(1.0, parent_routed_copper_ratio) * 2.0,
-    )
-
-    area_compactness_score = 0.0
-    area_utilization_ratio = 0.0
-    if parent_board_area_mm2 > 0.0 and child_total_area_mm2 > 0.0:
-        area_utilization_ratio = min(
-            1.0, child_total_area_mm2 / parent_board_area_mm2
+    if leaf_ratio < 1.0:
+        score = round(leaf_ratio * 15.0, 3)
+        breakdown = {"leaf_partial_credit": score}
+        notes = [
+            "tier=partial_leaves",
+            f"leaf_accepted={leaf_accepted}/{leaf_total}",
+            f"leaf_ratio={leaf_ratio:.3f}",
+        ]
+        tier = "partial_leaves"
+    elif not parent_routed:
+        score = 20.0
+        breakdown = {"not_routed_penalty": 20.0}
+        notes = [
+            "tier=not_routed",
+            f"leaf_accepted={leaf_accepted}/{leaf_total}",
+            "parent_routed=False",
+        ]
+        tier = "not_routed"
+    else:
+        composer_score, composer_breakdown = _read_composer_quality_score(
+            parent_output_json
         )
-        area_compactness_score = min(9.0, area_utilization_ratio * 9.0)
+        score = round(composer_score, 3)
+        breakdown = dict(composer_breakdown)
+        breakdown["composer_score_total"] = score
+        notes = [
+            "tier=functional",
+            f"leaf_accepted={leaf_accepted}/{leaf_total}",
+            f"composer_score_total={composer_score:.3f}",
+        ]
+        for key, value in sorted(composer_breakdown.items()):
+            notes.append(f"composer_{key}={value:.3f}")
+        tier = "functional"
 
-    absolute_score = round(
-        leaf_acceptance_score
-        + routed_copper_score
-        + parent_composition_score
-        + parent_routed_score
-        + parent_quality_score
-        + area_compactness_score,
-        3,
-    )
-
-    effective_baseline = absolute_score if baseline_score is None else baseline_score
-    rolling_reference = (
-        sum(recent_scores) / len(recent_scores) if recent_scores else effective_baseline
-    )
-
-    improvement_vs_baseline = absolute_score - effective_baseline
-    improvement_vs_recent = absolute_score - rolling_reference
-
-    baseline_improvement_score = max(0.0, min(10.0, improvement_vs_baseline * 0.6))
-    recent_improvement_score = max(0.0, min(4.0, improvement_vs_recent * 1.0))
-
-    plateau_escape_trigger = max(2, plateau_count)
-    plateau_escape_score = 0.0
-    if plateau_count >= plateau_escape_trigger and improvement_vs_recent > 0.5:
-        plateau_escape_score = min(4.0, 1.0 + improvement_vs_recent * 0.75)
-
-    improvement_score = round(
-        baseline_improvement_score + recent_improvement_score,
-        3,
-    )
-    plateau_escape_score = round(plateau_escape_score, 3)
-
-    score_breakdown = {
-        "absolute_leaf_acceptance": round(leaf_acceptance_score, 3),
-        "absolute_routed_copper": round(routed_copper_score, 3),
-        "absolute_parent_composition": round(parent_composition_score, 3),
-        "absolute_parent_routed": round(parent_routed_score, 3),
-        "absolute_parent_quality": round(parent_quality_score, 3),
-        "absolute_area_compactness": round(area_compactness_score, 3),
-        "area_utilization_ratio": round(area_utilization_ratio, 3),
-        "improvement_vs_baseline": round(baseline_improvement_score, 3),
-        "improvement_vs_recent": round(recent_improvement_score, 3),
-        "plateau_escape": plateau_escape_score,
-    }
-    score = round(
-        absolute_score + improvement_score + plateau_escape_score,
-        3,
-    )
-
-    score_notes = [
-        f"leaf_acceptance_ratio={acceptance_ratio:.3f}",
-        f"trace_coverage_ratio={trace_coverage_ratio:.3f}",
-        f"via_coverage_ratio={via_coverage_ratio:.3f}",
-        f"accepted_leafs={leaf_accepted}/{leaf_total}",
-        f"accepted_traces={accepted_trace_count}/{all_trace_count}",
-        f"accepted_vias={accepted_via_count}/{all_via_count}",
-        f"composition_ok={composition_ok}",
-        f"parent_routed={parent_routed}",
-        f"preserved_child_trace_ratio={preserved_trace_ratio:.3f}",
-        f"preserved_child_via_ratio={preserved_via_ratio:.3f}",
-        f"parent_added_copper_present={parent_added_copper_present:.3f}",
-        f"parent_routed_copper_ratio={parent_routed_copper_ratio:.3f}",
-        f"baseline_score={effective_baseline:.3f}",
-        f"rolling_score={rolling_reference:.3f}",
-        f"improvement_vs_baseline={improvement_vs_baseline:.3f}",
-        f"improvement_vs_recent={improvement_vs_recent:.3f}",
-        f"plateau_count_in={plateau_count}",
-        f"area_utilization_ratio={area_utilization_ratio:.3f}",
-        f"parent_board_area_mm2={parent_board_area_mm2:.1f}",
-        f"child_total_area_mm2={child_total_area_mm2:.1f}",
-        f"area_compactness_score={area_compactness_score:.3f}",
-        "score_architecture=absolute_plus_improvement_plus_plateau_escape",
-        "score_scale=bounded_components_with_relative_rewards",
-    ]
     if timing_breakdown:
-        score_notes.append(_format_timing_breakdown(timing_breakdown))
-        for key, value in sorted(timing_breakdown.items()):
-            score_notes.append(f"timing_{key}={value:.3f}s")
-    score_context = {
-        "absolute_score": absolute_score,
-        "improvement_score": improvement_score,
-        "plateau_escape_score": plateau_escape_score,
-        "parent_quality_score": round(parent_quality_score, 3),
-        "area_compactness_score": round(area_compactness_score, 3),
-        "area_utilization_ratio": round(area_utilization_ratio, 3),
-        "baseline_score": round(effective_baseline, 3),
-        "rolling_score": round(rolling_reference, 3),
-        "improvement_vs_baseline": round(improvement_vs_baseline, 3),
-        "improvement_vs_recent": round(improvement_vs_recent, 3),
-    }
-    return score, score_breakdown, score_notes, score_context
+        notes.append(_format_timing_breakdown(timing_breakdown))
+
+    return score, breakdown, notes, tier
 
 
 def _extract_leaf_timing_summary(solve_payload: dict[str, Any]) -> dict[str, Any]:
@@ -1272,6 +1184,31 @@ def _copy_if_exists(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
+def _leaf_summary(leaf: dict[str, Any]) -> dict[str, Any]:
+    """Lean per-leaf record for round JSON.
+
+    Strip the full `solved_layout` blob (which can be hundreds of KB per
+    leaf and is written to `.experiments/subcircuits/<slug>/solved_layout.json`
+    anyway). Retain the identifying bits a human needs to locate the artifact
+    on disk and a handful of counts for quick grep.
+    """
+    solved = leaf.get("solved_layout") or {}
+    validation = leaf.get("validation") or (
+        solved.get("validation") if isinstance(solved, dict) else {}
+    )
+    accepted = False
+    if isinstance(validation, dict):
+        accepted = bool(validation.get("accepted"))
+    return {
+        "sheet_name": leaf.get("sheet_name", ""),
+        "instance_path": leaf.get("instance_path", ""),
+        "artifact_dir": leaf.get("artifact_dir", ""),
+        "trace_count": int(leaf.get("trace_count", 0) or 0),
+        "via_count": int(leaf.get("via_count", 0) or 0),
+        "accepted": accepted,
+    }
+
+
 def _write_round_detail(
     rounds_dir: Path,
     round_result: HierarchyRound,
@@ -1279,12 +1216,9 @@ def _write_round_detail(
     accepted_leafs: list[dict[str, Any]],
     all_leafs: list[dict[str, Any]],
     solve_exit_code: int,
-    compose_exit_code: int,
     parent_route_exit_code: int | None,
     solve_stdout: str,
     solve_stderr: str,
-    compose_stdout: str,
-    compose_stderr: str,
     parent_route_stdout: str,
     parent_route_stderr: str,
     parent_copper_accounting: dict[str, int] | None = None,
@@ -1312,22 +1246,13 @@ def _write_round_detail(
             "accepted_leaf_names": round_result.accepted_leaf_names,
             "score_breakdown": dict(round_result.score_breakdown),
             "score_notes": list(round_result.score_notes),
-            "absolute_score": round_result.absolute_score,
-            "improvement_score": round_result.improvement_score,
-            "plateau_escape_score": round_result.plateau_escape_score,
-            "parent_quality_score": round_result.parent_quality_score,
-            "baseline_score": round_result.baseline_score,
-            "rolling_score": round_result.rolling_score,
+            "tier": round_result.tier,
             "improvement_vs_best": round_result.improvement_vs_best,
-            "improvement_vs_baseline": round_result.improvement_vs_baseline,
-            "improvement_vs_recent": round_result.improvement_vs_recent,
-            "plateau_count": round_result.plateau_count,
             "timing_breakdown": dict(round_result.timing_breakdown),
             "leaf_timing_summary": dict(round_result.leaf_timing_summary),
         },
         "artifacts": {
             "artifact_root": round_result.artifact_root,
-            "composition_json": round_result.composition_json,
             "parent_output_json": round_result.parent_output_json,
             "parent_copper_accounting": dict(parent_copper_accounting or {}),
             "parent_board_paths": {
@@ -1342,16 +1267,17 @@ def _write_round_detail(
         },
         "commands": {
             "solve_exit_code": solve_exit_code,
-            "compose_exit_code": compose_exit_code,
             "parent_route_exit_code": parent_route_exit_code,
         },
-        "accepted_leaf_artifacts": accepted_leafs,
-        "all_leaf_artifacts": all_leafs,
+        # Lean per-leaf summary -- the full solved_layout dict lives on disk
+        # at each artifact_dir/solved_layout.json. Dumping it here inflated
+        # round JSON to ~2.4 MB with no consumer reading it from inside the
+        # round file.
+        "accepted_leaf_artifacts": [_leaf_summary(leaf) for leaf in accepted_leafs],
+        "all_leaf_artifacts": [_leaf_summary(leaf) for leaf in all_leafs],
         "logs": {
             "solve_stdout_tail": solve_stdout[-12000:],
             "solve_stderr_tail": solve_stderr[-12000:],
-            "compose_stdout_tail": compose_stdout[-12000:],
-            "compose_stderr_tail": compose_stderr[-12000:],
             "parent_route_stdout_tail": parent_route_stdout[-12000:],
             "parent_route_stderr_tail": parent_route_stderr[-12000:],
         },
@@ -1379,25 +1305,15 @@ def _write_frame_metadata(
         "accepted_via_count": round_result.accepted_via_count,
         "score_breakdown": dict(round_result.score_breakdown),
         "score_notes": list(round_result.score_notes),
-        "absolute_score": round_result.absolute_score,
-        "improvement_score": round_result.improvement_score,
-        "plateau_escape_score": round_result.plateau_escape_score,
-        "parent_quality_score": round_result.parent_quality_score,
-        "baseline_score": round_result.baseline_score,
-        "rolling_score": round_result.rolling_score,
+        "tier": round_result.tier,
         "improvement_vs_best": round_result.improvement_vs_best,
-        "improvement_vs_baseline": round_result.improvement_vs_baseline,
-        "improvement_vs_recent": round_result.improvement_vs_recent,
-        "plateau_count": round_result.plateau_count,
         "timing_breakdown": dict(round_result.timing_breakdown),
         "leaf_timing_summary": dict(round_result.leaf_timing_summary),
         "sheet_name": ", ".join(round_result.accepted_leaf_names[:3])
         if round_result.accepted_leaf_names
         else "",
-        "instance_path": round_result.parent_output_json
-        or round_result.composition_json,
+        "instance_path": round_result.parent_output_json,
         "artifact_root": round_result.artifact_root,
-        "composition_json": round_result.composition_json,
         "parent_output_json": round_result.parent_output_json,
         "details": round_result.details,
     }
@@ -1591,37 +1507,6 @@ def _build_solve_cmd(
     return cmd
 
 
-def _build_compose_cmd(
-    *,
-    project_dir: Path,
-    parent: str,
-    output_json: Path,
-    only: list[str],
-    config: str | None = None,
-    spacing_mm: float = 2.0,
-) -> list[str]:
-    cmd = [
-        sys.executable,
-        str(SCRIPT_DIR / "compose_subcircuits.py"),
-        "--project",
-        str(project_dir),
-        "--parent",
-        parent,
-        "--mode",
-        "packed",
-        "--spacing-mm",
-        str(spacing_mm),
-        "--output",
-        str(output_json),
-        "--json",
-    ]
-    if config:
-        cmd.extend(["--config", config])
-    for selector in only:
-        cmd.extend(["--only", selector])
-    return cmd
-
-
 def _build_visible_cmd(
     *,
     project_dir: Path,
@@ -1682,12 +1567,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--fast-smoke",
         action="store_true",
         help="Pass through fast smoke mode to leaf solving for faster routed verification rounds",
-    )
-    parser.add_argument(
-        "--plateau",
-        type=int,
-        default=2,
-        help="Number of non-improving rounds tolerated before plateau markers become explicit",
     )
     parser.add_argument(
         "--jar",
@@ -1808,9 +1687,6 @@ def main(argv: list[str] | None = None) -> int:
     start_ts = time.monotonic()
     best_score = -1.0
     kept_count = 0
-    plateau_count = 0
-    baseline_score: float | None = None
-    recent_scores: list[float] = []
     best_round: HierarchyRound | None = None
     resolved_config_path = args.config
     if not resolved_config_path:
@@ -1915,7 +1791,6 @@ def main(argv: list[str] | None = None) -> int:
         round_mutated: dict[str, int | float] = {}
         round_dir = hierarchy_dir / f"round_{round_num:04d}"
         parent_output_json = round_dir / "parent_pipeline.json"
-        composition_json = round_dir / "parent_composition.json"
         round_dir.mkdir(parents=True, exist_ok=True)
 
         round_candidate_config = dict(_best_config)
@@ -2128,101 +2003,11 @@ def main(argv: list[str] | None = None) -> int:
         leaf_timing_summary["scheduled_leafs"] = scheduled_leaf_rows
         leaf_timing_summary["schedule_recommendation"] = list(scheduled_leaf_names)
 
-        _write_live_status(
-            status_json_path,
-            status_txt_path,
-            phase="running",
-            rounds_total=args.rounds,
-            round_num=round_num,
-            best_score=max(best_score, 0.0),
-            kept_count=kept_count,
-            latest_score=None,
-            latest_marker=f"round {round_num} leaf solve complete",
-            start_ts=start_ts,
-            current_stage="compose_parent",
-            leaf_total=len(all_leafs),
-            leaf_accepted=len(accepted_leafs),
-            parent_routed=False,
-            leaf_worker_count=effective_workers,
-            leaf_workers_active=0,
-            leaf_workers_queued=0,
-            leaf_workers_completed=len(accepted_leafs),
-            current_node=args.parent,
-            current_parent=args.parent,
-            current_leaf=", ".join(accepted_leaf_names[:3])
-            if accepted_leaf_names
-            else None,
-            top_level_status="pending",
-            composition_status="composing_parent",
-            copper_accounting={},
-            current_action="leaf solve complete; composing parent snapshot",
-            current_command=" ".join(
-                _build_compose_cmd(
-                    project_dir=project_dir,
-                    parent=args.parent,
-                    output_json=composition_json,
-                    only=args.only,
-                    config=current_round_config,
-                    spacing_mm=round_candidate_config.get("parent_spacing_mm", 2.0),
-                )
-            ),
-            preview_paths=_discover_live_preview_paths(project_dir),
-            leaf_timing_summary=leaf_timing_summary,
-        )
-
-        compose_cmd = _build_compose_cmd(
-            project_dir=project_dir,
-            parent=args.parent,
-            output_json=composition_json,
-            only=args.only,
-            config=current_round_config,
-            spacing_mm=round_candidate_config.get("parent_spacing_mm", 2.0),
-        )
-        _write_live_status(
-            status_json_path,
-            status_txt_path,
-            phase="running",
-            rounds_total=args.rounds,
-            round_num=round_num,
-            best_score=max(best_score, 0.0),
-            kept_count=kept_count,
-            latest_score=None,
-            latest_marker=f"round {round_num} parent composition launched",
-            start_ts=start_ts,
-            current_stage="compose_parent",
-            leaf_total=len(all_leafs),
-            leaf_accepted=len(accepted_leafs),
-            parent_routed=False,
-            leaf_worker_count=effective_workers,
-            leaf_workers_active=0,
-            leaf_workers_queued=0,
-            leaf_workers_completed=len(accepted_leafs),
-            current_node=args.parent,
-            current_parent=args.parent,
-            current_leaf=", ".join(accepted_leaf_names[:3])
-            if accepted_leaf_names
-            else None,
-            top_level_status="pending",
-            composition_status="composing_parent",
-            copper_accounting={},
-            current_action="running compose_subcircuits snapshot stage",
-            current_command=" ".join(compose_cmd),
-            preview_paths=_discover_live_preview_paths(project_dir),
-            leaf_timing_summary=leaf_timing_summary,
-        )
-        compose_start_ts = _timing_now()
-        compose_rc, compose_stdout, compose_stderr = _run_command(
-            compose_cmd,
-            cwd=project_dir,
-        )
-        compose_elapsed_s = _record_timing(
-            round_timing_breakdown,
-            "compose_subcircuits_total",
-            compose_start_ts,
-        )
-        print(
-            f"[timing] round {round_num} compose_subcircuits_total={compose_elapsed_s:.3f}s"
-        )
+        # The --stamp --route invocation below is the sole composition step.
+        # A previous generation ran compose twice per round (once dry-run
+        # without --pcb, once with --stamp --route); the dry-run saw no
+        # parent-local components and produced a different layout than the
+        # routed one -- pure waste.
 
         parent_route_rc: int | None = None
         parent_route_stdout = ""
@@ -2368,8 +2153,6 @@ def main(argv: list[str] | None = None) -> int:
                 leaf_timing_summary=leaf_timing_summary,
             )
 
-        composition_ok = compose_rc == 0
-
         # Snapshot the parent render(s) into the round directory so the
         # monitor can show per-round parent renders after the shared
         # artifacts are overwritten by the next round. _discover_live_preview_paths
@@ -2396,32 +2179,12 @@ def main(argv: list[str] | None = None) -> int:
 
         score_round_start_ts = _timing_now()
 
-        # Extract parent board dimensions for area compactness scoring
-        parent_w, parent_h = _extract_parent_board_dimensions(parent_output_json)
-        parent_board_area_mm2 = parent_w * parent_h
-
-        # Sum child leaf areas from solved_layout bounding boxes
-        child_total_area_mm2 = 0.0
-        for leaf in accepted_leafs:
-            sl = leaf.get("solved_layout", {})
-            bb = sl.get("bounding_box", {})
-            if isinstance(bb, dict):
-                lw = float(bb.get("width_mm", 0.0) or 0.0)
-                lh = float(bb.get("height_mm", 0.0) or 0.0)
-                child_total_area_mm2 += lw * lh
-
-        score, score_breakdown, score_notes, score_context = _score_round(
-            accepted_leafs=accepted_leafs,
-            all_leafs=all_leafs,
-            composition_ok=composition_ok,
+        score, score_breakdown, score_notes, tier = _score_round(
+            leaf_accepted=len(accepted_leafs),
+            leaf_total=len(all_leafs),
             parent_routed=parent_routed,
-            parent_copper_accounting=parent_copper_accounting,
-            baseline_score=baseline_score,
-            recent_scores=recent_scores,
-            plateau_count=plateau_count,
+            parent_output_json=parent_output_json,
             timing_breakdown=dict(round_timing_breakdown),
-            parent_board_area_mm2=parent_board_area_mm2,
-            child_total_area_mm2=child_total_area_mm2,
         )
         score_round_elapsed_s = _record_timing(
             round_timing_breakdown,
@@ -2434,9 +2197,6 @@ def main(argv: list[str] | None = None) -> int:
         duration_s = round(time.monotonic() - t0, 2)
         round_timing_breakdown["round_total"] = round(duration_s, 3)
 
-        if baseline_score is None:
-            baseline_score = score_context["absolute_score"]
-
         improvement_vs_best = (
             score if best_score < 0.0 else round(score - best_score, 3)
         )
@@ -2444,11 +2204,6 @@ def main(argv: list[str] | None = None) -> int:
         is_meaningful_improvement = (
             best_score < 0.0 or improvement_vs_best >= keep_threshold
         )
-
-        if is_meaningful_improvement:
-            plateau_count = 0
-        else:
-            plateau_count += 1
 
         long_pole_leafs = leaf_timing_summary.get("long_pole_leafs", [])
         if not isinstance(long_pole_leafs, list):
@@ -2483,7 +2238,7 @@ def main(argv: list[str] | None = None) -> int:
             duration_s=duration_s,
             leaf_total=len(all_leafs),
             leaf_accepted=len(accepted_leafs),
-            parent_composed=composition_ok,
+            parent_composed=parent_routed,
             parent_routed=parent_routed,
             accepted_trace_count=sum(
                 item.get("trace_count", 0) for item in accepted_leafs
@@ -2491,35 +2246,22 @@ def main(argv: list[str] | None = None) -> int:
             accepted_via_count=sum(item.get("via_count", 0) for item in accepted_leafs),
             latest_stage="done",
             details=(
+                f"tier={tier}; "
                 f"leafs {len(accepted_leafs)}/{len(all_leafs)} accepted; "
-                f"compose={'ok' if composition_ok else 'fail'}; "
                 f"parent_route={'ok' if parent_routed else 'fail'}; "
-                f"absolute={score_context['absolute_score']:.2f}; "
-                f"parent_quality={score_context['parent_quality_score']:.2f}; "
-                f"improvement={score_context['improvement_score']:.2f}; "
-                f"escape={score_context['plateau_escape_score']:.2f}; "
+                f"score={score:.2f}; "
                 f"improvement_vs_best={improvement_vs_best:+.2f}; "
-                f"plateau={plateau_count}; "
                 f"leaf_imbalance={float(leaf_timing_summary.get('imbalance_ratio', 0.0) or 0.0):.2f}; "
                 f"{_format_timing_breakdown(round_timing_breakdown)}"
             ),
             artifact_root=str(project_dir / ".experiments" / "subcircuits"),
-            composition_json=str(composition_json),
             parent_output_json=str(parent_output_json),
             leaf_names=leaf_names,
             accepted_leaf_names=accepted_leaf_names,
             score_breakdown=score_breakdown,
             score_notes=score_notes
             + [
-                f"absolute_score={score_context['absolute_score']:.3f}",
-                f"parent_quality_score={score_context['parent_quality_score']:.3f}",
-                f"improvement_score={score_context['improvement_score']:.3f}",
-                f"plateau_escape_score={score_context['plateau_escape_score']:.3f}",
-                "leaf_size_reduction_loop_plan=after_best_leaf_layout_found_shrink_local_outline_in_small_steps_until_validation_fails_then_keep_last_passing_size",
-                "parent_size_reduction_loop_plan=after_best_parent_layout_found_shrink_parent_outline_in_small_steps_preserving_child_copper_then_reroute_and_keep_last_passing_size",
-                "size_reduction_acceptance=must_preserve_required_anchors_and_avoid_new_illegal_geometry_or_drc_regression",
                 f"keep_threshold={keep_threshold:.2f}",
-                f"plateau_threshold={max(1, args.plateau)}",
                 f"meaningful_improvement={is_meaningful_improvement}",
                 f"leaf_timing_total_s={float(leaf_timing_summary.get('total_leaf_time_s', 0.0) or 0.0):.3f}",
                 f"leaf_timing_avg_s={float(leaf_timing_summary.get('avg_leaf_time_s', 0.0) or 0.0):.3f}",
@@ -2529,16 +2271,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"leaf_schedule_top5={','.join(scheduled_leaf_notes) if scheduled_leaf_notes else 'none'}",
                 f"leaf_long_poles={','.join(long_pole_notes) if long_pole_notes else 'none'}",
             ],
-            absolute_score=score_context["absolute_score"],
-            improvement_score=score_context["improvement_score"],
-            plateau_escape_score=score_context["plateau_escape_score"],
-            parent_quality_score=score_context["parent_quality_score"],
-            baseline_score=score_context["baseline_score"],
-            rolling_score=score_context["rolling_score"],
+            tier=tier,
             improvement_vs_best=improvement_vs_best,
-            improvement_vs_baseline=score_context["improvement_vs_baseline"],
-            improvement_vs_recent=score_context["improvement_vs_recent"],
-            plateau_count=plateau_count,
             leaf_timing_summary=leaf_timing_summary,
         )
 
@@ -2552,22 +2286,11 @@ def main(argv: list[str] | None = None) -> int:
                 "round_num": round_num,
                 "seed": round_seed,
                 "score": score,
-                "absolute_score": round_result.absolute_score,
-                "improvement_score": round_result.improvement_score,
-                "plateau_escape_score": round_result.plateau_escape_score,
-                "parent_quality_score": round_result.parent_quality_score,
-                "baseline_score": round_result.baseline_score,
-                "rolling_score": round_result.rolling_score,
+                "tier": tier,
                 "details": round_result.details,
-                "composition_json": str(composition_json),
                 "parent_output_json": str(parent_output_json),
             }
             _write_json(best_dir / "best_hierarchical_round.json", best_summary)
-
-            if composition_json.exists():
-                _copy_if_exists(
-                    composition_json, best_dir / "best_parent_composition.json"
-                )
 
             live_previews = _discover_live_preview_paths(project_dir)
             preview = None
@@ -2585,10 +2308,6 @@ def main(argv: list[str] | None = None) -> int:
                 _copy_if_exists(preview, frames_dir / f"frame_{round_num:04d}.png")
                 _copy_if_exists(preview, frames_dir / "frame_latest.png")
 
-        recent_scores.append(round_result.absolute_score)
-        if len(recent_scores) > 5:
-            recent_scores = recent_scores[-5:]
-
         _append_jsonl(log_path, asdict(round_result))
         _write_round_detail(
             rounds_dir,
@@ -2596,12 +2315,9 @@ def main(argv: list[str] | None = None) -> int:
             accepted_leafs=accepted_leafs,
             all_leafs=all_leafs,
             solve_exit_code=solve_rc,
-            compose_exit_code=compose_rc,
             parent_route_exit_code=parent_route_rc,
             solve_stdout=solve_stdout,
             solve_stderr=solve_stderr,
-            compose_stdout=compose_stdout,
-            compose_stderr=compose_stderr,
             parent_route_stdout=parent_route_stdout,
             parent_route_stderr=parent_route_stderr,
             parent_copper_accounting=parent_copper_accounting,
@@ -2644,8 +2360,8 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Round {round_num:3d}/{args.rounds} "
             f"score={score:6.2f} "
+            f"tier={tier:14s} "
             f"leafs={len(accepted_leafs)}/{len(all_leafs)} "
-            f"compose={'ok' if composition_ok else 'fail'} "
             f"parent_route={'ok' if parent_routed else 'fail'} "
             f"[{'KEPT' if round_result.kept else 'discard'}]"
         )
@@ -2661,10 +2377,7 @@ def main(argv: list[str] | None = None) -> int:
         "master_seed": master_seed,
         "rounds_requested": args.rounds,
         "best_score": max(best_score, 0.0),
-        "baseline_score": baseline_score,
-        "recent_scores": recent_scores,
         "kept_count": kept_count,
-        "plateau_count": plateau_count,
         "best_round": asdict(best_round) if best_round else None,
     }
     _write_json(work_dir / "hierarchical_summary.json", final_payload)
