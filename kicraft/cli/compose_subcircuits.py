@@ -718,13 +718,18 @@ def _resolve_parent_local_allowlist(component_zones: dict[str, Any], loaded_arti
     }
 
 
-def _make_unconstrained_model(index: int, artifact, rotation_step_deg: float) -> PlacementModel:
+def _make_unconstrained_model(
+    index: int,
+    artifact,
+    rotation_step_deg: float,
+    cfg: dict[str, Any] | None = None,
+) -> PlacementModel:
     rotation = (index * rotation_step_deg) % 360.0
     transformed = transform_loaded_artifact(artifact, origin=Point(0.0, 0.0), rotation=rotation)
     return PlacementModel(
         rotation=rotation,
         transformed=transformed,
-        blocker_set=extract_leaf_blocker_set(artifact),
+        blocker_set=extract_leaf_blocker_set(artifact, cfg=cfg),
         layer_envelopes=child_layer_envelopes(transformed),
         constraint_entries=[],
     )
@@ -1056,7 +1061,12 @@ def _find_non_overlapping_origin(
     )
 
 
-def _ordered_unconstrained_indices(mode: str, unconstrained_artifacts, spacing_mm: float):
+def _ordered_unconstrained_indices(
+    mode: str,
+    unconstrained_artifacts,
+    spacing_mm: float,
+    cfg: dict[str, Any] | None = None,
+):
     if mode != "packed":
         return list(unconstrained_artifacts)
 
@@ -1067,7 +1077,7 @@ def _ordered_unconstrained_indices(mode: str, unconstrained_artifacts, spacing_m
 
     def _sort_metrics(item):
         index, artifact = item
-        blocker_set = extract_leaf_blocker_set(artifact)
+        blocker_set = extract_leaf_blocker_set(artifact, cfg=cfg)
         front_blocker_area = sum(_rect_area(rect) for rect in blocker_set.front_pads) + sum(_rect_area(rect) for rect in blocker_set.tht_drills)
         back_blocker_area = sum(_rect_area(rect) for rect in blocker_set.back_pads) + sum(_rect_area(rect) for rect in blocker_set.tht_drills)
         has_tht_or_dual = int(
@@ -1157,6 +1167,7 @@ def _compose_artifacts(
     rotation_step_deg: float,
     parent_definition: SubCircuitDefinition | None = None,
     pcb_path: Path | None = None,
+    cfg: dict[str, Any] | None = None,
 ) -> tuple[ParentCompositionState, list[dict[str, Any]]]:
     """Compose loaded artifacts into a parent composition snapshot."""
     entries: list[CompositionEntry] = []
@@ -1374,7 +1385,7 @@ def _compose_artifacts(
             occupied_rects=_occupied_pad_rects(placed_envelopes),
         )
 
-        ordered_unconstrained = _ordered_unconstrained_indices(mode, unconstrained_artifacts, spacing_mm)
+        ordered_unconstrained = _ordered_unconstrained_indices(mode, unconstrained_artifacts, spacing_mm, cfg=cfg)
         row_count = 0
         row_widths: list[float] = []
         row_heights: list[float] = []
@@ -1425,7 +1436,7 @@ def _compose_artifacts(
             raise ValueError(f"Unsupported composition mode: {mode}")
 
         for ordinal, (index, artifact) in enumerate(ordered_unconstrained):
-            model = _make_unconstrained_model(index, artifact, rotation_step_deg)
+            model = _make_unconstrained_model(index, artifact, rotation_step_deg, cfg=cfg)
             final_models[index] = model
             if mode == "column":
                 proposed = Point(seed_frame_min.x + spacing_mm, row_y)
@@ -3089,6 +3100,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
             return 1
 
+        # Resolve project clearance early so the composer's pad-margin can adapt
+        # to the project's design rules even on plain compose runs without
+        # --stamp/--route.
+        from kicraft.autoplacer.config import discover_project_config, load_project_config
+        compose_cfg: dict[str, Any] = {}
+        if project_dir:
+            proj_cfg_path = discover_project_config(str(project_dir))
+            if proj_cfg_path:
+                compose_cfg.update(load_project_config(str(proj_cfg_path)))
+        if args.config:
+            compose_cfg.update(load_project_config(args.config))
+
         state, transformed_payloads = _compose_artifacts(
             loaded_artifacts,
             mode=args.mode,
@@ -3096,6 +3119,7 @@ def main(argv: list[str] | None = None) -> int:
             rotation_step_deg=args.rotation_step_deg,
             parent_definition=parent_definition,
             pcb_path=Path(args.pcb) if args.pcb else None,
+            cfg=compose_cfg,
         )
 
         output_path = None

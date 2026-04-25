@@ -1222,23 +1222,38 @@ def _score_parent_composition(
     )
 
     tl, br = board_state.board_outline
-    board_area = max(1.0, (br.x - tl.x) * (br.y - tl.y))
+    board_w = max(1.0, br.x - tl.x)
+    board_h = max(1.0, br.y - tl.y)
+    board_area = board_w * board_h
+    board_diag = (board_w * board_w + board_h * board_h) ** 0.5
     component_area = sum(comp.area for comp in board_state.components.values())
     area_utilization = min(1.0, component_area / board_area)
+
+    if board_state.components:
+        child_bboxes = [comp.bbox() for comp in board_state.components.values()]
+        child_xmin = min(b[0].x for b in child_bboxes)
+        child_ymin = min(b[0].y for b in child_bboxes)
+        child_xmax = max(b[1].x for b in child_bboxes)
+        child_ymax = max(b[1].y for b in child_bboxes)
+        child_bbox_area = max(1.0, (child_xmax - child_xmin) * (child_ymax - child_ymin))
+    else:
+        child_bbox_area = board_area
+    packing_density = min(1.0, component_area / child_bbox_area)
 
     child_score_component = max(0.0, min(100.0, avg_child_score))
     anchor_coverage_component = max(0.0, min(100.0, anchor_coverage * 100.0))
     interconnect_component = max(
         0.0,
-        min(100.0, 100.0 - min(avg_anchor_distance, 100.0)),
+        min(100.0, 100.0 * (1.0 - avg_anchor_distance / max(1.0, board_diag))),
     )
     utilization_component = max(0.0, min(100.0, area_utilization * 100.0))
+    packing_component = max(0.0, min(100.0, packing_density * 150.0))
 
     total = (
-        child_score_component * 0.35
-        + anchor_coverage_component * 0.20
-        + interconnect_component * 0.20
-        + utilization_component * 0.25
+        child_score_component * 0.30
+        + interconnect_component * 0.30
+        + packing_component * 0.30
+        + anchor_coverage_component * 0.10
     )
 
     notes = [
@@ -1246,7 +1261,9 @@ def _score_parent_composition(
         f"child_score_avg={avg_child_score:.3f}",
         f"anchor_coverage={anchor_coverage:.3f}",
         f"avg_anchor_distance_mm={avg_anchor_distance:.3f}",
+        f"board_diag_mm={board_diag:.3f}",
         f"area_utilization={area_utilization:.3f}",
+        f"packing_density={packing_density:.3f}",
         f"interconnect_nets={len(interconnect_nets)}",
     ]
 
@@ -1257,6 +1274,7 @@ def _score_parent_composition(
             "anchor_coverage": anchor_coverage_component,
             "interconnect_compactness": interconnect_component,
             "area_utilization": utilization_component,
+            "packing_density": packing_component,
         },
         notes=notes,
     )
@@ -1698,9 +1716,27 @@ def _extract_blockers_from_pcb(
 def extract_leaf_blocker_set(
     artifact: LoadedSubcircuitArtifact,
     *,
-    pad_margin_mm: float = 0.2,
-    drill_margin_mm: float = 0.2,
+    pad_margin_mm: float | None = None,
+    drill_margin_mm: float | None = None,
+    cfg: dict[str, Any] | None = None,
 ) -> LeafBlockerSet:
+    """Extract per-leaf blocker geometry for the parent composer.
+
+    The pad/drill margins must give the inter-child overlap check enough
+    headroom over the project's design-rule clearance to absorb the AABB
+    growth introduced by `_transform_rect` for non-orthogonal rotations and
+    the difference between a TH pad's circular flash and its rectangular
+    bounding box. When unset, the margins are derived from cfg as
+    `max(clearance_mm, 0.2) + 0.3mm` of safety buffer.
+    """
+    if pad_margin_mm is None or drill_margin_mm is None:
+        clearance = float((cfg or {}).get("clearance_mm", 0.2))
+        clearance = max(clearance, 0.2)
+        derived = clearance + 0.3
+        if pad_margin_mm is None:
+            pad_margin_mm = derived
+        if drill_margin_mm is None:
+            drill_margin_mm = derived
     blocker_set = _extract_blockers_from_pcb(
         artifact,
         pad_margin_mm=pad_margin_mm,
