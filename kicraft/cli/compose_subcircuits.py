@@ -51,7 +51,6 @@ from kicraft.autoplacer.brain.copper_accounting import (
 )
 from kicraft.autoplacer.brain.subcircuit_composer import (
     ChildArtifactPlacement,
-    DerivedAttachmentConstraints,
     LeafBlockerSet,
     ParentComposition,
     PlacementModel,
@@ -384,7 +383,6 @@ def _rect_area(rect: tuple[Point, Point]) -> float:
 
 def _build_parent_local_blocker_set(comp) -> LeafBlockerSet:
     bbox = _component_geometry_bbox(comp)
-    pad_rects = tuple(_shift_rect((pad.pos, pad.pos), Point(0.2, 0.2)) for pad in [])
     front_rects: list[tuple[Point, Point]] = []
     back_rects: list[tuple[Point, Point]] = []
     tht_rects: list[tuple[Point, Point]] = []
@@ -1244,13 +1242,6 @@ def _compose_artifacts(
         (i, art) for i, art in enumerate(loaded_artifacts) if i not in constrained_indices
     ]
 
-    child_bbox_sizes = [
-        _bbox_size(spec.models[spec.rotation_candidates[0]].transformed.bounding_box)
-        for spec in derived_constraints.child_specs.values()
-    ] + [
-        _bbox_size(_make_unconstrained_model(index, artifact, rotation_step_deg).transformed.bounding_box)
-        for index, artifact in unconstrained_artifacts
-    ]
     seed_child_envelopes = [
         child_layer_envelopes(
             transform_loaded_artifact(artifact, origin=Point(0.0, 0.0), rotation=0.0)
@@ -1357,7 +1348,7 @@ def _compose_artifacts(
                     f"Unable to place constrained child {artifact.instance_path} for refs {refs}"
                 )
 
-            transformed = _append_entry(child_index, artifact, selected_origin, selected_model)
+            _append_entry(child_index, artifact, selected_origin, selected_model)
             final_models[child_index] = selected_model
             placed_child_bboxes[child_index] = selected_bbox
             placed_envelopes.append(
@@ -1478,7 +1469,7 @@ def _compose_artifacts(
                 parent_local_keep_in_rects=parent_local_keep_in_rects,
             )
             placed_bbox = _shift_bbox(model.transformed.bounding_box, origin)
-            transformed = _append_entry(index, artifact, origin, model)
+            _append_entry(index, artifact, origin, model)
             placed_child_bboxes[index] = placed_bbox
             placed_envelopes.append(
                 _make_placed_item(

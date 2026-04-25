@@ -223,9 +223,6 @@ def build_copper_manifest(
             trace_fingerprints=trace_fps,
             via_fingerprints=via_fps,
         )
-        if final_child_bboxes and child.instance_path in final_child_bboxes:
-            bbox = final_child_bboxes[child.instance_path]
-            entry.total_length_mm = total_length
         manifest.per_child[entry.instance_path] = entry
         manifest.total_child_traces += len(traces)
         manifest.total_child_vias += len(vias)

@@ -144,7 +144,6 @@ from kicraft.autoplacer.brain.types import (
     BoardState,
     Component,
     PlacementScore,
-    Point,
     SolveRoundResult,
     SubCircuitLayout,
 )

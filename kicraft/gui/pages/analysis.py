@@ -56,7 +56,6 @@ def _experiment_data_panel(state) -> None:
         if not rounds:
             return None
         best = max((r.get("score", 0) or 0 for r in rounds), default=0)
-        latest = rounds[-1].get("round_num", len(rounds))
         return {
             "id": LIVE_ID,
             "label": f"Live run — {len(rounds)}r, best={float(best):.1f}",
