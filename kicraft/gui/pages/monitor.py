@@ -315,7 +315,6 @@ def monitor_page():
                 pcb_file=state.strategy["pcb_file"],
                 rounds=state.strategy["rounds"],
                 workers=state.strategy["workers"],
-                plateau=state.strategy["plateau_threshold"],
                 seed=state.strategy.get("seed"),
                 param_ranges=state.get_control_ranges(),
                 score_weights=state.score_weights,

@@ -65,6 +65,7 @@ class ExperimentRunner:
             "run_status.txt",
             "parent_composition_routed.json",
             "hierarchical_summary.json",
+            "experiment.log",
         ):
             (exp / name).unlink(missing_ok=True)
 
@@ -91,7 +92,6 @@ class ExperimentRunner:
         pcb_file: str,
         rounds: int,
         workers: int = 0,
-        plateau: int = 3,
         seed: int | None = None,
         param_ranges: dict | None = None,
         score_weights: dict | None = None,
@@ -129,8 +129,6 @@ class ExperimentRunner:
             str(rounds),
             "--workers",
             str(hierarchical_workers),
-            "--plateau",
-            str(plateau),
             "--status-file",
             str(self.experiments_dir / "run_status.json"),
             "--log",
@@ -202,10 +200,13 @@ class ExperimentRunner:
             f.write(json.dumps(program_data, indent=2))
             f.write("\n```\n")
 
+        log_path = self.experiments_dir / "experiment.log"
+        self.experiments_dir.mkdir(parents=True, exist_ok=True)
+        log_fh = open(log_path, "w", buffering=1)
         self._process = subprocess.Popen(
             cmd,
             cwd=str(self.project_root),
-            stdout=subprocess.PIPE,
+            stdout=log_fh,
             stderr=subprocess.STDOUT,
             text=True,
             start_new_session=True,
@@ -315,7 +316,13 @@ class ExperimentRunner:
         return rounds
 
     def get_stdout_tail(self, n_lines: int = 50) -> str:
-        """Read last N lines of subprocess stdout if available."""
-        if self._process and self._process.stdout:
-            pass
-        return ""
+        """Read last N lines of subprocess stdout/stderr from experiment.log."""
+        log_path = self.experiments_dir / "experiment.log"
+        if not log_path.exists():
+            return ""
+        try:
+            with open(log_path) as f:
+                lines = f.readlines()
+            return "".join(lines[-n_lines:])
+        except OSError:
+            return ""
