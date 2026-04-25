@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from nicegui import ui
 
 from ..components.node_detail import node_detail_panel
@@ -35,6 +37,11 @@ def monitor_page():
     prev_detail_node_id = {"value": ""}
     latest_pipeline_state: dict = {"value": None}
     experiment_terminated = {"value": False}
+
+    # Live timing: start_monotonic anchors to subprocess elapsed_s on each
+    # status read, then a 1s ticker extrapolates to keep the label moving
+    # between status writes (which only happen at round/stage transitions).
+    run_timing: dict = {"start_monotonic": None}
 
     # Parent-round selection: None = auto-track best; int = user pinned a round.
     selected_parent_round: dict = {"value": None, "user_pinned": False}
@@ -190,14 +197,19 @@ def monitor_page():
         phase_label.set_text(stage.replace("_", " ").title())
 
         try:
-            elapsed = float(run_status.get("elapsed_s", 0))
+            backend_elapsed = float(run_status.get("elapsed_s", 0))
         except (TypeError, ValueError):
-            elapsed = 0.0
-        try:
-            eta = float(run_status.get("eta_s", 0))
-        except (TypeError, ValueError):
-            eta = 0.0
-        timing_label.set_text(f"Elapsed: {_format_time(elapsed)} | ETA: {_format_time(eta)}")
+            backend_elapsed = 0.0
+
+        if phase == "running":
+            # Re-anchor the local clock to the subprocess's elapsed_s so the
+            # 1s ticker can extrapolate forward without drifting.
+            run_timing["start_monotonic"] = time.monotonic() - backend_elapsed
+        else:
+            run_timing["start_monotonic"] = None
+            timing_label.set_text(
+                f"Elapsed: {_format_time(backend_elapsed)} | ETA: --"
+            )
 
         try:
             rnd = int(run_status.get("round", 0))
@@ -308,6 +320,46 @@ def monitor_page():
                     _rebuild_detail()
 
     ui.timer(2.0, _update_status)
+
+    def _update_timing() -> None:
+        """Tick the elapsed/ETA label every second between status writes."""
+        start_mono = run_timing["start_monotonic"]
+        if start_mono is None:
+            return
+        live_elapsed = max(0.0, time.monotonic() - start_mono)
+
+        # ETA from completed-round durations. Need >=1 finished round for a
+        # meaningful estimate; otherwise show "--".
+        completed = [
+            float(r.get("duration_s", 0)) for r in live_rounds
+            if r.get("duration_s")
+        ]
+        try:
+            total_rounds = int(
+                latest_pipeline_state["value"].total_rounds
+                if latest_pipeline_state["value"]
+                else 0
+            )
+        except (AttributeError, TypeError, ValueError):
+            total_rounds = 0
+
+        if completed and total_rounds > 0:
+            avg_dur = sum(completed) / len(completed)
+            current_round_elapsed = max(0.0, live_elapsed - sum(completed))
+            remaining_after_current = max(0, total_rounds - len(completed) - 1)
+            eta = (
+                max(0.0, avg_dur - current_round_elapsed)
+                + remaining_after_current * avg_dur
+            )
+            eta_text = _format_time(eta)
+        else:
+            eta_text = "--"
+
+        timing_label.set_text(
+            f"Elapsed: {_format_time(live_elapsed)} | ETA: {eta_text}"
+        )
+
+    ui.timer(1.0, _update_timing)
 
     async def _start():
         try:
