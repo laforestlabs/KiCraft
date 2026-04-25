@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("pcbnew", reason="KiCad Python bindings not available")
+
 from kicraft.autoplacer.hardware import adapter
 
 

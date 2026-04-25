@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import pytest
 
+pytest.importorskip("pcbnew", reason="KiCad Python bindings not available")
+
 from kicraft.autoplacer.brain.hierarchy_parser import HierarchyNode
 from kicraft.autoplacer.brain.subcircuit_extractor import ExtractedSubcircuitBoard, NetPartition
 from kicraft.autoplacer.brain.types import (
