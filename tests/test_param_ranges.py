@@ -18,7 +18,6 @@ import math
 import random
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
 from kicraft.autoplacer.config import (
     CONFIG_SEARCH_SPACE,
@@ -168,8 +167,7 @@ class TestMutationBoundPersistence:
     def _make_state(self):
         from kicraft.gui.state import AppState
 
-        with patch("kicraft.gui.state.Database"):
-            return AppState()
+        return AppState()
 
     def test_roundtrip_preserves_default_bounds(self):
         state = self._make_state()
@@ -226,8 +224,7 @@ class TestInvalidBoundHandling:
     def _make_state(self):
         from kicraft.gui.state import AppState
 
-        with patch("kicraft.gui.state.Database"):
-            return AppState()
+        return AppState()
 
     def test_stale_key_ignored(self):
         state = self._make_state()
@@ -386,8 +383,7 @@ class TestSessionPersistence:
     def _make_state(self, tmp_dir: Path):
         from kicraft.gui.state import AppState
 
-        with patch("kicraft.gui.state.Database"):
-            state = AppState()
+        state = AppState()
         state._experiments_dir_override = tmp_dir
         # Monkey-patch experiments_dir property
         type(state).experiments_dir = property(lambda self: self._experiments_dir_override)

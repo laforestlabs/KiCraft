@@ -166,7 +166,7 @@ PLACEMENT_PARAMS: list[dict[str, Any]] = [
     {"key": "board_height_mm", "label": "Board height (mm)", "default": 58.0, "min": 20.0, "max": 150.0, "step": 1.0, "group": "Board Geometry", "description": "PCB height in millimeters"},
     {"key": "edge_margin_mm", "label": "Edge margin (mm)", "default": 6.0, "min": 0.5, "max": 15.0, "step": 0.5, "group": "Board Geometry", "description": "Keep-out distance from board edges"},
     {"key": "subcircuit_margin_mm", "label": "Subcircuit margin (mm)", "default": 5.0, "min": 1.0, "max": 15.0, "step": 0.5, "group": "Board Geometry", "description": "Extra space around leaf subcircuit bounding box"},
-    {"key": "parent_spacing_mm", "label": "Parent spacing (mm)", "default": 6.0, "min": 0.5, "max": 20.0, "step": 0.5, "group": "Board Geometry", "description": "Spacing between subcircuits when composing into the parent board"},
+    {"key": "parent_spacing_mm", "label": "Parent spacing (mm)", "default": 6.0, "min": 0.5, "max": 6.0, "step": 0.5, "group": "Board Geometry", "description": "Spacing between subcircuits when composing into the parent board"},
     {"key": "placement_clearance_mm", "label": "Placement clearance (mm)", "default": 2.5, "min": 0.5, "max": 8.0, "step": 0.25, "group": "Board Geometry", "description": "Minimum gap between component bounding boxes"},
     {"key": "placement_grid_mm", "label": "Placement grid (mm)", "default": 1.0, "min": 0.1, "max": 2.54, "step": 0.1, "group": "Board Geometry", "description": "Snap grid resolution for component placement"},
     # -- Edge & Connectors --
