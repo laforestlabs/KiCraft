@@ -33,15 +33,17 @@ def _import_hierarchical_best_preset() -> None:
     if not summary:
         return
 
-    presets = state.db.get_presets()
-    if any(p.name == "Best Hierarchical (imported)" for p in presets):
+    from . import presets as preset_store
+
+    if any(
+        p.name == "Best Hierarchical (imported)" for p in preset_store.list_presets()
+    ):
         return
 
     preset_config = {
         "_strategy": {
             "rounds": state.strategy.get("rounds", 50),
             "workers": state.strategy.get("workers", 0),
-            "plateau_threshold": state.strategy.get("plateau_threshold", 1),
             "seed": summary.get("seed", 0),
             "pcb_file": state.strategy["pcb_file"],
         },
@@ -52,19 +54,14 @@ def _import_hierarchical_best_preset() -> None:
         "Auto-imported from hierarchical best summary "
         f"(round={summary.get('round_num', '?')}, score={summary.get('score', '?')})"
     )
-    state.db.save_preset("Best Hierarchical (imported)", preset_config, notes)
+    preset_store.save_preset(
+        "Best Hierarchical (imported)", preset_config, notes
+    )
 
 
 def _auto_import_on_startup() -> None:
-    """Import existing experiment data and hierarchical presets on first startup."""
+    """Run startup hooks: import the best preset and restore session state."""
     state = get_state()
-
-    existing = state.db.get_experiments()
-    if not existing:
-        from .migrations.init_db import import_all_jsonl
-
-        import_all_jsonl(state.db, state.experiments_dir)
-
     _import_hierarchical_best_preset()
     state.restore_session_state()
 

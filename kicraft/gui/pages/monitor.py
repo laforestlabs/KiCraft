@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-
 from nicegui import ui
 
 from ..components.node_detail import node_detail_panel
@@ -29,13 +27,9 @@ def _format_time(seconds: float) -> str:
 def monitor_page():
     state = get_state()
     runner = state.runner
-    db = state.db
-    if db is None:
-        raise RuntimeError("Database is not initialized")
 
     selected_node: dict = {"value": None}
     live_rounds: list[dict] = []
-    last_round_seen = {"value": 0}
     prev_phase = {"value": "idle"}
     prev_graph_fingerprint = {"value": ""}
     prev_detail_node_id = {"value": ""}
@@ -226,28 +220,37 @@ def monitor_page():
         force_kill_btn.set_visibility(is_stopping)
         stopping_spinner.set_visibility(is_stopping)
 
-        new_rounds = runner.read_latest_rounds(last_round_seen["value"])
-        if new_rounds:
-            live_rounds.extend(new_rounds)
-            last_round_seen["value"] = max(r.get("round_num", 0) for r in new_rounds)
-            if state.active_experiment_id:
-                for nr in new_rounds:
-                    db.add_round(state.active_experiment_id, nr)
-                best_so_far = max((r.get("score", 0) for r in live_rounds), default=0)
-                db.update_experiment(
-                    state.active_experiment_id,
-                    completed_rounds=len(live_rounds),
-                    best_score=best_so_far,
-                )
-            # If the user hasn't pinned a round, follow the best. If they have
-            # pinned one, leave the selection alone.
+        # Full re-read every poll. experiments.jsonl is unconditionally
+        # truncated by autoexperiment at startup, so reading the whole file
+        # always reflects the current run. The previous incremental
+        # `read_latest_rounds(since_round=N)` optimization saved ~50KB of I/O
+        # but silently kept stale rounds from prior runs cached in
+        # `live_rounds` whenever a new run started outside the GUI (CLI).
+        fresh_rounds = runner.read_latest_rounds(0)
+
+        # Detect new run via identity: round count or first-round seed
+        # changed. On change, drop the in-memory cache and reset selection.
+        cached_signature = (
+            len(live_rounds),
+            live_rounds[0].get("seed") if live_rounds else None,
+        )
+        fresh_signature = (
+            len(fresh_rounds),
+            fresh_rounds[0].get("seed") if fresh_rounds else None,
+        )
+        if cached_signature != fresh_signature:
+            live_rounds.clear()
+            live_rounds.extend(fresh_rounds)
             if not selected_parent_round["user_pinned"]:
                 selected_parent_round["value"] = pick_best_round(live_rounds)
+            # Force chart redraw next pass.
+            prev_parent_score_fp["value"] = ""
 
         # Redraw the parent chart only when its contents changed (new rounds,
         # selection flip, or pin state change).
         parent_fp = (
-            f"{len(live_rounds)}|{last_round_seen['value']}|"
+            f"{len(live_rounds)}|"
+            f"{live_rounds[0].get('seed') if live_rounds else None}|"
             f"{selected_parent_round['value']}|{selected_parent_round['user_pinned']}"
         )
         if parent_fp != prev_parent_score_fp["value"]:
@@ -263,16 +266,8 @@ def monitor_page():
             # this is a transient read failure -- skip the transition.
             if phase == "error" and runner.is_running:
                 pass  # transient JSON parse error; do not mark as failed
-            elif state.active_experiment_id:
+            else:
                 experiment_terminated["value"] = True
-                final_status = "error" if phase == "error" else "done"
-                best_so_far = max((r.get("score", 0) for r in live_rounds), default=0)
-                db.update_experiment(
-                    state.active_experiment_id,
-                    status=final_status,
-                    completed_rounds=len(live_rounds),
-                    best_score=best_so_far,
-                )
                 if phase == "error":
                     ui.notify("Experiment failed!", type="negative")
                 else:
@@ -339,17 +334,8 @@ def monitor_page():
                     },
                 },
             )
-            exp = db.create_experiment(
-                name=f"Hierarchical Run {time.strftime('%Y-%m-%d %H:%M')}",
-                pcb_file=state.strategy["pcb_file"],
-                total_rounds=state.strategy["rounds"],
-                config=state.to_config_dict(),
-            )
-            state.active_experiment_id = exp.id
-            db.update_experiment(exp.id, status="running")
             ui.notify(f"Started experiment (PID {pid})", type="positive")
             live_rounds.clear()
-            last_round_seen["value"] = 0
             experiment_terminated["value"] = False
         except Exception as e:
             ui.notify(f"Failed to start: {e}", type="negative")
@@ -357,15 +343,11 @@ def monitor_page():
     def _stop():
         runner.stop()
         ui.notify("Stop requested -- will stop at next safe checkpoint", type="info")
-        if state.active_experiment_id:
-            db.update_experiment(state.active_experiment_id, status="stopping")
 
     def _force_kill():
         runner.kill()
         experiment_terminated["value"] = True
         ui.notify("Force killed experiment", type="warning")
-        if state.active_experiment_id:
-            db.update_experiment(state.active_experiment_id, status="killed")
 
     start_btn.on_click(_start)
     stop_btn.on_click(_stop)

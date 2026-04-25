@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from nicegui import ui
 
+from ..components.per_component import per_component_panel
 from ..state import PLACEMENT_PARAMS, get_state
 from kicraft.autoplacer.config import CONFIG_SEARCH_SPACE, normalize_bounds
 
@@ -22,6 +23,7 @@ def setup_page():
     with ui.tabs().classes("w-full") as tabs:
         strategy_tab = ui.tab("Run Strategy", icon="play_circle")
         placement_tab = ui.tab("Placement & Routing", icon="tune")
+        per_component_tab = ui.tab("Per Component", icon="view_list")
         hierarchy_tab = ui.tab("Hierarchy Scope", icon="account_tree")
         presets_tab = ui.tab("Presets", icon="bookmark")
 
@@ -31,6 +33,9 @@ def setup_page():
 
         with ui.tab_panel(placement_tab):
             _placement_routing_panel(state)
+
+        with ui.tab_panel(per_component_tab):
+            per_component_panel(state)
 
         with ui.tab_panel(hierarchy_tab):
             _hierarchy_panel(state)
@@ -434,7 +439,9 @@ def _presets_panel(state):
                 ui.notify("Enter a preset name", type="warning")
                 return
             config = state.to_config_dict()
-            state.db.save_preset(name, config, preset_notes.value)
+            from .. import presets as preset_store
+
+            preset_store.save_preset(name, config, preset_notes.value)
             ui.notify(f"Saved preset '{name}'", type="positive")
             _refresh_presets()
 
@@ -446,15 +453,17 @@ def _presets_panel(state):
     presets_container = ui.column().classes("w-full gap-2")
 
     def _refresh_presets():
+        from .. import presets as preset_store
+
         presets_container.clear()
-        presets = state.db.get_presets()
-        if not presets:
+        items = preset_store.list_presets()
+        if not items:
             with presets_container:
                 ui.label("No presets saved yet").classes("text-gray-500 italic")
             return
 
         with presets_container:
-            for preset in presets:
+            for preset in items:
                 if not state.gui_cleanup.get(
                     "show_legacy_presets", False
                 ) and preset.name in {
@@ -465,11 +474,9 @@ def _presets_panel(state):
                 with ui.card().classes("w-full p-3"):
                     with ui.row().classes("items-center gap-3"):
                         ui.label(preset.name).classes("font-bold")
-                        ui.label(
-                            preset.created_at.strftime("%Y-%m-%d %H:%M")
-                            if preset.created_at
-                            else ""
-                        ).classes("text-xs text-gray-500")
+                        ui.label(preset.created_at or "").classes(
+                            "text-xs text-gray-500"
+                        )
                         ui.space()
                         ui.button(
                             "Load",
@@ -486,7 +493,9 @@ def _presets_panel(state):
                         ui.label(preset.notes).classes("text-xs text-gray-400 mt-1")
 
     def _load(name: str):
-        config = state.db.load_preset(name)
+        from .. import presets as preset_store
+
+        config = preset_store.load_preset(name)
         if config:
             state.load_from_config(config)
             ui.notify(f"Loaded preset '{name}'", type="positive")
@@ -495,7 +504,9 @@ def _presets_panel(state):
             ui.notify(f"Preset '{name}' not found", type="warning")
 
     def _delete(name: str):
-        state.db.delete_preset(name)
+        from .. import presets as preset_store
+
+        preset_store.delete_preset(name)
         ui.notify(f"Deleted preset '{name}'")
         _refresh_presets()
 

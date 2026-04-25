@@ -26,8 +26,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .db import Database
-
 if TYPE_CHECKING:
     from .experiment_runner import ExperimentRunner
 
@@ -223,7 +221,6 @@ class AppState:
 
     project_root: Path = field(default_factory=lambda: _PROJECT_ROOT)
     project_name: str = field(default_factory=lambda: _PROJECT_NAME)
-    db: Database | None = field(default=None)
 
     hierarchical_controls: list[dict[str, Any]] = field(
         default_factory=lambda: [{**d} for d in HIERARCHICAL_CONTROLS]
@@ -238,14 +235,15 @@ class AppState:
     mutation_bounds: dict[str, list[float | int]] = field(
         default_factory=_default_mutation_bounds
     )
+    component_zone_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    parent_overhang_overrides: dict[str, float] = field(default_factory=dict)
+    thermal_ref_overrides: set[str] = field(default_factory=set)
+    per_component_loaded: bool = False
 
-    active_experiment_id: int | None = None
     runner_pid: int | None = None
     _runner: ExperimentRunner | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        if self.db is None:
-            self.db = Database()
         # Seed strategy with hierarchical control defaults so leaf_rounds,
         # top_level_rounds, compose_spacing_mm all have a value before a
         # preset is loaded. Start and Setup then read the same source.

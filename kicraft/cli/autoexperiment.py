@@ -1205,6 +1205,36 @@ def _copy_if_exists(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
+def _archive_run(work_dir: Path, run_id: str, summary: dict[str, Any]) -> Path:
+    """Snapshot the current run's artifacts into ``.experiments/runs/<run_id>/``.
+
+    The live ``.experiments/`` files (rounds/, experiments.jsonl, etc.) are
+    overwritten on every run. The archive preserves a per-run record so the
+    GUI's analysis page can browse history without an SQL layer. We copy the
+    JSON-only artifacts (rounds, jsonl, summary, frames metadata) and leave
+    the heavy renders/PCBs in ``.experiments/subcircuits/`` and
+    ``.experiments/hierarchical_autoexperiment/`` -- those are typically
+    only useful for the most recent run.
+    """
+    archive_root = work_dir / "runs" / run_id
+    archive_root.mkdir(parents=True, exist_ok=True)
+    _write_json(archive_root / "summary.json", summary)
+
+    jsonl_src = work_dir / "experiments.jsonl"
+    if jsonl_src.exists():
+        shutil.copy2(str(jsonl_src), str(archive_root / "experiments.jsonl"))
+
+    rounds_src = work_dir / "rounds"
+    if rounds_src.exists():
+        rounds_dst = archive_root / "rounds"
+        rounds_dst.mkdir(exist_ok=True)
+        for f in sorted(rounds_src.iterdir()):
+            if f.is_file() and f.suffix == ".json":
+                shutil.copy2(str(f), str(rounds_dst / f.name))
+
+    return archive_root
+
+
 def _leaf_summary(leaf: dict[str, Any]) -> dict[str, Any]:
     """Lean per-leaf record for round JSON.
 
@@ -1685,6 +1715,11 @@ def main(argv: list[str] | None = None) -> int:
 
     master_seed = args.seed if args.seed is not None else random.randint(0, 2**31 - 1)
     rng = random.Random(master_seed)
+    start_iso = time.strftime("%Y-%m-%dT%H:%M:%S")
+    # Run identity for the on-disk archive: timestamp-master_seed. Stable
+    # for resume scenarios (same seed → same archive dir), unique across
+    # different runs since timestamps tick second-by-second.
+    run_id = f"{start_iso.replace(':', '').replace('-', '')}-{master_seed}"
 
     requested_workers = int(args.workers or 0)
     available_cpus = max(1, int(os.cpu_count() or 1))
@@ -2406,8 +2441,13 @@ def main(argv: list[str] | None = None) -> int:
         "best_score": max(best_score, 0.0),
         "kept_count": kept_count,
         "best_round": asdict(best_round) if best_round else None,
+        "started_at": start_iso,
+        "completed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "run_id": run_id,
+        "pcb_file": str(pcb),
     }
     _write_json(work_dir / "hierarchical_summary.json", final_payload)
+    _archive_run(work_dir, run_id, final_payload)
 
     final_parent_copper_accounting = _extract_parent_copper_accounting(project_dir)
 

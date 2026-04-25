@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +18,7 @@ from ..components.score_chart import (
     build_timing_figure,
     build_timing_summary_figure,
 )
+from ..run_archive import list_runs, load_live_rounds, load_run_rounds
 from ..state import get_state
 
 
@@ -44,103 +44,62 @@ def analysis_page() -> None:
 
 
 def _experiment_data_panel(state) -> None:
-    def _ensure_latest_running_experiment() -> None:
-        active_id = state.active_experiment_id
-        if not active_id:
-            return
+    # Source of truth: ``.experiments/runs/<run_id>/`` archives plus the
+    # currently-running ``.experiments/experiments.jsonl``. The "live"
+    # pseudo-run is selectable so users can analyze a run as it progresses;
+    # it gets a synthetic id "__live__" until autoexperiment finishes and
+    # archives it.
+    LIVE_ID = "__live__"
 
-        exp = state.db.get_experiment(active_id)
-        if exp is not None:
-            return
-
-        status = state.runner.read_status()
-        total_rounds = int(
-            status.get("total_rounds", 0) or state.strategy.get("rounds", 0) or 0
-        )
-        best_score = float(status.get("best_score", 0) or 0)
-        completed_rounds = int(status.get("round", 0) or 0)
-        phase = str(status.get("phase", "running") or "running")
-        if phase not in {"running", "stopping", "done", "error"}:
-            phase = "running"
-
-        exp = state.db.create_experiment(
-            name=f"Hierarchical Run {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            pcb_file=state.strategy["pcb_file"],
-            total_rounds=total_rounds,
-            config=state.to_config_dict(),
-        )
-        state.active_experiment_id = exp.id
-        state.db.update_experiment(
-            exp.id,
-            status=phase,
-            best_score=best_score,
-            completed_rounds=completed_rounds,
-        )
-
-    _ensure_latest_running_experiment()
-
-    experiments = state.db.get_experiments()
-    if not experiments:
-        ui.label(
-            "No experiments found. Import JSONL data or run a hierarchical experiment."
-        ).classes("text-gray-500 italic")
-
-        async def _import() -> None:
-            from ..migrations.init_db import import_all_jsonl
-
-            ids = import_all_jsonl(state.db, state.experiments_dir)
-            if ids:
-                ui.notify(f"Imported {len(ids)} experiments", type="positive")
-                ui.navigate.reload()
-            else:
-                ui.notify("No JSONL files found to import", type="warning")
-
-        ui.button("Import from .experiments/", icon="upload", on_click=_import)
-        return
-
-    def _build_exp_options() -> dict[int, str]:
-        exps = state.db.get_experiments()
+    def _live_run_summary() -> dict[str, Any] | None:
+        rounds = load_live_rounds(state.experiments_dir)
+        if not rounds:
+            return None
+        best = max((r.get("score", 0) or 0 for r in rounds), default=0)
+        latest = rounds[-1].get("round_num", len(rounds))
         return {
-            exp.id: (
-                f"#{exp.id} — {exp.name} "
-                f"({exp.completed_rounds}r, best={exp.best_score:.1f})"
-            )
-            for exp in exps
+            "id": LIVE_ID,
+            "label": f"Live run — {len(rounds)}r, best={float(best):.1f}",
+            "rounds": rounds,
         }
 
-    exp_options = _build_exp_options()
-    best_default = (
-        next((exp for exp in experiments if exp.id == state.active_experiment_id), None)
-        or experiments[0]
-    )
-    selected_exp = {"id": best_default.id}
+    def _build_options() -> dict[str, str]:
+        opts: dict[str, str] = {}
+        live = _live_run_summary()
+        if live is not None:
+            opts[LIVE_ID] = live["label"]
+        for run in list_runs(state.experiments_dir):
+            opts[run.run_id] = (
+                f"{run.name} — {run.completed_rounds}r, best={run.best_score:.1f}"
+            )
+        return opts
 
+    options = _build_options()
+    if not options:
+        ui.label(
+            "No experiments found. Run a hierarchical experiment to populate "
+            "this page."
+        ).classes("text-gray-500 italic")
+        return
+
+    selected_exp = {"id": next(iter(options))}
     content = ui.column().classes("w-full")
 
-    def _load_experiment(exp_id: int) -> None:
+    def _resolve_rounds(exp_id: str) -> list[dict[str, Any]]:
+        if exp_id == LIVE_ID:
+            return load_live_rounds(state.experiments_dir)
+        return load_run_rounds(state.experiments_dir, exp_id)
+
+    def _load_experiment(exp_id: str) -> None:
         selected_exp["id"] = exp_id
         content.clear()
-        rounds = state.db.get_round_dicts(exp_id)
+        rounds = _resolve_rounds(exp_id)
 
         if not rounds:
             with content:
                 ui.label("No round data for this experiment.").classes(
                     "text-gray-500 italic"
                 )
-
-                async def _sync() -> None:
-                    from ..migrations.init_db import import_all_jsonl
-
-                    ids = import_all_jsonl(state.db, state.experiments_dir)
-                    if ids:
-                        ui.notify(
-                            f"Re-imported {len(ids)} experiments", type="positive"
-                        )
-                        ui.navigate.reload()
-                    else:
-                        ui.notify("No new data to import", type="info")
-
-                ui.button("Sync from disk", icon="sync", on_click=_sync).classes("mt-2")
             return
 
         with content:
@@ -206,37 +165,18 @@ def _experiment_data_panel(state) -> None:
 
     with ui.row().classes("w-full items-center gap-4 mb-4"):
         exp_select = ui.select(
-            options=exp_options,
+            options=options,
             value=selected_exp["id"],
             label="Select Experiment",
             on_change=lambda e: _load_experiment(e.value),
         ).classes("w-96")
 
-        async def _import() -> None:
-            from ..migrations.init_db import import_all_jsonl
-
-            ids = import_all_jsonl(state.db, state.experiments_dir)
-            if ids:
-                ui.notify(f"Imported {len(ids)} experiments", type="positive")
-                ui.navigate.reload()
-            else:
-                ui.notify("No new JSONL files to import", type="info")
-
-        ui.button("Import JSONL", icon="upload", on_click=_import).props("flat")
-
         def _refresh() -> None:
-            _ensure_latest_running_experiment()
-            new_options = _build_exp_options()
+            new_options = _build_options()
             exp_select.options = new_options
-
-            active_id = state.active_experiment_id
-            if active_id and active_id in new_options:
-                selected_exp["id"] = active_id
-                exp_select.value = active_id
-            elif selected_exp["id"] not in new_options and new_options:
+            if selected_exp["id"] not in new_options and new_options:
                 selected_exp["id"] = next(iter(new_options))
                 exp_select.value = selected_exp["id"]
-
             exp_select.update()
             if selected_exp["id"]:
                 _load_experiment(selected_exp["id"])
@@ -244,25 +184,17 @@ def _experiment_data_panel(state) -> None:
         ui.button("Refresh", icon="refresh", on_click=_refresh).props("flat")
 
     def _auto_refresh() -> None:
-        _ensure_latest_running_experiment()
-        new_options = _build_exp_options()
+        new_options = _build_options()
         exp_select.options = new_options
-
-        active_id = state.active_experiment_id
-        if active_id and active_id in new_options:
-            if selected_exp["id"] != active_id:
-                selected_exp["id"] = active_id
-                exp_select.value = active_id
-        elif selected_exp["id"] not in new_options and new_options:
+        if selected_exp["id"] not in new_options and new_options:
             selected_exp["id"] = next(iter(new_options))
             exp_select.value = selected_exp["id"]
-
         exp_select.update()
 
-        if selected_exp["id"]:
-            exp = state.db.get_experiment(selected_exp["id"])
-            if exp and exp.status in {"running", "stopping"}:
-                _load_experiment(selected_exp["id"])
+        # Only auto-reload contents when viewing the live run; archived runs
+        # don't change.
+        if selected_exp["id"] == LIVE_ID:
+            _load_experiment(LIVE_ID)
 
     ui.timer(10.0, _auto_refresh)
 
