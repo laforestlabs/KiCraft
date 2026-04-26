@@ -41,7 +41,13 @@ def monitor_page():
     # Live timing: start_monotonic anchors to subprocess elapsed_s on each
     # status read, then a 1s ticker extrapolates to keep the label moving
     # between status writes (which only happen at round/stage transitions).
-    run_timing: dict = {"start_monotonic": None}
+    # start_monotonic anchors the local 1s ticker. last_backend_elapsed
+    # tracks the most recent elapsed_s value seen in run_status.json so we
+    # only re-anchor when the backend has *actually* advanced. Without this
+    # guard, a long-running blocking subprocess (e.g. solve_subcircuits)
+    # leaves elapsed_s stale, every status poll re-anchors to the same
+    # value, and the local clock visibly snaps back -- the 0s/1s toggle.
+    run_timing: dict = {"start_monotonic": None, "last_backend_elapsed": -1.0}
 
     # Parent-round selection: None = auto-track best; int = user pinned a round.
     selected_parent_round: dict = {"value": None, "user_pinned": False}
@@ -210,11 +216,17 @@ def monitor_page():
             backend_elapsed = 0.0
 
         if phase == "running":
-            # Re-anchor the local clock to the subprocess's elapsed_s so the
-            # 1s ticker can extrapolate forward without drifting.
-            run_timing["start_monotonic"] = time.monotonic() - backend_elapsed
+            # Re-anchor only when the backend has reported a fresher
+            # elapsed_s than we last saw. If it's stale (e.g. status was
+            # written before a blocking subprocess started), let the local
+            # 1s ticker free-run from its existing anchor.
+            last_seen = run_timing["last_backend_elapsed"]
+            if backend_elapsed > last_seen + 0.1 or run_timing["start_monotonic"] is None:
+                run_timing["start_monotonic"] = time.monotonic() - backend_elapsed
+                run_timing["last_backend_elapsed"] = backend_elapsed
         else:
             run_timing["start_monotonic"] = None
+            run_timing["last_backend_elapsed"] = -1.0
             timing_label.set_text(
                 f"Elapsed: {_format_time(backend_elapsed)} | ETA: --"
             )
