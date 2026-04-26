@@ -174,14 +174,23 @@ class SolvedLeafSubcircuit:
     def instance_path(self) -> str:
         return self.node.id.instance_path
 
-    def best_round_to_layout(self, cfg: dict[str, Any] | None = None):
+    def round_to_layout(
+        self,
+        round_result: SolveRoundResult,
+        cfg: dict[str, Any] | None = None,
+    ):
+        """Build a SubCircuitLayout from any solver round, not just the winner.
+
+        Used both to materialize the canonical layout (winner) and to
+        snapshot every accepted attempt as a pinnable candidate.
+        """
         from kicraft.autoplacer.brain.subcircuit_solver import (
             infer_interface_anchors,
             _build_leaf_silkscreen,
             _compute_component_bbox,
         )
 
-        routed_board_path = self.best_round.routing.get("routed_board_path")
+        routed_board_path = round_result.routing.get("routed_board_path")
         if routed_board_path:
             routed_state = _load_board_state(Path(routed_board_path), cfg or {})
             solved_components = copy.deepcopy(routed_state.components)
@@ -192,14 +201,14 @@ class SolvedLeafSubcircuit:
                 routed_state.board_height,
             )
         else:
-            solved_components = copy.deepcopy(self.best_round.components)
+            solved_components = copy.deepcopy(round_result.components)
             routed_traces = [
                 copy.deepcopy(trace)
-                for trace in self.best_round.routing.get("_trace_segments", [])
+                for trace in round_result.routing.get("_trace_segments", [])
             ]
             routed_vias = [
                 copy.deepcopy(via)
-                for via in self.best_round.routing.get("_via_objects", [])
+                for via in round_result.routing.get("_via_objects", [])
             ]
             bounding_box = (
                 self.extraction.local_state.board_width,
@@ -227,10 +236,13 @@ class SolvedLeafSubcircuit:
             bounding_box=bounding_box,
             ports=[copy.deepcopy(port) for port in self.extraction.interface_ports],
             interface_anchors=anchors,
-            score=self.best_round.score,
+            score=round_result.score,
             artifact_paths={},
             frozen=True,
         )
+
+    def best_round_to_layout(self, cfg: dict[str, Any] | None = None):
+        return self.round_to_layout(self.best_round, cfg=cfg)
 
     def canonical_layout_artifact(self, cfg: dict[str, Any]) -> dict[str, Any]:
         layout = self.best_round_to_layout(cfg=cfg)
@@ -1010,21 +1022,71 @@ def _persist_solution(
         },
     )
 
-    # Snapshot metadata/solved_layout/debug JSON per experiment round.
-    # leaf_routing already snapshots round_NNNN_leaf_*.kicad_pcb but the
-    # metadata/solved_layout files get overwritten each round, which makes
-    # it impossible to restore a leaf to an older round's full state.
-    # Pinning needs all three files together.
-    exp_round = int(getattr(solved, "experiment_round", 0) or 0)
-    if exp_round > 0:
-        round_prefix = f"round_{exp_round:04d}"
-        metadata_path = Path(metadata.artifact_paths["metadata_json"])
-        artifact_dir = metadata_path.parent
-        for canonical_name in ("metadata.json", "solved_layout.json", "debug.json"):
-            src = artifact_dir / canonical_name
-            if src.exists():
-                dst = artifact_dir / f"{round_prefix}_{canonical_name}"
-                shutil.copy2(src, dst)
+    # Snapshot every accepted placement attempt as a pinnable candidate.
+    # leaf_routing already wrote round_NNNN_leaf_routed.kicad_pcb per
+    # attempt (using the inner round_index, monotonic across experiment
+    # rounds). Here we add the matching round_NNNN_solved_layout.json and
+    # round_NNNN_metadata.json so pins.list_available_rounds can offer
+    # every attempt the user might want to choose -- not just the winner.
+    metadata_path = Path(metadata.artifact_paths["metadata_json"])
+    artifact_dir = metadata_path.parent
+    project_dir_for_layout = Path(extraction.subcircuit.schematic_path).parent
+    for round_result in solved.all_rounds:
+        round_idx = getattr(round_result, "round_index", None)
+        if round_idx is None:
+            continue
+        # Only snapshot attempts that produced a routed PCB on disk;
+        # leaf_routing skips the .kicad_pcb copy when routing failed,
+        # so a metadata/layout snapshot without a matching PCB would
+        # be useless to the pin picker.
+        round_pcb = artifact_dir / f"round_{int(round_idx):04d}_leaf_routed.kicad_pcb"
+        if not round_pcb.exists():
+            continue
+        round_prefix = f"round_{int(round_idx):04d}"
+
+        # Per-attempt solved_layout: re-derive from this round's components
+        # and routed_board_path so the pin operation gets the actual
+        # placement of THIS attempt, not the canonical winner's.
+        try:
+            layout = solved.round_to_layout(round_result, cfg=cfg)
+            layout_artifact = build_solved_layout_artifact(
+                layout,
+                project_dir=project_dir_for_layout,
+                source_hash=extraction.subcircuit.id.instance_path,
+                config_hash=json.dumps(cfg, sort_keys=True, default=str),
+                solver_version="subcircuits-m3-placement",
+                notes=[
+                    f"round_index={round_idx}",
+                    f"seed={getattr(round_result, 'seed', 0)}",
+                    f"score={getattr(round_result, 'score', 0.0):.3f}",
+                ],
+            )
+            layout_artifact["validation"] = dict(
+                round_result.routing.get("validation", {})
+            )
+            (artifact_dir / f"{round_prefix}_solved_layout.json").write_text(
+                json.dumps(layout_artifact, indent=2, sort_keys=True, default=str),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            # Per-attempt snapshot is non-critical; don't block the
+            # canonical save if one attempt's layout build fails.
+            print(
+                f"  WARNING: per-attempt layout snapshot failed for "
+                f"round_index={round_idx}: {exc}"
+            )
+            continue
+
+        # metadata.json is essentially per-leaf (interface ports, paths,
+        # notes -- doesn't vary per attempt), but the pin operation
+        # requires a file at the round_NNNN prefix to consider the
+        # snapshot complete. Copy the canonical metadata under each
+        # accepted round_index.
+        canonical_metadata = artifact_dir / "metadata.json"
+        if canonical_metadata.exists():
+            shutil.copy2(
+                canonical_metadata, artifact_dir / f"{round_prefix}_metadata.json"
+            )
 
     return metadata.to_dict()
 
