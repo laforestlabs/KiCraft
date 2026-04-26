@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
 from nicegui import ui
 
@@ -78,6 +79,120 @@ def monitor_page():
         timing_label = ui.label("--").classes("text-xs text-gray-400")
         ui.space()
         progress_label = ui.label("").classes("text-xs text-gray-400")
+
+    # Pinned-leaves summary -- collapsible so it doesn't always take screen
+    # space, but readily accessible. Lives directly above the parent score
+    # chart since it pairs conceptually with the "Start parent only" gate.
+    # Replaces the per-leaf pin UI that used to live on the Analysis tab's
+    # Board Progression sub-tab; per-leaf pinning is now in the right-side
+    # node detail panel below.
+    pin_summary_state: dict[str, Any] = {"expansion": None}
+
+    def _refresh_pin_summary() -> None:
+        from kicraft.autoplacer.brain import pins as pins_module
+        exp = pin_summary_state["expansion"]
+        if exp is None:
+            return
+        pins = pins_module.list_pins(state.experiments_dir)
+        exp.text = f"Pinned leaves: {len(pins)} pinned"
+        exp.update()
+
+    pin_summary_expansion = ui.expansion(
+        "Pinned leaves: 0 pinned",
+        icon="push_pin",
+        value=False,
+    ).classes("w-full mb-2")
+    pin_summary_state["expansion"] = pin_summary_expansion
+
+    with pin_summary_expansion:
+        pin_summary_body = ui.column().classes("w-full gap-2")
+
+        def _redraw_pin_summary_body() -> None:
+            from kicraft.autoplacer.brain import pins as pins_module
+            pin_summary_body.clear()
+            pins = pins_module.list_pins(state.experiments_dir)
+            with pin_summary_body:
+                if not pins:
+                    ui.label(
+                        "No leaves pinned. Click a leaf in the pipeline graph "
+                        "below and use the Snapshots picker to lock a chosen "
+                        "round."
+                    ).classes("text-xs text-gray-400")
+                else:
+                    for leaf_key, pin in sorted(pins.items()):
+                        if not isinstance(pin, dict):
+                            continue
+                        with ui.row().classes("w-full items-center gap-2"):
+                            ui.label(leaf_key).classes(
+                                "text-xs font-mono text-gray-300 truncate "
+                                "max-w-[55%]"
+                            )
+                            ui.badge(
+                                f"round {pin.get('round')}", color="green"
+                            ).classes("text-xs")
+                            ui.space()
+
+                            def _make_unpin(key=leaf_key):
+                                def _on_unpin() -> None:
+                                    pins_module.unpin_leaf(
+                                        state.experiments_dir, key
+                                    )
+                                    ui.notify(f"Unpinned {key}", color="amber")
+                                    _refresh_pin_summary()
+                                    _redraw_pin_summary_body()
+                                    _rebuild_detail()
+                                return _on_unpin
+
+                            ui.button(
+                                "Unpin", icon="link_off", on_click=_make_unpin()
+                            ).props("flat dense").classes("text-amber-300 text-xs")
+
+                with ui.row().classes("w-full items-center gap-2 mt-2"):
+                    ui.label(
+                        "Parent compose loads pinned snapshots; leaves "
+                        "without a pin use whatever is on disk."
+                    ).classes("text-xs text-gray-500")
+                    ui.space()
+
+                    def _start_parents_only() -> None:
+                        if runner.is_running:
+                            ui.notify(
+                                "Experiment already running; stop it first.",
+                                type="negative",
+                            )
+                            return
+                        try:
+                            pid = runner.start(
+                                pcb_file=state.strategy["pcb_file"],
+                                rounds=state.strategy["rounds"],
+                                workers=state.strategy["workers"],
+                                seed=state.strategy.get("seed"),
+                                param_ranges=state.get_control_ranges(),
+                                score_weights=state.score_weights,
+                                extra_config={
+                                    "schematic_file": state.strategy["schematic_file"],
+                                    "parent": state.strategy.get("parent", "/"),
+                                    "only": state.strategy.get("only", []),
+                                    "leaf_rounds": state.strategy.get("leaf_rounds", 2),
+                                },
+                                phase="parents_only",
+                            )
+                            ui.notify(
+                                f"Started parent-only run (PID {pid})",
+                                type="positive",
+                            )
+                        except Exception as exc:
+                            ui.notify(f"Failed to start: {exc}", type="negative")
+
+                    ui.button(
+                        "Run parent compose with these pins",
+                        icon="play_arrow",
+                        on_click=_start_parents_only,
+                    ).props("color=primary dense")
+
+        _redraw_pin_summary_body()
+
+    _refresh_pin_summary()
 
     parent_chart_container = ui.column().classes("w-full mb-2")
     with parent_chart_container:
@@ -171,7 +286,14 @@ def monitor_page():
                     ui.label("Click a node to view details").classes("text-gray-500")
             return
         with detail_container:
-            node_detail_panel(node)
+            def _on_pins_changed() -> None:
+                _refresh_pin_summary()
+                _redraw_pin_summary_body()
+            node_detail_panel(
+                node,
+                experiments_dir=state.experiments_dir,
+                on_pins_changed=_on_pins_changed,
+            )
 
     def _update_status():
         run_status = runner.read_status()
