@@ -2103,6 +2103,10 @@ def main(argv: list[str] | None = None) -> int:
         parent_route_stderr = ""
         parent_routed = False
         parent_copper_accounting: dict[str, int] = {}
+        # Initialize the validation dict here so the --leaves-only branch
+        # (which never enters the parent compose block) doesn't trigger an
+        # UnboundLocalError when _write_round_detail consumes it below.
+        parent_routed_validation: dict[str, Any] = {}
 
         if args.leaves_only:
             print(
