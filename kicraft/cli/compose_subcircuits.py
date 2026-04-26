@@ -3079,6 +3079,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    # Apply any active leaf pins so the canonical artifact files reflect
+    # the pinned round, then load. ensure_applied is idempotent and a no-op
+    # when no pins.json exists, so this is safe on every compose run.
+    if project_dir is not None:
+        from kicraft.autoplacer.brain import pins
+        try:
+            pin_status = pins.ensure_applied(project_dir / ".experiments")
+            for leaf_key, status in pin_status.items():
+                print(f"[pins] {leaf_key}: {status}")
+        except Exception as exc:
+            print(f"[pins] warning: ensure_applied failed: {exc}", file=sys.stderr)
+
     try:
         loaded_artifacts = load_solved_artifacts(list(artifact_dirs))
         loaded_artifacts = _filter_loaded_artifacts(loaded_artifacts, args.only)

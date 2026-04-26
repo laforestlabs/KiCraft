@@ -1672,6 +1672,25 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "-o",
         help="Output best top-level artifact directory marker file",
     )
+    phase_group = parser.add_mutually_exclusive_group()
+    phase_group.add_argument(
+        "--leaves-only",
+        action="store_true",
+        help=(
+            "Only solve leaves (skip parent compose/route). Use when "
+            "exploring leaf candidates before manually pinning leaves and "
+            "running parent compose separately."
+        ),
+    )
+    phase_group.add_argument(
+        "--parents-only",
+        action="store_true",
+        help=(
+            "Only run the parent compose/route phase, skipping leaf solve. "
+            "Uses whatever leaf state is on disk (typically pinned via "
+            "pins.json). Each round still varies parent-side knobs."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -2006,19 +2025,31 @@ def main(argv: list[str] | None = None) -> int:
             leaf_timing_summary=leaf_timing_summary,
         )
         round_timing_breakdown: dict[str, float] = {}
-        solve_start_ts = _timing_now()
-        solve_rc, solve_stdout, solve_stderr = _run_command(
-            solve_cmd,
-            cwd=project_dir,
-        )
-        solve_elapsed_s = _record_timing(
-            round_timing_breakdown,
-            "solve_subcircuits_total",
-            solve_start_ts,
-        )
-        print(
-            f"[timing] round {round_num} solve_subcircuits_total={solve_elapsed_s:.3f}s"
-        )
+        solve_rc: int = 0
+        solve_stdout: str = ""
+        solve_stderr: str = ""
+        if args.parents_only:
+            # Skip the leaf solve subprocess entirely. The composer will
+            # use whatever leaf state is already on disk (typically a
+            # pinned-leaf set from a prior --leaves-only run).
+            print(
+                f"[round {round_num}] --parents-only: skipping leaf solve, "
+                f"using existing leaf artifacts on disk"
+            )
+        else:
+            solve_start_ts = _timing_now()
+            solve_rc, solve_stdout, solve_stderr = _run_command(
+                solve_cmd,
+                cwd=project_dir,
+            )
+            solve_elapsed_s = _record_timing(
+                round_timing_breakdown,
+                "solve_subcircuits_total",
+                solve_start_ts,
+            )
+            print(
+                f"[timing] round {round_num} solve_subcircuits_total={solve_elapsed_s:.3f}s"
+            )
 
         solve_payload = _extract_solve_json_payload(solve_stdout)
         leaf_timing_summary = _extract_leaf_timing_summary(solve_payload)
@@ -2073,7 +2104,12 @@ def main(argv: list[str] | None = None) -> int:
         parent_routed = False
         parent_copper_accounting: dict[str, int] = {}
 
-        if True:
+        if args.leaves_only:
+            print(
+                f"[round {round_num}] --leaves-only: skipping parent compose; "
+                f"pin leaves and rerun with --parents-only to compose"
+            )
+        if not args.leaves_only:
             _write_live_status(
                 status_json_path,
                 status_txt_path,
@@ -2238,6 +2274,24 @@ def main(argv: list[str] | None = None) -> int:
             if src_path:
                 _copy_if_exists(Path(src_path), round_dir / fname)
 
+        # Snapshot the parent .kicad_pcb files into the parent artifact dir
+        # using the same round_NNNN_ naming convention as leaf snapshots
+        # (see leaf_routing._copy_round_board). Without this, only the
+        # latest round's parent PCB survives -- everything else is
+        # overwritten on the next compose. Mirroring the leaf naming makes
+        # the pin layer treat parents and leaves uniformly. Skip when
+        # --leaves-only since there's no fresh parent to snapshot (we'd
+        # otherwise pin stale data from a prior compose).
+        if not args.leaves_only:
+            parent_artifact_dir = _discover_latest_parent_artifact_dir(project_dir)
+            if parent_artifact_dir is not None:
+                round_prefix = f"round_{round_num:04d}"
+                for canonical in ("parent_pre_freerouting", "parent_routed"):
+                    src = parent_artifact_dir / f"{canonical}.kicad_pcb"
+                    if src.exists():
+                        dst = parent_artifact_dir / f"{round_prefix}_{canonical}.kicad_pcb"
+                        _copy_if_exists(src, dst)
+
         score_round_start_ts = _timing_now()
 
         score, score_breakdown, score_notes, tier = _score_round(
@@ -2368,6 +2422,33 @@ def main(argv: list[str] | None = None) -> int:
                 _copy_if_exists(preview, work_dir / "best_preview.png")
                 _copy_if_exists(preview, frames_dir / f"frame_{round_num:04d}.png")
                 _copy_if_exists(preview, frames_dir / "frame_latest.png")
+
+            # Promote the best round's parent PCB to a stable fab-ready
+            # path. Without this, even the best parent is one experiment
+            # away from being clobbered by the next round. The destination
+            # mirrors the canonical name in the parent artifact dir so
+            # tooling can open it the same way.
+            best_parent_dir = _discover_latest_parent_artifact_dir(project_dir)
+            if best_parent_dir is not None:
+                best_parent_routed = best_parent_dir / "parent_routed.kicad_pcb"
+                if best_parent_routed.exists():
+                    _copy_if_exists(
+                        best_parent_routed, best_dir / "parent_routed.kicad_pcb"
+                    )
+                    # Pick up the .kicad_pro / .kicad_prl siblings if they
+                    # exist so KiCad opens the promoted board cleanly.
+                    for sibling_ext in (".kicad_pro", ".kicad_prl"):
+                        sibling = best_parent_routed.with_suffix(sibling_ext)
+                        if sibling.exists():
+                            _copy_if_exists(
+                                sibling, best_dir / f"parent_routed{sibling_ext}"
+                            )
+                    # Refresh the project-root fab-ready file the user can
+                    # open straight from the project directory.
+                    _copy_if_exists(
+                        best_parent_routed,
+                        project_dir / f"{project_dir.name}_best.kicad_pcb",
+                    )
 
         _append_jsonl(log_path, asdict(round_result))
         _write_round_detail(

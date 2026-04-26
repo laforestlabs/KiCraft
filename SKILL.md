@@ -80,6 +80,22 @@ The autoexperiment system collects detailed per-round data for post-run analysis
 3. **DRC overlay**: `python3 scripts/render_drc_overlay.py board.kicad_pcb .experiments/rounds/round_0015.json` — highlights violations on board render
 4. **Failure heatmap**: `python3 scripts/render_failure_heatmap.py .experiments/ board.kicad_pcb` — shows where routing consistently fails
 
+#### Two-phase guided experiments and leaf pinning
+
+A normal `autoexperiment` run re-solves every leaf and recomposes the parent on every round, so the user can't lock in a leaf they like and only iterate on the parent. The two-phase mode + pin manifest fixes that:
+
+1. **Explore leaves** — `python3 -m kicraft.cli.autoexperiment <pcb> --schematic <sch> --rounds 30 --leaves-only` runs only the leaf solve phase. Each round's leaf state is snapshotted to `.experiments/subcircuits/<leaf>/round_NNNN_*.kicad_pcb` (plus `metadata.json` and `solved_layout.json`).
+2. **Pin chosen leaves** — open the GUI Analysis page → "Pinned leaves" panel at the top of Hierarchical Progression. Each leaf in the gallery has a "Pin from prior experiment-round snapshots" expansion with a thumbnail per snapshotted round and a Pin button. Pins are stored in `.experiments/pins.json`.
+3. **Compose against pinned leaves** — `python3 -m kicraft.cli.autoexperiment <pcb> --schematic <sch> --rounds 10 --parents-only` (or use the "Run parent compose with these pins" button in the GUI). The composer calls `pins.ensure_applied()` before loading artifacts, so pinned leaves are guaranteed to be the canonical state on disk.
+
+**Persistent artifacts:**
+- Per-round leaf snapshots: `.experiments/subcircuits/<leaf>/round_NNNN_{leaf_routed,metadata,solved_layout,debug}.json` and `.kicad_pcb`
+- Per-round parent snapshots: `.experiments/subcircuits/subcircuit__<hash>/round_NNNN_parent_{routed,pre_freerouting}.kicad_pcb`
+- Best parent (fab-ready): `.experiments/best/parent_routed.kicad_pcb` and `<projectname>_best.kicad_pcb` at the project root, refreshed every time a round is "kept"
+- Pin manifest: `.experiments/pins.json` — schema `pins.v1`. Commit this if you want pins to survive across machines.
+
+`pins.ensure_applied()` is idempotent and a no-op when `pins.json` doesn't exist, so adding `--parents-only` doesn't change behavior of normal runs.
+
 ## Important Rules
 
 1. **Always back up before modifying**: Scripts that modify the PCB save to `<filename>_modified.kicad_pcb` by default. Pass `--in-place` to overwrite.

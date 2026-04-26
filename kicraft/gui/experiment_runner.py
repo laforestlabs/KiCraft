@@ -96,6 +96,7 @@ class ExperimentRunner:
         param_ranges: dict | None = None,
         score_weights: dict | None = None,
         extra_config: dict | None = None,
+        phase: str | None = None,
     ) -> int:
         """Start a hierarchical experiment subprocess. Returns PID."""
         if self.is_running:
@@ -136,6 +137,10 @@ class ExperimentRunner:
         ]
         if seed is not None:
             cmd += ["--seed", str(seed)]
+        if phase == "leaves_only":
+            cmd += ["--leaves-only"]
+        elif phase == "parents_only":
+            cmd += ["--parents-only"]
         if extra_config:
             parent = extra_config.get("parent")
             if parent:

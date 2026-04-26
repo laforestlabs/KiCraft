@@ -50,6 +50,29 @@ solve-subcircuits project.kicad_sch --pcb project.kicad_pcb --rounds 3 --route
 autoexperiment project.kicad_pcb project.kicad_sch --rounds 20 --workers 2
 ```
 
+### Two-phase guided experiment (leaf pinning)
+
+Explore leaf candidates first, lock the ones you like, then iterate on the
+parent only:
+
+```bash
+# 1. Solve only leaves -- snapshots every round to .experiments/subcircuits/<leaf>/round_NNNN_*
+autoexperiment project.kicad_pcb --schematic project.kicad_sch --rounds 30 --leaves-only
+
+# 2. Pin chosen rounds via the GUI Analysis page (Hierarchical Progression -> Accepted
+#    Leaf Gallery -> "Pin from prior experiment-round snapshots"), or write
+#    .experiments/pins.json by hand.
+
+# 3. Run only the parent compose phase against the pinned leaves
+autoexperiment project.kicad_pcb --schematic project.kicad_sch --rounds 10 --parents-only
+```
+
+The composer calls `pins.ensure_applied()` before loading artifacts, so
+pinned leaves stay locked even if a stray leaf-solve overwrites the
+canonical files. The best parent of any run is also copied to
+`.experiments/best/parent_routed.kicad_pcb` and `<projectname>_best.kicad_pcb`
+at the project root for fab handoff.
+
 ### Score a layout
 
 ```bash

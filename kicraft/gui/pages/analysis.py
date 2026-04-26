@@ -208,6 +208,8 @@ def _progression_panel(state) -> None:
         "This view is intended to make the bottom-up flow visually inspectable."
     ).classes("text-sm text-gray-400 mb-4")
 
+    _pinned_leaves_status_panel(state)
+
     with ui.tabs().classes("w-full") as prog_tabs:
         viewer_tab = ui.tab("Timeline Viewer", icon="slideshow")
         leaf_tab = ui.tab("Accepted Leaf Gallery", icon="view_module")
@@ -222,6 +224,114 @@ def _progression_panel(state) -> None:
 
         with ui.tab_panel(parent_tab):
             _parent_preview_panel(state)
+
+
+def _pinned_leaves_status_panel(state) -> None:
+    """Show the current pin manifest and a one-click parents-only run.
+
+    Pins are written to .experiments/pins.json. When set, the composer
+    uses the pinned round's leaf snapshot instead of whatever was solved
+    most recently. Pin via the per-leaf "Available experiment-round
+    snapshots" section below.
+    """
+    from kicraft.autoplacer.brain import pins as pins_module
+
+    pin_card = ui.card().classes("w-full p-4 mb-4 bg-slate-900/60")
+
+    def _refresh_panel() -> None:
+        pin_card.clear()
+        with pin_card:
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.icon("push_pin", color="amber").classes("text-2xl")
+                ui.label("Pinned leaves").classes("text-lg font-bold")
+                ui.space()
+                pins = pins_module.list_pins(state.experiments_dir)
+                ui.badge(
+                    f"{len(pins)} pinned", color="amber" if pins else "gray"
+                ).classes("text-xs")
+                ui.button(
+                    "Refresh",
+                    icon="refresh",
+                    on_click=_refresh_panel,
+                ).props("flat dense").classes("text-cyan-300")
+
+            if not pins:
+                ui.label(
+                    "No leaves are pinned. Run an experiment with --leaves-only "
+                    "to explore candidates, then use the Pin button under each "
+                    "leaf to lock a chosen round."
+                ).classes("text-sm text-gray-400 mt-2")
+                return
+
+            with ui.column().classes("w-full gap-1 mt-2"):
+                for leaf_key, pin in sorted(pins.items()):
+                    if not isinstance(pin, dict):
+                        continue
+                    with ui.row().classes("w-full items-center gap-2"):
+                        ui.label(leaf_key).classes(
+                            "text-xs font-mono text-gray-300 truncate max-w-[40%]"
+                        )
+                        ui.badge(f"round {pin.get('round')}", color="green").classes(
+                            "text-xs"
+                        )
+                        ui.label(
+                            f"pinned {pin.get('pinned_at', '')}"
+                        ).classes("text-xs text-gray-500 font-mono")
+                        ui.space()
+
+                        def _make_unpin(key=leaf_key):
+                            def _on_unpin() -> None:
+                                pins_module.unpin_leaf(state.experiments_dir, key)
+                                ui.notify(f"Unpinned {key}", color="amber")
+                                _refresh_panel()
+
+                            return _on_unpin
+
+                        ui.button(
+                            "Unpin", icon="link_off", on_click=_make_unpin()
+                        ).props("flat dense").classes("text-amber-300 text-xs")
+
+            with ui.row().classes("w-full items-center gap-2 mt-3"):
+                ui.label(
+                    "Parent compose will load the pinned snapshots; leaves "
+                    "without a pin use whatever is on disk."
+                ).classes("text-xs text-gray-400")
+                ui.space()
+
+                def _start_parents_only() -> None:
+                    if state.runner.is_running:
+                        ui.notify(
+                            "Experiment already running; stop it before starting another.",
+                            color="negative",
+                        )
+                        return
+                    pcb_file = state.strategy.get("pcb_file", "")
+                    if not pcb_file:
+                        ui.notify(
+                            "No PCB file configured in strategy.", color="negative"
+                        )
+                        return
+                    rounds = int(state.strategy.get("parents_only_rounds", 5))
+                    try:
+                        pid = state.runner.start(
+                            pcb_file=pcb_file,
+                            rounds=rounds,
+                            phase="parents_only",
+                        )
+                        ui.notify(
+                            f"Started parents-only run ({rounds} rounds) pid={pid}",
+                            color="positive",
+                        )
+                    except Exception as exc:
+                        ui.notify(f"Failed to start: {exc}", color="negative")
+
+                ui.button(
+                    "Run parent compose with these pins",
+                    icon="play_arrow",
+                    on_click=_start_parents_only,
+                ).props("color=primary")
+
+    _refresh_panel()
 
 
 def _leaf_gallery_panel(state) -> None:
@@ -758,6 +868,120 @@ def _leaf_gallery_panel(state) -> None:
                     ui.label(
                         "No candidate-round metadata was found for this leaf."
                     ).classes("text-sm text-gray-500 italic mt-4")
+
+                _leaf_pin_section(state, item["artifact_dir"])
+
+
+def _leaf_pin_section(state, leaf_key: str) -> None:
+    """Per-leaf Pin/Unpin UI driven by snapshot files on disk.
+
+    Lists every experiment-round snapshot for this leaf (i.e. every round
+    that has round_NNNN_metadata.json + round_NNNN_solved_layout.json +
+    round_NNNN_leaf_routed.kicad_pcb). Pinning copies the snapshot over
+    the canonical files; the composer picks it up on the next run.
+    """
+    from kicraft.autoplacer.brain import pins as pins_module
+
+    leaf_dir = state.experiments_dir / "subcircuits" / leaf_key
+    available = pins_module.list_available_rounds(state.experiments_dir, leaf_key)
+    current_pin = pins_module.is_pinned(state.experiments_dir, leaf_key)
+
+    section = ui.expansion(
+        f"Pin from prior experiment-round snapshots ({len(available)} available)",
+        value=False,
+    ).classes("w-full mt-4")
+
+    def _redraw() -> None:
+        section.clear()
+        nonlocal current_pin
+        current_pin = pins_module.is_pinned(state.experiments_dir, leaf_key)
+        with section:
+            if current_pin is not None:
+                with ui.row().classes("w-full items-center gap-2 mb-2"):
+                    ui.badge(f"PINNED to round {current_pin}", color="amber").classes(
+                        "text-xs"
+                    )
+
+                    def _unpin() -> None:
+                        pins_module.unpin_leaf(state.experiments_dir, leaf_key)
+                        ui.notify(
+                            f"Unpinned {leaf_key}; canonical files left in place "
+                            "(next leaf solve will overwrite them)",
+                            color="amber",
+                        )
+                        _redraw()
+
+                    ui.button("Unpin", icon="link_off", on_click=_unpin).props(
+                        "flat dense"
+                    ).classes("text-amber-300")
+
+            if not available:
+                ui.label(
+                    "No round snapshots on disk yet for this leaf. Run an "
+                    "experiment first to generate round_NNNN_* files."
+                ).classes("text-sm text-gray-500 italic")
+                return
+
+            ui.label(
+                "Each snapshot below is a complete leaf state (PCB + metadata + "
+                "solved_layout) from a prior experiment round. Pinning copies "
+                "the snapshot over the canonical files."
+            ).classes("text-xs text-gray-400 mb-2")
+
+            renders_dir = leaf_dir / "renders"
+            with ui.grid(columns=4).classes("w-full gap-2"):
+                for round_num in available:
+                    is_current = current_pin == round_num
+                    with ui.card().classes(
+                        "w-full p-2 bg-slate-900/70"
+                        + (" border-2 border-amber-400" if is_current else "")
+                    ):
+                        with ui.row().classes("w-full items-center gap-1"):
+                            ui.badge(f"R{round_num}", color="blue").classes("text-xs")
+                            if is_current:
+                                ui.badge("PINNED", color="amber").classes("text-xs")
+                        preview = renders_dir / (
+                            f"round_{round_num:04d}_routed_front_all.png"
+                        )
+                        if not preview.exists():
+                            preview = renders_dir / (
+                                f"round_{round_num:04d}_pre_route_front_all.png"
+                            )
+                        if preview.exists():
+                            ui.image(str(preview)).classes(
+                                "w-full h-[160px] object-contain rounded "
+                                "border border-slate-700 bg-slate-950"
+                            )
+                        else:
+                            ui.label("(no preview)").classes(
+                                "text-xs text-gray-500 italic"
+                            )
+
+                        def _make_pin(rn=round_num):
+                            def _on_pin() -> None:
+                                try:
+                                    pins_module.pin_leaf(
+                                        state.experiments_dir, leaf_key, rn
+                                    )
+                                    ui.notify(
+                                        f"Pinned {leaf_key} to round {rn}",
+                                        color="positive",
+                                    )
+                                    _redraw()
+                                except FileNotFoundError as exc:
+                                    ui.notify(str(exc), color="negative")
+
+                            return _on_pin
+
+                        ui.button(
+                            "Pin this round" if not is_current else "Re-apply pin",
+                            icon="push_pin",
+                            on_click=_make_pin(),
+                        ).props("flat dense").classes(
+                            "text-amber-300 text-xs w-full"
+                        )
+
+    _redraw()
 
 
 def _parent_preview_panel(state) -> None:

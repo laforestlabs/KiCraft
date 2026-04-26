@@ -41,6 +41,7 @@ import json
 import multiprocessing as mp
 import os
 import random
+import shutil
 import site
 import sys
 import time
@@ -1008,6 +1009,23 @@ def _persist_solution(
             "failure_summary": dict(solved.failure_summary or {}),
         },
     )
+
+    # Snapshot metadata/solved_layout/debug JSON per experiment round.
+    # leaf_routing already snapshots round_NNNN_leaf_*.kicad_pcb but the
+    # metadata/solved_layout files get overwritten each round, which makes
+    # it impossible to restore a leaf to an older round's full state.
+    # Pinning needs all three files together.
+    exp_round = int(getattr(solved, "experiment_round", 0) or 0)
+    if exp_round > 0:
+        round_prefix = f"round_{exp_round:04d}"
+        metadata_path = Path(metadata.artifact_paths["metadata_json"])
+        artifact_dir = metadata_path.parent
+        for canonical_name in ("metadata.json", "solved_layout.json", "debug.json"):
+            src = artifact_dir / canonical_name
+            if src.exists():
+                dst = artifact_dir / f"{round_prefix}_{canonical_name}"
+                shutil.copy2(src, dst)
+
     return metadata.to_dict()
 
 
