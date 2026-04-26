@@ -48,7 +48,15 @@ def monitor_page():
     prev_parent_score_fp: dict = {"value": ""}
 
     with ui.row().classes("w-full items-center gap-3 mb-2 px-2"):
-        start_btn = ui.button("Start", icon="play_arrow", color="green").props("dense")
+        start_btn = ui.button(
+            "Start complete", icon="play_arrow", color="green"
+        ).props("dense")
+        start_leaves_btn = ui.button(
+            "Start leaves only", icon="account_tree", color="teal"
+        ).props("dense")
+        start_parents_btn = ui.button(
+            "Start parent only", icon="dashboard", color="amber"
+        ).props("dense")
         stop_btn = ui.button("Stop", icon="stop", color="red").props("dense")
         stop_btn.set_visibility(False)
         force_kill_btn = ui.button("Kill", icon="dangerous", color="deep-orange").props("dense")
@@ -227,10 +235,41 @@ def monitor_page():
 
         is_running = phase == "running" or runner.is_running
         is_stopping = phase == "stopping"
-        start_btn.set_visibility(not is_running and not is_stopping)
+        idle = not is_running and not is_stopping
+        start_btn.set_visibility(idle)
+        start_leaves_btn.set_visibility(idle)
+        start_parents_btn.set_visibility(idle)
         stop_btn.set_visibility(is_running and not is_stopping)
         force_kill_btn.set_visibility(is_stopping)
         stopping_spinner.set_visibility(is_stopping)
+
+        # Gate "Start parent only" on every leaf with snapshots being
+        # pinned. Disabled-but-visible (rather than hidden) so the user
+        # sees the affordance and gets a tooltip explaining what's missing.
+        if idle:
+            from kicraft.autoplacer.brain import pins as pins_module
+            ready, blockers = pins_module.parent_only_ready(state.experiments_dir)
+            start_parents_btn.props(remove="disable")
+            if ready:
+                start_parents_btn.tooltip(
+                    "All required leaves are pinned -- composer will use the "
+                    "pinned snapshots."
+                )
+            else:
+                start_parents_btn.props("disable")
+                if not blockers:
+                    start_parents_btn.tooltip(
+                        "No leaf snapshots on disk yet. Run --leaves-only or "
+                        "a complete experiment first."
+                    )
+                else:
+                    preview = ", ".join(b[:18] for b in blockers[:3])
+                    if len(blockers) > 3:
+                        preview += f" (+{len(blockers) - 3} more)"
+                    start_parents_btn.tooltip(
+                        f"Pin these leaves first via Analysis -> Accepted "
+                        f"Leaf Gallery: {preview}"
+                    )
 
         # Full re-read every poll. experiments.jsonl is unconditionally
         # truncated by autoexperiment at startup, so reading the whole file
@@ -361,7 +400,7 @@ def monitor_page():
 
     ui.timer(1.0, _update_timing)
 
-    async def _start():
+    async def _start(phase: str | None = None):
         try:
             pid = runner.start(
                 pcb_file=state.strategy["pcb_file"],
@@ -384,8 +423,13 @@ def monitor_page():
                         ),
                     },
                 },
+                phase=phase,
             )
-            ui.notify(f"Started experiment (PID {pid})", type="positive")
+            label = {
+                "leaves_only": "leaves-only experiment",
+                "parents_only": "parent-only experiment",
+            }.get(phase or "", "experiment")
+            ui.notify(f"Started {label} (PID {pid})", type="positive")
             live_rounds.clear()
             experiment_terminated["value"] = False
         except Exception as e:
@@ -400,7 +444,9 @@ def monitor_page():
         experiment_terminated["value"] = True
         ui.notify("Force killed experiment", type="warning")
 
-    start_btn.on_click(_start)
+    start_btn.on_click(lambda: _start(phase=None))
+    start_leaves_btn.on_click(lambda: _start(phase="leaves_only"))
+    start_parents_btn.on_click(lambda: _start(phase="parents_only"))
     stop_btn.on_click(_stop)
     force_kill_btn.on_click(_force_kill)
 

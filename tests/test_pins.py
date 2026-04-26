@@ -126,3 +126,49 @@ def test_ensure_applied_reports_missing_snapshot(tmp_path):
 
 def test_ensure_applied_with_no_pins_is_noop(tmp_path):
     assert pins.ensure_applied(tmp_path) == {}
+
+
+def test_required_leaf_status_classifies_each_leaf(tmp_path):
+    # leaf-A: has snapshots, not pinned -> "unpinned"
+    _seed_round_snapshot(tmp_path, "leaf-a", 1, "x")
+    # leaf-B: has snapshots, pinned -> "pinned"
+    _seed_round_snapshot(tmp_path, "leaf-b", 1, "x")
+    pins.pin_leaf(tmp_path, "leaf-b", 1)
+    # leaf-C: no snapshots (e.g. trivial leaf with no internal nets) -> "no-snapshots"
+    (tmp_path / "subcircuits" / "leaf-c").mkdir(parents=True)
+    # parent_composition entries should be skipped entirely
+    (tmp_path / "subcircuits" / "subcircuit__abc123").mkdir()
+
+    statuses = pins.required_leaf_status(tmp_path)
+    assert statuses == {
+        "leaf-a": "unpinned",
+        "leaf-b": "pinned",
+        "leaf-c": "no-snapshots",
+    }
+
+
+def test_parent_only_ready_blocks_on_unpinned_leaves(tmp_path):
+    _seed_round_snapshot(tmp_path, "leaf-a", 1, "x")
+    _seed_round_snapshot(tmp_path, "leaf-b", 1, "x")
+    (tmp_path / "subcircuits" / "leaf-c").mkdir(parents=True)
+
+    ready, blockers = pins.parent_only_ready(tmp_path)
+    assert ready is False
+    assert set(blockers) == {"leaf-a", "leaf-b"}
+
+    pins.pin_leaf(tmp_path, "leaf-a", 1)
+    ready, blockers = pins.parent_only_ready(tmp_path)
+    assert ready is False
+    assert blockers == ["leaf-b"]
+
+    pins.pin_leaf(tmp_path, "leaf-b", 1)
+    # leaf-c has no snapshots so it does not block
+    ready, blockers = pins.parent_only_ready(tmp_path)
+    assert ready is True
+    assert blockers == []
+
+
+def test_parent_only_ready_returns_false_when_no_subcircuits(tmp_path):
+    ready, blockers = pins.parent_only_ready(tmp_path)
+    assert ready is False
+    assert blockers == []

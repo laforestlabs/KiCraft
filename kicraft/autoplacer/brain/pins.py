@@ -164,6 +164,53 @@ def list_pins(experiments_dir: Path) -> dict[str, dict[str, Any]]:
     return dict(read_pins(experiments_dir).get("pinned_leaves", {}))
 
 
+def required_leaf_status(experiments_dir: Path) -> dict[str, str]:
+    """Discover leaves on disk and report each leaf's pin readiness.
+
+    Used by the GUI to gate the "Start parent only" button. Status values:
+    - "pinned":       leaf is in pins.json
+    - "unpinned":     leaf has snapshots but no pin (blocks parent-only)
+    - "no-snapshots": leaf exists but has nothing to pin (e.g. BT1 with
+                       no internal nets); composer just uses canonical
+                       state, so this does not block parent-only
+
+    Returns empty dict if .experiments/subcircuits/ doesn't exist.
+    """
+    sub_root = Path(experiments_dir) / "subcircuits"
+    if not sub_root.exists():
+        return {}
+    pinned = set(list_pins(experiments_dir).keys())
+    out: dict[str, str] = {}
+    for child in sub_root.iterdir():
+        if not child.is_dir():
+            continue
+        # Skip parent_composition artifacts (named subcircuit__<hash>)
+        if child.name.startswith("subcircuit__"):
+            continue
+        leaf_key = child.name
+        if leaf_key in pinned:
+            out[leaf_key] = "pinned"
+        elif list_available_rounds(experiments_dir, leaf_key):
+            out[leaf_key] = "unpinned"
+        else:
+            out[leaf_key] = "no-snapshots"
+    return out
+
+
+def parent_only_ready(experiments_dir: Path) -> tuple[bool, list[str]]:
+    """Return (ready, blocking_leaf_keys).
+
+    Parent-only is ready when every leaf with snapshots is pinned. Leaves
+    with no snapshots are exempt (nothing to pin). Returns (False, []) if
+    no leaves exist on disk yet.
+    """
+    statuses = required_leaf_status(experiments_dir)
+    if not statuses:
+        return False, []
+    blockers = [k for k, s in statuses.items() if s == "unpinned"]
+    return len(blockers) == 0, blockers
+
+
 def is_pinned(experiments_dir: Path, leaf_key: str) -> int | None:
     """Return the pinned round number for this leaf, or None if not pinned."""
     pin = read_pins(experiments_dir).get("pinned_leaves", {}).get(leaf_key)
