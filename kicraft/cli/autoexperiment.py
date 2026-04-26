@@ -92,6 +92,11 @@ class HierarchyRound:
     improvement_vs_best: float = 0.0
     timing_breakdown: dict[str, float] = field(default_factory=dict)
     leaf_timing_summary: dict[str, Any] = field(default_factory=dict)
+    # Per-round leaf score summary (avg/min/max + per-leaf scores). The
+    # GUI parent-score chart falls back to plotting avg leaf score when
+    # parent_routed is uniformly False (e.g. --leaves-only mode), since
+    # the parent score is a meaningless 20.0 fallback in that case.
+    leaf_score_summary: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=False)
@@ -499,6 +504,49 @@ def _extract_leaf_timing_summary(solve_payload: dict[str, Any]) -> dict[str, Any
         "imbalance_ratio": imbalance_ratio,
         "long_pole_leafs": long_poles,
         "leafs": leaf_rows,
+    }
+
+
+def _extract_leaf_score_summary(solve_payload: dict[str, Any]) -> dict[str, Any]:
+    """Pull per-leaf best-round scores out of the solve payload.
+
+    Used by the GUI chart so a leaves-only run can plot something
+    meaningful instead of the flat 20.0 not_routed_penalty.
+    """
+    results = solve_payload.get("results", [])
+    if not isinstance(results, list):
+        return {}
+    leaf_scores: list[dict[str, Any]] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        solved = item.get("solved", {})
+        if not isinstance(solved, dict):
+            continue
+        best_round = solved.get("best_round", {})
+        if not isinstance(best_round, dict):
+            continue
+        score_val = best_round.get("score")
+        if score_val is None:
+            continue
+        try:
+            score = float(score_val)
+        except (TypeError, ValueError):
+            continue
+        leaf_scores.append({
+            "sheet_name": str(solved.get("sheet_name", "") or ""),
+            "instance_path": str(solved.get("instance_path", "") or ""),
+            "score": score,
+        })
+    if not leaf_scores:
+        return {}
+    score_values = [row["score"] for row in leaf_scores]
+    return {
+        "leafs": leaf_scores,
+        "avg_score": round(sum(score_values) / len(score_values), 3),
+        "min_score": round(min(score_values), 3),
+        "max_score": round(max(score_values), 3),
+        "leaf_count": len(leaf_scores),
     }
 
 
@@ -2393,6 +2441,7 @@ def main(argv: list[str] | None = None) -> int:
             tier=tier,
             improvement_vs_best=improvement_vs_best,
             leaf_timing_summary=leaf_timing_summary,
+            leaf_score_summary=_extract_leaf_score_summary(solve_payload),
         )
 
         if round_result.kept:
