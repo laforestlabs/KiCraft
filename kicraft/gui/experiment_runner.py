@@ -40,18 +40,33 @@ class ExperimentRunner:
                 self._cleanup_stale_state()
         return False
 
-    def _purge_prior_run_artifacts(self) -> None:
+    def _purge_prior_run_artifacts(self, phase: str | None = None) -> None:
         """Clear per-run outputs so the Monitor tab reflects the new run.
 
-        Removes leaf solve/render artifacts, per-round metadata, the
-        parent-round log, and the run-status files. Keeps user/config
-        files (presets DB, program.md, config overlays) intact.
+        Removes per-round metadata, the parent-round log, and the
+        run-status files. Keeps user/config files (presets DB,
+        program.md, config overlays) intact.
+
+        Phase-aware: in --parents-only and --leaves-only modes the
+        subcircuits/ dir is preserved because those modes either consume
+        existing leaf artifacts (parents-only reads pinned snapshots) or
+        accumulate new ones on top of existing snapshots (leaves-only).
+        Wiping subcircuits/ in those modes broke the whole point of the
+        two-phase workflow -- pins.json would point to ghosts.
         """
         exp = self.experiments_dir
         if not exp.exists():
             return
 
-        for sub in ("subcircuits", "rounds", "frames", "hierarchical_autoexperiment"):
+        # subcircuits/ is the leaf-artifact store. Wiping it deletes the
+        # snapshots that pins.json references, so only purge it on a
+        # fresh full run.
+        purge_subcircuits = phase is None
+        round_dirs = ["rounds", "frames", "hierarchical_autoexperiment"]
+        if purge_subcircuits:
+            round_dirs.insert(0, "subcircuits")
+
+        for sub in round_dirs:
             path = exp / sub
             if path.exists():
                 try:
@@ -105,7 +120,7 @@ class ExperimentRunner:
         stop_file = self.experiments_dir / "stop.now"
         stop_file.unlink(missing_ok=True)
 
-        self._purge_prior_run_artifacts()
+        self._purge_prior_run_artifacts(phase=phase)
 
         autoexp = self.scripts_dir / "autoexperiment.py"
         pcb_path = self.project_root / pcb_file
