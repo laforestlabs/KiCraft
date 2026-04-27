@@ -2351,12 +2351,20 @@ def _stamp_parent_board(
         overhangs=cfg.get("parent_overhang_mm", {}),
     )
     if not geometry_validation.get("accepted", False):
-        raise RuntimeError(
-            "Parent composition geometry is invalid before stamping: "
+        # Don't raise -- the caller wants to stamp + render even on
+        # geometry rejection so the user has a diagnostic image showing
+        # where components ended up. The outer code's geometry_accepted
+        # flag still gates routing, so we won't attempt to route an
+        # off-board layout. Just surface a warning so the failure is
+        # visible in the log.
+        print(
+            "warning: parent composition geometry is invalid before "
+            "stamping (continuing to stamp for diagnostic render): "
             f"outside_components={geometry_validation.get('outside_component_count', 0)} "
             f"outside_pads={geometry_validation.get('outside_pad_count', 0)} "
             f"outside_traces={geometry_validation.get('outside_trace_count', 0)} "
-            f"outside_vias={geometry_validation.get('outside_via_count', 0)}"
+            f"outside_vias={geometry_validation.get('outside_via_count', 0)}",
+            file=sys.stderr,
         )
 
     keepout_json = [

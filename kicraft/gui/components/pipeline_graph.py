@@ -343,6 +343,9 @@ def gather_pipeline_state(
         state.root_status = "done"
     elif current_stage in ("done", "complete", "score_round"):
         state.root_status = "done"
+    # We may downgrade root_status to "routing_failed" below once we know
+    # the most-recent round's parent_routed flag. Doing it here would be
+    # premature -- round_parent_routed isn't populated until line ~370.
     elif current_stage == "route_parent":
         state.root_status = "routing"
     elif current_stage == "compose_parent":
@@ -372,6 +375,17 @@ def gather_pipeline_state(
     if status_round is not None and status_round in round_statuses:
         round_parent_routed = round_statuses[status_round]["parent_routed"]
         round_parent_composed = round_statuses[status_round]["parent_composed"]
+
+    # If the run is "done" but the displayed round's parent failed to
+    # route, downgrade root_status so the parent node card shows its
+    # red "FAILED TO ROUTE" badge and the detail panel triggers the
+    # rejection-reason banner. Without this, a leaves-only or pin-bad
+    # run displays "done" with no indication anything went wrong.
+    if (
+        state.root_status == "done"
+        and round_parent_routed is False
+    ):
+        state.root_status = "routing_failed"
 
     # Per-round parent render. When the round failed to route, prefer the
     # pre-route (stamped) snapshot over the routed one -- the routed PNG may

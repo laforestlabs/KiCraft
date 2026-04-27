@@ -36,7 +36,10 @@ def node_detail_panel(
     with ui.column().classes("w-full gap-3"):
         _header(node)
         if node.status == "routing_failed":
-            _rejection_reason_panel(node)
+            if node.is_leaf:
+                _rejection_reason_panel(node)
+            else:
+                _parent_rejection_panel(experiments_dir)
         main_image_host = ui.column().classes("w-full")
         _render_main_image(main_image_host, maximized)
         if node.is_leaf and node.rounds:
@@ -207,6 +210,113 @@ def _header(node: NodeStatus) -> None:
             ui.label(f"Traces: {node.traces}")
             ui.label(f"Vias: {node.vias}")
             ui.label(f"Rounds: {node.total_rounds_run}")
+
+
+def _parent_rejection_panel(experiments_dir: Path | None) -> None:
+    """Surface why the parent failed: geometry overflow or routing reasons.
+
+    Reads the most recent round's parent_pipeline.json + round_NNNN.json
+    so the user has a starting point for diagnosing parent failures
+    without leaving the Monitor tab.
+    """
+    import json
+    if experiments_dir is None:
+        return
+    rounds_dir = Path(experiments_dir) / "rounds"
+    if not rounds_dir.exists():
+        return
+    round_files = sorted(rounds_dir.glob("round_*.json"))
+    if not round_files:
+        return
+    try:
+        round_payload = json.loads(round_files[-1].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+
+    geometry: dict = {}
+    routing_rejection: list[str] = []
+    parent_output_json = (round_payload.get("artifacts") or {}).get(
+        "parent_output_json"
+    )
+    if parent_output_json:
+        try:
+            pp = json.loads(Path(parent_output_json).read_text(encoding="utf-8"))
+            geometry = (pp.get("state") or {}).get("geometry_validation") or {}
+        except (OSError, json.JSONDecodeError):
+            geometry = {}
+
+    val = (round_payload.get("artifacts") or {}).get("parent_routed_validation") or {}
+    raw_reasons = val.get("rejection_reasons") or []
+    if isinstance(raw_reasons, list):
+        routing_rejection = [str(r) for r in raw_reasons if r]
+
+    with ui.card().classes("w-full bg-red-900/30 border border-red-700 p-3"):
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("warning", color="red-4").classes("text-red-400")
+            ui.label("Parent failed to route").classes(
+                "text-sm font-medium text-red-300"
+            )
+
+        # Geometry overflow: the placed leaves don't fit on the parent
+        # board. Common with --parents-only when pinned leaves were sized
+        # for a different board outline than the parent's mutated knobs.
+        if geometry and geometry.get("accepted") is False:
+            outside_components = geometry.get("outside_components") or []
+            ui.label(
+                f"Composition geometry rejected: "
+                f"{geometry.get('outside_component_count', 0)} components, "
+                f"{geometry.get('outside_pad_count', 0)} pads, "
+                f"{geometry.get('outside_trace_count', 0)} traces "
+                "extend past the parent board outline."
+            ).classes("text-xs text-red-200 mt-1")
+            if outside_components:
+                refs = ", ".join(
+                    str(c.get("ref", "?"))
+                    for c in outside_components[:6]
+                    if isinstance(c, dict)
+                )
+                if len(outside_components) > 6:
+                    refs += f" (+{len(outside_components) - 6} more)"
+                ui.label(f"Off-board: {refs}").classes(
+                    "text-xs text-red-200 font-mono"
+                )
+
+            board = geometry.get("board_outline") or {}
+            union = geometry.get("geometry_union") or {}
+            if board and union:
+                bw = board.get("width_mm") or 0
+                bh = board.get("height_mm") or 0
+                br = union.get("bottom_right") or {}
+                tl = union.get("top_left") or {}
+                if all(isinstance(x, (int, float)) for x in (
+                    br.get("x"), br.get("y"), tl.get("x"), tl.get("y")
+                )):
+                    uw = float(br["x"]) - float(tl["x"])
+                    uh = float(br["y"]) - float(tl["y"])
+                    ui.label(
+                        f"Parent board: {bw:.1f}×{bh:.1f} mm  |  "
+                        f"placed leaves span: {uw:.1f}×{uh:.1f} mm"
+                    ).classes("text-xs text-red-200 font-mono")
+            ui.label(
+                "Tip: increase board_width_mm / board_height_mm in the "
+                "search bounds, or pin leaves whose footprints fit the "
+                "current parent outline."
+            ).classes("text-xs text-amber-300 mt-1")
+
+        if routing_rejection:
+            ui.label("FreeRouting rejection reasons:").classes(
+                "text-xs text-red-300 mt-2"
+            )
+            for reason in routing_rejection[:5]:
+                ui.label(f"• {reason}").classes(
+                    "text-xs text-red-200 font-mono"
+                )
+
+        if not geometry and not routing_rejection:
+            ui.label(
+                "No structured rejection info recorded. Check the round "
+                "detail JSON under .experiments/rounds/."
+            ).classes("text-xs text-red-200 mt-1")
 
 
 def _rejection_reason_panel(node: NodeStatus) -> None:
