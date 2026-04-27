@@ -100,10 +100,28 @@ def _snapshot_picker(
                     ).classes("text-xs text-gray-400")
 
             if not available:
-                ui.label(
-                    "No round snapshots on disk yet for this leaf. Run a "
-                    "leaves-only or complete experiment to generate them."
-                ).classes("text-xs text-gray-500 italic")
+                # Distinguish "trivial leaf with no PCB" (e.g. BT1, a
+                # battery with no internal nets) from "haven't run an
+                # experiment yet". Trivial leaves never produce a
+                # leaf_routed.kicad_pcb because there's nothing to route.
+                has_any_pcb = (
+                    leaf_dir.exists()
+                    and any(leaf_dir.glob("*_leaf_routed.kicad_pcb"))
+                )
+                if leaf_dir.exists() and not has_any_pcb:
+                    ui.label(
+                        "This leaf has no internal nets to route -- there's "
+                        "no PCB layout to pin. The composer uses the leaf's "
+                        "metadata directly, and the parent_only gate exempts "
+                        "it from the pinning requirement."
+                    ).classes("text-xs text-gray-400 italic")
+                else:
+                    ui.label(
+                        "No round snapshots on disk yet for this leaf. Run "
+                        "a leaves-only or complete experiment to generate "
+                        "them (each successful placement attempt becomes a "
+                        "pickable candidate)."
+                    ).classes("text-xs text-gray-500 italic")
                 return
 
             ui.label(

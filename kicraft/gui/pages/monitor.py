@@ -64,6 +64,13 @@ def monitor_page():
         start_parents_btn = ui.button(
             "Start parent only", icon="dashboard", color="amber"
         ).props("dense")
+        # Single tooltip element whose text we mutate as state changes.
+        # Calling .tooltip() repeatedly (the obvious API) appends a new
+        # Tooltip slot each time -- yields a cascade of overlapping
+        # tooltips on hover. Holding the reference and updating .text
+        # avoids that.
+        with start_parents_btn:
+            parent_only_tooltip = ui.tooltip("").props("max-width=420px")
         stop_btn = ui.button("Stop", icon="stop", color="red").props("dense")
         stop_btn.set_visibility(False)
         force_kill_btn = ui.button("Kill", icon="dangerous", color="deep-orange").props("dense")
@@ -385,25 +392,28 @@ def monitor_page():
             ready, blockers = pins_module.parent_only_ready(state.experiments_dir)
             start_parents_btn.props(remove="disable")
             if ready:
-                start_parents_btn.tooltip(
-                    "All required leaves are pinned -- composer will use the "
-                    "pinned snapshots."
+                tip = (
+                    "All required leaves are pinned -- composer will use "
+                    "the pinned snapshots."
+                )
+            elif not blockers:
+                start_parents_btn.props("disable")
+                tip = (
+                    "No leaf snapshots on disk yet. Run a leaves-only or "
+                    "complete experiment first."
                 )
             else:
                 start_parents_btn.props("disable")
-                if not blockers:
-                    start_parents_btn.tooltip(
-                        "No leaf snapshots on disk yet. Run --leaves-only or "
-                        "a complete experiment first."
-                    )
-                else:
-                    preview = ", ".join(b[:18] for b in blockers[:3])
-                    if len(blockers) > 3:
-                        preview += f" (+{len(blockers) - 3} more)"
-                    start_parents_btn.tooltip(
-                        f"Pin these leaves first via Analysis -> Accepted "
-                        f"Leaf Gallery: {preview}"
-                    )
+                preview = ", ".join(b[:18] for b in blockers[:3])
+                if len(blockers) > 3:
+                    preview += f" (+{len(blockers) - 3} more)"
+                tip = (
+                    f"Click these leaves in the pipeline graph below to "
+                    f"pin them: {preview}"
+                )
+            if parent_only_tooltip.text != tip:
+                parent_only_tooltip.text = tip
+                parent_only_tooltip.update()
 
         # Full re-read every poll. experiments.jsonl is unconditionally
         # truncated by autoexperiment at startup, so reading the whole file
