@@ -149,28 +149,50 @@ class TestMutateConfigClamping:
                     assert isinstance(val, int), f"{key}: expected int, got {type(val)}"
 
 
-class TestMutateConfigBoardSize:
-    """Board size params are only mutated when enable_board_size=True."""
+class TestSearchSpaceContents:
+    """Regression guard: only true heuristics belong in the search space.
 
-    def test_board_size_excluded_by_default(self):
-        """Board width/height excluded when enable_board_size=False."""
-        rng = random.Random(42)
-        result = _mutate_config(
-            DEFAULT_CONFIG, CONFIG_SEARCH_SPACE, rng,
-            mutation_rate=1.0, enable_board_size=False,
+    Board dimensions, fab/circuit constraints (signal/power widths, vias,
+    zone fab limits, pad inset, thermal radius) and FreeRouting operational
+    budgets are NOT optimization knobs. They must stay out of
+    CONFIG_SEARCH_SPACE so a parameter sweep can't game the score by
+    enlarging boards or fattening traces.
+    """
+
+    FORBIDDEN_KEYS = {
+        "board_width_mm",
+        "board_height_mm",
+        "signal_width_mm",
+        "power_width_mm",
+        "via_drill_mm",
+        "via_size_mm",
+        "freerouting_timeout_s",
+        "freerouting_max_passes",
+        "zone_clearance_mm",
+        "zone_min_thickness_mm",
+        "zone_thermal_gap_mm",
+        "zone_thermal_spoke_mm",
+        "pad_inset_margin_mm",
+        "thermal_radius_mm",
+    }
+
+    def test_constraints_not_searchable(self):
+        present = self.FORBIDDEN_KEYS & set(CONFIG_SEARCH_SPACE.keys())
+        assert not present, (
+            f"fab/derived constraints leaked into CONFIG_SEARCH_SPACE: "
+            f"{sorted(present)}"
         )
-        assert "board_width_mm" not in result
-        assert "board_height_mm" not in result
 
-    def test_board_size_included_when_enabled(self):
-        """Board width/height included when enable_board_size=True."""
+    def test_board_size_excluded_even_when_enabled(self):
+        """enable_board_size=True is now a no-op since board dims are not
+        in the search space; mutate must not produce them either way."""
         rng = random.Random(42)
         result = _mutate_config(
             DEFAULT_CONFIG, CONFIG_SEARCH_SPACE, rng,
             mutation_rate=1.0, enable_board_size=True,
         )
-        assert "board_width_mm" in result
-        assert "board_height_mm" in result
+        assert "board_width_mm" not in result
+        assert "board_height_mm" not in result
 
 
 class TestMutateConfigReproducibility:

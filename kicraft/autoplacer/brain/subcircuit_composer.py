@@ -1225,7 +1225,6 @@ def _score_parent_composition(
     board_w = max(1.0, br.x - tl.x)
     board_h = max(1.0, br.y - tl.y)
     board_area = board_w * board_h
-    board_diag = (board_w * board_w + board_h * board_h) ** 0.5
     component_area = sum(comp.area for comp in board_state.components.values())
     area_utilization = min(1.0, component_area / board_area)
 
@@ -1235,24 +1234,36 @@ def _score_parent_composition(
         child_ymin = min(b[0].y for b in child_bboxes)
         child_xmax = max(b[1].x for b in child_bboxes)
         child_ymax = max(b[1].y for b in child_bboxes)
-        child_bbox_area = max(1.0, (child_xmax - child_xmin) * (child_ymax - child_ymin))
+        child_bbox_w = max(1.0, child_xmax - child_xmin)
+        child_bbox_h = max(1.0, child_ymax - child_ymin)
+        child_bbox_area = child_bbox_w * child_bbox_h
+        child_bbox_diag = (child_bbox_w ** 2 + child_bbox_h ** 2) ** 0.5
     else:
         child_bbox_area = board_area
+        child_bbox_diag = (board_w * board_w + board_h * board_h) ** 0.5
     packing_density = min(1.0, component_area / child_bbox_area)
 
     child_score_component = max(0.0, min(100.0, avg_child_score))
     anchor_coverage_component = max(0.0, min(100.0, anchor_coverage * 100.0))
+    # Normalize anchor distances by the children's bounding-box diagonal,
+    # NOT the board diagonal. Using board_diag actively rewards bigger empty
+    # boards (same anchor distance = smaller fraction = higher score), which
+    # caused parameter sweeps to crown oversized layouts.
     interconnect_component = max(
         0.0,
-        min(100.0, 100.0 * (1.0 - avg_anchor_distance / max(1.0, board_diag))),
+        min(100.0, 100.0 * (1.0 - avg_anchor_distance / max(1.0, child_bbox_diag))),
     )
     utilization_component = max(0.0, min(100.0, area_utilization * 100.0))
     packing_component = max(0.0, min(100.0, packing_density * 150.0))
 
+    # area_utilization carries real weight in the total so the score actually
+    # penalises oversized boards. Without this it was breakdown-only and
+    # sweeps were free to inflate score by enlarging the board.
     total = (
-        child_score_component * 0.30
-        + interconnect_component * 0.30
-        + packing_component * 0.30
+        child_score_component * 0.25
+        + interconnect_component * 0.25
+        + packing_component * 0.25
+        + utilization_component * 0.15
         + anchor_coverage_component * 0.10
     )
 
@@ -1261,7 +1272,7 @@ def _score_parent_composition(
         f"child_score_avg={avg_child_score:.3f}",
         f"anchor_coverage={anchor_coverage:.3f}",
         f"avg_anchor_distance_mm={avg_anchor_distance:.3f}",
-        f"board_diag_mm={board_diag:.3f}",
+        f"child_bbox_diag_mm={child_bbox_diag:.3f}",
         f"area_utilization={area_utilization:.3f}",
         f"packing_density={packing_density:.3f}",
         f"interconnect_nets={len(interconnect_nets)}",

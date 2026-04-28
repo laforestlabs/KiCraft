@@ -86,16 +86,19 @@ class TestNormalizeBounds:
 
 class TestGuiSearchSpaceParity:
 
-    def test_numeric_gui_params_have_search_space_entry(self):
+    def test_search_space_params_have_gui_entry(self):
+        """Every searchable knob must be exposed in the GUI so users can
+        see what an experiment will mutate. The reverse is intentionally
+        not enforced: the GUI also lets users edit fab/circuit constraints
+        (signal width, via size, etc.) which are NOT optimization knobs and
+        deliberately excluded from CONFIG_SEARCH_SPACE.
+        """
         from kicraft.gui.state import PLACEMENT_PARAMS
 
-        numeric_keys = [
-            p["key"] for p in PLACEMENT_PARAMS
-            if p.get("type") not in ("bool", "text", "list") and p["min"] is not None
-        ]
-        for key in numeric_keys:
-            assert key in CONFIG_SEARCH_SPACE, (
-                f"GUI param '{key}' has no CONFIG_SEARCH_SPACE entry"
+        gui_keys = {p["key"] for p in PLACEMENT_PARAMS}
+        for key in CONFIG_SEARCH_SPACE.keys():
+            assert key in gui_keys, (
+                f"search-space param '{key}' has no GUI entry in PLACEMENT_PARAMS"
             )
 
     def test_gui_min_matches_search_space_min(self):
@@ -368,9 +371,14 @@ class TestParamRangesMerging:
         spec = CONFIG_SEARCH_SPACE["orderedness"]
         assert result == (spec["min"], spec["max"])
 
-    def test_freerouting_timeout_int_range(self):
-        result = normalize_bounds("freerouting_timeout_s", 15.0, 120.0)
-        assert result == (15, 120)
+    def test_int_param_range_rounded(self):
+        """Integer params are rounded after clamping (covers any int-typed
+        entry in CONFIG_SEARCH_SPACE; previously checked freerouting_timeout_s
+        which is no longer a search-space knob)."""
+        result = normalize_bounds("sa_refine_iterations", 100.0, 5000.0)
+        assert result == (100, 5000)
+        spec = CONFIG_SEARCH_SPACE["sa_refine_iterations"]
+        assert spec["type"] == "int"
 
 
 # ---------------------------------------------------------------------------

@@ -184,6 +184,14 @@ DEFAULT_CONFIG = {
 }
 
 
+# Only true layout heuristics belong here. Fab/circuit constraints
+# (signal_width_mm, power_width_mm, via_drill_mm, via_size_mm, zone_*_mm,
+# pad_inset_margin_mm, thermal_radius_mm) are dictated by the fab's minimum
+# feature size and the schematic's current/voltage requirements -- they are
+# NOT optimization knobs. Operational params (freerouting_timeout_s,
+# freerouting_max_passes) are runtime budgets, not quality knobs. Board
+# dimensions (board_width_mm, board_height_mm) are derived from leaf areas
+# and enclosure constraints, not searched.
 CONFIG_SEARCH_SPACE = {
     "orderedness": {"min": 0.0, "max": 1.0, "sigma": 0.05, "type": "float"},
     "reheat_strength": {"min": 0.0, "max": 0.4, "sigma": 0.05, "type": "float"},
@@ -193,8 +201,6 @@ CONFIG_SEARCH_SPACE = {
     "cooling_factor": {"min": 0.80, "max": 0.999, "sigma": 0.02, "type": "float"},
     "edge_margin_mm": {"min": 0.5, "max": 15.0, "sigma": 0.5, "type": "float"},
     "courtyard_padding_mm": {"min": 0.0, "max": 3.0, "sigma": 0.1, "type": "float"},
-    "board_width_mm": {"min": 30.0, "max": 200.0, "sigma": 5.0, "type": "float"},
-    "board_height_mm": {"min": 20.0, "max": 150.0, "sigma": 5.0, "type": "float"},
     "sa_refine_initial_temp": {"min": 0.5, "max": 30.0, "sigma": 2.0, "type": "float"},
     "sa_refine_move_radius_mm": {"min": 0.2, "max": 8.0, "sigma": 0.5, "type": "float"},
     "sa_refine_iterations": {"min": 100, "max": 10000, "sigma": 500, "type": "int"},
@@ -203,28 +209,15 @@ CONFIG_SEARCH_SPACE = {
     "intra_cluster_iters": {"min": 10, "max": 500, "sigma": 20, "type": "int"},
     "max_placement_iterations": {"min": 100, "max": 5000, "sigma": 300, "type": "int"},
     "subcircuit_margin_mm": {"min": 1.0, "max": 15.0, "sigma": 1.0, "type": "float"},
-    "signal_width_mm": {"min": 0.05, "max": 2.0, "sigma": 0.02, "type": "float"},
-    "power_width_mm": {"min": 0.05, "max": 5.0, "sigma": 0.05, "type": "float"},
-    "via_drill_mm": {"min": 0.15, "max": 1.0, "sigma": 0.05, "type": "float"},
-    "via_size_mm": {"min": 0.3, "max": 1.5, "sigma": 0.05, "type": "float"},
     "gnd_zone_margin_mm": {"min": 0.1, "max": 2.0, "sigma": 0.1, "type": "float"},
     "connector_edge_inset_mm": {"min": -2.0, "max": 5.0, "sigma": 0.25, "type": "float"},
     "connector_pad_margin_mm": {"min": 0.0, "max": 3.0, "sigma": 0.2, "type": "float"},
-    "thermal_radius_mm": {"min": 1.0, "max": 10.0, "sigma": 0.5, "type": "float"},
     "sa_refine_cooling_rate": {"min": 0.9, "max": 0.9999, "sigma": 0.005, "type": "float"},
     "sa_refine_swap_probability": {"min": 0.0, "max": 1.0, "sigma": 0.05, "type": "float"},
     "sa_refine_rotation_probability": {"min": 0.0, "max": 1.0, "sigma": 0.05, "type": "float"},
     "placement_convergence_threshold": {"min": 0.01, "max": 2.0, "sigma": 0.1, "type": "float"},
-
     "placement_grid_mm": {"min": 0.1, "max": 2.54, "sigma": 0.1, "type": "float"},
-    "pad_inset_margin_mm": {"min": 0.0, "max": 2.0, "sigma": 0.1, "type": "float"},
     "tht_backside_min_area_mm2": {"min": 10.0, "max": 200.0, "sigma": 10.0, "type": "float"},
-    "freerouting_timeout_s": {"min": 10, "max": 600, "sigma": 20, "type": "int"},
-    "freerouting_max_passes": {"min": 5, "max": 200, "sigma": 10, "type": "int"},
-    "zone_clearance_mm": {"min": 0.1, "max": 1.0, "sigma": 0.05, "type": "float"},
-    "zone_min_thickness_mm": {"min": 0.1, "max": 0.8, "sigma": 0.05, "type": "float"},
-    "zone_thermal_gap_mm": {"min": 0.2, "max": 1.5, "sigma": 0.1, "type": "float"},
-    "zone_thermal_spoke_mm": {"min": 0.2, "max": 1.5, "sigma": 0.1, "type": "float"},
     "parent_spacing_mm": {"min": 0.5, "max": 6.0, "sigma": 0.5, "type": "float"},
 }
 
