@@ -19,12 +19,14 @@ DEFAULT_CONFIG = {
     "via_drill_mm": 0.3,
     "via_size_mm": 0.6,
     # Placement clearance — minimum gap between component bounding boxes.
-    # 2.5mm leaves room for vias/traces, reduces courtyard overlaps.
-    "placement_clearance_mm": 2.5,
+    # 2.84mm gives the SA solver enough breathing room to avoid courtyard
+    # overlaps while staying within typical 4-layer trace+via budgets.
+    # Tuned via overnight parameter sweep (r=-0.59, top-quintile median).
+    "placement_clearance_mm": 2.84,
     # Power nets (common names — projects override with their own)
     "power_nets": set(),
     # Placement (spread components — room to route, no courtyard overlaps)
-    "placement_grid_mm": 1.0,
+    "placement_grid_mm": 1.20,
     "edge_margin_mm": 6.0,
     "force_attract_k": 0.02,
     "force_repel_k": 200.0,
@@ -32,12 +34,20 @@ DEFAULT_CONFIG = {
     "sa_refine_enabled": True,
     "sa_refine_iterations": 1000,
     "sa_refine_initial_temp": 5.0,
-    "sa_refine_cooling_rate": 0.995,
-    "sa_refine_move_radius_mm": 2.0,
+    # Faster cooling (0.952 vs 0.995) lets SA spend more iterations near the
+    # target temperature instead of crawling through high-temp randomness.
+    "sa_refine_cooling_rate": 0.952,
+    # Larger SA move radius helps escape local minima found by force solve.
+    "sa_refine_move_radius_mm": 5.63,
     "sa_refine_swap_probability": 0.3,
-    "sa_refine_rotation_probability": 0.2,
-    # Placement solver iterations
-    "max_placement_iterations": 300,
+    # Higher rotation probability gives the solver more chances to find a
+    # better orientation per component during refinement.
+    "sa_refine_rotation_probability": 0.44,
+    # Placement solver iterations -- raised from 300 to 3332 because the
+    # sweep found measurable score gains for harder leaves at the higher
+    # cap. Easy leaves still terminate at placement_convergence_threshold
+    # well before this limit.
+    "max_placement_iterations": 3332,
     "placement_convergence_threshold": 0.5,
     "placement_score_every_n": 1,
     "intra_cluster_iters": 80,
@@ -53,7 +63,8 @@ DEFAULT_CONFIG = {
     "randomize_group_layout": False,
     # Courtyard overlap padding — extra margin (mm) added when scoring
     # courtyard overlaps.  Drives the optimizer to leave breathing room.
-    "courtyard_padding_mm": 0.5,
+    # 1.30mm chosen via parameter sweep (top-quintile median).
+    "courtyard_padding_mm": 1.30,
     # Pad inset margin — minimum distance (mm) all electrical pads must be
     # inside the board Edge.Cuts boundary.  Pads outside are unfabricatable.
     "pad_inset_margin_mm": 0.3,
@@ -62,11 +73,11 @@ DEFAULT_CONFIG = {
     # placement diversity across rounds while keeping components on edges.
     "edge_jitter_mm": 5.0,
     # Connector gap — spacing (mm) between connectors grouped on the same edge.
-    "connector_gap_mm": 2.0,
+    "connector_gap_mm": 3.58,
     # Connector edge inset — distance (mm) from board edge to the nearest
     # edge of the connector body.  0 = flush, positive = inset, negative =
     # overhang.  Only applies to edge-pinned connectors.
-    "connector_edge_inset_mm": 1.0,
+    "connector_edge_inset_mm": 2.5,
     # Per-ref connector overhang -- overrides connector_edge_inset_mm.
     # Positive values mean outward overhang. e.g. {"<connector_ref>": 1.5}
     "parent_overhang_mm": {},
@@ -86,7 +97,9 @@ DEFAULT_CONFIG = {
     # above this value (mm²) are placed on B.Cu so SMT parts can use F.Cu.
     # SMT passives always stay on F.Cu — IC group connectivity forces keep
     # them near their THT group leaders, achieving dual-sided board usage.
-    "tht_backside_min_area_mm2": 50.0,
+    # 130mm² (vs former 50) keeps small-medium THT on the front side; only
+    # genuinely large THT (battery holders, big connectors) move to B.Cu.
+    "tht_backside_min_area_mm2": 130.0,
     # SMT opposite THT — when True, actively attract SMT components on F.Cu
     # toward XY regions occupied by large back-side THT components.  This
     # uses board space efficiently by placing SMT on the opposite side of
@@ -176,11 +189,13 @@ DEFAULT_CONFIG = {
     "board_height_mm": 58.0,
     # Subcircuit margin — extra space (mm) added around the tight bounding
     # box of component positions when building a local subcircuit board.
-    # Gives the solver room to rearrange components.
-    "subcircuit_margin_mm": 5.0,
+    # 10.82mm gives the SA solver enough slack to find good arrangements;
+    # the previous 5mm was the strongest leaf-side bottleneck (r=+0.59).
+    "subcircuit_margin_mm": 10.82,
     # Parent spacing — gap (mm) between child subcircuit bounding boxes when
-    # composing them into the parent board.  Searchable by autoexperiment.
-    "parent_spacing_mm": 2.0,
+    # composing them into the parent board.  1.17mm packs leaves tightly
+    # without compromising routability (r=-0.41 in parents-only sweep).
+    "parent_spacing_mm": 1.17,
 }
 
 
@@ -193,32 +208,40 @@ DEFAULT_CONFIG = {
 # dimensions (board_width_mm, board_height_mm) are derived from leaf areas
 # and enclosure constraints, not searched.
 CONFIG_SEARCH_SPACE = {
+    # --- Insensitive params: full original ranges retained ---
+    # These showed |r| < 0.10 in both stages of the overnight sweep, so
+    # narrowing their range would just constrain future searches without
+    # gain. Widen if a future change makes them sensitive again.
     "orderedness": {"min": 0.0, "max": 1.0, "sigma": 0.05, "type": "float"},
     "reheat_strength": {"min": 0.0, "max": 0.4, "sigma": 0.05, "type": "float"},
     "force_attract_k": {"min": 0.001, "max": 0.2, "sigma": 0.01, "type": "float"},
     "force_repel_k": {"min": 50.0, "max": 1000.0, "sigma": 50.0, "type": "float"},
-    "placement_clearance_mm": {"min": 0.5, "max": 8.0, "sigma": 0.5, "type": "float"},
     "cooling_factor": {"min": 0.80, "max": 0.999, "sigma": 0.02, "type": "float"},
     "edge_margin_mm": {"min": 0.5, "max": 15.0, "sigma": 0.5, "type": "float"},
-    "courtyard_padding_mm": {"min": 0.0, "max": 3.0, "sigma": 0.1, "type": "float"},
     "sa_refine_initial_temp": {"min": 0.5, "max": 30.0, "sigma": 2.0, "type": "float"},
-    "sa_refine_move_radius_mm": {"min": 0.2, "max": 8.0, "sigma": 0.5, "type": "float"},
     "sa_refine_iterations": {"min": 100, "max": 10000, "sigma": 500, "type": "int"},
-    "connector_gap_mm": {"min": 0.0, "max": 8.0, "sigma": 0.5, "type": "float"},
     "edge_jitter_mm": {"min": 0.0, "max": 15.0, "sigma": 1.0, "type": "float"},
     "intra_cluster_iters": {"min": 10, "max": 500, "sigma": 20, "type": "int"},
-    "max_placement_iterations": {"min": 100, "max": 5000, "sigma": 300, "type": "int"},
-    "subcircuit_margin_mm": {"min": 1.0, "max": 15.0, "sigma": 1.0, "type": "float"},
     "gnd_zone_margin_mm": {"min": 0.1, "max": 2.0, "sigma": 0.1, "type": "float"},
-    "connector_edge_inset_mm": {"min": -2.0, "max": 5.0, "sigma": 0.25, "type": "float"},
     "connector_pad_margin_mm": {"min": 0.0, "max": 3.0, "sigma": 0.2, "type": "float"},
-    "sa_refine_cooling_rate": {"min": 0.9, "max": 0.9999, "sigma": 0.005, "type": "float"},
     "sa_refine_swap_probability": {"min": 0.0, "max": 1.0, "sigma": 0.05, "type": "float"},
-    "sa_refine_rotation_probability": {"min": 0.0, "max": 1.0, "sigma": 0.05, "type": "float"},
     "placement_convergence_threshold": {"min": 0.01, "max": 2.0, "sigma": 0.1, "type": "float"},
-    "placement_grid_mm": {"min": 0.1, "max": 2.54, "sigma": 0.1, "type": "float"},
-    "tht_backside_min_area_mm2": {"min": 10.0, "max": 200.0, "sigma": 10.0, "type": "float"},
-    "parent_spacing_mm": {"min": 0.5, "max": 6.0, "sigma": 0.5, "type": "float"},
+    # --- Sensitive params: ranges narrowed to top-quintile [P10, P90] ---
+    # min/max replaced from .experiments/param_sweep/proposed_param_ranges.json
+    # Sigma roughly = 10% of new range so Gaussian mutation steps at a
+    # sensible scale for the narrower interval.
+    "placement_clearance_mm": {"min": 1.10, "max": 5.38, "sigma": 0.4, "type": "float"},
+    "courtyard_padding_mm": {"min": 0.65, "max": 2.57, "sigma": 0.2, "type": "float"},
+    "sa_refine_move_radius_mm": {"min": 1.52, "max": 7.41, "sigma": 0.6, "type": "float"},
+    "connector_gap_mm": {"min": 0.46, "max": 7.50, "sigma": 0.7, "type": "float"},
+    "max_placement_iterations": {"min": 829, "max": 4551, "sigma": 370, "type": "int"},
+    "subcircuit_margin_mm": {"min": 6.97, "max": 13.38, "sigma": 0.6, "type": "float"},
+    "connector_edge_inset_mm": {"min": 0.47, "max": 4.32, "sigma": 0.4, "type": "float"},
+    "sa_refine_cooling_rate": {"min": 0.9076, "max": 0.99, "sigma": 0.008, "type": "float"},
+    "sa_refine_rotation_probability": {"min": 0.05, "max": 0.85, "sigma": 0.08, "type": "float"},
+    "placement_grid_mm": {"min": 0.34, "max": 2.13, "sigma": 0.18, "type": "float"},
+    "tht_backside_min_area_mm2": {"min": 80.0, "max": 176.0, "sigma": 10.0, "type": "float"},
+    "parent_spacing_mm": {"min": 0.66, "max": 1.60, "sigma": 0.1, "type": "float"},
 }
 
 

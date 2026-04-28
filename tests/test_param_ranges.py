@@ -45,11 +45,13 @@ class TestNormalizeBounds:
         assert result == (0.2, 0.8)
 
     def test_int_type_applies_ceil_floor(self):
-        result = normalize_bounds("max_placement_iterations", 350.3, 2000.7)
-        assert result == (351, 2000)
+        # Values inside the current max_placement_iterations spec range.
+        result = normalize_bounds("max_placement_iterations", 1000.3, 4000.7)
+        assert result == (1001, 4000)
 
     def test_int_type_empty_range_returns_none(self):
-        result = normalize_bounds("max_placement_iterations", 300.9, 300.1)
+        # An interval that collapses to empty after ceil/floor returns None.
+        result = normalize_bounds("max_placement_iterations", 1000.9, 1000.1)
         assert result is None
 
     def test_unknown_key_returns_none(self):
@@ -336,12 +338,14 @@ class TestParamRangesMerging:
         assert effective["orderedness"]["type"] == CONFIG_SEARCH_SPACE["orderedness"]["type"]
 
     def test_valid_int_range_rounds_correctly(self):
-        result = normalize_bounds("max_placement_iterations", 350.3, 2000.7)
-        assert result == (351, 2000)
+        # Values inside the current max_placement_iterations spec range.
+        result = normalize_bounds("max_placement_iterations", 1000.3, 4000.7)
+        assert result == (1001, 4000)
 
     def test_int_range_empty_after_rounding_is_skipped(self):
-        result = normalize_bounds("max_placement_iterations", 300.9, 300.1)
-        # After swap: lo=300.1, hi=300.9 -> ceil(300.1)=301, floor(300.9)=300 -> empty
+        # An interval that collapses to empty after ceil/floor returns None.
+        result = normalize_bounds("max_placement_iterations", 1000.9, 1000.1)
+        # After swap: lo=1000.1, hi=1000.9 -> ceil(1000.1)=1001, floor(1000.9)=1000 -> empty
         assert result is None
 
     def test_inverted_user_range_auto_swapped(self):
