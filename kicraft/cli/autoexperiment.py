@@ -1491,6 +1491,50 @@ def _leaf_feasible_min_board(
     return (round(min_w, 2), round(min_h, 2))
 
 
+def _random_sample_config(
+    search_space: Mapping[str, Mapping[str, Any]],
+    rng: random.Random,
+    enable_board_size: bool = False,
+    min_board_wh: tuple[float, float] | None = None,
+) -> dict[str, int | float]:
+    """Uniform random sample across the full search space.
+
+    Drop-in alternative to _mutate_config for parameter sweeps. Every param
+    in search_space is sampled uniformly from [min, max] (after optional
+    --param-ranges narrowing). Integer params are rounded.
+
+    Used by --random-search to give each param coverage independent of any
+    incumbent best config -- needed when the goal is per-param sensitivity
+    analysis rather than greedy hill climbing.
+    """
+    sampled: dict[str, int | float] = {}
+    for key, spec in search_space.items():
+        spec_min = float(spec["min"])
+        spec_max = float(spec["max"])
+        spec_type = str(spec["type"])
+        if not enable_board_size and key in {"board_width_mm", "board_height_mm"}:
+            continue
+        if min_board_wh is not None:
+            if key == "board_width_mm":
+                spec_min = max(spec_min, float(min_board_wh[0]))
+                if spec_min > spec_max:
+                    spec_min = spec_max
+            elif key == "board_height_mm":
+                spec_min = max(spec_min, float(min_board_wh[1]))
+                if spec_min > spec_max:
+                    spec_min = spec_max
+        if spec_min >= spec_max:
+            new_val = spec_min
+        else:
+            new_val = rng.uniform(spec_min, spec_max)
+        if spec_type == "int":
+            new_val = int(round(new_val))
+        else:
+            new_val = round(new_val, 4)
+        sampled[key] = new_val
+    return sampled
+
+
 def _mutate_config(
     base_config: dict[str, Any],
     search_space: Mapping[str, Mapping[str, Any]],
@@ -1720,6 +1764,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "-o",
         help="Output best top-level artifact directory marker file",
     )
+    parser.add_argument(
+        "--random-search",
+        action="store_true",
+        help=(
+            "Sample each parameter uniformly from its search-space [min, max] "
+            "every round, instead of Gaussian mutation around the current best. "
+            "Required for per-parameter sensitivity analysis (avoids the "
+            "greedy hill-climb bias)."
+        ),
+    )
     phase_group = parser.add_mutually_exclusive_group()
     phase_group.add_argument(
         "--leaves-only",
@@ -1806,6 +1860,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Master seed:  {master_seed}")
     print(f"Workers:      {effective_workers} (requested={requested_workers})")
     print(f"Fast smoke:   {args.fast_smoke}")
+    print(f"Search:       {'random uniform' if args.random_search else 'greedy mutation around best'}")
     print("Mode:         subcircuit leaf bottom-up only")
     print()
 
@@ -1932,13 +1987,21 @@ def main(argv: list[str] | None = None) -> int:
             edge_margin_mm=float(_best_config.get("edge_margin_mm", 4.0) or 4.0),
         )
 
-        round_mutated = _mutate_config(
-            _best_config,
-            effective_search_space,
-            rng,
-            enable_board_size=bool(_best_config.get("enable_board_size_search", False)),
-            min_board_wh=min_board_wh,
-        )
+        if args.random_search:
+            round_mutated = _random_sample_config(
+                effective_search_space,
+                rng,
+                enable_board_size=bool(_best_config.get("enable_board_size_search", False)),
+                min_board_wh=min_board_wh,
+            )
+        else:
+            round_mutated = _mutate_config(
+                _best_config,
+                effective_search_space,
+                rng,
+                enable_board_size=bool(_best_config.get("enable_board_size_search", False)),
+                min_board_wh=min_board_wh,
+            )
         round_candidate_config.update(round_mutated)
         enforce_param_constraints(round_candidate_config)
 
