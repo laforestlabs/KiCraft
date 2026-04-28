@@ -441,7 +441,12 @@ def _presets_panel(state):
             config = state.to_config_dict()
             from .. import presets as preset_store
 
-            preset_store.save_preset(name, config, preset_notes.value)
+            try:
+                preset_store.save_preset(name, config, preset_notes.value)
+            except ValueError as exc:
+                # Built-in preset names are read-only.
+                ui.notify(str(exc), type="negative")
+                return
             ui.notify(f"Saved preset '{name}'", type="positive")
             _refresh_presets()
 
@@ -474,6 +479,12 @@ def _presets_panel(state):
                 with ui.card().classes("w-full p-3"):
                     with ui.row().classes("items-center gap-3"):
                         ui.label(preset.name).classes("font-bold")
+                        if preset.builtin:
+                            # Read-only badge so the user knows why Delete
+                            # is missing for this row.
+                            ui.label("READ-ONLY").classes(
+                                "text-xs px-2 py-0.5 rounded bg-blue-700 text-white"
+                            )
                         ui.label(preset.created_at or "").classes(
                             "text-xs text-gray-500"
                         )
@@ -483,12 +494,13 @@ def _presets_panel(state):
                             icon="download",
                             on_click=lambda _, pn=preset.name: _load(pn),
                         ).props("flat dense")
-                        ui.button(
-                            "Delete",
-                            icon="delete",
-                            on_click=lambda _, pn=preset.name: _delete(pn),
-                            color="red",
-                        ).props("flat dense")
+                        if not preset.builtin:
+                            ui.button(
+                                "Delete",
+                                icon="delete",
+                                on_click=lambda _, pn=preset.name: _delete(pn),
+                                color="red",
+                            ).props("flat dense")
                     if preset.notes:
                         ui.label(preset.notes).classes("text-xs text-gray-400 mt-1")
 
