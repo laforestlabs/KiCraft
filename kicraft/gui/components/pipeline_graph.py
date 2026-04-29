@@ -176,8 +176,25 @@ def _load_round_statuses(experiments_dir: Path) -> dict[int, dict[str, Any]]:
     return result
 
 
-def _determine_leaf_status(artifact_dir: Path) -> str:
-    """Determine leaf status from artifact presence."""
+def _determine_leaf_status(artifact_dir: Path, *, run_in_progress: bool = False) -> str:
+    """Determine leaf status from artifact presence.
+
+    ``run_in_progress`` is True while a fresh autoexperiment run is
+    still solving. In that mode, ``debug.json`` is the authoritative
+    "this leaf has been processed in the current run" signal -- the
+    run-start cleanup deletes it, so its absence means "queued, not
+    yet visited". We avoid trusting stale canonical files
+    (``solved_layout.json`` validation, ``leaf_routed.kicad_pcb``)
+    while running, since they describe the previous run's output.
+    """
+    debug_path = artifact_dir / "debug.json"
+    debug_present = debug_path.is_file()
+
+    if run_in_progress and not debug_present:
+        # Fresh-run state: cleanup removed debug.json, the leaf has
+        # not been processed yet. Don't read stale canonical.
+        return "queued"
+
     solved = artifact_dir / "solved_layout.json"
     if solved.exists():
         data = _safe_read_json(solved)
@@ -189,10 +206,11 @@ def _determine_leaf_status(artifact_dir: Path) -> str:
                 if validation.get("failed") or validation.get("rejected"):
                     return "failed"
 
-    debug = _safe_read_json(artifact_dir / "debug.json")
-    if isinstance(debug, dict):
-        if debug.get("error") or debug.get("failed"):
-            return "failed"
+    if debug_present:
+        debug = _safe_read_json(debug_path)
+        if isinstance(debug, dict):
+            if debug.get("error") or debug.get("failed"):
+                return "failed"
 
     if (artifact_dir / "leaf_routed.kicad_pcb").exists():
         return "routing"
@@ -337,6 +355,17 @@ def gather_pipeline_state(
         eta_s=_safe_float(run_status.get("eta_s", 0)),
         round_num=_safe_int(run_status.get("round", 0)),
         total_rounds=_safe_int(run_status.get("total_rounds", 0)),
+    )
+
+    # "Run in progress" gates leaf status decisions below: while
+    # running we trust per-leaf debug.json over stale canonical files
+    # (the cleanup wiped debug.json at run start, so its absence
+    # genuinely means "leaf not yet processed in this run").
+    run_in_progress = phase in ("running", "stopping", "starting") or current_stage in (
+        "solve_leafs",
+        "compose_parent",
+        "route_parent",
+        "score_round",
     )
 
     if phase == "done":
@@ -488,7 +517,9 @@ def gather_pipeline_state(
             component_refs = meta.get("component_refs", [])
 
             renders_dir = artifact_dir / "renders"
-            leaf_status = _determine_leaf_status(artifact_dir)
+            leaf_status = _determine_leaf_status(
+                artifact_dir, run_in_progress=run_in_progress
+            )
             best_render = _find_best_render(renders_dir) if renders_dir.exists() else None
 
             score = None
@@ -546,16 +577,18 @@ def gather_pipeline_state(
                         leaf_status = "routing_failed"
                 else:
                     # No rounds for this leaf in the selected parent round.
-                    # Usually means that parent round's solve failed before
-                    # this leaf's artifact was persisted. Reflect that in the
-                    # UI instead of silently showing stale data from an
-                    # earlier round.
+                    # Two cases: (a) the run is still in flight and this
+                    # leaf hasn't been solved yet -- "queued" / WAITING is
+                    # the right user-facing state; (b) the run finished
+                    # and this leaf actually missed the round -- that's
+                    # a real failure. Distinguish by whether the run is
+                    # currently in progress.
                     rounds = []
                     best_render = None
-                    leaf_status = "failed"
                     score = None
                     traces = 0
                     vias = 0
+                    leaf_status = "queued" if run_in_progress else "failed"
 
             node = NodeStatus(
                 name=sheet_name,
@@ -589,7 +622,11 @@ def gather_pipeline_state(
     if state.current_node:
         for leaf in state.leaves:
             if state.current_node in (leaf.name, leaf.node_id):
-                if leaf.status == "pending":
+                # The leaf the runner is currently working on becomes
+                # "solving" regardless of whether it was previously
+                # "pending" (never started) or "queued" (run in progress
+                # but not yet visited).
+                if leaf.status in ("pending", "queued"):
                     leaf.status = "solving"
 
     return state
@@ -601,6 +638,7 @@ def gather_pipeline_state(
 
 _STATUS_COLORS = {
     "pending": "grey",
+    "queued": "grey",
     "solving": "blue",
     "routing": "orange",
     "accepted": "green",
@@ -612,6 +650,7 @@ _STATUS_COLORS = {
 
 _STATUS_ICONS = {
     "pending": "hourglass_empty",
+    "queued": "schedule",
     "solving": "build",
     "routing": "route",
     "accepted": "check_circle",
@@ -622,6 +661,7 @@ _STATUS_ICONS = {
 }
 
 _STATUS_LABELS = {
+    "queued": "WAITING",
     "routing_failed": "FAILED TO ROUTE",
 }
 
