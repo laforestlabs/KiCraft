@@ -567,6 +567,20 @@ class PlacementSolver:
         work_state = copy.copy(self.state)
         work_state.components = comps
 
+        # Detect alignment groups from the INITIAL component positions.
+        # SA refinement happily scrambles paired components (parallel
+        # batteries, header arrays, LED rows) far enough apart that
+        # post-SA position-based axis inference can't tell which axis
+        # they were meant to share. Detecting up-front captures the
+        # user's schematic-time intent; we apply the snap at the end of
+        # solve() once the SA-chosen group center is known.
+        from kicraft.autoplacer.brain.placement_alignment import (
+            apply_alignment_repair,
+            detect_alignment_groups,
+        )
+
+        alignment_groups = detect_alignment_groups(self.cfg, comps)
+
         # Build connectivity graph
         conn_graph = build_connectivity_graph(self.state.nets)
 
@@ -763,6 +777,14 @@ class PlacementSolver:
                 swap_prob=float(self.cfg.get("sa_refine_swap_probability", 0.3)),
                 rotation_prob=float(self.cfg.get("sa_refine_rotation_probability", 0.2)),
             )
+
+        # Alignment repair: apply the alignment_groups detected from the
+        # INITIAL positions (before SA could scramble them). Runs after
+        # SA so the group's parallel-axis center reflects the solver's
+        # chosen position; the repair snaps perpendicular-axis to the
+        # current group mean and redistributes at fixed pitch.
+        if alignment_groups:
+            apply_alignment_repair(best_comps, alignment_groups)
 
         # Step 7: Swap optimization — directly minimize crossovers
         comps = best_comps

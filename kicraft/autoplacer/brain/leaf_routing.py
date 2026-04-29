@@ -56,30 +56,19 @@ def route_local_subcircuit(
         cfg.get("subcircuit_build_comparison_contact_sheet", not fast_smoke_mode)
     )
     if not extraction.internal_net_names:
-        return (
-            {
-                "enabled": True,
-                "skipped": True,
-                "reason": "no_internal_nets",
-                "router": "freerouting",
-                "traces": 0,
-                "vias": 0,
-                "total_length_mm": 0.0,
-                "routed_internal_nets": [],
-                "failed_internal_nets": [],
-                "_trace_segments": [],
-                "_via_objects": [],
-                "validation": {
-                    "accepted": True,
-                    "reason": "no_internal_nets",
-                    "board_exists": True,
-                    "shorts": 0,
-                    "clearance_violations": 0,
-                    "track_summary": {"traces": 0, "vias": 0},
-                },
-                "failed": False,
-            },
-            {},
+        # Trivial leaf: no nets to route, but we still stamp the placed
+        # components onto a real PCB so the leaf flows through the same
+        # workflow as every other leaf -- pin_best_leaves can promote it,
+        # the GUI snapshot picker shows its rounds, and the composer reads
+        # uniformly from leaf_routed.kicad_pcb. The "routed" board is
+        # identical to the pre-route board because there's nothing to add.
+        return _stamp_trivial_leaf(
+            extraction=extraction,
+            solved_components=solved_components,
+            cfg=cfg,
+            round_index=round_index,
+            generate_diagnostics=generate_diagnostics,
+            fast_smoke_mode=fast_smoke_mode,
         )
 
     artifact_paths = resolve_artifact_paths(
@@ -756,6 +745,189 @@ def route_local_subcircuit(
             "round_preview_routed_front": round_preview_routed_front,
             "round_preview_routed_back": round_preview_routed_back,
             "round_preview_routed_copper": round_preview_routed_copper,
+            "failed": False,
+        },
+        route_timing,
+    )
+
+
+def _stamp_trivial_leaf(
+    *,
+    extraction: ExtractedSubcircuitBoard,
+    solved_components: dict[str, Component],
+    cfg: dict[str, Any],
+    round_index: int | None,
+    generate_diagnostics: bool,
+    fast_smoke_mode: bool,
+) -> tuple[dict[str, Any], dict[str, float]]:
+    """Stamp a placed-but-not-routed PCB for a leaf with no internal nets.
+
+    A trivial leaf (e.g. a battery holder with both terminals exposed
+    via interface ports) has nothing to route, but we still want a
+    real ``leaf_routed.kicad_pcb`` on disk so:
+
+    * ``pin_best_leaves`` can promote a chosen round like every other
+      leaf (no more "no-snapshots" status).
+    * The GUI snapshot picker can show this leaf's rounds and let the
+      user pin keyboard-style.
+    * The composer's blocker extraction reads the same way from
+      every leaf.
+
+    The resulting PCB is just the placed footprints; no traces, no
+    vias, no FreeRouting invocation. The returned routing dict
+    advertises ``traces=0, vias=0, reason="no_internal_nets"`` and
+    ``routed_board_path`` set to the same file as
+    ``pre_route_board_path``.
+    """
+    route_timing: dict[str, float] = {}
+    route_total_start = time.monotonic()
+
+    artifact_paths = resolve_artifact_paths(
+        Path(extraction.subcircuit.schematic_path).parent,
+        extraction.subcircuit.id,
+    )
+    pre_route_board = Path(artifact_paths.artifact_dir) / "leaf_pre_freerouting.kicad_pcb"
+    routed_board = Path(artifact_paths.artifact_dir) / "leaf_routed.kicad_pcb"
+
+    legality_start = time.monotonic()
+    repaired_components, legality_repair = repair_leaf_placement_legality(
+        extraction,
+        solved_components,
+        cfg,
+    )
+    route_timing["legality_repair_s"] = round(
+        max(0.0, time.monotonic() - legality_start), 3
+    )
+
+    source_pcb = Path(cfg.get("subcircuit_route_source_pcb", cfg.get("pcb_path", "")))
+    if not source_pcb.exists():
+        source_pcb = Path(extraction.subcircuit.schematic_path).with_suffix(".kicad_pcb")
+    if not source_pcb.exists():
+        # Without a source board we can't stamp; degrade to the original
+        # behaviour (no PCB on disk, validation accepted because there's
+        # nothing to fail). pin_best_leaves will report "no-snapshots"
+        # like before, which is honest in this configuration.
+        return (
+            {
+                "enabled": True,
+                "skipped": True,
+                "reason": "no_internal_nets",
+                "router": "freerouting",
+                "traces": 0,
+                "vias": 0,
+                "total_length_mm": 0.0,
+                "routed_internal_nets": [],
+                "failed_internal_nets": [],
+                "_trace_segments": [],
+                "_via_objects": [],
+                "validation": {
+                    "accepted": True,
+                    "reason": "no_internal_nets",
+                    "board_exists": False,
+                    "shorts": 0,
+                    "clearance_violations": 0,
+                    "track_summary": {"traces": 0, "vias": 0},
+                },
+                "failed": False,
+            },
+            route_timing,
+        )
+
+    route_input_board = copy.deepcopy(extraction.local_state)
+    route_input_board.components = copy.deepcopy(repaired_components)
+    route_input_board.traces = []
+    route_input_board.vias = []
+
+    stamp_start = time.monotonic()
+    route_adapter = KiCadAdapter(str(source_pcb), config=cfg)
+    route_adapter.stamp_subcircuit_board(
+        route_input_board,
+        output_path=str(pre_route_board),
+        clear_existing_tracks=True,
+        clear_existing_zones=True,
+        remove_unmapped_footprints=True,
+    )
+    route_timing["stamp_pre_route_board_s"] = round(
+        max(0.0, time.monotonic() - stamp_start), 3
+    )
+
+    # No FreeRouting to run; the placed board IS the routed board.
+    shutil.copy2(pre_route_board, routed_board)
+
+    round_board_pre_route = ""
+    round_board_routed = ""
+    if round_index is not None:
+        round_prefix = f"round_{int(round_index):04d}"
+        for src_path, suffix in (
+            (pre_route_board, "leaf_pre_freerouting"),
+            (routed_board, "leaf_routed"),
+        ):
+            if not src_path.exists():
+                continue
+            dst = src_path.parent / f"{round_prefix}_{suffix}{src_path.suffix}"
+            shutil.copy2(src_path, dst)
+            if suffix == "leaf_pre_freerouting":
+                round_board_pre_route = str(dst)
+            else:
+                round_board_routed = str(dst)
+
+    diagnostics_payload: dict[str, Any]
+    if generate_diagnostics and not fast_smoke_mode:
+        try:
+            diagnostics_payload = generate_leaf_diagnostic_artifacts(
+                artifact_dir=artifact_paths.artifact_dir,
+                pre_route_board=str(pre_route_board),
+                routed_board=str(routed_board),
+                pre_route_validation={"accepted": True, "reason": "no_internal_nets"},
+                routed_validation={"accepted": True, "reason": "no_internal_nets"},
+                render_pre_route_board_views=True,
+                render_routed_board_views=True,
+                write_pre_route_drc_json=False,
+                write_routed_drc_json=False,
+                write_pre_route_drc_report=False,
+                write_routed_drc_report=False,
+                render_pre_route_drc_overlay=False,
+                render_routed_drc_overlay=False,
+                build_comparison_contact_sheet_enabled=False,
+                quiet_board_render=fast_smoke_mode,
+            )
+        except Exception as exc:
+            diagnostics_payload = {"skipped": True, "reason": f"diag_failed:{exc}"}
+    else:
+        diagnostics_payload = {"skipped": True, "reason": "fast_smoke_or_no_diag"}
+
+    route_timing["route_local_subcircuit_total_s"] = round(
+        max(0.0, time.monotonic() - route_total_start), 3
+    )
+
+    return (
+        {
+            "enabled": True,
+            "skipped": True,
+            "reason": "no_internal_nets",
+            "router": "freerouting",
+            "traces": 0,
+            "vias": 0,
+            "total_length_mm": 0.0,
+            "round_board_illegal_pre_stamp": "",
+            "round_board_pre_route": round_board_pre_route,
+            "round_board_routed": round_board_routed,
+            "routed_internal_nets": [],
+            "failed_internal_nets": [],
+            "_trace_segments": [],
+            "_via_objects": [],
+            "validation": {
+                "accepted": True,
+                "reason": "no_internal_nets",
+                "board_exists": True,
+                "shorts": 0,
+                "clearance_violations": 0,
+                "track_summary": {"traces": 0, "vias": 0},
+            },
+            "render_diagnostics": diagnostics_payload,
+            "leaf_legality_repair": copy.deepcopy(legality_repair),
+            "routed_board_path": str(routed_board),
+            "pre_route_board_path": str(pre_route_board),
             "failed": False,
         },
         route_timing,

@@ -22,7 +22,19 @@ def local_solver_config(
     cfg["enable_board_size_search"] = False
     cfg["hierarchical_placement"] = False
 
-    local_component_zones: dict[str, Any] = {}
+    # Start the local zone map from the parent's zones so axis hints
+    # carry through unchanged for non-connector parts (batteries, ICs,
+    # passives). Connectors get re-derived below from leaf-local
+    # geometry, OVERWRITING whatever the parent said -- the parent's
+    # "edge:right" may not be the closest leaf-board edge. Without this
+    # fallback, alignment-group detection inside the leaf solver loses
+    # the parent's axis hint for non-connector groups (e.g. parallel
+    # batteries) and the alignment repair pass becomes a no-op.
+    local_component_zones: dict[str, Any] = {
+        ref: dict(spec)
+        for ref, spec in (base_cfg.get("component_zones", {}) or {}).items()
+        if isinstance(spec, dict)
+    }
     source_outline = (
         extraction.envelope.source_board_outline
         if extraction.envelope is not None
