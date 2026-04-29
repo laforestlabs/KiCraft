@@ -630,15 +630,30 @@ def pipeline_graph(
     state: PipelineState,
     on_node_select: Callable[[NodeStatus | None], None] | None = None,
     selected_node_id: str | None = None,
+    pin_status: dict[str, str] | None = None,
 ) -> None:
     """Render the pipeline flowchart.
 
     Horizontal layout: leaf cards on left -> connecting lines -> root card on right.
+
+    ``pin_status`` maps each leaf's ``node_id`` to one of:
+
+    * ``"pinned"`` -- a round is pinned for this leaf; show normal styling
+    * ``"unpinned"`` -- snapshots exist but no pin set; highlight (amber dashed border + PIN? badge)
+    * ``"no-snapshots"`` -- nothing to pin (e.g. trivial leaves with 0 internal nets); normal styling
+
+    When ``pin_status`` is None, every leaf renders normally (no highlighting).
     """
+    pin_status = pin_status or {}
     with ui.row().classes("w-full items-center justify-center gap-0 min-h-[300px]"):
         with ui.column().classes("gap-2 items-end"):
             for leaf in state.leaves:
-                _leaf_card(leaf, on_node_select, selected_node_id)
+                _leaf_card(
+                    leaf,
+                    on_node_select,
+                    selected_node_id,
+                    pin_state=pin_status.get(leaf.node_id, "no-snapshots"),
+                )
 
         with ui.column().classes("items-center justify-center px-4"):
             n_leaves = len(state.leaves)
@@ -666,10 +681,22 @@ def _leaf_card(
     node: NodeStatus,
     on_select: Callable[[NodeStatus | None], None] | None,
     selected_id: str | None,
+    pin_state: str = "no-snapshots",
 ) -> None:
-    """Render a single leaf node card."""
+    """Render a single leaf node card.
+
+    ``pin_state`` (one of ``"pinned"`` / ``"unpinned"`` / ``"no-snapshots"``)
+    controls the unpinned-leaf highlight: leaves with snapshots that the
+    user hasn't picked yet get a dashed amber border and a "PIN?" badge so
+    the leaves-first workflow's progress is visible at a glance.
+    """
     is_selected = selected_id == node.node_id
-    border = "border-2 border-blue-400" if is_selected else "border border-slate-600"
+    if is_selected:
+        border = "border-2 border-blue-400"
+    elif pin_state == "unpinned":
+        border = "border-2 border-dashed border-amber-400"
+    else:
+        border = "border border-slate-600"
     color = _STATUS_COLORS.get(node.status, "grey")
 
     def _handle_click(n: NodeStatus = node) -> None:
@@ -682,6 +709,10 @@ def _leaf_card(
         with ui.row().classes("items-center gap-2 w-full"):
             ui.icon(_STATUS_ICONS.get(node.status, "circle")).classes(f"text-{color}-400")
             ui.label(node.name).classes("font-medium text-sm truncate flex-1")
+            if pin_state == "unpinned":
+                ui.badge("PIN?", color="amber").classes("text-[10px]")
+            elif pin_state == "pinned":
+                ui.badge("PINNED", color="amber").classes("text-[10px]")
             badge_text = _STATUS_LABELS.get(node.status, node.status.upper())
             ui.badge(badge_text, color=color).classes("text-[10px]")
 

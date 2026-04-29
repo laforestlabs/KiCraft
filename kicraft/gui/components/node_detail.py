@@ -15,6 +15,7 @@ def node_detail_panel(
     node: NodeStatus,
     experiments_dir: Path | None = None,
     on_pins_changed: Callable[[], None] | None = None,
+    displayed_round_idx: int | None = None,
 ) -> None:
     """Render the detail panel for a selected pipeline node.
 
@@ -23,15 +24,37 @@ def node_detail_panel(
     snapshot for this leaf with Pin/Unpin controls. Pin/unpin actions
     fire `on_pins_changed` so the caller (Monitor) can refresh its
     pinned-leaves summary.
+
+    ``displayed_round_idx`` lets the caller (typically the Monitor's
+    keyboard handler) drive which round's render fills the main image
+    without the user having to click a thumbnail. When provided and
+    matching one of ``node.rounds``, the main image and label show
+    THAT round; otherwise the leaf's best/final render is shown.
     """
     # Mutable container for the "maximized" image path so clicking a round
     # thumbnail below can swap the big render above without rebuilding the
-    # whole panel.
-    if node.status == "routing_failed":
+    # whole panel. Seeded from displayed_round_idx (keyboard nav) when
+    # provided, else from the leaf's best/final render.
+    if node.is_leaf and displayed_round_idx is not None:
+        match = next(
+            (r for r in node.rounds if r.index == displayed_round_idx),
+            None,
+        )
+    else:
+        match = None
+    if match is not None:
+        initial_src = match.thumbnail or match.pre_route_thumbnail or node.best_render
+        score_suffix = (
+            f" — score {match.score:.2f}" if match.score is not None else ""
+        )
+        initial_label = f"Round {match.index}{score_suffix}"
+    elif node.status == "routing_failed":
+        initial_src = node.best_render
         initial_label = "Pre-route (routing failed)"
     else:
+        initial_src = node.best_render
         initial_label = "Best round"
-    maximized = {"src": node.best_render, "label": initial_label}
+    maximized = {"src": initial_src, "label": initial_label}
 
     with ui.column().classes("w-full gap-3"):
         _header(node)

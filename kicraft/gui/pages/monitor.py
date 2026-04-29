@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any
 
 from nicegui import ui
@@ -54,10 +55,20 @@ def monitor_page():
     selected_parent_round: dict = {"value": None, "user_pinned": False}
     prev_parent_score_fp: dict = {"value": ""}
 
+    # Round currently shown in the leaf detail panel's main image, driven by
+    # the keyboard navigation (left/right arrows step through rounds; Enter
+    # pins). None means "use the leaf's best/best_render fallback."
+    current_displayed_round: dict = {"value": None}
+
     with ui.row().classes("w-full items-center gap-3 mb-2 px-2"):
+        # "Start complete" full-pipeline button intentionally hidden -- the
+        # leaves-only -> pin-best -> parents-only workflow is the user-facing
+        # path. start_btn is still constructed and wired up so the on_click
+        # plumbing below continues to work; it just isn't shown.
         start_btn = ui.button(
             "Start complete", icon="play_arrow", color="green"
         ).props("dense")
+        start_btn.set_visibility(False)
         start_leaves_btn = ui.button(
             "Start leaves only", icon="account_tree", color="teal"
         ).props("dense")
@@ -220,6 +231,11 @@ def monitor_page():
 
     def _on_node_select(node: NodeStatus | None) -> None:
         selected_node["value"] = node
+        # Switching nodes resets keyboard-driven round navigation. None means
+        # "no round explicitly selected yet" -- the panel falls back to the
+        # leaf's best_render and the first arrow press will land on the
+        # node's first round.
+        current_displayed_round["value"] = None
         prev_detail_node_id["value"] = ""
         prev_graph_fingerprint["value"] = ""
         if latest_pipeline_state["value"] is not None:
@@ -274,6 +290,26 @@ def monitor_page():
                 f"Viewing best so far: R{sel}"
             )
 
+    def _compute_pin_status_map(pipeline_state: PipelineState) -> dict[str, str]:
+        """Per-leaf pin state for the pipeline graph's unpinned highlight.
+
+        Returns ``{node_id: state}`` where ``state`` is "pinned",
+        "unpinned" (snapshots exist but no pin), or "no-snapshots"
+        (trivial leaves with nothing to pin -- e.g. battery holders with
+        zero internal nets, which the parent compose treats as already
+        canonical).
+        """
+        from kicraft.autoplacer.brain import pins as pins_module
+
+        leaf_status = pins_module.required_leaf_status(state.experiments_dir)
+        out: dict[str, str] = {}
+        for leaf in pipeline_state.leaves:
+            if not leaf.artifact_dir:
+                continue
+            leaf_key = Path(leaf.artifact_dir).name
+            out[leaf.node_id] = leaf_status.get(leaf_key, "no-snapshots")
+        return out
+
     def _rebuild_graph(pipeline_state: PipelineState) -> None:
         graph_container.clear()
         with graph_container:
@@ -281,6 +317,7 @@ def monitor_page():
                 pipeline_state,
                 on_node_select=_on_node_select,
                 selected_node_id=selected_node["value"].node_id if selected_node["value"] else None,
+                pin_status=_compute_pin_status_map(pipeline_state),
             )
 
     def _rebuild_detail() -> None:
@@ -296,11 +333,157 @@ def monitor_page():
             def _on_pins_changed() -> None:
                 _refresh_pin_summary()
                 _redraw_pin_summary_body()
+                # Pin state drives the unpinned-leaf highlight in the
+                # pipeline graph -- force the next graph fingerprint to
+                # miss so the UI repaints with the new pin map.
+                prev_graph_fingerprint["value"] = ""
+                if latest_pipeline_state["value"] is not None:
+                    _rebuild_graph(latest_pipeline_state["value"])
             node_detail_panel(
                 node,
                 experiments_dir=state.experiments_dir,
                 on_pins_changed=_on_pins_changed,
+                displayed_round_idx=current_displayed_round["value"],
             )
+
+    def _next_unpinned_leaf(
+        pipeline_state: PipelineState | None,
+        after: NodeStatus | None,
+    ) -> NodeStatus | None:
+        """First leaf after ``after`` (cyclic) whose pin status is "unpinned".
+
+        Skips leaves with no snapshots (trivial/no-internal-nets leaves
+        that the parent compose treats as canonical regardless) and
+        leaves that already have a pin. Used by the keyboard handler's
+        Enter action to auto-advance focus down the leaves-first path.
+        """
+        if pipeline_state is None or not pipeline_state.leaves:
+            return None
+        from kicraft.autoplacer.brain import pins as pins_module
+
+        leaf_status = pins_module.required_leaf_status(state.experiments_dir)
+        leaves = pipeline_state.leaves
+        start_idx = 0
+        if after is not None:
+            for i, leaf in enumerate(leaves):
+                if leaf.node_id == after.node_id:
+                    start_idx = i + 1
+                    break
+        n = len(leaves)
+        for offset in range(n):
+            leaf = leaves[(start_idx + offset) % n]
+            if not leaf.artifact_dir:
+                continue
+            leaf_key = Path(leaf.artifact_dir).name
+            if leaf_status.get(leaf_key) == "unpinned":
+                return leaf
+        return None
+
+    def _on_keyboard(event) -> None:
+        """Keyboard navigation for the leaves-first pin workflow.
+
+        * Left / Right arrow: cycle through the selected leaf's accepted
+          rounds, updating the main render in the detail panel.
+        * Enter: pin the currently-displayed round for this leaf, then
+          jump to the next unpinned leaf with a toast describing it.
+
+        Only fires on keydown so an arrow key held down doesn't spam
+        rebuilds (browser repeat events still call us, but they're
+        infrequent enough to feel responsive without overwhelming the
+        rebuild path).
+        """
+        if not getattr(event.action, "keydown", False):
+            return
+        node = selected_node["value"]
+        if node is None or not node.is_leaf or not node.rounds:
+            return
+
+        # ui.keyboard's default ``ignore`` list already swallows keystrokes
+        # while focus is on input/textarea/select/button, so the user can
+        # type round numbers and preset names normally without the arrow
+        # keys hijacking those edits.
+
+        round_indices = sorted(r.index for r in node.rounds)
+        if not round_indices:
+            return
+
+        is_left = bool(getattr(event.key, "arrow_left", False))
+        is_right = bool(getattr(event.key, "arrow_right", False))
+        is_enter = bool(getattr(event.key, "enter", False))
+
+        if is_left or is_right:
+            current = current_displayed_round["value"]
+            if current not in round_indices:
+                # First arrow press lands on the highest-scoring round so
+                # the user starts on a sensible default.
+                best_round = max(node.rounds, key=lambda r: r.score)
+                current_displayed_round["value"] = best_round.index
+            else:
+                pos = round_indices.index(current)
+                step = -1 if is_left else +1
+                current_displayed_round["value"] = round_indices[
+                    (pos + step) % len(round_indices)
+                ]
+            _rebuild_detail()
+            return
+
+        if is_enter:
+            from kicraft.autoplacer.brain import pins as pins_module
+
+            target_round = current_displayed_round["value"]
+            if target_round is None:
+                # Nothing displayed yet -- pin the highest-scoring round.
+                best_round = max(node.rounds, key=lambda r: r.score)
+                target_round = best_round.index
+            if not node.artifact_dir:
+                ui.notify(
+                    f"{node.name} has no artifact dir to pin",
+                    color="negative",
+                )
+                return
+            leaf_key = Path(node.artifact_dir).name
+            try:
+                pins_module.pin_leaf(
+                    state.experiments_dir, leaf_key, int(target_round)
+                )
+            except FileNotFoundError as exc:
+                ui.notify(str(exc), color="negative")
+                return
+            ui.notify(
+                f"Pinned {node.name} to round {target_round}",
+                color="positive",
+            )
+            _refresh_pin_summary()
+            _redraw_pin_summary_body()
+            prev_graph_fingerprint["value"] = ""
+            if latest_pipeline_state["value"] is not None:
+                _rebuild_graph(latest_pipeline_state["value"])
+
+            # Auto-advance to the next leaf that still needs a pin so the
+            # user can flow through the leaves-first workflow without
+            # reaching for the mouse.
+            next_leaf = _next_unpinned_leaf(
+                latest_pipeline_state["value"], after=node
+            )
+            if next_leaf is None:
+                ui.notify(
+                    "All leaves pinned -- ready to start parents-only.",
+                    color="positive",
+                    icon="check_circle",
+                )
+                return
+            _on_node_select(next_leaf)
+            ui.notify(
+                f"Now: {next_leaf.name} -- "
+                f"{next_leaf.total_rounds_run} round(s), "
+                f"{next_leaf.component_count} component(s); "
+                "←/→ to browse, Enter to pin",
+                color="info",
+                multi_line=True,
+            )
+            return
+
+    ui.keyboard(on_key=_on_keyboard)
 
     def _update_status():
         run_status = runner.read_status()
