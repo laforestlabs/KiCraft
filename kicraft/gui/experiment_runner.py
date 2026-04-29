@@ -43,27 +43,39 @@ class ExperimentRunner:
     def _purge_prior_run_artifacts(self, phase: str | None = None) -> None:
         """Clear per-run outputs so the Monitor tab reflects the new run.
 
-        Removes per-round metadata, the parent-round log, and the
-        run-status files. Keeps user/config files (presets DB,
-        program.md, config overlays) intact.
+        Removes per-round metadata, the parent-round log, the
+        run-status files, and per-leaf round snapshots. Keeps:
 
-        Phase-aware: in --parents-only and --leaves-only modes the
-        subcircuits/ dir is preserved because those modes either consume
-        existing leaf artifacts (parents-only reads pinned snapshots) or
-        accumulate new ones on top of existing snapshots (leaves-only).
-        Wiping subcircuits/ in those modes broke the whole point of the
-        two-phase workflow -- pins.json would point to ghosts.
+        * Pinned canonical leaf artifacts (``leaf_routed.kicad_pcb``,
+          ``solved_layout.json``, ``metadata.json``, ``renders/``) so
+          ``pins.json`` references survive between leaves-only runs and
+          ``--parents-only`` reads stay valid.
+        * User/config files (presets DB, program.md, config overlays).
+
+        Per-leaf ``round_NNNN_*`` snapshot files and ``debug.json``
+        are wiped on every run (regardless of phase). These accumulate
+        across runs and are the source of the "rounds 1..14 in a 3x3
+        run" GUI confusion: the score plot is built from
+        ``debug.json``'s ``all_rounds`` list, and prior runs' entries
+        used to linger.
+
+        Phase-aware: in ``--parents-only`` and ``--leaves-only`` modes
+        the ``subcircuits/`` dir's per-leaf canonical files are
+        preserved (only round-snapshot files inside each leaf dir are
+        removed). On a full run the dir is wiped wholesale because
+        leaves are about to be re-solved from scratch.
         """
         exp = self.experiments_dir
         if not exp.exists():
             return
 
-        # subcircuits/ is the leaf-artifact store. Wiping it deletes the
-        # snapshots that pins.json references, so only purge it on a
-        # fresh full run.
-        purge_subcircuits = phase is None
+        # subcircuits/ contains canonical leaf artifacts that pins
+        # depend on. On a full run we wipe it; on phased runs we keep
+        # canonical files but wipe per-attempt round_NNNN_* snapshots
+        # and debug.json so a fresh run gets clean round numbering.
+        purge_subcircuits_wholesale = phase is None
         round_dirs = ["rounds", "frames", "hierarchical_autoexperiment"]
-        if purge_subcircuits:
+        if purge_subcircuits_wholesale:
             round_dirs.insert(0, "subcircuits")
 
         for sub in round_dirs:
@@ -73,6 +85,9 @@ class ExperimentRunner:
                     shutil.rmtree(path, ignore_errors=True)
                 except OSError:
                     pass
+
+        if not purge_subcircuits_wholesale:
+            self._purge_per_leaf_round_snapshots(exp / "subcircuits")
 
         for name in (
             "experiments.jsonl",
@@ -85,6 +100,38 @@ class ExperimentRunner:
             (exp / name).unlink(missing_ok=True)
 
         exp.mkdir(parents=True, exist_ok=True)
+
+    def _purge_per_leaf_round_snapshots(self, sub_root: Path) -> None:
+        """Drop ``round_NNNN_*`` snapshots and ``debug.json`` per leaf.
+
+        Pin canonical files (``leaf_routed.kicad_pcb``,
+        ``solved_layout.json``, ``metadata.json``, ``renders/``) are
+        preserved so an ongoing pin keeps applying. The per-attempt
+        snapshots and the cumulative-history ``debug.json`` are
+        ephemeral run-state and have no business lingering once a new
+        run starts solving the same leaves.
+        """
+        if not sub_root.is_dir():
+            return
+        for leaf_dir in sub_root.iterdir():
+            if not leaf_dir.is_dir():
+                continue
+            for snapshot in leaf_dir.glob("round_*"):
+                # Top-level files only; leaf renders live under
+                # leaf_dir / "renders" / round_NNNN_*.png and we leave
+                # those in place because they're cheap to overwrite
+                # by the next run.
+                if snapshot.is_file():
+                    try:
+                        snapshot.unlink()
+                    except OSError:
+                        pass
+            debug_json = leaf_dir / "debug.json"
+            if debug_json.exists():
+                try:
+                    debug_json.unlink()
+                except OSError:
+                    pass
 
     def _cleanup_stale_state(self) -> None:
         """Remove stale PID/stop files and mark status as done."""

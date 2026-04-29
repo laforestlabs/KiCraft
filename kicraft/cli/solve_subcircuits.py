@@ -164,7 +164,6 @@ class SolvedLeafSubcircuit:
     scheduling_metadata: dict[str, Any] = field(default_factory=dict)
     failure_summary: dict[str, Any] = field(default_factory=dict)
     experiment_round: int = 0
-    prior_rounds: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def sheet_name(self) -> str:
@@ -598,44 +597,16 @@ def _solve_leaf_subcircuit(
     round_results: list[SolveRoundResult] = []
     best: SolveRoundResult | None = None
 
-    # Determine base round-index offset by reading any prior debug.json for
-    # this leaf. Prior rounds from earlier experiment rounds are preserved so
-    # the GUI can filter leaf rounds by parent round; to avoid render-filename
-    # collisions and keep indices monotonic, we start this run's round_index
-    # where the prior run left off.
-    base_offset = 0
-    prior_all_rounds: list[dict[str, Any]] = []
-    schematic_path = getattr(extraction.subcircuit, "schematic_path", None)
-    if schematic_path:
-        try:
-            paths = resolve_artifact_paths(
-                project_dir=Path(schematic_path).parent,
-                subcircuit_id=node.definition.id,
-            )
-            debug_path = Path(paths.debug_json)
-            if debug_path.exists():
-                prior_payload = json.loads(debug_path.read_text(encoding="utf-8"))
-                prior_extra = prior_payload.get("extra", {}) if isinstance(prior_payload, dict) else {}
-                raw_prior = prior_extra.get("all_rounds", []) if isinstance(prior_extra, dict) else []
-                if isinstance(raw_prior, list):
-                    # Drop legacy rounds that predate experiment_round
-                    # instrumentation; they confuse the GUI's round filter.
-                    prior_all_rounds = [
-                        r for r in raw_prior
-                        if isinstance(r, dict)
-                        and r.get("experiment_round") is not None
-                        and int(r.get("experiment_round", 0) or 0) > 0
-                    ]
-                    if prior_all_rounds:
-                        max_idx = max(
-                            int(r.get("round_index", -1) or -1) for r in prior_all_rounds
-                        )
-                        if max_idx >= 0:
-                            base_offset = max_idx + 1
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            prior_all_rounds = []
-            base_offset = 0
-
+    # Each autoexperiment invocation is a fresh run. Round indices start
+    # at 0 and per-leaf debug.json contains only this run's rounds. The
+    # previous design accumulated round_index across runs (base_offset =
+    # max_prior_round + 1) so the GUI could "see history," but the GUI
+    # never exposed that filter and the unbounded indices made fresh
+    # 3-round runs look like rounds 9..14 in the score plot. The
+    # corresponding cleanup -- wiping round_NNNN_* snapshots and the
+    # prior debug.json before the run starts -- happens in
+    # experiment_runner._purge_prior_run_artifacts so canonical pinned
+    # files are still preserved.
     effective_rounds = rounds
     if route:
         if bool(local_cfg.get("subcircuit_fast_smoke_mode", False)):
@@ -661,7 +632,7 @@ def _solve_leaf_subcircuit(
     acceptance_cfg = acceptance_config_from_dict(cfg)
 
     for local_round_index in range(effective_rounds):
-        round_index = base_offset + local_round_index
+        round_index = local_round_index
         seed = rng.randint(0, 2**31 - 1)
         round_cfg = dict(local_cfg)
         if route and not fast_smoke_mode:
@@ -837,7 +808,6 @@ def _solve_leaf_subcircuit(
         scheduling_metadata=scheduling_metadata,
         failure_summary=failure_summary,
         experiment_round=experiment_round,
-        prior_rounds=prior_all_rounds,
     )
 
 
@@ -988,23 +958,18 @@ def _persist_solution(
     persist_elapsed_s = round(max(0.0, time.monotonic() - persist_start), 3)
     solved.best_round.timing_breakdown["persist_solution_s"] = persist_elapsed_s
 
-    # Stamp each new round record with the experiment_round it belongs to so
-    # the GUI can filter per-parent-round. Merge with any prior rounds
-    # recovered from an earlier experiment round (same leaf, same artifact dir).
-    new_round_dicts: list[dict[str, Any]] = []
+    # debug.json contains only the current run's rounds. Stamp each
+    # round record with the experiment_round it belongs to so the GUI
+    # can filter per-parent-round within this run. Merging with prior
+    # runs' rounds was removed: the per-leaf cleanup at run start (see
+    # experiment_runner._purge_prior_run_artifacts) deletes prior
+    # debug.json so each invocation gets a fresh history.
+    all_rounds_dicts: list[dict[str, Any]] = []
     for round_result in solved.all_rounds:
         rec = round_result.to_dict()
         rec["experiment_round"] = int(solved.experiment_round or 0)
-        new_round_dicts.append(rec)
-
-    new_indices = {int(r.get("round_index", -1) or -1) for r in new_round_dicts}
-    merged_rounds = [
-        r
-        for r in solved.prior_rounds
-        if int(r.get("round_index", -1) or -1) not in new_indices
-    ]
-    merged_rounds.extend(new_round_dicts)
-    merged_rounds.sort(key=lambda r: int(r.get("round_index", 0) or 0))
+        all_rounds_dicts.append(rec)
+    all_rounds_dicts.sort(key=lambda r: int(r.get("round_index", 0) or 0))
 
     save_debug_payload(
         extraction=extraction,
@@ -1012,7 +977,7 @@ def _persist_solution(
         extra={
             "solve_summary": solved.to_dict(),
             "best_round": solved.best_round.to_dict(),
-            "all_rounds": merged_rounds,
+            "all_rounds": all_rounds_dicts,
             "leaf_board_state": extraction_debug_dict(solved.extraction),
             "solved_placement_summary": {
                 "component_count": len(solved.best_round.components),
