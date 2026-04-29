@@ -34,13 +34,13 @@ HIERARCHICAL_CONTROLS = [
     {
         "key": "leaf_rounds",
         "label": "Leaf Solve Rounds",
-        "default": 2,
+        "default": 3,
         "min": 1,
         "max": None,
         "step": 1,
         "enabled": True,
         "group": "Leaf Solving",
-        "description": "How many local solve attempts each leaf gets. Higher is slower but more likely to find a legal placement.",
+        "description": "How many local solve attempts each leaf gets. The default 3 gives the canonical 3x3 recipe (3 experiment rounds x 3 leaf attempts) -- enough variation for the GUI's per-round pin picker to be useful without excessive runtime.",
     },
     {
         "key": "top_level_rounds",
@@ -100,7 +100,11 @@ _PROJECT_NAME, _DEFAULT_PCB, _DEFAULT_SCH = _detect_project_files(_PROJECT_ROOT)
 
 
 DEFAULT_STRATEGY = {
-    "rounds": 10,
+    # Default to the 3x3 recipe: 3 experiment rounds x 3 leaf attempts.
+    # Pairs with HIERARCHICAL_CONTROLS["leaf_rounds"]=3 to give the
+    # snapshot picker a meaningful set of candidates to choose from
+    # without long runtimes.
+    "rounds": 3,
     "workers": 0,
     "plateau_threshold": 2,
     "seed": 0,

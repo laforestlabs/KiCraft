@@ -70,10 +70,22 @@ class ExperimentRunner:
             return
 
         # subcircuits/ contains canonical leaf artifacts that pins
-        # depend on. On a full run we wipe it; on phased runs we keep
-        # canonical files but wipe per-attempt round_NNNN_* snapshots
-        # and debug.json so a fresh run gets clean round numbering.
+        # depend on. Cleanup is phase-aware:
+        #
+        # * full run (phase=None): wipe subcircuits/ wholesale -- leaves
+        #   are about to be re-solved from scratch anyway.
+        # * leaves-only: keep canonical (so existing pins survive) but
+        #   drop per-leaf debug.json + round_NNNN_* snapshots so the
+        #   new run produces clean round indices [0..N-1] in the GUI's
+        #   score plot. This is the fix for "rounds 1..14 in a 3x3 run".
+        # * parents-only: do NOT touch subcircuits/. Leaves were
+        #   pinned from a previous leaves-only run; their debug.json
+        #   is the source of truth for the GUI's leaf round timeline
+        #   AND for selected_round filtering. Wiping it makes every
+        #   leaf card flip to "FAILED" because the round filter sees
+        #   rounds=[] (the parents-only run produces no leaf rounds).
         purge_subcircuits_wholesale = phase is None
+        purge_per_leaf_snapshots = phase == "leaves_only"
         round_dirs = ["rounds", "frames", "hierarchical_autoexperiment"]
         if purge_subcircuits_wholesale:
             round_dirs.insert(0, "subcircuits")
@@ -86,7 +98,7 @@ class ExperimentRunner:
                 except OSError:
                     pass
 
-        if not purge_subcircuits_wholesale:
+        if purge_per_leaf_snapshots:
             self._purge_per_leaf_round_snapshots(exp / "subcircuits")
 
         for name in (

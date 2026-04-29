@@ -68,13 +68,14 @@ def _strategy_panel(state):
 
         ui.number(
             "Leaf solve rounds per experiment round",
-            value=state.strategy.get("leaf_rounds", 2),
+            value=state.strategy.get("leaf_rounds", 3),
             min=1,
             step=1,
             on_change=lambda e: state.strategy.update({"leaf_rounds": int(e.value)}),
         ).tooltip(
             "How many local solve attempts each leaf subcircuit gets inside one "
-            "experiment round. A balanced default is 2: usually enough to improve "
+            "experiment round. The default 3 matches the 3x3 recipe: usually "
+            "enough to improve "
             "stability over 1, without the runtime jump of deeper search."
         )
 

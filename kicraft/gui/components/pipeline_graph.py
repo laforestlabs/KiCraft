@@ -176,6 +176,24 @@ def _load_round_statuses(experiments_dir: Path) -> dict[int, dict[str, Any]]:
     return result
 
 
+def _leaf_is_pinned(experiments_dir: Path, leaf_key: str) -> bool:
+    """Return True if pins.json claims this leaf is pinned.
+
+    Used by ``gather_pipeline_state`` to decide whether to fall back
+    to canonical state when the selected_round filter yields no
+    rounds. A pin means "use this exact state regardless of which
+    parent round the chart is on" -- so don't blow away score /
+    render / status just because the parent round produced no per-leaf
+    rounds (the parents-only-after-leaves-only path).
+    """
+    try:
+        from kicraft.autoplacer.brain import pins as pins_module
+
+        return pins_module.is_pinned(experiments_dir, leaf_key) is not None
+    except Exception:
+        return False
+
+
 def _determine_leaf_status(artifact_dir: Path, *, run_in_progress: bool = False) -> str:
     """Determine leaf status from artifact presence.
 
@@ -577,18 +595,35 @@ def gather_pipeline_state(
                         leaf_status = "routing_failed"
                 else:
                     # No rounds for this leaf in the selected parent round.
-                    # Two cases: (a) the run is still in flight and this
-                    # leaf hasn't been solved yet -- "queued" / WAITING is
-                    # the right user-facing state; (b) the run finished
-                    # and this leaf actually missed the round -- that's
-                    # a real failure. Distinguish by whether the run is
-                    # currently in progress.
-                    rounds = []
-                    best_render = None
-                    score = None
-                    traces = 0
-                    vias = 0
-                    leaf_status = "queued" if run_in_progress else "failed"
+                    # Three cases:
+                    #   (a) the leaf is PINNED -- the user explicitly froze
+                    #       its state from a prior run. selected_round is
+                    #       a parent-round filter that's irrelevant to a
+                    #       pinned leaf; fall back to canonical state.
+                    #       This is the parents-only-after-leaves-only
+                    #       workflow where parent rounds don't produce
+                    #       per-leaf rounds at all.
+                    #   (b) the run is still in flight and this leaf
+                    #       hasn't been solved yet -- "queued" / WAITING.
+                    #   (c) the run finished and this leaf actually
+                    #       missed the round -- that's a real failure.
+                    leaf_key = artifact_dir.name
+                    is_pinned = _leaf_is_pinned(experiments_dir, leaf_key)
+                    if is_pinned:
+                        # Keep canonical-derived leaf_status / score /
+                        # traces / vias / best_render -- the pin already
+                        # represents the user's chosen state for THIS
+                        # leaf. We just clear the per-round timeline
+                        # because the parent round in question didn't
+                        # produce any.
+                        rounds = []
+                    else:
+                        rounds = []
+                        best_render = None
+                        score = None
+                        traces = 0
+                        vias = 0
+                        leaf_status = "queued" if run_in_progress else "failed"
 
             node = NodeStatus(
                 name=sheet_name,

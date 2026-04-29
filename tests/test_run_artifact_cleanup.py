@@ -119,19 +119,35 @@ def test_leaves_only_purge_keeps_canonical_drops_snapshots(tmp_path: Path):
     assert not (leaf / "debug.json").exists()
 
 
-def test_parents_only_purge_also_drops_per_leaf_snapshots(tmp_path: Path):
-    """parents-only typically doesn't re-solve leaves, so the score
-    plot for each leaf shouldn't keep showing prior leaves-only data
-    once a new run starts. Same cleanup applies."""
+def test_parents_only_purge_preserves_leaves_only_state(tmp_path: Path):
+    """parents-only does NOT re-solve leaves -- it consumes pinned
+    snapshots from a previous leaves-only run. The leaves-only run's
+    debug.json is the source of truth for both the GUI's per-leaf
+    round timeline AND the selected_round filter that maps parent
+    rounds to leaf rounds. Wiping it on a parents-only run start
+    causes every leaf card to flip to FAILED (rounds=[]; selected_round
+    branch picks the failure path). So the cleanup MUST keep
+    debug.json + round_NNNN_* + canonical files all intact for
+    parents-only."""
     runner = _build_runner_for(tmp_path)
     leaf = runner.experiments_dir / "subcircuits" / "leafA"
-    _seed_leaf_dir(leaf, round_indices=[0, 5, 14])
+    _seed_leaf_dir(leaf, round_indices=[0, 1, 2])
 
     runner._purge_prior_run_artifacts(phase="parents_only")
 
+    # All canonical + round + debug state preserved.
     assert (leaf / "leaf_routed.kicad_pcb").exists()
-    assert not (leaf / "debug.json").exists()
-    assert not list(leaf.glob("round_*_*.kicad_pcb"))
+    assert (leaf / "solved_layout.json").exists()
+    assert (leaf / "metadata.json").exists()
+    assert (leaf / "debug.json").exists()
+    assert sorted(p.name for p in leaf.glob("round_*_*.kicad_pcb")) == [
+        "round_0000_leaf_pre_freerouting.kicad_pcb",
+        "round_0000_leaf_routed.kicad_pcb",
+        "round_0001_leaf_pre_freerouting.kicad_pcb",
+        "round_0001_leaf_routed.kicad_pcb",
+        "round_0002_leaf_pre_freerouting.kicad_pcb",
+        "round_0002_leaf_routed.kicad_pcb",
+    ]
 
 
 def test_purge_handles_multiple_leaves(tmp_path: Path):
