@@ -178,11 +178,28 @@ class SolvedLeafSubcircuit:
         self,
         round_result: SolveRoundResult,
         cfg: dict[str, Any] | None = None,
+        *,
+        routed_board_path_override: str | Path | None = None,
     ):
         """Build a SubCircuitLayout from any solver round, not just the winner.
 
         Used both to materialize the canonical layout (winner) and to
         snapshot every accepted attempt as a pinnable candidate.
+
+        ``round_result.routing["routed_board_path"]`` always points to the
+        canonical ``leaf_routed.kicad_pcb`` (every route_local_subcircuit
+        call overwrites that one path). When this method is called for the
+        WINNING round just after solve, that's correct -- the canonical is
+        in the winner's state. When it's called LATER for a per-round
+        snapshot (so each ``round_NNNN_solved_layout.json`` describes its
+        own attempt), the canonical has already been overwritten by other
+        rounds and dereferencing it returns the wrong components.
+
+        Pass ``routed_board_path_override`` (typically a
+        ``round_NNNN_leaf_routed.kicad_pcb`` path) to read components from
+        the per-round PCB snapshot instead. The per-round JSON layout then
+        agrees with the per-round PCB snapshot it pairs with -- pinning a
+        non-winning round no longer mismatches its own PCB.
         """
         from kicraft.autoplacer.brain.subcircuit_solver import (
             infer_interface_anchors,
@@ -190,7 +207,10 @@ class SolvedLeafSubcircuit:
             _compute_component_bbox,
         )
 
-        routed_board_path = round_result.routing.get("routed_board_path")
+        if routed_board_path_override is not None:
+            routed_board_path: str | None = str(routed_board_path_override)
+        else:
+            routed_board_path = round_result.routing.get("routed_board_path")
         if routed_board_path:
             routed_state = _load_board_state(Path(routed_board_path), cfg or {})
             solved_components = copy.deepcopy(routed_state.components)
@@ -1044,11 +1064,19 @@ def _persist_solution(
             continue
         round_prefix = f"round_{int(round_idx):04d}"
 
-        # Per-attempt solved_layout: re-derive from this round's components
-        # and routed_board_path so the pin operation gets the actual
-        # placement of THIS attempt, not the canonical winner's.
+        # Per-attempt solved_layout: re-derive from THIS round's PCB
+        # snapshot so the pin operation gets the actual placement of THIS
+        # attempt, not whatever state the canonical leaf_routed.kicad_pcb
+        # ended up in after subsequent rounds. Without the override,
+        # round_to_layout would dereference round_result.routing
+        # ["routed_board_path"], which always points to the canonical and
+        # has been overwritten by later rounds by the time this loop runs.
         try:
-            layout = solved.round_to_layout(round_result, cfg=cfg)
+            layout = solved.round_to_layout(
+                round_result,
+                cfg=cfg,
+                routed_board_path_override=round_pcb,
+            )
             layout_artifact = build_solved_layout_artifact(
                 layout,
                 project_dir=project_dir_for_layout,
