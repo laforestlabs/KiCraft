@@ -1,4 +1,9 @@
-"""Tests for kicraft.autoplacer.brain.leaf_geometry -- connector pad margin.
+"""Tests for kicraft.autoplacer.brain.leaf_geometry tight bounds.
+
+Verifies that ``tight_leaf_geometry_bounds`` reports the union of every
+component's ``physical_bbox()`` -- courtyard plus actual pad copper
+extents -- so a connector whose pads stick out past the courtyard
+correctly grows the leaf outline.
 
 All tests use synthetic/mock data only; no pcbnew dependency.
 """
@@ -28,8 +33,23 @@ from kicraft.autoplacer.brain.types import (
 # ---------------------------------------------------------------------------
 
 
-def _make_pad(ref: str, pad_id: str, x: float, y: float, net: str) -> Pad:
-    return Pad(ref=ref, pad_id=pad_id, pos=Point(x, y), net=net, layer=Layer.FRONT)
+def _make_pad(
+    ref: str,
+    pad_id: str,
+    x: float,
+    y: float,
+    net: str,
+    *,
+    size_mm: Point | None = None,
+) -> Pad:
+    return Pad(
+        ref=ref,
+        pad_id=pad_id,
+        pos=Point(x, y),
+        net=net,
+        layer=Layer.FRONT,
+        size_mm=size_mm,
+    )
 
 
 def _make_connector(
@@ -117,104 +137,84 @@ def _make_extraction(components: dict[str, Component]) -> ExtractedSubcircuitBoa
 # ---------------------------------------------------------------------------
 
 
-class TestTightBoundsConnectorPadMargin:
-    """Tests for the connector_pad_margin_mm parameter."""
+class TestTightBoundsPhysicalExtent:
+    """Tight bounds reflect each component's physical extent (courtyard
+    plus pad copper bboxes), not just courtyard plus pad centers."""
 
-    def test_tight_bounds_without_connector_margin(self):
-        """Default margin=0: bounds come from component bbox and pad centers."""
+    def test_pad_centers_inside_courtyard_match_bbox(self):
+        """Pads with no recorded size and centers inside courtyard => bounds = courtyard."""
         connector = _make_connector()
         components = {"J1": connector}
         extraction = _make_extraction(components)
 
         bounds = tight_leaf_geometry_bounds(extraction, components, {})
 
-        # Component bbox: center at (5,5), w=4, h=6 => TL(3,2), BR(7,8)
-        # Pad centers: (3.5, 4.0) and (3.5, 6.0) -- inside the bbox
-        # So the bounds should match the component bbox
+        # Courtyard: center (5,5), w=4, h=6 => TL(3,2), BR(7,8).
+        # Pad centers (3.5, 4.0)/(3.5, 6.0) are inside; no size_mm => contribute centers only.
         assert bounds["min_x"] == pytest.approx(3.0)
         assert bounds["min_y"] == pytest.approx(2.0)
         assert bounds["max_x"] == pytest.approx(7.0)
         assert bounds["max_y"] == pytest.approx(8.0)
 
-    def test_tight_bounds_with_connector_margin(self):
-        """connector_pad_margin_mm=1.0 expands bounds by pad margin."""
-        connector = _make_connector()
+    def test_pad_size_extends_bounds_outboard_of_courtyard(self):
+        """A pad whose copper extends past the courtyard pushes bounds out."""
+        connector = Component(
+            ref="J1",
+            value="USB-C",
+            pos=Point(5.0, 5.0),
+            rotation=0.0,
+            layer=Layer.FRONT,
+            width_mm=4.0,
+            height_mm=6.0,
+            pads=[
+                # Pad copper centered at (3.5, 4.0) with width 2mm reaches
+                # x=2.5 -- outside the courtyard's left edge at x=3.0.
+                _make_pad("J1", "1", 3.5, 4.0, "VBUS",
+                          size_mm=Point(2.0, 1.5)),
+                _make_pad("J1", "2", 3.5, 6.0, "GND",
+                          size_mm=Point(2.0, 1.5)),
+            ],
+            locked=True,
+            kind="connector",
+        )
         components = {"J1": connector}
         extraction = _make_extraction(components)
+        bounds = tight_leaf_geometry_bounds(extraction, components, {})
 
-        bounds = tight_leaf_geometry_bounds(
-            extraction, components, {},
-            connector_pad_margin_mm=1.0,
-        )
-
-        # Component bbox: TL(3,2), BR(7,8)
-        # Pad centers: (3.5, 4.0) and (3.5, 6.0)
-        # With margin=1.0 on connector pads:
-        #   pad1 contributes x range [2.5, 4.5], y range [3.0, 5.0]
-        #   pad2 contributes x range [2.5, 4.5], y range [5.0, 7.0]
-        # Combined with component bbox:
-        #   min_x = min(3.0, 2.5) = 2.5
-        #   min_y = min(2.0, 3.0) = 2.0 (bbox still dominates)
-        #   max_x = max(7.0, 4.5) = 7.0 (bbox still dominates)
-        #   max_y = max(8.0, 7.0) = 8.0 (bbox still dominates)
+        # Courtyard left edge x=3.0; pad bbox extends to x=2.5 -> bounds at 2.5
         assert bounds["min_x"] == pytest.approx(2.5)
+        # Courtyard dominates on the other three sides.
         assert bounds["min_y"] == pytest.approx(2.0)
         assert bounds["max_x"] == pytest.approx(7.0)
         assert bounds["max_y"] == pytest.approx(8.0)
-        # Width should be wider than without margin
-        assert bounds["width_mm"] == pytest.approx(7.0 - 2.5)
 
-    def test_tight_bounds_connector_margin_only_affects_connectors(self):
-        """Margin expands connector pads but NOT passive pads."""
-        connector = _make_connector()
-        passive = _make_passive()
-        components = {"J1": connector, "R1": passive}
+    def test_works_for_any_component_kind_not_only_connectors(self):
+        """A passive with oversized pads grows the bounds too -- the previous
+        connector-only band-aid no longer applies."""
+        passive = Component(
+            ref="R1",
+            value="10k",
+            pos=Point(10.0, 5.0),
+            rotation=0.0,
+            layer=Layer.FRONT,
+            width_mm=1.6,
+            height_mm=0.8,
+            pads=[
+                # Pad copper at x=10.5 with width 2mm reaches x=11.5 --
+                # outside the courtyard's right edge at x=10.8.
+                _make_pad("R1", "1", 9.5, 5.0, "NET1",
+                          size_mm=Point(2.0, 1.0)),
+                _make_pad("R1", "2", 10.5, 5.0, "NET2",
+                          size_mm=Point(2.0, 1.0)),
+            ],
+            locked=False,
+            kind="passive",
+        )
+        components = {"R1": passive}
         extraction = _make_extraction(components)
+        bounds = tight_leaf_geometry_bounds(extraction, components, {})
 
-        # Get bounds without margin for baseline
-        bounds_no_margin = tight_leaf_geometry_bounds(
-            extraction, components, {},
-        )
-
-        # Get bounds with margin
-        bounds_with_margin = tight_leaf_geometry_bounds(
-            extraction, components, {},
-            connector_pad_margin_mm=1.0,
-        )
-
-        # The connector pad at x=3.5 with margin=1.0 pushes min_x to 2.5
-        # (from 3.0 which is the connector bbox left edge)
-        assert bounds_with_margin["min_x"] < bounds_no_margin["min_x"]
-
-        # The passive at x=10, pads at 9.5 and 10.5, bbox TL.x=9.2, BR.x=10.8
-        # Without margin the right edge is from the passive bbox at 10.8
-        # With margin, the passive should NOT be expanded, so max_x stays
-        assert bounds_with_margin["max_x"] == pytest.approx(
-            bounds_no_margin["max_x"]
-        )
-
-    def test_tight_bounds_connector_margin_zero_is_noop(self):
-        """Explicit connector_pad_margin_mm=0.0 gives same result as default."""
-        connector = _make_connector()
-        passive = _make_passive()
-        components = {"J1": connector, "R1": passive}
-        extraction = _make_extraction(components)
-
-        bounds_default = tight_leaf_geometry_bounds(
-            extraction, components, {},
-        )
-        bounds_explicit_zero = tight_leaf_geometry_bounds(
-            extraction, components, {},
-            connector_pad_margin_mm=0.0,
-        )
-
-        assert bounds_explicit_zero["min_x"] == pytest.approx(bounds_default["min_x"])
-        assert bounds_explicit_zero["min_y"] == pytest.approx(bounds_default["min_y"])
-        assert bounds_explicit_zero["max_x"] == pytest.approx(bounds_default["max_x"])
-        assert bounds_explicit_zero["max_y"] == pytest.approx(bounds_default["max_y"])
-        assert bounds_explicit_zero["width_mm"] == pytest.approx(
-            bounds_default["width_mm"]
-        )
-        assert bounds_explicit_zero["height_mm"] == pytest.approx(
-            bounds_default["height_mm"]
-        )
+        # Pad copper extends past courtyard.right (10.8) to 11.5
+        assert bounds["max_x"] == pytest.approx(11.5)
+        # Pad copper extends past courtyard.left (9.2) to 8.5
+        assert bounds["min_x"] == pytest.approx(8.5)

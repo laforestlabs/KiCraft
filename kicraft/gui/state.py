@@ -173,7 +173,6 @@ PLACEMENT_PARAMS: list[dict[str, Any]] = [
     {"key": "edge_jitter_mm", "label": "Edge jitter (mm)", "default": 5.0, "min": 0.0, "max": 15.0, "step": 0.5, "group": "Edge & Connectors", "description": "Random displacement along edge for edge-pinned parts"},
     {"key": "connector_gap_mm", "label": "Connector gap (mm)", "default": 3.58, "min": 0.46, "max": 7.50, "step": 0.5, "group": "Edge & Connectors", "description": "Spacing between connectors on the same edge"},
     {"key": "connector_edge_inset_mm", "label": "Connector inset (mm)", "default": 2.5, "min": 0.47, "max": 4.32, "step": 0.25, "group": "Edge & Connectors", "description": "Inset from board edge (0 = flush, negative = overhang)"},
-    {"key": "connector_pad_margin_mm", "label": "Connector pad margin (mm)", "default": 1.0, "min": 0.0, "max": 3.0, "step": 0.25, "group": "Edge & Connectors", "description": "Extra pad margin for DRC clearance on connectors"},
     {"key": "courtyard_padding_mm", "label": "Courtyard padding (mm)", "default": 1.30, "min": 0.65, "max": 2.57, "step": 0.1, "group": "Edge & Connectors", "description": "Extra margin when scoring courtyard overlaps"},
     {"key": "pad_inset_margin_mm", "label": "Pad inset margin (mm)", "default": 0.3, "min": 0.0, "max": 2.0, "step": 0.1, "group": "Edge & Connectors", "description": "Minimum distance pads must be inside Edge.Cuts boundary"},
     # -- Component Behavior --
@@ -236,7 +235,6 @@ class AppState:
         default_factory=_default_mutation_bounds
     )
     component_zone_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
-    parent_overhang_overrides: dict[str, float] = field(default_factory=dict)
     thermal_ref_overrides: set[str] = field(default_factory=set)
     per_component_loaded: bool = False
 

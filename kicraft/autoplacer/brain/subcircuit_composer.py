@@ -282,10 +282,16 @@ def derive_attachment_constraints(
             inward = cfg.get("mounting_hole_keep_in_mm", 5.0)
             outward = 0.0
         elif is_conn:
+            # connector_edge_inset_mm: positive = inset INTO the board,
+            # negative = body overhangs OUTBOARD by |inset|. The previous
+            # parent_overhang_mm per-ref dict was a project-level escape
+            # hatch for connectors whose footprints lacked a "PCB Edge"
+            # marker -- with proper pad bbox tracking and the PCB Edge
+            # marker fallback in _compute_local_anchor_offset, that escape
+            # hatch is no longer load-bearing.
             inset = cfg.get("connector_edge_inset_mm", 1.0)
-            per_ref_overhang = cfg.get("parent_overhang_mm", {}).get(ref, 0.0)
             inward = max(0.0, inset)
-            outward = max(0.0, -inset) + per_ref_overhang
+            outward = max(0.0, -inset)
         else:
             inward = 0.0
             outward = 0.0
@@ -489,12 +495,22 @@ def constrained_child_offset(
     return origin
 
 
-def _exact_target_coordinate(
+def edge_anchor_target_coordinate(
     side: str,
     constraint: AttachmentConstraint,
     parent_outline_min: Point,
     parent_outline_max: Point,
 ) -> float:
+    """World coordinate the constrained edge should land at for ``side``.
+
+    Single source of truth for edge-attachment math. Use this from any
+    code path that needs to know where a given side of the parent's
+    outline a constrained reference must touch -- placement, validation,
+    preview, and per-side checks all share this formula.
+
+    ``inward_keep_in_mm`` pushes the edge INTO the board; ``outward_overhang_mm``
+    extends it OUTWARD past the board (e.g. USB-C body).
+    """
     if side == "left":
         return parent_outline_min.x + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
     if side == "right":
@@ -504,6 +520,10 @@ def _exact_target_coordinate(
     if side == "bottom":
         return parent_outline_max.y - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
     raise ValueError(f"Unsupported constrained side: {side}")
+
+
+# Backward-compat alias for the old private name.
+_exact_target_coordinate = edge_anchor_target_coordinate
 
 
 def _zone_band_interval(
@@ -1229,7 +1249,10 @@ def _score_parent_composition(
     area_utilization = min(1.0, component_area / board_area)
 
     if board_state.components:
-        child_bboxes = [comp.bbox() for comp in board_state.components.values()]
+        # physical_bbox() = courtyard ∪ pad copper extents. Packing density
+        # must reflect actual physical occupancy; using courtyard alone
+        # under-counts components whose pads stick out past the courtyard.
+        child_bboxes = [comp.physical_bbox() for comp in board_state.components.values()]
         child_xmin = min(b[0].x for b in child_bboxes)
         child_ymin = min(b[0].y for b in child_bboxes)
         child_xmax = max(b[1].x for b in child_bboxes)
@@ -1407,17 +1430,15 @@ def _any_rect_overlap(
 
 
 def _component_local_bbox(comp: Component) -> tuple[Point, Point]:
-    bbox_min, bbox_max = comp.bbox()
-    min_x = bbox_min.x
-    min_y = bbox_min.y
-    max_x = bbox_max.x
-    max_y = bbox_max.y
-    for pad in comp.pads:
-        min_x = min(min_x, pad.pos.x)
-        min_y = min(min_y, pad.pos.y)
-        max_x = max(max_x, pad.pos.x)
-        max_y = max(max_y, pad.pos.y)
-    return (Point(min_x, min_y), Point(max_x, max_y))
+    """Physical extent of ``comp`` in its local frame (courtyard ∪ pad bboxes).
+
+    Used for the layout-fallback blocker extraction (when a leaf has no
+    routed PCB on disk, e.g. a leaf with no internal nets like a battery
+    holder). Returns the same answer as the PCB-based extraction would
+    when ``Pad.size_mm`` is populated; degenerates to courtyard ∪ pad
+    centers only for legacy artifacts that predate the size field.
+    """
+    return comp.physical_bbox()
 
 
 def _constraint_local_rect(
@@ -2240,16 +2261,13 @@ def _derive_board_outline(
     max_y = float("-inf")
 
     for comp in components.values():
-        tl, br = comp.bbox()
+        # Parent outline must enclose the full physical extent of every
+        # component including pad copper that hangs past the courtyard.
+        tl, br = comp.physical_bbox()
         min_x = min(min_x, tl.x)
         min_y = min(min_y, tl.y)
         max_x = max(max_x, br.x)
         max_y = max(max_y, br.y)
-        for pad in comp.pads:
-            min_x = min(min_x, pad.pos.x)
-            min_y = min(min_y, pad.pos.y)
-            max_x = max(max_x, pad.pos.x)
-            max_y = max(max_y, pad.pos.y)
 
     for trace in traces:
         min_x = min(min_x, trace.start.x, trace.end.x)

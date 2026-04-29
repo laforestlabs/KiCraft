@@ -46,9 +46,25 @@ class Point:
 class Pad:
     ref: str  # component reference, e.g. "U2"
     pad_id: str  # pad number/name, e.g. "1"
-    pos: Point  # absolute position in mm
+    pos: Point  # absolute position of pad center, in mm
     net: str  # net name
     layer: Layer
+    # Pad copper extent (width, height) in mm. None = legacy artifact with
+    # no recorded size; bbox() then returns the center as a degenerate point.
+    # Populated by hardware.adapter from KiCad's Pad.GetSize() during board
+    # extraction and carried through solved_layout.json round-trip.
+    size_mm: Point | None = None
+
+    def bbox(self) -> tuple[Point, Point]:
+        """Pad copper bbox (top_left, bottom_right) in absolute coords."""
+        if self.size_mm is None:
+            return (self.pos, self.pos)
+        hw = self.size_mm.x / 2.0
+        hh = self.size_mm.y / 2.0
+        return (
+            Point(self.pos.x - hw, self.pos.y - hh),
+            Point(self.pos.x + hw, self.pos.y + hh),
+        )
 
 
 @dataclass
@@ -58,8 +74,8 @@ class Component:
     pos: Point
     rotation: float  # degrees
     layer: Layer
-    width_mm: float  # bounding box width
-    height_mm: float  # bounding box height
+    width_mm: float  # courtyard bbox width
+    height_mm: float  # courtyard bbox height
     pads: list[Pad] = field(default_factory=list)
     locked: bool = False
     kind: str = ""  # "connector", "mounting_hole", "ic", "passive", "misc"
@@ -74,13 +90,18 @@ class Component:
         return self.width_mm * self.height_mm
 
     def bbox(self, clearance: float = 0.0) -> tuple[Point, Point]:
-        """Return (top_left, bottom_right) with optional clearance margin.
+        """Courtyard bbox (top_left, bottom_right) with optional clearance.
 
-        Centers the bounding box on body_center (courtyard geometric center)
-        when available, falling back to pos (footprint origin).  This is
-        critical for components where the origin differs from the courtyard
-        center (e.g. battery holders, some connectors) — using pos would
-        produce a shifted bbox that misses real overlaps.
+        This is the keep-out / repulsion target -- the area routing tries to
+        leave clear of other parts. It does NOT include pad copper that
+        sticks out past the courtyard. Use ``physical_bbox()`` when the
+        question is "where is the actual physical extent of this component
+        including its copper" (e.g. board-edge containment, parent frame
+        sizing, packing density).
+
+        Centers the bbox on body_center when available, falling back to pos
+        (footprint origin). Critical for components whose origin differs
+        from the courtyard center (battery holders, some connectors).
         """
         hw = self.width_mm / 2 + clearance
         hh = self.height_mm / 2 + clearance
@@ -90,6 +111,31 @@ class Component:
             Point(cx - hw, cy - hh),
             Point(cx + hw, cy + hh),
         )
+
+    def physical_bbox(self, clearance: float = 0.0) -> tuple[Point, Point]:
+        """Union of courtyard bbox and every pad's copper bbox.
+
+        This is the SINGLE source of truth for "where is this component
+        physically present in board coordinates", used wherever the answer
+        must include pad copper that extends past the courtyard:
+        board-edge containment, parent frame sizing, packing density,
+        outside-the-board geometry validation.
+
+        For pads with no recorded ``size_mm`` (legacy artifacts), the pad
+        contributes its center point only -- behaviour identical to the
+        old courtyard ∪ pad-centers heuristic. Re-extract the leaf from
+        its PCB to get pad sizes captured.
+        """
+        body_tl, body_br = self.bbox(clearance)
+        min_x, min_y = body_tl.x, body_tl.y
+        max_x, max_y = body_br.x, body_br.y
+        for pad in self.pads:
+            pad_tl, pad_br = pad.bbox()
+            min_x = min(min_x, pad_tl.x - clearance)
+            min_y = min(min_y, pad_tl.y - clearance)
+            max_x = max(max_x, pad_br.x + clearance)
+            max_y = max(max_y, pad_br.y + clearance)
+        return (Point(min_x, min_y), Point(max_x, max_y))
 
 
 @dataclass

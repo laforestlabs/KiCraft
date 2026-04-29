@@ -481,17 +481,11 @@ def _derive_local_envelope(
     max_y = float("-inf")
 
     for comp in components.values():
-        tl, br = comp.bbox()
+        tl, br = comp.physical_bbox()
         min_x = min(min_x, tl.x)
         min_y = min(min_y, tl.y)
         max_x = max(max_x, br.x)
         max_y = max(max_y, br.y)
-
-        for pad in comp.pads:
-            min_x = min(min_x, pad.pos.x)
-            min_y = min(min_y, pad.pos.y)
-            max_x = max(max_x, pad.pos.x)
-            max_y = max(max_y, pad.pos.y)
 
     if min_x == float("inf"):
         min_x = min_y = 0.0

@@ -206,6 +206,11 @@ def serialize_component(component: Component) -> dict[str, Any]:
                 "pos": serialize_point(pad.pos),
                 "net": pad.net,
                 "layer": serialize_layer(pad.layer),
+                "size_mm": (
+                    serialize_point(pad.size_mm)
+                    if pad.size_mm is not None
+                    else None
+                ),
             }
             for pad in component.pads
         ],

@@ -56,6 +56,7 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
     PlacementModel,
     build_parent_composition,
     dominant_blocker_side,
+    edge_anchor_target_coordinate,
     estimate_layer_aware_parent_board_size,
     packed_extents_outline,
     derive_attachment_constraints,
@@ -1108,6 +1109,7 @@ def _translate_component_geometry(comp, delta: Point) -> None:
             pos=Point(pad.pos.x + delta.x, pad.pos.y + delta.y),
             net=pad.net,
             layer=pad.layer,
+            size_mm=pad.size_mm,
         )
         for pad in comp.pads
     ]
@@ -1127,10 +1129,10 @@ def _place_parent_local_components(
         bbox_min, bbox_max = _component_geometry_bbox(comp)
         delta_x = 0.0
         delta_y = 0.0
-        left_target = min_pt.x + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
-        right_target = max_pt.x - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
-        top_target = min_pt.y + constraint.inward_keep_in_mm - constraint.outward_overhang_mm
-        bottom_target = max_pt.y - constraint.inward_keep_in_mm + constraint.outward_overhang_mm
+        left_target = edge_anchor_target_coordinate("left", constraint, min_pt, max_pt)
+        right_target = edge_anchor_target_coordinate("right", constraint, min_pt, max_pt)
+        top_target = edge_anchor_target_coordinate("top", constraint, min_pt, max_pt)
+        bottom_target = edge_anchor_target_coordinate("bottom", constraint, min_pt, max_pt)
 
         if constraint.target == "corner":
             if constraint.value == "top-left":
@@ -1692,27 +1694,21 @@ def _compose_artifacts(
                 actual_y = anchor.y
 
         if c.target == "edge":
-            if c.value == "left":
-                expected_x = min_pt.x + c.inward_keep_in_mm - c.outward_overhang_mm
-            elif c.value == "right":
-                expected_x = max_pt.x - c.inward_keep_in_mm + c.outward_overhang_mm
-            elif c.value == "top":
-                expected_y = min_pt.y + c.inward_keep_in_mm - c.outward_overhang_mm
-            elif c.value == "bottom":
-                expected_y = max_pt.y - c.inward_keep_in_mm + c.outward_overhang_mm
+            if c.value in ("left", "right"):
+                expected_x = edge_anchor_target_coordinate(c.value, c, min_pt, max_pt)
+            elif c.value in ("top", "bottom"):
+                expected_y = edge_anchor_target_coordinate(c.value, c, min_pt, max_pt)
         elif c.target == "corner":
-            if c.value == "top-left":
-                expected_x = min_pt.x + c.inward_keep_in_mm - c.outward_overhang_mm
-                expected_y = min_pt.y + c.inward_keep_in_mm - c.outward_overhang_mm
-            elif c.value == "top-right":
-                expected_x = max_pt.x - c.inward_keep_in_mm + c.outward_overhang_mm
-                expected_y = min_pt.y + c.inward_keep_in_mm - c.outward_overhang_mm
-            elif c.value == "bottom-left":
-                expected_x = min_pt.x + c.inward_keep_in_mm - c.outward_overhang_mm
-                expected_y = max_pt.y - c.inward_keep_in_mm + c.outward_overhang_mm
-            elif c.value == "bottom-right":
-                expected_x = max_pt.x - c.inward_keep_in_mm + c.outward_overhang_mm
-                expected_y = max_pt.y - c.inward_keep_in_mm + c.outward_overhang_mm
+            corner_sides = {
+                "top-left":     ("left",  "top"),
+                "top-right":    ("right", "top"),
+                "bottom-left":  ("left",  "bottom"),
+                "bottom-right": ("right", "bottom"),
+            }.get(c.value)
+            if corner_sides is not None:
+                x_side, y_side = corner_sides
+                expected_x = edge_anchor_target_coordinate(x_side, c, min_pt, max_pt)
+                expected_y = edge_anchor_target_coordinate(y_side, c, min_pt, max_pt)
         elif c.target == "zone" and c.value == "bottom":
             expected_y = max_pt.y - c.inward_keep_in_mm
 
@@ -2061,9 +2057,24 @@ def _compact_routed_validation(validation: dict[str, Any]) -> dict[str, Any]:
 
 def _validate_parent_geometry(
     state: ParentCompositionState,
-    overhangs: dict[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Validate that composed parent geometry fits inside the derived outline."""
+    """Validate that composed parent geometry fits inside the derived outline.
+
+    Two independent checks per component:
+
+    * **Body** (``comp.bbox()`` = courtyard) must be inside the board outline,
+      EXCEPT for edge-constrained refs (USB-C, edge connectors) whose
+      housing legitimately extends past the PCB edge to mate with an
+      external host.
+    * **Pad copper** (``pad.bbox()`` = full pad extent) must be inside the
+      board outline. Always. Overhanging pad copper is unfabricable; no
+      exemption.
+
+    The previous implementation checked pad **centers** rather than pad
+    bboxes, undercounting copper overhang by half the pad width. It also
+    accepted a per-ref ``parent_overhang_mm`` exemption that, paired with
+    the center-only check, was a band-aid over the same bug.
+    """
     composition = state.composition
     if composition is None:
         raise RuntimeError("ParentCompositionState has no composition object")
@@ -2084,7 +2095,6 @@ def _validate_parent_geometry(
     geometry_union_min_y = float("inf")
     geometry_union_max_x = float("-inf")
     geometry_union_max_y = float("-inf")
-    overhang_map = {str(ref): float(value) for ref, value in (overhangs or {}).items()}
 
     min_x = tl.x - margin
     min_y = tl.y - margin
@@ -2098,44 +2108,56 @@ def _validate_parent_geometry(
     edge_constrained = set(state.edge_constrained_refs or ())
 
     for ref, comp in (composition.board_state.components or {}).items():
-        bbox_tl, bbox_br = comp.bbox()
-        geometry_union_min_x = min(geometry_union_min_x, bbox_tl.x)
-        geometry_union_min_y = min(geometry_union_min_y, bbox_tl.y)
-        geometry_union_max_x = max(geometry_union_max_x, bbox_br.x)
-        geometry_union_max_y = max(geometry_union_max_y, bbox_br.y)
-        allowed_overhang = max(0.0, overhang_map.get(ref, 0.0))
-        ref_min_x = min_x - allowed_overhang
-        ref_max_x = max_x + allowed_overhang
+        # geometry_union tracks the full physical extent of every component
+        # so the diagnostic shows where the actual copper/courtyard lives
+        # relative to the board outline, not just the courtyard centerline.
+        phys_tl, phys_br = comp.physical_bbox()
+        geometry_union_min_x = min(geometry_union_min_x, phys_tl.x)
+        geometry_union_min_y = min(geometry_union_min_y, phys_tl.y)
+        geometry_union_max_x = max(geometry_union_max_x, phys_br.x)
+        geometry_union_max_y = max(geometry_union_max_y, phys_br.y)
+
+        # Body (courtyard) check: a non-edge-constrained component whose
+        # courtyard extends past the board outline is misplaced. Edge-pinned
+        # connectors are exempted because the housing legitimately mounts
+        # past the PCB edge.
+        body_tl, body_br = comp.bbox()
         if ref in edge_constrained:
-            # Edge-pinned connectors (e.g. USB-C) are allowed to have their
-            # body extend beyond the outline on the constrained side -- the
-            # PCB Edge marker (D1) anchors pads to the fab edge, so the
-            # shell naturally hangs off. We still verify pads are inside.
             component_outside = False
         else:
             component_outside = (
-                bbox_tl.x < ref_min_x
-                or bbox_tl.y < min_y
-                or bbox_br.x > ref_max_x
-                or bbox_br.y > max_y
+                body_tl.x < min_x
+                or body_tl.y < min_y
+                or body_br.x > max_x
+                or body_br.y > max_y
             )
+
+        # Pad check: pad COPPER (not just the center) must be inside the
+        # board outline. No edge-constrained exemption -- pad copper that
+        # crosses Edge.Cuts is unfabricable.
         pad_outside_count = 0
         for pad in comp.pads:
+            pad_tl, pad_br = pad.bbox()
             if (
-                pad.pos.x < ref_min_x
-                or pad.pos.x > ref_max_x
-                or pad.pos.y < min_y
-                or pad.pos.y > max_y
+                pad_tl.x < min_x
+                or pad_br.x > max_x
+                or pad_tl.y < min_y
+                or pad_br.y > max_y
             ):
                 pad_outside_count += 1
                 outside_pads += 1
+
         if component_outside or pad_outside_count > 0:
             outside_components.append(
                 {
                     "ref": ref,
                     "bbox": {
-                        "top_left": {"x": bbox_tl.x, "y": bbox_tl.y},
-                        "bottom_right": {"x": bbox_br.x, "y": bbox_br.y},
+                        "top_left": {"x": body_tl.x, "y": body_tl.y},
+                        "bottom_right": {"x": body_br.x, "y": body_br.y},
+                    },
+                    "physical_bbox": {
+                        "top_left": {"x": phys_tl.x, "y": phys_tl.y},
+                        "bottom_right": {"x": phys_br.x, "y": phys_br.y},
                     },
                     "outside_body": component_outside,
                     "outside_pad_count": pad_outside_count,
@@ -2346,10 +2368,7 @@ def _stamp_parent_board(
             "br_y": outline[1].y,
         }
 
-    geometry_validation = _validate_parent_geometry(
-        state,
-        overhangs=cfg.get("parent_overhang_mm", {}),
-    )
+    geometry_validation = _validate_parent_geometry(state)
     if not geometry_validation.get("accepted", False):
         # Don't raise -- the caller wants to stamp + render even on
         # geometry rejection so the user has a diagnostic image showing
@@ -3201,10 +3220,7 @@ def main(argv: list[str] | None = None) -> int:
             cfg["freerouting_jar"] = args.jar
 
         try:
-            geometry_validation = _validate_parent_geometry(
-                state,
-                overhangs=cfg.get("parent_overhang_mm", {}),
-            )
+            geometry_validation = _validate_parent_geometry(state)
             geometry_accepted = bool(geometry_validation.get("accepted", False))
 
             # Always stamp + render, even when geometry validation fails.

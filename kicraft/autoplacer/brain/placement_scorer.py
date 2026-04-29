@@ -167,11 +167,16 @@ class PlacementScorer:
 
             for pad in comp.pads:
                 total_pads += 1
+                # Check the actual pad copper extent, not just the center.
+                # A pad whose center is just inside the inset but whose copper
+                # crosses the inset is just as fab-illegal as one whose center
+                # is outside.
+                pad_tl, pad_br = pad.bbox()
                 if (
-                    pad.pos.x < tl.x + inset
-                    or pad.pos.x > br.x - inset
-                    or pad.pos.y < tl.y + inset
-                    or pad.pos.y > br.y - inset
+                    pad_tl.x < tl.x + inset
+                    or pad_br.x > br.x - inset
+                    or pad_tl.y < tl.y + inset
+                    or pad_br.y > br.y - inset
                 ):
                     pads_outside += 1
 

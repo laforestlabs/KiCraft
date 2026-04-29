@@ -78,17 +78,9 @@ DEFAULT_CONFIG = {
     # edge of the connector body.  0 = flush, positive = inset, negative =
     # overhang.  Only applies to edge-pinned connectors.
     "connector_edge_inset_mm": 2.5,
-    # Per-ref connector overhang -- overrides connector_edge_inset_mm.
-    # Positive values mean outward overhang. e.g. {"<connector_ref>": 1.5}
-    "parent_overhang_mm": {},
     # Mounting hole keep-in -- minimum distance (mm) from board edge to
     # the center of a mounting hole.
     "mounting_hole_keep_in_mm": 2.5,
-    # Connector pad margin -- extra margin (mm) added around each pad of
-    # edge-pinned connectors when computing tight geometry bounds.
-    # Compensates for pad copper extent beyond the pad center point.
-    # Prevents copper_edge_clearance DRC violations after size reduction.
-    "connector_pad_margin_mm": 1.0,
     # Orderedness — how strongly passives are snapped into neat rows/columns.
     # 0.0 = organic/force-directed layout, 1.0 = full grid alignment.
     # Intermediate values blend proportionally.  Searchable by autoexperiment.
@@ -223,7 +215,6 @@ CONFIG_SEARCH_SPACE = {
     "edge_jitter_mm": {"min": 0.0, "max": 15.0, "sigma": 1.0, "type": "float"},
     "intra_cluster_iters": {"min": 10, "max": 500, "sigma": 20, "type": "int"},
     "gnd_zone_margin_mm": {"min": 0.1, "max": 2.0, "sigma": 0.1, "type": "float"},
-    "connector_pad_margin_mm": {"min": 0.0, "max": 3.0, "sigma": 0.2, "type": "float"},
     "sa_refine_swap_probability": {"min": 0.0, "max": 1.0, "sigma": 0.05, "type": "float"},
     "placement_convergence_threshold": {"min": 0.01, "max": 2.0, "sigma": 0.1, "type": "float"},
     # --- Sensitive params: ranges narrowed to top-quintile [P10, P90] ---

@@ -662,12 +662,15 @@ def _component_from_dict(payload: dict[str, Any]) -> Component:
 
 def _pad_from_dict(payload: dict[str, Any]) -> Pad:
     """Reconstruct a `Pad` from serialized artifact geometry."""
+    raw_size = payload.get("size_mm")
+    size_mm = _point_from_dict(raw_size) if isinstance(raw_size, dict) else None
     return Pad(
         ref=str(payload.get("ref", "")),
         pad_id=str(payload.get("pad_id", "")),
         pos=_point_from_dict(payload.get("pos")),
         net=str(payload.get("net", "")),
         layer=_layer_from_value(payload.get("layer")),
+        size_mm=size_mm,
     )
 
 
@@ -714,10 +717,40 @@ def _transform_pad(
     origin: Point,
     rotation_deg: float,
 ) -> Pad:
-    """Apply rigid transform to a pad."""
+    """Apply rigid transform to a pad.
+
+    Position is rotated and translated; pad ``size_mm`` (the AABB of the
+    pad copper) is rotated as well so the post-transform bbox accurately
+    reflects where the copper sits. Orthogonal rotations swap width and
+    height; arbitrary rotations grow the AABB to enclose the rotated
+    rectangle.
+    """
     new_pad = copy.deepcopy(pad)
     new_pad.pos = _transform_point(pad.pos, origin, rotation_deg)
+    if pad.size_mm is not None:
+        new_pad.size_mm = _rotate_size(pad.size_mm, rotation_deg)
     return new_pad
+
+
+def _rotate_size(size: Point, rotation_deg: float) -> Point:
+    """Return the AABB extent of a (size.x by size.y) rectangle rotated by
+    ``rotation_deg``. Orthogonal rotations are exact; non-orthogonal ones
+    return the bounding-box extent of the rotated rectangle.
+    """
+    import math
+
+    rot = rotation_deg % 360.0
+    if abs(rot) < 1e-3 or abs(rot - 180.0) < 1e-3:
+        return Point(size.x, size.y)
+    if abs(rot - 90.0) < 1e-3 or abs(rot - 270.0) < 1e-3:
+        return Point(size.y, size.x)
+    theta = math.radians(rot)
+    cos_t = abs(math.cos(theta))
+    sin_t = abs(math.sin(theta))
+    return Point(
+        size.x * cos_t + size.y * sin_t,
+        size.x * sin_t + size.y * cos_t,
+    )
 
 
 def _transform_trace(
@@ -804,23 +837,24 @@ def _compute_layout_bbox(
     vias: list[Via],
     anchors: list[InterfaceAnchor],
 ) -> tuple[Point, Point]:
-    """Compute a tight bbox around transformed artifact geometry."""
+    """Compute a tight bbox around transformed artifact geometry.
+
+    Uses ``Component.physical_bbox()`` (courtyard ∪ pad copper bboxes) so
+    the result includes pad copper that extends past the courtyard --
+    critical for sizing the parent frame to enclose every leaf's actual
+    physical extent.
+    """
     min_x = float("inf")
     min_y = float("inf")
     max_x = float("-inf")
     max_y = float("-inf")
 
     for comp in components.values():
-        tl, br = comp.bbox()
+        tl, br = comp.physical_bbox()
         min_x = min(min_x, tl.x)
         min_y = min(min_y, tl.y)
         max_x = max(max_x, br.x)
         max_y = max(max_y, br.y)
-        for pad in comp.pads:
-            min_x = min(min_x, pad.pos.x)
-            min_y = min(min_y, pad.pos.y)
-            max_x = max(max_x, pad.pos.x)
-            max_y = max(max_y, pad.pos.y)
 
     for trace in traces:
         min_x = min(min_x, trace.start.x, trace.end.x)
@@ -849,23 +883,18 @@ def _compute_layout_bbox(
 def _compute_component_bbox(
     components: dict[str, Component],
 ) -> tuple[Point, Point]:
-    """Compute a tight bbox around components and pads only."""
+    """Compute a tight bbox around component physical extents (no traces/vias)."""
     min_x = float("inf")
     min_y = float("inf")
     max_x = float("-inf")
     max_y = float("-inf")
 
     for comp in components.values():
-        tl, br = comp.bbox()
+        tl, br = comp.physical_bbox()
         min_x = min(min_x, tl.x)
         min_y = min(min_y, tl.y)
         max_x = max(max_x, br.x)
         max_y = max(max_y, br.y)
-        for pad in comp.pads:
-            min_x = min(min_x, pad.pos.x)
-            min_y = min(min_y, pad.pos.y)
-            max_x = max(max_x, pad.pos.x)
-            max_y = max(max_y, pad.pos.y)
 
     if min_x == float("inf"):
         return (Point(0.0, 0.0), Point(0.0, 0.0))

@@ -198,15 +198,10 @@ def attempt_leaf_size_reduction(
         float(cfg.get("leaf_size_reduction_margin_mm", 0.5)),
     )
 
-    connector_pad_margin = max(
-        0.0,
-        float(cfg.get("connector_pad_margin_mm", 1.0)),
-    )
     geometry_bounds = tight_leaf_geometry_bounds(
         extraction,
         best_round.components,
         best_round.routing,
-        connector_pad_margin_mm=connector_pad_margin,
     )
     min_width = max(1.0, geometry_bounds["width_mm"] + 2.0 * outline_margin)
     min_height = max(1.0, geometry_bounds["height_mm"] + 2.0 * outline_margin)

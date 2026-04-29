@@ -571,12 +571,22 @@ class KiCadAdapter:
                 if not net_name or net_name.startswith("unconnected-"):
                     continue
                 ppos = pad.GetPosition()
+                # Pad copper extent. For oblong/oval/rounded-rect pads,
+                # GetSize() returns the major-axis bounds, which is the right
+                # answer for "is this pad inside the board outline"; we use
+                # the AABB rather than a polygon for downstream simplicity.
+                psize = pad.GetSize()
+                pad_size = Point(
+                    pcbnew.ToMM(psize.x),
+                    pcbnew.ToMM(psize.y),
+                )
                 p = Pad(
                     ref=ref,
                     pad_id=pad.GetNumber(),
                     pos=Point(pcbnew.ToMM(ppos.x), pcbnew.ToMM(ppos.y)),
                     net=net_name,
                     layer=_layer_to_enum(pad.GetLayer()),
+                    size_mm=pad_size,
                 )
                 comp.pads.append(p)
                 net_pads.setdefault(net_name, []).append((ref, pad.GetNumber()))
