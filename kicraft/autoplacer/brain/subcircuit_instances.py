@@ -840,9 +840,16 @@ def _compute_layout_bbox(
     """Compute a tight bbox around transformed artifact geometry.
 
     Uses ``Component.physical_bbox()`` (courtyard ∪ pad copper bboxes) so
-    the result includes pad copper that extends past the courtyard --
-    critical for sizing the parent frame to enclose every leaf's actual
-    physical extent.
+    the result includes pad copper that extends past the courtyard. Traces
+    are inflated by ``width / 2`` and vias by their radius so the bbox
+    reflects each shape's *physical* extent, not its centerline. This
+    matters because the parent composer's compaction has a fast
+    bbox-disjoint early-out that skips the deeper trace-aware blocker
+    check. If this bbox were centerline-only, two leaves whose centerline
+    bboxes touch could still have their actual copper overlap by a full
+    track-width -- producing GND/VSYS shorts at the leaf seam that
+    FreeRouting never had a chance to avoid (it sees them as locked
+    pre-routes).
     """
     min_x = float("inf")
     min_y = float("inf")
@@ -857,16 +864,18 @@ def _compute_layout_bbox(
         max_y = max(max_y, br.y)
 
     for trace in traces:
-        min_x = min(min_x, trace.start.x, trace.end.x)
-        min_y = min(min_y, trace.start.y, trace.end.y)
-        max_x = max(max_x, trace.start.x, trace.end.x)
-        max_y = max(max_y, trace.start.y, trace.end.y)
+        half_w = max(0.0, trace.width_mm) / 2.0
+        min_x = min(min_x, trace.start.x - half_w, trace.end.x - half_w)
+        min_y = min(min_y, trace.start.y - half_w, trace.end.y - half_w)
+        max_x = max(max_x, trace.start.x + half_w, trace.end.x + half_w)
+        max_y = max(max_y, trace.start.y + half_w, trace.end.y + half_w)
 
     for via in vias:
-        min_x = min(min_x, via.pos.x)
-        min_y = min(min_y, via.pos.y)
-        max_x = max(max_x, via.pos.x)
-        max_y = max(max_y, via.pos.y)
+        radius = max(0.0, via.size_mm) / 2.0
+        min_x = min(min_x, via.pos.x - radius)
+        min_y = min(min_y, via.pos.y - radius)
+        max_x = max(max_x, via.pos.x + radius)
+        max_y = max(max_y, via.pos.y + radius)
 
     for anchor in anchors:
         min_x = min(min_x, anchor.pos.x)

@@ -150,6 +150,13 @@ class ParentCompositionState:
     # so callers can diagnose why a routed board was rejected even when the
     # run exits non-zero.
     routed_validation: dict[str, Any] = field(default_factory=dict)
+    # Pre-route DRC summary: DRC counts on parent_pre_freerouting.kicad_pcb
+    # (i.e., the stamped board BEFORE FreeRouting runs). Distinguishes
+    # composer-introduced shorts (shorts>0 here) from router-introduced
+    # shorts (shorts==0 here, but >0 after route). Without this split, every
+    # route failure looks like a FreeRouting clearance bug even when the
+    # composer stamped two leaves' tracks on top of each other.
+    stamp_drc: dict[str, Any] = field(default_factory=dict)
     score_total: float = 0.0
     score_breakdown: dict[str, float] = field(default_factory=dict)
     score_notes: list[str] = field(default_factory=list)
@@ -202,6 +209,7 @@ class ParentCompositionState:
             "packing_metadata": dict(self.packing_metadata),
             "geometry_validation": dict(self.geometry_validation),
             "routed_validation": dict(self.routed_validation),
+            "stamp_drc": dict(self.stamp_drc),
             "score_total": self.score_total,
             "score_breakdown": dict(self.score_breakdown),
             "score_notes": list(self.score_notes),
@@ -3271,6 +3279,36 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 1
+
+            # Stamp-time DRC guard: kicad-cli DRC on the pre-route board so
+            # composer-introduced shorts (two leaves' locked tracks stamped
+            # on top of each other) are caught and labeled as such, instead
+            # of being misattributed to FreeRouting later. Routing still
+            # runs so the user gets a routed-board artifact + render to
+            # inspect; the composer-vs-router attribution is recorded in
+            # state.stamp_drc and surfaces in the round JSON.
+            try:
+                from kicraft.autoplacer.freerouting_runner import _run_kicad_cli_drc
+                _stamp_drc = _run_kicad_cli_drc(str(stamped_pcb), timeout_s=30)
+                stamp_shorts = int(_stamp_drc.get("shorts", 0))
+                stamp_clearance = int(_stamp_drc.get("clearance", 0))
+                state.stamp_drc = {
+                    "ran": bool(_stamp_drc.get("ran", False)),
+                    "shorts": stamp_shorts,
+                    "clearance": stamp_clearance,
+                    "copper_edge_clearance": int(_stamp_drc.get("copper_edge_clearance", 0)),
+                    "courtyard": int(_stamp_drc.get("courtyard", 0)),
+                    "report_excerpt": (str(_stamp_drc.get("report_text", ""))[:2000]),
+                }
+                if stamp_shorts > 0:
+                    print(
+                        f"warning: stamp-time DRC found {stamp_shorts} shorts on "
+                        f"parent_pre_freerouting -- composer stamped overlapping "
+                        f"leaf tracks; FreeRouting cannot fix this",
+                        file=sys.stderr,
+                    )
+            except Exception as drc_exc:
+                state.stamp_drc = {"ran": False, "error": str(drc_exc)}
 
             if args.route:
                 routing_result = _route_parent_board(
