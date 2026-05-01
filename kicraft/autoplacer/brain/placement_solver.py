@@ -1066,11 +1066,27 @@ class PlacementSolver:
             )
 
         def _random_in_corner(corner: str, comp: Component) -> Point:
-            """Return a position near the named corner with small jitter."""
+            """Return a position near the named corner with small jitter.
+
+            For ``kind == "subcircuit"`` blocks with an ``anchor_offset_mm``
+            zone entry, the returned point is shifted so the named anchor
+            -- not the block body center -- lands at the corner target.
+            The body bbox of a synthetic block is otherwise meaningless
+            for body-flush placement.
+            """
             cx = tl.x + margin if "left" in corner else br.x - margin
             cy = tl.y + margin if "top" in corner else br.y - margin
             cx += self.rng.uniform(-jitter, jitter)
             cy += self.rng.uniform(-jitter, jitter)
+
+            if comp.kind == "subcircuit":
+                anchor_off = zones.get(comp.ref, {}).get("anchor_offset_mm")
+                if anchor_off is not None:
+                    rad = math.radians(comp.rotation)
+                    cos_r, sin_r = math.cos(rad), math.sin(rad)
+                    cx -= anchor_off.x * cos_r - anchor_off.y * sin_r
+                    cy -= anchor_off.x * sin_r + anchor_off.y * cos_r
+
             # Clamp to board
             hw, hh = comp.width_mm / 2, comp.height_mm / 2
             cx = max(tl.x + hw + 1, min(br.x - hw - 1, cx))
@@ -1120,7 +1136,22 @@ class PlacementSolver:
 
             For left edge: body left edge at tl.x + connector_inset
             For right edge: body right edge at br.x - connector_inset
+
+            For ``kind == "subcircuit"`` blocks with ``anchor_offset_mm``
+            in their zone config, the named anchor -- not the body edge
+            -- is what we flush against the board edge. The body half
+            offset is replaced by the inverse-rotated anchor offset.
             """
+            if comp.kind == "subcircuit":
+                anchor_off = zones.get(comp.ref, {}).get("anchor_offset_mm")
+                if anchor_off is not None:
+                    rad = math.radians(comp.rotation)
+                    cos_r, sin_r = math.cos(rad), math.sin(rad)
+                    rotated_x = anchor_off.x * cos_r - anchor_off.y * sin_r
+                    if edge == "left":
+                        return tl.x + connector_inset - rotated_x
+                    else:
+                        return br.x - connector_inset - rotated_x
             hw = comp.width_mm / 2
             if edge == "left":
                 return tl.x + connector_inset + hw
@@ -1133,7 +1164,19 @@ class PlacementSolver:
 
             For top edge: body top edge at tl.y + connector_inset
             For bottom edge: body bottom edge at br.y - connector_inset
+
+            See ``_connector_edge_x`` for the subcircuit-block override.
             """
+            if comp.kind == "subcircuit":
+                anchor_off = zones.get(comp.ref, {}).get("anchor_offset_mm")
+                if anchor_off is not None:
+                    rad = math.radians(comp.rotation)
+                    cos_r, sin_r = math.cos(rad), math.sin(rad)
+                    rotated_y = anchor_off.x * sin_r + anchor_off.y * cos_r
+                    if edge == "top":
+                        return tl.y + connector_inset - rotated_y
+                    else:
+                        return br.y - connector_inset - rotated_y
             hh = comp.height_mm / 2
             if edge == "top":
                 return tl.y + connector_inset + hh
@@ -2736,6 +2779,8 @@ class PlacementSolver:
         min_area = self.cfg.get("tht_backside_min_area_mm2", 50.0)
         moved = []
         for ref, comp in comps.items():
+            if comp.kind == "subcircuit":
+                continue  # parent-side blocks own their internal layer assignment
             if not comp.is_through_hole:
                 continue
             if comp.area < min_area:
@@ -2771,12 +2816,15 @@ class PlacementSolver:
         zones = self.cfg.get("component_zones", {})
         tl, br = self.state.board_outline
 
-        # Find candidates: large, non-passive, non-misc
+        # Find candidates: large, non-passive, non-misc.
+        # Subcircuit blocks are excluded -- alignment is a leaf-level concern;
+        # parent-side blocks coordinate via attachment constraints instead.
         candidates = [
             (ref, comp)
             for ref, comp in comps.items()
             if comp.area >= min_area
-            and comp.kind not in ("", "misc", "passive", "connector", "mounting_hole")
+            and comp.kind
+            not in ("", "misc", "passive", "connector", "mounting_hole", "subcircuit")
         ]
 
         # Detect pairs: same kind, similar area
