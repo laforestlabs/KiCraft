@@ -1323,12 +1323,15 @@ class PlacementSolver:
                         self.rng.uniform(zy0 + hh, max(zy0 + hh + 1, zy1 - hh)),
                     )
                 _update_pad_positions(comp, old_pos, comp.rotation)
-                # For subcircuit blocks: pin the zone target so SA cannot
-                # drift them out of the named zone. Without this lock,
-                # zone constraints are advisory and large blocks
-                # frequently land outside their zone after refinement.
+                # For subcircuit blocks: lock the zone-placed comp so SA
+                # cannot drift it out of the named zone. We do NOT add it
+                # to _pinned_targets because the zone is a region, not an
+                # exact coordinate -- _resolve_overlaps must be free to
+                # push the zone-placed block away from edge-pinned
+                # neighbors with conflicting blocker sets, and
+                # _restore_pinned_positions would otherwise undo those
+                # legalizing pushes on the next pass.
                 if comp.kind == "subcircuit":
-                    self._pinned_targets[ref] = Point(comp.pos.x, comp.pos.y)
                     comp.locked = not unlock_all
 
             elif comp.kind == "mounting_hole":
