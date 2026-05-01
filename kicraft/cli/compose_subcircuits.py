@@ -610,19 +610,18 @@ def _compute_final_outline(
     anchor_positions: dict[str, Point],
     spacing_mm: float,
 ) -> tuple[Point, Point]:
-    """Final outline is `max(constraint_target, geom_max + margin)` per
-    side -- never shrinking past geometry. Combines the constraint-aware
-    target (which can pull edges outward to meet anchor targets) with
-    the raw packed extent so blocks never end up outside the board."""
+    """Final outline tracks ``constraint_aware_outline`` (which already
+    applies ``margin_mm`` to unconstrained sides and snaps constrained
+    sides to anchor targets), expanded if necessary so the outline still
+    contains every placed bbox -- never shrinking past geometry."""
     if not placed_bboxes:
         return (Point(0.0, 0.0), Point(0.0, 0.0))
 
-    geom_min_x = min(b[0].x for b in placed_bboxes) - spacing_mm
-    geom_min_y = min(b[0].y for b in placed_bboxes) - spacing_mm
-    geom_max_x = max(b[1].x for b in placed_bboxes) + spacing_mm
-    geom_max_y = max(b[1].y for b in placed_bboxes) + spacing_mm
-
     if not constraints:
+        geom_min_x = min(b[0].x for b in placed_bboxes) - spacing_mm
+        geom_min_y = min(b[0].y for b in placed_bboxes) - spacing_mm
+        geom_max_x = max(b[1].x for b in placed_bboxes) + spacing_mm
+        geom_max_y = max(b[1].y for b in placed_bboxes) + spacing_mm
         return (Point(geom_min_x, geom_min_y), Point(geom_max_x, geom_max_y))
 
     constraint_outline = constraint_aware_outline(
@@ -631,14 +630,23 @@ def _compute_final_outline(
         constrained_ref_world_anchors=anchor_positions,
         margin_mm=spacing_mm,
     )
+    # Containment: guarantee that every placed bbox sits inside the
+    # constraint outline. constraint_aware_outline already applies
+    # margin_mm to unconstrained sides, so we only widen if a placed
+    # bbox actually pokes out (rare, but possible when a block ends up
+    # outboard of its constraint anchor by SA jitter).
+    geom_min_x = min(b[0].x for b in placed_bboxes)
+    geom_min_y = min(b[0].y for b in placed_bboxes)
+    geom_max_x = max(b[1].x for b in placed_bboxes)
+    geom_max_y = max(b[1].y for b in placed_bboxes)
     return (
         Point(
-            min(geom_min_x, constraint_outline[0].x),
-            min(geom_min_y, constraint_outline[0].y),
+            min(constraint_outline[0].x, geom_min_x),
+            min(constraint_outline[0].y, geom_min_y),
         ),
         Point(
-            max(geom_max_x, constraint_outline[1].x),
-            max(geom_max_y, constraint_outline[1].y),
+            max(constraint_outline[1].x, geom_max_x),
+            max(constraint_outline[1].y, geom_max_y),
         ),
     )
 
