@@ -151,6 +151,10 @@ def test_synthetic_block_ref_handles_empty_name():
 
 
 def test_artifact_to_component_populates_block_metadata():
+    """A single component fills the layout's body extent. The synthetic
+    block's width/height/body_center should track that content extent --
+    not the leaf-board outline (which can be larger when leaves have
+    padding around their components)."""
     layout = _layout(
         "USB",
         width=10.0,
@@ -158,10 +162,10 @@ def test_artifact_to_component_populates_block_metadata():
         components={
             "J1": _comp(
                 "J1",
-                pos=Point(2.0, 4.0),
-                width=4.0,
-                height=2.0,
-                pads=[_pad("J1", "1", 1.0, 4.0, "VBUS"), _pad("J1", "2", 3.0, 4.0, "GND")],
+                pos=Point(5.0, 4.0),
+                width=10.0,
+                height=8.0,
+                pads=[_pad("J1", "1", 1.0, 4.0, "VBUS"), _pad("J1", "2", 9.0, 4.0, "GND")],
             )
         },
     )
@@ -169,6 +173,7 @@ def test_artifact_to_component_populates_block_metadata():
 
     assert comp.ref == "BLOCK_0_USB"
     assert comp.kind == "subcircuit"
+    # Content extent: the J1 component bbox spans the full 10 x 8.
     assert comp.width_mm == 10.0
     assert comp.height_mm == 8.0
     assert comp.block_blocker_set is not None
@@ -185,9 +190,24 @@ def test_artifact_to_component_populates_block_metadata():
 def test_placements_round_trip_each_rotation(rotation):
     """When the solver places the body center at world position P, rotated
     by r, the recovered artifact origin must satisfy
-    P = origin + rotated((w/2, h/2), r). This test exercises the round
-    trip for each cardinal rotation."""
-    layout = _layout("LEAF", width=10.0, height=8.0)
+    P = origin + rotated(content_center, r). This test exercises the round
+    trip for each cardinal rotation. The synthetic layout has a single
+    component spanning the full 10 x 8 area so content bbox equals the
+    leaf bbox (centered at (5, 4))."""
+    layout = _layout(
+        "LEAF",
+        width=10.0,
+        height=8.0,
+        components={
+            "U1": _comp(
+                "U1",
+                pos=Point(5.0, 4.0),
+                width=10.0,
+                height=8.0,
+                pads=[_pad("U1", "1", 5.0, 4.0)],
+            )
+        },
+    )
     artifact = _artifact(layout)
     refs = {0: "BLOCK_0_LEAF"}
 
@@ -202,7 +222,7 @@ def test_placements_round_trip_each_rotation(rotation):
     placement = placements["/leaf"]
     assert placement.rotation == rotation
 
-    # Verify forward direction: body_center = origin + rotated((w/2, h/2), rot)
+    # Verify forward direction: body_center = origin + rotated(content_center, rot)
     rad = math.radians(rotation)
     cos_r, sin_r = math.cos(rad), math.sin(rad)
     expected_body_x = placement.origin.x + (5.0 * cos_r - 4.0 * sin_r)

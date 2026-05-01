@@ -67,6 +67,22 @@ def _rotated(point: Point, rotation_deg: float) -> Point:
     )
 
 
+def _content_bbox(artifact: LoadedSubcircuitArtifact) -> tuple[Point, Point]:
+    """Return the artifact's actual content bbox in local frame.
+
+    ``layout.bounding_box`` is the leaf-PCB *board outline* (often larger
+    than the routed extent because the leaf board has padding around the
+    components). For parent placement we want the synthetic block's
+    width/height/body-center to track the *content* extent -- the union
+    of transformed components, traces, vias, and anchors -- so the placer
+    doesn't reserve dead space around each block.
+    """
+    identity = transform_loaded_artifact(
+        artifact, origin=Point(0.0, 0.0), rotation=0.0
+    )
+    return identity.bounding_box
+
+
 def artifact_to_component(
     artifact: LoadedSubcircuitArtifact,
     *,
@@ -78,34 +94,36 @@ def artifact_to_component(
     The returned Component represents the artifact as a single rectangular
     block in the parent placer. ``block_blocker_set`` is populated, so
     pairs of blocks are checked for sparse-keepout compatibility before
-    the solver decides whether to push them apart. The body bbox follows
-    the artifact's local layout bbox.
+    the solver decides whether to push them apart.
 
-    ``pos`` is initialized to the body center at the artifact's local
-    origin (the solver will move it during placement). ``body_center``
-    matches ``pos`` so courtyard math operates against the body as a
-    whole rather than against any specific pad cluster.
+    The body bbox tracks the artifact's *content* extent (not the leaf
+    board outline) so the solver doesn't reserve empty space around each
+    block. ``block_artifact_origin_offset`` is set to the content center,
+    so ``world_artifact_origin = comp.pos - rotated(offset, rotation)``
+    inverts back to the artifact's instance origin (which is what
+    ``transform_loaded_artifact`` consumes downstream).
     """
-    layout = artifact.layout
-    width, height = layout.bounding_box
+    tl, br = _content_bbox(artifact)
+    width = max(0.1, br.x - tl.x)
+    height = max(0.1, br.y - tl.y)
+    body_center = Point((tl.x + br.x) / 2.0, (tl.y + br.y) / 2.0)
+
     blocker_set = extract_leaf_blocker_set(artifact)
     side = dominant_blocker_side(blocker_set)
-
-    body_center_local = Point(width / 2.0, height / 2.0)
 
     return Component(
         ref=ref,
         value=artifact.sheet_name,
-        pos=Point(body_center_local.x, body_center_local.y),
+        pos=Point(body_center.x, body_center.y),
         rotation=float(rotation),
         layer=Layer.FRONT,
         width_mm=float(width),
         height_mm=float(height),
         pads=[],
         kind="subcircuit",
-        body_center=Point(body_center_local.x, body_center_local.y),
+        body_center=Point(body_center.x, body_center.y),
         block_blocker_set=blocker_set,
-        block_artifact_origin_offset=Point(body_center_local.x, body_center_local.y),
+        block_artifact_origin_offset=Point(body_center.x, body_center.y),
         block_side=side,
     )
 
@@ -190,8 +208,8 @@ def attachment_constraints_to_zones(
             continue
 
         artifact = artifacts[child_index]
-        layout = artifact.layout
-        body_center = Point(layout.bounding_box[0] / 2.0, layout.bounding_box[1] / 2.0)
+        tl, br = _content_bbox(artifact)
+        body_center = Point((tl.x + br.x) / 2.0, (tl.y + br.y) / 2.0)
 
         # First strict constraint wins for the zone target. Edge/corner
         # constraints are strict by construction; zone constraints are
@@ -254,11 +272,8 @@ def placements_from_solved_state(
         if comp is None or child_index >= len(artifacts):
             continue
         artifact = artifacts[child_index]
-        layout = artifact.layout
-        body_center_offset = Point(
-            layout.bounding_box[0] / 2.0,
-            layout.bounding_box[1] / 2.0,
-        )
+        tl, br = _content_bbox(artifact)
+        body_center_offset = Point((tl.x + br.x) / 2.0, (tl.y + br.y) / 2.0)
         rotated_offset = _rotated(body_center_offset, comp.rotation)
         artifact_origin = Point(
             comp.pos.x - rotated_offset.x,

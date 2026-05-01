@@ -454,9 +454,16 @@ def _seed_outline_dimensions(
     if not loaded_artifacts:
         return (max(20.0, spacing_mm * 4),) * 2
 
+    # Use the content bbox of each artifact (not the leaf-PCB outline) so
+    # the seed reflects the placer's actual space need.
     n = len(loaded_artifacts)
-    widths = [max(0.0, art.layout.width) for art in loaded_artifacts]
-    heights = [max(0.0, art.layout.height) for art in loaded_artifacts]
+    widths: list[float] = []
+    heights: list[float] = []
+    for art in loaded_artifacts:
+        transformed = transform_loaded_artifact(art, origin=Point(0.0, 0.0), rotation=0.0)
+        tl, br = transformed.bounding_box
+        widths.append(max(0.0, br.x - tl.x))
+        heights.append(max(0.0, br.y - tl.y))
     total_area = sum(w * h for w, h in zip(widths, heights))
     side = math.sqrt(max(total_area, 1.0) * 2.5) + spacing_mm * 2.0
     sum_w = sum(widths) + spacing_mm * (n + 1)
@@ -472,15 +479,15 @@ def _seed_outline_dimensions(
         if not spec.constraints:
             continue
         primary = next((c for c in spec.constraints if c.strict), spec.constraints[0])
-        art = loaded_artifacts[spec.child_index]
+        idx = spec.child_index
         if primary.target == "edge":
             if primary.value in ("left", "right"):
-                horizontal_widths.append(art.layout.width)
+                horizontal_widths.append(widths[idx])
             elif primary.value in ("top", "bottom"):
-                vertical_heights.append(art.layout.height)
+                vertical_heights.append(heights[idx])
         elif primary.target == "corner":
-            horizontal_widths.append(art.layout.width)
-            vertical_heights.append(art.layout.height)
+            horizontal_widths.append(widths[idx])
+            vertical_heights.append(heights[idx])
 
     if horizontal_widths:
         span = sum(horizontal_widths) + spacing_mm * (len(horizontal_widths) + 1)
