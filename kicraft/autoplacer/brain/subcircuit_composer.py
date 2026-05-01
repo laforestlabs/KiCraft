@@ -34,6 +34,7 @@ import copy
 import importlib
 import logging
 import math
+import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -482,19 +483,6 @@ def _compute_local_anchor_offset(
     return anchor
 
 
-def constrained_child_offset(
-    placement_model: PlacementModel,
-    parent_outline_min: Point,
-    parent_outline_max: Point,
-) -> Point:
-    origin, _ = place_constrained_child(
-        placement_model,
-        parent_outline_min=parent_outline_min,
-        parent_outline_max=parent_outline_max,
-    )
-    return origin
-
-
 def edge_anchor_target_coordinate(
     side: str,
     constraint: AttachmentConstraint,
@@ -563,148 +551,6 @@ def _zone_band_interval(
             band_max - entry.local_anchor_offset.x,
         )
     raise ValueError(f"Unsupported zone side: {side}")
-
-
-def _resolve_exact_axis_origin(
-    axis: Literal["x", "y"],
-    entries: list[PlacementConstraintEntry],
-    parent_outline_min: Point,
-    parent_outline_max: Point,
-    tolerance_mm: float = 1e-3,
-) -> float | None:
-    exact_targets: list[tuple[str, float]] = []
-    zone_ranges: list[tuple[str, tuple[float, float]]] = []
-    for entry in entries:
-        for side in _constraint_sides(entry.constraint):
-            if axis == "x" and side not in {"left", "right"}:
-                continue
-            if axis == "y" and side not in {"top", "bottom"}:
-                continue
-            if entry.constraint.strict:
-                exact_targets.append(
-                    (
-                        entry.constraint.ref,
-                        _exact_target_coordinate(
-                            side,
-                            entry.constraint,
-                            parent_outline_min,
-                            parent_outline_max,
-                        )
-                        - (entry.local_anchor_offset.x if axis == "x" else entry.local_anchor_offset.y),
-                    )
-                )
-            else:
-                zone_ranges.append(
-                    (
-                        entry.constraint.ref,
-                        _zone_band_interval(
-                            side,
-                            entry,
-                            parent_outline_min,
-                            parent_outline_max,
-                        ),
-                    )
-                )
-
-    if exact_targets:
-        values = [value for _, value in exact_targets]
-        reference = values[0]
-        if any(abs(value - reference) > tolerance_mm for value in values[1:]):
-            detail = ", ".join(
-                f"{ref}={value:.3f}" for ref, value in exact_targets
-            )
-            axis_name = "x" if axis == "x" else "y"
-            raise ValueError(f"Conflicting attachment targets on {axis_name}-axis: {detail}")
-        return reference
-
-    if zone_ranges:
-        lower = max(interval[0] for _, interval in zone_ranges)
-        upper = min(interval[1] for _, interval in zone_ranges)
-        if lower > upper + tolerance_mm:
-            detail = ", ".join(
-                f"{ref}=[{interval[0]:.3f},{interval[1]:.3f}]"
-                for ref, interval in zone_ranges
-            )
-            axis_name = "x" if axis == "x" else "y"
-            raise ValueError(f"Infeasible zone attachment band on {axis_name}-axis: {detail}")
-        return upper
-
-    return None
-
-
-def place_constrained_child(
-    placement_model: PlacementModel,
-    *,
-    parent_outline_min: Point,
-    parent_outline_max: Point,
-) -> tuple[Point, tuple[Point, Point]]:
-    origin_x = _resolve_exact_axis_origin(
-        "x",
-        placement_model.constraint_entries,
-        parent_outline_min,
-        parent_outline_max,
-    )
-    origin_y = _resolve_exact_axis_origin(
-        "y",
-        placement_model.constraint_entries,
-        parent_outline_min,
-        parent_outline_max,
-    )
-
-    bbox_min, bbox_max = _placement_model_outline(placement_model)
-    if origin_x is None:
-        origin_x = parent_outline_min.x - bbox_min.x
-    if origin_y is None:
-        origin_y = parent_outline_min.y - bbox_min.y
-
-    placed_bbox = (
-        Point(origin_x + bbox_min.x, origin_y + bbox_min.y),
-        Point(origin_x + bbox_max.x, origin_y + bbox_max.y),
-    )
-    return Point(origin_x, origin_y), placed_bbox
-
-
-def validate_child_constraints(
-    placement_model: PlacementModel,
-    origin: Point,
-    parent_outline_min: Point,
-    parent_outline_max: Point,
-    *,
-    tolerance_mm: float = 1e-3,
-) -> None:
-    for entry in placement_model.constraint_entries:
-        world_anchor = Point(
-            origin.x + entry.local_anchor_offset.x,
-            origin.y + entry.local_anchor_offset.y,
-        )
-        for side in _constraint_sides(entry.constraint):
-            if entry.constraint.strict:
-                expected = _exact_target_coordinate(
-                    side,
-                    entry.constraint,
-                    parent_outline_min,
-                    parent_outline_max,
-                )
-                actual = world_anchor.x if side in {"left", "right"} else world_anchor.y
-                if abs(actual - expected) > tolerance_mm:
-                    raise ValueError(
-                        f"Constraint not satisfied for {entry.constraint.ref} on {side}: "
-                        f"expected {expected:.3f}, got {actual:.3f}"
-                    )
-                continue
-
-            lower, upper = _zone_band_interval(
-                side,
-                entry,
-                parent_outline_min,
-                parent_outline_max,
-            )
-            actual_origin = origin.x if side in {"left", "right"} else origin.y
-            if actual_origin < lower - tolerance_mm or actual_origin > upper + tolerance_mm:
-                raise ValueError(
-                    f"Zone constraint not satisfied for {entry.constraint.ref} on {side}: "
-                    f"expected origin in [{lower:.3f}, {upper:.3f}], got {actual_origin:.3f}"
-                )
 
 
 def build_parent_composition(
@@ -1045,6 +891,47 @@ def _build_merged_nets(
     return merged
 
 
+def infer_interconnect_nets_local(
+    parent_subcircuit: SubCircuitDefinition,
+    loaded_artifacts: list[LoadedSubcircuitArtifact],
+) -> dict[str, Net]:
+    """Infer parent interconnect nets from loaded artifact layouts (pre-placement).
+
+    Operates on each artifact's local-frame layout (untransformed). Returns
+    nets keyed by name with leaf-level ``(ref, pad_id)`` pad_refs that match
+    the post-placement variant — net membership is transform-stable.
+    """
+    inferred: dict[str, Net] = {}
+    artifact_by_path = {a.instance_path: a for a in loaded_artifacts}
+
+    for child_id in parent_subcircuit.child_ids:
+        artifact = artifact_by_path.get(child_id.instance_path)
+        if artifact is None:
+            continue
+
+        layout = artifact.layout
+        anchors_by_port = {
+            anchor.port_name: anchor for anchor in layout.interface_anchors
+        }
+        center = Point(layout.width / 2.0, layout.height / 2.0)
+
+        for port in layout.ports:
+            if not port.net_name:
+                continue
+            pad_ref = _resolve_layout_port_pad_ref(
+                anchors_by_port,
+                layout.components,
+                center,
+                port.name,
+                port.net_name,
+            )
+            if pad_ref is None:
+                continue
+            _append_pad_ref(inferred, port.net_name, pad_ref)
+
+    return _dedupe_inferred_nets(inferred)
+
+
 def _infer_parent_interconnect_nets(
     parent_subcircuit: SubCircuitDefinition,
     composed_children: list[ComposedChild],
@@ -1060,33 +947,35 @@ def _infer_parent_interconnect_nets(
         if child is None:
             continue
 
+        layout = child.transformed.layout
+        anchors_by_port = child_anchor_maps.get(child.instance_path, {})
+        center = _child_center(child)
+
         for port in _child_interface_ports(child):
             if not port.net_name:
                 continue
-            pad_ref = _resolve_child_port_pad_ref(
-                child,
-                child_anchor_maps.get(child.instance_path, {}),
+            pad_ref = _resolve_layout_port_pad_ref(
+                anchors_by_port,
+                child.transformed.transformed_components,
+                center,
                 port.name,
                 port.net_name,
             )
             if pad_ref is None:
                 continue
-            _append_pad_ref(
-                inferred,
-                port.net_name,
-                pad_ref,
-            )
+            _append_pad_ref(inferred, port.net_name, pad_ref)
 
     for comp in local_components.values():
         for pad in comp.pads:
             if not pad.net:
                 continue
-            _append_pad_ref(
-                inferred,
-                pad.net,
-                (pad.ref, pad.pad_id),
-            )
+            _append_pad_ref(inferred, pad.net, (pad.ref, pad.pad_id))
 
+    return _dedupe_inferred_nets(inferred)
+
+
+def _dedupe_inferred_nets(inferred: dict[str, Net]) -> dict[str, Net]:
+    """Collapse case/slash-variant net names; drop nets with <2 distinct refs."""
     deduped: dict[str, Net] = {}
     for net in inferred.values():
         normalized_name = _normalize_net_name(net.name)
@@ -1141,22 +1030,26 @@ def _child_interface_ports(child: ComposedChild) -> list[Any]:
     return list(child.transformed.layout.ports)
 
 
-def _resolve_child_port_pad_ref(
-    child: ComposedChild,
-    anchors: dict[str, InterfaceAnchor],
+def _resolve_layout_port_pad_ref(
+    anchors_by_port: dict[str, InterfaceAnchor],
+    components: dict[str, Component],
+    center: Point,
     port_name: str,
     net_name: str,
 ) -> tuple[str, str] | None:
-    """Resolve a representative pad ref for one child port/net."""
-    anchor = anchors.get(port_name)
+    """Resolve a representative pad ref for one port/net on a layout.
+
+    The (ref, pad_id) tuple returned is transform-stable, so this helper
+    works on either local-frame or transformed component dicts.
+    """
+    anchor = anchors_by_port.get(port_name)
     if anchor is not None and anchor.pad_ref:
         return anchor.pad_ref
 
     best_pad_ref: tuple[str, str] | None = None
     best_distance = float("inf")
-    center = _child_center(child)
 
-    for comp in child.transformed.transformed_components.values():
+    for comp in components.values():
         for pad in comp.pads:
             if not _nets_match(pad.net, net_name):
                 continue
@@ -2311,7 +2204,6 @@ __all__ = [
     "child_component_refs",
     "composition_debug_dict",
     "composition_summary",
-    "constrained_child_offset",
     "derive_attachment_constraints",
     "dominant_blocker_side",
     "estimate_parent_board_size",

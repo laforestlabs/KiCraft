@@ -84,6 +84,12 @@ class Component:
     opening_direction: float | None = (
         None  # LOCAL-frame angle (0/90/180/270) where opening faces
     )
+    # Parent-level placement: dominant copper side of a synthetic block
+    # ('front'|'back'|'dual'|'none'). None for leaf-level components.
+    block_side: str | None = None
+    # Restrict rotation candidates considered by _optimize_rotations and
+    # the SA refine rotation move. None = solver default [0, 90, 180, 270].
+    allowed_rotations: list[float] | None = None
 
     @property
     def area(self) -> float:
@@ -254,6 +260,9 @@ class PlacementScore:
     topology_structure: float = (
         100.0  # 100 = topology-aware passive chains stay ordered around anchors
     )
+    # Parent-level: rewards opposite-side bbox overlap between synthetic
+    # blocks (dual-layer dense packing). 100 when no comp has block_side set.
+    block_opposite_side: float = 100.0
 
     def compute_total(self, weights: Optional[dict[str, float]] = None) -> float:
         w = weights or {
@@ -268,6 +277,7 @@ class PlacementScore:
             "group_coherence": 0.08,  # functional groups stay compact
             "aspect_ratio": 0.02,  # penalize elongated board shapes
             "topology_structure": 0.05,  # reward topology-aware passive ordering
+            "block_opposite_side": 0.00,  # parent-level dual-layer block stacking
         }
         self.total = sum(getattr(self, k) * v for k, v in w.items())
         return self.total

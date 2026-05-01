@@ -24,7 +24,7 @@ from .graph import (
     count_crossings,
     find_communities,
 )
-from .placement_scorer import PlacementScorer
+from .placement_scorer import PlacementScorer, _opposite_side_overlap_weight
 from .placement_utils import (
     _bbox_overlap_amount,
     _bbox_overlap_xy,
@@ -1059,7 +1059,23 @@ class PlacementSolver:
             )
 
         def _random_in_corner(corner: str, comp: Component) -> Point:
-            """Return a position near the named corner with small jitter."""
+            """Return a position near the named corner with small jitter.
+
+            For ``kind == "subcircuit"`` with a zone ``anchor_offset_mm``,
+            the corner is treated as the target *anchor* position — comp.pos
+            is computed so ``body_center + anchor_offset`` lands at the
+            corner.
+            """
+            if comp.kind == "subcircuit":
+                ax, ay = zones.get(comp.ref, {}).get("anchor_offset_mm", (0.0, 0.0))
+                body_x = comp.body_center.x if comp.body_center else comp.pos.x
+                body_y = comp.body_center.y if comp.body_center else comp.pos.y
+                target_body_x = (tl.x if "left" in corner else br.x) - ax
+                target_body_y = (tl.y if "top" in corner else br.y) - ay
+                return Point(
+                    target_body_x + (comp.pos.x - body_x),
+                    target_body_y + (comp.pos.y - body_y),
+                )
             cx = tl.x + margin if "left" in corner else br.x - margin
             cy = tl.y + margin if "top" in corner else br.y - margin
             cx += self.rng.uniform(-jitter, jitter)
@@ -1108,12 +1124,20 @@ class PlacementSolver:
                     )
 
         def _connector_edge_x(comp: Component, edge: str) -> float:
-            """Compute X position so connector body edge is flush with the
-            board edge (plus connector_inset_mm offset).
+            """Compute X position so connector body edge (or block anchor)
+            lands on the board edge.
 
-            For left edge: body left edge at tl.x + connector_inset
-            For right edge: body right edge at br.x - connector_inset
+            Leaf path: body edge flush with board edge plus connector_inset.
+            Subcircuit path (kind=="subcircuit" with zone anchor_offset_mm):
+              place comp such that body_center.x + anchor_offset_x lands on
+              the board edge — preserves the precise anchor-on-edge
+              guarantee the old constraint placer used to enforce.
             """
+            if comp.kind == "subcircuit":
+                ax, _ = zones.get(comp.ref, {}).get("anchor_offset_mm", (0.0, 0.0))
+                body_x = comp.body_center.x if comp.body_center else comp.pos.x
+                target_body_x = (tl.x if edge == "left" else br.x) - ax
+                return target_body_x + (comp.pos.x - body_x)
             hw = comp.width_mm / 2
             if edge == "left":
                 return tl.x + connector_inset + hw
@@ -1121,12 +1145,15 @@ class PlacementSolver:
                 return br.x - connector_inset - hw
 
         def _connector_edge_y(comp: Component, edge: str) -> float:
-            """Compute Y position so connector body edge is flush with the
-            board edge (plus connector_inset_mm offset).
-
-            For top edge: body top edge at tl.y + connector_inset
-            For bottom edge: body bottom edge at br.y - connector_inset
+            """Compute Y position so connector body edge (or block anchor)
+            lands on the board edge. See ``_connector_edge_x`` for the
+            subcircuit semantics.
             """
+            if comp.kind == "subcircuit":
+                _, ay = zones.get(comp.ref, {}).get("anchor_offset_mm", (0.0, 0.0))
+                body_y = comp.body_center.y if comp.body_center else comp.pos.y
+                target_body_y = (tl.y if edge == "top" else br.y) - ay
+                return target_body_y + (comp.pos.y - body_y)
             hh = comp.height_mm / 2
             if edge == "top":
                 return tl.y + connector_inset + hh
@@ -1141,11 +1168,15 @@ class PlacementSolver:
             zone_cfg = zones.get(comp.ref, {})
             if "rotation" in zone_cfg:
                 comp.rotation = zone_cfg["rotation"]
-            else:
+            elif comp.kind != "subcircuit":
                 comp.rotation = self._best_rotation_for_edge(comp, edge)
             comp.pos = pos
             _update_pad_positions(comp, old_pos, old_rot)
-            _shift_pads_inside(comp, assigned_edge=edge)
+            # Synthetic blocks know their own anchor positions; shifting their
+            # synthetic pads "inside" would undo the precise anchor-on-edge
+            # placement we just computed.
+            if comp.kind != "subcircuit":
+                _shift_pads_inside(comp, assigned_edge=edge)
 
         # --- Collect edge-pinned connectors by edge for grouped placement ---
         edge_groups: dict[str, list[str]] = {}  # edge -> [ref, ...]
@@ -1691,7 +1722,12 @@ class PlacementSolver:
             best_rot = orig_rot
             best_score = self._score_rotation_for_routing(work_state, comp)
 
-            for rot in [0, 90, 180, 270]:
+            candidates = (
+                comp.allowed_rotations
+                if comp.allowed_rotations is not None
+                else [0, 90, 180, 270]
+            )
+            for rot in candidates:
                 if rot == orig_rot:
                     continue
                 # Apply rotation: rotate pad offsets by (rot - orig_rot)
@@ -1755,6 +1791,7 @@ class PlacementSolver:
         else:
             self._accumulate_repulsion_python(comps, forces)
         self._accumulate_smt_opposite_tht_force(comps, refs, forces)
+        self._accumulate_block_opposite_side_force(comps, refs, forces)
         self._accumulate_boundary_force(comps, refs, forces, tl, br)
         self._accumulate_center_attraction(comps, refs, forces, tl, br)
         self._accumulate_alignment_force(comps, forces)
@@ -1852,8 +1889,18 @@ class PlacementSolver:
                 ref = rng.choice(unlocked)
                 comp = comps[ref]
                 old_rot = comp.rotation
-                # Try 90-degree rotation increments
-                new_rot = (old_rot + rng.choice([90.0, 180.0, 270.0])) % 360.0
+                # Restrict to allowed_rotations when set; otherwise try
+                # 90-degree increments. Filter out the current rotation
+                # so the move actually perturbs.
+                if comp.allowed_rotations is not None:
+                    choices = [
+                        r for r in comp.allowed_rotations if r != old_rot
+                    ]
+                    if not choices:
+                        continue
+                    new_rot = rng.choice(choices)
+                else:
+                    new_rot = (old_rot + rng.choice([90.0, 180.0, 270.0])) % 360.0
                 old_pos = Point(comp.pos.x, comp.pos.y)
                 comp.rotation = new_rot
                 _update_pad_positions(comp, old_pos, old_rot)
@@ -2085,6 +2132,42 @@ class PlacementSolver:
             angle = math.atan2(best_ty - c.pos.y, best_tx - c.pos.x)
             forces[ref].x += f_mag * math.cos(angle)
             forces[ref].y += f_mag * math.sin(angle)
+
+    def _accumulate_block_opposite_side_force(
+        self,
+        comps: dict[str, Component],
+        refs: list[str],
+        forces: dict[str, Point],
+    ) -> None:
+        """Mild attraction between synthetic block components with
+        opposite ``block_side`` (front-vs-back). Encourages the dense
+        dual-layer stacking that the parent-level scorer rewards.
+
+        Inactive when no component carries ``block_side`` (leaf path).
+        """
+        blocks = [(r, comps[r]) for r in refs if comps[r].block_side is not None]
+        if len(blocks) < 2:
+            return
+        k = self.k_attract * 0.4
+        for i, (ra, a) in enumerate(blocks):
+            if a.locked:
+                continue
+            for rb, b in blocks[i + 1 :]:
+                w = _opposite_side_overlap_weight(a.block_side, b.block_side)
+                if w <= 0.2:
+                    continue  # same-side / none — no extra pull
+                dx = b.pos.x - a.pos.x
+                dy = b.pos.y - a.pos.y
+                d = math.hypot(dx, dy)
+                if d < 0.1:
+                    continue
+                f_mag = k * w * d
+                angle = math.atan2(dy, dx)
+                forces[ra].x += f_mag * math.cos(angle)
+                forces[ra].y += f_mag * math.sin(angle)
+                if not b.locked:
+                    forces[rb].x -= f_mag * math.cos(angle)
+                    forces[rb].y -= f_mag * math.sin(angle)
 
     def _accumulate_boundary_force(
         self,
@@ -2683,6 +2766,8 @@ class PlacementSolver:
         min_area = self.cfg.get("tht_backside_min_area_mm2", 50.0)
         moved = []
         for ref, comp in comps.items():
+            if comp.kind == "subcircuit":
+                continue  # synthetic blocks have no KiCad flip semantics
             if not comp.is_through_hole:
                 continue
             if comp.area < min_area:
@@ -2718,12 +2803,16 @@ class PlacementSolver:
         zones = self.cfg.get("component_zones", {})
         tl, br = self.state.board_outline
 
-        # Find candidates: large, non-passive, non-misc
+        # Find candidates: large, non-passive, non-misc.
+        # Synthetic blocks (kind="subcircuit") use attachment constraints,
+        # not large-pair alignment — exclude them to avoid the alignment
+        # force fighting the edge-pin force in _force_step.
         candidates = [
             (ref, comp)
             for ref, comp in comps.items()
             if comp.area >= min_area
-            and comp.kind not in ("", "misc", "passive", "connector", "mounting_hole")
+            and comp.kind
+            not in ("", "misc", "passive", "connector", "mounting_hole", "subcircuit")
         ]
 
         # Detect pairs: same kind, similar area
