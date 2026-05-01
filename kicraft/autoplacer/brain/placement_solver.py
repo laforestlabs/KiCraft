@@ -1297,11 +1297,39 @@ class PlacementSolver:
                 zx0, zy0, zx1, zy1 = self._get_zone_bounds(zone_cfg["zone"])
                 hw, hh = comp.width_mm / 2, comp.height_mm / 2
                 old_pos = Point(comp.pos.x, comp.pos.y)
-                comp.pos = Point(
-                    self.rng.uniform(zx0 + hw, max(zx0 + hw + 1, zx1 - hw)),
-                    self.rng.uniform(zy0 + hh, max(zy0 + hh + 1, zy1 - hh)),
-                )
+                # For subcircuit-kind blocks honor anchor_offset_mm so the
+                # named anchor (not the block body) lands in the zone, and
+                # bias toward the inward edge so larger blocks don't slip
+                # outside the zone after edge-of-zone jitter.
+                if comp.kind == "subcircuit":
+                    anchor_off = zone_cfg.get("anchor_offset_mm")
+                    rad = math.radians(comp.rotation)
+                    cos_r, sin_r = math.cos(rad), math.sin(rad)
+                    off_x = 0.0
+                    off_y = 0.0
+                    if anchor_off is not None:
+                        off_x = anchor_off.x * cos_r - anchor_off.y * sin_r
+                        off_y = anchor_off.x * sin_r + anchor_off.y * cos_r
+                    target_x = self.rng.uniform(
+                        zx0 + hw, max(zx0 + hw + 1, zx1 - hw)
+                    )
+                    target_y = self.rng.uniform(
+                        zy0 + hh, max(zy0 + hh + 1, zy1 - hh)
+                    )
+                    comp.pos = Point(target_x - off_x, target_y - off_y)
+                else:
+                    comp.pos = Point(
+                        self.rng.uniform(zx0 + hw, max(zx0 + hw + 1, zx1 - hw)),
+                        self.rng.uniform(zy0 + hh, max(zy0 + hh + 1, zy1 - hh)),
+                    )
                 _update_pad_positions(comp, old_pos, comp.rotation)
+                # For subcircuit blocks: pin the zone target so SA cannot
+                # drift them out of the named zone. Without this lock,
+                # zone constraints are advisory and large blocks
+                # frequently land outside their zone after refinement.
+                if comp.kind == "subcircuit":
+                    self._pinned_targets[ref] = Point(comp.pos.x, comp.pos.y)
+                    comp.locked = not unlock_all
 
             elif comp.kind == "mounting_hole":
                 pass  # handled in batch below
