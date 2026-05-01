@@ -11,6 +11,53 @@ import math
 
 from .types import BoardState, Component, Point
 
+
+def _world_artifact_origin(comp: Component) -> Point:
+    """World-frame artifact origin for a synthetic block component.
+
+    ``block_artifact_origin_offset`` is the local-frame vector
+    (body_center - artifact_origin). When the block is rotated and placed
+    at ``comp.pos`` (the body center), the artifact origin is the
+    inverse-rotated offset subtracted from pos.
+    """
+    if comp.block_artifact_origin_offset is None:
+        return Point(comp.pos.x, comp.pos.y)
+    rad = math.radians(comp.rotation)
+    cos_r = math.cos(rad)
+    sin_r = math.sin(rad)
+    ox = comp.block_artifact_origin_offset.x
+    oy = comp.block_artifact_origin_offset.y
+    rotated_x = ox * cos_r - oy * sin_r
+    rotated_y = ox * sin_r + oy * cos_r
+    return Point(comp.pos.x - rotated_x, comp.pos.y - rotated_y)
+
+
+def _blocker_pair_compatible(a: Component, b: Component) -> bool:
+    """Return True if two blocks' sparse blocker sets permit bbox overlap.
+
+    Used by the parent-side path: when both components carry block
+    metadata, the unified solver consults ``can_overlap_sparse`` to
+    decide if the courtyards may overlap (e.g. front-only vs back-only
+    copper). Leaf placement components have ``block_blocker_set is None``
+    and this short-circuits to False -- preserving today's bbox-only
+    semantics for the leaf path.
+    """
+    if a.block_blocker_set is None or b.block_blocker_set is None:
+        return False
+    # Local import to avoid a top-level cycle (subcircuit_composer
+    # transitively pulls in this module's siblings via types).
+    from .subcircuit_composer import can_overlap_sparse
+
+    return can_overlap_sparse(
+        a.block_blocker_set,
+        _world_artifact_origin(a),
+        a.rotation,
+        b.block_blocker_set,
+        _world_artifact_origin(b),
+        b.rotation,
+    )
+
+
 def _pad_half_extents(comp: Component) -> tuple[float, float]:
     """Return pad-aware half-extents (max distance from pos to any pad or body edge).
 

@@ -11,6 +11,7 @@ import math
 from collections import defaultdict
 
 from .graph import count_crossings, total_ratsnest_length
+from .placement_utils import _blocker_pair_compatible
 from .types import BoardState, Layer, PlacementScore, Point
 
 class PlacementScorer:
@@ -215,6 +216,8 @@ class PlacementScorer:
                 # Compute overlap rectangle
                 ox = max(0.0, min(a_br.x, b_br.x) - max(a_tl.x, b_tl.x))
                 oy = max(0.0, min(a_br.y, b_br.y) - max(a_tl.y, b_tl.y))
+                if ox > 0.0 and oy > 0.0 and _blocker_pair_compatible(a, b):
+                    continue
                 total_overlap_area += ox * oy
 
         if total_courtyard_area <= 0:

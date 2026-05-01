@@ -9,7 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from math import atan2, hypot
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from .subcircuit_composer import LeafBlockerSet
 
 
 class Layer(IntEnum):
@@ -84,6 +87,10 @@ class Component:
     opening_direction: float | None = (
         None  # LOCAL-frame angle (0/90/180/270) where opening faces
     )
+    block_blocker_set: LeafBlockerSet | None = None
+    block_artifact_origin_offset: Point | None = None
+    block_side: str | None = None
+    allowed_rotations: list[float] | None = None
 
     @property
     def area(self) -> float:

@@ -28,6 +28,7 @@ from .placement_scorer import PlacementScorer
 from .placement_utils import (
     _bbox_overlap_amount,
     _bbox_overlap_xy,
+    _blocker_pair_compatible,
     _effective_bbox,
     _pad_half_extents,
     _swap_pad_positions,
@@ -42,6 +43,7 @@ from .types import (
     PlacedGroup,
     Point,
 )
+
 
 class PlacementSolver:
     """Force-directed placement with edge-first constraints and scoring feedback.
@@ -356,7 +358,12 @@ class PlacementSolver:
             orig_rot = comp.rotation
             best_rot = orig_rot
             best_score = self._score_rotation_for_routing(mini_state, comp)
-            for rot in [0, 90, 180, 270]:
+            rotations = (
+                comp.allowed_rotations
+                if comp.allowed_rotations
+                else [0, 90, 180, 270]
+            )
+            for rot in rotations:
                 if rot == orig_rot:
                     continue
                 delta = math.radians(rot - orig_rot)
@@ -1553,7 +1560,12 @@ class PlacementSolver:
                     best_rscore = -1.0
                     temp_state = copy.copy(self.state)
                     temp_state.components = comps
-                    for rot in [0, 90, 180, 270]:
+                    rotations = (
+                        comps[ref].allowed_rotations
+                        if comps[ref].allowed_rotations
+                        else [0, 90, 180, 270]
+                    )
+                    for rot in rotations:
                         delta = math.radians(rot - orig_rot)
                         cos_d, sin_d = math.cos(delta), math.sin(delta)
                         for k, p in enumerate(comps[ref].pads):
@@ -1691,7 +1703,12 @@ class PlacementSolver:
             best_rot = orig_rot
             best_score = self._score_rotation_for_routing(work_state, comp)
 
-            for rot in [0, 90, 180, 270]:
+            rotations = (
+                comp.allowed_rotations
+                if comp.allowed_rotations
+                else [0, 90, 180, 270]
+            )
+            for rot in rotations:
                 if rot == orig_rot:
                     continue
                 # Apply rotation: rotate pad offsets by (rot - orig_rot)
@@ -1852,8 +1869,14 @@ class PlacementSolver:
                 ref = rng.choice(unlocked)
                 comp = comps[ref]
                 old_rot = comp.rotation
-                # Try 90-degree rotation increments
-                new_rot = (old_rot + rng.choice([90.0, 180.0, 270.0])) % 360.0
+                if comp.allowed_rotations:
+                    candidates = [r for r in comp.allowed_rotations if r != old_rot]
+                    if not candidates:
+                        continue
+                    new_rot = float(rng.choice(candidates))
+                else:
+                    # Try 90-degree rotation increments
+                    new_rot = (old_rot + rng.choice([90.0, 180.0, 270.0])) % 360.0
                 old_pos = Point(comp.pos.x, comp.pos.y)
                 comp.rotation = new_rot
                 _update_pad_positions(comp, old_pos, old_rot)
@@ -1956,6 +1979,8 @@ class PlacementSolver:
                 b = comps[ref_list[j]]
                 if a.locked and b.locked:
                     continue  # both fixed, nothing to do
+                if _blocker_pair_compatible(a, b):
+                    continue
                 d = a.pos.dist(b.pos)
                 min_dist = (
                     max(a.width_mm, a.height_mm) + max(b.width_mm, b.height_mm)
@@ -2025,6 +2050,28 @@ class PlacementSolver:
 
         fx_matrix = np.where(both_locked, 0, fx_matrix)
         fy_matrix = np.where(both_locked, 0, fy_matrix)
+
+        # Blocker-aware compatibility: zero pairwise repulsion when both
+        # components carry blocker sets and their copper does not conflict.
+        # For pure leaf placement (no blocker_set on any component) this is
+        # an O(N) early exit and the matrix is unchanged.
+        any_block = any(comps[r].block_blocker_set is not None for r in ref_list)
+        if any_block:
+            n = len(ref_list)
+            compat = np.zeros((n, n), dtype=bool)
+            for i in range(n):
+                a = comps[ref_list[i]]
+                if a.block_blocker_set is None:
+                    continue
+                for j in range(i + 1, n):
+                    b = comps[ref_list[j]]
+                    if b.block_blocker_set is None:
+                        continue
+                    if _blocker_pair_compatible(a, b):
+                        compat[i, j] = True
+                        compat[j, i] = True
+            fx_matrix = np.where(compat, 0, fx_matrix)
+            fy_matrix = np.where(compat, 0, fy_matrix)
 
         fx_totals = fx_matrix.sum(axis=1)
         fy_totals = fy_matrix.sum(axis=1)
@@ -2330,6 +2377,9 @@ class PlacementSolver:
                     if ox <= 0 or oy <= 0:
                         continue
 
+                    if _blocker_pair_compatible(a, b):
+                        continue
+
                     hw_a, hh_a = _pad_half_extents(a)
                     hw_b, hh_b = _pad_half_extents(b)
                     if ox < oy:
@@ -2375,6 +2425,9 @@ class PlacementSolver:
                     b_tl, b_br = _effective_bbox(b, half_gap)
                     ox, oy = _bbox_overlap_xy(a_tl, a_br, b_tl, b_br)
                     if ox <= 0 or oy <= 0:
+                        continue
+
+                    if _blocker_pair_compatible(a, b):
                         continue
 
                     if a.locked and b.locked:
