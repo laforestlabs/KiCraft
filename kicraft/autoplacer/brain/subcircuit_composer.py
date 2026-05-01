@@ -1087,6 +1087,82 @@ def _infer_parent_interconnect_nets(
                 (pad.ref, pad.pad_id),
             )
 
+    return _dedupe_inferred_nets(inferred)
+
+
+def infer_interconnect_nets_local(
+    parent_subcircuit: SubCircuitDefinition,
+    layouts_by_instance_path: dict[str, SubCircuitLayout],
+    local_components: dict[str, Component] | None = None,
+) -> dict[str, Net]:
+    """Infer parent interconnect nets from raw, untransformed child layouts.
+
+    Equivalent to ``_infer_parent_interconnect_nets`` but operates on the
+    pre-placement layout view: rigid transforms preserve pad-distance
+    ordering, so closest-pad disambiguation yields identical pad refs
+    before or after placement. This is what the parent-side adapter uses
+    when seeding the unified placer with synthetic block components.
+    """
+    inferred: dict[str, Net] = {}
+
+    for child_id in parent_subcircuit.child_ids:
+        layout = layouts_by_instance_path.get(child_id.instance_path)
+        if layout is None:
+            continue
+
+        anchors_by_port = {
+            anchor.port_name: anchor for anchor in layout.interface_anchors
+        }
+        for port in layout.ports:
+            if not port.net_name:
+                continue
+            pad_ref = _resolve_layout_port_pad_ref(
+                layout, anchors_by_port, port.name, port.net_name
+            )
+            if pad_ref is None:
+                continue
+            _append_pad_ref(inferred, port.net_name, pad_ref)
+
+    if local_components:
+        for comp in local_components.values():
+            for pad in comp.pads:
+                if not pad.net:
+                    continue
+                _append_pad_ref(inferred, pad.net, (pad.ref, pad.pad_id))
+
+    return _dedupe_inferred_nets(inferred)
+
+
+def _resolve_layout_port_pad_ref(
+    layout: SubCircuitLayout,
+    anchors_by_port: dict[str, InterfaceAnchor],
+    port_name: str,
+    net_name: str,
+) -> tuple[str, str] | None:
+    """Resolve a representative pad ref for one port from a local layout."""
+    anchor = anchors_by_port.get(port_name)
+    if anchor is not None and anchor.pad_ref:
+        return anchor.pad_ref
+
+    width, height = layout.bounding_box
+    center = Point(width / 2.0, height / 2.0)
+
+    best_pad_ref: tuple[str, str] | None = None
+    best_distance = float("inf")
+    for comp in layout.components.values():
+        for pad in comp.pads:
+            if not _nets_match(pad.net, net_name):
+                continue
+            distance = pad.pos.dist(center)
+            if distance < best_distance:
+                best_distance = distance
+                best_pad_ref = (pad.ref, pad.pad_id)
+
+    return best_pad_ref
+
+
+def _dedupe_inferred_nets(inferred: dict[str, Net]) -> dict[str, Net]:
+    """Normalize, dedupe, and filter inferred nets to those with >= 2 refs."""
     deduped: dict[str, Net] = {}
     for net in inferred.values():
         normalized_name = _normalize_net_name(net.name)
@@ -2317,6 +2393,7 @@ __all__ = [
     "estimate_parent_board_size",
     "estimate_layer_aware_parent_board_size",
     "extract_leaf_blocker_set",
+    "infer_interconnect_nets_local",
     "packed_extents_outline",
     "child_layer_envelopes",
     "can_overlap",
