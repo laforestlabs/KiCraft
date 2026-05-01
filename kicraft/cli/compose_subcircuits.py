@@ -669,58 +669,6 @@ def _compose_artifacts(
     else:
         exact_outline = packed_extents_outline(placed_bbox_list, margin_mm=spacing_mm)
 
-    # Snap parent-local components (mounting holes, locked connectors) to
-    # their exact constraint coordinates relative to the final outline.
-    # The solver's _random_in_corner places them with edge_jitter_mm of
-    # randomness, which violates the sub-mm keep-in tolerance attachment
-    # constraints require. The snap is precise: target = outline_edge ±
-    # inward_keep_in_mm relative to the body bbox edge.
-    for constraint in derived.parent_local_constraints:
-        comp = parent_local_solved.get(constraint.ref)
-        if comp is None:
-            continue
-        bbox_min, bbox_max = exact_outline
-        body_tl, body_br = comp.bbox()
-        body_w = body_br.x - body_tl.x
-        body_h = body_br.y - body_tl.y
-        body_cx = comp.body_center.x if comp.body_center else comp.pos.x
-        body_cy = comp.body_center.y if comp.body_center else comp.pos.y
-        target_cx = body_cx
-        target_cy = body_cy
-        if constraint.target == "corner":
-            inward = constraint.inward_keep_in_mm
-            corner = constraint.value
-            target_cx = (
-                bbox_min.x + inward + body_w / 2
-                if "left" in corner
-                else bbox_max.x - inward - body_w / 2
-            )
-            target_cy = (
-                bbox_min.y + inward + body_h / 2
-                if "top" in corner
-                else bbox_max.y - inward - body_h / 2
-            )
-        elif constraint.target == "edge":
-            inward = constraint.inward_keep_in_mm
-            if constraint.value == "left":
-                target_cx = bbox_min.x + inward + body_w / 2
-            elif constraint.value == "right":
-                target_cx = bbox_max.x - inward - body_w / 2
-            elif constraint.value == "top":
-                target_cy = bbox_min.y + inward + body_h / 2
-            elif constraint.value == "bottom":
-                target_cy = bbox_max.y - inward - body_h / 2
-        delta_x = target_cx - body_cx
-        delta_y = target_cy - body_cy
-        if abs(delta_x) > 1e-6 or abs(delta_y) > 1e-6:
-            comp.pos = Point(comp.pos.x + delta_x, comp.pos.y + delta_y)
-            if comp.body_center is not None:
-                comp.body_center = Point(
-                    comp.body_center.x + delta_x, comp.body_center.y + delta_y
-                )
-            for pad in comp.pads:
-                pad.pos = Point(pad.pos.x + delta_x, pad.pos.y + delta_y)
-
     parent_subcircuit = parent_definition or SubCircuitDefinition(
         id=SubCircuitId(
             sheet_name="COMPOSED_PARENT",
@@ -1022,6 +970,7 @@ def _print_human_summary(
 ) -> None:
     print("=== Subcircuit Composition ===")
     print(f"artifacts              : {len(loaded_artifacts)}")
+    print(f"mode                   : {state.mode}")
     print(f"spacing_mm             : {state.spacing_mm:.2f}")
     print(f"parent                 : {state.parent_sheet_name}")
     print(f"parent_instance_path   : {state.parent_instance_path}")
@@ -1932,6 +1881,7 @@ def _persist_parent_artifact(
     notes = [
         "parent_composition=true",
         f"child_count={len(state.entries)}",
+        f"mode={state.mode}",
         f"interconnect_nets={state.interconnect_net_count}",
         f"inferred_interconnects={state.inferred_interconnect_net_count}",
         f"expected_child_traces={expected_child_trace_count}",
