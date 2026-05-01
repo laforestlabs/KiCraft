@@ -2264,8 +2264,6 @@ def main(argv: list[str] | None = None) -> int:
                 str(project_dir),
                 "--parent",
                 args.parent,
-                "--mode",
-                "packed",
                 "--spacing-mm",
                 str(round_candidate_config.get("parent_spacing_mm", 2.0)),
                 "--pcb",
