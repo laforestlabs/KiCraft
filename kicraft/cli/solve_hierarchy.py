@@ -130,6 +130,7 @@ def _compose_and_route_parent(
     parent: str,
     cfg: dict,
     spacing_mm: float,
+    mode: str,
     route: bool,
 ) -> str:
     """Compose leaves into parent and optionally route via FreeRouting."""
@@ -143,6 +144,8 @@ def _compose_and_route_parent(
         parent,
         "--pcb",
         pcb,
+        "--mode",
+        mode,
         "--spacing-mm",
         str(spacing_mm),
         "--stamp",
@@ -248,6 +251,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Parent composition spacing in mm (default: 2.0)",
     )
     parser.add_argument(
+        "--mode",
+        choices=("row", "column", "grid", "packed"),
+        default="packed",
+        help="Parent composition layout mode (default: packed)",
+    )
+    parser.add_argument(
         "--jar",
         help="FreeRouting JAR path override",
     )
@@ -281,6 +290,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"pcb         : {args.pcb}")
     print(f"rounds      : {args.rounds}")
     print(f"route       : {args.route}")
+    print(f"mode        : {args.mode}")
     print(f"spacing_mm  : {args.spacing_mm}")
     print(f"  hierarchy levels: {len(levels)}")
     for i, level_nodes in enumerate(levels):
@@ -349,6 +359,7 @@ def main(argv: list[str] | None = None) -> int:
                         parent_name,
                         cfg,
                         args.spacing_mm,
+                        args.mode,
                         args.route,
                     )
                 except Exception as exc:

@@ -2264,6 +2264,8 @@ def main(argv: list[str] | None = None) -> int:
                 str(project_dir),
                 "--parent",
                 args.parent,
+                "--mode",
+                "packed",
                 "--spacing-mm",
                 str(round_candidate_config.get("parent_spacing_mm", 2.0)),
                 "--pcb",
@@ -2271,12 +2273,6 @@ def main(argv: list[str] | None = None) -> int:
                 "--route",
                 "--output",
                 str(parent_output_json),
-                # Each parent round gets a fresh seed so the placer
-                # explores different child orderings, rotations, and
-                # unconstrained-axis defaults instead of producing
-                # byte-identical layouts every round.
-                "--seed",
-                str(round_seed),
             ]
             if args.jar:
                 parent_route_cmd.extend(["--jar", args.jar])

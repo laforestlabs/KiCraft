@@ -13,21 +13,6 @@ from collections import defaultdict
 from .graph import count_crossings, total_ratsnest_length
 from .types import BoardState, Layer, PlacementScore, Point
 
-
-def _opposite_side_overlap_weight(a_side: str, b_side: str) -> float:
-    """Weight bbox overlap by whether two block sides represent dense
-    dual-layer packing. Mirrors the original parent-composer logic:
-    opposite sides = 1.0 (true stacking), dual = 0.5, same/none = 0.2.
-    """
-    if a_side == "none" or b_side == "none":
-        return 0.2
-    if a_side == "dual" or b_side == "dual":
-        return 0.5
-    if a_side != b_side:
-        return 1.0
-    return 0.2
-
-
 class PlacementScorer:
     """Scores a placement configuration to guide optimization.
 
@@ -52,7 +37,6 @@ class PlacementScorer:
         s.smt_opposite_tht = self._score_smt_opposite_tht()
         s.group_coherence = self._score_group_coherence()
         s.topology_structure = self._score_topology_structure()
-        s.block_opposite_side = self._score_block_opposite_side()
 
         # Board aspect ratio scoring
         board_w = self.state.board_width
@@ -290,45 +274,6 @@ class PlacementScorer:
         overlap_frac = min(1.0, overlap_area / total_smt_area)
         # 0% overlap → 0, 50% → 50, 100% → 100
         return max(0.0, 100.0 * overlap_frac)
-
-    def _score_block_opposite_side(self) -> float:
-        """Reward dual-layer dense stacking between synthetic block components.
-
-        Active only when at least one component carries ``block_side``
-        ('front'|'back'|'dual'|'none'). Sums pairwise bbox overlap weighted
-        by the opposite-side preference: opposite sides get full weight
-        (rewards stacking), dual gets half, same/none gets a small share.
-        Score is normalized by total block area; 100 means every block has
-        a perfectly opposite-side overlap partner. Returns 100 when no
-        block_side is set (leaf path is bit-identical).
-        """
-        blocks = [
-            c for c in self.state.components.values() if c.block_side is not None
-        ]
-        if len(blocks) < 2:
-            return 100.0
-
-        total_area = sum(c.area for c in blocks)
-        if total_area <= 0:
-            return 100.0
-
-        weighted_overlap = 0.0
-        for i, a in enumerate(blocks):
-            a_tl, a_br = a.bbox()
-            for b in blocks[i + 1 :]:
-                b_tl, b_br = b.bbox()
-                ox = max(0.0, min(a_br.x, b_br.x) - max(a_tl.x, b_tl.x))
-                oy = max(0.0, min(a_br.y, b_br.y) - max(a_tl.y, b_tl.y))
-                if ox <= 0 or oy <= 0:
-                    continue
-                weighted_overlap += _opposite_side_overlap_weight(
-                    a.block_side, b.block_side
-                ) * (ox * oy)
-
-        # Normalize: each block can contribute up to its own area in true
-        # opposite-side overlap, so the upper bound for the sum is total_area.
-        frac = min(1.0, weighted_overlap / total_area)
-        return max(0.0, 100.0 * frac)
 
     def _score_group_coherence(self) -> float:
         """Score how compact functional groups are.
