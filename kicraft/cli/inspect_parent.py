@@ -26,7 +26,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import shutil
+import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -39,6 +42,7 @@ from kicraft.autoplacer.config import discover_project_config, load_project_conf
 
 GRID_MM = 5.0
 ANNOTATION_PAD_MM = 4.0  # how far outside the board to draw labels
+KICAD_CLI = shutil.which("kicad-cli") or "kicad-cli"
 
 
 @dataclass
@@ -176,11 +180,74 @@ class EdgeFinding:
 
 
 @dataclass
+class DRCViolation:
+    type: str
+    severity: str
+    description: str
+    pos: tuple[float, float] | None
+    refs: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.type,
+            "severity": self.severity,
+            "description": self.description,
+            "pos": list(self.pos) if self.pos else None,
+            "refs": list(self.refs),
+        }
+
+
+@dataclass
+class DRCSummary:
+    ran: bool = False
+    error_count: int = 0
+    warning_count: int = 0
+    unconnected: int = 0
+    by_type: dict[str, int] = field(default_factory=dict)
+    violations: list[DRCViolation] = field(default_factory=list)
+    note: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "ran": self.ran,
+            "error_count": self.error_count,
+            "warning_count": self.warning_count,
+            "unconnected": self.unconnected,
+            "by_type": dict(self.by_type),
+            "violations": [v.to_dict() for v in self.violations],
+            "note": self.note,
+        }
+
+
+@dataclass
+class Issue:
+    severity: str  # "error" / "warning" / "info"
+    kind: str
+    message: str
+    ref: str | None = None
+    location: tuple[float, float] | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "severity": self.severity,
+            "kind": self.kind,
+            "message": self.message,
+            "ref": self.ref,
+            "location": list(self.location) if self.location else None,
+        }
+
+
+_SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
+
+
+@dataclass
 class Report:
     pcb_path: str
     board_outline: Bbox
     footprints: list[FootprintInfo] = field(default_factory=list)
     edge_findings: list[EdgeFinding] = field(default_factory=list)
+    drc: DRCSummary = field(default_factory=DRCSummary)
+    issues: list[Issue] = field(default_factory=list)
     grid_mm: float = GRID_MM
     cells_total: int = 0
     cells_empty: int = 0
@@ -219,6 +286,8 @@ class Report:
             "board_area_mm2": self.board_area_mm2,
             "footprints": [fp.to_dict() for fp in self.footprints],
             "edge_findings": [ef.to_dict() for ef in self.edge_findings],
+            "drc": self.drc.to_dict(),
+            "issues": [i.to_dict() for i in self.issues],
             "area_grid_mm": self.grid_mm,
             "cells_total": self.cells_total,
             "cells_empty": self.cells_empty,
@@ -230,6 +299,241 @@ class Report:
             "wasted_fraction": self.wasted_fraction,
             "stacked_fraction": self.stacked_fraction,
         }
+
+
+def _run_drc(pcb_path: Path) -> DRCSummary:
+    if not shutil.which(KICAD_CLI):
+        return DRCSummary(ran=False, note="kicad-cli not found in PATH")
+    with tempfile.NamedTemporaryFile(
+        suffix=".json", delete=False
+    ) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        result = subprocess.run(
+            [
+                KICAD_CLI,
+                "pcb",
+                "drc",
+                "--format",
+                "json",
+                "--severity-error",
+                "--severity-warning",
+                "-o",
+                str(tmp_path),
+                str(pcb_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if not tmp_path.is_file() or tmp_path.stat().st_size == 0:
+            return DRCSummary(
+                ran=False,
+                note=f"kicad-cli drc produced no output (rc={result.returncode}): {result.stderr[:200]}",
+            )
+        data = json.loads(tmp_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return DRCSummary(ran=False, note=f"drc failed: {exc}")
+    finally:
+        try:
+            tmp_path.unlink()
+        except Exception:
+            pass
+
+    violations: list[DRCViolation] = []
+    by_type: dict[str, int] = {}
+    error_count = 0
+    warning_count = 0
+    for v in data.get("violations", []):
+        sev = v.get("severity", "error")
+        if sev == "error":
+            error_count += 1
+        elif sev == "warning":
+            warning_count += 1
+        items = v.get("items", []) or []
+        refs: list[str] = []
+        pos = None
+        for it in items:
+            desc = it.get("description", "")
+            # Try to extract ref like "of J1" or "[GND] of J1"
+            m_idx = desc.rfind(" of ")
+            if m_idx >= 0:
+                tail = desc[m_idx + 4 :].strip().split()[0].rstrip(",")
+                if tail and tail not in refs:
+                    refs.append(tail)
+            if pos is None and "pos" in it:
+                p = it["pos"]
+                pos = (p.get("x", 0.0), p.get("y", 0.0))
+        vtype = v.get("type", "unknown")
+        by_type[vtype] = by_type.get(vtype, 0) + 1
+        violations.append(
+            DRCViolation(
+                type=vtype,
+                severity=sev,
+                description=v.get("description", ""),
+                pos=pos,
+                refs=refs,
+            )
+        )
+    unconnected = len(data.get("unconnected_items") or [])
+    return DRCSummary(
+        ran=True,
+        error_count=error_count,
+        warning_count=warning_count,
+        unconnected=unconnected,
+        by_type=by_type,
+        violations=violations,
+    )
+
+
+def _build_issues(report: "Report") -> list[Issue]:
+    """Aggregate findings into a single severity-ordered issues list.
+
+    AI agents should be able to skim this list to know what's broken
+    without parsing the rest of the report. Nearby same-type DRC
+    violations on the same ref are clustered (e.g., 14 clearance
+    violations on J1 collapse to one issue) so the list stays
+    actionable rather than noisy.
+    """
+    issues: list[Issue] = []
+
+    # DRC errors -- cluster by (type, ref) so 14 J1-clearance entries
+    # collapse to one "J1 has 14 clearance violations" issue.
+    drc_clusters: dict[tuple[str, str | None], list[DRCViolation]] = {}
+    for v in report.drc.violations:
+        if v.severity != "error":
+            continue
+        ref = v.refs[0] if v.refs else None
+        drc_clusters.setdefault((v.type, ref), []).append(v)
+    for (vtype, ref), vlist in drc_clusters.items():
+        if len(vlist) == 1:
+            v = vlist[0]
+            issues.append(
+                Issue(
+                    severity="error",
+                    kind=f"drc.{vtype}",
+                    message=v.description,
+                    ref=ref,
+                    location=v.pos,
+                )
+            )
+        else:
+            sample = vlist[0]
+            issues.append(
+                Issue(
+                    severity="error",
+                    kind=f"drc.{vtype}",
+                    message=(
+                        f"{len(vlist)} {vtype} violations clustered on "
+                        f"{ref or 'multiple refs'} "
+                        f"(e.g., {sample.description})"
+                    ),
+                    ref=ref,
+                    location=sample.pos,
+                )
+            )
+
+    # Edge findings flagged BUG
+    for f in report.edge_findings:
+        if f.interpretation.startswith("BUG"):
+            issues.append(
+                Issue(
+                    severity="error",
+                    kind="edge.marker_inside_board",
+                    message=f.interpretation,
+                    ref=f.ref,
+                    location=f.marker_world,
+                )
+            )
+        elif f.interpretation.startswith("WARN"):
+            issues.append(
+                Issue(
+                    severity="warning",
+                    kind="edge.marker_anomaly",
+                    message=f.interpretation,
+                    ref=f.ref,
+                    location=f.marker_world,
+                )
+            )
+
+    # DRC warnings -- same clustering treatment.
+    warn_clusters: dict[tuple[str, str | None], list[DRCViolation]] = {}
+    for v in report.drc.violations:
+        if v.severity != "warning":
+            continue
+        ref = v.refs[0] if v.refs else None
+        warn_clusters.setdefault((v.type, ref), []).append(v)
+    for (vtype, ref), vlist in warn_clusters.items():
+        if len(vlist) == 1:
+            v = vlist[0]
+            issues.append(
+                Issue(
+                    severity="warning",
+                    kind=f"drc.{vtype}",
+                    message=v.description,
+                    ref=ref,
+                    location=v.pos,
+                )
+            )
+        else:
+            sample = vlist[0]
+            issues.append(
+                Issue(
+                    severity="warning",
+                    kind=f"drc.{vtype}",
+                    message=(
+                        f"{len(vlist)} {vtype} warnings clustered on "
+                        f"{ref or 'multiple refs'} "
+                        f"(e.g., {sample.description})"
+                    ),
+                    ref=ref,
+                    location=sample.pos,
+                )
+            )
+
+    # Wasted-area heuristic (info severity unless very high)
+    if report.wasted_fraction > 0.45:
+        sev = "warning" if report.wasted_fraction > 0.55 else "info"
+        issues.append(
+            Issue(
+                severity=sev,
+                kind="utilization.wasted_area",
+                message=(
+                    f"{report.wasted_fraction * 100:.1f}% of the board "
+                    f"({report.wasted_area_mm2:.0f} mm^2) is empty. Stacking "
+                    f"more SMT on top of back-side blocks could shrink the "
+                    f"board substantially."
+                ),
+            )
+        )
+
+    # Low stacked-area heuristic (info)
+    cells_back_only = report.cells_back_only
+    if cells_back_only > 0 and report.cells_stacked < cells_back_only * 0.4:
+        issues.append(
+            Issue(
+                severity="info",
+                kind="utilization.poor_stacking",
+                message=(
+                    f"Only {report.cells_stacked} of "
+                    f"{cells_back_only + report.cells_stacked} back-side cells "
+                    f"have a front-side stack on them. The opposite-side "
+                    f"front area is largely unused."
+                ),
+            )
+        )
+
+    if report.drc.unconnected:
+        issues.append(
+            Issue(
+                severity="warning",
+                kind="route.unconnected",
+                message=f"{report.drc.unconnected} unconnected ratlines remain",
+            )
+        )
+
+    issues.sort(key=lambda i: (_SEVERITY_ORDER.get(i.severity, 9), i.kind))
+    return issues
 
 
 def _find_zones(pcb_path: Path) -> dict[str, Any]:
@@ -355,11 +659,13 @@ def collect(pcb_path: Path) -> Report:
             else:
                 cells_empty += 1
 
-    return Report(
+    drc = _run_drc(pcb_path)
+    report = Report(
         pcb_path=str(pcb_path),
         board_outline=outline,
         footprints=footprints,
         edge_findings=edge_findings,
+        drc=drc,
         grid_mm=GRID_MM,
         cells_total=nx * ny,
         cells_empty=cells_empty,
@@ -367,6 +673,8 @@ def collect(pcb_path: Path) -> Report:
         cells_back_only=cells_back_only,
         cells_stacked=cells_stacked,
     )
+    report.issues = _build_issues(report)
+    return report
 
 
 # --- Markdown summary -----------------------------------------------------
@@ -382,20 +690,66 @@ def to_markdown(report: Report, *, png_paths: dict[str, Path] | None = None) -> 
     bo = report.board_outline
     lines.append(f"# Parent PCB inspection: `{Path(report.pcb_path).name}`")
     lines.append("")
+
+    # Top-line health: the first thing an AI agent should see.
+    error_count = sum(1 for i in report.issues if i.severity == "error")
+    warn_count = sum(1 for i in report.issues if i.severity == "warning")
+    info_count = sum(1 for i in report.issues if i.severity == "info")
+    if error_count:
+        verdict = f"BROKEN ({error_count} error{'s' if error_count != 1 else ''})"
+    elif warn_count:
+        verdict = f"WORKS WITH WARNINGS ({warn_count})"
+    elif info_count:
+        verdict = "WORKS (with utilization notes)"
+    else:
+        verdict = "OK"
+    lines.append(f"**Verdict:** {verdict}")
+    lines.append("")
+
     lines.append(f"- **Board** : ({bo.min_x:.2f}, {bo.min_y:.2f}) to "
                  f"({bo.max_x:.2f}, {bo.max_y:.2f}) "
-                 f"= **{bo.width:.2f} × {bo.height:.2f} mm** "
-                 f"({report.board_area_mm2:.0f} mm²)")
+                 f"= **{bo.width:.2f} x {bo.height:.2f} mm** "
+                 f"({report.board_area_mm2:.0f} mm^2)")
     lines.append(f"- **Wasted area**     : "
-                 f"{report.wasted_area_mm2:.0f} mm² "
+                 f"{report.wasted_area_mm2:.0f} mm^2 "
                  f"({report.wasted_fraction * 100:.1f}% of board)")
     lines.append(f"- **Dual-layer stacked** : "
-                 f"{report.stacked_area_mm2:.0f} mm² "
+                 f"{report.stacked_area_mm2:.0f} mm^2 "
                  f"({report.stacked_fraction * 100:.1f}% of board)")
     lines.append(f"- **Footprints**     : "
                  f"{sum(1 for f in report.footprints if f.layer == 'front')} front, "
                  f"{sum(1 for f in report.footprints if f.layer == 'back')} back")
+    drc = report.drc
+    if drc.ran:
+        type_summary = ", ".join(f"{k}={v}" for k, v in sorted(drc.by_type.items()))
+        lines.append(
+            f"- **DRC**            : {drc.error_count} errors, {drc.warning_count} warnings, "
+            f"{drc.unconnected} unconnected"
+            + (f"  ({type_summary})" if type_summary else "")
+        )
+    else:
+        lines.append(f"- **DRC**            : not run ({drc.note})")
     lines.append("")
+
+    # Structured issues list -- this is the part AI agents care about most.
+    if report.issues:
+        lines.append("## Issues (sorted by severity)")
+        lines.append("")
+        for i in report.issues:
+            tag = {"error": "ERR", "warning": "WARN", "info": "INFO"}.get(i.severity, i.severity.upper())
+            ref_part = f" `{i.ref}`" if i.ref else ""
+            loc_part = (
+                f" @ ({i.location[0]:.2f}, {i.location[1]:.2f})"
+                if i.location
+                else ""
+            )
+            lines.append(f"- **{tag}** [{i.kind}]{ref_part}{loc_part}: {i.message}")
+        lines.append("")
+    else:
+        lines.append("## Issues")
+        lines.append("")
+        lines.append("(none)")
+        lines.append("")
 
     # Edge findings: lead with anything flagged BUG.
     if report.edge_findings:
@@ -435,7 +789,7 @@ def to_markdown(report: Report, *, png_paths: dict[str, Path] | None = None) -> 
     ):
         area = cells * cell_area
         frac = (area / report.board_area_mm2) * 100 if report.board_area_mm2 > 0 else 0
-        lines.append(f"| {label:<19s} | {area:>7.0f} mm² | {frac:>6.1f}% |")
+        lines.append(f"| {label:<19s} | {area:>7.0f} mm^2 | {frac:>6.1f}% |")
     lines.append("")
 
     # Footprint table (compact, alphabetical).
@@ -448,7 +802,7 @@ def to_markdown(report: Report, *, png_paths: dict[str, Path] | None = None) -> 
         lines.append(
             f"| `{fp.ref:<5}` | {fp.layer:<5} "
             f"| ({fp.pos[0]:>6.2f}, {fp.pos[1]:>6.2f}) "
-            f"| ({c.min_x:>6.2f}, {c.min_y:>6.2f}) → "
+            f"| ({c.min_x:>6.2f}, {c.min_y:>6.2f}) -> "
             f"({c.max_x:>6.2f}, {c.max_y:>6.2f}) |"
         )
     lines.append("")
@@ -593,13 +947,56 @@ def render_annotated_top(report: Report, output: Path) -> Path:
             oy = 6
         draw.text((m[0] + ox, m[1] + oy), label, fill=color, font=font_label)
 
+    # DRC violations -- only show errors prominently; cluster nearby
+    # violations of the same (type, ref) so an AI agent doesn't get a
+    # cloud of overlapping markers on a single cluster of pins.
+    drc_pin_clusters: dict[tuple[str, str | None], tuple[float, float, int]] = {}
+    for v in report.drc.violations:
+        if v.pos is None:
+            continue
+        ref = v.refs[0] if v.refs else None
+        key = (v.type, ref)
+        if key in drc_pin_clusters:
+            cx, cy, count = drc_pin_clusters[key]
+            drc_pin_clusters[key] = (
+                (cx * count + v.pos[0]) / (count + 1),
+                (cy * count + v.pos[1]) / (count + 1),
+                count + 1,
+            )
+        else:
+            drc_pin_clusters[key] = (v.pos[0], v.pos[1], 1)
+
+    # Draw errors with bigger emphasis than warnings.
+    sev_by_key = {
+        (v.type, v.refs[0] if v.refs else None): v.severity
+        for v in report.drc.violations
+    }
+    for (vtype, ref), (cx, cy, count) in drc_pin_clusters.items():
+        sev = sev_by_key.get((vtype, ref), "warning")
+        color = "#f87171" if sev == "error" else "#facc15"
+        radius = 9 if sev == "error" else 6
+        p = _world_to_image((cx, cy), bo, (width, height), pad)
+        draw.ellipse(
+            [p[0] - radius, p[1] - radius, p[0] + radius, p[1] + radius],
+            outline=color,
+            width=2 if sev == "error" else 1,
+        )
+        draw.ellipse([p[0] - 2, p[1] - 2, p[0] + 2, p[1] + 2], fill=color)
+        label = f"{vtype}" + (f" x{count}" if count > 1 else "")
+        draw.text(
+            (p[0] + radius + 3, p[1] - 7),
+            label,
+            fill=color,
+            font=font_small,
+        )
+
     # Legend.
     legend_y = height - pad + 8
     draw.text((pad, legend_y), "front", fill="#34d399", font=font_label)
     draw.text((pad + 70, legend_y), "back", fill="#f87171", font=font_label)
     draw.text(
         (pad + 140, legend_y),
-        "marker→edge (cyan=ok, yellow=warn, orange=bug)",
+        "marker->edge (cyan=ok, yellow=warn, orange=bug)  DRC: red=err  yellow=warn",
         fill="#e5e7eb",
         font=font_label,
     )
