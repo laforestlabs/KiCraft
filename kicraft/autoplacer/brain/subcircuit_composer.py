@@ -1458,19 +1458,8 @@ def _extract_blockers_from_layout(
             else:
                 back_pads.append(pad_rect)
 
-        # THT components (battery holders, big connectors, mounting hardware)
-        # physically occupy their full body bbox on BOTH layers -- the
-        # battery cell sits in the middle of a holder, between its terminal
-        # pads, but it still blocks any other footprint from being placed
-        # there. Adding only per-pad rects leaves the body interior looking
-        # free to the placer and SMT pads from another leaf end up shorting
-        # to the THT terminals at the seam. Add the full body bbox so the
-        # blocker check enforces the physical extent, not just the copper.
-        if component.is_through_hole:
-            front_pads.append(component_bbox)
-            back_pads.append(component_bbox)
-            if not component.pads:
-                tht_drills.append(component_bbox)
+        if component.is_through_hole and not component.pads:
+            tht_drills.append(component_bbox)
 
     return LeafBlockerSet(
         front_pads=_coalesce_rects(front_pads),
