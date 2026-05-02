@@ -89,10 +89,17 @@ def _content_bbox(artifact: LoadedSubcircuitArtifact) -> tuple[Point, Point]:
 # extent (traces inflated by track width / 2) and the resolver only
 # pushes blocks apart to bbox-disjoint -- which puts traces at adjacent
 # block edges within trace-clearance of each other and produces shorts at
-# the seam after stamping. 1.0 mm is the smallest value that empirically
-# eliminates inter-block stamp-time shorts on LLUPS without forcing the
-# placer to inflate the parent board.
-_BLOCK_BBOX_SAFETY_MM_PER_SIDE = 1.0
+# the seam after stamping.
+#
+# 1.0 mm/side was the first cut and dropped 3x3 stamp shorts from 5-10
+# down to 2-3 but didn't clear them entirely: with strong inter-leaf
+# net attraction (CHARGER--BOOST 5V share /5V), the force-directed
+# step pulls blocks back together fast enough that _resolve_overlaps
+# only barely separates them per iteration. Bumping to 2.0 mm/side
+# gives the resolver enough push budget that even with attraction
+# pulling back, the steady-state content separation stays >= 2 mm --
+# above the trace+pad clearance floor on this design.
+_BLOCK_BBOX_SAFETY_MM_PER_SIDE = 2.0
 
 
 def artifact_to_component(
