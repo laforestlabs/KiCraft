@@ -62,9 +62,14 @@ def read_pins(experiments_dir: Path) -> dict[str, Any]:
 def _write_pins(experiments_dir: Path, manifest: dict[str, Any]) -> None:
     path = _pins_path(experiments_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    # Atomic write: pins.json is read by the GUI in 8 places (monitor,
+    # pipeline_graph, node_detail) plus compose_subcircuits. Mid-write
+    # reads would surface as JSONDecodeError or stale pin state.
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
     )
+    tmp_path.replace(path)
 
 
 def _leaf_artifact_dir(experiments_dir: Path, leaf_key: str) -> Path:

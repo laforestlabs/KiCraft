@@ -334,7 +334,9 @@ def generate_stage_diagnostic_artifacts(
     if write_drc_report:
         try:
             report_text = str(drc.get("report_text", "") or "")
-            report_text_path.write_text(report_text, encoding="utf-8")
+            tmp_report = report_text_path.with_suffix(report_text_path.suffix + ".tmp")
+            tmp_report.write_text(report_text, encoding="utf-8")
+            tmp_report.replace(report_text_path)
             stage_result["drc_report_text_path"] = str(report_text_path)
         except Exception as exc:
             stage_result["drc_report_text_path"] = None
@@ -453,10 +455,12 @@ def generate_leaf_diagnostic_artifacts(
 
     summary_path = renders_dir / "diagnostics_summary.json"
     try:
-        summary_path.write_text(
+        tmp_summary = summary_path.with_suffix(summary_path.suffix + ".tmp")
+        tmp_summary.write_text(
             json.dumps(result, indent=2, sort_keys=True),
             encoding="utf-8",
         )
+        tmp_summary.replace(summary_path)
         result["summary_json_path"] = str(summary_path)
     except Exception as exc:
         result["summary_json_path"] = None

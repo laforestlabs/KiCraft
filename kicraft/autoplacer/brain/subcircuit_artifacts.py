@@ -579,10 +579,14 @@ def save_solved_layout_artifact(payload: dict[str, Any]) -> str:
     artifact_paths = payload.get("artifact_paths", {})
     out_path = Path(artifact_paths["solved_layout_json"])
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
+    # Atomic write: autoexperiment polls solved_layout.json across leaves
+    # to extract scores; a torn read crashes score extraction.
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp_path.write_text(
         json.dumps(payload, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    tmp_path.replace(out_path)
     return str(out_path)
 
 
@@ -600,10 +604,13 @@ def save_artifact_metadata(metadata: ArtifactMetadata) -> str:
     """Write artifact metadata JSON to disk and return the path."""
     out_path = Path(metadata.artifact_paths["metadata_json"])
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
+    # Atomic write: same race rationale as save_solved_layout_artifact.
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp_path.write_text(
         json.dumps(metadata.to_dict(), indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    tmp_path.replace(out_path)
     return str(out_path)
 
 
@@ -641,10 +648,15 @@ def save_debug_payload(
         payload["solved_components"] = serialize_components(extra["solved_components"])
     if extra:
         payload["extra"] = extra
-    debug_path.write_text(
+    # Atomic write: solve_subcircuits resumes round indices by reading
+    # the prior debug.json to compute base_offset. A torn read would
+    # produce wrong indices and collide with new round-snapshot writes.
+    tmp_debug = debug_path.with_suffix(debug_path.suffix + ".tmp")
+    tmp_debug.write_text(
         json.dumps(payload, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    tmp_debug.replace(debug_path)
     return str(debug_path)
 
 
