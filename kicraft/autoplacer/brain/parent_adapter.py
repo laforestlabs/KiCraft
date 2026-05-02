@@ -83,6 +83,18 @@ def _content_bbox(artifact: LoadedSubcircuitArtifact) -> tuple[Point, Point]:
     return identity.bounding_box
 
 
+# Per-side safety margin (mm) added to the synthetic block bbox so the
+# placer's bbox-overlap resolver leaves a routing channel between adjacent
+# leaves. Without this, the body bbox is the artifact's tight content
+# extent (traces inflated by track width / 2) and the resolver only
+# pushes blocks apart to bbox-disjoint -- which puts traces at adjacent
+# block edges within trace-clearance of each other and produces shorts at
+# the seam after stamping. 1.0 mm is the smallest value that empirically
+# eliminates inter-block stamp-time shorts on LLUPS without forcing the
+# placer to inflate the parent board.
+_BLOCK_BBOX_SAFETY_MM_PER_SIDE = 1.0
+
+
 def artifact_to_component(
     artifact: LoadedSubcircuitArtifact,
     *,
@@ -102,10 +114,18 @@ def artifact_to_component(
     so ``world_artifact_origin = comp.pos - rotated(offset, rotation)``
     inverts back to the artifact's instance origin (which is what
     ``transform_loaded_artifact`` consumes downstream).
+
+    A small safety margin is added to width/height so that the placer's
+    bbox-overlap resolver keeps a routing channel between adjacent leaves
+    -- otherwise traces near opposite-side block edges end up within
+    trace-clearance of each other and short at the stamped seam.
     """
     tl, br = _content_bbox(artifact)
-    width = max(0.1, br.x - tl.x)
-    height = max(0.1, br.y - tl.y)
+    content_width = max(0.1, br.x - tl.x)
+    content_height = max(0.1, br.y - tl.y)
+    margin = _BLOCK_BBOX_SAFETY_MM_PER_SIDE
+    width = content_width + 2.0 * margin
+    height = content_height + 2.0 * margin
     body_center = Point((tl.x + br.x) / 2.0, (tl.y + br.y) / 2.0)
 
     blocker_set = extract_leaf_blocker_set(artifact)
