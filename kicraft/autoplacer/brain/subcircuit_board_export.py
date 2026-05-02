@@ -67,7 +67,13 @@ def export_subcircuit_board(
     opts = options or ExportOptions()
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render_subcircuit_board(layout, opts), encoding="utf-8")
+    # Atomic write: a torn .kicad_pcb read by pcbnew.LoadBoard would
+    # crash or load partial state. Cheap to do even though no in-tree
+    # callers were found at iteration-5 audit time -- module is exported
+    # in __all__ and may be invoked externally.
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp_path.write_text(render_subcircuit_board(layout, opts), encoding="utf-8")
+    tmp_path.replace(out_path)
     return str(out_path)
 
 
