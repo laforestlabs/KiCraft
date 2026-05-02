@@ -505,13 +505,7 @@ def _seed_outline_dimensions(
         widths.append(max(0.0, br.x - tl.x))
         heights.append(max(0.0, br.y - tl.y))
     total_area = sum(w * h for w, h in zip(widths, heights))
-    # 1.8x area factor (was 2.5x) gives the placer ~55% reachable utilization
-    # at packed-square geometry, still leaving slack for routing channels and
-    # constrained-edge anchors but biasing the search toward denser packings.
-    # Empirically iter3b R6 produced 37% area_utilization at 2.5x slack, so
-    # there's headroom to tighten the seed before placement starts hitting
-    # solver-feasibility issues.
-    side = math.sqrt(max(total_area, 1.0) * 1.8) + spacing_mm * 2.0
+    side = math.sqrt(max(total_area, 1.0) * 2.5) + spacing_mm * 2.0
     sum_w = sum(widths) + spacing_mm * (n + 1)
     sum_h = sum(heights) + spacing_mm * (n + 1)
     # Side gives a square-ish base; sum_*/2 is the half-width if children
