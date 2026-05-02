@@ -320,9 +320,8 @@ def extract_parent_local_components(
             continue
         if allowed_refs and ref.upper() not in allowed_refs:
             continue
-        if not allowed_refs or ref.upper() in allowed_refs:
-            local_components[ref] = copy.deepcopy(comp)
-            
+        local_components[ref] = copy.deepcopy(comp)
+
     return local_components
 
 
