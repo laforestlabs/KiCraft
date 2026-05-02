@@ -1225,6 +1225,70 @@ def render_stacking_heatmap(report: Report, output: Path) -> Path:
 # --- CLI -----------------------------------------------------------------
 
 
+def diff_reports(prev: dict, cur: dict) -> list[str]:
+    """Diff two inspector report.json dicts and return human-readable
+    deltas suitable for an AI agent's 'did this change help?' check."""
+    out: list[str] = []
+
+    def _f(path: list[str], default=0):
+        d = cur
+        for p in path:
+            d = d.get(p, {}) if isinstance(d, dict) else {}
+        return d if not isinstance(d, dict) else default
+
+    def _p(path: list[str], default=0):
+        d = prev
+        for p in path:
+            d = d.get(p, {}) if isinstance(d, dict) else {}
+        return d if not isinstance(d, dict) else default
+
+    metrics = [
+        ("board_area_mm2", "board area mm^2", "lower"),
+        ("wasted_fraction", "wasted fraction", "lower"),
+        ("stacked_fraction", "stacked fraction", "higher"),
+        ("stacking_efficiency", "stacking efficiency", "higher"),
+        ("packing_density", "packing density", "higher"),
+    ]
+    for key, label, direction in metrics:
+        p_val = _p([key])
+        c_val = _f([key])
+        if p_val == c_val:
+            continue
+        delta = c_val - p_val
+        sign = "+" if delta >= 0 else ""
+        verdict = ""
+        if direction == "lower":
+            verdict = " (BETTER)" if delta < 0 else " (WORSE)"
+        elif direction == "higher":
+            verdict = " (BETTER)" if delta > 0 else " (WORSE)"
+        if isinstance(c_val, float) and abs(c_val) < 1.0:
+            out.append(
+                f"- {label}: {p_val * 100:.1f}% -> {c_val * 100:.1f}% "
+                f"({sign}{delta * 100:.1f} pp){verdict}"
+            )
+        else:
+            out.append(f"- {label}: {p_val:.1f} -> {c_val:.1f} ({sign}{delta:.1f}){verdict}")
+
+    p_drc = prev.get("drc", {})
+    c_drc = cur.get("drc", {})
+    p_err = p_drc.get("error_count", 0)
+    c_err = c_drc.get("error_count", 0)
+    if p_err != c_err:
+        verdict = " (BETTER)" if c_err < p_err else " (WORSE)"
+        out.append(f"- DRC errors: {p_err} -> {c_err}{verdict}")
+
+    p_kinds = {i["kind"] for i in prev.get("issues", [])}
+    c_kinds = {i["kind"] for i in cur.get("issues", [])}
+    new_kinds = c_kinds - p_kinds
+    fixed_kinds = p_kinds - c_kinds
+    if new_kinds:
+        out.append(f"- New issue kinds: {', '.join(sorted(new_kinds))}")
+    if fixed_kinds:
+        out.append(f"- Fixed issue kinds: {', '.join(sorted(fixed_kinds))}")
+
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("pcb", help="Stamped or routed parent .kicad_pcb")
@@ -1233,6 +1297,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Directory to write reports + PNGs (default: <pcb_dir>/inspect/)",
     )
     parser.add_argument("--json-only", action="store_true", help="Skip PNGs, only emit JSON")
+    parser.add_argument(
+        "--baseline",
+        help="Path to a previous report.json to diff against; deltas are "
+        "appended to summary.md and printed on stdout.",
+    )
     args = parser.parse_args(argv)
 
     pcb_path = Path(args.pcb).resolve()
@@ -1263,13 +1332,30 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             print(f"warning: render failed: {exc}", file=sys.stderr)
 
+    md_text = to_markdown(report, png_paths=pngs)
+
+    diff_lines: list[str] = []
+    if args.baseline:
+        try:
+            prev = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
+            cur = report.to_dict()
+            diff_lines = diff_reports(prev, cur)
+        except Exception as exc:
+            diff_lines = [f"(diff failed: {exc})"]
+    if diff_lines:
+        md_text += "\n## Diff vs baseline\n\n" + "\n".join(diff_lines) + "\n"
+
     md_path = out_dir / "summary.md"
-    md_path.write_text(to_markdown(report, png_paths=pngs), encoding="utf-8")
+    md_path.write_text(md_text, encoding="utf-8")
 
     print(f"summary  : {md_path}")
     print(f"json     : {json_path}")
     for label, p in pngs.items():
         print(f"{label:<8} : {p}")
+    if diff_lines:
+        print("\n--- diff vs baseline ---")
+        for line in diff_lines:
+            print(line)
     return 0
 
 
