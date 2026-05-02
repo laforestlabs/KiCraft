@@ -261,6 +261,10 @@ class PlacementScore:
     topology_structure: float = (
         100.0  # 100 = topology-aware passive chains stay ordered around anchors
     )
+    block_opposite_side: float = 0.0  # parent-side: reward stacking of
+    # blocker-compatible pairs (front-only x back-only). 100 = every
+    # compatible pair fully overlaps; 0 = none overlap. Stays at 0 for
+    # leaf placement (no synthetic blocks present).
 
     def compute_total(self, weights: Optional[dict[str, float]] = None) -> float:
         w = weights or {
@@ -275,6 +279,18 @@ class PlacementScore:
             "group_coherence": 0.08,  # functional groups stay compact
             "aspect_ratio": 0.02,  # penalize elongated board shapes
             "topology_structure": 0.05,  # reward topology-aware passive ordering
+            "block_opposite_side": 0.0,  # parent-side: reward stacking
+            # blocker-compatible (front-only x back-only) block pairs
+            # so SMT leaves migrate onto large back-side THT footprints.
+            # Plumbing is in place but the default weight is 0 -- the
+            # _place_clusters initial placement already puts SMT blocks
+            # in a connectivity-driven cluster, and SA refinement
+            # consistently finds no nearby improvement that would
+            # actually start the stacking. Achieving stacking requires
+            # either a stronger initial placement hint that seeds SMT
+            # blocks inside large back-side block bboxes, or a much
+            # higher weight here paired with a stronger force-phase
+            # attraction. Track as follow-up.
         }
         self.total = sum(getattr(self, k) * v for k, v in w.items())
         return self.total

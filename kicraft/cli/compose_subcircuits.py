@@ -630,25 +630,41 @@ def _compute_final_outline(
         constrained_ref_world_anchors=anchor_positions,
         margin_mm=spacing_mm,
     )
-    # Containment: guarantee that every placed bbox sits inside the
-    # constraint outline. constraint_aware_outline already applies
-    # margin_mm to unconstrained sides, so we only widen if a placed
-    # bbox actually pokes out (rare, but possible when a block ends up
-    # outboard of its constraint anchor by SA jitter).
+    # On a constrained side the outline must STOP at the constraint
+    # anchor target (the leaf's "PCB Edge" marker), even if the leaf's
+    # body geometry extends outboard -- that overhang is what makes
+    # connectors like USB-C usable. On an unconstrained side, expand
+    # the outline if a placed bbox happens to poke past the geom +
+    # margin (rare, but possible when SA jitter pushes a block outboard
+    # of the seed). constrained sides never widen via geom; they
+    # are governed solely by the marker.
+    constrained_sides = {"left": False, "right": False, "top": False, "bottom": False}
+    for c in constraints:
+        if c.target == "edge":
+            constrained_sides[c.value] = True
+        elif c.target == "corner":
+            for side in c.value.split("-"):
+                if side in constrained_sides:
+                    constrained_sides[side] = True
+
     geom_min_x = min(b[0].x for b in placed_bboxes)
     geom_min_y = min(b[0].y for b in placed_bboxes)
     geom_max_x = max(b[1].x for b in placed_bboxes)
     geom_max_y = max(b[1].y for b in placed_bboxes)
-    return (
-        Point(
-            min(constraint_outline[0].x, geom_min_x),
-            min(constraint_outline[0].y, geom_min_y),
-        ),
-        Point(
-            max(constraint_outline[1].x, geom_max_x),
-            max(constraint_outline[1].y, geom_max_y),
-        ),
+
+    out_min_x = constraint_outline[0].x if constrained_sides["left"] else min(
+        constraint_outline[0].x, geom_min_x
     )
+    out_min_y = constraint_outline[0].y if constrained_sides["top"] else min(
+        constraint_outline[0].y, geom_min_y
+    )
+    out_max_x = constraint_outline[1].x if constrained_sides["right"] else max(
+        constraint_outline[1].x, geom_max_x
+    )
+    out_max_y = constraint_outline[1].y if constrained_sides["bottom"] else max(
+        constraint_outline[1].y, geom_max_y
+    )
+    return (Point(out_min_x, out_min_y), Point(out_max_x, out_max_y))
 
 
 def _snap_parent_local(
@@ -756,8 +772,13 @@ def _compose_artifacts(
 
     logger = logging.getLogger(__name__)
 
-    cfg = dict(cfg or {})
-    component_zones: dict[str, Any] = {}
+    # Merge caller-supplied cfg over project config so explicit overrides
+    # (e.g., opposite_side_attraction_k from the parent route command,
+    # connector_edge_inset_mm tuning) survive. Without this merge,
+    # load_project_config used to clobber whatever the caller passed in.
+    user_cfg = dict(cfg or {})
+    cfg = dict(user_cfg)
+    component_zones: dict[str, Any] = cfg.get("component_zones", {})
     parent_local: dict[str, Component] = {}
 
     if pcb_path:
@@ -765,7 +786,8 @@ def _compose_artifacts(
             project_dir = Path(pcb_path).resolve().parent
             cfg_file = discover_project_config(project_dir)
             if cfg_file is not None:
-                cfg = load_project_config(str(cfg_file))
+                project_cfg = load_project_config(str(cfg_file))
+                cfg = {**project_cfg, **user_cfg}
                 component_zones = cfg.get("component_zones", {})
             parent_local = extract_parent_local_components(
                 str(pcb_path),
@@ -825,7 +847,14 @@ def _compose_artifacts(
         silkscreen=[],
         board_outline=(Point(0.0, 0.0), Point(seed_w, seed_h)),
     )
+    # Forward project-level cfg so the solver sees connector_edge_inset_mm,
+    # edge_margin_mm, force_attract_k, etc. parent_placement is an optional
+    # override layer for parent-specific tuning. component_zones is forced
+    # to block-level only so the leaf-pad warning doesn't fire and so the
+    # solver doesn't try to pin J1/J2/J3 directly (those flow through
+    # attachment_constraints_to_zones into the synthetic block zones).
     solver_cfg = {
+        **cfg,
         **cfg.get("parent_placement", {}),
         "component_zones": dict(block_zones),
         "placement_clearance_mm": spacing_mm,

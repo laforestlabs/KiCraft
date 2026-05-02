@@ -38,6 +38,7 @@ class PlacementScorer:
         s.smt_opposite_tht = self._score_smt_opposite_tht()
         s.group_coherence = self._score_group_coherence()
         s.topology_structure = self._score_topology_structure()
+        s.block_opposite_side = self._score_block_opposite_side()
 
         # Board aspect ratio scoring
         board_w = self.state.board_width
@@ -228,6 +229,54 @@ class PlacementScorer:
         #                  ratio of 0.3 (30% overlap) → score ~30
         #                  ratio of 0.0 → score 100
         return max(0.0, min(100.0, 100.0 * (1.0 - overlap_ratio * 3.0)))
+
+    def _score_block_opposite_side(self) -> float:
+        """Reward bbox overlap between blocker-compatible block pairs.
+
+        On the parent-side path, synthetic blocks carry block_blocker_set
+        and the courtyard scorer waives the overlap penalty for
+        compatible pairs. That alone is permissive (overlap doesn't
+        hurt) but not active (overlap doesn't help). This term *rewards*
+        the overlap so SA refinement actively packs front-side SMT
+        blocks on top of back-side THT blocks (e.g. SMT regulators on
+        the back-side battery footprint).
+
+        Returns 0 when no compatible pairs exist (leaf placement) so the
+        weighted contribution to the total score stays neutral. Returns
+        100 when every compatible pair has its smaller bbox fully
+        contained in the larger; scales linearly with overlap fraction.
+        """
+        comps = list(self.state.components.values())
+        n = len(comps)
+        if n < 2:
+            return 0.0
+        compatible_total = 0.0
+        compatible_overlap = 0.0
+        for i in range(n):
+            a = comps[i]
+            if a.block_blocker_set is None:
+                continue
+            a_tl, a_br = a.bbox(0.0)
+            a_area = max(0.0, (a_br.x - a_tl.x) * (a_br.y - a_tl.y))
+            for j in range(i + 1, n):
+                b = comps[j]
+                if b.block_blocker_set is None:
+                    continue
+                if not _blocker_pair_compatible(a, b):
+                    continue
+                b_tl, b_br = b.bbox(0.0)
+                b_area = max(0.0, (b_br.x - b_tl.x) * (b_br.y - b_tl.y))
+                small_area = min(a_area, b_area)
+                if small_area <= 0.0:
+                    continue
+                ox = max(0.0, min(a_br.x, b_br.x) - max(a_tl.x, b_tl.x))
+                oy = max(0.0, min(a_br.y, b_br.y) - max(a_tl.y, b_tl.y))
+                overlap = ox * oy
+                compatible_total += small_area
+                compatible_overlap += min(small_area, overlap)
+        if compatible_total <= 0.0:
+            return 0.0
+        return max(0.0, min(100.0, 100.0 * compatible_overlap / compatible_total))
 
     def _score_smt_opposite_tht(self) -> float:
         """Bonus for SMT components placed in the XY shadow of back-side THT parts.

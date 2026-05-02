@@ -1845,6 +1845,7 @@ class PlacementSolver:
             self._accumulate_repulsion_numpy(comps, forces)
         else:
             self._accumulate_repulsion_python(comps, forces)
+        self._accumulate_opposite_side_attraction(comps, forces)
         self._accumulate_smt_opposite_tht_force(comps, refs, forces)
         self._accumulate_boundary_force(comps, refs, forces, tl, br)
         self._accumulate_center_attraction(comps, refs, forces, tl, br)
@@ -2035,6 +2036,57 @@ class PlacementSolver:
                 angle = math.atan2(b.pos.y - a.pos.y, b.pos.x - a.pos.x)
                 forces[ref].x += f_mag * math.cos(angle)
                 forces[ref].y += f_mag * math.sin(angle)
+
+    def _accumulate_opposite_side_attraction(
+        self,
+        comps: dict[str, Component],
+        forces: dict[str, Point],
+    ) -> None:
+        """Pull blocker-compatible block pairs (e.g. front-only x back-only)
+        toward each other so opposite-side stacking emerges naturally
+        during force-directed refinement.
+
+        Without this term, the blocker-aware repulsion gate only *allows*
+        overlap; it never *encourages* it. On dual-layer parents like
+        LLUPS that means small SMT blocks scatter to whatever empty
+        space exists rather than parking on top of the back-side
+        battery footprint -- exactly the wasted-space failure mode the
+        user flagged.
+
+        Force is proportional to combined block area (so bigger blocks
+        exert stronger pull) and falls off with distance. Skipped for
+        non-block leaf components (block_blocker_set is None) so leaf
+        placement is unchanged.
+        """
+        weight = float(self.cfg.get("opposite_side_attraction_k", 0.4))
+        if weight <= 0.0:
+            return
+        ref_list = list(comps.keys())
+        for i in range(len(ref_list)):
+            a = comps[ref_list[i]]
+            if a.block_blocker_set is None:
+                continue
+            for j in range(i + 1, len(ref_list)):
+                b = comps[ref_list[j]]
+                if b.block_blocker_set is None:
+                    continue
+                if a.locked and b.locked:
+                    continue
+                if not _blocker_pair_compatible(a, b):
+                    continue
+                d = a.pos.dist(b.pos)
+                if d < 0.5:
+                    continue
+                f_mag = weight * math.sqrt(max(1.0, a.area * b.area)) / d
+                angle = math.atan2(b.pos.y - a.pos.y, b.pos.x - a.pos.x)
+                fx = f_mag * math.cos(angle)
+                fy = f_mag * math.sin(angle)
+                if not a.locked:
+                    forces[ref_list[i]].x += fx
+                    forces[ref_list[i]].y += fy
+                if not b.locked:
+                    forces[ref_list[j]].x -= fx
+                    forces[ref_list[j]].y -= fy
 
     def _accumulate_repulsion_python(
         self,
