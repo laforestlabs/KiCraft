@@ -279,6 +279,29 @@ class Report:
             return 0.0
         return self.stacked_area_mm2 / self.board_area_mm2
 
+    @property
+    def stacking_efficiency(self) -> float:
+        """Of the back-side footprint area, what fraction has a front-side
+        stack on it. 1.0 = every back cell has a front stack; 0.0 = none.
+        High values mean dual-layer real estate is being used well.
+        """
+        denom = self.cells_stacked + self.cells_back_only
+        if denom <= 0:
+            return 0.0
+        return self.cells_stacked / denom
+
+    @property
+    def packing_density(self) -> float:
+        """Fraction of the board occupied by at least one footprint
+        (front or back). 1.0 = full board; 0.0 = empty board."""
+        if self.cells_total <= 0:
+            return 0.0
+        return (
+            self.cells_stacked
+            + self.cells_front_only
+            + self.cells_back_only
+        ) / self.cells_total
+
     def to_dict(self) -> dict:
         return {
             "pcb_path": self.pcb_path,
@@ -298,6 +321,8 @@ class Report:
             "stacked_area_mm2": self.stacked_area_mm2,
             "wasted_fraction": self.wasted_fraction,
             "stacked_fraction": self.stacked_fraction,
+            "stacking_efficiency": self.stacking_efficiency,
+            "packing_density": self.packing_density,
         }
 
 
@@ -716,6 +741,12 @@ def to_markdown(report: Report, *, png_paths: dict[str, Path] | None = None) -> 
     lines.append(f"- **Dual-layer stacked** : "
                  f"{report.stacked_area_mm2:.0f} mm^2 "
                  f"({report.stacked_fraction * 100:.1f}% of board)")
+    lines.append(f"- **Stacking efficiency** : "
+                 f"{report.stacking_efficiency * 100:.1f}% "
+                 f"(fraction of back-side area with a front-side stack)")
+    lines.append(f"- **Packing density**     : "
+                 f"{report.packing_density * 100:.1f}% "
+                 f"(fraction of board occupied by any footprint)")
     lines.append(f"- **Footprints**     : "
                  f"{sum(1 for f in report.footprints if f.layer == 'front')} front, "
                  f"{sum(1 for f in report.footprints if f.layer == 'back')} back")
@@ -768,11 +799,29 @@ def to_markdown(report: Report, *, png_paths: dict[str, Path] | None = None) -> 
                 )
         lines.append("")
 
-    # Visual artifacts.
+    # Visual artifacts -- with brief descriptions so AI agents know
+    # which one to load for which question.
+    PNG_DESCRIPTIONS = {
+        "annotated_top": (
+            "top-view with leaf courtyards (front=green, back=red), "
+            "edge-marker arrows, and DRC violation markers (red=err, "
+            "yellow=warn). Read this to confirm marker alignment, "
+            "stacking layout, and DRC location clusters."
+        ),
+        "stacking_heatmap": (
+            "5 mm grid colored by occupancy: yellow=stacked (front+back), "
+            "green=front-only, red=back-only, black=empty. Read this to "
+            "see at a glance how much board area is unused and where "
+            "back-only opportunity zones for more stacking exist."
+        ),
+    }
     if png_paths:
         lines.append("## Visual artifacts")
+        lines.append("")
         for label, path in png_paths.items():
-            lines.append(f"- {label}: `{path}`")
+            desc = PNG_DESCRIPTIONS.get(label, "")
+            lines.append(f"- **{label}** ({desc})")
+            lines.append(f"  - path: `{path}`")
         lines.append("")
 
     # Stacking analysis.
@@ -792,22 +841,116 @@ def to_markdown(report: Report, *, png_paths: dict[str, Path] | None = None) -> 
         lines.append(f"| {label:<19s} | {area:>7.0f} mm^2 | {frac:>6.1f}% |")
     lines.append("")
 
-    # Footprint table (compact, alphabetical).
-    lines.append("## Footprints (alphabetical)")
-    lines.append("")
-    lines.append("| Ref     | Layer | Position (mm)        | Courtyard (mm)                                |")
-    lines.append("| ------- | ----- | -------------------- | --------------------------------------------- |")
+    # Next-actions hints derived from issues. These are heuristics, not
+    # guarantees -- but they save the AI agent from reasoning through
+    # the issue list manually for the common cases.
+    next_actions = _suggest_next_actions(report)
+    if next_actions:
+        lines.append("## Suggested next actions")
+        lines.append("")
+        for action in next_actions:
+            lines.append(f"- {action}")
+        lines.append("")
+
+    # Footprint table -- only the largest/refs-with-issues to keep the
+    # report skimmable. Full list is always in report.json.
+    interesting_refs: set[str] = set()
+    for f in report.edge_findings:
+        interesting_refs.add(f.ref)
+    for v in report.drc.violations:
+        for r in v.refs:
+            interesting_refs.add(r)
+    sorted_by_area = sorted(
+        report.footprints,
+        key=lambda f: f.courtyard.area,
+        reverse=True,
+    )
+    pick: list[FootprintInfo] = []
+    seen: set[str] = set()
+    for fp in sorted_by_area[:8]:
+        pick.append(fp)
+        seen.add(fp.ref)
     for fp in sorted(report.footprints, key=lambda f: f.ref):
-        c = fp.courtyard
-        lines.append(
-            f"| `{fp.ref:<5}` | {fp.layer:<5} "
-            f"| ({fp.pos[0]:>6.2f}, {fp.pos[1]:>6.2f}) "
-            f"| ({c.min_x:>6.2f}, {c.min_y:>6.2f}) -> "
-            f"({c.max_x:>6.2f}, {c.max_y:>6.2f}) |"
-        )
-    lines.append("")
+        if fp.ref in interesting_refs and fp.ref not in seen:
+            pick.append(fp)
+            seen.add(fp.ref)
+
+    if pick:
+        lines.append("## Notable footprints")
+        lines.append("")
+        lines.append(f"(largest 8 + refs with edge/DRC findings; full list in report.json)")
+        lines.append("")
+        lines.append("| Ref     | Layer | Position (mm)        | Courtyard (mm)                                |")
+        lines.append("| ------- | ----- | -------------------- | --------------------------------------------- |")
+        for fp in sorted(pick, key=lambda f: f.ref):
+            c = fp.courtyard
+            lines.append(
+                f"| `{fp.ref:<5}` | {fp.layer:<5} "
+                f"| ({fp.pos[0]:>6.2f}, {fp.pos[1]:>6.2f}) "
+                f"| ({c.min_x:>6.2f}, {c.min_y:>6.2f}) -> "
+                f"({c.max_x:>6.2f}, {c.max_y:>6.2f}) |"
+            )
+        lines.append("")
 
     return "\n".join(lines)
+
+
+def _suggest_next_actions(report: Report) -> list[str]:
+    """Translate aggregated findings into concrete suggestions."""
+    actions: list[str] = []
+    drc_errors_by_type: dict[str, int] = {}
+    for issue in report.issues:
+        if issue.severity != "error" or not issue.kind.startswith("drc."):
+            continue
+        kind = issue.kind.split(".", 1)[1]
+        drc_errors_by_type[kind] = drc_errors_by_type.get(kind, 0) + 1
+    if drc_errors_by_type.get("clearance"):
+        actions.append(
+            "Investigate clearance violations: probably a leaf-internal "
+            "issue (the parent compose only places leaves, doesn't move "
+            "their internal pads). Check the smallest leaf bbox + "
+            "design rule clearance."
+        )
+    if drc_errors_by_type.get("items_not_allowed"):
+        actions.append(
+            "Items-not-allowed (keepout) errors usually mean a mounting "
+            "hole or pad is inside a configured keepout zone. Either move "
+            "the offending ref out of the keepout or relax the keepout."
+        )
+    if any(i.kind == "edge.marker_inside_board" for i in report.issues):
+        actions.append(
+            "Edge marker is inside the board: the connector body is sitting "
+            "fully on the PCB instead of overhanging. Check that "
+            "_compute_final_outline does NOT widen the constrained side "
+            "to enclose the connector overhang, and that "
+            "connector_edge_inset_mm in the project config is 0 (or "
+            "negative for explicit overhang)."
+        )
+    if report.stacking_efficiency < 0.3 and report.cells_back_only > 5:
+        actions.append(
+            f"Low stacking efficiency ({report.stacking_efficiency * 100:.0f}%): "
+            f"{report.cells_back_only * report.grid_mm * report.grid_mm:.0f} mm^2 "
+            f"of back-only board area has no front-side block on top. "
+            f"Consider strengthening the opposite-side stacking pass / "
+            f"attraction (cfg.opposite_side_attraction_k) or seeding more "
+            f"SMT blocks inside large back-side block bboxes during "
+            f"_place_clusters."
+        )
+    if report.wasted_fraction > 0.5 and report.packing_density < 0.4:
+        actions.append(
+            f"Board is mostly empty ({report.wasted_fraction * 100:.0f}% wasted, "
+            f"only {report.packing_density * 100:.0f}% packed). Corner-pinned "
+            f"mounting holes anchor the outline to the seed corners; consider "
+            f"re-snapping H4/H86-style refs to the actual leaf-geometry "
+            f"corners after the stacking pass to shrink the board."
+        )
+    if report.drc.unconnected:
+        actions.append(
+            f"{report.drc.unconnected} unconnected ratlines: re-run the "
+            f"router with more passes, widen the route channel, or check "
+            f"that the parent net inference picked up all interconnect nets."
+        )
+    return actions
 
 
 # --- Annotated rendering --------------------------------------------------
