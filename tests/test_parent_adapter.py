@@ -173,11 +173,11 @@ def test_artifact_to_component_populates_block_metadata():
 
     assert comp.ref == "BLOCK_0_USB"
     assert comp.kind == "subcircuit"
-    # Content extent (J1 spans the full 10 x 8) plus a 2 mm safety margin
+    # Content extent (J1 spans the full 10 x 8) plus a 1 mm safety margin
     # per side so the placer's bbox-overlap resolver leaves a routing
     # channel between adjacent leaves.
-    assert comp.width_mm == 14.0
-    assert comp.height_mm == 12.0
+    assert comp.width_mm == 12.0
+    assert comp.height_mm == 10.0
     assert comp.block_blocker_set is not None
     assert comp.block_artifact_origin_offset == Point(5.0, 4.0)
     assert comp.block_side in {"front", "back", "dual", "none"}
