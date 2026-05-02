@@ -1164,11 +1164,15 @@ def _score_parent_composition(
     # area_utilization carries real weight in the total so the score actually
     # penalises oversized boards. Without this it was breakdown-only and
     # sweeps were free to inflate score by enlarging the board.
+    # area_utilization weight bumped 0.15 -> 0.25 to push search harder
+    # toward smaller PCBs; packing_density dropped 0.25 -> 0.15 because
+    # packing and utilization are correlated and packing-only optimization
+    # was rewarding tight component groups inside oversized boards.
     total = (
         child_score_component * 0.25
         + interconnect_component * 0.25
-        + packing_component * 0.25
-        + utilization_component * 0.15
+        + packing_component * 0.15
+        + utilization_component * 0.25
         + anchor_coverage_component * 0.10
     )
 
