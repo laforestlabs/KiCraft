@@ -2271,6 +2271,8 @@ def main(argv: list[str] | None = None) -> int:
                 "--route",
                 "--output",
                 str(parent_output_json),
+                "--seed",
+                str(round_seed),
             ]
             if args.jar:
                 parent_route_cmd.extend(["--jar", args.jar])

@@ -2468,6 +2468,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--config",
         help="Optional JSON config file to merge on top of default/project config",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help=(
+            "RNG seed forwarded to the parent PlacementSolver. Different seeds "
+            "produce different parent placements at fixed config; required for "
+            "random-search to actually explore parent layouts (default: 0)."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -2536,6 +2546,7 @@ def main(argv: list[str] | None = None) -> int:
             parent_definition=parent_definition,
             pcb_path=Path(args.pcb) if args.pcb else None,
             cfg=compose_cfg,
+            seed=int(args.seed),
         )
 
         output_path = None
