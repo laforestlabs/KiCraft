@@ -2623,8 +2623,16 @@ class PlacementSolver:
 
                     hw_a, hh_a = _pad_half_extents(a)
                     hw_b, hh_b = _pad_half_extents(b)
+                    # Push by overlap + full clearance (not just overlap + 0.1)
+                    # so the steady state actually separates by clearance,
+                    # not "barely disjoint." With strong inter-net attraction
+                    # the previous (overlap + 0.1) / 2 push only kept blocks
+                    # 0.1 mm disjoint on the bbox-effective metric, which
+                    # left content traces within trace-clearance of each
+                    # other and produced stamp shorts at the seam.
+                    extra = max(0.5, self.clearance)
                     if ox < oy:
-                        push = (ox + 0.1) / 2
+                        push = (ox + extra) / 2
                         sign = 1.0 if a.pos.x >= b.pos.x else -1.0
                         old_a = Point(a.pos.x, a.pos.y)
                         old_b = Point(b.pos.x, b.pos.y)
@@ -2637,7 +2645,7 @@ class PlacementSolver:
                             min(br.x - hw_b - 1.0, b.pos.x - sign * push),
                         )
                     else:
-                        push = (oy + 0.1) / 2
+                        push = (oy + extra) / 2
                         sign = 1.0 if a.pos.y >= b.pos.y else -1.0
                         old_a = Point(a.pos.x, a.pos.y)
                         old_b = Point(b.pos.x, b.pos.y)
