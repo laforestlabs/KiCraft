@@ -862,6 +862,18 @@ class PlacementSolver:
             # Re-snap aligned pairs after orderedness
             self._re_snap_aligned_pairs(best_comps)
 
+        # Step 8.7: Block stacking pass -- for parent-side blocks only.
+        # Force-directed + SA alone consistently fail to migrate small
+        # front-only SMT blocks onto large back-only THT blocks (they
+        # converge to a connectivity centroid that's never inside the
+        # back-side block). Without active stacking, dual-layer parents
+        # like LLUPS waste >50% of board area opposite the battery
+        # footprint. This pass deterministically translates each
+        # unlocked subcircuit block onto its largest blocker-compatible
+        # neighbor whose bbox can accommodate it.
+        if self.cfg.get("opposite_side_stacking_pass", True):
+            self._stack_compatible_blocks(best_comps)
+
         # Step 9: Final exhaustive overlap resolution — guarantee no courtyard
         # overlaps before routing. Must run after snap since snapping can
         # re-introduce small overlaps.
@@ -2036,6 +2048,66 @@ class PlacementSolver:
                 angle = math.atan2(b.pos.y - a.pos.y, b.pos.x - a.pos.x)
                 forces[ref].x += f_mag * math.cos(angle)
                 forces[ref].y += f_mag * math.sin(angle)
+
+    def _stack_compatible_blocks(self, comps: dict[str, Component]) -> None:
+        """Migrate small unlocked subcircuit blocks onto large blocker-
+        compatible neighbors so dual-layer board real estate is actually
+        used (e.g. front-side SMT regulators sit on top of the back-side
+        battery footprint).
+
+        Algorithm: rank candidates (unlocked, kind==subcircuit, has
+        blocker_set) by area ascending and "anchors" (locked blocks
+        with kind==subcircuit and blocker_set) by area descending. For
+        each candidate, find the largest anchor whose body bbox can
+        contain the candidate's body bbox AND whose blocker set is
+        compatible with the candidate's. Translate the candidate so its
+        body center lands at the anchor's body center. Skip if no
+        anchor fits.
+
+        Same-side conflicts between candidates that pile onto the same
+        anchor are left for _resolve_overlaps to handle in the very
+        next step -- it will spread them out within the anchor's bbox
+        without violating the blocker compatibility (the anchor pair
+        with each candidate is still compatible; candidates among
+        themselves push apart per the standard same-layer rule).
+        """
+        anchors = []
+        candidates = []
+        for ref, comp in comps.items():
+            if comp.kind != "subcircuit":
+                continue
+            if comp.block_blocker_set is None:
+                continue
+            if comp.locked:
+                anchors.append((ref, comp))
+            else:
+                candidates.append((ref, comp))
+        if not anchors or not candidates:
+            return
+        anchors.sort(key=lambda rc: rc[1].area, reverse=True)
+        candidates.sort(key=lambda rc: rc[1].area)
+
+        for cand_ref, cand in candidates:
+            best_anchor: tuple[str, Component] | None = None
+            for anc_ref, anc in anchors:
+                # Need the candidate to fit inside the anchor's bbox so
+                # the stacked geometry stays inside the board.
+                if cand.width_mm > anc.width_mm + 0.5:
+                    continue
+                if cand.height_mm > anc.height_mm + 0.5:
+                    continue
+                if not _blocker_pair_compatible(cand, anc):
+                    continue
+                best_anchor = (anc_ref, anc)
+                break
+            if best_anchor is None:
+                continue
+            anc_ref, anc = best_anchor
+            old_pos = Point(cand.pos.x, cand.pos.y)
+            cand.pos = Point(anc.pos.x, anc.pos.y)
+            if cand.body_center is not None:
+                cand.body_center = Point(anc.pos.x, anc.pos.y)
+            _update_pad_positions(cand, old_pos, cand.rotation)
 
     def _accumulate_opposite_side_attraction(
         self,
