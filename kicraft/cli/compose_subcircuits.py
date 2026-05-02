@@ -248,9 +248,13 @@ def _emit_inspector_bundle(routed_pcb: Path) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         report = collect(routed_pcb)
         json_path = out_dir / "report.json"
-        json_path.write_text(
+        # Atomic writes: this bundle is auto-emitted after every parent
+        # route, and downstream tools (GUI, agents) may read mid-write.
+        tmp_json = json_path.with_suffix(json_path.suffix + ".tmp")
+        tmp_json.write_text(
             json.dumps(report.to_dict(), indent=2), encoding="utf-8"
         )
+        tmp_json.replace(json_path)
         pngs: dict[str, Path] = {}
         try:
             pngs["annotated_top"] = render_annotated_top(
@@ -262,7 +266,9 @@ def _emit_inspector_bundle(routed_pcb: Path) -> None:
         except Exception as exc:
             print(f"inspect: render failed: {exc}", file=sys.stderr)
         md_path = out_dir / "summary.md"
-        md_path.write_text(to_markdown(report, png_paths=pngs), encoding="utf-8")
+        tmp_md = md_path.with_suffix(md_path.suffix + ".tmp")
+        tmp_md.write_text(to_markdown(report, png_paths=pngs), encoding="utf-8")
+        tmp_md.replace(md_path)
         print(f"inspect_summary    : {md_path}")
         print(f"inspect_json       : {json_path}")
         for label, p in pngs.items():
@@ -1263,10 +1269,16 @@ def _save_composition_snapshot(
         "state": state.to_dict(),
         "artifacts": transformed_payloads,
     }
-    output_path.write_text(
+    # Atomic write: autoexperiment reads this output via
+    # _read_composer_quality_score to extract the round score; a torn
+    # mid-write read would crash the score-extraction path and reject
+    # an otherwise-valid round.
+    tmp_output = output_path.with_suffix(output_path.suffix + ".tmp")
+    tmp_output.write_text(
         json.dumps(payload, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    tmp_output.replace(output_path)
     return str(output_path)
 
 
@@ -2281,10 +2293,14 @@ def _persist_parent_artifact(
         "notes": notes,
     }
     metadata_path = artifact_dir / "metadata.json"
-    metadata_path.write_text(
+    # Atomic write: GUI and other downstream consumers may read this
+    # while compose is still finishing other artifacts in the same dir.
+    tmp_metadata = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
+    tmp_metadata.write_text(
         json.dumps(metadata_payload, indent=2, sort_keys=True, default=str),
         encoding="utf-8",
     )
+    tmp_metadata.replace(metadata_path)
 
     # Write a debug.json with routing details
     debug_payload = {
@@ -2386,10 +2402,13 @@ def _persist_parent_artifact(
         "composition_state": state.to_dict(),
     }
     debug_path = artifact_dir / "debug.json"
-    debug_path.write_text(
+    # Atomic write: same rationale as metadata.json above.
+    tmp_debug = debug_path.with_suffix(debug_path.suffix + ".tmp")
+    tmp_debug.write_text(
         json.dumps(debug_payload, indent=2, sort_keys=True, default=str),
         encoding="utf-8",
     )
+    tmp_debug.replace(debug_path)
 
     return str(artifact_dir)
 

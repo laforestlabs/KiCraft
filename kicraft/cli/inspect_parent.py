@@ -1351,7 +1351,9 @@ def main(argv: list[str] | None = None) -> int:
         md_text += "\n## Diff vs baseline\n\n" + "\n".join(diff_lines) + "\n"
 
     md_path = out_dir / "summary.md"
-    md_path.write_text(md_text, encoding="utf-8")
+    tmp_md = md_path.with_suffix(md_path.suffix + ".tmp")
+    tmp_md.write_text(md_text, encoding="utf-8")
+    tmp_md.replace(md_path)
 
     print(f"summary  : {md_path}")
     print(f"json     : {json_path}")
