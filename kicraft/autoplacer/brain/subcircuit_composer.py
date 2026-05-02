@@ -1458,20 +1458,8 @@ def _extract_blockers_from_layout(
             else:
                 back_pads.append(pad_rect)
 
-        # THT components (battery holders, big connectors) physically
-        # occupy their full body bbox on BOTH layers -- the cell sits in
-        # the middle of the holder, between the terminal pads, but it
-        # still blocks any other footprint from being placed there. Per-pad
-        # rects alone leave the body interior looking free, and adjacent
-        # leaves' SMT components / traces end up shorting on the THT
-        # terminals at the seam (BT1 vs CHARGER trace was the smoking gun
-        # in the seed=42 R2 failure). Add the full body bbox so the
-        # blocker check enforces physical extent, not just copper extent.
-        if component.is_through_hole:
-            front_pads.append(component_bbox)
-            back_pads.append(component_bbox)
-            if not component.pads:
-                tht_drills.append(component_bbox)
+        if component.is_through_hole and not component.pads:
+            tht_drills.append(component_bbox)
 
     return LeafBlockerSet(
         front_pads=_coalesce_rects(front_pads),
