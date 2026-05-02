@@ -1890,9 +1890,15 @@ class PlacementSolver:
         """
         import copy
         import math
-        import random
 
-        rng = random.Random(self.seed + 9999)
+        # Reuse the solver's primary RNG (self.rng) so SA draws stay on the
+        # same deterministic stream as the rest of the solver. Previously
+        # this created `random.Random(self.seed + 9999)`, which made SA
+        # noise insensitive to upstream RNG state changes -- per-config
+        # deltas (THT body blockers, area_factor tweaks, etc.) were drowned
+        # out by SA stream variance, plausibly explaining recent
+        # "no measurable win" reverts.
+        rng = self.rng
 
         # Score current state
         work_state.components = comps
