@@ -2055,24 +2055,18 @@ class PlacementSolver:
         used (e.g. front-side SMT regulators sit on top of the back-side
         battery footprint).
 
-        Algorithm: rank candidates (unlocked, kind==subcircuit, has
-        blocker_set) by area ascending and "anchors" (locked blocks
-        with kind==subcircuit and blocker_set) by area descending. For
-        each candidate, find the largest anchor whose body bbox can
-        contain the candidate's body bbox AND whose blocker set is
-        compatible with the candidate's. Translate the candidate so its
-        body center lands at the anchor's body center. Skip if no
-        anchor fits.
-
-        Same-side conflicts between candidates that pile onto the same
-        anchor are left for _resolve_overlaps to handle in the very
-        next step -- it will spread them out within the anchor's bbox
-        without violating the blocker compatibility (the anchor pair
-        with each candidate is still compatible; candidates among
-        themselves push apart per the standard same-layer rule).
+        Group candidates (unlocked, kind==subcircuit, with a blocker
+        set) by their best-fit anchor (locked subcircuit blocks ranked
+        by area descending). Each candidate goes to the largest anchor
+        whose bbox can contain it AND whose blocker set permits the
+        overlap. Within each group, candidates are placed deterministic-
+        ally along a row inside the anchor's bbox (centered on the
+        anchor's body center, packed left-to-right with spacing) so
+        _resolve_overlaps doesn't have to push them apart from a single
+        coincident point and watch them scatter outside the anchor.
         """
-        anchors = []
-        candidates = []
+        anchors: list[tuple[str, Component]] = []
+        candidates: list[tuple[str, Component]] = []
         for ref, comp in comps.items():
             if comp.kind != "subcircuit":
                 continue
@@ -2085,29 +2079,78 @@ class PlacementSolver:
         if not anchors or not candidates:
             return
         anchors.sort(key=lambda rc: rc[1].area, reverse=True)
-        candidates.sort(key=lambda rc: rc[1].area)
+        candidates.sort(key=lambda rc: rc[1].area, reverse=True)
 
+        # Group candidates by their chosen anchor.
+        groups: dict[str, list[tuple[str, Component]]] = {}
+        anchor_by_ref = {ref: comp for ref, comp in anchors}
         for cand_ref, cand in candidates:
-            best_anchor: tuple[str, Component] | None = None
+            chosen_anchor_ref: str | None = None
             for anc_ref, anc in anchors:
-                # Need the candidate to fit inside the anchor's bbox so
-                # the stacked geometry stays inside the board.
                 if cand.width_mm > anc.width_mm + 0.5:
                     continue
                 if cand.height_mm > anc.height_mm + 0.5:
                     continue
                 if not _blocker_pair_compatible(cand, anc):
                     continue
-                best_anchor = (anc_ref, anc)
+                chosen_anchor_ref = anc_ref
                 break
-            if best_anchor is None:
+            if chosen_anchor_ref is None:
                 continue
-            anc_ref, anc = best_anchor
-            old_pos = Point(cand.pos.x, cand.pos.y)
-            cand.pos = Point(anc.pos.x, anc.pos.y)
-            if cand.body_center is not None:
-                cand.body_center = Point(anc.pos.x, anc.pos.y)
-            _update_pad_positions(cand, old_pos, cand.rotation)
+            groups.setdefault(chosen_anchor_ref, []).append((cand_ref, cand))
+
+        # Pack each group as a row centered on the anchor.
+        for anc_ref, group in groups.items():
+            anc = anchor_by_ref[anc_ref]
+            spacing = max(0.5, self.clearance / 2.0)
+            row_width = sum(c.width_mm for _, c in group) + spacing * (len(group) - 1)
+            anc_left = anc.pos.x - anc.width_mm / 2.0
+            anc_top = anc.pos.y - anc.height_mm / 2.0
+            anc_right = anc.pos.x + anc.width_mm / 2.0
+            anc_bottom = anc.pos.y + anc.height_mm / 2.0
+            # Pack horizontally if it fits along x; otherwise pack
+            # vertically. Center the row inside the anchor.
+            if row_width <= anc.width_mm:
+                cursor_x = anc.pos.x - row_width / 2.0
+                for cand_ref, cand in group:
+                    target_x = cursor_x + cand.width_mm / 2.0
+                    target_y = anc.pos.y
+                    target_x = max(
+                        anc_left + cand.width_mm / 2.0,
+                        min(anc_right - cand.width_mm / 2.0, target_x),
+                    )
+                    target_y = max(
+                        anc_top + cand.height_mm / 2.0,
+                        min(anc_bottom - cand.height_mm / 2.0, target_y),
+                    )
+                    old_pos = Point(cand.pos.x, cand.pos.y)
+                    cand.pos = Point(target_x, target_y)
+                    if cand.body_center is not None:
+                        cand.body_center = Point(target_x, target_y)
+                    _update_pad_positions(cand, old_pos, cand.rotation)
+                    cursor_x += cand.width_mm + spacing
+            else:
+                col_height = sum(c.height_mm for _, c in group) + spacing * (
+                    len(group) - 1
+                )
+                cursor_y = anc.pos.y - col_height / 2.0
+                for cand_ref, cand in group:
+                    target_x = anc.pos.x
+                    target_y = cursor_y + cand.height_mm / 2.0
+                    target_x = max(
+                        anc_left + cand.width_mm / 2.0,
+                        min(anc_right - cand.width_mm / 2.0, target_x),
+                    )
+                    target_y = max(
+                        anc_top + cand.height_mm / 2.0,
+                        min(anc_bottom - cand.height_mm / 2.0, target_y),
+                    )
+                    old_pos = Point(cand.pos.x, cand.pos.y)
+                    cand.pos = Point(target_x, target_y)
+                    if cand.body_center is not None:
+                        cand.body_center = Point(target_x, target_y)
+                    _update_pad_positions(cand, old_pos, cand.rotation)
+                    cursor_y += cand.height_mm + spacing
 
     def _accumulate_opposite_side_attraction(
         self,
