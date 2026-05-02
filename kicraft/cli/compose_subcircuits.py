@@ -231,6 +231,46 @@ class ParentCompositionState:
         }
 
 
+def _emit_inspector_bundle(routed_pcb: Path) -> None:
+    """Run the parent-PCB inspector and print bundle paths.
+
+    Emits a structured JSON report, a markdown summary, and annotated
+    PNGs that downstream callers (especially AI agents) can read to
+    understand the layout. Failures are non-fatal -- the inspector is
+    a diagnostic, not a gate.
+    """
+    if not routed_pcb.is_file():
+        return
+    try:
+        from kicraft.cli.inspect_parent import collect, render_annotated_top, \
+            render_stacking_heatmap, to_markdown
+        out_dir = routed_pcb.parent / "inspect"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        report = collect(routed_pcb)
+        json_path = out_dir / "report.json"
+        json_path.write_text(
+            json.dumps(report.to_dict(), indent=2), encoding="utf-8"
+        )
+        pngs: dict[str, Path] = {}
+        try:
+            pngs["annotated_top"] = render_annotated_top(
+                report, out_dir / "annotated_top.png"
+            )
+            pngs["stacking_heatmap"] = render_stacking_heatmap(
+                report, out_dir / "stacking_heatmap.png"
+            )
+        except Exception as exc:
+            print(f"inspect: render failed: {exc}", file=sys.stderr)
+        md_path = out_dir / "summary.md"
+        md_path.write_text(to_markdown(report, png_paths=pngs), encoding="utf-8")
+        print(f"inspect_summary    : {md_path}")
+        print(f"inspect_json       : {json_path}")
+        for label, p in pngs.items():
+            print(f"inspect_{label:<10s}: {p}")
+    except Exception as exc:
+        print(f"inspect: failed: {exc}", file=sys.stderr)
+
+
 def _discover_artifact_dirs(project_dir: Path) -> list[Path]:
     """Find solved subcircuit artifact directories under a project."""
     root = project_dir / ".experiments" / "subcircuits"
@@ -2698,12 +2738,26 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         print(f"parent_artifact    : {artifact_dir}")
                         print("parent_status      : accepted")
+                        _emit_inspector_bundle(
+                            Path(artifact_dir) / "parent_routed.kicad_pcb"
+                        )
                     else:
                         reasons = validation.get("rejection_reasons", [])
                         reason_str = ', '.join(reasons) if reasons else 'unknown'
                         print(
                             f"parent_status      : rejected ({reason_str})"
                         )
+                        # Still run the inspector on the rejected board so
+                        # an AI agent can see exactly what failed: which
+                        # DRC violations triggered the rejection, where
+                        # the marker is vs. the board edge, etc.
+                        rejected_pcb = (
+                            Path(routing_result.get("routed_pcb", ""))
+                            if routing_result.get("routed_pcb")
+                            else None
+                        )
+                        if rejected_pcb and rejected_pcb.is_file():
+                            _emit_inspector_bundle(rejected_pcb)
                         print(
                             f"error: parent board rejected by acceptance gate: {reason_str}",
                             file=sys.stderr,
