@@ -1318,7 +1318,12 @@ def main(argv: list[str] | None = None) -> int:
     report = collect(pcb_path)
 
     json_path = out_dir / "report.json"
-    json_path.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+    # Atomic write: tmp + replace. inspect_parent runs after every parent
+    # route in the autoexperiment loop; a downstream tool reading
+    # report.json mid-write would otherwise see truncated JSON.
+    tmp_json = json_path.with_suffix(json_path.suffix + ".tmp")
+    tmp_json.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+    tmp_json.replace(json_path)
 
     pngs: dict[str, Path] = {}
     if not args.json_only:
