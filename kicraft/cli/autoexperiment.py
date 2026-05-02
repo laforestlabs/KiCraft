@@ -123,10 +123,16 @@ def _format_mmss(seconds: float) -> str:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    # Atomic write: tmp + os.replace. The GUI polls status JSON during long
+    # subprocesses and previously caught partial/truncated writes mid-flush,
+    # which surfaced as stuck or toggling clock counters when the frontend
+    # re-anchored against a stale read.
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
         f.write("\n")
+    os.replace(tmp_path, path)
 
 
 def _timing_now() -> float:
@@ -1243,8 +1249,10 @@ def _write_live_status(
             for key, value in board_path_items:
                 lines.append(f"  {key}: {value}")
     status_txt_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(status_txt_path, "w", encoding="utf-8") as f:
+    tmp_status_txt = status_txt_path.with_suffix(status_txt_path.suffix + ".tmp")
+    with open(tmp_status_txt, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
+    os.replace(tmp_status_txt, status_txt_path)
 
 
 def _copy_if_exists(src: Path, dst: Path) -> None:
@@ -1850,7 +1858,7 @@ def main(argv: list[str] | None = None) -> int:
         effective_workers = min(available_cpus, 6)
     effective_workers = max(1, effective_workers)
 
-    print("=== Hierarchical Autoexperiment Complete ===")
+    print("=== Hierarchical Autoexperiment Starting ===")
     print(f"Project:      {project_dir}")
     print(f"Schematic:    {schematic}")
     print(f"PCB:          {pcb}")
@@ -2431,7 +2439,18 @@ def main(argv: list[str] | None = None) -> int:
             score if best_score < 0.0 else round(score - best_score, 3)
         )
         keep_threshold = 0.5
-        is_meaningful_improvement = (
+        # A round can only be promoted to "best" if both the leaf solve
+        # subprocess (skipped in --parents-only mode) and the parent
+        # compose subprocess (skipped in --leaves-only mode) succeeded.
+        # Without this gate, a failed first round (best_score < 0.0)
+        # always becomes the new best, polluting subsequent
+        # improvement_vs_best comparisons; a non-first round whose
+        # subprocess crashed but whose stale-cache score happens to
+        # exceed the threshold can also be wrongly promoted.
+        subprocesses_ok = (args.parents_only or solve_rc == 0) and (
+            args.leaves_only or parent_route_rc == 0
+        )
+        is_meaningful_improvement = subprocesses_ok and (
             best_score < 0.0 or improvement_vs_best >= keep_threshold
         )
 
