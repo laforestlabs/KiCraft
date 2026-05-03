@@ -1105,6 +1105,92 @@ class PlacementSolver:
             cy = max(tl.y + hh + 1, min(br.y - hh - 1, cy))
             return Point(cx, cy)
 
+        def _escape_corner_from_locked(
+            corner: str, comp: Component, target: Point
+        ) -> Point:
+            """Slide ``target`` along the corner's edges until comp's bbox no
+            longer overlaps any already-locked component's bbox.
+
+            Without this, a corner-pinned mounting hole placed at e.g.
+            top-left can land directly on top of an edge-pinned connector
+            that also occupies the top-left region. _resolve_overlaps later
+            pushes the mount aside, but _restore_pinned_positions then snaps
+            it back to the conflicting corner target -- no resolve runs
+            after the final restore, so the overlap survives to the stamp.
+            By baking the escape into the pinned_target, the restore is a
+            no-op and the conflict cannot return.
+
+            Slides along the corner's parallel-to-edge axes (top corners
+            slide in x or y, etc.). Picks the smallest move that clears all
+            conflicts within board bounds. If neither axis produces a clear
+            position, returns the original target (caller falls back to
+            letting _resolve_overlaps handle it as best it can).
+            """
+            half_gap = self.clearance / 2.0
+            # Use width_mm/height_mm directly so the bbox is centered on
+            # the proposed target, not on comp.pos (which still points at
+            # the pre-pin position when this is called).
+            hw = comp.width_mm / 2
+            hh = comp.height_mm / 2
+            comp_tl = Point(target.x - hw - half_gap, target.y - hh - half_gap)
+            comp_br = Point(target.x + hw + half_gap, target.y + hh + half_gap)
+
+            conflicts: list[tuple[Point, Point]] = []
+            for other_ref, other in comps.items():
+                if other is comp or not other.locked:
+                    continue
+                o_tl, o_br = _effective_bbox(other, half_gap)
+                ox = min(comp_br.x, o_br.x) - max(comp_tl.x, o_tl.x)
+                oy = min(comp_br.y, o_br.y) - max(comp_tl.y, o_tl.y)
+                if ox > 0 and oy > 0:
+                    conflicts.append((o_tl, o_br))
+            if not conflicts:
+                return target
+
+            # Slide along the corner's perpendicular edge so the mount
+            # stays in the corner's named region (top-left stays top, etc.)
+            min_x = tl.x + hw + 1.0
+            max_x = br.x - hw - 1.0
+            min_y = tl.y + hh + 1.0
+            max_y = br.y - hh - 1.0
+
+            def clear_at(x: float, y: float) -> bool:
+                ctl = Point(x - hw - half_gap, y - hh - half_gap)
+                cbr = Point(x + hw + half_gap, y + hh + half_gap)
+                for o_tl, o_br in conflicts:
+                    if (
+                        ctl.x < o_br.x
+                        and cbr.x > o_tl.x
+                        and ctl.y < o_br.y
+                        and cbr.y > o_tl.y
+                    ):
+                        return False
+                return True
+
+            candidates: list[tuple[float, float, float]] = []
+            for o_tl, o_br in conflicts:
+                if "left" in corner:
+                    new_x = o_br.x + hw + half_gap + 0.1
+                else:
+                    new_x = o_tl.x - hw - half_gap - 0.1
+                new_x = max(min_x, min(max_x, new_x))
+                if clear_at(new_x, target.y):
+                    candidates.append((abs(new_x - target.x), new_x, target.y))
+
+                if "top" in corner:
+                    new_y = o_br.y + hh + half_gap + 0.1
+                else:
+                    new_y = o_tl.y - hh - half_gap - 0.1
+                new_y = max(min_y, min(max_y, new_y))
+                if clear_at(target.x, new_y):
+                    candidates.append((abs(new_y - target.y), target.x, new_y))
+
+            if not candidates:
+                return target
+            candidates.sort()
+            _, nx, ny = candidates[0]
+            return Point(nx, ny)
+
         def _shift_pads_inside(comp: Component, assigned_edge: str = None):
             """Shift component so ALL pads are inside the board boundary.
 
@@ -1300,7 +1386,9 @@ class PlacementSolver:
             if "corner" in zone_cfg:
                 corner = zone_cfg["corner"]
                 old_pos = Point(comp.pos.x, comp.pos.y)
-                comp.pos = _random_in_corner(corner, comp)
+                target = _random_in_corner(corner, comp)
+                target = _escape_corner_from_locked(corner, comp, target)
+                comp.pos = target
                 _update_pad_positions(comp, old_pos, comp.rotation)
                 self._pinned_targets[ref] = Point(comp.pos.x, comp.pos.y)
                 comp.locked = not unlock_all
@@ -1369,7 +1457,9 @@ class PlacementSolver:
             for ref, corner in zip(mh_refs, diag):
                 comp = comps[ref]
                 old_pos = Point(comp.pos.x, comp.pos.y)
-                comp.pos = _random_in_corner(corner, comp)
+                target = _random_in_corner(corner, comp)
+                target = _escape_corner_from_locked(corner, comp, target)
+                comp.pos = target
                 _update_pad_positions(comp, old_pos, comp.rotation)
                 self._pinned_targets[ref] = Point(comp.pos.x, comp.pos.y)
                 comp.locked = not unlock_all
@@ -1380,7 +1470,9 @@ class PlacementSolver:
             for ref, corner in zip(mh_refs, corners):
                 comp = comps[ref]
                 old_pos = Point(comp.pos.x, comp.pos.y)
-                comp.pos = _random_in_corner(corner, comp)
+                target = _random_in_corner(corner, comp)
+                target = _escape_corner_from_locked(corner, comp, target)
+                comp.pos = target
                 _update_pad_positions(comp, old_pos, comp.rotation)
                 self._pinned_targets[ref] = Point(comp.pos.x, comp.pos.y)
                 comp.locked = not unlock_all
@@ -1393,7 +1485,9 @@ class PlacementSolver:
                 corner += "-"
                 corner += "left" if comp.pos.x < (tl.x + br.x) / 2 else "right"
                 old_pos = Point(comp.pos.x, comp.pos.y)
-                comp.pos = _random_in_corner(corner, comp)
+                target = _random_in_corner(corner, comp)
+                target = _escape_corner_from_locked(corner, comp, target)
+                comp.pos = target
                 _update_pad_positions(comp, old_pos, comp.rotation)
                 self._pinned_targets[ref] = Point(comp.pos.x, comp.pos.y)
                 comp.locked = not unlock_all
