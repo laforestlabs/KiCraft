@@ -2682,10 +2682,13 @@ def main(argv: list[str] | None = None) -> int:
             # Stamp-time DRC guard: kicad-cli DRC on the pre-route board so
             # composer-introduced shorts (two leaves' locked tracks stamped
             # on top of each other) are caught and labeled as such, instead
-            # of being misattributed to FreeRouting later. Routing still
-            # runs so the user gets a routed-board artifact + render to
-            # inspect; the composer-vs-router attribution is recorded in
-            # state.stamp_drc and surfaces in the round JSON.
+            # of being misattributed to FreeRouting later. When shorts are
+            # detected, routing is skipped: FreeRouting cannot fix
+            # overlapping copper, and a 200 s+ routing pass on a known-bad
+            # layout is wasted CPU. The composer-vs-router attribution is
+            # recorded in state.stamp_drc and surfaces in the round JSON.
+            stamp_shorts = 0
+            stamp_clearance = 0
             try:
                 from kicraft.autoplacer.freerouting_runner import _run_kicad_cli_drc
                 _stamp_drc = _run_kicad_cli_drc(str(stamped_pcb), timeout_s=30)
@@ -2703,11 +2706,40 @@ def main(argv: list[str] | None = None) -> int:
                     print(
                         f"warning: stamp-time DRC found {stamp_shorts} shorts on "
                         f"parent_pre_freerouting -- composer stamped overlapping "
-                        f"leaf tracks; FreeRouting cannot fix this",
+                        f"leaf tracks; skipping FreeRouting",
                         file=sys.stderr,
                     )
             except Exception as drc_exc:
                 state.stamp_drc = {"ran": False, "error": str(drc_exc)}
+
+            # Early bail: stamp DRC shows the placement is unroutable as
+            # stamped. Surface as a routing rejection so callers (the
+            # autoexperiment harness, etc.) treat the round as failed.
+            if stamp_shorts > 0 and args.route:
+                state.routed_validation = {
+                    "accepted": False,
+                    "rejection_reasons": [f"stamp_shorts={stamp_shorts}"],
+                    "drc": {
+                        "shorts": stamp_shorts,
+                        "clearance": stamp_clearance,
+                        "skipped_routing": True,
+                    },
+                }
+                if args.output:
+                    _save_composition_snapshot(
+                        Path(args.output).resolve(),
+                        state,
+                        transformed_payloads,
+                    )
+                print(
+                    f"parent_status      : rejected (stamp_shorts={stamp_shorts})"
+                )
+                print(
+                    f"error: parent stamped with {stamp_shorts} shorts; "
+                    f"skipped routing",
+                    file=sys.stderr,
+                )
+                return 1
 
             if args.route:
                 routing_result = _route_parent_board(
