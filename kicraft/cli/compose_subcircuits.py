@@ -86,7 +86,7 @@ from kicraft.autoplacer.brain.subcircuit_instances import (
     transformed_debug_dict,
     transformed_summary,
 )
-from kicraft.autoplacer.brain.types import Point, SubCircuitDefinition, SubCircuitId
+from kicraft.autoplacer.brain.types import Component, Point, SubCircuitDefinition, SubCircuitId
 
 
 @dataclass(slots=True)
@@ -650,6 +650,261 @@ def _resolve_constraint_anchor_positions(
     return anchors
 
 
+def _block_artifact_origin(comp: Component) -> Point:
+    """Inverse of synthetic-block-pos -> artifact-origin mapping. For a
+    synthetic block, ``world_origin = pos - rotated(body_center_offset, rot)``;
+    matches ``placements_from_solved_state``. For non-block components
+    (parent-local mounting holes) the origin is simply ``comp.pos``.
+    """
+    if comp.kind != "subcircuit" or comp.block_artifact_origin_offset is None:
+        return comp.pos
+    body_offset = comp.block_artifact_origin_offset
+    rad = math.radians(comp.rotation)
+    cos_r = math.cos(rad)
+    sin_r = math.sin(rad)
+    return Point(
+        comp.pos.x - (body_offset.x * cos_r - body_offset.y * sin_r),
+        comp.pos.y - (body_offset.x * sin_r + body_offset.y * cos_r),
+    )
+
+
+def _apply_slide(comp: Component, free_axis_y: bool, delta: float) -> None:
+    """Translate a Component (its ``pos``, ``body_center``, and pad
+    positions) along one axis by ``delta``."""
+    if free_axis_y:
+        comp.pos = Point(comp.pos.x, comp.pos.y + delta)
+        if comp.body_center is not None:
+            comp.body_center = Point(comp.body_center.x, comp.body_center.y + delta)
+        for pad in comp.pads:
+            pad.pos = Point(pad.pos.x, pad.pos.y + delta)
+    else:
+        comp.pos = Point(comp.pos.x + delta, comp.pos.y)
+        if comp.body_center is not None:
+            comp.body_center = Point(comp.body_center.x + delta, comp.body_center.y)
+        for pad in comp.pads:
+            pad.pos = Point(pad.pos.x + delta, pad.pos.y)
+
+
+def _slide_clearance_ok(solved: dict[str, Component], moving_ref: str) -> bool:
+    """True iff the bbox of ``solved[moving_ref]`` does not introduce an
+    incompatible overlap with any other placed component. Compatible
+    block-on-block overlaps (per ``can_overlap_sparse``) are allowed --
+    those represent the dual-layer stacking the parent solver already
+    builds. Non-block components and same-side blocks are not allowed
+    to overlap.
+    """
+    moving = solved[moving_ref]
+    moving_bbox = moving.bbox()
+    moving_blocker = moving.block_blocker_set
+    moving_origin = _block_artifact_origin(moving)
+    for other_ref, other in solved.items():
+        if other_ref == moving_ref:
+            continue
+        if _bbox_disjoint(moving_bbox, other.bbox()):
+            continue
+        if moving_blocker is not None and other.block_blocker_set is not None:
+            other_origin = _block_artifact_origin(other)
+            if can_overlap_sparse(
+                moving_blocker,
+                moving_origin,
+                moving.rotation,
+                other.block_blocker_set,
+                other_origin,
+                other.rotation,
+            ):
+                continue
+        return False
+    return True
+
+
+def _largest_safe_slide(
+    solved: dict[str, Component],
+    moving_ref: str,
+    free_axis_y: bool,
+    desired_delta: float,
+) -> float:
+    """Binary-search the largest |delta| in [0, |desired_delta|] (same sign
+    as desired) that keeps ``_slide_clearance_ok`` true. Mutates and
+    restores the moving component during probes."""
+    if abs(desired_delta) < 1e-3:
+        return 0.0
+
+    moving = solved[moving_ref]
+    saved_pos = moving.pos
+    saved_body = moving.body_center
+    saved_pad_positions = [pad.pos for pad in moving.pads]
+
+    def restore() -> None:
+        moving.pos = saved_pos
+        moving.body_center = saved_body
+        for pad, original in zip(moving.pads, saved_pad_positions):
+            pad.pos = original
+
+    def safe_at(d: float) -> bool:
+        _apply_slide(moving, free_axis_y, d)
+        try:
+            return _slide_clearance_ok(solved, moving_ref)
+        finally:
+            restore()
+
+    if safe_at(desired_delta):
+        return desired_delta
+
+    sign = 1.0 if desired_delta > 0 else -1.0
+    lo, hi = 0.0, abs(desired_delta)
+    for _ in range(8):
+        mid = (lo + hi) / 2.0
+        if safe_at(sign * mid):
+            lo = mid
+        else:
+            hi = mid
+    return sign * lo
+
+
+def _cluster_bbox(
+    solved: dict[str, Component], exclude_refs: set[str]
+) -> tuple[Point, Point] | None:
+    """Bbox union of every component in ``solved`` whose ref is not in
+    ``exclude_refs``. Returns None when nothing is left."""
+    lo_x = lo_y = math.inf
+    hi_x = hi_y = -math.inf
+    for ref, comp in solved.items():
+        if ref in exclude_refs:
+            continue
+        b_min, b_max = comp.bbox()
+        if b_min.x < lo_x:
+            lo_x = b_min.x
+        if b_min.y < lo_y:
+            lo_y = b_min.y
+        if b_max.x > hi_x:
+            hi_x = b_max.x
+        if b_max.y > hi_y:
+            hi_y = b_max.y
+    if lo_x == math.inf:
+        return None
+    return (Point(lo_x, lo_y), Point(hi_x, hi_y))
+
+
+def _slide_constrained_to_cluster(
+    solved: dict[str, Component],
+    derived: DerivedAttachmentConstraints,
+    synthetic_refs: dict[int, str],
+) -> None:
+    """In-place: pull each constrained component back to the cluster.
+
+    The parent solver pins constrained components to the seed frame's
+    edges or corners. The seed frame is oversized (2.5x area slack) to
+    leave routing room, so a constrained component pinned to its corner
+    can sit far outside the actual cluster's extent. ``_compute_final_outline``
+    then snaps the corresponding board side to include the constrained
+    component, inflating PCB area.
+
+    Two operations:
+
+      * **Edge-pinned components** keep their pinned axis fixed but slide
+        along the free axis so their bbox falls inside the cluster's
+        perpendicular span. Walked back via ``_largest_safe_slide`` if
+        the slide would create an incompatible block overlap.
+      * **Corner-pinned parent-local components** (mounting holes) jump
+        to the corresponding corner of the cluster bbox. They are placed
+        BY the constraint -- their absolute position is meant to track
+        the board corner -- so dragging them off the seed-frame corner
+        onto the cluster corner is the right operation.
+    """
+    edge_targets: list[tuple[str, str]] = []
+    for child_index, spec in derived.child_specs.items():
+        block_ref = synthetic_refs.get(child_index)
+        if block_ref is None or block_ref not in solved:
+            continue
+        primary = next((c for c in spec.constraints if c.strict), None)
+        if primary is None or primary.target != "edge":
+            continue
+        edge_targets.append((block_ref, primary.value))
+    for c in derived.parent_local_constraints:
+        if c.target != "edge" or c.ref not in solved:
+            continue
+        edge_targets.append((c.ref, c.value))
+
+    corner_targets: list[tuple[str, str]] = [
+        (c.ref, c.value)
+        for c in derived.parent_local_constraints
+        if c.target == "corner" and c.ref in solved
+    ]
+    if not edge_targets and not corner_targets:
+        return
+
+    # Corner-pinned refs sit at board corners by design and would stretch
+    # the span to the full seed frame; exclude them from cluster math.
+    corner_refs = {c.ref for c in derived.constraints if c.target == "corner"}
+
+    slides_applied = 0
+    snapped_corners = 0
+
+    # --- 1. Edge-pinned slides on the free axis ---
+    for ref, edge_value in edge_targets:
+        comp = solved[ref]
+        free_axis_y = edge_value in ("left", "right")
+        # Cluster span excludes the moving ref and every corner-pinned ref.
+        exclude = {ref} | corner_refs
+        cluster = _cluster_bbox(solved, exclude)
+        if cluster is None:
+            continue
+        cluster_lo = cluster[0].y if free_axis_y else cluster[0].x
+        cluster_hi = cluster[1].y if free_axis_y else cluster[1].x
+
+        b_min, b_max = comp.bbox()
+        cur_lo, cur_hi = (b_min.y, b_max.y) if free_axis_y else (b_min.x, b_max.x)
+
+        if cur_lo >= cluster_lo and cur_hi <= cluster_hi:
+            continue
+        if (cur_hi - cur_lo) > (cluster_hi - cluster_lo) + 1e-3:
+            continue
+
+        if cur_hi > cluster_hi:
+            delta = cluster_hi - cur_hi
+        elif cur_lo < cluster_lo:
+            delta = cluster_lo - cur_lo
+        else:
+            continue
+
+        safe = _largest_safe_slide(solved, ref, free_axis_y, delta)
+        if abs(safe) < 1e-3:
+            continue
+        _apply_slide(comp, free_axis_y, safe)
+        slides_applied += 1
+
+    # --- 2. Corner-pinned parent-local snap to cluster corner ---
+    # Edge-slid components are now in the cluster's perpendicular span,
+    # so include them in the cluster bbox used for corner placement.
+    cluster_for_corners = _cluster_bbox(solved, corner_refs)
+    if cluster_for_corners is not None:
+        c_min, c_max = cluster_for_corners
+        for ref, corner_value in corner_targets:
+            comp = solved[ref]
+            cur_anchor_x = (
+                comp.body_center.x if comp.body_center is not None else comp.pos.x
+            )
+            cur_anchor_y = (
+                comp.body_center.y if comp.body_center is not None else comp.pos.y
+            )
+            target_x = c_min.x if "left" in corner_value else c_max.x
+            target_y = c_min.y if "top" in corner_value else c_max.y
+            dx = target_x - cur_anchor_x
+            dy = target_y - cur_anchor_y
+            if abs(dx) > 1e-3:
+                _apply_slide(comp, free_axis_y=False, delta=dx)
+            if abs(dy) > 1e-3:
+                _apply_slide(comp, free_axis_y=True, delta=dy)
+            if abs(dx) > 1e-3 or abs(dy) > 1e-3:
+                snapped_corners += 1
+
+    if slides_applied or snapped_corners:
+        print(
+            f"  Cluster-slide: aligned {slides_applied} edge-constrained, "
+            f"{snapped_corners} corner-constrained component(s) to the cluster"
+        )
+
+
 def _compute_final_outline(
     placed_bboxes: list[tuple[Point, Point]],
     constraints: list[AttachmentConstraint],
@@ -921,6 +1176,14 @@ def _compose_artifacts(
     }
     solver = PlacementSolver(state_in, config=solver_cfg, seed=seed)
     solved = solver.solve()
+
+    # Slide any edge-constrained block whose free axis drifted outside the
+    # rest of the cluster's perpendicular span. The solver pins X (or Y)
+    # to the board edge but lets the free axis float; a leaf parked in a
+    # corner inflates the final outline because the orthogonal sides snap
+    # to include it. Bringing it back inside the cluster span lets
+    # _compute_final_outline shrink the board.
+    _slide_constrained_to_cluster(solved, derived, synthetic_refs)
 
     # --- Recover artifact placements from solver output ---
     placements_dict = placements_from_solved_state(solved, list(loaded_artifacts), synthetic_refs)
