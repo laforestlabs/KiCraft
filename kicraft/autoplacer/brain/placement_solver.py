@@ -2056,21 +2056,30 @@ class PlacementSolver:
                 forces[ref].y += f_mag * math.sin(angle)
 
     def _stack_compatible_blocks(self, comps: dict[str, Component]) -> None:
-        """Migrate small unlocked subcircuit blocks onto large blocker-
-        compatible neighbors so dual-layer board real estate is actually
-        used (e.g. front-side SMT regulators sit on top of the back-side
-        battery footprint).
+        """Migrate small unlocked subcircuit blocks onto large
+        opposite-side neighbors so dual-layer board real estate is
+        actually used (e.g. front-side SMT regulators sit on top of
+        the back-side battery footprint).
 
-        Group candidates (unlocked, kind==subcircuit, with a blocker
-        set) by their best-fit anchor (locked subcircuit blocks ranked
-        by area descending). Each candidate goes to the largest anchor
-        whose bbox can contain it AND whose blocker set permits the
-        overlap. Within each group, candidates are placed deterministic-
-        ally along a row inside the anchor's bbox (centered on the
-        anchor's body center, packed left-to-right with spacing) so
+        Selection uses the dominant-blocker side of each block (front /
+        back / dual / none), not the position-dependent
+        ``_blocker_pair_compatible`` predicate. The position-dependent
+        check returned False whenever a candidate's force-directed
+        position happened to land inside a rotated anchor's pads, then
+        the candidate fell through to a same-side anchor whose pads
+        the candidate's row-pack target would directly overlap. The
+        side-only intent rule removes that selection trap: same-side
+        cand-anc pairs are never stacked, opposite-side pairs always
+        are when geometry fits.
+
+        Within each group, candidates are placed deterministically
+        along a row inside the anchor's bbox (centered on the anchor's
+        body center, packed left-to-right with spacing) so
         _resolve_overlaps doesn't have to push them apart from a single
         coincident point and watch them scatter outside the anchor.
         """
+        from .subcircuit_composer import dominant_blocker_side
+
         anchors: list[tuple[str, Component]] = []
         candidates: list[tuple[str, Component]] = []
         for ref, comp in comps.items():
@@ -2091,13 +2100,20 @@ class PlacementSolver:
         groups: dict[str, list[tuple[str, Component]]] = {}
         anchor_by_ref = {ref: comp for ref, comp in anchors}
         for cand_ref, cand in candidates:
+            cand_side = dominant_blocker_side(cand.block_blocker_set)
+            # Dual cands have copper on both layers and cannot stack on
+            # anything without conflict; "none" cands carry no blocker
+            # signal at all. Either way, leave at force-directed pos.
+            if cand_side in ("dual", "none"):
+                continue
             chosen_anchor_ref: str | None = None
             for anc_ref, anc in anchors:
                 if cand.width_mm > anc.width_mm + 0.5:
                     continue
                 if cand.height_mm > anc.height_mm + 0.5:
                     continue
-                if not _blocker_pair_compatible(cand, anc):
+                anc_side = dominant_blocker_side(anc.block_blocker_set)
+                if anc_side == "none" or anc_side == cand_side:
                     continue
                 chosen_anchor_ref = anc_ref
                 break
