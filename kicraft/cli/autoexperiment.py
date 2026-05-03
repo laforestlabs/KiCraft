@@ -310,6 +310,28 @@ def _read_composer_quality_score(
     return max(0.0, min(100.0, total_f)), breakdown
 
 
+def _read_stamp_drc(parent_output_json: Path) -> tuple[int, int]:
+    """Read stamp-time DRC counts (shorts, clearance) from the parent pipeline JSON.
+
+    Returns (0, 0) when the file is missing or stamp_drc is absent. Used to
+    grade not_routed-tier rounds so the search has a gradient: a layout
+    with 3 shorts ranks above one with 30, and the harness can converge
+    toward fewer pre-route violations even before any round routes
+    successfully.
+    """
+    try:
+        data = json.loads(parent_output_json.read_text())
+    except Exception:
+        return (0, 0)
+    sd = data.get("state", {}).get("stamp_drc", {})
+    if not isinstance(sd, dict):
+        return (0, 0)
+    try:
+        return (int(sd.get("shorts", 0) or 0), int(sd.get("clearance", 0) or 0))
+    except (TypeError, ValueError):
+        return (0, 0)
+
+
 def _score_round(
     *,
     leaf_accepted: int,
@@ -326,7 +348,10 @@ def _score_round(
 
     Tiers:
       - "partial_leaves": some leaves failed. Score = leaf_ratio * 15 (0-15).
-      - "not_routed": all leaves ok but parent failed to route. Score = 20.
+      - "not_routed": all leaves ok but parent failed to route.
+            Score = 20 - stamp_short_penalty - stamp_clearance_penalty
+            (range 0-20, graded so search can descend toward fewer
+            pre-route violations).
       - "functional": routed. Score = composer_score (realistic range ~50-90).
 
     Returns (score, breakdown, notes, tier).
@@ -343,12 +368,22 @@ def _score_round(
         ]
         tier = "partial_leaves"
     elif not parent_routed:
-        score = 20.0
-        breakdown = {"not_routed_penalty": 20.0}
+        stamp_shorts, stamp_clearance = _read_stamp_drc(parent_output_json)
+        short_penalty = min(15.0, stamp_shorts * 0.5)
+        clearance_penalty = min(5.0, stamp_clearance * 0.1)
+        base = 20.0
+        score = round(max(0.0, base - short_penalty - clearance_penalty), 3)
+        breakdown = {
+            "not_routed_base": base,
+            "stamp_short_penalty": -short_penalty,
+            "stamp_clearance_penalty": -clearance_penalty,
+        }
         notes = [
             "tier=not_routed",
             f"leaf_accepted={leaf_accepted}/{leaf_total}",
             "parent_routed=False",
+            f"stamp_shorts={stamp_shorts}",
+            f"stamp_clearance={stamp_clearance}",
         ]
         tier = "not_routed"
     else:

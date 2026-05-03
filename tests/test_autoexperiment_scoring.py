@@ -21,14 +21,16 @@ def _write_parent_pipeline(
     tmp_path: Path,
     score_total: float,
     breakdown: dict[str, float] | None = None,
+    stamp_drc: dict[str, int] | None = None,
 ) -> Path:
-    payload = {
-        "state": {
-            "score_total": score_total,
-            "score_breakdown": dict(breakdown or {}),
-            "bounding_box": {"width_mm": 80.0, "height_mm": 55.0},
-        }
+    state: dict = {
+        "score_total": score_total,
+        "score_breakdown": dict(breakdown or {}),
+        "bounding_box": {"width_mm": 80.0, "height_mm": 55.0},
     }
+    if stamp_drc is not None:
+        state["stamp_drc"] = dict(stamp_drc)
+    payload = {"state": state}
     path = tmp_path / "parent_pipeline.json"
     path.write_text(json.dumps(payload))
     return path
@@ -86,8 +88,8 @@ class TestScoreRoundTiers:
         assert breakdown["area_utilization"] == pytest.approx(44.0)
         assert "tier=functional" in notes
 
-    def test_not_routed_tier_fixed_20(self, tmp_path: Path):
-        # Even if composer reports a high score, a failed route is 20.
+    def test_not_routed_tier_clean_stamp_is_20(self, tmp_path: Path):
+        # No stamp-time violations: best-case not_routed score = 20.
         path = _write_parent_pipeline(tmp_path, 99.0)
         score, breakdown, _, tier = _score_round(
             leaf_accepted=6,
@@ -97,7 +99,50 @@ class TestScoreRoundTiers:
         )
         assert tier == "not_routed"
         assert score == 20.0
-        assert "not_routed_penalty" in breakdown
+        assert breakdown["not_routed_base"] == 20.0
+        assert breakdown["stamp_short_penalty"] == 0.0
+        assert breakdown["stamp_clearance_penalty"] == 0.0
+
+    def test_not_routed_tier_grades_by_stamp_drc(self, tmp_path: Path):
+        # Pre-route violations drop the score below 20 so the search has
+        # a gradient to follow toward fewer overlapping leaves.
+        path = _write_parent_pipeline(
+            tmp_path,
+            99.0,
+            stamp_drc={"shorts": 4, "clearance": 10},
+        )
+        score, breakdown, notes, tier = _score_round(
+            leaf_accepted=6,
+            leaf_total=6,
+            parent_routed=False,
+            parent_output_json=path,
+        )
+        assert tier == "not_routed"
+        # 20 - (4 * 0.5) - (10 * 0.1) = 20 - 2 - 1 = 17
+        assert score == pytest.approx(17.0)
+        assert breakdown["stamp_short_penalty"] == pytest.approx(-2.0)
+        assert breakdown["stamp_clearance_penalty"] == pytest.approx(-1.0)
+        assert any("stamp_shorts=4" in n for n in notes)
+
+    def test_not_routed_tier_penalty_caps(self, tmp_path: Path):
+        # Penalties are capped so the score floors at 0, not negative.
+        path = _write_parent_pipeline(
+            tmp_path,
+            99.0,
+            stamp_drc={"shorts": 1000, "clearance": 1000},
+        )
+        score, breakdown, _, tier = _score_round(
+            leaf_accepted=6,
+            leaf_total=6,
+            parent_routed=False,
+            parent_output_json=path,
+        )
+        assert tier == "not_routed"
+        # short_penalty capped at 15, clearance_penalty capped at 5
+        # → 20 - 15 - 5 = 0
+        assert score == 0.0
+        assert breakdown["stamp_short_penalty"] == -15.0
+        assert breakdown["stamp_clearance_penalty"] == -5.0
 
     def test_partial_leaves_tier_proportional(self, tmp_path: Path):
         path = _write_parent_pipeline(tmp_path, 75.0)
