@@ -2144,6 +2144,14 @@ class PlacementSolver:
             # next solve.
             if row_width > anc.width_mm and col_height > anc.height_mm:
                 continue
+            # Body_center accounting: do NOT explicitly assign body_center
+            # before _update_pad_positions. The helper translates body_center
+            # by (new_pos - old_pos), so passing in a body_center already
+            # set to the new pos lands it at (2*target - old_pos) -- a huge
+            # offset from pos. _pad_half_extents then returns inflated
+            # half-extents (height/2 + abs(body_center.y - pos.y)) and
+            # _clamp_to_board snaps cands far up/in, breaking the row-pack
+            # alignment. Just move pos and let the helper do its thing.
             if row_width <= anc.width_mm:
                 cursor_x = anc.pos.x - row_width / 2.0
                 for cand_ref, cand in group:
@@ -2159,8 +2167,6 @@ class PlacementSolver:
                     )
                     old_pos = Point(cand.pos.x, cand.pos.y)
                     cand.pos = Point(target_x, target_y)
-                    if cand.body_center is not None:
-                        cand.body_center = Point(target_x, target_y)
                     _update_pad_positions(cand, old_pos, cand.rotation)
                     cursor_x += cand.width_mm + spacing
             else:
@@ -2178,8 +2184,6 @@ class PlacementSolver:
                     )
                     old_pos = Point(cand.pos.x, cand.pos.y)
                     cand.pos = Point(target_x, target_y)
-                    if cand.body_center is not None:
-                        cand.body_center = Point(target_x, target_y)
                     _update_pad_positions(cand, old_pos, cand.rotation)
                     cursor_y += cand.height_mm + spacing
 
