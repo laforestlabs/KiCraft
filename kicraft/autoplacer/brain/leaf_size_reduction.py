@@ -9,7 +9,7 @@ from kicraft.autoplacer.brain.leaf_geometry import (
     tight_leaf_geometry_bounds,
 )
 from kicraft.autoplacer.brain.leaf_routing import route_local_subcircuit
-from kicraft.autoplacer.brain.placement import PlacementSolver
+from kicraft.autoplacer.brain.placement_solver import PlacementSolver
 from kicraft.autoplacer.brain.subcircuit_extractor import ExtractedSubcircuitBoard
 from kicraft.autoplacer.brain.types import Point, SolveRoundResult
 

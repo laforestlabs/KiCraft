@@ -13,7 +13,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from kicraft.autoplacer.brain.placement import PlacementScorer, PlacementSolver
+from kicraft.autoplacer.brain.placement_scorer import PlacementScorer
+from kicraft.autoplacer.brain.placement_solver import PlacementSolver
 from kicraft.autoplacer.brain.subcircuit_extractor import ExtractedSubcircuitBoard
 from kicraft.autoplacer.brain.types import (
     BoardState,

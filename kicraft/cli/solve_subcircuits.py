@@ -109,9 +109,7 @@ from kicraft.autoplacer.brain.leaf_acceptance import (
     acceptance_config_from_dict,
     evaluate_leaf_acceptance,
 )
-from kicraft.autoplacer.brain.placement import (
-    PlacementSolver,
-)
+from kicraft.autoplacer.brain.placement_solver import PlacementSolver
 from kicraft.autoplacer.brain.leaf_routing import route_local_subcircuit
 from kicraft.autoplacer.brain.leaf_size_reduction import (
     attempt_leaf_size_reduction,

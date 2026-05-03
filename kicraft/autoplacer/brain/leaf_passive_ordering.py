@@ -12,7 +12,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from kicraft.autoplacer.brain.placement import _update_pad_positions
+from kicraft.autoplacer.brain.placement_utils import _update_pad_positions
 from kicraft.autoplacer.brain.subcircuit_extractor import ExtractedSubcircuitBoard
 from kicraft.autoplacer.brain.types import Component, Point
 
