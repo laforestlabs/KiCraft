@@ -1318,6 +1318,48 @@ class PlacementSolver:
                 nearest = min(distances, key=distances.get)
                 edge_groups.setdefault(nearest, []).append(ref)
 
+        # Reserve corner space along edge before placing edge groups so
+        # edge connectors don't land where a corner-pinned mounting hole
+        # will go. Without this, on LLUPS J1 (USB-C, edge=left) could
+        # randomly land at the very top of the left edge -- exactly where
+        # H4 corner=top-left needs to be -- and either:
+        #   - the H4 corner-escape moved H4 down past USB to clear, then
+        #     constraint_aware_outline used H4's escaped Y as the top
+        #     edge, snapping H4 back to (corner.x, top + keep_in) which
+        #     is right inside USB INPUT's pad area = stamp shorts; or
+        #   - geometry validation flagged USB pads as outside the
+        #     constraint-derived outline.
+        # Reserving the corner footprint up front side-steps both.
+        corner_keep = float(self.cfg.get("mounting_hole_keep_in_mm", 5.0))
+        zones_cfg_all = self.cfg.get("component_zones", {})
+        # Detect corner mounts that landed at this edge's two extremes
+        edge_to_corners = {
+            "left":   ("top-left", "bottom-left"),
+            "right":  ("top-right", "bottom-right"),
+            "top":    ("top-left", "top-right"),
+            "bottom": ("bottom-left", "bottom-right"),
+        }
+        # Auto-detect mounting hole assignment for unconfigured holes
+        mh_unzoned = [
+            r for r, c in comps.items()
+            if c.kind == "mounting_hole"
+            and zones_cfg_all.get(r, {}).get("corner") is None
+            and zones_cfg_all.get(r, {}).get("edge") is None
+        ]
+        # 2 unzoned mounting holes get diagonal corners (top-left+bottom-
+        # right or top-right+bottom-left); both diagonals reserve all
+        # four edge endpoints, so reserve every edge endpoint when there
+        # are 2 holes regardless of which diagonal the RNG picks.
+        auto_diag_all = len(mh_unzoned) == 2
+
+        def _has_corner_mount(corner_name: str) -> bool:
+            for r, zc in zones_cfg_all.items():
+                if zc.get("corner") == corner_name and r in comps:
+                    return True
+            if auto_diag_all:
+                return True
+            return False
+
         # --- Place each edge group as a compact row/column ---
         for edge, refs in edge_groups.items():
             group_comps = [comps[r] for r in refs]
@@ -1326,14 +1368,24 @@ class PlacementSolver:
                 range(len(refs)), key=lambda i: group_comps[i].area, reverse=True
             )
 
+            corner_a, corner_b = edge_to_corners.get(edge, (None, None))
+
             if edge in ("left", "right"):
                 # Column along Y axis — body edge flush with board edge
-                # Total height needed for the group
                 sizes = [group_comps[i].height_mm for i in order]
                 total_h = sum(sizes) + connector_gap * (len(sizes) - 1)
-                # Randomize the group's starting Y within usable range
                 usable_top = tl.y + margin + sizes[0] / 2
                 usable_bot = br.y - margin - sizes[-1] / 2
+                # Subtract corner-mount footprint from each end so the
+                # column never starts inside the corner mount's keep-in.
+                if corner_a and _has_corner_mount(corner_a):
+                    usable_top = max(
+                        usable_top, tl.y + corner_keep * 2 + sizes[0] / 2
+                    )
+                if corner_b and _has_corner_mount(corner_b):
+                    usable_bot = min(
+                        usable_bot, br.y - corner_keep * 2 - sizes[-1] / 2
+                    )
                 group_span = total_h
                 if group_span < (usable_bot - usable_top):
                     start_y = self.rng.uniform(
@@ -1345,7 +1397,6 @@ class PlacementSolver:
                 cursor_y = start_y
                 for idx in order:
                     comp = group_comps[idx]
-                    # Place connector body flush to board edge
                     fixed_x = _connector_edge_x(comp, edge)
                     pos = Point(fixed_x, cursor_y)
                     _orient_and_place(comp, edge, pos)
@@ -1358,6 +1409,14 @@ class PlacementSolver:
                 total_w = sum(sizes) + connector_gap * (len(sizes) - 1)
                 usable_left = tl.x + margin + sizes[0] / 2
                 usable_right = br.x - margin - sizes[-1] / 2
+                if corner_a and _has_corner_mount(corner_a):
+                    usable_left = max(
+                        usable_left, tl.x + corner_keep * 2 + sizes[0] / 2
+                    )
+                if corner_b and _has_corner_mount(corner_b):
+                    usable_right = min(
+                        usable_right, br.x - corner_keep * 2 - sizes[-1] / 2
+                    )
                 group_span = total_w
                 if group_span < (usable_right - usable_left):
                     start_x = self.rng.uniform(
@@ -1368,7 +1427,6 @@ class PlacementSolver:
                 cursor_x = start_x
                 for idx in order:
                     comp = group_comps[idx]
-                    # Place connector body flush to board edge
                     fixed_y = _connector_edge_y(comp, edge)
                     pos = Point(cursor_x, fixed_y)
                     _orient_and_place(comp, edge, pos)

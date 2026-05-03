@@ -676,40 +676,53 @@ def _compute_final_outline(
         constrained_ref_world_anchors=anchor_positions,
         margin_mm=spacing_mm,
     )
-    # On a constrained side the outline must STOP at the constraint
-    # anchor target (the leaf's "PCB Edge" marker), even if the leaf's
-    # body geometry extends outboard -- that overhang is what makes
-    # connectors like USB-C usable. On an unconstrained side, expand
-    # the outline if a placed bbox happens to poke past the geom +
-    # margin (rare, but possible when SA jitter pushes a block outboard
-    # of the seed). constrained sides never widen via geom; they
-    # are governed solely by the marker.
-    constrained_sides = {"left": False, "right": False, "top": False, "bottom": False}
+    # On a side constrained by an EDGE constraint (e.g. J1 edge=left)
+    # the outline must STOP at the constraint anchor target -- expanding
+    # past it would push the connector inboard so its body no longer sits
+    # flush with the PCB edge. CORNER-only sides (e.g. only H4 corner=
+    # top-left constrains the top edge) are different: the corner mount
+    # may have been escaped by _stack_compatible_blocks / corner-escape
+    # to dodge an edge connector, and using the escaped mount's centroid
+    # as the precise outline edge clips legitimately-placed leaves outside
+    # the board. For corner-only sides, expand to fit geometry so escaped
+    # mounts never shrink the outline below placed bboxes.
+    edge_constrained_sides = {
+        "left": False, "right": False, "top": False, "bottom": False,
+    }
+    corner_constrained_sides = {
+        "left": False, "right": False, "top": False, "bottom": False,
+    }
     for c in constraints:
         if c.target == "edge":
-            constrained_sides[c.value] = True
+            edge_constrained_sides[c.value] = True
         elif c.target == "corner":
             for side in c.value.split("-"):
-                if side in constrained_sides:
-                    constrained_sides[side] = True
+                if side in corner_constrained_sides:
+                    corner_constrained_sides[side] = True
 
     geom_min_x = min(b[0].x for b in placed_bboxes)
     geom_min_y = min(b[0].y for b in placed_bboxes)
     geom_max_x = max(b[1].x for b in placed_bboxes)
     geom_max_y = max(b[1].y for b in placed_bboxes)
 
-    out_min_x = constraint_outline[0].x if constrained_sides["left"] else min(
-        constraint_outline[0].x, geom_min_x
-    )
-    out_min_y = constraint_outline[0].y if constrained_sides["top"] else min(
-        constraint_outline[0].y, geom_min_y
-    )
-    out_max_x = constraint_outline[1].x if constrained_sides["right"] else max(
-        constraint_outline[1].x, geom_max_x
-    )
-    out_max_y = constraint_outline[1].y if constrained_sides["bottom"] else max(
-        constraint_outline[1].y, geom_max_y
-    )
+    def _resolve_min(side: str, c_val: float, g_val: float) -> float:
+        if edge_constrained_sides[side]:
+            return c_val
+        if corner_constrained_sides[side]:
+            return min(c_val, g_val)
+        return min(c_val, g_val)
+
+    def _resolve_max(side: str, c_val: float, g_val: float) -> float:
+        if edge_constrained_sides[side]:
+            return c_val
+        if corner_constrained_sides[side]:
+            return max(c_val, g_val)
+        return max(c_val, g_val)
+
+    out_min_x = _resolve_min("left", constraint_outline[0].x, geom_min_x)
+    out_min_y = _resolve_min("top", constraint_outline[0].y, geom_min_y)
+    out_max_x = _resolve_max("right", constraint_outline[1].x, geom_max_x)
+    out_max_y = _resolve_max("bottom", constraint_outline[1].y, geom_max_y)
     return (Point(out_min_x, out_min_y), Point(out_max_x, out_max_y))
 
 
