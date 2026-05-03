@@ -2108,14 +2108,26 @@ class PlacementSolver:
         # Pack each group as a row centered on the anchor.
         for anc_ref, group in groups.items():
             anc = anchor_by_ref[anc_ref]
-            spacing = max(0.5, self.clearance / 2.0)
+            # Full clearance between same-side candidates: half-clearance
+            # left their copper close enough that the post-stack
+            # _resolve_overlaps flagged them as conflict and tried to
+            # push them apart, undoing the stack.
+            spacing = max(0.5, self.clearance)
             row_width = sum(c.width_mm for _, c in group) + spacing * (len(group) - 1)
+            col_height = sum(c.height_mm for _, c in group) + spacing * (len(group) - 1)
             anc_left = anc.pos.x - anc.width_mm / 2.0
             anc_top = anc.pos.y - anc.height_mm / 2.0
             anc_right = anc.pos.x + anc.width_mm / 2.0
             anc_bottom = anc.pos.y + anc.height_mm / 2.0
-            # Pack horizontally if it fits along x; otherwise pack
-            # vertically. Center the row inside the anchor.
+            # Bail if neither orientation fits inside the anchor. The
+            # previous fall-through to col-pack clamped each candidate
+            # to the anchor bbox, producing piles of overlapping blocks
+            # and off-board positions (one observed at x=-1.51). Better
+            # to leave the group at its force-directed positions and
+            # let opposite-side attraction continue to pull on the
+            # next solve.
+            if row_width > anc.width_mm and col_height > anc.height_mm:
+                continue
             if row_width <= anc.width_mm:
                 cursor_x = anc.pos.x - row_width / 2.0
                 for cand_ref, cand in group:
@@ -2136,9 +2148,6 @@ class PlacementSolver:
                     _update_pad_positions(cand, old_pos, cand.rotation)
                     cursor_x += cand.width_mm + spacing
             else:
-                col_height = sum(c.height_mm for _, c in group) + spacing * (
-                    len(group) - 1
-                )
                 cursor_y = anc.pos.y - col_height / 2.0
                 for cand_ref, cand in group:
                     target_x = anc.pos.x
