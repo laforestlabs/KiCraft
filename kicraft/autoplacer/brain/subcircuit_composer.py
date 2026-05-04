@@ -320,7 +320,7 @@ def derive_attachment_constraints(
         all_rotation_candidates = [
             (base_rotation + delta) % 360.0 for delta in (0.0, 90.0, 180.0, 270.0)
         ]
-        child_specs[child_index] = PlacementSpec(
+        spec = PlacementSpec(
             child_index=child_index,
             instance_path=artifact.instance_path,
             rotation_candidates=[all_rotation_candidates[0]],
@@ -328,6 +328,8 @@ def derive_attachment_constraints(
             constraints=list(grouped_constraints),
             models=_build_models_for_artifact(artifact, grouped_constraints, all_rotation_candidates),
         )
+        expand_rotation_candidates(spec)
+        child_specs[child_index] = spec
 
     return DerivedAttachmentConstraints(
         constraints=constraints,
@@ -374,7 +376,27 @@ def _build_models_for_artifact(
 
 
 def expand_rotation_candidates(spec: PlacementSpec) -> None:
+    """Widen ``spec.rotation_candidates`` from its single seed value to the
+    full set of side-valid rotations.
+
+    Every rotation in ``all_rotation_candidates`` is geometrically pinnable
+    via ``_compute_local_anchor_offset`` (which recomputes the anchor per
+    rotation), so the filter is permissive: keep the full set unless every
+    constraint is a round mounting hole. Round holes are rotationally
+    symmetric, so picking one orientation is enough to avoid wasting search
+    budget on visually-identical candidates. The placement scorer's edge
+    compliance, board containment, and overlap metrics handle any rotations
+    that produce poor geometry.
+    """
+    constraints = spec.constraints
+    if constraints and all(_is_mounting_hole_constraint(c) for c in constraints):
+        return
     spec.rotation_candidates = list(spec.all_rotation_candidates)
+
+
+def _is_mounting_hole_constraint(constraint: AttachmentConstraint) -> bool:
+    """A constraint targets a round mounting hole (rotationally symmetric)."""
+    return constraint.ref.startswith("H")
 
 
 def _constraint_sides(constraint: AttachmentConstraint) -> list[str]:
