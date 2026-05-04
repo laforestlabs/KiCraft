@@ -1187,6 +1187,7 @@ def _compose_artifacts(
     }
     solver = PlacementSolver(state_in, config=solver_cfg, seed=seed)
     solved = solver.solve()
+    solver_phase_timings = dict(getattr(solver, "last_solve_phase_timings", {}))
 
     # Slide any edge-constrained block whose free axis drifted outside the
     # rest of the cluster's perpendicular span. The solver pins X (or Y)
@@ -1507,6 +1508,7 @@ def _compose_artifacts(
             c.ref for c in all_constraints if c.target in ("edge", "corner")
         ),
     )
+    state.phase_timings.update(solver_phase_timings)
     return state, transformed_payloads
 
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 import copy
 import math
 import random
+import time
+from contextlib import contextmanager
 
 try:
     import numpy as np
@@ -24,6 +26,20 @@ from .graph import (
     count_crossings,
     find_communities,
 )
+
+
+@contextmanager
+def _timed_phase(timings: dict[str, float], key: str):
+    """Record perf_counter delta in ms into timings[key].
+
+    Always records, including for gated phases that took ~0 ms — absent
+    keys would be ambiguous between "skipped" and "didn't instrument."
+    """
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        timings[key] = (time.perf_counter() - t0) * 1000.0
 from .placement_scorer import PlacementScorer
 from .placement_utils import (
     _bbox_overlap_amount,
@@ -568,6 +584,13 @@ class PlacementSolver:
         self, max_iterations: int = None, convergence_threshold: float = None
     ) -> dict[str, Component]:
         """Run full placement pipeline. Returns updated components dict."""
+        # Per-phase wall-clock timings, populated below. Each key is
+        # set unconditionally on every solve() call so callers can sum
+        # without worrying about missing entries when a phase is gated
+        # off via cfg.
+        phase_t: dict[str, float] = {}
+        self.last_solve_phase_timings = phase_t
+
         # Deep copy so we don't mutate the original
         comps = {ref: copy.deepcopy(c) for ref, c in self.state.components.items()}
         # Build a working state for scoring
@@ -591,68 +614,74 @@ class PlacementSolver:
         # Build connectivity graph
         conn_graph = build_connectivity_graph(self.state.nets)
 
-        # Step 0.5: Assign layers BEFORE edge pinning so pad positions
-        # reflect the flip when computing connector placement
-        self._assign_layers(comps)
+        with _timed_phase(phase_t, "solve_pin_edges_ms"):
+            # Step 0.5: Assign layers BEFORE edge pinning so pad positions
+            # reflect the flip when computing connector placement
+            self._assign_layers(comps)
 
-        # Step 1: Pin edge components (connectors, mounting holes)
-        self._pin_edge_components(comps)
+            # Step 1: Pin edge components (connectors, mounting holes)
+            self._pin_edge_components(comps)
 
-        # Step 1.3: Align large paired components side-by-side
-        self._align_large_pairs(comps)
+        with _timed_phase(phase_t, "solve_align_pairs_ms"):
+            # Step 1.3: Align large paired components side-by-side
+            self._align_large_pairs(comps)
 
-        # Step 1.5: Use explicit IC groups to boost connectivity weights
-        ic_groups = self.cfg.get("ic_groups", {})
-        if ic_groups:
-            # Add extra weight to connections within IC groups
-            for ic_ref, supporting in ic_groups.items():
-                for sup_ref in supporting:
-                    if sup_ref in comps and ic_ref in comps:
-                        conn_graph.add_edge(sup_ref, ic_ref, 2.0)  # Strong bond
-            clusters = find_communities(conn_graph, seed=self.seed)
-            print(
-                f"  Found {len(clusters)} component clusters (with {len(ic_groups)} IC groups)"
-            )
-        else:
-            # Step 2: Cluster by connectivity (seeded for reproducible variation)
-            clusters = find_communities(conn_graph, seed=self.seed)
-            print(f"  Found {len(clusters)} component clusters")
-
-        # Step 1.6: Sibling grouping — components with the same kind and
-        # similar dimensions should be placed adjacent to conserve space.
-        # Detects siblings by kind+value or kind+similar area.
-        sibling_pairs = []
-        comp_list = list(comps.values())
-        for i, a in enumerate(comp_list):
-            for b in comp_list[i + 1 :]:
-                if a.locked or b.locked:
-                    continue
-                same_kind = a.kind == b.kind and a.kind not in ("", "misc", "passive")
-                similar_size = (
-                    a.area > 0
-                    and b.area > 0
-                    and min(a.area, b.area) / max(a.area, b.area) > 0.7
+        with _timed_phase(phase_t, "solve_clusters_ms"):
+            # Step 1.5: Use explicit IC groups to boost connectivity weights
+            ic_groups = self.cfg.get("ic_groups", {})
+            if ic_groups:
+                # Add extra weight to connections within IC groups
+                for ic_ref, supporting in ic_groups.items():
+                    for sup_ref in supporting:
+                        if sup_ref in comps and ic_ref in comps:
+                            conn_graph.add_edge(sup_ref, ic_ref, 2.0)  # Strong bond
+                clusters = find_communities(conn_graph, seed=self.seed)
+                print(
+                    f"  Found {len(clusters)} component clusters (with {len(ic_groups)} IC groups)"
                 )
-                if same_kind and similar_size:
-                    # Weight proportional to component area — larger siblings
-                    # benefit more from adjacency (saves more board space)
-                    weight = min(3.0, 1.0 + (a.area + b.area) / 200.0)
-                    conn_graph.add_edge(a.ref, b.ref, weight)
-                    sibling_pairs.append((a.ref, b.ref))
-        if sibling_pairs:
-            print(
-                f"  Sibling grouping: {len(sibling_pairs)} pair(s) "
-                f"({', '.join(f'{a}+{b}' for a, b in sibling_pairs)})"
-            )
+            else:
+                # Step 2: Cluster by connectivity (seeded for reproducible variation)
+                clusters = find_communities(conn_graph, seed=self.seed)
+                print(f"  Found {len(clusters)} component clusters")
 
-        # Step 3: Initial cluster placement (with seeded jitter)
-        self._place_clusters(comps, clusters, conn_graph)
+            # Step 1.6: Sibling grouping — components with the same kind and
+            # similar dimensions should be placed adjacent to conserve space.
+            # Detects siblings by kind+value or kind+similar area.
+            sibling_pairs = []
+            comp_list = list(comps.values())
+            for i, a in enumerate(comp_list):
+                for b in comp_list[i + 1 :]:
+                    if a.locked or b.locked:
+                        continue
+                    same_kind = a.kind == b.kind and a.kind not in ("", "misc", "passive")
+                    similar_size = (
+                        a.area > 0
+                        and b.area > 0
+                        and min(a.area, b.area) / max(a.area, b.area) > 0.7
+                    )
+                    if same_kind and similar_size:
+                        # Weight proportional to component area — larger siblings
+                        # benefit more from adjacency (saves more board space)
+                        weight = min(3.0, 1.0 + (a.area + b.area) / 200.0)
+                        conn_graph.add_edge(a.ref, b.ref, weight)
+                        sibling_pairs.append((a.ref, b.ref))
+            if sibling_pairs:
+                print(
+                    f"  Sibling grouping: {len(sibling_pairs)} pair(s) "
+                    f"({', '.join(f'{a}+{b}' for a, b in sibling_pairs)})"
+                )
 
-        # Step 4: Optimize layout within each cluster before global layout
-        self._optimize_intra_cluster(comps, clusters, conn_graph)
+        with _timed_phase(phase_t, "solve_place_clusters_ms"):
+            # Step 3: Initial cluster placement (with seeded jitter)
+            self._place_clusters(comps, clusters, conn_graph)
 
-        # Step 5: Try 4 rotations per IC/connector, keep best
-        self._optimize_rotations(comps, work_state)
+        with _timed_phase(phase_t, "solve_intra_cluster_ms"):
+            # Step 4: Optimize layout within each cluster before global layout
+            self._optimize_intra_cluster(comps, clusters, conn_graph)
+
+        with _timed_phase(phase_t, "solve_optimize_rotations_ms"):
+            # Step 5: Try 4 rotations per IC/connector, keep best
+            self._optimize_rotations(comps, work_state)
 
         # Step 6: Force-directed refinement with scoring feedback
         scorer = PlacementScorer(work_state, self.cfg)
@@ -680,6 +709,7 @@ class PlacementSolver:
             f"xovers={best_score.crossover_count})"
         )
 
+        _t_force = time.perf_counter()
         for iteration in range(self.max_iterations):
             # Temperature reheat: at 50% of iterations, apply perturbation kick
             if (
@@ -768,169 +798,178 @@ class PlacementSolver:
                     f"(score={best_score.total:.1f}, disp={max_disp:.2f})"
                 )
                 break
+        phase_t["solve_force_loop_ms"] = (time.perf_counter() - _t_force) * 1000.0
 
-        # SA refinement: escape local minima after FD convergence
-        if self.cfg.get("sa_refine_enabled", True):
-            self._seen_force_states.clear()
-            work_state.components = best_comps
-            best_comps = self._sa_refine(
-                {r: copy.deepcopy(c) for r, c in best_comps.items()},
-                work_state,
-                scorer,
-                max_iters=int(self.cfg.get("sa_refine_iterations", 1000)),
-                init_temp=float(self.cfg.get("sa_refine_initial_temp", 5.0)),
-                cooling_rate=float(self.cfg.get("sa_refine_cooling_rate", 0.995)),
-                move_radius=float(self.cfg.get("sa_refine_move_radius_mm", 2.0)),
-                swap_prob=float(self.cfg.get("sa_refine_swap_probability", 0.3)),
-                rotation_prob=float(self.cfg.get("sa_refine_rotation_probability", 0.2)),
-            )
+        with _timed_phase(phase_t, "solve_sa_refine_ms"):
+            # SA refinement: escape local minima after FD convergence
+            if self.cfg.get("sa_refine_enabled", True):
+                self._seen_force_states.clear()
+                work_state.components = best_comps
+                best_comps = self._sa_refine(
+                    {r: copy.deepcopy(c) for r, c in best_comps.items()},
+                    work_state,
+                    scorer,
+                    max_iters=int(self.cfg.get("sa_refine_iterations", 1000)),
+                    init_temp=float(self.cfg.get("sa_refine_initial_temp", 5.0)),
+                    cooling_rate=float(self.cfg.get("sa_refine_cooling_rate", 0.995)),
+                    move_radius=float(self.cfg.get("sa_refine_move_radius_mm", 2.0)),
+                    swap_prob=float(self.cfg.get("sa_refine_swap_probability", 0.3)),
+                    rotation_prob=float(self.cfg.get("sa_refine_rotation_probability", 0.2)),
+                )
 
-        # Alignment repair: apply the alignment_groups detected from the
-        # INITIAL positions (before SA could scramble them). Runs after
-        # SA so the group's parallel-axis center reflects the solver's
-        # chosen position; the repair snaps perpendicular-axis to the
-        # current group mean and redistributes at fixed pitch.
-        if alignment_groups:
-            apply_alignment_repair(best_comps, alignment_groups)
+        with _timed_phase(phase_t, "solve_alignment_repair_ms"):
+            # Alignment repair: apply the alignment_groups detected from the
+            # INITIAL positions (before SA could scramble them). Runs after
+            # SA so the group's parallel-axis center reflects the solver's
+            # chosen position; the repair snaps perpendicular-axis to the
+            # current group mean and redistributes at fixed pitch.
+            if alignment_groups:
+                apply_alignment_repair(best_comps, alignment_groups)
 
-        # Step 7: Swap optimization — directly minimize crossovers
-        comps = best_comps
-        if enable_swap:
-            self._seen_force_states.clear()
-            work_state.components = comps
-            best_cross = count_crossings(work_state)
-            print(f"  Starting swap optimization ({best_cross} crossings)")
+        with _timed_phase(phase_t, "solve_swap_opt_ms"):
+            # Step 7: Swap optimization — directly minimize crossovers
+            comps = best_comps
+            if enable_swap:
+                self._seen_force_states.clear()
+                work_state.components = comps
+                best_cross = count_crossings(work_state)
+                print(f"  Starting swap optimization ({best_cross} crossings)")
 
-            # Build set of refs in aligned pairs — exclude from swaps to
-            # preserve side-by-side alignment
-            aligned_refs = set()
-            for ref_a, ref_b, _axis in self._aligned_pairs:
-                aligned_refs.add(ref_a)
-                aligned_refs.add(ref_b)
+                # Build set of refs in aligned pairs — exclude from swaps to
+                # preserve side-by-side alignment
+                aligned_refs = set()
+                for ref_a, ref_b, _axis in self._aligned_pairs:
+                    aligned_refs.add(ref_a)
+                    aligned_refs.add(ref_b)
 
-            improved = True
-            swap_round = 0
-            while improved and swap_round < 5:
-                improved = False
-                swap_round += 1
-                unlocked = [
-                    r for r in comps if not comps[r].locked and r not in aligned_refs
-                ]
-                for i in range(len(unlocked)):
-                    for j in range(i + 1, len(unlocked)):
-                        a, b = comps[unlocked[i]], comps[unlocked[j]]
-                        # Only swap components of similar size
-                        size_ratio = max(a.area, b.area) / max(
-                            min(a.area, b.area), 0.01
-                        )
-                        if size_ratio > 4:
-                            continue
-                        # Swap positions and update pads
-                        a.pos, b.pos = Point(b.pos.x, b.pos.y), Point(a.pos.x, a.pos.y)
-                        _swap_pad_positions(a, b)
-                        cross = count_crossings(work_state)
-                        if cross < best_cross:
-                            best_cross = cross
-                            improved = True
-                        else:
-                            # Revert
-                            a.pos, b.pos = (
-                                Point(b.pos.x, b.pos.y),
-                                Point(a.pos.x, a.pos.y),
+                improved = True
+                swap_round = 0
+                while improved and swap_round < 5:
+                    improved = False
+                    swap_round += 1
+                    unlocked = [
+                        r for r in comps if not comps[r].locked and r not in aligned_refs
+                    ]
+                    for i in range(len(unlocked)):
+                        for j in range(i + 1, len(unlocked)):
+                            a, b = comps[unlocked[i]], comps[unlocked[j]]
+                            # Only swap components of similar size
+                            size_ratio = max(a.area, b.area) / max(
+                                min(a.area, b.area), 0.01
                             )
+                            if size_ratio > 4:
+                                continue
+                            # Swap positions and update pads
+                            a.pos, b.pos = Point(b.pos.x, b.pos.y), Point(a.pos.x, a.pos.y)
                             _swap_pad_positions(a, b)
-                if improved:
-                    print(f"    Swap round {swap_round}: {best_cross} crossings")
+                            cross = count_crossings(work_state)
+                            if cross < best_cross:
+                                best_cross = cross
+                                improved = True
+                            else:
+                                # Revert
+                                a.pos, b.pos = (
+                                    Point(b.pos.x, b.pos.y),
+                                    Point(a.pos.x, a.pos.y),
+                                )
+                                _swap_pad_positions(a, b)
+                    if improved:
+                        print(f"    Swap round {swap_round}: {best_cross} crossings")
 
-            best_comps = comps
-        else:
-            self._seen_force_states.clear()
+                best_comps = comps
+            else:
+                self._seen_force_states.clear()
 
-        # Re-snap aligned pairs after swap optimization
-        self._re_snap_aligned_pairs(best_comps)
-
-        # Step 8: Snap to grid
-        self._snap_to_grid(best_comps)
-
-        # Re-snap aligned pairs after grid snap
-        self._re_snap_aligned_pairs(best_comps)
-
-        # Step 8.5: Orderedness — align passives into neat rows/columns
-        orderedness = self.cfg.get("orderedness", 0.0)
-        if orderedness > 0.01:
-            self._apply_orderedness(best_comps, orderedness)
-            # Re-snap aligned pairs after orderedness
+            # Re-snap aligned pairs after swap optimization
             self._re_snap_aligned_pairs(best_comps)
 
-        # Step 8.7: Block stacking pass -- for parent-side blocks only.
-        # Force-directed + SA alone consistently fail to migrate small
-        # front-only SMT blocks onto large back-only THT blocks (they
-        # converge to a connectivity centroid that's never inside the
-        # back-side block). Without active stacking, dual-layer parents
-        # like LLUPS waste >50% of board area opposite the battery
-        # footprint. This pass deterministically translates each
-        # unlocked subcircuit block onto its largest blocker-compatible
-        # neighbor whose bbox can accommodate it.
-        if self.cfg.get("opposite_side_stacking_pass", True):
-            self._stack_compatible_blocks(best_comps)
+            # Step 8: Snap to grid
+            self._snap_to_grid(best_comps)
 
-        # Step 9: Final exhaustive overlap resolution — guarantee no courtyard
-        # overlaps before routing. Must run after snap since snapping can
-        # re-introduce small overlaps.
-        self._resolve_overlaps(best_comps)
+            # Re-snap aligned pairs after grid snap
+            self._re_snap_aligned_pairs(best_comps)
 
-        # Re-snap aligned pairs after overlap resolution
-        self._re_snap_aligned_pairs(best_comps)
+        with _timed_phase(phase_t, "solve_orderedness_ms"):
+            # Step 8.5: Orderedness — align passives into neat rows/columns
+            orderedness = self.cfg.get("orderedness", 0.0)
+            if orderedness > 0.01:
+                self._apply_orderedness(best_comps, orderedness)
+                # Re-snap aligned pairs after orderedness
+                self._re_snap_aligned_pairs(best_comps)
 
-        # Step 9.5: Comprehensive legalization repair for subcircuit mode
-        if prefer_legal:
-            repair_passes = int(self.cfg.get("leaf_legality_repair_passes", 12))
-            self.legalize_components(best_comps, max_passes=repair_passes)
+        with _timed_phase(phase_t, "solve_stack_blocks_ms"):
+            # Step 8.7: Block stacking pass -- for parent-side blocks only.
+            # Force-directed + SA alone consistently fail to migrate small
+            # front-only SMT blocks onto large back-only THT blocks (they
+            # converge to a connectivity centroid that's never inside the
+            # back-side block). Without active stacking, dual-layer parents
+            # like LLUPS waste >50% of board area opposite the battery
+            # footprint. This pass deterministically translates each
+            # unlocked subcircuit block onto its largest blocker-compatible
+            # neighbor whose bbox can accommodate it.
+            if self.cfg.get("opposite_side_stacking_pass", True):
+                self._stack_compatible_blocks(best_comps)
 
-        # Step 10: Hard clamp — nothing outside the board
-        self._clamp_to_board(best_comps)
+        with _timed_phase(phase_t, "solve_resolve_overlaps_ms"):
+            # Step 9: Final exhaustive overlap resolution — guarantee no courtyard
+            # overlaps before routing. Must run after snap since snapping can
+            # re-introduce small overlaps.
+            self._resolve_overlaps(best_comps)
 
-        # Step 11: Ensure all pads are inside the board boundary
-        self._clamp_pads_to_board(best_comps)
+            # Re-snap aligned pairs after overlap resolution
+            self._re_snap_aligned_pairs(best_comps)
 
-        # Step 12: Validate pad containment — re-clamp if any pads still outside
-        for clamp_pass in range(3):
-            tl_v, br_v = self.state.board_outline
-            inset_v = self.cfg.get("pad_inset_margin_mm", 0.3)
-            any_outside = False
-            for comp in best_comps.values():
-                for pad in comp.pads:
-                    if (
-                        pad.pos.x < tl_v.x + inset_v
-                        or pad.pos.x > br_v.x - inset_v
-                        or pad.pos.y < tl_v.y + inset_v
-                        or pad.pos.y > br_v.y - inset_v
-                    ):
-                        any_outside = True
-                        break
-                if any_outside:
-                    break
-            if not any_outside:
-                break
+        with _timed_phase(phase_t, "solve_legalize_ms"):
+            # Step 9.5: Comprehensive legalization repair for subcircuit mode
+            if prefer_legal:
+                repair_passes = int(self.cfg.get("leaf_legality_repair_passes", 12))
+                self.legalize_components(best_comps, max_passes=repair_passes)
+
+        with _timed_phase(phase_t, "solve_clamp_ms"):
+            # Step 10: Hard clamp — nothing outside the board
             self._clamp_to_board(best_comps)
+
+            # Step 11: Ensure all pads are inside the board boundary
             self._clamp_pads_to_board(best_comps)
-            if clamp_pass == 2:
-                print("  WARNING: some pads still outside board after 3 clamp passes")
 
-        # Step 13: Re-pin edge/corner components that may have drifted
-        # during overlap resolution (both-locked case can push pinned parts)
-        self._restore_pinned_positions(best_comps)
+            # Step 12: Validate pad containment — re-clamp if any pads still outside
+            for clamp_pass in range(3):
+                tl_v, br_v = self.state.board_outline
+                inset_v = self.cfg.get("pad_inset_margin_mm", 0.3)
+                any_outside = False
+                for comp in best_comps.values():
+                    for pad in comp.pads:
+                        if (
+                            pad.pos.x < tl_v.x + inset_v
+                            or pad.pos.x > br_v.x - inset_v
+                            or pad.pos.y < tl_v.y + inset_v
+                            or pad.pos.y > br_v.y - inset_v
+                        ):
+                            any_outside = True
+                            break
+                    if any_outside:
+                        break
+                if not any_outside:
+                    break
+                self._clamp_to_board(best_comps)
+                self._clamp_pads_to_board(best_comps)
+                if clamp_pass == 2:
+                    print("  WARNING: some pads still outside board after 3 clamp passes")
 
-        # Step 13.5: Overlap resolution after restoration — restoring pinned
-        # components can introduce new overlaps (e.g. a mounting hole restored
-        # to its corner now overlaps a component that was pushed there during
-        # the force simulation).  Re-resolve, then re-restore to ensure both
-        # overlap-free placement AND correct pinned positions.
-        self._resolve_overlaps(best_comps)
-        self._restore_pinned_positions(best_comps)
+            # Step 13: Re-pin edge/corner components that may have drifted
+            # during overlap resolution (both-locked case can push pinned parts)
+            self._restore_pinned_positions(best_comps)
 
-        # Step 14: Re-validate pad containment after restoring pinned positions
-        self._clamp_pads_to_board(best_comps)
+            # Step 13.5: Overlap resolution after restoration — restoring pinned
+            # components can introduce new overlaps (e.g. a mounting hole restored
+            # to its corner now overlaps a component that was pushed there during
+            # the force simulation).  Re-resolve, then re-restore to ensure both
+            # overlap-free placement AND correct pinned positions.
+            self._resolve_overlaps(best_comps)
+            self._restore_pinned_positions(best_comps)
+
+            # Step 14: Re-validate pad containment after restoring pinned positions
+            self._clamp_pads_to_board(best_comps)
 
         # Final score
         work_state.components = best_comps
