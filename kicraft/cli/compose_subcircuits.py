@@ -182,10 +182,15 @@ class ParentCompositionState:
     # the geometry validator must only flag them when pads fall outside.
     edge_constrained_refs: frozenset[str] = field(default_factory=frozenset)
     # Wall-clock per phase of a parent compose+route round. Keys (when
-    # populated): place_solve_ms, stamp_ms, stamp_drc_ms, freerouting_ms.
+    # populated): place_solve_ms, stamp_ms, stamp_drc_ms, freerouting_ms,
+    # candidate_search_ms, plus solve_*_ms sub-phases from the solver.
     # Lets the harness see whether routing or layout dominates a round so
     # the layout-search budget can be tuned without re-instrumenting.
     phase_timings: dict[str, float] = field(default_factory=dict)
+    # Per-round candidate search summary written by _search_best_layout.
+    # Keys: k, tried, accepted, rejected_drc, best_index, best_seed,
+    # fallback_used, total_search_ms, candidates (list of per-trial dicts).
+    candidate_search: dict[str, Any] = field(default_factory=dict)
 
     @property
     def width_mm(self) -> float:
@@ -223,6 +228,7 @@ class ParentCompositionState:
             "routed_validation": dict(self.routed_validation),
             "stamp_drc": dict(self.stamp_drc),
             "phase_timings": dict(self.phase_timings),
+            "candidate_search": dict(self.candidate_search),
             "score_total": self.score_total,
             "score_breakdown": dict(self.score_breakdown),
             "score_notes": list(self.score_notes),
@@ -1951,6 +1957,7 @@ def _stamp_parent_board(
     pcb_path: Path,
     project_dir: Path,
     cfg: dict[str, Any],
+    output_pcb_path: Path | None = None,
 ) -> Path:
     """Stamp the parent composition onto a real .kicad_pcb file.
 
@@ -1961,6 +1968,11 @@ def _stamp_parent_board(
     3. Clears existing tracks/zones
     4. Recreates traces/vias from the merged child copper
     5. Rebuilds connectivity and saves
+
+    If ``output_pcb_path`` is provided, the stamped board is written there
+    instead of the canonical ``<artifact_dir>/parent_pre_freerouting.kicad_pcb``.
+    The candidate-search loop uses this to stamp each trial to a distinct
+    file under ``<artifact_dir>/_search/``.
 
     Returns the stamped board path.
     """
@@ -1981,7 +1993,11 @@ def _stamp_parent_board(
     artifact_dir = project_dir / ".experiments" / "subcircuits" / slug
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    output_pcb = artifact_dir / "parent_pre_freerouting.kicad_pcb"
+    if output_pcb_path is not None:
+        output_pcb = Path(output_pcb_path)
+        output_pcb.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        output_pcb = artifact_dir / "parent_pre_freerouting.kicad_pcb"
     shutil.copy2(str(pcb_path), str(output_pcb))
 
     # Serialize board state for the subprocess
@@ -2300,6 +2316,258 @@ board.BuildConnectivity()
 board.Save(_out_path)
 print("OK")
 """
+
+
+@dataclass(slots=True)
+class CandidateRecord:
+    """One trial in the layout search loop."""
+
+    seed: int
+    shorts: int
+    score: float
+    place_solve_ms: float
+    stamp_ms: float
+    stamp_drc_ms: float
+    accepted: bool  # shorts == 0
+    pcb_path: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "seed": self.seed,
+            "shorts": self.shorts,
+            "score": self.score,
+            "place_solve_ms": self.place_solve_ms,
+            "stamp_ms": self.stamp_ms,
+            "stamp_drc_ms": self.stamp_drc_ms,
+            "accepted": self.accepted,
+            "pcb_path": self.pcb_path,
+        }
+
+
+@dataclass(slots=True)
+class SearchResult:
+    """Outcome of _search_best_layout: winner state + per-candidate records."""
+
+    winner_idx: int
+    winner_seed: int
+    winner_state: ParentCompositionState
+    winner_payloads: list[dict[str, Any]]
+    winner_pcb_path: Path
+    candidates: list[CandidateRecord]
+    total_search_ms: float
+    fallback_used: bool
+
+
+def _search_best_layout(
+    loaded_artifacts,
+    *,
+    spacing_mm: float,
+    rotation_step_deg: float,
+    parent_definition,
+    pcb_path: Path | None,
+    project_dir: Path,
+    cfg: dict[str, Any] | None,
+    base_seed: int,
+    k: int = 8,
+    time_budget_s: float = 60.0,
+) -> SearchResult:
+    """Generate K placement candidates, hard-prefer shorts==0, return the winner.
+
+    Each iteration calls ``_compose_artifacts`` with cfg overrides that
+    skip the expensive solver passes (SA refine, swap optimisation,
+    block stacking, deep force-loop iteration cap). Preserved phases:
+    pin-edges, clusters, place-clusters, intra-cluster, optimize-rotations,
+    final overlap resolution, legalize, clamp -- the load-bearing minimum
+    for "candidate doesn't have spurious overlap-induced shorts."
+
+    Winner selection is lexicographic: shorts ascending first, composite
+    score descending second. If no candidate has shorts==0, the
+    fewest-shorts candidate is returned with ``fallback_used=True`` and a
+    WARN log entry; the round still produces an artifact so downstream
+    diagnostics work even when search fails.
+    """
+    from kicraft.autoplacer.brain.graph import total_ratsnest_length
+    from kicraft.autoplacer.brain.placement_scorer import PlacementScorer
+    from kicraft.autoplacer.freerouting_runner import _run_kicad_cli_drc
+
+    base_cfg = dict(cfg or {})
+    base_parent_placement = dict(base_cfg.get("parent_placement", {}))
+    fast_overrides = {
+        "sa_refine_enabled": False,
+        "opposite_side_stacking_pass": False,
+        "enable_swap_optimization": False,
+        "max_placement_iterations": 50,
+        "orderedness": 0.0,
+    }
+    fast_parent_placement = {**base_parent_placement, **fast_overrides}
+    fast_cfg = {**base_cfg, "parent_placement": fast_parent_placement}
+
+    # Resolve artifact_dir for candidate stamping. Mirrors the path
+    # _stamp_parent_board() builds so downstream code finds the winner
+    # under the canonical slug.
+    from kicraft.autoplacer.brain.subcircuit_artifacts import slugify_subcircuit_id
+
+    if parent_definition is not None and getattr(parent_definition, "id", None):
+        slug = slugify_subcircuit_id(parent_definition.id)
+    else:
+        slug = "parent"
+    artifact_dir = project_dir / ".experiments" / "subcircuits" / slug
+    search_dir = artifact_dir / "_search"
+    search_dir.mkdir(parents=True, exist_ok=True)
+
+    candidates: list[CandidateRecord] = []
+    cand_states: list[ParentCompositionState] = []
+    cand_payloads: list[list[dict[str, Any]]] = []
+    cand_pcb_paths: list[Path] = []
+
+    t_search_start = time.perf_counter()
+    for i in range(k):
+        elapsed_ms = (time.perf_counter() - t_search_start) * 1000.0
+        if elapsed_ms > time_budget_s * 1000.0:
+            print(
+                f"[candidate-search] time budget {time_budget_s:.0f}s exhausted "
+                f"after {i} candidate(s)",
+                file=sys.stderr,
+            )
+            break
+        seed_i = base_seed + i
+        try:
+            t_solve = time.perf_counter()
+            state, payloads = _compose_artifacts(
+                loaded_artifacts,
+                spacing_mm=spacing_mm,
+                rotation_step_deg=rotation_step_deg,
+                parent_definition=parent_definition,
+                pcb_path=pcb_path,
+                cfg=fast_cfg,
+                seed=seed_i,
+            )
+            place_solve_ms = (time.perf_counter() - t_solve) * 1000.0
+            state.phase_timings["place_solve_ms"] = place_solve_ms
+
+            if pcb_path is None:
+                # No source PCB → no stamping, no DRC. Search degrades to
+                # placement-quality ranking (composite score only); shorts
+                # is unknowable so all candidates are treated as
+                # accepted=True. This keeps a single search code path
+                # for the rare interactive `compose-subcircuits --output`
+                # case without --pcb.
+                stamp_ms = 0.0
+                stamp_drc_ms = 0.0
+                shorts = 0
+                stamped = Path("")
+            else:
+                cand_pcb = search_dir / f"cand_{i:02d}.kicad_pcb"
+                t_stamp = time.perf_counter()
+                stamped = _stamp_parent_board(
+                    state, pcb_path, project_dir, fast_cfg,
+                    output_pcb_path=cand_pcb,
+                )
+                stamp_ms = (time.perf_counter() - t_stamp) * 1000.0
+                state.phase_timings["stamp_ms"] = stamp_ms
+
+                t_drc = time.perf_counter()
+                drc = _run_kicad_cli_drc(str(stamped), timeout_s=30) or {}
+                stamp_drc_ms = (time.perf_counter() - t_drc) * 1000.0
+                state.phase_timings["stamp_drc_ms"] = stamp_drc_ms
+                state.stamp_drc = dict(drc)
+                shorts = int(drc.get("shorts", 0) or 0)
+
+            board_state = state.composition.board_state if state.composition else None
+            if board_state is not None:
+                scorer = PlacementScorer(board_state, fast_parent_placement)
+                opp_side = float(scorer._score_block_opposite_side())
+                overlap = float(scorer._score_courtyard_overlap())
+                try:
+                    ratsnest_mm = float(total_ratsnest_length(board_state))
+                except Exception:
+                    ratsnest_mm = 0.0
+                net_dist = max(0.0, 100.0 - ratsnest_mm * 0.1)
+                composite = 0.45 * opp_side + 0.35 * overlap + 0.20 * net_dist
+            else:
+                composite = 0.0
+
+            rec = CandidateRecord(
+                seed=seed_i,
+                shorts=shorts,
+                score=composite,
+                place_solve_ms=place_solve_ms,
+                stamp_ms=stamp_ms,
+                stamp_drc_ms=stamp_drc_ms,
+                accepted=(shorts == 0),
+                pcb_path=str(stamped),
+            )
+            candidates.append(rec)
+            cand_states.append(state)
+            cand_payloads.append(payloads)
+            cand_pcb_paths.append(stamped)
+            print(
+                f"[candidate-search] cand={i} seed={seed_i} "
+                f"shorts={shorts} score={composite:.1f} "
+                f"place={place_solve_ms / 1000:.1f}s drc={stamp_drc_ms / 1000:.1f}s"
+            )
+        except Exception as exc:
+            print(
+                f"[candidate-search] cand={i} seed={seed_i} failed: {exc}",
+                file=sys.stderr,
+            )
+            continue
+
+    total_search_ms = (time.perf_counter() - t_search_start) * 1000.0
+
+    if not candidates:
+        raise RuntimeError("candidate-search produced no successful candidates")
+
+    accepted_recs = [c for c in candidates if c.accepted]
+    fallback_used = False
+    if accepted_recs:
+        winner_rec = max(accepted_recs, key=lambda c: c.score)
+    else:
+        fallback_used = True
+        winner_rec = min(candidates, key=lambda c: (c.shorts, -c.score))
+        print(
+            f"[candidate-search] no shorts-free candidate in K={len(candidates)}; "
+            f"selecting fewest-shorts={winner_rec.shorts}, score={winner_rec.score:.1f}",
+            file=sys.stderr,
+        )
+
+    winner_idx = candidates.index(winner_rec)
+    winner_state = cand_states[winner_idx]
+    winner_payloads = cand_payloads[winner_idx]
+    winner_pcb = cand_pcb_paths[winner_idx]
+
+    winner_state.candidate_search = {
+        "k": k,
+        "tried": len(candidates),
+        "accepted": len(accepted_recs),
+        "rejected_drc": len(candidates) - len(accepted_recs),
+        "best_index": winner_idx,
+        "best_seed": winner_rec.seed,
+        "fallback_used": fallback_used,
+        "total_search_ms": total_search_ms,
+        "candidates": [c.to_dict() for c in candidates],
+    }
+    winner_state.phase_timings["candidate_search_ms"] = total_search_ms
+
+    if not fallback_used:
+        # Keep the search dir on fallback for forensics (which candidate
+        # had which DRC failure mode); discard on success to avoid leaking
+        # ~16 MB / round of intermediate stamped boards.
+        try:
+            shutil.rmtree(search_dir)
+        except OSError:
+            pass
+
+    return SearchResult(
+        winner_idx=winner_idx,
+        winner_seed=winner_rec.seed,
+        winner_state=winner_state,
+        winner_payloads=winner_payloads,
+        winner_pcb_path=winner_pcb,
+        candidates=candidates,
+        total_search_ms=total_search_ms,
+        fallback_used=fallback_used,
+    )
 
 
 def _route_parent_board(
@@ -2847,19 +3115,37 @@ def main(argv: list[str] | None = None) -> int:
         if args.config:
             compose_cfg.update(load_project_config(args.config))
 
-        _t_place = time.perf_counter()
-        state, transformed_payloads = _compose_artifacts(
+        # Candidate-search loop: K fast-cfg solves + DRC, pick shorts==0
+        # winner (lex order: shorts asc, composite score desc). K=1 collapses
+        # to a single fast solve; same code path. K and time_budget come
+        # from cfg["parent_placement"]["candidate_search"], with project
+        # config overrides applied via load_project_config above.
+        search_cfg_raw = (
+            compose_cfg.get("parent_placement", {}).get("candidate_search", {})
+        )
+        try:
+            k = max(1, int(search_cfg_raw.get("k", 8)))
+        except (TypeError, ValueError):
+            k = 8
+        try:
+            time_budget_s = max(1.0, float(search_cfg_raw.get("time_budget_s", 60.0)))
+        except (TypeError, ValueError):
+            time_budget_s = 60.0
+
+        search_result = _search_best_layout(
             loaded_artifacts,
             spacing_mm=max(0.0, args.spacing_mm),
             rotation_step_deg=args.rotation_step_deg,
             parent_definition=parent_definition,
             pcb_path=Path(args.pcb) if args.pcb else None,
+            project_dir=project_dir if project_dir else Path("."),
             cfg=compose_cfg,
-            seed=int(args.seed),
+            base_seed=int(args.seed),
+            k=k,
+            time_budget_s=time_budget_s,
         )
-        state.phase_timings["place_solve_ms"] = (
-            time.perf_counter() - _t_place
-        ) * 1000.0
+        state = search_result.winner_state
+        transformed_payloads = search_result.winner_payloads
 
         output_path = None
         if args.output:
