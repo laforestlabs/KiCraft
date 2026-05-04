@@ -37,6 +37,7 @@ import math
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -180,6 +181,11 @@ class ParentCompositionState:
     # are expected to extend beyond the board outline (e.g. USB-C shell);
     # the geometry validator must only flag them when pads fall outside.
     edge_constrained_refs: frozenset[str] = field(default_factory=frozenset)
+    # Wall-clock per phase of a parent compose+route round. Keys (when
+    # populated): place_solve_ms, stamp_ms, stamp_drc_ms, freerouting_ms.
+    # Lets the harness see whether routing or layout dominates a round so
+    # the layout-search budget can be tuned without re-instrumenting.
+    phase_timings: dict[str, float] = field(default_factory=dict)
 
     @property
     def width_mm(self) -> float:
@@ -216,6 +222,7 @@ class ParentCompositionState:
             "geometry_validation": dict(self.geometry_validation),
             "routed_validation": dict(self.routed_validation),
             "stamp_drc": dict(self.stamp_drc),
+            "phase_timings": dict(self.phase_timings),
             "score_total": self.score_total,
             "score_breakdown": dict(self.score_breakdown),
             "score_notes": list(self.score_notes),
@@ -2838,6 +2845,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.config:
             compose_cfg.update(load_project_config(args.config))
 
+        _t_place = time.perf_counter()
         state, transformed_payloads = _compose_artifacts(
             loaded_artifacts,
             spacing_mm=max(0.0, args.spacing_mm),
@@ -2847,6 +2855,9 @@ def main(argv: list[str] | None = None) -> int:
             cfg=compose_cfg,
             seed=int(args.seed),
         )
+        state.phase_timings["place_solve_ms"] = (
+            time.perf_counter() - _t_place
+        ) * 1000.0
 
         output_path = None
         if args.output:
@@ -2915,7 +2926,11 @@ def main(argv: list[str] | None = None) -> int:
             # rejected, and the Monitor tab falls back to it when
             # parent_routed.png is absent (failed routing).
             try:
+                _t_stamp = time.perf_counter()
                 stamped_pcb = _stamp_parent_board(state, pcb_path, project_dir, cfg)
+                state.phase_timings["stamp_ms"] = (
+                    time.perf_counter() - _t_stamp
+                ) * 1000.0
                 print(f"parent_stamped_pcb : {stamped_pcb}")
 
                 stamped_render_dir = stamped_pcb.parent / "renders"
@@ -2971,7 +2986,11 @@ def main(argv: list[str] | None = None) -> int:
             stamp_clearance = 0
             try:
                 from kicraft.autoplacer.freerouting_runner import _run_kicad_cli_drc
+                _t_stamp_drc = time.perf_counter()
                 _stamp_drc = _run_kicad_cli_drc(str(stamped_pcb), timeout_s=30)
+                state.phase_timings["stamp_drc_ms"] = (
+                    time.perf_counter() - _t_stamp_drc
+                ) * 1000.0
                 stamp_shorts = int(_stamp_drc.get("shorts", 0))
                 stamp_clearance = int(_stamp_drc.get("clearance", 0))
                 state.stamp_drc = {
@@ -2991,6 +3010,16 @@ def main(argv: list[str] | None = None) -> int:
                     )
             except Exception as drc_exc:
                 state.stamp_drc = {"ran": False, "error": str(drc_exc)}
+
+            # Re-save the snapshot with stamp + stamp_drc timings populated
+            # so --stamp-only runs (and the route-skipped path below) carry
+            # the full phase_timings breakdown into the output JSON.
+            if args.output:
+                _save_composition_snapshot(
+                    Path(args.output).resolve(),
+                    state,
+                    transformed_payloads,
+                )
 
             # Early bail: stamp DRC shows the placement is unroutable as
             # stamped. Surface as a routing rejection so callers (the
@@ -3022,9 +3051,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
 
             if args.route:
+                _t_route = time.perf_counter()
                 routing_result = _route_parent_board(
                     stamped_pcb, state, project_dir, cfg
                 )
+                state.phase_timings["freerouting_ms"] = (
+                    time.perf_counter() - _t_route
+                ) * 1000.0
                 if not routing_result.get("failed"):
                     routed_board_path = Path(routing_result["routed_board_path"])
                     routed_renders = _render_parent_board_views(

@@ -2369,6 +2369,19 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"[timing] round {round_num} parent_route_total={parent_route_elapsed_s:.3f}s"
             )
+            # Merge per-phase timings published by compose_subcircuits so
+            # the round-level breakdown distinguishes layout (place_solve)
+            # from routing (freerouting). Lets the harness see whether a
+            # round is layout-bound or route-bound without re-instrumenting.
+            try:
+                if parent_output_json and Path(parent_output_json).exists():
+                    with open(parent_output_json, "r") as _pf:
+                        _ppl = json.load(_pf)
+                    _phase = (_ppl.get("state") or {}).get("phase_timings") or {}
+                    for _key, _val_ms in _phase.items():
+                        round_timing_breakdown[f"compose_{_key}"] = float(_val_ms) / 1000.0
+            except Exception:
+                pass
             parent_routed = parent_route_rc == 0
             parent_copper_accounting = _extract_parent_copper_accounting(project_dir)
             parent_routed_validation = _extract_parent_routed_validation(
