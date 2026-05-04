@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from .placement_utils import packing_metrics
 from .subcircuit_instances import (
     LoadedSubcircuitArtifact,
     TransformedSubcircuit,
@@ -1146,7 +1147,8 @@ def _score_parent_composition(
     else:
         child_bbox_area = board_area
         child_bbox_diag = (board_w * board_w + board_h * board_h) ** 0.5
-    packing_density = min(1.0, component_area / child_bbox_area)
+    pm = packing_metrics(component_area, child_bbox_area)
+    packing_density = pm.density
 
     child_score_component = max(0.0, min(100.0, avg_child_score))
     anchor_coverage_component = max(0.0, min(100.0, anchor_coverage * 100.0))
@@ -1159,7 +1161,7 @@ def _score_parent_composition(
         min(100.0, 100.0 * (1.0 - avg_anchor_distance / max(1.0, child_bbox_diag))),
     )
     utilization_component = max(0.0, min(100.0, area_utilization * 100.0))
-    packing_component = max(0.0, min(100.0, packing_density * 150.0))
+    packing_component = pm.score
 
     # area_utilization carries real weight in the total so the score actually
     # penalises oversized boards. Without this it was breakdown-only and

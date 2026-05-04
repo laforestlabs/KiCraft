@@ -8,8 +8,34 @@ or directly from this module in new code.
 from __future__ import annotations
 
 import math
+from typing import NamedTuple
 
 from .types import BoardState, Component, Point
+
+
+class PackingMetrics(NamedTuple):
+    density: float  # 0-1, clamped (matches min(1.0, comp_area / placed_area))
+    score: float  # 0-100, = min(100, density * fill_multiplier)
+
+
+def packing_metrics(
+    component_area: float,
+    placed_bbox_area: float,
+    *,
+    fill_multiplier: float = 150.0,
+) -> PackingMetrics:
+    """Centralise the packing-score curve so the in-loop SA score and the
+    post-compose round score agree on the meaning of "tightly packed".
+
+    Pre-computed areas in mm²; callers own the bbox extraction. Returns
+    density=0.0 / score=0.0 for degenerate placed_bbox_area (<= 0);
+    callers wanting "no opinion" should guard before calling.
+    """
+    if placed_bbox_area <= 0.0:
+        return PackingMetrics(0.0, 0.0)
+    density = min(1.0, component_area / placed_bbox_area)
+    score = max(0.0, min(100.0, density * fill_multiplier))
+    return PackingMetrics(density, score)
 
 
 def _world_artifact_origin(comp: Component) -> Point:
