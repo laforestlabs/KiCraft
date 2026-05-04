@@ -265,12 +265,14 @@ class PlacementScore:
     # blocker-compatible pairs (front-only x back-only). 100 = every
     # compatible pair fully overlaps; 0 = none overlap. Stays at 0 for
     # leaf placement (no synthetic blocks present).
+    bbox_packing: float = 100.0  # tight packing vs placed bbox; 100 when <2 comps
 
     def compute_total(self, weights: Optional[dict[str, float]] = None) -> float:
         w = weights or {
             "net_distance": 0.20,  # connected parts close together
             "crossover_score": 0.17,  # fewer crossings = easier routing
-            "compactness": 0.01,  # tighter layouts = smaller boards
+            "compactness": 0.00,  # absorbed by bbox_packing (was 0.01); seed-frame
+            # ratio is constant within a solve so SA cannot move it.
             "edge_compliance": 0.10,
             "rotation_score": 0.00,
             "board_containment": 0.12,
@@ -279,6 +281,8 @@ class PlacementScore:
             "group_coherence": 0.08,  # functional groups stay compact
             "aspect_ratio": 0.02,  # penalize elongated board shapes
             "topology_structure": 0.05,  # reward topology-aware passive ordering
+            "bbox_packing": 0.01,  # tight packing vs placed bbox (dynamic
+            # under SA, unlike compactness which is fixed for the solve).
             "block_opposite_side": 0.0,  # parent-side: reward stacking
             # blocker-compatible (front-only x back-only) block pairs
             # so SMT leaves migrate onto large back-side THT footprints.

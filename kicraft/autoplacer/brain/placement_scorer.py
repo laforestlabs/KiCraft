@@ -11,7 +11,7 @@ import math
 from collections import defaultdict
 
 from .graph import count_crossings, total_ratsnest_length
-from .placement_utils import _blocker_pair_compatible
+from .placement_utils import _blocker_pair_compatible, packing_metrics
 from .types import BoardState, Layer, PlacementScore, Point
 
 class PlacementScorer:
@@ -39,6 +39,7 @@ class PlacementScorer:
         s.group_coherence = self._score_group_coherence()
         s.topology_structure = self._score_topology_structure()
         s.block_opposite_side = self._score_block_opposite_side()
+        s.bbox_packing = self._score_bbox_packing()
 
         # Board aspect ratio scoring
         board_w = self.state.board_width
@@ -93,6 +94,29 @@ class PlacementScorer:
         fill = total_area / board_area
         # Gentle curve: 10% fill ≈ 40, 30% ≈ 65, 50%+ ≈ 90+
         return min(100, fill * 150 + 25)
+
+    def _score_bbox_packing(self) -> float:
+        """Reward tight clustering measured against the placed-component bbox.
+
+        ``_score_compactness`` divides by the *seed* board area, which is
+        fixed for the whole solve and contributes a constant -- SA cannot
+        move it. This metric divides by the dynamic bbox of placed
+        components, so an isolated leaf parked in a corner inflates the
+        bbox and reduces the score, giving SA a real signal that drift
+        costs PCB area. Mirrors ``_score_parent_composition``'s
+        ``packing_density`` via the shared ``packing_metrics`` helper.
+        """
+        comps = list(self.state.components.values())
+        if len(comps) < 2:
+            return 100.0  # no spread to score
+        total_area = sum(c.area for c in comps)
+        if total_area <= 0.0:
+            return 100.0  # degenerate input
+        bboxes = [c.physical_bbox() for c in comps]
+        placed_w = max(b[1].x for b in bboxes) - min(b[0].x for b in bboxes)
+        placed_h = max(b[1].y for b in bboxes) - min(b[0].y for b in bboxes)
+        placed_area = max(1.0, placed_w * placed_h)
+        return packing_metrics(total_area, placed_area).score
 
     def _score_edge_compliance(self) -> float:
         """Check connectors and mounting holes are near board edges.

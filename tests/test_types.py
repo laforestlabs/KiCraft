@@ -297,6 +297,7 @@ class TestPlacementScore:
             group_coherence=0.0,
             aspect_ratio=0.0,
             topology_structure=0.0,
+            bbox_packing=0.0,  # else the 100.0 default would contribute 1.0
         )
         total = ps.compute_total()
         # Only net_distance contributes: 50 * 0.20 = 10
