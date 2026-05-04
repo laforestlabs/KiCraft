@@ -1920,15 +1920,50 @@ class PlacementSolver:
         print(f"  Intra-cluster optimization done ({len(clusters)} clusters)")
 
     def _optimize_rotations(self, comps: dict[str, Component], work_state: BoardState):
-        """Try 0/90/180/270 rotations - optimize for routing (low crossovers + accessible pads)."""
+        """Try 0/90/180/270 rotations -- two scoring modes:
+
+        - IC/connector with pads: rotate pads via KiCad math, score with
+          routing signal (crossings, pad accessibility, ratsnest length).
+        - Synthetic leaf block (kind="subcircuit", no pads, populated
+          ``block_rotation_geometry``): swap bbox width/height per
+          rotation, score with placement signal (opposite-side blocker
+          overlap + inverse courtyard overlap). Leaf blocks have no pads
+          to rotate, so the IC/connector path doesn't apply -- but they
+          still benefit from rotation because their footprint AABB
+          changes shape under 90°/270°, opening packing opportunities
+          with neighbours that single-rotation placement misses.
+        """
         work_state.components = comps
 
         for ref, comp in comps.items():
-            if comp.locked or comp.kind == "mounting_hole":
+            if comp.kind == "mounting_hole":
                 continue
             # Skip edge-pinned connectors — rotation set by _best_rotation_for_edge
+            # (this orients pads outward toward the board edge, so changing
+            # rotation would break the side-orientation contract).
             if ref in self._pinned_targets:
                 continue
+            # Synthetic leaf blocks: locked means the *position* is committed
+            # to a zone, but rotation is still freely searchable. For non-block
+            # components, locked still means hands-off.
+            is_subcircuit_block = (
+                comp.kind == "subcircuit"
+                and comp.block_rotation_geometry
+            )
+            if comp.locked and not is_subcircuit_block:
+                continue
+
+            rotations = (
+                comp.allowed_rotations
+                if comp.allowed_rotations
+                else [0, 90, 180, 270]
+            )
+
+            # Branch: synthetic leaf block (no pads, but per-rotation geometry)
+            if is_subcircuit_block:
+                self._optimize_block_rotation(comp, rotations, work_state)
+                continue
+
             if len(comp.pads) < 2:
                 continue
 
@@ -1941,11 +1976,6 @@ class PlacementSolver:
             best_rot = orig_rot
             best_score = self._score_rotation_for_routing(work_state, comp)
 
-            rotations = (
-                comp.allowed_rotations
-                if comp.allowed_rotations
-                else [0, 90, 180, 270]
-            )
             for rot in rotations:
                 if rot == orig_rot:
                     continue
@@ -1979,6 +2009,72 @@ class PlacementSolver:
                     comp.pos.y - ox * sin_d + oy * cos_d,
                 )
             comp.rotation = best_rot
+
+    def _optimize_block_rotation(
+        self,
+        comp: Component,
+        rotations: list[float],
+        work_state: BoardState,
+    ) -> None:
+        """Choose the best rotation for a synthetic leaf block.
+
+        Leaf blocks have no pads; their geometry under rotation is captured
+        in ``block_rotation_geometry`` (width/height per rotation; the body
+        center is the rotation pivot, so it's invariant). Scoring uses a
+        placement signal (opposite-side blocker overlap + inverse courtyard
+        overlap) because pad-facing routing scores don't apply to blocks.
+        """
+        geo_by_rot = comp.block_rotation_geometry or {}
+        if not geo_by_rot:
+            return
+
+        orig_rot = float(comp.rotation)
+        orig_w = comp.width_mm
+        orig_h = comp.height_mm
+
+        best_rot = orig_rot
+        best_score = self._score_rotation_for_block(work_state)
+
+        for rot in rotations:
+            rot = float(rot)
+            if rot == orig_rot:
+                continue
+            geom = geo_by_rot.get(rot)
+            if geom is None:
+                continue
+            comp.rotation = rot
+            comp.width_mm = geom.width_mm
+            comp.height_mm = geom.height_mm
+
+            score = self._score_rotation_for_block(work_state)
+            if score > best_score:
+                best_score = score
+                best_rot = rot
+
+        # Apply best (revert to original geometry first if no improvement)
+        if best_rot == orig_rot:
+            comp.rotation = orig_rot
+            comp.width_mm = orig_w
+            comp.height_mm = orig_h
+        else:
+            geom = geo_by_rot[best_rot]
+            comp.rotation = best_rot
+            comp.width_mm = geom.width_mm
+            comp.height_mm = geom.height_mm
+
+    def _score_rotation_for_block(self, work_state: BoardState) -> float:
+        """Placement-signal score for synthetic leaf block rotation choice.
+
+        Combines opposite-side blocker overlap (rewards F.Cu/B.Cu compatible
+        leaves stacking, e.g. front-side regulators on top of a back-side
+        battery footprint) with inverse courtyard overlap (penalises
+        incompatible bbox overlap). Both come from ``PlacementScorer`` so
+        the rotation search uses the same signals as the global scorer.
+        """
+        scorer = PlacementScorer(work_state, self.cfg)
+        opposite = scorer._score_block_opposite_side()
+        inv_overlap = scorer._score_courtyard_overlap()
+        return 0.6 * opposite + 0.4 * inv_overlap
 
     def _force_step(
         self, comps: dict[str, Component], conn_graph: AdjacencyGraph, damping: float

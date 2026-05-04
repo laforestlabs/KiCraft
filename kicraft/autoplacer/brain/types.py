@@ -20,6 +20,21 @@ class Layer(IntEnum):
     BACK = 1  # B.Cu
 
 
+@dataclass(slots=True, frozen=True)
+class BlockRotationGeometry:
+    """Per-rotation bbox dimensions for a synthetic leaf block.
+
+    Leaf blocks rotate around their body_center (the rotation pivot), so
+    the body_center offset is rotation-invariant; only the AABB swaps
+    width/height for 90°/270° rotations of axis-aligned content. The
+    placement solver swaps these fields when trying alternate rotations
+    of a block, since blocks have no pads to rotate via the IC/connector
+    rotation path.
+    """
+    width_mm: float
+    height_mm: float
+
+
 @dataclass(slots=True)
 class Point:
     x: float  # mm
@@ -91,6 +106,11 @@ class Component:
     block_artifact_origin_offset: Point | None = None
     block_side: str | None = None
     allowed_rotations: list[float] | None = None
+    # Per-rotation bbox dimensions for synthetic leaf blocks. Keyed by
+    # rotation degrees (0/90/180/270). For 90° and 270° the width/height
+    # values swap relative to 0°/180°. Used by the placement solver to
+    # try alternate block rotations without recomputing geometry.
+    block_rotation_geometry: dict[float, "BlockRotationGeometry"] | None = None
 
     @property
     def area(self) -> float:

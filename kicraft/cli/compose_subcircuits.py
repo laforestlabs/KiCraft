@@ -1135,7 +1135,11 @@ def _compose_artifacts(
     for i, art in enumerate(loaded_artifacts):
         ref = synthetic_refs[i]
         rot = float(block_zones.get(ref, {}).get("rotation", 0.0))
-        comp = artifact_to_component(art, ref=ref, rotation=rot)
+        spec = derived.child_specs.get(i)
+        rotation_models = spec.models if spec is not None else None
+        comp = artifact_to_component(
+            art, ref=ref, rotation=rot, rotation_models=rotation_models
+        )
         if ref in allowed_rotations:
             comp.allowed_rotations = list(allowed_rotations[ref])
         synthetic_comps[ref] = comp

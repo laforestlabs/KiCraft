@@ -30,6 +30,7 @@ from .subcircuit_composer import (
     AttachmentConstraint,
     ChildArtifactPlacement,
     DerivedAttachmentConstraints,
+    PlacementModel,
     _compute_local_anchor_offset,
     dominant_blocker_side,
     extract_leaf_blocker_set,
@@ -40,6 +41,7 @@ from .subcircuit_instances import (
     transform_loaded_artifact,
 )
 from .types import (
+    BlockRotationGeometry,
     Component,
     Layer,
     Net,
@@ -88,6 +90,7 @@ def artifact_to_component(
     *,
     ref: str,
     rotation: float = 0.0,
+    rotation_models: dict[float, PlacementModel] | None = None,
 ) -> Component:
     """Build a synthetic block ``Component`` carrying blocker-set metadata.
 
@@ -102,6 +105,10 @@ def artifact_to_component(
     so ``world_artifact_origin = comp.pos - rotated(offset, rotation)``
     inverts back to the artifact's instance origin (which is what
     ``transform_loaded_artifact`` consumes downstream).
+
+    When ``rotation_models`` is provided, per-rotation bbox dimensions
+    are recorded on ``block_rotation_geometry`` so the placement solver
+    can swap width/height when trying 90°/270° rotations of this block.
     """
     tl, br = _content_bbox(artifact)
     width = max(0.1, br.x - tl.x)
@@ -111,20 +118,53 @@ def artifact_to_component(
     blocker_set = extract_leaf_blocker_set(artifact)
     side = dominant_blocker_side(blocker_set)
 
+    rotation_geometry: dict[float, BlockRotationGeometry] = {}
+    if rotation_models:
+        for rot_deg, model in rotation_models.items():
+            r_tl, r_br = model.transformed.bounding_box
+            rotation_geometry[float(rot_deg)] = BlockRotationGeometry(
+                width_mm=max(0.1, r_br.x - r_tl.x),
+                height_mm=max(0.1, r_br.y - r_tl.y),
+            )
+    # Fill in any missing cardinal rotations by transforming the raw
+    # artifact -- unconstrained leaves don't get a PlacementSpec, so no
+    # rotation_models are precomputed for them, but they still need
+    # per-rotation geometry so the placement solver can rotate them.
+    for rot_deg in (0.0, 90.0, 180.0, 270.0):
+        if rot_deg in rotation_geometry:
+            continue
+        transformed = transform_loaded_artifact(
+            artifact, origin=Point(0.0, 0.0), rotation=rot_deg
+        )
+        r_tl, r_br = transformed.bounding_box
+        rotation_geometry[rot_deg] = BlockRotationGeometry(
+            width_mm=max(0.1, r_br.x - r_tl.x),
+            height_mm=max(0.1, r_br.y - r_tl.y),
+        )
+
+    init_width = width
+    init_height = height
+    if rotation_geometry is not None:
+        rg = rotation_geometry.get(float(rotation))
+        if rg is not None:
+            init_width = rg.width_mm
+            init_height = rg.height_mm
+
     return Component(
         ref=ref,
         value=artifact.sheet_name,
         pos=Point(body_center.x, body_center.y),
         rotation=float(rotation),
         layer=Layer.FRONT,
-        width_mm=float(width),
-        height_mm=float(height),
+        width_mm=float(init_width),
+        height_mm=float(init_height),
         pads=[],
         kind="subcircuit",
         body_center=Point(body_center.x, body_center.y),
         block_blocker_set=blocker_set,
         block_artifact_origin_offset=Point(body_center.x, body_center.y),
         block_side=side,
+        block_rotation_geometry=rotation_geometry,
     )
 
 
