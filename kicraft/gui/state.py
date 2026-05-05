@@ -240,6 +240,11 @@ class AppState:
     )
     component_zone_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     thermal_ref_overrides: set[str] = field(default_factory=set)
+    # Sheet names whose front-side copper is THT shadow (battery holders,
+    # screw terminals); listed in cfg.parent_placement.backside_through_hole_leaves
+    # to opt them into SMT-on-front stacking. See per_component.py and the
+    # README "Configuring Placement" section for details.
+    backside_through_hole_overrides: set[str] = field(default_factory=set)
     per_component_loaded: bool = False
 
     runner_pid: int | None = None

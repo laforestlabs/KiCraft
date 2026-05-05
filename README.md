@@ -138,21 +138,26 @@ real F.Cu occupancy and rejects SMT-on-front stacking inside its
 bbox -- even when the body centre is empty and stacking would be
 physically fine.
 
-To re-enable opposite-side stacking on top of such a leaf, list its
-**sheet name** under `parent_placement.backside_through_hole_leaves`:
+To re-enable opposite-side stacking on top of such a leaf, open the
+GUI's **Setup → Per-Component Placement Rules** tab, expand the leaf,
+and toggle the sheet-level switch:
+
+> ☐ → ☑ **Backside THT anchor (allow SMT-front leaves to stack on top)**
+
+Click **Save to project JSON…**, review the diff modal, and confirm.
+The toggle persists as a sheet-name entry under
+`parent_placement.backside_through_hole_leaves`. For headless or CI
+workflows the same key can be set by hand:
 
 ```json
 {
   "parent_placement": {
-    "backside_through_hole_leaves": [
-      "BATT",
-      "TERMINAL_BLOCK"
-    ]
+    "backside_through_hole_leaves": ["BATT", "TERMINAL_BLOCK"]
   }
 }
 ```
 
-The override:
+What the override does:
 
 * Marks the leaf as having no F.Cu intent for the same-layer-outline
   gate, so SMT-on-front leaves may overlap inside its bbox.
@@ -166,7 +171,7 @@ The override:
 
 The flag is keyed by `sheet_name` so any project can list its own
 THT-back leaves; nothing is hardcoded to a single board. CHARGER-style
-leaves with continuous F.Cu routing **must not** be listed -- the
+leaves with continuous F.Cu routing **must not** be enabled -- the
 override there would let the original same-layer shorts return.
 
 #### Picker safety caps
