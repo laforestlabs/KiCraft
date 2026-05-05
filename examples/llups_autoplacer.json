@@ -106,5 +106,16 @@
     ],
     "freerouting_jar": "/home/jason/.local/lib/freerouting-1.9.0.jar",
     "project_name": "LLUPS",
-    "pcb_file": "LLUPS.kicad_pcb"
+    "pcb_file": "LLUPS.kicad_pcb",
+    "parent_placement": {
+        "candidate_search": {
+            "k": 4,
+            "time_budget_s": 240.0,
+            "max_outline_height_mm": 120.0,
+            "max_outline_width_mm": 160.0
+        },
+        "backside_through_hole_leaves": [
+            "BATT"
+        ]
+    }
 }

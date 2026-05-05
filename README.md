@@ -85,6 +85,114 @@ score-layout project.kicad_pcb
 python -m kicraft.gui
 ```
 
+### Configuring Placement
+
+Placement constraints live in `<project>_autoplacer.json` at the project
+root. The autoplacer auto-discovers it; the file is project-agnostic --
+it references components by ref designator (e.g. `J1`) or subcircuit
+sheet name (e.g. `BATT`), nothing is hardcoded to a particular project.
+See `examples/llups_autoplacer.json` for a full working file.
+
+#### Pinning components to edges, corners, or zones
+
+`component_zones` constrains where individual refs land on the board.
+Three constraint types, all applied at solve time:
+
+```json
+{
+  "component_zones": {
+    "J1":  { "edge":   "left" },
+    "J2":  { "edge":   "right" },
+    "H4":  { "corner": "top-left" },
+    "H86": { "corner": "bottom-right" },
+    "BT1": { "zone":   "bottom" },
+    "BT2": { "zone":   "bottom" }
+  }
+}
+```
+
+* `edge: left|right|top|bottom` — connector body flush with the named
+  edge. Pads face inward, housing overhangs outward by
+  `connector_edge_inset_mm`.
+* `corner: top-left|top-right|bottom-left|bottom-right` — typically
+  mounting holes. Locks at the corner with `mounting_hole_keep_in_mm`
+  reserved.
+* `zone: top|bottom|left|right|...` — soft confinement to a region.
+  The component is locked inside the zone; the solver may place it
+  anywhere within it.
+
+When a ref is part of a child subcircuit (e.g. `BT1` inside the `BATT`
+subcircuit), the constraint is propagated to the *block* during parent
+composition, so the BATT block ends up zone-bottom-pinned at parent
+solve time.
+
+#### Backside THT components: enabling stacking
+
+By default, the parent composer prevents two leaves from overlapping
+when both have any same-layer copper -- a strict same-layer-outline
+gate that catches CHARGER-style continuous-F.Cu shorts. PTH pads
+register as copper on **both** F.Cu and B.Cu, so a leaf whose only
+front-side copper is the shadow of through-hole pads (battery
+holders, screw terminals, large barrel jacks) is treated as having
+real F.Cu occupancy and rejects SMT-on-front stacking inside its
+bbox -- even when the body centre is empty and stacking would be
+physically fine.
+
+To re-enable opposite-side stacking on top of such a leaf, list its
+**sheet name** under `parent_placement.backside_through_hole_leaves`:
+
+```json
+{
+  "parent_placement": {
+    "backside_through_hole_leaves": [
+      "BATT",
+      "TERMINAL_BLOCK"
+    ]
+  }
+}
+```
+
+The override:
+
+* Marks the leaf as having no F.Cu intent for the same-layer-outline
+  gate, so SMT-on-front leaves may overlap inside its bbox.
+* Tells the post-SA stack pass (`_stack_compatible_blocks`) to use
+  it as a stacking anchor, actively row-packing front-only candidates
+  inside its body.
+* Leaves the per-pad sparse-rect overlap checks in place -- if a
+  candidate's pads happen to land on the THT pads themselves
+  (corner positions), the predicate still rejects that specific
+  geometry.
+
+The flag is keyed by `sheet_name` so any project can list its own
+THT-back leaves; nothing is hardcoded to a single board. CHARGER-style
+leaves with continuous F.Cu routing **must not** be listed -- the
+override there would let the original same-layer shorts return.
+
+#### Picker safety caps
+
+`parent_placement.candidate_search` controls the K-candidate search
+loop and the hard outline-dimension caps that filter sprawled
+placements:
+
+```json
+{
+  "parent_placement": {
+    "candidate_search": {
+      "k": 4,
+      "time_budget_s": 240.0,
+      "max_outline_height_mm": 120.0,
+      "max_outline_width_mm": 160.0
+    }
+  }
+}
+```
+
+Each candidate must satisfy `shorts == 0`, geometry validation, and
+the dim caps to be considered. The round fails loudly with a per-
+candidate breakdown if zero candidates pass -- per the
+"no fallbacks" rule, a sprawled board is never silently emitted.
+
 ### Mutation Search Bounds
 
 The GUI Setup tab exposes 39 searchable parameters that the evolutionary
