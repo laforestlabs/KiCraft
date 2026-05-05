@@ -301,8 +301,14 @@ class PlacementScore:
             "group_coherence": 0.08,  # functional groups stay compact
             "aspect_ratio": 0.02,  # penalize elongated board shapes
             "topology_structure": 0.05,  # reward topology-aware passive ordering
-            "bbox_packing": 0.01,  # tight packing vs placed bbox (dynamic
+            "bbox_packing": 0.15,  # tight packing vs placed bbox (dynamic
             # under SA, unlike compactness which is fixed for the solve).
+            # Bumped from 0.01 because the post-rotation-fix solver was
+            # producing sprawling placements (board height 170-250 mm) on
+            # most seeds -- with the predicate fix preventing leaf overlap,
+            # nothing else in the score function was pulling leaves
+            # together, so SA had no signal to compact. 0.15 is on par
+            # with smt_opposite_tht so compactness competes with stacking.
             "block_opposite_side": 0.0,  # parent-side: reward stacking
             # blocker-compatible (front-only x back-only) block pairs
             # so SMT leaves migrate onto large back-side THT footprints.

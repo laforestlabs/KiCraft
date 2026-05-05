@@ -2498,7 +2498,20 @@ def _search_best_layout(
         overlap = float(scorer._score_courtyard_overlap())
         ratsnest_mm = float(total_ratsnest_length(board_state))
         net_dist = max(0.0, 100.0 - ratsnest_mm * 0.1)
-        composite = 0.45 * opp_side + 0.35 * overlap + 0.20 * net_dist
+        # Compactness penalty: candidates with sprawling placements grow
+        # the parent outline (sometimes 200+ mm tall) and break geometry
+        # validation. The previous composite saturated to 4.37 across
+        # most candidates (opp_side=0, overlap=12.5, net_dist=0),
+        # leaving K=4 selection essentially random. Add a direct bbox
+        # term so smaller boards beat bigger ones when the rest is
+        # tied. Uses _score_bbox_packing (0..100, higher = denser).
+        bbox_packing = float(scorer._score_bbox_packing())
+        composite = (
+            0.30 * opp_side
+            + 0.25 * overlap
+            + 0.15 * net_dist
+            + 0.30 * bbox_packing
+        )
 
         rec = CandidateRecord(
             seed=seed_i,
