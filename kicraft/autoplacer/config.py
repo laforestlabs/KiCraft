@@ -12,10 +12,13 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_CONFIG = {
-    # Trace widths (5 mil = 0.127mm)
-    "signal_width_mm": 0.127,
-    "power_width_mm": 0.127,
-    # Via
+    # Trace + via floors match OSH Park 2-layer service:
+    # https://docs.oshpark.com/services/two-layer/
+    # Signal: 6 mil (0.1524mm) min trace width.
+    # Power: 0.5mm matches the Power netclass in LLUPS.kicad_pro.
+    "signal_width_mm": 0.1524,
+    "power_width_mm": 0.5,
+    # Via: 0.3mm drill + 0.15mm ring = 0.6mm dia (5.91 mil ring, above 5 mil floor)
     "via_drill_mm": 0.3,
     "via_size_mm": 0.6,
     # Placement clearance — minimum gap between component bounding boxes.
@@ -32,7 +35,18 @@ DEFAULT_CONFIG = {
     "force_repel_k": 200.0,
     "cooling_factor": 0.97,
     "sa_refine_enabled": True,
-    "sa_refine_iterations": 1000,
+    # Hard ceiling on SA iterations. Adaptive convergence (see
+    # `sa_refine_no_improve_break`) typically exits well before this limit
+    # once score has plateaued. Lowered from 1000 -> 300 because the parent
+    # solve has ~13 components and SA usually plateaus inside ~150 iters;
+    # leaf solves rarely benefit from > 300 either, and runaway iterations
+    # were the bulk of a 232 s solve on LLUPS.
+    "sa_refine_iterations": 300,
+    # Adaptive break: exit SA once no new best score has been found for
+    # this many consecutive iterations. 150 is wide enough to ride out
+    # high-temp Metropolis noise, narrow enough to save wall-clock once
+    # SA has truly converged.
+    "sa_refine_no_improve_break": 150,
     "sa_refine_initial_temp": 5.0,
     # Faster cooling (0.952 vs 0.995) lets SA spend more iterations near the
     # target temperature instead of crawling through high-temp randomness.

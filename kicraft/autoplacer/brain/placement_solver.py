@@ -809,7 +809,7 @@ class PlacementSolver:
                     {r: copy.deepcopy(c) for r, c in best_comps.items()},
                     work_state,
                     scorer,
-                    max_iters=int(self.cfg.get("sa_refine_iterations", 1000)),
+                    max_iters=int(self.cfg.get("sa_refine_iterations", 300)),
                     init_temp=float(self.cfg.get("sa_refine_initial_temp", 5.0)),
                     cooling_rate=float(self.cfg.get("sa_refine_cooling_rate", 0.995)),
                     move_radius=float(self.cfg.get("sa_refine_move_radius_mm", 2.0)),
@@ -2205,8 +2205,14 @@ class PlacementSolver:
         temp = init_temp
         accepted = 0
         improved = 0
+        iters_since_improvement = 0
+        no_improve_break = int(self.cfg.get("sa_refine_no_improve_break", 150))
+        temp_floor = init_temp * 0.001
+        iters_run = 0
 
         for iteration in range(max_iters):
+            iters_run = iteration + 1
+            prev_improved = improved
             # Choose move type
             roll = rng.random()
             if roll < swap_prob and len(unlocked) >= 2:
@@ -2310,11 +2316,29 @@ class PlacementSolver:
             # Cool down
             temp *= cooling_rate
 
+            if improved > prev_improved:
+                iters_since_improvement = 0
+            else:
+                iters_since_improvement += 1
+
+            # Adaptive convergence: exit once SA has stopped finding wins.
+            # The 150-iter window is long enough to cover Metropolis stalls
+            # at moderate temp (acceptance ~5-10% randomly accepted moves
+            # without an actual best-score win), short enough to save
+            # ~80% of wall-clock when SA has truly converged.
+            if iters_since_improvement >= no_improve_break:
+                break
+            # Numerical floor: at very low temp the Metropolis exp() under-
+            # flows and SA degenerates to greedy; no point continuing.
+            if temp < temp_floor:
+                break
+
         if improved > 0:
-            print(f"  SA refine: {improved} improvements, {accepted} accepted of {max_iters} "
-                  f"(best {best_score:.1f} vs initial {current_score:.1f})")
+            print(f"  SA refine: {improved} improvements, {accepted} accepted of "
+                  f"{iters_run}/{max_iters} (best {best_score:.1f} vs initial "
+                  f"{current_score:.1f})")
         else:
-            print(f"  SA refine: no improvement after {max_iters} iterations")
+            print(f"  SA refine: no improvement after {iters_run}/{max_iters} iterations")
 
         return best_comps
 
