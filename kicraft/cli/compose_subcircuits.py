@@ -2355,8 +2355,17 @@ class CandidateRecord:
     place_solve_ms: float
     stamp_ms: float
     stamp_drc_ms: float
-    accepted: bool  # shorts == 0
+    accepted: bool
     pcb_path: str
+    bbox_h_mm: float = 0.0
+    bbox_w_mm: float = 0.0
+    outline_h_mm: float = 0.0
+    outline_w_mm: float = 0.0
+    breakdown: dict[str, float] = field(default_factory=dict)
+    geometry_accepted: bool = False
+    outside_component_count: int = 0
+    outside_pad_count: int = 0
+    phase_timings: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2368,6 +2377,15 @@ class CandidateRecord:
             "stamp_drc_ms": self.stamp_drc_ms,
             "accepted": self.accepted,
             "pcb_path": self.pcb_path,
+            "bbox_h_mm": self.bbox_h_mm,
+            "bbox_w_mm": self.bbox_w_mm,
+            "outline_h_mm": self.outline_h_mm,
+            "outline_w_mm": self.outline_w_mm,
+            "breakdown": dict(self.breakdown),
+            "geometry_accepted": self.geometry_accepted,
+            "outside_component_count": self.outside_component_count,
+            "outside_pad_count": self.outside_pad_count,
+            "phase_timings": dict(self.phase_timings),
         }
 
 
@@ -2416,6 +2434,20 @@ def _search_best_layout(
 
     base_cfg = dict(cfg or {})
     base_parent_placement = dict(base_cfg.get("parent_placement", {}))
+    # Outline caps for candidate filtering. A sprawled candidate (cluster
+    # height > max_h or width > max_w) is rejected -- the picker prefers
+    # a colliding-but-compact alternate over a non-colliding sprawled
+    # one, since a sprawled board fails geometry validation downstream
+    # anyway. Round fails iff zero candidates pass shorts+geometry+caps.
+    _search_cfg = dict(base_parent_placement.get("candidate_search", {}))
+    try:
+        max_outline_height_mm = float(_search_cfg.get("max_outline_height_mm", 120.0))
+    except (TypeError, ValueError):
+        max_outline_height_mm = 120.0
+    try:
+        max_outline_width_mm = float(_search_cfg.get("max_outline_width_mm", 160.0))
+    except (TypeError, ValueError):
+        max_outline_width_mm = 160.0
 
     # Resolve artifact_dir for candidate stamping. Mirrors the path
     # _stamp_parent_board() builds so downstream code finds the winner
@@ -2513,6 +2545,45 @@ def _search_best_layout(
             + 0.30 * bbox_packing
         )
 
+        # Diagnostic capture: placed-component AABB (the actual cluster
+        # extent) and the auto-grown outline are NOT the same. Outline
+        # grows asymmetrically when one side is constrained (edge/corner
+        # mounts) and the other expands to fit a sprawled placement.
+        # Capture both so Branch A/B in the sprawl plan is decidable.
+        comps = list(board_state.components.values())
+        if comps:
+            phys = [c.physical_bbox() for c in comps]
+            placed_w_mm = max(b[1].x for b in phys) - min(b[0].x for b in phys)
+            placed_h_mm = max(b[1].y for b in phys) - min(b[0].y for b in phys)
+        else:
+            placed_w_mm = 0.0
+            placed_h_mm = 0.0
+        outline_tl, outline_br = board_state.board_outline
+        outline_w_mm = max(0.0, outline_br.x - outline_tl.x)
+        outline_h_mm = max(0.0, outline_br.y - outline_tl.y)
+        # state.geometry_validation is populated inside _stamp_parent_board
+        # via _validate_parent_geometry. When pcb_path is None the stamp
+        # path is skipped, leaving geometry_validation = {} -- treat that
+        # as accepted=True (no stamping happened, so nothing to reject).
+        gv = state.geometry_validation or {}
+        geometry_accepted = bool(gv.get("accepted", True))
+        outside_component_count = int(gv.get("outside_component_count", 0) or 0)
+        outside_pad_count = int(gv.get("outside_pad_count", 0) or 0)
+
+        # Lexicographic gate: a candidate must pass ALL hard checks to
+        # enter the picker. shorts==0 protects against electrical
+        # collisions; geometry_accepted protects against pads/components
+        # outside the auto-grown outline; the outline caps protect
+        # against sprawl that the auto-grown outline would otherwise
+        # accommodate (the validator alone is insufficient because the
+        # outline grows to fit the placement).
+        accepted = (
+            shorts == 0
+            and geometry_accepted
+            and placed_h_mm <= max_outline_height_mm
+            and placed_w_mm <= max_outline_width_mm
+        )
+
         rec = CandidateRecord(
             seed=seed_i,
             shorts=shorts,
@@ -2520,8 +2591,22 @@ def _search_best_layout(
             place_solve_ms=place_solve_ms,
             stamp_ms=stamp_ms,
             stamp_drc_ms=stamp_drc_ms,
-            accepted=(shorts == 0),
+            accepted=accepted,
             pcb_path=str(stamped),
+            bbox_h_mm=placed_h_mm,
+            bbox_w_mm=placed_w_mm,
+            outline_h_mm=outline_h_mm,
+            outline_w_mm=outline_w_mm,
+            breakdown={
+                "opp_side": opp_side,
+                "overlap": overlap,
+                "net_dist": net_dist,
+                "bbox_packing": bbox_packing,
+            },
+            geometry_accepted=geometry_accepted,
+            outside_component_count=outside_component_count,
+            outside_pad_count=outside_pad_count,
+            phase_timings=dict(state.phase_timings),
         )
         candidates.append(rec)
         cand_states.append(state)
@@ -2530,6 +2615,8 @@ def _search_best_layout(
         print(
             f"[candidate-search] cand={i} seed={seed_i} "
             f"shorts={shorts} score={composite:.1f} "
+            f"bh={placed_h_mm:.1f}mm bw={placed_w_mm:.1f}mm "
+            f"oh={outline_h_mm:.1f}mm geom_ok={geometry_accepted} "
             f"place={place_solve_ms / 1000:.1f}s drc={stamp_drc_ms / 1000:.1f}s"
         )
 
@@ -2547,18 +2634,29 @@ def _search_best_layout(
 
     accepted_recs = [c for c in candidates if c.accepted]
     if not accepted_recs:
-        # All K candidates failed stamp-DRC (shorts > 0). Fail the round
-        # loudly instead of emitting a broken artifact -- per "no
+        # All K candidates failed at least one hard gate (shorts > 0,
+        # geometry_accepted False, or outline cap exceeded). Fail the
+        # round loudly instead of emitting a broken artifact -- per "no
         # fallbacks", a masked failure here would let real solver bugs
-        # ship under a green checkmark. The exception text gives the
-        # operator the information they need to diagnose without having
-        # to re-run.
-        shorts_summary = ", ".join(
-            f"seed={c.seed}:shorts={c.shorts}" for c in candidates
+        # ship under a green checkmark. The exception names which gate
+        # killed each candidate so the operator can decide whether to
+        # widen the cap, change seeds, or fix the solver.
+        rejection_summary = ", ".join(
+            (
+                f"seed={c.seed}:"
+                f"shorts={c.shorts},"
+                f"geom_ok={c.geometry_accepted},"
+                f"bh={c.bbox_h_mm:.1f}mm,"
+                f"bw={c.bbox_w_mm:.1f}mm"
+            )
+            for c in candidates
         )
         raise RuntimeError(
-            f"candidate-search produced no shorts-free placement in K={len(candidates)} "
-            f"({shorts_summary}). Round aborted; investigate solver before re-running."
+            f"candidate-search produced no acceptable placement in K={len(candidates)} "
+            f"(caps: max_outline_h={max_outline_height_mm:.1f}mm, "
+            f"max_outline_w={max_outline_width_mm:.1f}mm; "
+            f"per-candidate: {rejection_summary}). "
+            f"Round aborted; investigate solver before re-running."
         )
     winner_rec = max(accepted_recs, key=lambda c: c.score)
 

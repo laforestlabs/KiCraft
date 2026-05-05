@@ -29,17 +29,53 @@ from .graph import (
 
 
 @contextmanager
-def _timed_phase(timings: dict[str, float], key: str):
+def _timed_phase(
+    timings: dict[str, float],
+    key: str,
+    capture_comps=None,
+):
     """Record perf_counter delta in ms into timings[key].
 
     Always records, including for gated phases that took ~0 ms — absent
     keys would be ambiguous between "skipped" and "didn't instrument."
+
+    When ``capture_comps`` is supplied (a zero-arg callable returning a
+    {ref: Component} dict), also records the AABB of unlocked components
+    at the phase's end via _record_placed_extent. The callable is
+    evaluated at exit so it sees any reassignment that happened inside
+    the with body (e.g. ``comps = best_comps`` in swap_opt).
     """
     t0 = time.perf_counter()
     try:
         yield
     finally:
         timings[key] = (time.perf_counter() - t0) * 1000.0
+        if capture_comps is not None:
+            prefix = key[:-3] if key.endswith("_ms") else key
+            _record_placed_extent(timings, prefix, capture_comps())
+
+
+def _record_placed_extent(
+    timings: dict[str, float], prefix: str, comps_dict: dict
+) -> None:
+    """Record AABB of unlocked components under <prefix>_placed_{w,h}_mm.
+
+    Drives the parent-compose sprawl diagnostic. Filters out locked
+    components (mounting holes, edge-pinned connectors) since their
+    positions are fixed by constraints rather than the solver phase
+    being timed -- including them would constant-pad the AABB and hide
+    the cluster's actual evolution. Phase keys parallel the existing
+    solve_<phase>_ms timing keys.
+    """
+    bboxes = [c.physical_bbox() for c in comps_dict.values() if not c.locked]
+    if bboxes:
+        w = max(b[1].x for b in bboxes) - min(b[0].x for b in bboxes)
+        h = max(b[1].y for b in bboxes) - min(b[0].y for b in bboxes)
+    else:
+        w = 0.0
+        h = 0.0
+    timings[f"{prefix}_placed_w_mm"] = w
+    timings[f"{prefix}_placed_h_mm"] = h
 from .placement_scorer import PlacementScorer
 from .placement_utils import (
     _bbox_overlap_amount,
@@ -614,7 +650,7 @@ class PlacementSolver:
         # Build connectivity graph
         conn_graph = build_connectivity_graph(self.state.nets)
 
-        with _timed_phase(phase_t, "solve_pin_edges_ms"):
+        with _timed_phase(phase_t, "solve_pin_edges_ms", capture_comps=lambda: comps):
             # Step 0.5: Assign layers BEFORE edge pinning so pad positions
             # reflect the flip when computing connector placement
             self._assign_layers(comps)
@@ -622,11 +658,11 @@ class PlacementSolver:
             # Step 1: Pin edge components (connectors, mounting holes)
             self._pin_edge_components(comps)
 
-        with _timed_phase(phase_t, "solve_align_pairs_ms"):
+        with _timed_phase(phase_t, "solve_align_pairs_ms", capture_comps=lambda: comps):
             # Step 1.3: Align large paired components side-by-side
             self._align_large_pairs(comps)
 
-        with _timed_phase(phase_t, "solve_clusters_ms"):
+        with _timed_phase(phase_t, "solve_clusters_ms", capture_comps=lambda: comps):
             # Step 1.5: Use explicit IC groups to boost connectivity weights
             ic_groups = self.cfg.get("ic_groups", {})
             if ic_groups:
@@ -671,15 +707,15 @@ class PlacementSolver:
                     f"({', '.join(f'{a}+{b}' for a, b in sibling_pairs)})"
                 )
 
-        with _timed_phase(phase_t, "solve_place_clusters_ms"):
+        with _timed_phase(phase_t, "solve_place_clusters_ms", capture_comps=lambda: comps):
             # Step 3: Initial cluster placement (with seeded jitter)
             self._place_clusters(comps, clusters, conn_graph)
 
-        with _timed_phase(phase_t, "solve_intra_cluster_ms"):
+        with _timed_phase(phase_t, "solve_intra_cluster_ms", capture_comps=lambda: comps):
             # Step 4: Optimize layout within each cluster before global layout
             self._optimize_intra_cluster(comps, clusters, conn_graph)
 
-        with _timed_phase(phase_t, "solve_optimize_rotations_ms"):
+        with _timed_phase(phase_t, "solve_optimize_rotations_ms", capture_comps=lambda: comps):
             # Step 5: Try 4 rotations per IC/connector, keep best
             self._optimize_rotations(comps, work_state)
 
@@ -799,8 +835,13 @@ class PlacementSolver:
                 )
                 break
         phase_t["solve_force_loop_ms"] = (time.perf_counter() - _t_force) * 1000.0
+        # Force loop's product is best_comps (the highest-scoring snapshot
+        # captured during iteration), not the live comps. Capture extent
+        # of best_comps so the diagnostic compares apples-to-apples with
+        # the SA phase that consumes best_comps as its input.
+        _record_placed_extent(phase_t, "solve_force_loop", best_comps)
 
-        with _timed_phase(phase_t, "solve_sa_refine_ms"):
+        with _timed_phase(phase_t, "solve_sa_refine_ms", capture_comps=lambda: best_comps):
             # SA refinement: escape local minima after FD convergence
             if self.cfg.get("sa_refine_enabled", True):
                 self._seen_force_states.clear()
@@ -817,7 +858,7 @@ class PlacementSolver:
                     rotation_prob=float(self.cfg.get("sa_refine_rotation_probability", 0.2)),
                 )
 
-        with _timed_phase(phase_t, "solve_alignment_repair_ms"):
+        with _timed_phase(phase_t, "solve_alignment_repair_ms", capture_comps=lambda: best_comps):
             # Alignment repair: apply the alignment_groups detected from the
             # INITIAL positions (before SA could scramble them). Runs after
             # SA so the group's parallel-axis center reflects the solver's
@@ -826,7 +867,7 @@ class PlacementSolver:
             if alignment_groups:
                 apply_alignment_repair(best_comps, alignment_groups)
 
-        with _timed_phase(phase_t, "solve_swap_opt_ms"):
+        with _timed_phase(phase_t, "solve_swap_opt_ms", capture_comps=lambda: best_comps):
             # Step 7: Swap optimization — directly minimize crossovers
             comps = best_comps
             if enable_swap:
@@ -889,7 +930,7 @@ class PlacementSolver:
             # Re-snap aligned pairs after grid snap
             self._re_snap_aligned_pairs(best_comps)
 
-        with _timed_phase(phase_t, "solve_orderedness_ms"):
+        with _timed_phase(phase_t, "solve_orderedness_ms", capture_comps=lambda: best_comps):
             # Step 8.5: Orderedness — align passives into neat rows/columns
             orderedness = self.cfg.get("orderedness", 0.0)
             if orderedness > 0.01:
@@ -897,7 +938,7 @@ class PlacementSolver:
                 # Re-snap aligned pairs after orderedness
                 self._re_snap_aligned_pairs(best_comps)
 
-        with _timed_phase(phase_t, "solve_stack_blocks_ms"):
+        with _timed_phase(phase_t, "solve_stack_blocks_ms", capture_comps=lambda: best_comps):
             # Step 8.7: Block stacking pass -- for parent-side blocks only.
             # Force-directed + SA alone consistently fail to migrate small
             # front-only SMT blocks onto large back-only THT blocks (they
@@ -910,7 +951,7 @@ class PlacementSolver:
             if self.cfg.get("opposite_side_stacking_pass", True):
                 self._stack_compatible_blocks(best_comps)
 
-        with _timed_phase(phase_t, "solve_resolve_overlaps_ms"):
+        with _timed_phase(phase_t, "solve_resolve_overlaps_ms", capture_comps=lambda: best_comps):
             # Step 9: Final exhaustive overlap resolution — guarantee no courtyard
             # overlaps before routing. Must run after snap since snapping can
             # re-introduce small overlaps.
@@ -931,13 +972,13 @@ class PlacementSolver:
                     break
                 self._resolve_overlaps(best_comps)
 
-        with _timed_phase(phase_t, "solve_legalize_ms"):
+        with _timed_phase(phase_t, "solve_legalize_ms", capture_comps=lambda: best_comps):
             # Step 9.5: Comprehensive legalization repair for subcircuit mode
             if prefer_legal:
                 repair_passes = int(self.cfg.get("leaf_legality_repair_passes", 12))
                 self.legalize_components(best_comps, max_passes=repair_passes)
 
-        with _timed_phase(phase_t, "solve_clamp_ms"):
+        with _timed_phase(phase_t, "solve_clamp_ms", capture_comps=lambda: best_comps):
             # Step 10: Hard clamp — nothing outside the board
             self._clamp_to_board(best_comps)
 
