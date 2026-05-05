@@ -1184,12 +1184,26 @@ def _compose_artifacts(
     # to block-level only so the leaf-pad warning doesn't fire and so the
     # solver doesn't try to pin J1/J2/J3 directly (those flow through
     # attachment_constraints_to_zones into the synthetic block zones).
+    #
+    # parent_keep_in_rects: hard-keepout zones derived from parent-local
+    # attachment constraints (e.g. mounting-hole inward_keep_in_mm). The
+    # solver's _resolve_keep_in_rects pass pushes any unlocked component
+    # whose bbox enters one of these zones back toward the board center.
+    # Without this, fast-cfg / SA-disabled runs were producing layouts
+    # with leaves stamped on top of mounting-hole keep-ins -> stamped
+    # DRC items_not_allowed violations (14 on a recent failed candidate).
+    parent_keep_in_specs = [
+        {"ref": c.ref, "margin_mm": float(c.inward_keep_in_mm)}
+        for c in derived.parent_local_constraints
+        if c.ref in parent_local
+    ]
     solver_cfg = {
         **cfg,
         **cfg.get("parent_placement", {}),
         "component_zones": dict(block_zones),
         "placement_clearance_mm": spacing_mm,
         "clearance_mm": spacing_mm,
+        "parent_keep_in_rects": parent_keep_in_specs,
     }
     solver = PlacementSolver(state_in, config=solver_cfg, seed=seed)
     solved = solver.solve()
@@ -2373,12 +2387,9 @@ def _search_best_layout(
 ) -> SearchResult:
     """Generate K placement candidates, hard-prefer shorts==0, return the winner.
 
-    Each iteration calls ``_compose_artifacts`` with cfg overrides that
-    skip the expensive solver passes (SA refine, swap optimisation,
-    block stacking, deep force-loop iteration cap). Preserved phases:
-    pin-edges, clusters, place-clusters, intra-cluster, optimize-rotations,
-    final overlap resolution, legalize, clamp -- the load-bearing minimum
-    for "candidate doesn't have spurious overlap-induced shorts."
+    Each iteration calls ``_compose_artifacts`` with the project cfg
+    UNCHANGED -- one solver pipeline, full fidelity per candidate. K is a
+    diversity knob across seeds, not a quality mode.
 
     Winner selection is lexicographic: shorts ascending first, composite
     score descending second. If no candidate has shorts==0, the
@@ -2392,15 +2403,6 @@ def _search_best_layout(
 
     base_cfg = dict(cfg or {})
     base_parent_placement = dict(base_cfg.get("parent_placement", {}))
-    fast_overrides = {
-        "sa_refine_enabled": False,
-        "opposite_side_stacking_pass": False,
-        "enable_swap_optimization": False,
-        "max_placement_iterations": 50,
-        "orderedness": 0.0,
-    }
-    fast_parent_placement = {**base_parent_placement, **fast_overrides}
-    fast_cfg = {**base_cfg, "parent_placement": fast_parent_placement}
 
     # Resolve artifact_dir for candidate stamping. Mirrors the path
     # _stamp_parent_board() builds so downstream code finds the winner
@@ -2439,7 +2441,7 @@ def _search_best_layout(
                 rotation_step_deg=rotation_step_deg,
                 parent_definition=parent_definition,
                 pcb_path=pcb_path,
-                cfg=fast_cfg,
+                cfg=base_cfg,
                 seed=seed_i,
             )
             place_solve_ms = (time.perf_counter() - t_solve) * 1000.0
@@ -2460,7 +2462,7 @@ def _search_best_layout(
                 cand_pcb = search_dir / f"cand_{i:02d}.kicad_pcb"
                 t_stamp = time.perf_counter()
                 stamped = _stamp_parent_board(
-                    state, pcb_path, project_dir, fast_cfg,
+                    state, pcb_path, project_dir, base_cfg,
                     output_pcb_path=cand_pcb,
                 )
                 stamp_ms = (time.perf_counter() - t_stamp) * 1000.0
@@ -2475,7 +2477,7 @@ def _search_best_layout(
 
             board_state = state.composition.board_state if state.composition else None
             if board_state is not None:
-                scorer = PlacementScorer(board_state, fast_parent_placement)
+                scorer = PlacementScorer(board_state, base_parent_placement)
                 opp_side = float(scorer._score_block_opposite_side())
                 overlap = float(scorer._score_courtyard_overlap())
                 try:
@@ -3124,13 +3126,13 @@ def main(argv: list[str] | None = None) -> int:
             compose_cfg.get("parent_placement", {}).get("candidate_search", {})
         )
         try:
-            k = max(1, int(search_cfg_raw.get("k", 8)))
+            k = max(1, int(search_cfg_raw.get("k", 4)))
         except (TypeError, ValueError):
-            k = 8
+            k = 4
         try:
-            time_budget_s = max(1.0, float(search_cfg_raw.get("time_budget_s", 60.0)))
+            time_budget_s = max(1.0, float(search_cfg_raw.get("time_budget_s", 240.0)))
         except (TypeError, ValueError):
-            time_budget_s = 60.0
+            time_budget_s = 240.0
 
         search_result = _search_best_layout(
             loaded_artifacts,

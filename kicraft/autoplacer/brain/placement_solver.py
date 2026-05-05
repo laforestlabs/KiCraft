@@ -919,6 +919,18 @@ class PlacementSolver:
             # Re-snap aligned pairs after overlap resolution
             self._re_snap_aligned_pairs(best_comps)
 
+            # Step 9.1: Push any unlocked components out of parent-local
+            # keep-in zones (mounting holes etc.). Runs after stacking/SA
+            # so we correct any drift those passes introduced; runs before
+            # legalize/clamp so the corrections survive into the final
+            # output. Iterating up to 3 times handles rare cascades where
+            # pushing one component creates a new overlap with another
+            # keep-in.
+            for _ in range(3):
+                if self._resolve_keep_in_rects(best_comps) == 0:
+                    break
+                self._resolve_overlaps(best_comps)
+
         with _timed_phase(phase_t, "solve_legalize_ms"):
             # Step 9.5: Comprehensive legalization repair for subcircuit mode
             if prefer_legal:
@@ -2155,6 +2167,60 @@ class PlacementSolver:
         self._post_step_clamp(comps, refs)
 
         return max_disp
+
+    def _resolve_keep_in_rects(self, comps: dict[str, Component]) -> int:
+        """Push unlocked components out of parent-local keep-in zones.
+
+        Each entry in cfg["parent_keep_in_rects"] is {ref, margin_mm}.
+        The keep-in rect is the protected component's bbox grown by
+        margin_mm. Other unlocked components must not overlap this rect.
+
+        Without this pass, SA refine + the post-stack reorderings can
+        drift unlocked leaves into mounting-hole keep-ins, producing
+        stamped-DRC items_not_allowed violations (the keep-in is
+        ultimately rendered as a KiCad keepout zone). Returns the count
+        of corrections applied so callers can log convergence.
+        """
+        specs = self.cfg.get("parent_keep_in_rects", [])
+        if not specs:
+            return 0
+        corrections = 0
+        for entry in specs:
+            protected_ref = entry.get("ref")
+            margin = float(entry.get("margin_mm", 0.0))
+            protected = comps.get(protected_ref)
+            if protected is None:
+                continue
+            p_tl, p_br = protected.bbox(margin)
+            cx = (p_tl.x + p_br.x) / 2.0
+            cy = (p_tl.y + p_br.y) / 2.0
+            for ref, comp in comps.items():
+                if comp.locked or ref == protected_ref:
+                    continue
+                c_tl, c_br = comp.bbox(0.0)
+                ox = max(0.0, min(c_br.x, p_br.x) - max(c_tl.x, p_tl.x))
+                oy = max(0.0, min(c_br.y, p_br.y) - max(c_tl.y, p_tl.y))
+                if ox <= 0.0 or oy <= 0.0:
+                    continue
+                old_pos = Point(comp.pos.x, comp.pos.y)
+                dx = comp.pos.x - cx
+                dy = comp.pos.y - cy
+                mag = math.hypot(dx, dy)
+                if mag < 0.01:
+                    dx, dy, mag = 1.0, 0.0, 1.0
+                push_dist = min(ox, oy) + 0.5  # extra slack so DRC margin holds
+                new_x = comp.pos.x + (dx / mag) * push_dist
+                new_y = comp.pos.y + (dy / mag) * push_dist
+                # Clamp to board so we don't push off-edge
+                tl, br = self.state.board_outline
+                hw = comp.width_mm / 2.0
+                hh = comp.height_mm / 2.0
+                new_x = max(tl.x + hw, min(br.x - hw, new_x))
+                new_y = max(tl.y + hh, min(br.y - hh, new_y))
+                comp.pos = Point(new_x, new_y)
+                _update_pad_positions(comp, old_pos, comp.rotation)
+                corrections += 1
+        return corrections
 
     def _sa_refine(
         self,
