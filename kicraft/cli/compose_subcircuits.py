@@ -189,7 +189,7 @@ class ParentCompositionState:
     phase_timings: dict[str, float] = field(default_factory=dict)
     # Per-round candidate search summary written by _search_best_layout.
     # Keys: k, tried, accepted, rejected_drc, best_index, best_seed,
-    # fallback_used, total_search_ms, candidates (list of per-trial dicts).
+    # total_search_ms, candidates (list of per-trial dicts).
     candidate_search: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -1109,22 +1109,25 @@ def _compose_artifacts(
     parent_local: dict[str, Component] = {}
 
     if pcb_path:
-        try:
-            project_dir = Path(pcb_path).resolve().parent
-            cfg_file = discover_project_config(project_dir)
-            if cfg_file is not None:
-                project_cfg = load_project_config(str(cfg_file))
-                cfg = {**project_cfg, **user_cfg}
-                component_zones = cfg.get("component_zones", {})
-            parent_local = extract_parent_local_components(
-                str(pcb_path),
-                loaded_artifacts,
-                allowlist=_resolve_parent_local_allowlist(
-                    component_zones, loaded_artifacts
-                ),
-            )
-        except Exception as exc:
-            logger.warning("Could not load config/local components: %s", exc)
+        # No try/except here: a project-config parse error or a
+        # parent_local extraction failure leaves the solver without
+        # mounting-hole keepouts, edge-connector pins, etc. -- which
+        # silently produces broken placements (items_not_allowed
+        # violations, leaves over mounting holes). Better to fail loudly
+        # at the cfg loading boundary than to ship a bad layout.
+        project_dir = Path(pcb_path).resolve().parent
+        cfg_file = discover_project_config(project_dir)
+        if cfg_file is not None:
+            project_cfg = load_project_config(str(cfg_file))
+            cfg = {**project_cfg, **user_cfg}
+            component_zones = cfg.get("component_zones", {})
+        parent_local = extract_parent_local_components(
+            str(pcb_path),
+            loaded_artifacts,
+            allowlist=_resolve_parent_local_allowlist(
+                component_zones, loaded_artifacts
+            ),
+        )
 
     derived = derive_attachment_constraints(
         loaded_artifacts,
@@ -2369,7 +2372,6 @@ class SearchResult:
     winner_pcb_path: Path
     candidates: list[CandidateRecord]
     total_search_ms: float
-    fallback_used: bool
 
 
 def _search_best_layout(
@@ -2392,10 +2394,11 @@ def _search_best_layout(
     diversity knob across seeds, not a quality mode.
 
     Winner selection is lexicographic: shorts ascending first, composite
-    score descending second. If no candidate has shorts==0, the
-    fewest-shorts candidate is returned with ``fallback_used=True`` and a
-    WARN log entry; the round still produces an artifact so downstream
-    diagnostics work even when search fails.
+    score descending second. If no candidate has shorts==0, the function
+    raises ``RuntimeError`` -- the round fails loudly. There is no
+    "best of bad options" fallback: a stamped board with shorts is not
+    a useful artifact, and silently emitting one masks solver bugs that
+    deserve attention.
     """
     from kicraft.autoplacer.brain.graph import total_ratsnest_length
     from kicraft.autoplacer.brain.placement_scorer import PlacementScorer
@@ -2433,105 +2436,108 @@ def _search_best_layout(
             )
             break
         seed_i = base_seed + i
-        try:
-            t_solve = time.perf_counter()
-            state, payloads = _compose_artifacts(
-                loaded_artifacts,
-                spacing_mm=spacing_mm,
-                rotation_step_deg=rotation_step_deg,
-                parent_definition=parent_definition,
-                pcb_path=pcb_path,
-                cfg=base_cfg,
-                seed=seed_i,
-            )
-            place_solve_ms = (time.perf_counter() - t_solve) * 1000.0
-            state.phase_timings["place_solve_ms"] = place_solve_ms
+        t_solve = time.perf_counter()
+        state, payloads = _compose_artifacts(
+            loaded_artifacts,
+            spacing_mm=spacing_mm,
+            rotation_step_deg=rotation_step_deg,
+            parent_definition=parent_definition,
+            pcb_path=pcb_path,
+            cfg=base_cfg,
+            seed=seed_i,
+        )
+        place_solve_ms = (time.perf_counter() - t_solve) * 1000.0
+        state.phase_timings["place_solve_ms"] = place_solve_ms
 
-            if pcb_path is None:
-                # No source PCB → no stamping, no DRC. Search degrades to
-                # placement-quality ranking (composite score only); shorts
-                # is unknowable so all candidates are treated as
-                # accepted=True. This keeps a single search code path
-                # for the rare interactive `compose-subcircuits --output`
-                # case without --pcb.
-                stamp_ms = 0.0
-                stamp_drc_ms = 0.0
-                shorts = 0
-                stamped = Path("")
-            else:
-                cand_pcb = search_dir / f"cand_{i:02d}.kicad_pcb"
-                t_stamp = time.perf_counter()
-                stamped = _stamp_parent_board(
-                    state, pcb_path, project_dir, base_cfg,
-                    output_pcb_path=cand_pcb,
-                )
-                stamp_ms = (time.perf_counter() - t_stamp) * 1000.0
-                state.phase_timings["stamp_ms"] = stamp_ms
-
-                t_drc = time.perf_counter()
-                drc = _run_kicad_cli_drc(str(stamped), timeout_s=30) or {}
-                stamp_drc_ms = (time.perf_counter() - t_drc) * 1000.0
-                state.phase_timings["stamp_drc_ms"] = stamp_drc_ms
-                state.stamp_drc = dict(drc)
-                shorts = int(drc.get("shorts", 0) or 0)
-
-            board_state = state.composition.board_state if state.composition else None
-            if board_state is not None:
-                scorer = PlacementScorer(board_state, base_parent_placement)
-                opp_side = float(scorer._score_block_opposite_side())
-                overlap = float(scorer._score_courtyard_overlap())
-                try:
-                    ratsnest_mm = float(total_ratsnest_length(board_state))
-                except Exception:
-                    ratsnest_mm = 0.0
-                net_dist = max(0.0, 100.0 - ratsnest_mm * 0.1)
-                composite = 0.45 * opp_side + 0.35 * overlap + 0.20 * net_dist
-            else:
-                composite = 0.0
-
-            rec = CandidateRecord(
-                seed=seed_i,
-                shorts=shorts,
-                score=composite,
-                place_solve_ms=place_solve_ms,
-                stamp_ms=stamp_ms,
-                stamp_drc_ms=stamp_drc_ms,
-                accepted=(shorts == 0),
-                pcb_path=str(stamped),
+        if pcb_path is None:
+            # No source PCB → no stamping, no DRC. Search degrades to
+            # placement-quality ranking (composite score only); shorts
+            # is unknowable so all candidates are treated as
+            # accepted=True. This keeps a single search code path
+            # for the rare interactive `compose-subcircuits --output`
+            # case without --pcb.
+            stamp_ms = 0.0
+            stamp_drc_ms = 0.0
+            shorts = 0
+            stamped = Path("")
+        else:
+            cand_pcb = search_dir / f"cand_{i:02d}.kicad_pcb"
+            t_stamp = time.perf_counter()
+            stamped = _stamp_parent_board(
+                state, pcb_path, project_dir, base_cfg,
+                output_pcb_path=cand_pcb,
             )
-            candidates.append(rec)
-            cand_states.append(state)
-            cand_payloads.append(payloads)
-            cand_pcb_paths.append(stamped)
-            print(
-                f"[candidate-search] cand={i} seed={seed_i} "
-                f"shorts={shorts} score={composite:.1f} "
-                f"place={place_solve_ms / 1000:.1f}s drc={stamp_drc_ms / 1000:.1f}s"
+            stamp_ms = (time.perf_counter() - t_stamp) * 1000.0
+            state.phase_timings["stamp_ms"] = stamp_ms
+
+            t_drc = time.perf_counter()
+            drc = _run_kicad_cli_drc(str(stamped), timeout_s=30) or {}
+            stamp_drc_ms = (time.perf_counter() - t_drc) * 1000.0
+            state.phase_timings["stamp_drc_ms"] = stamp_drc_ms
+            state.stamp_drc = dict(drc)
+            shorts = int(drc.get("shorts", 0) or 0)
+
+        board_state = state.composition.board_state if state.composition else None
+        if board_state is None:
+            raise RuntimeError(
+                f"candidate-search cand={i} seed={seed_i}: composition has no "
+                "board_state; cannot compute composite score"
             )
-        except Exception as exc:
-            print(
-                f"[candidate-search] cand={i} seed={seed_i} failed: {exc}",
-                file=sys.stderr,
-            )
-            continue
+        scorer = PlacementScorer(board_state, base_parent_placement)
+        opp_side = float(scorer._score_block_opposite_side())
+        overlap = float(scorer._score_courtyard_overlap())
+        ratsnest_mm = float(total_ratsnest_length(board_state))
+        net_dist = max(0.0, 100.0 - ratsnest_mm * 0.1)
+        composite = 0.45 * opp_side + 0.35 * overlap + 0.20 * net_dist
+
+        rec = CandidateRecord(
+            seed=seed_i,
+            shorts=shorts,
+            score=composite,
+            place_solve_ms=place_solve_ms,
+            stamp_ms=stamp_ms,
+            stamp_drc_ms=stamp_drc_ms,
+            accepted=(shorts == 0),
+            pcb_path=str(stamped),
+        )
+        candidates.append(rec)
+        cand_states.append(state)
+        cand_payloads.append(payloads)
+        cand_pcb_paths.append(stamped)
+        print(
+            f"[candidate-search] cand={i} seed={seed_i} "
+            f"shorts={shorts} score={composite:.1f} "
+            f"place={place_solve_ms / 1000:.1f}s drc={stamp_drc_ms / 1000:.1f}s"
+        )
 
     total_search_ms = (time.perf_counter() - t_search_start) * 1000.0
 
     if not candidates:
-        raise RuntimeError("candidate-search produced no successful candidates")
+        # K iterations exited the budget loop with zero successful
+        # appends. Either k <= 0 was passed or the time_budget_s was so
+        # tight that the very first compose blew it. Either way it's a
+        # configuration problem, not a placement bug -- surface it.
+        raise RuntimeError(
+            f"candidate-search ran zero candidates in K={k}, "
+            f"time_budget_s={time_budget_s:.0f}; check candidate_search cfg"
+        )
 
     accepted_recs = [c for c in candidates if c.accepted]
-    fallback_used = False
-    if accepted_recs:
-        winner_rec = max(accepted_recs, key=lambda c: c.score)
-    else:
-        fallback_used = True
-        winner_rec = min(candidates, key=lambda c: (c.shorts, -c.score))
-        print(
-            f"[candidate-search] no shorts-free candidate in K={len(candidates)}; "
-            f"selecting fewest-shorts={winner_rec.shorts}, score={winner_rec.score:.1f}",
-            file=sys.stderr,
+    if not accepted_recs:
+        # All K candidates failed stamp-DRC (shorts > 0). Fail the round
+        # loudly instead of emitting a broken artifact -- per "no
+        # fallbacks", a masked failure here would let real solver bugs
+        # ship under a green checkmark. The exception text gives the
+        # operator the information they need to diagnose without having
+        # to re-run.
+        shorts_summary = ", ".join(
+            f"seed={c.seed}:shorts={c.shorts}" for c in candidates
         )
+        raise RuntimeError(
+            f"candidate-search produced no shorts-free placement in K={len(candidates)} "
+            f"({shorts_summary}). Round aborted; investigate solver before re-running."
+        )
+    winner_rec = max(accepted_recs, key=lambda c: c.score)
 
     winner_idx = candidates.index(winner_rec)
     winner_state = cand_states[winner_idx]
@@ -2545,20 +2551,18 @@ def _search_best_layout(
         "rejected_drc": len(candidates) - len(accepted_recs),
         "best_index": winner_idx,
         "best_seed": winner_rec.seed,
-        "fallback_used": fallback_used,
         "total_search_ms": total_search_ms,
         "candidates": [c.to_dict() for c in candidates],
     }
     winner_state.phase_timings["candidate_search_ms"] = total_search_ms
 
-    if not fallback_used:
-        # Keep the search dir on fallback for forensics (which candidate
-        # had which DRC failure mode); discard on success to avoid leaking
-        # ~16 MB / round of intermediate stamped boards.
-        try:
-            shutil.rmtree(search_dir)
-        except OSError:
-            pass
+    # Drop the per-trial stamped boards now that the winner is selected.
+    # The search dir leaks ~16 MB/round of intermediates and the winner
+    # is captured in winner_state + winner_pcb_path.
+    try:
+        shutil.rmtree(search_dir)
+    except OSError:
+        pass
 
     return SearchResult(
         winner_idx=winner_idx,
@@ -2568,7 +2572,6 @@ def _search_best_layout(
         winner_pcb_path=winner_pcb,
         candidates=candidates,
         total_search_ms=total_search_ms,
-        fallback_used=fallback_used,
     )
 
 
@@ -3074,15 +3077,15 @@ def main(argv: list[str] | None = None) -> int:
 
     # Apply any active leaf pins so the canonical artifact files reflect
     # the pinned round, then load. ensure_applied is idempotent and a no-op
-    # when no pins.json exists, so this is safe on every compose run.
+    # when no pins.json exists, so this is safe on every compose run. If
+    # ensure_applied fails (corrupt pins.json, missing pinned round file),
+    # we let it raise -- silently continuing with stale leaf state would
+    # produce wrong placements without surfacing why.
     if project_dir is not None:
         from kicraft.autoplacer.brain import pins
-        try:
-            pin_status = pins.ensure_applied(project_dir / ".experiments")
-            for leaf_key, status in pin_status.items():
-                print(f"[pins] {leaf_key}: {status}")
-        except Exception as exc:
-            print(f"[pins] warning: ensure_applied failed: {exc}", file=sys.stderr)
+        pin_status = pins.ensure_applied(project_dir / ".experiments")
+        for leaf_key, status in pin_status.items():
+            print(f"[pins] {leaf_key}: {status}")
 
     try:
         loaded_artifacts = load_solved_artifacts(list(artifact_dirs))
@@ -3299,7 +3302,20 @@ def main(argv: list[str] | None = None) -> int:
                         file=sys.stderr,
                     )
             except Exception as drc_exc:
+                # kicad-cli failure or subprocess crash. Without a stamp
+                # DRC result we can't verify the placement is routable;
+                # proceeding to FreeRouting on an unverified board would
+                # let composer-introduced shorts ship as routing failures
+                # without attribution. Persist what we know and re-raise
+                # so the round fails loudly.
                 state.stamp_drc = {"ran": False, "error": str(drc_exc)}
+                if args.output:
+                    _save_composition_snapshot(
+                        Path(args.output).resolve(),
+                        state,
+                        transformed_payloads,
+                    )
+                raise
 
             # Re-save the snapshot with stamp + stamp_drc timings populated
             # so --stamp-only runs (and the route-skipped path below) carry

@@ -1823,10 +1823,36 @@ def can_overlap_sparse(
 
     outline_a = _transform_rect(blocker_a.leaf_outline, origin_a, rotation_a)
     outline_b = _transform_rect(blocker_b.leaf_outline, origin_b, rotation_b)
-    side_a = dominant_blocker_side(blocker_a)
-    side_b = dominant_blocker_side(blocker_b)
-    if side_a in {"front", "back"} and side_a == side_b and _rects_intersect(outline_a, outline_b):
-        return False
+    # Same-layer outline overlap is forbidden, full stop. The sparse
+    # rect checks above only inspect specific pads/traces; they miss
+    # the continuous F.Cu plane between them, so a leaf with sparse
+    # F.Cu pads at (10,5) and (15,5) reports compatible with another
+    # leaf whose pad sits at (12,5) -- but the leaves' actual stamped
+    # copper, components, silkscreen, and mask occupy the full leaf
+    # rectangle. Two leaves with any meaningful copper on the same
+    # physical layer cannot share an XY footprint regardless of which
+    # specific pad rects happen to miss each other.
+    #
+    # Was previously gated on `side_a == side_b in {front, back}`,
+    # which left the (dual, front) and (dual, back) cases uncovered:
+    # CHARGER (dual: front SMT + back THT drills) ended up marked
+    # compatible with BOOST_5V (front-only) on LLUPS, so the solver
+    # let them stack on F.Cu and DRC reported ~45 shorting_items.
+    front_a = sum(_rect_area(r) for r in blocker_a.front_pads) + sum(
+        _rect_area(r) for r in blocker_a.front_traces
+    ) > 0.0
+    front_b = sum(_rect_area(r) for r in blocker_b.front_pads) + sum(
+        _rect_area(r) for r in blocker_b.front_traces
+    ) > 0.0
+    back_a = sum(_rect_area(r) for r in blocker_a.back_pads) + sum(
+        _rect_area(r) for r in blocker_a.back_traces
+    ) > 0.0
+    back_b = sum(_rect_area(r) for r in blocker_b.back_pads) + sum(
+        _rect_area(r) for r in blocker_b.back_traces
+    ) > 0.0
+    if (front_a and front_b) or (back_a and back_b):
+        if _rects_intersect(outline_a, outline_b):
+            return False
     return True
 
 
