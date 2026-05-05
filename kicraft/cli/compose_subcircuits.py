@@ -2315,7 +2315,17 @@ for _ko in _keepouts:
         _zone.SetIsRuleArea(True)
         _zone.SetDoNotAllowTracks(True)
         _zone.SetDoNotAllowVias(True)
-        _zone.SetDoNotAllowPads(True)
+        # SetDoNotAllowPads(False) on purpose: the keepout rect is
+        # bbox(protected_comp) + inward_keep_in_mm, which by construction
+        # covers the protected component's own pad. Setting pads
+        # not_allowed flagged the protected pad as items_not_allowed
+        # against its own zone -- a self-overlap that DRC counts
+        # regardless of intent. Leaf-pad keep-out is enforced upstream
+        # by placement_solver._resolve_keep_in_rects (which pushes
+        # unlocked components away from these zones during solve), so
+        # the runtime zone only needs to block tracks/vias for
+        # FreeRouting protection.
+        _zone.SetDoNotAllowPads(False)
         _zone.SetDoNotAllowCopperPour(True)
         _outline = _zone.Outline()
         _outline.NewOutline()

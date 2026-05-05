@@ -807,12 +807,31 @@ def _transform_point(
     origin: Point,
     rotation_deg: float,
 ) -> Point:
-    """Rotate around local origin, then translate."""
+    """Rotate around local origin (KiCad convention), then translate.
+
+    Uses KiCad's rotation convention to match pcbnew.SetOrientationDegrees:
+        x' = x·cos θ + y·sin θ
+        y' = -x·sin θ + y·cos θ
+
+    Empirically verified: pcbnew rotating a pad at library (1, 0) by 90°
+    places it at world (0, -1). Using math CCW (the previous formula,
+    `x' = x cos θ - y sin θ; y' = x sin θ + y cos θ`) put the python
+    pad at (0, +1) -- the opposite side. The leaf solver's
+    `_update_pad_positions` already uses KiCad CW, and stamped leaf
+    geometry is DRC-clean. Parent compose was using math CCW here,
+    so leaves placed at non-zero rotation by the parent solver had
+    pads transformed CCW while pcbnew rendered them CW. The transformed
+    trace endpoints (also via this function) and pcbnew-rendered pads
+    ended up at inconsistent world coords -- enough mm-scale offset on
+    a 90° rotation to coincide some traces with same-leaf pads of
+    different nets after nm rounding, producing intra-leaf shorting_items
+    on stamped boards even when leaf_routed.kicad_pcb was clean.
+    """
     theta = math.radians(rotation_deg)
     cos_t = math.cos(theta)
     sin_t = math.sin(theta)
-    x = point.x * cos_t - point.y * sin_t
-    y = point.x * sin_t + point.y * cos_t
+    x = point.x * cos_t + point.y * sin_t
+    y = -point.x * sin_t + point.y * cos_t
     return Point(x + origin.x, y + origin.y)
 
 
