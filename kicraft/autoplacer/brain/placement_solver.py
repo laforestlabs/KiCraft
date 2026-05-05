@@ -2517,8 +2517,21 @@ class PlacementSolver:
         # Group candidates by their chosen anchor.
         groups: dict[str, list[tuple[str, Component]]] = {}
         anchor_by_ref = {ref: comp for ref, comp in anchors}
+
+        def _effective_side(comp: Component) -> str:
+            # block_force_back_only is the project-level override that
+            # overrules the heuristic for both can_overlap_sparse and
+            # this anchor-selection check. Without honouring it here,
+            # a config-flagged anchor still classifies as "front" or
+            # "dual" via dominant_blocker_side and the same-side gate
+            # below skips it -- the override would be unable to revive
+            # stacking on its own.
+            if getattr(comp, "block_force_back_only", False):
+                return "back"
+            return dominant_blocker_side(comp.block_blocker_set)
+
         for cand_ref, cand in candidates:
-            cand_side = dominant_blocker_side(cand.block_blocker_set)
+            cand_side = _effective_side(cand)
             # Dual cands have copper on both layers and cannot stack on
             # anything without conflict; "none" cands carry no blocker
             # signal at all. Either way, leave at force-directed pos.
@@ -2530,7 +2543,7 @@ class PlacementSolver:
                     continue
                 if cand.height_mm > anc.height_mm + 0.5:
                     continue
-                anc_side = dominant_blocker_side(anc.block_blocker_set)
+                anc_side = _effective_side(anc)
                 if anc_side == "none" or anc_side == cand_side:
                     continue
                 chosen_anchor_ref = anc_ref

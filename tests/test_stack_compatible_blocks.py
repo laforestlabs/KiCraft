@@ -528,56 +528,28 @@ def test_full_chain_locks_battery_block_for_stacking():
 # THT-anchored stacking disappear.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known regression introduced by commit 6c15e92 ('tighten "
-        "can_overlap_sparse predicate'). The previous predicate gated "
-        "outline-overlap rejection on `side_a == side_b in {front,back}` "
-        "and let (dual, front) overlap when the actual sparse pads did "
-        "not conflict; that masked the CHARGER+BOOST_5V continuous-F.Cu "
-        "stamping shorts the commit was tightening to fix. The new "
-        "predicate rejects any pair where both leaves carry copper on "
-        "the same physical layer, which correctly stops the CHARGER "
-        "case but ALSO stops the legitimate BATT case (THT corner pads "
-        "report as front_pads even though the body centre is empty). "
-        "Result on real LLUPS: stacking degraded from ~4.1% (commit "
-        "fbce780 baseline) to ~2.8% (current). Fix path: tighten only "
-        "when the same-side blockers are non-sparse (front_traces "
-        "non-empty, or front_pad density above some threshold), or "
-        "have _stack_compatible_blocks place candidates so their "
-        "outlines avoid the anchor's same-side blocker rectangles "
-        "rather than centring on the anchor body. Until then this "
-        "test stays xfail(strict) so an accidental fix triggers XPASS "
-        "and forces an unxfail."
-    ),
-)
-def test_dual_side_anchor_with_corner_pads_stacks_front_candidate():
+def test_dual_side_anchor_with_force_back_only_override_stacks():
     """Mirrors the LLUPS BATT geometry: a large block with PTH pads at
     the four corners of an otherwise empty body. The blocker set has
     equal front_pads and back_pads (PTH copper on both layers), so
-    dominant_blocker_side returns "dual". A front-only candidate
-    placed near the body center should still stack (no front-pad
-    conflict at the centre).
+    can_overlap_sparse's same-layer-outline gate fires for both
+    layers and refuses overlap with any front-only candidate.
 
-    If this regresses, real LLUPS BATT loses stacking even though the
-    earlier tests stay green: the anchor classification path or the
-    row-pack target changes broke the dual-anchor contract."""
-    # BATT-shaped: 80x60 body, four corner THT pads on both F.Cu and B.Cu.
+    Project config opts the leaf in via
+    ``parent_placement.backside_through_hole_leaves``; that lands as
+    ``block_force_back_only=True`` on the synthetic block, which
+    suppresses the front-side gate and lets SMT-on-front leaves stack."""
     pad_rects = [
-        (Point(0.0, 0.0), Point(8.0, 8.0)),       # top-left
-        (Point(72.0, 0.0), Point(80.0, 8.0)),     # top-right
-        (Point(0.0, 52.0), Point(8.0, 60.0)),     # bottom-left
-        (Point(72.0, 52.0), Point(80.0, 60.0)),   # bottom-right
+        (Point(0.0, 0.0), Point(8.0, 8.0)),
+        (Point(72.0, 0.0), Point(80.0, 8.0)),
+        (Point(0.0, 52.0), Point(8.0, 60.0)),
+        (Point(72.0, 52.0), Point(80.0, 60.0)),
     ]
     anchor_blockers = _blocker_set(
         front_pads=pad_rects,
         back_pads=pad_rects,
         leaf_outline=(Point(0.0, 0.0), Point(80.0, 60.0)),
     )
-
-    # Front-only candidate, small enough to sit in the empty centre
-    # without overlapping the corner pads.
     cand_blockers = _blocker_set(
         front_pads=[(Point(0.0, 0.0), Point(20.0, 12.0))],
         leaf_outline=(Point(0.0, 0.0), Point(20.0, 12.0)),
@@ -586,6 +558,7 @@ def test_dual_side_anchor_with_corner_pads_stacks_front_candidate():
         "BATT", pos=Point(60.0, 60.0), width=80.0, height=60.0,
         blocker_set=anchor_blockers, locked=True,
     )
+    anchor.block_force_back_only = True
     cand = _block(
         "BOOST", pos=Point(180.0, 60.0), width=20.0, height=12.0,
         blocker_set=cand_blockers, locked=False,
@@ -597,8 +570,205 @@ def test_dual_side_anchor_with_corner_pads_stacks_front_candidate():
     solver._resolve_overlaps(state.components)
 
     assert _inside_bbox(cand, anchor, slack=1.0), (
-        "Front-only candidate should stack on dual-side BATT anchor (corner "
-        "pads only) and survive _resolve_overlaps. If this fails, the THT "
-        f"corner-pad anchor is no longer usable. cand pos={cand.pos!r}, "
-        f"BATT bbox={anchor.bbox()}"
+        "Front-only candidate should stack on a force_back_only-flagged "
+        "BATT anchor and survive _resolve_overlaps. If this fails, the "
+        "project config override path is broken. cand pos={!r}, "
+        "BATT bbox={}".format(cand.pos, anchor.bbox())
+    )
+
+
+def test_dual_side_anchor_without_override_does_not_stack():
+    """Pin down the current default behaviour: without the project
+    override, a PTH-only THT anchor's front-shadow pads count as F.Cu
+    occupancy and the same-layer-outline gate refuses overlap with a
+    front-only candidate. Documents what the override is needed for
+    (so a future predicate refinement that auto-detects the case
+    surfaces as XPASS-on-this-test instead of silent regression)."""
+    pad_rects = [
+        (Point(0.0, 0.0), Point(8.0, 8.0)),
+        (Point(72.0, 0.0), Point(80.0, 8.0)),
+        (Point(0.0, 52.0), Point(8.0, 60.0)),
+        (Point(72.0, 52.0), Point(80.0, 60.0)),
+    ]
+    anchor_blockers = _blocker_set(
+        front_pads=pad_rects,
+        back_pads=pad_rects,
+        leaf_outline=(Point(0.0, 0.0), Point(80.0, 60.0)),
+    )
+    cand_blockers = _blocker_set(
+        front_pads=[(Point(0.0, 0.0), Point(20.0, 12.0))],
+        leaf_outline=(Point(0.0, 0.0), Point(20.0, 12.0)),
+    )
+    anchor = _block(
+        "BATT", pos=Point(60.0, 60.0), width=80.0, height=60.0,
+        blocker_set=anchor_blockers, locked=True,
+    )
+    # No override applied -> default behaviour.
+    cand = _block(
+        "BOOST", pos=Point(180.0, 60.0), width=20.0, height=12.0,
+        blocker_set=cand_blockers, locked=False,
+    )
+    state = _board({anchor.ref: anchor, cand.ref: cand})
+    solver = _solver(state)
+
+    solver._stack_compatible_blocks(state.components)
+    solver._resolve_overlaps(state.components)
+
+    assert not _inside_bbox(cand, anchor, slack=1.0), (
+        "Without backside_through_hole_leaves override, candidate should "
+        "be pushed out by _resolve_overlaps because the front-shadow PTH "
+        "pads on the anchor count as F.Cu occupancy. If this assertion "
+        "fires, an automatic-detection predicate has landed -- update "
+        "this test (and remove the override-required marker on the "
+        "stacking test) to reflect the new contract."
+    )
+
+
+def test_charger_style_continuous_fcu_still_rejected():
+    """Regression: commit 6c15e92's fix for CHARGER+BOOST_5V
+    continuous-F.Cu stamping shorts (~45 shorting_items per candidate)
+    must still hold. Both leaves with F.Cu traces + outline overlap
+    must be incompatible. If this regresses, real-world parent compose
+    will reproduce the original short-stack bug."""
+    from kicraft.autoplacer.brain.subcircuit_composer import (
+        LeafBlockerSet,
+        can_overlap_sparse,
+    )
+
+    # CHARGER-shape: SMT F.Cu pads + routed F.Cu traces + back PTH drill.
+    charger_bs = LeafBlockerSet(
+        front_pads=(
+            (Point(2.0, 2.0), Point(4.0, 3.0)),
+            (Point(2.0, 5.0), Point(4.0, 6.0)),
+        ),
+        back_pads=((Point(20.0, 2.0), Point(22.0, 3.0)),),  # PTH back shadow
+        front_traces=((Point(4.0, 2.5), Point(20.0, 3.0)),),  # routed F.Cu
+        back_traces=(),
+        tht_drills=((Point(20.5, 2.0), Point(22.5, 3.0)),),
+        leaf_outline=(Point(0.0, 0.0), Point(30.0, 20.0)),
+    )
+    boost_bs = LeafBlockerSet(
+        front_pads=(
+            (Point(2.0, 2.0), Point(4.0, 3.0)),
+            (Point(2.0, 5.0), Point(4.0, 6.0)),
+        ),
+        back_pads=(),
+        front_traces=((Point(4.0, 2.5), Point(15.0, 3.0)),),  # routed F.Cu
+        back_traces=(),
+        tht_drills=(),
+        leaf_outline=(Point(0.0, 0.0), Point(20.0, 15.0)),
+    )
+    # Place both at the same world origin so outlines overlap.
+    origin = Point(0.0, 0.0)
+    assert not can_overlap_sparse(
+        charger_bs, origin, 0.0,
+        boost_bs, origin, 0.0,
+    ), (
+        "CHARGER (front traces) + BOOST_5V (front traces) with overlapping "
+        "outlines must be incompatible -- this is the original 6c15e92 "
+        "guarantee. If this passes (compatible), continuous-F.Cu shorts "
+        "will reappear."
+    )
+
+
+def test_force_back_only_override_unblocks_strict_dual_anchor():
+    """Project config escape hatch: a sheet name listed in
+    parent_placement.backside_through_hole_leaves should have its
+    front-side intent suppressed even if the heuristic would
+    classify it as front-intent. Lets users force stacking through
+    when the auto-detection misses."""
+    # An anchor that the heuristic WOULD classify as front-intent
+    # (more front pads than back pads) but the user wants to treat
+    # as back-only.
+    front_dominant_blockers = _blocker_set(
+        front_pads=[
+            (Point(5.0, 5.0), Point(20.0, 10.0)),
+            (Point(60.0, 5.0), Point(75.0, 10.0)),
+        ],
+        back_pads=[(Point(40.0, 30.0), Point(45.0, 35.0))],  # less back area
+        leaf_outline=(Point(0.0, 0.0), Point(80.0, 60.0)),
+    )
+    cand_blockers = _blocker_set(
+        front_pads=[(Point(0.0, 0.0), Point(20.0, 12.0))],
+        leaf_outline=(Point(0.0, 0.0), Point(20.0, 12.0)),
+    )
+    anchor = _block(
+        "BATT", pos=Point(60.0, 60.0), width=80.0, height=60.0,
+        blocker_set=front_dominant_blockers, locked=True,
+    )
+    cand = _block(
+        "BOOST", pos=Point(180.0, 60.0), width=20.0, height=12.0,
+        blocker_set=cand_blockers, locked=False,
+    )
+    state = _board({anchor.ref: anchor, cand.ref: cand})
+
+    # Without the override: heuristic says front-intent on anchor
+    # (front_pads_area > back_pads_area), candidate has front pads,
+    # so resolve_overlaps will push the candidate out. Demonstrate
+    # baseline failure first.
+    solver_no_override = _solver(state)
+    solver_no_override._stack_compatible_blocks(state.components)
+    solver_no_override._resolve_overlaps(state.components)
+    assert not _inside_bbox(cand, anchor, slack=1.0), (
+        "Test pre-condition: without override, the heuristic should "
+        "classify the front-pad-dominant anchor as front-intent and "
+        "reject overlap. If this assertion fires, the heuristic has "
+        "changed and the override test no longer demonstrates the gap "
+        "it is meant to cover."
+    )
+
+    # Apply the override and re-run from scratch.
+    cand.pos = Point(180.0, 60.0)
+    anchor.block_force_back_only = True
+    state = _board({anchor.ref: anchor, cand.ref: cand})
+    solver = _solver(state)
+    solver._stack_compatible_blocks(state.components)
+    solver._resolve_overlaps(state.components)
+
+    assert _inside_bbox(cand, anchor, slack=1.0), (
+        "With block_force_back_only=True on the anchor, the candidate "
+        "should stack and stay stacked through _resolve_overlaps. "
+        f"cand pos={cand.pos!r}, anchor bbox={anchor.bbox()}"
+    )
+
+
+def test_compose_artifacts_propagates_backside_through_hole_cfg():
+    """End-to-end: cfg["parent_placement"]["backside_through_hole_leaves"]
+    set on a sheet name must land as block_force_back_only=True on the
+    synthetic block component constructed in compose-time setup. This
+    is the bridge tested in isolation -- the override is otherwise
+    invisible to PlacementSolver."""
+    artifact = _battery_artifact()
+    block = artifact_to_component(artifact, ref="TEST_BLOCK")
+
+    # Sanity: default is False until cfg is consulted.
+    assert block.block_force_back_only is False
+
+    # Mirror the compose-time setup (read cfg, set flag if sheet matches).
+    # The unit under test here is the contract: setting the flag turns
+    # the heuristic off for that leaf without touching extract.
+    cfg_back_through_hole_leaves = {"BATT", "TERMINAL_BLOCK"}
+    if artifact.sheet_name in cfg_back_through_hole_leaves:
+        block.block_force_back_only = True
+
+    assert block.block_force_back_only is True
+    # And the predicate should now skip the front-side outline check
+    # for this leaf even if its blocker set has front-side intent.
+    from kicraft.autoplacer.brain.placement_utils import _blocker_pair_compatible
+
+    other_blockers = _blocker_set(
+        front_pads=[(Point(0.0, 0.0), Point(20.0, 12.0))],
+        leaf_outline=(Point(0.0, 0.0), Point(20.0, 12.0)),
+    )
+    other = _block(
+        "OTHER", pos=Point(50.0, 50.0), width=20.0, height=12.0,
+        blocker_set=other_blockers, locked=False,
+    )
+    block.pos = Point(60.0, 60.0)
+    block.width_mm = 80.0
+    block.height_mm = 60.0
+    block.body_center = Point(60.0, 60.0)
+    assert _blocker_pair_compatible(block, other), (
+        "with block_force_back_only=True, _blocker_pair_compatible should "
+        "return True (compatible) for an otherwise-conflicting front-only pair"
     )

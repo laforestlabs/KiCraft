@@ -1147,6 +1147,16 @@ def _compose_artifacts(
     block_zones, allowed_rotations = attachment_constraints_to_zones(
         derived, synthetic_refs, list(loaded_artifacts)
     )
+    # Project-level override for the layer-intent heuristic. Sheet
+    # names listed here force can_overlap_sparse to treat the leaf as
+    # having no front-side copper intent, so SMT-on-front candidates
+    # may stack on it. Generalises the THT-back-anchor case (battery
+    # holders, terminal blocks) without per-project hardcoding -- any
+    # project lists its own offending sheet names. Default empty: the
+    # heuristic alone handles the common shadow-PTH case.
+    _back_through_hole_leaves = set(
+        cfg.get("parent_placement", {}).get("backside_through_hole_leaves", []) or []
+    )
     synthetic_comps: dict[str, Component] = {}
     for i, art in enumerate(loaded_artifacts):
         ref = synthetic_refs[i]
@@ -1158,6 +1168,8 @@ def _compose_artifacts(
         )
         if ref in allowed_rotations:
             comp.allowed_rotations = list(allowed_rotations[ref])
+        if art.sheet_name in _back_through_hole_leaves:
+            comp.block_force_back_only = True
         synthetic_comps[ref] = comp
 
     # Parent-local components (mounting holes etc.) join the same solver

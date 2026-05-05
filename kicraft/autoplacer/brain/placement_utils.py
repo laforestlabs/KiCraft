@@ -67,6 +67,12 @@ def _blocker_pair_compatible(a: Component, b: Component) -> bool:
     copper). Leaf placement components have ``block_blocker_set is None``
     and this short-circuits to False -- preserving today's bbox-only
     semantics for the leaf path.
+
+    ``block_force_back_only`` rides on each Component as a project-level
+    override for the layer-intent heuristic; passed through to
+    ``can_overlap_sparse`` so its same-layer-outline check treats the
+    flagged leaf as having no front-side copper intent regardless of
+    its blocker geometry.
     """
     if a.block_blocker_set is None or b.block_blocker_set is None:
         return False
@@ -81,6 +87,8 @@ def _blocker_pair_compatible(a: Component, b: Component) -> bool:
         b.block_blocker_set,
         _world_artifact_origin(b),
         b.rotation,
+        force_back_only_a=bool(getattr(a, "block_force_back_only", False)),
+        force_back_only_b=bool(getattr(b, "block_force_back_only", False)),
     )
 
 

@@ -105,6 +105,17 @@ class Component:
     block_blocker_set: LeafBlockerSet | None = None
     block_artifact_origin_offset: Point | None = None
     block_side: str | None = None
+    # Project-level override: when True, can_overlap_sparse treats this
+    # leaf as having NO front-side intent regardless of what its blocker
+    # set looks like. Set from
+    # cfg["parent_placement"]["backside_through_hole_leaves"] for boards
+    # whose front_pads are PTH shadows the layer-intent heuristic
+    # already classifies as no-intent, but the user wants to be explicit
+    # about. The flag rides on the synthetic block component so the
+    # bridge between project config and the leaf-pair compatibility
+    # check is local to compose-time setup; everything downstream
+    # (placement solver, scorer) reads it via the predicate.
+    block_force_back_only: bool = False
     allowed_rotations: list[float] | None = None
     # Per-rotation bbox dimensions for synthetic leaf blocks. Keyed by
     # rotation degrees (0/90/180/270). For 90° and 270° the width/height

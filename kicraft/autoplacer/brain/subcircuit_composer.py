@@ -1720,6 +1720,9 @@ def can_overlap_sparse(
     blocker_b: LeafBlockerSet,
     origin_b: Point,
     rotation_b: float,
+    *,
+    force_back_only_a: bool = False,
+    force_back_only_b: bool = False,
 ) -> bool:
     if _any_rect_overlap(
         blocker_a.front_pads,
@@ -1838,18 +1841,31 @@ def can_overlap_sparse(
     # CHARGER (dual: front SMT + back THT drills) ended up marked
     # compatible with BOOST_5V (front-only) on LLUPS, so the solver
     # let them stack on F.Cu and DRC reported ~45 shorting_items.
-    front_a = sum(_rect_area(r) for r in blocker_a.front_pads) + sum(
-        _rect_area(r) for r in blocker_a.front_traces
-    ) > 0.0
-    front_b = sum(_rect_area(r) for r in blocker_b.front_pads) + sum(
-        _rect_area(r) for r in blocker_b.front_traces
-    ) > 0.0
-    back_a = sum(_rect_area(r) for r in blocker_a.back_pads) + sum(
-        _rect_area(r) for r in blocker_a.back_traces
-    ) > 0.0
-    back_b = sum(_rect_area(r) for r in blocker_b.back_pads) + sum(
-        _rect_area(r) for r in blocker_b.back_traces
-    ) > 0.0
+    #
+    # ``force_back_only_*`` is a project-level escape hatch for leaves
+    # whose front-layer copper is the shadow of through-hole pads
+    # rather than real F.Cu intent (battery holders, screw terminals).
+    # Passed through from
+    # cfg["parent_placement"]["backside_through_hole_leaves"] via the
+    # synthetic block component's block_force_back_only flag. When set,
+    # the leaf is treated as having no front-side copper for the
+    # outline-overlap gate, so SMT-on-front leaves may stack on it.
+    front_a = (
+        sum(_rect_area(r) for r in blocker_a.front_pads)
+        + sum(_rect_area(r) for r in blocker_a.front_traces)
+    ) > 0.0 and not force_back_only_a
+    front_b = (
+        sum(_rect_area(r) for r in blocker_b.front_pads)
+        + sum(_rect_area(r) for r in blocker_b.front_traces)
+    ) > 0.0 and not force_back_only_b
+    back_a = (
+        sum(_rect_area(r) for r in blocker_a.back_pads)
+        + sum(_rect_area(r) for r in blocker_a.back_traces)
+    ) > 0.0 or force_back_only_a
+    back_b = (
+        sum(_rect_area(r) for r in blocker_b.back_pads)
+        + sum(_rect_area(r) for r in blocker_b.back_traces)
+    ) > 0.0 or force_back_only_b
     if (front_a and front_b) or (back_a and back_b):
         if _rects_intersect(outline_a, outline_b):
             return False
