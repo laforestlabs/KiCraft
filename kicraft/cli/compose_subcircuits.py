@@ -3407,6 +3407,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
             if not geometry_accepted:
+                # Diagnostic dump but DON'T exit. The previous behaviour
+                # was to return 1 here, which is the THIRD pre-route
+                # rejection gate that starved the search of signal:
+                # the stamped board exists, the user wants to see what
+                # came out, and FreeRouting can still produce a useful
+                # routed render even on a layout whose components extend
+                # past the auto-grown outline. Surface as a warning and
+                # let routing run.
                 print(
                     json.dumps(
                         {
@@ -3418,10 +3426,11 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 print(
-                    "error: parent composition geometry validation failed before stamping",
+                    "warning: parent composition geometry validation failed; "
+                    "continuing to route so the routed render is available "
+                    "as a diagnostic",
                     file=sys.stderr,
                 )
-                return 1
 
             # Stamp-time DRC guard: kicad-cli DRC on the pre-route board so
             # composer-introduced shorts (two leaves' locked tracks stamped
