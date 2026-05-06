@@ -523,21 +523,20 @@ def _round_timeline(
                 "Click a card to view, ←/→ to cycle, Pin to lock for parent compose."
             ).classes("text-[11px] text-gray-500")
 
-            with ui.scroll_area().classes("w-full").style("max-height: 320px"):
-                with ui.row().classes("gap-2 flex-wrap"):
-                    for r in rounds:
-                        _round_thumbnail_card(
-                            r,
-                            main_image_host,
-                            maximized,
-                            is_pinned=(current_pin == r.index),
-                            pickable=(r.index in pickable),
-                            experiments_dir=experiments_dir,
-                            leaf_key=leaf_key,
-                            node=node,
-                            on_pins_changed=on_pins_changed,
-                            redraw=_redraw,
-                        )
+            with ui.row().classes("w-full gap-2 flex-wrap"):
+                for r in rounds:
+                    _round_thumbnail_card(
+                        r,
+                        main_image_host,
+                        maximized,
+                        is_pinned=(current_pin == r.index),
+                        pickable=(r.index in pickable),
+                        experiments_dir=experiments_dir,
+                        leaf_key=leaf_key,
+                        node=node,
+                        on_pins_changed=on_pins_changed,
+                        redraw=_redraw,
+                    )
 
     _redraw()
 
