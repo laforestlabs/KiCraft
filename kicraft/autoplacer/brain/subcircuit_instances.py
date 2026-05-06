@@ -696,10 +696,35 @@ def _transform_component(
     origin: Point,
     rotation_deg: float,
 ) -> Component:
-    """Apply rigid transform to a component and all dependent geometry."""
+    """Apply rigid transform to a component and all dependent geometry.
+
+    ``pos``, ``rotation``, ``body_center``, and pads all rotate. Critically,
+    ``width_mm`` / ``height_mm`` (the AABB of the body) ALSO rotate via
+    ``_rotate_size`` -- without this, a component rotated 90° keeps its
+    rotation-0 dims, ``Component.bbox()`` returns a wrong-shaped rect, and
+    ``Component.physical_bbox()`` (= body bbox ∪ pad copper bboxes) blows up
+    because the pads (which DO rotate position) land outside the wrong body
+    bbox. Real-world impact: ``transform_loaded_artifact(BATT, rot=90)``
+    used to report w=101.7 h=71.8 instead of 47.1 x 76.8, because BT1's
+    end-pad at y=-81.8 falls outside the 22.2 mm-tall body bbox that
+    ``bbox()`` was still computing for the unrotated dims. That broken
+    artifact bbox propagated into ``block_rotation_geometry`` for the
+    synthetic block, into the solver's ``_cluster_bbox``, and into
+    ``_slide_constrained_to_cluster`` -- which then snapped corner-pinned
+    mounting holes to "cluster top-left" coords that were 90 mm off, and
+    eventually drove the auto-grown outline 50 mm above where it should
+    have been. End result: BATT-zone-bottom layouts with BATT placed
+    visibly at the top of the board.
+    """
     new_component = copy.deepcopy(component)
     new_component.pos = _transform_point(component.pos, origin, rotation_deg)
     new_component.rotation = (component.rotation + rotation_deg) % 360.0
+
+    rotated_size = _rotate_size(
+        Point(component.width_mm, component.height_mm), rotation_deg
+    )
+    new_component.width_mm = rotated_size.x
+    new_component.height_mm = rotated_size.y
 
     if component.body_center is not None:
         new_component.body_center = _transform_point(
