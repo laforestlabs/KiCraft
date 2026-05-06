@@ -2660,6 +2660,32 @@ def _search_best_layout(
         # ship under a green checkmark. The exception names which gate
         # killed each candidate so the operator can decide whether to
         # widen the cap, change seeds, or fix the solver.
+        #
+        # Before raising, persist per-candidate diagnostics. Each record
+        # already carries the per-phase solve_*_placed_{w,h}_mm extents
+        # captured by _record_placed_extent(); without writing them to
+        # disk now, the round abort throws this data away and the next
+        # operator has nothing to triage from. The success path scrubs
+        # search_dir at line ~2703; the abort path leaves cand_*.kicad_pcb
+        # AND now this JSON for inspection.
+        rejected_payload = {
+            "k": k,
+            "tried": len(candidates),
+            "max_outline_height_mm": max_outline_height_mm,
+            "max_outline_width_mm": max_outline_width_mm,
+            "total_search_ms": total_search_ms,
+            "candidates": [c.to_dict() for c in candidates],
+        }
+        try:
+            (search_dir / "_rejected_candidates.json").write_text(
+                json.dumps(rejected_payload, indent=2, default=float)
+            )
+        except OSError as exc:
+            print(
+                f"[candidate-search] failed to write rejected-candidate "
+                f"diagnostics to {search_dir}: {exc}",
+                file=sys.stderr,
+            )
         rejection_summary = ", ".join(
             (
                 f"seed={c.seed}:"
@@ -2675,7 +2701,9 @@ def _search_best_layout(
             f"(caps: max_outline_h={max_outline_height_mm:.1f}mm, "
             f"max_outline_w={max_outline_width_mm:.1f}mm; "
             f"per-candidate: {rejection_summary}). "
-            f"Round aborted; investigate solver before re-running."
+            f"Round aborted; investigate solver before re-running. "
+            f"Per-candidate phase timings written to "
+            f"{search_dir / '_rejected_candidates.json'}."
         )
     winner_rec = max(accepted_recs, key=lambda c: c.score)
 
