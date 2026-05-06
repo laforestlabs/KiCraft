@@ -2564,12 +2564,21 @@ def _search_best_layout(
             + 0.30 * bbox_packing
         )
 
-        # Diagnostic capture: placed-component AABB (the actual cluster
-        # extent) and the auto-grown outline are NOT the same. Outline
-        # grows asymmetrically when one side is constrained (edge/corner
-        # mounts) and the other expands to fit a sprawled placement.
-        # Capture both so Branch A/B in the sprawl plan is decidable.
-        comps = list(board_state.components.values())
+        # Diagnostic capture: unlocked-component cluster AABB (the
+        # spread the solver actually controls) and the auto-grown
+        # outline are NOT the same. Locked components (corner-pinned
+        # mounting holes, edge-pinned connectors) sit at fixed
+        # template positions and would constant-pad the cluster
+        # measurement -- including them here would compare the
+        # outline cap against a frame the solver can't shrink, so a
+        # template board larger than the cap would always fail
+        # regardless of how compact the unlocked placement was.
+        # Mirrors _record_placed_extent so this measurement is
+        # apples-to-apples with the per-phase solve_*_placed_*_mm
+        # extents persisted alongside.
+        comps = [
+            c for c in board_state.components.values() if not c.locked
+        ]
         if comps:
             phys = [c.physical_bbox() for c in comps]
             placed_w_mm = max(b[1].x for b in phys) - min(b[0].x for b in phys)
