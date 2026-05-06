@@ -979,8 +979,39 @@ def _discover_latest_parent_artifact_dir(project_dir: Path) -> Path | None:
     return candidates[0][1]
 
 
-def _discover_live_preview_paths(project_dir: Path) -> dict[str, str]:
+def _discover_live_preview_paths(
+    project_dir: Path,
+    *,
+    mtime_floor: float | None = None,
+) -> dict[str, str]:
+    """Resolve canonical preview paths for the GUI to display.
+
+    When ``mtime_floor`` is provided, any candidate file with mtime below
+    the floor is treated as stale (i.e. left over from a prior round or
+    a prior run) and dropped from the result. This is the ONLY way to
+    prevent the canonical-render path from carrying yesterday's image
+    into today's failed round: the file path doesn't change with the
+    round number, so identifying "is this artifact fresh for THIS round"
+    has to be done by mtime. The freshness gate on the per-round COPY
+    side already exists, but consumers reading ``preview_paths`` from
+    the round JSON or live-status JSON go directly to the canonical
+    path -- they need the same gate, applied at discover time.
+
+    Pass ``round_wall_started_at`` as the floor inside the round loop;
+    leave None outside the loop (e.g. final summary, where we want the
+    latest successful artifact regardless of when it was produced).
+    """
     previews: dict[str, str] = {}
+
+    def _ok(path: Path) -> bool:
+        if not path.exists():
+            return False
+        if mtime_floor is None:
+            return True
+        try:
+            return path.stat().st_mtime >= mtime_floor
+        except OSError:
+            return False
 
     latest_parent_dir = _discover_latest_parent_artifact_dir(project_dir)
     if latest_parent_dir is not None:
@@ -1003,19 +1034,19 @@ def _discover_live_preview_paths(project_dir: Path) -> dict[str, str]:
             latest_parent_dir / "parent_routed.kicad_pcb",
         ]
         for candidate in stamped_candidates:
-            if candidate.exists():
+            if _ok(candidate):
                 previews["parent_stamped_preview"] = str(candidate)
                 break
         for candidate in routed_candidates:
-            if candidate.exists():
+            if _ok(candidate):
                 previews["parent_routed_preview"] = str(candidate)
                 break
         for candidate in stamped_board_candidates:
-            if candidate.exists():
+            if _ok(candidate):
                 previews["parent_stamped_board"] = str(candidate)
                 break
         for candidate in routed_board_candidates:
-            if candidate.exists():
+            if _ok(candidate):
                 previews["parent_routed_board"] = str(candidate)
                 break
         previews["parent_artifact_dir"] = str(latest_parent_dir)
@@ -2135,7 +2166,7 @@ def main(argv: list[str] | None = None) -> int:
                     experiment_round=round_num,
                 )
             ),
-            preview_paths=_discover_live_preview_paths(project_dir),
+            preview_paths=_discover_live_preview_paths(project_dir, mtime_floor=round_wall_started_at),
             leaf_timing_summary={},
         )
 
@@ -2199,7 +2230,7 @@ def main(argv: list[str] | None = None) -> int:
             copper_accounting={},
             current_action="running solve_subcircuits",
             current_command=" ".join(solve_cmd),
-            preview_paths=_discover_live_preview_paths(project_dir),
+            preview_paths=_discover_live_preview_paths(project_dir, mtime_floor=round_wall_started_at),
             leaf_timing_summary=leaf_timing_summary,
         )
         round_timing_breakdown: dict[str, float] = {}
@@ -2320,7 +2351,7 @@ def main(argv: list[str] | None = None) -> int:
                 composition_status="routing_parent",
                 copper_accounting={},
                 current_action="parent snapshot complete; preparing parent routing run",
-                preview_paths=_discover_live_preview_paths(project_dir),
+                preview_paths=_discover_live_preview_paths(project_dir, mtime_floor=round_wall_started_at),
                 leaf_timing_summary=leaf_timing_summary,
             )
 
@@ -2377,7 +2408,7 @@ def main(argv: list[str] | None = None) -> int:
                 copper_accounting={},
                 current_action="running unified parent stamping/routing pipeline",
                 current_command=" ".join(parent_route_cmd),
-                preview_paths=_discover_live_preview_paths(project_dir),
+                preview_paths=_discover_live_preview_paths(project_dir, mtime_floor=round_wall_started_at),
                 leaf_timing_summary=leaf_timing_summary,
             )
             parent_route_start_ts = _timing_now()
@@ -2441,7 +2472,7 @@ def main(argv: list[str] | None = None) -> int:
                 else "parent_failed",
                 copper_accounting=parent_copper_accounting,
                 current_action="parent routing complete; scoring round",
-                preview_paths=_discover_live_preview_paths(project_dir),
+                preview_paths=_discover_live_preview_paths(project_dir, mtime_floor=round_wall_started_at),
                 leaf_timing_summary=leaf_timing_summary,
             )
 
@@ -2699,7 +2730,7 @@ def main(argv: list[str] | None = None) -> int:
             parent_route_stderr=parent_route_stderr,
             parent_copper_accounting=parent_copper_accounting,
             parent_routed_validation=parent_routed_validation,
-            preview_paths=_discover_live_preview_paths(project_dir),
+            preview_paths=_discover_live_preview_paths(project_dir, mtime_floor=round_wall_started_at),
         )
         _write_frame_metadata(frames_dir, round_result)
 
@@ -2731,7 +2762,7 @@ def main(argv: list[str] | None = None) -> int:
             composition_status="complete" if parent_routed else "parent_failed",
             copper_accounting=parent_copper_accounting,
             current_action="round complete",
-            preview_paths=_discover_live_preview_paths(project_dir),
+            preview_paths=_discover_live_preview_paths(project_dir, mtime_floor=round_wall_started_at),
             leaf_timing_summary=leaf_timing_summary,
         )
 
