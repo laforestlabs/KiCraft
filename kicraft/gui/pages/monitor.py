@@ -571,7 +571,7 @@ def monitor_page():
                     selected_node["value"] = updated
                     _rebuild_detail()
 
-    ui.timer(2.0, _update_status)
+    status_timer = ui.timer(2.0, _update_status)
 
     def _update_timing() -> None:
         """Tick the elapsed/ETA label every second between status writes."""
@@ -611,7 +611,23 @@ def monitor_page():
             f"Elapsed: {_format_time(live_elapsed)} | ETA: {eta_text}"
         )
 
-    ui.timer(1.0, _update_timing)
+    timing_timer = ui.timer(1.0, _update_timing)
+
+    # Stop the timers when the client disconnects so their _run_in_loop
+    # doesn't tick into a deleted parent_slot weakref and spam
+    # "The parent slot of the element has been deleted" tracebacks
+    # to the terminal on every page reload. NiceGUI's own _should_stop
+    # check happens AFTER _get_context() inside the loop, so a fresh
+    # tick whose parent was GC'd between _can_start() and
+    # _get_context() always raises before the stop check runs.
+    def _stop_timers() -> None:
+        for t in (status_timer, timing_timer):
+            try:
+                t.cancel()
+            except Exception:
+                pass
+
+    ui.context.client.on_disconnect(_stop_timers)
 
     async def _start(phase: str | None = None):
         try:

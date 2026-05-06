@@ -185,7 +185,11 @@ def _experiment_data_panel(state) -> None:
         if selected_exp["id"] == LIVE_ID:
             _load_experiment(LIVE_ID)
 
-    ui.timer(10.0, _auto_refresh)
+    refresh_timer = ui.timer(10.0, _auto_refresh)
+    # Cancel on client disconnect so the timer doesn't fire into a
+    # deleted parent_slot after a page reload (see monitor.py for
+    # the same pattern + reasoning).
+    ui.context.client.on_disconnect(lambda: refresh_timer.cancel())
 
     if selected_exp["id"]:
         _load_experiment(selected_exp["id"])
