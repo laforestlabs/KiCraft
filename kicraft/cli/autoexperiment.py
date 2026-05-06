@@ -2015,6 +2015,30 @@ def main(argv: list[str] | None = None) -> int:
         round_dir = hierarchy_dir / f"round_{round_num:04d}"
         parent_output_json = round_dir / "parent_pipeline.json"
         round_dir.mkdir(parents=True, exist_ok=True)
+        # Scrub stale outputs from any prior run that left files in this
+        # round_dir (e.g. a killed orphan, or a run whose
+        # _purge_prior_run_artifacts was bypassed). The directory must
+        # reflect ONLY this round's output -- otherwise the GUI shows a
+        # round_NNNN preview that's actually from a different run, and
+        # users debug from garbage. Belt-and-suspenders alongside the
+        # mtime-freshness gate at the copy site below.
+        for _stale_name in (
+            "parent_routed.png",
+            "parent_stamped.png",
+            "parent_pipeline.json",
+        ):
+            _stale_path = round_dir / _stale_name
+            if _stale_path.exists():
+                try:
+                    _stale_path.unlink()
+                except OSError:
+                    pass
+        # Wall-clock timestamp at round start, used to gate the per-round
+        # render-snapshot copy below: any source render with mtime < this
+        # is from a prior round (or prior run) and must NOT be copied
+        # into this round's directory. time.time() not _timing_now()
+        # because file mtimes are wall-clock, not monotonic.
+        round_wall_started_at = time.time()
 
         round_candidate_config = dict(_best_config)
         current_round_config = resolved_config_path
@@ -2423,11 +2447,28 @@ def main(argv: list[str] | None = None) -> int:
 
         # Snapshot the parent render(s) into the round directory so the
         # monitor can show per-round parent renders after the shared
-        # artifacts are overwritten by the next round. _discover_live_preview_paths
-        # only populates parent previews when the metadata/debug JSON exists,
-        # which can be missing when the parent is rejected by an acceptance
-        # gate. Fall back to probing the shared render dirs directly so we
-        # still capture whatever render was produced.
+        # artifacts are overwritten by the next round.
+        # _discover_live_preview_paths only populates parent previews
+        # when the metadata/debug JSON exists, which can be missing when
+        # the parent is rejected by an acceptance gate. Fall back to
+        # probing the shared render dirs directly so we still capture
+        # whatever render this round produced.
+        #
+        # CRITICAL: every candidate source render is freshness-gated
+        # against round_wall_started_at. The shared render dirs hold
+        # the canonical (= latest *successful*) parent artifact; a
+        # round that didn't successfully compose/stamp/route would
+        # otherwise inherit a prior round's render or even an orphan
+        # earlier-run's render and present it as if it were this
+        # round's output. The mtime check is the only correct way to
+        # tell "this render came from THIS round" because the file
+        # path is the same regardless of which round wrote it.
+        def _fresh_for_this_round(p: Path) -> bool:
+            try:
+                return p.stat().st_mtime >= round_wall_started_at
+            except OSError:
+                return False
+
         round_previews = _discover_live_preview_paths(project_dir)
         sub_root = project_dir / ".experiments" / "subcircuits"
         for key, fname in (
@@ -2443,7 +2484,9 @@ def main(argv: list[str] | None = None) -> int:
                             src_path = str(candidate)
                             break
             if src_path:
-                _copy_if_exists(Path(src_path), round_dir / fname)
+                src = Path(src_path)
+                if _fresh_for_this_round(src):
+                    _copy_if_exists(src, round_dir / fname)
 
         # Snapshot the parent .kicad_pcb files into the parent artifact dir
         # using the same round_NNNN_ naming convention as leaf snapshots
@@ -2453,13 +2496,22 @@ def main(argv: list[str] | None = None) -> int:
         # the pin layer treat parents and leaves uniformly. Skip when
         # --leaves-only since there's no fresh parent to snapshot (we'd
         # otherwise pin stale data from a prior compose).
+        #
+        # Each canonical source PCB is freshness-gated against
+        # round_wall_started_at: if compose for this round didn't
+        # produce an updated parent_pre_freerouting / parent_routed,
+        # the canonical files still carry a prior round's contents
+        # and must NOT be tagged with this round's number. Otherwise
+        # a failed round would pin its number onto someone else's
+        # board and the pin layer / score gallery present garbage as
+        # if it were this round's output.
         if not args.leaves_only:
             parent_artifact_dir = _discover_latest_parent_artifact_dir(project_dir)
             if parent_artifact_dir is not None:
                 round_prefix = f"round_{round_num:04d}"
                 for canonical in ("parent_pre_freerouting", "parent_routed"):
                     src = parent_artifact_dir / f"{canonical}.kicad_pcb"
-                    if src.exists():
+                    if src.exists() and _fresh_for_this_round(src):
                         dst = parent_artifact_dir / f"{round_prefix}_{canonical}.kicad_pcb"
                         _copy_if_exists(src, dst)
 
