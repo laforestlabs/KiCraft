@@ -2585,16 +2585,18 @@ def _search_best_layout(
         outside_component_count = int(gv.get("outside_component_count", 0) or 0)
         outside_pad_count = int(gv.get("outside_pad_count", 0) or 0)
 
-        # Hard gate: the candidate must be electrically valid before it's
-        # eligible to win. shorts==0 covers stamped pad-vs-pad shorts;
-        # geometry_accepted covers pads/components outside the auto-grown
-        # outline. The previous outline-cap (placed_h/w_mm <= 120/160)
-        # was a pre-route rejection that starved the picker of signal:
-        # a "too tall" layout was discarded before FreeRouting got a
-        # chance to actually try, which left zero diagnostic when the
-        # cap was wrong for a project's board geometry. Routing is the
-        # source of truth for "does this layout work" -- let it run.
-        accepted = shorts == 0 and geometry_accepted
+        # Hard gate: shorts==0 only. Stamped electrical shorts are an
+        # objective truth (DRC counts them), so a candidate with shorts
+        # cannot win regardless of its routing prospects. Geometry
+        # violations (components/pads outside the auto-grown outline)
+        # are RECORDED on the CandidateRecord (geometry_accepted,
+        # outside_component_count, outside_pad_count) but no longer
+        # short-circuit the picker -- they're a guess at unfabricability
+        # that prevents FreeRouting from running and starves the search
+        # of real signal. Let routing run; a layout that violates
+        # geometry will produce a routed PNG showing exactly where the
+        # problem is, which is more actionable than "round aborted".
+        accepted = shorts == 0
 
         rec = CandidateRecord(
             seed=seed_i,
