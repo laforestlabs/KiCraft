@@ -21,6 +21,7 @@ import math
 
 from kicraft.cli.compose_subcircuits import (
     _compose_artifacts,
+    _compute_final_outline,
     _snap_parent_local,
 )
 from kicraft.autoplacer.brain.subcircuit_composer import AttachmentConstraint
@@ -336,3 +337,116 @@ def test_snap_parent_local_bottom_right_corner():
     # Expected: (100 - 5, 80 - 5) = (95, 75).
     assert math.isclose(centroid_x, 95.0, abs_tol=1e-3)
     assert math.isclose(centroid_y, 75.0, abs_tol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# _compute_final_outline -- corner-constrained side margin behavior.
+#
+# Regression for the LLUPS round-2 case where BOOST 5V's pad copper sat
+# flush with the south Edge.Cuts (zero clearance), violating
+# copper_edge_clearance. Root cause: when a corner-constraint partially
+# pins a side (H86 corner=bottom-right pins the "bottom" side) and a
+# placed leaf's geometry extends past the corner anchor on that side,
+# the outline must still leave spacing_mm between the leaf and the edge
+# -- a corner anchor describes a point, not a side line.
+
+
+def _outline_corner_constraint(ref: str, value: str, anchor: Point) -> tuple[
+    AttachmentConstraint, dict[str, Point]
+]:
+    constraint = AttachmentConstraint(
+        ref=ref,
+        target="corner",
+        value=value,
+        inward_keep_in_mm=2.5,
+        outward_overhang_mm=0.0,
+        source="parent_local",
+        child_index=None,
+        strict=True,
+    )
+    return constraint, {ref: anchor}
+
+
+def test_compute_final_outline_corner_south_overhang_keeps_margin():
+    # Leaf bbox extends 4 mm south of the corner anchor's "bottom-right".
+    # Corner anchor at (90, 60) with keep_in 2.5 -> contributes bottom=62.5.
+    # Leaf south at y=70 must end up with at least 1.0 mm gap to outline.
+    placed = [(Point(10.0, 10.0), Point(80.0, 70.0))]
+    constraint, anchors = _outline_corner_constraint(
+        "H86", "bottom-right", Point(90.0, 60.0)
+    )
+    outline = _compute_final_outline(placed, [constraint], anchors, spacing_mm=1.0)
+    _, br = outline
+    assert math.isclose(br.y, 71.0, abs_tol=1e-3), (
+        f"south outline must be leaf_south + spacing_mm = 71.0, got {br.y:.4f}"
+    )
+
+
+def test_compute_final_outline_corner_north_overhang_keeps_margin():
+    # Symmetric to south: corner=top-left anchored north, leaf extends
+    # further north. Outline must leave spacing_mm clearance.
+    placed = [(Point(10.0, 5.0), Point(80.0, 70.0))]
+    constraint, anchors = _outline_corner_constraint(
+        "H4", "top-left", Point(20.0, 20.0)
+    )
+    outline = _compute_final_outline(placed, [constraint], anchors, spacing_mm=1.5)
+    tl, _ = outline
+    assert math.isclose(tl.y, 3.5, abs_tol=1e-3), (
+        f"north outline must be leaf_north - spacing_mm = 3.5, got {tl.y:.4f}"
+    )
+
+
+def test_compute_final_outline_corner_anchor_dominates_when_no_overhang():
+    # Same corner constraint but leaves stay well inside the corner
+    # anchor. Outline should track the constraint anchor (no margin
+    # added on top -- the anchor target IS the keep-in line for the
+    # mounting hole).
+    placed = [(Point(10.0, 10.0), Point(40.0, 30.0))]
+    constraint, anchors = _outline_corner_constraint(
+        "H86", "bottom-right", Point(90.0, 60.0)
+    )
+    outline = _compute_final_outline(placed, [constraint], anchors, spacing_mm=1.0)
+    _, br = outline
+    # constraint anchor at y=60 + keep_in 2.5 = 62.5. Geometry max y=30
+    # plus spacing=31, so anchor (62.5) wins.
+    assert math.isclose(br.y, 62.5, abs_tol=1e-3), (
+        f"south outline must equal corner anchor target 62.5 when no "
+        f"leaf overhang, got {br.y:.4f}"
+    )
+
+
+def test_compute_final_outline_edge_pinned_no_margin():
+    # An edge constraint must keep the outline flush with the anchor:
+    # adding spacing would push the connector inboard. This branch is
+    # untouched by the fix, but we assert it explicitly so the
+    # regression doesn't drift.
+    placed = [(Point(10.0, 10.0), Point(80.0, 60.0))]
+    constraint = AttachmentConstraint(
+        ref="J1",
+        target="edge",
+        value="left",
+        inward_keep_in_mm=0.0,
+        outward_overhang_mm=0.0,
+        source="parent_local",
+        child_index=None,
+        strict=True,
+    )
+    anchors = {"J1": Point(10.0, 30.0)}
+    outline = _compute_final_outline(placed, [constraint], anchors, spacing_mm=2.0)
+    tl, _ = outline
+    assert math.isclose(tl.x, 10.0, abs_tol=1e-3), (
+        f"left outline must equal edge anchor 10.0 (no margin), got {tl.x:.4f}"
+    )
+
+
+def test_compute_final_outline_unconstrained_gets_margin():
+    # No constraints at all -> all four sides are unconstrained and
+    # should land at geom +/- spacing_mm. This branch is also untouched
+    # by the fix, asserted to catch drift.
+    placed = [(Point(10.0, 10.0), Point(80.0, 60.0))]
+    outline = _compute_final_outline(placed, [], {}, spacing_mm=1.0)
+    tl, br = outline
+    assert math.isclose(tl.x, 9.0, abs_tol=1e-3)
+    assert math.isclose(tl.y, 9.0, abs_tol=1e-3)
+    assert math.isclose(br.x, 81.0, abs_tol=1e-3)
+    assert math.isclose(br.y, 61.0, abs_tol=1e-3)

@@ -973,18 +973,25 @@ def _compute_final_outline(
     geom_max_x = max(b[1].x for b in placed_bboxes)
     geom_max_y = max(b[1].y for b in placed_bboxes)
 
+    # For corner-constrained sides, ``c_val`` is the corner anchor's
+    # coordinate (no margin -- corner anchors are points, and
+    # ``constraint_aware_outline`` populates ``{top,bottom,left,right}_edges``
+    # from corner constraints without adding ``margin_mm``). When a leaf's
+    # geometry extends past the corner anchor on that side, we must inflate
+    # ``g_val`` by ``spacing_mm`` so pad copper keeps its full edge clearance
+    # -- the unconstrained branch already gets margin via constraint_aware_outline.
     def _resolve_min(side: str, c_val: float, g_val: float) -> float:
         if edge_constrained_sides[side]:
             return c_val
         if corner_constrained_sides[side]:
-            return min(c_val, g_val)
+            return min(c_val, g_val - spacing_mm)
         return min(c_val, g_val)
 
     def _resolve_max(side: str, c_val: float, g_val: float) -> float:
         if edge_constrained_sides[side]:
             return c_val
         if corner_constrained_sides[side]:
-            return max(c_val, g_val)
+            return max(c_val, g_val + spacing_mm)
         return max(c_val, g_val)
 
     out_min_x = _resolve_min("left", constraint_outline[0].x, geom_min_x)
