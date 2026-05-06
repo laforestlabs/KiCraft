@@ -2453,20 +2453,7 @@ def _search_best_layout(
 
     base_cfg = dict(cfg or {})
     base_parent_placement = dict(base_cfg.get("parent_placement", {}))
-    # Outline caps for candidate filtering. A sprawled candidate (cluster
-    # height > max_h or width > max_w) is rejected -- the picker prefers
-    # a colliding-but-compact alternate over a non-colliding sprawled
-    # one, since a sprawled board fails geometry validation downstream
-    # anyway. Round fails iff zero candidates pass shorts+geometry+caps.
     _search_cfg = dict(base_parent_placement.get("candidate_search", {}))
-    try:
-        max_outline_height_mm = float(_search_cfg.get("max_outline_height_mm", 120.0))
-    except (TypeError, ValueError):
-        max_outline_height_mm = 120.0
-    try:
-        max_outline_width_mm = float(_search_cfg.get("max_outline_width_mm", 160.0))
-    except (TypeError, ValueError):
-        max_outline_width_mm = 160.0
 
     # Resolve artifact_dir for candidate stamping. Mirrors the path
     # _stamp_parent_board() builds so downstream code finds the winner
@@ -2598,19 +2585,16 @@ def _search_best_layout(
         outside_component_count = int(gv.get("outside_component_count", 0) or 0)
         outside_pad_count = int(gv.get("outside_pad_count", 0) or 0)
 
-        # Lexicographic gate: a candidate must pass ALL hard checks to
-        # enter the picker. shorts==0 protects against electrical
-        # collisions; geometry_accepted protects against pads/components
-        # outside the auto-grown outline; the outline caps protect
-        # against sprawl that the auto-grown outline would otherwise
-        # accommodate (the validator alone is insufficient because the
-        # outline grows to fit the placement).
-        accepted = (
-            shorts == 0
-            and geometry_accepted
-            and placed_h_mm <= max_outline_height_mm
-            and placed_w_mm <= max_outline_width_mm
-        )
+        # Hard gate: the candidate must be electrically valid before it's
+        # eligible to win. shorts==0 covers stamped pad-vs-pad shorts;
+        # geometry_accepted covers pads/components outside the auto-grown
+        # outline. The previous outline-cap (placed_h/w_mm <= 120/160)
+        # was a pre-route rejection that starved the picker of signal:
+        # a "too tall" layout was discarded before FreeRouting got a
+        # chance to actually try, which left zero diagnostic when the
+        # cap was wrong for a project's board geometry. Routing is the
+        # source of truth for "does this layout work" -- let it run.
+        accepted = shorts == 0 and geometry_accepted
 
         rec = CandidateRecord(
             seed=seed_i,
@@ -2662,13 +2646,10 @@ def _search_best_layout(
 
     accepted_recs = [c for c in candidates if c.accepted]
     if not accepted_recs:
-        # All K candidates failed at least one hard gate (shorts > 0,
-        # geometry_accepted False, or outline cap exceeded). Fail the
-        # round loudly instead of emitting a broken artifact -- per "no
-        # fallbacks", a masked failure here would let real solver bugs
-        # ship under a green checkmark. The exception names which gate
-        # killed each candidate so the operator can decide whether to
-        # widen the cap, change seeds, or fix the solver.
+        # All K candidates failed at least one hard gate (shorts > 0
+        # or geometry_accepted False). Fail loudly -- per "no
+        # fallbacks", a masked failure here would let real solver
+        # bugs ship under a green checkmark.
         #
         # Before raising, persist per-candidate diagnostics. Each record
         # already carries the per-phase solve_*_placed_{w,h}_mm extents
@@ -2680,8 +2661,6 @@ def _search_best_layout(
         rejected_payload = {
             "k": k,
             "tried": len(candidates),
-            "max_outline_height_mm": max_outline_height_mm,
-            "max_outline_width_mm": max_outline_width_mm,
             "total_search_ms": total_search_ms,
             "candidates": [c.to_dict() for c in candidates],
         }
@@ -2707,9 +2686,7 @@ def _search_best_layout(
         )
         raise RuntimeError(
             f"candidate-search produced no acceptable placement in K={len(candidates)} "
-            f"(caps: max_outline_h={max_outline_height_mm:.1f}mm, "
-            f"max_outline_w={max_outline_width_mm:.1f}mm; "
-            f"per-candidate: {rejection_summary}). "
+            f"(per-candidate: {rejection_summary}). "
             f"Round aborted; investigate solver before re-running. "
             f"Per-candidate phase timings written to "
             f"{search_dir / '_rejected_candidates.json'}."
