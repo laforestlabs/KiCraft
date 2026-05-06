@@ -312,19 +312,14 @@ class PlacementScore:
             "group_coherence": 0.08,  # functional groups stay compact
             "aspect_ratio": 0.02,  # penalize elongated board shapes
             "topology_structure": 0.05,  # reward topology-aware passive ordering
-            "bbox_packing": 0.35,  # tight packing vs placed bbox (dynamic
+            "bbox_packing": 0.15,  # tight packing vs placed bbox (dynamic
             # under SA, unlike compactness which is fixed for the solve).
-            # Bumped 0.01 -> 0.15 -> 0.35: at 0.15 the score-delta between
-            # compact (~100) and sprawled (~30) was only ~10 points,
-            # which gets swamped by saturated nets/crossings (worth 37
-            # combined when both hit max). SA's Metropolis acceptance at
-            # initial_temp=5 then accepts a worse-by-10 move 13% of the
-            # time -- enough that sprawled equilibria persist as final
-            # output. At 0.35 the same delta is 24 points, dropping
-            # acceptance to 0.8% and flipping the rank order so SA
-            # actively walks downhill toward compact. Same direction as
-            # the existing comment said (compactness must compete with
-            # stacking); just stronger.
+            # Bumped from 0.01 because the post-rotation-fix solver was
+            # producing sprawling placements (board height 170-250 mm) on
+            # most seeds -- with the predicate fix preventing leaf overlap,
+            # nothing else in the score function was pulling leaves
+            # together, so SA had no signal to compact. 0.15 is on par
+            # with smt_opposite_tht so compactness competes with stacking.
             "block_opposite_side": 0.0,  # parent-side: reward stacking
             # blocker-compatible (front-only x back-only) block pairs
             # so SMT leaves migrate onto large back-side THT footprints.
