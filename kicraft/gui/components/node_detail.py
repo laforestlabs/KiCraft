@@ -101,11 +101,10 @@ def node_detail_panel(
 ) -> None:
     """Render the detail panel for a selected pipeline node.
 
-    When `experiments_dir` is provided and the selected node is a leaf,
-    appends a "Snapshots" picker showing every prior experiment-round
-    snapshot for this leaf with Pin/Unpin controls. Pin/unpin actions
-    fire `on_pins_changed` so the caller (Monitor) can refresh its
-    pinned-leaves summary.
+    For leaves, shows a single Rounds section that combines the
+    click-to-view round timeline with the pin/unpin controls. Pin
+    actions fire ``on_pins_changed`` so the caller (Monitor) can
+    refresh dependent UI such as the pipeline-graph pin highlight.
 
     ``displayed_round_idx`` lets the caller (typically the Monitor's
     keyboard handler) drive which round's render fills the main image
@@ -187,151 +186,18 @@ def node_detail_panel(
         _render_main_image(main_image_host, maximized)
         if node.is_leaf and detail_rounds:
             _score_plot(detail_rounds)
-            _round_timeline(detail_rounds, main_image_host, maximized)
-        if node.is_leaf and experiments_dir is not None and node.artifact_dir:
-            _snapshot_picker(
+            _round_timeline(
+                detail_rounds,
                 node,
-                Path(experiments_dir),
-                on_pins_changed=on_pins_changed,
+                Path(experiments_dir) if experiments_dir else None,
+                on_pins_changed,
+                main_image_host,
+                maximized,
             )
+        elif node.is_leaf and experiments_dir is not None and node.artifact_dir:
+            _trivial_leaf_message(Path(experiments_dir), Path(node.artifact_dir).name)
 
 
-def _snapshot_picker(
-    node: NodeStatus,
-    experiments_dir: Path,
-    on_pins_changed: Callable[[], None] | None = None,
-) -> None:
-    """Per-leaf round snapshot picker with Pin/Unpin controls.
-
-    Reads .experiments/pins.json + the leaf's round_NNNN_* snapshot files
-    via the kicraft.autoplacer.brain.pins module. Replaces the per-leaf
-    pin section that used to live in the Analysis tab's leaf gallery.
-    """
-    from kicraft.autoplacer.brain import pins as pins_module
-
-    leaf_key = Path(node.artifact_dir).name
-    leaf_dir = experiments_dir / "subcircuits" / leaf_key
-    renders_dir = leaf_dir / "renders"
-
-    section = ui.column().classes("w-full gap-2 mt-3")
-
-    def _redraw() -> None:
-        section.clear()
-        available = pins_module.list_available_rounds(experiments_dir, leaf_key)
-        current_pin = pins_module.is_pinned(experiments_dir, leaf_key)
-        with section:
-            with ui.row().classes("w-full items-center gap-2"):
-                ui.icon("push_pin", color="amber").classes("text-lg")
-                ui.label("Snapshots").classes("text-base font-bold")
-                if current_pin is not None:
-                    ui.badge(
-                        f"PINNED to round {current_pin}", color="amber"
-                    ).classes("text-xs")
-
-                    def _unpin() -> None:
-                        pins_module.unpin_leaf(experiments_dir, leaf_key)
-                        ui.notify(f"Unpinned {leaf_key}", color="amber")
-                        if on_pins_changed:
-                            on_pins_changed()
-                        _redraw()
-
-                    ui.space()
-                    ui.button("Unpin", icon="link_off", on_click=_unpin).props(
-                        "flat dense"
-                    ).classes("text-amber-300 text-xs")
-                else:
-                    ui.space()
-                    ui.label(
-                        f"{len(available)} pickable snapshot{'s' if len(available) != 1 else ''}"
-                    ).classes("text-xs text-gray-400")
-
-            if not available:
-                # Distinguish "trivial leaf with no PCB" (e.g. BT1, a
-                # battery with no internal nets) from "haven't run an
-                # experiment yet". Trivial leaves never produce a
-                # leaf_routed.kicad_pcb because there's nothing to route.
-                has_any_pcb = (
-                    leaf_dir.exists()
-                    and any(leaf_dir.glob("*_leaf_routed.kicad_pcb"))
-                )
-                if leaf_dir.exists() and not has_any_pcb:
-                    ui.label(
-                        "This leaf has no internal nets to route -- there's "
-                        "no PCB layout to pin. The composer uses the leaf's "
-                        "metadata directly, and the parent_only gate exempts "
-                        "it from the pinning requirement."
-                    ).classes("text-xs text-gray-400 italic")
-                else:
-                    ui.label(
-                        "No round snapshots on disk yet for this leaf. Run "
-                        "a leaves-only or complete experiment to generate "
-                        "them (each successful placement attempt becomes a "
-                        "pickable candidate)."
-                    ).classes("text-xs text-gray-500 italic")
-                return
-
-            ui.label(
-                "Each snapshot is a complete leaf state from a prior placement "
-                "attempt. Pinning copies the snapshot over the canonical files "
-                "so the next parent compose uses it."
-            ).classes("text-xs text-gray-400")
-
-            with ui.grid(columns=4).classes("w-full gap-2"):
-                for round_num in available:
-                    is_current = current_pin == round_num
-                    card_classes = "w-full p-2 bg-slate-900/70"
-                    if is_current:
-                        card_classes += " border-2 border-amber-400"
-                    with ui.card().classes(card_classes):
-                        with ui.row().classes("w-full items-center gap-1"):
-                            ui.badge(f"R{round_num}", color="blue").classes("text-xs")
-                            if is_current:
-                                ui.badge("PINNED", color="amber").classes("text-xs")
-
-                        preview = renders_dir / (
-                            f"round_{round_num:04d}_routed_front_all.png"
-                        )
-                        if not preview.exists():
-                            preview = renders_dir / (
-                                f"round_{round_num:04d}_pre_route_front_all.png"
-                            )
-                        if preview.exists():
-                            ui.image(str(preview)).classes(
-                                "w-full h-[140px] object-contain rounded "
-                                "border border-slate-700 bg-slate-950"
-                            )
-                        else:
-                            ui.label("(no preview)").classes(
-                                "text-xs text-gray-500 italic"
-                            )
-
-                        def _make_pin(rn=round_num):
-                            def _on_pin() -> None:
-                                try:
-                                    pins_module.pin_leaf(
-                                        experiments_dir, leaf_key, rn
-                                    )
-                                    ui.notify(
-                                        f"Pinned {node.name} to round {rn}",
-                                        color="positive",
-                                    )
-                                    if on_pins_changed:
-                                        on_pins_changed()
-                                    _redraw()
-                                except FileNotFoundError as exc:
-                                    ui.notify(str(exc), color="negative")
-
-                            return _on_pin
-
-                        ui.button(
-                            "Pin this round" if not is_current else "Re-apply pin",
-                            icon="push_pin",
-                            on_click=_make_pin(),
-                        ).props("flat dense").classes(
-                            "text-amber-300 text-xs w-full"
-                        )
-
-    _redraw()
 
 
 def _header(
@@ -575,27 +441,131 @@ def _score_plot(rounds: list[RoundInfo]) -> None:
     ui.plotly(fig).classes("w-full")
 
 
+def _trivial_leaf_message(experiments_dir: Path, leaf_key: str) -> None:
+    """Render a one-line note for leaves with no internal nets.
+
+    Trivial leaves (battery holders etc.) never produce a
+    ``leaf_routed.kicad_pcb`` because there's nothing to route, so they
+    have neither rounds nor pickable snapshots. The parent compose
+    treats their canonical metadata as already-pinned, so the user
+    doesn't need to act -- this just explains the empty state.
+    """
+    leaf_dir = experiments_dir / "subcircuits" / leaf_key
+    has_any_pcb = leaf_dir.exists() and any(leaf_dir.glob("*_leaf_routed.kicad_pcb"))
+    if leaf_dir.exists() and not has_any_pcb:
+        ui.label(
+            "No internal nets to route on this leaf -- the composer uses its "
+            "metadata directly and parent_only treats it as already pinned."
+        ).classes("text-xs text-gray-400 italic mt-2")
+    else:
+        ui.label(
+            "No round snapshots yet. Run leaves-only or a complete experiment "
+            "to generate pickable rounds."
+        ).classes("text-xs text-gray-500 italic mt-2")
+
+
 def _round_timeline(
-    rounds: list[RoundInfo], main_image_host, maximized: dict
+    rounds: list[RoundInfo],
+    node: NodeStatus,
+    experiments_dir: Path | None,
+    on_pins_changed: Callable[[], None] | None,
+    main_image_host,
+    maximized: dict,
 ) -> None:
-    ui.label(f"Round Timeline ({len(rounds)} rounds)").classes(
-        "text-sm font-medium text-gray-300 mt-2"
-    )
-    ui.label(
-        "Click a round to maximize its render above. ← / → cycle through rounds."
-    ).classes("text-[11px] text-gray-500")
+    """Per-round cards merging click-to-view + pin/unpin in one section.
 
-    with ui.scroll_area().classes("w-full").style("max-height: 280px"):
-        with ui.row().classes("gap-2 flex-wrap"):
-            for r in rounds:
-                _round_thumbnail_card(r, main_image_host, maximized)
+    Replaces the former separate Round Timeline and Snapshots picker.
+    Each card shows the round's thumbnail (clickable to maximize the
+    main image above), score, and a Pin button when the round has a
+    pickable .kicad_pcb snapshot on disk. The section header carries
+    the leaf-level pin status and Unpin control.
+    """
+    from kicraft.autoplacer.brain import pins as pins_module
+
+    leaf_key = Path(node.artifact_dir).name if node.artifact_dir else ""
+    has_pin_state = experiments_dir is not None and leaf_key
+
+    section = ui.column().classes("w-full gap-2 mt-2")
+
+    def _redraw() -> None:
+        section.clear()
+        if has_pin_state:
+            try:
+                pickable = set(pins_module.list_available_rounds(experiments_dir, leaf_key))
+                current_pin = pins_module.is_pinned(experiments_dir, leaf_key)
+            except Exception:
+                pickable, current_pin = set(), None
+        else:
+            pickable, current_pin = set(), None
+
+        def _do_unpin() -> None:
+            pins_module.unpin_leaf(experiments_dir, leaf_key)
+            ui.notify(f"Unpinned {node.name}", color="amber")
+            if on_pins_changed:
+                on_pins_changed()
+            _redraw()
+
+        with section:
+            with ui.row().classes("w-full items-center gap-2"):
+                ui.label(f"Rounds ({len(rounds)})").classes(
+                    "text-sm font-medium text-gray-300"
+                )
+                if current_pin is not None:
+                    ui.badge(f"PINNED to R{current_pin}", color="amber").classes(
+                        "text-xs"
+                    )
+                ui.space()
+                if current_pin is not None:
+                    ui.button(
+                        "Unpin", icon="link_off", on_click=_do_unpin
+                    ).props("flat dense").classes("text-amber-300 text-xs")
+            ui.label(
+                "Click a card to view, ←/→ to cycle, Pin to lock for parent compose."
+            ).classes("text-[11px] text-gray-500")
+
+            with ui.scroll_area().classes("w-full").style("max-height: 320px"):
+                with ui.row().classes("gap-2 flex-wrap"):
+                    for r in rounds:
+                        _round_thumbnail_card(
+                            r,
+                            main_image_host,
+                            maximized,
+                            is_pinned=(current_pin == r.index),
+                            pickable=(r.index in pickable),
+                            experiments_dir=experiments_dir,
+                            leaf_key=leaf_key,
+                            node=node,
+                            on_pins_changed=on_pins_changed,
+                            redraw=_redraw,
+                        )
+
+    _redraw()
 
 
-def _round_thumbnail_card(r: RoundInfo, main_image_host, maximized: dict) -> None:
+def _round_thumbnail_card(
+    r: RoundInfo,
+    main_image_host,
+    maximized: dict,
+    *,
+    is_pinned: bool = False,
+    pickable: bool = False,
+    experiments_dir: Path | None = None,
+    leaf_key: str = "",
+    node: NodeStatus | None = None,
+    on_pins_changed: Callable[[], None] | None = None,
+    redraw: Callable[[], None] | None = None,
+) -> None:
+    from kicraft.autoplacer.brain import pins as pins_module
+
     thumb = r.thumbnail or r.pre_route_thumbnail
-    border_color = "border-green-500" if r.routed else "border-slate-600"
+    if is_pinned:
+        border = "border-2 border-amber-400"
+    elif r.routed:
+        border = "border border-green-500"
+    else:
+        border = "border border-slate-600"
 
-    def _on_click():
+    def _on_click_image():
         if not thumb:
             return
         maximized["src"] = thumb
@@ -606,22 +576,47 @@ def _round_thumbnail_card(r: RoundInfo, main_image_host, maximized: dict) -> Non
         )
         _render_main_image(main_image_host, maximized)
 
-    card = ui.card().classes(
-        f"p-1 w-[120px] {border_color} border bg-slate-900/80 cursor-pointer hover:border-blue-400"
-    )
-    card.on("click", lambda _e: _on_click())
-    with card:
-        ui.label(f"R{r.index}").classes("text-[10px] text-gray-400 font-mono")
+    def _on_pin():
+        try:
+            pins_module.pin_leaf(experiments_dir, leaf_key, r.index)
+            name = node.name if node is not None else leaf_key
+            ui.notify(f"Pinned {name} to round {r.index}", color="positive")
+            if on_pins_changed:
+                on_pins_changed()
+            if redraw is not None:
+                redraw()
+        except FileNotFoundError as exc:
+            ui.notify(str(exc), color="negative")
 
-        if thumb:
-            ui.image(thumb).classes(
-                "w-full h-[60px] object-contain rounded bg-slate-950"
-            )
-        else:
-            with ui.row().classes("w-full h-[60px] items-center justify-center bg-slate-950 rounded"):
+    with ui.card().classes(f"p-1 w-[140px] {border} bg-slate-900/80"):
+        with ui.row().classes("w-full items-center gap-1"):
+            ui.badge(
+                f"R{r.index}", color="amber" if is_pinned else "blue"
+            ).classes("text-[10px]")
+            ui.space()
+            if r.score is not None:
+                ui.label(f"{r.score:.1f}").classes(
+                    "text-[11px] text-green-400 font-mono"
+                )
+
+        # Image area is the click-to-maximize hot zone.
+        img_host = ui.row().classes(
+            "w-full h-[90px] items-center justify-center bg-slate-950 "
+            "rounded cursor-pointer hover:opacity-80"
+        )
+        img_host.on("click", lambda _e: _on_click_image())
+        with img_host:
+            if thumb:
+                ui.image(thumb).classes("w-full h-[90px] object-contain rounded")
+            else:
                 ui.icon("image", size="xs").classes("text-gray-700")
 
-        ui.label(f"{r.score:.1f}").classes("text-[11px] text-green-400 font-mono text-center w-full")
+        if pickable and experiments_dir is not None and leaf_key:
+            ui.button(
+                "Re-apply pin" if is_pinned else "Pin",
+                icon="push_pin",
+                on_click=_on_pin,
+            ).props("flat dense").classes("text-amber-300 text-[11px] w-full")
 
 
 def _status_color(status: str) -> str:
