@@ -185,7 +185,7 @@ def node_detail_panel(
         main_image_host = ui.column().classes("w-full")
         _render_main_image(main_image_host, maximized)
         if node.is_leaf and detail_rounds:
-            _score_plot(detail_rounds)
+            _score_plot(detail_rounds, main_image_host, maximized)
             _round_timeline(
                 detail_rounds,
                 node,
@@ -400,7 +400,11 @@ def _render_main_image(host, maximized: dict) -> None:
                 ui.label("No render available").classes("text-gray-500 italic")
 
 
-def _score_plot(rounds: list[RoundInfo]) -> None:
+def _score_plot(
+    rounds: list[RoundInfo],
+    main_image_host=None,
+    maximized: dict | None = None,
+) -> None:
     if not rounds:
         return
 
@@ -438,7 +442,39 @@ def _score_plot(rounds: list[RoundInfo]) -> None:
         yaxis_title="Score",
         showlegend=False,
     )
-    ui.plotly(fig).classes("w-full")
+    plot = ui.plotly(fig).classes("w-full")
+
+    if main_image_host is None or maximized is None:
+        return
+
+    rounds_by_index = {r.index: r for r in rounds}
+
+    def _handle_click(e) -> None:
+        try:
+            points = e.args.get("points", []) if hasattr(e, "args") else []
+        except AttributeError:
+            points = []
+        if not points:
+            return
+        try:
+            round_num = int(points[0].get("x"))
+        except (TypeError, ValueError):
+            return
+        r = rounds_by_index.get(round_num)
+        if r is None:
+            return
+        thumb = r.thumbnail or r.pre_route_thumbnail
+        if not thumb:
+            return
+        maximized["src"] = thumb
+        maximized["label"] = (
+            f"Round {r.index} — score {r.score:.2f}"
+            if r.score is not None
+            else f"Round {r.index}"
+        )
+        _render_main_image(main_image_host, maximized)
+
+    plot.on("plotly_click", _handle_click)
 
 
 def _trivial_leaf_message(experiments_dir: Path, leaf_key: str) -> None:
