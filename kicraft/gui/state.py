@@ -158,7 +158,7 @@ def _default_mutation_bounds() -> dict[str, list[float | int]]:
 PLACEMENT_PARAMS: list[dict[str, Any]] = [
     # -- Placement Physics --
     {"key": "orderedness", "label": "Orderedness", "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05, "group": "Placement Physics", "description": "How strongly passives snap into rows/columns (0 = organic, 1 = full grid)"},
-    {"key": "force_attract_k", "label": "Attraction strength", "default": 0.02, "min": 0.001, "max": 0.2, "step": 0.005, "group": "Placement Physics", "description": "Force pulling connected components together"},
+    {"key": "force_attract_k", "label": "Attraction strength", "default": 0.02, "min": 0.02, "max": 0.2, "step": 0.005, "group": "Placement Physics", "description": "Force pulling connected components together"},
     {"key": "force_repel_k", "label": "Repulsion strength", "default": 200.0, "min": 50.0, "max": 1000.0, "step": 10.0, "group": "Placement Physics", "description": "Force pushing overlapping components apart"},
     {"key": "cooling_factor", "label": "Cooling factor", "default": 0.97, "min": 0.80, "max": 0.999, "step": 0.005, "group": "Placement Physics", "description": "How fast the force-directed solver settles (lower = faster)"},
     {"key": "reheat_strength", "label": "Reheat strength", "default": 0.1, "min": 0.0, "max": 0.4, "step": 0.02, "group": "Placement Physics", "description": "Random perturbation kick at 50% iterations to escape local minima"},
@@ -188,7 +188,7 @@ PLACEMENT_PARAMS: list[dict[str, Any]] = [
     {"key": "enable_board_size_search", "label": "Board size search", "default": True, "min": None, "max": None, "step": None, "group": "Component Behavior", "type": "bool", "description": "Allow autoexperiment to vary board dimensions"},
     # -- SA Refinement --
     {"key": "sa_refine_enabled", "label": "SA refinement enabled", "default": True, "min": None, "max": None, "step": None, "group": "SA Refinement", "type": "bool", "description": "Run simulated annealing refinement after force-directed pass"},
-    {"key": "sa_refine_iterations", "label": "SA iterations", "default": 1000, "min": 100, "max": 10000, "step": 100, "group": "SA Refinement", "description": "Number of simulated annealing steps"},
+    {"key": "sa_refine_iterations", "label": "SA iterations", "default": 1000, "min": 250, "max": 10000, "step": 100, "group": "SA Refinement", "description": "Number of simulated annealing steps"},
     {"key": "sa_refine_initial_temp", "label": "SA initial temperature", "default": 5.0, "min": 0.5, "max": 30.0, "step": 0.5, "group": "SA Refinement", "description": "Starting temperature for SA"},
     {"key": "sa_refine_cooling_rate", "label": "SA cooling rate", "default": 0.952, "min": 0.9076, "max": 0.99, "step": 0.001, "group": "SA Refinement", "description": "Temperature decay per SA step (higher = slower cooling)"},
     {"key": "sa_refine_move_radius_mm", "label": "SA move radius (mm)", "default": 5.63, "min": 1.52, "max": 7.41, "step": 0.2, "group": "SA Refinement", "description": "Max random displacement per SA step"},

@@ -220,12 +220,38 @@ CONFIG_SEARCH_SPACE = {
     # gain. Widen if a future change makes them sensitive again.
     "orderedness": {"min": 0.0, "max": 1.0, "sigma": 0.05, "type": "float"},
     "reheat_strength": {"min": 0.0, "max": 0.4, "sigma": 0.05, "type": "float"},
-    "force_attract_k": {"min": 0.001, "max": 0.2, "sigma": 0.01, "type": "float"},
+    # force_attract_k floor narrowed 0.001 -> 0.02 = the DEFAULT_CONFIG
+    # value. Empirical evidence on LLUPS (3 separate 5-round verifies):
+    # mutated values of 0.0098, 0.0148, and 0.01 each produced 0/4
+    # accepted candidates due to bh=160-200 mm sprawl, while default
+    # 0.02 produced 1+/4 accepted candidates. The intermediate floor
+    # of 0.01 was empirically equivalent to no floor at all -- the
+    # placement is fragile to even small downward mutations because
+    # PlacementScore saturates at >100 on sprawled layouts (nets and
+    # crossings hit max), so SA's Metropolis acceptance can't distinguish
+    # between sprawled and compact strongly enough to walk back.
+    # Sigma stays at 0.01 so the mutator still searches upward (default
+    # to ~0.05 at 3-sigma) but cannot drop below the empirically-viable
+    # minimum. This is the load-bearing constraint -- the broad
+    # mutator search space inherited from earlier sweeps assumed
+    # ANY value in [0.001, 0.2] could yield viable placements; in
+    # practice, only [default, 3-sigma-up] does for parent compose.
+    "force_attract_k": {"min": 0.02, "max": 0.2, "sigma": 0.01, "type": "float"},
     "force_repel_k": {"min": 50.0, "max": 1000.0, "sigma": 50.0, "type": "float"},
     "cooling_factor": {"min": 0.80, "max": 0.999, "sigma": 0.02, "type": "float"},
     "edge_margin_mm": {"min": 0.5, "max": 15.0, "sigma": 0.5, "type": "float"},
     "sa_refine_initial_temp": {"min": 0.5, "max": 30.0, "sigma": 2.0, "type": "float"},
-    "sa_refine_iterations": {"min": 100, "max": 10000, "sigma": 500, "type": "int"},
+    # sa_refine_iterations floor 100 -> 250 (default 300). At 100 SA
+    # has too few moves to escape a sprawled force-loop equilibrium:
+    # going from bh=180 mm to bh=90 mm under the bumped bbox_packing
+    # weight needs ~30+ sequential accept-toward-compact moves, each
+    # bounded by sa_refine_move_radius_mm. 100 iterations after the
+    # rotation/swap ratio splits leaves ~50 translations to do that
+    # work, and the reheat-at-50% perturbation eats half of those.
+    # 250 gives ~150 translations after reheat, enough to cross the
+    # space deterministically. Mutator can still go up to 10000;
+    # only the lower end is protected.
+    "sa_refine_iterations": {"min": 250, "max": 10000, "sigma": 500, "type": "int"},
     "edge_jitter_mm": {"min": 0.0, "max": 15.0, "sigma": 1.0, "type": "float"},
     "intra_cluster_iters": {"min": 10, "max": 500, "sigma": 20, "type": "int"},
     "gnd_zone_margin_mm": {"min": 0.1, "max": 2.0, "sigma": 0.1, "type": "float"},

@@ -822,16 +822,32 @@ class PlacementSolver:
                 print(f"  Displacement converged at iteration {iteration + 1}")
                 break
 
-            # Adaptive convergence: early exit when placement is good and stable
+            # Adaptive convergence: early exit when placement is good and
+            # stable. The bbox_packing threshold is the load-bearing gate
+            # for parent-side composition: PlacementScore.total saturates
+            # near 100 on sprawled layouts because nets/crossings hit max
+            # whenever connected components find ANY routing-friendly
+            # arrangement, regardless of how spread out they are. Without
+            # the bbox_packing gate, a sprawled equilibrium triggers
+            # early exit at iteration 17 with bh=160-200mm, the
+            # candidate-search outline cap rejects it, and the round
+            # fails to route. Requiring bbox_packing > 60 keeps the loop
+            # iterating until the placement is genuinely compact;
+            # max_iterations is the backstop for cases where compaction
+            # is unreachable under the current force balance (then the
+            # outline cap correctly fails the round, no silent ship).
             if (
                 iteration > 15
                 and best_score.total > 85.0
+                and best_score.bbox_packing > 60.0
                 and max_disp < 3.0
                 and stagnant >= 3
             ):
                 print(
                     f"  Adaptive early exit at iteration {iteration + 1} "
-                    f"(score={best_score.total:.1f}, disp={max_disp:.2f})"
+                    f"(score={best_score.total:.1f}, "
+                    f"bbox_packing={best_score.bbox_packing:.1f}, "
+                    f"disp={max_disp:.2f})"
                 )
                 break
         phase_t["solve_force_loop_ms"] = (time.perf_counter() - _t_force) * 1000.0
