@@ -114,6 +114,7 @@ class ExperimentRunner:
             "hierarchical_summary.json",
             "experiment.log",
             "run_started_at",
+            "run_phase",
         ):
             (exp / name).unlink(missing_ok=True)
 
@@ -190,10 +191,18 @@ class ExperimentRunner:
         # Stamp run-start time so the GUI can hide stale renders from
         # prior runs until fresh ones land on disk. Read by
         # pipeline_graph._load_render_floor; any render with mtime
-        # below this floor is treated as carry-over and not displayed
-        # for live (non-pinned) nodes.
+        # below this floor is treated as carry-over.
+        #
+        # Also stamp the phase so the GUI knows whether to gate renders
+        # for pinned leaves: in leaves_only/full runs every leaf is
+        # about to be re-solved and its render is about to be replaced,
+        # so pinned-leaf renders should be hidden too. In parents_only
+        # leaves are NOT touched, so pinned-leaf renders stay valid
+        # and should remain visible -- otherwise the user loses the
+        # leaf preview right when they need it most (parent compose).
         self.experiments_dir.mkdir(parents=True, exist_ok=True)
         (self.experiments_dir / "run_started_at").write_text(f"{time.time()}\n")
+        (self.experiments_dir / "run_phase").write_text((phase or "full") + "\n")
 
         autoexp = self.scripts_dir / "autoexperiment.py"
         pcb_path = self.project_root / pcb_file

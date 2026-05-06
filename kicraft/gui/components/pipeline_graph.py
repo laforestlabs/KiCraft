@@ -118,13 +118,29 @@ def _load_render_floor(experiments_dir: Path) -> float | None:
     The runner stamps this file the instant a new run starts (after
     purge, before subprocess launch). Render lookups gate on this so
     PNGs left over from a prior run don't show up as if they belong
-    to the new run. Pinned leaves bypass the gate -- their canonical
-    files predate run_started_at on purpose.
+    to the new run.
     """
     floor_path = experiments_dir / "run_started_at"
     try:
         return float(floor_path.read_text().strip())
     except (OSError, ValueError):
+        return None
+
+
+def _load_run_phase(experiments_dir: Path) -> str | None:
+    """Read .experiments/run_phase; return None if absent.
+
+    Returns one of "leaves_only", "parents_only", "full", or None.
+    Used to decide whether pinned-leaf renders should bypass the
+    freshness gate: in parents_only the leaves are NOT touched so
+    their renders stay valid; in leaves_only/full the leaves are
+    being re-solved so even pinned-leaf renders must hide until the
+    new ones land.
+    """
+    phase_path = experiments_dir / "run_phase"
+    try:
+        return phase_path.read_text().strip() or None
+    except OSError:
         return None
 
 
@@ -427,10 +443,15 @@ def gather_pipeline_state(
     # Stale-render gate: the runner stamps run_started_at the moment a
     # new run starts (after purge). Any render with mtime older than
     # this floor is from a prior run and must not be displayed for live
-    # nodes. Pinned leaves bypass this gate (their canonical files are
-    # deliberately older). Parent renders are always run-scoped, no
-    # exception.
+    # nodes. The pinned-leaf bypass kicks in only for parents_only runs
+    # (where leaves are NOT touched and their renders stay valid); in
+    # leaves_only / full runs every leaf is about to be re-solved, so
+    # even pinned-leaf renders must hide until fresh ones land --
+    # otherwise the user sees a confusing mix of last-run and new-run
+    # renders for the duration of the run.
     render_floor = _load_render_floor(experiments_dir)
+    run_phase = _load_run_phase(experiments_dir)
+    pinned_leaves_keep_renders = run_phase == "parents_only"
 
     # "Run in progress" gates leaf status decisions below: while
     # running we trust per-leaf debug.json over stale canonical files
@@ -592,14 +613,17 @@ def gather_pipeline_state(
             instance_path = meta.get("instance_path", "")
             component_refs = meta.get("component_refs", [])
 
-            # Pinned leaves keep their canonical render visible across
-            # runs (their files are deliberately older than the run
-            # floor). Non-pinned leaves' renders are gated so prior-run
-            # PNGs don't masquerade as fresh.
+            # Pinned-leaf render preservation only applies in
+            # parents_only mode (where leaves are not re-solved).
+            # In leaves_only / full runs, every leaf is about to be
+            # re-rendered, so the pin doesn't protect against staleness.
             leaf_key = artifact_dir.name
             leaf_floor = (
                 None
-                if _leaf_is_pinned(experiments_dir, leaf_key)
+                if (
+                    pinned_leaves_keep_renders
+                    and _leaf_is_pinned(experiments_dir, leaf_key)
+                )
                 else render_floor
             )
 
