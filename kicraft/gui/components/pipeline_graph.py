@@ -112,6 +112,33 @@ def _path_with_mtime(path: str | None) -> str:
         return path
 
 
+def _load_render_floor(experiments_dir: Path) -> float | None:
+    """Read .experiments/run_started_at; return None if absent or invalid.
+
+    The runner stamps this file the instant a new run starts (after
+    purge, before subprocess launch). Render lookups gate on this so
+    PNGs left over from a prior run don't show up as if they belong
+    to the new run. Pinned leaves bypass the gate -- their canonical
+    files predate run_started_at on purpose.
+    """
+    floor_path = experiments_dir / "run_started_at"
+    try:
+        return float(floor_path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _mtime_passes(path: Path, mtime_floor: float | None) -> bool:
+    """True if path exists and (no floor, or path's mtime >= floor)."""
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    if mtime_floor is None:
+        return True
+    return st.st_mtime >= mtime_floor
+
+
 # ---------------------------------------------------------------------------
 # Data gathering -- scan artifacts + run_status to build PipelineState
 # ---------------------------------------------------------------------------
@@ -127,9 +154,15 @@ def _safe_read_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _find_best_render(renders_dir: Path) -> str | None:
-    """Find the best available render for a leaf node."""
-    # Priority: routed front > pre-route front > copper both
+def _find_best_render(
+    renders_dir: Path, mtime_floor: float | None = None
+) -> str | None:
+    """Find the best available render for a leaf node.
+
+    When ``mtime_floor`` is provided, candidates older than the floor
+    are skipped -- prevents stale PNGs from a prior run from being
+    surfaced as if they belong to the current run.
+    """
     candidates = [
         renders_dir / "routed_front_all.png",
         renders_dir / "pre_route_front_all.png",
@@ -137,18 +170,22 @@ def _find_best_render(renders_dir: Path) -> str | None:
         renders_dir / "pre_route_copper_both.png",
     ]
     for c in candidates:
-        if c.exists():
+        if _mtime_passes(c, mtime_floor):
             return str(c)
     return None
 
 
-def _find_round_renders(renders_dir: Path, round_index: int) -> tuple[str | None, str | None]:
+def _find_round_renders(
+    renders_dir: Path,
+    round_index: int,
+    mtime_floor: float | None = None,
+) -> tuple[str | None, str | None]:
     """Find routed and pre-route renders for a specific round."""
     routed = renders_dir / f"round_{round_index:04d}_routed_front_all.png"
     pre_route = renders_dir / f"round_{round_index:04d}_pre_route_front_all.png"
     return (
-        str(routed) if routed.exists() else None,
-        str(pre_route) if pre_route.exists() else None,
+        str(routed) if _mtime_passes(routed, mtime_floor) else None,
+        str(pre_route) if _mtime_passes(pre_route, mtime_floor) else None,
     )
 
 
@@ -245,7 +282,11 @@ def _determine_leaf_status(artifact_dir: Path, *, run_in_progress: bool = False)
     return "pending"
 
 
-def _build_rounds_from_debug(artifact_dir: Path, renders_dir: Path) -> list[RoundInfo]:
+def _build_rounds_from_debug(
+    artifact_dir: Path,
+    renders_dir: Path,
+    mtime_floor: float | None = None,
+) -> list[RoundInfo]:
     """Extract per-round info from debug.json."""
     debug = _safe_read_json(artifact_dir / "debug.json")
     if not isinstance(debug, dict):
@@ -299,7 +340,9 @@ def _build_rounds_from_debug(artifact_dir: Path, renders_dir: Path) -> list[Roun
                 if candidate:
                     rejection_reason = str(candidate)
 
-        routed_thumb, pre_route_thumb = _find_round_renders(renders_dir, idx)
+        routed_thumb, pre_route_thumb = _find_round_renders(
+            renders_dir, idx, mtime_floor=mtime_floor
+        )
         rounds.append(RoundInfo(
             index=idx,
             score=score,
@@ -381,6 +424,14 @@ def gather_pipeline_state(
         total_rounds=_safe_int(run_status.get("total_rounds", 0)),
     )
 
+    # Stale-render gate: the runner stamps run_started_at the moment a
+    # new run starts (after purge). Any render with mtime older than
+    # this floor is from a prior run and must not be displayed for live
+    # nodes. Pinned leaves bypass this gate (their canonical files are
+    # deliberately older). Parent renders are always run-scoped, no
+    # exception.
+    render_floor = _load_render_floor(experiments_dir)
+
     # "Run in progress" gates leaf status decisions below: while
     # running we trust per-leaf debug.json over stale canonical files
     # (the cleanup wiped debug.json at run start, so its absence
@@ -455,7 +506,7 @@ def gather_pipeline_state(
             preferred_names = ("parent_routed.png", "parent_stamped.png")
         for name in preferred_names:
             p = round_dir / name
-            if p.exists():
+            if _mtime_passes(p, render_floor):
                 state.root_render = str(p)
                 break
 
@@ -465,20 +516,20 @@ def gather_pipeline_state(
         # When the round we're viewing failed to route, prefer the stamped
         # preview path from run_status as well.
         if round_parent_routed is False:
-            if parent_stamped and Path(str(parent_stamped)).exists():
+            if parent_stamped and _mtime_passes(Path(str(parent_stamped)), render_floor):
                 state.root_render = str(parent_stamped)
-            elif parent_routed and Path(str(parent_routed)).exists():
+            elif parent_routed and _mtime_passes(Path(str(parent_routed)), render_floor):
                 state.root_render = str(parent_routed)
         else:
-            if parent_routed and Path(str(parent_routed)).exists():
+            if parent_routed and _mtime_passes(Path(str(parent_routed)), render_floor):
                 state.root_render = str(parent_routed)
-            elif parent_stamped and Path(str(parent_stamped)).exists():
+            elif parent_stamped and _mtime_passes(Path(str(parent_stamped)), render_floor):
                 state.root_render = str(parent_stamped)
         if state.root_render is None:
             hp = experiments_dir / "hierarchical_pipeline"
             for name in ("parent_routed.png", "parent_stamped.png"):
                 p = hp / name
-                if p.exists():
+                if _mtime_passes(p, render_floor):
                     state.root_render = str(p)
                     break
 
@@ -501,14 +552,15 @@ def gather_pipeline_state(
                     continue
                 for name in probe_names:
                     candidate = child / "renders" / name
-                    if candidate.exists():
-                        try:
-                            mt = candidate.stat().st_mtime
-                        except OSError:
-                            mt = 0.0
-                        if mt > best_mtime:
-                            best_mtime = mt
-                            best_path = str(candidate)
+                    if not _mtime_passes(candidate, render_floor):
+                        continue
+                    try:
+                        mt = candidate.stat().st_mtime
+                    except OSError:
+                        mt = 0.0
+                    if mt > best_mtime:
+                        best_mtime = mt
+                        best_path = str(candidate)
             if best_path:
                 state.root_render = best_path
 
@@ -540,11 +592,26 @@ def gather_pipeline_state(
             instance_path = meta.get("instance_path", "")
             component_refs = meta.get("component_refs", [])
 
+            # Pinned leaves keep their canonical render visible across
+            # runs (their files are deliberately older than the run
+            # floor). Non-pinned leaves' renders are gated so prior-run
+            # PNGs don't masquerade as fresh.
+            leaf_key = artifact_dir.name
+            leaf_floor = (
+                None
+                if _leaf_is_pinned(experiments_dir, leaf_key)
+                else render_floor
+            )
+
             renders_dir = artifact_dir / "renders"
             leaf_status = _determine_leaf_status(
                 artifact_dir, run_in_progress=run_in_progress
             )
-            best_render = _find_best_render(renders_dir) if renders_dir.exists() else None
+            best_render = (
+                _find_best_render(renders_dir, mtime_floor=leaf_floor)
+                if renders_dir.exists()
+                else None
+            )
 
             score = None
             traces = 0
@@ -563,7 +630,9 @@ def gather_pipeline_state(
                 if not sheet_name or sheet_name == artifact_dir.name:
                     sheet_name = solved.get("sheet_name", sheet_name)
 
-            rounds = _build_rounds_from_debug(artifact_dir, renders_dir)
+            rounds = _build_rounds_from_debug(
+                artifact_dir, renders_dir, mtime_floor=leaf_floor
+            )
             # Snapshot the full unfiltered list before any per-parent-round
             # narrowing below. The detail panel and arrow-key navigation
             # use this so the user can scrub every solve in the run.
@@ -617,8 +686,7 @@ def gather_pipeline_state(
                     #       hasn't been solved yet -- "queued" / WAITING.
                     #   (c) the run finished and this leaf actually
                     #       missed the round -- that's a real failure.
-                    leaf_key = artifact_dir.name
-                    is_pinned = _leaf_is_pinned(experiments_dir, leaf_key)
+                    is_pinned = leaf_floor is None
                     if is_pinned:
                         # Keep canonical-derived leaf_status / score /
                         # traces / vias / best_render -- the pin already

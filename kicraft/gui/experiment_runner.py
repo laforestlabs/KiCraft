@@ -86,7 +86,12 @@ class ExperimentRunner:
         #   rounds=[] (the parents-only run produces no leaf rounds).
         purge_subcircuits_wholesale = phase is None
         purge_per_leaf_snapshots = phase == "leaves_only"
-        round_dirs = ["rounds", "frames", "hierarchical_autoexperiment"]
+        round_dirs = [
+            "rounds",
+            "frames",
+            "hierarchical_autoexperiment",
+            "hierarchical_pipeline",
+        ]
         if purge_subcircuits_wholesale:
             round_dirs.insert(0, "subcircuits")
 
@@ -108,6 +113,7 @@ class ExperimentRunner:
             "parent_composition_routed.json",
             "hierarchical_summary.json",
             "experiment.log",
+            "run_started_at",
         ):
             (exp / name).unlink(missing_ok=True)
 
@@ -180,6 +186,14 @@ class ExperimentRunner:
         stop_file.unlink(missing_ok=True)
 
         self._purge_prior_run_artifacts(phase=phase)
+
+        # Stamp run-start time so the GUI can hide stale renders from
+        # prior runs until fresh ones land on disk. Read by
+        # pipeline_graph._load_render_floor; any render with mtime
+        # below this floor is treated as carry-over and not displayed
+        # for live (non-pinned) nodes.
+        self.experiments_dir.mkdir(parents=True, exist_ok=True)
+        (self.experiments_dir / "run_started_at").write_text(f"{time.time()}\n")
 
         autoexp = self.scripts_dir / "autoexperiment.py"
         pcb_path = self.project_root / pcb_file

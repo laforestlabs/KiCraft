@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import subprocess
 from pathlib import Path
 from typing import Callable
 
@@ -9,6 +11,86 @@ import plotly.graph_objects as go
 from nicegui import ui
 
 from .pipeline_graph import NodeStatus, RoundInfo
+
+
+_ROUND_NUM_RE = re.compile(r"round_(\d{4})")
+
+
+def _displayed_round_from_path(src: str | None) -> int | None:
+    """Extract a 4-digit round number from a render path, if present.
+
+    Matches both leaf round renders (``round_0003_routed_front_all.png``)
+    and parent per-round dirs (``hierarchical_autoexperiment/round_0003/...``).
+    """
+    if not src:
+        return None
+    m = _ROUND_NUM_RE.search(src)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+def _resolve_pcb_path(
+    node: NodeStatus,
+    experiments_dir: Path | None,
+    displayed_src: str | None,
+) -> Path | None:
+    """Pick the .kicad_pcb that corresponds to the currently displayed render.
+
+    Leaf: prefer ``round_NNNN_leaf_routed.kicad_pcb`` if a round-specific
+    snapshot is on screen; fall back to canonical ``leaf_routed.kicad_pcb``.
+
+    Parent (root): prefer
+    ``hierarchical_autoexperiment/round_NNNN/parent_routed.kicad_pcb``
+    when a per-round render is on screen; fall back to
+    ``best/parent_routed.kicad_pcb``.
+    """
+    if node.is_leaf:
+        if not node.artifact_dir:
+            return None
+        leaf_dir = Path(node.artifact_dir)
+        round_num = _displayed_round_from_path(displayed_src)
+        if round_num is not None:
+            snap = leaf_dir / f"round_{round_num:04d}_leaf_routed.kicad_pcb"
+            if snap.is_file():
+                return snap
+        return leaf_dir / "leaf_routed.kicad_pcb"
+
+    if experiments_dir is None:
+        return None
+    round_num = _displayed_round_from_path(displayed_src)
+    if round_num is not None:
+        # Per-round parent PCBs live in the parent-composition
+        # subcircuit dir (named ``subcircuit__<hash>``), alongside the
+        # canonical ``parent_routed.kicad_pcb``.
+        for snap in (experiments_dir / "subcircuits").glob(
+            f"subcircuit__*/round_{round_num:04d}_parent_routed.kicad_pcb"
+        ):
+            if snap.is_file():
+                return snap
+    return experiments_dir / "best" / "parent_routed.kicad_pcb"
+
+
+def _open_in_kicad(pcb_path: Path | None) -> None:
+    """Launch system KiCad on a .kicad_pcb path. Non-blocking."""
+    if pcb_path is None:
+        ui.notify("Could not resolve a PCB to open.", type="negative")
+        return
+    if not pcb_path.is_file():
+        ui.notify(f"PCB not on disk: {pcb_path.name}", type="negative")
+        return
+    try:
+        subprocess.Popen(
+            ["kicad", str(pcb_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        ui.notify(f"Opened {pcb_path.name} in KiCad", type="positive")
+    except (FileNotFoundError, OSError) as exc:
+        ui.notify(f"Failed to launch KiCad: {exc}", type="negative")
 
 
 def node_detail_panel(
@@ -91,7 +173,11 @@ def node_detail_panel(
     maximized = {"src": initial_src, "label": initial_label}
 
     with ui.column().classes("w-full gap-3"):
-        _header(node)
+        _header(
+            node,
+            experiments_dir=Path(experiments_dir) if experiments_dir else None,
+            maximized=maximized,
+        )
         if node.status == "routing_failed":
             if node.is_leaf:
                 _rejection_reason_panel(node, detail_rounds)
@@ -248,7 +334,11 @@ def _snapshot_picker(
     _redraw()
 
 
-def _header(node: NodeStatus) -> None:
+def _header(
+    node: NodeStatus,
+    experiments_dir: Path | None = None,
+    maximized: dict | None = None,
+) -> None:
     with ui.row().classes("w-full items-center gap-3"):
         ui.label(node.name).classes("text-xl font-bold")
         badge_text = (
@@ -260,6 +350,23 @@ def _header(node: NodeStatus) -> None:
             ui.label(f"Score: {node.score:.2f}").classes(
                 "text-lg font-mono text-green-400"
             )
+
+        # Resolve at click time so timeline thumbnail clicks (which
+        # mutate maximized["src"] in place) feed through to the
+        # round-specific .kicad_pcb without a panel rebuild.
+        def _open_clicked() -> None:
+            displayed_src = (
+                maximized.get("src") if isinstance(maximized, dict) else None
+            )
+            _open_in_kicad(
+                _resolve_pcb_path(node, experiments_dir, displayed_src)
+            )
+
+        ui.button(
+            "Open in KiCad",
+            icon="open_in_new",
+            on_click=_open_clicked,
+        ).props("flat dense").classes("text-blue-300 text-xs")
 
     if node.is_leaf:
         with ui.row().classes("gap-4 text-sm text-gray-300"):
