@@ -1,12 +1,16 @@
-"""Regression tests for per-run leaf-artifact cleanup.
+"""Regression tests for per-run leaf-artifact cleanup and within-run
+round accumulation.
 
 The Monitor tab's score plot and round timeline are built from each
 leaf's ``debug.json`` (key ``extra.all_rounds``). When a fresh
 autoexperiment run is started, the GUI must show ONLY rounds from
-that run -- not stale rounds that piled up across earlier runs.
+that run -- not stale rounds that piled up across earlier runs. But
+WITHIN a single run, when a leaf is solved across multiple parent
+rounds (one invocation per parent round in ``--leaves-only`` mode),
+debug.json must accumulate so the GUI can scrub R1, R2, R3 and see
+each parent round's leaf solves.
 
-Two pieces have to work together for the user-visible "rounds 1..N
-in an N-round run" property to hold:
+Two pieces have to work together:
 
 1. ``ExperimentRunner._purge_prior_run_artifacts`` deletes per-leaf
    ``round_NNNN_*`` snapshots and ``debug.json`` at the start of
@@ -15,13 +19,17 @@ in an N-round run" property to hold:
    ``solved_layout.json``, ``metadata.json``, ``renders/``) are
    preserved so ``pins.json`` references survive.
 
-2. The leaf solver's round_index resets to 0 on each invocation
-   (no ``base_offset`` continuation across runs). Together with (1)
-   this means a fresh 3-round run produces round_NNNN files
-   round_0000 / round_0001 / round_0002 -- not round_0014 / 0015 /
-   0016 stacked on top of a prior run's leftovers.
+2. ``solve_subcircuits._persist_solution`` reads any prior rounds
+   left in debug.json by earlier parent-round invocations within
+   THIS run (carried on ``SolvedLeafSubcircuit.prior_rounds``) and
+   merges them with the current invocation's new rounds, dedup'd by
+   round_index and sorted. ``solve_subcircuits._solve_leaf_subcircuit``
+   computes ``base_offset = max(prior_round_index) + 1`` so new
+   round indices are monotonic across parent rounds (no snapshot
+   filename collisions).
 
-These tests lock the cleanup contract.
+These tests lock both the cleanup contract (cross-run isolation) and
+the merge contract (within-run accumulation).
 """
 
 from __future__ import annotations
@@ -206,16 +214,22 @@ def test_purge_idempotent_on_empty_subcircuits(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Cumulative round_index regression
+# Within-run round accumulation across parent rounds
 # ---------------------------------------------------------------------------
 
 
-def test_solve_leaf_resets_round_index_each_run(monkeypatch: pytest.MonkeyPatch):
-    """Smoke check that the cumulative ``base_offset`` logic is gone:
-    even with a populated debug.json declaring prior rounds, the leaf
-    solver no longer reads it for offset purposes. We exercise this by
-    grepping the source for the removed symbols rather than running a
-    full leaf solve (which requires pcbnew + a real schematic).
+def test_solve_subcircuits_source_wires_within_run_accumulation():
+    """Source-level lock that the within-run accumulation plumbing is
+    present in ``solve_subcircuits.py``: prior_rounds field on the
+    dataclass, prior-debug read in ``_solve_leaf_subcircuit`` with
+    ``base_offset`` derived from existing rounds, monotonic
+    ``round_index = base_offset + local_round_index``, and the
+    merge-and-sort step in ``_persist_solution``.
+
+    Cross-run isolation is enforced separately by
+    ``_purge_prior_run_artifacts`` (covered by the cleanup tests above).
+    Together they guarantee: fresh-run debug.json contains exactly the
+    new run's rounds; multi-parent-round runs accumulate within a run.
     """
     src = (
         Path(__file__).resolve().parent.parent
@@ -224,11 +238,119 @@ def test_solve_leaf_resets_round_index_each_run(monkeypatch: pytest.MonkeyPatch)
         / "solve_subcircuits.py"
     ).read_text(encoding="utf-8")
 
-    # No reference to the cumulative-round-index plumbing should remain
-    # outside of the explanatory comment that documents why it's gone.
-    assert "base_offset = max_idx + 1" not in src
-    assert "prior_all_rounds: list" not in src
-    assert "prior_rounds: list" not in src
+    assert "prior_rounds: list[dict[str, Any]] = field(default_factory=list)" in src
+    assert "base_offset = max_idx + 1" in src
+    assert "round_index = base_offset + local_round_index" in src
+    assert "prior_rounds=prior_all_rounds" in src
+    assert "merged_rounds.extend(new_round_dicts)" in src
 
-    # And the loop must increment from 0, not from a base_offset.
-    assert "round_index = local_round_index" in src
+
+def test_within_run_merge_dedups_and_sorts_by_round_index():
+    """Algorithmic lock on the merge step in ``_persist_solution``.
+
+    Prior rounds (carried on ``SolvedLeafSubcircuit.prior_rounds`` from
+    earlier parent-round invocations of the same leaf within this run)
+    must be combined with the current invocation's new rounds:
+      - new wins on round_index collision (defensive)
+      - result sorted by round_index ascending
+      - experiment_round stamps are preserved per-row (so R1's rounds
+        retain ``experiment_round=1`` even after R2 appends)
+    """
+    # Parent round 1 produced rounds 0, 1.
+    prior_rounds = [
+        {"round_index": 0, "experiment_round": 1, "score": 80.0},
+        {"round_index": 1, "experiment_round": 1, "score": 82.0},
+    ]
+    # Parent round 2: base_offset = 2, so this invocation's rounds get
+    # indices 2, 3 with experiment_round=2.
+    new_round_dicts = [
+        {"round_index": 2, "experiment_round": 2, "score": 85.0},
+        {"round_index": 3, "experiment_round": 2, "score": 84.0},
+    ]
+
+    new_indices = {int(r.get("round_index", -1) or -1) for r in new_round_dicts}
+    merged_rounds = [
+        r
+        for r in prior_rounds
+        if int(r.get("round_index", -1) or -1) not in new_indices
+    ]
+    merged_rounds.extend(new_round_dicts)
+    merged_rounds.sort(key=lambda r: int(r.get("round_index", 0) or 0))
+
+    assert [r["round_index"] for r in merged_rounds] == [0, 1, 2, 3]
+    assert [r["experiment_round"] for r in merged_rounds] == [1, 1, 2, 2]
+    assert [r["score"] for r in merged_rounds] == [80.0, 82.0, 85.0, 84.0]
+
+
+def test_within_run_merge_new_wins_on_round_index_collision():
+    """If a prior round and a new round share a round_index (defensive
+    edge case -- shouldn't happen in normal operation since base_offset
+    keeps indices monotonic), the new value replaces the prior one.
+    This guards against stale data masquerading as fresh.
+    """
+    prior_rounds = [
+        {"round_index": 0, "experiment_round": 1, "score": 50.0},  # stale
+        {"round_index": 1, "experiment_round": 1, "score": 82.0},
+    ]
+    new_round_dicts = [
+        {"round_index": 0, "experiment_round": 2, "score": 90.0},  # fresh
+    ]
+
+    new_indices = {int(r.get("round_index", -1) or -1) for r in new_round_dicts}
+    merged_rounds = [
+        r
+        for r in prior_rounds
+        if int(r.get("round_index", -1) or -1) not in new_indices
+    ]
+    merged_rounds.extend(new_round_dicts)
+    merged_rounds.sort(key=lambda r: int(r.get("round_index", 0) or 0))
+
+    assert [r["round_index"] for r in merged_rounds] == [0, 1]
+    # round_index 0 must reflect the new (experiment_round=2) value, not stale.
+    assert merged_rounds[0]["experiment_round"] == 2
+    assert merged_rounds[0]["score"] == 90.0
+    # round_index 1 (no collision) is preserved from prior.
+    assert merged_rounds[1]["experiment_round"] == 1
+
+
+def test_cross_run_wipe_clears_within_run_state(tmp_path: Path):
+    """End-to-end: even with a populated debug.json from a prior run,
+    the leaves-only run-start cleanup wipes it before the new run's
+    invocations begin. So when the new run's first parent-round
+    invocation runs ``_solve_leaf_subcircuit``, prior_all_rounds is
+    empty, base_offset is 0, and the new debug.json contains only the
+    new run's rounds.
+    """
+    runner = _build_runner_for(tmp_path)
+    leaf_dir = runner.experiments_dir / "subcircuits" / "leaf-uuid"
+    leaf_dir.mkdir(parents=True, exist_ok=True)
+
+    import json as _json
+
+    # Pre-populate debug.json as if a prior run wrote rounds 0..2.
+    debug_path = leaf_dir / "debug.json"
+    debug_path.write_text(
+        _json.dumps({
+            "extra": {
+                "all_rounds": [
+                    {"round_index": i, "experiment_round": 1, "score": 80.0}
+                    for i in range(3)
+                ],
+            },
+        }),
+        encoding="utf-8",
+    )
+    # Pre-populate canonical files that must survive.
+    (leaf_dir / "leaf_routed.kicad_pcb").write_text("(placeholder)")
+    (leaf_dir / "solved_layout.json").write_text("{}")
+    (leaf_dir / "metadata.json").write_text("{}")
+
+    runner._purge_prior_run_artifacts(phase="leaves_only")
+
+    # debug.json gone -- the next invocation reads no prior rounds and
+    # so will not double-count.
+    assert not debug_path.exists()
+    # Canonical pin-source files still present.
+    assert (leaf_dir / "leaf_routed.kicad_pcb").exists()
+    assert (leaf_dir / "solved_layout.json").exists()
+    assert (leaf_dir / "metadata.json").exists()

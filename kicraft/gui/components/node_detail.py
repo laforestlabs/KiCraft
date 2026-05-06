@@ -28,20 +28,39 @@ def node_detail_panel(
     ``displayed_round_idx`` lets the caller (typically the Monitor's
     keyboard handler) drive which round's render fills the main image
     without the user having to click a thumbnail. When provided and
-    matching one of ``node.rounds``, the main image and label show
-    THAT round; otherwise the leaf's best/final render is shown.
+    matching one of the leaf's rounds, the main image and label show
+    THAT round; otherwise the highest-scoring round across the leaf's
+    full history is shown.
+
+    The detail view always operates on the leaf's *full* round history
+    (``node.all_rounds``) regardless of which parent round is selected
+    on the Monitor's score chart, so the user can scrub every solve
+    in the run.
     """
+    # Detail panel uses the leaf's full unfiltered history when present
+    # (populated by gather_pipeline_state); falls back to ``node.rounds``
+    # for parent nodes or older callers that don't set ``all_rounds``.
+    detail_rounds = node.all_rounds if (node.is_leaf and node.all_rounds) else node.rounds
+
     # Mutable container for the "maximized" image path so clicking a round
     # thumbnail below can swap the big render above without rebuilding the
     # whole panel. Seeded from displayed_round_idx (keyboard nav) when
-    # provided, else from the leaf's best/final render.
+    # provided, else from the highest-scoring round across all_rounds.
     if node.is_leaf and displayed_round_idx is not None:
         match = next(
-            (r for r in node.rounds if r.index == displayed_round_idx),
+            (r for r in detail_rounds if r.index == displayed_round_idx),
             None,
         )
     else:
         match = None
+
+    def _best_round(rounds_iter):
+        # Highest score wins; routed rounds preferred over pre-route.
+        scored = [r for r in rounds_iter if r.score is not None]
+        if not scored:
+            return None
+        return max(scored, key=lambda r: (1 if r.routed else 0, r.score))
+
     if match is not None:
         initial_src = match.thumbnail or match.pre_route_thumbnail or node.best_render
         score_suffix = (
@@ -51,6 +70,21 @@ def node_detail_panel(
     elif node.status == "routing_failed":
         initial_src = node.best_render
         initial_label = "Pre-route (routing failed)"
+    elif node.is_leaf and detail_rounds:
+        best = _best_round(detail_rounds)
+        if best is not None:
+            initial_src = (
+                best.thumbnail or best.pre_route_thumbnail or node.best_render
+            )
+            initial_label = (
+                f"Best of {len(detail_rounds)} rounds — R{best.index} score "
+                f"{best.score:.2f}"
+                if best.score is not None
+                else f"Best of {len(detail_rounds)} rounds — R{best.index}"
+            )
+        else:
+            initial_src = node.best_render
+            initial_label = "Best round"
     else:
         initial_src = node.best_render
         initial_label = "Best round"
@@ -60,14 +94,14 @@ def node_detail_panel(
         _header(node)
         if node.status == "routing_failed":
             if node.is_leaf:
-                _rejection_reason_panel(node)
+                _rejection_reason_panel(node, detail_rounds)
             else:
                 _parent_rejection_panel(experiments_dir)
         main_image_host = ui.column().classes("w-full")
         _render_main_image(main_image_host, maximized)
-        if node.is_leaf and node.rounds:
-            _score_plot(node)
-            _round_timeline(node, main_image_host, maximized)
+        if node.is_leaf and detail_rounds:
+            _score_plot(detail_rounds)
+            _round_timeline(detail_rounds, main_image_host, maximized)
         if node.is_leaf and experiments_dir is not None and node.artifact_dir:
             _snapshot_picker(
                 node,
@@ -342,16 +376,16 @@ def _parent_rejection_panel(experiments_dir: Path | None) -> None:
             ).classes("text-xs text-red-200 mt-1")
 
 
-def _rejection_reason_panel(node: NodeStatus) -> None:
+def _rejection_reason_panel(node: NodeStatus, rounds: list[RoundInfo]) -> None:
     """Banner explaining why the round(s) in view failed to route.
 
-    Counts how often each rejection reason appears across this leaf's
+    Counts how often each rejection reason appears across the leaf's
     rounds in the current view. Shows the top 2 reasons so the user can
     quickly tell whether a leaf is consistently hitting one failure mode
     or churning through several.
     """
     reasons: dict[str, int] = {}
-    for r in node.rounds:
+    for r in rounds:
         if r.rejection_reason:
             reasons[r.rejection_reason] = reasons.get(r.rejection_reason, 0) + 1
 
@@ -393,12 +427,12 @@ def _render_main_image(host, maximized: dict) -> None:
                 ui.label("No render available").classes("text-gray-500 italic")
 
 
-def _score_plot(node: NodeStatus) -> None:
-    if not node.rounds:
+def _score_plot(rounds: list[RoundInfo]) -> None:
+    if not rounds:
         return
 
-    x_rounds = [r.index for r in node.rounds]
-    y_scores = [r.score for r in node.rounds]
+    x_rounds = [r.index for r in rounds]
+    y_scores = [r.score for r in rounds]
 
     best_y: list[float] = []
     running_best = float("-inf")
@@ -434,15 +468,19 @@ def _score_plot(node: NodeStatus) -> None:
     ui.plotly(fig).classes("w-full")
 
 
-def _round_timeline(node: NodeStatus, main_image_host, maximized: dict) -> None:
-    ui.label("Round Timeline").classes("text-sm font-medium text-gray-300 mt-2")
-    ui.label("Click a round to maximize its render above.").classes(
-        "text-[11px] text-gray-500"
+def _round_timeline(
+    rounds: list[RoundInfo], main_image_host, maximized: dict
+) -> None:
+    ui.label(f"Round Timeline ({len(rounds)} rounds)").classes(
+        "text-sm font-medium text-gray-300 mt-2"
     )
+    ui.label(
+        "Click a round to maximize its render above. ← / → cycle through rounds."
+    ).classes("text-[11px] text-gray-500")
 
     with ui.scroll_area().classes("w-full").style("max-height: 280px"):
         with ui.row().classes("gap-2 flex-wrap"):
-            for r in node.rounds:
+            for r in rounds:
                 _round_thumbnail_card(r, main_image_host, maximized)
 
 

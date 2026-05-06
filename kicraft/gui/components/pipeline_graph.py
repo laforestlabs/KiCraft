@@ -53,6 +53,12 @@ class NodeStatus:
     vias: int = 0
     component_count: int = 0
     rounds: list[RoundInfo] = field(default_factory=list)
+    # Full unfiltered round history for this leaf (all parent rounds in
+    # the run). ``rounds`` may be narrowed to a single parent round when
+    # the user selects R1/R2/... on the score chart -- the detail panel
+    # and arrow-key navigation use ``all_rounds`` so the user can scrub
+    # every solve regardless of which parent round is highlighted.
+    all_rounds: list[RoundInfo] = field(default_factory=list)
     total_rounds_run: int = 0
     artifact_dir: str | None = None
 
@@ -558,6 +564,10 @@ def gather_pipeline_state(
                     sheet_name = solved.get("sheet_name", sheet_name)
 
             rounds = _build_rounds_from_debug(artifact_dir, renders_dir)
+            # Snapshot the full unfiltered list before any per-parent-round
+            # narrowing below. The detail panel and arrow-key navigation
+            # use this so the user can scrub every solve in the run.
+            all_rounds_full = list(rounds)
 
             # If the user has selected a specific parent round, narrow rounds
             # and best_render to that round's data.
@@ -636,6 +646,7 @@ def gather_pipeline_state(
                 vias=vias,
                 component_count=len(component_refs) if isinstance(component_refs, list) else 0,
                 rounds=rounds,
+                all_rounds=all_rounds_full,
                 total_rounds_run=len(rounds),
                 artifact_dir=str(artifact_dir),
             )

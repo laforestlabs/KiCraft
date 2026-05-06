@@ -395,7 +395,12 @@ def monitor_page():
         if not getattr(event.action, "keydown", False):
             return
         node = selected_node["value"]
-        if node is None or not node.is_leaf or not node.rounds:
+        if node is None or not node.is_leaf:
+            return
+        # Arrow nav cycles every solve in the run, not just rounds for
+        # the currently-selected parent round on the score chart.
+        nav_rounds = node.all_rounds or node.rounds
+        if not nav_rounds:
             return
 
         # ui.keyboard's default ``ignore`` list already swallows keystrokes
@@ -403,7 +408,7 @@ def monitor_page():
         # type round numbers and preset names normally without the arrow
         # keys hijacking those edits.
 
-        round_indices = sorted(r.index for r in node.rounds)
+        round_indices = sorted(r.index for r in nav_rounds)
         if not round_indices:
             return
 
@@ -416,7 +421,7 @@ def monitor_page():
             if current not in round_indices:
                 # First arrow press lands on the highest-scoring round so
                 # the user starts on a sensible default.
-                best_round = max(node.rounds, key=lambda r: r.score)
+                best_round = max(nav_rounds, key=lambda r: r.score)
                 current_displayed_round["value"] = best_round.index
             else:
                 pos = round_indices.index(current)
@@ -433,7 +438,7 @@ def monitor_page():
             target_round = current_displayed_round["value"]
             if target_round is None:
                 # Nothing displayed yet -- pin the highest-scoring round.
-                best_round = max(node.rounds, key=lambda r: r.score)
+                best_round = max(nav_rounds, key=lambda r: r.score)
                 target_round = best_round.index
             if not node.artifact_dir:
                 ui.notify(
