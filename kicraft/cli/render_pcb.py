@@ -261,7 +261,7 @@ def _svg_to_png(
             [
                 "magick",
                 "-background",
-                "#e5e7eb",
+                "#1e293b",
                 "-density",
                 str(dpi),
                 svg_path,
@@ -393,7 +393,7 @@ def _render_composite(
                 svg_front,
                 ")",
                 "-background",
-                "#e5e7eb",
+                "#1e293b",
                 "-layers",
                 "merge",
                 raw_png,
