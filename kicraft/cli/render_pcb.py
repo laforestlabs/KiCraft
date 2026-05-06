@@ -24,12 +24,25 @@ import tempfile
 # Layer sets for different views
 VIEWS = {
     "front_all": {
-        "layers": "F.Cu,F.SilkS,F.Mask,Edge.Cuts",
-        "desc": "Front copper + silkscreen + mask + outline",
+        # Top-down PCBnew-like view. F.Cu+B.Cu together triggers the
+        # _render_composite path which draws B.Cu at 52% opacity on a
+        # light-grey board background, then overlays F.Cu+silk on top.
+        # F.Mask is intentionally OMITTED: KiCad renders F.Mask as an
+        # opaque solder-mask-colored fill over the whole board area,
+        # which obscures B.Cu and produces a "blank blue PCB" when
+        # the router put all traces on the back layer.
+        #
+        # Post settings are deliberately gentle (contrast 1.15, sat
+        # 1.05, brightness 1.0): the previous heavy boost (1.38/1.24/
+        # 0.90) was tuned for the F.Mask-covered view and pushed the
+        # neutral grey board background into a saturated blue, which
+        # made B.Cu traces (also blue) invisible against it.
+        "layers": "B.Cu,F.Cu,F.SilkS,Edge.Cuts",
+        "desc": "Top-down view: both copper layers + silkscreen + outline (PCBnew-like)",
         "post": {
-            "contrast": 1.38,
-            "saturation": 1.24,
-            "brightness": 0.90,
+            "contrast": 1.15,
+            "saturation": 1.05,
+            "brightness": 1.00,
             "background": "#020617",
             "border_color": "#67e8f9",
             "border_width": 6,
