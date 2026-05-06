@@ -228,6 +228,87 @@ def _accepted_leaf_artifacts(project_dir: Path) -> list[dict[str, Any]]:
     return accepted
 
 
+def _auto_pin_best_leaves(project_dir: Path) -> None:
+    """Pin each leaf to its highest-scoring round of THIS run.
+
+    Run after ``--leaves-only`` completes. The run-start purge wipes
+    each leaf's ``round_NNNN_*`` snapshot files and ``debug.json``,
+    which leaves stale pin entries pointing at round numbers that no
+    longer exist on disk. The GUI's pin-status check then incorrectly
+    reports leaves as "pinned" when their snapshots are gone, and
+    parent-only fails to load the pinned state. Replacing the pin
+    with the best round of the just-finished leaves-only run gives
+    the user an immediately usable parent-only invocation.
+
+    For each leaf:
+      * Read ``debug.json`` -> ``extra.all_rounds`` for per-round scores.
+      * Pick the round with the highest score (routed preferred over
+        pre-route, ``-inf`` scores skipped).
+      * Call ``pin_leaf`` with ``source="auto-leaves-only"``.
+      * If no scoreable rounds exist (trivial leaf, or every round
+        failed), clear any stale pin so pins.json doesn't carry a
+        broken reference.
+    """
+    from kicraft.autoplacer.brain import pins as pins_module
+
+    experiments_dir = project_dir / ".experiments"
+    artifacts = _all_leaf_artifacts(project_dir)
+
+    pinned = 0
+    cleared = 0
+    skipped = 0
+
+    for art in artifacts:
+        artifact_dir = Path(art["artifact_dir"])
+        leaf_key = artifact_dir.name
+
+        debug = _load_json(artifact_dir / "debug.json")
+        extra = debug.get("extra", {}) if isinstance(debug, dict) else {}
+        all_rounds = extra.get("all_rounds") if isinstance(extra, dict) else None
+
+        best: tuple[tuple[int, float], int, float, bool] | None = None
+        if isinstance(all_rounds, list):
+            for r in all_rounds:
+                if not isinstance(r, dict):
+                    continue
+                score = r.get("score")
+                if not isinstance(score, (int, float)):
+                    continue
+                if score == float("-inf"):
+                    continue
+                idx = r.get("round_index")
+                if not isinstance(idx, int):
+                    continue
+                routed = bool(r.get("routed", False))
+                key = (1 if routed else 0, float(score))
+                if best is None or key > best[0]:
+                    best = (key, idx, float(score), routed)
+
+        if best is None:
+            if pins_module.unpin_leaf(experiments_dir, leaf_key):
+                cleared += 1
+                print(f"  cleared stale pin: {leaf_key} (no scored rounds)")
+            else:
+                skipped += 1
+            continue
+
+        _, best_idx, best_score, best_routed = best
+        try:
+            pins_module.pin_leaf(
+                experiments_dir, leaf_key, best_idx, source="auto-leaves-only"
+            )
+            pinned += 1
+            tag = "routed" if best_routed else "pre-route"
+            print(
+                f"  pinned {leaf_key} -> R{best_idx} ({tag}, score={best_score:.2f})"
+            )
+        except FileNotFoundError as exc:
+            print(f"  pin failed for {leaf_key}: {exc}")
+            skipped += 1
+
+    print(f"Auto-pin summary: {pinned} pinned, {cleared} cleared, {skipped} skipped")
+
+
 def _all_leaf_artifacts(project_dir: Path) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
     for artifact_dir in _discover_artifact_dirs(project_dir):
@@ -2837,6 +2918,11 @@ def main(argv: list[str] | None = None) -> int:
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(final_payload, f, indent=2)
             f.write("\n")
+
+    if args.leaves_only:
+        print()
+        print("=== Auto-pinning best round of each leaf ===")
+        _auto_pin_best_leaves(project_dir)
 
     print()
     print("=== Hierarchical Autoexperiment Complete ===")
