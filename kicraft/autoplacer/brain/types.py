@@ -120,6 +120,17 @@ class Component:
     # to compose-time setup; everything downstream (placement solver,
     # scorer) reads it via the predicate.
     block_force_back_only: bool = False
+    # Reference of the locked anchor this candidate was deliberately
+    # row/col-packed onto by ``_stack_compatible_blocks``. When set,
+    # ``_resolve_overlaps`` must skip its full-bbox escape against
+    # that anchor: the stacking placement is intentional, the
+    # candidate's pads are guaranteed to clear the anchor's pads at
+    # placement time, and any tiny pad-vs-corner-ring drift from the
+    # free-free push pass would otherwise flip the position-dependent
+    # predicate False and trigger a 30-50 mm escape that unwinds the
+    # whole stacking pass. Cleared on un-stacking (e.g. when the
+    # candidate is moved by SA outside its anchor's bbox by intent).
+    block_stacked_anchor: str | None = None
     allowed_rotations: list[float] | None = None
     # Per-rotation bbox dimensions for synthetic leaf blocks. Keyed by
     # rotation degrees (0/90/180/270). For 90° and 270° the width/height

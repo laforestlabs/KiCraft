@@ -2615,6 +2615,10 @@ class PlacementSolver:
                     old_pos = Point(cand.pos.x, cand.pos.y)
                     cand.pos = Point(target_x, target_y)
                     _update_pad_positions(cand, old_pos, cand.rotation)
+                    # Mark intent so _resolve_overlaps doesn't escape
+                    # this candidate off the anchor on a tiny
+                    # position-dependent predicate flip.
+                    cand.block_stacked_anchor = anc_ref
                     cursor_x += cand.width_mm + spacing
             else:
                 cursor_y = anc.pos.y - col_height / 2.0
@@ -2632,6 +2636,7 @@ class PlacementSolver:
                     old_pos = Point(cand.pos.x, cand.pos.y)
                     cand.pos = Point(target_x, target_y)
                     _update_pad_positions(cand, old_pos, cand.rotation)
+                    cand.block_stacked_anchor = anc_ref
                     cursor_y += cand.height_mm + spacing
 
     def _accumulate_opposite_side_attraction(
@@ -3159,6 +3164,24 @@ class PlacementSolver:
                         continue
 
                     if _blocker_pair_compatible(a, b):
+                        continue
+
+                    # Intentional stack: _stack_compatible_blocks
+                    # already vetted opposite-side compatibility and
+                    # row/col-packed this candidate inside the anchor's
+                    # bbox. Pass 1's tiny free-free pushes can drift a
+                    # candidate by a few mm so its SMT pad lands on an
+                    # anchor's THT corner-ring rect, flipping the
+                    # position-dependent _blocker_pair_compatible from
+                    # True to False; without this gate _escape() then
+                    # moves the candidate ~30-50 mm to clear the
+                    # anchor's bbox entirely, undoing the whole stack
+                    # pass and producing the sprawled layouts that
+                    # routing then fails on. The stacking decision is
+                    # the source of truth here -- preserve it.
+                    if a.locked and getattr(b, "block_stacked_anchor", None) == refs[i]:
+                        continue
+                    if b.locked and getattr(a, "block_stacked_anchor", None) == refs[j]:
                         continue
 
                     if a.locked and b.locked:
