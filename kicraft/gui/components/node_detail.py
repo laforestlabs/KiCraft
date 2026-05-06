@@ -75,7 +75,14 @@ def _resolve_pcb_path(
 
 
 def _open_in_kicad(pcb_path: Path | None) -> None:
-    """Launch system KiCad on a .kicad_pcb path. Non-blocking."""
+    """Launch the system PCB editor on a .kicad_pcb path. Non-blocking.
+
+    Uses ``pcbnew`` (the PCB editor binary) rather than ``kicad`` (the
+    project manager) -- the project manager rejects ``.kicad_pcb``
+    files as "not a valid KiCad project file" and surfaces an error
+    dialog. ``pcbnew`` opens the PCB editor directly on the file with
+    no project required.
+    """
     if pcb_path is None:
         ui.notify("Could not resolve a PCB to open.", type="negative")
         return
@@ -84,13 +91,13 @@ def _open_in_kicad(pcb_path: Path | None) -> None:
         return
     try:
         subprocess.Popen(
-            ["kicad", str(pcb_path)],
+            ["pcbnew", str(pcb_path)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        ui.notify(f"Opened {pcb_path.name} in KiCad", type="positive")
+        ui.notify(f"Opened {pcb_path.name} in PCBnew", type="positive")
     except (FileNotFoundError, OSError) as exc:
-        ui.notify(f"Failed to launch KiCad: {exc}", type="negative")
+        ui.notify(f"Failed to launch PCBnew: {exc}", type="negative")
 
 
 def node_detail_panel(
