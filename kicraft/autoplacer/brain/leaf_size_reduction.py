@@ -378,30 +378,44 @@ def attempt_leaf_size_reduction(
             rerouted: dict[str, Any] = {}
             reroute_timing: dict[str, float] = {}
 
-            if not should_reroute:
-                if current_round.routing.get("validation", {}).get("accepted", False):
-                    rerouted = copy.deepcopy(current_round.routing)
-                    rerouted["validation"] = copy.deepcopy(
-                        current_round.routing.get("validation", {})
+            # Reuse the previous routing only when the delta is below the
+            # reroute threshold AND the previous routing was already
+            # accepted -- it's still legal in the slightly-shrunk box.
+            # Otherwise we MUST reroute: large deltas could leave traces
+            # outside the new outline, and an unaccepted prior routing
+            # has nothing to reuse. The previous code path missed the
+            # should_reroute=True case entirely (rerouted stayed {} and
+            # every large-delta attempt was silently rejected as
+            # "reroute_validation_failed"), which is why outlines never
+            # actually shrunk on disk -- only small deltas were ever
+            # accepted, via the reuse path that doesn't rewrite the PCB.
+            can_reuse = (
+                not should_reroute
+                and current_round.routing.get("validation", {}).get("accepted", False)
+            )
+            if can_reuse:
+                rerouted = copy.deepcopy(current_round.routing)
+                rerouted["validation"] = copy.deepcopy(
+                    current_round.routing.get("validation", {})
+                )
+                rerouted["render_diagnostics"] = {
+                    "skipped": True,
+                    "reason": "size_reduction_reused_previous_route",
+                }
+                rerouted["size_reduction_reused_route"] = True
+            else:
+                try:
+                    rerouted, reroute_timing = route_local_subcircuit(
+                        candidate_extraction,
+                        candidate_extraction.local_state.components,
+                        candidate_cfg,
+                        generate_diagnostics=False,
+                        round_index=current_round.round_index,
                     )
-                    rerouted["render_diagnostics"] = {
-                        "skipped": True,
-                        "reason": "size_reduction_reused_previous_route",
-                    }
-                    rerouted["size_reduction_reused_route"] = True
-                else:
-                    try:
-                        rerouted, reroute_timing = route_local_subcircuit(
-                            candidate_extraction,
-                            candidate_extraction.local_state.components,
-                            candidate_cfg,
-                            generate_diagnostics=False,
-                            round_index=current_round.round_index,
-                        )
-                    except Exception as exc:
-                        attempt_record["rejection_reason"] = f"reroute_exception:{exc}"
-                        summary["attempts"].append(attempt_record)
-                        continue
+                except Exception as exc:
+                    attempt_record["rejection_reason"] = f"reroute_exception:{exc}"
+                    summary["attempts"].append(attempt_record)
+                    continue
 
             attempt_record["routing"] = {
                 key: value for key, value in rerouted.items() if not key.startswith("_")
