@@ -108,13 +108,17 @@ class Component:
     # Project-level override: when True, can_overlap_sparse treats this
     # leaf as having NO front-side intent regardless of what its blocker
     # set looks like. Set from
-    # cfg["parent_placement"]["backside_through_hole_leaves"] for boards
-    # whose front_pads are PTH shadows the layer-intent heuristic
-    # already classifies as no-intent, but the user wants to be explicit
-    # about. The flag rides on the synthetic block component so the
-    # bridge between project config and the leaf-pair compatibility
-    # check is local to compose-time setup; everything downstream
-    # (placement solver, scorer) reads it via the predicate.
+    # cfg["parent_placement"]["backside_through_hole_leaves"] for
+    # leaves whose ``dominant_blocker_side`` cannot be inferred from
+    # geometry alone (a pure-THT screw terminal has no real F.Cu or
+    # B.Cu intent — annular ring shadow lives in ``front_tht_pads`` /
+    # ``back_tht_pads`` and intentionally doesn't count as layer
+    # commitment, so the auto-detection returns "none" and the user
+    # must declare which side the leaf is meant to live on). The flag
+    # rides on the synthetic block component so the bridge between
+    # project config and the leaf-pair compatibility check is local
+    # to compose-time setup; everything downstream (placement solver,
+    # scorer) reads it via the predicate.
     block_force_back_only: bool = False
     allowed_rotations: list[float] | None = None
     # Per-rotation bbox dimensions for synthetic leaf blocks. Keyed by

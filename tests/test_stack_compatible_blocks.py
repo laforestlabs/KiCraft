@@ -65,12 +65,21 @@ def _blocker_set(
     *,
     front_pads=(),
     back_pads=(),
+    front_tht_pads=(),
+    back_tht_pads=(),
+    tht_drills=(),
+    front_traces=(),
+    back_traces=(),
     leaf_outline=(Point(0.0, 0.0), Point(10.0, 10.0)),
 ) -> LeafBlockerSet:
     return LeafBlockerSet(
         front_pads=tuple(front_pads),
         back_pads=tuple(back_pads),
-        tht_drills=(),
+        front_tht_pads=tuple(front_tht_pads),
+        back_tht_pads=tuple(back_tht_pads),
+        tht_drills=tuple(tht_drills),
+        front_traces=tuple(front_traces),
+        back_traces=tuple(back_traces),
         leaf_outline=leaf_outline,
     )
 
@@ -519,35 +528,54 @@ def test_full_chain_locks_battery_block_for_stacking():
 
 
 # ---------------------------------------------------------------------------
-# Dual-side anchor regression: a THT-heavy block (battery, terminal block,
-# screw header) has copper on BOTH layers because each PTH pad reports as
-# both front_pad and back_pad in extract_leaf_blocker_set. dominant_blocker_
-# side then returns "dual" rather than "back". This test pins down the
-# anchor selection contract for that case so a future change to
-# dominant_blocker_side or _stack_compatible_blocks doesn't silently make
-# THT-anchored stacking disappear.
+# THT-anchor regression: a THT-heavy block (battery holder, screw terminal)
+# has annular ring shadow on BOTH layers around each PTH drill. Before the
+# LeafBlockerSet split those shadow rects were stored in front_pads /
+# back_pads, which made dominant_blocker_side return "dual" and
+# can_overlap_sparse's outline gate refuse overlap with any front-only
+# candidate -- killing LLUPS-style SMT-on-back-THT stacking.
+#
+# The fix moved THT pad rings into front_tht_pads / back_tht_pads (still
+# checked for per-pad shorts via union, but excluded from outline-area
+# intent). Two contracts pinned below: (1) a THT anchor with REAL back
+# copper (typical battery holder with B.Cu battery contacts) auto-detects
+# as "back" without any project override; (2) a pure-THT anchor (screw
+# terminal with no SMT pads at all) classifies as "none" by geometry and
+# still requires the force_back_only override to declare placement intent.
 
 
-def test_dual_side_anchor_with_force_back_only_override_stacks():
-    """Mirrors the LLUPS BATT geometry: a large block with PTH pads at
-    the four corners of an otherwise empty body. The blocker set has
-    equal front_pads and back_pads (PTH copper on both layers), so
-    can_overlap_sparse's same-layer-outline gate fires for both
-    layers and refuses overlap with any front-only candidate.
+def test_thT_anchor_with_real_back_pads_auto_detects_as_back():
+    """A typical battery holder has THT corner pads (drill-shadow on
+    both layers) PLUS real B.Cu battery contact pads. The contact pads
+    establish "back-side intent"; the THT corner shadow must NOT count
+    as front-side intent. Result: ``dominant_blocker_side`` returns
+    "back" without any project override, ``_stack_compatible_blocks``
+    treats it as a back-side anchor, and a front-only SMT candidate
+    stacks on top and survives ``_resolve_overlaps``.
 
-    Project config opts the leaf in via
-    ``parent_placement.backside_through_hole_leaves``; that lands as
-    ``block_force_back_only=True`` on the synthetic block, which
-    suppresses the front-side gate and lets SMT-on-front leaves stack."""
-    pad_rects = [
+    This is the LLUPS BATT case the predicate fix targets. Before the
+    fix, the THT corner rings impersonated F.Cu intent and the anchor
+    looked "dual", forcing the user to set
+    ``parent_placement.backside_through_hole_leaves: ["BATT"]`` just
+    to declare what the geometry already implies."""
+    tht_corner_rings = [
         (Point(0.0, 0.0), Point(8.0, 8.0)),
         (Point(72.0, 0.0), Point(80.0, 8.0)),
         (Point(0.0, 52.0), Point(8.0, 60.0)),
         (Point(72.0, 52.0), Point(80.0, 60.0)),
     ]
+    real_back_contact_pads = [
+        # Battery contact strips on B.Cu, in the empty middle of the
+        # body where the candidate also wants to land. Slightly off-
+        # center on the y-axis so the candidate row-pack lands above
+        # the contacts rather than on top of them.
+        (Point(20.0, 38.0), Point(60.0, 50.0)),
+    ]
     anchor_blockers = _blocker_set(
-        front_pads=pad_rects,
-        back_pads=pad_rects,
+        back_pads=real_back_contact_pads,
+        front_tht_pads=tht_corner_rings,
+        back_tht_pads=tht_corner_rings,
+        tht_drills=tht_corner_rings,
         leaf_outline=(Point(0.0, 0.0), Point(80.0, 60.0)),
     )
     cand_blockers = _blocker_set(
@@ -558,7 +586,7 @@ def test_dual_side_anchor_with_force_back_only_override_stacks():
         "BATT", pos=Point(60.0, 60.0), width=80.0, height=60.0,
         blocker_set=anchor_blockers, locked=True,
     )
-    anchor.block_force_back_only = True
+    # Crucially: NO block_force_back_only override.
     cand = _block(
         "BOOST", pos=Point(180.0, 60.0), width=20.0, height=12.0,
         blocker_set=cand_blockers, locked=False,
@@ -570,20 +598,27 @@ def test_dual_side_anchor_with_force_back_only_override_stacks():
     solver._resolve_overlaps(state.components)
 
     assert _inside_bbox(cand, anchor, slack=1.0), (
-        "Front-only candidate should stack on a force_back_only-flagged "
-        "BATT anchor and survive _resolve_overlaps. If this fails, the "
-        "project config override path is broken. cand pos={!r}, "
-        "BATT bbox={}".format(cand.pos, anchor.bbox())
+        "Front-only candidate should auto-stack on a THT anchor with "
+        "real B.Cu pads -- the THT corner-ring shadow must not count as "
+        "F.Cu intent. cand pos={!r}, BATT bbox={}".format(
+            cand.pos, anchor.bbox()
+        )
     )
 
 
-def test_dual_side_anchor_without_override_does_not_stack():
-    """Pin down the current default behaviour: without the project
-    override, a PTH-only THT anchor's front-shadow pads count as F.Cu
-    occupancy and the same-layer-outline gate refuses overlap with a
-    front-only candidate. Documents what the override is needed for
-    (so a future predicate refinement that auto-detects the case
-    surfaces as XPASS-on-this-test instead of silent regression)."""
+def test_pure_THT_anchor_still_requires_force_back_only_override():
+    """A pure-THT anchor (e.g. a 0.1-inch pin-header strip) has annular
+    ring shadow on both layers and NO real SMT copper anywhere. The
+    geometry alone cannot determine which side the leaf is meant to
+    live on -- that is project intent, not blocker geometry.
+
+    ``dominant_blocker_side`` returns "none" for such a leaf;
+    ``_stack_compatible_blocks`` skips "none"-side anchors. The
+    project-level ``parent_placement.backside_through_hole_leaves``
+    override (lands as ``block_force_back_only=True``) remains the
+    declared escape hatch for these cases. This test pins both halves
+    of that contract: without override = no stacking, with override =
+    stacking succeeds."""
     pad_rects = [
         (Point(0.0, 0.0), Point(8.0, 8.0)),
         (Point(72.0, 0.0), Point(80.0, 8.0)),
@@ -591,59 +626,75 @@ def test_dual_side_anchor_without_override_does_not_stack():
         (Point(72.0, 52.0), Point(80.0, 60.0)),
     ]
     anchor_blockers = _blocker_set(
-        front_pads=pad_rects,
-        back_pads=pad_rects,
+        front_tht_pads=pad_rects,
+        back_tht_pads=pad_rects,
+        tht_drills=pad_rects,
         leaf_outline=(Point(0.0, 0.0), Point(80.0, 60.0)),
     )
     cand_blockers = _blocker_set(
         front_pads=[(Point(0.0, 0.0), Point(20.0, 12.0))],
         leaf_outline=(Point(0.0, 0.0), Point(20.0, 12.0)),
     )
+
+    # Half 1: no override -> "none"-side anchor -> no stacking.
     anchor = _block(
-        "BATT", pos=Point(60.0, 60.0), width=80.0, height=60.0,
+        "TERMINAL", pos=Point(60.0, 60.0), width=80.0, height=60.0,
         blocker_set=anchor_blockers, locked=True,
     )
-    # No override applied -> default behaviour.
     cand = _block(
         "BOOST", pos=Point(180.0, 60.0), width=20.0, height=12.0,
         blocker_set=cand_blockers, locked=False,
     )
     state = _board({anchor.ref: anchor, cand.ref: cand})
     solver = _solver(state)
-
     solver._stack_compatible_blocks(state.components)
     solver._resolve_overlaps(state.components)
-
     assert not _inside_bbox(cand, anchor, slack=1.0), (
-        "Without backside_through_hole_leaves override, candidate should "
-        "be pushed out by _resolve_overlaps because the front-shadow PTH "
-        "pads on the anchor count as F.Cu occupancy. If this assertion "
-        "fires, an automatic-detection predicate has landed -- update "
-        "this test (and remove the override-required marker on the "
-        "stacking test) to reflect the new contract."
+        "Pure-THT anchor with no real layer copper should classify as "
+        "'none' and not be selected as a stacking anchor without an "
+        "explicit project override."
+    )
+
+    # Half 2: with override -> forces "back" classification -> stacks.
+    anchor.block_force_back_only = True
+    cand.pos = Point(180.0, 60.0)
+    state = _board({anchor.ref: anchor, cand.ref: cand})
+    solver = _solver(state)
+    solver._stack_compatible_blocks(state.components)
+    solver._resolve_overlaps(state.components)
+    assert _inside_bbox(cand, anchor, slack=1.0), (
+        "Pure-THT anchor with block_force_back_only=True should host "
+        "front-only candidates as a back-side anchor. cand pos={!r}, "
+        "anchor bbox={}".format(cand.pos, anchor.bbox())
     )
 
 
 def test_charger_style_continuous_fcu_still_rejected():
     """Regression: commit 6c15e92's fix for CHARGER+BOOST_5V
     continuous-F.Cu stamping shorts (~45 shorting_items per candidate)
-    must still hold. Both leaves with F.Cu traces + outline overlap
-    must be incompatible. If this regresses, real-world parent compose
-    will reproduce the original short-stack bug."""
+    must still hold AFTER the THT-shadow split. Both leaves carry real
+    F.Cu intent (SMT pads + routed traces); the outline gate must
+    still refuse overlap when their outlines coincide. If this
+    regresses, real-world parent compose will reproduce the original
+    short-stack bug."""
     from kicraft.autoplacer.brain.subcircuit_composer import (
         LeafBlockerSet,
         can_overlap_sparse,
     )
 
-    # CHARGER-shape: SMT F.Cu pads + routed F.Cu traces + back PTH drill.
+    # CHARGER-shape: real SMT F.Cu pads + routed F.Cu traces + a back-
+    # side PTH drill (annular ring shadow now lives in back_tht_pads
+    # rather than back_pads, since it's not real B.Cu intent).
     charger_bs = LeafBlockerSet(
         front_pads=(
             (Point(2.0, 2.0), Point(4.0, 3.0)),
             (Point(2.0, 5.0), Point(4.0, 6.0)),
         ),
-        back_pads=((Point(20.0, 2.0), Point(22.0, 3.0)),),  # PTH back shadow
+        back_pads=(),
         front_traces=((Point(4.0, 2.5), Point(20.0, 3.0)),),  # routed F.Cu
         back_traces=(),
+        front_tht_pads=((Point(20.0, 2.0), Point(22.0, 3.0)),),
+        back_tht_pads=((Point(20.0, 2.0), Point(22.0, 3.0)),),
         tht_drills=((Point(20.5, 2.0), Point(22.5, 3.0)),),
         leaf_outline=(Point(0.0, 0.0), Point(30.0, 20.0)),
     )
@@ -664,10 +715,98 @@ def test_charger_style_continuous_fcu_still_rejected():
         charger_bs, origin, 0.0,
         boost_bs, origin, 0.0,
     ), (
-        "CHARGER (front traces) + BOOST_5V (front traces) with overlapping "
-        "outlines must be incompatible -- this is the original 6c15e92 "
-        "guarantee. If this passes (compatible), continuous-F.Cu shorts "
-        "will reappear."
+        "CHARGER (front pads + traces) + BOOST_5V (front pads + traces) "
+        "with overlapping outlines must be incompatible -- this is the "
+        "original 6c15e92 guarantee. If this passes (compatible), "
+        "continuous-F.Cu shorts will reappear."
+    )
+
+
+def test_outline_gate_uses_real_pads_not_THT_shadows():
+    """Direct contract test for the predicate's outline gate.
+
+    A leaf with ONLY THT pad rings on F.Cu (no real F.Cu pads, no
+    F.Cu traces) must NOT trigger the same-layer outline gate
+    against a front-only SMT leaf -- the per-pad checks already
+    cover ring-vs-pad collisions. The gate exists only for
+    continuous F.Cu plane / pour scenarios, and a sparse drill
+    shadow is not that."""
+    from kicraft.autoplacer.brain.subcircuit_composer import (
+        LeafBlockerSet,
+        can_overlap_sparse,
+    )
+
+    tht_only = LeafBlockerSet(
+        front_pads=(),
+        back_pads=(),
+        front_tht_pads=(
+            (Point(0.0, 0.0), Point(2.0, 2.0)),
+            (Point(28.0, 18.0), Point(30.0, 20.0)),
+        ),
+        back_tht_pads=(
+            (Point(0.0, 0.0), Point(2.0, 2.0)),
+            (Point(28.0, 18.0), Point(30.0, 20.0)),
+        ),
+        tht_drills=(
+            (Point(0.5, 0.5), Point(1.5, 1.5)),
+            (Point(28.5, 18.5), Point(29.5, 19.5)),
+        ),
+        leaf_outline=(Point(0.0, 0.0), Point(30.0, 20.0)),
+    )
+    smt_only_front = LeafBlockerSet(
+        front_pads=((Point(10.0, 8.0), Point(20.0, 12.0)),),
+        back_pads=(),
+        tht_drills=(),
+        leaf_outline=(Point(0.0, 0.0), Point(30.0, 20.0)),
+    )
+    # Outlines fully coincide; SMT pad sits in the empty middle of
+    # the THT outline, between the two corner drills.
+    assert can_overlap_sparse(
+        tht_only, Point(0.0, 0.0), 0.0,
+        smt_only_front, Point(0.0, 0.0), 0.0,
+    ), (
+        "THT-shadow-only outline overlapping a front-only SMT leaf must "
+        "be allowed -- THT annular ring shadow does not represent "
+        "continuous F.Cu copper. If this fails, the outline gate is "
+        "wrongly counting front_tht_pads as front intent."
+    )
+
+
+def test_outline_gate_fires_on_mixed_THT_plus_real_smt_front():
+    """Guard against over-correction. A leaf with BOTH THT corner rings
+    AND a real SMT F.Cu pad still has front-side intent (the real SMT
+    pad). The outline gate must still fire against another front-only
+    leaf to avoid the original CHARGER-style continuous-F.Cu shorts."""
+    from kicraft.autoplacer.brain.subcircuit_composer import (
+        LeafBlockerSet,
+        can_overlap_sparse,
+    )
+
+    mixed = LeafBlockerSet(
+        front_pads=((Point(10.0, 8.0), Point(15.0, 10.0)),),  # real SMT
+        back_pads=(),
+        front_tht_pads=((Point(0.0, 0.0), Point(2.0, 2.0)),),
+        back_tht_pads=((Point(0.0, 0.0), Point(2.0, 2.0)),),
+        tht_drills=((Point(0.5, 0.5), Point(1.5, 1.5)),),
+        leaf_outline=(Point(0.0, 0.0), Point(30.0, 20.0)),
+    )
+    smt_other_front = LeafBlockerSet(
+        front_pads=((Point(20.0, 8.0), Point(25.0, 10.0)),),
+        back_pads=(),
+        tht_drills=(),
+        leaf_outline=(Point(0.0, 0.0), Point(30.0, 20.0)),
+    )
+    # Outlines fully coincide; per-pad checks miss because the SMT
+    # pads are in different XY ranges. The outline gate must catch
+    # this on the strength of the real F.Cu intent on both leaves.
+    assert not can_overlap_sparse(
+        mixed, Point(0.0, 0.0), 0.0,
+        smt_other_front, Point(0.0, 0.0), 0.0,
+    ), (
+        "A leaf with BOTH THT corners AND real SMT F.Cu copper still "
+        "has front-side intent; outlines coinciding with another "
+        "front-intent leaf must be rejected to prevent continuous-F.Cu "
+        "plane shorts."
     )
 
 

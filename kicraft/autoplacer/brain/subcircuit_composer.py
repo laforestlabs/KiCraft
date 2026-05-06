@@ -153,7 +153,20 @@ class ParentComposition:
 
 @dataclass(frozen=True)
 class LeafBlockerSet:
-    """Sparse per-feature keepouts for one leaf in local coordinates."""
+    """Sparse per-feature keepouts for one leaf in local coordinates.
+
+    THT (plated through-hole) pad copper is annular ring shadow on BOTH
+    layers above/below each drill -- not a real layer-occupancy signal.
+    A leaf full of pure-THT components occupies its outline only at the
+    drill positions and is otherwise transparent to opposite-layer SMT
+    placements stacked on top. To reflect this, THT pad rectangles are
+    tracked in ``front_tht_pads`` / ``back_tht_pads`` rather than mixed
+    into ``front_pads`` / ``back_pads``. The outline-overlap gate in
+    ``can_overlap_sparse`` and the layer classifier in
+    ``dominant_blocker_side`` therefore see only *real* (SMT + trace)
+    F.Cu / B.Cu intent; the per-pad shorting checks combine SMT and
+    THT pad lists so existing geometric coverage is preserved.
+    """
 
     front_pads: tuple[tuple[Point, Point], ...]
     back_pads: tuple[tuple[Point, Point], ...]
@@ -161,6 +174,8 @@ class LeafBlockerSet:
     leaf_outline: tuple[Point, Point]
     front_traces: tuple[tuple[Point, Point], ...] = ()
     back_traces: tuple[tuple[Point, Point], ...] = ()
+    front_tht_pads: tuple[tuple[Point, Point], ...] = ()
+    back_tht_pads: tuple[tuple[Point, Point], ...] = ()
     component_rects: dict[str, tuple[Point, Point]] = field(default_factory=dict)
     # Per-footprint "PCB Edge" reference marker in leaf-local coordinates.
     # When a constrained component carries a marker, its coordinate overrides
@@ -1454,6 +1469,8 @@ def _extract_blockers_from_layout(
 ) -> LeafBlockerSet:
     front_pads: list[tuple[Point, Point]] = []
     back_pads: list[tuple[Point, Point]] = []
+    front_tht_pads: list[tuple[Point, Point]] = []
+    back_tht_pads: list[tuple[Point, Point]] = []
     tht_drills: list[tuple[Point, Point]] = []
     front_traces, back_traces = _trace_blocker_rects(
         artifact.layout.traces,
@@ -1472,8 +1489,13 @@ def _extract_blockers_from_layout(
         for pad in component.pads:
             pad_rect = _rect_from_center(pad.pos, pad_half_w, pad_half_h)
             if component.is_through_hole:
-                front_pads.append(pad_rect)
-                back_pads.append(pad_rect)
+                # THT pads are annular ring shadow on both layers, not
+                # a real layer-occupancy signal. Track separately so
+                # the outline gate / dominant-side classifier ignore
+                # them, while pad-vs-pad checks still combine them
+                # with SMT pads to catch overlapping copper.
+                front_tht_pads.append(pad_rect)
+                back_tht_pads.append(pad_rect)
                 tht_drills.append(
                     _rect_from_center(pad.pos, drill_half_w, drill_half_h)
                 )
@@ -1492,6 +1514,8 @@ def _extract_blockers_from_layout(
         leaf_outline=_artifact_outline(artifact),
         front_traces=_coalesce_rects(front_traces),
         back_traces=_coalesce_rects(back_traces),
+        front_tht_pads=_coalesce_rects(front_tht_pads),
+        back_tht_pads=_coalesce_rects(back_tht_pads),
         component_rects={
             ref: _component_local_bbox(component)
             for ref, component in artifact.layout.components.items()
@@ -1524,14 +1548,20 @@ def _extract_blockers_from_pcb(
         return None
     front_pads: list[tuple[Point, Point]] = []
     back_pads: list[tuple[Point, Point]] = []
+    front_tht_pads: list[tuple[Point, Point]] = []
+    back_tht_pads: list[tuple[Point, Point]] = []
     tht_drills: list[tuple[Point, Point]] = []
     front_traces, back_traces = _trace_blocker_rects(
         artifact.layout.traces,
         margin_mm=pad_margin_mm,
     )
-    copper_layers = {
+    smt_copper_layers = {
         pcbnew.F_Cu: front_pads,
         pcbnew.B_Cu: back_pads,
+    }
+    tht_copper_layers = {
+        pcbnew.F_Cu: front_tht_pads,
+        pcbnew.B_Cu: back_tht_pads,
     }
     component_rects: dict[str, tuple[Point, Point]] = {}
     edge_reference_points: dict[str, Point] = {}
@@ -1605,7 +1635,14 @@ def _extract_blockers_from_pcb(
                 or drill_x_mm > 0.0
                 or drill_y_mm > 0.0
             )
-            for layer_id, target in copper_layers.items():
+            # PTH pads route to front_tht_pads/back_tht_pads (annular
+            # ring shadow on both layers); SMT pads route to
+            # front_pads or back_pads based on the layer they flash.
+            # The split lets the outline gate / dominant-side classifier
+            # ignore THT shadow as "real layer intent" while pad-vs-pad
+            # checks still combine SMT + THT lists.
+            target_layers = tht_copper_layers if is_through_hole else smt_copper_layers
+            for layer_id, target in target_layers.items():
                 if not pad.CanFlashLayer(layer_id):
                     continue
                 bbox = pad.GetBoundingBox(layer_id)
@@ -1650,6 +1687,8 @@ def _extract_blockers_from_pcb(
         leaf_outline=_bbox_to_rect(board_edges),
         front_traces=_coalesce_rects(front_traces),
         back_traces=_coalesce_rects(back_traces),
+        front_tht_pads=_coalesce_rects(front_tht_pads),
+        back_tht_pads=_coalesce_rects(back_tht_pads),
         component_rects=component_rects,
         edge_reference_points=edge_reference_points,
     )
@@ -1694,6 +1733,12 @@ def extract_leaf_blocker_set(
 
 
 def dominant_blocker_side(blocker_set: LeafBlockerSet) -> Literal["front", "back", "dual", "none"]:
+    # Real-intent area only. ``front_tht_pads`` / ``back_tht_pads``
+    # are THT annular ring shadow on both layers and don't represent
+    # F.Cu / B.Cu layer commitment; counting them would misclassify a
+    # THT-only leaf with real B.Cu pads (e.g. LLUPS BATT) as ``dual``,
+    # which then blocks ``_stack_compatible_blocks`` from using it as
+    # an opposite-side anchor.
     front_area = sum(_rect_area(rect) for rect in blocker_set.front_pads) + sum(
         _rect_area(rect) for rect in blocker_set.front_traces
     )
@@ -1724,26 +1769,36 @@ def can_overlap_sparse(
     force_back_only_a: bool = False,
     force_back_only_b: bool = False,
 ) -> bool:
+    # Combined SMT + THT pad lists per layer. Per-rect overlap checks
+    # must catch any same-layer F.Cu / B.Cu copper conflict regardless
+    # of whether the rect came from an SMT pad or a THT annular ring;
+    # the dataclass split moved THT rings into ``front_tht_pads`` /
+    # ``back_tht_pads`` only so the OUTLINE GATE below can ignore them
+    # as non-intent shadow. Per-pad coverage stays whole via the union.
+    front_pads_a = blocker_a.front_pads + blocker_a.front_tht_pads
+    back_pads_a = blocker_a.back_pads + blocker_a.back_tht_pads
+    front_pads_b = blocker_b.front_pads + blocker_b.front_tht_pads
+    back_pads_b = blocker_b.back_pads + blocker_b.back_tht_pads
     if _any_rect_overlap(
-        blocker_a.front_pads,
+        front_pads_a,
         origin_a,
         rotation_a,
-        blocker_b.front_pads,
+        front_pads_b,
         origin_b,
         rotation_b,
     ):
         return False
     if _any_rect_overlap(
-        blocker_a.back_pads,
+        back_pads_a,
         origin_a,
         rotation_a,
-        blocker_b.back_pads,
+        back_pads_b,
         origin_b,
         rotation_b,
     ):
         return False
     if _any_rect_overlap(
-        blocker_a.front_pads,
+        front_pads_a,
         origin_a,
         rotation_a,
         blocker_b.tht_drills,
@@ -1755,13 +1810,13 @@ def can_overlap_sparse(
         blocker_a.tht_drills,
         origin_a,
         rotation_a,
-        blocker_b.front_pads,
+        front_pads_b,
         origin_b,
         rotation_b,
     ):
         return False
     if _any_rect_overlap(
-        blocker_a.back_pads,
+        back_pads_a,
         origin_a,
         rotation_a,
         blocker_b.tht_drills,
@@ -1773,7 +1828,7 @@ def can_overlap_sparse(
         blocker_a.tht_drills,
         origin_a,
         rotation_a,
-        blocker_b.back_pads,
+        back_pads_b,
         origin_b,
         rotation_b,
     ):
@@ -1791,7 +1846,7 @@ def can_overlap_sparse(
         blocker_a.front_traces,
         origin_a,
         rotation_a,
-        blocker_b.front_pads + blocker_b.front_traces,
+        front_pads_b + blocker_b.front_traces,
         origin_b,
         rotation_b,
     ):
@@ -1800,13 +1855,13 @@ def can_overlap_sparse(
         blocker_a.back_traces,
         origin_a,
         rotation_a,
-        blocker_b.back_pads + blocker_b.back_traces,
+        back_pads_b + blocker_b.back_traces,
         origin_b,
         rotation_b,
     ):
         return False
     if _any_rect_overlap(
-        blocker_a.front_pads,
+        front_pads_a,
         origin_a,
         rotation_a,
         blocker_b.front_traces,
@@ -1815,7 +1870,7 @@ def can_overlap_sparse(
     ):
         return False
     if _any_rect_overlap(
-        blocker_a.back_pads,
+        back_pads_a,
         origin_a,
         rotation_a,
         blocker_b.back_traces,
@@ -1826,30 +1881,35 @@ def can_overlap_sparse(
 
     outline_a = _transform_rect(blocker_a.leaf_outline, origin_a, rotation_a)
     outline_b = _transform_rect(blocker_b.leaf_outline, origin_b, rotation_b)
-    # Same-layer outline overlap is forbidden, full stop. The sparse
-    # rect checks above only inspect specific pads/traces; they miss
-    # the continuous F.Cu plane between them, so a leaf with sparse
-    # F.Cu pads at (10,5) and (15,5) reports compatible with another
-    # leaf whose pad sits at (12,5) -- but the leaves' actual stamped
-    # copper, components, silkscreen, and mask occupy the full leaf
-    # rectangle. Two leaves with any meaningful copper on the same
-    # physical layer cannot share an XY footprint regardless of which
-    # specific pad rects happen to miss each other.
+    # Same-layer outline overlap is forbidden when both leaves have
+    # MEANINGFUL same-layer copper. The sparse rect checks above only
+    # inspect specific pads/traces; they miss the continuous F.Cu
+    # plane between them, so a leaf with sparse F.Cu pads at (10,5)
+    # and (15,5) reports compatible with another leaf whose pad sits
+    # at (12,5) -- but the leaves' actual stamped copper, components,
+    # silkscreen, and mask occupy the full leaf rectangle.
     #
-    # Was previously gated on `side_a == side_b in {front, back}`,
-    # which left the (dual, front) and (dual, back) cases uncovered:
-    # CHARGER (dual: front SMT + back THT drills) ended up marked
-    # compatible with BOOST_5V (front-only) on LLUPS, so the solver
-    # let them stack on F.Cu and DRC reported ~45 shorting_items.
+    # "Meaningful" excludes ``front_tht_pads`` / ``back_tht_pads``
+    # (annular ring shadow around through-hole drills): a pure-THT
+    # leaf doesn't actually carry a continuous F.Cu plane that would
+    # short with an SMT-on-front leaf stacked above. Sparse drill /
+    # ring overlaps are caught by the per-pad checks above. This is
+    # what re-enables LLUPS-style stacking (SMT regulators on top of
+    # the back-side THT battery holder) without the manual
+    # ``force_back_only`` override having to be set per-project.
     #
-    # ``force_back_only_*`` is a project-level escape hatch for leaves
-    # whose front-layer copper is the shadow of through-hole pads
-    # rather than real F.Cu intent (battery holders, screw terminals).
+    # The original 6c15e92 fix targeted the (dual, front) and (dual,
+    # back) cases where dual = REAL SMT/trace copper on both layers
+    # (e.g. CHARGER's front SMT pads + back PTH drill); those still
+    # have non-zero ``front_pads`` area after the dataclass split, so
+    # the gate still fires for them.
+    #
+    # ``force_back_only_*`` remains as a project-level override for
+    # leaves the auto-detection cannot infer (a pure-THT screw
+    # terminal whose intended placement layer is project-specific).
     # Passed through from
     # cfg["parent_placement"]["backside_through_hole_leaves"] via the
-    # synthetic block component's block_force_back_only flag. When set,
-    # the leaf is treated as having no front-side copper for the
-    # outline-overlap gate, so SMT-on-front leaves may stack on it.
+    # synthetic block component's block_force_back_only flag.
     front_a = (
         sum(_rect_area(r) for r in blocker_a.front_pads)
         + sum(_rect_area(r) for r in blocker_a.front_traces)
