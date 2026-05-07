@@ -266,12 +266,18 @@ def attempt_leaf_size_reduction(
         }
         return extraction, best_round, summary
 
-    if best_round.routing.get("reason") == "no_internal_nets":
-        summary["validation"] = {
-            "accepted": False,
-            "reason": "no_internal_nets",
-        }
-        return extraction, best_round, summary
+    # Previously skipped trivial leaves ("no_internal_nets") here so the
+    # reducer never touched battery holders / pure-pass-through subcircuits.
+    # That caused the outline to stay at whatever the extractor emitted
+    # (often 6-15 mm of slack around the actual component extents),
+    # bloating parent compose. The reroute path for trivial leaves goes
+    # through _stamp_trivial_leaf which just re-stamps the placed board
+    # with route_input_board.board_outline -- which IS the candidate's
+    # reduced outline -- so shrinking trivial leaves is safe and the
+    # reroute is fast (no FreeRouting). The legality check still gates
+    # acceptance: candidates that put pads outside the new outline are
+    # rejected like for any other leaf. So the early-return is dropped
+    # and trivial leaves go through the same loop as routed ones.
 
     if min_width >= original_width and min_height >= original_height:
         summary["validation"] = {

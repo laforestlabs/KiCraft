@@ -262,7 +262,20 @@ def _auto_pin_best_leaves(project_dir: Path) -> None:
         artifact_dir = Path(art["artifact_dir"])
         leaf_key = artifact_dir.name
 
-        debug = _load_json(artifact_dir / "debug.json")
+        # Some leaves may finish without debug.json -- e.g. when
+        # legality repair fails partway and the per-round trace is
+        # never serialized. Treat that as "no scored rounds" and clear
+        # any stale pin, rather than crashing the whole run.
+        debug_path = artifact_dir / "debug.json"
+        if not debug_path.exists():
+            if pins_module.unpin_leaf(experiments_dir, leaf_key):
+                cleared += 1
+                print(f"  cleared stale pin: {leaf_key} (no debug.json)")
+            else:
+                skipped += 1
+            continue
+
+        debug = _load_json(debug_path)
         extra = debug.get("extra", {}) if isinstance(debug, dict) else {}
         all_rounds = extra.get("all_rounds") if isinstance(extra, dict) else None
 
