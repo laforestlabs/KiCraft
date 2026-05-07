@@ -5,13 +5,30 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from nicegui import ui
+from nicegui import app, ui
 
 from .pages.analysis import analysis_page
 from .pages.manual_layout import manual_layout_page
 from .pages.monitor import monitor_page
 from .pages.setup import setup_page
 from .state import get_state
+
+
+def _mount_experiment_assets() -> None:
+    """Expose .experiments/ as /experiments/ for the manual layout canvas.
+
+    The Manual Layout tab embeds each leaf's routed_front_all.png as
+    an SVG <image> element; the browser fetches it via this static
+    mount. Mounting at /experiments/ keeps the URL space namespaced so
+    nothing else collides with KiCraft artifact paths.
+    """
+    state = get_state()
+    experiments_dir = state.experiments_dir
+    if experiments_dir.is_dir():
+        app.add_static_files("/experiments", str(experiments_dir))
+
+
+_mount_experiment_assets()
 
 
 def _load_json(path: Path) -> dict | None:

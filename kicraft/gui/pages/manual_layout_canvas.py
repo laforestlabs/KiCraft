@@ -26,6 +26,7 @@ def _build_canvas_config(
             "width_mm": lf.width_mm,
             "height_mm": lf.height_mm,
             "color": lf.color,
+            "render_url": lf.render_url,
         }
         for lf in leaves
     ]
@@ -65,20 +66,28 @@ def build_canvas_html(
   .ml-leaf {{ cursor: grab; }}
   .ml-leaf.dragging {{ cursor: grabbing; }}
   .ml-leaf .ml-leaf-body {{
-    fill-opacity: 0.78;
-    stroke: #f8fafc;
-    stroke-width: 0.4;
+    fill-opacity: 0.18;
+    stroke: #94a3b8;
+    stroke-width: 0.25;
+    stroke-dasharray: 0.6 0.6;
   }}
   .ml-leaf.selected .ml-leaf-body {{
     stroke: #facc15;
-    stroke-width: 0.7;
+    stroke-width: 0.6;
+    stroke-dasharray: none;
+  }}
+  .ml-leaf-img {{
+    pointer-events: none;
   }}
   .ml-leaf-label {{
-    fill: #0f172a;
-    font: 600 2.4px sans-serif;
+    fill: #facc15;
+    font: 600 2.0px sans-serif;
     pointer-events: none;
     text-anchor: middle;
     dominant-baseline: middle;
+    paint-order: stroke;
+    stroke: #0f172a;
+    stroke-width: 0.4;
   }}
   .ml-rot-handle {{
     fill: #facc15;
@@ -263,10 +272,26 @@ _CANVAS_JS_TEMPLATE = """
       r.setAttribute('fill', leaf.color);
       g.appendChild(r);
 
+      // Routed-leaf PNG: pads + traces + silkscreen rendered by
+      // kicad-cli at fit-page-to-board, so it includes silkscreen
+      // overhang. Centered + aspect-preserved so the actual board
+      // content sits inside the dashed bbox without distortion.
+      if (leaf.render_url) {{
+        const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+        img.setAttribute('class', 'ml-leaf-img');
+        img.setAttribute('href', leaf.render_url);
+        img.setAttribute('x', 0);
+        img.setAttribute('y', 0);
+        img.setAttribute('width', leaf.width_mm);
+        img.setAttribute('height', leaf.height_mm);
+        img.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+        g.appendChild(img);
+      }}
+
       const lbl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
       lbl.setAttribute('class', 'ml-leaf-label');
       lbl.setAttribute('x', leaf.width_mm / 2);
-      lbl.setAttribute('y', leaf.height_mm / 2);
+      lbl.setAttribute('y', leaf.height_mm + 1.6);
       lbl.textContent = leaf.sheet_name;
       g.appendChild(lbl);
 

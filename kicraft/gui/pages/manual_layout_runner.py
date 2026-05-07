@@ -57,6 +57,28 @@ class LeafInfo:
     color: str = "#60a5fa"
 
 
+def _render_url_for(experiments_dir: Path, leaf_dir: Path) -> str | None:
+    """Map a leaf renders/routed_front_all.png to its /experiments URL.
+
+    Falls back to pre_route_front_all.png if routing hasn't completed
+    yet for this leaf. Returns None when neither file exists.
+    """
+    candidates = (
+        leaf_dir / "renders" / "routed_front_all.png",
+        leaf_dir / "renders" / "pre_route_front_all.png",
+    )
+    for cand in candidates:
+        if cand.is_file():
+            try:
+                rel = cand.relative_to(experiments_dir)
+            except ValueError:
+                return None
+            # Cache-bust on mtime so the canvas picks up new renders
+            # without forcing a hard browser reload.
+            return f"/experiments/{rel.as_posix()}?v={int(cand.stat().st_mtime)}"
+    return None
+
+
 def discover_leaves(experiments_dir: Path) -> list[LeafInfo]:
     """Scan .experiments/subcircuits/ for solved leaves.
 
@@ -95,6 +117,7 @@ def discover_leaves(experiments_dir: Path) -> list[LeafInfo]:
                 width_mm=w,
                 height_mm=h,
                 artifact_dir=leaf_dir,
+                render_url=_render_url_for(experiments_dir, leaf_dir),
             )
         )
 
