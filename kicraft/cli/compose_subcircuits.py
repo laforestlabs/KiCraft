@@ -57,6 +57,7 @@ from kicraft.autoplacer.brain.parent_adapter import (
     placements_from_solved_state,
     synthetic_block_ref,
 )
+from kicraft.autoplacer.brain.manual_layout import ManualLayout, load_manual_layout
 from kicraft.autoplacer.brain.placement_solver import PlacementSolver
 from kicraft.autoplacer.brain.subcircuit_composer import (
     AttachmentConstraint,
@@ -1111,6 +1112,7 @@ def _compose_artifacts(
     seed: int = 0,
     seed_area_overhead: float = 2.5,
     seed_aspect_target: float = 1.0,
+    manual_layout: ManualLayout | None = None,
 ) -> tuple[ParentCompositionState, list[dict[str, Any]]]:
     """Compose loaded artifacts into a parent composition snapshot.
 
@@ -1245,53 +1247,102 @@ def _compose_artifacts(
         for c in derived.parent_local_constraints
         if c.ref in parent_local
     ]
-    solver_cfg = {
-        **cfg,
-        **cfg.get("parent_placement", {}),
-        "component_zones": dict(block_zones),
-        "placement_clearance_mm": spacing_mm,
-        "clearance_mm": spacing_mm,
-        "parent_keep_in_rects": parent_keep_in_specs,
-    }
-    solver = PlacementSolver(state_in, config=solver_cfg, seed=seed)
-    solved = solver.solve()
-    solver_phase_timings = dict(getattr(solver, "last_solve_phase_timings", {}))
+    if manual_layout is not None:
+        # Manual mode: user-supplied placements + outline. Skip the solver
+        # and the auto outline-fit pass entirely. Validation, stamping and
+        # routing run unchanged on these placements.
+        manual_by_path = manual_layout.placement_by_path()
+        missing = [
+            art.instance_path
+            for art in loaded_artifacts
+            if art.instance_path not in manual_by_path
+        ]
+        if missing:
+            raise ValueError(
+                "manual layout missing placements for instance paths: "
+                + ", ".join(missing)
+            )
+        placements_dict = {
+            art.instance_path: ChildArtifactPlacement(
+                artifact=art,
+                origin=manual_by_path[art.instance_path].origin,
+                rotation=manual_by_path[art.instance_path].rotation,
+            )
+            for art in loaded_artifacts
+        }
+        # Honour user-supplied parent-local positions when present; else
+        # keep the extracted positions and let _snap_parent_local apply
+        # constraint targets within the manual outline.
+        parent_local_solved = {
+            ref: copy.deepcopy(comp) for ref, comp in parent_local.items()
+        }
+        manual_pl_by_ref = manual_layout.parent_local_by_ref()
+        for ref, mpl in manual_pl_by_ref.items():
+            comp = parent_local_solved.get(ref)
+            if comp is not None:
+                comp.pos = mpl.pos
+        solver_phase_timings = {}
 
-    # Slide any edge-constrained block whose free axis drifted outside the
-    # rest of the cluster's perpendicular span. The solver pins X (or Y)
-    # to the board edge but lets the free axis float; a leaf parked in a
-    # corner inflates the final outline because the orthogonal sides snap
-    # to include it. Bringing it back inside the cluster span lets
-    # _compute_final_outline shrink the board.
-    _slide_constrained_to_cluster(solved, derived, synthetic_refs)
+        placed_child_bboxes, placed_envelopes, _ignored_anchors, transformed_by_index = (
+            _post_solve_geometry(placements_dict, loaded_artifacts)
+        )
+        child_anchor_positions = _resolve_constraint_anchor_positions(
+            derived, placements_dict, loaded_artifacts, transformed_by_index, parent_local_solved
+        )
+        exact_outline = manual_layout.board_outline
+        _snap_parent_local(
+            parent_local_solved,
+            derived.parent_local_constraints,
+            exact_outline,
+        )
+    else:
+        solver_cfg = {
+            **cfg,
+            **cfg.get("parent_placement", {}),
+            "component_zones": dict(block_zones),
+            "placement_clearance_mm": spacing_mm,
+            "clearance_mm": spacing_mm,
+            "parent_keep_in_rects": parent_keep_in_specs,
+        }
+        solver = PlacementSolver(state_in, config=solver_cfg, seed=seed)
+        solved = solver.solve()
+        solver_phase_timings = dict(getattr(solver, "last_solve_phase_timings", {}))
 
-    # --- Recover artifact placements from solver output ---
-    placements_dict = placements_from_solved_state(solved, list(loaded_artifacts), synthetic_refs)
-    parent_local_solved: dict[str, Component] = {
-        ref: solved[ref] for ref in parent_local if ref in solved
-    }
+        # Slide any edge-constrained block whose free axis drifted outside the
+        # rest of the cluster's perpendicular span. The solver pins X (or Y)
+        # to the board edge but lets the free axis float; a leaf parked in a
+        # corner inflates the final outline because the orthogonal sides snap
+        # to include it. Bringing it back inside the cluster span lets
+        # _compute_final_outline shrink the board.
+        _slide_constrained_to_cluster(solved, derived, synthetic_refs)
 
-    # Build per-child geometry for outline + validation.
-    placed_child_bboxes, placed_envelopes, _ignored_anchors, transformed_by_index = (
-        _post_solve_geometry(placements_dict, loaded_artifacts)
-    )
-    child_anchor_positions = _resolve_constraint_anchor_positions(
-        derived, placements_dict, loaded_artifacts, transformed_by_index, parent_local_solved
-    )
+        # --- Recover artifact placements from solver output ---
+        placements_dict = placements_from_solved_state(solved, list(loaded_artifacts), synthetic_refs)
+        parent_local_solved: dict[str, Component] = {
+            ref: solved[ref] for ref in parent_local if ref in solved
+        }
 
-    placed_bbox_list = [
-        placed_child_bboxes[index] for index in sorted(placed_child_bboxes)
-    ]
-    exact_outline = _compute_final_outline(
-        placed_bbox_list, all_constraints, child_anchor_positions, spacing_mm
-    )
+        # Build per-child geometry for outline + validation.
+        placed_child_bboxes, placed_envelopes, _ignored_anchors, transformed_by_index = (
+            _post_solve_geometry(placements_dict, loaded_artifacts)
+        )
+        child_anchor_positions = _resolve_constraint_anchor_positions(
+            derived, placements_dict, loaded_artifacts, transformed_by_index, parent_local_solved
+        )
 
-    # Snap parent-local components to exact constraint coordinates.
-    _snap_parent_local(
-        parent_local_solved,
-        derived.parent_local_constraints,
-        exact_outline,
-    )
+        placed_bbox_list = [
+            placed_child_bboxes[index] for index in sorted(placed_child_bboxes)
+        ]
+        exact_outline = _compute_final_outline(
+            placed_bbox_list, all_constraints, child_anchor_positions, spacing_mm
+        )
+
+        # Snap parent-local components to exact constraint coordinates.
+        _snap_parent_local(
+            parent_local_solved,
+            derived.parent_local_constraints,
+            exact_outline,
+        )
 
     # --- Build CompositionEntry list + transformed_payloads in artifact order ---
     entries: list[CompositionEntry] = []
@@ -2459,6 +2510,7 @@ def _search_best_layout(
     base_seed: int,
     k: int = 8,
     time_budget_s: float = 60.0,
+    manual_layout: ManualLayout | None = None,
 ) -> SearchResult:
     """Generate K placement candidates, hard-prefer shorts==0, return the winner.
 
@@ -2480,6 +2532,12 @@ def _search_best_layout(
     base_cfg = dict(cfg or {})
     base_parent_placement = dict(base_cfg.get("parent_placement", {}))
     _search_cfg = dict(base_parent_placement.get("candidate_search", {}))
+
+    # Manual mode: collapse the candidate search to a single trial. The
+    # user has chosen the layout, so seed-aspect sweeping is meaningless
+    # and stamp_drc is informational rather than gating.
+    if manual_layout is not None:
+        k = 1
 
     # Resolve artifact_dir for candidate stamping. Mirrors the path
     # _stamp_parent_board() builds so downstream code finds the winner
@@ -2536,6 +2594,7 @@ def _search_best_layout(
             seed=seed_i,
             seed_area_overhead=seed_overhead_i,
             seed_aspect_target=seed_aspect_i,
+            manual_layout=manual_layout,
         )
         place_solve_ms = (time.perf_counter() - t_solve) * 1000.0
         state.phase_timings["place_solve_ms"] = place_solve_ms
@@ -2639,7 +2698,16 @@ def _search_best_layout(
         # of real signal. Let routing run; a layout that violates
         # geometry will produce a routed PNG showing exactly where the
         # problem is, which is more actionable than "round aborted".
-        accepted = shorts == 0
+        #
+        # Manual mode bypass: the user explicitly chose this placement.
+        # stamp_drc is informational (surfaced in the GUI), not a gate;
+        # auto-rejecting on shorts would force the user to redo the
+        # whole drag-route cycle when often a single track tweak in the
+        # routed result is enough.
+        if manual_layout is not None:
+            accepted = True
+        else:
+            accepted = shorts == 0
 
         rec = CandidateRecord(
             seed=seed_i,
@@ -3259,6 +3327,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "random-search to actually explore parent layouts (default: 0)."
         ),
     )
+    parser.add_argument(
+        "--manual-layout",
+        help=(
+            "Path to a manual_layout.v1 JSON file. When set, the candidate "
+            "search is skipped: leaf placements and the board outline are "
+            "taken verbatim from the file, and the rest of the pipeline "
+            "(stamp, stamp_drc, route) runs unchanged."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -3337,6 +3414,15 @@ def main(argv: list[str] | None = None) -> int:
         except (TypeError, ValueError):
             time_budget_s = 240.0
 
+        manual_layout: ManualLayout | None = None
+        if args.manual_layout:
+            manual_layout = load_manual_layout(args.manual_layout)
+            print(
+                f"[manual-layout] loaded {len(manual_layout.placements)} "
+                f"leaf placements + {len(manual_layout.parent_local)} parent-local "
+                f"overrides; outline={manual_layout.board_outline}"
+            )
+
         search_result = _search_best_layout(
             loaded_artifacts,
             spacing_mm=max(0.0, args.spacing_mm),
@@ -3348,6 +3434,7 @@ def main(argv: list[str] | None = None) -> int:
             base_seed=int(args.seed),
             k=k,
             time_budget_s=time_budget_s,
+            manual_layout=manual_layout,
         )
         state = search_result.winner_state
         transformed_payloads = search_result.winner_payloads
