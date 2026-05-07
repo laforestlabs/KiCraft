@@ -229,6 +229,14 @@ DEFAULT_CONFIG = {
     # composing them into the parent board.  1.17mm packs leaves tightly
     # without compromising routability (r=-0.41 in parents-only sweep).
     "parent_spacing_mm": 1.17,
+    # Parent seed area overhead -- multiplier on total child area to set
+    # the seed board's nominal area before the placer runs.  2.5 is the
+    # historical default; 1.8-2.0 forces compaction (placer cannot
+    # sprawl); 3.0+ leaves more slack at the cost of bigger final
+    # outlines.  Per-candidate aspect ratios are swept independently
+    # inside _search_best_layout so K=8 candidates already explore a
+    # spread of seed shapes.
+    "parent_seed_area_overhead": 2.5,
 }
 
 
@@ -300,6 +308,11 @@ CONFIG_SEARCH_SPACE = {
     "placement_grid_mm": {"min": 0.34, "max": 2.13, "sigma": 0.18, "type": "float"},
     "tht_backside_min_area_mm2": {"min": 80.0, "max": 176.0, "sigma": 10.0, "type": "float"},
     "parent_spacing_mm": {"min": 0.66, "max": 1.60, "sigma": 0.1, "type": "float"},
+    # parent_seed_area_overhead: lower = tighter seed (forces compaction);
+    # higher = looser (lets the placer sprawl).  1.5 floor avoids seeds
+    # that violate the sum*0.6 / max-child + spacing safety floors;
+    # 3.5 ceiling matches the legacy "lots of slack" upper end.
+    "parent_seed_area_overhead": {"min": 1.5, "max": 3.5, "sigma": 0.2, "type": "float"},
 }
 
 

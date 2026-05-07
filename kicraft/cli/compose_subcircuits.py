@@ -497,6 +497,9 @@ def _seed_outline_dimensions(
     loaded_artifacts,
     derived: DerivedAttachmentConstraints,
     spacing_mm: float,
+    *,
+    area_overhead: float = 2.5,
+    aspect_target: float = 1.0,
 ) -> tuple[float, float]:
     """Estimate (width, height) for the seed board outline the unified
     placer runs in.
@@ -509,6 +512,17 @@ def _seed_outline_dimensions(
     axis-pinning constraint exists -- so an aggressive ``USB on left +
     power on right`` config cannot collapse the seed below the children's
     natural width.
+
+    ``area_overhead`` (default 2.5) multiplies child total area to set
+    the seed's nominal area: lower = tighter seed = forces compaction;
+    higher = looser seed = lets the placer sprawl.
+
+    ``aspect_target`` (default 1.0 = square) is the seed's width/height
+    ratio.  Setting <1.0 produces a tall seed (favours vertical
+    layouts), >1.0 a wide seed (favours horizontal-strip layouts).  The
+    floors below (max widths/heights, sum*0.6, edge spans) still apply,
+    so an aggressive aspect cannot collapse the seed below what the
+    children actually need.
     """
     if not loaded_artifacts:
         return (max(20.0, spacing_mm * 4),) * 2
@@ -524,13 +538,17 @@ def _seed_outline_dimensions(
         widths.append(max(0.0, br.x - tl.x))
         heights.append(max(0.0, br.y - tl.y))
     total_area = sum(w * h for w, h in zip(widths, heights))
-    side = math.sqrt(max(total_area, 1.0) * 2.5) + spacing_mm * 2.0
+    target_area = max(total_area, 1.0) * max(0.5, area_overhead)
+    aspect = max(0.1, aspect_target)
+    base_w = math.sqrt(target_area * aspect) + spacing_mm * 2.0
+    base_h = math.sqrt(target_area / aspect) + spacing_mm * 2.0
     sum_w = sum(widths) + spacing_mm * (n + 1)
     sum_h = sum(heights) + spacing_mm * (n + 1)
-    # Side gives a square-ish base; sum_*/2 is the half-width if children
-    # are split evenly across axes. max(...) is a safe upper bound.
-    seed_w = max(side, sum_w * 0.6, max(widths) + spacing_mm * 4)
-    seed_h = max(side, sum_h * 0.6, max(heights) + spacing_mm * 4)
+    # Floors: max single child + spacing, sum*0.6 fallback, and the
+    # aspect-driven base.  The floors keep the seed solvable even when
+    # aspect_target is aggressive (e.g. 0.3 = very wide and short).
+    seed_w = max(base_w, sum_w * 0.6, max(widths) + spacing_mm * 4)
+    seed_h = max(base_h, sum_h * 0.6, max(heights) + spacing_mm * 4)
 
     horizontal_widths: list[float] = []
     vertical_heights: list[float] = []
@@ -1091,6 +1109,8 @@ def _compose_artifacts(
     pcb_path: Path | None = None,
     cfg: dict[str, Any] | None = None,
     seed: int = 0,
+    seed_area_overhead: float = 2.5,
+    seed_aspect_target: float = 1.0,
 ) -> tuple[ParentCompositionState, list[dict[str, Any]]]:
     """Compose loaded artifacts into a parent composition snapshot.
 
@@ -1185,7 +1205,13 @@ def _compose_artifacts(
     for ref, comp in parent_local.items():
         synthetic_comps[ref] = comp
 
-    seed_w, seed_h = _seed_outline_dimensions(loaded_artifacts, derived, spacing_mm)
+    seed_w, seed_h = _seed_outline_dimensions(
+        loaded_artifacts,
+        derived,
+        spacing_mm,
+        area_overhead=seed_area_overhead,
+        aspect_target=seed_aspect_target,
+    )
 
     parent_subcircuit = parent_definition or _synthetic_parent_definition(loaded_artifacts)
     interconnect_nets = infer_interconnect_nets_pre_placement(
@@ -2484,6 +2510,21 @@ def _search_best_layout(
             )
             break
         seed_i = base_seed + i
+        # Sweep the seed aspect linearly across the K candidates so each
+        # parents-only invocation explores a spread of horizontal-strip
+        # to vertical-stack shapes instead of K placements all starting
+        # from the same square seed.  i=0 is the most horizontal
+        # (aspect=0.6, wide+short), i=k-1 is the most vertical
+        # (aspect=1.7, tall+narrow).  K=1 stays at aspect=1.0 (square)
+        # for backward compatibility with single-candidate searches.
+        # area_overhead stays fixed -- it is config-tunable per round
+        # via parent_seed_area_overhead so users can dial overall seed
+        # tightness without forking the per-candidate aspect sweep.
+        if k > 1:
+            seed_aspect_i = 0.6 + (i / (k - 1)) * 1.1
+        else:
+            seed_aspect_i = 1.0
+        seed_overhead_i = float(base_cfg.get("parent_seed_area_overhead", 2.5))
         t_solve = time.perf_counter()
         state, payloads = _compose_artifacts(
             loaded_artifacts,
@@ -2493,6 +2534,8 @@ def _search_best_layout(
             pcb_path=pcb_path,
             cfg=base_cfg,
             seed=seed_i,
+            seed_area_overhead=seed_overhead_i,
+            seed_aspect_target=seed_aspect_i,
         )
         place_solve_ms = (time.perf_counter() - t_solve) * 1000.0
         state.phase_timings["place_solve_ms"] = place_solve_ms
@@ -2628,6 +2671,7 @@ def _search_best_layout(
         cand_pcb_paths.append(stamped)
         print(
             f"[candidate-search] cand={i} seed={seed_i} "
+            f"aspect={seed_aspect_i:.2f} "
             f"shorts={shorts} score={composite:.1f} "
             f"bh={placed_h_mm:.1f}mm bw={placed_w_mm:.1f}mm "
             f"oh={outline_h_mm:.1f}mm geom_ok={geometry_accepted} "

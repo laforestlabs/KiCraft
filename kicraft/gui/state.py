@@ -171,6 +171,7 @@ PLACEMENT_PARAMS: list[dict[str, Any]] = [
     {"key": "edge_margin_mm", "label": "Edge margin (mm)", "default": 6.0, "min": 0.5, "max": 15.0, "step": 0.5, "group": "Board Geometry", "description": "Keep-out distance from board edges"},
     {"key": "subcircuit_margin_mm", "label": "Subcircuit margin (mm)", "default": 10.82, "min": 6.97, "max": 13.38, "step": 0.5, "group": "Board Geometry", "description": "Extra space around leaf subcircuit bounding box"},
     {"key": "parent_spacing_mm", "label": "Parent spacing (mm)", "default": 1.17, "min": 0.66, "max": 1.60, "step": 0.05, "group": "Board Geometry", "description": "Spacing between subcircuits when composing into the parent board"},
+    {"key": "parent_seed_area_overhead", "label": "Parent seed overhead", "default": 2.5, "min": 1.5, "max": 3.5, "step": 0.1, "group": "Board Geometry", "description": "Multiplier on child total area to set the parent seed; lower = tighter (forces compaction). Aspect ratios are swept per candidate inside the round."},
     {"key": "placement_clearance_mm", "label": "Placement clearance (mm)", "default": 2.84, "min": 1.10, "max": 5.38, "step": 0.25, "group": "Board Geometry", "description": "Minimum gap between component bounding boxes"},
     {"key": "placement_grid_mm", "label": "Placement grid (mm)", "default": 1.20, "min": 0.34, "max": 2.13, "step": 0.1, "group": "Board Geometry", "description": "Snap grid resolution for component placement"},
     # -- Edge & Connectors --
