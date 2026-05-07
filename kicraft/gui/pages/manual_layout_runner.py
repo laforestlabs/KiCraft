@@ -307,17 +307,15 @@ def _seeded_grid(leaves: list[LeafInfo]) -> dict[str, Any]:
 
 
 def _find_latest_auto_layout(experiments_dir: Path) -> dict[str, Any] | None:
-    """Find the freshest parent_composition_routed.json under .experiments/."""
-    candidates: list[Path] = []
-    for sub_root in (experiments_dir / "subcircuits",):
-        if not sub_root.is_dir():
-            continue
-        for d in sub_root.iterdir():
-            if not d.is_dir():
-                continue
-            f = d / "parent_composition_routed.json"
-            if f.is_file():
-                candidates.append(f)
+    """Find the freshest parent_pipeline.json under .experiments/.
+
+    Recent runs land in ``.experiments/hierarchical_autoexperiment/
+    round_NNNN/parent_pipeline.json``; older `iter*` archives live
+    under sibling directories with the same per-round shape. Pick the
+    file with the latest mtime.
+    """
+    candidates = list(experiments_dir.glob("**/round_*/parent_pipeline.json"))
+    candidates += list(experiments_dir.glob("**/parent_composition_routed.json"))
     if not candidates:
         return None
     latest = max(candidates, key=lambda p: p.stat().st_mtime)
