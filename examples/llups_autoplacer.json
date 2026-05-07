@@ -110,12 +110,23 @@
     "parent_placement": {
         "candidate_search": {
             "k": 4,
-            "time_budget_s": 240.0,
-            "max_outline_height_mm": 120.0,
-            "max_outline_width_mm": 160.0
+            "time_budget_s": 240.0
         },
         "backside_through_hole_leaves": [
             "BATT"
         ]
+    },
+    "mounting_holes": {
+        "count": 2,
+        "screw": "M3",
+        "hole_diameter_mm": 3.2,
+        "pad": {
+            "shape": "hexagon",
+            "size_mm": 3.0
+        },
+        "keepout": {
+            "shape": "hexagon",
+            "size_mm": 4.0
+        }
     }
 }

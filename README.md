@@ -115,8 +115,8 @@ Three constraint types, all applied at solve time:
   edge. Pads face inward, housing overhangs outward by
   `connector_edge_inset_mm`.
 * `corner: top-left|top-right|bottom-left|bottom-right` — typically
-  mounting holes. Locks at the corner with `mounting_hole_keep_in_mm`
-  reserved.
+  mounting holes. Locks at the corner with `mounting_holes.keepout.size_mm`
+  reserved (see [Mounting holes](#mounting-holes) below).
 * `zone: top|bottom|left|right|...` — soft confinement to a region.
   The component is locked inside the zone; the solver may place it
   anywhere within it.
@@ -174,29 +174,61 @@ THT-back leaves; nothing is hardcoded to a single board. CHARGER-style
 leaves with continuous F.Cu routing **must not** be enabled -- the
 override there would let the original same-layer shorts return.
 
-#### Picker safety caps
+#### Candidate search
 
 `parent_placement.candidate_search` controls the K-candidate search
-loop and the hard outline-dimension caps that filter sprawled
-placements:
+loop. The picker stamps each candidate, runs DRC, scores by a
+composite of opposite-side packing, courtyard overlap, ratsnest
+length, and bbox density, and picks the highest-scoring candidate
+whose stamped DRC reports `shorts == 0`:
 
 ```json
 {
   "parent_placement": {
     "candidate_search": {
       "k": 4,
-      "time_budget_s": 240.0,
-      "max_outline_height_mm": 120.0,
-      "max_outline_width_mm": 160.0
+      "time_budget_s": 240.0
     }
   }
 }
 ```
 
-Each candidate must satisfy `shorts == 0`, geometry validation, and
-the dim caps to be considered. The round fails loudly with a per-
-candidate breakdown if zero candidates pass -- per the
-"no fallbacks" rule, a sprawled board is never silently emitted.
+`shorts == 0` is the only hard gate. Geometry-validation results
+(components/pads outside the auto-grown outline) are recorded on each
+candidate for diagnosis but no longer reject -- letting routing run
+on a violating layout produces a routed PNG showing exactly where the
+problem is, which is more actionable than aborting the round.
+
+#### Mounting holes
+
+The `mounting_holes` config block parameterizes the corner-anchored
+mechanical holes (H4, H86, etc.):
+
+```json
+{
+  "mounting_holes": {
+    "count": 2,
+    "screw": "M3",
+    "hole_diameter_mm": 3.2,
+    "pad":     { "shape": "hexagon", "size_mm": 3.0 },
+    "keepout": { "shape": "hexagon", "size_mm": 4.0 }
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `count` | Target number of holes (informational; actual count is whatever the source PCB project ships). |
+| `screw` | Free-form screw reference (`"M2.5"`, `"M3"`, `"#4-40"`). Documents intent; not parsed. |
+| `hole_diameter_mm` | Drill clearance diameter for the screw. M3 default = 3.2 mm (clearance fit + fab tolerance). |
+| `pad.shape` | `hexagon` (default), `circle`, or `square`. Reserved for the future footprint generator. |
+| `pad.size_mm` | Outer extent of the exposed copper / annular ring around the hole, measured from hole center to the closest edge of the shape (radius for `circle`, half-width-across-flats for `hexagon` / `square`). Reserved for the future footprint generator. |
+| `keepout.shape` | Same vocabulary as `pad.shape`. Reserved -- placer currently treats keepout as rectangular. |
+| `keepout.size_mm` | Component-free zone radius (face-to-flat distance for `hexagon` / `square`). The placer reads this directly: a corner-anchored hole sits this far inboard from each board edge. Default 4 mm = M3 head 3 mm + 1 mm fab slack; bump to ~5 mm if you ship M3 + washer. |
+
+Only `keepout.size_mm` currently affects geometry. The shape fields and
+`pad.*` are plumbing for an upcoming change that lets KiCraft generate
+or validate mounting-hole footprints directly from this block.
 
 ### Mutation Search Bounds
 

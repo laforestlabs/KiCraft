@@ -92,9 +92,36 @@ DEFAULT_CONFIG = {
     # edge of the connector body.  0 = flush, positive = inset, negative =
     # overhang.  Only applies to edge-pinned connectors.
     "connector_edge_inset_mm": 2.5,
-    # Mounting hole keep-in -- minimum distance (mm) from board edge to
-    # the center of a mounting hole.
-    "mounting_hole_keep_in_mm": 2.5,
+    # Mounting hole geometry. ``count`` is the target number of holes;
+    # actual count is whatever the source PCB project ships. ``screw``
+    # is a free-form reference (e.g. "M2.5", "M3", "#4-40") used to
+    # document the intended fastener.  ``hole_diameter_mm`` is the drill
+    # clearance diameter for that screw (M3 ≈ 3.2 mm including fab tolerance).
+    #
+    # ``pad`` describes the exposed copper / annular ring around the hole
+    # and ``keepout`` describes the component-free zone around the hole.
+    # ``size_mm`` is the radius from hole center to the outer edge of the
+    # shape (for ``circle`` it is literally the radius; for ``hexagon`` and
+    # ``square`` it is the half-width across the flats; the inscribed
+    # circle has this radius). Only ``keepout.size_mm`` is currently
+    # consumed by the placer -- it is the inward distance from each board
+    # edge that a corner-anchored mounting hole reserves, equivalent to
+    # the legacy flat ``mounting_hole_keep_in_mm`` knob.  ``pad.*`` and
+    # ``keepout.shape`` are plumbing for a future footprint generator and
+    # do not yet alter geometry.
+    "mounting_holes": {
+        "count": 2,
+        "screw": "M3",
+        "hole_diameter_mm": 3.2,
+        "pad": {
+            "shape": "hexagon",
+            "size_mm": 3.0,
+        },
+        "keepout": {
+            "shape": "hexagon",
+            "size_mm": 4.0,
+        },
+    },
     # Orderedness — how strongly passives are snapped into neat rows/columns.
     # 0.0 = organic/force-directed layout, 1.0 = full grid alignment.
     # Intermediate values blend proportionally.  Searchable by autoexperiment.
@@ -344,6 +371,63 @@ def enforce_param_constraints(config: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+_MOUNTING_HOLE_SHAPES = ("hexagon", "circle", "square")
+
+
+def _validate_mounting_holes(section: Any, source: str) -> None:
+    """Validate a ``mounting_holes`` config section. Raises on bad input."""
+    if not isinstance(section, dict):
+        raise ValueError(
+            f"{source}: 'mounting_holes' must be a JSON object, got {type(section).__name__}"
+        )
+    allowed_keys = {"count", "screw", "hole_diameter_mm", "pad", "keepout"}
+    extra = set(section.keys()) - allowed_keys
+    if extra:
+        raise ValueError(
+            f"{source}: unknown keys in 'mounting_holes': {sorted(extra)}; "
+            f"allowed: {sorted(allowed_keys)}"
+        )
+    if "count" in section and (
+        not isinstance(section["count"], int) or section["count"] < 0
+    ):
+        raise ValueError(
+            f"{source}: 'mounting_holes.count' must be a non-negative integer"
+        )
+    if "screw" in section and not isinstance(section["screw"], str):
+        raise ValueError(f"{source}: 'mounting_holes.screw' must be a string")
+    if "hole_diameter_mm" in section:
+        d = section["hole_diameter_mm"]
+        if not isinstance(d, (int, float)) or d <= 0:
+            raise ValueError(
+                f"{source}: 'mounting_holes.hole_diameter_mm' must be a positive number"
+            )
+    for sub in ("pad", "keepout"):
+        if sub not in section:
+            continue
+        block = section[sub]
+        if not isinstance(block, dict):
+            raise ValueError(
+                f"{source}: 'mounting_holes.{sub}' must be a JSON object"
+            )
+        sub_extra = set(block.keys()) - {"shape", "size_mm"}
+        if sub_extra:
+            raise ValueError(
+                f"{source}: unknown keys in 'mounting_holes.{sub}': "
+                f"{sorted(sub_extra)}; allowed: ['shape', 'size_mm']"
+            )
+        if "shape" in block and block["shape"] not in _MOUNTING_HOLE_SHAPES:
+            raise ValueError(
+                f"{source}: 'mounting_holes.{sub}.shape' must be one of "
+                f"{list(_MOUNTING_HOLE_SHAPES)}, got {block['shape']!r}"
+            )
+        if "size_mm" in block:
+            s = block["size_mm"]
+            if not isinstance(s, (int, float)) or s <= 0:
+                raise ValueError(
+                    f"{source}: 'mounting_holes.{sub}.size_mm' must be a positive number"
+                )
+
+
 def load_project_config(config_path: str | None = None) -> dict[str, Any]:
     """Load a project config from a JSON file.
 
@@ -366,6 +450,9 @@ def load_project_config(config_path: str | None = None) -> dict[str, Any]:
     # Convert power_nets list to set for efficient lookup
     if "power_nets" in cfg and isinstance(cfg["power_nets"], list):
         cfg["power_nets"] = set(cfg["power_nets"])
+
+    if "mounting_holes" in cfg:
+        _validate_mounting_holes(cfg["mounting_holes"], source=str(config_path))
 
     return cfg
 

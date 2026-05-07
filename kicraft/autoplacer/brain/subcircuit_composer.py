@@ -291,11 +291,13 @@ def derive_attachment_constraints(
         is_conn = ref.startswith("J") or ("connector" in getattr(comp, "kind", "").lower())
 
         if is_hole:
-            # 5mm gives M3 screw head + washer clearance (typical head
-            # ~6mm dia => 3mm radius; 2mm of slack for tolerance). 2.5mm
-            # was too tight -- left screws landing visibly inside
-            # neighbouring leaf silkscreen boxes.
-            inward = cfg.get("mounting_hole_keep_in_mm", 5.0)
+            # The mounting hole's keepout zone (component-free area) defines
+            # how far the corner-anchored hole sits from the board edge.
+            # The default 4 mm = M3 screw head radius (3 mm) + 1 mm fab slack;
+            # for a washered M3 use ~5 mm so the washer (3.5 mm radius) clears.
+            mh_cfg = cfg.get("mounting_holes") or {}
+            keepout = mh_cfg.get("keepout") or {}
+            inward = float(keepout.get("size_mm", 4.0))
             outward = 0.0
         elif is_conn:
             # connector_edge_inset_mm: positive = inset INTO the board,

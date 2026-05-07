@@ -1438,7 +1438,8 @@ class PlacementSolver:
         #   - geometry validation flagged USB pads as outside the
         #     constraint-derived outline.
         # Reserving the corner footprint up front side-steps both.
-        corner_keep = float(self.cfg.get("mounting_hole_keep_in_mm", 5.0))
+        mh_cfg = self.cfg.get("mounting_holes") or {}
+        corner_keep = float((mh_cfg.get("keepout") or {}).get("size_mm", 4.0))
         zones_cfg_all = self.cfg.get("component_zones", {})
         # Detect corner mounts that landed at this edge's two extremes
         edge_to_corners = {

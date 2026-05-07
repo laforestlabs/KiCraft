@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from typing import NamedTuple
 
-from .types import BoardState, Component, Point
+from .types import Component, Point
 
 
 class PackingMetrics(NamedTuple):
@@ -224,102 +224,3 @@ def _update_pad_positions(comp: Component, old_pos: Point, old_rot: float):
     if comp.body_center is not None:
         comp.body_center = _transform(comp.body_center)
 
-
-def compute_min_board_size(
-    state: BoardState,
-    overhead_factor: float = 2.5,
-    group_blocks: list[tuple[float, float]] | None = None,
-) -> tuple[float, float]:
-    """Estimate the minimum viable board dimensions from component area.
-
-    Returns (min_width_mm, min_height_mm) based on total component area
-    scaled by overhead_factor (to leave room for routing and clearances).
-
-    Also ensures the board is large enough to contain the largest group
-    block (if *group_blocks* is supplied) or the largest estimated
-    component cluster.  The board aspect ratio is clamped to 1:1–2:1 and
-    maximum dimensions are capped to avoid unnecessarily large boards.
-    """
-    total_area = sum(c.area for c in state.components.values())
-    min_area = total_area * overhead_factor
-    if min_area <= 0:
-        return (40.0, 30.0)  # fallback
-
-    # Start from board aspect ratio, clamped to 1:1 – 2:1
-    bw = max(1.0, state.board_width)
-    bh = max(1.0, state.board_height)
-    aspect = max(1.0, min(2.0, bw / bh))
-
-    # Area-based estimate
-    min_w = math.sqrt(min_area * aspect)
-    min_h = min_w / aspect
-
-    # --- Ensure board can hold the largest block -----------------------
-    largest_block_w = 0.0
-    largest_block_h = 0.0
-
-    # Explicit group blocks (provided by caller after solve_group)
-    if group_blocks:
-        for gw, gh in group_blocks:
-            largest_block_w = max(largest_block_w, gw)
-            largest_block_h = max(largest_block_h, gh)
-
-    # Estimate from individual components: largest single component and
-    # potential paired components (same kind, similar size) that the
-    # group solver will likely merge into one block.
-    comp_by_area = sorted(state.components.values(), key=lambda c: c.area, reverse=True)
-    if comp_by_area:
-        biggest = comp_by_area[0]
-        largest_block_w = max(largest_block_w, biggest.width_mm)
-        largest_block_h = max(largest_block_h, biggest.height_mm)
-
-        # Look for a potential pair partner (same kind, similar size)
-        for c2 in comp_by_area[1:5]:
-            if (
-                c2.kind == biggest.kind
-                and c2.kind not in ("", "misc", "passive")
-                and c2.area > 0
-                and biggest.area > 0
-                and min(c2.area, biggest.area) / max(c2.area, biggest.area) > 0.5
-            ):
-                gap = 2.0  # minimal gap between pair members
-                # Horizontal arrangement
-                horiz = (
-                    biggest.width_mm + c2.width_mm + gap,
-                    max(biggest.height_mm, c2.height_mm),
-                )
-                # Vertical arrangement
-                vert = (
-                    max(biggest.width_mm, c2.width_mm),
-                    biggest.height_mm + c2.height_mm + gap,
-                )
-                # Pick the more compact arrangement (smaller area)
-                if horiz[0] * horiz[1] <= vert[0] * vert[1]:
-                    pair_w, pair_h = horiz
-                else:
-                    pair_w, pair_h = vert
-                largest_block_w = max(largest_block_w, pair_w)
-                largest_block_h = max(largest_block_h, pair_h)
-                break  # only consider first matching pair
-
-    # Board must fit largest block with edge margin on each side
-    block_margin = 4.0
-    min_w = max(min_w, largest_block_w + block_margin * 2)
-    min_h = max(min_h, largest_block_h + block_margin * 2)
-
-    # --- Re-check aspect ratio after block adjustment ------------------
-    if min_w > 0 and min_h > 0:
-        ratio = min_w / min_h
-        if ratio > 2.0:
-            min_h = min_w / 2.0
-        elif ratio < 0.5:
-            min_w = min_h / 2.0
-
-    # --- Cap maximum dimensions to avoid runaway board sizes -----------
-    min_w = min(min_w, 120.0)
-    min_h = min(min_h, 100.0)
-
-    # Round up to nearest 5mm
-    min_w = math.ceil(min_w / 5.0) * 5.0
-    min_h = math.ceil(min_h / 5.0) * 5.0
-    return (max(30.0, min_w), max(20.0, min_h))
