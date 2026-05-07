@@ -28,8 +28,13 @@ VIA_DRILL_MM = 0.3
 VIA_SIZE_MM = 0.6
 
 
-def _atomic_save_board(board, output_path: str) -> None:
-    """Save a pcbnew board to disk durably.
+def _atomic_save_board(
+    board,
+    output_path: str,
+    *,
+    source_pro_path: str | None = None,
+) -> None:
+    """Save a pcbnew board to disk durably and sync its sibling .kicad_pro.
 
     Saves in place, then fsyncs the file and its containing directory so a
     follow-up pcbnew.LoadBoard() in another process cannot observe a partial
@@ -40,8 +45,25 @@ def _atomic_save_board(board, output_path: str) -> None:
     requested filename based on the .kicad_pcb extension and emits a sidecar
     .kicad_pro keyed off the same basename, which makes a sibling temp +
     os.replace pattern unreliable across KiCad versions.
+
+    The auto-emitted sidecar .kicad_pro carries KiCad's *defaults* (Default
+    netclass clearance 0.20 mm, min_clearance 0.0), NOT the project's actual
+    netclass values. When ``source_pro_path`` is supplied and exists, we
+    overwrite the sibling with that file -- this propagates the project's
+    real netclass / rules to anything that DRCs the freshly-saved PCB
+    (kicad-cli pcb drc, FreeRouting validators, etc.). Without this sync,
+    project edits like ``"clearance": 0.15`` are invisible at validation
+    time and cause phantom clearance violations.
     """
+    import shutil
     board.Save(output_path)
+    if source_pro_path and os.path.exists(source_pro_path):
+        sibling_pro = os.path.splitext(output_path)[0] + ".kicad_pro"
+        if os.path.abspath(source_pro_path) != os.path.abspath(sibling_pro):
+            try:
+                shutil.copy2(source_pro_path, sibling_pro)
+            except OSError:
+                pass
     try:
         with open(output_path, "rb") as tf:
             os.fsync(tf.fileno())
@@ -373,6 +395,21 @@ for _v in _vias:
 # and produces sidecar project files keyed off the basename, which makes atomic
 # renames brittle. Save in-place, then force durability.
 _save_status = board.Save(_out_path)
+# pcbnew.Save() emits a sidecar .kicad_pro with KiCad defaults (Default
+# netclass clearance 0.20, min_clearance 0). Overwrite with the source
+# PCB's pro so kicad-cli pcb drc validations see the project's actual
+# netclass/rules rather than the auto-emitted defaults.
+import shutil as _shutil_pro
+_src_pro = os.path.splitext(_pcb_path)[0] + ".kicad_pro"
+_dst_pro = os.path.splitext(_out_path)[0] + ".kicad_pro"
+if (
+    os.path.exists(_src_pro)
+    and os.path.abspath(_src_pro) != os.path.abspath(_dst_pro)
+):
+    try:
+        _shutil_pro.copy2(_src_pro, _dst_pro)
+    except OSError:
+        pass
 try:
     with open(_out_path, "rb") as _tf:
         os.fsync(_tf.fileno())
@@ -684,7 +721,10 @@ class KiCadAdapter:
             fp.SetOrientationDegrees(comp.rotation)
 
         out = output_path or self.pcb_path
-        _atomic_save_board(board, out)
+        # Pass the source PCB's sibling .kicad_pro so the saved output
+        # inherits project netclass/rules instead of pcbnew defaults.
+        source_pro = os.path.splitext(self.pcb_path)[0] + ".kicad_pro"
+        _atomic_save_board(board, out, source_pro_path=source_pro)
         print(f"Placement saved to {out}")
 
     def _stamp_subcircuit_board_inprocess(
@@ -830,7 +870,8 @@ class KiCadAdapter:
 
         board.BuildConnectivity()
         out = output_path or self.pcb_path
-        _atomic_save_board(board, out)
+        source_pro = os.path.splitext(self.pcb_path)[0] + ".kicad_pro"
+        _atomic_save_board(board, out, source_pro_path=source_pro)
         print(f"Subcircuit board stamped to {out}")
 
     # ------ subprocess-safe stamping (default) ------
