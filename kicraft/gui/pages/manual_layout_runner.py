@@ -58,25 +58,78 @@ class LeafInfo:
 
 
 def _render_url_for(experiments_dir: Path, leaf_dir: Path) -> str | None:
-    """Map a leaf renders/routed_front_all.png to its /experiments URL.
+    """Map a leaf's routed render to its /experiments URL, after stripping
+    the post-process cyan border + dark padding.
+
+    Two-pass ImageMagick ``-trim`` removes the cyan border first (corner
+    pixels are cyan) and then the dark navy padding now exposed at the
+    corners. The cropped result is cached at ``*_tight.png`` next to the
+    source so successive page loads avoid the magick subprocess.
 
     Falls back to pre_route_front_all.png if routing hasn't completed
-    yet for this leaf. Returns None when neither file exists.
+    yet for this leaf. Returns None when neither file exists or magick
+    is unavailable.
     """
     candidates = (
         leaf_dir / "renders" / "routed_front_all.png",
         leaf_dir / "renders" / "pre_route_front_all.png",
     )
-    for cand in candidates:
-        if cand.is_file():
-            try:
-                rel = cand.relative_to(experiments_dir)
-            except ValueError:
-                return None
-            # Cache-bust on mtime so the canvas picks up new renders
-            # without forcing a hard browser reload.
-            return f"/experiments/{rel.as_posix()}?v={int(cand.stat().st_mtime)}"
+    for src in candidates:
+        if not src.is_file():
+            continue
+        tight = _make_tight_render(src) or src
+        try:
+            rel = tight.relative_to(experiments_dir)
+        except ValueError:
+            return None
+        # Cache-bust on mtime so the canvas picks up new renders
+        # without forcing a hard browser reload.
+        return f"/experiments/{rel.as_posix()}?v={int(tight.stat().st_mtime)}"
     return None
+
+
+def _make_tight_render(src: Path) -> Path | None:
+    """Strip the post-process border + padding from a leaf render.
+
+    Cached: the trimmed copy is regenerated only when the source PNG is
+    newer than the cached file. Returns the cached path on success,
+    None if magick isn't available (caller falls back to the source).
+    """
+    import shutil
+    import subprocess
+
+    out = src.with_name(src.stem + "_tight.png")
+    try:
+        if out.is_file() and out.stat().st_mtime >= src.stat().st_mtime:
+            return out
+    except OSError:
+        pass
+
+    if shutil.which("magick") is None:
+        return None
+
+    try:
+        subprocess.run(
+            [
+                "magick",
+                str(src),
+                "-fuzz",
+                "8%",
+                "-trim",
+                "+repage",
+                "-fuzz",
+                "8%",
+                "-trim",
+                "+repage",
+                str(out),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=15,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+    return out if out.is_file() else None
 
 
 def discover_leaves(experiments_dir: Path) -> list[LeafInfo]:

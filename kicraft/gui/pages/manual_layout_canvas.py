@@ -65,36 +65,26 @@ def build_canvas_html(
   .ml-canvas-host svg {{ width: 100%; height: 100%; display: block; }}
   .ml-leaf {{ cursor: grab; }}
   .ml-leaf.dragging {{ cursor: grabbing; }}
-  .ml-leaf .ml-leaf-body {{
-    fill-opacity: 0.18;
-    stroke: #94a3b8;
-    stroke-width: 0.25;
-    stroke-dasharray: 0.6 0.6;
+  .ml-leaf .ml-leaf-hit {{
+    fill: transparent;
+    stroke: none;
   }}
-  .ml-leaf.selected .ml-leaf-body {{
+  .ml-leaf.selected .ml-leaf-hit {{
     stroke: #facc15;
-    stroke-width: 0.6;
-    stroke-dasharray: none;
-  }}
-  .ml-leaf-img {{
-    pointer-events: none;
-  }}
-  .ml-leaf-label {{
-    fill: #facc15;
-    font: 600 2.0px sans-serif;
-    pointer-events: none;
-    text-anchor: middle;
-    dominant-baseline: middle;
-    paint-order: stroke;
-    stroke: #0f172a;
     stroke-width: 0.4;
+    stroke-dasharray: 0.6 0.4;
   }}
+  .ml-leaf-img {{ pointer-events: none; }}
   .ml-rot-handle {{
     fill: #facc15;
-    stroke: #0f172a;
-    stroke-width: 0.3;
+    fill-opacity: 0;
+    stroke: #facc15;
+    stroke-width: 0.25;
     cursor: crosshair;
+    transition: fill-opacity 0.12s ease;
   }}
+  .ml-leaf:hover .ml-rot-handle,
+  .ml-leaf.selected .ml-rot-handle {{ fill-opacity: 0.95; }}
   .ml-outline {{
     fill: none;
     stroke: #67e8f9;
@@ -263,19 +253,10 @@ _CANVAS_JS_TEMPLATE = """
       g.setAttribute('transform',
         'translate(' + p.origin.x + ',' + p.origin.y + ') rotate(' + (p.rotation || 0) + ')');
 
-      const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-      r.setAttribute('class', 'ml-leaf-body');
-      r.setAttribute('x', 0);
-      r.setAttribute('y', 0);
-      r.setAttribute('width', leaf.width_mm);
-      r.setAttribute('height', leaf.height_mm);
-      r.setAttribute('fill', leaf.color);
-      g.appendChild(r);
-
-      // Routed-leaf PNG: pads + traces + silkscreen rendered by
-      // kicad-cli at fit-page-to-board, so it includes silkscreen
-      // overhang. Centered + aspect-preserved so the actual board
-      // content sits inside the dashed bbox without distortion.
+      // Routed-leaf PNG (pads + traces + silkscreen including the
+      // leaf outline). Stretched to leaf bbox so adjacent leaves
+      // touch visually; the silkscreen IS the visible outline so no
+      // additional rectangle or overlay label is drawn.
       if (leaf.render_url) {{
         const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
         img.setAttribute('class', 'ml-leaf-img');
@@ -284,16 +265,20 @@ _CANVAS_JS_TEMPLATE = """
         img.setAttribute('y', 0);
         img.setAttribute('width', leaf.width_mm);
         img.setAttribute('height', leaf.height_mm);
-        img.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+        img.setAttribute('preserveAspectRatio', 'none');
         g.appendChild(img);
       }}
 
-      const lbl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-      lbl.setAttribute('class', 'ml-leaf-label');
-      lbl.setAttribute('x', leaf.width_mm / 2);
-      lbl.setAttribute('y', leaf.height_mm + 1.6);
-      lbl.textContent = leaf.sheet_name;
-      g.appendChild(lbl);
+      // Invisible hit target so clicks anywhere over the leaf bbox
+      // start a drag, even where the PNG is dark / mostly empty. The
+      // .selected state turns this into a thin amber dashed outline.
+      const hit = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      hit.setAttribute('class', 'ml-leaf-hit');
+      hit.setAttribute('x', 0);
+      hit.setAttribute('y', 0);
+      hit.setAttribute('width', leaf.width_mm);
+      hit.setAttribute('height', leaf.height_mm);
+      g.appendChild(hit);
 
       // Rotation handle: a small disc at top-right, offset outside the rect
       const rot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
