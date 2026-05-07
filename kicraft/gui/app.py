@@ -8,6 +8,7 @@ from pathlib import Path
 from nicegui import ui
 
 from .pages.analysis import analysis_page
+from .pages.manual_layout import manual_layout_page
 from .pages.monitor import monitor_page
 from .pages.setup import setup_page
 from .state import get_state
@@ -97,6 +98,7 @@ def index() -> None:
     with ui.tabs().classes("w-full") as tabs:
         setup_tab = ui.tab("Setup", icon="tune")
         monitor_tab = ui.tab("Monitor", icon="monitor")
+        manual_tab = ui.tab("Manual Layout", icon="open_with")
         analysis_tab = None
         if show_analysis_tab:
             analysis_tab = ui.tab("Analysis", icon="analytics")
@@ -106,6 +108,8 @@ def index() -> None:
             setup_page()
         with ui.tab_panel(monitor_tab):
             monitor_page()
+        with ui.tab_panel(manual_tab):
+            manual_layout_page()
         if analysis_tab is not None:
             with ui.tab_panel(analysis_tab):
                 analysis_page()
