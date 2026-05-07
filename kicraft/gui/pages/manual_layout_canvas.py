@@ -457,9 +457,22 @@ _CANVAS_JS_TEMPLATE = """
     }},
   }};
 
-  // Initial render. SVG element is in the DOM because this script
-  // is invoked via ui.run_javascript() after ui.html() emitted the
-  // markup.
-  render();
+  // The Manual Layout tab is mounted lazily by Quasar -- on initial
+  // page load the SVG element is not yet in the DOM. Poll until it
+  // appears, then render once. After that the tab is kept alive and
+  // subsequent re-activations reuse the rendered DOM.
+  function tryInit(remainingTries) {{
+    const svg = document.getElementById(SVG_ID);
+    if (svg) {{
+      render();
+      return;
+    }}
+    if (remainingTries <= 0) {{
+      console.warn('manual layout canvas: SVG #' + SVG_ID + ' never mounted');
+      return;
+    }}
+    setTimeout(function() {{ tryInit(remainingTries - 1); }}, 200);
+  }}
+  tryInit(150);  // 30 seconds total: long enough for slow first-tab-click.
 }})();
 """

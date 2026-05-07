@@ -62,17 +62,13 @@ def manual_layout_page() -> None:
     with ui.row().classes("w-full items-stretch gap-4"):
         with ui.column().classes("flex-1"):
             ui.html(build_canvas_html(leaves, initial, canvas_id)).classes("w-full")
-            # Defer JS init until the SVG markup is in the client DOM.
-            # ui.html() renders synchronously on the server; the client
-            # parses + injects on connect, so a tiny timer pause avoids
-            # races where the script runs before getElementById finds
-            # the SVG.
+            # Inject the canvas controller as a body-level script. The
+            # script polls for the SVG element to appear because the
+            # Manual Layout tab panel is mounted lazily by Quasar --
+            # the script runs at page-parse time, before the user
+            # switches to this tab.
             init_js = build_canvas_init_script(leaves, initial, canvas_id)
-            ui.timer(
-                0.05,
-                lambda: ui.run_javascript(init_js),
-                once=True,
-            )
+            ui.add_body_html(f"<script>{init_js}</script>")
         with ui.column().classes("w-72 gap-3"):
             _legend(leaves)
             with ui.card().classes("p-3"):
