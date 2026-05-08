@@ -462,13 +462,25 @@ _CANVAS_JS_TEMPLATE = """
     svg.querySelectorAll('.ml-edge').forEach(el => {{
       const side = el.getAttribute('data-edge');
       el.addEventListener('mousedown', (e) => {{
-        const start = svgToWorld(svg, e);
+        // Capture the screen-to-viewBox scale ONCE at mousedown.
+        // Edge drags grow/shrink the outline, which changes the
+        // viewBox, which shifts the live CTM. If we reused
+        // svgToWorld() during the move, the delta would be measured
+        // against a moving reference and the drag would feel jumpy
+        // (especially on the Y axis, which is the canvas's scale-
+        // limiting dimension at typical aspect ratios).
+        const ctm = svg.getScreenCTM();
+        if (!ctm) return;
+        const ctmInv = ctm.inverse();
+        const mmPerPxX = ctmInv.a;
+        const mmPerPxY = ctmInv.d;
+        const startClientX = e.clientX;
+        const startClientY = e.clientY;
         const orig = deepCopy(state.board_outline);
         const minSize = 10;
         const move = (ev) => {{
-          const cur = svgToWorld(svg, ev);
-          const dx = cur.x - start.x;
-          const dy = cur.y - start.y;
+          const dx = (ev.clientX - startClientX) * mmPerPxX;
+          const dy = (ev.clientY - startClientY) * mmPerPxY;
           const out = state.board_outline;
           if (side === 'left') {{
             out.min.x = Math.min(orig.min.x + dx, orig.max.x - minSize);
