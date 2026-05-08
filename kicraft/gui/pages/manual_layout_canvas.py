@@ -270,14 +270,19 @@ _CANVAS_JS_TEMPLATE = """
       }}
 
       // Invisible hit target so clicks anywhere over the leaf bbox
-      // start a drag, even where the PNG is dark / mostly empty. The
-      // .selected state turns this into a thin amber dashed outline.
+      // start a drag, even where the PNG is dark / mostly empty. fill
+      // is set inline as well as via CSS because some sanitizers strip
+      // <style> blocks; without an inline fill the SVG default of
+      // black would cover the leaf image. Selection turns the stroke
+      // into a thin amber dashed outline via the CSS class.
       const hit = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
       hit.setAttribute('class', 'ml-leaf-hit');
       hit.setAttribute('x', 0);
       hit.setAttribute('y', 0);
       hit.setAttribute('width', leaf.width_mm);
       hit.setAttribute('height', leaf.height_mm);
+      hit.setAttribute('fill', 'transparent');
+      hit.setAttribute('stroke', 'none');
       g.appendChild(hit);
 
       // Rotation handle: a small disc at top-right, offset outside the rect

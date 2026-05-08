@@ -61,7 +61,14 @@ def manual_layout_page() -> None:
 
     with ui.row().classes("w-full items-stretch gap-4"):
         with ui.column().classes("flex-1"):
-            ui.html(build_canvas_html(leaves, initial, canvas_id)).classes("w-full")
+            # sanitize=False is REQUIRED: NiceGUI 3.x defaults to
+            # DOMPurify which strips <svg> and <style> blocks. Without
+            # this the canvas renders as plain text and the JS init
+            # script can't find the SVG container.
+            ui.html(
+                build_canvas_html(leaves, initial, canvas_id),
+                sanitize=False,
+            ).classes("w-full")
             # Inject the canvas controller as a body-level script. The
             # script polls for the SVG element to appear because the
             # Manual Layout tab panel is mounted lazily by Quasar --
