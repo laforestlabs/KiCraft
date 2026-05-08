@@ -206,30 +206,38 @@ _CANVAS_JS_TEMPLATE = """
     return Math.round(m / SNAP_DEG) * SNAP_DEG;
   }}
 
-  // Compose-equivalent transform: leaf_local pt (lx, ly) maps to
-  // (origin.x + cos*lx - sin*ly, origin.y + sin*lx + cos*ly).
-  // The leaf rotates around its local (0,0) which lands at `origin`
-  // in canvas coords, matching how transform_loaded_artifact rotates
-  // pads/traces around the placement origin.
+  // Compose-equivalent transform. KiCad / pcbnew rotates CLOCKWISE
+  // (matching SetOrientationDegrees), so transform_loaded_artifact's
+  // _transform_point uses:
+  //   x' = x*cos + y*sin
+  //   y' = -x*sin + y*cos
+  // The canvas MUST use the same convention or the visual layout
+  // diverges from the stamped output as soon as any leaf has a
+  // non-zero rotation. Empirically: BATT at origin (88.4, -11.8)
+  // rotation 90 with BT1 at leaf-local (46.8, 52.0) lands at
+  // (140.4, -58.6) in the stamped board (CW); the pre-fix canvas
+  // showed it at (36.4, 35.0) (CCW), explaining the "leaves wandered
+  // way outside the outline in KiCad" report.
   function leafCenter(p, leaf) {{
     const r = (p.rotation || 0) * Math.PI / 180;
     const c = Math.cos(r), s = Math.sin(r);
     const lx = leaf.width_mm / 2, ly = leaf.height_mm / 2;
     return {{
-      x: p.origin.x + c * lx - s * ly,
-      y: p.origin.y + s * lx + c * ly,
+      x: p.origin.x + c * lx + s * ly,
+      y: p.origin.y - s * lx + c * ly,
     }};
   }}
 
-  // Inverse: pin the visual center, recompute origin so the rotated
-  // local (0,0) lands wherever it needs to keep that center fixed.
+  // Inverse for the same CW rotation: solve
+  //   center = origin + R_CW(theta) * (lx, ly)
+  // for origin so the visual center stays put as the user rotates.
   function setRotationKeepCenter(p, leaf, newRotDeg) {{
     const center = leafCenter(p, leaf);
     const r = newRotDeg * Math.PI / 180;
     const c = Math.cos(r), s = Math.sin(r);
     const lx = leaf.width_mm / 2, ly = leaf.height_mm / 2;
-    p.origin.x = center.x - (c * lx - s * ly);
-    p.origin.y = center.y - (s * lx + c * ly);
+    p.origin.x = center.x - (c * lx + s * ly);
+    p.origin.y = center.y - (-s * lx + c * ly);
     p.rotation = newRotDeg;
   }}
 
@@ -287,8 +295,10 @@ _CANVAS_JS_TEMPLATE = """
       const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
       g.setAttribute('class', 'ml-leaf' + (state.selected === p.instance_path ? ' selected' : ''));
       g.setAttribute('data-instance-path', p.instance_path);
+      // SVG rotate() is CCW; KiCad rotation is CW. Negate so the
+      // canvas visual matches the stamped output.
       g.setAttribute('transform',
-        'translate(' + p.origin.x + ',' + p.origin.y + ') rotate(' + (p.rotation || 0) + ')');
+        'translate(' + p.origin.x + ',' + p.origin.y + ') rotate(' + (-(p.rotation || 0)) + ')');
 
       // Routed-leaf PNG (pads + traces + silkscreen including the
       // leaf outline). Stretched to leaf bbox so adjacent leaves
