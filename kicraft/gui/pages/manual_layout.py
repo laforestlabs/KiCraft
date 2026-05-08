@@ -31,7 +31,35 @@ from .manual_layout_runner import (
 
 
 def manual_layout_page() -> None:
-    """Render the Manual Layout tab."""
+    """Render the Manual Layout tab.
+
+    The body is wrapped in a ui.refreshable so the empty -> populated
+    transition (after a leaves-only run finishes) can be picked up
+    without a full browser reload. A 2 s timer polls for leaf
+    discovery; refresh fires only when the previous render saw zero
+    leaves AND now has some -- so the user's in-flight canvas edits
+    are preserved once leaves have been rendered.
+    """
+    _manual_layout_body()
+    state = get_state()
+    last_count = {"n": len(discover_leaves(state.experiments_dir))}
+
+    def _watch_for_leaves() -> None:
+        try:
+            count = len(discover_leaves(state.experiments_dir))
+        except Exception:  # noqa: BLE001
+            return
+        if last_count["n"] == 0 and count > 0:
+            last_count["n"] = count
+            _manual_layout_body.refresh()
+        else:
+            last_count["n"] = count
+
+    ui.timer(2.0, _watch_for_leaves)
+
+
+@ui.refreshable
+def _manual_layout_body() -> None:
     state = get_state()
 
     ui.label("Manual Layout").classes("text-2xl font-bold mb-1")
@@ -49,7 +77,8 @@ def manual_layout_page() -> None:
             ui.label("No solved leaves found.").classes("text-amber-300 font-bold")
             ui.label(
                 "Run a leaves-only experiment first (Setup → Start, or use "
-                "the Monitor tab) so manual layout has something to place."
+                "the Monitor tab) so manual layout has something to place. "
+                "This panel auto-refreshes when leaves appear."
             ).classes("text-sm text-gray-400")
         return
 
