@@ -108,6 +108,12 @@ def _make_tight_render(src: Path) -> Path | None:
     if shutil.which("magick") is None:
         return None
 
+    # The render_pcb post-process bakes in a #020617 (DEFAULT_BACKGROUND)
+    # navy fill, so trimming exposes that as the now-uniform corner. Two
+    # trim passes peel cyan-border + navy-padding, then a -transparent
+    # pass keys out the remaining navy fill that fills the leaf interior
+    # so neighboring leaves don't occlude each other when their bboxes
+    # overlap on the manual canvas.
     try:
         subprocess.run(
             [
@@ -121,6 +127,14 @@ def _make_tight_render(src: Path) -> Path | None:
                 "8%",
                 "-trim",
                 "+repage",
+                "-alpha",
+                "set",
+                "-fuzz",
+                "12%",
+                "-transparent",
+                "#020617",
+                "-transparent",
+                "#0b192f",
                 str(out),
             ],
             check=True,

@@ -69,10 +69,16 @@ def build_canvas_html(
     fill: transparent;
     stroke: none;
   }}
-  .ml-leaf.selected .ml-leaf-hit {{
+  .ml-leaf.selected .ml-leaf-outline {{
     stroke: #facc15;
-    stroke-width: 0.4;
     stroke-dasharray: 0.6 0.4;
+  }}
+  .ml-leaf-outline {{
+    fill: none;
+    stroke: #cbd5e1;
+    stroke-width: 0.18;
+    pointer-events: none;
+    stroke-opacity: 0.85;
   }}
   .ml-leaf-img {{ pointer-events: none; }}
   .ml-rot-handle {{
@@ -196,6 +202,33 @@ _CANVAS_JS_TEMPLATE = """
     return Math.round(m / SNAP_DEG) * SNAP_DEG;
   }}
 
+  // Compose-equivalent transform: leaf_local pt (lx, ly) maps to
+  // (origin.x + cos*lx - sin*ly, origin.y + sin*lx + cos*ly).
+  // The leaf rotates around its local (0,0) which lands at `origin`
+  // in canvas coords, matching how transform_loaded_artifact rotates
+  // pads/traces around the placement origin.
+  function leafCenter(p, leaf) {{
+    const r = (p.rotation || 0) * Math.PI / 180;
+    const c = Math.cos(r), s = Math.sin(r);
+    const lx = leaf.width_mm / 2, ly = leaf.height_mm / 2;
+    return {{
+      x: p.origin.x + c * lx - s * ly,
+      y: p.origin.y + s * lx + c * ly,
+    }};
+  }}
+
+  // Inverse: pin the visual center, recompute origin so the rotated
+  // local (0,0) lands wherever it needs to keep that center fixed.
+  function setRotationKeepCenter(p, leaf, newRotDeg) {{
+    const center = leafCenter(p, leaf);
+    const r = newRotDeg * Math.PI / 180;
+    const c = Math.cos(r), s = Math.sin(r);
+    const lx = leaf.width_mm / 2, ly = leaf.height_mm / 2;
+    p.origin.x = center.x - (c * lx - s * ly);
+    p.origin.y = center.y - (s * lx + c * ly);
+    p.rotation = newRotDeg;
+  }}
+
   function render() {{
     const svg = document.getElementById(SVG_ID);
     if (!svg) return;
@@ -270,11 +303,7 @@ _CANVAS_JS_TEMPLATE = """
       }}
 
       // Invisible hit target so clicks anywhere over the leaf bbox
-      // start a drag, even where the PNG is dark / mostly empty. fill
-      // is set inline as well as via CSS because some sanitizers strip
-      // <style> blocks; without an inline fill the SVG default of
-      // black would cover the leaf image. Selection turns the stroke
-      // into a thin amber dashed outline via the CSS class.
+      // start a drag, even where the PNG is mostly empty.
       const hit = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
       hit.setAttribute('class', 'ml-leaf-hit');
       hit.setAttribute('x', 0);
@@ -284,6 +313,23 @@ _CANVAS_JS_TEMPLATE = """
       hit.setAttribute('fill', 'transparent');
       hit.setAttribute('stroke', 'none');
       g.appendChild(hit);
+
+      // Visible silkscreen-style leaf outline. The solo leaf PNG
+      // renders don't always contain a complete board outline (the
+      // kicad-cli SVG export crops to drawn-content bbox, which
+      // sometimes excludes a side). A synthetic rect at the leaf
+      // bbox restores the visual boundary and matches the look of
+      // the auto-pipeline parent renders.
+      const outline = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      outline.setAttribute('class', 'ml-leaf-outline');
+      outline.setAttribute('x', 0);
+      outline.setAttribute('y', 0);
+      outline.setAttribute('width', leaf.width_mm);
+      outline.setAttribute('height', leaf.height_mm);
+      outline.setAttribute('fill', 'none');
+      outline.setAttribute('stroke', '#cbd5e1');
+      outline.setAttribute('stroke-width', '0.18');
+      g.appendChild(outline);
 
       // Rotation handle: a small disc at top-right, offset outside the rect
       const rot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
@@ -340,7 +386,8 @@ _CANVAS_JS_TEMPLATE = """
         const ip = target.getAttribute('data-instance-path');
         const p = state.placements.find(x => x.instance_path === ip);
         if (p) {{
-          p.rotation = snapAngle((p.rotation || 0) + SNAP_DEG, false);
+          const leaf = leafByPath[ip];
+          setRotationKeepCenter(p, leaf, snapAngle((p.rotation || 0) + SNAP_DEG, false));
           setSelected(ip);
         }}
       }}
@@ -350,7 +397,8 @@ _CANVAS_JS_TEMPLATE = """
       if (e.key === 'r' || e.key === 'R') {{
         const p = state.placements.find(x => x.instance_path === state.selected);
         if (p) {{
-          p.rotation = snapAngle((p.rotation || 0) + SNAP_DEG, false);
+          const leaf = leafByPath[state.selected];
+          setRotationKeepCenter(p, leaf, snapAngle((p.rotation || 0) + SNAP_DEG, false));
           render();
         }}
       }}
@@ -382,20 +430,22 @@ _CANVAS_JS_TEMPLATE = """
     const p = state.placements.find(x => x.instance_path === ip);
     if (!p) return;
     const leaf = leafByPath[ip];
-    const cx = p.origin.x;
-    const cy = p.origin.y;
+    // Drag the rotation handle relative to the leaf VISUAL CENTER so
+    // the leaf appears to spin in place. setRotationKeepCenter then
+    // updates origin to compensate, keeping JSON output composer-
+    // compatible (rotation pivots around leaf-local 0,0 there).
+    const center = leafCenter(p, leaf);
     const startW = svgToWorld(svg, evt);
-    const startAngle = Math.atan2(startW.y - cy, startW.x - cx) * 180 / Math.PI;
+    const startAngle = Math.atan2(startW.y - center.y, startW.x - center.x) * 180 / Math.PI;
     const baseRot = p.rotation || 0;
     const move = (e) => {{
       const cur = svgToWorld(svg, e);
-      const ang = Math.atan2(cur.y - cy, cur.x - cx) * 180 / Math.PI;
-      const delta = ang - startAngle;
-      p.rotation = baseRot + delta;
+      const ang = Math.atan2(cur.y - center.y, cur.x - center.x) * 180 / Math.PI;
+      setRotationKeepCenter(p, leaf, baseRot + (ang - startAngle));
       render();
     }};
     const up = (e) => {{
-      p.rotation = snapAngle(p.rotation, e.shiftKey);
+      setRotationKeepCenter(p, leaf, snapAngle(p.rotation, e.shiftKey));
       render();
       document.removeEventListener('mousemove', move);
       document.removeEventListener('mouseup', up);
