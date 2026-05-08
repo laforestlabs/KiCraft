@@ -101,6 +101,23 @@ def build_canvas_html(
   .ml-edge:hover {{ opacity: 0.95; }}
   .ml-grid line {{ stroke: #1e293b; stroke-width: 0.15; }}
   .ml-grid line.major {{ stroke: #334155; stroke-width: 0.25; }}
+  .ml-mhole {{
+    fill: none;
+    stroke: #f87171;
+    stroke-width: 0.25;
+    pointer-events: none;
+  }}
+  .ml-mhole-drill {{
+    fill: #f87171;
+    pointer-events: none;
+  }}
+  .ml-mhole-label {{
+    fill: #fca5a5;
+    font: 600 1.6px sans-serif;
+    pointer-events: none;
+    text-anchor: middle;
+    dominant-baseline: middle;
+  }}
 </style>
 <div id="{canvas_id}-host" class="ml-canvas-host">
   <svg id="{canvas_id}" xmlns="http://www.w3.org/2000/svg"></svg>
@@ -149,8 +166,32 @@ _CANVAS_JS_TEMPLATE = """
     return {{
       placements: deepCopy(cfg.initial.placements),
       board_outline: deepCopy(cfg.initial.board_outline),
+      mounting_holes: deepCopy(cfg.initial.mounting_holes || []),
       selected: null,
     }};
+  }}
+
+  // Mounting holes are pinned to outline corners with a per-hole
+  // inset; recompute their world positions whenever the outline
+  // changes so dragging an edge handle keeps the holes glued to
+  // their corners. Holes with corner=null keep whatever pos they
+  // had (they're declared but not pinned).
+  function recomputeMountingHoles() {{
+    const out = state.board_outline;
+    for (const h of state.mounting_holes) {{
+      if (!h.corner) continue;
+      const inset = Number(h.inset_mm) || 0;
+      switch (h.corner) {{
+        case 'top-left':
+          h.pos = {{ x: out.min.x + inset, y: out.min.y + inset }}; break;
+        case 'top-right':
+          h.pos = {{ x: out.max.x - inset, y: out.min.y + inset }}; break;
+        case 'bottom-left':
+          h.pos = {{ x: out.min.x + inset, y: out.max.y - inset }}; break;
+        case 'bottom-right':
+          h.pos = {{ x: out.max.x - inset, y: out.max.y - inset }}; break;
+      }}
+    }}
   }}
 
   const initial = makeState();
@@ -287,6 +328,29 @@ _CANVAS_JS_TEMPLATE = """
     addEdge(svg, 'right',  outline.max.x - HANDLE_GRIP_MM/2, outline.min.y, HANDLE_GRIP_MM, h);
     addEdge(svg, 'top',    outline.min.x, outline.min.y - HANDLE_GRIP_MM/2, w, HANDLE_GRIP_MM, true);
     addEdge(svg, 'bottom', outline.min.x, outline.max.y - HANDLE_GRIP_MM/2, w, HANDLE_GRIP_MM, true);
+
+    // Mounting holes (M3 default: 3.2 mm clearance, 6.4 mm pad / drill OD).
+    recomputeMountingHoles();
+    for (const hole of state.mounting_holes) {{
+      const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      ring.setAttribute('class', 'ml-mhole');
+      ring.setAttribute('cx', hole.pos.x);
+      ring.setAttribute('cy', hole.pos.y);
+      ring.setAttribute('r', 3.2);
+      svg.appendChild(ring);
+      const drill = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      drill.setAttribute('class', 'ml-mhole-drill');
+      drill.setAttribute('cx', hole.pos.x);
+      drill.setAttribute('cy', hole.pos.y);
+      drill.setAttribute('r', 0.5);
+      svg.appendChild(drill);
+      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      label.setAttribute('class', 'ml-mhole-label');
+      label.setAttribute('x', hole.pos.x);
+      label.setAttribute('y', hole.pos.y - 4.0);
+      label.textContent = 'H' + (hole.index + 1);
+      svg.appendChild(label);
+    }}
 
     // Leaves
     for (const p of state.placements) {{
@@ -528,6 +592,16 @@ _CANVAS_JS_TEMPLATE = """
         rotation: Math.round(((p.rotation || 0) * 10)) / 10,
       }}));
       const out = state.board_outline;
+      recomputeMountingHoles();
+      const mounting_holes = state.mounting_holes.map(h => ({{
+        index: h.index,
+        corner: h.corner,
+        inset_mm: Math.round(h.inset_mm * 100) / 100,
+        pos: {{
+          x: Math.round(h.pos.x * 1000) / 1000,
+          y: Math.round(h.pos.y * 1000) / 1000,
+        }},
+      }}));
       return {{
         placements: placements,
         board_outline: {{
@@ -540,6 +614,7 @@ _CANVAS_JS_TEMPLATE = """
             y: Math.round(out.max.y * 1000) / 1000,
           }},
         }},
+        mounting_holes: mounting_holes,
       }};
     }},
     reset: function() {{
@@ -562,6 +637,31 @@ _CANVAS_JS_TEMPLATE = """
       out.max.x = out.min.x + w;
       out.max.y = out.min.y + h;
       render();
+    }},
+    setMountingHoles: function(holes) {{
+      // Replace the entire mounting-holes list. Caller (Python side)
+      // owns count + per-hole corner/inset choices; the canvas just
+      // visualises and re-pegs positions to corners on every render.
+      state.mounting_holes = (holes || []).map((h, i) => ({{
+        index: typeof h.index === 'number' ? h.index : i,
+        corner: h.corner || null,
+        inset_mm: Number(h.inset_mm) || 5.0,
+        pos: h.pos ? {{ x: Number(h.pos.x) || 0, y: Number(h.pos.y) || 0 }}
+                   : {{ x: state.board_outline.min.x, y: state.board_outline.min.y }},
+      }}));
+      render();
+    }},
+    getMountingHoles: function() {{
+      recomputeMountingHoles();
+      return state.mounting_holes.map(h => ({{
+        index: h.index,
+        corner: h.corner,
+        inset_mm: Math.round(h.inset_mm * 100) / 100,
+        pos: {{
+          x: Math.round(h.pos.x * 1000) / 1000,
+          y: Math.round(h.pos.y * 1000) / 1000,
+        }},
+      }}));
     }},
   }};
 

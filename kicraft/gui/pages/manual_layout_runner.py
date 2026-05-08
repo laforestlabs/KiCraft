@@ -17,8 +17,10 @@ from pathlib import Path
 from typing import Any
 
 from kicraft.autoplacer.brain.manual_layout import (
+    MOUNTING_HOLE_CORNERS,
     ManualLayout,
     ManualLeafPlacement,
+    ManualMountingHole,
     ManualParentLocalPlacement,
     save_manual_layout,
 )
@@ -262,10 +264,30 @@ def save_manual_layout_json(
             )
         )
 
+    mounting_holes = []
+    for entry in payload.get("mounting_holes", []) or []:
+        try:
+            corner = entry.get("corner")
+            if corner is not None and corner not in MOUNTING_HOLE_CORNERS:
+                corner = None
+            mounting_holes.append(
+                ManualMountingHole(
+                    index=int(entry.get("index", len(mounting_holes))),
+                    corner=corner,
+                    inset_mm=float(entry.get("inset_mm", 5.0)),
+                    pos=Point(
+                        float(entry["pos"]["x"]), float(entry["pos"]["y"])
+                    ),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+
     layout = ManualLayout(
         placements=placements,
         board_outline=(min_pt, max_pt),
         parent_local=parent_local,
+        mounting_holes=mounting_holes,
     )
     out_path = experiments_dir / "manual" / "manual_layout.json"
     return save_manual_layout(layout, out_path)
@@ -409,6 +431,7 @@ def _seeded_grid(leaves: list[LeafInfo]) -> dict[str, Any]:
                 "min": {"x": 0.0, "y": 0.0},
                 "max": {"x": DEFAULT_OUTLINE_W_MM, "y": DEFAULT_OUTLINE_H_MM},
             },
+            "mounting_holes": [],
         }
     cols = max(1, int(math.ceil(math.sqrt(len(leaves)))))
     cell_w = max(lf.width_mm for lf in leaves) + DEFAULT_SPACING_MM
@@ -435,6 +458,7 @@ def _seeded_grid(leaves: list[LeafInfo]) -> dict[str, Any]:
             "min": {"x": 0.0, "y": 0.0},
             "max": {"x": w, "y": h},
         },
+        "mounting_holes": [],
     }
 
 
@@ -503,7 +527,7 @@ def _auto_layout_to_canvas(
     except (KeyError, TypeError, ValueError):
         outline = fallback["board_outline"]
 
-    return {"placements": placements, "board_outline": outline}
+    return {"placements": placements, "board_outline": outline, "mounting_holes": []}
 
 
 def _layout_to_canvas(
@@ -546,4 +570,29 @@ def _layout_to_canvas(
     except (KeyError, TypeError, ValueError):
         outline = fallback["board_outline"]
 
-    return {"placements": placements, "board_outline": outline}
+    holes_in = payload.get("mounting_holes") or []
+    holes_out: list[dict[str, Any]] = []
+    for h in holes_in:
+        try:
+            corner = h.get("corner")
+            if corner is not None and corner not in MOUNTING_HOLE_CORNERS:
+                corner = None
+            holes_out.append(
+                {
+                    "index": int(h.get("index", len(holes_out))),
+                    "corner": corner,
+                    "inset_mm": float(h.get("inset_mm", 5.0)),
+                    "pos": {
+                        "x": float(h.get("pos", {}).get("x", 0.0)),
+                        "y": float(h.get("pos", {}).get("y", 0.0)),
+                    },
+                }
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    return {
+        "placements": placements,
+        "board_outline": outline,
+        "mounting_holes": holes_out,
+    }

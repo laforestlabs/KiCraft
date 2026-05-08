@@ -35,6 +35,29 @@ class ManualParentLocalPlacement:
     pos: Point
 
 
+# Allowed corners. ``None`` means "declared but not pinned" so the
+# composer can leave the hole at its natural position rather than
+# snapping it.
+MOUNTING_HOLE_CORNERS = ("top-left", "top-right", "bottom-left", "bottom-right")
+
+
+@dataclass(slots=True)
+class ManualMountingHole:
+    """One user-configured mounting hole.
+
+    ``corner``: one of MOUNTING_HOLE_CORNERS or None (unpinned).
+    ``inset_mm``: distance from the named corner along both axes.
+    ``pos``: the resolved (x, y) the GUI computes from outline +
+    corner + inset, persisted so the composer doesn't have to
+    re-derive it.
+    """
+
+    index: int
+    corner: str | None
+    inset_mm: float
+    pos: Point
+
+
 @dataclass(slots=True)
 class ManualLayout:
     """User-specified parent layout: placements + outline.
@@ -43,12 +66,14 @@ class ManualLayout:
     authoritative -- the auto outline-fit pass is skipped when a manual
     layout is provided. ``parent_local`` is optional; entries override
     constraint-snapped positions for mounting holes / edge connectors
-    that the user dragged in the GUI.
+    that the user dragged in the GUI. ``mounting_holes`` carries the
+    GUI's per-hole corner pin choices.
     """
 
     placements: list[ManualLeafPlacement]
     board_outline: tuple[Point, Point]
     parent_local: list[ManualParentLocalPlacement] = field(default_factory=list)
+    mounting_holes: list[ManualMountingHole] = field(default_factory=list)
     schema_version: str = SCHEMA_VERSION
 
     def placement_by_path(self) -> dict[str, ManualLeafPlacement]:
@@ -76,6 +101,15 @@ class ManualLayout:
             "parent_local": [
                 {"ref": p.ref, "pos": {"x": p.pos.x, "y": p.pos.y}}
                 for p in self.parent_local
+            ],
+            "mounting_holes": [
+                {
+                    "index": h.index,
+                    "corner": h.corner,
+                    "inset_mm": h.inset_mm,
+                    "pos": {"x": h.pos.x, "y": h.pos.y},
+                }
+                for h in self.mounting_holes
             ],
         }
 
@@ -127,10 +161,26 @@ class ManualLayout:
                 raise ValueError(f"invalid parent_local entry: {exc}") from exc
             parent_local.append(ManualParentLocalPlacement(ref=ref, pos=pos))
 
+        mounting_holes: list[ManualMountingHole] = []
+        for entry in data.get("mounting_holes", []) or []:
+            try:
+                idx = int(entry["index"])
+                corner = entry.get("corner")
+                if corner is not None and corner not in MOUNTING_HOLE_CORNERS:
+                    raise ValueError(f"invalid corner: {corner!r}")
+                inset = float(entry.get("inset_mm", 5.0))
+                pos = Point(float(entry["pos"]["x"]), float(entry["pos"]["y"]))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"invalid mounting_holes entry: {exc}") from exc
+            mounting_holes.append(
+                ManualMountingHole(index=idx, corner=corner, inset_mm=inset, pos=pos)
+            )
+
         return cls(
             placements=placements,
             board_outline=(min_pt, max_pt),
             parent_local=parent_local,
+            mounting_holes=mounting_holes,
             schema_version=version,
         )
 

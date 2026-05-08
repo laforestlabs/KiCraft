@@ -178,6 +178,8 @@ def manual_layout_page() -> None:
             f"window.manualLayoutCanvases['{canvas_id}'].reset()"
         )).props("flat")
 
+    _mounting_hole_panel(canvas_id, initial.get("mounting_holes") or [])
+
     def _on_open_in_kicad() -> None:
         pcb = find_latest_parent_pcb(state.experiments_dir)
         if pcb is None:
@@ -352,3 +354,129 @@ def _html_escape(s: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+
+
+_MOUNTING_HOLE_CORNER_OPTIONS = {
+    "": "None (unpinned)",
+    "top-left": "Top-Left",
+    "top-right": "Top-Right",
+    "bottom-left": "Bottom-Left",
+    "bottom-right": "Bottom-Right",
+}
+# Default cycling order so a new hole picks up a sensible corner.
+_DEFAULT_CORNER_CYCLE = (
+    "top-left",
+    "bottom-right",
+    "top-right",
+    "bottom-left",
+)
+
+
+def _mounting_hole_panel(canvas_id: str, initial_holes: list[dict]) -> None:
+    """Collapsible expander to declare N mounting holes and their corners.
+
+    State lives in a Python list mirrored to the canvas via
+    ``setMountingHoles``. The canvas re-pegs each pinned hole to the
+    outline's corner + inset on every render, so the user can resize
+    the outline and see the holes follow.
+    """
+    state: list[dict] = []
+    for i, h in enumerate(initial_holes):
+        corner = h.get("corner")
+        if corner not in _MOUNTING_HOLE_CORNER_OPTIONS:
+            corner = None
+        state.append(
+            {
+                "index": int(h.get("index", i)),
+                "corner": corner,
+                "inset_mm": float(h.get("inset_mm", 5.0)),
+            }
+        )
+
+    with ui.expansion(
+        "Mounting Holes",
+        icon="circle",
+        value=bool(state),
+    ).classes("w-full mt-4 bg-slate-800/40 rounded"):
+        with ui.row().classes("items-center gap-3 px-2 pt-2"):
+            count_input = ui.number(
+                "Count",
+                value=len(state),
+                min=0,
+                max=8,
+                step=1,
+                format="%d",
+            ).classes("w-24")
+            ui.label(
+                "Each hole pegs to the named corner with the given inset; "
+                "set corner to 'None' to skip the peg."
+            ).classes("text-xs text-gray-400")
+        rows_container = ui.column().classes("w-full px-2 pb-2 gap-1")
+
+        def _push_to_canvas() -> None:
+            ui.run_javascript(
+                f"window.manualLayoutCanvases['{canvas_id}'] && "
+                f"window.manualLayoutCanvases['{canvas_id}']"
+                f".setMountingHoles({json.dumps(state)})"
+            )
+
+        def _rebuild() -> None:
+            rows_container.clear()
+            with rows_container:
+                for i, h in enumerate(state):
+                    _build_hole_row(i, h, _push_to_canvas)
+            _push_to_canvas()
+
+        def _on_count_change(e: Any) -> None:
+            n = max(0, min(8, int(e.value or 0)))
+            while len(state) < n:
+                idx = len(state)
+                state.append(
+                    {
+                        "index": idx,
+                        "corner": _DEFAULT_CORNER_CYCLE[
+                            idx % len(_DEFAULT_CORNER_CYCLE)
+                        ],
+                        "inset_mm": 5.0,
+                    }
+                )
+            while len(state) > n:
+                state.pop()
+            _rebuild()
+
+        count_input.on_value_change(_on_count_change)
+        _rebuild()
+
+
+def _build_hole_row(i: int, hole: dict, on_change) -> None:
+    """One H{N+1} row: corner dropdown + inset input."""
+    with ui.row().classes("items-center gap-2"):
+        ui.label(f"H{i + 1}").classes("text-xs text-gray-400 w-8")
+        sel = ui.select(
+            options=_MOUNTING_HOLE_CORNER_OPTIONS,
+            value=hole["corner"] or "",
+            label="Corner",
+        ).classes("w-44")
+
+        def _on_corner(e: Any, _hole=hole) -> None:
+            v = str(e.value or "")
+            _hole["corner"] = v if v in _MOUNTING_HOLE_CORNER_OPTIONS and v else None
+            on_change()
+
+        sel.on_value_change(_on_corner)
+        inset = ui.number(
+            "Inset (mm)",
+            value=hole["inset_mm"],
+            min=0,
+            step=0.5,
+            format="%.2f",
+        ).classes("w-32")
+
+        def _on_inset(e: Any, _hole=hole) -> None:
+            try:
+                _hole["inset_mm"] = max(0.0, float(e.value))
+            except (TypeError, ValueError):
+                return
+            on_change()
+
+        inset.on_value_change(_on_inset)
