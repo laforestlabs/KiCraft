@@ -290,21 +290,36 @@ _CANVAS_JS_TEMPLATE = """
       vb.vbX + ' ' + vb.vbY + ' ' + vb.vbW + ' ' + vb.vbH);
     svg.innerHTML = '';
 
-    // Grid (every 5mm minor, 10mm major)
+    // Grid (every 5mm minor, 10mm major). Cover the FULL visible
+    // area of the SVG element, not just the viewBox: with
+    // preserveAspectRatio="xMidYMid meet" the SVG letterboxes the
+    // viewBox, so the visible coordinate range is wider than the
+    // viewBox in the longer axis. Without this, leaves placed outside
+    // the outline (which still render correctly via the letterbox)
+    // float over a gridless dark background.
     const grid = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     grid.setAttribute('class', 'ml-grid');
-    const x0 = Math.floor(vb.vbX / 5) * 5;
-    const y0 = Math.floor(vb.vbY / 5) * 5;
-    for (let x = x0; x <= vb.vbX + vb.vbW; x += 5) {{
+    const svgW = svg.clientWidth || cfg.canvas_w_px;
+    const svgH = svg.clientHeight || cfg.canvas_h_px;
+    const scale = Math.min(svgW / vb.vbW, svgH / vb.vbH);
+    const visW = svgW / scale;
+    const visH = svgH / scale;
+    const visX = vb.vbX - (visW - vb.vbW) / 2;
+    const visY = vb.vbY - (visH - vb.vbH) / 2;
+    const x0 = Math.floor(visX / 5) * 5;
+    const x1 = visX + visW;
+    const y0 = Math.floor(visY / 5) * 5;
+    const y1 = visY + visH;
+    for (let x = x0; x <= x1; x += 5) {{
       const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
       ln.setAttribute('x1', x); ln.setAttribute('x2', x);
-      ln.setAttribute('y1', vb.vbY); ln.setAttribute('y2', vb.vbY + vb.vbH);
+      ln.setAttribute('y1', visY); ln.setAttribute('y2', y1);
       if (x % 10 === 0) ln.setAttribute('class', 'major');
       grid.appendChild(ln);
     }}
-    for (let y = y0; y <= vb.vbY + vb.vbH; y += 5) {{
+    for (let y = y0; y <= y1; y += 5) {{
       const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-      ln.setAttribute('x1', vb.vbX); ln.setAttribute('x2', vb.vbX + vb.vbW);
+      ln.setAttribute('x1', visX); ln.setAttribute('x2', x1);
       ln.setAttribute('y1', y); ln.setAttribute('y2', y);
       if (y % 10 === 0) ln.setAttribute('class', 'major');
       grid.appendChild(ln);
