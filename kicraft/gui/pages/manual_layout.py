@@ -22,7 +22,9 @@ from .manual_layout_canvas import (
 from .manual_layout_runner import (
     LeafInfo,
     discover_leaves,
+    find_latest_parent_pcb,
     load_initial_layout,
+    open_in_pcbnew,
     run_manual_compose,
     save_manual_layout_json,
 )
@@ -69,6 +71,78 @@ def manual_layout_page() -> None:
                 build_canvas_html(leaves, initial, canvas_id),
                 sanitize=False,
             ).classes("w-full")
+
+            # Outline size inputs -- two-way bound to the canvas state.
+            # Drag updates the JS state; a 600ms timer poll mirrors it
+            # back into these inputs, but only when the field isn't
+            # focused (so it doesn't clobber what the user is typing).
+            initial_w = float(initial["board_outline"]["max"]["x"]) - float(
+                initial["board_outline"]["min"]["x"]
+            )
+            initial_h = float(initial["board_outline"]["max"]["y"]) - float(
+                initial["board_outline"]["min"]["y"]
+            )
+            with ui.row().classes("items-end gap-3 mt-2"):
+                ui.label("Outline:").classes("text-xs text-gray-400 self-center")
+                width_input = ui.number(
+                    "Width (mm)",
+                    value=round(initial_w, 2),
+                    min=10,
+                    step=0.5,
+                    format="%.2f",
+                ).classes("w-32")
+                height_input = ui.number(
+                    "Height (mm)",
+                    value=round(initial_h, 2),
+                    min=10,
+                    step=0.5,
+                    format="%.2f",
+                ).classes("w-32")
+
+            def _push_size_to_canvas() -> None:
+                w = float(width_input.value or 0)
+                h = float(height_input.value or 0)
+                if w >= 10 and h >= 10:
+                    ui.run_javascript(
+                        f"window.manualLayoutCanvases['{canvas_id}']"
+                        f".setOutlineSize({w}, {h})"
+                    )
+
+            width_input.on("blur", lambda _e: _push_size_to_canvas())
+            height_input.on("blur", lambda _e: _push_size_to_canvas())
+            width_input.on("keydown.enter", lambda _e: _push_size_to_canvas())
+            height_input.on("keydown.enter", lambda _e: _push_size_to_canvas())
+
+            async def _pull_size_from_canvas() -> None:
+                # Don't trample mid-edit. The JS hasFocus check returns
+                # true if either input is focused; in that case skip
+                # the update so the user can finish typing.
+                try:
+                    has_focus = await ui.run_javascript(
+                        "(document.activeElement && "
+                        "document.activeElement.tagName === 'INPUT')",
+                        timeout=1.0,
+                    )
+                    if has_focus:
+                        return
+                    size = await ui.run_javascript(
+                        f"window.manualLayoutCanvases['{canvas_id}'] "
+                        f"&& window.manualLayoutCanvases['{canvas_id}']"
+                        f".getOutlineSize()",
+                        timeout=1.0,
+                    )
+                except Exception:  # noqa: BLE001
+                    return
+                if not isinstance(size, dict):
+                    return
+                w = float(size.get("width", 0))
+                h = float(size.get("height", 0))
+                if w > 0 and abs(w - float(width_input.value or 0)) > 0.01:
+                    width_input.value = round(w, 2)
+                if h > 0 and abs(h - float(height_input.value or 0)) > 0.01:
+                    height_input.value = round(h, 2)
+
+            ui.timer(0.6, _pull_size_from_canvas)
             # Inject the canvas controller as a body-level script. The
             # script polls for the SVG element to appear because the
             # Manual Layout tab panel is mounted lazily by Quasar --
@@ -98,9 +172,29 @@ def manual_layout_page() -> None:
         save_btn = ui.button("Save Layout", icon="save", color="primary")
         route_btn = ui.button("Route Now", icon="bolt", color="secondary")
         route_btn.props("disable")
+        open_btn = ui.button("Open in KiCad", icon="open_in_new")
+        open_btn.props("flat")
         ui.button("Reset", icon="refresh", on_click=lambda: ui.run_javascript(
             f"window.manualLayoutCanvases['{canvas_id}'].reset()"
         )).props("flat")
+
+    def _on_open_in_kicad() -> None:
+        pcb = find_latest_parent_pcb(state.experiments_dir)
+        if pcb is None:
+            status_label.set_text(
+                "no parent board on disk yet -- save the layout first"
+            )
+            return
+        try:
+            open_in_pcbnew(pcb)
+        except FileNotFoundError:
+            status_label.set_text(
+                "pcbnew not found on PATH; install kicad or open manually: " + str(pcb)
+            )
+            return
+        status_label.set_text(f"launched pcbnew on {pcb.name}")
+
+    open_btn.on_click(_on_open_in_kicad)
 
     saved_path: dict[str, Path | None] = {"path": None}
 

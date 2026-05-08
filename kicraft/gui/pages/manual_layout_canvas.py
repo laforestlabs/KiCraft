@@ -136,7 +136,11 @@ _CANVAS_JS_TEMPLATE = """
   const HANDLE_GRIP_MM = 0.8;
   const ROT_HANDLE_OFFSET_MM = 1.8;
   const ROT_HANDLE_R_MM = 0.9;
-  const PADDING_MM = 4.0;
+  const PADDING_X_MM = 4.0;
+  // Top/bottom edge handles need more breathing room: at PADDING_MM=4
+  // they end up flush against the canvas viewport, so a 1px overshoot
+  // jumps the outline by several mm.
+  const PADDING_Y_MM = 12.0;
   const SNAP_DEG = 90;
 
   function deepCopy(obj) {{ return JSON.parse(JSON.stringify(obj)); }}
@@ -158,10 +162,10 @@ _CANVAS_JS_TEMPLATE = """
     const out = state.board_outline;
     const w = out.max.x - out.min.x;
     const h = out.max.y - out.min.y;
-    const vbW = Math.max(w + 2 * PADDING_MM, 30);
-    const vbH = Math.max(h + 2 * PADDING_MM, 30);
-    const vbX = out.min.x - PADDING_MM;
-    const vbY = out.min.y - PADDING_MM;
+    const vbW = Math.max(w + 2 * PADDING_X_MM, 30);
+    const vbH = Math.max(h + 2 * PADDING_Y_MM, 30);
+    const vbX = out.min.x - PADDING_X_MM;
+    const vbY = out.min.y - PADDING_Y_MM;
     return {{ vbX, vbY, vbW, vbH }};
   }}
 
@@ -518,6 +522,23 @@ _CANVAS_JS_TEMPLATE = """
     }},
     reset: function() {{
       state = makeState();
+      render();
+    }},
+    getOutlineSize: function() {{
+      const out = state.board_outline;
+      return {{
+        width: Math.round((out.max.x - out.min.x) * 1000) / 1000,
+        height: Math.round((out.max.y - out.min.y) * 1000) / 1000,
+      }};
+    }},
+    setOutlineSize: function(width, height) {{
+      const out = state.board_outline;
+      const w = Math.max(10, Number(width) || 0);
+      const h = Math.max(10, Number(height) || 0);
+      // Anchor at the existing min corner so leaves don't get
+      // shoved when the user only adjusted width or only height.
+      out.max.x = out.min.x + w;
+      out.max.y = out.min.y + h;
       render();
     }},
   }};
