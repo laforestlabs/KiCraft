@@ -44,24 +44,29 @@ def manual_layout_page() -> None:
     """
     state = get_state()
     rendered_at = {"ts": _max_leaf_mtime(state.experiments_dir)}
-    _manual_layout_body()
+    # render_count > 0 -> this is a refresh, not the first paint;
+    # the canvas controller has to be re-injected via
+    # ui.run_javascript because ui.add_body_html only fires on
+    # initial page parse.
+    render_count = {"n": 0}
+    _manual_layout_body(render_count)
 
     def _watch() -> None:
         latest = _max_leaf_mtime(state.experiments_dir)
         if latest == rendered_at["ts"]:
             return
-        # Wait for the run to finish (no leaf modified in the last
-        # ~3 s) so we don't refresh halfway through a 6-leaf solve.
         if latest > 0 and (time.time() - latest) < 3.0:
             return
         rendered_at["ts"] = latest
-        _manual_layout_body.refresh()
+        _manual_layout_body.refresh(render_count)
 
     ui.timer(2.0, _watch)
 
 
 @ui.refreshable
-def _manual_layout_body() -> None:
+def _manual_layout_body(render_count: dict) -> None:
+    is_refresh = render_count["n"] > 0
+    render_count["n"] += 1
     state = get_state()
 
     # Compact header: the canvas should claim the rest of the viewport
@@ -181,25 +186,28 @@ def _manual_layout_body() -> None:
                     height_input.value = round(h, 2)
 
             ui.timer(0.6, _pull_size_from_canvas)
-            # Re-run the canvas controller on every render. The IIFE
-            # in build_canvas_init_script polls for the SVG element
-            # to mount (Quasar's lazy tab panel) and then renders --
-            # using ui.run_javascript here (instead of a one-shot
-            # ui.add_body_html on initial page load) means each
-            # _manual_layout_body.refresh() rebinds with the FRESH
-            # leaf list / initial state. Without that, an empty-
-            # canvas-after-re-route bug bit on every "ran leaves-only
-            # again" because the original IIFE held stale leaf
-            # config. ui.timer with once=True schedules the JS for
-            # the next client tick so the new SVG element from this
-            # render's ui.html() is in the DOM by the time the
-            # script runs.
+            # Canvas controller injection. ALWAYS via add_body_html,
+            # even on refresh: NiceGUI 3.x appends each call to the
+            # page body, so each refresh's script runs as the new
+            # SVG mounts. The version sentinel inside the IIFE
+            # (window.__mlc_version[canvas_id]) makes prior IIFEs
+            # bail out of their event handlers / pending tryInit
+            # retries, so only the latest version paints. Net cost
+            # is ~10 KB of accumulated <script> per refresh, which
+            # is fine for the few-refreshes-per-session reality.
             init_js = build_canvas_init_script(leaves, initial, canvas_id)
-            ui.timer(
-                0.05,
-                lambda: ui.run_javascript(init_js),
-                once=True,
-            )
+            ui.add_body_html(f"<script>{init_js}</script>")
+            # Belt-and-suspenders for the refresh case: NiceGUI may
+            # not always re-emit add_body_html across refreshable
+            # rerenders (the body html is conceptually page-scoped).
+            # ui.run_javascript reliably reaches the connected client
+            # the same instant ui.html() emits the new SVG.
+            if is_refresh:
+                ui.timer(
+                    0.05,
+                    lambda: ui.run_javascript(init_js),
+                    once=True,
+                )
         with ui.column().classes("w-72 gap-3"):
             _legend(leaves)
             with ui.card().classes("p-3"):
