@@ -145,13 +145,17 @@ def build_canvas_html(
     stroke-dasharray: 0.5 0.3;
     pointer-events: none;
   }}
-  .ml-leaf.overflow .ml-leaf-hit,
+  /* Overflow: paint the silk poly itself red dashed instead of layering
+     a second visible rect on top of it. The hit rect stays invisible
+     (it only catches pointer events). */
+  .ml-leaf.overflow .ml-leaf-silk,
   .ml-leaf.overflow .ml-rot-handle {{
     stroke: #ef4444;
   }}
-  .ml-leaf.overflow .ml-leaf-hit {{
+  .ml-leaf.overflow .ml-leaf-silk {{
     stroke-width: 0.5;
     stroke-dasharray: 0.6 0.4;
+    stroke-opacity: 1.0;
   }}
 </style>
 <div id="{canvas_id}-host" class="ml-canvas-host">

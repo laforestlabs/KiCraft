@@ -240,7 +240,11 @@ class SolvedLeafSubcircuit:
 
         silkscreen = []
         if cfg:
-            bbox = _compute_component_bbox(solved_components)
+            bbox = _compute_component_bbox(
+                solved_components,
+                traces=routed_traces,
+                vias=routed_vias,
+            )
             silkscreen = _build_leaf_silkscreen(
                 solved_components, bbox, self.extraction, cfg
             )

@@ -28,6 +28,8 @@ from .types import (
     InterfacePort,
     Point,
     SilkscreenElement,
+    TraceSegment,
+    Via,
 )
 
 
@@ -167,25 +169,45 @@ def _build_leaf_silkscreen(
     return [poly_element, text_element]
 
 
-def _compute_component_bbox(components: dict[str, Component]) -> dict[str, float]:
-    """Compute a tight bbox around solved components and pads."""
+def _compute_component_bbox(
+    components: dict[str, Component],
+    traces: list[TraceSegment] | None = None,
+    vias: list[Via] | None = None,
+) -> dict[str, float]:
+    """Compute a tight bbox over courtyards + pad copper + traces + vias.
+
+    Uses ``Component.physical_bbox()`` (courtyard ∪ pad copper bboxes), so
+    pads that stick out past the courtyard are included. When ``traces``
+    and ``vias`` are provided the bbox also covers routed copper -- that's
+    what the leaf-time silk stamp does post-route, so the silk hugs every
+    visible piece of the leaf.
+    """
     min_x = float("inf")
     min_y = float("inf")
     max_x = float("-inf")
     max_y = float("-inf")
 
     for comp in components.values():
-        tl, br = comp.bbox()
+        tl, br = comp.physical_bbox()
         min_x = min(min_x, tl.x)
         min_y = min(min_y, tl.y)
         max_x = max(max_x, br.x)
         max_y = max(max_y, br.y)
 
-        for pad in comp.pads:
-            min_x = min(min_x, pad.pos.x)
-            min_y = min(min_y, pad.pos.y)
-            max_x = max(max_x, pad.pos.x)
-            max_y = max(max_y, pad.pos.y)
+    for trace in traces or []:
+        half = trace.width_mm / 2.0
+        for pt in (trace.start, trace.end):
+            min_x = min(min_x, pt.x - half)
+            min_y = min(min_y, pt.y - half)
+            max_x = max(max_x, pt.x + half)
+            max_y = max(max_y, pt.y + half)
+
+    for via in vias or []:
+        half = via.size_mm / 2.0
+        min_x = min(min_x, via.pos.x - half)
+        min_y = min(min_y, via.pos.y - half)
+        max_x = max(max_x, via.pos.x + half)
+        max_y = max(max_y, via.pos.y + half)
 
     if min_x == float("inf"):
         min_x = min_y = max_x = max_y = 0.0

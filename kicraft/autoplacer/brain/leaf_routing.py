@@ -27,12 +27,19 @@ def _silk_for_leaf(
     extraction: ExtractedSubcircuitBoard,
     components: dict[str, Component],
     cfg: dict[str, Any],
+    *,
+    traces=None,
+    vias=None,
 ) -> list:
     """Compute leaf-local rounded-rect silk + optional label for stamping.
 
     Lazy-imports the solver helpers so this module stays cheap to import
     in pipelines that don't actually stamp boards. Returns ``[]`` when
     components are empty or no project ``group_labels`` entry matches.
+
+    Pass ``traces`` and ``vias`` post-route so the silk hugs every visible
+    piece of copper (courtyards + pad copper + tracks + vias). Pre-route
+    callers can omit them; the silk then hugs courtyards + pad copper only.
     """
     if not components:
         return []
@@ -40,7 +47,7 @@ def _silk_for_leaf(
         _build_leaf_silkscreen,
         _compute_component_bbox,
     )
-    bbox = _compute_component_bbox(components)
+    bbox = _compute_component_bbox(components, traces=traces, vias=vias)
     return _build_leaf_silkscreen(components, bbox, extraction, cfg)
 
 
@@ -275,7 +282,10 @@ def route_local_subcircuit(
     route_input_board.components = copy.deepcopy(repaired_components)
     route_input_board.traces = []
     route_input_board.vias = []
-    route_input_board.silkscreen = _silk_for_leaf(extraction, repaired_components, cfg)
+    # Silk is stamped post-route (after FreeRouting) so the rounded
+    # outline can hug the routed copper too -- not just courtyards and
+    # pad copper. See the silk re-stamp block after import_routed_copper.
+    route_input_board.silkscreen = []
 
     stamp_start = time.monotonic()
     route_adapter = KiCadAdapter(str(source_pcb), config=cfg)
@@ -443,6 +453,34 @@ def route_local_subcircuit(
     imported_copper = import_routed_copper(str(routed_board))
     route_timing["import_routed_copper_s"] = round(
         max(0.0, time.monotonic() - import_copper_start), 3
+    )
+
+    # Re-stamp the routed leaf board with silk computed from the FULL
+    # post-route content (courtyards + pad copper + traces + vias).
+    # Stamping silk here -- rather than on the pre-route board -- means
+    # the rounded outline includes routed copper that extends past the
+    # components, so the canvas + round-selector PNGs show one tight
+    # outline instead of "silk hugs the chip body but the trace stub
+    # pokes out past it."
+    silk_stamp_start = time.monotonic()
+    silk_adapter = KiCadAdapter(str(routed_board), config=cfg)
+    routed_state_for_silk = silk_adapter.load()
+    routed_state_for_silk.silkscreen = _silk_for_leaf(
+        extraction,
+        routed_state_for_silk.components,
+        cfg,
+        traces=routed_state_for_silk.traces,
+        vias=routed_state_for_silk.vias,
+    )
+    silk_adapter.stamp_subcircuit_board(
+        routed_state_for_silk,
+        output_path=str(routed_board),
+        clear_existing_tracks=True,
+        clear_existing_zones=True,
+        remove_unmapped_footprints=False,
+    )
+    route_timing["silk_post_route_stamp_s"] = round(
+        max(0.0, time.monotonic() - silk_stamp_start), 3
     )
 
     routed_validation_start = time.monotonic()
