@@ -181,13 +181,25 @@ def _manual_layout_body() -> None:
                     height_input.value = round(h, 2)
 
             ui.timer(0.6, _pull_size_from_canvas)
-            # Inject the canvas controller as a body-level script. The
-            # script polls for the SVG element to appear because the
-            # Manual Layout tab panel is mounted lazily by Quasar --
-            # the script runs at page-parse time, before the user
-            # switches to this tab.
+            # Re-run the canvas controller on every render. The IIFE
+            # in build_canvas_init_script polls for the SVG element
+            # to mount (Quasar's lazy tab panel) and then renders --
+            # using ui.run_javascript here (instead of a one-shot
+            # ui.add_body_html on initial page load) means each
+            # _manual_layout_body.refresh() rebinds with the FRESH
+            # leaf list / initial state. Without that, an empty-
+            # canvas-after-re-route bug bit on every "ran leaves-only
+            # again" because the original IIFE held stale leaf
+            # config. ui.timer with once=True schedules the JS for
+            # the next client tick so the new SVG element from this
+            # render's ui.html() is in the DOM by the time the
+            # script runs.
             init_js = build_canvas_init_script(leaves, initial, canvas_id)
-            ui.add_body_html(f"<script>{init_js}</script>")
+            ui.timer(
+                0.05,
+                lambda: ui.run_javascript(init_js),
+                once=True,
+            )
         with ui.column().classes("w-72 gap-3"):
             _legend(leaves)
             with ui.card().classes("p-3"):

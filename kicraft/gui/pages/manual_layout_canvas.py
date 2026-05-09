@@ -163,6 +163,20 @@ _CANVAS_JS_TEMPLATE = """
 (function() {{
   const cfg = {config_json};
   const HOST_ID = cfg.canvas_id + '-host';
+
+  // Each call to this IIFE bumps the canvas's version. The
+  // refreshable body re-runs build_canvas_init_script on every
+  // _manual_layout_body.refresh() so we end up with a stack of
+  // IIFEs whose only conflict is the document-level keydown
+  // listener (SVG-level listeners auto-clean when the SVG is
+  // replaced). Listeners check this sentinel and bail if a newer
+  // IIFE has registered, so only the latest version ever responds.
+  window.__mlc_version = window.__mlc_version || {{}};
+  window.__mlc_version[cfg.canvas_id] = (window.__mlc_version[cfg.canvas_id] || 0) + 1;
+  const myVersion = window.__mlc_version[cfg.canvas_id];
+  function isCurrent() {{
+    return window.__mlc_version[cfg.canvas_id] === myVersion;
+  }}
   const SVG_ID = cfg.canvas_id;
   const SELECTED_ID = cfg.canvas_id + '-selected';
   const COORDS_ID = cfg.canvas_id + '-coords';
@@ -554,6 +568,7 @@ _CANVAS_JS_TEMPLATE = """
       }}
     }});
     document.addEventListener('keydown', (e) => {{
+      if (!isCurrent()) return;  // stale IIFE from a prior refresh
       if (!state.selected) return;
       if (e.key === 'r' || e.key === 'R') {{
         const p = state.placements.find(x => x.instance_path === state.selected);
@@ -753,6 +768,7 @@ _CANVAS_JS_TEMPLATE = """
   // appears, then render once. After that the tab is kept alive and
   // subsequent re-activations reuse the rendered DOM.
   function tryInit(remainingTries) {{
+    if (!isCurrent()) return;  // a newer IIFE took over while we waited
     const svg = document.getElementById(SVG_ID);
     if (svg) {{
       render();
