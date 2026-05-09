@@ -635,45 +635,6 @@ def build_parent_composition(
             child_anchor_maps,
         )
 
-    # Synthetic silk rectangle around each placed leaf so the stamped
-    # parent shows the same per-leaf boundary the manual layout canvas
-    # uses. Loose silk on the leaf .kicad_pcb files doesn't transfer
-    # through composition (the canonical solved_layout.json schema only
-    # carries components/traces/vias plus poly+text silk), so generate
-    # the rectangle here from the leaf's bounding_box transformed by
-    # its placement origin + rotation. KiCad CW rotation matches
-    # transform_loaded_artifact._transform_point.
-    import math
-    for child in composed_children:
-        layout = child.transformed.layout
-        w, h = layout.width, layout.height
-        if w <= 0 or h <= 0:
-            continue
-        ox, oy = child.instance.origin.x, child.instance.origin.y
-        rad = math.radians(child.instance.rotation)
-        cos_t, sin_t = math.cos(rad), math.sin(rad)
-
-        def _xform(lx: float, ly: float) -> Point:
-            return Point(
-                ox + cos_t * lx + sin_t * ly,
-                oy - sin_t * lx + cos_t * ly,
-            )
-
-        merged_silkscreen.append(
-            SilkscreenElement(
-                kind="poly",
-                layer="F.SilkS",
-                points=[
-                    _xform(0.0, 0.0),
-                    _xform(w, 0.0),
-                    _xform(w, h),
-                    _xform(0.0, h),
-                    _xform(0.0, 0.0),
-                ],
-                stroke_width=0.15,
-            )
-        )
-
     for ref, comp in (local_components or {}).items():
         if ref in merged_components:
             raise ValueError(

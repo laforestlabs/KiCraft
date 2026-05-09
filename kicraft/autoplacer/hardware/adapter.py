@@ -330,6 +330,9 @@ _edge_remove = [d for d in board.GetDrawings()
 for d in _edge_remove:
     board.Remove(d)
 
+# No silkscreen outline added here -- the leaf solver's rounded-corner
+# silk poly travels through composition and stamps the boundary on
+# the parent. A second sharp-corner outline competed with it.
 _corners = [(_left, _top), (_right, _top), (_right, _bottom), (_left, _bottom)]
 for _i in range(4):
     _x1, _y1 = _corners[_i]
@@ -341,15 +344,6 @@ for _i in range(4):
     _edge.SetStart(pcbnew.VECTOR2I(_x1, _y1))
     _edge.SetEnd(pcbnew.VECTOR2I(_x2, _y2))
     board.Add(_edge)
-    # Silkscreen leaf-outline marker -- 0.15 mm width is the tag the
-    # in-process and retrofit code recognise on subsequent re-stamps.
-    _silk = pcbnew.PCB_SHAPE(board)
-    _silk.SetShape(pcbnew.SHAPE_T_SEGMENT)
-    _silk.SetLayer(pcbnew.F_SilkS)
-    _silk.SetWidth(pcbnew.FromMM(0.15))
-    _silk.SetStart(pcbnew.VECTOR2I(_x1, _y1))
-    _silk.SetEnd(pcbnew.VECTOR2I(_x2, _y2))
-    board.Add(_silk)
 
 # --- build component lookup ---
 _comp_map = {c["ref"]: c for c in _components}
@@ -1063,11 +1057,11 @@ class KiCadAdapter:
     ):
         """Rewrite the Edge.Cuts rectangle to the given dimensions at a chosen origin.
 
-        Also draws a matching F.Silkscreen rectangle so the leaf carries
-        a visible boundary marker that travels with it into parent
-        composition + manual-layout PNG renders. The silk lines are
-        kept tight against the edge cut (0.15 mm width) so they read
-        clearly without competing with component silk.
+        The leaf solver already emits a rounded-corner silkscreen
+        boundary via _silkscreen_for_label, which propagates through
+        composition into the parent stamp. No additional silk segments
+        here -- previous attempts double-stamped the boundary with a
+        sharp-corner rectangle that competed with the rounded one.
         """
         board = self.board
 
@@ -1077,7 +1071,8 @@ class KiCadAdapter:
         new_bottom = pcbnew.FromMM(top_mm + height_mm)
 
         # Remove existing Edge.Cuts lines AND any prior leaf-outline
-        # silk segments tagged "leaf_outline" so re-stamps stay clean.
+        # silk segments left over from the now-removed sharp-corner
+        # stamp so re-stamps stay clean.
         to_remove = []
         for dwg in board.GetDrawings():
             if dwg.GetLayer() == pcbnew.Edge_Cuts:
@@ -1103,15 +1098,6 @@ class KiCadAdapter:
             edge.SetStart(pcbnew.VECTOR2I(x1, y1))
             edge.SetEnd(pcbnew.VECTOR2I(x2, y2))
             board.Add(edge)
-
-            silk = pcbnew.PCB_SHAPE(board)
-            silk.SetShape(pcbnew.SHAPE_T_SEGMENT)
-            silk.SetLayer(pcbnew.F_SilkS)
-            silk.SetWidth(pcbnew.FromMM(0.15))
-            silk.SetStart(pcbnew.VECTOR2I(x1, y1))
-            silk.SetEnd(pcbnew.VECTOR2I(x2, y2))
-            _tag_leaf_outline_silk(silk)
-            board.Add(silk)
 
     def strip_zones(self):
         """Remove all non-rule-area copper zones from the board.
