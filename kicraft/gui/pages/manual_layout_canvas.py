@@ -32,15 +32,20 @@ def _build_canvas_config(
             "height_mm": lf.height_mm,
             "color": lf.color,
             "render_url": lf.render_url,
-            # Silk bbox in leaf-local coords. The canvas uses these
-            # for the visible leaf preview so its size + rounded
-            # corners match what F.Silkscreen actually shows on the
-            # stamped board.
+            # Tight content bbox (pads + traces + vias). Used as the
+            # leaf hit / preview / overflow rectangle.
             "silk_min_x": lf.silk_min_x,
             "silk_min_y": lf.silk_min_y,
             "silk_max_x": lf.silk_max_x,
             "silk_max_y": lf.silk_max_y,
             "silk_corner_radius_mm": lf.silk_corner_radius_mm,
+            # Silk poly points -- the actual rounded silkscreen
+            # outline the leaf solver writes. Drawn as a thin yellow
+            # overlay so the user sees the same silk shape that
+            # appears on the stamped board.
+            "silk_polygon_points": [
+                {"x": x, "y": y} for x, y in lf.silk_polygon_points
+            ],
         }
         for lf in leaves
     ]
@@ -88,6 +93,13 @@ def build_canvas_html(
     stroke: none;
   }}
   .ml-leaf-img {{ pointer-events: none; }}
+  .ml-leaf-silk {{
+    fill: none;
+    stroke: #fbbf24;
+    stroke-width: 0.18;
+    stroke-opacity: 0.85;
+    pointer-events: none;
+  }}
   .ml-rot-handle {{
     fill: #facc15;
     fill-opacity: 0;
@@ -494,8 +506,21 @@ _CANVAS_JS_TEMPLATE = """
         g.appendChild(img);
       }}
 
-      // Hit / selection target = silk bbox, rounded corners matching
-      // the leaf solver's _silkscreen_for_label output.
+      // Yellow silk-poly overlay -- the actual rounded silkscreen
+      // outline the leaf solver writes onto F.Silkscreen. Always
+      // visible (regardless of selection state) so the user sees
+      // the leaf's silk shape directly instead of inferring it
+      // from the routed-PNG content. Drawn between the image and
+      // the hit rect so it sits on top of the PNG but below the
+      // selection / drag affordance.
+      if (Array.isArray(leaf.silk_polygon_points) && leaf.silk_polygon_points.length >= 3) {{
+        const silk = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+        silk.setAttribute('class', 'ml-leaf-silk');
+        silk.setAttribute('points', leaf.silk_polygon_points.map(p => p.x + ',' + p.y).join(' '));
+        g.appendChild(silk);
+      }}
+
+      // Hit / selection target = content bbox, rounded corners.
       const hit = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
       hit.setAttribute('class', 'ml-leaf-hit');
       hit.setAttribute('x', sx0);

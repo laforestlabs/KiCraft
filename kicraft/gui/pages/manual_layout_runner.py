@@ -50,13 +50,21 @@ _LEAF_COLORS = [
 class LeafInfo:
     """One discovered leaf available for manual placement.
 
-    ``width_mm`` / ``height_mm`` are the Edge.Cuts bbox from metadata
-    (canonical leaf board size). ``silk_bbox`` is the rounded-corner
-    silkscreen outline the leaf solver writes into solved_layout.json
-    -- typically tighter than the Edge.Cuts because it hugs the
-    components' bbox + a small margin. The canvas uses silk_bbox for
-    its leaf preview so the visual rectangle matches what kicad-cli
-    actually renders on F.Silkscreen.
+    Two bboxes per leaf:
+
+    * ``silk_min_*`` / ``silk_max_*`` -- the TIGHT content bbox
+      (pads + traces + vias) the canvas uses as the leaf hit /
+      preview / overflow rectangle. NOT the leaf solver's silk poly
+      bbox: that's always larger because it hugs component bodies +
+      0.5 mm margin (BATT's body is 76 mm long while the pads only
+      cover 32 mm). Using the silk-poly bbox made the dashed red
+      "extent" indicator visibly oversized on most leaves.
+
+    * ``silk_polygon_points`` -- the actual rounded-rect silkscreen
+      outline the leaf solver wrote into solved_layout.json
+      (32 arc-sampled points). The canvas overlays this as a thin
+      yellow polygon so the user sees the silk shape that will land
+      on the stamped board, alongside the tight content bbox.
     """
 
     instance_path: str
@@ -66,13 +74,48 @@ class LeafInfo:
     artifact_dir: Path
     render_url: str | None = None
     color: str = "#60a5fa"
-    # Silk-bbox in leaf-local coords; defaults to (0,0)-(w,h) when no
-    # silk poly was found so the canvas falls back to the Edge.Cuts.
+    # Tight content bbox in leaf-local coords; defaults to
+    # (0,0)-(w,h) when no usable geometry is found.
     silk_min_x: float = 0.0
     silk_min_y: float = 0.0
     silk_max_x: float = 0.0
     silk_max_y: float = 0.0
     silk_corner_radius_mm: float = 1.0
+    # Silkscreen poly points in leaf-local coords -- closed polygon
+    # of (x, y) tuples. Empty if the leaf has no poly silk.
+    silk_polygon_points: list[tuple[float, float]] = field(default_factory=list)
+
+
+def _silk_polygon_from_solved_layout(leaf_dir: Path) -> list[tuple[float, float]]:
+    """Return the leaf solver's silkscreen poly points in leaf-local coords.
+
+    The leaf solver writes a single closed rounded-rect poly per leaf
+    (32 arc-sampled points) via ``_silkscreen_for_label``. The canvas
+    overlays this polygon as a thin yellow outline so the user sees
+    the same silkscreen shape that lands on the stamped board, on
+    top of the routed PNG and the dashed content bbox.
+
+    Returns an empty list when no poly silk is on disk.
+    """
+    sl_path = leaf_dir / "solved_layout.json"
+    try:
+        sl = json.loads(sl_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    points: list[tuple[float, float]] = []
+    for elem in sl.get("silkscreen", []) or []:
+        if elem.get("kind") != "poly":
+            continue
+        for pt in elem.get("points", []) or []:
+            try:
+                points.append((float(pt["x"]), float(pt["y"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        # The leaf solver writes one poly per leaf (the rounded outline).
+        # Subsequent polys would be component-level body silk that we do
+        # not want to draw as the overall leaf outline.
+        break
+    return points
 
 
 def _silk_bbox_from_solved_layout(leaf_dir: Path) -> tuple[float, float, float, float] | None:
@@ -276,6 +319,8 @@ def discover_leaves(experiments_dir: Path) -> list[LeafInfo]:
         else:
             silk_min_x, silk_min_y, silk_max_x, silk_max_y = silk_bbox
 
+        silk_poly = _silk_polygon_from_solved_layout(leaf_dir)
+
         leaves.append(
             LeafInfo(
                 instance_path=str(meta.get("instance_path", "")),
@@ -288,6 +333,7 @@ def discover_leaves(experiments_dir: Path) -> list[LeafInfo]:
                 silk_min_y=silk_min_y,
                 silk_max_x=silk_max_x,
                 silk_max_y=silk_max_y,
+                silk_polygon_points=silk_poly,
             )
         )
 
