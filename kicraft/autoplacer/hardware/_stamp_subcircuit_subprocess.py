@@ -74,11 +74,13 @@ def main(argv: list[str]) -> int:
     _components = _data["components"]
     _traces = _data["traces"]
     _vias = _data["vias"]
+    _silkscreen = _data.get("silkscreen", []) or []
     _clear_tracks = _data["clear_existing_tracks"]
     _clear_zones = _data["clear_existing_zones"]
     _remove_unmapped = _data["remove_unmapped_footprints"]
 
     _LAYER_NAME_MAP = {"F.Cu": pcbnew.F_Cu, "B.Cu": pcbnew.B_Cu}
+    _SILK_LAYER_MAP = {"F.SilkS": pcbnew.F_SilkS, "B.SilkS": pcbnew.B_SilkS}
 
     board = pcbnew.LoadBoard(_pcb_path)
 
@@ -101,13 +103,11 @@ def main(argv: list[str]) -> int:
     _right = pcbnew.FromMM(_outline["tl_x"] + _width_mm)
     _bottom = pcbnew.FromMM(_outline["tl_y"] + _height_mm)
 
-    # Strip every loose drawing -- we rebuild only Edge.Cuts below.
+    # Strip every loose drawing -- we rebuild Edge.Cuts + silk from
+    # the payload below.
     for d in _all_drawings:
         board.Remove(d)
 
-    # No silkscreen outline added here -- the leaf solver's rounded
-    # poly silk travels through composition and stamps the boundary
-    # on the parent. A second sharp-corner outline competed with it.
     _corners = [
         (_left, _top),
         (_right, _top),
@@ -203,6 +203,46 @@ def main(argv: list[str]) -> int:
         if _nc > 0:
             _tv.SetNetCode(_nc)
         board.Add(_tv)
+
+    # Silk for this leaf arrives in the payload's "silkscreen" list
+    # (built by leaf_routing._silk_for_leaf against the post-repair
+    # component bbox). Drawing it here -- or deriving any outline silk
+    # from the Edge.Cuts rectangle -- would either duplicate that
+    # rounded poly or compete with it as a sharp-corner rectangle (a
+    # previous regression). The leaf solver owns the silk shape; this
+    # code only owns Edge.Cuts.
+    for _silk in _silkscreen:
+        _slayer = _SILK_LAYER_MAP.get(_silk.get("layer", "F.SilkS"), pcbnew.F_SilkS)
+        if _silk["kind"] == "poly":
+            _shape = pcbnew.PCB_SHAPE(board)
+            _shape.SetShape(pcbnew.SHAPE_T_POLY)
+            _shape.SetLayer(_slayer)
+            _shape.SetFilled(False)
+            _shape.SetWidth(pcbnew.FromMM(_silk.get("stroke_width", 0.15)))
+            _poly = pcbnew.VECTOR_VECTOR2I()
+            for _pt in _silk.get("points", []):
+                _poly.append(
+                    pcbnew.VECTOR2I(pcbnew.FromMM(_pt["x"]), pcbnew.FromMM(_pt["y"]))
+                )
+            _shape.SetPolyPoints(_poly)
+            board.Add(_shape)
+        elif _silk["kind"] == "text":
+            _txt = pcbnew.PCB_TEXT(board)
+            _txt.SetText(_silk.get("text", ""))
+            _txt.SetLayer(_slayer)
+            _pos = _silk.get("pos", {"x": 0, "y": 0})
+            _txt.SetPosition(
+                pcbnew.VECTOR2I(pcbnew.FromMM(_pos["x"]), pcbnew.FromMM(_pos["y"]))
+            )
+            _txt.SetTextSize(
+                pcbnew.VECTOR2I(
+                    pcbnew.FromMM(_silk.get("font_width", 1.0)),
+                    pcbnew.FromMM(_silk.get("font_height", 1.0)),
+                )
+            )
+            _txt.SetTextThickness(pcbnew.FromMM(_silk.get("font_thickness", 0.15)))
+            _txt.SetHorizJustify(pcbnew.GR_TEXT_H_ALIGN_LEFT)
+            board.Add(_txt)
 
     # Do NOT call board.BuildConnectivity() here: pcbnew Save() silently
     # returns False (no file written, no exception) on ~half of attempts

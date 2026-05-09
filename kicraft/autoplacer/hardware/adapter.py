@@ -797,6 +797,26 @@ class KiCadAdapter:
                 "net_name": via.net or "",
             })
 
+        silkscreen_json = []
+        for elem in (state.silkscreen or []):
+            if elem.kind == "poly":
+                silkscreen_json.append({
+                    "kind": "poly",
+                    "layer": elem.layer,
+                    "points": [{"x": p.x, "y": p.y} for p in elem.points],
+                    "stroke_width": elem.stroke_width,
+                })
+            elif elem.kind == "text":
+                silkscreen_json.append({
+                    "kind": "text",
+                    "layer": elem.layer,
+                    "text": elem.text,
+                    "pos": {"x": elem.pos.x, "y": elem.pos.y},
+                    "font_height": elem.font_height,
+                    "font_width": elem.font_width,
+                    "font_thickness": elem.font_thickness,
+                })
+
         payload = {
             "pcb_path": self.pcb_path,
             "output_path": output_path or self.pcb_path,
@@ -809,6 +829,7 @@ class KiCadAdapter:
             "components": components_json,
             "traces": traces_json,
             "vias": vias_json,
+            "silkscreen": silkscreen_json,
             "clear_existing_tracks": clear_existing_tracks,
             "clear_existing_zones": clear_existing_zones,
             "remove_unmapped_footprints": remove_unmapped_footprints,
@@ -854,11 +875,13 @@ class KiCadAdapter:
     ):
         """Rewrite the Edge.Cuts rectangle to the given dimensions at a chosen origin.
 
-        The leaf solver already emits a rounded-corner silkscreen
-        boundary via _silkscreen_for_label, which propagates through
-        composition into the parent stamp. No additional silk segments
-        here -- previous attempts double-stamped the boundary with a
-        sharp-corner rectangle that competed with the rounded one.
+        Silk for this leaf is stamped from ``BoardState.silkscreen``
+        (built by ``leaf_routing._silk_for_leaf`` against the
+        post-repair component bbox). Drawing it here -- or deriving any
+        outline silk from the Edge.Cuts rectangle -- would either
+        duplicate that rounded poly or compete with it as a sharp-corner
+        rectangle (a previous regression). This function only owns
+        Edge.Cuts.
         """
         board = self.board
 

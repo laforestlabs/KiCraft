@@ -23,6 +23,27 @@ from kicraft.autoplacer.freerouting_runner import (
 from kicraft.autoplacer.hardware.adapter import KiCadAdapter
 
 
+def _silk_for_leaf(
+    extraction: ExtractedSubcircuitBoard,
+    components: dict[str, Component],
+    cfg: dict[str, Any],
+) -> list:
+    """Compute leaf-local rounded-rect silk + optional label for stamping.
+
+    Lazy-imports the solver helpers so this module stays cheap to import
+    in pipelines that don't actually stamp boards. Returns ``[]`` when
+    components are empty or no project ``group_labels`` entry matches.
+    """
+    if not components:
+        return []
+    from kicraft.autoplacer.brain.subcircuit_solver import (
+        _build_leaf_silkscreen,
+        _compute_component_bbox,
+    )
+    bbox = _compute_component_bbox(components)
+    return _build_leaf_silkscreen(components, bbox, extraction, cfg)
+
+
 def route_local_subcircuit(
     extraction: ExtractedSubcircuitBoard,
     solved_components: dict[str, Component],
@@ -254,6 +275,7 @@ def route_local_subcircuit(
     route_input_board.components = copy.deepcopy(repaired_components)
     route_input_board.traces = []
     route_input_board.vias = []
+    route_input_board.silkscreen = _silk_for_leaf(extraction, repaired_components, cfg)
 
     stamp_start = time.monotonic()
     route_adapter = KiCadAdapter(str(source_pcb), config=cfg)
@@ -837,6 +859,7 @@ def _stamp_trivial_leaf(
     route_input_board.components = copy.deepcopy(repaired_components)
     route_input_board.traces = []
     route_input_board.vias = []
+    route_input_board.silkscreen = _silk_for_leaf(extraction, repaired_components, cfg)
 
     stamp_start = time.monotonic()
     route_adapter = KiCadAdapter(str(source_pcb), config=cfg)
