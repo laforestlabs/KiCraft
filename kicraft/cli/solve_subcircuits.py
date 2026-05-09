@@ -147,7 +147,7 @@ from kicraft.autoplacer.brain.types import (
     SubCircuitLayout,
 )
 from kicraft.autoplacer.config import DEFAULT_CONFIG, load_project_config
-from kicraft.autoplacer.hardware.adapter import KiCadAdapter
+from kicraft.autoplacer.hardware.adapter import KiCadAdapter, StampSubprocessError
 
 
 @dataclass(slots=True)
@@ -492,6 +492,13 @@ def _solve_one_round(
                 round_index=round_index,
             )
             round_timing.update(route_timing)
+        except StampSubprocessError:
+            # Stamp subprocess crashed -- the leaf .kicad_pcb on disk
+            # is now stale relative to this round's intent. Re-raise
+            # so autoexperiment surfaces it as a hard run failure
+            # instead of degrading to routing_exception (which would
+            # let cached on-disk leaves keep masquerading as accepted).
+            raise
         except Exception as exc:
             print(f"  WARNING: unexpected routing error in round {round_index}: {exc}")
             routing = {

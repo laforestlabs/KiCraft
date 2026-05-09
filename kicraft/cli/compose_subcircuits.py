@@ -2160,7 +2160,7 @@ def _stamp_parent_board(
 
     from kicraft.autoplacer.brain.subcircuit_artifacts import slugify_subcircuit_id
     from kicraft.autoplacer.brain.types import Layer
-    from kicraft.autoplacer.freerouting_runner import _run_pcbnew_script
+    from kicraft.autoplacer.freerouting_runner import _run_pcbnew_script_file
 
     composition = state.composition
     if composition is None:
@@ -2293,8 +2293,7 @@ def _stamp_parent_board(
         with os.fdopen(tmp_fd, "w") as f:
             _json.dump(payload, f)
 
-        script = _PARENT_STAMP_SCRIPT.replace("__JSON_PATH__", tmp_path)
-        _run_pcbnew_script(script)
+        _run_pcbnew_script_file(_PARENT_STAMP_SCRIPT_PATH, tmp_path)
     finally:
         try:
             os.unlink(tmp_path)
@@ -2305,205 +2304,16 @@ def _stamp_parent_board(
     return output_pcb
 
 
-_PARENT_STAMP_SCRIPT = r"""
-import json, pcbnew
 
-with open("__JSON_PATH__") as _f:
-    _data = json.load(_f)
-
-_pcb_path = _data["pcb_path"]
-_out_path = _data["output_path"]
-_components = _data["components"]
-_traces = _data["traces"]
-_vias = _data["vias"]
-_silkscreen = _data.get("silkscreen", [])
-_keepouts = _data.get("keepouts", [])
-
-_LAYER_MAP = {0: pcbnew.F_Cu, 1: pcbnew.B_Cu}
-_LAYER_NAME_MAP = {"F.Cu": pcbnew.F_Cu, "B.Cu": pcbnew.B_Cu}
-
-board = pcbnew.LoadBoard(_pcb_path)
-
-# --- rewrite board outline if provided ---
-_outline = _data.get("outline")
-if _outline:
-    _width_mm = max(1.0, _outline["br_x"] - _outline["tl_x"])
-    _height_mm = max(1.0, _outline["br_y"] - _outline["tl_y"])
-    _left = pcbnew.FromMM(_outline["tl_x"])
-    _top = pcbnew.FromMM(_outline["tl_y"])
-    _right = pcbnew.FromMM(_outline["tl_x"] + _width_mm)
-    _bottom = pcbnew.FromMM(_outline["tl_y"] + _height_mm)
-
-    _edge_remove = [d for d in board.GetDrawings() if d.GetLayer() == pcbnew.Edge_Cuts]
-    for d in _edge_remove:
-        board.Remove(d)
-
-    _corners = [(_left, _top), (_right, _top), (_right, _bottom), (_left, _bottom)]
-    for _i in range(4):
-        _seg = pcbnew.PCB_SHAPE(board)
-        _seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
-        _seg.SetLayer(pcbnew.Edge_Cuts)
-        _seg.SetWidth(pcbnew.FromMM(0.05))
-        _x1, _y1 = _corners[_i]
-        _x2, _y2 = _corners[(_i + 1) % 4]
-        _seg.SetStart(pcbnew.VECTOR2I(_x1, _y1))
-        _seg.SetEnd(pcbnew.VECTOR2I(_x2, _y2))
-        board.Add(_seg)
-
-# --- build component lookup ---
-_comp_map = {c["ref"]: c for c in _components}
-
-# --- move footprints to composed positions (keep all footprints) ---
-for _fp in board.Footprints():
-    _ref = _fp.GetReferenceAsString()
-    _comp = _comp_map.get(_ref)
-    if _comp is None:
-        continue
-    _cur_layer = 1 if _fp.GetLayer() == pcbnew.B_Cu else 0
-    if _comp["layer"] != _cur_layer:
-        _fp.Flip(_fp.GetPosition(), False)
-    _fp.SetPosition(
-        pcbnew.VECTOR2I(pcbnew.FromMM(_comp["x"]), pcbnew.FromMM(_comp["y"]))
-    )
-    _fp.SetOrientationDegrees(_comp["rotation"])
-
-# --- clear existing tracks ---
-_tr = list(board.GetTracks())
-for _t in _tr:
-    board.Remove(_t)
-
-# --- clear existing zones ---
-_zr = [z for z in board.Zones() if not z.GetIsRuleArea()]
-for _z in _zr:
-    board.Remove(_z)
-
-# --- strip all non-outline drawings from the source/template board ---
-# The parent stamp rebuilds the board from scratch: tracks, zones, and
-# drawings are all cleared, then recreated from composed child geometry.
-# Only Edge_Cuts outlines survive (matching the leaf stamp in adapter.py).
-# Source-board silkscreen (group labels, boundary shapes) would otherwise
-# duplicate the composed child silkscreen stamped below.
-_draw_remove = []
-for _d in board.GetDrawings():
-    try:
-        if _d.GetLayer() == pcbnew.Edge_Cuts:
-            continue
-    except Exception:
-        pass
-    _draw_remove.append(_d)
-for _d in _draw_remove:
-    board.Remove(_d)
-
-# --- resolve net code ---
-_netinfo = board.GetNetInfo()
-
-def _resolve_net(name):
-    if not name:
-        return 0
-    ni = _netinfo.GetNetItem(name)
-    if ni is None:
-        return 0
-    try:
-        return int(ni.GetNetCode())
-    except Exception:
-        return 0
-
-# --- recreate child traces ---
-for _t in _traces:
-    _s = pcbnew.PCB_TRACK(board)
-    _s.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(_t["start_x"]), pcbnew.FromMM(_t["start_y"])))
-    _s.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(_t["end_x"]), pcbnew.FromMM(_t["end_y"])))
-    _s.SetLayer(_LAYER_NAME_MAP.get(_t["layer"], pcbnew.F_Cu))
-    _s.SetWidth(pcbnew.FromMM(_t["width"]))
-    _nc = _resolve_net(_t["net_name"])
-    if _nc > 0:
-        _s.SetNetCode(_nc)
-    board.Add(_s)
-
-# --- recreate vias ---
-for _v in _vias:
-    _tv = pcbnew.PCB_VIA(board)
-    _tv.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(_v["x"]), pcbnew.FromMM(_v["y"])))
-    _tv.SetDrill(pcbnew.FromMM(_v["drill"]))
-    try:
-        _tv.SetWidth(pcbnew.FromMM(_v["size"]))
-    except TypeError:
-        _tv.SetWidth(pcbnew.F_Cu, pcbnew.FromMM(_v["size"]))
-    _nc = _resolve_net(_v["net_name"])
-    if _nc > 0:
-        _tv.SetNetCode(_nc)
-    board.Add(_tv)
-
-# --- stamp silkscreen graphics ---
-_SILK_LAYER_MAP = {"F.SilkS": pcbnew.F_SilkS, "B.SilkS": pcbnew.B_SilkS}
-
-for _silk in _silkscreen:
-    _slayer = _SILK_LAYER_MAP.get(_silk.get("layer", "F.SilkS"), pcbnew.F_SilkS)
-    if _silk["kind"] == "poly":
-        _shape = pcbnew.PCB_SHAPE(board)
-        _shape.SetShape(pcbnew.SHAPE_T_POLY)
-        _shape.SetLayer(_slayer)
-        _shape.SetFilled(False)
-        _shape.SetWidth(pcbnew.FromMM(_silk.get("stroke_width", 0.15)))
-        _poly = pcbnew.VECTOR_VECTOR2I()
-        for _pt in _silk.get("points", []):
-            _poly.append(pcbnew.VECTOR2I(pcbnew.FromMM(_pt["x"]), pcbnew.FromMM(_pt["y"])))
-        _shape.SetPolyPoints(_poly)
-        board.Add(_shape)
-    elif _silk["kind"] == "text":
-        _txt = pcbnew.PCB_TEXT(board)
-        _txt.SetText(_silk.get("text", ""))
-        _txt.SetLayer(_slayer)
-        _pos = _silk.get("pos", {"x": 0, "y": 0})
-        _txt.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(_pos["x"]), pcbnew.FromMM(_pos["y"])))
-        _txt.SetTextSize(pcbnew.VECTOR2I(
-            pcbnew.FromMM(_silk.get("font_width", 1.0)),
-            pcbnew.FromMM(_silk.get("font_height", 1.0)),
-        ))
-        _txt.SetTextThickness(pcbnew.FromMM(_silk.get("font_thickness", 0.15)))
-        _txt.SetHorizJustify(pcbnew.GR_TEXT_H_ALIGN_LEFT)
-        board.Add(_txt)
-
-# --- stamp parent-local rule-area keepouts (mounting holes etc.) ---
-# These zones survive freerouting_runner.strip_zones() because that helper
-# preserves GetIsRuleArea()==True zones. The DSN export for FreeRouting
-# reads rule-area keepouts so no track or via can be placed inside them.
-_KEEPOUT_LAYERS = [pcbnew.F_Cu, pcbnew.B_Cu]
-for _ko in _keepouts:
-    for _layer in _KEEPOUT_LAYERS:
-        _zone = pcbnew.ZONE(board)
-        _zone.SetLayer(_layer)
-        _zone.SetIsRuleArea(True)
-        _zone.SetDoNotAllowTracks(True)
-        _zone.SetDoNotAllowVias(True)
-        # SetDoNotAllowPads(False) on purpose: the keepout rect is
-        # bbox(protected_comp) + inward_keep_in_mm, which by construction
-        # covers the protected component's own pad. Setting pads
-        # not_allowed flagged the protected pad as items_not_allowed
-        # against its own zone -- a self-overlap that DRC counts
-        # regardless of intent. Leaf-pad keep-out is enforced upstream
-        # by placement_solver._resolve_keep_in_rects (which pushes
-        # unlocked components away from these zones during solve), so
-        # the runtime zone only needs to block tracks/vias for
-        # FreeRouting protection.
-        _zone.SetDoNotAllowPads(False)
-        _zone.SetDoNotAllowCopperPour(True)
-        _outline = _zone.Outline()
-        _outline.NewOutline()
-        _x1 = pcbnew.FromMM(_ko["tl_x"])
-        _y1 = pcbnew.FromMM(_ko["tl_y"])
-        _x2 = pcbnew.FromMM(_ko["br_x"])
-        _y2 = pcbnew.FromMM(_ko["br_y"])
-        _outline.Append(_x1, _y1)
-        _outline.Append(_x2, _y1)
-        _outline.Append(_x2, _y2)
-        _outline.Append(_x1, _y2)
-        board.Add(_zone)
-
-board.BuildConnectivity()
-board.Save(_out_path)
-print("OK")
-"""
+# ---------------------------------------------------------------------------
+# Self-contained pcbnew script executed in a subprocess by
+# _stamp_parent_board(). Lifted to its own file (_parent_stamp_subprocess.py)
+# so import-time errors fire when the file is parsed and so linters / IDEs
+# see the pcbnew API calls.
+# ---------------------------------------------------------------------------
+_PARENT_STAMP_SCRIPT_PATH = str(
+    Path(__file__).parent / "_parent_stamp_subprocess.py"
+)
 
 
 @dataclass(slots=True)

@@ -7,18 +7,28 @@ FreeRouting could lay tracks straight through H4/H86.
 
 These tests lock in the two contract points that were broken:
   1. The stamp subprocess script creates rule-area zones (not plain zones),
-     with track/via/pad/copper-pour all disallowed, on both F.Cu and B.Cu.
+     with track/via/copper-pour disallowed, on both F.Cu and B.Cu.
   2. State.parent_local_keep_in_rects survive the JSON round-trip into the
      subprocess payload under the `keepouts` key.
+
+The stamp script lives at ``kicraft/cli/_parent_stamp_subprocess.py`` after
+being lifted out of an inline string literal -- the test reads its source
+directly so a renamed/refactored attribute can't silently dodge the check.
 """
 
+from pathlib import Path
+
 from kicraft.autoplacer.brain.types import Point
-from kicraft.cli.compose_subcircuits import _PARENT_STAMP_SCRIPT
+from kicraft.cli.compose_subcircuits import _PARENT_STAMP_SCRIPT_PATH
+
+
+def _stamp_script_source() -> str:
+    return Path(_PARENT_STAMP_SCRIPT_PATH).read_text(encoding="utf-8")
 
 
 def test_parent_stamp_script_creates_rule_area_keepouts_on_both_copper_layers():
     """The stamp subprocess must emit rule-area zones on F.Cu AND B.Cu."""
-    script = _PARENT_STAMP_SCRIPT
+    script = _stamp_script_source()
     assert "_KEEPOUT_LAYERS = [pcbnew.F_Cu, pcbnew.B_Cu]" in script, (
         "Keepout zones must be stamped on both copper layers so FreeRouting "
         "cannot place a track or via on either side through a mounting hole."
@@ -28,10 +38,13 @@ def test_parent_stamp_script_creates_rule_area_keepouts_on_both_copper_layers():
         "freerouting_runner.strip_zones() preserves them (it only keeps "
         "GetIsRuleArea()==True zones)."
     )
+    # Pads are intentionally NOT disallowed: the keepout rect is bbox(comp)
+    # + inward_keep_in_mm, which by construction covers the protected
+    # component's own pad. Setting pads not_allowed flagged the protected
+    # pad as items_not_allowed against its own zone.
     for flag in (
         "_zone.SetDoNotAllowTracks(True)",
         "_zone.SetDoNotAllowVias(True)",
-        "_zone.SetDoNotAllowPads(True)",
         "_zone.SetDoNotAllowCopperPour(True)",
     ):
         assert flag in script, f"Stamp script missing keepout flag: {flag}"
@@ -39,7 +52,7 @@ def test_parent_stamp_script_creates_rule_area_keepouts_on_both_copper_layers():
 
 def test_parent_stamp_script_iterates_keepouts_payload_key():
     """The subprocess reads the payload's `keepouts` list; don't rename it."""
-    script = _PARENT_STAMP_SCRIPT
+    script = _stamp_script_source()
     assert '_keepouts = _data.get("keepouts"' in script, (
         "The payload key 'keepouts' is the contract between the main process "
         "(keepout_json builder) and the subprocess (zone creator)."

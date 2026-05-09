@@ -173,11 +173,24 @@ def _pcbnew_subprocess_env() -> dict:
     return env
 
 
-def _run_pcbnew_subprocess(script: str) -> str:
-    """Run a pcbnew script in a fresh subprocess to avoid SWIG memory corruption.
+class StampSubprocessError(RuntimeError):
+    """Raised when the leaf-stamp subprocess fails non-recoverably.
 
-    Returns the stdout of the subprocess on success.
-    Raises RuntimeError on failure.
+    Distinguished from generic routing errors so callers can surface
+    "the implementation is broken" loudly instead of letting the round
+    quietly degrade to ``routing_exception`` like a recoverable
+    FreeRouting timeout. The exception text carries the rc / stderr /
+    stdout from ``_run_pcbnew_script_file`` for triage.
+    """
+
+
+def _run_pcbnew_subprocess(script: str) -> str:
+    """Run a pcbnew script string in a fresh subprocess.
+
+    Avoids SWIG memory corruption by giving each pcbnew workload its
+    own interpreter. Prefer ``_run_pcbnew_script_file`` for any
+    nontrivial script -- inline strings sidestep linters / IDEs and
+    let pcbnew API misuse hide until runtime.
     """
     result = subprocess.run(
         [sys.executable, "-c", script],
@@ -189,6 +202,30 @@ def _run_pcbnew_subprocess(script: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(
             f"pcbnew subprocess failed (rc={result.returncode}):\n{result.stderr}"
+        )
+    return result.stdout
+
+
+def _run_pcbnew_script_file(script_path: str, *args: str, timeout: int = 120) -> str:
+    """Run a pcbnew script that lives as its own .py file.
+
+    Same isolation as ``_run_pcbnew_subprocess`` but the script is a
+    real file -- which means import-time errors fire when the file is
+    parsed (catchable by linters and ``python -c "import x"`` smoke
+    tests) instead of being concealed inside a runtime string blob.
+    """
+    cmd = [sys.executable, str(script_path), *map(str, args)]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        env=_pcbnew_subprocess_env(),
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"pcbnew script {script_path} failed (rc={result.returncode}):\n"
+            f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
         )
     return result.stdout
 
@@ -297,290 +334,19 @@ def detect_opening_direction(fp) -> float | None:
     return (opening_board + rotation) % 360
 
 
+
+
+
 # ---------------------------------------------------------------------------
 # Self-contained pcbnew script executed in a subprocess by
-# stamp_subcircuit_board_subprocess().  The JSON path is injected at runtime.
+# stamp_subcircuit_board_subprocess(). Lifted out of an inline string into
+# its own file so import-time errors fire on adapter import (and so
+# linters can actually see it). The script reads its JSON payload path
+# from sys.argv[1].
 # ---------------------------------------------------------------------------
-_STAMP_SUBPROCESS_SCRIPT = r"""
-import json, os, pcbnew
-
-with open("__JSON_PATH__") as _f:
-    _data = json.load(_f)
-
-_pcb_path = _data["pcb_path"]
-_out_path = _data["output_path"]
-_outline = _data["outline"]
-_components = _data["components"]
-_traces = _data["traces"]
-_vias = _data["vias"]
-_clear_tracks = _data["clear_existing_tracks"]
-_clear_zones = _data["clear_existing_zones"]
-_remove_unmapped = _data["remove_unmapped_footprints"]
-
-_LAYER_MAP = {0: pcbnew.F_Cu, 1: pcbnew.B_Cu}
-_LAYER_NAME_MAP = {"F.Cu": pcbnew.F_Cu, "B.Cu": pcbnew.B_Cu}
-
-board = pcbnew.LoadBoard(_pcb_path)
-
-# --- rewrite board outline ---
-_width_mm = max(1.0, _outline["br_x"] - _outline["tl_x"])
-_height_mm = max(1.0, _outline["br_y"] - _outline["tl_y"])
-_left = pcbnew.FromMM(_outline["tl_x"])
-_top = pcbnew.FromMM(_outline["tl_y"])
-_right = pcbnew.FromMM(_outline["tl_x"] + _width_mm)
-_bottom = pcbnew.FromMM(_outline["tl_y"] + _height_mm)
-
-_edge_remove = []
-for d in board.GetDrawings():
-    if d.GetLayer() == pcbnew.Edge_Cuts:
-        _edge_remove.append(d)
-        continue
-    # Only PCB_SHAPE has GetShape(); PCB_TEXT and other graphics
-    # don't, and calling it would crash the subprocess. The 0.15 mm
-    # silk segment heuristic only makes sense for line shapes
-    # anyway.
-    if d.GetLayer() == pcbnew.F_SilkS and hasattr(d, "GetShape"):
-        try:
-            if (d.GetShape() == pcbnew.SHAPE_T_SEGMENT
-                    and abs(pcbnew.ToMM(d.GetWidth()) - 0.15) < 1e-3):
-                _edge_remove.append(d)
-        except Exception:
-            pass
-for d in _edge_remove:
-    board.Remove(d)
-
-# No silkscreen outline added here -- the leaf solver's rounded-corner
-# silk poly travels through composition and stamps the boundary on
-# the parent. A second sharp-corner outline competed with it.
-_corners = [(_left, _top), (_right, _top), (_right, _bottom), (_left, _bottom)]
-for _i in range(4):
-    _x1, _y1 = _corners[_i]
-    _x2, _y2 = _corners[(_i + 1) % 4]
-    _edge = pcbnew.PCB_SHAPE(board)
-    _edge.SetShape(pcbnew.SHAPE_T_SEGMENT)
-    _edge.SetLayer(pcbnew.Edge_Cuts)
-    _edge.SetWidth(pcbnew.FromMM(0.05))
-    _edge.SetStart(pcbnew.VECTOR2I(_x1, _y1))
-    _edge.SetEnd(pcbnew.VECTOR2I(_x2, _y2))
-    board.Add(_edge)
-
-# --- build component lookup ---
-_comp_map = {c["ref"]: c for c in _components}
-
-# --- move / remove footprints ---
-_footprints = list(board.Footprints())
-for _fp in _footprints:
-    _ref = _fp.GetReferenceAsString()
-    _comp = _comp_map.get(_ref)
-    if _comp is None:
-        if _remove_unmapped:
-            board.Remove(_fp)
-        continue
-    if _fp.IsLocked():
-        continue
-    _cur_layer = 1 if _fp.GetLayer() == pcbnew.B_Cu else 0
-    if _comp["layer"] != _cur_layer:
-        _fp.Flip(_fp.GetPosition(), False)
-    _fp.SetPosition(
-        pcbnew.VECTOR2I(pcbnew.FromMM(_comp["x"]), pcbnew.FromMM(_comp["y"]))
-    )
-    _fp.SetOrientationDegrees(_comp["rotation"])
-
-# --- strip non-outline drawings ---
-_draw_remove = []
-for _d in board.GetDrawings():
-    try:
-        if _d.GetLayer() == pcbnew.Edge_Cuts:
-            continue
-    except Exception:
-        pass
-    _draw_remove.append(_d)
-for _d in _draw_remove:
-    board.Remove(_d)
-
-# --- clear existing tracks ---
-if _clear_tracks:
-    _tr = list(board.GetTracks())
-    for _t in _tr:
-        board.Remove(_t)
-
-# --- clear existing zones ---
-if _clear_zones:
-    _zr = [z for z in board.Zones() if not z.GetIsRuleArea()]
-    for _z in _zr:
-        board.Remove(_z)
-
-# --- helper: resolve net code ---
-_netinfo = board.GetNetInfo()
-
-def _resolve_net(name):
-    if not name:
-        return 0
-    ni = _netinfo.GetNetItem(name)
-    if ni is None:
-        return 0
-    try:
-        return int(ni.GetNetCode())
-    except Exception:
-        return 0
-
-# --- recreate traces ---
-for _t in _traces:
-    _s = pcbnew.PCB_TRACK(board)
-    _s.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(_t["start_x"]), pcbnew.FromMM(_t["start_y"])))
-    _s.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(_t["end_x"]), pcbnew.FromMM(_t["end_y"])))
-    _s.SetLayer(_LAYER_NAME_MAP.get(_t["layer"], pcbnew.F_Cu))
-    _s.SetWidth(pcbnew.FromMM(_t["width"]))
-    _nc = _resolve_net(_t["net_name"])
-    if _nc > 0:
-        _s.SetNetCode(_nc)
-    board.Add(_s)
-
-# --- recreate vias ---
-for _v in _vias:
-    _tv = pcbnew.PCB_VIA(board)
-    _tv.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(_v["x"]), pcbnew.FromMM(_v["y"])))
-    _tv.SetDrill(pcbnew.FromMM(_v["drill"]))
-    try:
-        _tv.SetWidth(pcbnew.FromMM(_v["size"]))
-    except TypeError:
-        _tv.SetWidth(pcbnew.F_Cu, pcbnew.FromMM(_v["size"]))
-    _nc = _resolve_net(_v["net_name"])
-    if _nc > 0:
-        _tv.SetNetCode(_nc)
-    board.Add(_tv)
-
-# Do NOT call board.BuildConnectivity() here: pcbnew Save() silently returns
-# False (no file written, no exception) on ~half of attempts when called after
-# BuildConnectivity on a heavily-mutated board. Consumers rebuild connectivity
-# on LoadBoard().
-
-# Save the board, then flush file + directory so a follow-up pcbnew.LoadBoard()
-# in another process cannot observe a partial write or unsynced directory entry,
-# which would raise "Failed to load board: ...".
-# We do not use a temp + rename because pcbnew.Save() rewrites file extensions
-# and produces sidecar project files keyed off the basename, which makes atomic
-# renames brittle. Save in-place, then force durability.
-_save_status = board.Save(_out_path)
-# pcbnew.Save() emits a sidecar .kicad_pro with KiCad defaults (Default
-# netclass clearance 0.20, min_clearance 0). Overwrite with the source
-# PCB's pro so kicad-cli pcb drc validations see the project's actual
-# netclass/rules rather than the auto-emitted defaults.
-import shutil as _shutil_pro
-_src_pro = os.path.splitext(_pcb_path)[0] + ".kicad_pro"
-_dst_pro = os.path.splitext(_out_path)[0] + ".kicad_pro"
-if (
-    os.path.exists(_src_pro)
-    and os.path.abspath(_src_pro) != os.path.abspath(_dst_pro)
-):
-    try:
-        _shutil_pro.copy2(_src_pro, _dst_pro)
-    except OSError:
-        pass
-try:
-    with open(_out_path, "rb") as _tf:
-        os.fsync(_tf.fileno())
-except OSError:
-    pass
-try:
-    _out_dir = os.path.dirname(_out_path) or "."
-    _dir_fd = os.open(_out_dir, os.O_DIRECTORY)
-    try:
-        os.fsync(_dir_fd)
-    finally:
-        os.close(_dir_fd)
-except OSError:
-    pass
-
-# --- Self-load validator + failure capture ----------------------------------
-# pcbnew.LoadBoard() returns None instead of raising when the parser rejects a
-# file. Catch that here so we can preserve the bad artifact (which would
-# otherwise be overwritten by the next round) and exit non-zero with a
-# diagnostic dump. Without this, downstream LoadBoard failures only surface
-# in another subprocess after the evidence is gone.
-import hashlib as _hashlib
-import shutil as _shutil
-import time as _time
-import traceback as _traceback
-
-def _diag_dump(_path):
-    _info = {"path": _path, "exists": os.path.exists(_path)}
-    if not _info["exists"]:
-        return _info
-    try:
-        _info["size"] = os.path.getsize(_path)
-        _info["mtime_ns"] = os.stat(_path).st_mtime_ns
-        with open(_path, "rb") as _df:
-            _data = _df.read()
-        _info["sha256"] = _hashlib.sha256(_data).hexdigest()
-        _info["nul_bytes"] = _data.count(b"\x00")
-        try:
-            _text = _data.decode("utf-8", errors="replace")
-            _info["paren_balance"] = _text.count("(") - _text.count(")")
-            _info["has_nan"] = "nan" in _text.lower()
-            _info["has_inf"] = "inf" in _text.lower()
-            _lines = _text.splitlines()
-            _info["line_count"] = len(_lines)
-            _info["head"] = "\n".join(_lines[:5])
-            _info["tail"] = "\n".join(_lines[-5:])
-        except Exception as _de:
-            _info["decode_error"] = repr(_de)
-    except OSError as _oe:
-        _info["stat_error"] = repr(_oe)
-    return _info
-
-_self_load_ok = False
-_self_load_err = None
-try:
-    _verify = pcbnew.LoadBoard(_out_path)
-    _self_load_ok = _verify is not None
-except Exception as _se:
-    _self_load_err = "".join(_traceback.format_exception_only(type(_se), _se)).strip()
-
-if not _self_load_ok:
-    _capture_root = os.path.join(
-        os.path.dirname(_out_path) or ".",
-        ".failed_capture",
-    )
-    _stamp = _time.strftime("%Y%m%d_%H%M%S") + f"_{os.getpid()}"
-    _capture_dir = os.path.join(_capture_root, _stamp)
-    try:
-        os.makedirs(_capture_dir, exist_ok=True)
-        _base = os.path.splitext(_out_path)[0]
-        _diag = {
-            "save_status": repr(_save_status),
-            "self_load_ok": _self_load_ok,
-            "self_load_error": _self_load_err,
-            "out_path": _out_path,
-            "pcb_path": _pcb_path,
-            "captured_at": _stamp,
-            "files": {},
-        }
-        for _ext in (".kicad_pcb", ".kicad_pro", ".kicad_prl"):
-            _src = _base + _ext
-            _diag["files"][_ext] = _diag_dump(_src)
-            if os.path.exists(_src):
-                try:
-                    _shutil.copy2(_src, os.path.join(_capture_dir, "leaf" + _ext))
-                except OSError as _ce:
-                    _diag["files"][_ext]["copy_error"] = repr(_ce)
-        try:
-            _shutil.copy2("__JSON_PATH__", os.path.join(_capture_dir, "stamp_payload.json"))
-        except OSError as _je:
-            _diag["payload_copy_error"] = repr(_je)
-        with open(os.path.join(_capture_dir, "diagnostics.json"), "w") as _df:
-            json.dump(_diag, _df, indent=2, default=str)
-    except OSError as _ce:
-        print(f"DIAG_CAPTURE_FAILED {_ce!r}")
-    print(
-        f"SELF_LOAD_FAILED save_status={_save_status!r} "
-        f"capture_dir={_capture_dir} self_load_error={_self_load_err!r}"
-    )
-    raise SystemExit(2)
-
-print("OK")
-"""
-
+_STAMP_SUBPROCESS_SCRIPT_PATH = str(
+    Path(__file__).parent / "_stamp_subcircuit_subprocess.py"
+)
 
 class KiCadAdapter:
     """Reads and writes KiCad board state via pcbnew API."""
@@ -1053,8 +819,20 @@ class KiCadAdapter:
             with os.fdopen(tmp_fd, "w") as f:
                 json.dump(payload, f)
 
-            script = _STAMP_SUBPROCESS_SCRIPT.replace("__JSON_PATH__", tmp_path)
-            _run_pcbnew_subprocess(script)
+            try:
+                _run_pcbnew_script_file(_STAMP_SUBPROCESS_SCRIPT_PATH, tmp_path)
+            except RuntimeError as exc:
+                # Convert the generic subprocess RuntimeError into a
+                # StampSubprocessError so the catch in solve_subcircuits
+                # / leaf_routing can distinguish "stamp script crashed"
+                # (implementation bug -- bubble up loudly) from
+                # "FreeRouting timed out" (recoverable, degrade the
+                # round). Without this, a syntax / API regression in
+                # _stamp_subcircuit_subprocess.py silently turns into a
+                # routing_exception, the round is discarded with
+                # parent_route=fail, and autoexperiment still reports
+                # leafs=N/N "accepted" from the cached on-disk state.
+                raise StampSubprocessError(str(exc)) from exc
         finally:
             try:
                 os.unlink(tmp_path)

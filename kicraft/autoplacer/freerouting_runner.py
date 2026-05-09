@@ -82,13 +82,39 @@ def _kicad_subprocess_env() -> dict[str, str]:
 
 
 def _run_pcbnew_script(script: str) -> None:
-    """Run a pcbnew script in a fresh subprocess to avoid SwigPyObject bugs."""
+    """Run a pcbnew script string in a fresh subprocess.
+
+    Inline strings are not lintable -- prefer ``_run_pcbnew_script_file``
+    for any nontrivial workload so import-time errors fire when the
+    file is parsed instead of being concealed inside a runtime blob.
+    """
+    return _retry_pcbnew_run([sys.executable, "-c", script])
+
+
+def _run_pcbnew_script_file(script_path: str, *args: str) -> None:
+    """Run a pcbnew script that lives as its own .py file.
+
+    Same SWIG-isolation guarantee as ``_run_pcbnew_script`` but the
+    script is a real .py file, so type checkers, linters, and IDEs
+    can see the pcbnew API calls. The script reads its own argv.
+    """
+    return _retry_pcbnew_run([sys.executable, str(script_path), *map(str, args)])
+
+
+def _retry_pcbnew_run(cmd: list[str]) -> None:
+    """Shared retry loop for pcbnew subprocess launches.
+
+    The "Failed to load board:" race is real: pcbnew occasionally
+    fails to LoadBoard() a file that was just written by another
+    pcbnew subprocess if the OS hasn't fully flushed the directory
+    entry yet. Up to 6 retries with widening backoff.
+    """
     attempts = 6
     delays_s = (0.0, 0.05, 0.1, 0.25, 0.5, 1.0)
     last_result: subprocess.CompletedProcess[str] | None = None
     for attempt in range(attempts):
         result = subprocess.run(
-            [sys.executable, "-c", script],
+            cmd,
             capture_output=True,
             text=True,
             env=_kicad_subprocess_env(),
@@ -102,8 +128,12 @@ def _run_pcbnew_script(script: str) -> None:
         time.sleep(delays_s[min(attempt + 1, len(delays_s) - 1)])
 
     assert last_result is not None
+    stdout = getattr(last_result, "stdout", "") or ""
     raise RuntimeError(
-        f"pcbnew subprocess failed (rc={last_result.returncode}):\n{last_result.stderr}"
+        f"pcbnew subprocess failed (rc={last_result.returncode}):\n"
+        f"cmd: {cmd[0]} ... ({len(cmd) - 1} args)\n"
+        f"stderr:\n{last_result.stderr}\n"
+        + (f"stdout:\n{stdout}" if stdout else "")
     )
 
 
