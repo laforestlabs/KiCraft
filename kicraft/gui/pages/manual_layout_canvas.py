@@ -10,8 +10,13 @@ import json
 from typing import Any
 
 
-CANVAS_WIDTH_PX = 900
-CANVAS_HEIGHT_PX = 640
+# Default sizing fallback for the canvas host; the host is actually
+# styled with width: 100% and a viewport-relative height so it grows
+# with the available browser space. These values exist only as the
+# initial render-time fallback before clientWidth / clientHeight are
+# known (and as the lower bound for layouts that miss those metrics).
+CANVAS_WIDTH_PX = 1200
+CANVAS_HEIGHT_PX = 800
 
 
 def _build_canvas_config(
@@ -62,9 +67,9 @@ def build_canvas_html(
 <style>
   .ml-canvas-host {{
     position: relative;
-    width: {CANVAS_WIDTH_PX}px;
-    max-width: 100%;
-    height: {CANVAS_HEIGHT_PX}px;
+    width: 100%;
+    height: calc(100vh - 280px);
+    min-height: 520px;
     background: #0f172a;
     border: 1px solid #334155;
     border-radius: 6px;
@@ -452,11 +457,13 @@ _CANVAS_JS_TEMPLATE = """
       g.setAttribute('transform',
         'translate(' + p.origin.x + ',' + p.origin.y + ') rotate(' + (-(p.rotation || 0)) + ')');
 
-      // Routed-leaf PNG positioned and sized to the silk bbox -- the
-      // leaf solver's silk hugs the components plus a 0.5 mm margin
-      // and that's the visible leaf shape, so the canvas should show
-      // exactly that. preserveAspectRatio=none lets the PNG stretch
-      // to fill silk_bbox even when its native render aspect differs.
+      // Routed-leaf PNG positioned and sized to the silk bbox.
+      // preserveAspectRatio="xMidYMid meet" preserves the native
+      // render aspect -- distorted PNGs (the previous "none" mode)
+      // looked like the leaf had been squashed onto a different
+      // shape. Letterboxing inside the silk rect is fine because the
+      // silk poly itself defines the visible boundary; the slight
+      // gap between bbox edge and image edge reads as silk margin.
       if (leaf.render_url) {{
         const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
         img.setAttribute('class', 'ml-leaf-img');
@@ -465,7 +472,7 @@ _CANVAS_JS_TEMPLATE = """
         img.setAttribute('y', sy0);
         img.setAttribute('width', sw);
         img.setAttribute('height', sh);
-        img.setAttribute('preserveAspectRatio', 'none');
+        img.setAttribute('preserveAspectRatio', 'xMidYMid meet');
         g.appendChild(img);
       }}
 

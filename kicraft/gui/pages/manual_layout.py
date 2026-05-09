@@ -9,6 +9,7 @@ layout.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -33,42 +34,50 @@ from .manual_layout_runner import (
 def manual_layout_page() -> None:
     """Render the Manual Layout tab.
 
-    The body is wrapped in a ui.refreshable so the empty -> populated
-    transition (after a leaves-only run finishes) can be picked up
-    without a full browser reload. A 2 s timer polls for leaf
-    discovery; refresh fires only when the previous render saw zero
-    leaves AND now has some -- so the user's in-flight canvas edits
-    are preserved once leaves have been rendered.
+    Wrapped in a ``ui.refreshable`` so the canvas can pick up new
+    leaf solves without a full browser reload. The 2 s watcher fires
+    a refresh whenever ANY leaf's ``solved_layout.json`` mtime
+    advances past what we last rendered against, which covers both
+    "first leaves-only run produced leaves" and "second leaves-only
+    run replaced existing leaves." A short cooldown keeps the canvas
+    from refreshing mid-run while leaves are landing one at a time.
     """
-    _manual_layout_body()
     state = get_state()
-    last_count = {"n": len(discover_leaves(state.experiments_dir))}
+    rendered_at = {"ts": _max_leaf_mtime(state.experiments_dir)}
+    _manual_layout_body()
 
-    def _watch_for_leaves() -> None:
-        try:
-            count = len(discover_leaves(state.experiments_dir))
-        except Exception:  # noqa: BLE001
+    def _watch() -> None:
+        latest = _max_leaf_mtime(state.experiments_dir)
+        if latest == rendered_at["ts"]:
             return
-        if last_count["n"] == 0 and count > 0:
-            last_count["n"] = count
-            _manual_layout_body.refresh()
-        else:
-            last_count["n"] = count
+        # Wait for the run to finish (no leaf modified in the last
+        # ~3 s) so we don't refresh halfway through a 6-leaf solve.
+        if latest > 0 and (time.time() - latest) < 3.0:
+            return
+        rendered_at["ts"] = latest
+        _manual_layout_body.refresh()
 
-    ui.timer(2.0, _watch_for_leaves)
+    ui.timer(2.0, _watch)
 
 
 @ui.refreshable
 def _manual_layout_body() -> None:
     state = get_state()
 
-    ui.label("Manual Layout").classes("text-2xl font-bold mb-1")
-    ui.label(
-        "Drag each leaf onto the parent canvas, rotate (R or right-click for "
-        "90°; hold Shift while rotating for free angle), and pull the four "
-        "edge handles to resize the outline. Click Save to stamp the layout "
-        "and run a fast DRC pass; click Route Now to commit to FreeRouting."
-    ).classes("text-sm text-gray-400 mb-4")
+    # Compact header: the canvas should claim the rest of the viewport
+    # vertically. Detailed instructions live in a tooltip on the title
+    # so they don't burn rows on regular use.
+    with ui.row().classes("w-full items-center gap-3 mb-2"):
+        ui.label("Manual Layout").classes("text-xl font-bold").tooltip(
+            "Drag each leaf onto the parent canvas. Rotate with R or "
+            "right-click (90° snap; hold Shift on the rotation handle "
+            "for free angle). Pull any of the four outline-edge handles "
+            "to resize. Save Layout stamps + runs DRC; Route Now commits "
+            "to FreeRouting."
+        )
+        ui.label("drag · R / right-click rotate · edge handles resize").classes(
+            "text-xs text-gray-500"
+        )
 
     # --- Discover leaves ---
     leaves = discover_leaves(state.experiments_dir)
@@ -389,6 +398,32 @@ def _drc_pill(label: str, count: int) -> None:
         f'<span class="px-2 py-1 rounded text-xs {color}">'
         f'{label}: {count}</span>'
     )
+
+
+def _max_leaf_mtime(experiments_dir: Path) -> float:
+    """Latest mtime of any leaf's solved_layout.json or routed pcb.
+
+    Used by the canvas auto-refresh watcher: when a fresh leaves-only
+    run lands new files, this number jumps and the watcher fires
+    once the writes have settled.
+    """
+    sub_root = experiments_dir / "subcircuits"
+    if not sub_root.is_dir():
+        return 0.0
+    latest = 0.0
+    for d in sub_root.iterdir():
+        if not d.is_dir():
+            continue
+        for name in ("solved_layout.json", "leaf_routed.kicad_pcb"):
+            f = d / name
+            if f.is_file():
+                try:
+                    mt = f.stat().st_mtime
+                    if mt > latest:
+                        latest = mt
+                except OSError:
+                    pass
+    return latest
 
 
 def _html_escape(s: str) -> str:

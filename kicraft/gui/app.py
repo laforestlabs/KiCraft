@@ -96,8 +96,16 @@ def index() -> None:
     ui.add_head_html(
         """
     <style>
+        /* Most tabs read better at a fixed page width; the manual
+           layout tab needs every horizontal pixel for the canvas, so
+           it overrides this with .ml-tab-panel below. */
         .nicegui-content { max-width: 1400px; margin: 0 auto; }
         .q-tab-panel { padding: 16px 0 !important; }
+        body:has(.ml-tab-panel.q-tab-panel--active) .nicegui-content {
+            max-width: none;
+            padding-left: 12px;
+            padding-right: 12px;
+        }
     </style>
     """
     )
@@ -125,7 +133,7 @@ def index() -> None:
             setup_page()
         with ui.tab_panel(monitor_tab):
             monitor_page()
-        with ui.tab_panel(manual_tab):
+        with ui.tab_panel(manual_tab).classes("ml-tab-panel"):
             manual_layout_page()
         if analysis_tab is not None:
             with ui.tab_panel(analysis_tab):
