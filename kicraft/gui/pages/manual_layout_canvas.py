@@ -69,17 +69,6 @@ def build_canvas_html(
     fill: transparent;
     stroke: none;
   }}
-  .ml-leaf.selected .ml-leaf-outline {{
-    stroke: #facc15;
-    stroke-dasharray: 0.6 0.4;
-  }}
-  .ml-leaf-outline {{
-    fill: none;
-    stroke: #cbd5e1;
-    stroke-width: 0.18;
-    pointer-events: none;
-    stroke-opacity: 0.85;
-  }}
   .ml-leaf-img {{ pointer-events: none; }}
   .ml-rot-handle {{
     fill: #facc15;
@@ -407,22 +396,11 @@ _CANVAS_JS_TEMPLATE = """
       hit.setAttribute('stroke', 'none');
       g.appendChild(hit);
 
-      // Visible silkscreen-style leaf outline. The solo leaf PNG
-      // renders don't always contain a complete board outline (the
-      // kicad-cli SVG export crops to drawn-content bbox, which
-      // sometimes excludes a side). A synthetic rect at the leaf
-      // bbox restores the visual boundary and matches the look of
-      // the auto-pipeline parent renders.
-      const outline = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-      outline.setAttribute('class', 'ml-leaf-outline');
-      outline.setAttribute('x', 0);
-      outline.setAttribute('y', 0);
-      outline.setAttribute('width', leaf.width_mm);
-      outline.setAttribute('height', leaf.height_mm);
-      outline.setAttribute('fill', 'none');
-      outline.setAttribute('stroke', '#cbd5e1');
-      outline.setAttribute('stroke-width', '0.18');
-      g.appendChild(outline);
+      // The leaf .kicad_pcb now carries an F.Silkscreen outline at
+      // its Edge.Cuts boundary (added by adapter._apply_board_outline
+      // and the add_leaf_silk_outline retrofit), so the rendered PNG
+      // already shows a yellow silk rectangle. No synthetic SVG
+      // outline needed.
 
       // Rotation handle: a small disc at top-right, offset outside the rect
       const rot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
