@@ -107,6 +107,22 @@ def build_canvas_html(
     text-anchor: middle;
     dominant-baseline: middle;
   }}
+  .ml-mhole-keepin {{
+    fill: #f87171;
+    fill-opacity: 0.10;
+    stroke: #f87171;
+    stroke-width: 0.15;
+    stroke-dasharray: 0.5 0.3;
+    pointer-events: none;
+  }}
+  .ml-leaf.overflow .ml-leaf-hit,
+  .ml-leaf.overflow .ml-rot-handle {{
+    stroke: #ef4444;
+  }}
+  .ml-leaf.overflow .ml-leaf-hit {{
+    stroke-width: 0.5;
+    stroke-dasharray: 0.6 0.4;
+  }}
 </style>
 <div id="{canvas_id}-host" class="ml-canvas-host">
   <svg id="{canvas_id}" xmlns="http://www.w3.org/2000/svg"></svg>
@@ -334,8 +350,20 @@ _CANVAS_JS_TEMPLATE = """
     addEdge(svg, 'bottom', outline.min.x, outline.max.y - HANDLE_GRIP_MM/2, w, HANDLE_GRIP_MM, true);
 
     // Mounting holes (M3 default: 3.2 mm clearance, 6.4 mm pad / drill OD).
+    // KEEPIN_RADIUS_MM matches the typical no-route zone the auto
+    // pipeline draws around each mounting hole; keeps the user from
+    // packing leaf silk / pads into a region that won't actually be
+    // free of copper.
+    const KEEPIN_RADIUS_MM = 3.0;
     recomputeMountingHoles();
     for (const hole of state.mounting_holes) {{
+      const keepin = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      keepin.setAttribute('class', 'ml-mhole-keepin');
+      keepin.setAttribute('x', hole.pos.x - KEEPIN_RADIUS_MM);
+      keepin.setAttribute('y', hole.pos.y - KEEPIN_RADIUS_MM);
+      keepin.setAttribute('width', KEEPIN_RADIUS_MM * 2);
+      keepin.setAttribute('height', KEEPIN_RADIUS_MM * 2);
+      svg.appendChild(keepin);
       const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       ring.setAttribute('class', 'ml-mhole');
       ring.setAttribute('cx', hole.pos.x);
@@ -357,11 +385,40 @@ _CANVAS_JS_TEMPLATE = """
     }}
 
     // Leaves
+    const out = state.board_outline;
     for (const p of state.placements) {{
       const leaf = leafByPath[p.instance_path];
       if (!leaf) continue;
+      // Compute the rotated-bbox extent in parent coords with the
+      // SAME KiCad CW formula the composer uses, then flag the leaf
+      // if any corner falls outside the user's outline. The .overflow
+      // class turns the hit-rect outline red so the user sees at a
+      // glance that this leaf will end up off-board when stamped.
+      const r = (p.rotation || 0) * Math.PI / 180;
+      const rc = Math.cos(r), rs = Math.sin(r);
+      function corner(lx, ly) {{
+        return {{
+          x: p.origin.x + rc * lx + rs * ly,
+          y: p.origin.y - rs * lx + rc * ly,
+        }};
+      }}
+      const corners = [
+        corner(0, 0),
+        corner(leaf.width_mm, 0),
+        corner(leaf.width_mm, leaf.height_mm),
+        corner(0, leaf.height_mm),
+      ];
+      const overflow = corners.some(c =>
+        c.x < out.min.x - 0.01 || c.x > out.max.x + 0.01 ||
+        c.y < out.min.y - 0.01 || c.y > out.max.y + 0.01
+      );
       const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-      g.setAttribute('class', 'ml-leaf' + (state.selected === p.instance_path ? ' selected' : ''));
+      g.setAttribute(
+        'class',
+        'ml-leaf'
+        + (state.selected === p.instance_path ? ' selected' : '')
+        + (overflow ? ' overflow' : ''),
+      );
       g.setAttribute('data-instance-path', p.instance_path);
       // SVG rotate() is CCW; KiCad rotation is CW. Negate so the
       // canvas visual matches the stamped output.

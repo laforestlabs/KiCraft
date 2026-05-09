@@ -249,6 +249,18 @@ def _manual_layout_body() -> None:
                 state.experiments_dir, payload, leaves
             )
             saved_path["path"] = ml_path
+            # Drop any prior parent_routed.kicad_pcb so the
+            # find_latest_parent_pcb helper used by "Open in KiCad"
+            # doesn't return a stale routed board from a previous
+            # session -- the user just changed the layout, the
+            # last-routed result no longer matches their canvas.
+            for sub in (state.experiments_dir / "subcircuits").glob(
+                "*/parent_routed.kicad_pcb"
+            ):
+                try:
+                    sub.unlink()
+                except OSError:
+                    pass
             status_label.set_text(
                 f"saved {ml_path.relative_to(state.project_root)}; "
                 "stamping + running DRC…"
