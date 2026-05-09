@@ -340,6 +340,8 @@ def _legend(leaves: list[LeafInfo]) -> None:
     with ui.card().classes("p-3"):
         ui.label("Leaves").classes("text-xs uppercase text-gray-400")
         for leaf in leaves:
+            silk_w = leaf.silk_max_x - leaf.silk_min_x
+            silk_h = leaf.silk_max_y - leaf.silk_min_y
             with ui.row().classes("items-center gap-2"):
                 swatch = ui.html(
                     f'<span style="display:inline-block;width:12px;height:12px;'
@@ -347,7 +349,7 @@ def _legend(leaves: list[LeafInfo]) -> None:
                 )
                 ui.label(f"{leaf.sheet_name}").classes("text-sm")
                 ui.label(
-                    f"{leaf.width_mm:.1f}×{leaf.height_mm:.1f}mm"
+                    f"{silk_w:.1f}×{silk_h:.1f}mm"
                 ).classes("text-xs text-gray-500 ml-auto")
 
 

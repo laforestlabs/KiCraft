@@ -48,7 +48,16 @@ _LEAF_COLORS = [
 
 @dataclass(slots=True)
 class LeafInfo:
-    """One discovered leaf available for manual placement."""
+    """One discovered leaf available for manual placement.
+
+    ``width_mm`` / ``height_mm`` are the Edge.Cuts bbox from metadata
+    (canonical leaf board size). ``silk_bbox`` is the rounded-corner
+    silkscreen outline the leaf solver writes into solved_layout.json
+    -- typically tighter than the Edge.Cuts because it hugs the
+    components' bbox + a small margin. The canvas uses silk_bbox for
+    its leaf preview so the visual rectangle matches what kicad-cli
+    actually renders on F.Silkscreen.
+    """
 
     instance_path: str
     sheet_name: str
@@ -57,6 +66,43 @@ class LeafInfo:
     artifact_dir: Path
     render_url: str | None = None
     color: str = "#60a5fa"
+    # Silk-bbox in leaf-local coords; defaults to (0,0)-(w,h) when no
+    # silk poly was found so the canvas falls back to the Edge.Cuts.
+    silk_min_x: float = 0.0
+    silk_min_y: float = 0.0
+    silk_max_x: float = 0.0
+    silk_max_y: float = 0.0
+    silk_corner_radius_mm: float = 1.0
+
+
+def _silk_bbox_from_solved_layout(leaf_dir: Path) -> tuple[float, float, float, float] | None:
+    """Compute the leaf-solver silk poly bbox from solved_layout.json.
+
+    The solver's _silkscreen_for_label emits a single closed poly with
+    32 arc-sampled points; its bbox is (components_bbox ± 0.5 mm
+    margin), which can be smaller (silk doesn't hit Edge.Cuts) or
+    larger (silk overhangs Edge.Cuts) than the canonical leaf bbox.
+    Returns None when the layout has no poly silk.
+    """
+    sl_path = leaf_dir / "solved_layout.json"
+    try:
+        sl = json.loads(sl_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    xs: list[float] = []
+    ys: list[float] = []
+    for elem in sl.get("silkscreen", []) or []:
+        if elem.get("kind") != "poly":
+            continue
+        for pt in elem.get("points", []) or []:
+            try:
+                xs.append(float(pt["x"]))
+                ys.append(float(pt["y"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    if not xs or not ys:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
 
 
 def _render_url_for(experiments_dir: Path, leaf_dir: Path) -> str | None:
@@ -179,6 +225,12 @@ def discover_leaves(experiments_dir: Path) -> list[LeafInfo]:
             continue
         if w <= 0 or h <= 0:
             continue
+        silk_bbox = _silk_bbox_from_solved_layout(leaf_dir)
+        if silk_bbox is None:
+            silk_min_x, silk_min_y, silk_max_x, silk_max_y = 0.0, 0.0, w, h
+        else:
+            silk_min_x, silk_min_y, silk_max_x, silk_max_y = silk_bbox
+
         leaves.append(
             LeafInfo(
                 instance_path=str(meta.get("instance_path", "")),
@@ -187,6 +239,10 @@ def discover_leaves(experiments_dir: Path) -> list[LeafInfo]:
                 height_mm=h,
                 artifact_dir=leaf_dir,
                 render_url=_render_url_for(experiments_dir, leaf_dir),
+                silk_min_x=silk_min_x,
+                silk_min_y=silk_min_y,
+                silk_max_x=silk_max_x,
+                silk_max_y=silk_max_y,
             )
         )
 

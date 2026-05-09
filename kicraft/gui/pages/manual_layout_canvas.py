@@ -27,6 +27,15 @@ def _build_canvas_config(
             "height_mm": lf.height_mm,
             "color": lf.color,
             "render_url": lf.render_url,
+            # Silk bbox in leaf-local coords. The canvas uses these
+            # for the visible leaf preview so its size + rounded
+            # corners match what F.Silkscreen actually shows on the
+            # stamped board.
+            "silk_min_x": lf.silk_min_x,
+            "silk_min_y": lf.silk_min_y,
+            "silk_max_x": lf.silk_max_x,
+            "silk_max_y": lf.silk_max_y,
+            "silk_corner_radius_mm": lf.silk_corner_radius_mm,
         }
         for lf in leaves
     ]
@@ -264,26 +273,38 @@ _CANVAS_JS_TEMPLATE = """
   // (140.4, -58.6) in the stamped board (CW); the pre-fix canvas
   // showed it at (36.4, 35.0) (CCW), explaining the "leaves wandered
   // way outside the outline in KiCad" report.
+  //
+  // Center-rotation pivots around the SILK BBOX center (which is what
+  // the user sees), not the Edge.Cuts (0, 0)..(w, h) bbox. The two
+  // can differ by several mm when the silk hugs the components more
+  // tightly than the board outline.
+  function silkCenterLocal(leaf) {{
+    return {{
+      x: (leaf.silk_min_x + leaf.silk_max_x) * 0.5,
+      y: (leaf.silk_min_y + leaf.silk_max_y) * 0.5,
+    }};
+  }}
+
   function leafCenter(p, leaf) {{
     const r = (p.rotation || 0) * Math.PI / 180;
     const c = Math.cos(r), s = Math.sin(r);
-    const lx = leaf.width_mm / 2, ly = leaf.height_mm / 2;
+    const sc = silkCenterLocal(leaf);
     return {{
-      x: p.origin.x + c * lx + s * ly,
-      y: p.origin.y - s * lx + c * ly,
+      x: p.origin.x + c * sc.x + s * sc.y,
+      y: p.origin.y - s * sc.x + c * sc.y,
     }};
   }}
 
   // Inverse for the same CW rotation: solve
-  //   center = origin + R_CW(theta) * (lx, ly)
+  //   center = origin + R_CW(theta) * silk_center
   // for origin so the visual center stays put as the user rotates.
   function setRotationKeepCenter(p, leaf, newRotDeg) {{
     const center = leafCenter(p, leaf);
     const r = newRotDeg * Math.PI / 180;
     const c = Math.cos(r), s = Math.sin(r);
-    const lx = leaf.width_mm / 2, ly = leaf.height_mm / 2;
-    p.origin.x = center.x - (c * lx + s * ly);
-    p.origin.y = center.y - (-s * lx + c * ly);
+    const sc = silkCenterLocal(leaf);
+    p.origin.x = center.x - (c * sc.x + s * sc.y);
+    p.origin.y = center.y - (-s * sc.x + c * sc.y);
     p.rotation = newRotDeg;
   }}
 
@@ -389,11 +410,17 @@ _CANVAS_JS_TEMPLATE = """
     for (const p of state.placements) {{
       const leaf = leafByPath[p.instance_path];
       if (!leaf) continue;
-      // Compute the rotated-bbox extent in parent coords with the
-      // SAME KiCad CW formula the composer uses, then flag the leaf
-      // if any corner falls outside the user's outline. The .overflow
-      // class turns the hit-rect outline red so the user sees at a
-      // glance that this leaf will end up off-board when stamped.
+      // Visible leaf rect uses the SILK bbox so the canvas preview
+      // matches what the stamped board renders (rounded corners,
+      // tighter hug to the components). Edge.Cuts (width_mm/height_mm)
+      // is still useful for the leaf-local origin -- placement origin
+      // continues to map to leaf-local (0, 0) per composer convention.
+      const sx0 = leaf.silk_min_x, sy0 = leaf.silk_min_y;
+      const sx1 = leaf.silk_max_x, sy1 = leaf.silk_max_y;
+      const sw = Math.max(0, sx1 - sx0), sh = Math.max(0, sy1 - sy0);
+      // Rotated-bbox overflow check uses the silk corners (the
+      // visible leaf shape), so the red overflow flag fires exactly
+      // when what the user sees crosses the outline.
       const r = (p.rotation || 0) * Math.PI / 180;
       const rc = Math.cos(r), rs = Math.sin(r);
       function corner(lx, ly) {{
@@ -403,10 +430,10 @@ _CANVAS_JS_TEMPLATE = """
         }};
       }}
       const corners = [
-        corner(0, 0),
-        corner(leaf.width_mm, 0),
-        corner(leaf.width_mm, leaf.height_mm),
-        corner(0, leaf.height_mm),
+        corner(sx0, sy0),
+        corner(sx1, sy0),
+        corner(sx1, sy1),
+        corner(sx0, sy1),
       ];
       const overflow = corners.some(c =>
         c.x < out.min.x - 0.01 || c.x > out.max.x + 0.01 ||
@@ -425,45 +452,44 @@ _CANVAS_JS_TEMPLATE = """
       g.setAttribute('transform',
         'translate(' + p.origin.x + ',' + p.origin.y + ') rotate(' + (-(p.rotation || 0)) + ')');
 
-      // Routed-leaf PNG (pads + traces + silkscreen including the
-      // leaf outline). Stretched to leaf bbox so adjacent leaves
-      // touch visually; the silkscreen IS the visible outline so no
-      // additional rectangle or overlay label is drawn.
+      // Routed-leaf PNG positioned and sized to the silk bbox -- the
+      // leaf solver's silk hugs the components plus a 0.5 mm margin
+      // and that's the visible leaf shape, so the canvas should show
+      // exactly that. preserveAspectRatio=none lets the PNG stretch
+      // to fill silk_bbox even when its native render aspect differs.
       if (leaf.render_url) {{
         const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
         img.setAttribute('class', 'ml-leaf-img');
         img.setAttribute('href', leaf.render_url);
-        img.setAttribute('x', 0);
-        img.setAttribute('y', 0);
-        img.setAttribute('width', leaf.width_mm);
-        img.setAttribute('height', leaf.height_mm);
+        img.setAttribute('x', sx0);
+        img.setAttribute('y', sy0);
+        img.setAttribute('width', sw);
+        img.setAttribute('height', sh);
         img.setAttribute('preserveAspectRatio', 'none');
         g.appendChild(img);
       }}
 
-      // Invisible hit target so clicks anywhere over the leaf bbox
-      // start a drag, even where the PNG is mostly empty.
+      // Hit / selection target = silk bbox, rounded corners matching
+      // the leaf solver's _silkscreen_for_label output.
       const hit = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
       hit.setAttribute('class', 'ml-leaf-hit');
-      hit.setAttribute('x', 0);
-      hit.setAttribute('y', 0);
-      hit.setAttribute('width', leaf.width_mm);
-      hit.setAttribute('height', leaf.height_mm);
+      hit.setAttribute('x', sx0);
+      hit.setAttribute('y', sy0);
+      hit.setAttribute('width', sw);
+      hit.setAttribute('height', sh);
+      hit.setAttribute('rx', leaf.silk_corner_radius_mm || 1.0);
+      hit.setAttribute('ry', leaf.silk_corner_radius_mm || 1.0);
       hit.setAttribute('fill', 'transparent');
       hit.setAttribute('stroke', 'none');
       g.appendChild(hit);
 
-      // The leaf .kicad_pcb now carries an F.Silkscreen outline at
-      // its Edge.Cuts boundary (added by adapter._apply_board_outline
-      // and the add_leaf_silk_outline retrofit), so the rendered PNG
-      // already shows a yellow silk rectangle. No synthetic SVG
-      // outline needed.
-
-      // Rotation handle: a small disc at top-right, offset outside the rect
+      // Rotation handle floats just outside the silk bbox top-right
+      // (instead of the Edge.Cuts top-right) so it tracks the
+      // visible leaf shape under rotation.
       const rot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       rot.setAttribute('class', 'ml-rot-handle');
-      rot.setAttribute('cx', leaf.width_mm + ROT_HANDLE_OFFSET_MM);
-      rot.setAttribute('cy', -ROT_HANDLE_OFFSET_MM);
+      rot.setAttribute('cx', sx1 + ROT_HANDLE_OFFSET_MM);
+      rot.setAttribute('cy', sy0 - ROT_HANDLE_OFFSET_MM);
       rot.setAttribute('r', ROT_HANDLE_R_MM);
       rot.setAttribute('data-role', 'rotate');
       g.appendChild(rot);
