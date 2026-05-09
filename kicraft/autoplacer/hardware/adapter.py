@@ -57,9 +57,17 @@ def _is_leaf_outline_silk(dwg) -> bool:
     drawn as part of footprint silk, not loose graphics) and uses
     different shape kinds; loose 0.15 mm silk segments at exactly
     the Edge.Cuts bbox corners are the ones we want to replace.
+
+    GetDrawings() returns a mixed list -- PCB_SHAPE, PCB_TEXT,
+    PCB_DIMENSION, etc. Only PCB_SHAPE has GetShape() / GetWidth();
+    calling either on a PCB_TEXT raises AttributeError. Guard with
+    hasattr() so the cleanup pass doesn't crash the leaf stamp
+    subprocess on boards that have silk text or dimensions.
     """
     try:
         if dwg.GetLayer() != pcbnew.F_SilkS:
+            return False
+        if not hasattr(dwg, "GetShape") or not hasattr(dwg, "GetWidth"):
             return False
         if dwg.GetShape() != pcbnew.SHAPE_T_SEGMENT:
             return False
@@ -322,11 +330,22 @@ _top = pcbnew.FromMM(_outline["tl_y"])
 _right = pcbnew.FromMM(_outline["tl_x"] + _width_mm)
 _bottom = pcbnew.FromMM(_outline["tl_y"] + _height_mm)
 
-_edge_remove = [d for d in board.GetDrawings()
-                if d.GetLayer() == pcbnew.Edge_Cuts
-                or (d.GetLayer() == pcbnew.F_SilkS
-                    and d.GetShape() == pcbnew.SHAPE_T_SEGMENT
-                    and abs(pcbnew.ToMM(d.GetWidth()) - 0.15) < 1e-3)]
+_edge_remove = []
+for d in board.GetDrawings():
+    if d.GetLayer() == pcbnew.Edge_Cuts:
+        _edge_remove.append(d)
+        continue
+    # Only PCB_SHAPE has GetShape(); PCB_TEXT and other graphics
+    # don't, and calling it would crash the subprocess. The 0.15 mm
+    # silk segment heuristic only makes sense for line shapes
+    # anyway.
+    if d.GetLayer() == pcbnew.F_SilkS and hasattr(d, "GetShape"):
+        try:
+            if (d.GetShape() == pcbnew.SHAPE_T_SEGMENT
+                    and abs(pcbnew.ToMM(d.GetWidth()) - 0.15) < 1e-3):
+                _edge_remove.append(d)
+        except Exception:
+            pass
 for d in _edge_remove:
     board.Remove(d)
 
