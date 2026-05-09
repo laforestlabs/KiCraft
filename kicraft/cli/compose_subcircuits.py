@@ -1020,6 +1020,35 @@ def _compute_final_outline(
     return (Point(out_min_x, out_min_y), Point(out_max_x, out_max_y))
 
 
+def _is_mounting_hole_ref(ref: str, comp: Component | None = None) -> bool:
+    """Heuristic: refs like 'H1', 'H86' are mounting holes.
+
+    KiCad convention is 'H' or 'MH' prefix. Components fed to manual
+    mode's parent_local list are already filtered to constraint-pinned
+    items, so a name match is sufficient here.
+    """
+    if not ref:
+        return False
+    upper = ref.upper()
+    return upper.startswith("H") and (len(upper) == 1 or upper[1].isdigit() or upper[1] == "_")
+
+
+def _move_component_to(comp: Component, new_pos: Point) -> None:
+    """Translate a Component (and its pads / body_center) so its anchor
+    lands at ``new_pos``. Preserves rotation; mirrors the same delta
+    pattern used by _snap_parent_local.
+    """
+    dx = new_pos.x - comp.pos.x
+    dy = new_pos.y - comp.pos.y
+    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+        return
+    comp.pos = Point(comp.pos.x + dx, comp.pos.y + dy)
+    if comp.body_center is not None:
+        comp.body_center = Point(comp.body_center.x + dx, comp.body_center.y + dy)
+    for pad in comp.pads:
+        pad.pos = Point(pad.pos.x + dx, pad.pos.y + dy)
+
+
 def _snap_parent_local(
     comps: dict[str, Component],
     constraints: list[AttachmentConstraint],
@@ -1281,6 +1310,39 @@ def _compose_artifacts(
             comp = parent_local_solved.get(ref)
             if comp is not None:
                 comp.pos = mpl.pos
+
+        # GUI mounting-hole panel maps to the parent's existing
+        # parent-local mounting-hole footprints in alphabetical ref
+        # order (so H4 < H86 etc.). Override each paired component's
+        # position with the user's chosen corner+inset; mark it
+        # user-positioned so the constraint snap below leaves it
+        # alone.
+        user_positioned_refs: set[str] = set()
+        gui_holes = sorted(
+            getattr(manual_layout, "mounting_holes", []) or [],
+            key=lambda h: h.index,
+        )
+        if gui_holes:
+            mh_refs = sorted(
+                ref for ref, comp in parent_local_solved.items()
+                if _is_mounting_hole_ref(ref, comp)
+            )
+            for hole, ref in zip(gui_holes, mh_refs):
+                comp = parent_local_solved.get(ref)
+                if comp is None:
+                    continue
+                _move_component_to(comp, hole.pos)
+                user_positioned_refs.add(ref)
+            if len(gui_holes) > len(mh_refs):
+                print(
+                    f"[manual-layout] note: GUI has {len(gui_holes)} mounting "
+                    f"holes but parent has {len(mh_refs)} matching footprints "
+                    f"({', '.join(mh_refs) or 'none'}); the extra GUI holes "
+                    f"are decorative until composer-side footprint synthesis "
+                    f"lands.",
+                    file=sys.stderr,
+                )
+
         solver_phase_timings = {}
 
         placed_child_bboxes, placed_envelopes, _ignored_anchors, transformed_by_index = (
@@ -1292,7 +1354,10 @@ def _compose_artifacts(
         exact_outline = manual_layout.board_outline
         _snap_parent_local(
             parent_local_solved,
-            derived.parent_local_constraints,
+            [
+                c for c in derived.parent_local_constraints
+                if c.ref not in user_positioned_refs
+            ],
             exact_outline,
         )
     else:
