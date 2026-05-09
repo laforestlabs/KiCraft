@@ -125,22 +125,23 @@ def _manual_layout_body(render_count: dict) -> None:
             initial_h = float(initial["board_outline"]["max"]["y"]) - float(
                 initial["board_outline"]["min"]["y"]
             )
-            with ui.row().classes("items-end gap-3 mt-2"):
-                ui.label("Outline:").classes("text-xs text-gray-400 self-center")
+            with ui.row().classes("items-center gap-2 mt-1"):
+                ui.label("Outline").classes("text-xs text-gray-400")
                 width_input = ui.number(
-                    "Width (mm)",
+                    "W (mm)",
                     value=round(initial_w, 2),
                     min=10,
                     step=0.5,
                     format="%.2f",
-                ).classes("w-32")
+                ).classes("w-24").props("dense")
+                ui.label("×").classes("text-xs text-gray-500")
                 height_input = ui.number(
-                    "Height (mm)",
+                    "H (mm)",
                     value=round(initial_h, 2),
                     min=10,
                     step=0.5,
                     format="%.2f",
-                ).classes("w-32")
+                ).classes("w-24").props("dense")
 
             def _push_size_to_canvas() -> None:
                 w = float(width_input.value or 0)
@@ -226,7 +227,7 @@ def _manual_layout_body(render_count: dict) -> None:
                     'class="text-xs text-gray-400">--</div>'
                 )
 
-    with ui.row().classes("w-full items-center gap-3 mt-4"):
+    with ui.row().classes("w-full items-center gap-3 mt-2"):
         save_btn = ui.button("Save Layout", icon="save", color="primary")
         route_btn = ui.button("Route Now", icon="bolt", color="secondary")
         route_btn.props("disable")

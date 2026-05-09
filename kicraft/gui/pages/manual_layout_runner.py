@@ -76,33 +76,78 @@ class LeafInfo:
 
 
 def _silk_bbox_from_solved_layout(leaf_dir: Path) -> tuple[float, float, float, float] | None:
-    """Compute the leaf-solver silk poly bbox from solved_layout.json.
+    """Compute a tight bbox of the leaf's visible copper + silk content.
 
-    The solver's _silkscreen_for_label emits a single closed poly with
-    32 arc-sampled points; its bbox is (components_bbox ± 0.5 mm
-    margin), which can be smaller (silk doesn't hit Edge.Cuts) or
-    larger (silk overhangs Edge.Cuts) than the canonical leaf bbox.
-    Returns None when the layout has no poly silk.
+    NOT the leaf solver's _silkscreen_for_label rounded poly: that
+    poly's bbox is (component_BODIES ± 0.5 mm margin), which on
+    leaves like BATT (where the battery holder body is 76 mm long
+    but pads only appear at the ends) overstates the visible extent
+    by 50%+. The user expectation is "the rectangle around what's
+    actually drawn" -- pads, traces, vias.
+
+    Compute from:
+      * each pad bbox = pos ± size/2 (already on the canonical
+        components dict)
+      * each trace endpoint ± width/2
+      * each via pos ± drill/2
+
+    Plus a small visual margin so the rect doesn't crop the
+    outermost copper. Returns None when the layout has no usable
+    geometry.
     """
     sl_path = leaf_dir / "solved_layout.json"
     try:
         sl = json.loads(sl_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
     xs: list[float] = []
     ys: list[float] = []
-    for elem in sl.get("silkscreen", []) or []:
-        if elem.get("kind") != "poly":
-            continue
-        for pt in elem.get("points", []) or []:
+
+    def _accumulate(x: float, y: float, half: float = 0.0) -> None:
+        xs.append(x - half)
+        ys.append(y - half)
+        xs.append(x + half)
+        ys.append(y + half)
+
+    for ref, comp in (sl.get("components") or {}).items():
+        for pad in comp.get("pads", []) or []:
             try:
-                xs.append(float(pt["x"]))
-                ys.append(float(pt["y"]))
+                px = float(pad["pos"]["x"])
+                py = float(pad["pos"]["y"])
+                sz = pad.get("size_mm") or {}
+                hw = float(sz.get("x", 0.0)) / 2.0
+                hh = float(sz.get("y", 0.0)) / 2.0
             except (KeyError, TypeError, ValueError):
                 continue
+            xs += [px - hw, px + hw]
+            ys += [py - hh, py + hh]
+
+    for trace in sl.get("traces") or []:
+        try:
+            x1 = float(trace["start"]["x"])
+            y1 = float(trace["start"]["y"])
+            x2 = float(trace["end"]["x"])
+            y2 = float(trace["end"]["y"])
+            half = float(trace.get("width_mm", 0.2)) / 2.0
+        except (KeyError, TypeError, ValueError):
+            continue
+        for x, y in ((x1, y1), (x2, y2)):
+            _accumulate(x, y, half)
+
+    for via in sl.get("vias") or []:
+        try:
+            vx = float(via["pos"]["x"])
+            vy = float(via["pos"]["y"])
+            r = float(via.get("size_mm", 0.6)) / 2.0
+        except (KeyError, TypeError, ValueError):
+            continue
+        _accumulate(vx, vy, r)
+
     if not xs or not ys:
         return None
-    return (min(xs), min(ys), max(xs), max(ys))
+    margin = 0.5
+    return (min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin)
 
 
 def _render_url_for(experiments_dir: Path, leaf_dir: Path) -> str | None:

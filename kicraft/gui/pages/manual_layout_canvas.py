@@ -68,8 +68,12 @@ def build_canvas_html(
   .ml-canvas-host {{
     position: relative;
     width: 100%;
-    height: calc(100vh - 280px);
-    min-height: 520px;
+    /* 180 px reserves room for: header (40), tab strip (50),
+       outline inputs (50), action buttons (50), gap padding (~20).
+       Anything left over goes to the canvas. min-height keeps the
+       canvas usable on tall narrow viewports. */
+    height: calc(100vh - 180px);
+    min-height: 600px;
     background: #0f172a;
     border: 1px solid #334155;
     border-radius: 6px;
