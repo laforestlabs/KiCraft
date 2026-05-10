@@ -112,16 +112,13 @@ def _silk_bbox_from_solved_layout(
 
 def _render_url_for(experiments_dir: Path, leaf_dir: Path) -> str | None:
     """Map a leaf's routed render to its /experiments URL, after stripping
-    the post-process cyan border + dark padding.
+    the post-process cyan border, navy padding, and grey anti-alias halo.
 
-    Two-pass ImageMagick ``-trim`` removes the cyan border first (corner
-    pixels are cyan) and then the dark navy padding now exposed at the
-    corners. The cropped result is cached at ``*_tight.png`` next to the
-    source so successive page loads avoid the magick subprocess.
-
-    Falls back to pre_route_front_all.png if routing hasn't completed
-    yet for this leaf. Returns None when neither file exists or magick
-    is unavailable.
+    The cleaned PNG is cached at ``*_canvas.png`` next to the source so
+    successive page loads skip the magick + numpy work. Falls back to
+    pre_route_front_all.png if routing hasn't completed yet for this
+    leaf. Returns None when neither file exists or the post-process
+    fails.
     """
     candidates = (
         leaf_dir / "renders" / "routed_front_all.png",
@@ -142,16 +139,26 @@ def _render_url_for(experiments_dir: Path, leaf_dir: Path) -> str | None:
 
 
 def _make_tight_render(src: Path) -> Path | None:
-    """Strip the post-process border + padding from a leaf render.
+    """Strip cyan border, navy padding, AND grey anti-alias halo from a
+    leaf render so the result is tight to the actual silkscreen + copper.
 
-    Cached: the trimmed copy is regenerated only when the source PNG is
-    newer than the cached file. Returns the cached path on success,
-    None if magick isn't available (caller falls back to the source).
+    Two-pass ImageMagick ``-trim`` peels the uniform-color outer rings
+    (cyan border, then navy padding). What's left is the rendered PCB
+    content plus a perimeter of grey anti-aliased pixels (the cyan-to-
+    navy gradient at the original border, which neither -trim nor a
+    fuzzed -transparent on navy can catch without also chewing through
+    dim trace colors). NumPy then alpha-keys those low-saturation
+    pixels and we re-crop to the surviving content. Cached at
+    ``*_canvas.png``; regenerated only when the source PNG is newer.
+
+    Returns the cached path on success, None if magick / NumPy / PIL
+    aren't available or the pipeline produced no content.
     """
     import shutil
     import subprocess
+    import tempfile
 
-    out = src.with_name(src.stem + "_tight.png")
+    out = src.with_name(src.stem + "_canvas.png")
     try:
         if out.is_file() and out.stat().st_mtime >= src.stat().st_mtime:
             return out
@@ -161,12 +168,9 @@ def _make_tight_render(src: Path) -> Path | None:
     if shutil.which("magick") is None:
         return None
 
-    # The render_pcb post-process bakes in a #020617 (DEFAULT_BACKGROUND)
-    # navy fill, so trimming exposes that as the now-uniform corner. Two
-    # trim passes peel cyan-border + navy-padding, then a -transparent
-    # pass keys out the remaining navy fill that fills the leaf interior
-    # so neighboring leaves don't occlude each other when their bboxes
-    # overlap on the manual canvas.
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+        tmp_path = Path(tmp_file.name)
+
     try:
         subprocess.run(
             [
@@ -180,22 +184,61 @@ def _make_tight_render(src: Path) -> Path | None:
                 "8%",
                 "-trim",
                 "+repage",
-                "-alpha",
-                "set",
-                "-fuzz",
-                "12%",
-                "-transparent",
-                "#020617",
-                "-transparent",
-                "#0b192f",
-                str(out),
+                str(tmp_path),
             ],
             check=True,
             capture_output=True,
             timeout=15,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
         return None
+
+    try:
+        import numpy as np
+        from PIL import Image
+    except ImportError:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        return None
+
+    try:
+        img = Image.open(tmp_path).convert("RGBA")
+        arr = np.array(img)
+        r = arr[..., 0].astype(np.int32)
+        g = arr[..., 1].astype(np.int32)
+        b = arr[..., 2].astype(np.int32)
+        # Saturation = max - min channel; navy fill + cyan/navy
+        # anti-alias halo are nearly greyscale (saturation < 30) and
+        # navy itself is also very dark (max channel < 60). Real PCB
+        # content -- yellow silk, red F.Cu, blue B.Cu -- is highly
+        # saturated. Anything that fails both content tests gets
+        # alpha=0 so the surrounding crop tightens to actual content.
+        sat = np.maximum(np.maximum(r, g), b) - np.minimum(np.minimum(r, g), b)
+        max_c = np.maximum(np.maximum(r, g), b)
+        is_bg = (sat < 30) | (max_c < 60)
+        arr[..., 3] = np.where(is_bg, 0, arr[..., 3])
+
+        ys, xs = np.where(arr[..., 3] > 0)
+        if ys.size == 0:
+            return None
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        cropped = arr[y0:y1, x0:x1]
+        Image.fromarray(cropped, mode="RGBA").save(out)
+    except (OSError, ValueError):
+        return None
+    finally:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+
     return out if out.is_file() else None
 
 

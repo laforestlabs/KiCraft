@@ -471,39 +471,21 @@ _CANVAS_JS_TEMPLATE = """
       g.setAttribute('transform',
         'translate(' + p.origin.x + ',' + p.origin.y + ') rotate(' + (-(p.rotation || 0)) + ')');
 
-      // Routed-leaf PNG: stretched onto the leaf's Edge.Cuts area
-      // (the rendered SVG was fit-page-to-board, so the trimmed PNG
-      // ≈ Edge.Cuts in leaf-local mm coords) and clipped to the silk
-      // bbox. That makes the silk line on the PNG land at silk_min/
-      // max on the canvas -- the bbox the rotation handle / hit rect
-      // / overflow check all anchor to -- so the visible leaf, its
-      // grab handle, and its overflow flag stay in lockstep with one
-      // another. Halo / out-of-silk pad pixels at the PNG perimeter
-      // get clipped out, so no extra rectangle hovers around the
-      // leaf.
+      // Routed-leaf PNG fitted into the silk bbox aspect-preserved.
+      // _make_tight_render alpha-keys the cyan-border + navy-padding
+      // halo before serving, so the PNG content is tight to the
+      // actual silkscreen and components -- xMidYMid meet then lands
+      // the silk line approximately on the bbox edge instead of
+      // floating inside a grey frame.
       if (leaf.render_url) {{
-        const safeIp = ('ml-clip-' + p.instance_path).replace(/[^a-zA-Z0-9_-]/g, '_');
-        const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-        const clip = document.createElementNS('http://www.w3.org/2000/svg', 'clipPath');
-        clip.setAttribute('id', safeIp);
-        const clipRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-        clipRect.setAttribute('x', sx0);
-        clipRect.setAttribute('y', sy0);
-        clipRect.setAttribute('width', sw);
-        clipRect.setAttribute('height', sh);
-        clip.appendChild(clipRect);
-        defs.appendChild(clip);
-        g.appendChild(defs);
-
         const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
         img.setAttribute('class', 'ml-leaf-img');
         img.setAttribute('href', leaf.render_url);
-        img.setAttribute('x', 0);
-        img.setAttribute('y', 0);
-        img.setAttribute('width', leaf.width_mm);
-        img.setAttribute('height', leaf.height_mm);
-        img.setAttribute('preserveAspectRatio', 'none');
-        img.setAttribute('clip-path', 'url(#' + safeIp + ')');
+        img.setAttribute('x', sx0);
+        img.setAttribute('y', sy0);
+        img.setAttribute('width', sw);
+        img.setAttribute('height', sh);
+        img.setAttribute('preserveAspectRatio', 'xMidYMid meet');
         g.appendChild(img);
       }}
 
