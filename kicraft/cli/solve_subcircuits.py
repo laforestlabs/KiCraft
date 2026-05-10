@@ -785,6 +785,28 @@ def _solve_leaf_subcircuit(
             best = result
 
     if best is None:
+        # Append the failed rounds to debug.json before raising. Without
+        # this, the GUI's per-leaf timeline silently drops every attempt
+        # in this parent-round (it filters by debug.json entries with
+        # matching experiment_round). For a leaf that succeeded in an
+        # earlier parent-round and then failed every retry, the user
+        # would otherwise see only the original exp_round's solves and
+        # the timeline would look 1/3 the expected length on a 3x3
+        # recipe.
+        if schematic_path:
+            try:
+                _append_failed_rounds_to_debug(
+                    schematic_path=Path(schematic_path),
+                    subcircuit_id=node.definition.id,
+                    new_round_results=round_results,
+                    experiment_round=experiment_round,
+                    prior_all_rounds=prior_all_rounds,
+                )
+            except Exception:
+                # Don't mask the underlying RuntimeError with a
+                # debug-write failure -- the user needs to see the
+                # actual leaf-failure reason.
+                pass
         unique_reasons = sorted(set(failure_reasons))
         raise RuntimeError(
             "No accepted routed leaf artifact produced for "
@@ -853,6 +875,69 @@ def _solve_leaf_subcircuit(
         experiment_round=experiment_round,
         prior_rounds=prior_all_rounds,
     )
+
+
+def _append_failed_rounds_to_debug(
+    *,
+    schematic_path: Path,
+    subcircuit_id: Any,
+    new_round_results: list[SolveRoundResult],
+    experiment_round: int,
+    prior_all_rounds: list[dict[str, Any]],
+) -> None:
+    """Merge an exp_round of failed rounds into the leaf's debug.json.
+
+    ``_solve_leaf_subcircuit`` only reaches ``_persist_solution`` when at
+    least one round was accepted. When every round fails (parameter
+    sweep that strands a particular leaf, freerouting timeout on a dense
+    leaf, etc.), the function raises and ``_persist_solution`` never
+    runs -- so the prior debug.json (from earlier exp_rounds in this
+    same run) is left untouched and the GUI has no record this exp_
+    round even tried. Append the new failed rounds here so the per-leaf
+    timeline reflects every attempt the runner made.
+
+    Skip silently when no prior debug.json exists: rebuilding one from
+    scratch would require the LeafExtraction + ArtifactMetadata chain
+    that ``_persist_solution`` builds, which is too much scaffolding for
+    a failure path. In that case the leaf has only ever failed in this
+    run, and the autoexperiment failure summary already records that.
+    """
+    paths = resolve_artifact_paths(
+        project_dir=schematic_path.parent,
+        subcircuit_id=subcircuit_id,
+    )
+    debug_path = Path(paths.debug_json)
+    if not debug_path.is_file():
+        return
+    try:
+        payload = json.loads(debug_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(payload, dict):
+        return
+    extra = payload.get("extra")
+    if not isinstance(extra, dict):
+        extra = {}
+        payload["extra"] = extra
+
+    new_dicts: list[dict[str, Any]] = []
+    for r in new_round_results:
+        rec = r.to_dict()
+        rec["experiment_round"] = int(experiment_round or 0)
+        new_dicts.append(rec)
+    new_indices = {int(r.get("round_index", -1) or -1) for r in new_dicts}
+    merged = [
+        r
+        for r in prior_all_rounds
+        if int(r.get("round_index", -1) or -1) not in new_indices
+    ]
+    merged.extend(new_dicts)
+    merged.sort(key=lambda r: int(r.get("round_index", 0) or 0))
+    extra["all_rounds"] = merged
+
+    tmp = debug_path.with_suffix(debug_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(debug_path)
 
 
 def _solved_local_outline(extraction: ExtractedSubcircuitBoard) -> dict[str, float]:

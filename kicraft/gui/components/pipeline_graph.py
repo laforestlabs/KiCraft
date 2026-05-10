@@ -703,14 +703,18 @@ def gather_pipeline_state(
                     #       its state from a prior run. selected_round is
                     #       a parent-round filter that's irrelevant to a
                     #       pinned leaf; fall back to canonical state.
-                    #       This is the parents-only-after-leaves-only
-                    #       workflow where parent rounds don't produce
-                    #       per-leaf rounds at all.
+                    #       Applies to BOTH parents-only-after-leaves-only
+                    #       (where leaves never re-solve) and leaves-only
+                    #       runs where the pinned leaf's later rounds all
+                    #       failed -- the canonical PCB is still the pin's
+                    #       known-good state, so don't flip the card to
+                    #       FAILED just because debug.json never made it
+                    #       past exp_round 1.
                     #   (b) the run is still in flight and this leaf
                     #       hasn't been solved yet -- "queued" / WAITING.
                     #   (c) the run finished and this leaf actually
                     #       missed the round -- that's a real failure.
-                    is_pinned = leaf_floor is None
+                    is_pinned = _leaf_is_pinned(experiments_dir, leaf_key)
                     if is_pinned:
                         # Keep canonical-derived leaf_status / score /
                         # traces / vias / best_render -- the pin already
