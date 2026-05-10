@@ -91,11 +91,16 @@ def build_canvas_html(
     fill-opacity: 0;
     stroke: #facc15;
     stroke-width: 0.25;
+    stroke-opacity: 0;
+    pointer-events: none;
     cursor: crosshair;
-    transition: fill-opacity 0.12s ease;
+    transition: fill-opacity 0.12s ease, stroke-opacity 0.12s ease;
   }}
-  .ml-leaf:hover .ml-rot-handle,
-  .ml-leaf.selected .ml-rot-handle {{ fill-opacity: 0.95; }}
+  .ml-leaf.selected .ml-rot-handle {{
+    fill-opacity: 0.95;
+    stroke-opacity: 1;
+    pointer-events: auto;
+  }}
   .ml-outline {{
     fill: none;
     stroke: #67e8f9;
@@ -561,7 +566,13 @@ _CANVAS_JS_TEMPLATE = """
         const p = state.placements.find(x => x.instance_path === ip);
         if (p) {{
           const leaf = leafByPath[ip];
-          setRotationKeepCenter(p, leaf, snapAngle((p.rotation || 0) + SNAP_DEG, false));
+          // Negate to invert input mapping: a CW step (intuitive) is
+          // stored as a negative rotation, which the SVG transform's
+          // own rotate(-(p.rotation)) re-flips back into a CW visual,
+          // so the canvas now spins the same way the user expects
+          // while preserving the stamped-board parity the negation
+          // exists for in the first place.
+          setRotationKeepCenter(p, leaf, snapAngle((p.rotation || 0) - SNAP_DEG, false));
           setSelected(ip);
         }}
       }}
@@ -573,7 +584,7 @@ _CANVAS_JS_TEMPLATE = """
         const p = state.placements.find(x => x.instance_path === state.selected);
         if (p) {{
           const leaf = leafByPath[state.selected];
-          setRotationKeepCenter(p, leaf, snapAngle((p.rotation || 0) + SNAP_DEG, false));
+          setRotationKeepCenter(p, leaf, snapAngle((p.rotation || 0) - SNAP_DEG, false));
           render();
         }}
       }}
@@ -616,7 +627,12 @@ _CANVAS_JS_TEMPLATE = """
     const move = (e) => {{
       const cur = svgToWorld(svg, e);
       const ang = Math.atan2(cur.y - center.y, cur.x - center.x) * 180 / Math.PI;
-      setRotationKeepCenter(p, leaf, baseRot + (ang - startAngle));
+      // Negate the drag delta so a visual-CW mouse motion produces a
+      // visual-CW leaf rotation. The render-side rotate(-(p.rotation))
+      // exists to preserve canvas/stamp parity (KiCad's CW convention
+      // y-flips relative to SVG's mathematical CCW), so we invert the
+      // input mapping here instead of touching the transform.
+      setRotationKeepCenter(p, leaf, baseRot - (ang - startAngle));
       render();
     }};
     const up = (e) => {{
