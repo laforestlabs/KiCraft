@@ -12,7 +12,7 @@ import asyncio
 import json
 import math
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -50,17 +50,15 @@ _LEAF_COLORS = [
 class LeafInfo:
     """One discovered leaf available for manual placement.
 
-    Single source of truth for the leaf's visible extent: the rounded-
-    rect silk polygon the leaf solver writes into solved_layout.json
-    (computed post-route from courtyards + pad copper + traces + vias).
-
-    * ``silk_polygon_points`` -- the closed rounded-rect polygon (32
-      arc-sampled points) drawn on the canvas as a thin yellow outline.
-    * ``silk_min_*`` / ``silk_max_*`` -- the polygon's axis-aligned
-      bbox, used for hit detection, the leaf-image rect, and the
-      overflow check. Falls back to the leaf's Edge.Cuts dimensions
-      when no silk poly is on disk (rare, only when the leaf solver
-      had no ``group_labels`` match).
+    ``silk_min_*`` / ``silk_max_*`` is the axis-aligned bbox of the
+    leaf solver's rounded-rect silk polygon (computed post-route from
+    courtyards + pad copper + traces + vias). The bbox drives the
+    leaf-image rect, the hit target, and the overflow check; the
+    visible silkscreen outline is baked into the rendered PNG itself,
+    so no separate polygon overlay is drawn on the canvas. Falls
+    back to the leaf's Edge.Cuts dimensions when no silk poly is on
+    disk (rare, only when the leaf solver had no ``group_labels``
+    match).
     """
 
     instance_path: str
@@ -70,56 +68,46 @@ class LeafInfo:
     artifact_dir: Path
     render_url: str | None = None
     color: str = "#60a5fa"
-    # Silk polygon's axis-aligned bbox in leaf-local coords; matches
-    # silk_polygon_points exactly when present.
     silk_min_x: float = 0.0
     silk_min_y: float = 0.0
     silk_max_x: float = 0.0
     silk_max_y: float = 0.0
-    silk_corner_radius_mm: float = 1.0
-    # Silkscreen poly points in leaf-local coords -- closed polygon
-    # of (x, y) tuples. Empty if the leaf has no poly silk.
-    silk_polygon_points: list[tuple[float, float]] = field(default_factory=list)
 
 
-def _silk_polygon_from_solved_layout(leaf_dir: Path) -> list[tuple[float, float]]:
-    """Return the leaf solver's silkscreen poly points in leaf-local coords.
+def _silk_bbox_from_solved_layout(
+    leaf_dir: Path,
+) -> tuple[float, float, float, float] | None:
+    """Axis-aligned bbox of the leaf solver's silkscreen poly.
 
     The leaf solver writes a single closed rounded-rect poly per leaf
-    (32 arc-sampled points) via ``_build_leaf_silkscreen``. Computed
-    post-route, so the polygon hugs courtyards + pad copper + tracks +
-    vias. Returns an empty list when no poly silk is on disk.
+    via ``_build_leaf_silkscreen``. We only need its bbox -- the poly
+    itself is rendered into the leaf PNG via F.Silkscreen and the
+    canvas re-uses that PNG instead of drawing the polygon a second
+    time. Returns None when no poly silk is on disk.
     """
     sl_path = leaf_dir / "solved_layout.json"
     try:
         sl = json.loads(sl_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
-    points: list[tuple[float, float]] = []
+        return None
     for elem in sl.get("silkscreen", []) or []:
         if elem.get("kind") != "poly":
             continue
+        xs: list[float] = []
+        ys: list[float] = []
         for pt in elem.get("points", []) or []:
             try:
-                points.append((float(pt["x"]), float(pt["y"])))
+                xs.append(float(pt["x"]))
+                ys.append(float(pt["y"]))
             except (KeyError, TypeError, ValueError):
                 continue
         # The leaf solver writes one poly per leaf (the rounded outline).
         # Subsequent polys would be component-level body silk that we do
-        # not want to draw as the overall leaf outline.
-        break
-    return points
-
-
-def _silk_polygon_bbox(
-    points: list[tuple[float, float]],
-) -> tuple[float, float, float, float] | None:
-    """Axis-aligned bbox of the silk polygon's points. None when empty."""
-    if not points:
+        # not want to use as the overall leaf bbox.
+        if xs and ys:
+            return (min(xs), min(ys), max(xs), max(ys))
         return None
-    xs = [p[0] for p in points]
-    ys = [p[1] for p in points]
-    return (min(xs), min(ys), max(xs), max(ys))
+    return None
 
 
 def _render_url_for(experiments_dir: Path, leaf_dir: Path) -> str | None:
@@ -242,8 +230,7 @@ def discover_leaves(experiments_dir: Path) -> list[LeafInfo]:
             continue
         if w <= 0 or h <= 0:
             continue
-        silk_poly = _silk_polygon_from_solved_layout(leaf_dir)
-        poly_bbox = _silk_polygon_bbox(silk_poly)
+        poly_bbox = _silk_bbox_from_solved_layout(leaf_dir)
         if poly_bbox is None:
             silk_min_x, silk_min_y, silk_max_x, silk_max_y = 0.0, 0.0, w, h
         else:
@@ -261,7 +248,6 @@ def discover_leaves(experiments_dir: Path) -> list[LeafInfo]:
                 silk_min_y=silk_min_y,
                 silk_max_x=silk_max_x,
                 silk_max_y=silk_max_y,
-                silk_polygon_points=silk_poly,
             )
         )
 

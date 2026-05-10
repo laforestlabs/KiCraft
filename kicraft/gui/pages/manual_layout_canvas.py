@@ -33,19 +33,12 @@ def _build_canvas_config(
             "color": lf.color,
             "render_url": lf.render_url,
             # Tight content bbox (pads + traces + vias). Used as the
-            # leaf hit / preview / overflow rectangle.
+            # leaf image / hit / overflow rectangle. The visible silk
+            # outline is baked into the rendered PNG.
             "silk_min_x": lf.silk_min_x,
             "silk_min_y": lf.silk_min_y,
             "silk_max_x": lf.silk_max_x,
             "silk_max_y": lf.silk_max_y,
-            "silk_corner_radius_mm": lf.silk_corner_radius_mm,
-            # Silk poly points -- the actual rounded silkscreen
-            # outline the leaf solver writes. Drawn as a thin yellow
-            # overlay so the user sees the same silk shape that
-            # appears on the stamped board.
-            "silk_polygon_points": [
-                {"x": x, "y": y} for x, y in lf.silk_polygon_points
-            ],
         }
         for lf in leaves
     ]
@@ -93,13 +86,6 @@ def build_canvas_html(
     stroke: none;
   }}
   .ml-leaf-img {{ pointer-events: none; }}
-  .ml-leaf-silk {{
-    fill: none;
-    stroke: #fbbf24;
-    stroke-width: 0.18;
-    stroke-opacity: 0.85;
-    pointer-events: none;
-  }}
   .ml-rot-handle {{
     fill: #facc15;
     fill-opacity: 0;
@@ -145,17 +131,11 @@ def build_canvas_html(
     stroke-dasharray: 0.5 0.3;
     pointer-events: none;
   }}
-  /* Overflow: paint the silk poly itself red dashed instead of layering
-     a second visible rect on top of it. The hit rect stays invisible
-     (it only catches pointer events). */
-  .ml-leaf.overflow .ml-leaf-silk,
+  /* Overflow indicator: turn the rotation handle red so the user can
+     spot a leaf placed outside the outline without overlaying any
+     extra outline on top of the leaf's baked silkscreen. */
   .ml-leaf.overflow .ml-rot-handle {{
     stroke: #ef4444;
-  }}
-  .ml-leaf.overflow .ml-leaf-silk {{
-    stroke-width: 0.5;
-    stroke-dasharray: 0.6 0.4;
-    stroke-opacity: 1.0;
   }}
 </style>
 <div id="{canvas_id}-host" class="ml-canvas-host">
@@ -496,8 +476,7 @@ _CANVAS_JS_TEMPLATE = """
       // render aspect -- distorted PNGs (the previous "none" mode)
       // looked like the leaf had been squashed onto a different
       // shape. Letterboxing inside the silk rect is fine because the
-      // silk poly itself defines the visible boundary; the slight
-      // gap between bbox edge and image edge reads as silk margin.
+      // PNG already has the rounded silkscreen outline baked in.
       if (leaf.render_url) {{
         const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
         img.setAttribute('class', 'ml-leaf-img');
@@ -510,29 +489,16 @@ _CANVAS_JS_TEMPLATE = """
         g.appendChild(img);
       }}
 
-      // Yellow silk-poly overlay -- the actual rounded silkscreen
-      // outline the leaf solver writes onto F.Silkscreen. Always
-      // visible (regardless of selection state) so the user sees
-      // the leaf's silk shape directly instead of inferring it
-      // from the routed-PNG content. Drawn between the image and
-      // the hit rect so it sits on top of the PNG but below the
-      // selection / drag affordance.
-      if (Array.isArray(leaf.silk_polygon_points) && leaf.silk_polygon_points.length >= 3) {{
-        const silk = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-        silk.setAttribute('class', 'ml-leaf-silk');
-        silk.setAttribute('points', leaf.silk_polygon_points.map(p => p.x + ',' + p.y).join(' '));
-        g.appendChild(silk);
-      }}
-
-      // Hit / selection target = content bbox, rounded corners.
+      // Hit / selection target = silk content bbox. The visible
+      // silk outline is baked into the rendered PNG (the leaf
+      // solver writes F.Silkscreen there); no SVG overlay is drawn
+      // on top to avoid showing a second, mis-sized outline.
       const hit = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
       hit.setAttribute('class', 'ml-leaf-hit');
       hit.setAttribute('x', sx0);
       hit.setAttribute('y', sy0);
       hit.setAttribute('width', sw);
       hit.setAttribute('height', sh);
-      hit.setAttribute('rx', leaf.silk_corner_radius_mm || 1.0);
-      hit.setAttribute('ry', leaf.silk_corner_radius_mm || 1.0);
       hit.setAttribute('fill', 'transparent');
       hit.setAttribute('stroke', 'none');
       g.appendChild(hit);
