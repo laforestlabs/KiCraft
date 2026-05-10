@@ -76,8 +76,8 @@
       4551
     ],
     "subcircuit_margin_mm": [
-      6.97,
-      13.38
+      0.5,
+      3.0
     ],
     "connector_edge_inset_mm": [
       0.47,
@@ -102,6 +102,10 @@
     "parent_spacing_mm": [
       0.66,
       1.6
+    ],
+    "parent_seed_area_overhead": [
+      1.5,
+      3.5
     ]
   },
   "score_weights": {
@@ -114,6 +118,11 @@
   "schematic_file": "LLUPS.kicad_sch",
   "parent": "/",
   "only": [],
-  "leaf_rounds": 3
+  "leaf_rounds": 3,
+  "render_png": true,
+  "save_round_details": true,
+  "placement_config": {
+    "freerouting_hide_window": true
+  }
 }
 ```
