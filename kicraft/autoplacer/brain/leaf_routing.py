@@ -268,6 +268,37 @@ def route_local_subcircuit(
                 f"illegal_pre_stamp_render_failed:{exc}"
             )
 
+        # Copy the illegal-pre-stamp PNGs (and the .kicad_pcb) to
+        # round_XXXX_pre_route_* names so the GUI's _find_round_renders
+        # can show *something* for failed rounds. Without this, failed
+        # rounds appear as bare "-inf" cards with a placeholder icon and
+        # the user has no way to inspect what placement was rejected.
+        if round_index is not None:
+            _round_prefix = f"round_{int(round_index):04d}"
+            _renders_dir = Path(artifact_paths.artifact_dir) / "renders"
+            _renders_dir.mkdir(parents=True, exist_ok=True)
+            _ip = illegal_render_diagnostics.get("illegal_pre_stamp") or {}
+            _view_paths = (_ip.get("board_views", {}) or {}).get("paths", {}) or {}
+            for _view, _suffix in (
+                ("front_all", "pre_route_front_all"),
+                ("back_all", "pre_route_back_all"),
+                ("copper_both", "pre_route_copper_both"),
+            ):
+                _src = _view_paths.get(_view)
+                if _src and Path(_src).exists():
+                    try:
+                        shutil.copy2(_src, _renders_dir / f"{_round_prefix}_{_suffix}.png")
+                    except OSError:
+                        pass
+            if illegal_board.exists():
+                try:
+                    shutil.copy2(
+                        illegal_board,
+                        illegal_board.parent / f"{_round_prefix}_leaf_pre_freerouting{illegal_board.suffix}",
+                    )
+                except OSError:
+                    pass
+
         route_timing["route_local_subcircuit_total_s"] = round(
             max(0.0, time.monotonic() - route_total_start), 3
         )

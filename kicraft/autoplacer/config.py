@@ -222,12 +222,15 @@ DEFAULT_CONFIG = {
     "board_height_mm": 58.0,
     # Subcircuit margin — extra space (mm) added around the tight bounding
     # box of component positions when building a local subcircuit board.
-    # 1.5mm sits just outside the silkscreen poly margin (0.5mm) and
-    # gives Freerouting ~1mm of routing slack at the leaf perimeter,
-    # so the leaf's Edge.Cuts ends up hugging its silkscreen rather
-    # than swallowing ~10mm of empty board around it (which the parent
-    # composer would then have to pack around).
-    "subcircuit_margin_mm": 1.5,
+    # 10.82mm gives the SA solver enough slack to find good arrangements;
+    # the previous 5mm was the strongest leaf-side bottleneck (r=+0.59),
+    # and at 1.5mm dense leaves (e.g., BOOST 5V) failed legality repair
+    # on ~50% of seeds because D3/C6/L1 got forced into overlapping
+    # placements the legalizer couldn't escape. The final leaf Edge.Cuts
+    # is shrunk post-route by _outline_around_geometry to hug silk anyway,
+    # so a generous extraction margin costs nothing in the final geometry
+    # -- it only buys the placement solver more search room.
+    "subcircuit_margin_mm": 10.82,
     # Parent spacing — gap (mm) between child subcircuit bounding boxes when
     # composing them into the parent board.  1.17mm packs leaves tightly
     # without compromising routability (r=-0.41 in parents-only sweep).
@@ -304,7 +307,7 @@ CONFIG_SEARCH_SPACE = {
     "sa_refine_move_radius_mm": {"min": 1.52, "max": 7.41, "sigma": 0.6, "type": "float"},
     "connector_gap_mm": {"min": 0.46, "max": 7.50, "sigma": 0.7, "type": "float"},
     "max_placement_iterations": {"min": 829, "max": 4551, "sigma": 370, "type": "int"},
-    "subcircuit_margin_mm": {"min": 0.5, "max": 3.0, "sigma": 0.25, "type": "float"},
+    "subcircuit_margin_mm": {"min": 6.97, "max": 13.38, "sigma": 0.6, "type": "float"},
     "connector_edge_inset_mm": {"min": 0.47, "max": 4.32, "sigma": 0.4, "type": "float"},
     "sa_refine_cooling_rate": {"min": 0.9076, "max": 0.99, "sigma": 0.008, "type": "float"},
     "sa_refine_rotation_probability": {"min": 0.05, "max": 0.85, "sigma": 0.08, "type": "float"},
