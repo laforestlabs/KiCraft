@@ -245,6 +245,8 @@ def _manual_layout_body(render_count: dict) -> None:
 
     _mounting_hole_panel(canvas_id, initial.get("mounting_holes") or [])
 
+    _view_options_panel(canvas_id)
+
     def _on_open_in_kicad() -> None:
         pcb = find_latest_parent_pcb(state.experiments_dir)
         if pcb is None:
@@ -551,6 +553,76 @@ def _mounting_hole_panel(canvas_id: str, initial_holes: list[dict]) -> None:
 
         count_input.on_value_change(_on_count_change)
         _rebuild()
+
+
+def _view_options_panel(canvas_id: str) -> None:
+    """Collapsible View options panel at the bottom of the manual layout tab.
+
+    Toggles plus a spacing input that propagate to the canvas controller
+    via ``setViewOptions(opts)``. Defaults match the historical canvas
+    behavior (grid on, snap on, 0 mm gap) so flipping the expansion open
+    without changing anything is a no-op. The spacing field defaults to
+    1 mm so flipping it on visibly opens up gaps between snapped leaves.
+    """
+    options: dict[str, Any] = {
+        "show_grid": True,
+        "snap_enabled": True,
+        "snap_spacing_mm": 1.0,
+    }
+
+    def _push() -> None:
+        ui.run_javascript(
+            f"window.manualLayoutCanvases['{canvas_id}'] && "
+            f"window.manualLayoutCanvases['{canvas_id}']"
+            f".setViewOptions({json.dumps(options)})"
+        )
+
+    def _on_grid_change(e: Any) -> None:
+        options["show_grid"] = bool(e.value)
+        _push()
+
+    def _on_snap_change(e: Any) -> None:
+        options["snap_enabled"] = bool(e.value)
+        _push()
+
+    def _on_spacing_change(e: Any) -> None:
+        try:
+            options["snap_spacing_mm"] = max(0.0, float(e.value or 0))
+        except (TypeError, ValueError):
+            options["snap_spacing_mm"] = 0.0
+        _push()
+
+    with ui.expansion(
+        "View options",
+        icon="visibility",
+        value=False,
+    ).classes("w-full mt-4 bg-slate-800/40 rounded"):
+        with ui.column().classes("w-full px-2 py-2 gap-2"):
+            ui.switch(
+                "Show grid",
+                value=options["show_grid"],
+                on_change=_on_grid_change,
+            )
+            with ui.row().classes("items-center gap-3"):
+                ui.switch(
+                    "Snap leafs together",
+                    value=options["snap_enabled"],
+                    on_change=_on_snap_change,
+                )
+                ui.number(
+                    "Spacing (mm)",
+                    value=options["snap_spacing_mm"],
+                    min=0,
+                    step=0.1,
+                    format="%.2f",
+                    on_change=_on_spacing_change,
+                ).classes("w-32")
+
+    # Push the initial values once the canvas JS has had a chance to
+    # mount -- the panel renders before the IIFE registers
+    # window.manualLayoutCanvases[canvas_id], so a synchronous push
+    # would silently no-op via the `&& ...` guard.
+    ui.timer(0.3, _push, once=True)
 
 
 def _build_hole_row(i: int, hole: dict, on_change) -> None:

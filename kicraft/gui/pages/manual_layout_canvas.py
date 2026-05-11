@@ -235,6 +235,14 @@ _CANVAS_JS_TEMPLATE = """
       mounting_holes: deepCopy(cfg.initial.mounting_holes || []),
       selected: null,
       snap_active: null,
+      // View options -- mutated by setViewOptions() from the Python
+      // panel. Defaults match the historical canvas behavior (grid on,
+      // edge-snap on, 0 mm gap between snapped leaves).
+      view_options: {{
+        show_grid: true,
+        snap_enabled: true,
+        snap_spacing_mm: 0.0,
+      }},
     }};
   }}
 
@@ -389,44 +397,57 @@ _CANVAS_JS_TEMPLATE = """
   // edges into exact alignment, when that offset is within
   // SNAP_THRESHOLD_MM. Returns null when nothing is close enough.
   function computeDragSnap(ip, myBbox) {{
+    if (!state.view_options.snap_enabled) return null;
+    const gap = Math.max(0, Number(state.view_options.snap_spacing_mm) || 0);
     const candidates = [];
     for (const other of state.placements) {{
       if (other.instance_path === ip) continue;
       const otherLeaf = leafByPath[other.instance_path];
       if (!otherLeaf) continue;
       const ob = silkBboxParent(other, otherLeaf);
-      candidates.push(ob);
+      candidates.push({{ b: ob, edge_gap: gap }});
     }}
-    // Board outline counts too -- snap to the inside of the parent edges.
+    // Board outline counts too -- snap to the INSIDE of the parent
+    // edges, with no gap (the gap setting is for leaf-to-leaf spacing,
+    // not leaf-to-outline padding).
     const o = state.board_outline;
-    candidates.push({{ min_x: o.min.x, max_x: o.max.x, min_y: o.min.y, max_y: o.max.y }});
+    candidates.push({{
+      b: {{ min_x: o.min.x, max_x: o.max.x, min_y: o.min.y, max_y: o.max.y }},
+      edge_gap: 0,
+    }});
 
     let bestDx = 0, bestDxDist = Infinity;
     let bestDy = 0, bestDyDist = Infinity;
-    for (const ob of candidates) {{
+    for (const c of candidates) {{
+      const ob = c.b;
+      const g = c.edge_gap;
+      // For each pair: (current_offset, target_offset). Snap activates
+      // when the offset is within SNAP_THRESHOLD_MM of the target, and
+      // moves the leaf by (target - current). Edge-to-edge pairs use
+      // ±gap; axis-alignment pairs keep target=0.
       const xPairs = [
-        myBbox.max_x - ob.min_x,  // my right == other left
-        myBbox.min_x - ob.max_x,  // my left  == other right
-        myBbox.min_x - ob.min_x,  // left-aligned
-        myBbox.max_x - ob.max_x,  // right-aligned
+        [myBbox.max_x - ob.min_x, -g],  // my right -> other left (gap to the right of me)
+        [myBbox.min_x - ob.max_x,  g],  // my left  -> other right (gap to the left of me)
+        [myBbox.min_x - ob.min_x,  0],  // left-aligned
+        [myBbox.max_x - ob.max_x,  0],  // right-aligned
       ];
       const yPairs = [
-        myBbox.max_y - ob.min_y,  // my bottom == other top
-        myBbox.min_y - ob.max_y,  // my top    == other bottom
-        myBbox.min_y - ob.min_y,  // top-aligned
-        myBbox.max_y - ob.max_y,  // bottom-aligned
+        [myBbox.max_y - ob.min_y, -g],  // my bottom -> other top
+        [myBbox.min_y - ob.max_y,  g],  // my top    -> other bottom
+        [myBbox.min_y - ob.min_y,  0],  // top-aligned
+        [myBbox.max_y - ob.max_y,  0],  // bottom-aligned
       ];
-      for (const d of xPairs) {{
-        const a = Math.abs(d);
+      for (const [d, target] of xPairs) {{
+        const a = Math.abs(d - target);
         if (a < SNAP_THRESHOLD_MM && a < bestDxDist) {{
-          bestDx = -d;
+          bestDx = target - d;
           bestDxDist = a;
         }}
       }}
-      for (const d of yPairs) {{
-        const a = Math.abs(d);
+      for (const [d, target] of yPairs) {{
+        const a = Math.abs(d - target);
         if (a < SNAP_THRESHOLD_MM && a < bestDyDist) {{
-          bestDy = -d;
+          bestDy = target - d;
           bestDyDist = a;
         }}
       }}
@@ -449,35 +470,38 @@ _CANVAS_JS_TEMPLATE = """
     // viewBox, so the visible coordinate range is wider than the
     // viewBox in the longer axis. Without this, leaves placed outside
     // the outline (which still render correctly via the letterbox)
-    // float over a gridless dark background.
-    const grid = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-    grid.setAttribute('class', 'ml-grid');
-    const svgW = svg.clientWidth || cfg.canvas_w_px;
-    const svgH = svg.clientHeight || cfg.canvas_h_px;
-    const scale = Math.min(svgW / vb.vbW, svgH / vb.vbH);
-    const visW = svgW / scale;
-    const visH = svgH / scale;
-    const visX = vb.vbX - (visW - vb.vbW) / 2;
-    const visY = vb.vbY - (visH - vb.vbH) / 2;
-    const x0 = Math.floor(visX / 5) * 5;
-    const x1 = visX + visW;
-    const y0 = Math.floor(visY / 5) * 5;
-    const y1 = visY + visH;
-    for (let x = x0; x <= x1; x += 5) {{
-      const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-      ln.setAttribute('x1', x); ln.setAttribute('x2', x);
-      ln.setAttribute('y1', visY); ln.setAttribute('y2', y1);
-      if (x % 10 === 0) ln.setAttribute('class', 'major');
-      grid.appendChild(ln);
+    // float over a gridless dark background. Skipped entirely when
+    // the View options panel toggles show_grid off.
+    if (state.view_options.show_grid) {{
+      const grid = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      grid.setAttribute('class', 'ml-grid');
+      const svgW = svg.clientWidth || cfg.canvas_w_px;
+      const svgH = svg.clientHeight || cfg.canvas_h_px;
+      const scale = Math.min(svgW / vb.vbW, svgH / vb.vbH);
+      const visW = svgW / scale;
+      const visH = svgH / scale;
+      const visX = vb.vbX - (visW - vb.vbW) / 2;
+      const visY = vb.vbY - (visH - vb.vbH) / 2;
+      const x0 = Math.floor(visX / 5) * 5;
+      const x1 = visX + visW;
+      const y0 = Math.floor(visY / 5) * 5;
+      const y1 = visY + visH;
+      for (let x = x0; x <= x1; x += 5) {{
+        const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        ln.setAttribute('x1', x); ln.setAttribute('x2', x);
+        ln.setAttribute('y1', visY); ln.setAttribute('y2', y1);
+        if (x % 10 === 0) ln.setAttribute('class', 'major');
+        grid.appendChild(ln);
+      }}
+      for (let y = y0; y <= y1; y += 5) {{
+        const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        ln.setAttribute('x1', visX); ln.setAttribute('x2', x1);
+        ln.setAttribute('y1', y); ln.setAttribute('y2', y);
+        if (y % 10 === 0) ln.setAttribute('class', 'major');
+        grid.appendChild(ln);
+      }}
+      svg.appendChild(grid);
     }}
-    for (let y = y0; y <= y1; y += 5) {{
-      const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-      ln.setAttribute('x1', visX); ln.setAttribute('x2', x1);
-      ln.setAttribute('y1', y); ln.setAttribute('y2', y);
-      if (y % 10 === 0) ln.setAttribute('class', 'major');
-      grid.appendChild(ln);
-    }}
-    svg.appendChild(grid);
 
     // Outline rect
     const outline = state.board_outline;
@@ -918,6 +942,24 @@ _CANVAS_JS_TEMPLATE = """
           y: Math.round(h.pos.y * 1000) / 1000,
         }},
       }}));
+    }},
+    setViewOptions: function(opts) {{
+      // Merge into state.view_options so callers only need to pass
+      // changed fields. Keys: show_grid (bool), snap_enabled (bool),
+      // snap_spacing_mm (number). Re-render so toggles take effect
+      // immediately; the snap_spacing_mm value is read live during
+      // each drag so no render-time work is needed for it alone.
+      if (!opts || typeof opts !== 'object') return;
+      if (typeof opts.show_grid === 'boolean') {{
+        state.view_options.show_grid = opts.show_grid;
+      }}
+      if (typeof opts.snap_enabled === 'boolean') {{
+        state.view_options.snap_enabled = opts.snap_enabled;
+      }}
+      if (typeof opts.snap_spacing_mm === 'number') {{
+        state.view_options.snap_spacing_mm = Math.max(0, opts.snap_spacing_mm);
+      }}
+      render();
     }},
   }};
 
