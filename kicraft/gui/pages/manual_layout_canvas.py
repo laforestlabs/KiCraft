@@ -86,6 +86,21 @@ def build_canvas_html(
     stroke: none;
   }}
   .ml-leaf-img {{ pointer-events: none; }}
+  /* Silk-bbox border draws the leaf's true silk_min/max rectangle so
+     what the user sees on the canvas matches what gets stamped to the
+     parent's F.Silkscreen layer. The PNG underneath shows letterboxed
+     silk + components; the border is the canonical alignment edge. */
+  .ml-leaf-silk-bbox {{
+    fill: none;
+    stroke: #fbbf24;
+    stroke-width: 0.2;
+    stroke-opacity: 0.85;
+    pointer-events: none;
+  }}
+  .ml-leaf-silk-bbox.snap-active {{
+    stroke: #22d3ee;
+    stroke-opacity: 1;
+  }}
   .ml-rot-handle {{
     fill: #facc15;
     fill-opacity: 0;
@@ -197,6 +212,12 @@ _CANVAS_JS_TEMPLATE = """
   // jumps the outline by several mm.
   const PADDING_Y_MM = 12.0;
   const SNAP_DEG = 90;
+  // Edge-snap during drag: any silk edge of another leaf (or the board
+  // outline) within this many mm of the dragged leaf's edge will pull
+  // the drag to exact alignment. 0.5 mm catches the sub-mm sloppiness
+  // that produced visible stamped-board offsets without hijacking
+  // intentional gaps.
+  const SNAP_THRESHOLD_MM = 0.5;
 
   function deepCopy(obj) {{ return JSON.parse(JSON.stringify(obj)); }}
 
@@ -206,6 +227,7 @@ _CANVAS_JS_TEMPLATE = """
       board_outline: deepCopy(cfg.initial.board_outline),
       mounting_holes: deepCopy(cfg.initial.mounting_holes || []),
       selected: null,
+      snap_active: null,
     }};
   }}
 
@@ -330,6 +352,80 @@ _CANVAS_JS_TEMPLATE = """
     p.origin.x = center.x - (c * sc.x + s * sc.y);
     p.origin.y = center.y - (-s * sc.x + c * sc.y);
     p.rotation = newRotDeg;
+  }}
+
+  // Axis-aligned silk bbox for a placement in PARENT (canvas-world)
+  // coords, accounting for the leaf's rotation. The four corners of
+  // silk_min/max are rotated via the KiCad CW transform that the
+  // backend uses, then min/max'd. This is the bbox the parent's
+  // F.Silkscreen stamp will land at -- snapping aligns to this so the
+  // user's canvas placement matches the stamped board to mm precision.
+  function silkBboxParent(p, leaf) {{
+    const r = (p.rotation || 0) * Math.PI / 180;
+    const c = Math.cos(r), s = Math.sin(r);
+    const sx0 = leaf.silk_min_x, sy0 = leaf.silk_min_y;
+    const sx1 = leaf.silk_max_x, sy1 = leaf.silk_max_y;
+    const tx = (x, y) => x * c + y * s + p.origin.x;
+    const ty = (x, y) => -x * s + y * c + p.origin.y;
+    const xs = [tx(sx0, sy0), tx(sx1, sy0), tx(sx1, sy1), tx(sx0, sy1)];
+    const ys = [ty(sx0, sy0), ty(sx1, sy0), ty(sx1, sy1), ty(sx0, sy1)];
+    return {{
+      min_x: Math.min.apply(null, xs),
+      max_x: Math.max.apply(null, xs),
+      min_y: Math.min.apply(null, ys),
+      max_y: Math.max.apply(null, ys),
+    }};
+  }}
+
+  // Walk every other leaf's silk bbox + the board outline edges and
+  // collect the smallest x/y offset that pulls the dragged leaf's
+  // edges into exact alignment, when that offset is within
+  // SNAP_THRESHOLD_MM. Returns null when nothing is close enough.
+  function computeDragSnap(ip, myBbox) {{
+    const candidates = [];
+    for (const other of state.placements) {{
+      if (other.instance_path === ip) continue;
+      const otherLeaf = leafByPath[other.instance_path];
+      if (!otherLeaf) continue;
+      const ob = silkBboxParent(other, otherLeaf);
+      candidates.push(ob);
+    }}
+    // Board outline counts too -- snap to the inside of the parent edges.
+    const o = state.board_outline;
+    candidates.push({{ min_x: o.min.x, max_x: o.max.x, min_y: o.min.y, max_y: o.max.y }});
+
+    let bestDx = 0, bestDxDist = Infinity;
+    let bestDy = 0, bestDyDist = Infinity;
+    for (const ob of candidates) {{
+      const xPairs = [
+        myBbox.max_x - ob.min_x,  // my right == other left
+        myBbox.min_x - ob.max_x,  // my left  == other right
+        myBbox.min_x - ob.min_x,  // left-aligned
+        myBbox.max_x - ob.max_x,  // right-aligned
+      ];
+      const yPairs = [
+        myBbox.max_y - ob.min_y,  // my bottom == other top
+        myBbox.min_y - ob.max_y,  // my top    == other bottom
+        myBbox.min_y - ob.min_y,  // top-aligned
+        myBbox.max_y - ob.max_y,  // bottom-aligned
+      ];
+      for (const d of xPairs) {{
+        const a = Math.abs(d);
+        if (a < SNAP_THRESHOLD_MM && a < bestDxDist) {{
+          bestDx = -d;
+          bestDxDist = a;
+        }}
+      }}
+      for (const d of yPairs) {{
+        const a = Math.abs(d);
+        if (a < SNAP_THRESHOLD_MM && a < bestDyDist) {{
+          bestDy = -d;
+          bestDyDist = a;
+        }}
+      }}
+    }}
+    if (bestDxDist === Infinity && bestDyDist === Infinity) return null;
+    return {{ dx: bestDx, dy: bestDy }};
   }}
 
   function render() {{
@@ -494,10 +590,26 @@ _CANVAS_JS_TEMPLATE = """
         g.appendChild(img);
       }}
 
-      // Hit / selection target = silk content bbox. The visible
-      // silk outline is baked into the rendered PNG (the leaf
-      // solver writes F.Silkscreen there); no SVG overlay is drawn
-      // on top to avoid showing a second, mis-sized outline.
+      // Silk-bbox border: the leaf's true silk extent. The PNG underneath
+      // letterboxes its silk line slightly inside the bbox when the PNG
+      // aspect doesn't match the silk aspect, so the user couldn't see
+      // sub-mm placement offsets that became visible when stamped to
+      // the parent's F.Silkscreen layer. This border is the canonical
+      // edge for alignment + snapping.
+      const silkBbox = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      const isSnapActive = state.snap_active === p.instance_path;
+      silkBbox.setAttribute(
+        'class', 'ml-leaf-silk-bbox' + (isSnapActive ? ' snap-active' : ''),
+      );
+      silkBbox.setAttribute('x', sx0);
+      silkBbox.setAttribute('y', sy0);
+      silkBbox.setAttribute('width', sw);
+      silkBbox.setAttribute('height', sh);
+      g.appendChild(silkBbox);
+
+      // Hit / selection target = same silk content bbox, transparent
+      // so it catches mouse events for drag / rotate / contextmenu
+      // without hiding the silk border underneath.
       const hit = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
       hit.setAttribute('class', 'ml-leaf-hit');
       hit.setAttribute('x', sx0);
@@ -595,15 +707,33 @@ _CANVAS_JS_TEMPLATE = """
     setSelected(ip);
     const p = state.placements.find(x => x.instance_path === ip);
     if (!p) return;
+    const leaf = leafByPath[ip];
     const start = svgToWorld(svg, evt);
     const orig = {{ x: p.origin.x, y: p.origin.y }};
     const move = (e) => {{
       const cur = svgToWorld(svg, e);
       p.origin.x = orig.x + (cur.x - start.x);
       p.origin.y = orig.y + (cur.y - start.y);
+
+      // Edge-snap: pull the dragged leaf's silk bbox into exact
+      // alignment with any other leaf's silk edge (or the board
+      // outline) that's within SNAP_THRESHOLD_MM. Shift modifier
+      // disables snap so the user can drop a leaf 0.2 mm off an
+      // edge when they really want to.
+      const myBbox = silkBboxParent(p, leaf);
+      const snap = e.shiftKey ? null : computeDragSnap(ip, myBbox);
+      if (snap) {{
+        p.origin.x += snap.dx;
+        p.origin.y += snap.dy;
+        state.snap_active = ip;
+      }} else {{
+        state.snap_active = null;
+      }}
       render();
     }};
     const up = () => {{
+      state.snap_active = null;
+      render();
       document.removeEventListener('mousemove', move);
       document.removeEventListener('mouseup', up);
     }};
