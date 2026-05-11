@@ -2277,6 +2277,48 @@ def _stamp_parent_board(
         for rect in (state.parent_local_keep_in_rects or [])
     ]
 
+    # Center the assembly on a standard A4 drawing sheet (297 x 210 mm)
+    # so the PCB opens centered in the title block rather than crammed
+    # against the top-left corner. The composer's native origin is the
+    # parent search-space's top-left, which lands at (0, 0) on the
+    # sheet and looks lopsided in the schematic / board editor.
+    _PAGE_W_MM = float(cfg.get("parent_page_width_mm", 297.0))
+    _PAGE_H_MM = float(cfg.get("parent_page_height_mm", 210.0))
+    if outline_data:
+        _board_w = outline_data["br_x"] - outline_data["tl_x"]
+        _board_h = outline_data["br_y"] - outline_data["tl_y"]
+        _dx = (_PAGE_W_MM - _board_w) / 2.0 - outline_data["tl_x"]
+        _dy = (_PAGE_H_MM - _board_h) / 2.0 - outline_data["tl_y"]
+        if abs(_dx) > 1e-6 or abs(_dy) > 1e-6:
+            for _c in components_json:
+                _c["x"] += _dx
+                _c["y"] += _dy
+            for _t in traces_json:
+                _t["start_x"] += _dx
+                _t["start_y"] += _dy
+                _t["end_x"] += _dx
+                _t["end_y"] += _dy
+            for _v in vias_json:
+                _v["x"] += _dx
+                _v["y"] += _dy
+            for _s in silkscreen_json:
+                if _s.get("kind") == "poly":
+                    for _pt in _s.get("points", []):
+                        _pt["x"] += _dx
+                        _pt["y"] += _dy
+                elif _s.get("kind") == "text":
+                    _s["pos"]["x"] += _dx
+                    _s["pos"]["y"] += _dy
+            for _k in keepout_json:
+                _k["tl_x"] += _dx
+                _k["tl_y"] += _dy
+                _k["br_x"] += _dx
+                _k["br_y"] += _dy
+            outline_data["tl_x"] += _dx
+            outline_data["tl_y"] += _dy
+            outline_data["br_x"] += _dx
+            outline_data["br_y"] += _dy
+
     payload = {
         "pcb_path": str(output_pcb),
         "output_path": str(output_pcb),

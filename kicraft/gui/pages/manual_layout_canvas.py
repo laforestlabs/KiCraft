@@ -92,12 +92,19 @@ def build_canvas_html(
      silk + components; the border is the canonical alignment edge. */
   .ml-leaf-silk-bbox {{
     fill: none;
+    /* Hidden by default; the leaf PNG's rendered silk poly is the
+       visible edge. Flip display to "block" (or comment out display)
+       to bring the sharp-corner debug overlay back for verifying
+       bbox = AABB(silk_poly) alignment. */
+    display: none;
     stroke: #fbbf24;
     stroke-width: 0.2;
     stroke-opacity: 0.85;
     pointer-events: none;
   }}
   .ml-leaf-silk-bbox.snap-active {{
+    /* Snap feedback still shows even when the static border is hidden. */
+    display: block;
     stroke: #22d3ee;
     stroke-opacity: 1;
   }}
