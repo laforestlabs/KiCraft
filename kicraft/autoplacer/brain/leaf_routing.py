@@ -14,7 +14,7 @@ from kicraft.autoplacer.brain.subcircuit_render_diagnostics import (
     generate_leaf_diagnostic_artifacts,
     generate_stage_diagnostic_artifacts,
 )
-from kicraft.autoplacer.brain.types import Component
+from kicraft.autoplacer.brain.types import Component, Point
 from kicraft.autoplacer.freerouting_runner import (
     import_routed_copper,
     route_with_freerouting,
@@ -49,6 +49,33 @@ def _silk_for_leaf(
     )
     bbox = _compute_component_bbox(components, traces=traces, vias=vias)
     return _build_leaf_silkscreen(components, bbox, extraction, cfg)
+
+
+def _outline_around_geometry(
+    components: dict[str, Component],
+    cfg: dict[str, Any],
+    *,
+    traces=None,
+    vias=None,
+) -> tuple[Point, Point] | None:
+    """Compute a tight Edge.Cuts outline hugging the same bbox as the silk.
+
+    The silk poly is drawn at ``bbox ± silkscreen_margin_mm`` (default 0.5 mm).
+    Edge.Cuts sits ``edge_margin = silk_margin + 0.3 mm`` outside that bbox so
+    the yellow board outline tracks the white silk with a uniform 0.3 mm gap.
+    Returns ``None`` for empty leaves so the caller can keep the original
+    outline.
+    """
+    if not components:
+        return None
+    from kicraft.autoplacer.brain.subcircuit_solver import _compute_component_bbox
+    bbox = _compute_component_bbox(components, traces=traces, vias=vias)
+    silk_margin = float(cfg.get("silkscreen_margin_mm", 0.5))
+    edge_margin = float(cfg.get("leaf_edge_margin_mm", silk_margin + 0.3))
+    return (
+        Point(bbox["min_x"] - edge_margin, bbox["min_y"] - edge_margin),
+        Point(bbox["max_x"] + edge_margin, bbox["max_y"] + edge_margin),
+    )
 
 
 def route_local_subcircuit(
@@ -465,6 +492,42 @@ def route_local_subcircuit(
     silk_stamp_start = time.monotonic()
     silk_adapter = KiCadAdapter(str(routed_board), config=cfg)
     routed_state_for_silk = silk_adapter.load()
+    # Shrink Edge.Cuts to hug the post-route geometry the silk hugs, and
+    # translate all geometry so the new outline starts at (0, 0). Without
+    # the translate, the parent composer (which rotates each leaf around
+    # local origin and assumes outline TL is at (0, 0)) silently misplaces
+    # the leaf by (tl.x, tl.y). Without the shrink, the yellow outline
+    # stays at whatever size-reduction accepted (or the raw extractor
+    # envelope), and the rounded silk sits inside a much larger sharp rect.
+    _new_outline = _outline_around_geometry(
+        routed_state_for_silk.components,
+        cfg,
+        traces=routed_state_for_silk.traces,
+        vias=routed_state_for_silk.vias,
+    )
+    if _new_outline is not None:
+        _new_tl, _new_br = _new_outline
+        if abs(_new_tl.x) > 1e-6 or abs(_new_tl.y) > 1e-6:
+            from kicraft.autoplacer.brain.leaf_geometry import (
+                copy_components_with_translation,
+                copy_traces_with_translation,
+                copy_vias_with_translation,
+            )
+            _delta = Point(-_new_tl.x, -_new_tl.y)
+            routed_state_for_silk.components = copy_components_with_translation(
+                routed_state_for_silk.components, _delta
+            )
+            routed_state_for_silk.traces = copy_traces_with_translation(
+                routed_state_for_silk.traces, _delta
+            )
+            routed_state_for_silk.vias = copy_vias_with_translation(
+                routed_state_for_silk.vias, _delta
+            )
+        routed_state_for_silk.board_outline = (
+            Point(0.0, 0.0),
+            Point(_new_br.x - _new_tl.x, _new_br.y - _new_tl.y),
+        )
+    # Silk is computed AFTER the translate so it lands in the (0, 0)-anchored frame.
     routed_state_for_silk.silkscreen = _silk_for_leaf(
         extraction,
         routed_state_for_silk.components,
@@ -897,7 +960,28 @@ def _stamp_trivial_leaf(
     route_input_board.components = copy.deepcopy(repaired_components)
     route_input_board.traces = []
     route_input_board.vias = []
-    route_input_board.silkscreen = _silk_for_leaf(extraction, repaired_components, cfg)
+    # Trivial leaves skip FreeRouting, so the pre-route stamp is also the
+    # final stamp. Apply the same shrink-and-translate as the main-path
+    # silk re-stamp so the rounded silk hugs Edge.Cuts and the parent
+    # composer can place the leaf consistently.
+    _new_outline = _outline_around_geometry(route_input_board.components, cfg)
+    if _new_outline is not None:
+        _new_tl, _new_br = _new_outline
+        if abs(_new_tl.x) > 1e-6 or abs(_new_tl.y) > 1e-6:
+            from kicraft.autoplacer.brain.leaf_geometry import (
+                copy_components_with_translation,
+            )
+            _delta = Point(-_new_tl.x, -_new_tl.y)
+            route_input_board.components = copy_components_with_translation(
+                route_input_board.components, _delta
+            )
+        route_input_board.board_outline = (
+            Point(0.0, 0.0),
+            Point(_new_br.x - _new_tl.x, _new_br.y - _new_tl.y),
+        )
+    route_input_board.silkscreen = _silk_for_leaf(
+        extraction, route_input_board.components, cfg
+    )
 
     stamp_start = time.monotonic()
     route_adapter = KiCadAdapter(str(source_pcb), config=cfg)

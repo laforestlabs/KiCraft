@@ -1002,9 +1002,32 @@ def _persist_solution(
     canonical_layout["scheduling_metadata"] = dict(solved.scheduling_metadata or {})
     canonical_layout["failure_summary"] = dict(solved.failure_summary or {})
     size_reduction = dict(solved.size_reduction or {})
-    reduced_outline = dict(
-        size_reduction.get("reduced_outline", _solved_local_outline(solved.extraction))
-    )
+    # The post-route silk re-stamp in leaf_routing._outline_around_geometry
+    # shrinks Edge.Cuts to hug the actual placed/routed geometry, so the
+    # size-reduction-time `reduced_outline` is stale once the routed board
+    # is saved. Re-read the on-disk outline so `local_board_outline` (read
+    # by the parent composer via subcircuit_instances._composer_outline)
+    # matches what's actually on the leaf board.
+    reduced_outline: dict[str, float] | None = None
+    routed_board_path = solved.best_round.routing.get("routed_board_path")
+    if routed_board_path and Path(routed_board_path).exists():
+        try:
+            _disk_state = _load_board_state(Path(routed_board_path), cfg or {})
+            _disk_tl, _disk_br = _disk_state.board_outline
+            reduced_outline = {
+                "top_left_x": _disk_tl.x,
+                "top_left_y": _disk_tl.y,
+                "bottom_right_x": _disk_br.x,
+                "bottom_right_y": _disk_br.y,
+                "width_mm": _disk_state.board_width,
+                "height_mm": _disk_state.board_height,
+            }
+        except Exception:
+            reduced_outline = None
+    if reduced_outline is None:
+        reduced_outline = dict(
+            size_reduction.get("reduced_outline", _solved_local_outline(solved.extraction))
+        )
     original_outline = dict(size_reduction.get("original_outline", reduced_outline))
     extraction = build_leaf_extraction(
         subcircuit=solved.node.definition,
