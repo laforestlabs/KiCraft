@@ -572,12 +572,14 @@ _CANVAS_JS_TEMPLATE = """
       g.setAttribute('transform',
         'translate(' + p.origin.x + ',' + p.origin.y + ') rotate(' + (-(p.rotation || 0)) + ')');
 
-      // Routed-leaf PNG fitted into the silk bbox aspect-preserved.
+      // Routed-leaf PNG stretched to fill the silk bbox exactly.
       // _make_tight_render alpha-keys the cyan-border + navy-padding
-      // halo before serving, so the PNG content is tight to the
-      // actual silkscreen and components -- xMidYMid meet then lands
-      // the silk line approximately on the bbox edge instead of
-      // floating inside a grey frame.
+      // halo before serving, so the PNG content is tight to the actual
+      // silkscreen and components. With preserveAspectRatio='none' the
+      // PNG's silk poly lands exactly on the silk-bbox edge -- 'meet'
+      // letterboxed the PNG inside the bbox when aspect ratios drifted
+      // by even a few percent, creating a visible gap between the
+      // rounded silk in the PNG and the bbox border drawn on top.
       if (leaf.render_url) {{
         const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
         img.setAttribute('class', 'ml-leaf-img');
@@ -586,7 +588,7 @@ _CANVAS_JS_TEMPLATE = """
         img.setAttribute('y', sy0);
         img.setAttribute('width', sw);
         img.setAttribute('height', sh);
-        img.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+        img.setAttribute('preserveAspectRatio', 'none');
         g.appendChild(img);
       }}
 
@@ -605,6 +607,13 @@ _CANVAS_JS_TEMPLATE = """
       silkBbox.setAttribute('y', sy0);
       silkBbox.setAttribute('width', sw);
       silkBbox.setAttribute('height', sh);
+      // Round the corners to match the actual silk poly's rounded shape
+      // (silkscreen_corner_radius_mm default 1.0). Without this, the
+      // canvas shows a sharp-corner bbox around a rounded silk poly,
+      // which the user reads as a mismatch even though the bbox =
+      // AABB(silk_poly).
+      silkBbox.setAttribute('rx', '1.0');
+      silkBbox.setAttribute('ry', '1.0');
       g.appendChild(silkBbox);
 
       // Hit / selection target = same silk content bbox, transparent
