@@ -572,22 +572,22 @@ _CANVAS_JS_TEMPLATE = """
       g.setAttribute('transform',
         'translate(' + p.origin.x + ',' + p.origin.y + ') rotate(' + (-(p.rotation || 0)) + ')');
 
-      // Routed-leaf PNG stretched to fill the silk bbox exactly.
-      // _make_tight_render alpha-keys the cyan-border + navy-padding
-      // halo before serving, so the PNG content is tight to the actual
-      // silkscreen and components. With preserveAspectRatio='none' the
-      // PNG's silk poly lands exactly on the silk-bbox edge -- 'meet'
-      // letterboxed the PNG inside the bbox when aspect ratios drifted
-      // by even a few percent, creating a visible gap between the
-      // rounded silk in the PNG and the bbox border drawn on top.
+      // Routed-leaf PNG drawn at full Edge.Cuts dimensions so the silk
+      // poly INSIDE the PNG -- which lives at silk_min/max relative to
+      // the leaf's local origin -- lands exactly on the silk-bbox SVG
+      // border drawn on top. _make_tight_render crops the PNG to the
+      // outermost saturated content (the yellow Edge.Cuts line), so the
+      // PNG extent ≈ Edge.Cuts extent; drawing it at silk-bbox extent
+      // scaled the silk poly INSIDE the PNG to a slightly different
+      // position than the bbox border, producing a visible 0.3mm gap.
       if (leaf.render_url) {{
         const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
         img.setAttribute('class', 'ml-leaf-img');
         img.setAttribute('href', leaf.render_url);
-        img.setAttribute('x', sx0);
-        img.setAttribute('y', sy0);
-        img.setAttribute('width', sw);
-        img.setAttribute('height', sh);
+        img.setAttribute('x', 0);
+        img.setAttribute('y', 0);
+        img.setAttribute('width', leaf.width_mm);
+        img.setAttribute('height', leaf.height_mm);
         img.setAttribute('preserveAspectRatio', 'none');
         g.appendChild(img);
       }}
@@ -607,13 +607,10 @@ _CANVAS_JS_TEMPLATE = """
       silkBbox.setAttribute('y', sy0);
       silkBbox.setAttribute('width', sw);
       silkBbox.setAttribute('height', sh);
-      // Round the corners to match the actual silk poly's rounded shape
-      // (silkscreen_corner_radius_mm default 1.0). Without this, the
-      // canvas shows a sharp-corner bbox around a rounded silk poly,
-      // which the user reads as a mismatch even though the bbox =
-      // AABB(silk_poly).
-      silkBbox.setAttribute('rx', '1.0');
-      silkBbox.setAttribute('ry', '1.0');
+      // Sharp corners are intentional: the rounded silk poly inside
+      // should fill the straight edges exactly, and the corner curves
+      // peeking out (~1mm radius) make it visually obvious when a
+      // placement nudges silk over the bbox boundary.
       g.appendChild(silkBbox);
 
       // Hit / selection target = same silk content bbox, transparent
