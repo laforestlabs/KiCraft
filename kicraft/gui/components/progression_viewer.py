@@ -794,6 +794,11 @@ def create_progression_viewer(experiments_dir: Path):
         play_btn.update()
         if timer_ref["timer"] is None:
             timer_ref["timer"] = ui.timer(1.0 / max(state["speed_fps"], 1), _tick)
+            # Cancel on client disconnect so the playback timer doesn't tick
+            # into a deleted parent_slot after a page reload.
+            ui.context.client.on_disconnect(
+                lambda: timer_ref["timer"] and timer_ref["timer"].cancel()
+            )
         else:
             timer_ref["timer"].interval = 1.0 / max(state["speed_fps"], 1)
             timer_ref["timer"].activate()

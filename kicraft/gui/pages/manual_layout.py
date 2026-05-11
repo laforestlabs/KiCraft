@@ -60,7 +60,12 @@ def manual_layout_page() -> None:
         rendered_at["ts"] = latest
         _manual_layout_body.refresh(render_count)
 
-    ui.timer(2.0, _watch)
+    watch_timer = ui.timer(2.0, _watch)
+    # Cancel on client disconnect so the timer doesn't tick into a deleted
+    # parent_slot after a page reload (NiceGUI's _should_stop check runs
+    # AFTER _get_context() inside the loop, so a fresh tick whose parent
+    # was GC'd between _can_start() and _get_context() always raises).
+    ui.context.client.on_disconnect(lambda: watch_timer.cancel())
 
 
 @ui.refreshable
@@ -186,7 +191,8 @@ def _manual_layout_body(render_count: dict) -> None:
                 if h > 0 and abs(h - float(height_input.value or 0)) > 0.01:
                     height_input.value = round(h, 2)
 
-            ui.timer(0.6, _pull_size_from_canvas)
+            _pull_size_timer = ui.timer(0.6, _pull_size_from_canvas)
+            ui.context.client.on_disconnect(lambda: _pull_size_timer.cancel())
             # Canvas controller injection. ALWAYS via add_body_html,
             # even on refresh: NiceGUI 3.x appends each call to the
             # page body, so each refresh's script runs as the new
