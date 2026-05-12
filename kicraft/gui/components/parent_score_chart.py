@@ -175,30 +175,19 @@ def parent_score_chart(
     selected_round: int | None,
     on_select: Callable[[int], None],
 ):
-    """Render the plot as a nicegui element and wire a click handler.
+    """Render the plot as a nicegui element.
 
     Returns the ui.plotly element so the caller can call .update() on it
-    when new rounds arrive.
+    when new rounds arrive. ``on_select`` is retained in the signature
+    for API stability but the click-to-filter handler is intentionally
+    not wired -- the rounds grid now shows every round regardless of
+    parent selection, so filtering on click would just hide data the
+    user wants to see. Hover tooltips (hovertemplate) continue to
+    surface the per-round details.
     """
+    del on_select  # documented above; intentionally unused
     fig = build_parent_round_figure(rounds, selected_round=selected_round)
     plot = ui.plotly(fig).classes("w-full")
-
-    def _handle_click(e) -> None:
-        # nicegui wraps plotly click events in e.args with points list
-        try:
-            points = e.args.get("points", []) if hasattr(e, "args") else []
-        except AttributeError:
-            points = []
-        if not points:
-            return
-        p = points[0]
-        try:
-            round_num = int(p.get("x"))
-        except (TypeError, ValueError):
-            return
-        on_select(round_num)
-
-    plot.on("plotly_click", _handle_click)
     return plot
 
 

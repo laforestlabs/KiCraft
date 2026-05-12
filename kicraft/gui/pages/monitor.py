@@ -390,7 +390,11 @@ def monitor_page():
             run_status,
             project_dir=state.project_root,
             project_name=state.project_name,
-            selected_round=selected_parent_round["value"],
+            # selected_round intentionally passed as None: the rounds
+            # grid now shows every round so the user doesn't lose data
+            # to a parent-round filter. selected_parent_round still
+            # drives the chart highlight only.
+            selected_round=None,
         )
         latest_pipeline_state["value"] = pipeline_state
 

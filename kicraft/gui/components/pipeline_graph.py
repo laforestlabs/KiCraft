@@ -235,6 +235,24 @@ def _load_round_statuses(experiments_dir: Path) -> dict[int, dict[str, Any]]:
     return result
 
 
+def _leaf_pinned_round(experiments_dir: Path, leaf_key: str) -> int | None:
+    """Return the pinned round number for this leaf, or None.
+
+    Wraps ``pins.is_pinned`` so callers don't need to import the pins
+    module directly. The pinned round drives the left-side leaf
+    preview: when a pin exists, the preview surfaces that round's
+    routed/pre-route thumbnail instead of the canonical render, so the
+    card always reflects the state the user committed to even if a
+    later leaves-only run overwrote ``routed_front_all.png``.
+    """
+    try:
+        from kicraft.autoplacer.brain import pins as pins_module
+
+        return pins_module.is_pinned(experiments_dir, leaf_key)
+    except Exception:
+        return None
+
+
 def _leaf_is_pinned(experiments_dir: Path, leaf_key: str) -> bool:
     """Return True if pins.json claims this leaf is pinned.
 
@@ -245,12 +263,7 @@ def _leaf_is_pinned(experiments_dir: Path, leaf_key: str) -> bool:
     render / status just because the parent round produced no per-leaf
     rounds (the parents-only-after-leaves-only path).
     """
-    try:
-        from kicraft.autoplacer.brain import pins as pins_module
-
-        return pins_module.is_pinned(experiments_dir, leaf_key) is not None
-    except Exception:
-        return False
+    return _leaf_pinned_round(experiments_dir, leaf_key) is not None
 
 
 def _determine_leaf_status(artifact_dir: Path, *, run_in_progress: bool = False) -> str:
@@ -631,11 +644,29 @@ def gather_pipeline_state(
             leaf_status = _determine_leaf_status(
                 artifact_dir, run_in_progress=run_in_progress
             )
-            best_render = (
-                _find_best_render(renders_dir, mtime_floor=leaf_floor)
+            # When a leaf is pinned, surface the pinned round's render
+            # in the left-side preview card so the thumbnail tracks the
+            # committed state. _find_round_renders returns
+            # (routed, pre_route); prefer routed and fall back to
+            # pre-route when routing failed for that round. Canonical
+            # _find_best_render is the unpinned fallback.
+            best_render: str | None = None
+            pinned_round = (
+                _leaf_pinned_round(experiments_dir, leaf_key)
                 if renders_dir.exists()
                 else None
             )
+            if pinned_round is not None:
+                _pinned_routed, _pinned_pre = _find_round_renders(
+                    renders_dir, pinned_round, mtime_floor=leaf_floor
+                )
+                best_render = _pinned_routed or _pinned_pre
+            if best_render is None:
+                best_render = (
+                    _find_best_render(renders_dir, mtime_floor=leaf_floor)
+                    if renders_dir.exists()
+                    else None
+                )
 
             score = None
             traces = 0
