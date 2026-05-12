@@ -90,6 +90,37 @@ def _round_snapshot_files(
     return out
 
 
+def _round_all_snapshot_files(
+    leaf_dir: Path, round_num: int
+) -> dict[Path, Path]:
+    """Return {snapshot_path: canonical_path} for ALL ``round_NNNN_*`` files
+    in the leaf dir + ``renders/`` subdir, mapped to their canonical names.
+
+    Includes the three core files plus every render PNG (and any other
+    round-prefixed artifact) so downstream consumers that key off
+    canonical filenames -- e.g. the monitor's leaf pin-card thumbnail
+    reading ``renders/routed_front_all.png`` -- always see the pinned
+    round's content. Without this, only the core ``leaf_routed.kicad_pcb``
+    / ``metadata.json`` / ``solved_layout.json`` get pinned and the
+    monitor surfaces a stale render from whichever round happened to
+    write ``routed_front_all.png`` last.
+    """
+    prefix = f"round_{int(round_num):04d}_"
+    out: dict[Path, Path] = {}
+    for d in (leaf_dir, leaf_dir / "renders"):
+        if not d.is_dir():
+            continue
+        for entry in d.iterdir():
+            if not entry.is_file():
+                continue
+            name = entry.name
+            if not name.startswith(prefix):
+                continue
+            canonical = d / name[len(prefix):]
+            out[entry] = canonical
+    return out
+
+
 def list_available_rounds(experiments_dir: Path, leaf_key: str) -> list[int]:
     """Return sorted round numbers that have a complete snapshot for this leaf.
 
@@ -140,8 +171,15 @@ def pin_leaf(
     # to invalidate against this change. shutil.copy2 preserved the round
     # snapshot's mtime, which is often EARLIER than existing render caches
     # and would silently leave stale PNGs in place.
-    for canonical, src in snapshot.items():
-        dst = leaf_dir / canonical
+    #
+    # Pin EVERYTHING with the round prefix, not just the core three files:
+    # the monitor's leaf pin-card thumbnail reads
+    # ``renders/routed_front_all.png``, so leaving render PNGs unpinned
+    # meant the monitor surfaced whichever round wrote that file last
+    # (typically the final round of the leaves-only run, not the pinned
+    # one) while the manual layout correctly showed the pinned content.
+    for src, dst in _round_all_snapshot_files(leaf_dir, round_num).items():
+        dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(src, dst)
 
     manifest = read_pins(experiments_dir)
@@ -251,22 +289,22 @@ def ensure_applied(experiments_dir: Path) -> dict[str, str]:
         if not snapshot:
             statuses[leaf_key] = "snapshot-missing"
             continue
-        # Skip the copy if every canonical file already matches its
-        # snapshot. Compare SIZE only (not mtime): pin_leaf and the copy
-        # below use shutil.copy which sets dst mtime to NOW so downstream
-        # caches invalidate, which means src.mtime != dst.mtime for any
-        # already-applied pin. Round snapshots are immutable so a size
-        # match implies a content match in practice.
+        # Skip the copy if every round_NNNN_* snapshot file already
+        # matches its canonical counterpart by SIZE. Round snapshots are
+        # immutable so size match implies content match in practice.
+        # (mtime comparison can't be used because pin_leaf uses
+        # shutil.copy which sets dst mtime to NOW.)
+        all_files = _round_all_snapshot_files(leaf_dir, round_num)
         all_current = True
-        for canonical, src in snapshot.items():
-            dst = leaf_dir / canonical
+        for src, dst in all_files.items():
             if not dst.exists() or src.stat().st_size != dst.stat().st_size:
                 all_current = False
                 break
         if all_current:
             statuses[leaf_key] = "already-current"
             continue
-        for canonical, src in snapshot.items():
-            shutil.copy(src, leaf_dir / canonical)
+        for src, dst in all_files.items():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(src, dst)
         statuses[leaf_key] = "applied"
     return statuses
