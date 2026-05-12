@@ -76,8 +76,8 @@
       4551
     ],
     "subcircuit_margin_mm": [
-      0.5,
-      3.0
+      6.97,
+      13.38
     ],
     "connector_edge_inset_mm": [
       0.47,
@@ -118,7 +118,7 @@
   "schematic_file": "LLUPS.kicad_sch",
   "parent": "/",
   "only": [],
-  "leaf_rounds": 3,
+  "leaf_rounds": 2,
   "render_png": true,
   "save_round_details": true,
   "placement_config": {
