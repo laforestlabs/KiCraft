@@ -917,7 +917,7 @@ def _leaf_card(
             on_select(n)
 
     with ui.card().classes(
-        f"p-2 w-[180px] cursor-pointer hover:border-blue-300 {border} bg-slate-800/80"
+        f"p-2 w-[260px] cursor-pointer hover:border-blue-300 {border} bg-slate-800/80"
     ).on("click", lambda _e, n=node: _handle_click(n)):
         with ui.row().classes("items-center gap-2 w-full"):
             ui.icon(_STATUS_ICONS.get(node.status, "circle")).classes(f"text-{color}-400")
@@ -929,24 +929,18 @@ def _leaf_card(
             badge_text = _STATUS_LABELS.get(node.status, node.status.upper())
             ui.badge(badge_text, color=color).classes("text-[10px]")
 
+        # Larger preview thumbnail so the rendered board is actually
+        # readable on the monitor screen. Numerical details (score,
+        # trace/via counts, rounds completed) intentionally live in the
+        # detail panel on the right -- the card is a glanceable status
+        # tile, not a stat dashboard.
         if node.best_render:
             ui.image(node.best_render).classes(
-                "w-full h-[80px] object-contain rounded mt-1 bg-slate-950"
+                "w-full h-[160px] object-contain rounded mt-1 bg-slate-950"
             )
         else:
-            with ui.row().classes("w-full h-[80px] items-center justify-center bg-slate-950 rounded mt-1"):
+            with ui.row().classes("w-full h-[160px] items-center justify-center bg-slate-950 rounded mt-1"):
                 ui.icon("image_not_supported", size="sm").classes("text-gray-600")
-
-        with ui.row().classes("w-full items-center gap-1 mt-1"):
-            if node.score is not None:
-                ui.label(f"{node.score:.1f}").classes("text-[11px] text-green-400 font-mono")
-            if node.traces:
-                ui.label(f"T{node.traces}").classes("text-[11px] text-cyan-300 font-mono")
-            if node.vias:
-                ui.label(f"V{node.vias}").classes("text-[11px] text-amber-300 font-mono")
-            ui.space()
-            if node.total_rounds_run:
-                ui.label(f"R{node.total_rounds_run}").classes("text-[11px] text-gray-400")
 
 
 def _root_card(
