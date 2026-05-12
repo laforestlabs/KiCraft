@@ -182,17 +182,31 @@ def discover_leaves(experiments_dir: Path) -> list[LeafInfo]:
             continue
         if w <= 0 or h <= 0:
             continue
-        poly_bbox = _silk_bbox_from_solved_layout(leaf_dir)
-        if poly_bbox is None:
-            silk_min_x, silk_min_y, silk_max_x, silk_max_y = 0.0, 0.0, w, h
-        else:
-            silk_min_x, silk_min_y, silk_max_x, silk_max_y = poly_bbox
-
         render_url, extent = _canvas_render_for(experiments_dir, leaf_dir)
         if extent is None:
             image_x, image_y, image_w, image_h = 0.0, 0.0, w, h
         else:
             image_x, image_y, image_w, image_h = extent
+
+        # Drag / snap / overflow / rotation-pivot bbox = the leaf's full
+        # visible content extent (the kicad-cli viewBox the PNG was
+        # rasterized from), NOT the leaf solver's rounded silk poly.
+        # The poly is one element among many; pads and silk labels can
+        # extend past it (BOOST 5V's D3 ref label hangs ~1.4 mm below
+        # the silk-poly bottom edge, for example), and snapping to the
+        # poly leaves visible content overlapping when adjacent leaves
+        # tile flush. Falls back to the solver's poly bbox only when the
+        # SVG render failed -- preserves previous behaviour for leaves
+        # with no canvas render on disk yet.
+        if extent is not None:
+            silk_min_x, silk_min_y = image_x, image_y
+            silk_max_x, silk_max_y = image_x + image_w, image_y + image_h
+        else:
+            poly_bbox = _silk_bbox_from_solved_layout(leaf_dir)
+            if poly_bbox is None:
+                silk_min_x, silk_min_y, silk_max_x, silk_max_y = 0.0, 0.0, w, h
+            else:
+                silk_min_x, silk_min_y, silk_max_x, silk_max_y = poly_bbox
 
         leaves.append(
             LeafInfo(
