@@ -90,15 +90,55 @@ def _sidecar_path(out_png: Path) -> Path:
     return out_png.with_suffix(out_png.suffix + ".extent.json")
 
 
+def _experiments_dir_for(leaf_pcb: Path) -> Path | None:
+    """``.experiments`` root inferred from a leaf PCB path.
+
+    Leaf PCBs live at ``<experiments>/subcircuits/<leaf_key>/leaf_routed.kicad_pcb``;
+    walk up two parents. Returns None when the path doesn't fit that layout
+    so callers can fall back to the leaf-pcb-only mtime check.
+    """
+    try:
+        sub_dir = leaf_pcb.parent.parent
+        if sub_dir.name != "subcircuits":
+            return None
+        return sub_dir.parent
+    except (AttributeError, OSError):
+        return None
+
+
+def _invalidating_mtime(leaf_pcb: Path) -> float:
+    """Latest mtime among all signals that should bust the canvas cache.
+
+    pins.json is checked alongside the leaf PCB because ``pin_leaf`` /
+    ``ensure_applied`` can swap the canonical file's content without
+    advancing its mtime (older versions used ``shutil.copy2`` which
+    preserved the round snapshot's mtime). A pin or unpin always
+    rewrites pins.json with a fresh mtime, so taking the max() catches
+    those silent content swaps even on artifacts that pre-date the
+    copy2 -> copy fix.
+    """
+    mt = leaf_pcb.stat().st_mtime
+    exp_dir = _experiments_dir_for(leaf_pcb)
+    if exp_dir is not None:
+        try:
+            pins_mt = (exp_dir / "pins.json").stat().st_mtime
+            if pins_mt > mt:
+                mt = pins_mt
+        except OSError:
+            pass
+    return mt
+
+
 def _read_sidecar(
     out_png: Path, leaf_pcb: Path
 ) -> tuple[float, float, float, float] | None:
-    """Cache hit only when sidecar AND PNG are both newer than the source,
-    and the sidecar declares the current ``RENDERER_VERSION``.
+    """Cache hit only when sidecar AND PNG are both newer than every
+    invalidation signal (leaf PCB mtime, pins.json mtime), and the sidecar
+    declares the current ``RENDERER_VERSION``.
     """
     sidecar = _sidecar_path(out_png)
     try:
-        src_mtime = leaf_pcb.stat().st_mtime
+        src_mtime = _invalidating_mtime(leaf_pcb)
         if out_png.stat().st_mtime < src_mtime:
             return None
         if sidecar.stat().st_mtime < src_mtime:

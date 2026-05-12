@@ -135,9 +135,14 @@ def pin_leaf(
 
     # Apply the snapshot now -- copy each round_NNNN_* file over the
     # canonical name. Composer will see the pinned state on its next load.
+    # shutil.copy (not copy2) so the destination mtime is set to NOW: any
+    # downstream mtime-based cache (canvas PNG, routed_front_all.png) needs
+    # to invalidate against this change. shutil.copy2 preserved the round
+    # snapshot's mtime, which is often EARLIER than existing render caches
+    # and would silently leave stale PNGs in place.
     for canonical, src in snapshot.items():
         dst = leaf_dir / canonical
-        shutil.copy2(src, dst)
+        shutil.copy(src, dst)
 
     manifest = read_pins(experiments_dir)
     manifest["pinned_leaves"][leaf_key] = {
@@ -247,25 +252,21 @@ def ensure_applied(experiments_dir: Path) -> dict[str, str]:
             statuses[leaf_key] = "snapshot-missing"
             continue
         # Skip the copy if every canonical file already matches its
-        # snapshot byte-for-byte (cheap mtime + size check first).
+        # snapshot. Compare SIZE only (not mtime): pin_leaf and the copy
+        # below use shutil.copy which sets dst mtime to NOW so downstream
+        # caches invalidate, which means src.mtime != dst.mtime for any
+        # already-applied pin. Round snapshots are immutable so a size
+        # match implies a content match in practice.
         all_current = True
         for canonical, src in snapshot.items():
             dst = leaf_dir / canonical
-            if not dst.exists():
-                all_current = False
-                break
-            src_stat = src.stat()
-            dst_stat = dst.stat()
-            if (src_stat.st_size, src_stat.st_mtime_ns) != (
-                dst_stat.st_size,
-                dst_stat.st_mtime_ns,
-            ):
+            if not dst.exists() or src.stat().st_size != dst.stat().st_size:
                 all_current = False
                 break
         if all_current:
             statuses[leaf_key] = "already-current"
             continue
         for canonical, src in snapshot.items():
-            shutil.copy2(src, leaf_dir / canonical)
+            shutil.copy(src, leaf_dir / canonical)
         statuses[leaf_key] = "applied"
     return statuses
