@@ -33,12 +33,19 @@ def _build_canvas_config(
             "color": lf.color,
             "render_url": lf.render_url,
             # Tight content bbox (pads + traces + vias). Used as the
-            # leaf image / hit / overflow rectangle. The visible silk
-            # outline is baked into the rendered PNG.
+            # hit / overflow / snap rectangle.
             "silk_min_x": lf.silk_min_x,
             "silk_min_y": lf.silk_min_y,
             "silk_max_x": lf.silk_max_x,
             "silk_max_y": lf.silk_max_y,
+            # Leaf-local mm extent of render_url's PNG (from the SVG
+            # viewBox that produced it). The canvas draws the image at
+            # this exact rect so pixel aspect lands 1:1 with the
+            # post-route board, no preserveAspectRatio fudge needed.
+            "image_x_mm": lf.image_x_mm,
+            "image_y_mm": lf.image_y_mm,
+            "image_width_mm": lf.image_width_mm,
+            "image_height_mm": lf.image_height_mm,
         }
         for lf in leaves
     ]
@@ -134,7 +141,12 @@ def build_canvas_html(
     pointer-events: auto;
   }}
   .ml-outline {{
-    fill: none;
+    /* Pcbnew-style black fill inside the parent's Edge.Cuts so the PCB
+       area is visibly distinct from the navy canvas. Leaves render on
+       top with transparent backgrounds, so their PCB content composites
+       over this black fill (and over any overlapping leaf content) the
+       same way it would in pcbnew. */
+    fill: #000000;
     stroke: #67e8f9;
     stroke-width: 0.6;
   }}
@@ -625,22 +637,21 @@ _CANVAS_JS_TEMPLATE = """
       g.setAttribute('transform',
         'translate(' + p.origin.x + ',' + p.origin.y + ') rotate(' + (-(p.rotation || 0)) + ')');
 
-      // Routed-leaf PNG drawn at full Edge.Cuts dimensions so the silk
-      // poly INSIDE the PNG -- which lives at silk_min/max relative to
-      // the leaf's local origin -- lands exactly on the silk-bbox SVG
-      // border drawn on top. _make_tight_render crops the PNG to the
-      // outermost saturated content (the yellow Edge.Cuts line), so the
-      // PNG extent ≈ Edge.Cuts extent; drawing it at silk-bbox extent
-      // scaled the silk poly INSIDE the PNG to a slightly different
-      // position than the bbox border, producing a visible 0.3mm gap.
+      // PNG is rasterized from kicad-cli's SVG export with no trim or
+      // chrome, so its pixel aspect already matches its mm aspect
+      // exactly. Drawing it at the recorded SVG-viewBox rect places
+      // every pixel 1:1 with the post-route board file in leaf-local
+      // coords -- the silk poly INSIDE the PNG lands on the silk_min/
+      // max bbox by construction, and stacked leaves composite cleanly
+      // through the PNG's transparent background.
       if (leaf.render_url) {{
         const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
         img.setAttribute('class', 'ml-leaf-img');
         img.setAttribute('href', leaf.render_url);
-        img.setAttribute('x', 0);
-        img.setAttribute('y', 0);
-        img.setAttribute('width', leaf.width_mm);
-        img.setAttribute('height', leaf.height_mm);
+        img.setAttribute('x', leaf.image_x_mm);
+        img.setAttribute('y', leaf.image_y_mm);
+        img.setAttribute('width', leaf.image_width_mm);
+        img.setAttribute('height', leaf.image_height_mm);
         img.setAttribute('preserveAspectRatio', 'none');
         g.appendChild(img);
       }}

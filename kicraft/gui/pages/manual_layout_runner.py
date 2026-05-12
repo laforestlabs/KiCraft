@@ -25,6 +25,7 @@ from kicraft.autoplacer.brain.manual_layout import (
     save_manual_layout,
 )
 from kicraft.autoplacer.brain.types import Point
+from kicraft.gui.pages.leaf_canvas_render import render_leaf_canvas
 
 
 DEFAULT_OUTLINE_W_MM = 80.0
@@ -72,6 +73,18 @@ class LeafInfo:
     silk_min_y: float = 0.0
     silk_max_x: float = 0.0
     silk_max_y: float = 0.0
+    # Leaf-local mm extent of ``render_url``'s PNG. ``image_width_mm`` and
+    # ``image_height_mm`` are the viewBox of the post-route kicad-cli SVG
+    # the canvas image was rasterized from, so the canvas can draw the
+    # PNG at the exact (x, y, w, h) it represents instead of stretching
+    # it to width_mm/height_mm (Edge.Cuts) and producing aspect drift.
+    # Falls back to (0, 0, width_mm, height_mm) when the canvas render
+    # fails -- equivalent to the old behaviour but with no distortion
+    # claim attached.
+    image_x_mm: float = 0.0
+    image_y_mm: float = 0.0
+    image_width_mm: float = 0.0
+    image_height_mm: float = 0.0
 
 
 def _silk_bbox_from_solved_layout(
@@ -110,136 +123,32 @@ def _silk_bbox_from_solved_layout(
     return None
 
 
-def _render_url_for(experiments_dir: Path, leaf_dir: Path) -> str | None:
-    """Map a leaf's routed render to its /experiments URL, after stripping
-    the post-process cyan border, navy padding, and grey anti-alias halo.
+def _canvas_render_for(
+    experiments_dir: Path, leaf_dir: Path
+) -> tuple[str | None, tuple[float, float, float, float] | None]:
+    """Return ``(render_url, (x_mm, y_mm, w_mm, h_mm))`` for the manual
+    layout canvas.
 
-    The cleaned PNG is cached at ``*_canvas.png`` next to the source so
-    successive page loads skip the magick + numpy work. Falls back to
-    pre_route_front_all.png if routing hasn't completed yet for this
-    leaf. Returns None when neither file exists or the post-process
-    fails.
+    Renders ``leaf_routed.kicad_pcb`` to a transparent-background PNG with
+    its leaf-local mm extent recorded in a sidecar JSON, so the canvas
+    can place the image at the exact mm coordinates it represents (no
+    aspect drift, no stale cache once the leaf is re-routed).
     """
-    candidates = (
-        leaf_dir / "renders" / "routed_front_all.png",
-        leaf_dir / "renders" / "pre_route_front_all.png",
-    )
-    for src in candidates:
-        if not src.is_file():
-            continue
-        tight = _make_tight_render(src) or src
-        try:
-            rel = tight.relative_to(experiments_dir)
-        except ValueError:
-            return None
-        # Cache-bust on mtime so the canvas picks up new renders
-        # without forcing a hard browser reload.
-        return f"/experiments/{rel.as_posix()}?v={int(tight.stat().st_mtime)}"
-    return None
-
-
-def _make_tight_render(src: Path) -> Path | None:
-    """Strip cyan border, navy padding, AND grey anti-alias halo from a
-    leaf render so the result is tight to the actual silkscreen + copper.
-
-    Two-pass ImageMagick ``-trim`` peels the uniform-color outer rings
-    (cyan border, then navy padding). What's left is the rendered PCB
-    content plus a perimeter of grey anti-aliased pixels (the cyan-to-
-    navy gradient at the original border, which neither -trim nor a
-    fuzzed -transparent on navy can catch without also chewing through
-    dim trace colors). NumPy then alpha-keys those low-saturation
-    pixels and we re-crop to the surviving content. Cached at
-    ``*_canvas.png``; regenerated only when the source PNG is newer.
-
-    Returns the cached path on success, None if magick / NumPy / PIL
-    aren't available or the pipeline produced no content.
-    """
-    import shutil
-    import subprocess
-    import tempfile
-
-    out = src.with_name(src.stem + "_canvas.png")
+    pcb = leaf_dir / "leaf_routed.kicad_pcb"
+    if not pcb.is_file():
+        return (None, None)
+    out_png = leaf_dir / "renders" / "leaf_canvas.png"
+    extent = render_leaf_canvas(pcb, out_png)
+    if extent is None or not out_png.is_file():
+        return (None, None)
     try:
-        if out.is_file() and out.stat().st_mtime >= src.stat().st_mtime:
-            return out
-    except OSError:
-        pass
-
-    if shutil.which("magick") is None:
-        return None
-
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
-        tmp_path = Path(tmp_file.name)
-
-    try:
-        subprocess.run(
-            [
-                "magick",
-                str(src),
-                "-fuzz",
-                "8%",
-                "-trim",
-                "+repage",
-                "-fuzz",
-                "8%",
-                "-trim",
-                "+repage",
-                str(tmp_path),
-            ],
-            check=True,
-            capture_output=True,
-            timeout=15,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
-        return None
-
-    try:
-        import numpy as np
-        from PIL import Image
-    except ImportError:
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
-        return None
-
-    try:
-        img = Image.open(tmp_path).convert("RGBA")
-        arr = np.array(img)
-        r = arr[..., 0].astype(np.int32)
-        g = arr[..., 1].astype(np.int32)
-        b = arr[..., 2].astype(np.int32)
-        # Saturation = max - min channel; navy fill + cyan/navy
-        # anti-alias halo are nearly greyscale (saturation < 30) and
-        # navy itself is also very dark (max channel < 60). Real PCB
-        # content -- yellow silk, red F.Cu, blue B.Cu -- is highly
-        # saturated. Anything that fails both content tests gets
-        # alpha=0 so the surrounding crop tightens to actual content.
-        sat = np.maximum(np.maximum(r, g), b) - np.minimum(np.minimum(r, g), b)
-        max_c = np.maximum(np.maximum(r, g), b)
-        is_bg = (sat < 30) | (max_c < 60)
-        arr[..., 3] = np.where(is_bg, 0, arr[..., 3])
-
-        ys, xs = np.where(arr[..., 3] > 0)
-        if ys.size == 0:
-            return None
-        y0, y1 = int(ys.min()), int(ys.max()) + 1
-        x0, x1 = int(xs.min()), int(xs.max()) + 1
-        cropped = arr[y0:y1, x0:x1]
-        Image.fromarray(cropped, mode="RGBA").save(out)
-    except (OSError, ValueError):
-        return None
-    finally:
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
-
-    return out if out.is_file() else None
+        rel = out_png.relative_to(experiments_dir)
+    except ValueError:
+        return (None, extent)
+    # Cache-bust on mtime so the browser picks up a freshly-rendered PNG
+    # without a hard reload.
+    url = f"/experiments/{rel.as_posix()}?v={int(out_png.stat().st_mtime)}"
+    return (url, extent)
 
 
 def discover_leaves(experiments_dir: Path) -> list[LeafInfo]:
@@ -279,6 +188,12 @@ def discover_leaves(experiments_dir: Path) -> list[LeafInfo]:
         else:
             silk_min_x, silk_min_y, silk_max_x, silk_max_y = poly_bbox
 
+        render_url, extent = _canvas_render_for(experiments_dir, leaf_dir)
+        if extent is None:
+            image_x, image_y, image_w, image_h = 0.0, 0.0, w, h
+        else:
+            image_x, image_y, image_w, image_h = extent
+
         leaves.append(
             LeafInfo(
                 instance_path=str(meta.get("instance_path", "")),
@@ -286,11 +201,15 @@ def discover_leaves(experiments_dir: Path) -> list[LeafInfo]:
                 width_mm=w,
                 height_mm=h,
                 artifact_dir=leaf_dir,
-                render_url=_render_url_for(experiments_dir, leaf_dir),
+                render_url=render_url,
                 silk_min_x=silk_min_x,
                 silk_min_y=silk_min_y,
                 silk_max_x=silk_max_x,
                 silk_max_y=silk_max_y,
+                image_x_mm=image_x,
+                image_y_mm=image_y,
+                image_width_mm=image_w,
+                image_height_mm=image_h,
             )
         )
 
