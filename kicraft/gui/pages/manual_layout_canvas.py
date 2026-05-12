@@ -101,6 +101,13 @@ def build_canvas_html(
      off. This is visual only; drag / snap / overflow run against the
      full content extent (image_*_mm). */
   .ml-leaf-silk-bbox {{
+    /* Hidden by default. The yellow rounded silk poly baked into the
+       PNG is already the visible leaf boundary; an additional amber
+       overlay just duplicated it (with different corners) and the user
+       reported the resulting double-line as visual noise. Flip display
+       to "block" for debugging if you want to verify that the silk-poly
+       AABB matches the drawn poly. */
+    display: none;
     fill: none;
     stroke: #fbbf24;
     stroke-width: 0.12;
