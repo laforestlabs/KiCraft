@@ -32,8 +32,9 @@ def _build_canvas_config(
             "height_mm": lf.height_mm,
             "color": lf.color,
             "render_url": lf.render_url,
-            # Tight content bbox (pads + traces + vias). Used as the
-            # hit / overflow / snap rectangle.
+            # Leaf solver's rounded silk-poly bbox. Drawn as the visible
+            # sharp-cornered amber rectangle per leaf (visual only --
+            # drag / snap / overflow use image_*_mm).
             "silk_min_x": lf.silk_min_x,
             "silk_min_y": lf.silk_min_y,
             "silk_max_x": lf.silk_max_x,
@@ -93,20 +94,17 @@ def build_canvas_html(
     stroke: none;
   }}
   .ml-leaf-img {{ pointer-events: none; }}
-  /* Silk-bbox border draws the leaf's true silk_min/max rectangle so
-     what the user sees on the canvas matches what gets stamped to the
-     parent's F.Silkscreen layer. The PNG underneath shows letterboxed
-     silk + components; the border is the canonical alignment edge. */
+  /* Sharp-cornered amber outline tracing the leaf solver's silk-poly
+     bbox -- what gets stamped on the parent's F.Silkscreen layer. The
+     rounded silk poly inside the PNG should sit exactly inside these
+     straight edges; if not, the placement (or the solver's poly) is
+     off. This is visual only; drag / snap / overflow run against the
+     full content extent (image_*_mm). */
   .ml-leaf-silk-bbox {{
     fill: none;
-    /* Hidden by default; the leaf PNG's rendered silk poly is the
-       visible edge. Flip display to "block" (or comment out display)
-       to bring the sharp-corner debug overlay back for verifying
-       bbox = AABB(silk_poly) alignment. */
-    display: none;
     stroke: #fbbf24;
-    stroke-width: 0.2;
-    stroke-opacity: 0.85;
+    stroke-width: 0.12;
+    stroke-opacity: 0.55;
     pointer-events: none;
   }}
   .ml-leaf-silk-bbox.snap-active {{
@@ -363,21 +361,22 @@ _CANVAS_JS_TEMPLATE = """
   // showed it at (36.4, 35.0) (CCW), explaining the "leaves wandered
   // way outside the outline in KiCad" report.
   //
-  // Center-rotation pivots around the SILK BBOX center (which is what
-  // the user sees), not the Edge.Cuts (0, 0)..(w, h) bbox. The two
-  // can differ by several mm when the silk hugs the components more
-  // tightly than the board outline.
-  function silkCenterLocal(leaf) {{
+  // Center-rotation pivots around the leaf's full visible-content
+  // center (the kicad-cli viewBox center, in leaf-local coords).
+  // Aligned with image_*_mm so the rotation handle and the visual
+  // center the user sees stay coherent regardless of where the leaf
+  // solver decided to draw the rounded silk poly.
+  function leafCenterLocal(leaf) {{
     return {{
-      x: (leaf.silk_min_x + leaf.silk_max_x) * 0.5,
-      y: (leaf.silk_min_y + leaf.silk_max_y) * 0.5,
+      x: leaf.image_x_mm + leaf.image_width_mm * 0.5,
+      y: leaf.image_y_mm + leaf.image_height_mm * 0.5,
     }};
   }}
 
   function leafCenter(p, leaf) {{
     const r = (p.rotation || 0) * Math.PI / 180;
     const c = Math.cos(r), s = Math.sin(r);
-    const sc = silkCenterLocal(leaf);
+    const sc = leafCenterLocal(leaf);
     return {{
       x: p.origin.x + c * sc.x + s * sc.y,
       y: p.origin.y - s * sc.x + c * sc.y,
@@ -385,33 +384,35 @@ _CANVAS_JS_TEMPLATE = """
   }}
 
   // Inverse for the same CW rotation: solve
-  //   center = origin + R_CW(theta) * silk_center
+  //   center = origin + R_CW(theta) * leaf_center
   // for origin so the visual center stays put as the user rotates.
   function setRotationKeepCenter(p, leaf, newRotDeg) {{
     const center = leafCenter(p, leaf);
     const r = newRotDeg * Math.PI / 180;
     const c = Math.cos(r), s = Math.sin(r);
-    const sc = silkCenterLocal(leaf);
+    const sc = leafCenterLocal(leaf);
     p.origin.x = center.x - (c * sc.x + s * sc.y);
     p.origin.y = center.y - (-s * sc.x + c * sc.y);
     p.rotation = newRotDeg;
   }}
 
-  // Axis-aligned silk bbox for a placement in PARENT (canvas-world)
-  // coords, accounting for the leaf's rotation. The four corners of
-  // silk_min/max are rotated via the KiCad CW transform that the
-  // backend uses, then min/max'd. This is the bbox the parent's
-  // F.Silkscreen stamp will land at -- snapping aligns to this so the
-  // user's canvas placement matches the stamped board to mm precision.
-  function silkBboxParent(p, leaf) {{
+  // Axis-aligned bbox of the leaf's full visible content, in PARENT
+  // (canvas-world) coords, accounting for rotation. Used by snap +
+  // overflow logic: snapping aligns the visible content edges of two
+  // leaves (not the silk-poly edges), so adjacent leaves tile flush
+  // even when pads or labels overflow the silk poly. The visible amber
+  // outline drawn per leaf is the silk-poly bbox -- a separate visual
+  // hint matching what gets stamped on F.Silkscreen.
+  function leafBboxParent(p, leaf) {{
     const r = (p.rotation || 0) * Math.PI / 180;
     const c = Math.cos(r), s = Math.sin(r);
-    const sx0 = leaf.silk_min_x, sy0 = leaf.silk_min_y;
-    const sx1 = leaf.silk_max_x, sy1 = leaf.silk_max_y;
+    const x0 = leaf.image_x_mm, y0 = leaf.image_y_mm;
+    const x1 = leaf.image_x_mm + leaf.image_width_mm;
+    const y1 = leaf.image_y_mm + leaf.image_height_mm;
     const tx = (x, y) => x * c + y * s + p.origin.x;
     const ty = (x, y) => -x * s + y * c + p.origin.y;
-    const xs = [tx(sx0, sy0), tx(sx1, sy0), tx(sx1, sy1), tx(sx0, sy1)];
-    const ys = [ty(sx0, sy0), ty(sx1, sy0), ty(sx1, sy1), ty(sx0, sy1)];
+    const xs = [tx(x0, y0), tx(x1, y0), tx(x1, y1), tx(x0, y1)];
+    const ys = [ty(x0, y0), ty(x1, y0), ty(x1, y1), ty(x0, y1)];
     return {{
       min_x: Math.min.apply(null, xs),
       max_x: Math.max.apply(null, xs),
@@ -432,7 +433,7 @@ _CANVAS_JS_TEMPLATE = """
       if (other.instance_path === ip) continue;
       const otherLeaf = leafByPath[other.instance_path];
       if (!otherLeaf) continue;
-      const ob = silkBboxParent(other, otherLeaf);
+      const ob = leafBboxParent(other, otherLeaf);
       candidates.push({{ b: ob, edge_gap: gap, path: other.instance_path }});
     }}
     // Board outline counts too -- snap to the INSIDE of the parent
@@ -595,17 +596,24 @@ _CANVAS_JS_TEMPLATE = """
     for (const p of state.placements) {{
       const leaf = leafByPath[p.instance_path];
       if (!leaf) continue;
-      // Visible leaf rect uses the SILK bbox so the canvas preview
-      // matches what the stamped board renders (rounded corners,
-      // tighter hug to the components). Edge.Cuts (width_mm/height_mm)
-      // is still useful for the leaf-local origin -- placement origin
-      // continues to map to leaf-local (0, 0) per composer convention.
+      // Two leaf-local rects per placement:
+      //   silk_min/max  -- the leaf solver's rounded silk poly bbox.
+      //                    Drawn as a faint sharp-cornered amber
+      //                    rectangle so the user can see the poly
+      //                    (what gets stamped on F.Silkscreen) with a
+      //                    crisp edge. Visual only.
+      //   image_*_mm    -- the leaf's full visible content extent
+      //                    (kicad-cli SVG viewBox). Used for hit,
+      //                    drag/snap, rotation pivot, and overflow.
       const sx0 = leaf.silk_min_x, sy0 = leaf.silk_min_y;
       const sx1 = leaf.silk_max_x, sy1 = leaf.silk_max_y;
       const sw = Math.max(0, sx1 - sx0), sh = Math.max(0, sy1 - sy0);
-      // Rotated-bbox overflow check uses the silk corners (the
-      // visible leaf shape), so the red overflow flag fires exactly
-      // when what the user sees crosses the outline.
+      const ix0 = leaf.image_x_mm, iy0 = leaf.image_y_mm;
+      const ix1 = leaf.image_x_mm + leaf.image_width_mm;
+      const iy1 = leaf.image_y_mm + leaf.image_height_mm;
+      // Overflow check uses the image (full content) corners, so the
+      // red overflow flag fires when any actual pad / silk / trace
+      // crosses the outline -- not just when the silk poly does.
       const r = (p.rotation || 0) * Math.PI / 180;
       const rc = Math.cos(r), rs = Math.sin(r);
       function corner(lx, ly) {{
@@ -615,10 +623,10 @@ _CANVAS_JS_TEMPLATE = """
         }};
       }}
       const corners = [
-        corner(sx0, sy0),
-        corner(sx1, sy0),
-        corner(sx1, sy1),
-        corner(sx0, sy1),
+        corner(ix0, iy0),
+        corner(ix1, iy0),
+        corner(ix1, iy1),
+        corner(ix0, iy1),
       ];
       const overflow = corners.some(c =>
         c.x < out.min.x - 0.01 || c.x > out.max.x + 0.01 ||
@@ -656,12 +664,13 @@ _CANVAS_JS_TEMPLATE = """
         g.appendChild(img);
       }}
 
-      // Silk-bbox border: the leaf's true silk extent. The PNG underneath
-      // letterboxes its silk line slightly inside the bbox when the PNG
-      // aspect doesn't match the silk aspect, so the user couldn't see
-      // sub-mm placement offsets that became visible when stamped to
-      // the parent's F.Silkscreen layer. This border is the canonical
-      // edge for alignment + snapping.
+      // Sharp-cornered amber rectangle traced over the leaf solver's
+      // silk-poly bbox. Lets the user see what gets stamped to the
+      // parent's F.Silkscreen layer with a crisper edge than the
+      // rounded poly inside the PNG; the rounded poly should sit
+      // exactly inside these straight edges, and any corner curves
+      // peeking out (~1 mm radius) make it visually obvious when a
+      // placement has the silk poly somewhere unexpected.
       const silkBbox = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
       const isSnapActive = state.snap_active === p.instance_path;
       silkBbox.setAttribute(
@@ -671,32 +680,29 @@ _CANVAS_JS_TEMPLATE = """
       silkBbox.setAttribute('y', sy0);
       silkBbox.setAttribute('width', sw);
       silkBbox.setAttribute('height', sh);
-      // Sharp corners are intentional: the rounded silk poly inside
-      // should fill the straight edges exactly, and the corner curves
-      // peeking out (~1mm radius) make it visually obvious when a
-      // placement nudges silk over the bbox boundary.
       g.appendChild(silkBbox);
 
-      // Hit / selection target = same silk content bbox, transparent
-      // so it catches mouse events for drag / rotate / contextmenu
-      // without hiding the silk border underneath.
+      // Hit / selection target covers the full visible content extent
+      // (image_*_mm), not just the silk poly. Pads and silk text that
+      // extend past the poly stay grabbable, and snap / overflow work
+      // off the same rectangle, so what the user sees is what they
+      // can drag.
       const hit = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
       hit.setAttribute('class', 'ml-leaf-hit');
-      hit.setAttribute('x', sx0);
-      hit.setAttribute('y', sy0);
-      hit.setAttribute('width', sw);
-      hit.setAttribute('height', sh);
+      hit.setAttribute('x', ix0);
+      hit.setAttribute('y', iy0);
+      hit.setAttribute('width', Math.max(0, ix1 - ix0));
+      hit.setAttribute('height', Math.max(0, iy1 - iy0));
       hit.setAttribute('fill', 'transparent');
       hit.setAttribute('stroke', 'none');
       g.appendChild(hit);
 
-      // Rotation handle floats just outside the silk bbox top-right
-      // (instead of the Edge.Cuts top-right) so it tracks the
-      // visible leaf shape under rotation.
+      // Rotation handle floats just outside the content top-right
+      // corner so it tracks the visible leaf shape under rotation.
       const rot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       rot.setAttribute('class', 'ml-rot-handle');
-      rot.setAttribute('cx', sx1 + ROT_HANDLE_OFFSET_MM);
-      rot.setAttribute('cy', sy0 - ROT_HANDLE_OFFSET_MM);
+      rot.setAttribute('cx', ix1 + ROT_HANDLE_OFFSET_MM);
+      rot.setAttribute('cy', iy0 - ROT_HANDLE_OFFSET_MM);
       rot.setAttribute('r', ROT_HANDLE_R_MM);
       rot.setAttribute('data-role', 'rotate');
       g.appendChild(rot);
@@ -712,7 +718,7 @@ _CANVAS_JS_TEMPLATE = """
       const me = state.placements.find(x => x.instance_path === state.snap_active);
       const meLeaf = me ? leafByPath[state.snap_active] : null;
       if (me && meLeaf) {{
-        const meBbox = silkBboxParent(me, meLeaf);
+        const meBbox = leafBboxParent(me, meLeaf);
         const constraints = [state.snap_constraints.x, state.snap_constraints.y];
         for (const c of constraints) {{
           if (!c) continue;
@@ -724,7 +730,7 @@ _CANVAS_JS_TEMPLATE = """
           }} else {{
             const other = state.placements.find(x => x.instance_path === c.other_path);
             const otherLeaf = other ? leafByPath[c.other_path] : null;
-            if (other && otherLeaf) otherBbox = silkBboxParent(other, otherLeaf);
+            if (other && otherLeaf) otherBbox = leafBboxParent(other, otherLeaf);
           }}
           if (otherBbox) appendSnapEdge(svg, edgeLine(otherBbox, c.other_edge));
         }}
@@ -739,7 +745,7 @@ _CANVAS_JS_TEMPLATE = """
   function edgeLine(bbox, side) {{
     // Axis-aligned line segment along the named edge of an AABB.
     // The render layer rotates leaves at the group level, but
-    // silkBboxParent already returns the rotated AABB in parent
+    // leafBboxParent already returns the rotated AABB in parent
     // coords, so these segments live on the visible parent-space
     // edge regardless of the leaf's rotation.
     switch (side) {{
@@ -842,7 +848,7 @@ _CANVAS_JS_TEMPLATE = """
       // outline) that's within SNAP_THRESHOLD_MM. Shift modifier
       // disables snap so the user can drop a leaf 0.2 mm off an
       // edge when they really want to.
-      const myBbox = silkBboxParent(p, leaf);
+      const myBbox = leafBboxParent(p, leaf);
       const snap = e.shiftKey ? null : computeDragSnap(ip, myBbox);
       if (snap) {{
         p.origin.x += snap.dx;
