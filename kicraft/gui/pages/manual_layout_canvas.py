@@ -103,10 +103,20 @@ def build_canvas_html(
     pointer-events: none;
   }}
   .ml-leaf-silk-bbox.snap-active {{
-    /* Snap feedback still shows even when the static border is hidden. */
-    display: block;
+    /* Kept for code/debug parity; snap feedback now uses per-edge
+       highlights via .ml-snap-edge instead of the whole bbox. */
     stroke: #22d3ee;
     stroke-opacity: 1;
+  }}
+  /* Highlight segments drawn over the specific constrained edges of
+     the dragged leaf and the leaf (or outline) it's snapping against.
+     Drawn on top of everything during a snap so the constraint is
+     obvious without the whole leaf lighting up. */
+  .ml-snap-edge {{
+    stroke: #22d3ee;
+    stroke-width: 0.45;
+    stroke-linecap: round;
+    pointer-events: none;
   }}
   .ml-rot-handle {{
     fill: #facc15;
@@ -235,6 +245,12 @@ _CANVAS_JS_TEMPLATE = """
       mounting_holes: deepCopy(cfg.initial.mounting_holes || []),
       selected: null,
       snap_active: null,
+      // Per-axis edge pair that the latest snap pinned, populated by
+      // startDrag's move handler. Each entry (when non-null) has shape
+      // {{ my_edge, other_path, other_edge }}. Read by render() to
+      // draw highlighted edge segments on the dragged leaf and on the
+      // constraining neighbor / outline.
+      snap_constraints: {{ x: null, y: null }},
       // View options -- mutated by setViewOptions() from the Python
       // panel. Defaults match the historical canvas behavior (grid on,
       // edge-snap on, 0 mm gap between snapped leaves).
@@ -405,55 +421,61 @@ _CANVAS_JS_TEMPLATE = """
       const otherLeaf = leafByPath[other.instance_path];
       if (!otherLeaf) continue;
       const ob = silkBboxParent(other, otherLeaf);
-      candidates.push({{ b: ob, edge_gap: gap }});
+      candidates.push({{ b: ob, edge_gap: gap, path: other.instance_path }});
     }}
     // Board outline counts too -- snap to the INSIDE of the parent
     // edges, with no gap (the gap setting is for leaf-to-leaf spacing,
-    // not leaf-to-outline padding).
+    // not leaf-to-outline padding). The sentinel path '__outline__'
+    // lets the renderer find the right bbox without aliasing a leaf.
     const o = state.board_outline;
     candidates.push({{
       b: {{ min_x: o.min.x, max_x: o.max.x, min_y: o.min.y, max_y: o.max.y }},
       edge_gap: 0,
+      path: '__outline__',
     }});
 
-    let bestDx = 0, bestDxDist = Infinity;
-    let bestDy = 0, bestDyDist = Infinity;
+    let bestDx = 0, bestDxDist = Infinity, bestXC = null;
+    let bestDy = 0, bestDyDist = Infinity, bestYC = null;
     for (const c of candidates) {{
       const ob = c.b;
       const g = c.edge_gap;
-      // For each pair: (current_offset, target_offset). Snap activates
-      // when the offset is within SNAP_THRESHOLD_MM of the target, and
-      // moves the leaf by (target - current). Edge-to-edge pairs use
-      // ±gap; axis-alignment pairs keep target=0.
+      // Pair format: [my_edge, other_edge, current_offset, target_offset].
+      // Snap activates when |offset - target| < SNAP_THRESHOLD_MM, and
+      // moves the leaf by (target - offset). Edge-to-edge pairs use
+      // ±gap; axis-alignment pairs keep target=0. The edge names are
+      // carried through so the renderer can highlight exactly which
+      // edges are pinned.
       const xPairs = [
-        [myBbox.max_x - ob.min_x, -g],  // my right -> other left (gap to the right of me)
-        [myBbox.min_x - ob.max_x,  g],  // my left  -> other right (gap to the left of me)
-        [myBbox.min_x - ob.min_x,  0],  // left-aligned
-        [myBbox.max_x - ob.max_x,  0],  // right-aligned
+        ['right', 'left',  myBbox.max_x - ob.min_x, -g],  // my right -> other left
+        ['left',  'right', myBbox.min_x - ob.max_x,  g],  // my left  -> other right
+        ['left',  'left',  myBbox.min_x - ob.min_x,  0],  // left-aligned
+        ['right', 'right', myBbox.max_x - ob.max_x,  0],  // right-aligned
       ];
       const yPairs = [
-        [myBbox.max_y - ob.min_y, -g],  // my bottom -> other top
-        [myBbox.min_y - ob.max_y,  g],  // my top    -> other bottom
-        [myBbox.min_y - ob.min_y,  0],  // top-aligned
-        [myBbox.max_y - ob.max_y,  0],  // bottom-aligned
+        ['bottom', 'top',    myBbox.max_y - ob.min_y, -g],  // my bottom -> other top
+        ['top',    'bottom', myBbox.min_y - ob.max_y,  g],  // my top    -> other bottom
+        ['top',    'top',    myBbox.min_y - ob.min_y,  0],  // top-aligned
+        ['bottom', 'bottom', myBbox.max_y - ob.max_y,  0],  // bottom-aligned
       ];
-      for (const [d, target] of xPairs) {{
+      for (const [myE, otherE, d, target] of xPairs) {{
         const a = Math.abs(d - target);
         if (a < SNAP_THRESHOLD_MM && a < bestDxDist) {{
           bestDx = target - d;
           bestDxDist = a;
+          bestXC = {{ my_edge: myE, other_path: c.path, other_edge: otherE }};
         }}
       }}
-      for (const [d, target] of yPairs) {{
+      for (const [myE, otherE, d, target] of yPairs) {{
         const a = Math.abs(d - target);
         if (a < SNAP_THRESHOLD_MM && a < bestDyDist) {{
           bestDy = target - d;
           bestDyDist = a;
+          bestYC = {{ my_edge: myE, other_path: c.path, other_edge: otherE }};
         }}
       }}
     }}
     if (bestDxDist === Infinity && bestDyDist === Infinity) return null;
-    return {{ dx: bestDx, dy: bestDy }};
+    return {{ dx: bestDx, dy: bestDy, x_constraint: bestXC, y_constraint: bestYC }};
   }}
 
   function render() {{
@@ -671,9 +693,61 @@ _CANVAS_JS_TEMPLATE = """
       svg.appendChild(g);
     }}
 
+    // Snap-edge highlights: draw the constrained edges of the dragged
+    // leaf AND the leaf (or outline) it's snapping against, drawn on
+    // top of every leaf so the constraint is obvious without lighting
+    // up the whole bbox. Only fires while a drag-snap is active.
+    if (state.snap_active) {{
+      const me = state.placements.find(x => x.instance_path === state.snap_active);
+      const meLeaf = me ? leafByPath[state.snap_active] : null;
+      if (me && meLeaf) {{
+        const meBbox = silkBboxParent(me, meLeaf);
+        const constraints = [state.snap_constraints.x, state.snap_constraints.y];
+        for (const c of constraints) {{
+          if (!c) continue;
+          appendSnapEdge(svg, edgeLine(meBbox, c.my_edge));
+          let otherBbox = null;
+          if (c.other_path === '__outline__') {{
+            const o = state.board_outline;
+            otherBbox = {{ min_x: o.min.x, max_x: o.max.x, min_y: o.min.y, max_y: o.max.y }};
+          }} else {{
+            const other = state.placements.find(x => x.instance_path === c.other_path);
+            const otherLeaf = other ? leafByPath[c.other_path] : null;
+            if (other && otherLeaf) otherBbox = silkBboxParent(other, otherLeaf);
+          }}
+          if (otherBbox) appendSnapEdge(svg, edgeLine(otherBbox, c.other_edge));
+        }}
+      }}
+    }}
+
     bindLeafEvents(svg);
     bindEdgeEvents(svg);
     updateCoordsLabel();
+  }}
+
+  function edgeLine(bbox, side) {{
+    // Axis-aligned line segment along the named edge of an AABB.
+    // The render layer rotates leaves at the group level, but
+    // silkBboxParent already returns the rotated AABB in parent
+    // coords, so these segments live on the visible parent-space
+    // edge regardless of the leaf's rotation.
+    switch (side) {{
+      case 'left':   return {{ x1: bbox.min_x, y1: bbox.min_y, x2: bbox.min_x, y2: bbox.max_y }};
+      case 'right':  return {{ x1: bbox.max_x, y1: bbox.min_y, x2: bbox.max_x, y2: bbox.max_y }};
+      case 'top':    return {{ x1: bbox.min_x, y1: bbox.min_y, x2: bbox.max_x, y2: bbox.min_y }};
+      case 'bottom': return {{ x1: bbox.min_x, y1: bbox.max_y, x2: bbox.max_x, y2: bbox.max_y }};
+      default: return {{ x1: 0, y1: 0, x2: 0, y2: 0 }};
+    }}
+  }}
+
+  function appendSnapEdge(svg, line) {{
+    const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    ln.setAttribute('class', 'ml-snap-edge');
+    ln.setAttribute('x1', line.x1);
+    ln.setAttribute('y1', line.y1);
+    ln.setAttribute('x2', line.x2);
+    ln.setAttribute('y2', line.y2);
+    svg.appendChild(ln);
   }}
 
   function addEdge(svg, side, x, y, w, h, horizontal=false) {{
@@ -763,13 +837,19 @@ _CANVAS_JS_TEMPLATE = """
         p.origin.x += snap.dx;
         p.origin.y += snap.dy;
         state.snap_active = ip;
+        state.snap_constraints.x = snap.x_constraint;
+        state.snap_constraints.y = snap.y_constraint;
       }} else {{
         state.snap_active = null;
+        state.snap_constraints.x = null;
+        state.snap_constraints.y = null;
       }}
       render();
     }};
     const up = () => {{
       state.snap_active = null;
+      state.snap_constraints.x = null;
+      state.snap_constraints.y = null;
       render();
       document.removeEventListener('mousemove', move);
       document.removeEventListener('mouseup', up);
