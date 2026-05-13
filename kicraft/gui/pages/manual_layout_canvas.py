@@ -445,10 +445,27 @@ _CANVAS_JS_TEMPLATE = """
   }}
 
   // Compute the set of leaves that collide with at least one other leaf
-  // in parent space. Used to red-flag overlapping placements. The
-  // collision is on Edge.Cuts AABBs -- if two leaves' physical boards
-  // overlap by more than EPS_MM, both go in the set.
+  // in parent space. Used to red-flag overlapping placements. Edge.Cuts
+  // AABBs intersect by > EPS_MM in BOTH axes => both leaves in the set.
+  //
+  // Containment exception: when one leaf's AABB fully contains the
+  // other (within EPS_MM tolerance), the pair is treated as intentional
+  // stacking and is NOT flagged. This is the BATT case -- the battery-
+  // holder leaf spans the whole parent area as a substrate and the
+  // smaller subcircuit leaves are MEANT to sit on top. The same
+  // exemption naturally handles any future "background" leaf without
+  // hard-coding a name. Partial intersections (the BATT_PROT/CHARGER
+  // case the user reported) still flag both leaves -- containment is
+  // strict, not "mostly inside".
   const OVERLAP_EPS_MM = 0.01;
+  function aabbFullyContains(outer, inner) {{
+    return (
+      outer.min_x <= inner.min_x + OVERLAP_EPS_MM &&
+      outer.min_y <= inner.min_y + OVERLAP_EPS_MM &&
+      outer.max_x + OVERLAP_EPS_MM >= inner.max_x &&
+      outer.max_y + OVERLAP_EPS_MM >= inner.max_y
+    );
+  }}
   function computeOverlaps() {{
     const bboxes = state.placements.map(p => {{
       const leaf = leafByPath[p.instance_path];
@@ -461,10 +478,11 @@ _CANVAS_JS_TEMPLATE = """
         const a = bboxes[i].b, b = bboxes[j].b;
         const ox = Math.min(a.max_x, b.max_x) - Math.max(a.min_x, b.min_x);
         const oy = Math.min(a.max_y, b.max_y) - Math.max(a.min_y, b.min_y);
-        if (ox > OVERLAP_EPS_MM && oy > OVERLAP_EPS_MM) {{
-          overlapping.add(bboxes[i].ip);
-          overlapping.add(bboxes[j].ip);
-        }}
+        if (ox <= OVERLAP_EPS_MM || oy <= OVERLAP_EPS_MM) continue;
+        // One fully contains the other => intentional stacking, skip.
+        if (aabbFullyContains(a, b) || aabbFullyContains(b, a)) continue;
+        overlapping.add(bboxes[i].ip);
+        overlapping.add(bboxes[j].ip);
       }}
     }}
     return overlapping;
