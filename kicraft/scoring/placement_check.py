@@ -23,7 +23,13 @@ class PlacementCheck(LayoutCheck):
         # Collect courtyard bounding boxes (tighter than full bbox which includes silkscreen)
         fp_data = []
         total_fp_area = 0
-        out_of_bounds = 0
+        out_of_bounds = 0  # footprint-center off-board (mild defect)
+        pads_off_board = 0  # ANY pad off the physical board edge (fab-fatal)
+
+        bx1 = pcbnew.ToMM(board_rect.GetX())
+        by1 = pcbnew.ToMM(board_rect.GetY())
+        bx2 = bx1 + board_w
+        by2 = by1 + board_h
 
         for fp in fps:
             # Try courtyard first, fall back to bounding box
@@ -47,14 +53,34 @@ class PlacementCheck(LayoutCheck):
             # Check if footprint center is inside board outline
             pos = fp.GetPosition()
             px, py = pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y)
-            bx1 = pcbnew.ToMM(board_rect.GetX())
-            by1 = pcbnew.ToMM(board_rect.GetY())
-            bx2 = bx1 + board_w
-            by2 = by1 + board_h
             if not (bx1 <= px <= bx2 and by1 <= py <= by2):
                 out_of_bounds += 1
                 issues.append(Issue("error", f"{ref} center is outside board outline",
                                     {"ref": ref, "x": round(px, 2), "y": round(py, 2)}))
+
+            # Solder pads must stay inside Edge.Cuts. Courtyards on
+            # edge-mounted connectors (J*) can legitimately overhang
+            # (USB-C tab past the board edge, e.g.), but the COPPER
+            # PADS need on-board substrate to solder to. Pad off-board
+            # is unrecoverable: fab either cuts the pad in half or
+            # leaves it dangling without copper.
+            for pad in fp.Pads():
+                pbox = pad.GetBoundingBox()
+                px1 = pcbnew.ToMM(pbox.GetX())
+                py1 = pcbnew.ToMM(pbox.GetY())
+                px2 = px1 + pcbnew.ToMM(pbox.GetWidth())
+                py2 = py1 + pcbnew.ToMM(pbox.GetHeight())
+                overshoot = max(
+                    bx1 - px1, by1 - py1, px2 - bx2, py2 - by2, 0.0
+                )
+                if overshoot > 0.01:
+                    pads_off_board += 1
+                    pad_name = pad.GetNumber() or "?"
+                    issues.append(Issue("error",
+                        f"{ref} pad {pad_name} extends {overshoot:.2f}mm past board edge "
+                        f"(pads must stay inside Edge.Cuts -- fab-fatal)",
+                        {"ref": ref, "pad": pad_name, "overshoot_mm": round(overshoot, 3)}))
+                    break  # one issue per footprint is enough; user fixes the whole component
 
         # Overlap detection (O(n^2) is fine for <100 components)
         # Build set of large mechanical refs to skip expected overlaps
@@ -85,7 +111,27 @@ class PlacementCheck(LayoutCheck):
 
         utilization = total_fp_area / board_area if board_area > 0 else 0
 
-        # Scoring
+        # Scoring. Any pad off-board is fab-fatal -- the layout cannot
+        # be manufactured. We hard-zero the placement score so the
+        # weighted total collapses (placement weight = 0.22, so any
+        # off-board pad cuts at minimum 22 points off the overall
+        # leaf score regardless of other checks).
+        if pads_off_board > 0:
+            return CheckResult(
+                score=0.0,
+                issues=issues,
+                metrics={
+                    "board_area_mm2": round(board_area, 1),
+                    "footprint_area_mm2": round(total_fp_area, 1),
+                    "utilization": round(utilization, 3),
+                    "overlaps": overlaps,
+                    "out_of_bounds": out_of_bounds,
+                    "pads_off_board": pads_off_board,
+                    "footprint_count": len(fps),
+                },
+                summary=f"FAB-FATAL: {pads_off_board} component(s) with pads past Edge.Cuts",
+            )
+
         overlap_score = 40.0 * (1.0 / (1.0 + overlaps))
         bounds_score = 20.0 * (1.0 / (1.0 + out_of_bounds))
 
@@ -107,6 +153,7 @@ class PlacementCheck(LayoutCheck):
                 "utilization": round(utilization, 3),
                 "overlaps": overlaps,
                 "out_of_bounds": out_of_bounds,
+                "pads_off_board": pads_off_board,
                 "footprint_count": len(fps),
             },
             summary=f"{len(fps)} components, {utilization:.0%} utilization, {overlaps} overlaps",

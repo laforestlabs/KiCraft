@@ -61,7 +61,12 @@ class MonitorStyle:
     writes the raw transparent-background PNG the manual layout canvas
     consumes directly."""
 
-    background: str = "#020617"
+    # Flat neutral dark-gray. The previous #020617 (deep navy) read
+    # as either pure black or dark blue depending on browser gamma /
+    # the user's display, which made the monitor tiles look like
+    # two different render pipelines were in use. #3a3a3a is the
+    # same hue on every display.
+    background: str = "#3a3a3a"
     border_color: str = "#67e8f9"
     border_width: int = 6
     padding: int = 52

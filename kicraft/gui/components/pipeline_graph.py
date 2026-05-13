@@ -187,7 +187,7 @@ def _find_best_render(
     ]
     for c in candidates:
         if _mtime_passes(c, mtime_floor):
-            return str(c)
+            return _experiments_url(c)
     return None
 
 
@@ -196,13 +196,37 @@ def _find_round_renders(
     round_index: int,
     mtime_floor: float | None = None,
 ) -> tuple[str | None, str | None]:
-    """Find routed and pre-route renders for a specific round."""
+    """Find routed and pre-route renders for a specific round.
+
+    Returns ``/experiments/...`` URLs with an mtime cache-buster
+    (``?v=<mtime>``) so the browser refetches after the underlying
+    PNG is re-rendered. Without the cache-buster the URL stays the
+    same across renders, the browser serves the cached copy, and
+    the user sees stale thumbnails until they hard-reload.
+    """
     routed = renders_dir / f"round_{round_index:04d}_routed_front_all.png"
     pre_route = renders_dir / f"round_{round_index:04d}_pre_route_front_all.png"
     return (
-        str(routed) if _mtime_passes(routed, mtime_floor) else None,
-        str(pre_route) if _mtime_passes(pre_route, mtime_floor) else None,
+        _experiments_url(routed) if _mtime_passes(routed, mtime_floor) else None,
+        _experiments_url(pre_route) if _mtime_passes(pre_route, mtime_floor) else None,
     )
+
+
+def _experiments_url(p: Path) -> str:
+    """Map an absolute path under ``.experiments/`` to its mounted
+    ``/experiments/...?v=<mtime>`` URL. Falls back to the absolute
+    path string when the file isn't under the mount (e.g. tests).
+    """
+    from kicraft.gui.state import get_state
+    try:
+        rel = p.relative_to(get_state().experiments_dir)
+    except (ValueError, AttributeError):
+        return str(p)
+    try:
+        mt = int(p.stat().st_mtime)
+    except OSError:
+        return f"/experiments/{rel.as_posix()}"
+    return f"/experiments/{rel.as_posix()}?v={mt}"
 
 
 def _load_round_statuses(experiments_dir: Path) -> dict[int, dict[str, Any]]:
