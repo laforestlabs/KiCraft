@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Render PCB layers to PNG images for visual analysis.
 
-This version improves preview quality for the experiment manager by:
-- tightly cropping to the actual rendered board content
-- adding a contrasting dark surround so the board edge is visible
-- drawing a visible border around the rendered board image
-- boosting contrast/saturation slightly for readability
-- making silkscreen-inclusive views easier to inspect
+CLI on top of the unified ``kicraft.render.render_pcb`` pipeline. The
+``VIEWS`` registry below names each preset (layer set + chrome style),
+and each view delegates the actual rasterization to the unified
+renderer so the monitor / pipeline-graph PNGs and the manual layout
+canvas PNG come out of the same code path.
 
-The script still uses `kicad-cli` for SVG export and ImageMagick (`magick`)
-for rasterization/post-processing.
+Why the styled previews look as they do:
+- tightly clipped to the board outline (Edge.Cuts) so off-board silk
+  text never leaks into the preview
+- dark surround so the board edge is visible against a navy chrome
+- cyan accent border so the rendered tile is easy to spot
+- gentle contrast/saturation boost for readability
 """
 
 from __future__ import annotations
@@ -19,24 +22,25 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
+from pathlib import Path
 
-# Layer sets for different views
+from kicraft.render import MonitorStyle, render_pcb
+
+# Layer sets + chrome configs for each preset view. Each entry's
+# ``post`` keys map 1:1 onto ``MonitorStyle`` fields.
 VIEWS = {
     "front_all": {
         # Top-down PCBnew-like view. F.Cu+B.Cu together triggers the
-        # _render_composite path which draws B.Cu at 52% opacity on a
-        # light-grey board background, then overlays F.Cu+silk on top.
-        # F.Mask is intentionally OMITTED: KiCad renders F.Mask as an
-        # opaque solder-mask-colored fill over the whole board area,
-        # which obscures B.Cu and produces a "blank blue PCB" when
-        # the router put all traces on the back layer.
+        # composite path in the renderer (B.Cu rendered at reduced
+        # opacity so it doesn't obscure front detail). F.Mask is
+        # intentionally OMITTED: KiCad renders it as an opaque
+        # solder-mask-colored fill over the whole board, which would
+        # obscure B.Cu and produce a "blank blue PCB" when the router
+        # put traces on the back layer.
         #
-        # Post settings are deliberately gentle (contrast 1.15, sat
-        # 1.05, brightness 1.0): the previous heavy boost (1.38/1.24/
-        # 0.90) was tuned for the F.Mask-covered view and pushed the
-        # neutral grey board background into a saturated blue, which
-        # made B.Cu traces (also blue) invisible against it.
+        # Post settings deliberately gentle (contrast 1.15, sat 1.05):
+        # the heavier boost used elsewhere washed out B.Cu against
+        # the saturated background.
         "layers": "B.Cu,F.Cu,F.SilkS,Edge.Cuts",
         "desc": "Top-down view: both copper layers + silkscreen + outline (PCBnew-like)",
         "post": {
@@ -120,10 +124,6 @@ VIEWS = {
 
 DEFAULT_DPI = 420
 DEFAULT_MAX_PX = 3200
-DEFAULT_BACKGROUND = "#020617"
-DEFAULT_BORDER = "#67e8f9"
-DEFAULT_BORDER_WIDTH = 6
-DEFAULT_PADDING = 52
 
 
 def _which_or_warn(name: str) -> str | None:
@@ -133,301 +133,38 @@ def _which_or_warn(name: str) -> str | None:
     return path
 
 
-def _run(cmd: list[str], *, check: bool = False) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, check=check)
-
-
-def _safe_remove(path: str | os.PathLike[str]) -> None:
-    try:
-        os.remove(path)
-    except OSError:
-        pass
-
-
-def _svg_export(
-    pcb_path: str,
-    svg_path: str,
-    layers: str,
-    *,
-    mirror: bool = False,
-) -> bool:
-    cmd = [
-        "kicad-cli",
-        "pcb",
-        "export",
-        "svg",
-        "--layers",
-        layers,
-        "--mode-single",
-        "--fit-page-to-board",
-        "--exclude-drawing-sheet",
-        "--drill-shape-opt",
-        "2",
-        "-o",
-        svg_path,
-    ]
-    if mirror:
-        cmd.append("--mirror")
-    cmd.append(pcb_path)
-
-    result = _run(cmd)
-    if result.returncode != 0:
-        print(
-            f"  SVG export failed for layers '{layers}': {result.stderr.strip()}",
-            file=sys.stderr,
-        )
-        return False
-    return True
-
-
-def _postprocess_png(
-    input_png: str,
-    output_png: str,
-    *,
-    max_px: int,
-    background: str = DEFAULT_BACKGROUND,
-    border_color: str = DEFAULT_BORDER,
-    border_width: int = DEFAULT_BORDER_WIDTH,
-    padding: int = DEFAULT_PADDING,
-    contrast: float = 1.12,
-    saturation: float = 1.08,
-    brightness: float = 1.00,
-) -> bool:
-    """Crop tightly, improve contrast, and add a visible surround/border."""
-    cmd = [
-        "magick",
-        input_png,
-        "-alpha",
-        "remove",
-        "-alpha",
-        "off",
-        "-fuzz",
-        "2%",
-        "-trim",
-        "+repage",
-        "-bordercolor",
-        background,
-        "-border",
-        str(padding),
-        "-resize",
-        f"{max_px}x{max_px}>",
-        "-brightness-contrast",
-        _brightness_contrast_arg(brightness, contrast),
-        "-modulate",
-        _modulate_arg(brightness, saturation),
-        "-bordercolor",
-        border_color,
-        "-border",
-        str(border_width),
-        output_png,
-    ]
-    result = _run(cmd)
-    if result.returncode != 0:
-        print(
-            f"  PNG post-process failed: {result.stderr.strip()}",
-            file=sys.stderr,
-        )
-        return False
-    return True
-
-
-def _brightness_contrast_arg(brightness: float, contrast: float) -> str:
-    # ImageMagick expects percentages. Keep brightness subtle and use contrast
-    # as the main readability control.
-    brightness_pct = int(round((brightness - 1.0) * 100.0))
-    contrast_pct = int(round((contrast - 1.0) * 100.0))
-    return f"{brightness_pct}x{contrast_pct}"
-
-
-def _modulate_arg(brightness: float, saturation: float) -> str:
-    brightness_pct = int(round(brightness * 100.0))
-    saturation_pct = int(round(saturation * 100.0))
-    return f"{brightness_pct},{saturation_pct},100"
-
-
-def _svg_to_png(
-    svg_path: str,
-    png_path: str,
-    *,
-    dpi: int,
-    max_px: int,
-    post_cfg: dict | None = None,
-) -> bool:
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        raw_png = tmp.name
-
-    try:
-        result = _run(
-            [
-                "magick",
-                "-background",
-                "#1e293b",
-                "-density",
-                str(dpi),
-                svg_path,
-                raw_png,
-            ]
-        )
-        if result.returncode != 0:
-            print(
-                f"  PNG conversion failed: {result.stderr.strip()}",
-                file=sys.stderr,
-            )
-            return False
-
-        cfg = dict(post_cfg or {})
-        return _postprocess_png(
-            raw_png,
-            png_path,
-            max_px=max_px,
-            background=cfg.get("background", DEFAULT_BACKGROUND),
-            border_color=cfg.get("border_color", DEFAULT_BORDER),
-            border_width=int(cfg.get("border_width", DEFAULT_BORDER_WIDTH)),
-            padding=int(cfg.get("padding", DEFAULT_PADDING)),
-            contrast=float(cfg.get("contrast", 1.12)),
-            saturation=float(cfg.get("saturation", 1.08)),
-            brightness=float(cfg.get("brightness", 1.00)),
-        )
-    finally:
-        _safe_remove(raw_png)
-
-
 def render_view(
-    pcb_path, view_name, view_cfg, output_dir, dpi=DEFAULT_DPI, max_px=DEFAULT_MAX_PX
-):
-    """Render a single view to PNG. Returns output path or None on failure."""
+    pcb_path: str,
+    view_name: str,
+    view_cfg: dict,
+    output_dir: str,
+    dpi: int = DEFAULT_DPI,
+    max_px: int = DEFAULT_MAX_PX,
+) -> str | None:
+    """Render a single named view to PNG. Returns the output path on
+    success or None on failure. Edge.Cuts clipping, F.Cu+B.Cu compositing,
+    and chrome are all handled by the unified renderer."""
     png_path = os.path.join(output_dir, f"{view_name}.png")
-    layers = view_cfg["layers"]
-
-    # For views with both copper layers, render them separately and composite
-    # B.Cu at reduced opacity so it doesn't obscure F.Cu detail.
-    if "F.Cu" in layers and "B.Cu" in layers:
-        front_layers = (
-            layers.replace("B.Cu,", "").replace(",B.Cu", "").replace("B.Cu", "")
-        )
-        front_layers = ",".join(
-            layer_name for layer_name in front_layers.split(",") if layer_name
-        )
-        back_layers = "B.Cu,Edge.Cuts"
-        return _render_composite(
-            pcb_path,
-            front_layers,
-            back_layers,
-            png_path,
-            view_cfg,
-            dpi,
-            max_px,
-        )
-
-    svg_path = os.path.join(output_dir, f"{view_name}.svg")
-    ok = _svg_export(
-        pcb_path,
-        svg_path,
-        layers,
-        mirror=bool(view_cfg.get("mirror")),
+    post = dict(view_cfg.get("post") or {})
+    style = MonitorStyle(
+        background=post.get("background", "#020617"),
+        border_color=post.get("border_color", "#67e8f9"),
+        border_width=int(post.get("border_width", 6)),
+        padding=int(post.get("padding", 52)),
+        contrast=float(post.get("contrast", 1.12)),
+        saturation=float(post.get("saturation", 1.08)),
+        brightness=float(post.get("brightness", 1.00)),
+        max_px=max_px,
     )
-    if not ok:
-        return None
-
-    try:
-        ok = _svg_to_png(
-            svg_path,
-            png_path,
-            dpi=dpi,
-            max_px=max_px,
-            post_cfg=view_cfg.get("post"),
-        )
-        if not ok:
-            return None
-        return png_path
-    finally:
-        _safe_remove(svg_path)
-
-
-def _render_composite(
-    pcb_path,
-    front_layers,
-    back_layers,
-    png_path,
-    view_cfg,
-    dpi,
-    max_px,
-    back_opacity=0.52,
-):
-    """Render front and back layers separately, composite with alpha."""
-    svg_front = None
-    svg_back = None
-    raw_png = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as f:
-            svg_front = f.name
-        with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as f:
-            svg_back = f.name
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            raw_png = f.name
-
-        mirror = bool(view_cfg.get("mirror"))
-
-        if not _svg_export(pcb_path, svg_front, front_layers, mirror=mirror):
-            return None
-        if not _svg_export(pcb_path, svg_back, back_layers, mirror=mirror):
-            return None
-
-        result = _run(
-            [
-                "magick",
-                "-background",
-                "none",
-                "-density",
-                str(dpi),
-                "(",
-                svg_back,
-                "-channel",
-                "A",
-                "-evaluate",
-                "multiply",
-                str(back_opacity),
-                "+channel",
-                ")",
-                "(",
-                svg_front,
-                ")",
-                "-background",
-                "#1e293b",
-                "-layers",
-                "merge",
-                raw_png,
-            ]
-        )
-        if result.returncode != 0:
-            print(f"  Composite failed: {result.stderr.strip()}", file=sys.stderr)
-            return None
-
-        ok = _postprocess_png(
-            raw_png,
-            png_path,
-            max_px=max_px,
-            background=view_cfg.get("post", {}).get("background", DEFAULT_BACKGROUND),
-            border_color=view_cfg.get("post", {}).get("border_color", DEFAULT_BORDER),
-            border_width=int(
-                view_cfg.get("post", {}).get("border_width", DEFAULT_BORDER_WIDTH)
-            ),
-            padding=int(view_cfg.get("post", {}).get("padding", DEFAULT_PADDING)),
-            contrast=float(view_cfg.get("post", {}).get("contrast", 1.12)),
-            saturation=float(view_cfg.get("post", {}).get("saturation", 1.05)),
-            brightness=float(view_cfg.get("post", {}).get("brightness", 1.00)),
-        )
-        return png_path if ok else None
-    except FileNotFoundError as e:
-        print(f"  Composite render failed: {e}", file=sys.stderr)
-        return None
-    finally:
-        if svg_front:
-            _safe_remove(svg_front)
-        if svg_back:
-            _safe_remove(svg_back)
-        if raw_png:
-            _safe_remove(raw_png)
+    extent = render_pcb(
+        Path(pcb_path),
+        Path(png_path),
+        layers=view_cfg["layers"],
+        mirror=bool(view_cfg.get("mirror")),
+        dpi=dpi,
+        style=style,
+    )
+    return png_path if extent is not None else None
 
 
 def render_all(pcb_path, output_dir, views=None):

@@ -26,6 +26,7 @@ from kicraft.autoplacer.brain.manual_layout import (
 )
 from kicraft.autoplacer.brain.types import Point
 from kicraft.gui.pages.leaf_canvas_render import render_leaf_canvas
+from kicraft.render.edge_cuts import parse_edge_cuts_aabb
 
 
 DEFAULT_OUTLINE_W_MM = 80.0
@@ -73,12 +74,13 @@ class LeafInfo:
     silk_min_y: float = 0.0
     silk_max_x: float = 0.0
     silk_max_y: float = 0.0
-    # Leaf-local mm extent of ``render_url``'s PNG. The viewBox of the
-    # post-route kicad-cli SVG, used to draw the <image> element at its
-    # natural extent (silk text labels included). NOT a physical extent --
-    # kicad-cli ``--fit-page-to-board`` includes footprint reference
-    # labels that hang past Edge.Cuts, so this rectangle is typically
-    # WIDER and TALLER than the actual board.
+    # Leaf-local mm extent of ``render_url``'s PNG. With the unified
+    # renderer (v2 sidecar) this equals the Edge.Cuts AABB by
+    # construction -- the renderer rewrites kicad-cli's SVG viewBox to
+    # Edge.Cuts before rasterizing, so the PNG content lands exactly
+    # inside the physical board outline. Kept as a distinct field
+    # (rather than aliasing ``edge_*``) so the canvas code reads
+    # self-documenting at each call site (PNG placement vs hit-test).
     image_x_mm: float = 0.0
     image_y_mm: float = 0.0
     image_width_mm: float = 0.0
@@ -94,55 +96,6 @@ class LeafInfo:
     edge_min_y: float = 0.0
     edge_max_x: float = 0.0
     edge_max_y: float = 0.0
-
-
-def _edge_cuts_bbox_from_pcb(
-    pcb_path: Path,
-) -> tuple[float, float, float, float] | None:
-    """AABB of every ``gr_line`` / ``gr_arc`` / ``gr_rect`` on the
-    Edge.Cuts layer of ``leaf_routed.kicad_pcb``. This is the leaf's
-    physical board outline, NOT the SVG viewBox (which can be inflated
-    by footprint silk reference labels that hang past Edge.Cuts).
-
-    Used by the canvas as the single source of truth for hit testing,
-    snapping, overflow against the parent outline, and inter-leaf
-    overlap detection. Returns None when the file is missing or has no
-    Edge.Cuts geometry.
-    """
-    import re
-
-    try:
-        text = pcb_path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-
-    xs: list[float] = []
-    ys: list[float] = []
-    # ``(gr_<kind> ... layer "Edge.Cuts" ...)`` blocks; the geometry
-    # tokens are ``(start x y)`` / ``(end x y)`` / ``(center x y)`` /
-    # ``(mid x y)`` / ``(xy x y)`` depending on the shape kind.
-    block_re = re.compile(
-        r'\(gr_(line|arc|rect|poly|circle)\s+(.*?)\)\s*(?=\(gr_|\(footprint|\Z)',
-        re.S,
-    )
-    point_re = re.compile(
-        r'(?:\((?:start|end|center|mid)\s+([-\d.eE+]+)\s+([-\d.eE+]+)\))'
-        r'|(?:\(xy\s+([-\d.eE+]+)\s+([-\d.eE+]+)\))'
-    )
-    for m in block_re.finditer(text):
-        blk = m.group(0)
-        if 'Edge.Cuts' not in blk:
-            continue
-        for pm in point_re.finditer(blk):
-            if pm.group(1) is not None:
-                xs.append(float(pm.group(1)))
-                ys.append(float(pm.group(2)))
-            else:
-                xs.append(float(pm.group(3)))
-                ys.append(float(pm.group(4)))
-    if not xs:
-        return None
-    return (min(xs), min(ys), max(xs), max(ys))
 
 
 def _silk_bbox_from_solved_layout(
@@ -261,7 +214,7 @@ def discover_leaves(experiments_dir: Path) -> list[LeafInfo]:
         # Falls back to the metadata's local_board_outline (which is
         # what the leaf solver was told to fit into) when Edge.Cuts
         # is missing from the PCB file -- conservative default.
-        edge_bbox = _edge_cuts_bbox_from_pcb(leaf_dir / "leaf_routed.kicad_pcb")
+        edge_bbox = parse_edge_cuts_aabb(leaf_dir / "leaf_routed.kicad_pcb")
         if edge_bbox is None:
             edge_min_x, edge_min_y, edge_max_x, edge_max_y = 0.0, 0.0, w, h
         else:
