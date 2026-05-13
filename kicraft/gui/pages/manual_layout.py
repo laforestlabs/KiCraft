@@ -49,7 +49,22 @@ def manual_layout_page() -> None:
     # ui.run_javascript because ui.add_body_html only fires on
     # initial page parse.
     render_count = {"n": 0}
-    _manual_layout_body(render_count)
+    # Timers created inside the @ui.refreshable body must be cancelled
+    # before each refresh, otherwise the previous render's timer keeps
+    # ticking against its deleted parent_slot and spams
+    # "The parent slot of the element has been deleted" tracebacks.
+    # on_disconnect alone is not enough -- it only fires on full client
+    # disconnect, not on refresh.
+    body_timers: list = []
+    _manual_layout_body(render_count, body_timers)
+
+    def _cancel_body_timers() -> None:
+        for t in body_timers:
+            try:
+                t.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+        body_timers.clear()
 
     def _watch() -> None:
         latest = _max_leaf_mtime(state.experiments_dir)
@@ -58,18 +73,26 @@ def manual_layout_page() -> None:
         if latest > 0 and (time.time() - latest) < 3.0:
             return
         rendered_at["ts"] = latest
-        _manual_layout_body.refresh(render_count)
+        _cancel_body_timers()
+        _manual_layout_body.refresh(render_count, body_timers)
 
     watch_timer = ui.timer(2.0, _watch)
     # Cancel on client disconnect so the timer doesn't tick into a deleted
     # parent_slot after a page reload (NiceGUI's _should_stop check runs
     # AFTER _get_context() inside the loop, so a fresh tick whose parent
     # was GC'd between _can_start() and _get_context() always raises).
-    ui.context.client.on_disconnect(lambda: watch_timer.cancel())
+    def _on_disconnect() -> None:
+        try:
+            watch_timer.cancel()
+        except Exception:  # noqa: BLE001
+            pass
+        _cancel_body_timers()
+
+    ui.context.client.on_disconnect(_on_disconnect)
 
 
 @ui.refreshable
-def _manual_layout_body(render_count: dict) -> None:
+def _manual_layout_body(render_count: dict, body_timers: list) -> None:
     is_refresh = render_count["n"] > 0
     render_count["n"] += 1
     state = get_state()
@@ -192,7 +215,7 @@ def _manual_layout_body(render_count: dict) -> None:
                     height_input.value = round(h, 2)
 
             _pull_size_timer = ui.timer(0.6, _pull_size_from_canvas)
-            ui.context.client.on_disconnect(lambda: _pull_size_timer.cancel())
+            body_timers.append(_pull_size_timer)
             # Canvas controller injection. ALWAYS via add_body_html,
             # even on refresh: NiceGUI 3.x appends each call to the
             # page body, so each refresh's script runs as the new
@@ -210,10 +233,12 @@ def _manual_layout_body(render_count: dict) -> None:
             # ui.run_javascript reliably reaches the connected client
             # the same instant ui.html() emits the new SVG.
             if is_refresh:
-                ui.timer(
-                    0.05,
-                    lambda: ui.run_javascript(init_js),
-                    once=True,
+                body_timers.append(
+                    ui.timer(
+                        0.05,
+                        lambda: ui.run_javascript(init_js),
+                        once=True,
+                    )
                 )
         with ui.column().classes("w-72 gap-3"):
             _legend(leaves)
@@ -245,7 +270,7 @@ def _manual_layout_body(render_count: dict) -> None:
 
     _mounting_hole_panel(canvas_id, initial.get("mounting_holes") or [])
 
-    _view_options_panel(canvas_id)
+    _view_options_panel(canvas_id, body_timers)
 
     def _on_open_in_kicad() -> None:
         pcb = find_latest_parent_pcb(state.experiments_dir)
@@ -555,7 +580,7 @@ def _mounting_hole_panel(canvas_id: str, initial_holes: list[dict]) -> None:
         _rebuild()
 
 
-def _view_options_panel(canvas_id: str) -> None:
+def _view_options_panel(canvas_id: str, body_timers: list) -> None:
     """Collapsible View options panel at the bottom of the manual layout tab.
 
     Toggles plus a spacing input that propagate to the canvas controller
@@ -622,7 +647,7 @@ def _view_options_panel(canvas_id: str) -> None:
     # mount -- the panel renders before the IIFE registers
     # window.manualLayoutCanvases[canvas_id], so a synchronous push
     # would silently no-op via the `&& ...` guard.
-    ui.timer(0.3, _push, once=True)
+    body_timers.append(ui.timer(0.3, _push, once=True))
 
 
 def _build_hole_row(i: int, hole: dict, on_change) -> None:

@@ -3,9 +3,42 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 
 from nicegui import app, ui
+from nicegui.elements.timer import Timer as _NgTimer
+
+
+def _patch_timer_context() -> None:
+    """Stop NiceGUI 3.x timers from spamming tracebacks on page reload.
+
+    Upstream race: ``Timer._get_context`` is written as
+    ``return self.parent_slot or nullcontext()``, but ``Element.parent_slot``
+    *raises* RuntimeError when its weakref has died (instead of returning
+    None). The ``or`` never fires, so an in-flight tick whose parent slot
+    was GC'd between ``_should_stop()`` and ``_get_context()`` always
+    raises before the next stop check. ``on_disconnect``-based
+    ``timer.cancel()`` cannot close this race -- the cancelled timer's
+    next tick still enters ``_get_context``.
+
+    This shim catches that one RuntimeError and falls back to nullcontext,
+    letting the loop iterate once more, observe ``_should_stop()``, and
+    exit cleanly. Targeted to ``Timer._get_context`` so no other element's
+    behaviour is touched.
+    """
+    original = _NgTimer._get_context
+
+    def _safe_get_context(self):
+        try:
+            return original(self)
+        except RuntimeError:
+            return nullcontext()
+
+    _NgTimer._get_context = _safe_get_context
+
+
+_patch_timer_context()
 
 from .pages.analysis import analysis_page
 from .pages.manual_layout import manual_layout_page
