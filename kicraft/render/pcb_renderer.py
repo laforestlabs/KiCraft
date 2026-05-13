@@ -61,11 +61,19 @@ class MonitorStyle:
     writes the raw transparent-background PNG the manual layout canvas
     consumes directly."""
 
-    # Flat neutral dark-gray. The previous #020617 (deep navy) read
-    # as either pure black or dark blue depending on browser gamma /
-    # the user's display, which made the monitor tiles look like
-    # two different render pipelines were in use. #3a3a3a is the
-    # same hue on every display.
+    # Two background colors so the PCB substrate visually separates from
+    # the surrounding chrome -- otherwise an Edge.Cuts boundary on top
+    # of "transparent over identical-color padding" disappears and the
+    # monitor tile looks like one big rectangle of color.
+    #
+    # ``board_background`` is composited onto the transparent pixels
+    # INSIDE Edge.Cuts (where there's no copper or silk) -- the PCB
+    # substrate color. Darker than the chrome so copper / silk pop.
+    #
+    # ``background`` is the chrome ring OUTSIDE Edge.Cuts (the padding
+    # before the cyan border). Lighter neutral so the board reads as a
+    # panel sitting on top of it.
+    board_background: str = "#1e1e1e"
     background: str = "#3a3a3a"
     border_color: str = "#67e8f9"
     border_width: int = 6
@@ -201,19 +209,31 @@ def _apply_monitor_style(
     raw_png: Path, out_png: Path, style: MonitorStyle
 ) -> bool:
     """Convert the transparent-background Edge.Cuts PNG into the styled
-    monitor preview: dark padding, contrast/saturation boost, cyan
-    border. ``-trim`` is intentionally absent -- the input PNG is
-    already clipped to Edge.Cuts."""
+    monitor preview: PCB-color substrate inside Edge.Cuts, gray chrome
+    padding outside, then a cyan accent border. The two fills are
+    applied in sequence so the Edge.Cuts boundary stays visible as a
+    color transition even where the leaf has no copper or silk -- with
+    a single fill, the board area dissolves into the padding.
+
+    ``-trim`` is intentionally absent -- the input PNG is already
+    clipped to Edge.Cuts.
+    """
     cmd = [
         "magick", str(raw_png),
-        "-background", style.background,
+        # 1) Fill transparent areas INSIDE Edge.Cuts with the PCB
+        #    substrate color. After this the image is opaque, exactly
+        #    Edge.Cuts-sized, and the board area reads as a panel.
+        "-background", style.board_background,
         "-alpha", "remove",
         "-alpha", "off",
+        # 2) Wrap with chrome padding in the lighter neutral so the
+        #    PCB panel sits visibly on top of it.
         "-bordercolor", style.background,
         "-border", str(style.padding),
         "-resize", f"{style.max_px}x{style.max_px}>",
         "-brightness-contrast", _brightness_contrast_arg(style.brightness, style.contrast),
         "-modulate", _modulate_arg(style.brightness, style.saturation),
+        # 3) Accent border.
         "-bordercolor", style.border_color,
         "-border", str(style.border_width),
         str(out_png),
