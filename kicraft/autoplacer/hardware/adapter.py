@@ -441,14 +441,25 @@ class KiCadAdapter:
                 if not net_name or net_name.startswith("unconnected-"):
                     continue
                 ppos = pad.GetPosition()
-                # Pad copper extent. For oblong/oval/rounded-rect pads,
-                # GetSize() returns the major-axis bounds, which is the right
-                # answer for "is this pad inside the board outline"; we use
-                # the AABB rather than a polygon for downstream simplicity.
-                psize = pad.GetSize()
+                # Pad copper extent, world-axis-aligned. We deliberately use
+                # GetBoundingBox() (not GetSize()) because GetSize() returns
+                # the pad shape in the pad's LOCAL frame -- before footprint
+                # rotation and before pad-local rotation. For rotated
+                # footprints (every edge-mounted connector: USB-C, USB-A,
+                # pin headers), the local extent's x/y don't match the
+                # world axes, and Pad.bbox() -- which treats size_mm as
+                # world-aligned half-extents around ``pos`` -- ends up
+                # painting an AABB that doesn't enclose the actual pad.
+                # That bug propagated through Component.physical_bbox ->
+                # _compute_component_bbox -> silk poly -> Edge.Cuts, and
+                # produced leaves whose board outline cut through their
+                # own solder pads. GetBoundingBox() applies all rotations
+                # and returns the world AABB, which is the contract Pad
+                # downstream code assumes.
+                pbbox = pad.GetBoundingBox()
                 pad_size = Point(
-                    pcbnew.ToMM(psize.x),
-                    pcbnew.ToMM(psize.y),
+                    pcbnew.ToMM(pbbox.GetWidth()),
+                    pcbnew.ToMM(pbbox.GetHeight()),
                 )
                 p = Pad(
                     ref=ref,

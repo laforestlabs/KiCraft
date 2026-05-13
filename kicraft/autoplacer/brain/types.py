@@ -67,14 +67,27 @@ class Pad:
     pos: Point  # absolute position of pad center, in mm
     net: str  # net name
     layer: Layer
-    # Pad copper extent (width, height) in mm. None = legacy artifact with
-    # no recorded size; bbox() then returns the center as a degenerate point.
-    # Populated by hardware.adapter from KiCad's Pad.GetSize() during board
-    # extraction and carried through solved_layout.json round-trip.
+    # Pad copper extent in mm -- WORLD-AXIS-ALIGNED width and height of the
+    # pad's bounding box, with footprint rotation and pad-local rotation
+    # already applied. Stored this way so bbox() can return the world AABB
+    # by centering on ``pos`` without any rotation math.
+    #
+    # None = legacy artifact with no recorded size; bbox() then returns the
+    # center as a degenerate point. Populated by hardware.adapter from
+    # KiCad's Pad.GetBoundingBox() during board extraction and carried
+    # through solved_layout.json round-trip. _transform_pad rotates this
+    # again when a leaf is placed onto the parent at some rotation, so a
+    # leaf-frame world-AABB becomes a parent-frame world-AABB.
     size_mm: Point | None = None
 
     def bbox(self) -> tuple[Point, Point]:
-        """Pad copper bbox (top_left, bottom_right) in absolute coords."""
+        """Pad copper bbox (top_left, bottom_right) in absolute world coords.
+
+        ``size_mm`` is already world-axis-aligned (post-rotation), so the
+        bbox is simply ``pos ± size_mm / 2``. No rotation math here -- the
+        rotation was applied upstream when ``size_mm`` was populated by
+        the adapter (or rotated by ``_rotate_size`` during placement).
+        """
         if self.size_mm is None:
             return (self.pos, self.pos)
         hw = self.size_mm.x / 2.0
