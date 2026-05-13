@@ -32,21 +32,28 @@ def _build_canvas_config(
             "height_mm": lf.height_mm,
             "color": lf.color,
             "render_url": lf.render_url,
-            # Leaf solver's rounded silk-poly bbox. Drawn as the visible
-            # sharp-cornered amber rectangle per leaf (visual only --
-            # drag / snap / overflow use image_*_mm).
+            # Cosmetic only -- leaf solver's silk-poly bbox.
             "silk_min_x": lf.silk_min_x,
             "silk_min_y": lf.silk_min_y,
             "silk_max_x": lf.silk_max_x,
             "silk_max_y": lf.silk_max_y,
-            # Leaf-local mm extent of render_url's PNG (from the SVG
-            # viewBox that produced it). The canvas draws the image at
-            # this exact rect so pixel aspect lands 1:1 with the
-            # post-route board, no preserveAspectRatio fudge needed.
+            # Where the <image> element draws (SVG viewBox). Includes
+            # footprint silk-text labels that hang past the board edge,
+            # so this is BIGGER than the leaf's physical board. Used
+            # only for <image> x/y/width/height; not for snap/overflow.
             "image_x_mm": lf.image_x_mm,
             "image_y_mm": lf.image_y_mm,
             "image_width_mm": lf.image_width_mm,
             "image_height_mm": lf.image_height_mm,
+            # Edge.Cuts AABB -- single source of truth for physical
+            # extent. Hit, drag/snap, overflow against the parent
+            # outline, and inter-leaf overlap all run against this.
+            # What gets stamped to the parent occupies THIS rectangle,
+            # not the image rectangle.
+            "edge_min_x": lf.edge_min_x,
+            "edge_min_y": lf.edge_min_y,
+            "edge_max_x": lf.edge_max_x,
+            "edge_max_y": lf.edge_max_y,
         }
         for lf in leaves
     ]
@@ -190,6 +197,19 @@ def build_canvas_html(
      extra outline on top of the leaf's baked silkscreen. */
   .ml-leaf.overflow .ml-rot-handle {{
     stroke: #ef4444;
+  }}
+  /* Overlap indicator: a red Edge.Cuts AABB outline draws on top of
+     any leaf whose physical board (the rectangle stamped on the
+     parent) intersects another leaf's. Save is still allowed (per
+     workflow choice) but the user sees exactly which leaves are
+     colliding before they hit save. The .ml-leaf-overlap rect is
+     rendered AFTER the silk-bbox and hit rects so it sits on top. */
+  .ml-leaf-overlap {{
+    fill: rgba(239, 68, 68, 0.10);
+    stroke: #ef4444;
+    stroke-width: 0.35;
+    stroke-opacity: 0.95;
+    pointer-events: none;
   }}
 </style>
 <div id="{canvas_id}-host" class="ml-canvas-host">
@@ -368,15 +388,14 @@ _CANVAS_JS_TEMPLATE = """
   // showed it at (36.4, 35.0) (CCW), explaining the "leaves wandered
   // way outside the outline in KiCad" report.
   //
-  // Center-rotation pivots around the leaf's full visible-content
-  // center (the kicad-cli viewBox center, in leaf-local coords).
-  // Aligned with image_*_mm so the rotation handle and the visual
-  // center the user sees stay coherent regardless of where the leaf
-  // solver decided to draw the rounded silk poly.
+  // Center-rotation pivots around the leaf's physical center (Edge.Cuts
+  // AABB center). This is what gets stamped on the parent, so rotating
+  // around it keeps the user's mental model -- "I'm spinning the board"
+  // -- consistent with the stamped result.
   function leafCenterLocal(leaf) {{
     return {{
-      x: leaf.image_x_mm + leaf.image_width_mm * 0.5,
-      y: leaf.image_y_mm + leaf.image_height_mm * 0.5,
+      x: (leaf.edge_min_x + leaf.edge_max_x) * 0.5,
+      y: (leaf.edge_min_y + leaf.edge_max_y) * 0.5,
     }};
   }}
 
@@ -403,19 +422,16 @@ _CANVAS_JS_TEMPLATE = """
     p.rotation = newRotDeg;
   }}
 
-  // Axis-aligned bbox of the leaf's full visible content, in PARENT
-  // (canvas-world) coords, accounting for rotation. Used by snap +
-  // overflow logic: snapping aligns the visible content edges of two
-  // leaves (not the silk-poly edges), so adjacent leaves tile flush
-  // even when pads or labels overflow the silk poly. The visible amber
-  // outline drawn per leaf is the silk-poly bbox -- a separate visual
-  // hint matching what gets stamped on F.Silkscreen.
+  // Axis-aligned bbox of the leaf's PHYSICAL board (Edge.Cuts) in
+  // PARENT (canvas-world) coords, accounting for rotation. This is the
+  // single source of truth for snap + overflow + inter-leaf overlap:
+  // it's the rectangle the parent stamper actually places on the
+  // board, so anything aligned here matches what gets stamped.
   function leafBboxParent(p, leaf) {{
     const r = (p.rotation || 0) * Math.PI / 180;
     const c = Math.cos(r), s = Math.sin(r);
-    const x0 = leaf.image_x_mm, y0 = leaf.image_y_mm;
-    const x1 = leaf.image_x_mm + leaf.image_width_mm;
-    const y1 = leaf.image_y_mm + leaf.image_height_mm;
+    const x0 = leaf.edge_min_x, y0 = leaf.edge_min_y;
+    const x1 = leaf.edge_max_x, y1 = leaf.edge_max_y;
     const tx = (x, y) => x * c + y * s + p.origin.x;
     const ty = (x, y) => -x * s + y * c + p.origin.y;
     const xs = [tx(x0, y0), tx(x1, y0), tx(x1, y1), tx(x0, y1)];
@@ -426,6 +442,32 @@ _CANVAS_JS_TEMPLATE = """
       min_y: Math.min.apply(null, ys),
       max_y: Math.max.apply(null, ys),
     }};
+  }}
+
+  // Compute the set of leaves that collide with at least one other leaf
+  // in parent space. Used to red-flag overlapping placements. The
+  // collision is on Edge.Cuts AABBs -- if two leaves' physical boards
+  // overlap by more than EPS_MM, both go in the set.
+  const OVERLAP_EPS_MM = 0.01;
+  function computeOverlaps() {{
+    const bboxes = state.placements.map(p => {{
+      const leaf = leafByPath[p.instance_path];
+      if (!leaf) return null;
+      return {{ ip: p.instance_path, b: leafBboxParent(p, leaf) }};
+    }}).filter(Boolean);
+    const overlapping = new Set();
+    for (let i = 0; i < bboxes.length; i++) {{
+      for (let j = i + 1; j < bboxes.length; j++) {{
+        const a = bboxes[i].b, b = bboxes[j].b;
+        const ox = Math.min(a.max_x, b.max_x) - Math.max(a.min_x, b.min_x);
+        const oy = Math.min(a.max_y, b.max_y) - Math.max(a.min_y, b.min_y);
+        if (ox > OVERLAP_EPS_MM && oy > OVERLAP_EPS_MM) {{
+          overlapping.add(bboxes[i].ip);
+          overlapping.add(bboxes[j].ip);
+        }}
+      }}
+    }}
+    return overlapping;
   }}
 
   // Walk every other leaf's silk bbox + the board outline edges and
@@ -600,27 +642,33 @@ _CANVAS_JS_TEMPLATE = """
 
     // Leaves
     const out = state.board_outline;
+    const overlapping = computeOverlaps();
     for (const p of state.placements) {{
       const leaf = leafByPath[p.instance_path];
       if (!leaf) continue;
-      // Two leaf-local rects per placement:
-      //   silk_min/max  -- the leaf solver's rounded silk poly bbox.
-      //                    Drawn as a faint sharp-cornered amber
-      //                    rectangle so the user can see the poly
-      //                    (what gets stamped on F.Silkscreen) with a
-      //                    crisp edge. Visual only.
-      //   image_*_mm    -- the leaf's full visible content extent
-      //                    (kicad-cli SVG viewBox). Used for hit,
-      //                    drag/snap, rotation pivot, and overflow.
+      // Three leaf-local rects per placement:
+      //   silk_min/max  -- leaf solver's rounded silk poly bbox.
+      //                    Cosmetic; not drawn by default.
+      //   image_*_mm    -- SVG viewBox of leaf_canvas.png. Used only
+      //                    to position the <image> element so the
+      //                    rendered PNG lands at its natural extent
+      //                    (silk text labels visible). NOT used for
+      //                    snap/overflow.
+      //   edge_*_mm     -- Edge.Cuts AABB. The leaf's PHYSICAL extent
+      //                    -- the rectangle that gets stamped on the
+      //                    parent. Hit, drag/snap, overflow against
+      //                    the parent outline, and inter-leaf overlap
+      //                    all key off this rectangle.
       const sx0 = leaf.silk_min_x, sy0 = leaf.silk_min_y;
       const sx1 = leaf.silk_max_x, sy1 = leaf.silk_max_y;
       const sw = Math.max(0, sx1 - sx0), sh = Math.max(0, sy1 - sy0);
       const ix0 = leaf.image_x_mm, iy0 = leaf.image_y_mm;
       const ix1 = leaf.image_x_mm + leaf.image_width_mm;
       const iy1 = leaf.image_y_mm + leaf.image_height_mm;
-      // Overflow check uses the image (full content) corners, so the
-      // red overflow flag fires when any actual pad / silk / trace
-      // crosses the outline -- not just when the silk poly does.
+      const ex0 = leaf.edge_min_x, ey0 = leaf.edge_min_y;
+      const ex1 = leaf.edge_max_x, ey1 = leaf.edge_max_y;
+      // Overflow check uses Edge.Cuts corners: the red flag fires when
+      // the physical board crosses the parent outline.
       const r = (p.rotation || 0) * Math.PI / 180;
       const rc = Math.cos(r), rs = Math.sin(r);
       function corner(lx, ly) {{
@@ -630,21 +678,23 @@ _CANVAS_JS_TEMPLATE = """
         }};
       }}
       const corners = [
-        corner(ix0, iy0),
-        corner(ix1, iy0),
-        corner(ix1, iy1),
-        corner(ix0, iy1),
+        corner(ex0, ey0),
+        corner(ex1, ey0),
+        corner(ex1, ey1),
+        corner(ex0, ey1),
       ];
       const overflow = corners.some(c =>
         c.x < out.min.x - 0.01 || c.x > out.max.x + 0.01 ||
         c.y < out.min.y - 0.01 || c.y > out.max.y + 0.01
       );
+      const collides = overlapping.has(p.instance_path);
       const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
       g.setAttribute(
         'class',
         'ml-leaf'
         + (state.selected === p.instance_path ? ' selected' : '')
-        + (overflow ? ' overflow' : ''),
+        + (overflow ? ' overflow' : '')
+        + (collides ? ' overlap' : ''),
       );
       g.setAttribute('data-instance-path', p.instance_path);
       // SVG rotate() is CCW; KiCad rotation is CW. Negate so the
@@ -689,27 +739,40 @@ _CANVAS_JS_TEMPLATE = """
       silkBbox.setAttribute('height', sh);
       g.appendChild(silkBbox);
 
-      // Hit / selection target covers the full visible content extent
-      // (image_*_mm), not just the silk poly. Pads and silk text that
-      // extend past the poly stay grabbable, and snap / overflow work
-      // off the same rectangle, so what the user sees is what they
-      // can drag.
+      // Hit / selection target = Edge.Cuts AABB. The hit area is the
+      // physical board; clicking outside Edge.Cuts (e.g. on a silk
+      // text label that hangs past the board) does NOT grab the leaf,
+      // because that area isn't really part of this leaf's placement.
       const hit = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
       hit.setAttribute('class', 'ml-leaf-hit');
-      hit.setAttribute('x', ix0);
-      hit.setAttribute('y', iy0);
-      hit.setAttribute('width', Math.max(0, ix1 - ix0));
-      hit.setAttribute('height', Math.max(0, iy1 - iy0));
+      hit.setAttribute('x', ex0);
+      hit.setAttribute('y', ey0);
+      hit.setAttribute('width', Math.max(0, ex1 - ex0));
+      hit.setAttribute('height', Math.max(0, ey1 - ey0));
       hit.setAttribute('fill', 'transparent');
       hit.setAttribute('stroke', 'none');
       g.appendChild(hit);
 
-      // Rotation handle floats just outside the content top-right
-      // corner so it tracks the visible leaf shape under rotation.
+      // Red Edge.Cuts overlay when this leaf collides with another.
+      // Drawn AFTER the hit rect so it sits visibly on top of the leaf
+      // image. Mostly transparent fill so the leaf content underneath
+      // still reads.
+      if (collides) {{
+        const ov = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        ov.setAttribute('class', 'ml-leaf-overlap');
+        ov.setAttribute('x', ex0);
+        ov.setAttribute('y', ey0);
+        ov.setAttribute('width', Math.max(0, ex1 - ex0));
+        ov.setAttribute('height', Math.max(0, ey1 - ey0));
+        g.appendChild(ov);
+      }}
+
+      // Rotation handle sits just outside the Edge.Cuts top-right
+      // corner so it tracks the physical board under rotation.
       const rot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       rot.setAttribute('class', 'ml-rot-handle');
-      rot.setAttribute('cx', ix1 + ROT_HANDLE_OFFSET_MM);
-      rot.setAttribute('cy', iy0 - ROT_HANDLE_OFFSET_MM);
+      rot.setAttribute('cx', ex1 + ROT_HANDLE_OFFSET_MM);
+      rot.setAttribute('cy', ey0 - ROT_HANDLE_OFFSET_MM);
       rot.setAttribute('r', ROT_HANDLE_R_MM);
       rot.setAttribute('data-role', 'rotate');
       g.appendChild(rot);

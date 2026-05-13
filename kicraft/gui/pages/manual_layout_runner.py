@@ -73,18 +73,76 @@ class LeafInfo:
     silk_min_y: float = 0.0
     silk_max_x: float = 0.0
     silk_max_y: float = 0.0
-    # Leaf-local mm extent of ``render_url``'s PNG. ``image_width_mm`` and
-    # ``image_height_mm`` are the viewBox of the post-route kicad-cli SVG
-    # the canvas image was rasterized from, so the canvas can draw the
-    # PNG at the exact (x, y, w, h) it represents instead of stretching
-    # it to width_mm/height_mm (Edge.Cuts) and producing aspect drift.
-    # Falls back to (0, 0, width_mm, height_mm) when the canvas render
-    # fails -- equivalent to the old behaviour but with no distortion
-    # claim attached.
+    # Leaf-local mm extent of ``render_url``'s PNG. The viewBox of the
+    # post-route kicad-cli SVG, used to draw the <image> element at its
+    # natural extent (silk text labels included). NOT a physical extent --
+    # kicad-cli ``--fit-page-to-board`` includes footprint reference
+    # labels that hang past Edge.Cuts, so this rectangle is typically
+    # WIDER and TALLER than the actual board.
     image_x_mm: float = 0.0
     image_y_mm: float = 0.0
     image_width_mm: float = 0.0
     image_height_mm: float = 0.0
+    # Leaf-local Edge.Cuts AABB -- the leaf's PHYSICAL extent, parsed
+    # from the canonical leaf_routed.kicad_pcb's ``gr_line`` items on
+    # the Edge.Cuts layer. This is the single source of truth for the
+    # leaf's footprint on the parent board: hit testing, snapping,
+    # overflow against the outline, AND inter-leaf overlap detection
+    # all run against this rectangle. Falls back to (0, 0, width_mm,
+    # height_mm) from metadata when no Edge.Cuts is present.
+    edge_min_x: float = 0.0
+    edge_min_y: float = 0.0
+    edge_max_x: float = 0.0
+    edge_max_y: float = 0.0
+
+
+def _edge_cuts_bbox_from_pcb(
+    pcb_path: Path,
+) -> tuple[float, float, float, float] | None:
+    """AABB of every ``gr_line`` / ``gr_arc`` / ``gr_rect`` on the
+    Edge.Cuts layer of ``leaf_routed.kicad_pcb``. This is the leaf's
+    physical board outline, NOT the SVG viewBox (which can be inflated
+    by footprint silk reference labels that hang past Edge.Cuts).
+
+    Used by the canvas as the single source of truth for hit testing,
+    snapping, overflow against the parent outline, and inter-leaf
+    overlap detection. Returns None when the file is missing or has no
+    Edge.Cuts geometry.
+    """
+    import re
+
+    try:
+        text = pcb_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    xs: list[float] = []
+    ys: list[float] = []
+    # ``(gr_<kind> ... layer "Edge.Cuts" ...)`` blocks; the geometry
+    # tokens are ``(start x y)`` / ``(end x y)`` / ``(center x y)`` /
+    # ``(mid x y)`` / ``(xy x y)`` depending on the shape kind.
+    block_re = re.compile(
+        r'\(gr_(line|arc|rect|poly|circle)\s+(.*?)\)\s*(?=\(gr_|\(footprint|\Z)',
+        re.S,
+    )
+    point_re = re.compile(
+        r'(?:\((?:start|end|center|mid)\s+([-\d.eE+]+)\s+([-\d.eE+]+)\))'
+        r'|(?:\(xy\s+([-\d.eE+]+)\s+([-\d.eE+]+)\))'
+    )
+    for m in block_re.finditer(text):
+        blk = m.group(0)
+        if 'Edge.Cuts' not in blk:
+            continue
+        for pm in point_re.finditer(blk):
+            if pm.group(1) is not None:
+                xs.append(float(pm.group(1)))
+                ys.append(float(pm.group(2)))
+            else:
+                xs.append(float(pm.group(3)))
+                ys.append(float(pm.group(4)))
+    if not xs:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
 
 
 def _silk_bbox_from_solved_layout(
@@ -188,17 +246,26 @@ def discover_leaves(experiments_dir: Path) -> list[LeafInfo]:
         else:
             image_x, image_y, image_w, image_h = extent
 
-        # silk_min/max = the leaf solver's silk-poly bbox. Drawn on the
-        # canvas as the sharp-cornered amber outline a user can see and
-        # snap by eye to. The drag/snap/overflow logic uses image_*_mm
-        # (the full visible content extent), so adjacent leaves tile
-        # flush even when pads or labels overflow the silk poly --
-        # silk_min/max is purely visual.
+        # silk_min/max = the leaf solver's silk-poly bbox. Cosmetic only.
         poly_bbox = _silk_bbox_from_solved_layout(leaf_dir)
         if poly_bbox is None:
             silk_min_x, silk_min_y, silk_max_x, silk_max_y = 0.0, 0.0, w, h
         else:
             silk_min_x, silk_min_y, silk_max_x, silk_max_y = poly_bbox
+
+        # edge_min/max = the leaf's Edge.Cuts AABB from the canonical
+        # leaf_routed.kicad_pcb. This is the single source of truth for
+        # the leaf's physical extent: it's what gets stamped on the
+        # parent board, what defines whether two leaves physically
+        # collide, and what the canvas snaps / overflow-checks against.
+        # Falls back to the metadata's local_board_outline (which is
+        # what the leaf solver was told to fit into) when Edge.Cuts
+        # is missing from the PCB file -- conservative default.
+        edge_bbox = _edge_cuts_bbox_from_pcb(leaf_dir / "leaf_routed.kicad_pcb")
+        if edge_bbox is None:
+            edge_min_x, edge_min_y, edge_max_x, edge_max_y = 0.0, 0.0, w, h
+        else:
+            edge_min_x, edge_min_y, edge_max_x, edge_max_y = edge_bbox
 
         leaves.append(
             LeafInfo(
@@ -216,6 +283,10 @@ def discover_leaves(experiments_dir: Path) -> list[LeafInfo]:
                 image_y_mm=image_y,
                 image_width_mm=image_w,
                 image_height_mm=image_h,
+                edge_min_x=edge_min_x,
+                edge_min_y=edge_min_y,
+                edge_max_x=edge_max_x,
+                edge_max_y=edge_max_y,
             )
         )
 
