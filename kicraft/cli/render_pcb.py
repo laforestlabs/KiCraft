@@ -10,9 +10,11 @@ canvas PNG come out of the same code path.
 Why the styled previews look as they do:
 - tightly clipped to the board outline (Edge.Cuts) so off-board silk
   text never leaks into the preview
-- dark surround so the board edge is visible against a navy chrome
-- cyan accent border so the rendered tile is easy to spot
+- transparent pixels inside Edge.Cuts filled with a dark substrate
+  color so the board reads as a panel against the page background
 - gentle contrast/saturation boost for readability
+- no surrounding padding or border -- the surrounding page (a dark
+  card / experiment-manager background) supplies the framing
 """
 
 from __future__ import annotations
@@ -47,10 +49,6 @@ VIEWS = {
             "contrast": 1.15,
             "saturation": 1.05,
             "brightness": 1.00,
-            "background": "#3a3a3a",
-            "border_color": "#67e8f9",
-            "border_width": 6,
-            "padding": 52,
         },
     },
     "back_all": {
@@ -61,10 +59,6 @@ VIEWS = {
             "contrast": 1.38,
             "saturation": 1.24,
             "brightness": 0.90,
-            "background": "#3a3a3a",
-            "border_color": "#67e8f9",
-            "border_width": 6,
-            "padding": 52,
         },
     },
     "copper_both": {
@@ -74,10 +68,6 @@ VIEWS = {
             "contrast": 1.34,
             "saturation": 1.18,
             "brightness": 0.90,
-            "background": "#3a3a3a",
-            "border_color": "#22d3ee",
-            "border_width": 6,
-            "padding": 52,
         },
     },
     "front_copper": {
@@ -87,10 +77,6 @@ VIEWS = {
             "contrast": 1.30,
             "saturation": 1.12,
             "brightness": 0.90,
-            "background": "#3a3a3a",
-            "border_color": "#22d3ee",
-            "border_width": 6,
-            "padding": 52,
         },
     },
     "back_copper": {
@@ -101,10 +87,6 @@ VIEWS = {
             "contrast": 1.30,
             "saturation": 1.12,
             "brightness": 0.90,
-            "background": "#3a3a3a",
-            "border_color": "#22d3ee",
-            "border_width": 6,
-            "padding": 52,
         },
     },
     "courtyard": {
@@ -114,10 +96,6 @@ VIEWS = {
             "contrast": 1.34,
             "saturation": 1.02,
             "brightness": 0.90,
-            "background": "#3a3a3a",
-            "border_color": "#c4b5fd",
-            "border_width": 6,
-            "padding": 52,
         },
     },
 }
@@ -143,14 +121,10 @@ def render_view(
 ) -> str | None:
     """Render a single named view to PNG. Returns the output path on
     success or None on failure. Edge.Cuts clipping, F.Cu+B.Cu compositing,
-    and chrome are all handled by the unified renderer."""
+    and substrate fill are all handled by the unified renderer."""
     png_path = os.path.join(output_dir, f"{view_name}.png")
     post = dict(view_cfg.get("post") or {})
     style = MonitorStyle(
-        background=post.get("background", "#020617"),
-        border_color=post.get("border_color", "#67e8f9"),
-        border_width=int(post.get("border_width", 6)),
-        padding=int(post.get("padding", 52)),
         contrast=float(post.get("contrast", 1.12)),
         saturation=float(post.get("saturation", 1.08)),
         brightness=float(post.get("brightness", 1.00)),

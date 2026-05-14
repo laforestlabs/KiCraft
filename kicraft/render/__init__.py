@@ -2,9 +2,10 @@
 
 One core function (``render_pcb``) renders a ``.kicad_pcb`` to a PNG
 clipped to the board's Edge.Cuts AABB. A ``MonitorStyle`` adapter on
-top adds chrome (dark padding, cyan border, contrast/saturation) for
-the monitor / pipeline-graph views; without it the renderer produces
-a transparent-background, exactly-Edge.Cuts-sized PNG that the manual
+top fills the transparent pixels inside Edge.Cuts with the PCB
+substrate color and applies a contrast/saturation boost for the
+monitor / pipeline-graph views; without it the renderer produces a
+transparent-background, exactly-Edge.Cuts-sized PNG that the manual
 layout canvas drops directly onto its SVG. Both consumers go through
 the same pipeline so they cannot drift.
 """
