@@ -181,6 +181,7 @@ def pin_leaf(
     for src, dst in _round_all_snapshot_files(leaf_dir, round_num).items():
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(src, dst)
+    _invalidate_leaf_canvas_cache(leaf_dir)
 
     manifest = read_pins(experiments_dir)
     manifest["pinned_leaves"][leaf_key] = {
@@ -306,5 +307,17 @@ def ensure_applied(experiments_dir: Path) -> dict[str, str]:
         for src, dst in all_files.items():
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(src, dst)
+        _invalidate_leaf_canvas_cache(leaf_dir)
         statuses[leaf_key] = "applied"
     return statuses
+
+
+def _invalidate_leaf_canvas_cache(leaf_dir: Path) -> None:
+    """Delete the cached manual-layout canvas PNG + extent sidecar so the
+    next ``render_leaf_canvas`` call re-renders from the just-pinned
+    canonical PCB. Required because ``render_leaf_canvas``'s mtime check
+    uses strict-less-than, so a same-second pin+canvas-mtime collision
+    leaves the stale PNG in place -- the user then sees a different leaf
+    in the manual layout than the pinned snapshot."""
+    (leaf_dir / "renders" / "leaf_canvas.png").unlink(missing_ok=True)
+    (leaf_dir / "renders" / "leaf_canvas.png.extent.json").unlink(missing_ok=True)

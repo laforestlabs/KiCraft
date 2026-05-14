@@ -74,6 +74,59 @@ def test_pin_leaf_raises_when_snapshot_incomplete(tmp_path):
     assert pins.is_pinned(tmp_path, LEAF_KEY) is None
 
 
+def test_pin_leaf_invalidates_leaf_canvas_cache(tmp_path):
+    """pin_leaf must delete the cached leaf_canvas.png + extent sidecar so the
+    next manual layout render comes from the just-pinned PCB, not whichever
+    PCB was canonical when the cache was last written. Without this, the user
+    sees a different leaf in the Manual Layout tab than the one they pinned."""
+    leaf_dir = _seed_round_snapshot(tmp_path, LEAF_KEY, 7, "winner")
+    renders = leaf_dir / "renders"
+    renders.mkdir()
+    canvas = renders / "leaf_canvas.png"
+    sidecar = renders / "leaf_canvas.png.extent.json"
+    canvas.write_bytes(b"stale-png")
+    sidecar.write_text(
+        '{"renderer_version": 2, "x_mm": 0, "y_mm": 0,'
+        ' "width_mm": 1, "height_mm": 1}'
+    )
+
+    pins.pin_leaf(tmp_path, LEAF_KEY, 7)
+
+    assert not canvas.exists(), (
+        "pin_leaf left a stale leaf_canvas.png; manual layout will show wrong content"
+    )
+    assert not sidecar.exists(), (
+        "pin_leaf left a stale extent sidecar; manual layout will use wrong mm extent"
+    )
+
+
+def test_ensure_applied_invalidates_leaf_canvas_cache_when_copying(tmp_path):
+    """ensure_applied must also invalidate the canvas cache on the same
+    code path -- a composer-driven re-apply has the same staleness window
+    as the initial pin."""
+    leaf_dir = _seed_round_snapshot(tmp_path, LEAF_KEY, 9, "pinned-state")
+    pins.pin_leaf(tmp_path, LEAF_KEY, 9)
+
+    # Simulate: leaf solver overwrites canonical AND re-renders the canvas.
+    # The canvas now shows the overwriting state, not the pinned one.
+    (leaf_dir / "leaf_routed.kicad_pcb").write_text("OVERWRITTEN")
+    renders = leaf_dir / "renders"
+    renders.mkdir(exist_ok=True)
+    canvas = renders / "leaf_canvas.png"
+    sidecar = renders / "leaf_canvas.png.extent.json"
+    canvas.write_bytes(b"canvas-from-overwrite")
+    sidecar.write_text(
+        '{"renderer_version": 2, "x_mm": 0, "y_mm": 0,'
+        ' "width_mm": 1, "height_mm": 1}'
+    )
+
+    statuses = pins.ensure_applied(tmp_path)
+    assert statuses[LEAF_KEY] == "applied"
+    # Cache cleared so the next page load re-renders from the restored PCB.
+    assert not canvas.exists()
+    assert not sidecar.exists()
+
+
 def test_unpin_leaf_removes_manifest_entry_but_leaves_files(tmp_path):
     leaf_dir = _seed_round_snapshot(tmp_path, LEAF_KEY, 4, "kept")
     pins.pin_leaf(tmp_path, LEAF_KEY, 4)
