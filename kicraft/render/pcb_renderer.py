@@ -63,11 +63,15 @@ class MonitorStyle:
     transparent-background PNG the manual layout canvas consumes
     directly.
 
-    ``board_background`` is composited onto the transparent pixels
+    ``board_background`` is composited UNDER the transparent pixels
     INSIDE Edge.Cuts (where there's no copper or silk) -- the PCB
-    substrate color. Picked dark so copper and silk pop."""
+    substrate color. Accepts any magick color spec including RGBA
+    (e.g. ``rgba(255,182,193,0.5)``) so the output PNG can carry partial
+    alpha in the substrate area and the page background bleeds through;
+    this makes the leaf edge visually unambiguous against the GUI's
+    dark surface."""
 
-    board_background: str = "#1e1e1e"
+    board_background: str = "rgba(255,182,193,0.5)"
     contrast: float = 1.12
     saturation: float = 1.08
     brightness: float = 1.00
@@ -199,26 +203,37 @@ def _apply_monitor_style(
     raw_png: Path, out_png: Path, style: MonitorStyle
 ) -> bool:
     """Convert the transparent-background Edge.Cuts PNG into the styled
-    monitor preview: PCB-color substrate inside Edge.Cuts, contrast +
+    monitor preview: PCB-color substrate under Edge.Cuts, contrast +
     saturation boost. No padding or border -- the surrounding page
     supplies framing.
 
     ``-trim`` is intentionally absent -- the input PNG is already
     clipped to Edge.Cuts.
+
+    Output keeps the alpha channel so an RGBA ``board_background``
+    (e.g. translucent pink) lets the page show through the substrate;
+    copper/silk pixels remain fully opaque because raw composites on
+    top using its own alpha.
     """
     cmd = [
         "magick", str(raw_png),
-        # Fill transparent areas INSIDE Edge.Cuts with the PCB substrate
-        # color. After this the image is opaque, exactly Edge.Cuts-sized,
-        # and the board area reads as a panel against whatever the page
-        # background is.
-        "-background", style.board_background,
-        "-alpha", "remove",
-        "-alpha", "off",
+        # Build a same-size substrate canvas by cloning raw and painting
+        # every pixel (RGB + alpha) to board_background, then put raw
+        # back on top via Over -- raw's opaque pixels mask the substrate
+        # color out, raw's transparent pixels expose it. Result keeps
+        # whatever alpha board_background's color spec carries.
+        "(",
+        "-clone", "0",
+        "-alpha", "set",
+        "-fill", style.board_background,
+        "-draw", "color 0,0 reset",
+        ")",
+        "+swap",
+        "-compose", "Over", "-composite",
         "-resize", f"{style.max_px}x{style.max_px}>",
         "-brightness-contrast", _brightness_contrast_arg(style.brightness, style.contrast),
         "-modulate", _modulate_arg(style.brightness, style.saturation),
-        str(out_png),
+        "PNG32:" + str(out_png),
     ]
     try:
         subprocess.run(cmd, check=True, capture_output=True, timeout=30)

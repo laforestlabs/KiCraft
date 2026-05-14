@@ -61,17 +61,18 @@ def _outline_around_geometry(
     """Compute a tight Edge.Cuts outline hugging the same bbox as the silk.
 
     The silk poly is drawn at ``bbox ± silkscreen_margin_mm`` (default 0.5 mm).
-    Edge.Cuts sits ``edge_margin = silk_margin + 0.3 mm`` outside that bbox so
-    the yellow board outline tracks the white silk with a uniform 0.3 mm gap.
-    Returns ``None`` for empty leaves so the caller can keep the original
-    outline.
+    Edge.Cuts defaults to ``edge_margin = silk_margin`` so the yellow board
+    outline sits exactly on top of the white silk outline (zero gap).
+    Callers can still override via ``leaf_edge_margin_mm`` if they want a
+    visible gap. Returns ``None`` for empty leaves so the caller can keep
+    the original outline.
     """
     if not components:
         return None
     from kicraft.autoplacer.brain.subcircuit_solver import _compute_component_bbox
     bbox = _compute_component_bbox(components, traces=traces, vias=vias)
     silk_margin = float(cfg.get("silkscreen_margin_mm", 0.5))
-    edge_margin = float(cfg.get("leaf_edge_margin_mm", silk_margin + 0.3))
+    edge_margin = float(cfg.get("leaf_edge_margin_mm", silk_margin))
     return (
         Point(bbox["min_x"] - edge_margin, bbox["min_y"] - edge_margin),
         Point(bbox["max_x"] + edge_margin, bbox["max_y"] + edge_margin),
