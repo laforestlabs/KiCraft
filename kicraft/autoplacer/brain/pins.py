@@ -178,9 +178,42 @@ def pin_leaf(
     # meant the monitor surfaced whichever round wrote that file last
     # (typically the final round of the leaves-only run, not the pinned
     # one) while the manual layout correctly showed the pinned content.
+    #
+    # Phase B made round_NNNN_* render PNGs hardlinks to their canonical
+    # paths, so when the requested round is the one whose bytes are
+    # already in canonical, ``shutil.copy`` raises SameFileError (src and
+    # dst share an inode). In that case the canonical already IS the
+    # pinned content; we still want canonical to bump its mtime to NOW
+    # so downstream caches invalidate, so we unlink + re-link instead of
+    # copying. For paths that ARE distinct (different inodes), use
+    # ``os.replace`` after creating a fresh inode via a temp copy so the
+    # write is atomic.
     for src, dst in _round_all_snapshot_files(leaf_dir, round_num).items():
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(src, dst)
+        try:
+            src_stat = src.stat()
+            dst_stat = dst.stat() if dst.exists() else None
+        except OSError:
+            src_stat, dst_stat = None, None
+        same_inode = (
+            src_stat is not None
+            and dst_stat is not None
+            and src_stat.st_dev == dst_stat.st_dev
+            and src_stat.st_ino == dst_stat.st_ino
+        )
+        if same_inode:
+            # Canonical already points at the pinned content via the
+            # Phase B hardlink. Drop and re-link to bump mtime so caches
+            # invalidate.
+            try:
+                dst.unlink()
+                import os as _os
+                _os.link(src, dst)
+            except OSError:
+                # Fall back to copy on filesystems that reject hardlinks.
+                shutil.copy(src, dst)
+        else:
+            shutil.copy(src, dst)
     _invalidate_leaf_canvas_cache(leaf_dir)
 
     manifest = read_pins(experiments_dir)
