@@ -26,7 +26,6 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -97,19 +96,22 @@ def ensure_renders_dir(artifact_dir: str | Path) -> Path:
 def promote_to_round_snapshot(
     canonical: str | Path | None, round_index: int | None
 ) -> Path | None:
-    """Make ``round_NNNN_<canonical_basename>`` next to ``canonical`` --
-    a hardlink when the filesystem supports it (so the snapshot and the
-    canonical share one inode and one set of bytes), otherwise a regular
-    copy. Returns the snapshot path, or ``None`` when there is nothing
-    to promote.
+    """Make ``round_NNNN_<canonical_basename>`` next to ``canonical``
+    as a byte-level copy. Returns the snapshot path, or ``None`` when
+    there is nothing to promote.
 
-    Hardlinks make ``verify_pinned_renders.py``'s "canonical ==
-    round_NNNN bytewise" invariant hold by construction rather than by
-    the two-step "render then copy" dance the round-snapshot logic used
-    to do. Subsequent overwrites of ``canonical`` (e.g. the next round
-    of routing producing a new render) create a new inode, leaving the
-    earlier round snapshot pointing at the bytes that were on disk when
-    THIS round produced them.
+    Earlier this function hardlinked the snapshot to canonical for
+    disk savings + byte-equivalence-by-construction. That works for
+    PNGs (``render_pcb`` writes via tmpfile + os.replace so canonical
+    gets a fresh inode on every render, leaving prior hardlinks
+    pointing at the now-frozen old inode). It does NOT work for
+    ``.kicad_pcb`` files: ``pcbnew.Save()`` overwrites the canonical
+    inode in place each round, so a hardlinked ``round_NNNN_*.kicad_pcb``
+    would silently see whatever the LATEST round of routing wrote, not
+    the bytes that were on disk when THIS round produced them. Auto-pin
+    + manual layout then read back the wrong geometry for every
+    non-latest round. Copy is the only safe primitive for files we do
+    not control the writer of.
     """
     if canonical is None or round_index is None:
         return None
@@ -118,15 +120,12 @@ def promote_to_round_snapshot(
         return None
     dst = src.parent / f"round_{int(round_index):04d}_{src.name}"
     dst.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        if dst.exists():
+    if dst.exists():
+        try:
             dst.unlink()
-        os.link(src, dst)
-    except OSError:
-        # Cross-device, exhausted hardlink table, or filesystem that
-        # rejects hardlinks (some FUSE / network mounts) -- fall back
-        # to copy so the snapshot still exists.
-        shutil.copy2(src, dst)
+        except OSError:
+            pass
+    shutil.copy2(src, dst)
     return dst
 
 
