@@ -17,6 +17,7 @@ itself supplies any framing around the resulting tile.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -285,9 +286,24 @@ def render_pcb(
 
     out_png.parent.mkdir(parents=True, exist_ok=True)
 
+    # All magick writes target ``stage_png`` (a sibling of out_png so
+    # os.replace stays on the same filesystem). After every step
+    # succeeds, we ``os.replace(stage_png, out_png)`` to swap the file
+    # in atomically. The atomic swap creates a NEW inode for out_png;
+    # any hardlinks an earlier round made to the previous out_png keep
+    # pointing at the old, now-frozen inode. Without this, magick's
+    # truncate-and-write on out_png would clobber the bytes seen
+    # through any hardlinked round_NNNN snapshot of a prior render.
+    with tempfile.NamedTemporaryFile(
+        suffix=".png", delete=False, dir=str(out_png.parent),
+        prefix=f".{out_png.stem}.",
+    ) as f:
+        stage_png = Path(f.name)
+
     composite = _has_both_copper(layers)
     tmp_svgs: list[Path] = []
     raw_png_path: Path | None = None
+    success = False
     try:
         if composite:
             front_layers_list = [
@@ -311,7 +327,7 @@ def render_pcb(
                 return None
             if style is None:
                 if not _rasterize_composite(
-                    svg_front, svg_back, out_png, dpi=dpi, back_opacity=0.52,
+                    svg_front, svg_back, stage_png, dpi=dpi, back_opacity=0.52,
                 ):
                     return None
             else:
@@ -321,7 +337,7 @@ def render_pcb(
                     svg_front, svg_back, raw_png_path, dpi=dpi, back_opacity=0.52,
                 ):
                     return None
-                if not _apply_monitor_style(raw_png_path, out_png, style):
+                if not _apply_monitor_style(raw_png_path, stage_png, style):
                     return None
         else:
             with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as f:
@@ -332,15 +348,17 @@ def render_pcb(
             if not _rewrite_svg_viewbox(svg, ec):
                 return None
             if style is None:
-                if not _rasterize_single(svg, out_png, dpi=dpi):
+                if not _rasterize_single(svg, stage_png, dpi=dpi):
                     return None
             else:
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
                     raw_png_path = Path(f.name)
                 if not _rasterize_single(svg, raw_png_path, dpi=dpi):
                     return None
-                if not _apply_monitor_style(raw_png_path, out_png, style):
+                if not _apply_monitor_style(raw_png_path, stage_png, style):
                     return None
+        os.replace(stage_png, out_png)
+        success = True
     finally:
         for p in tmp_svgs:
             try:
@@ -350,6 +368,11 @@ def render_pcb(
         if raw_png_path is not None:
             try:
                 raw_png_path.unlink()
+            except OSError:
+                pass
+        if not success:
+            try:
+                stage_png.unlink()
             except OSError:
                 pass
 

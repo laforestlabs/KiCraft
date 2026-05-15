@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -38,9 +39,9 @@ except Exception:  # pragma: no cover - best-effort import
     render_overlay = None
 
 try:
-    from kicraft.cli.render_pcb import render_all
+    from kicraft.render import render_views as _render_views
 except Exception:  # pragma: no cover - best-effort import
-    render_all = None
+    _render_views = None
 
 
 DEFAULT_VIEWS = ("front_all", "back_all", "copper_both")
@@ -72,6 +73,42 @@ def ensure_renders_dir(artifact_dir: str | Path) -> Path:
     renders_dir = Path(artifact_dir) / "renders"
     renders_dir.mkdir(parents=True, exist_ok=True)
     return renders_dir
+
+
+def promote_to_round_snapshot(
+    canonical: str | Path | None, round_index: int | None
+) -> Path | None:
+    """Make ``round_NNNN_<canonical_basename>`` next to ``canonical`` --
+    a hardlink when the filesystem supports it (so the snapshot and the
+    canonical share one inode and one set of bytes), otherwise a regular
+    copy. Returns the snapshot path, or ``None`` when there is nothing
+    to promote.
+
+    Hardlinks make ``verify_pinned_renders.py``'s "canonical ==
+    round_NNNN bytewise" invariant hold by construction rather than by
+    the two-step "render then copy" dance the round-snapshot logic used
+    to do. Subsequent overwrites of ``canonical`` (e.g. the next round
+    of routing producing a new render) create a new inode, leaving the
+    earlier round snapshot pointing at the bytes that were on disk when
+    THIS round produced them.
+    """
+    if canonical is None or round_index is None:
+        return None
+    src = Path(canonical)
+    if not src.is_file():
+        return None
+    dst = src.parent / f"round_{int(round_index):04d}_{src.name}"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if dst.exists():
+            dst.unlink()
+        os.link(src, dst)
+    except OSError:
+        # Cross-device, exhausted hardlink table, or filesystem that
+        # rejects hardlinks (some FUSE / network mounts) -- fall back
+        # to copy so the snapshot still exists.
+        shutil.copy2(src, dst)
+    return dst
 
 
 def write_leaf_drc_json(drc_dict: dict[str, Any], output_path: str | Path) -> str:
@@ -106,7 +143,7 @@ def render_leaf_board_views(
         "errors": [],
     }
 
-    if render_all is None:
+    if _render_views is None:
         result["errors"].append("render_pcb_import_failed")
         return result
 
@@ -118,30 +155,22 @@ def render_leaf_board_views(
         result["errors"].append("pcb_missing")
         return result
 
-    temp_dir = out_dir / f".tmp_{prefix}_views"
-    temp_dir.mkdir(parents=True, exist_ok=True)
-
     try:
         with (
             _suppress_noisy_stderr(),
             contextlib.redirect_stdout(io.StringIO() if quiet else sys.stdout),
         ):
-            rendered = render_all(str(pcb), str(temp_dir), list(views))
-        for view_name, src_path in rendered.items():
-            src = Path(src_path)
-            if not src.exists():
-                continue
-            dest = out_dir / f"{prefix}_{view_name}.png"
-            shutil.move(str(src), str(dest))
+            rendered = _render_views(
+                pcb,
+                out_dir,
+                views=list(views),
+                name_template=f"{prefix}_{{view}}.png",
+            )
+        for view_name, path in rendered.items():
             result["rendered_views"].append(view_name)
-            result["paths"][view_name] = str(dest)
+            result["paths"][view_name] = str(path)
     except Exception as exc:  # pragma: no cover - external tool path
         result["errors"].append(f"render_failed:{exc}")
-    finally:
-        try:
-            shutil.rmtree(temp_dir)
-        except OSError:
-            pass
 
     return result
 

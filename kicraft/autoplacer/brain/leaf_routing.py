@@ -13,6 +13,7 @@ from kicraft.autoplacer.brain.subcircuit_extractor import ExtractedSubcircuitBoa
 from kicraft.autoplacer.brain.subcircuit_render_diagnostics import (
     generate_leaf_diagnostic_artifacts,
     generate_stage_diagnostic_artifacts,
+    promote_to_round_snapshot,
 )
 from kicraft.autoplacer.brain.types import Component, Point
 from kicraft.autoplacer.freerouting_runner import (
@@ -441,67 +442,23 @@ def route_local_subcircuit(
     round_board_pre_route = ""
     round_board_routed = ""
 
-    if round_index is not None:
-        round_prefix = f"round_{int(round_index):04d}"
-
-        def _copy_round_board(
-            source_path: Path,
-            suffix: str,
-        ) -> str:
-            if not source_path.exists():
-                return ""
-            destination = source_path.parent / f"{round_prefix}_{suffix}{source_path.suffix}"
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_path, destination)
-            return str(destination)
-
-        round_board_pre_route = _copy_round_board(
-            pre_route_board,
-            "leaf_pre_freerouting",
-        )
+    _board_snapshot = promote_to_round_snapshot(pre_route_board, round_index)
+    if _board_snapshot is not None:
+        round_board_pre_route = str(_board_snapshot)
 
     if round_index is not None and not leaf_diagnostics.get("skipped", False):
-        renders_dir = Path(artifact_paths.artifact_dir) / "renders"
-        round_prefix = f"round_{int(round_index):04d}"
-
-        def _copy_round_preview(
-            source_path: str | None,
-            suffix: str,
-        ) -> str:
-            if not source_path:
-                return ""
-            source = Path(source_path)
-            if not source.exists():
-                return ""
-            destination = renders_dir / f"{round_prefix}_{suffix}{source.suffix}"
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-            return str(destination)
-
         pre_route_section = leaf_diagnostics.get("pre_route", {})
         if isinstance(pre_route_section, dict):
             pre_route_views = pre_route_section.get("board_views", {})
             if isinstance(pre_route_views, dict):
                 pre_route_paths = pre_route_views.get("paths", {})
                 if isinstance(pre_route_paths, dict):
-                    round_pre_front = _copy_round_preview(
-                        pre_route_paths.get("front_all"),
-                        "pre_route_front_all",
-                    )
-                    round_pre_back = _copy_round_preview(
-                        pre_route_paths.get("back_all"),
-                        "pre_route_back_all",
-                    )
-                    round_pre_copper = _copy_round_preview(
-                        pre_route_paths.get("copper_both"),
-                        "pre_route_copper_both",
-                    )
-                    if round_pre_front:
-                        pre_route_paths["round_front_all"] = round_pre_front
-                    if round_pre_back:
-                        pre_route_paths["round_back_all"] = round_pre_back
-                    if round_pre_copper:
-                        pre_route_paths["round_copper_both"] = round_pre_copper
+                    for _view in ("front_all", "back_all", "copper_both"):
+                        snap = promote_to_round_snapshot(
+                            pre_route_paths.get(_view), round_index
+                        )
+                        if snap is not None:
+                            pre_route_paths[f"round_{_view}"] = str(snap)
 
     pre_route_validation["render_diagnostics"] = copy.deepcopy(leaf_diagnostics)
     pre_route_validation["leaf_legality_repair"] = copy.deepcopy(legality_repair)
@@ -621,99 +578,25 @@ def route_local_subcircuit(
         }
         route_timing["routed_render_diagnostics_s"] = 0.0
 
-    round_preview_pre_route_front = ""
-    round_preview_pre_route_back = ""
-    round_preview_pre_route_copper = ""
-    round_preview_routed_front = ""
-    round_preview_routed_back = ""
-    round_preview_routed_copper = ""
-
-    if round_index is not None:
-        round_prefix = f"round_{int(round_index):04d}"
-
-        def _copy_round_board(
-            source_path: Path,
-            suffix: str,
-        ) -> str:
-            if not source_path.exists():
-                return ""
-            destination = source_path.parent / f"{round_prefix}_{suffix}{source_path.suffix}"
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_path, destination)
-            return str(destination)
-
-        round_board_routed = _copy_round_board(
-            routed_board,
-            "leaf_routed",
-        )
+    _routed_board_snapshot = promote_to_round_snapshot(routed_board, round_index)
+    if _routed_board_snapshot is not None:
+        round_board_routed = str(_routed_board_snapshot)
 
     if round_index is not None and not leaf_diagnostics.get("skipped", False):
-        renders_dir = Path(artifact_paths.artifact_dir) / "renders"
-        round_prefix = f"round_{int(round_index):04d}"
-
-        def _copy_round_preview(
-            source_path: str | None,
-            suffix: str,
-        ) -> str:
-            if not source_path:
-                return ""
-            source = Path(source_path)
-            if not source.exists():
-                return ""
-            destination = renders_dir / f"{round_prefix}_{suffix}{source.suffix}"
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-            return str(destination)
-
-        pre_route_section = leaf_diagnostics.get("pre_route", {})
-        if isinstance(pre_route_section, dict):
-            pre_route_views = pre_route_section.get("board_views", {})
-            if isinstance(pre_route_views, dict):
-                pre_route_paths = pre_route_views.get("paths", {})
-                if isinstance(pre_route_paths, dict):
-                    round_preview_pre_route_front = _copy_round_preview(
-                        pre_route_paths.get("front_all"),
-                        "pre_route_front_all",
-                    )
-                    round_preview_pre_route_back = _copy_round_preview(
-                        pre_route_paths.get("back_all"),
-                        "pre_route_back_all",
-                    )
-                    round_preview_pre_route_copper = _copy_round_preview(
-                        pre_route_paths.get("copper_both"),
-                        "pre_route_copper_both",
-                    )
-                    if round_preview_pre_route_front:
-                        pre_route_paths["round_front_all"] = round_preview_pre_route_front
-                    if round_preview_pre_route_back:
-                        pre_route_paths["round_back_all"] = round_preview_pre_route_back
-                    if round_preview_pre_route_copper:
-                        pre_route_paths["round_copper_both"] = round_preview_pre_route_copper
-
-        routed_section = leaf_diagnostics.get("routed", {})
-        if isinstance(routed_section, dict):
-            routed_views = routed_section.get("board_views", {})
-            if isinstance(routed_views, dict):
-                routed_paths = routed_views.get("paths", {})
-                if isinstance(routed_paths, dict):
-                    round_preview_routed_front = _copy_round_preview(
-                        routed_paths.get("front_all"),
-                        "routed_front_all",
-                    )
-                    round_preview_routed_back = _copy_round_preview(
-                        routed_paths.get("back_all"),
-                        "routed_back_all",
-                    )
-                    round_preview_routed_copper = _copy_round_preview(
-                        routed_paths.get("copper_both"),
-                        "routed_copper_both",
-                    )
-                    if round_preview_routed_front:
-                        routed_paths["round_front_all"] = round_preview_routed_front
-                    if round_preview_routed_back:
-                        routed_paths["round_back_all"] = round_preview_routed_back
-                    if round_preview_routed_copper:
-                        routed_paths["round_copper_both"] = round_preview_routed_copper
+        for _stage_key in ("pre_route", "routed"):
+            _section = leaf_diagnostics.get(_stage_key, {})
+            if not isinstance(_section, dict):
+                continue
+            _views = _section.get("board_views", {})
+            if not isinstance(_views, dict):
+                continue
+            _paths = _views.get("paths", {})
+            if not isinstance(_paths, dict):
+                continue
+            for _view in ("front_all", "back_all", "copper_both"):
+                snap = promote_to_round_snapshot(_paths.get(_view), round_index)
+                if snap is not None:
+                    _paths[f"round_{_view}"] = str(snap)
 
     validation["pre_route_validation"] = copy.deepcopy(pre_route_validation)
     validation["render_diagnostics"] = copy.deepcopy(leaf_diagnostics)
