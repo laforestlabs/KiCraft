@@ -30,6 +30,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -45,6 +46,24 @@ except Exception:  # pragma: no cover - best-effort import
 
 
 DEFAULT_VIEWS = ("front_all", "back_all", "copper_both")
+
+
+@dataclass(frozen=True)
+class LeafStageOpts:
+    """Per-stage diagnostic toggles. Replaces the four boolean kwargs
+    (``render_X_board_views``, ``write_X_drc_json``, ``write_X_drc_report``,
+    ``render_X_drc_overlay``) that the legacy 14-param API repeated for
+    each stage. Defaults render everything; ``LeafStageOpts.off()`` skips
+    every artifact for that stage."""
+
+    render_board_views: bool = True
+    write_drc_json: bool = True
+    write_drc_report: bool = True
+    render_drc_overlay: bool = True
+
+    @classmethod
+    def off(cls) -> "LeafStageOpts":
+        return cls(False, False, False, False)
 
 
 _NOISY_STDERR_PATTERNS = (
@@ -401,21 +420,18 @@ def generate_leaf_diagnostic_artifacts(
     routed_board: str | Path | None = None,
     pre_route_validation: dict[str, Any] | None = None,
     routed_validation: dict[str, Any] | None = None,
+    pre_route_opts: LeafStageOpts = LeafStageOpts(),
+    routed_opts: LeafStageOpts = LeafStageOpts(),
     views: tuple[str, ...] = DEFAULT_VIEWS,
-    render_pre_route_board_views: bool = True,
-    render_routed_board_views: bool = True,
-    write_pre_route_drc_json: bool = True,
-    write_routed_drc_json: bool = True,
-    write_pre_route_drc_report: bool = True,
-    write_routed_drc_report: bool = True,
-    render_pre_route_drc_overlay: bool = True,
-    render_routed_drc_overlay: bool = True,
-    build_comparison_contact_sheet_enabled: bool = True,
-    quiet_board_render: bool = False,
+    build_contact_sheet: bool = True,
+    quiet_render: bool = False,
 ) -> dict[str, Any]:
     """Generate the full leaf diagnostic bundle.
 
     Returns a JSON-serializable dict describing all generated artifacts.
+    Pass ``LeafStageOpts.off()`` for ``pre_route_opts`` or ``routed_opts``
+    to skip a stage entirely (used by the pre-route-only first pass
+    inside ``route_local_subcircuit``).
     """
     renders_dir = ensure_renders_dir(artifact_dir)
     result: dict[str, Any] = {
@@ -430,35 +446,26 @@ def generate_leaf_diagnostic_artifacts(
         },
     }
 
-    if pre_route_board:
-        result["pre_route"] = generate_stage_diagnostic_artifacts(
-            pcb_path=pre_route_board,
-            validation=pre_route_validation,
+    for stage_key, board, validation, opts in (
+        ("pre_route", pre_route_board, pre_route_validation, pre_route_opts),
+        ("routed", routed_board, routed_validation, routed_opts),
+    ):
+        if not board:
+            continue
+        result[stage_key] = generate_stage_diagnostic_artifacts(
+            pcb_path=board,
+            validation=validation,
             artifact_dir=artifact_dir,
-            stage="pre_route",
+            stage=stage_key,
             views=views,
-            render_board_views=render_pre_route_board_views,
-            write_drc_json=write_pre_route_drc_json,
-            write_drc_report=write_pre_route_drc_report,
-            render_drc_overlay=render_pre_route_drc_overlay,
-            quiet_board_render=quiet_board_render,
+            render_board_views=opts.render_board_views,
+            write_drc_json=opts.write_drc_json,
+            write_drc_report=opts.write_drc_report,
+            render_drc_overlay=opts.render_drc_overlay,
+            quiet_board_render=quiet_render,
         )
 
-    if routed_board:
-        result["routed"] = generate_stage_diagnostic_artifacts(
-            pcb_path=routed_board,
-            validation=routed_validation,
-            artifact_dir=artifact_dir,
-            stage="routed",
-            views=views,
-            render_board_views=render_routed_board_views,
-            write_drc_json=write_routed_drc_json,
-            write_drc_report=write_routed_drc_report,
-            render_drc_overlay=render_routed_drc_overlay,
-            quiet_board_render=quiet_board_render,
-        )
-
-    if build_comparison_contact_sheet_enabled:
+    if build_contact_sheet:
         contact_inputs: list[str] = []
         for stage_key in ("pre_route", "routed"):
             stage_payload = result.get(stage_key) or {}

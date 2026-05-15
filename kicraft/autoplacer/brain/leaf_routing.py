@@ -11,6 +11,7 @@ from kicraft.autoplacer.brain.leaf_geometry import repair_leaf_placement_legalit
 from kicraft.autoplacer.brain.subcircuit_artifacts import resolve_artifact_paths
 from kicraft.autoplacer.brain.subcircuit_extractor import ExtractedSubcircuitBoard
 from kicraft.autoplacer.brain.subcircuit_render_diagnostics import (
+    LeafStageOpts,
     generate_leaf_diagnostic_artifacts,
     generate_stage_diagnostic_artifacts,
     promote_to_round_snapshot,
@@ -416,17 +417,15 @@ def route_local_subcircuit(
             pre_route_board=str(pre_route_board),
             routed_board=str(routed_board) if routed_board.exists() else None,
             pre_route_validation=pre_route_validation,
-            routed_validation=None,
-            render_pre_route_board_views=render_pre_route_board_views,
-            render_routed_board_views=False,
-            write_pre_route_drc_json=write_pre_route_drc_json,
-            write_routed_drc_json=False,
-            write_pre_route_drc_report=write_pre_route_drc_report,
-            write_routed_drc_report=False,
-            render_pre_route_drc_overlay=render_pre_route_drc_overlay,
-            render_routed_drc_overlay=False,
-            build_comparison_contact_sheet_enabled=False,
-            quiet_board_render=fast_smoke_mode,
+            pre_route_opts=LeafStageOpts(
+                render_board_views=render_pre_route_board_views,
+                write_drc_json=write_pre_route_drc_json,
+                write_drc_report=write_pre_route_drc_report,
+                render_drc_overlay=render_pre_route_drc_overlay,
+            ),
+            routed_opts=LeafStageOpts.off(),
+            build_contact_sheet=False,
+            quiet_render=fast_smoke_mode,
         )
         route_timing["pre_route_render_diagnostics_s"] = round(
             max(0.0, time.monotonic() - pre_route_render_start), 3
@@ -557,16 +556,20 @@ def route_local_subcircuit(
             routed_board=str(routed_board),
             pre_route_validation=pre_route_validation,
             routed_validation=validation,
-            render_pre_route_board_views=render_pre_route_board_views,
-            render_routed_board_views=render_routed_board_views,
-            write_pre_route_drc_json=write_pre_route_drc_json,
-            write_routed_drc_json=write_routed_drc_json,
-            write_pre_route_drc_report=write_pre_route_drc_report,
-            write_routed_drc_report=write_routed_drc_report,
-            render_pre_route_drc_overlay=render_pre_route_drc_overlay,
-            render_routed_drc_overlay=render_routed_drc_overlay,
-            build_comparison_contact_sheet_enabled=build_comparison_contact_sheet,
-            quiet_board_render=fast_smoke_mode,
+            pre_route_opts=LeafStageOpts(
+                render_board_views=render_pre_route_board_views,
+                write_drc_json=write_pre_route_drc_json,
+                write_drc_report=write_pre_route_drc_report,
+                render_drc_overlay=render_pre_route_drc_overlay,
+            ),
+            routed_opts=LeafStageOpts(
+                render_board_views=render_routed_board_views,
+                write_drc_json=write_routed_drc_json,
+                write_drc_report=write_routed_drc_report,
+                render_drc_overlay=render_routed_drc_overlay,
+            ),
+            build_contact_sheet=build_comparison_contact_sheet,
+            quiet_render=fast_smoke_mode,
         )
         route_timing["routed_render_diagnostics_s"] = round(
             max(0.0, time.monotonic() - routed_render_start), 3
@@ -934,22 +937,22 @@ def _stamp_trivial_leaf(
     diagnostics_payload: dict[str, Any]
     if generate_diagnostics and not fast_smoke_mode:
         try:
+            _no_drc_opts = LeafStageOpts(
+                render_board_views=True,
+                write_drc_json=False,
+                write_drc_report=False,
+                render_drc_overlay=False,
+            )
             diagnostics_payload = generate_leaf_diagnostic_artifacts(
                 artifact_dir=artifact_paths.artifact_dir,
                 pre_route_board=str(pre_route_board),
                 routed_board=str(routed_board),
                 pre_route_validation={"accepted": True, "reason": "no_internal_nets"},
                 routed_validation={"accepted": True, "reason": "no_internal_nets"},
-                render_pre_route_board_views=True,
-                render_routed_board_views=True,
-                write_pre_route_drc_json=False,
-                write_routed_drc_json=False,
-                write_pre_route_drc_report=False,
-                write_routed_drc_report=False,
-                render_pre_route_drc_overlay=False,
-                render_routed_drc_overlay=False,
-                build_comparison_contact_sheet_enabled=False,
-                quiet_board_render=fast_smoke_mode,
+                pre_route_opts=_no_drc_opts,
+                routed_opts=_no_drc_opts,
+                build_contact_sheet=False,
+                quiet_render=fast_smoke_mode,
             )
         except Exception as exc:
             diagnostics_payload = {"skipped": True, "reason": f"diag_failed:{exc}"}
