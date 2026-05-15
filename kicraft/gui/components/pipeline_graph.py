@@ -112,49 +112,6 @@ def _path_with_mtime(path: str | None) -> str:
         return path
 
 
-def _load_render_floor(experiments_dir: Path) -> float | None:
-    """Read .experiments/run_started_at; return None if absent or invalid.
-
-    The runner stamps this file the instant a new run starts (after
-    purge, before subprocess launch). Render lookups gate on this so
-    PNGs left over from a prior run don't show up as if they belong
-    to the new run.
-    """
-    floor_path = experiments_dir / "run_started_at"
-    try:
-        return float(floor_path.read_text().strip())
-    except (OSError, ValueError):
-        return None
-
-
-def _load_run_phase(experiments_dir: Path) -> str | None:
-    """Read .experiments/run_phase; return None if absent.
-
-    Returns one of "leaves_only", "parents_only", "full", or None.
-    Used to decide whether pinned-leaf renders should bypass the
-    freshness gate: in parents_only the leaves are NOT touched so
-    their renders stay valid; in leaves_only/full the leaves are
-    being re-solved so even pinned-leaf renders must hide until the
-    new ones land.
-    """
-    phase_path = experiments_dir / "run_phase"
-    try:
-        return phase_path.read_text().strip() or None
-    except OSError:
-        return None
-
-
-def _mtime_passes(path: Path, mtime_floor: float | None) -> bool:
-    """True if path exists and (no floor, or path's mtime >= floor)."""
-    try:
-        st = path.stat()
-    except OSError:
-        return False
-    if mtime_floor is None:
-        return True
-    return st.st_mtime >= mtime_floor
-
-
 # ---------------------------------------------------------------------------
 # Data gathering -- scan artifacts + run_status to build PipelineState
 # ---------------------------------------------------------------------------
@@ -168,48 +125,6 @@ def _safe_read_json(path: Path) -> dict[str, Any] | None:
             return json.load(f)
     except (json.JSONDecodeError, OSError, TypeError):
         return None
-
-
-def _find_best_render(
-    renders_dir: Path, mtime_floor: float | None = None
-) -> str | None:
-    """Find the best available render for a leaf node.
-
-    When ``mtime_floor`` is provided, candidates older than the floor
-    are skipped -- prevents stale PNGs from a prior run from being
-    surfaced as if they belong to the current run.
-    """
-    candidates = [
-        renders_dir / "routed_front_all.png",
-        renders_dir / "pre_route_front_all.png",
-        renders_dir / "routed_copper_both.png",
-        renders_dir / "pre_route_copper_both.png",
-    ]
-    for c in candidates:
-        if _mtime_passes(c, mtime_floor):
-            return _experiments_url(c)
-    return None
-
-
-def _find_round_renders(
-    renders_dir: Path,
-    round_index: int,
-    mtime_floor: float | None = None,
-) -> tuple[str | None, str | None]:
-    """Find routed and pre-route renders for a specific round.
-
-    Returns ``/experiments/...`` URLs with an mtime cache-buster
-    (``?v=<mtime>``) so the browser refetches after the underlying
-    PNG is re-rendered. Without the cache-buster the URL stays the
-    same across renders, the browser serves the cached copy, and
-    the user sees stale thumbnails until they hard-reload.
-    """
-    routed = renders_dir / f"round_{round_index:04d}_routed_front_all.png"
-    pre_route = renders_dir / f"round_{round_index:04d}_pre_route_front_all.png"
-    return (
-        _experiments_url(routed) if _mtime_passes(routed, mtime_floor) else None,
-        _experiments_url(pre_route) if _mtime_passes(pre_route, mtime_floor) else None,
-    )
 
 
 def _experiments_url(p: Path) -> str:
@@ -259,37 +174,6 @@ def _load_round_statuses(experiments_dir: Path) -> dict[int, dict[str, Any]]:
     return result
 
 
-def _leaf_pinned_round(experiments_dir: Path, leaf_key: str) -> int | None:
-    """Return the pinned round number for this leaf, or None.
-
-    Wraps ``pins.is_pinned`` so callers don't need to import the pins
-    module directly. The pinned round drives the left-side leaf
-    preview: when a pin exists, the preview surfaces that round's
-    routed/pre-route thumbnail instead of the canonical render, so the
-    card always reflects the state the user committed to even if a
-    later leaves-only run overwrote ``routed_front_all.png``.
-    """
-    try:
-        from kicraft.autoplacer.brain import pins as pins_module
-
-        return pins_module.is_pinned(experiments_dir, leaf_key)
-    except Exception:
-        return None
-
-
-def _leaf_is_pinned(experiments_dir: Path, leaf_key: str) -> bool:
-    """Return True if pins.json claims this leaf is pinned.
-
-    Used by ``gather_pipeline_state`` to decide whether to fall back
-    to canonical state when the selected_round filter yields no
-    rounds. A pin means "use this exact state regardless of which
-    parent round the chart is on" -- so don't blow away score /
-    render / status just because the parent round produced no per-leaf
-    rounds (the parents-only-after-leaves-only path).
-    """
-    return _leaf_pinned_round(experiments_dir, leaf_key) is not None
-
-
 def _determine_leaf_status(artifact_dir: Path, *, run_in_progress: bool = False) -> str:
     """Determine leaf status from artifact presence.
 
@@ -337,10 +221,11 @@ def _determine_leaf_status(artifact_dir: Path, *, run_in_progress: bool = False)
 
 def _build_rounds_from_debug(
     artifact_dir: Path,
-    renders_dir: Path,
-    mtime_floor: float | None = None,
+    leaf_key: str,
+    render_index: "Any",
 ) -> list[RoundInfo]:
-    """Extract per-round info from debug.json."""
+    """Extract per-round info from debug.json. ``render_index`` provides
+    per-round thumbnails with the right freshness gates applied."""
     debug = _safe_read_json(artifact_dir / "debug.json")
     if not isinstance(debug, dict):
         return []
@@ -393,15 +278,15 @@ def _build_rounds_from_debug(
                 if candidate:
                     rejection_reason = str(candidate)
 
-        routed_thumb, pre_route_thumb = _find_round_renders(
-            renders_dir, idx, mtime_floor=mtime_floor
+        routed_path, pre_route_path = render_index.round_renders(
+            artifact_dir, leaf_key, idx
         )
         rounds.append(RoundInfo(
             index=idx,
             score=score,
             routed=routed,
-            thumbnail=routed_thumb,
-            pre_route_thumbnail=pre_route_thumb,
+            thumbnail=_experiments_url(routed_path) if routed_path else None,
+            pre_route_thumbnail=_experiments_url(pre_route_path) if pre_route_path else None,
             experiment_round=exp_round,
             rejection_reason=rejection_reason,
         ))
@@ -486,9 +371,9 @@ def gather_pipeline_state(
     # even pinned-leaf renders must hide until fresh ones land --
     # otherwise the user sees a confusing mix of last-run and new-run
     # renders for the duration of the run.
-    render_floor = _load_render_floor(experiments_dir)
-    run_phase = _load_run_phase(experiments_dir)
-    pinned_leaves_keep_renders = run_phase == "parents_only"
+    from kicraft.render.index import RenderIndex
+    render_index = RenderIndex.load(experiments_dir)
+    render_floor = render_index.render_floor
 
     # "Run in progress" gates leaf status decisions below: while
     # running we trust per-leaf debug.json over stale canonical files
@@ -549,78 +434,16 @@ def gather_pipeline_state(
     ):
         state.root_status = "routing_failed"
 
-    # Per-round parent render. When the round failed to route, prefer the
-    # pre-route (stamped) snapshot over the routed one -- the routed PNG may
-    # not exist, or may be the reject-candidate that misled the user.
-    if status_round is not None and status_round > 0:
-        round_dir = (
-            experiments_dir
-            / "hierarchical_autoexperiment"
-            / f"round_{status_round:04d}"
-        )
-        if round_parent_routed is False:
-            preferred_names = ("parent_stamped.png", "parent_routed.png")
-        else:
-            preferred_names = ("parent_routed.png", "parent_stamped.png")
-        for name in preferred_names:
-            p = round_dir / name
-            if _mtime_passes(p, render_floor):
-                state.root_render = str(p)
-                break
-
-    if state.root_render is None:
-        parent_routed = preview_paths.get("parent_routed_preview")
-        parent_stamped = preview_paths.get("parent_stamped_preview")
-        # When the round we're viewing failed to route, prefer the stamped
-        # preview path from run_status as well.
-        if round_parent_routed is False:
-            if parent_stamped and _mtime_passes(Path(str(parent_stamped)), render_floor):
-                state.root_render = str(parent_stamped)
-            elif parent_routed and _mtime_passes(Path(str(parent_routed)), render_floor):
-                state.root_render = str(parent_routed)
-        else:
-            if parent_routed and _mtime_passes(Path(str(parent_routed)), render_floor):
-                state.root_render = str(parent_routed)
-            elif parent_stamped and _mtime_passes(Path(str(parent_stamped)), render_floor):
-                state.root_render = str(parent_stamped)
-        if state.root_render is None:
-            hp = experiments_dir / "hierarchical_pipeline"
-            for name in ("parent_routed.png", "parent_stamped.png"):
-                p = hp / name
-                if _mtime_passes(p, render_floor):
-                    state.root_render = str(p)
-                    break
-
-    # Last resort: when the parent composition's metadata/debug JSON is
-    # missing (acceptance gate rejection, truncated run, etc.) the discovery
-    # helpers return nothing. Probe subcircuits/*/renders/ directly so we
-    # still surface whatever parent render was produced.
-    if state.root_render is None:
-        sub_root = experiments_dir / "subcircuits"
-        if sub_root.exists():
-            best_mtime = -1.0
-            best_path: str | None = None
-            probe_names = (
-                ("parent_stamped.png", "parent_routed.png")
-                if round_parent_routed is False
-                else ("parent_routed.png", "parent_stamped.png")
-            )
-            for child in sub_root.iterdir():
-                if not child.is_dir():
-                    continue
-                for name in probe_names:
-                    candidate = child / "renders" / name
-                    if not _mtime_passes(candidate, render_floor):
-                        continue
-                    try:
-                        mt = candidate.stat().st_mtime
-                    except OSError:
-                        mt = 0.0
-                    if mt > best_mtime:
-                        best_mtime = mt
-                        best_path = str(candidate)
-            if best_path:
-                state.root_render = best_path
+    # The four-layer fallback (per-round dir -> run_status preview_paths ->
+    # hierarchical_pipeline canonical -> last-resort subcircuits scan) lives
+    # in RenderIndex.parent_render so this site no longer re-implements it.
+    _parent_path = render_index.parent_render(
+        round_index=status_round,
+        prefer_routed=round_parent_routed is not False,
+        preview_paths=preview_paths,
+    )
+    if _parent_path is not None:
+        state.root_render = str(_parent_path)
 
     # Override root_status and root_routed for the round being viewed so the
     # UI shows "FAILED TO ROUTE" instead of a misleading "DONE" badge.
@@ -650,47 +473,23 @@ def gather_pipeline_state(
             instance_path = meta.get("instance_path", "")
             component_refs = meta.get("component_refs", [])
 
-            # Pinned-leaf render preservation only applies in
-            # parents_only mode (where leaves are not re-solved).
-            # In leaves_only / full runs, every leaf is about to be
-            # re-rendered, so the pin doesn't protect against staleness.
+            # Pinned-leaf vs run-floor freshness, pinned-round preference
+            # over canonical, and the canonical fallback ladder all live in
+            # RenderIndex.leaf_render (and RenderIndex.leaf_floor for the
+            # parents_only pin bypass) so this site is one call.
             leaf_key = artifact_dir.name
-            leaf_floor = (
-                None
-                if (
-                    pinned_leaves_keep_renders
-                    and _leaf_is_pinned(experiments_dir, leaf_key)
-                )
-                else render_floor
-            )
 
             renders_dir = artifact_dir / "renders"
             leaf_status = _determine_leaf_status(
                 artifact_dir, run_in_progress=run_in_progress
             )
-            # When a leaf is pinned, surface the pinned round's render
-            # in the left-side preview card so the thumbnail tracks the
-            # committed state. _find_round_renders returns
-            # (routed, pre_route); prefer routed and fall back to
-            # pre-route when routing failed for that round. Canonical
-            # _find_best_render is the unpinned fallback.
-            best_render: str | None = None
-            pinned_round = (
-                _leaf_pinned_round(experiments_dir, leaf_key)
+            _leaf_path = (
+                render_index.leaf_render(artifact_dir, leaf_key)
                 if renders_dir.exists()
                 else None
             )
-            if pinned_round is not None:
-                _pinned_routed, _pinned_pre = _find_round_renders(
-                    renders_dir, pinned_round, mtime_floor=leaf_floor
-                )
-                best_render = _pinned_routed or _pinned_pre
-            if best_render is None:
-                best_render = (
-                    _find_best_render(renders_dir, mtime_floor=leaf_floor)
-                    if renders_dir.exists()
-                    else None
-                )
+            best_render = _experiments_url(_leaf_path) if _leaf_path else None
+            pinned_round = render_index.pinned_round(leaf_key)
 
             score = None
             traces = 0
@@ -710,7 +509,7 @@ def gather_pipeline_state(
                     sheet_name = solved.get("sheet_name", sheet_name)
 
             rounds = _build_rounds_from_debug(
-                artifact_dir, renders_dir, mtime_floor=leaf_floor
+                artifact_dir, leaf_key, render_index
             )
             # Snapshot the full unfiltered list before any per-parent-round
             # narrowing below. The detail panel and arrow-key navigation
@@ -769,7 +568,7 @@ def gather_pipeline_state(
                     #       hasn't been solved yet -- "queued" / WAITING.
                     #   (c) the run finished and this leaf actually
                     #       missed the round -- that's a real failure.
-                    is_pinned = _leaf_is_pinned(experiments_dir, leaf_key)
+                    is_pinned = render_index.is_pinned(leaf_key)
                     if is_pinned:
                         # Keep canonical-derived leaf_status / score /
                         # traces / vias / best_render -- the pin already
@@ -960,8 +759,8 @@ def _leaf_card(
         # tile, not a stat dashboard.
         if node.best_render:
             ui.image(node.best_render).classes(
-                "w-full h-[160px] object-contain rounded mt-1 bg-slate-950"
-            )
+                "w-full h-[160px] rounded mt-1 bg-slate-950"
+            ).props("fit=contain")
         else:
             with ui.row().classes("w-full h-[160px] items-center justify-center bg-slate-950 rounded mt-1"):
                 ui.icon("image_not_supported", size="sm").classes("text-gray-600")
@@ -1005,8 +804,8 @@ def _root_card(
 
         if state.root_render:
             ui.image(state.root_render).classes(
-                "w-full h-[120px] object-contain rounded mt-2 bg-slate-950"
-            )
+                "w-full h-[120px] rounded mt-2 bg-slate-950"
+            ).props("fit=contain")
         else:
             with ui.row().classes(
                 "w-full h-[120px] items-center justify-center bg-slate-950 rounded mt-2"
