@@ -585,6 +585,18 @@ def route_local_subcircuit(
     if _routed_board_snapshot is not None:
         round_board_routed = str(_routed_board_snapshot)
 
+    # Round-snapshot paths surfaced to downstream consumers (types.py's
+    # round_to_layout, the GUI's per-round scrubber via routing dict).
+    # Empty string when this stage didn't produce that view, which the
+    # consumers already handle as "no per-round preview" (gracefully fall
+    # back to canonical render).
+    round_preview_pre_route_front = ""
+    round_preview_pre_route_back = ""
+    round_preview_pre_route_copper = ""
+    round_preview_routed_front = ""
+    round_preview_routed_back = ""
+    round_preview_routed_copper = ""
+
     if round_index is not None and not leaf_diagnostics.get("skipped", False):
         for _stage_key in ("pre_route", "routed"):
             _section = leaf_diagnostics.get(_stage_key, {})
@@ -599,7 +611,22 @@ def route_local_subcircuit(
             for _view in ("front_all", "back_all", "copper_both"):
                 snap = promote_to_round_snapshot(_paths.get(_view), round_index)
                 if snap is not None:
-                    _paths[f"round_{_view}"] = str(snap)
+                    snap_str = str(snap)
+                    _paths[f"round_{_view}"] = snap_str
+                    if _stage_key == "pre_route":
+                        if _view == "front_all":
+                            round_preview_pre_route_front = snap_str
+                        elif _view == "back_all":
+                            round_preview_pre_route_back = snap_str
+                        elif _view == "copper_both":
+                            round_preview_pre_route_copper = snap_str
+                    else:
+                        if _view == "front_all":
+                            round_preview_routed_front = snap_str
+                        elif _view == "back_all":
+                            round_preview_routed_back = snap_str
+                        elif _view == "copper_both":
+                            round_preview_routed_copper = snap_str
 
     validation["pre_route_validation"] = copy.deepcopy(pre_route_validation)
     validation["render_diagnostics"] = copy.deepcopy(leaf_diagnostics)
