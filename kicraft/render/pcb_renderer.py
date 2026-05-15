@@ -122,11 +122,25 @@ def _svg_export(
     *,
     mirror: bool,
 ) -> bool:
+    """Export ``pcb_path`` to SVG. We DELIBERATELY OMIT
+    ``--fit-page-to-board`` -- that flag asks kicad-cli to inflate the
+    page just enough to contain the board plus a margin, AND to
+    translate the path coordinates into that inflated page (asymmetric
+    in x and y; not a simple centering). When the renderer then
+    rewrites the viewBox to the Edge.Cuts AABB (0..w, 0..h), it lands
+    on the top-left corner of the inflated page rather than on the
+    actual board content -- visible as a half-cropped leaf for tall
+    narrow boards.
+
+    Without the flag, kicad-cli emits the SVG with the full page size
+    in the viewBox but path coordinates equal the raw KiCad mm of the
+    board. The subsequent viewBox rewrite to the Edge.Cuts AABB then
+    aligns by construction with the actual content.
+    """
     cmd = [
         "kicad-cli", "pcb", "export", "svg",
         "--layers", layers,
         "--mode-single",
-        "--fit-page-to-board",
         "--exclude-drawing-sheet",
         "--drill-shape-opt", "2",
         "-o", str(svg_path),

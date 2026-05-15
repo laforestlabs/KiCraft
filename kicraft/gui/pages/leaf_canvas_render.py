@@ -20,11 +20,12 @@ from pathlib import Path
 
 from kicraft.render import EdgeCutsExtent, render_pcb
 
-# Bump this to invalidate every cached canvas PNG + sidecar. v3 = leaf
-# Edge.Cuts now traces the silk poly's rounded contour (was a sharp
-# 4-segment rectangle that left visible substrate corners outside the
-# yellow silk outline).
-RENDERER_VERSION = 3
+# Bump this to invalidate every cached canvas PNG + sidecar. v4 =
+# kicad-cli no longer called with --fit-page-to-board, so SVG path
+# coords equal raw KiCad mm and the viewBox rewrite to the Edge.Cuts
+# AABB lands on the actual board content (was clipping tall narrow
+# leaves to a half-content slice).
+RENDERER_VERSION = 4
 
 DEFAULT_DPI = 420
 
