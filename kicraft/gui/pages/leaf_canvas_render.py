@@ -20,10 +20,11 @@ from pathlib import Path
 
 from kicraft.render import EdgeCutsExtent, render_pcb
 
-# Bump this to invalidate every cached canvas PNG + sidecar. v2 = the
-# PNG content extent is now Edge.Cuts (was kicad-cli's fit-page-to-
-# board viewBox, which included silk text hanging past the board).
-RENDERER_VERSION = 2
+# Bump this to invalidate every cached canvas PNG + sidecar. v3 = leaf
+# Edge.Cuts now traces the silk poly's rounded contour (was a sharp
+# 4-segment rectangle that left visible substrate corners outside the
+# yellow silk outline).
+RENDERER_VERSION = 3
 
 DEFAULT_DPI = 420
 

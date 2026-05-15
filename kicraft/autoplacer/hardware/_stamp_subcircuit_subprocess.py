@@ -96,34 +96,58 @@ def main(argv: list[str]) -> int:
     _all_zones = list(board.Zones())
 
     # --- rewrite board outline (Edge.Cuts) ---
-    _width_mm = max(1.0, _outline["br_x"] - _outline["tl_x"])
-    _height_mm = max(1.0, _outline["br_y"] - _outline["tl_y"])
-    _left = pcbnew.FromMM(_outline["tl_x"])
-    _top = pcbnew.FromMM(_outline["tl_y"])
-    _right = pcbnew.FromMM(_outline["tl_x"] + _width_mm)
-    _bottom = pcbnew.FromMM(_outline["tl_y"] + _height_mm)
-
     # Strip every loose drawing -- we rebuild Edge.Cuts + silk from
     # the payload below.
     for d in _all_drawings:
         board.Remove(d)
 
-    _corners = [
-        (_left, _top),
-        (_right, _top),
-        (_right, _bottom),
-        (_left, _bottom),
-    ]
-    for _i in range(4):
-        _x1, _y1 = _corners[_i]
-        _x2, _y2 = _corners[(_i + 1) % 4]
-        _edge = pcbnew.PCB_SHAPE(board)
-        _edge.SetShape(pcbnew.SHAPE_T_SEGMENT)
-        _edge.SetLayer(pcbnew.Edge_Cuts)
-        _edge.SetWidth(pcbnew.FromMM(0.05))
-        _edge.SetStart(pcbnew.VECTOR2I(_x1, _y1))
-        _edge.SetEnd(pcbnew.VECTOR2I(_x2, _y2))
-        board.Add(_edge)
+    _polyline_mm = _outline.get("polyline")
+    if _polyline_mm is not None and len(_polyline_mm) >= 3:
+        # Leaf flow: Edge.Cuts traces the SAME closed polyline as the
+        # F.SilkS leaf outline. The polyline came from
+        # subcircuit_solver.leaf_outline_polyline upstream; we just
+        # stamp segments between consecutive points (and a closing
+        # segment from last to first) so the two layers share one
+        # contour and cannot drift.
+        _n = len(_polyline_mm)
+        for _i in range(_n):
+            _x1_mm, _y1_mm = _polyline_mm[_i]
+            _x2_mm, _y2_mm = _polyline_mm[(_i + 1) % _n]
+            _edge = pcbnew.PCB_SHAPE(board)
+            _edge.SetShape(pcbnew.SHAPE_T_SEGMENT)
+            _edge.SetLayer(pcbnew.Edge_Cuts)
+            _edge.SetWidth(pcbnew.FromMM(0.05))
+            _edge.SetStart(
+                pcbnew.VECTOR2I(pcbnew.FromMM(_x1_mm), pcbnew.FromMM(_y1_mm))
+            )
+            _edge.SetEnd(
+                pcbnew.VECTOR2I(pcbnew.FromMM(_x2_mm), pcbnew.FromMM(_y2_mm))
+            )
+            board.Add(_edge)
+    else:
+        # Parent flow / unlabeled leaf: sharp 4-segment rectangle.
+        _width_mm = max(1.0, _outline["br_x"] - _outline["tl_x"])
+        _height_mm = max(1.0, _outline["br_y"] - _outline["tl_y"])
+        _left = pcbnew.FromMM(_outline["tl_x"])
+        _top = pcbnew.FromMM(_outline["tl_y"])
+        _right = pcbnew.FromMM(_outline["tl_x"] + _width_mm)
+        _bottom = pcbnew.FromMM(_outline["tl_y"] + _height_mm)
+        _corners = [
+            (_left, _top),
+            (_right, _top),
+            (_right, _bottom),
+            (_left, _bottom),
+        ]
+        for _i in range(4):
+            _x1, _y1 = _corners[_i]
+            _x2, _y2 = _corners[(_i + 1) % 4]
+            _edge = pcbnew.PCB_SHAPE(board)
+            _edge.SetShape(pcbnew.SHAPE_T_SEGMENT)
+            _edge.SetLayer(pcbnew.Edge_Cuts)
+            _edge.SetWidth(pcbnew.FromMM(0.05))
+            _edge.SetStart(pcbnew.VECTOR2I(_x1, _y1))
+            _edge.SetEnd(pcbnew.VECTOR2I(_x2, _y2))
+            board.Add(_edge)
 
     # --- move / remove footprints to match the placement payload ---
     _comp_map = {c["ref"]: c for c in _components}

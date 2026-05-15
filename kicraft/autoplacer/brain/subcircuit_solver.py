@@ -93,6 +93,46 @@ def infer_interface_anchors(
     return anchors
 
 
+def leaf_outline_polyline(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    radius_mm: float,
+    n_arc: int = 8,
+) -> list[Point]:
+    """Canonical leaf-boundary polyline: closed rounded rectangle.
+
+    Single source of truth for both the F.SilkS leaf outline AND the
+    Edge.Cuts contour. The two layers are stamped from this exact point
+    list (or its serialised JSON twin in the subprocess stamper), so
+    they cannot drift; before this helper existed the silk producer
+    drew a rounded poly while the Edge.Cuts stamper drew a sharp 4-seg
+    rectangle, and the rendered leaf showed pink substrate corners
+    poking out past the yellow silk.
+
+    Points form a closed loop (last point connects back to first;
+    do not duplicate the first point at the end). ``n_arc`` is the
+    number of straight-line samples per 90 deg corner; the silk and
+    Edge.Cuts callers must pass the same ``n_arc`` to stay aligned.
+    """
+    r = min(radius_mm, (x1 - x0) / 2, (y1 - y0) / 2)
+    points: list[Point] = []
+    corners = [
+        (x0 + r, y0 + r, math.pi, math.pi / 2),       # top-left
+        (x1 - r, y0 + r, math.pi / 2, 0),              # top-right
+        (x1 - r, y1 - r, 0, -math.pi / 2),             # bottom-right
+        (x0 + r, y1 - r, -math.pi / 2, -math.pi),      # bottom-left
+    ]
+    for cx, cy, a_start, a_end in corners:
+        for i in range(n_arc):
+            t = a_start + (a_end - a_start) * i / (n_arc - 1)
+            px = cx + r * math.cos(t)
+            py = cy - r * math.sin(t)  # KiCad Y-down
+            points.append(Point(px, py))
+    return points
+
+
 def _build_leaf_silkscreen(
     solved_components: dict[str, Component],
     bbox: dict[str, float],
@@ -131,21 +171,9 @@ def _build_leaf_silkscreen(
     x1 = bbox["max_x"] + margin
     y1 = bbox["max_y"] + margin
 
+    points = leaf_outline_polyline(x0, y0, x1, y1, radius)
+    # Recover r for text positioning below.
     r = min(radius, (x1 - x0) / 2, (y1 - y0) / 2)
-    points: list[Point] = []
-    corners = [
-        (x0 + r, y0 + r, math.pi, math.pi / 2),       # top-left
-        (x1 - r, y0 + r, math.pi / 2, 0),              # top-right
-        (x1 - r, y1 - r, 0, -math.pi / 2),             # bottom-right
-        (x0 + r, y1 - r, -math.pi / 2, -math.pi),      # bottom-left
-    ]
-    n_arc = 8
-    for cx, cy, a_start, a_end in corners:
-        for i in range(n_arc):
-            t = a_start + (a_end - a_start) * i / (n_arc - 1)
-            px = cx + r * math.cos(t)
-            py = cy - r * math.sin(t)  # KiCad Y-down
-            points.append(Point(px, py))
 
     poly_element = SilkscreenElement(
         kind="poly",

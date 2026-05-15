@@ -48,6 +48,28 @@ def _tag_leaf_outline_silk(shape) -> None:
         pass
 
 
+def _extract_leaf_outline_polyline_mm(silkscreen) -> list[tuple[float, float]] | None:
+    """Pull the leaf-outline polyline (mm) out of a BoardState.silkscreen.
+
+    Returns the F.SilkS poly element's points as a list of (x, y) tuples
+    so the same closed contour can be stamped as both the silk outline
+    and Edge.Cuts -- single source of truth for the leaf boundary. The
+    silk producer (``_build_leaf_silkscreen``) emits exactly one poly
+    element per leaf via ``leaf_outline_polyline``, so the first poly
+    on F.SilkS is the outline.
+
+    Returns ``None`` for unlabeled leaves (silk producer returned empty,
+    parent flow, etc.) so the caller can fall back to a sharp rectangle.
+    """
+    for elem in silkscreen or []:
+        if elem.kind != "poly" or elem.layer != "F.SilkS":
+            continue
+        pts = list(elem.points or [])
+        if len(pts) >= 3:
+            return [(p.x, p.y) for p in pts]
+    return None
+
+
 def _is_leaf_outline_silk(dwg) -> bool:
     """Heuristic: a 0.15 mm silk segment qualifies as the leaf outline.
 
@@ -607,11 +629,19 @@ class KiCadAdapter:
         outline_right_mm = state.board_outline[1].x
         outline_bottom_mm = state.board_outline[1].y
 
+        # Edge.Cuts traces the same rounded polyline as the F.SilkS leaf
+        # outline -- the silk poly's `.points` IS the leaf boundary, so
+        # we hand the same list to the outline stamper. Falls back to a
+        # sharp rectangle only when no leaf-outline silk exists (unlabeled
+        # leaf, parent flow), which is the legacy shape.
+        leaf_outline_poly = _extract_leaf_outline_polyline_mm(state.silkscreen)
+
         self._apply_board_outline(
             max(1.0, outline_right_mm - outline_left_mm),
             max(1.0, outline_bottom_mm - outline_top_mm),
             left_mm=outline_left_mm,
             top_mm=outline_top_mm,
+            polyline_mm=leaf_outline_poly,
         )
 
         component_map = state.components or {}
@@ -828,6 +858,8 @@ class KiCadAdapter:
                     "font_thickness": elem.font_thickness,
                 })
 
+        outline_polyline = _extract_leaf_outline_polyline_mm(state.silkscreen)
+
         payload = {
             "pcb_path": self.pcb_path,
             "output_path": output_path or self.pcb_path,
@@ -836,6 +868,15 @@ class KiCadAdapter:
                 "tl_y": outline_tl.y,
                 "br_x": outline_br.x,
                 "br_y": outline_br.y,
+                # When present, Edge.Cuts is stamped as this closed
+                # rounded polyline (matching the silk leaf outline);
+                # otherwise the subprocess falls back to a sharp
+                # rectangle derived from the tl/br bbox.
+                "polyline": (
+                    [[x, y] for x, y in outline_polyline]
+                    if outline_polyline is not None
+                    else None
+                ),
             },
             "components": components_json,
             "traces": traces_json,
@@ -883,27 +924,29 @@ class KiCadAdapter:
         *,
         left_mm: float = 0.0,
         top_mm: float = 0.0,
+        polyline_mm: list[tuple[float, float]] | None = None,
     ):
-        """Rewrite the Edge.Cuts rectangle to the given dimensions at a chosen origin.
+        """Rewrite the Edge.Cuts shape.
 
-        Silk for this leaf is stamped from ``BoardState.silkscreen``
-        (built by ``leaf_routing._silk_for_leaf`` against the
-        post-repair component bbox). Drawing it here -- or deriving any
-        outline silk from the Edge.Cuts rectangle -- would either
-        duplicate that rounded poly or compete with it as a sharp-corner
-        rectangle (a previous regression). This function only owns
-        Edge.Cuts.
+        With ``polyline_mm`` supplied (leaf flow), Edge.Cuts is stamped as
+        the same closed polyline that the F.SilkS leaf outline traces --
+        the silk poly's ``.points`` and Edge.Cuts share one point list
+        so the two layers cannot drift (previously Edge.Cuts was a sharp
+        4-segment rectangle while silk was a rounded poly, leaving a
+        visible ring of bare substrate at each corner). With
+        ``polyline_mm=None`` (parent flow / unlabeled leaf), Edge.Cuts
+        is stamped as a 4-segment sharp rectangle of the given
+        dimensions, the legacy shape.
+
+        Silk text + the leaf-outline silk poly itself are stamped from
+        ``BoardState.silkscreen`` later in the stamp pipeline; this
+        function only owns Edge.Cuts.
         """
         board = self.board
 
-        new_left = pcbnew.FromMM(left_mm)
-        new_top = pcbnew.FromMM(top_mm)
-        new_right = pcbnew.FromMM(left_mm + width_mm)
-        new_bottom = pcbnew.FromMM(top_mm + height_mm)
-
         # Remove existing Edge.Cuts lines AND any prior leaf-outline
-        # silk segments left over from the now-removed sharp-corner
-        # stamp so re-stamps stay clean.
+        # silk segments left over from earlier stamps so re-stamps stay
+        # clean.
         to_remove = []
         for dwg in board.GetDrawings():
             if dwg.GetLayer() == pcbnew.Edge_Cuts:
@@ -912,6 +955,25 @@ class KiCadAdapter:
                 to_remove.append(dwg)
         for dwg in to_remove:
             board.Remove(dwg)
+
+        if polyline_mm is not None and len(polyline_mm) >= 3:
+            n = len(polyline_mm)
+            for i in range(n):
+                x1, y1 = polyline_mm[i]
+                x2, y2 = polyline_mm[(i + 1) % n]
+                edge = pcbnew.PCB_SHAPE(board)
+                edge.SetShape(pcbnew.SHAPE_T_SEGMENT)
+                edge.SetLayer(pcbnew.Edge_Cuts)
+                edge.SetWidth(pcbnew.FromMM(0.05))
+                edge.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(x1), pcbnew.FromMM(y1)))
+                edge.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(x2), pcbnew.FromMM(y2)))
+                board.Add(edge)
+            return
+
+        new_left = pcbnew.FromMM(left_mm)
+        new_top = pcbnew.FromMM(top_mm)
+        new_right = pcbnew.FromMM(left_mm + width_mm)
+        new_bottom = pcbnew.FromMM(top_mm + height_mm)
 
         corners = [
             (new_left, new_top),
