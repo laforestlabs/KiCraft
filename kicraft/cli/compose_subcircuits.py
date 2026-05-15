@@ -2099,35 +2099,18 @@ def _render_parent_board_views(
     pcb_path: Path,
     output_dir: Path,
 ) -> dict[str, str]:
-    """Render standard parent board preview images."""
-    script_dir = Path(__file__).resolve().parent
-    render_script = script_dir / "render_pcb.py"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    """Render standard parent board preview images via the unified
+    ``kicraft.render.render_views`` pipeline. Same code path the GUI
+    monitor and the score-time visual check use, so parent previews
+    cannot drift from leaf previews."""
+    from kicraft.render import render_views
 
-    cmd = [
-        sys.executable,
-        str(render_script),
-        str(pcb_path),
-        "--output-dir",
-        str(output_dir),
-        "--views",
-        "front_all",
-        "back_all",
-        "copper_both",
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Parent render failed for "
-            f"{pcb_path}: {result.stderr.strip() or result.stdout.strip()}"
-        )
-
-    rendered = {
-        "front_all": str(output_dir / "front_all.png"),
-        "back_all": str(output_dir / "back_all.png"),
-        "copper_both": str(output_dir / "copper_both.png"),
-    }
-    return {name: path for name, path in rendered.items() if Path(path).exists()}
+    results = render_views(
+        pcb_path,
+        output_dir,
+        views=["front_all", "back_all", "copper_both"],
+    )
+    return {name: str(path) for name, path in results.items()}
 
 
 def _stamp_parent_board(

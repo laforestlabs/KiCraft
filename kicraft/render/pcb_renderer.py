@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kicraft.render.edge_cuts import parse_edge_cuts_aabb
+from kicraft.render.views import VIEWS
 
 
 DEFAULT_DPI = 420
@@ -353,3 +354,55 @@ def render_pcb(
                 pass
 
     return extent
+
+
+def render_views(
+    pcb_path: Path,
+    output_dir: Path,
+    *,
+    views: list[str] | None = None,
+    name_template: str = "{view}.png",
+    dpi: int = DEFAULT_DPI,
+    max_px: int = DEFAULT_MAX_PX,
+    template_fields: dict[str, str | int] | None = None,
+) -> dict[str, Path]:
+    """Render one or more named views to PNGs in ``output_dir``.
+
+    ``name_template`` is a Python str.format template controlling the
+    output filename per view. ``{view}`` is the view name; any extra
+    fields the caller wants (e.g. ``{round:04d}``, ``{stage}``) are
+    supplied via ``template_fields``. Default ``"{view}.png"`` gives
+    the historical ``front_all.png`` / ``back_all.png`` layout.
+
+    Returns ``{view_name: output_path}`` for the views that rendered
+    successfully. Views unknown to the registry are silently skipped --
+    the caller's responsibility to validate names against ``VIEWS``.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    selected = views or list(VIEWS.keys())
+    fields = dict(template_fields or {})
+    results: dict[str, Path] = {}
+
+    for view_name in selected:
+        cfg = VIEWS.get(view_name)
+        if cfg is None:
+            continue
+        out_path = output_dir / name_template.format(view=view_name, **fields)
+        post = dict(cfg.get("post") or {})
+        style = MonitorStyle(
+            contrast=float(post.get("contrast", 1.12)),
+            saturation=float(post.get("saturation", 1.08)),
+            brightness=float(post.get("brightness", 1.00)),
+            max_px=max_px,
+        )
+        extent = render_pcb(
+            pcb_path,
+            out_path,
+            layers=cfg["layers"],
+            mirror=bool(cfg.get("mirror")),
+            dpi=dpi,
+            style=style,
+        )
+        if extent is not None:
+            results[view_name] = out_path
+    return results
