@@ -201,47 +201,123 @@ def _modulate_arg(brightness: float, saturation: float) -> str:
     return f"{int(round(brightness * 100.0))},{int(round(saturation * 100.0))},100"
 
 
+_RGBA_RE = re.compile(
+    r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\s*\)"
+)
+
+
+def _parse_substrate_color(spec: str) -> tuple[int, int, int, int]:
+    """Parse a magick-style color spec into an RGBA tuple. Accepts
+    ``rgba(r,g,b,a)`` with a 0..1 alpha float, ``rgb(r,g,b)``, or any
+    other spec PIL can resolve. Falls back to opaque pink on parse
+    failure so the substrate fill never silently disappears."""
+    m = _RGBA_RE.match(spec.strip())
+    if m:
+        r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        a_token = m.group(4)
+        a = int(round(float(a_token) * 255)) if a_token is not None else 255
+        return (r, g, b, max(0, min(255, a)))
+    try:
+        from PIL import ImageColor
+        rgba = ImageColor.getrgb(spec)
+        return rgba if len(rgba) == 4 else (*rgba, 255)
+    except Exception:
+        return (255, 182, 193, 128)
+
+
+def _build_substrate_masked_png(raw_png: Path, out_png: Path, color: str) -> bool:
+    """Paint the substrate fill UNDER ``raw_png``'s transparent pixels,
+    masked to the actual Edge.Cuts polygon.
+
+    The naive "paint every pixel of the clone with substrate, then put
+    raw on top" approach fills the full Edge.Cuts AABB rectangle. For
+    leaves with a ROUNDED Edge.Cuts polygon, the AABB corner regions
+    fall outside the polygon -- they should stay transparent so the
+    page background bleeds through, but they were getting filled with
+    substrate, producing a visible pink halo past the silk frame.
+
+    Fix: flood-fill the alpha channel from a transparent corner pixel
+    with a sentinel value, marking the OUTSIDE-of-polygon transparent
+    region. The Edge.Cuts stroke (opaque) blocks the flood; INSIDE-of-
+    polygon transparent pixels remain at alpha=0. Substrate is then
+    painted only where alpha is still 0. Sharp-rectangle Edge.Cuts
+    (no corner gap to start the flood) falls through to fill the whole
+    AABB, matching the legacy behavior for parent boards.
+    """
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return False
+    try:
+        raw = Image.open(raw_png).convert("RGBA")
+    except OSError:
+        return False
+    w, h = raw.size
+
+    alpha = raw.getchannel("A")
+    outside_seed: tuple[int, int] | None = None
+    for cx, cy in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
+        if alpha.getpixel((cx, cy)) == 0:
+            outside_seed = (cx, cy)
+            break
+    if outside_seed is not None:
+        # Sentinel value 1 distinguishes outside-of-polygon pixels from
+        # inside-of-polygon transparent pixels (both started at 0).
+        ImageDraw.floodfill(alpha, outside_seed, 1)
+    mask = alpha.point(lambda v: 255 if v == 0 else 0)
+
+    substrate = Image.new("RGBA", (w, h), _parse_substrate_color(color))
+    base = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    base.paste(substrate, (0, 0), mask=mask)
+    result = Image.alpha_composite(base, raw)
+    try:
+        result.save(out_png, "PNG")
+    except OSError:
+        return False
+    return out_png.is_file()
+
+
 def _apply_monitor_style(
     raw_png: Path, out_png: Path, style: MonitorStyle
 ) -> bool:
     """Convert the transparent-background Edge.Cuts PNG into the styled
-    monitor preview: PCB-color substrate under Edge.Cuts, contrast +
-    saturation boost. No padding or border -- the surrounding page
-    supplies framing.
+    monitor preview: PCB-color substrate under the actual Edge.Cuts
+    polygon (not just the AABB), plus a contrast/saturation boost. No
+    padding or border -- the surrounding page supplies framing.
 
-    ``-trim`` is intentionally absent -- the input PNG is already
-    clipped to Edge.Cuts.
+    The substrate fill is built in PIL because flood-filling the alpha
+    channel from a corner is what keeps the rounded-Edge.Cuts corner
+    regions transparent; magick then handles resize + brightness /
+    contrast / saturation post.
 
     Output keeps the alpha channel so an RGBA ``board_background``
     (e.g. translucent pink) lets the page show through the substrate;
     copper/silk pixels remain fully opaque because raw composites on
     top using its own alpha.
     """
-    cmd = [
-        "magick", str(raw_png),
-        # Build a same-size substrate canvas by cloning raw and painting
-        # every pixel (RGB + alpha) to board_background, then put raw
-        # back on top via Over -- raw's opaque pixels mask the substrate
-        # color out, raw's transparent pixels expose it. Result keeps
-        # whatever alpha board_background's color spec carries.
-        "(",
-        "-clone", "0",
-        "-alpha", "set",
-        "-fill", style.board_background,
-        "-draw", "color 0,0 reset",
-        ")",
-        "+swap",
-        "-compose", "Over", "-composite",
-        "-resize", f"{style.max_px}x{style.max_px}>",
-        "-brightness-contrast", _brightness_contrast_arg(style.brightness, style.contrast),
-        "-modulate", _modulate_arg(style.brightness, style.saturation),
-        "PNG32:" + str(out_png),
-    ]
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        masked_png = Path(f.name)
     try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=30)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-        return False
-    return out_png.is_file()
+        if not _build_substrate_masked_png(raw_png, masked_png, style.board_background):
+            return False
+        cmd = [
+            "magick", str(masked_png),
+            "-resize", f"{style.max_px}x{style.max_px}>",
+            "-brightness-contrast",
+            _brightness_contrast_arg(style.brightness, style.contrast),
+            "-modulate", _modulate_arg(style.brightness, style.saturation),
+            "PNG32:" + str(out_png),
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=30)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            return False
+        return out_png.is_file()
+    finally:
+        try:
+            masked_png.unlink()
+        except OSError:
+            pass
 
 
 def _has_both_copper(layers: str) -> bool:
