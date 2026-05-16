@@ -25,6 +25,11 @@ experiment = [
     "flask>=3.0",
     "structlog>=23.0",
 ]
+upstream = [
+    "anthropic>=0.40",
+    "pydantic>=2.6",
+    "kicad-skip>=0.2",
+]
 dev = [
     "pytest>=7.0",
     "ruff>=0.1",
@@ -61,6 +66,9 @@ add-group-labels = "kicraft.cli.add_group_labels:main"
 cleanup-routing = "kicraft.cli.cleanup_routing:main"
 split-schematic = "kicraft.cli.split_schematic:main"
 
+# Upstream chat pipeline
+kicraft-new = "kicraft.upstream.cli:main"
+
 # Inspection
 list-footprints = "kicraft.cli.list_footprints:main"
 check-trace-widths = "kicraft.cli.check_trace_widths:main"
@@ -74,6 +82,7 @@ include = ["kicraft*"]
 
 [tool.setuptools.package-data]
 "kicraft.cli" = ["program.md"]
+"kicraft.upstream" = ["prompts/*.md"]
 
 [tool.ruff]
 line-length = 100
