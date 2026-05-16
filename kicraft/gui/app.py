@@ -140,6 +140,50 @@ def index() -> None:
             padding-right: 12px;
         }
     </style>
+    <script>
+        /* Workaround for a NiceGUI Socket.IO reconnect bug.
+         *
+         * The page template embeds the outbox's next_message_id at
+         * render time into options.query.next_message_id. nicegui.js
+         * passes that object straight into io(url, {query: ...}), and
+         * Socket.IO-client reuses the same query object on every
+         * reconnect attempt. window.nextMessageId is correctly
+         * incremented as messages arrive, but options.query.next_message_id
+         * is never updated -- so on any brief WS reconnect (a
+         * round-end message burst that stalls the asyncio loop past
+         * Socket.IO keepalive is enough), the server's handshake
+         * handler gets a stale next_message_id (usually 0), runs
+         * outbox.try_rewind, can't find that id in the pruned message
+         * history, and falls through to its
+         * window.location.reload() recovery -- snapping the active
+         * tab back to Setup mid-run.
+         *
+         * Patch: when Socket.IO is about to reconnect, sync the
+         * query value to whatever the client actually has. Then the
+         * server's try_rewind finds the id in history and replays
+         * the missed messages instead of reloading.
+         */
+        (function() {
+            function attach() {
+                if (!window.socket || !window.socket.io) {
+                    setTimeout(attach, 50);
+                    return;
+                }
+                const sync = function() {
+                    try {
+                        window.socket.io.opts.query.next_message_id =
+                            window.nextMessageId;
+                    } catch (e) { /* opts may not be writable on some versions */ }
+                };
+                window.socket.io.on("reconnect_attempt", sync);
+                // Belt-and-suspenders: also sync just before the
+                // engine.io transport opens, which is when the query
+                // is actually serialised onto the URL.
+                window.socket.io.on("open", sync);
+            }
+            attach();
+        })();
+    </script>
     """
     )
 
