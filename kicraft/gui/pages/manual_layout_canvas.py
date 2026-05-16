@@ -1131,22 +1131,31 @@ _CANVAS_JS_TEMPLATE = """
   }};
 
   // The Manual Layout tab is mounted lazily by Quasar -- on initial
-  // page load the SVG element is not yet in the DOM. Poll until it
-  // appears, then render once. After that the tab is kept alive and
-  // subsequent re-activations reuse the rendered DOM.
-  function tryInit(remainingTries) {{
-    if (!isCurrent()) return;  // a newer IIFE took over while we waited
-    const svg = document.getElementById(SVG_ID);
-    if (svg) {{
+  // page load the SVG element is not yet in the DOM. Wait for it via
+  // MutationObserver so the bootstrap survives an arbitrary delay
+  // between page load and the first tab click (an earlier 30 s
+  // timeout silently dropped renders when the user lingered in
+  // Setup / Monitor before opening Manual Layout). RAF lets layout
+  // settle before the first paint.
+  function fireRender() {{
+    if (!isCurrent()) return;
+    if (!document.getElementById(SVG_ID)) return;
+    requestAnimationFrame(function() {{
+      if (!isCurrent()) return;
       render();
-      return;
-    }}
-    if (remainingTries <= 0) {{
-      console.warn('manual layout canvas: SVG #' + SVG_ID + ' never mounted');
-      return;
-    }}
-    setTimeout(function() {{ tryInit(remainingTries - 1); }}, 200);
+    }});
   }}
-  tryInit(150);  // 30 seconds total: long enough for slow first-tab-click.
+  if (document.getElementById(SVG_ID)) {{
+    fireRender();
+  }} else {{
+    const observer = new MutationObserver(function(_muts, obs) {{
+      if (!isCurrent()) {{ obs.disconnect(); return; }}
+      if (document.getElementById(SVG_ID)) {{
+        obs.disconnect();
+        fireRender();
+      }}
+    }});
+    observer.observe(document.body, {{ childList: true, subtree: true }});
+  }}
 }})();
 """
