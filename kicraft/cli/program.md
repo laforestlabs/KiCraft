@@ -118,7 +118,7 @@
   "schematic_file": "LLUPS.kicad_sch",
   "parent": "/",
   "only": [],
-  "leaf_rounds": 2,
+  "leaf_rounds": 3,
   "render_png": true,
   "save_round_details": true,
   "placement_config": {
