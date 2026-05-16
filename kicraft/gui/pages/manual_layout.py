@@ -34,68 +34,32 @@ from .manual_layout_runner import (
 def manual_layout_page() -> None:
     """Render the Manual Layout tab.
 
-    Wrapped in a ``ui.refreshable`` so the canvas can pick up new
-    leaf solves without a full browser reload. The 2 s watcher fires
-    a refresh whenever ANY leaf's ``solved_layout.json`` mtime
-    advances past what we last rendered against, which covers both
-    "first leaves-only run produced leaves" and "second leaves-only
-    run replaced existing leaves." A short cooldown keeps the canvas
-    from refreshing mid-run while leaves are landing one at a time.
+    Built once at page load. A 2 s watcher detects new leaf solves on
+    disk and pushes a fresh canvas init script via
+    ``ui.run_javascript``; the canvas controller's version sentinel +
+    ``render()`` clear-and-repaint handle the in-place swap so the SVG
+    repaints with the new leaf set without any Python element churn.
+
+    The legend on the right gets a surgical clear+repopulate when
+    leaves change (a few dozen messages). Everything else -- canvas
+    wrapper, outline inputs, save/route buttons, mounting holes panel,
+    view options panel -- is mounted once and survives untouched.
+
+    This replaces an earlier ``@ui.refreshable`` body that rebuilt the
+    whole panel per leaf landing. That sledgehammer + a 39 KB
+    per-refresh ``<script>`` appended via ``ui.add_body_html`` produced
+    a message storm and DOM growth that destabilised the Socket.IO
+    connection, and a brief client reconnect would land on NiceGUI's
+    hard-reload recovery (``outbox.try_rewind`` ->
+    ``window.location.reload()``), snapping the active tab back to
+    Setup mid-run.
     """
     state = get_state()
     rendered_at = {"ts": _max_leaf_mtime(state.experiments_dir)}
-    # render_count > 0 -> this is a refresh, not the first paint;
-    # the canvas controller has to be re-injected via
-    # ui.run_javascript because ui.add_body_html only fires on
-    # initial page parse.
-    render_count = {"n": 0}
-    # Timers created inside the @ui.refreshable body must be cancelled
-    # before each refresh, otherwise the previous render's timer keeps
-    # ticking against its deleted parent_slot and spams
-    # "The parent slot of the element has been deleted" tracebacks.
-    # on_disconnect alone is not enough -- it only fires on full client
-    # disconnect, not on refresh.
-    body_timers: list = []
-    _manual_layout_body(render_count, body_timers)
+    canvas_id = "manual-layout-canvas"
 
-    def _cancel_body_timers() -> None:
-        for t in body_timers:
-            try:
-                t.cancel()
-            except Exception:  # noqa: BLE001
-                pass
-        body_timers.clear()
-
-    def _watch() -> None:
-        latest = _max_leaf_mtime(state.experiments_dir)
-        if latest == rendered_at["ts"]:
-            return
-        if latest > 0 and (time.time() - latest) < 3.0:
-            return
-        rendered_at["ts"] = latest
-        _cancel_body_timers()
-        _manual_layout_body.refresh(render_count, body_timers)
-
-    watch_timer = ui.timer(2.0, _watch)
-    # Cancel on client disconnect so the timer doesn't tick into a deleted
-    # parent_slot after a page reload (NiceGUI's _should_stop check runs
-    # AFTER _get_context() inside the loop, so a fresh tick whose parent
-    # was GC'd between _can_start() and _get_context() always raises).
-    def _on_disconnect() -> None:
-        try:
-            watch_timer.cancel()
-        except Exception:  # noqa: BLE001
-            pass
-        _cancel_body_timers()
-
-    ui.context.client.on_disconnect(_on_disconnect)
-
-
-@ui.refreshable
-def _manual_layout_body(render_count: dict, body_timers: list) -> None:
-    is_refresh = render_count["n"] > 0
-    render_count["n"] += 1
-    state = get_state()
+    leaves = discover_leaves(state.experiments_dir)
+    initial = load_initial_layout(state.experiments_dir, leaves)
 
     # Compact header: the canvas should claim the rest of the viewport
     # vertically. Detailed instructions live in a tooltip on the title
@@ -112,22 +76,19 @@ def _manual_layout_body(render_count: dict, body_timers: list) -> None:
             "text-xs text-gray-500"
         )
 
-    # --- Discover leaves ---
-    leaves = discover_leaves(state.experiments_dir)
-    if not leaves:
-        with ui.card().classes("p-4 bg-amber-900/20 border border-amber-600"):
-            ui.label("No solved leaves found.").classes("text-amber-300 font-bold")
-            ui.label(
-                "Run a leaves-only experiment first (Setup → Start, or use "
-                "the Monitor tab) so manual layout has something to place. "
-                "This panel auto-refreshes when leaves appear."
-            ).classes("text-sm text-gray-400")
-        return
+    # Waiting banner: visible only when zero leaves have been solved
+    # yet. Stays mounted so the watcher only has to toggle visibility,
+    # never insert/remove DOM. _seeded_grid([]) already returns a
+    # default outline so the canvas renders fine with no leaves.
+    waiting_label = ui.label(
+        "No solved leaves yet -- start a leaves-only run from the Monitor "
+        "tab. The canvas refreshes automatically as each leaf completes."
+    ).classes(
+        "text-sm text-amber-300 mb-2 px-3 py-2 bg-amber-900/20 "
+        "rounded border border-amber-600/40"
+    )
+    waiting_label.set_visibility(not leaves)
 
-    initial = load_initial_layout(state.experiments_dir, leaves)
-
-    # --- Canvas + controls ---
-    canvas_id = "manual-layout-canvas"
     status_label = ui.label("").classes("text-sm text-gray-300 ml-2")
     drc_card = ui.card().classes("w-full mt-4 hidden")
     drc_card.props("id=manual-drc-card")
@@ -214,34 +175,26 @@ def _manual_layout_body(render_count: dict, body_timers: list) -> None:
                 if h > 0 and abs(h - float(height_input.value or 0)) > 0.01:
                     height_input.value = round(h, 2)
 
-            _pull_size_timer = ui.timer(0.6, _pull_size_from_canvas)
-            body_timers.append(_pull_size_timer)
-            # Canvas controller injection. ALWAYS via add_body_html,
-            # even on refresh: NiceGUI 3.x appends each call to the
-            # page body, so each refresh's script runs as the new
-            # SVG mounts. The version sentinel inside the IIFE
-            # (window.__mlc_version[canvas_id]) makes prior IIFEs
-            # bail out of their event handlers / pending tryInit
-            # retries, so only the latest version paints. Net cost
-            # is ~10 KB of accumulated <script> per refresh, which
-            # is fine for the few-refreshes-per-session reality.
-            init_js = build_canvas_init_script(leaves, initial, canvas_id)
-            ui.add_body_html(f"<script>{init_js}</script>")
-            # Belt-and-suspenders for the refresh case: NiceGUI may
-            # not always re-emit add_body_html across refreshable
-            # rerenders (the body html is conceptually page-scoped).
-            # ui.run_javascript reliably reaches the connected client
-            # the same instant ui.html() emits the new SVG.
-            if is_refresh:
-                body_timers.append(
-                    ui.timer(
-                        0.05,
-                        lambda: ui.run_javascript(init_js),
-                        once=True,
-                    )
-                )
+            pull_size_timer = ui.timer(0.6, _pull_size_from_canvas)
+
+            # Canvas controller injection. ALWAYS via run_javascript --
+            # add_body_html would append a fresh <script> tag to the
+            # body on every push, accumulating ~39 KB per leaf landing
+            # in the DOM until the browser fell behind and NiceGUI's
+            # reconnect-recovery hard-reloaded the page. The IIFE's
+            # tryInit MutationObserver waits for the SVG to mount
+            # (Quasar lazy-mounts inactive tabs, see commit 992c03c)
+            # and its version sentinel lets later pushes supersede
+            # earlier ones cleanly.
+            ui.run_javascript(
+                build_canvas_init_script(leaves, initial, canvas_id)
+            )
+
         with ui.column().classes("w-72 gap-3"):
-            _legend(leaves)
+            # Stable container so the watcher can clear + repopulate
+            # the legend rows without churning the surrounding column.
+            legend_card = ui.card().classes("p-3")
+            _legend(legend_card, leaves)
             with ui.card().classes("p-3"):
                 ui.label("Selected").classes("text-xs uppercase text-gray-400")
                 ui.html(
@@ -270,7 +223,7 @@ def _manual_layout_body(render_count: dict, body_timers: list) -> None:
 
     _mounting_hole_panel(canvas_id, initial.get("mounting_holes") or [])
 
-    _view_options_panel(canvas_id, body_timers)
+    _view_options_panel(canvas_id)
 
     def _on_open_in_kicad() -> None:
         pcb = find_latest_parent_pcb(state.experiments_dir)
@@ -308,8 +261,13 @@ def _manual_layout_body(render_count: dict, body_timers: list) -> None:
             return
 
         try:
+            # Re-discover so a save after the watcher has picked up
+            # additional leaves still matches the canvas's current
+            # placements -- save_manual_layout_json filters out any
+            # placement whose instance_path isn't in this list.
+            current_leaves = discover_leaves(state.experiments_dir)
             ml_path = save_manual_layout_json(
-                state.experiments_dir, payload, leaves
+                state.experiments_dir, payload, current_leaves
             )
             saved_path["path"] = ml_path
             # Drop any prior parent_routed.kicad_pcb so the
@@ -398,15 +356,57 @@ def _manual_layout_body(render_count: dict, body_timers: list) -> None:
     save_btn.on_click(_on_save)
     route_btn.on_click(_on_route)
 
+    def _watch() -> None:
+        latest = _max_leaf_mtime(state.experiments_dir)
+        if latest == rendered_at["ts"]:
+            return
+        # Let bursts settle: if the latest write is younger than 3 s,
+        # wait for the run to finish dumping its current leaf before
+        # rebuilding. Keeps the canvas from flickering through
+        # half-written solved_layout.json files.
+        if latest > 0 and (time.time() - latest) < 3.0:
+            return
+        rendered_at["ts"] = latest
+        new_leaves = discover_leaves(state.experiments_dir)
+        new_initial = load_initial_layout(state.experiments_dir, new_leaves)
+        waiting_label.set_visibility(not new_leaves)
+        _legend(legend_card, new_leaves)
+        ui.run_javascript(
+            build_canvas_init_script(new_leaves, new_initial, canvas_id)
+        )
 
-def _legend(leaves: list[LeafInfo]) -> None:
-    with ui.card().classes("p-3"):
+    watch_timer = ui.timer(2.0, _watch)
+
+    # Cancel both timers on client disconnect so they don't tick into a
+    # deleted parent_slot after a page reload (NiceGUI's _should_stop
+    # check runs AFTER _get_context() inside the loop, so a fresh tick
+    # whose parent was GC'd between _can_start() and _get_context()
+    # always raises -- see the patch in app.py for the same reason).
+    def _on_disconnect() -> None:
+        for t in (watch_timer, pull_size_timer):
+            try:
+                t.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+
+    ui.context.client.on_disconnect(_on_disconnect)
+
+
+def _legend(card: ui.card, leaves: list[LeafInfo]) -> None:
+    """Clear ``card`` and repopulate it with one row per leaf.
+
+    Takes the container so the caller can keep its identity stable
+    across watcher updates -- only the rows inside churn, not the
+    surrounding column.
+    """
+    card.clear()
+    with card:
         ui.label("Leaves").classes("text-xs uppercase text-gray-400")
         for leaf in leaves:
             silk_w = leaf.silk_max_x - leaf.silk_min_x
             silk_h = leaf.silk_max_y - leaf.silk_min_y
             with ui.row().classes("items-center gap-2"):
-                swatch = ui.html(
+                ui.html(
                     f'<span style="display:inline-block;width:12px;height:12px;'
                     f'background:{leaf.color};border-radius:2px"></span>'
                 )
@@ -580,7 +580,7 @@ def _mounting_hole_panel(canvas_id: str, initial_holes: list[dict]) -> None:
         _rebuild()
 
 
-def _view_options_panel(canvas_id: str, body_timers: list) -> None:
+def _view_options_panel(canvas_id: str) -> None:
     """Collapsible View options panel at the bottom of the manual layout tab.
 
     Toggles plus a spacing input that propagate to the canvas controller
@@ -646,8 +646,9 @@ def _view_options_panel(canvas_id: str, body_timers: list) -> None:
     # Push the initial values once the canvas JS has had a chance to
     # mount -- the panel renders before the IIFE registers
     # window.manualLayoutCanvases[canvas_id], so a synchronous push
-    # would silently no-op via the `&& ...` guard.
-    body_timers.append(ui.timer(0.3, _push, once=True))
+    # would silently no-op via the `&& ...` guard. once=True so it
+    # self-destructs after firing; no cleanup needed.
+    ui.timer(0.3, _push, once=True)
 
 
 def _build_hole_row(i: int, hole: dict, on_change) -> None:

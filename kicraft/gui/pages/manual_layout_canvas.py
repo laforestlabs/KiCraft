@@ -238,12 +238,12 @@ _CANVAS_JS_TEMPLATE = """
   const cfg = {config_json};
   const HOST_ID = cfg.canvas_id + '-host';
 
-  // Each call to this IIFE bumps the canvas's version. The
-  // refreshable body re-runs build_canvas_init_script on every
-  // _manual_layout_body.refresh() so we end up with a stack of
-  // IIFEs whose only conflict is the document-level keydown
-  // listener (SVG-level listeners auto-clean when the SVG is
-  // replaced). Listeners check this sentinel and bail if a newer
+  // Each call to this IIFE bumps the canvas's version. The Python
+  // side calls build_canvas_init_script + ui.run_javascript whenever
+  // a new leaf lands on disk, so we end up with a stack of IIFEs
+  // whose only conflict is the document-level keydown listener
+  // (SVG-level listeners auto-clean when render() replaces the SVG
+  // contents). Listeners check this sentinel and bail if a newer
   // IIFE has registered, so only the latest version ever responds.
   window.__mlc_version = window.__mlc_version || {{}};
   window.__mlc_version[cfg.canvas_id] = (window.__mlc_version[cfg.canvas_id] || 0) + 1;
