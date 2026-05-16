@@ -172,25 +172,18 @@ def _experiment_data_panel(state) -> None:
 
         ui.button("Refresh", icon="refresh", on_click=_refresh).props("flat")
 
-    def _auto_refresh() -> None:
-        new_options = _build_options()
-        exp_select.options = new_options
-        if selected_exp["id"] not in new_options and new_options:
-            selected_exp["id"] = next(iter(new_options))
-            exp_select.value = selected_exp["id"]
-        exp_select.update()
-
-        # Only auto-reload contents when viewing the live run; archived runs
-        # don't change.
-        if selected_exp["id"] == LIVE_ID:
-            _load_experiment(LIVE_ID)
-
-    refresh_timer = ui.timer(10.0, _auto_refresh)
-    # Cancel on client disconnect so the timer doesn't fire into a
-    # deleted parent_slot after a page reload (see monitor.py for
-    # the same pattern + reasoning).
-    ui.context.client.on_disconnect(lambda: refresh_timer.cancel())
-
+    # No auto-refresh timer. Auto-refreshing this page meant calling
+    # _load_experiment(LIVE_ID) every 10 s, which clears `content` and
+    # rebuilds ~100 NiceGUI elements + 7 plotly figures (each ~50 KB of
+    # JSON) regardless of whether the live data actually changed. That
+    # accumulating background churn was the dominant feeder of
+    # NiceGUI's Socket.IO message history, so a brief client reconnect
+    # at a round boundary would land on outbox.try_rewind failing to
+    # find the client's last-known message id and fall through to
+    # window.location.reload() -- snapping the active tab back to
+    # Setup. Live progress already has a home on the Monitor tab; the
+    # Analysis tab is a retrospective view, so a manual Refresh button
+    # (above) is the right grain.
     if selected_exp["id"]:
         _load_experiment(selected_exp["id"])
 
