@@ -398,8 +398,8 @@ def _render_main_image(host, maximized: dict) -> None:
             if label:
                 ui.label(label).classes("text-xs text-gray-400")
             ui.image(src).classes(
-                "w-full max-h-[400px] object-contain rounded bg-slate-950 border border-slate-700"
-            )
+                "w-full max-h-[400px] rounded bg-slate-950 border border-slate-700"
+            ).props("fit=contain")
         else:
             with ui.row().classes(
                 "w-full h-[200px] items-center justify-center bg-slate-950 rounded border border-slate-700"
@@ -649,7 +649,7 @@ def _round_thumbnail_card(
         img_host.on("click", lambda _e: _on_click_image())
         with img_host:
             if thumb:
-                ui.image(thumb).classes("w-full h-[90px] object-contain rounded")
+                ui.image(thumb).classes("w-full h-[90px] rounded").props("fit=contain")
             else:
                 ui.icon("image", size="xs").classes("text-gray-700")
 

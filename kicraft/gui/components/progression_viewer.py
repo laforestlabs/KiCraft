@@ -425,8 +425,8 @@ def create_progression_viewer(experiments_dir: Path):
                         for item in leaf_gallery[:12]:
                             with ui.card().classes("p-2 bg-slate-900/70"):
                                 ui.image(item["preview_path"]).classes(
-                                    "w-full h-48 object-contain rounded border border-slate-700 bg-slate-950"
-                                )
+                                    "w-full h-48 rounded border border-slate-700 bg-slate-950"
+                                ).props("fit=contain")
                                 ui.label(item["sheet_name"]).classes(
                                     "text-sm font-bold mt-2"
                                 )
@@ -464,8 +464,8 @@ def create_progression_viewer(experiments_dir: Path):
                                     )
                                     if preview_set["preloaded_path"]:
                                         ui.image(preview_set["preloaded_path"]).classes(
-                                            "w-full h-56 object-contain rounded border border-slate-700 bg-slate-950"
-                                        )
+                                            "w-full h-56 rounded border border-slate-700 bg-slate-950"
+                                        ).props("fit=contain")
                                     else:
                                         ui.label("No preloaded preview").classes(
                                             "text-gray-500 italic"
@@ -474,8 +474,8 @@ def create_progression_viewer(experiments_dir: Path):
                                     ui.label("Routed").classes("text-xs text-gray-400")
                                     if preview_set["routed_path"]:
                                         ui.image(preview_set["routed_path"]).classes(
-                                            "w-full h-56 object-contain rounded border border-slate-700 bg-slate-950"
-                                        )
+                                            "w-full h-56 rounded border border-slate-700 bg-slate-950"
+                                        ).props("fit=contain")
                                     else:
                                         ui.label("No routed preview").classes(
                                             "text-gray-500 italic"
@@ -683,8 +683,8 @@ def create_progression_viewer(experiments_dir: Path):
         image_container.clear()
         with image_container:
             ui.image(frame["frame_path"]).classes(
-                "w-full max-w-[1400px] max-h-[82vh] rounded-lg border border-slate-700 bg-slate-900 object-contain shadow-2xl"
-            )
+                "w-full max-w-[1400px] max-h-[82vh] rounded-lg border border-slate-700 bg-slate-900 shadow-2xl"
+            ).props("fit=contain")
 
         round_label.set_text(f"Round {frame['round_num']}")
         score = frame.get("score", 0.0)
