@@ -7,14 +7,14 @@ experiment management for KiCad projects via the pcbnew Python API.
 
 KiCraft is a multi-layer pipeline. Top-down:
 
-1. **start-new-project** (LLM-driven, opencode plugin) -- turns a natural-language
-   project description into a topology-level `project_plan.json`. See
-   [`opencode-plugin/`](opencode-plugin/).
-2. **formalize-design** -- not yet implemented. Will take a topology plan and
-   produce a concrete schematic-level design.
-3. **select-parts** -- not yet implemented. Will resolve generic part classes
-   to specific MPNs based on price and availability.
-4. **placement + routing + scoring** (Python, this repo) -- everything below.
+1. **upstream chat pipeline** (LLM-driven, in-repo) -- turns a natural-language
+   project description into the hierarchical KiCad 9 file set (root +
+   leaf `.kicad_sch`, `.kicad_pro`, `_autoplacer.json`). Five stages
+   (intent / functional_spec / architecture / bom / synthesis); the first
+   four are LLM-driven, the fifth is mechanical. See
+   [Upstream pipeline](#upstream-pipeline-chat--kicad-files) below and
+   `kicraft/upstream/`.
+2. **placement + routing + scoring** (Python, this repo) -- everything below.
 
 ## Installation
 
@@ -25,9 +25,102 @@ pip install -e .
 # With GUI support
 pip install -e ".[gui]"
 
+# With the upstream chat pipeline (anthropic + pydantic + kicad-skip)
+pip install -e ".[upstream]"
+
 # With all optional dependencies
-pip install -e ".[gui,scoring,experiment,dev]"
+pip install -e ".[gui,scoring,experiment,upstream,dev]"
 ```
+
+## Upstream pipeline (chat -> KiCad files)
+
+A multi-turn chat that takes a project description in plain English and
+emits the hierarchical KiCad 9 file set that the placement / routing
+half of KiCraft ingests. No prior schematic required.
+
+### Prerequisites
+
+```bash
+pip install -e ".[upstream]"        # anthropic, pydantic, kicad-skip
+export ANTHROPIC_API_KEY=sk-...     # required for the LLM-driven stages
+```
+
+### GUI
+
+```bash
+python -m kicraft.gui
+# -> open the "Upstream Chat" tab
+```
+
+Describe your project ("USB-C powered 3.3V regulator with status LED,
+JLCPCB target, under $5 BOM"). The orchestrator runs stages as the
+conversation warrants. The right-hand pane shows the state slot
+summary; the **Expert mode** switch flips it to a full JSON view of
+the underlying `ConversationState`. When all four LLM stages are
+populated, the **Synthesize** button writes the file set into the
+target directory and runs the SS9.1-SS9.6 mechanical checks from
+`docs/upstream_schematic_prompt.md`.
+
+### CLI
+
+```bash
+# Interactive REPL
+kicraft-new
+
+# Save / resume conversations
+kicraft-new --save state.json
+kicraft-new --load state.json
+
+# Headless synthesis from a saved state
+kicraft-new --load state.json --synthesize ./generated/MYPROJ
+
+# REPL commands: :state :dump :synth DIR :expert on|off :quit
+```
+
+The headless `--synthesize` path takes a fully populated state JSON
+and emits the file set; useful for tests and for resuming a run after
+GUI tab close.
+
+### What gets written
+
+For project stem `MYPROJ`, the synthesis stage writes:
+
+```
+MYPROJ/
+  MYPROJ.kicad_sch                    # hierarchical root
+  <SHEET>.kicad_sch ...               # one per leaf sheet
+  MYPROJ.kicad_pro                    # design rules + Default/Power netclasses
+  MYPROJ_autoplacer.json              # ic_groups, power_nets, signal_flow_order, ...
+  MYPROJ.kicad_pcb                    # empty pcbnew stub
+```
+
+Everything past that is the existing layout/routing pipeline:
+
+```bash
+cd MYPROJ
+autoexperiment MYPROJ.kicad_pcb --schematic MYPROJ.kicad_sch --rounds 20
+```
+
+### Validation
+
+Every synthesis run executes SS9.1-SS9.6 from
+`docs/upstream_schematic_prompt.md` against the written files
+(schematic version, footprints non-empty, pin directions valid,
+Sheetfile refs resolve, autoplacer JSON valid, every named ref in
+the schematic). The mechanical stage raises
+`SynthesisValidationError` and prints the failing check rather than
+shipping a broken file set.
+
+### Notes
+
+- Costs land on the configured `ANTHROPIC_API_KEY`. Prompt-cached
+  system prompts keep per-turn cost low; a typical 5-7 turn
+  conversation is well under the cost of a single Claude API call.
+- Custom footprints (`<PROJECT>.pretty/`) are out of scope for v1 --
+  if the BOM references a footprint not in the stock KiCad libraries,
+  the orchestrator surfaces a blocking question instead.
+- State is per-tab / per-CLI-session; cross-session memory is out
+  of scope per the original brief.
 
 ## Quick Start
 
@@ -260,6 +353,11 @@ from the command line.
 
 ## CLI Commands
 
+### Upstream Chat Pipeline
+- `kicraft-new` — Multi-turn chat that turns a project description into the
+  hierarchical KiCad 9 file set. `--synthesize DIR` runs headless against a
+  saved state. See [Upstream pipeline](#upstream-pipeline-chat--kicad-files).
+
 ### Core Pipeline
 - `solve-subcircuits` — Hierarchical subcircuit placement and routing
 - `compose-subcircuits` — Assemble solved subcircuits into parent boards
@@ -301,13 +399,21 @@ from the command line.
 
 ```
 kicraft/
+├── upstream/            # Chat -> KiCad file set (5-stage LLM pipeline)
+│   ├── models.py        # Pydantic state slots (intent / functional_spec / architecture / bom)
+│   ├── llm.py           # Anthropic wrapper (prompt caching, forced tool use)
+│   ├── orchestrator.py  # Per-turn run_stage / ask / respond dispatcher
+│   ├── prompts/         # Stage and orchestrator system prompts (.md)
+│   ├── stages/          # One module per stage; synthesis is mechanical
+│   ├── synthesis/       # .kicad_sch / .kicad_pro / autoplacer.json emitters + §9 checks
+│   └── cli.py           # `kicraft-new` REPL + headless `--synthesize`
 ├── autoplacer/          # Placement and routing engine
 │   ├── config.py        # Default config + project config loader
 │   ├── freerouting_runner.py
 │   ├── brain/           # Pure algorithms (no pcbnew dependency)
 │   └── hardware/        # KiCad pcbnew API adapter
 ├── scoring/             # Layout quality scoring checks
-├── gui/                 # NiceGUI experiment manager
+├── gui/                 # NiceGUI experiment manager (includes Upstream Chat tab)
 ├── cli/                 # CLI entry-point scripts
 └── logging_config.py    # Structured logging setup
 ```
