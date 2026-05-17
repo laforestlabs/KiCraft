@@ -7,13 +7,13 @@ experiment management for KiCad projects via the pcbnew Python API.
 
 KiCraft is a multi-layer pipeline. Top-down:
 
-1. **upstream chat pipeline** (LLM-driven, in-repo) -- turns a natural-language
+1. **CircuitChat pipeline** (LLM-driven, in-repo) -- turns a natural-language
    project description into the hierarchical KiCad 9 file set (root +
    leaf `.kicad_sch`, `.kicad_pro`, `_autoplacer.json`). Five stages
    (intent / functional_spec / architecture / bom / synthesis); the first
    four are LLM-driven, the fifth is mechanical. See
-   [Upstream pipeline](#upstream-pipeline-chat--kicad-files) below and
-   `kicraft/upstream/`.
+   [CircuitChat pipeline](#circuitchat-pipeline-chat--kicad-files) below and
+   `kicraft/circuitchat/`.
 2. **placement + routing + scoring** (Python, this repo) -- everything below.
 
 ## Installation
@@ -25,14 +25,14 @@ pip install -e .
 # With GUI support
 pip install -e ".[gui]"
 
-# With the upstream chat pipeline (anthropic + pydantic + kicad-skip)
-pip install -e ".[upstream]"
+# With the CircuitChat pipeline (anthropic + pydantic + kicad-skip)
+pip install -e ".[circuitchat]"
 
 # With all optional dependencies
-pip install -e ".[gui,scoring,experiment,upstream,dev]"
+pip install -e ".[gui,scoring,experiment,circuitchat,dev]"
 ```
 
-## Upstream pipeline (chat -> KiCad files)
+## CircuitChat pipeline (chat -> KiCad files)
 
 A multi-turn chat that takes a project description in plain English and
 emits the hierarchical KiCad 9 file set that the placement / routing
@@ -41,7 +41,7 @@ half of KiCraft ingests. No prior schematic required.
 ### Prerequisites
 
 ```bash
-pip install -e ".[upstream]"        # anthropic, pydantic, kicad-skip
+pip install -e ".[circuitchat]"        # anthropic, pydantic, kicad-skip
 export ANTHROPIC_API_KEY=sk-...     # required for the LLM-driven stages
 ```
 
@@ -49,7 +49,7 @@ export ANTHROPIC_API_KEY=sk-...     # required for the LLM-driven stages
 
 ```bash
 python -m kicraft.gui
-# -> open the "Upstream Chat" tab
+# -> open the "CircuitChat" tab
 ```
 
 Describe your project ("USB-C powered 3.3V regulator with status LED,
@@ -59,7 +59,7 @@ summary; the **Expert mode** switch flips it to a full JSON view of
 the underlying `ConversationState`. When all four LLM stages are
 populated, the **Synthesize** button writes the file set into the
 target directory and runs the SS9.1-SS9.6 mechanical checks from
-`docs/upstream_schematic_prompt.md`.
+`docs/circuitchat_schematic_prompt.md`.
 
 ### CLI
 
@@ -104,7 +104,7 @@ autoexperiment MYPROJ.kicad_pcb --schematic MYPROJ.kicad_sch --rounds 20
 ### Validation
 
 Every synthesis run executes SS9.1-SS9.6 from
-`docs/upstream_schematic_prompt.md` against the written files
+`docs/circuitchat_schematic_prompt.md` against the written files
 (schematic version, footprints non-empty, pin directions valid,
 Sheetfile refs resolve, autoplacer JSON valid, every named ref in
 the schematic). The mechanical stage raises
@@ -353,10 +353,10 @@ from the command line.
 
 ## CLI Commands
 
-### Upstream Chat Pipeline
+### CircuitChat Pipeline
 - `kicraft-new` — Multi-turn chat that turns a project description into the
   hierarchical KiCad 9 file set. `--synthesize DIR` runs headless against a
-  saved state. See [Upstream pipeline](#upstream-pipeline-chat--kicad-files).
+  saved state. See [CircuitChat pipeline](#circuitchat-pipeline-chat--kicad-files).
 
 ### Core Pipeline
 - `solve-subcircuits` — Hierarchical subcircuit placement and routing
@@ -399,7 +399,7 @@ from the command line.
 
 ```
 kicraft/
-├── upstream/            # Chat -> KiCad file set (5-stage LLM pipeline)
+├── circuitchat/               # Chat -> KiCad file set (5-stage LLM pipeline)
 │   ├── models.py        # Pydantic state slots (intent / functional_spec / architecture / bom)
 │   ├── llm.py           # Anthropic wrapper (prompt caching, forced tool use)
 │   ├── orchestrator.py  # Per-turn run_stage / ask / respond dispatcher
@@ -413,7 +413,7 @@ kicraft/
 │   ├── brain/           # Pure algorithms (no pcbnew dependency)
 │   └── hardware/        # KiCad pcbnew API adapter
 ├── scoring/             # Layout quality scoring checks
-├── gui/                 # NiceGUI experiment manager (includes Upstream Chat tab)
+├── gui/                 # NiceGUI experiment manager (includes CircuitChat tab)
 ├── cli/                 # CLI entry-point scripts
 └── logging_config.py    # Structured logging setup
 ```

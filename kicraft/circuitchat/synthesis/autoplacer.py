@@ -1,7 +1,7 @@
 """Emit `<PROJECT>_autoplacer.json` from architecture + BOM slots.
 
 Straight serialization of the state into the schema KiCraft already reads
-(see `docs/upstream_schematic_prompt.md` §4 and the existing
+(see `docs/circuitchat_schematic_prompt.md` §4 and the existing
 `LLUPS_autoplacer.json` for shape).
 """
 from __future__ import annotations

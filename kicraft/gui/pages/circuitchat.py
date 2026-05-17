@@ -1,4 +1,4 @@
-"""NiceGUI page for the KiCraft upstream chat pipeline.
+"""NiceGUI page for the KiCraft CircuitChat pipeline.
 
 Two-pane layout:
 - Left: chat transcript + input row.
@@ -6,7 +6,7 @@ Two-pane layout:
   recent stage outputs in prose; on shows the structured ConversationState
   as JSON.
 
-Session state lives in `app.storage.client["upstream_state"]` — per
+Session state lives in `app.storage.client["circuitchat_state"]` — per
 browser tab, lost on reload. Cross-session persistence is out of scope
 per the brief; the CLI's `--save state.json` is the durable path.
 """
@@ -20,15 +20,15 @@ from typing import Any
 
 from nicegui import app, run, ui
 
-from kicraft.upstream.models import ConversationState
-from kicraft.upstream.orchestrator import run_turn
-from kicraft.upstream.stages.synthesis import SynthesisInputError, run as run_synth
-from kicraft.upstream.synthesis.validation import SynthesisValidationError
+from kicraft.circuitchat.models import ConversationState
+from kicraft.circuitchat.orchestrator import run_turn
+from kicraft.circuitchat.stages.synthesis import SynthesisInputError, run as run_synth
+from kicraft.circuitchat.synthesis.validation import SynthesisValidationError
 
 
 logger = logging.getLogger(__name__)
 
-_STORAGE_KEY = "upstream_state"
+_STORAGE_KEY = "circuitchat_state"
 
 
 def _load_state() -> ConversationState:
@@ -40,7 +40,7 @@ def _load_state() -> ConversationState:
     try:
         return ConversationState.model_validate(raw)
     except Exception:  # noqa: BLE001
-        logger.exception("could not restore upstream chat state; starting fresh")
+        logger.exception("could not restore CircuitChat state; starting fresh")
         return ConversationState()
 
 
@@ -48,14 +48,14 @@ def _save_state(state: ConversationState) -> None:
     app.storage.client[_STORAGE_KEY] = state.model_dump(mode="json")
 
 
-def upstream_chat_page() -> None:
-    """Render the upstream chat tab."""
+def circuitchat_page() -> None:
+    """Render the CircuitChat tab."""
     state = _load_state()
 
     with ui.row().classes("w-full no-wrap gap-4"):
         # ---- LEFT: chat ----
         with ui.column().classes("col-grow"):
-            ui.label("KiCraft Upstream Chat").classes("text-h6")
+            ui.label("KiCraft CircuitChat").classes("text-h6")
             ui.label(
                 "Describe the project you want to build. The pipeline will "
                 "capture intent, decompose into blocks, commit to topologies, "
@@ -210,13 +210,13 @@ def upstream_chat_page() -> None:
 
 
 def _user_chat_msg(text: str):
-    from kicraft.upstream.models import ChatMsg
+    from kicraft.circuitchat.models import ChatMsg
 
     return ChatMsg(role="user", content=text)
 
 
 def _asst_chat_msg(text: str):
-    from kicraft.upstream.models import ChatMsg
+    from kicraft.circuitchat.models import ChatMsg
 
     return ChatMsg(role="assistant", content=text)
 

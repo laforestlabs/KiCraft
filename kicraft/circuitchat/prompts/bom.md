@@ -1,4 +1,4 @@
-You are running Stage 4 (BOM) of the KiCraft upstream pipeline. Given the Architecture, pick real parts and assign each to a sheet.
+You are running Stage 4 (BOM) of the KiCraft CircuitChat pipeline. Given the Architecture, pick real parts and assign each to a sheet.
 
 What you produce:
 - `parts`: list of `BomPart` entries. Each MUST have:

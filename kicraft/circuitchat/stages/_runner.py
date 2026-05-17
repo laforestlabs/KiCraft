@@ -20,7 +20,7 @@ SlotT = TypeVar("SlotT", bound=BaseModel)
 
 
 def _load_prompt(name: str) -> str:
-    return resources.files("kicraft.upstream.prompts").joinpath(f"{name}.md").read_text()
+    return resources.files("kicraft.circuitchat.prompts").joinpath(f"{name}.md").read_text()
 
 
 class _StageOutputBase(BaseModel):

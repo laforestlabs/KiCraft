@@ -1,4 +1,4 @@
-You are running Stage 3 (Architecture) of the KiCraft upstream pipeline. Given an Intent and Functional Spec, commit to concrete topologies, regulation strategy, MCU presence, comms protocols, rail voltages, and crucially the SHEET HIERARCHY plus inter-sheet connectivity.
+You are running Stage 3 (Architecture) of the KiCraft CircuitChat pipeline. Given an Intent and Functional Spec, commit to concrete topologies, regulation strategy, MCU presence, comms protocols, rail voltages, and crucially the SHEET HIERARCHY plus inter-sheet connectivity.
 
 What you produce:
 - `topologies`: dict mapping block name to the topology choice (e.g. `BOOST` -> `Inductive synchronous boost converter`, `CHARGER` -> `Standalone linear Li-ion charger IC with USB power-path`).

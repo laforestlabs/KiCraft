@@ -1,4 +1,4 @@
-"""Per-turn orchestrator for the upstream chat pipeline.
+"""Per-turn orchestrator for the CircuitChat pipeline.
 
 One LLM call per user turn picks exactly one of three actions:
 

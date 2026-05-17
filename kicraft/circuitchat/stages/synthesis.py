@@ -1,7 +1,7 @@
 """Stage 5: mechanical synthesis.
 
 Reads a complete ConversationState and writes the file set described in
-`docs/upstream_schematic_prompt.md` (root + leaf schematics, .kicad_pro,
+`docs/circuitchat_schematic_prompt.md` (root + leaf schematics, .kicad_pro,
 _autoplacer.json). Runs §9.1-§9.6 unconditionally and §9.7 (solve-subcircuits
 smoke) optionally.
 

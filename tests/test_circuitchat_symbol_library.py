@@ -1,4 +1,4 @@
-"""Tests for upstream.synthesis.symbol_library.
+"""Tests for circuitchat.synthesis.symbol_library.
 
 These touch the real KiCad stock libraries at /usr/share/kicad/symbols.
 Skip the file if that directory isn't present (e.g. on machines without KiCad).
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from kicraft.upstream.synthesis.symbol_library import (
+from kicraft.circuitchat.synthesis.symbol_library import (
     DEFAULT_KICAD_SYMBOL_DIR,
     SymbolNotFoundError,
     build_lib_symbols_block,

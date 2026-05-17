@@ -8,8 +8,8 @@ import os
 
 import pytest
 
-from kicraft.upstream.llm import LLMError, pydantic_tool
-from kicraft.upstream.models import (
+from kicraft.circuitchat.llm import LLMError, pydantic_tool
+from kicraft.circuitchat.models import (
     Architecture,
     BOM,
     BomPart,
@@ -21,14 +21,14 @@ from kicraft.upstream.models import (
     Sheet,
     SheetPin,
 )
-from kicraft.upstream.orchestrator import (
+from kicraft.circuitchat.orchestrator import (
     _ASK_TOOL,
     _RESPOND_TOOL,
     _RUN_STAGE_TOOL,
     _derive_project_stem,
     _slot_attr_for,
 )
-from kicraft.upstream.stages._runner import _load_prompt
+from kicraft.circuitchat.stages._runner import _load_prompt
 
 
 def test_orchestrator_tool_schemas_are_well_formed() -> None:
@@ -79,7 +79,7 @@ def test_project_stem_derivation(goal: str, expected_prefix: str) -> None:
 
 
 def test_llm_client_raises_without_api_key(monkeypatch) -> None:
-    from kicraft.upstream.llm import _client
+    from kicraft.circuitchat.llm import _client
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(LLMError):
@@ -92,8 +92,8 @@ def test_llm_client_raises_without_api_key(monkeypatch) -> None:
 )
 def test_live_intent_round_trip() -> None:
     """Smoke: real Anthropic call returns a valid IntentSlot."""
-    from kicraft.upstream.models import ChatMsg
-    from kicraft.upstream.stages.intent import run as run_intent
+    from kicraft.circuitchat.models import ChatMsg
+    from kicraft.circuitchat.stages.intent import run as run_intent
 
     state = ConversationState(
         history=[
@@ -117,7 +117,7 @@ def test_live_intent_round_trip() -> None:
 
 def test_cli_synthesize_from_saved_state(tmp_path) -> None:
     """CLI `--synthesize` reads a saved state JSON and writes the file set."""
-    from kicraft.upstream.cli import main
+    from kicraft.circuitchat.cli import main
 
     # Build a complete state and save it.
     state = ConversationState(

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from kicraft.upstream.models import (
+from kicraft.circuitchat.models import (
     BOM,
     Architecture,
     BomPart,
@@ -27,8 +27,8 @@ from kicraft.upstream.models import (
     Sheet,
     SheetPin,
 )
-from kicraft.upstream.stages.synthesis import SynthesisInputError, run
-from kicraft.upstream.synthesis.validation import (
+from kicraft.circuitchat.stages.synthesis import SynthesisInputError, run
+from kicraft.circuitchat.synthesis.validation import (
     SynthesisValidationError,
     check_named_refs_exist,
     check_pin_directions,

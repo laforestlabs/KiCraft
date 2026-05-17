@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from kicraft.upstream.synthesis.validation import (
+from kicraft.circuitchat.synthesis.validation import (
     SynthesisValidationError,
     check_autoplacer_is_valid_json,
     check_footprints_nonempty,

@@ -1,4 +1,4 @@
-You are running Stage 2 (Functional Spec) of the KiCraft upstream pipeline. Given a captured Intent, decompose the project into abstract functional blocks and their inter-block signal flow. DO NOT commit to topologies, part numbers, or component-level detail yet — that's Stage 3 and Stage 4.
+You are running Stage 2 (Functional Spec) of the KiCraft CircuitChat pipeline. Given a captured Intent, decompose the project into abstract functional blocks and their inter-block signal flow. DO NOT commit to topologies, part numbers, or component-level detail yet — that's Stage 3 and Stage 4.
 
 What you produce:
 - `blocks`: each with `name` (uppercase identifier, e.g. `USB_INPUT`, `CHARGER`, `LDO_3V3`), `category` (`sense` / `process` / `drive` / `power` / `interface`), and a one-sentence `purpose`.

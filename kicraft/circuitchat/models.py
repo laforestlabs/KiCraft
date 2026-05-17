@@ -1,11 +1,11 @@
-"""Pydantic models for the upstream conversation state.
+"""Pydantic models for the CircuitChat conversation state.
 
 One slot per stage (intent / functional_spec / architecture / bom) plus a
 Question type used by every stage to surface clarifications and an
 ArtifactPaths type set by the synthesis stage.
 
 Validation rules mirror the hard requirements from
-`docs/upstream_schematic_prompt.md` so invalid state cannot reach synthesis.
+`docs/circuitchat_schematic_prompt.md` so invalid state cannot reach synthesis.
 """
 from __future__ import annotations
 

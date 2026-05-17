@@ -44,7 +44,7 @@ def _client():
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise LLMError(
-            "ANTHROPIC_API_KEY not set. Export it before running the upstream pipeline."
+            "ANTHROPIC_API_KEY not set. Export it before running the CircuitChat pipeline."
         )
     return anthropic.Anthropic(api_key=api_key)
 

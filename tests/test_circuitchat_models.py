@@ -1,4 +1,4 @@
-"""Unit tests for upstream Pydantic models.
+"""Unit tests for CircuitChat Pydantic models.
 
 Locks the validation contract:
 - reference designator regex
@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from kicraft.upstream.models import (
+from kicraft.circuitchat.models import (
     Architecture,
     BOM,
     BomPart,

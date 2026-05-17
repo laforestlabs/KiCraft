@@ -1,8 +1,8 @@
-"""`kicraft-new` — stdin/stdout chat loop driving the upstream pipeline.
+"""`kicraft-new` — stdin/stdout chat loop driving the CircuitChat pipeline.
 
 Useful for scripting and end-to-end tests; the same orchestrator and
 state model power the GUI page. The CLI deliberately keeps zero
-dependencies beyond the upstream package itself.
+dependencies beyond the circuitchat package itself.
 
 Usage:
     kicraft-new                       # interactive chat loop
@@ -23,7 +23,7 @@ from .models import ConversationState
 from .orchestrator import run_turn
 
 
-_BANNER = """KiCraft upstream chat -- describe the project you want to build.
+_BANNER = """KiCraft CircuitChat -- describe the project you want to build.
 Type ':help' for commands, ':quit' to exit.
 """
 
