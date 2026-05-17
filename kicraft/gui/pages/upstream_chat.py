@@ -6,9 +6,9 @@ Two-pane layout:
   recent stage outputs in prose; on shows the structured ConversationState
   as JSON.
 
-Session state lives in `app.storage.user["upstream_state"]` so a tab
-reload keeps the conversation. Cross-session persistence is out of
-scope per the brief.
+Session state lives in `app.storage.client["upstream_state"]` — per
+browser tab, lost on reload. Cross-session persistence is out of scope
+per the brief; the CLI's `--save state.json` is the durable path.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ _STORAGE_KEY = "upstream_state"
 
 
 def _load_state() -> ConversationState:
-    raw = app.storage.user.get(_STORAGE_KEY)
+    raw = app.storage.client.get(_STORAGE_KEY)
     if raw is None:
         return ConversationState()
     if isinstance(raw, str):
@@ -45,7 +45,7 @@ def _load_state() -> ConversationState:
 
 
 def _save_state(state: ConversationState) -> None:
-    app.storage.user[_STORAGE_KEY] = state.model_dump(mode="json")
+    app.storage.client[_STORAGE_KEY] = state.model_dump(mode="json")
 
 
 def upstream_chat_page() -> None:
