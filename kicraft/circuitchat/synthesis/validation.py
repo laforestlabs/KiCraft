@@ -271,11 +271,201 @@ def check_named_refs_exist(project_dir: Path, project_stem: str) -> CheckResult:
     )
 
 
+# ---------- §9.7 ref uniqueness (leaf-library reuse + general hygiene) ----------
+
+
+def check_refdes_uniqueness(project_dir: Path, project_stem: str) -> CheckResult:
+    """§9.7 — every refdes is globally unique across schematic + autoplacer.
+
+    Catches renumber-map bugs that would otherwise surface as silent
+    refdes collisions between library-imported and from-scratch sheets.
+    """
+    import json as _json
+    import re
+
+    ref_re = re.compile(r'\(property\s+"Reference"\s+"([A-Z]+[0-9]+)"')
+    ap_path = project_dir / f"{project_stem}_autoplacer.json"
+    refs_by_origin: dict[str, list[str]] = {}
+
+    for sch in sorted(project_dir.glob("*.kicad_sch")):
+        if sch.name == f"{project_stem}.kicad_sch":
+            continue  # root has no symbol refs in our emitter
+        text = sch.read_text(encoding="utf-8")
+        for ref in ref_re.findall(text):
+            refs_by_origin.setdefault(ref, []).append(f"sch:{sch.name}")
+
+    # Collect refs from autoplacer.json (ic_groups keys + members,
+    # thermal_refs, signal_flow_order, component_zones keys).
+    if ap_path.exists():
+        try:
+            ap = _json.loads(ap_path.read_text(encoding="utf-8"))
+        except Exception:
+            ap = {}
+        for key in ("ic_groups", "group_labels", "component_zones"):
+            d = ap.get(key, {})
+            if isinstance(d, dict):
+                for k, v in d.items():
+                    if isinstance(k, str) and re.match(r"^[A-Z]+[0-9]+$", k):
+                        refs_by_origin.setdefault(k, []).append(f"ap:{key}")
+                    if isinstance(v, list):
+                        for item in v:
+                            if isinstance(item, str) and re.match(r"^[A-Z]+[0-9]+$", item):
+                                refs_by_origin.setdefault(item, []).append(f"ap:{key}:member")
+        for key in ("thermal_refs", "signal_flow_order"):
+            lst = ap.get(key, [])
+            if isinstance(lst, list):
+                for item in lst:
+                    if isinstance(item, str) and re.match(r"^[A-Z]+[0-9]+$", item):
+                        refs_by_origin.setdefault(item, []).append(f"ap:{key}")
+
+    # Origins are recorded as a list of where the ref was *seen*; for
+    # uniqueness, what matters is whether the SAME ref appears in two
+    # different .kicad_sch files (the schematic side is the source of
+    # truth for ref ownership). Autoplacer refs reference what should
+    # be a unique sch ref, so they may legitimately appear N times for
+    # one schematic ref.
+    sch_origins_by_ref: dict[str, set[str]] = {}
+    for ref, origins in refs_by_origin.items():
+        for o in origins:
+            if o.startswith("sch:"):
+                sch_origins_by_ref.setdefault(ref, set()).add(o)
+    collisions = [
+        (ref, sorted(origins))
+        for ref, origins in sch_origins_by_ref.items()
+        if len(origins) > 1
+    ]
+    if collisions:
+        return CheckResult(
+            name="9.7 refdes uniqueness",
+            ok=False,
+            message=f"{len(collisions)} ref(s) appear in multiple schematics",
+            offenders=[f"{r}: {', '.join(o)}" for r, o in collisions],
+        )
+    return CheckResult(
+        name="9.7 refdes uniqueness",
+        ok=True,
+        message=f"{len(sch_origins_by_ref)} unique refs across schematics",
+    )
+
+
+# ---------- §9.8 library interface match ----------
+
+
+def check_library_interface_match(
+    project_dir: Path, project_stem: str
+) -> CheckResult:
+    """§9.8 — every library-backed sheet's hierarchical labels match
+    the manifest's declared interface exactly.
+
+    Failure mode: the leaf on disk was edited between architecture and
+    synthesis, or the renumber/copy step corrupted the labels.
+    """
+    import json as _json
+    import re
+
+    ap_path = project_dir / f"{project_stem}_autoplacer.json"
+    if not ap_path.exists():
+        return CheckResult(
+            name="9.8 library interface match",
+            ok=True,
+            message="no library_leaves (autoplacer.json absent)",
+        )
+    try:
+        ap = _json.loads(ap_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return CheckResult(
+            name="9.8 library interface match",
+            ok=False,
+            message=f"could not parse autoplacer.json: {exc}",
+        )
+    library_leaves = ap.get("library_leaves") or {}
+    if not isinstance(library_leaves, dict) or not library_leaves:
+        return CheckResult(
+            name="9.8 library interface match",
+            ok=True,
+            message="no library-backed sheets",
+        )
+
+    try:
+        from kicraft.leaf_library import LeafLibrary
+    except ImportError:
+        return CheckResult(
+            name="9.8 library interface match",
+            ok=False,
+            message="kicraft.leaf_library not importable",
+        )
+
+    lib = LeafLibrary.from_env()
+    label_re = re.compile(
+        r'\(hierarchical_label\s+"([A-Z][A-Z0-9_]*)"\s+\(shape\s+(\w+)\)'
+    )
+    shape_to_direction = {
+        "input": "input",
+        "output": "output",
+        "bidirectional": "bidirectional",
+        "passive": "passive",
+        "tri_state": "bidirectional",
+    }
+
+    mismatches: list[str] = []
+    for sheet_name, entry in library_leaves.items():
+        if not isinstance(entry, dict):
+            continue
+        slug = entry.get("source")
+        if not isinstance(slug, str):
+            continue
+        leaf = lib.find(slug)
+        if leaf is None:
+            mismatches.append(f"{sheet_name}: leaf {slug} not loadable")
+            continue
+        # Find this sheet's stem from autoplacer.json or fall back to
+        # scanning for a matching label set. The synthesis stage writes
+        # the sheet's stem to <stem>.kicad_sch, but we don't have the
+        # stem in library_leaves. Scan every leaf .kicad_sch and match.
+        leaf_iface = {
+            (lbl.name, lbl.direction)
+            for lbl in leaf.manifest.interface.hierarchical_labels
+        }
+        # Find a sheet whose labels match -- since stems and sheet_uuid
+        # are not in library_leaves we accept any leaf .kicad_sch whose
+        # labels are a superset of the expected set.
+        found = False
+        for sch in sorted(project_dir.glob("*.kicad_sch")):
+            if sch.name == f"{project_stem}.kicad_sch":
+                continue
+            text = sch.read_text(encoding="utf-8")
+            labels = {
+                (m.group(1), shape_to_direction.get(m.group(2), "passive"))
+                for m in label_re.finditer(text)
+            }
+            if labels == leaf_iface:
+                found = True
+                break
+        if not found:
+            mismatches.append(
+                f"{sheet_name}: no leaf .kicad_sch has interface "
+                f"{sorted(leaf_iface)}"
+            )
+
+    if mismatches:
+        return CheckResult(
+            name="9.8 library interface match",
+            ok=False,
+            message=f"{len(mismatches)} mismatch(es)",
+            offenders=mismatches,
+        )
+    return CheckResult(
+        name="9.8 library interface match",
+        ok=True,
+        message=f"{len(library_leaves)} library-backed sheet(s) match manifest",
+    )
+
+
 # ---------- aggregator ----------
 
 
 def run_validations(project_dir: Path, project_stem: str) -> list[CheckResult]:
-    """Run §9.1-§9.6 and raise SynthesisValidationError if any failed."""
+    """Run §9.1-§9.8 and raise SynthesisValidationError if any failed."""
     results = [
         check_schematic_version(project_dir),
         check_footprints_nonempty(project_dir),
@@ -283,6 +473,8 @@ def run_validations(project_dir: Path, project_stem: str) -> list[CheckResult]:
         check_sheetfile_refs_resolve(project_dir),
         check_autoplacer_is_valid_json(project_dir, project_stem),
         check_named_refs_exist(project_dir, project_stem),
+        check_refdes_uniqueness(project_dir, project_stem),
+        check_library_interface_match(project_dir, project_stem),
     ]
     failures = [r for r in results if not r.ok]
     if failures:

@@ -351,13 +351,26 @@ def emit_schematic(
     architecture: Architecture,
     bom: BOM,
     title: str | None = None,
+    *,
+    skip_leaf_sheets: set[str] | None = None,
+    sheet_instances: list[_SheetInstance] | None = None,
 ) -> tuple[Path, list[Path]]:
     """Emit root + leaf .kicad_sch files into project_dir.
+
+    Args:
+        skip_leaf_sheets: sheet names to skip during leaf emission. Used
+            by the synthesis stage to delegate library-backed sheets to
+            the leaf-library installer (which writes the leaf
+            .kicad_sch with renumbered refs).
+        sheet_instances: optional pre-built _SheetInstance list. If
+            supplied, the emitter uses these (with their pre-allocated
+            UUIDs) instead of building fresh ones. The installer needs
+            the same UUIDs to derive the matching leaf_key.
 
     Returns (root_path, [leaf_paths]).
     """
     project_dir.mkdir(parents=True, exist_ok=True)
-    sheet_insts = _build_sheet_instances(architecture, bom)
+    sheet_insts = sheet_instances if sheet_instances is not None else _build_sheet_instances(architecture, bom)
     root = _emit_root(
         project_stem,
         project_dir,
@@ -365,8 +378,24 @@ def emit_schematic(
         architecture,
         project_title=title or project_stem,
     )
-    leaves = [_emit_leaf(project_dir, project_stem, si) for si in sheet_insts]
+    skip = skip_leaf_sheets or set()
+    leaves = [
+        _emit_leaf(project_dir, project_stem, si)
+        for si in sheet_insts
+        if si.sheet.name not in skip
+    ]
     return root, leaves
+
+
+def build_sheet_instances(
+    architecture: Architecture, bom: BOM
+) -> list[_SheetInstance]:
+    """Public re-export of the internal _build_sheet_instances helper.
+
+    The synthesis stage uses this to pre-allocate UUIDs so the
+    leaf-library installer derives the matching leaf_key.
+    """
+    return _build_sheet_instances(architecture, bom)
 
 
 # ---------- aggregate entry point ----------

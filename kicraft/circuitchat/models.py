@@ -131,6 +131,12 @@ class Sheet(BaseModel):
     name: str
     stem: str
     function: str
+    # Set when the LLM elects to reuse a Leaf Library entry verbatim for
+    # this sheet. ``from_library`` is "<name>@<version>"; ``library_instance``
+    # disambiguates multiple uses of the same leaf (1 for the first, 2 for
+    # the second, etc.). Both None for from-scratch sheets.
+    from_library: str | None = None
+    library_instance: int | None = None
 
     @field_validator("name")
     @classmethod
@@ -149,6 +155,24 @@ class Sheet(BaseModel):
                 f"Sheet.stem {v!r} must be uppercase with underscores (e.g. 'USB_INPUT')"
             )
         return v
+
+    @model_validator(mode="after")
+    def _library_fields_paired(self):
+        if (self.from_library is None) != (self.library_instance is None):
+            raise ValueError(
+                "Sheet.from_library and Sheet.library_instance must both "
+                "be set or both be None"
+            )
+        if self.library_instance is not None and self.library_instance < 1:
+            raise ValueError(
+                f"Sheet.library_instance must be >= 1, got {self.library_instance}"
+            )
+        if self.from_library is not None and "@" not in self.from_library:
+            raise ValueError(
+                f"Sheet.from_library {self.from_library!r} must be "
+                f"'<name>@<version>'"
+            )
+        return self
 
 
 class SheetPin(BaseModel):
@@ -219,6 +243,10 @@ class BomPart(BaseModel):
     mpn: str | None = None
     datasheet: str | None = None
     sourcing_note: str | None = None
+    # Set on parts that came from a Leaf Library entry. "<name>@<version>".
+    # None for LLM-emitted parts. Synthesis applies the renumber map to
+    # parts where this is set; LLM parts pass through unchanged.
+    source_leaf: str | None = None
 
     @field_validator("ref")
     @classmethod

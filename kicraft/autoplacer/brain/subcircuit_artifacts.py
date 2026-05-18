@@ -326,6 +326,31 @@ def slugify_subcircuit_id(subcircuit_id: SubCircuitId) -> str:
     return f"{slug}__{_short_hash(subcircuit_id.instance_path or subcircuit_id.sheet_name)}"
 
 
+def derive_leaf_key(
+    sheet_name: str,
+    sheet_file: str,
+    instance_path: str,
+    parent_instance_path: str | None = "/",
+) -> str:
+    """Compute the leaf_key (= subcircuit dir name) for a sheet without
+    needing to parse the schematic first.
+
+    Same output as ``slugify_subcircuit_id(SubCircuitId(...))`` but
+    callable from contexts that synthesize a schematic instead of
+    discovering it on disk (notably the leaf-library installer, which
+    pre-populates ``.experiments/subcircuits/<leaf_key>/`` before the
+    solver ever runs).
+    """
+    return slugify_subcircuit_id(
+        SubCircuitId(
+            sheet_name=sheet_name,
+            sheet_file=sheet_file,
+            instance_path=instance_path,
+            parent_instance_path=parent_instance_path,
+        )
+    )
+
+
 def artifact_root_dir(project_dir: str | Path) -> Path:
     """Return the default artifact root directory for subcircuits."""
     return Path(project_dir) / ".experiments" / "subcircuits"
@@ -696,6 +721,7 @@ __all__ = [
     "build_solved_layout_artifact",
     "compute_config_hash",
     "compute_source_hash",
+    "derive_leaf_key",
     "ensure_artifact_dirs",
     "extraction_summary",
     "file_sha256",

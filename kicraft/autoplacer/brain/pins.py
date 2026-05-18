@@ -76,11 +76,25 @@ def _leaf_artifact_dir(experiments_dir: Path, leaf_key: str) -> Path:
     return Path(experiments_dir) / "subcircuits" / leaf_key
 
 
+def _normalize_snapshot_id(snapshot_id: str | int) -> str:
+    """Normalize a snapshot id to its on-disk string form.
+
+    Ints are formatted as 4-digit zero-padded numerics (``7`` -> ``"0007"``)
+    matching the solver's ``round_NNNN_*`` naming. Strings are used
+    verbatim; non-numeric forms (e.g. library imports ``"lib0001"``) flow
+    through unchanged.
+    """
+    if isinstance(snapshot_id, int):
+        return f"{snapshot_id:04d}"
+    return snapshot_id
+
+
 def _round_snapshot_files(
-    leaf_dir: Path, round_num: int
+    leaf_dir: Path, snapshot_id: str | int
 ) -> dict[str, Path]:
     """Return {canonical_filename: snapshot_path} for a round, if all exist."""
-    prefix = f"round_{int(round_num):04d}"
+    token = _normalize_snapshot_id(snapshot_id)
+    prefix = f"round_{token}"
     out: dict[str, Path] = {}
     for canonical, _suffix in _LEAF_CANONICAL_FILES:
         snapshot = leaf_dir / f"{prefix}_{canonical}"
@@ -91,9 +105,9 @@ def _round_snapshot_files(
 
 
 def _round_all_snapshot_files(
-    leaf_dir: Path, round_num: int
+    leaf_dir: Path, snapshot_id: str | int
 ) -> dict[Path, Path]:
-    """Return {snapshot_path: canonical_path} for ALL ``round_NNNN_*`` files
+    """Return {snapshot_path: canonical_path} for ALL ``round_<id>_*`` files
     in the leaf dir + ``renders/`` subdir, mapped to their canonical names.
 
     Includes the three core files plus every render PNG (and any other
@@ -105,7 +119,8 @@ def _round_all_snapshot_files(
     monitor surfaces a stale render from whichever round happened to
     write ``routed_front_all.png`` last.
     """
-    prefix = f"round_{int(round_num):04d}_"
+    token = _normalize_snapshot_id(snapshot_id)
+    prefix = f"round_{token}_"
     out: dict[Path, Path] = {}
     for d in (leaf_dir, leaf_dir / "renders"):
         if not d.is_dir():
@@ -124,7 +139,9 @@ def _round_all_snapshot_files(
 def list_available_rounds(experiments_dir: Path, leaf_key: str) -> list[int]:
     """Return sorted round numbers that have a complete snapshot for this leaf.
 
-    Used by the GUI to populate the per-leaf round picker.
+    Numeric solver rounds only. Library-imported snapshots (``round_lib*_*``)
+    are filtered out -- use ``list_library_imports`` for those. Used by the
+    GUI to populate the per-leaf round picker.
     """
     leaf_dir = _leaf_artifact_dir(experiments_dir, leaf_key)
     if not leaf_dir.exists():
@@ -143,25 +160,62 @@ def list_available_rounds(experiments_dir: Path, leaf_key: str) -> list[int]:
     return sorted(r for r in rounds if _round_snapshot_files(leaf_dir, r))
 
 
+def list_library_imports(experiments_dir: Path, leaf_key: str) -> list[str]:
+    """Return sorted library-import snapshot ids (``"lib0001"`` etc.) that
+    have a complete snapshot for this leaf.
+
+    Surfaced separately from :func:`list_available_rounds` so the GUI
+    round picker stays purely numeric while library reuse can be audited
+    independently.
+    """
+    leaf_dir = _leaf_artifact_dir(experiments_dir, leaf_key)
+    if not leaf_dir.exists():
+        return []
+    ids: set[str] = set()
+    for entry in leaf_dir.iterdir():
+        name = entry.name
+        if not name.startswith("round_"):
+            continue
+        parts = name.split("_", 2)
+        if len(parts) < 3:
+            continue
+        token = parts[1]
+        # A solver round is a pure int -- already covered by
+        # list_available_rounds. Everything else (e.g. "lib0001") is a
+        # library import.
+        try:
+            int(token)
+            continue
+        except ValueError:
+            pass
+        ids.add(token)
+    return sorted(s for s in ids if _round_snapshot_files(leaf_dir, s))
+
+
 def pin_leaf(
     experiments_dir: Path,
     leaf_key: str,
-    round_num: int,
+    snapshot_id: str | int,
     *,
     source: str = "manual",
 ) -> dict[str, Any]:
-    """Pin a leaf to a specific round. Applies the snapshot immediately.
+    """Pin a leaf to a specific snapshot. Applies the snapshot immediately.
 
-    Raises FileNotFoundError if the round snapshot is incomplete.
+    ``snapshot_id`` may be an int (solver round, e.g. ``7``) or a string
+    (library import, e.g. ``"lib0001"``). Ints are stored in ``pins.json``
+    as ints for back-compat; strings are stored as strings.
+
+    Raises FileNotFoundError if the snapshot is incomplete.
     """
     leaf_dir = _leaf_artifact_dir(experiments_dir, leaf_key)
-    snapshot = _round_snapshot_files(leaf_dir, round_num)
+    snapshot = _round_snapshot_files(leaf_dir, snapshot_id)
     if not snapshot:
+        token = _normalize_snapshot_id(snapshot_id)
         raise FileNotFoundError(
-            f"round {round_num} for leaf {leaf_key} has no complete snapshot "
-            f"in {leaf_dir} (need round_{round_num:04d}_leaf_routed.kicad_pcb, "
-            f"round_{round_num:04d}_metadata.json, "
-            f"round_{round_num:04d}_solved_layout.json)"
+            f"snapshot {snapshot_id!r} for leaf {leaf_key} is incomplete "
+            f"in {leaf_dir} (need round_{token}_leaf_routed.kicad_pcb, "
+            f"round_{token}_metadata.json, "
+            f"round_{token}_solved_layout.json)"
         )
 
     # Apply the snapshot now -- copy each round_NNNN_* file over the
@@ -188,7 +242,7 @@ def pin_leaf(
     # copying. For paths that ARE distinct (different inodes), use
     # ``os.replace`` after creating a fresh inode via a temp copy so the
     # write is atomic.
-    for src, dst in _round_all_snapshot_files(leaf_dir, round_num).items():
+    for src, dst in _round_all_snapshot_files(leaf_dir, snapshot_id).items():
         dst.parent.mkdir(parents=True, exist_ok=True)
         try:
             src_stat = src.stat()
@@ -217,8 +271,15 @@ def pin_leaf(
     _invalidate_leaf_canvas_cache(leaf_dir)
 
     manifest = read_pins(experiments_dir)
+    # Preserve the on-the-wire type: ints stay ints (back-compat with
+    # pre-widening pins.json), strings stay strings (library imports).
+    stored_id: int | str
+    if isinstance(snapshot_id, int):
+        stored_id = int(snapshot_id)
+    else:
+        stored_id = snapshot_id
     manifest["pinned_leaves"][leaf_key] = {
-        "round": int(round_num),
+        "round": stored_id,
         "source": source,
         "pinned_at": _now_iso(),
     }
@@ -293,13 +354,33 @@ def parent_only_ready(experiments_dir: Path) -> tuple[bool, list[str]]:
     return len(blockers) == 0, blockers
 
 
-def is_pinned(experiments_dir: Path, leaf_key: str) -> int | None:
-    """Return the pinned round number for this leaf, or None if not pinned."""
+def is_pinned(experiments_dir: Path, leaf_key: str) -> int | str | None:
+    """Return the pinned snapshot id for this leaf, or None if not pinned.
+
+    Returns an int for solver rounds (back-compat) or a string for
+    library-imported snapshots (e.g. ``"lib0001"``). Callers that only
+    care about numeric rounds should branch on ``isinstance(result, int)``
+    or use :func:`is_pinned_to_solver_round`.
+    """
     pin = read_pins(experiments_dir).get("pinned_leaves", {}).get(leaf_key)
     if not isinstance(pin, dict):
         return None
     round_val = pin.get("round")
-    return int(round_val) if isinstance(round_val, int) else None
+    if isinstance(round_val, int):
+        return int(round_val)
+    if isinstance(round_val, str):
+        return round_val
+    return None
+
+
+def is_pinned_to_solver_round(experiments_dir: Path, leaf_key: str) -> int | None:
+    """Convenience wrapper for callers that only handle numeric rounds.
+
+    Returns the pinned round number iff the pin is to a solver round.
+    Library-imported pins return None here even though the leaf IS pinned.
+    """
+    result = is_pinned(experiments_dir, leaf_key)
+    return result if isinstance(result, int) else None
 
 
 def ensure_applied(experiments_dir: Path) -> dict[str, str]:
@@ -315,20 +396,22 @@ def ensure_applied(experiments_dir: Path) -> dict[str, str]:
     for leaf_key, pin in manifest.get("pinned_leaves", {}).items():
         if not isinstance(pin, dict):
             continue
-        round_num = pin.get("round")
-        if not isinstance(round_num, int):
+        snapshot_id = pin.get("round")
+        # Accept int (solver round) or str (library import). Anything
+        # else is malformed -- skip.
+        if not isinstance(snapshot_id, (int, str)):
             continue
         leaf_dir = _leaf_artifact_dir(experiments_dir, leaf_key)
-        snapshot = _round_snapshot_files(leaf_dir, round_num)
+        snapshot = _round_snapshot_files(leaf_dir, snapshot_id)
         if not snapshot:
             statuses[leaf_key] = "snapshot-missing"
             continue
-        # Skip the copy if every round_NNNN_* snapshot file already
+        # Skip the copy if every round_*_ snapshot file already
         # matches its canonical counterpart by SIZE. Round snapshots are
         # immutable so size match implies content match in practice.
         # (mtime comparison can't be used because pin_leaf uses
         # shutil.copy which sets dst mtime to NOW.)
-        all_files = _round_all_snapshot_files(leaf_dir, round_num)
+        all_files = _round_all_snapshot_files(leaf_dir, snapshot_id)
         all_current = True
         for src, dst in all_files.items():
             if not dst.exists() or src.stat().st_size != dst.stat().st_size:
