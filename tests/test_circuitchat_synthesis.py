@@ -27,7 +27,7 @@ from kicraft.circuitchat.models import (
     Sheet,
     SheetPin,
 )
-from kicraft.circuitchat.stages.synthesis import SynthesisInputError, run
+from kicraft.circuitchat.synthesize import SynthesisInputError, run
 from kicraft.circuitchat.synthesis.validation import (
     SynthesisValidationError,
     check_named_refs_exist,

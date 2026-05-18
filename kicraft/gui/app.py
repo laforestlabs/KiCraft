@@ -41,10 +41,10 @@ def _patch_timer_context() -> None:
 _patch_timer_context()
 
 from .pages.analysis import analysis_page
+from .pages.leaf_library import leaf_library_page
 from .pages.manual_layout import manual_layout_page
 from .pages.monitor import monitor_page
 from .pages.setup import setup_page
-from .pages.circuitchat import circuitchat_page
 from .state import get_state
 
 
@@ -199,7 +199,7 @@ def index() -> None:
     show_analysis_tab = bool(state.gui_cleanup.get("show_analysis_tab", True))
 
     with ui.tabs().classes("w-full") as tabs:
-        circuitchat_tab = ui.tab("CircuitChat", icon="chat")
+        leaf_library_tab = ui.tab("Leaf Library", icon="library_books")
         setup_tab = ui.tab("Setup", icon="tune")
         monitor_tab = ui.tab("Monitor", icon="monitor")
         manual_tab = ui.tab("Manual Layout", icon="open_with")
@@ -208,8 +208,8 @@ def index() -> None:
             analysis_tab = ui.tab("Analysis", icon="analytics")
 
     with ui.tab_panels(tabs, value=setup_tab).classes("w-full px-4"):
-        with ui.tab_panel(circuitchat_tab):
-            circuitchat_page()
+        with ui.tab_panel(leaf_library_tab):
+            leaf_library_page()
         with ui.tab_panel(setup_tab):
             setup_page()
         with ui.tab_panel(monitor_tab):

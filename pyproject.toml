@@ -26,7 +26,6 @@ experiment = [
     "structlog>=23.0",
 ]
 circuitchat = [
-    "anthropic>=0.40",
     "pydantic>=2.6",
     "kicad-skip>=0.2",
 ]
@@ -66,8 +65,11 @@ add-group-labels = "kicraft.cli.add_group_labels:main"
 cleanup-routing = "kicraft.cli.cleanup_routing:main"
 split-schematic = "kicraft.cli.split_schematic:main"
 
-# CircuitChat pipeline
-kicraft-new = "kicraft.circuitchat.cli:main"
+# CircuitChat — deterministic helpers; LLM stages run in the Claude Code skill
+kicraft-circuitchat = "kicraft.circuitchat.cli_app:main"
+
+# Leaf library (read-only — promotion is GUI-driven)
+kicraft-leaf = "kicraft.cli.leaf:main"
 
 # Inspection
 list-footprints = "kicraft.cli.list_footprints:main"
@@ -82,7 +84,6 @@ include = ["kicraft*"]
 
 [tool.setuptools.package-data]
 "kicraft.cli" = ["program.md"]
-"kicraft.circuitchat" = ["prompts/*.md"]
 
 [tool.ruff]
 line-length = 100

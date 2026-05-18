@@ -7,13 +7,14 @@ experiment management for KiCad projects via the pcbnew Python API.
 
 KiCraft is a multi-layer pipeline. Top-down:
 
-1. **CircuitChat pipeline** (LLM-driven, in-repo) -- turns a natural-language
-   project description into the hierarchical KiCad 9 file set (root +
-   leaf `.kicad_sch`, `.kicad_pro`, `_autoplacer.json`). Five stages
-   (intent / functional_spec / architecture / bom / synthesis); the first
-   four are LLM-driven, the fifth is mechanical. See
-   [CircuitChat pipeline](#circuitchat-pipeline-chat--kicad-files) below and
-   `kicraft/circuitchat/`.
+1. **CircuitChat** (Claude Code skill + Python helpers) -- turns a natural-
+   language project description into the hierarchical KiCad 9 file set
+   (root + leaf `.kicad_sch`, `.kicad_pro`, `_autoplacer.json`). The LLM-
+   driven stages (intent / functional_spec / architecture / bom) run as a
+   Claude Code skill at `.claude/skills/circuitchat/`, so a Claude Code
+   subscription pays for inference and no API key is required. The
+   deterministic synthesis step is a Python CLI (`kicraft-circuitchat
+   synthesize`). See [CircuitChat](#circuitchat-chat--kicad-files) below.
 2. **placement + routing + scoring** (Python, this repo) -- everything below.
 
 ## Installation
@@ -25,65 +26,83 @@ pip install -e .
 # With GUI support
 pip install -e ".[gui]"
 
-# With the CircuitChat pipeline (anthropic + pydantic + kicad-skip)
+# With CircuitChat helpers (pydantic + kicad-skip; the LLM stages run in
+# the Claude Code skill, not in this Python package — no API key needed)
 pip install -e ".[circuitchat]"
 
 # With all optional dependencies
 pip install -e ".[gui,scoring,experiment,circuitchat,dev]"
 ```
 
-## CircuitChat pipeline (chat -> KiCad files)
+## CircuitChat (chat -> KiCad files)
 
 A multi-turn chat that takes a project description in plain English and
 emits the hierarchical KiCad 9 file set that the placement / routing
-half of KiCraft ingests. No prior schematic required.
+half of KiCraft ingests. No prior schematic required, and no API key —
+the conversation runs inside Claude Code on the user's subscription.
 
-### Prerequisites
+### Architecture
+
+- The four LLM stages (intent / functional_spec / architecture / bom)
+  and the per-turn orchestrator are a Claude Code skill at
+  `.claude/skills/circuitchat/`. Claude reads/writes a `.kicraft/state.json`
+  file matching the `ConversationState` Pydantic schema.
+- The deterministic synthesis step (state.json → file set + SS9.1-SS9.6
+  checks) is the `kicraft-circuitchat` CLI.
+
+### Run it
+
+From inside this repo (or any project that has copied the skill into its
+own `.claude/skills/circuitchat/`):
 
 ```bash
-pip install -e ".[circuitchat]"        # anthropic, pydantic, kicad-skip
-export ANTHROPIC_API_KEY=sk-...     # required for the LLM-driven stages
-```
-
-### GUI
-
-```bash
-python -m kicraft.gui
-# -> open the "CircuitChat" tab
+claude                 # start a Claude Code session
+/circuitchat           # invokes the skill (or just say "I want to design a PCB")
 ```
 
 Describe your project ("USB-C powered 3.3V regulator with status LED,
-JLCPCB target, under $5 BOM"). The orchestrator runs stages as the
-conversation warrants. The right-hand pane shows the state slot
-summary; the **Expert mode** switch flips it to a full JSON view of
-the underlying `ConversationState`. When all four LLM stages are
-populated, the **Synthesize** button writes the file set into the
-target directory and runs the SS9.1-SS9.6 mechanical checks from
-`docs/circuitchat_schematic_prompt.md`.
-
-### CLI
+JLCPCB target, under $5 BOM"). Claude steps through the stages, writes
+`.kicraft/state.json` as it goes, and validates after every slot update
+via `kicraft-circuitchat validate`. When all four slots are filled, ask
+it to synthesize and it will run:
 
 ```bash
-# Interactive REPL
-kicraft-new
-
-# Save / resume conversations
-kicraft-new --save state.json
-kicraft-new --load state.json
-
-# Headless synthesis from a saved state
-kicraft-new --load state.json --synthesize ./generated/MYPROJ
-
-# REPL commands: :state :dump :synth DIR :expert on|off :quit
+kicraft-circuitchat synthesize .kicraft/state.json ./generated
 ```
 
-The headless `--synthesize` path takes a fully populated state JSON
-and emits the file set; useful for tests and for resuming a run after
-GUI tab close.
+### Using the skill in your own project
+
+Copy the skill directory into your project's `.claude/`:
+
+```bash
+cp -r /path/to/KiCraft/.claude/skills/circuitchat your-project/.claude/skills/
+cp /path/to/KiCraft/.claude/commands/circuitchat.md your-project/.claude/commands/
+```
+
+Then `pip install -e /path/to/KiCraft[circuitchat]` so the
+`kicraft-circuitchat` CLI is on PATH. The skill activates the next time
+you run `claude` inside your project.
+
+### CLI reference
+
+```bash
+kicraft-circuitchat validate .kicraft/state.json
+# prints {ok, project_stem, slots_filled, open_questions, blocking_questions}
+# exit codes: 0 ok, 2 schema error, 3 library validation error
+
+kicraft-circuitchat list-leaves
+# prints the same "Available leaves" markdown block the architecture
+# stage shows to the model (the skill calls this before drafting the
+# architecture slot)
+
+kicraft-circuitchat synthesize .kicraft/state.json ./generated [--smoke]
+# wraps kicraft.circuitchat.synthesize.run; --smoke adds the (slow)
+# solve-subcircuits check
+```
 
 ### What gets written
 
-For project stem `MYPROJ`, the synthesis stage writes:
+For project stem `MYPROJ`, synthesis writes:
 
 ```
 MYPROJ/
@@ -107,20 +126,96 @@ Every synthesis run executes SS9.1-SS9.6 from
 `docs/circuitchat_schematic_prompt.md` against the written files
 (schematic version, footprints non-empty, pin directions valid,
 Sheetfile refs resolve, autoplacer JSON valid, every named ref in
-the schematic). The mechanical stage raises
-`SynthesisValidationError` and prints the failing check rather than
-shipping a broken file set.
+the schematic). Synthesis raises `SynthesisValidationError` and prints
+the failing check rather than shipping a broken file set.
 
 ### Notes
 
-- Costs land on the configured `ANTHROPIC_API_KEY`. Prompt-cached
-  system prompts keep per-turn cost low; a typical 5-7 turn
-  conversation is well under the cost of a single Claude API call.
 - Custom footprints (`<PROJECT>.pretty/`) are out of scope for v1 --
   if the BOM references a footprint not in the stock KiCad libraries,
-  the orchestrator surfaces a blocking question instead.
-- State is per-tab / per-CLI-session; cross-session memory is out
-  of scope per the original brief.
+  the skill surfaces a blocking question instead.
+- State persists as `.kicraft/state.json` in the project directory —
+  gitignore it (or commit it; it's plain JSON and reviewable).
+
+## Leaf Library (reuse vetted designs across projects)
+
+A *leaf* is a single hierarchical sheet — a pre-routed PCB fragment plus
+its schematic, BOM, and autoplacer settings. Once you've solved one
+("USB-C 1S LiPo charger") and pinned a round you trust, you can promote
+it into the global Leaf Library. The CircuitChat pipeline then reuses
+it verbatim every time the LLM judges it a match for a new project,
+collapsing leaf-level design surface to a vetted, pinned solution.
+
+### Where leaves live
+
+```
+$KICRAFT_LEAF_LIB                # default: ~/.kicraft/leaves/
+  usb-c-lipo-charger/
+    manifest.json
+    leaf_routed.kicad_pcb        # canonical name (matches .experiments/...)
+    metadata.json
+    solved_layout.json
+    schematic.kicad_sch
+    autoplacer_fragment.json
+    bom.csv
+    renders/
+      front_all.png
+      back_copper.png
+      copper_both.png
+      thumbnail.png
+```
+
+The pinned-PCB triad (`leaf_routed.kicad_pcb` + `metadata.json` +
+`solved_layout.json`) is the same triad the existing pin manager (under
+`.experiments/subcircuits/<leaf_key>/`) consumes, so an imported leaf
+drops in as a pre-solved round and the parent composer treats it as
+already-solved on the next `autoexperiment --parents-only`.
+
+### Promote a leaf (GUI)
+
+```bash
+python -m kicraft.gui
+# -> open the "Leaf Library" tab
+# -> point at a source project that has a pinned round under
+#    .experiments/subcircuits/<leaf_key>/round_NNNN_*
+# -> fill in name/version/description and click Promote
+```
+
+The wizard runs the renders, writes a manifest with the
+content-addressed hash, and atomically writes the new directory into
+`$KICRAFT_LEAF_LIB`. To replace an existing leaf, bump the version
+(e.g. `0.1.0 -> 0.1.1` for a patch, `0.2.0` for additive interface
+changes, `1.0.0` for breaking ones).
+
+### Automatic reuse during CircuitChat
+
+When the skill enters the architecture stage it runs
+`kicraft-circuitchat list-leaves` and reads the result so the model can
+see the curated catalog. Claude picks any matches by setting
+`Sheet.from_library = "<name>@<version>"` and `Sheet.library_instance = N`.
+`kicraft-circuitchat validate` then verifies the leaf's hierarchical-
+label interface matches the sheet's endpoints exactly. Synthesis then:
+
+1. Skips the LLM-generated leaf schematic for that sheet.
+2. Copies the leaf's `schematic.kicad_sch` to the project (with refdes
+   renumbered to fit the host project's existing refs).
+3. Writes the renumbered triad into
+   `<project>/.experiments/subcircuits/<leaf_key>/round_lib0001_*`.
+4. Pins the import via `pins.json` so `ensure_applied()` keeps it locked
+   across solver runs.
+5. Adds a `library_leaves` audit record to `<project>_autoplacer.json`.
+
+### CLI
+
+```bash
+kicraft-leaf list             # rows: name@version, hash, tags, description
+kicraft-leaf show <name>      # full manifest as JSON
+kicraft-leaf path             # resolved library directory
+```
+
+Promotion and removal are GUI-only — there's no `kicraft-leaf promote`.
+The intent is that curating the library is a deliberate, human-in-loop
+step, not a scriptable one.
 
 ## Quick Start
 
@@ -353,10 +448,15 @@ from the command line.
 
 ## CLI Commands
 
-### CircuitChat Pipeline
-- `kicraft-new` — Multi-turn chat that turns a project description into the
-  hierarchical KiCad 9 file set. `--synthesize DIR` runs headless against a
-  saved state. See [CircuitChat pipeline](#circuitchat-pipeline-chat--kicad-files).
+### CircuitChat
+- `kicraft-circuitchat validate STATE.json` — Validate a `.kicraft/state.json`
+  against the `ConversationState` schema + library-pick rules.
+- `kicraft-circuitchat list-leaves` — Print the "Available leaves" markdown
+  block the architecture stage shows to the model.
+- `kicraft-circuitchat synthesize STATE.json OUT_DIR [--smoke]` — Emit the
+  KiCad file set from a complete state. The LLM-driven chat itself runs in
+  the Claude Code skill at `.claude/skills/circuitchat/`. See
+  [CircuitChat](#circuitchat-chat--kicad-files).
 
 ### Core Pipeline
 - `solve-subcircuits` — Hierarchical subcircuit placement and routing
@@ -399,21 +499,21 @@ from the command line.
 
 ```
 kicraft/
-├── circuitchat/               # Chat -> KiCad file set (5-stage LLM pipeline)
+├── circuitchat/               # Chat -> KiCad file set
 │   ├── models.py        # Pydantic state slots (intent / functional_spec / architecture / bom)
-│   ├── llm.py           # Anthropic wrapper (prompt caching, forced tool use)
-│   ├── orchestrator.py  # Per-turn run_stage / ask / respond dispatcher
-│   ├── prompts/         # Stage and orchestrator system prompts (.md)
-│   ├── stages/          # One module per stage; synthesis is mechanical
+│   ├── library.py       # Leaf-library helpers (list / validate picks)
+│   ├── synthesize.py    # Deterministic state -> file set step
 │   ├── synthesis/       # .kicad_sch / .kicad_pro / autoplacer.json emitters + §9 checks
-│   └── cli.py           # `kicraft-new` REPL + headless `--synthesize`
+│   └── cli_app.py       # `kicraft-circuitchat` validate / list-leaves / synthesize
+│   # The LLM-driven stages and per-turn orchestrator live in the
+│   # Claude Code skill at .claude/skills/circuitchat/ (not in this package).
 ├── autoplacer/          # Placement and routing engine
 │   ├── config.py        # Default config + project config loader
 │   ├── freerouting_runner.py
 │   ├── brain/           # Pure algorithms (no pcbnew dependency)
 │   └── hardware/        # KiCad pcbnew API adapter
 ├── scoring/             # Layout quality scoring checks
-├── gui/                 # NiceGUI experiment manager (includes CircuitChat tab)
+├── gui/                 # NiceGUI experiment manager (Leaf Library, Setup, Monitor, Manual Layout, Analysis)
 ├── cli/                 # CLI entry-point scripts
 └── logging_config.py    # Structured logging setup
 ```
