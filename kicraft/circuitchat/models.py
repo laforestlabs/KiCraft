@@ -22,6 +22,7 @@ FOOTPRINT_RE = re.compile(r"^[A-Za-z0-9_]+:[A-Za-z0-9_.+-]+$")
 SYMBOL_RE = re.compile(r"^[A-Za-z0-9_]+:[A-Za-z0-9_.+-]+$")
 SHEET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9 ]*[A-Z0-9]$")
 SHEET_STEM_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+PIN_NUMBER_RE = re.compile(r"^[A-Za-z0-9+~_/.\-]+$")
 
 POWER_NET_PATTERNS = [
     re.compile(r"^[+]?\d+\.?\d*V$", re.IGNORECASE),
@@ -274,6 +275,59 @@ class BomPart(BaseModel):
         return v
 
 
+class PinEndpoint(BaseModel):
+    """One pin's participation in a net.
+
+    ``ref`` matches a BomPart.ref. ``pin`` is the pin number as defined
+    in the KiCad symbol (matches the ``(pin "<number>" …)`` token in
+    .kicad_sym). For multi-unit symbols, this addresses unit 1 only.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str
+    pin: str
+
+    @field_validator("ref")
+    @classmethod
+    def _ref_pattern(cls, v: str) -> str:
+        if not REF_RE.match(v):
+            raise ValueError(f"PinEndpoint.ref {v!r} must match {REF_RE.pattern}")
+        return v
+
+    @field_validator("pin")
+    @classmethod
+    def _pin_pattern(cls, v: str) -> str:
+        if not PIN_NUMBER_RE.match(v):
+            raise ValueError(
+                f"PinEndpoint.pin {v!r} must match {PIN_NUMBER_RE.pattern}"
+            )
+        return v
+
+
+class NetConnection(BaseModel):
+    """One electrical net inside a leaf sheet.
+
+    ``net_name`` is either an ``Architecture.power_nets`` entry, an
+    ``Architecture.inter_sheet_nets`` name, or a sheet-local descriptive
+    name. Pin-level mappings live here; the synthesis stage renders them
+    as PCB nets (Stage A) and as schematic wires + power symbols
+    (Stage B).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    net_name: str
+    endpoints: list[PinEndpoint]
+    sheet: str
+
+    @model_validator(mode="after")
+    def _has_endpoints(self):
+        if len(self.endpoints) < 1:
+            raise ValueError(f"NetConnection {self.net_name!r} has no endpoints")
+        return self
+
+
 class BOM(BaseModel):
     parts: list[BomPart]
     ic_groups: dict[str, list[str]] = Field(default_factory=dict)
@@ -282,6 +336,8 @@ class BOM(BaseModel):
     signal_flow_order: list[str] = Field(default_factory=list)
     component_zones: dict[str, dict[str, str]] = Field(default_factory=dict)
     assumptions: list[str] = Field(default_factory=list)
+    connections: list[NetConnection] = Field(default_factory=list)
+    no_connect_pins: list[PinEndpoint] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _refs_unique(self):
@@ -314,6 +370,33 @@ class BOM(BaseModel):
         for ref in self.component_zones:
             if ref not in ref_set:
                 raise ValueError(f"component_zones entry {ref!r} not in BOM parts")
+        return self
+
+    @model_validator(mode="after")
+    def _connection_refs_known(self):
+        ref_set = {p.ref for p in self.parts}
+        for c in self.connections:
+            for ep in c.endpoints:
+                if ep.ref not in ref_set:
+                    raise ValueError(
+                        f"NetConnection {c.net_name!r} references unknown ref {ep.ref!r}"
+                    )
+        for ep in self.no_connect_pins:
+            if ep.ref not in ref_set:
+                raise ValueError(
+                    f"no_connect_pins references unknown ref {ep.ref!r}"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _connection_sheets_known(self):
+        part_sheets = {p.sheet for p in self.parts}
+        unknown = {c.sheet for c in self.connections} - part_sheets
+        if unknown:
+            raise ValueError(
+                f"NetConnection.sheet values not represented in BOM.parts: "
+                f"{sorted(unknown)}"
+            )
         return self
 
 

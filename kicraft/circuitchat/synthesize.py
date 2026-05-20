@@ -193,9 +193,9 @@ def run(
         library_fragments=fragments or None,
         library_leaves=library_leaves or None,
     )
-    write_empty_pcb(project_dir, state.project_stem)
+    write_empty_pcb(project_dir, state.project_stem, state.bom)
 
-    results = run_validations(project_dir, state.project_stem)
+    results = run_validations(project_dir, state.project_stem, bom=state.bom)
     if smoke:
         results.append(
             run_solve_subcircuits_smoke(

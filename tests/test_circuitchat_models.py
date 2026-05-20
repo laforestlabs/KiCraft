@@ -21,6 +21,8 @@ from kicraft.circuitchat.models import (
     FunctionalSpec,
     IntentSlot,
     InterSheetNet,
+    NetConnection,
+    PinEndpoint,
     Question,
     Sheet,
     SheetPin,
@@ -274,3 +276,121 @@ def test_functional_spec_unknown_block_rejected() -> None:
                 }
             ],
         )
+
+
+# ---------- PinEndpoint / NetConnection ----------
+
+
+def test_pin_endpoint_valid() -> None:
+    ep = PinEndpoint(ref="U1", pin="3")
+    assert ep.ref == "U1"
+    assert ep.pin == "3"
+
+
+@pytest.mark.parametrize("pin", ["3", "A1", "B12", "VBAT", "+3V3", "~RESET", "GPIO0"])
+def test_pin_endpoint_pin_accepts_real_kicad_pin_tokens(pin: str) -> None:
+    ep = PinEndpoint(ref="U1", pin=pin)
+    assert ep.pin == pin
+
+
+@pytest.mark.parametrize("pin", ["pin one", "with space", "()", ""])
+def test_pin_endpoint_pin_rejects_garbage(pin: str) -> None:
+    with pytest.raises(ValidationError):
+        PinEndpoint(ref="U1", pin=pin)
+
+
+def test_pin_endpoint_ref_must_be_a_real_ref() -> None:
+    with pytest.raises(ValidationError):
+        PinEndpoint(ref="bad ref", pin="1")
+
+
+def test_net_connection_requires_endpoints() -> None:
+    with pytest.raises(ValidationError):
+        NetConnection(net_name="VBUS", endpoints=[], sheet="USB INPUT")
+
+
+def test_net_connection_valid_single_endpoint() -> None:
+    # Hier-label-only nets can have a single in-sheet endpoint.
+    nc = NetConnection(
+        net_name="VBUS",
+        endpoints=[PinEndpoint(ref="J1", pin="1")],
+        sheet="USB INPUT",
+    )
+    assert nc.net_name == "VBUS"
+
+
+# ---------- BOM.connections / no_connect_pins cross-validators ----------
+
+
+def _two_part_bom_with_conn(**overrides) -> BOM:
+    base = dict(
+        parts=[
+            BomPart(
+                ref="U1",
+                value="LDO",
+                symbol="Regulator_Linear:AP2112K-3.3",
+                footprint="Package_TO_SOT_SMD:SOT-23-5",
+                sheet="REG",
+            ),
+            BomPart(
+                ref="C1",
+                value="1uF",
+                symbol="Device:C",
+                footprint="Capacitor_SMD:C_0402_1005Metric",
+                sheet="REG",
+            ),
+        ],
+        connections=[
+            NetConnection(
+                net_name="VIN",
+                endpoints=[
+                    PinEndpoint(ref="U1", pin="1"),
+                    PinEndpoint(ref="C1", pin="1"),
+                ],
+                sheet="REG",
+            )
+        ],
+    )
+    base.update(overrides)
+    return BOM(**base)
+
+
+def test_bom_connections_valid() -> None:
+    bom = _two_part_bom_with_conn()
+    assert len(bom.connections) == 1
+
+
+def test_bom_connection_endpoint_unknown_ref_rejected() -> None:
+    with pytest.raises(ValidationError):
+        _two_part_bom_with_conn(
+            connections=[
+                NetConnection(
+                    net_name="VIN",
+                    endpoints=[PinEndpoint(ref="U99", pin="1")],
+                    sheet="REG",
+                )
+            ]
+        )
+
+
+def test_bom_connection_unknown_sheet_rejected() -> None:
+    with pytest.raises(ValidationError):
+        _two_part_bom_with_conn(
+            connections=[
+                NetConnection(
+                    net_name="VIN",
+                    endpoints=[PinEndpoint(ref="U1", pin="1")],
+                    sheet="GHOST",
+                )
+            ]
+        )
+
+
+def test_bom_no_connect_pin_unknown_ref_rejected() -> None:
+    with pytest.raises(ValidationError):
+        _two_part_bom_with_conn(no_connect_pins=[PinEndpoint(ref="U99", pin="4")])
+
+
+def test_bom_no_connect_pin_valid() -> None:
+    bom = _two_part_bom_with_conn(no_connect_pins=[PinEndpoint(ref="U1", pin="4")])
+    assert len(bom.no_connect_pins) == 1

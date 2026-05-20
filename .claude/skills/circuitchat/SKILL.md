@@ -13,6 +13,16 @@ All structured output lives in `.kicraft/state.json` in the user's working direc
 
 Read `.kicraft/state.json` at the start of every turn. If it doesn't exist yet, create the `.kicraft/` directory and start from `{}`.
 
+## Session ID
+
+On turn 1 of a new session — i.e. when you create `.kicraft/state.json` for the first time — also write `.kicraft/session_id`, a single-line text file:
+
+```
+<UTC_iso_compact>_<project_stem_or_UNNAMED>
+```
+
+`UTC_iso_compact` is the `YYYYMMDDTHHMMSSZ` form of the current UTC time. `project_stem` may not be known yet on turn 1; use `UNNAMED` in that case and DO NOT rewrite the file later when the intent stage sets `project_stem` (the archive helper handles the missing-stem case fine). If `.kicraft/session_id` already exists, leave it alone — it is the sticky handle for archival and must not change across the life of the session.
+
 Top-level fields:
 
 - `project_stem` (str | null) — short uppercase tag like `"USB_CHARGER"`. Set this when the intent slot is first written.
@@ -45,9 +55,10 @@ Append an assistant message to `history` on every turn that ends with output to 
 - `functional_spec` needs `intent`.
 - `architecture` needs `intent` + `functional_spec`.
 - `bom` needs all three.
-- Synthesis needs all four plus `project_stem`.
+- `wiring` needs all four. It writes the `bom.connections` and `bom.no_connect_pins` fields of the existing BOM slot (it does not create a new slot).
+- Synthesis needs all four slots, `bom.connections` populated, and `project_stem`.
 
-Stages are stateless and re-runnable. If the user revises a constraint, re-run the affected stage and any downstream stages — don't try to diff. Don't skip stages: if `intent` is missing and the user asks for a BOM, run `intent` first (or `ask` to gather what you need).
+Stages are stateless and re-runnable. If the user revises a constraint, re-run the affected stage and any downstream stages — don't try to diff. Don't skip stages: if `intent` is missing and the user asks for a BOM, run `intent` first (or `ask` to gather what you need). Re-running `bom` invalidates `bom.connections`; the wiring stage must run again.
 
 ## Running a stage
 
@@ -69,13 +80,23 @@ Open-question discipline (applies to every stage):
 
 ## Synthesis
 
-When all four slots are populated and the user says something like "synthesize", "build it", "generate the project", confirm the output directory (default: `./generated`) and run:
+When all four slots are populated, `bom.connections` is non-empty (the wiring stage has run), and the user says something like "synthesize", "build it", "generate the project", confirm the output directory (default: `./generated`) and run:
 
 ```
 kicraft-circuitchat synthesize .kicraft/state.json <out_dir>
 ```
 
-The script prints the written paths and per-check validation results. Add `--smoke` for the slow solve-subcircuits smoke check (requires KiCad PCB tools installed; skip unless the user asks).
+The script prints the written paths and per-check validation results, then auto-archives the session into `~/.kicraft/sessions/<session_id>/`. Add `--smoke` for the slow solve-subcircuits smoke check (requires KiCad PCB tools installed; skip unless the user asks). Pass `--no-archive` only if the user explicitly asks; archival is the default.
+
+## Archival
+
+After every successful stage run (step 6 of "Running a stage", once `kicraft-circuitchat validate` exits 0), run:
+
+```
+kicraft-circuitchat archive
+```
+
+This snapshots `.kicraft/` (state.json, session_id, log.jsonl if present) into `~/.kicraft/sessions/<session_id>/` and refreshes a `manifest.json` summarizing slot completion. The destination's `feedback.md` — if the user has written one — is preserved across re-archives. The command is idempotent and silent on the chat surface; you do not need to mention it to the user unless it fails. If it fails, surface the error and keep going; archival is best-effort and must not block the conversation.
 
 ## Style
 

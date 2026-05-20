@@ -20,6 +20,12 @@ from pathlib import Path
 REQUIRED_SCHEMATIC_VERSION = 20250114
 VALID_PIN_DIRECTIONS = frozenset({"input", "output", "bidirectional", "passive"})
 
+# Electrical types that are intentionally floating in the symbol — these
+# don't have to appear in a NetConnection or no_connect_pins for §9.11 to
+# pass. Net coverage is a real concern for signal/power pins, not for
+# pins the symbol itself declares disconnected.
+_COVERAGE_EXEMPT_ELECTRICAL_TYPES = frozenset({"no_connect", "free"})
+
 _VERSION_RE = re.compile(r"\(version\s+(\d+)\)")
 _PIN_RE = re.compile(r'^\s*\(pin\s+"[^"]+"\s+(\w+)', re.MULTILINE)
 _SHEETFILE_RE = re.compile(r'\(property\s+"Sheetfile"\s+"([^"]+)"')
@@ -461,11 +467,237 @@ def check_library_interface_match(
     )
 
 
+# ---------- §9.10 pin existence ----------
+
+
+def check_pin_existence(bom) -> CheckResult:
+    """§9.10 — every (ref, pin) in BOM.connections + no_connect_pins
+    references a pin that actually exists on the part's KiCad symbol.
+
+    Catches LLM pin-number hallucination at the wiring stage.
+    """
+    from .symbol_pinout import SymbolNotFoundError, lookup_pins
+
+    bad: list[str] = []
+    symbol_by_ref = {p.ref: p.symbol for p in bom.parts}
+    pins_by_ref_cache: dict[str, set[str]] = {}
+
+    def _pins_for_ref(ref: str) -> set[str] | None:
+        if ref in pins_by_ref_cache:
+            return pins_by_ref_cache[ref]
+        sym = symbol_by_ref.get(ref)
+        if sym is None:
+            return None
+        try:
+            info = lookup_pins(sym)
+        except (SymbolNotFoundError, ValueError) as exc:
+            bad.append(f"{ref} ({sym}): {exc}")
+            pins_by_ref_cache[ref] = set()
+            return pins_by_ref_cache[ref]
+        nums = {p["number"] for p in info["pins"]}
+        pins_by_ref_cache[ref] = nums
+        return nums
+
+    def _check(ep, ctx: str) -> None:
+        nums = _pins_for_ref(ep.ref)
+        if nums is None:
+            bad.append(f"{ctx}: ref {ep.ref!r} not in BOM.parts")
+            return
+        if ep.pin not in nums:
+            bad.append(
+                f"{ctx}: pin {ep.pin!r} not in symbol {symbol_by_ref[ep.ref]!r} "
+                f"for {ep.ref} (known: {sorted(nums)[:8]}…)"
+            )
+
+    for c in bom.connections:
+        for ep in c.endpoints:
+            _check(ep, f"connection {c.net_name!r}")
+    for ep in bom.no_connect_pins:
+        _check(ep, "no_connect_pins")
+
+    return CheckResult(
+        name="9.10 pin existence",
+        ok=not bad,
+        message=("every endpoint pin exists in its symbol" if not bad else "missing pin(s)"),
+        offenders=bad,
+    )
+
+
+# ---------- §9.11 net coverage ----------
+
+
+def check_net_coverage(bom) -> CheckResult:
+    """§9.11 — every part pin defined by the symbol must appear in either a
+    NetConnection.endpoints entry or in no_connect_pins. No silent drops.
+
+    Pins whose electrical type is ``no_connect`` or ``free`` in the
+    symbol are exempt — the symbol itself declares them disconnected.
+    """
+    from .symbol_pinout import SymbolNotFoundError, lookup_pins
+
+    bad: list[str] = []
+    connected: dict[str, set[str]] = {}
+    for c in bom.connections:
+        for ep in c.endpoints:
+            connected.setdefault(ep.ref, set()).add(ep.pin)
+    for ep in bom.no_connect_pins:
+        connected.setdefault(ep.ref, set()).add(ep.pin)
+
+    for part in bom.parts:
+        try:
+            info = lookup_pins(part.symbol)
+        except (SymbolNotFoundError, ValueError) as exc:
+            bad.append(f"{part.ref} ({part.symbol}): {exc}")
+            continue
+        accounted = connected.get(part.ref, set())
+        for pin in info["pins"]:
+            if pin["electrical_type"] in _COVERAGE_EXEMPT_ELECTRICAL_TYPES:
+                continue
+            if pin["number"] not in accounted:
+                bad.append(
+                    f"{part.ref}.{pin['number']} ({pin['name']!r}, "
+                    f"{pin['electrical_type']}) not in connections or no_connect_pins"
+                )
+
+    return CheckResult(
+        name="9.11 net coverage",
+        ok=not bad,
+        message=(
+            "every part pin accounted for" if not bad else "uncovered pin(s)"
+        ),
+        offenders=bad,
+    )
+
+
+# ---------- §9.9 connectivity (Stage B) ----------
+
+
+_LIB_ID_RE = re.compile(r'\(lib_id\s+"([^"]+)"')
+
+
+def check_connectivity(project_dir: Path, project_stem: str) -> CheckResult:
+    """§9.9 — every leaf sheet with ≥2 component symbols must contain at
+    least one ``(wire …)`` or at least one ``(symbol (lib_id "power:…")…)``
+    instance. A leaf with components but zero electrical artifacts is a
+    Stage-B regression (or a Stage-A pre-wiring snapshot, which is gated
+    out by the caller).
+    """
+    bad: list[str] = []
+    root_name = f"{project_stem}.kicad_sch"
+    for sch in sorted(project_dir.glob("*.kicad_sch")):
+        if sch.name == root_name:
+            continue  # root has no components
+        text = sch.read_text()
+        non_power_components = 0
+        power_symbols = 0
+        for _offset, block in _iter_symbol_instance_blocks(text):
+            lib_id_m = _LIB_ID_RE.search(block)
+            if lib_id_m and lib_id_m.group(1).startswith("power:"):
+                power_symbols += 1
+            else:
+                non_power_components += 1
+        if non_power_components < 2:
+            continue
+        # Wire count (top-level only is fine — wires never appear inside
+        # lib_symbols).
+        wire_count = text.count("(wire")
+        if wire_count == 0 and power_symbols == 0:
+            bad.append(
+                f"{sch.name}: {non_power_components} components, "
+                f"0 wires, 0 power symbols"
+            )
+    return CheckResult(
+        name="9.9 connectivity",
+        ok=not bad,
+        message=(
+            "every leaf has wires or power symbols"
+            if not bad
+            else "leaf(s) without electrical connectivity"
+        ),
+        offenders=bad,
+    )
+
+
+# ---------- §9.12 ERC (Stage B) ----------
+
+
+def check_erc(project_dir: Path, project_stem: str) -> CheckResult:
+    """§9.12 — ``kicad-cli sch erc`` reports 0 errors.
+
+    Skips gracefully when ``kicad-cli`` is not installed. Treats only
+    severity=error as failing; warnings are tolerated per the spec's
+    v1 non-goal of ERC zero-warnings.
+    """
+    root_sch = project_dir / f"{project_stem}.kicad_sch"
+    if not root_sch.is_file():
+        return CheckResult(
+            name="9.12 ERC", ok=False, message=f"{root_sch.name} missing"
+        )
+    out_path = project_dir / f"{project_stem}_erc.rpt"
+    try:
+        proc = subprocess.run(
+            ["kicad-cli", "sch", "erc",
+             "--output", str(out_path), str(root_sch)],
+            capture_output=True, text=True, timeout=60.0,
+        )
+    except FileNotFoundError:
+        return CheckResult(
+            name="9.12 ERC", ok=True,
+            message="kicad-cli not available; ERC skipped",
+        )
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            name="9.12 ERC", ok=False, message="kicad-cli timed out after 60s",
+        )
+
+    if not out_path.exists():
+        return CheckResult(
+            name="9.12 ERC", ok=False,
+            message=(
+                f"kicad-cli sch erc exit {proc.returncode}; no report at "
+                f"{out_path.name}"
+            ),
+        )
+    report_text = out_path.read_text()
+    error_lines: list[str] = []
+    try:
+        report = json.loads(report_text)
+        for sheet in report.get("sheets", []) or []:
+            for v in sheet.get("violations", []) or []:
+                if str(v.get("severity", "")).lower() == "error":
+                    desc = v.get("description", "")
+                    error_lines.append(f"{sheet.get('path', '?')}: {desc}")
+    except (json.JSONDecodeError, AttributeError):
+        # Text report fallback: count lines that look like errors.
+        for line in report_text.splitlines():
+            if re.search(r"\b(severity\s*[:=]\s*)?error\b", line, re.IGNORECASE):
+                error_lines.append(line.strip())
+
+    if error_lines:
+        return CheckResult(
+            name="9.12 ERC", ok=False,
+            message=f"{len(error_lines)} ERC error(s)",
+            offenders=error_lines[:20],
+        )
+    return CheckResult(name="9.12 ERC", ok=True, message="ERC clean (0 errors)")
+
+
 # ---------- aggregator ----------
 
 
-def run_validations(project_dir: Path, project_stem: str) -> list[CheckResult]:
-    """Run §9.1-§9.8 and raise SynthesisValidationError if any failed."""
+def run_validations(
+    project_dir: Path,
+    project_stem: str,
+    bom=None,
+) -> list[CheckResult]:
+    """Run §9.1-§9.8 and raise SynthesisValidationError if any failed.
+
+    When ``bom`` is provided AND has a non-empty ``connections`` list,
+    §9.10 (pin existence), §9.11 (net coverage), §9.9 (connectivity),
+    and §9.12 (ERC) also run. The latter two are Stage-B checks that
+    only make sense once schematic wires + power symbols are being
+    emitted.
+    """
     results = [
         check_schematic_version(project_dir),
         check_footprints_nonempty(project_dir),
@@ -476,6 +708,11 @@ def run_validations(project_dir: Path, project_stem: str) -> list[CheckResult]:
         check_refdes_uniqueness(project_dir, project_stem),
         check_library_interface_match(project_dir, project_stem),
     ]
+    if bom is not None and bom.connections:
+        results.append(check_pin_existence(bom))
+        results.append(check_net_coverage(bom))
+        results.append(check_connectivity(project_dir, project_stem))
+        results.append(check_erc(project_dir, project_stem))
     failures = [r for r in results if not r.ok]
     if failures:
         raise SynthesisValidationError(failures)
