@@ -83,17 +83,59 @@ Then `pip install -e /path/to/KiCraft[circuitchat]` so the
 `kicraft-circuitchat` CLI is on PATH. The skill activates the next time
 you run `claude` inside your project.
 
+### Permission model
+
+CircuitChat now runs each stage in a sub-agent that uses only two bundled CLI
+commands — `stage-prep` (read-only collector) and `stage-commit` (atomic
+validate + merge + archive). With those pre-allowed in `~/.claude/settings.json`,
+the user only sees interview-style questions, not a stream of permission prompts
+for every tool call. Recommended allowlist entries:
+
+```jsonc
+"permissions": {
+  "allow": [
+    "Bash(kicraft-circuitchat stage-prep *)",
+    "Bash(kicraft-circuitchat stage-commit *)",
+    "Bash(kicraft-circuitchat synthesize *)",
+    "Bash(kicraft-circuitchat validate *)",
+    "Bash(kicraft-circuitchat archive *)",
+    "Bash(kicraft-circuitchat list-leaves)",
+    "Bash(kicraft-circuitchat lookup-symbol *)",
+    "Write(/tmp/circuitchat_*.json)",
+    "Write(/tmp/claude/circuitchat_*.json)"
+  ]
+}
+```
+
+Install once via `/update-config` or edit the file directly; the patterns are
+narrow (kicraft-circuitchat CLI only).
+
 ### CLI reference
 
 ```bash
+kicraft-circuitchat stage-prep <stage> [STATE]
+# Single-shot collector. Returns JSON: {state, extras} where extras carries
+# the leaf-library output for architecture and BATCHED symbol pinouts for
+# wiring (replacing N per-part lookup-symbol calls with one).
+
+kicraft-circuitchat stage-commit <stage> --slot-file F.json \
+  [--questions-file Q.json] [--history-message M] [--project-stem S] \
+  [STATE] [--no-archive] [--archive-root DIR]
+# Atomic: validate the proposed slot, merge into state.json, append history,
+# archive. Returns {"ok": true, ...} or {"ok": false, "errors": [...]} so the
+# sub-agent can self-correct on validation failures.
+
 kicraft-circuitchat validate .kicraft/state.json
 # prints {ok, project_stem, slots_filled, open_questions, blocking_questions}
 # exit codes: 0 ok, 2 schema error, 3 library validation error
 
 kicraft-circuitchat list-leaves
-# prints the same "Available leaves" markdown block the architecture
-# stage shows to the model (the skill calls this before drafting the
-# architecture slot)
+# prints the "Available leaves" markdown block. The architecture stage
+# receives this via stage-prep's extras; this command is for ad-hoc inspection.
+
+kicraft-circuitchat lookup-symbol Library:Name
+# prints one symbol's pin inventory. The wiring stage receives all needed
+# pinouts via stage-prep's batched extras; this command is for ad-hoc lookup.
 
 kicraft-circuitchat synthesize .kicraft/state.json ./generated [--smoke]
 # wraps kicraft.circuitchat.synthesize.run; --smoke adds the (slow)

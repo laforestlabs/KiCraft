@@ -34,7 +34,15 @@ from .library import (
     _load_library_leaves,
     _validate_library_picks,
 )
-from .models import ConversationState
+from .models import (
+    Architecture,
+    BOM,
+    ChatMsg,
+    ConversationState,
+    FunctionalSpec,
+    IntentSlot,
+    Question,
+)
 from .synthesize import SynthesisInputError, run as run_synth
 from .synthesis.symbol_pinout import SymbolNotFoundError, lookup_pins
 from .synthesis.validation import (
@@ -43,6 +51,8 @@ from .synthesis.validation import (
     check_net_coverage,
     check_pin_existence,
 )
+
+KNOWN_STAGES = ("intent", "functional_spec", "architecture", "bom", "wiring")
 
 
 _SAFE_STEM_RE = re.compile(r"[^A-Z0-9_]")
@@ -246,6 +256,272 @@ def _cmd_archive(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_slot(
+    state: ConversationState,
+    stage: str,
+    slot_data: dict,
+    *,
+    project_stem: str | None,
+) -> None:
+    """Mutate ``state`` so the named stage's owned fields reflect ``slot_data``.
+
+    Owned-field map:
+      intent          -> state.intent (and top-level project_stem if given)
+      functional_spec -> state.functional_spec
+      architecture    -> state.architecture
+      bom             -> state.bom, preserving existing wiring fields
+                         (connections / no_connect_pins are owned by wiring)
+      wiring          -> state.bom.connections + state.bom.no_connect_pins
+    """
+    if stage == "intent":
+        state.intent = IntentSlot.model_validate(slot_data)
+        if project_stem is not None:
+            state.project_stem = project_stem
+    elif stage == "functional_spec":
+        state.functional_spec = FunctionalSpec.model_validate(slot_data)
+    elif stage == "architecture":
+        state.architecture = Architecture.model_validate(slot_data)
+    elif stage == "bom":
+        merged = dict(slot_data)
+        if state.bom is not None:
+            merged.setdefault(
+                "connections",
+                [c.model_dump() for c in state.bom.connections],
+            )
+            merged.setdefault(
+                "no_connect_pins",
+                [n.model_dump() for n in state.bom.no_connect_pins],
+            )
+        state.bom = BOM.model_validate(merged)
+    elif stage == "wiring":
+        if state.bom is None:
+            raise ValueError("wiring stage requires bom slot to be populated")
+        existing = state.bom.model_dump()
+        if "connections" in slot_data:
+            existing["connections"] = slot_data["connections"]
+        if "no_connect_pins" in slot_data:
+            existing["no_connect_pins"] = slot_data["no_connect_pins"]
+        state.bom = BOM.model_validate(existing)
+    else:
+        raise ValueError(f"unknown stage {stage!r}; expected one of {KNOWN_STAGES}")
+
+
+def _cmd_stage_prep(args: argparse.Namespace) -> int:
+    """Single-shot collector for a stage. Side-effect free.
+
+    Returns JSON on stdout containing the current ``ConversationState``
+    plus stage-specific extras the LLM stage needs to draft its slot:
+      - architecture: ``leaves_block`` (rendered "Available leaves" markdown)
+      - wiring:       ``symbol_pinouts`` mapping every distinct BomPart.symbol
+                      to its pin inventory (one batched lookup instead of N)
+    """
+    stage = args.stage
+    if stage not in KNOWN_STAGES:
+        print(f"unknown stage {stage!r}; expected one of {KNOWN_STAGES}", file=sys.stderr)
+        return 2
+
+    state_path = Path(args.state)
+    if state_path.exists():
+        try:
+            state = _load_state(state_path)
+        except ValidationError as e:
+            print(f"schema validation failed:\n{e}", file=sys.stderr)
+            return 2
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"could not read {state_path}: {e}", file=sys.stderr)
+            return 2
+    else:
+        state = ConversationState()
+
+    extras: dict = {}
+
+    if stage == "architecture":
+        leaves = _load_library_leaves()
+        extras["leaves_block"] = _format_available_leaves_block(leaves)
+
+    elif stage == "wiring":
+        if state.bom is None:
+            print(
+                "stage-prep wiring requires the bom slot to be populated",
+                file=sys.stderr,
+            )
+            return 4
+        pinouts: dict[str, dict] = {}
+        for part in state.bom.parts:
+            sym = part.symbol
+            if sym in pinouts:
+                continue
+            try:
+                pinouts[sym] = lookup_pins(sym)
+            except (SymbolNotFoundError, ValueError) as e:
+                pinouts[sym] = {"error": str(e)}
+        extras["symbol_pinouts"] = pinouts
+
+    output = {
+        "stage": stage,
+        "state": json.loads(state.model_dump_json()),
+        "extras": extras,
+    }
+    print(json.dumps(output, indent=2, default=str))
+    return 0
+
+
+def _cmd_stage_commit(args: argparse.Namespace) -> int:
+    """Atomic stage commit: validate the proposed slot, merge into state, archive.
+
+    Replaces the old ``draft -> write -> validate -> rewrite -> validate ->
+    archive`` chain with one command. Returns JSON on stdout describing
+    success or the specific validation failure so the LLM can self-correct.
+    """
+    stage = args.stage
+    if stage not in KNOWN_STAGES:
+        print(
+            json.dumps({"ok": False, "errors": [f"unknown stage {stage!r}"]}, indent=2)
+        )
+        return 2
+
+    state_path = Path(args.state)
+
+    if state_path.exists():
+        try:
+            state = _load_state(state_path)
+        except ValidationError as e:
+            print(
+                json.dumps(
+                    {"ok": False, "errors": [f"existing state invalid: {e}"]},
+                    indent=2,
+                )
+            )
+            return 2
+        except (OSError, json.JSONDecodeError) as e:
+            print(
+                json.dumps(
+                    {"ok": False, "errors": [f"could not read state: {e}"]},
+                    indent=2,
+                )
+            )
+            return 2
+    else:
+        state = ConversationState()
+
+    slot_path = Path(args.slot_file)
+    try:
+        slot_data = json.loads(slot_path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        print(
+            json.dumps(
+                {"ok": False, "errors": [f"could not read slot-file {slot_path}: {e}"]},
+                indent=2,
+            )
+        )
+        return 2
+
+    try:
+        _apply_slot(state, stage, slot_data, project_stem=args.project_stem)
+    except (ValueError, ValidationError) as e:
+        print(
+            json.dumps(
+                {"ok": False, "errors": [f"slot validation failed: {e}"]},
+                indent=2,
+                default=str,
+            )
+        )
+        return 3
+
+    new_questions: list[Question] = []
+    if args.questions_file:
+        try:
+            q_data = json.loads(Path(args.questions_file).read_text())
+            new_questions = [Question.model_validate(q) for q in q_data]
+        except (OSError, json.JSONDecodeError, ValidationError) as e:
+            print(
+                json.dumps(
+                    {"ok": False, "errors": [f"could not read questions-file: {e}"]},
+                    indent=2,
+                    default=str,
+                )
+            )
+            return 2
+
+    state.replace_open_questions_for_stage(stage, new_questions)
+
+    if args.history_message:
+        state.history.append(ChatMsg(role="assistant", content=args.history_message))
+
+    try:
+        state = ConversationState.model_validate(state.model_dump())
+    except ValidationError as e:
+        print(
+            json.dumps(
+                {"ok": False, "errors": [f"post-merge state invalid: {e}"]},
+                indent=2,
+                default=str,
+            )
+        )
+        return 3
+
+    if state.architecture is not None:
+        leaves = _load_library_leaves()
+        if leaves:
+            try:
+                _validate_library_picks(state.architecture, leaves)
+            except ArchitectureLibraryError as e:
+                print(
+                    json.dumps(
+                        {"ok": False, "errors": [f"library validation failed: {e}"]},
+                        indent=2,
+                    )
+                )
+                return 3
+
+    if state.bom is not None and state.bom.connections:
+        for check in (check_pin_existence(state.bom), check_net_coverage(state.bom)):
+            if not check.ok:
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "errors": [f"{check.name}: {check.message}"],
+                            "offenders": check.offenders[:20],
+                        },
+                        indent=2,
+                    )
+                )
+                return 3
+
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(state.model_dump_json(indent=2) + "\n")
+
+    archive_warning: str | None = None
+    if not args.no_archive:
+        archive_root = (
+            Path(args.archive_root).expanduser().resolve()
+            if args.archive_root
+            else _default_archive_root().resolve()
+        )
+        try:
+            _archive_session(state_path.resolve(), state, archive_root)
+        except OSError as e:
+            archive_warning = f"archive failed: {e}"
+
+    summary: dict = {
+        "ok": True,
+        "stage": stage,
+        "project_stem": state.project_stem,
+        "slots_filled": [
+            name
+            for name in ("intent", "functional_spec", "architecture", "bom")
+            if getattr(state, name) is not None
+        ],
+        "open_questions": len(state.open_questions),
+        "blocking_questions": sum(1 for q in state.open_questions if q.blocking),
+    }
+    if archive_warning:
+        summary["archive_warning"] = archive_warning
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
 def _cmd_synthesize(args: argparse.Namespace) -> int:
     state_path = Path(args.state)
     out_dir = Path(args.out_dir)
@@ -353,6 +629,68 @@ def main(argv: list[str] | None = None) -> int:
         help="skip the post-synthesis session archive",
     )
     p_syn.set_defaults(func=_cmd_synthesize)
+
+    p_prep = sub.add_parser(
+        "stage-prep",
+        help=(
+            "single-shot collector: print state + stage-specific extras as JSON "
+            "(leaf library for architecture; batched symbol pinouts for wiring)"
+        ),
+    )
+    p_prep.add_argument("stage", choices=KNOWN_STAGES, help="stage name")
+    p_prep.add_argument(
+        "state",
+        nargs="?",
+        default=".kicraft/state.json",
+        help="path to state.json (default .kicraft/state.json)",
+    )
+    p_prep.set_defaults(func=_cmd_stage_prep)
+
+    p_commit = sub.add_parser(
+        "stage-commit",
+        help=(
+            "atomic stage commit: validate the proposed slot, merge into "
+            "state.json, append history, archive"
+        ),
+    )
+    p_commit.add_argument("stage", choices=KNOWN_STAGES, help="stage name")
+    p_commit.add_argument(
+        "--slot-file",
+        required=True,
+        help="path to a JSON file containing the proposed slot value",
+    )
+    p_commit.add_argument(
+        "--questions-file",
+        default=None,
+        help="optional path to a JSON file with a list of Question dicts to attach to the stage",
+    )
+    p_commit.add_argument(
+        "--history-message",
+        default=None,
+        help="optional assistant summary text to append to state.history",
+    )
+    p_commit.add_argument(
+        "--project-stem",
+        default=None,
+        help="for the intent stage, the top-level project_stem to set (e.g. ESP32_WEATHER_STATION)",
+    )
+    p_commit.add_argument(
+        "state",
+        nargs="?",
+        default=".kicraft/state.json",
+        help="path to state.json (default .kicraft/state.json)",
+    )
+    p_commit.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="skip the post-commit session archive",
+    )
+    p_commit.add_argument(
+        "--archive-root",
+        default=None,
+        help=f"archive root directory (default {_default_archive_root()})",
+    )
+    p_commit.set_defaults(func=_cmd_stage_commit)
 
     p_arch = sub.add_parser(
         "archive",

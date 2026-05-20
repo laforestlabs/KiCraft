@@ -1,4 +1,4 @@
-Stage 1: Intent. Read the conversation so far and write the `intent` slot of `.kicraft/state.json`.
+Stage 1: Intent. You are running inside the CircuitChat stage sub-agent. Your job is to draft the `intent` slot of the conversation state and commit it. Follow SKILL.md's "Workflow (follow exactly, in order)" section to do that — this file specifies what the slot must look like.
 
 Slot shape (`IntentSlot`):
 
@@ -8,12 +8,14 @@ Slot shape (`IntentSlot`):
 - `inferred_expertise`: one of `"beginner"` / `"intermediate"` / `"expert"`, inferred from vocabulary and constraint specificity.
 - `assumptions`: defaults you applied because the user didn't say. Each entry MUST end with `(defaulted)` so the user can spot and override (e.g. `"target fab: JLCPCB (defaulted)"`).
 
-Open questions discipline:
+`project_stem` rule (top-level state field, NOT inside the slot — pass via `--project-stem`):
 
-- `blocking: true` — the stage cannot produce useful output without an answer. Reserve for things that materially change the project (battery vs USB, single-board vs multi-board).
-- `material: true` (default; not blocking) — worth surfacing at the next stage boundary. Affects topology or part choice (e.g. output current).
+Pick the 2-3 most significant words from the goal, uppercase-and-underscore them, cap at 32 chars. Examples: goal "USB-powered Li-ion charger" → `"USB_LIION_CHARGER"`; goal "ESP32 weather station" → `"ESP32_WEATHER_STATION"`.
+
+Open-question discipline:
+
+- `blocking: true` — reserve for things that materially change the project (battery vs USB, single-board vs multi-board).
+- `material: true` (default; not blocking) — worth surfacing at the next stage boundary. Affects topology or part choice.
 - Cosmetic clarifications — DON'T emit a question; record the default in `assumptions` instead.
-
-Set `project_stem` on the top-level state at the same time: pick the 2-3 most significant words from the goal, uppercase-and-underscore them, cap at 32 chars (e.g. goal "USB-powered Li-ion charger" → `"USB_LIION_CHARGER"`).
 
 Keep it tight. This stage captures what the user said, not what they should build.

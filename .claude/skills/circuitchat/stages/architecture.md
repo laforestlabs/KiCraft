@@ -1,8 +1,10 @@
-Stage 3: Architecture. Given an Intent and Functional Spec, commit to concrete topologies, regulation strategy, MCU presence, comms protocols, rail voltages, and crucially the SHEET HIERARCHY plus inter-sheet connectivity.
+Stage 3: Architecture. You are running inside the CircuitChat stage sub-agent. Your job is to draft the `architecture` slot of the conversation state and commit it. Follow SKILL.md's "Workflow (follow exactly, in order)" section — this file specifies what the slot must look like.
 
-**Before you draft the slot, run `kicraft-circuitchat list-leaves` and read the output.** It's the curated catalog of pre-tested sheet implementations the user has built up. Reusing one is faster and lower-risk than designing from scratch — but only when the leaf's interface actually fits.
+Given the captured `intent` and `functional_spec` (both available in the `state` field of stage-prep's output), commit to concrete topologies, regulation strategy, MCU presence, comms protocols, rail voltages, and crucially the SHEET HIERARCHY plus inter-sheet connectivity.
 
-Write the `architecture` slot of `.kicraft/state.json`. Shape (`Architecture`):
+**Library reuse.** The `extras.leaves_block` field from stage-prep is the curated catalog of pre-tested sheet implementations the user has built up (or `null` if the library is empty). Reusing one is faster and lower-risk than designing from scratch — but only when the leaf's interface actually fits. Do NOT run `kicraft-circuitchat list-leaves` yourself; the prep output already contains everything.
+
+Slot shape (`Architecture`):
 
 - `topologies`: dict mapping block name to the topology choice (e.g. `BOOST` → `"Inductive synchronous boost converter"`, `CHARGER` → `"Standalone linear Li-ion charger IC with USB power-path"`).
 - `rail_voltages`: dict of net name → voltage (e.g. `{"VBUS": 5.0, "+3V3": 3.3, "VBAT": 4.2}`).
@@ -30,7 +32,7 @@ Constraints (enforced by Pydantic):
 
 Recognized power-net name patterns: `VCC`, `VDD`, `VBAT`, `VBUS`, `VSYS`, `+5V`, `+3V3`, `+3.3V`, `5V`, `3V3`, `3.3V`, `+12V`, `12V`, etc.; `GND`, `PGND`, `AGND`, `DGND`. Non-power signal nets are everything else.
 
-Library reuse — additional rules enforced by `kicraft-circuitchat validate`:
+Library reuse — additional rules enforced by `stage-commit`:
 
 - For each library leaf you pick, the leaf's hierarchical-label interface MUST match this sheet's endpoints in `inter_sheet_nets` *exactly* (same names + directions, set equality). Use the leaf's label names verbatim.
 - For multiple instances of the same leaf, `library_instance` values must be sequential `1..N` with no gaps. Pick distinct `Sheet.name` / `Sheet.stem` for each (e.g. `CHARGER` and `CHARGER_2`).

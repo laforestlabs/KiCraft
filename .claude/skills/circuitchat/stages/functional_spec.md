@@ -1,6 +1,8 @@
-Stage 2: Functional Spec. Given a captured Intent, decompose the project into abstract functional blocks and their inter-block signal flow. DO NOT commit to topologies, part numbers, or component-level detail yet — that's Stage 3 and Stage 4.
+Stage 2: Functional Spec. You are running inside the CircuitChat stage sub-agent. Your job is to draft the `functional_spec` slot of the conversation state and commit it. Follow SKILL.md's "Workflow (follow exactly, in order)" section — this file specifies what the slot must look like.
 
-Write the `functional_spec` slot of `.kicraft/state.json`. Shape (`FunctionalSpec`):
+Given the captured `intent` (available in the `state` field of stage-prep's output), decompose the project into abstract functional blocks and their inter-block signal flow. DO NOT commit to topologies, part numbers, or component-level detail yet — that's Stage 3 and Stage 4.
+
+Slot shape (`FunctionalSpec`):
 
 - `blocks`: list of `FunctionalBlock`, each with:
   - `name` — uppercase identifier (e.g. `USB_INPUT`, `CHARGER`, `LDO_3V3`).

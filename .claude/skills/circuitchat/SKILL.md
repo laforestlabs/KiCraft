@@ -5,74 +5,120 @@ description: Use this skill to design a new KiCad printed-circuit-board project 
 
 # CircuitChat
 
-You are running the KiCraft CircuitChat pipeline. The user is going to describe a PCB they want to build; you turn that into a complete KiCad project through four LLM-driven stages and one deterministic synthesis step.
+You are running the KiCraft CircuitChat pipeline. The user is going to describe a PCB they want to build; you turn that into a complete KiCad project through five LLM-driven stages and one deterministic synthesis step.
+
+**Your job in the main thread is the interview, not the typing.** Stage drafting happens inside a sub-agent so the user is never staring at a wall of permission prompts mid-stage. You read state, ask the user what's needed, decide when to run a stage, spawn the sub-agent that runs it, and relay the one-line summary back. That's it.
 
 ## State file
 
-All structured output lives in `.kicraft/state.json` in the user's working directory. The schema is the `ConversationState` Pydantic model at `kicraft/circuitchat/models.py` in the installed KiCraft package — reading that file directly is the source of truth for field names, types, regex constraints, and cross-field validators.
+All structured output lives in `.kicraft/state.json` in the user's working directory. The schema is the `ConversationState` Pydantic model at `kicraft/circuitchat/models.py` in the installed KiCraft package — that file is the source of truth for field names, types, regex constraints, and cross-field validators.
 
-Read `.kicraft/state.json` at the start of every turn. If it doesn't exist yet, create the `.kicraft/` directory and start from `{}`.
+Read `.kicraft/state.json` at the start of every turn. If it doesn't exist yet, that's fine — the stage sub-agent creates it on first commit. You do NOT need to create `.kicraft/` or initialize an empty state.json yourself.
 
 ## Session ID
 
-On turn 1 of a new session — i.e. when you create `.kicraft/state.json` for the first time — also write `.kicraft/session_id`, a single-line text file:
+`.kicraft/session_id` is a single-line text file written automatically the first time `stage-commit` runs and archives the session. You do not write it. If it already exists when you start a turn, leave it alone — it's the sticky archive handle and must not change across the life of the session.
 
-```
-<UTC_iso_compact>_<project_stem_or_UNNAMED>
-```
+Top-level state fields:
 
-`UTC_iso_compact` is the `YYYYMMDDTHHMMSSZ` form of the current UTC time. `project_stem` may not be known yet on turn 1; use `UNNAMED` in that case and DO NOT rewrite the file later when the intent stage sets `project_stem` (the archive helper handles the missing-stem case fine). If `.kicraft/session_id` already exists, leave it alone — it is the sticky handle for archival and must not change across the life of the session.
-
-Top-level fields:
-
-- `project_stem` (str | null) — short uppercase tag like `"USB_CHARGER"`. Set this when the intent slot is first written.
+- `project_stem` (str | null) — short uppercase tag like `"USB_CHARGER"`. The intent stage sets this via `--project-stem`.
 - `intent` (IntentSlot | null)
 - `functional_spec` (FunctionalSpec | null)
 - `architecture` (Architecture | null)
-- `bom` (BOM | null)
-- `open_questions` (list[Question]) — every stage may surface clarifications here. `stage` field tags which stage emitted each entry.
-- `history` (list[ChatMsg]) — append a `{role, content}` entry for every user and assistant turn so re-runs of any stage see the full conversation. `timestamp` is optional in the schema; omit if you don't have it.
-- `artifacts` (ArtifactPaths | null) — populated by `kicraft-circuitchat synthesize`. Leave alone otherwise.
+- `bom` (BOM | null) — `bom.connections` and `bom.no_connect_pins` are owned by the wiring stage.
+- `open_questions` (list[Question]) — every stage may surface clarifications. `stage` tags which stage emitted each entry.
+- `history` (list[ChatMsg]) — automatically appended by `stage-commit`. You do not append directly.
+- `artifacts` (ArtifactPaths | null) — populated by `synthesize`. Leave alone otherwise.
 
 ## Per-turn workflow
 
 On each user message, decide ONE of:
 
-1. **run_stage** — invoke a stage to produce/update a slot. Use when you have enough information and the user is moving forward (explicit or implicit).
-2. **ask** — surface 1-5 clarifying questions. Use when blocking open_questions exist or the latest message left a critical ambiguity.
+1. **spawn_stage** — fire off a stage sub-agent to produce/update a slot. Use when you have enough information and the user is moving forward (explicit or implicit).
+2. **ask** — surface 1-5 clarifying questions in chat. Use when blocking `open_questions` exist or the latest message left a critical ambiguity that the next stage can't reasonably default.
 3. **respond** — natural reply. Use for chit-chat, summaries, explanations, and stage-completion proposals like "I think we have enough for architecture — want me to proceed?".
 
-Choosing between **ask** and **run_stage**:
+Choosing between **ask** and **spawn_stage**:
 
 - If any `open_questions` have `blocking: true`, ask FIRST.
 - If a stage just ran and produced material questions, surface them before the next stage runs.
-- If everything is settled and the user is moving forward, run the next stage.
+- If everything is settled and the user is moving forward, spawn the next stage.
 
-Append an assistant message to `history` on every turn that ends with output to the user.
+You do NOT manually append assistant history. The stage sub-agent does that through `stage-commit --history-message`. For pure **ask** / **respond** turns (no stage spawned), the assistant text you write to chat is what the user sees and is not persisted to history — that's intentional; only stage-committing moments get archived.
 
 ## Stage ordering
 
 - `functional_spec` needs `intent`.
 - `architecture` needs `intent` + `functional_spec`.
 - `bom` needs all three.
-- `wiring` needs all four. It writes the `bom.connections` and `bom.no_connect_pins` fields of the existing BOM slot (it does not create a new slot).
-- Synthesis needs all four slots, `bom.connections` populated, and `project_stem`.
+- `wiring` needs all four. It writes `bom.connections` and `bom.no_connect_pins` of the existing BOM slot; it does not replace the BOM.
+- Synthesis needs all four slots + `bom.connections` populated + `project_stem`.
 
-Stages are stateless and re-runnable. If the user revises a constraint, re-run the affected stage and any downstream stages — don't try to diff. Don't skip stages: if `intent` is missing and the user asks for a BOM, run `intent` first (or `ask` to gather what you need). Re-running `bom` invalidates `bom.connections`; the wiring stage must run again.
+Stages are stateless and re-runnable. If the user revises a constraint, re-spawn the affected stage and any downstream stages — don't try to diff. Don't skip stages: if `intent` is missing and the user asks for a BOM, spawn `intent` first (or `ask` to gather what you need). Re-running `bom` invalidates `bom.connections`; the wiring stage must run again.
 
-## Running a stage
+## Spawning a stage
 
-When you decide to run stage X:
+When you decide to run stage X, use the **Agent** tool to spawn a sub-agent with a tight prompt. The sub-agent is responsible for the drafting; you are responsible for relaying its summary.
 
-1. Read the stage's specific instructions: `.claude/skills/circuitchat/stages/X.md`.
-2. Read the current `.kicraft/state.json`.
-3. **Architecture stage only:** also run `kicraft-circuitchat list-leaves` and treat its output as additional context. The user maintains a curated leaf library; reusing a leaf verbatim is cheaper, more reliable, and avoids re-deriving a known-good sub-circuit.
-4. Draft the slot value matching the corresponding Pydantic model. Check `kicraft/circuitchat/models.py` for any field validator or `model_validator` you might miss (regex on `ref`, required `library_instance` pairing on `Sheet`, unique block names, etc.).
-5. Write the updated `state.json`. Replace any existing `open_questions` entries whose `stage` matches X — the new stage output owns its question set.
-6. Run `kicraft-circuitchat validate .kicraft/state.json`. If it exits non-zero, READ the error, FIX the slot, re-write, re-validate. Do not proceed until validation passes.
-7. Append an assistant message to `history` summarizing what just changed (e.g. "Captured the architecture: 5 sheets, 3 power nets, 2 material questions for you.").
+Use this prompt template (substitute `<STAGE>` and inline the stage's specific instruction file):
 
-Open-question discipline (applies to every stage):
+```
+You are running the CircuitChat <STAGE> stage. Your only job is to draft the slot value for this stage, validate it, and commit. Then report a one-line summary.
+
+## Stage-specific instructions
+
+<paste the entire contents of .claude/skills/circuitchat/stages/<STAGE>.md here>
+
+## Recent user context
+
+The latest user message was:
+
+<paste the user's latest message verbatim>
+
+(If earlier user turns matter, paste them too — the sub-agent does not see the parent conversation.)
+
+## Workflow (follow exactly, in order)
+
+1. Run `kicraft-circuitchat stage-prep <STAGE>` and parse the JSON it prints to stdout. It contains:
+   - `state` — the current ConversationState (intent / functional_spec / architecture / bom / history / etc.)
+   - `extras` — stage-specific extras:
+     - architecture: `leaves_block` (rendered "Available leaves" markdown, or null if the library is empty)
+     - wiring: `symbol_pinouts` — a dict mapping every distinct BomPart.symbol to its full pin inventory (number, name, electrical_type, position). NEVER call `lookup-symbol` yourself; this dict is the canonical pin reference for the wiring stage.
+
+2. Draft the slot value as a JSON object that matches the Pydantic model named in the instructions above. Follow every constraint in the instructions and in the model's validators (regex on ref, sheet name shape, library_instance pairing, etc.).
+
+3. Write the drafted slot to `/tmp/circuitchat_stage_<STAGE>.json`.
+
+4. If your draft includes new clarifying questions for the user, write a JSON list of Question dicts (`[{"text":"…","stage":"<STAGE>","blocking":false,"material":true}, …]`) to `/tmp/circuitchat_questions_<STAGE>.json` and pass `--questions-file` to stage-commit.
+
+5. Run:
+   ```
+   kicraft-circuitchat stage-commit <STAGE> \
+     --slot-file /tmp/circuitchat_stage_<STAGE>.json \
+     [--questions-file /tmp/circuitchat_questions_<STAGE>.json] \
+     --history-message "<one-paragraph summary of what changed>" \
+     [--project-stem <STEM>  (only on the intent stage)]
+   ```
+
+6. If commit returns `{"ok": false, "errors": [...]}`, READ the errors, fix the slot, re-write the slot file, re-commit. Maximum 2 retries.
+
+7. Return EXACTLY one line of output back to the parent agent: a concise summary of what this stage produced. No preamble, no explanation of how you did it, no markdown. Example: "Drafted architecture: 12 sheets, 8 power nets, 22 inter-sheet nets, 3 material questions."
+
+## Hard rules
+
+- You may use only `Bash` (limited to `kicraft-circuitchat *` commands) and `Write` (limited to `/tmp/circuitchat_*`).
+- Do NOT use Read on `.kicraft/state.json` — `stage-prep` already gives you the state.
+- Do NOT call `kicraft-circuitchat lookup-symbol`, `validate`, or `archive` directly. `stage-prep` and `stage-commit` cover everything.
+- Do NOT touch any other CLI command or any other file.
+```
+
+After the Agent call returns, the sub-agent's one-line summary is your tool result. Relay it to the user verbatim (or with a one-sentence framing). If commit failed even after retries, report the error to the user and stop — don't spawn another sub-agent without their input.
+
+### Reading the stage instruction file
+
+The stage instruction files live at `.claude/skills/circuitchat/stages/<STAGE>.md` (relative to wherever this skill is installed). Read the relevant file once at the start of the spawn so you can paste its contents into the sub-agent prompt. Cache it within the turn.
+
+## Open-question discipline (applies to every stage)
 
 - `blocking: true` — the stage cannot produce useful output without an answer. Use sparingly.
 - `material: true` (and not blocking) — worth surfacing at the next stage boundary. Affects topology or part choice.
@@ -88,15 +134,19 @@ kicraft-circuitchat synthesize .kicraft/state.json <out_dir>
 
 The script prints the written paths and per-check validation results, then auto-archives the session into `~/.kicraft/sessions/<session_id>/`. Add `--smoke` for the slow solve-subcircuits smoke check (requires KiCad PCB tools installed; skip unless the user asks). Pass `--no-archive` only if the user explicitly asks; archival is the default.
 
-## Archival
+Synthesis is the only mid-conversation Bash call you make directly from the main thread — it doesn't go through the sub-agent because it's already one bundled call.
 
-After every successful stage run (step 6 of "Running a stage", once `kicraft-circuitchat validate` exits 0), run:
+## Permission model
 
-```
-kicraft-circuitchat archive
-```
+For the silent-stage flow to work, the user's `.claude/settings.json` should pre-allow these patterns:
 
-This snapshots `.kicraft/` (state.json, session_id, log.jsonl if present) into `~/.kicraft/sessions/<session_id>/` and refreshes a `manifest.json` summarizing slot completion. The destination's `feedback.md` — if the user has written one — is preserved across re-archives. The command is idempotent and silent on the chat surface; you do not need to mention it to the user unless it fails. If it fails, surface the error and keep going; archival is best-effort and must not block the conversation.
+- `Bash(kicraft-circuitchat stage-prep *)`
+- `Bash(kicraft-circuitchat stage-commit *)`
+- `Bash(kicraft-circuitchat synthesize *)`
+- `Read(./.kicraft/**)` and `Read(./.claude/skills/circuitchat/**)`
+- `Write(/tmp/circuitchat_*)`
+
+If the user hasn't installed these, the first stage spawn will produce a flurry of prompts. Mention this once at the start of a fresh session and offer to install the allowlist via the `update-config` skill.
 
 ## Style
 

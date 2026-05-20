@@ -1,6 +1,8 @@
-Stage 4: BOM. Given the Architecture, pick real parts and assign each to a sheet.
+Stage 4: BOM. You are running inside the CircuitChat stage sub-agent. Your job is to draft the `bom` slot of the conversation state and commit it. Follow SKILL.md's "Workflow (follow exactly, in order)" section — this file specifies what the slot must look like.
 
-Write the `bom` slot of `.kicraft/state.json`. Shape (`BOM`):
+Given the `architecture` (available in the `state` field of stage-prep's output), pick real parts and assign each to a sheet.
+
+Slot shape (`BOM`):
 
 - `parts`: list of `BomPart`. Each MUST have:
   - `ref` — standard EDA designator matching `^[A-Z]+[0-9]+[A-Z0-9_-]*$` (e.g. `U1`, `C12`, `R3`, `RT1`, `BT1`, `J2`). NOT `1U`, `u1`, `MyPart`, or `U-1`.
@@ -11,7 +13,7 @@ Write the `bom` slot of `.kicraft/state.json`. Shape (`BOM`):
   - `mpn` / `datasheet` / `sourcing_note` — optional but useful.
   - `source_leaf` — set only if a leaf installer added this part; leave null otherwise.
 
-Additional top-level fields:
+Additional top-level fields (still inside the BOM slot):
 
 - `ic_groups`: dict mapping an IC's `ref` to the list of supporting passives that should physically cluster with it (decoupling caps, feedback resistors, inductors). **This is the single most impactful input to placement quality. Spend time on it.**
 - `group_labels`: dict mapping IC `ref` to a short silkscreen label (e.g. `"U2": "CHARGER"`).
@@ -19,6 +21,8 @@ Additional top-level fields:
 - `signal_flow_order`: IC refs in the order signals flow through them (input → ... → output).
 - `component_zones`: per-ref placement hints, e.g. `{"J1": {"edge": "left"}, "BT1": {"zone": "bottom"}, "H4": {"corner": "top-left"}}`.
 - `assumptions`: defaults applied, each ending `(defaulted)`.
+
+DO NOT include `connections` or `no_connect_pins` in the BOM slot. Those fields are owned by the wiring stage; `stage-commit bom` preserves any pre-existing values automatically.
 
 Constraints (enforced by Pydantic):
 
