@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:6912d4ba7f44e10640ce992d3ebdf867a7716f5eca90a3f30a9e3c16a8680c0c",
+  "datasheet_url": "https://www.injoinic.com/upload/files/2024/1/26015432-2c8b97fa97879ab9.pdf",
+  "description": "Bidirectional USB-PD 3.0 buck-boost power-bank IC. Negotiates PD source (discharge) and sink (charge) on a single USB-C port. External 4-switch H-bridge for the buck-boost stage; integrated charger control and LED bar driver.",
+  "footprint_name": "QFN-48-1EP_7x7mm_P0.5mm_EP5.1x5.1mm",
+  "kicad_version_min": "9.0.0",
+  "mpn": "IP2368-BZ",
+  "name": "ip2368",
+  "provenance": {
+    "added_at": "2026-05-21T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored",
+    "source_project_stem": "USB_PD_POWERBANK"
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2837135"
+  },
+  "symbol_name": "IP2368",
+  "tags": [
+    "usb-pd",
+    "buck-boost",
+    "power-bank",
+    "bidirectional",
+    "battery-charger"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Configuration straps set protocol behavior: BAT_NUM (R4) selects cell count (91k = 3S); V_SET (R6) selects per-cell termination voltage (10k = 4.20V); I_SET (R7) selects charge current ceiling. Verify resistor values against the latest IP2368 datasheet revision before fabrication."
+}
