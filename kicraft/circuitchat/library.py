@@ -1,14 +1,19 @@
-"""Leaf-library helpers shared by the skill-driven workflow.
+"""Library helpers shared by the skill-driven workflow.
 
-Lifted out of the old ``stages/architecture.py``. The Python pipeline no
-longer drives the architecture LLM call; instead the Claude Code skill
-asks the CLI to format an "Available leaves" block (so the model can see
-what's reusable) and to validate library picks after the architecture
-slot is written. Both responsibilities live here.
+Two libraries the BOM/architecture stages consult:
+
+- Leaf library — pinned sheet-level subcircuits (this module's original
+  responsibility; lifted from the old ``stages/architecture.py``).
+- Parts library — atomic symbol+footprint bundles, four-tier search
+  (project / home / vendored / extras).
+
+Each library has a loader + an "available …" markdown formatter the
+relevant stage pastes into its sub-agent prompt.
 """
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from .models import Architecture
 
@@ -124,3 +129,72 @@ def _validate_library_picks(
                 f"missing from architecture: {sorted(missing)}; "
                 f"extra in architecture: {sorted(extra)}"
             )
+
+
+# ---------- parts library ----------
+
+
+def _load_library_parts(project_root: Path | None = None) -> tuple[list, list]:
+    """Best-effort load of the parts library across all tiers.
+
+    Returns ``(active, broken)`` — never raises. ``shadowed`` entries
+    are discarded here; the BOM stage only needs the active set.
+    """
+    try:
+        from kicraft.parts_library import load_all_with_overrides
+        active, _shadowed, broken = load_all_with_overrides(project_root)
+        if broken:
+            logger.warning(
+                "skipping %d broken parts: %s",
+                len(broken),
+                [f"{b.tier.value}:{b.dir.name}" for b in broken],
+            )
+        return active, broken
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not load parts library: %s", exc)
+        return [], []
+
+
+def _format_available_parts_block(loaded_parts: list) -> str | None:
+    """Render the "Available parts" block the BOM stage sees.
+
+    ``None`` if the library is empty (the BOM stage falls back to
+    KiCad stock libraries and ad-hoc questions). Each row carries
+    enough context for the LLM to pick a part by tag, MPN, or
+    sourcing vendor and to know which symbol/footprint id to use in
+    the BOM (``<name>:<symbol_name>`` and ``<name>:<footprint_name>``).
+    """
+    if not loaded_parts:
+        return None
+    lines: list[str] = ["## Available parts\n"]
+    lines.append(
+        "These are pre-curated symbol+footprint bundles outside the stock "
+        "KiCad libraries. Use them by reference (no substitutions) when "
+        "they match a needed part. In the BOM, the `symbol` field is "
+        "`<name>:<symbol_name>` and the `footprint` field is "
+        "`<name>:<footprint_name>` — both verbatim from the rows below.\n"
+    )
+    lines.append(
+        "| name | mpn | sourcing | tags | symbol | footprint | tier |"
+    )
+    lines.append("|---|---|---|---|---|---|---|")
+    for part in loaded_parts:
+        m = part.manifest
+        sourcing = (
+            ", ".join(f"{k}:{v}" for k, v in sorted(m.sourcing.items()))
+            if m.sourcing
+            else "—"
+        )
+        tags = ", ".join(m.tags) if m.tags else "—"
+        lines.append(
+            f"| `{m.name}` | {m.mpn} | {sourcing} | {tags} | "
+            f"`{m.name}:{m.symbol_name}` | "
+            f"`{m.name}:{m.footprint_name}` | {part.tier.value} |"
+        )
+    # Watch-out notes for parts that have them — easy to miss in the table.
+    flagged = [p for p in loaded_parts if p.manifest.watch_out_for]
+    if flagged:
+        lines.append("\n### Watch out for")
+        for part in flagged:
+            lines.append(f"- **{part.manifest.name}**: {part.manifest.watch_out_for}")
+    return "\n".join(lines)

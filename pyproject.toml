@@ -28,6 +28,7 @@ experiment = [
 circuitchat = [
     "pydantic>=2.6",
     "kicad-skip>=0.2",
+    "easyeda2kicad>=1.0",
 ]
 dev = [
     "pytest>=7.0",

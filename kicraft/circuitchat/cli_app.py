@@ -31,7 +31,9 @@ from pydantic import ValidationError
 from .library import (
     ArchitectureLibraryError,
     _format_available_leaves_block,
+    _format_available_parts_block,
     _load_library_leaves,
+    _load_library_parts,
     _validate_library_picks,
 )
 from .models import (
@@ -239,6 +241,287 @@ def _cmd_list_leaves(_: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_list_parts(_: argparse.Namespace) -> int:
+    active, _broken = _load_library_parts(Path.cwd())
+    block = _format_available_parts_block(active)
+    if block is None:
+        print("(no parts available in the library)")
+        return 0
+    print(block)
+    return 0
+
+
+def _slugify_libname(s: str) -> str:
+    """Lowercase + collapse non-alphanumeric runs into single dashes.
+
+    The result must satisfy ``parts_library.PART_NAME_RE`` (at least two
+    chars, starts with a letter, ends with letter or digit). If the input
+    doesn't yield a valid slug, returns the empty string so the caller
+    can prompt for an explicit ``--name``.
+    """
+    import re as _re
+
+    out = _re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
+    from kicraft.parts_library import PART_NAME_RE
+    return out if PART_NAME_RE.match(out) else ""
+
+
+def _cmd_add_part(args: argparse.Namespace) -> int:
+    """Fetch a part from LCSC via easyeda2kicad and bundle it for the parts library.
+
+    Writes the canonical layout::
+
+        <dest>/<libname>/manifest.json
+        <dest>/<libname>/<libname>.kicad_sym
+        <dest>/<libname>/<libname>.pretty/<footprint_name>.kicad_mod
+
+    Then computes the content_hash and rewrites the manifest. After this
+    runs, ``list-parts`` shows the new entry and the resolver picks it
+    up automatically the next time a BOM references ``<libname>:<sym>``.
+    """
+    if not args.from_lcsc:
+        print("add-part requires --from-lcsc <LCSC_ID>", file=sys.stderr)
+        return 2
+
+    try:
+        from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
+        from easyeda2kicad.easyeda.easyeda_importer import (
+            EasyedaFootprintImporter,
+            EasyedaSymbolImporter,
+        )
+        from easyeda2kicad.kicad.export_kicad_footprint import ExporterFootprintKicad
+        from easyeda2kicad.kicad.export_kicad_symbol import ExporterSymbolKicad
+    except ImportError as exc:
+        print(
+            f"easyeda2kicad not installed in this Python environment: {exc}\n"
+            f"install with: pip install easyeda2kicad",
+            file=sys.stderr,
+        )
+        return 2
+
+    from kicraft.parts_library import (
+        PartManifest,
+        Provenance,
+        compute_content_hash,
+        dump_manifest,
+    )
+
+    lcsc_id = args.from_lcsc
+
+    print(f"fetching {lcsc_id} from EasyEDA/LCSC...", file=sys.stderr)
+    api = EasyedaApi(use_cache=False)
+    cad_data = api.get_cad_data_of_component(lcsc_id=lcsc_id)
+    if not cad_data:
+        print(f"EasyEDA returned no data for {lcsc_id}", file=sys.stderr)
+        return 2
+
+    ee_symbol = EasyedaSymbolImporter(easyeda_cp_cad_data=cad_data).get_symbol()
+    ee_footprint = EasyedaFootprintImporter(
+        easyeda_cp_cad_data=cad_data
+    ).get_footprint()
+
+    # Derive the library name from --name, then MPN, then symbol info name.
+    libname = (
+        (args.name and _slugify_libname(args.name))
+        or _slugify_libname(ee_symbol.info.mpn or "")
+        or _slugify_libname(ee_symbol.info.name or "")
+    )
+    if not libname:
+        print(
+            f"could not derive a valid library name from MPN "
+            f"{ee_symbol.info.mpn!r} or symbol name {ee_symbol.info.name!r}; "
+            f"rerun with --name <slug> (lowercase, alphanumeric, dashes)",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Pick destination tier.
+    if args.into == "home":
+        dest_base = Path.home() / ".kicraft" / "parts"
+    else:  # project (default)
+        dest_base = Path.cwd() / ".kicraft" / "parts"
+    part_dir = dest_base / libname
+
+    if part_dir.exists() and not args.overwrite:
+        print(
+            f"part directory already exists: {part_dir}\n"
+            f"  rerun with --overwrite to replace, or pass --name to use a "
+            f"different slug",
+            file=sys.stderr,
+        )
+        return 2
+    if part_dir.exists() and args.overwrite:
+        import shutil as _shutil
+
+        _shutil.rmtree(part_dir)
+
+    pretty_dir = part_dir / f"{libname}.pretty"
+    pretty_dir.mkdir(parents=True, exist_ok=True)
+
+    # Symbol: write to <libname>.kicad_sym (fresh file).
+    sym_path = part_dir / f"{libname}.kicad_sym"
+    sym_exporter = ExporterSymbolKicad(
+        symbol=ee_symbol, lib_path=str(sym_path), custom_fields={}
+    )
+    if not sym_exporter.save_to_lib(
+        lib_path=str(sym_path), footprint_lib_name=libname, overwrite=True
+    ):
+        print(f"failed to write symbol for {lcsc_id}", file=sys.stderr)
+        return 2
+    symbol_name = ee_symbol.info.name
+
+    # Footprint: write into the .pretty dir. 3D model path is left empty
+    # (no .step yet); user can re-fetch with a 3D flag in a follow-up.
+    footprint_name = ee_footprint.info.name
+    fp_path = pretty_dir / f"{footprint_name}.kicad_mod"
+    ExporterFootprintKicad(footprint=ee_footprint).export(
+        footprint_full_path=str(fp_path), model_3d_path=""
+    )
+
+    # Compose the manifest, then compute content_hash and rewrite once.
+    sourcing: dict[str, str] = {"lcsc": lcsc_id}
+    if ee_symbol.info.mpn and ee_symbol.info.manufacturer:
+        # MPN goes in its own field; manufacturer is informational only.
+        pass
+
+    description = (
+        ee_symbol.info.description
+        or f"{ee_symbol.info.manufacturer or ''} {ee_symbol.info.mpn or ''}".strip()
+        or f"part {symbol_name}"
+    )
+    datasheet = ee_symbol.info.datasheet or None
+    if datasheet and not (
+        datasheet.startswith("http://") or datasheet.startswith("https://")
+    ):
+        datasheet = None
+
+    import datetime as _dt
+
+    manifest = PartManifest(
+        schema_version="1",
+        name=libname,
+        version="0.1.0",
+        content_hash="sha256:" + "0" * 64,
+        description=description,
+        mpn=ee_symbol.info.mpn or symbol_name,
+        sourcing=sourcing,
+        datasheet_url=datasheet,
+        tags=[],
+        watch_out_for=None,
+        symbol_name=symbol_name,
+        footprint_name=footprint_name,
+        kicad_version_min="9.0.0",
+        provenance=Provenance(
+            source="easyeda2kicad",
+            source_project_stem=None,
+            added_at=_dt.datetime.now(_dt.timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            kicad_version="9.0.0",
+        ),
+    )
+    dump_manifest(manifest, part_dir)
+    actual_hash = compute_content_hash(part_dir)
+    dump_manifest(manifest.model_copy(update={"content_hash": actual_hash}), part_dir)
+
+    print(
+        f"OK added {libname}@0.1.0 -> {part_dir}\n"
+        f"  symbol:    {libname}:{symbol_name}\n"
+        f"  footprint: {libname}:{footprint_name}\n"
+        f"  mpn:       {manifest.mpn}\n"
+        f"  sourcing:  lcsc:{lcsc_id}\n"
+        f"  tier:      {args.into}"
+    )
+    return 0
+
+
+def _cmd_validate_part(args: argparse.Namespace) -> int:
+    """Validate a parts-library directory: schema, files, content_hash.
+
+    Three checks, in order: (1) the manifest parses and the directory
+    name matches ``name``; (2) the symbol + footprint files declared in
+    the manifest exist and parse; (3) the recomputed content_hash matches
+    the value stored in the manifest. With ``--update-hash``, recompute
+    and rewrite the manifest's ``content_hash`` instead of failing — used
+    when authoring a new part or after deliberate edits.
+    """
+    from pydantic import ValidationError as _PydValidationError
+
+    from kicraft.parts_library import (
+        compute_content_hash,
+        dump_manifest,
+        footprint_file_path,
+        load_manifest,
+        manifest_path,
+        symbol_file_path,
+    )
+
+    part_dir = Path(args.path).resolve()
+    if not part_dir.is_dir():
+        print(f"not a directory: {part_dir}", file=sys.stderr)
+        return 2
+
+    if not manifest_path(part_dir).is_file():
+        print(f"missing manifest.json in {part_dir}", file=sys.stderr)
+        return 2
+
+    try:
+        manifest = load_manifest(part_dir)
+    except _PydValidationError as e:
+        print(f"manifest schema error:\n{e}", file=sys.stderr)
+        return 2
+    except Exception as e:  # noqa: BLE001 — JSON decode etc.
+        print(f"manifest read error: {e}", file=sys.stderr)
+        return 2
+
+    if part_dir.name != manifest.name:
+        print(
+            f"directory name {part_dir.name!r} does not match manifest "
+            f"name {manifest.name!r}",
+            file=sys.stderr,
+        )
+        return 2
+
+    sym = symbol_file_path(part_dir)
+    if not sym.is_file():
+        print(f"missing symbol file {sym}", file=sys.stderr)
+        return 2
+    sym_text = sym.read_text()
+    needle = f'(symbol "{manifest.symbol_name}"'
+    if needle not in sym_text:
+        print(
+            f"symbol {manifest.symbol_name!r} not found in {sym.name}",
+            file=sys.stderr,
+        )
+        return 2
+
+    fp = footprint_file_path(part_dir, manifest.footprint_name)
+    if not fp.is_file():
+        print(f"missing footprint file {fp}", file=sys.stderr)
+        return 2
+    if "(footprint " not in fp.read_text():
+        print(f"footprint file {fp} does not contain a (footprint ...) block", file=sys.stderr)
+        return 2
+
+    actual = compute_content_hash(part_dir)
+    if actual != manifest.content_hash:
+        if args.update_hash:
+            updated = manifest.model_copy(update={"content_hash": actual})
+            dump_manifest(updated, part_dir)
+            print(f"updated content_hash for {manifest.name}@{manifest.version}: {actual}")
+            return 0
+        print(
+            f"content_hash mismatch:\n  manifest: {manifest.content_hash}\n  actual:   {actual}\n"
+            f"  rerun with --update-hash to accept the current files",
+            file=sys.stderr,
+        )
+        return 2
+
+    print(f"OK {manifest.name}@{manifest.version} ({part_dir})")
+    return 0
+
+
 def _cmd_archive(args: argparse.Namespace) -> int:
     state_path = Path(args.state)
     try:
@@ -312,6 +595,7 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
     Returns JSON on stdout containing the current ``ConversationState``
     plus stage-specific extras the LLM stage needs to draft its slot:
       - architecture: ``leaves_block`` (rendered "Available leaves" markdown)
+      - bom:          ``parts_block`` (rendered "Available parts" markdown)
       - wiring:       ``symbol_pinouts`` mapping every distinct BomPart.symbol
                       to its pin inventory (one batched lookup instead of N)
     """
@@ -338,6 +622,10 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
     if stage == "architecture":
         leaves = _load_library_leaves()
         extras["leaves_block"] = _format_available_leaves_block(leaves)
+
+    elif stage == "bom":
+        parts, _broken = _load_library_parts(state_path.parent.parent.resolve())
+        extras["parts_block"] = _format_available_parts_block(parts)
 
     elif stage == "wiring":
         if state.bom is None:
@@ -593,6 +881,63 @@ def main(argv: list[str] | None = None) -> int:
         help="print the markdown block listing every reusable leaf",
     )
     p_list.set_defaults(func=_cmd_list_leaves)
+
+    p_list_parts = sub.add_parser(
+        "list-parts",
+        help=(
+            "print the markdown block listing every parts-library bundle "
+            "(project / home / vendored / extras tiers)"
+        ),
+    )
+    p_list_parts.set_defaults(func=_cmd_list_parts)
+
+    p_add_part = sub.add_parser(
+        "add-part",
+        help=(
+            "fetch a part from LCSC via easyeda2kicad and bundle it for the "
+            "parts library (writes symbol + footprint + stub manifest)"
+        ),
+    )
+    p_add_part.add_argument(
+        "--from-lcsc",
+        metavar="LCSC_ID",
+        help="LCSC part number (e.g. C2837135)",
+    )
+    p_add_part.add_argument(
+        "--into",
+        choices=["project", "home"],
+        default="project",
+        help="destination tier (default: project, i.e. <cwd>/.kicraft/parts/)",
+    )
+    p_add_part.add_argument(
+        "--name",
+        default=None,
+        help=(
+            "explicit library slug (lowercase, alphanumeric, dashes); "
+            "auto-derived from MPN if omitted"
+        ),
+    )
+    p_add_part.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace an existing part directory with the same slug",
+    )
+    p_add_part.set_defaults(func=_cmd_add_part)
+
+    p_val_part = sub.add_parser(
+        "validate-part",
+        help=(
+            "validate a parts-library directory: manifest schema, required "
+            "files, recomputed content_hash"
+        ),
+    )
+    p_val_part.add_argument("path", help="path to the part directory")
+    p_val_part.add_argument(
+        "--update-hash",
+        action="store_true",
+        help="recompute content_hash and rewrite the manifest instead of failing",
+    )
+    p_val_part.set_defaults(func=_cmd_validate_part)
 
     p_look = sub.add_parser(
         "lookup-symbol",
