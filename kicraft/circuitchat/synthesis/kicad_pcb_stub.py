@@ -19,12 +19,15 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..models import BOM
-
-DEFAULT_KICAD_FOOTPRINT_DIR = Path("/usr/share/kicad/footprints")
+from .parts_lookup import (
+    DEFAULT_KICAD_FOOTPRINT_DIR,
+    LibraryNotFoundError,
+    resolve_footprint_library_path,
+)
 
 
 class FootprintNotFoundError(LookupError):
-    """Raised when a footprint cannot be loaded from the stock libraries."""
+    """Raised when a footprint cannot be loaded from the resolver chain."""
 
 
 def _split_footprint_id(fid: str) -> tuple[str, str]:
@@ -38,13 +41,15 @@ def _load_footprint(
     pcbnew_mod,
     library: str,
     name: str,
-    footprint_dir: Path = DEFAULT_KICAD_FOOTPRINT_DIR,
+    project_root: Path | None = None,
+    stock_dir: Path = DEFAULT_KICAD_FOOTPRINT_DIR,
 ):
-    lib_dir = footprint_dir / f"{library}.pretty"
-    if not lib_dir.is_dir():
-        raise FootprintNotFoundError(
-            f"footprint library {library!r} not found at {lib_dir}"
+    try:
+        lib_dir = resolve_footprint_library_path(
+            library, project_root=project_root, stock_dir=stock_dir
         )
+    except LibraryNotFoundError as exc:
+        raise FootprintNotFoundError(str(exc)) from exc
     try:
         fp = pcbnew_mod.FootprintLoad(str(lib_dir), name)
     except Exception as exc:  # noqa: BLE001
@@ -63,7 +68,8 @@ def write_empty_pcb(
     project_stem: str,
     bom: BOM | None = None,
     *,
-    footprint_dir: Path = DEFAULT_KICAD_FOOTPRINT_DIR,
+    project_root: Path | None = None,
+    stock_dir: Path = DEFAULT_KICAD_FOOTPRINT_DIR,
 ) -> Path:
     """Create `<project_stem>.kicad_pcb`.
 
@@ -91,7 +97,9 @@ def write_empty_pcb(
 
     for idx, part in enumerate(bom.parts):
         lib, name = _split_footprint_id(part.footprint)
-        fp = _load_footprint(pcbnew, lib, name, footprint_dir=footprint_dir)
+        fp = _load_footprint(
+            pcbnew, lib, name, project_root=project_root, stock_dir=stock_dir
+        )
         fp.SetReference(part.ref)
         fp.SetValue(part.value)
         col = idx % cols

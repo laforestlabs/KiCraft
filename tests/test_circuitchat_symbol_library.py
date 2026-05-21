@@ -80,5 +80,5 @@ def test_custom_symbol_dir(tmp_path: Path) -> None:
         '\t)\n'
         ')\n'
     )
-    block = extract_symbol_block("Fake", "Widget", symbol_dir=tmp_path)
+    block = extract_symbol_block("Fake", "Widget", stock_dir=tmp_path)
     assert block.startswith('(symbol "Fake:Widget"')

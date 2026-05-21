@@ -105,6 +105,6 @@ def test_custom_symbol_dir(tmp_path: Path) -> None:
         '\t)\n'
         ')\n'
     )
-    info = lookup_pins("Fake:Widget", symbol_dir=tmp_path)
+    info = lookup_pins("Fake:Widget", stock_dir=tmp_path)
     assert {p["number"] for p in info["pins"]} == {"1", "2"}
     assert {p["electrical_type"] for p in info["pins"]} == {"input", "output"}

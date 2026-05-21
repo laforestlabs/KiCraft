@@ -13,8 +13,12 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
-from .symbol_library import (
+from .parts_lookup import (
     DEFAULT_KICAD_SYMBOL_DIR,
+    LibraryNotFoundError,
+    resolve_symbol_library_path,
+)
+from .symbol_library import (
     SymbolNotFoundError,
     _match_block,
     _resolve_extends_chain,
@@ -31,9 +35,13 @@ _NUMBER_RE = re.compile(r'\(number\s+"([^"]+)"')
 
 def lookup_pins(
     lib_id: str,
-    symbol_dir: Path = DEFAULT_KICAD_SYMBOL_DIR,
+    project_root: Path | None = None,
+    stock_dir: Path = DEFAULT_KICAD_SYMBOL_DIR,
 ) -> dict:
     """Resolve `Library:Name` to its pin inventory.
+
+    The library prefix is resolved through the parts-library four-tier
+    search before falling back to KiCad stock at ``stock_dir``.
 
     Returns a dict with keys ``symbol``, ``unit_count``, and ``pins``
     (a list of pin dicts; see the README for the schema).
@@ -41,15 +49,22 @@ def lookup_pins(
     library, _, name = lib_id.partition(":")
     if not library or not name:
         raise SymbolNotFoundError(f"bad lib_id {lib_id!r} (expected 'Library:Name')")
-    return _lookup_cached(library, name, str(symbol_dir))
+    root_str = str(project_root) if project_root is not None else ""
+    return _lookup_cached(library, name, root_str, str(stock_dir))
 
 
 @lru_cache(maxsize=256)
-def _lookup_cached(library: str, name: str, symbol_dir_str: str) -> dict:
-    symbol_dir = Path(symbol_dir_str)
-    lib_path = symbol_dir / f"{library}.kicad_sym"
-    if not lib_path.is_file():
-        raise SymbolNotFoundError(f"library {library!r} not found at {lib_path}")
+def _lookup_cached(
+    library: str, name: str, project_root_str: str, stock_dir_str: str
+) -> dict:
+    project_root = Path(project_root_str) if project_root_str else None
+    stock_dir = Path(stock_dir_str)
+    try:
+        lib_path = resolve_symbol_library_path(
+            library, project_root=project_root, stock_dir=stock_dir
+        )
+    except LibraryNotFoundError as exc:
+        raise SymbolNotFoundError(str(exc)) from exc
     lib_text = lib_path.read_text()
     resolved = _resolve_extends_chain(lib_text, name)
 

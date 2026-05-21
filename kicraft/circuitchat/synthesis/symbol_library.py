@@ -1,21 +1,27 @@
-"""Extract (symbol "Library:Name" ...) blocks from stock KiCad symbol libraries.
+"""Extract (symbol "Library:Name" ...) blocks from KiCad symbol libraries.
 
-A leaf `.kicad_sch` file must contain a `(lib_symbols ...)` block listing
-every symbol it references. KiCad expects those blocks to be the exact text
-from the corresponding `<Library>.kicad_sym` file, qualified with the
-library prefix (`Library:Name` instead of bare `Name`) and with any
-`(extends ...)` references resolved into a self-contained block.
+A leaf ``.kicad_sch`` file must contain a ``(lib_symbols ...)`` block
+listing every symbol it references. KiCad expects those blocks to be
+the exact text from the corresponding ``<Library>.kicad_sym`` file,
+qualified with the library prefix (``Library:Name`` instead of bare
+``Name``) and with any ``(extends ...)`` references resolved into a
+self-contained block.
 
-This module owns that extraction. Ported from `generate_project.py` with a
-strict API: missing libraries or symbols raise, not warn.
+This module owns that extraction. Library discovery is delegated to
+:mod:`kicraft.circuitchat.synthesis.parts_lookup`, which walks the
+four-tier parts library before falling back to KiCad stock. Missing
+libraries or symbols raise, not warn.
 """
 from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Final
 
-DEFAULT_KICAD_SYMBOL_DIR: Final = Path("/usr/share/kicad/symbols")
+from .parts_lookup import (
+    DEFAULT_KICAD_SYMBOL_DIR,
+    LibraryNotFoundError,
+    resolve_symbol_library_path,
+)
 
 
 class SymbolNotFoundError(LookupError):
@@ -122,21 +128,31 @@ def _qualify_with_prefix(symbol_text: str, symbol_name: str, library: str) -> st
 def extract_symbol_block(
     library: str,
     symbol_name: str,
-    symbol_dir: Path = DEFAULT_KICAD_SYMBOL_DIR,
+    project_root: Path | None = None,
+    stock_dir: Path = DEFAULT_KICAD_SYMBOL_DIR,
 ) -> str:
     """Return the fully-resolved, qualified `(symbol "Library:Name" ...)` text.
 
+    The library prefix is resolved through the parts-library 4-tier
+    search (project / home / vendored / extras) before falling back to
+    ``stock_dir``. See :mod:`parts_lookup` for tier ordering.
+
     Args:
-        library: KiCad library name (e.g. `Device`, `Regulator_Linear`).
-        symbol_name: Symbol within the library (e.g. `C`, `AP2112K-3.3`).
-        symbol_dir: Directory containing `<Library>.kicad_sym` files.
+        library: KiCad library prefix (e.g. ``Device``, ``ip2368``).
+        symbol_name: Symbol within that library (e.g. ``C``, ``IP2368``).
+        project_root: Defaults to ``Path.cwd()``. Pass explicitly when
+            invoking from a directory other than the CircuitChat project.
+        stock_dir: KiCad stock-library directory used as tier 5.
 
     Raises:
-        SymbolNotFoundError: library file missing or symbol not in library.
+        SymbolNotFoundError: library file missing, or symbol not in it.
     """
-    lib_path = symbol_dir / f"{library}.kicad_sym"
-    if not lib_path.is_file():
-        raise SymbolNotFoundError(f"library {library!r} not found at {lib_path}")
+    try:
+        lib_path = resolve_symbol_library_path(
+            library, project_root=project_root, stock_dir=stock_dir
+        )
+    except LibraryNotFoundError as exc:
+        raise SymbolNotFoundError(str(exc)) from exc
     lib_text = lib_path.read_text()
     resolved = _resolve_extends_chain(lib_text, symbol_name)
     return _qualify_with_prefix(resolved, symbol_name, library)
@@ -144,7 +160,8 @@ def extract_symbol_block(
 
 def build_lib_symbols_block(
     pairs: list[tuple[str, str]],
-    symbol_dir: Path = DEFAULT_KICAD_SYMBOL_DIR,
+    project_root: Path | None = None,
+    stock_dir: Path = DEFAULT_KICAD_SYMBOL_DIR,
     indent: str = "\t",
 ) -> str:
     """Build a complete `(lib_symbols ...)` block from a list of (library, name) pairs.
@@ -163,6 +180,9 @@ def build_lib_symbols_block(
     if not unique:
         return f"{indent}(lib_symbols)"
 
-    blocks = [extract_symbol_block(lib, name, symbol_dir) for lib, name in unique]
+    blocks = [
+        extract_symbol_block(lib, name, project_root=project_root, stock_dir=stock_dir)
+        for lib, name in unique
+    ]
     body = "\n".join(f"{indent}\t{b}" for b in blocks)
     return f"{indent}(lib_symbols\n{body}\n{indent})"
