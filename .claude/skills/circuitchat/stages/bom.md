@@ -55,9 +55,14 @@ This is the case to handle deliberately — never silently substitute an inferio
 
 - **`advanced`** — never auto-fetch silently. Surface a `material: true` open question of the form:
 
-  > MPN `IP2368-BZ` is not in the parts library and not in stock KiCad. I can fetch it from LCSC (C2837135) into the project parts library, or you can add it manually under `.kicraft/parts/ip2368/`. Which would you like?
+  > MPN `IP2368-BZ` is not in the parts library and not in stock KiCad. Options:
+  > 1. fetch from LCSC: `kicraft-circuitchat add-part --from-lcsc C2837135 --into project`
+  > 2. download .kicad_sym + .kicad_mod from SnapEDA / Ultra Librarian / a silicon-vendor library, then: `kicraft-circuitchat add-part --symbol <path> --footprint <path> --mpn IP2368-BZ --into project`
+  > 3. roll your own under `.kicraft/parts/<slug>/` and run `kicraft-circuitchat validate-part .kicraft/parts/<slug> --update-hash`
+  >
+  > Which do you want to do?
 
-  Leave the BOM out the missing part (or mark its line with a placeholder MPN and `(awaiting parts-library entry)` in `sourcing_note`) so the user has something concrete to react to.
+  Leave the missing part out of the BOM (or mark its line with a placeholder MPN and `(awaiting parts-library entry)` in `sourcing_note`) so the user has something concrete to react to.
 
 The principle: **the BOM must either reference a real, resolvable symbol+footprint pair, or surface the gap explicitly.** Off-board substitutions, downgraded connectors, and "we don't have this so we'll use a header instead" decisions belong as `material: true` questions, not as silent `(defaulted)` assumptions.
 

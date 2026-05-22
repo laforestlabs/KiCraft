@@ -266,21 +266,282 @@ def _slugify_libname(s: str) -> str:
     return out if PART_NAME_RE.match(out) else ""
 
 
-def _cmd_add_part(args: argparse.Namespace) -> int:
-    """Fetch a part from LCSC via easyeda2kicad and bundle it for the parts library.
+def _resolve_dest_dir(into: str) -> Path:
+    if into == "home":
+        return Path.home() / ".kicraft" / "parts"
+    return Path.cwd() / ".kicraft" / "parts"
 
-    Writes the canonical layout::
+
+def _scan_symbol_name(text: str) -> str | None:
+    """Return the raw name of the first top-level (symbol "...") in a .kicad_sym.
+
+    The returned string is the verbatim contents of the quotes — either an
+    unprefixed name (``IP2368``) or a library-prefixed one (``OldLib:IP2368``).
+    The caller strips the library prefix when deciding the bundle's
+    ``symbol_name`` and passes both the raw and stripped forms to
+    :func:`_normalize_symbol_text` so the embedded prefix can be rewritten.
+    """
+    import re as _re
+
+    for m in _re.finditer(r'\(symbol\s+"([^"]+)"', text):
+        raw = m.group(1)
+        # Top-level symbols are followed by other top-level forms, not by an
+        # immediate sub-symbol "<name>_<unit>_<style>" form. Skip sub-symbol
+        # entries by detecting their numeric "<name>_<unit>_<style>" suffix.
+        if _re.match(r'^.+_\d+_\d+$', raw):
+            continue
+        return raw
+    return None
+
+
+def _scan_footprint_name(text: str) -> str | None:
+    """Return the name of the (footprint "...") block in a .kicad_mod file."""
+    import re as _re
+
+    m = _re.search(r'\(footprint\s+"([^"]+)"', text)
+    return m.group(1) if m else None
+
+
+def _normalize_symbol_text(text: str, original_name: str, target_name: str) -> str:
+    """Rewrite (symbol "Old" ...) → (symbol "New" ...) once if names differ.
+
+    Preserves library-wrapper boilerplate and sub-symbol references that
+    embed the original name (``<name>_<unit>_1``) so KiCad still parses
+    the resulting file as a complete unit.
+    """
+    if original_name == target_name:
+        return text
+    text = text.replace(
+        f'(symbol "{original_name}"', f'(symbol "{target_name}"', 1
+    )
+    # Rename sub-symbol entries (`(symbol "Old_1_1" ...)`) so units stay
+    # tied to their parent. Limit to forms that look like real units.
+    import re as _re
+
+    return _re.sub(
+        r'\(symbol\s+"' + _re.escape(original_name) + r'_(\d+)_(\d+)"',
+        lambda m: f'(symbol "{target_name}_{m.group(1)}_{m.group(2)}"',
+        text,
+    )
+
+
+def _parse_sourcing_args(entries: list[str]) -> dict[str, str]:
+    """Parse repeated ``--sourcing vendor=part_number`` into a dict.
+
+    Raises ``ValueError`` with a useful message on malformed input.
+    """
+    from kicraft.parts_library import SOURCING_KEY_RE
+
+    out: dict[str, str] = {}
+    for entry in entries:
+        if "=" not in entry:
+            raise ValueError(
+                f"--sourcing entry {entry!r} missing '=' (expected vendor=part_number)"
+            )
+        key, _, value = entry.partition("=")
+        key = key.strip().lower()
+        value = value.strip()
+        if not value:
+            raise ValueError(f"--sourcing entry {entry!r} has empty value")
+        if not SOURCING_KEY_RE.match(key):
+            raise ValueError(
+                f"--sourcing vendor key {key!r} must be lowercase alphanumeric/dashes"
+            )
+        out[key] = value
+    return out
+
+
+def _finalize_part_bundle(
+    part_dir: Path,
+    manifest: "PartManifest",  # noqa: F821 — forward ref to avoid top-level import
+) -> None:
+    """Write the manifest, recompute the content hash, write it again.
+
+    Two writes is intentional: the first establishes a deterministic
+    set of non-manifest files on disk, the second stores the hash of
+    those files so subsequent verification passes.
+    """
+    from kicraft.parts_library import compute_content_hash, dump_manifest
+
+    dump_manifest(manifest, part_dir)
+    actual = compute_content_hash(part_dir)
+    dump_manifest(manifest.model_copy(update={"content_hash": actual}), part_dir)
+
+
+def _add_part_from_files(args: argparse.Namespace) -> int:
+    """Bundle a part from user-supplied .kicad_sym + .kicad_mod files.
+
+    Use this path when the part isn't on LCSC: the user obtains KiCad
+    files from anywhere (SnapEDA web UI, Ultra Librarian, silicon-vendor
+    sites, hand-edited) and points add-part at them. The bundle layout
+    and manifest format are identical to the LCSC path.
+    """
+    from kicraft.parts_library import (
+        PartManifest,
+        Provenance,
+    )
+
+    sym_src = Path(args.symbol).expanduser().resolve()
+    fp_src = Path(args.footprint).expanduser().resolve()
+
+    if not sym_src.is_file():
+        print(f"symbol file not found: {sym_src}", file=sys.stderr)
+        return 2
+    if not fp_src.is_file():
+        print(f"footprint file not found: {fp_src}", file=sys.stderr)
+        return 2
+    if not args.mpn:
+        print("--mpn is required when using --symbol/--footprint", file=sys.stderr)
+        return 2
+
+    sym_text = sym_src.read_text()
+    fp_text = fp_src.read_text()
+
+    raw_symbol_name = _scan_symbol_name(sym_text)
+    if raw_symbol_name is None:
+        print(
+            f"no top-level (symbol \"...\") found in {sym_src}",
+            file=sys.stderr,
+        )
+        return 2
+    # The bundle's symbol_name is unprefixed — the bundle's library prefix is
+    # the directory name, not whatever the source file used.
+    stripped_symbol_name = raw_symbol_name.split(":", 1)[-1]
+    symbol_name = args.symbol_name or stripped_symbol_name
+
+    footprint_name = _scan_footprint_name(fp_text)
+    if footprint_name is None:
+        print(
+            f"no (footprint \"...\") found in {fp_src}",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        sourcing = _parse_sourcing_args(args.sourcing or [])
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    libname = (
+        (args.name and _slugify_libname(args.name))
+        or _slugify_libname(args.mpn)
+        or _slugify_libname(symbol_name)
+    )
+    if not libname:
+        print(
+            f"could not derive a valid library name from --mpn {args.mpn!r}; "
+            f"rerun with --name <slug>",
+            file=sys.stderr,
+        )
+        return 2
+
+    dest_base = _resolve_dest_dir(args.into)
+    part_dir = dest_base / libname
+    if part_dir.exists() and not args.overwrite:
+        print(
+            f"part directory already exists: {part_dir}\n"
+            f"  rerun with --overwrite to replace, or pass --name to use a "
+            f"different slug",
+            file=sys.stderr,
+        )
+        return 2
+    if part_dir.exists() and args.overwrite:
+        import shutil as _shutil
+
+        _shutil.rmtree(part_dir)
+
+    pretty_dir = part_dir / f"{libname}.pretty"
+    pretty_dir.mkdir(parents=True, exist_ok=True)
+
+    # Normalize the symbol so its bare name matches what the manifest declares
+    # (no library prefix; matches the bundle's library-prefix convention).
+    normalized_sym = _normalize_symbol_text(sym_text, raw_symbol_name, symbol_name)
+    (part_dir / f"{libname}.kicad_sym").write_text(normalized_sym)
+    (pretty_dir / f"{footprint_name}.kicad_mod").write_text(fp_text)
+
+    import datetime as _dt
+
+    manifest = PartManifest(
+        schema_version="1",
+        name=libname,
+        version="0.1.0",
+        content_hash="sha256:" + "0" * 64,
+        description=args.description or f"{args.mpn} (imported)",
+        mpn=args.mpn,
+        sourcing=sourcing,
+        datasheet_url=args.datasheet_url,
+        tags=list(args.tag or []),
+        watch_out_for=args.watch_out_for,
+        symbol_name=symbol_name,
+        footprint_name=footprint_name,
+        kicad_version_min="9.0.0",
+        provenance=Provenance(
+            source="file-import",
+            source_project_stem=None,
+            added_at=_dt.datetime.now(_dt.timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            kicad_version="9.0.0",
+        ),
+    )
+    _finalize_part_bundle(part_dir, manifest)
+
+    print(
+        f"OK added {libname}@0.1.0 -> {part_dir}\n"
+        f"  symbol:    {libname}:{symbol_name}\n"
+        f"  footprint: {libname}:{footprint_name}\n"
+        f"  mpn:       {manifest.mpn}\n"
+        f"  sourcing:  {', '.join(f'{k}:{v}' for k, v in sourcing.items()) or '—'}\n"
+        f"  tier:      {args.into}"
+    )
+    return 0
+
+
+def _cmd_add_part(args: argparse.Namespace) -> int:
+    """Bundle a part for the parts library, from LCSC or from supplied files.
+
+    Two dispatch modes:
+
+    - ``--from-lcsc C<NNNNN>`` — fetch from EasyEDA via the easyeda2kicad
+      library. Self-contained; no other args needed in the simple case.
+    - ``--symbol PATH --footprint PATH --mpn MPN`` — bundle user-supplied
+      KiCad files (from SnapEDA web UI, Ultra Librarian, vendor sites,
+      hand-edited, etc.). Vendor-agnostic; works without credentials.
+
+    Both paths write the canonical layout::
 
         <dest>/<libname>/manifest.json
         <dest>/<libname>/<libname>.kicad_sym
         <dest>/<libname>/<libname>.pretty/<footprint_name>.kicad_mod
 
-    Then computes the content_hash and rewrites the manifest. After this
-    runs, ``list-parts`` shows the new entry and the resolver picks it
-    up automatically the next time a BOM references ``<libname>:<sym>``.
+    and finalize with the content_hash. After this runs, ``list-parts``
+    shows the new entry and the resolver picks it up the next time a
+    BOM references ``<libname>:<sym>``.
     """
-    if not args.from_lcsc:
-        print("add-part requires --from-lcsc <LCSC_ID>", file=sys.stderr)
+    using_lcsc = bool(args.from_lcsc)
+    using_files = bool(args.symbol or args.footprint)
+    if using_lcsc and using_files:
+        print(
+            "add-part: --from-lcsc and --symbol/--footprint are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 2
+    if using_files:
+        if not (args.symbol and args.footprint):
+            print(
+                "add-part: --symbol and --footprint must be supplied together",
+                file=sys.stderr,
+            )
+            return 2
+        return _add_part_from_files(args)
+    if not using_lcsc:
+        print(
+            "add-part requires either --from-lcsc <ID> OR "
+            "--symbol PATH --footprint PATH --mpn MPN",
+            file=sys.stderr,
+        )
         return 2
 
     try:
@@ -299,12 +560,7 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
         )
         return 2
 
-    from kicraft.parts_library import (
-        PartManifest,
-        Provenance,
-        compute_content_hash,
-        dump_manifest,
-    )
+    from kicraft.parts_library import PartManifest, Provenance
 
     lcsc_id = args.from_lcsc
 
@@ -335,13 +591,7 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
         )
         return 2
 
-    # Pick destination tier.
-    if args.into == "home":
-        dest_base = Path.home() / ".kicraft" / "parts"
-    else:  # project (default)
-        dest_base = Path.cwd() / ".kicraft" / "parts"
-    part_dir = dest_base / libname
-
+    part_dir = _resolve_dest_dir(args.into) / libname
     if part_dir.exists() and not args.overwrite:
         print(
             f"part directory already exists: {part_dir}\n"
@@ -380,16 +630,18 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
 
     # Compose the manifest, then compute content_hash and rewrite once.
     sourcing: dict[str, str] = {"lcsc": lcsc_id}
-    if ee_symbol.info.mpn and ee_symbol.info.manufacturer:
-        # MPN goes in its own field; manufacturer is informational only.
-        pass
+    try:
+        sourcing.update(_parse_sourcing_args(args.sourcing or []))
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
-    description = (
+    description = args.description or (
         ee_symbol.info.description
         or f"{ee_symbol.info.manufacturer or ''} {ee_symbol.info.mpn or ''}".strip()
         or f"part {symbol_name}"
     )
-    datasheet = ee_symbol.info.datasheet or None
+    datasheet = args.datasheet_url or ee_symbol.info.datasheet or None
     if datasheet and not (
         datasheet.startswith("http://") or datasheet.startswith("https://")
     ):
@@ -406,8 +658,8 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
         mpn=ee_symbol.info.mpn or symbol_name,
         sourcing=sourcing,
         datasheet_url=datasheet,
-        tags=[],
-        watch_out_for=None,
+        tags=list(args.tag or []),
+        watch_out_for=args.watch_out_for,
         symbol_name=symbol_name,
         footprint_name=footprint_name,
         kicad_version_min="9.0.0",
@@ -421,16 +673,14 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
             kicad_version="9.0.0",
         ),
     )
-    dump_manifest(manifest, part_dir)
-    actual_hash = compute_content_hash(part_dir)
-    dump_manifest(manifest.model_copy(update={"content_hash": actual_hash}), part_dir)
+    _finalize_part_bundle(part_dir, manifest)
 
     print(
         f"OK added {libname}@0.1.0 -> {part_dir}\n"
         f"  symbol:    {libname}:{symbol_name}\n"
         f"  footprint: {libname}:{footprint_name}\n"
         f"  mpn:       {manifest.mpn}\n"
-        f"  sourcing:  lcsc:{lcsc_id}\n"
+        f"  sourcing:  {', '.join(f'{k}:{v}' for k, v in sourcing.items())}\n"
         f"  tier:      {args.into}"
     )
     return 0
@@ -894,14 +1144,77 @@ def main(argv: list[str] | None = None) -> int:
     p_add_part = sub.add_parser(
         "add-part",
         help=(
-            "fetch a part from LCSC via easyeda2kicad and bundle it for the "
-            "parts library (writes symbol + footprint + stub manifest)"
+            "bundle a part for the parts library, from LCSC (via easyeda2kicad) "
+            "or from user-supplied .kicad_sym + .kicad_mod files"
         ),
     )
     p_add_part.add_argument(
         "--from-lcsc",
         metavar="LCSC_ID",
-        help="LCSC part number (e.g. C2837135)",
+        help="LCSC part number (e.g. C2837135). Mutually exclusive with --symbol/--footprint.",
+    )
+    p_add_part.add_argument(
+        "--symbol",
+        metavar="PATH",
+        help=(
+            "path to a .kicad_sym file (typically downloaded from SnapEDA, "
+            "Ultra Librarian, or a silicon-vendor library). Pair with --footprint."
+        ),
+    )
+    p_add_part.add_argument(
+        "--footprint",
+        metavar="PATH",
+        help="path to a .kicad_mod file. Pair with --symbol.",
+    )
+    p_add_part.add_argument(
+        "--symbol-name",
+        default=None,
+        metavar="NAME",
+        help=(
+            "override the symbol name written into the bundle "
+            "(default: parsed from the .kicad_sym file)"
+        ),
+    )
+    p_add_part.add_argument(
+        "--mpn",
+        default=None,
+        help=(
+            "manufacturer part number. Required with --symbol/--footprint; "
+            "auto-detected from EasyEDA when using --from-lcsc."
+        ),
+    )
+    p_add_part.add_argument(
+        "--sourcing",
+        action="append",
+        metavar="VENDOR=ID",
+        help=(
+            "extra sourcing entry (repeatable). E.g. --sourcing digikey=ND-12-34 "
+            "--sourcing mouser=581-XYZ. Vendor key must be lowercase alphanumeric."
+        ),
+    )
+    p_add_part.add_argument(
+        "--description",
+        default=None,
+        help="short part description for the manifest (default: derived from source)",
+    )
+    p_add_part.add_argument(
+        "--datasheet-url",
+        default=None,
+        help="datasheet URL for the manifest",
+    )
+    p_add_part.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        help="add a tag (repeatable). E.g. --tag power --tag buck-boost",
+    )
+    p_add_part.add_argument(
+        "--watch-out-for",
+        default=None,
+        help=(
+            "free-form note recorded in the manifest, surfaced as the "
+            "'Watch out for' block when the BOM stage lists this part"
+        ),
     )
     p_add_part.add_argument(
         "--into",
