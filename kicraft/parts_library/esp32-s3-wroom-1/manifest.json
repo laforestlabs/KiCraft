@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:93f81027d8f0f7c5d446c3ed9478907f3b6e3b05ea30f69642445522c96ab347",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C2913201.pdf",
+  "description": "Espressif ESP32-S3-WROOM-1-N8R8 \u2014 dual-core Xtensa LX7 MCU module (240 MHz) with 2.4 GHz Wi-Fi 802.11 b/g/n, Bluetooth 5 LE, 8 MB flash, 8 MB PSRAM, and on-board PCB antenna. The workhorse Wi-Fi MCU for maker PCBs; native USB on GPIO19/20 means no USB-serial chip required.",
+  "footprint_name": "WIRELM-SMD_ESP32-S3-WROOM-1",
+  "kicad_version_min": "9.0.0",
+  "mpn": "ESP32-S3-WROOM-1-N8R8",
+  "name": "esp32-s3-wroom-1",
+  "provenance": {
+    "added_at": "2026-05-22T18:26:38Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2913201"
+  },
+  "symbol_name": "ESP32-S3-WROOM-1",
+  "tags": [
+    "mcu",
+    "wifi",
+    "bluetooth",
+    "esp32",
+    "module"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Strapping pins (IO0, IO3, IO45, IO46) set boot mode; keep them from being held by external loads at reset. The PCB antenna needs the keep-out region from the datasheet (no copper, no ground plane within the marked zone) or Wi-Fi range tanks. Single 3.3 V supply, ~500 mA peak."
+}

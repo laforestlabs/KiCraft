@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:bcac53ddf3fa50df966d5ede9a3089d282875f9c6e82e21173756dbd89a92195",
+  "datasheet_url": "https://lcsc.com/product-detail/Light-Emitting-Diodes-LED_Worldsemi-WS2812B-2020_C965555.html",
+  "description": "Worldsemi WS2812B-2020 \u2014 2\u00d72 mm addressable RGB LED in the smallest standard package. WS2812 protocol-compatible. Use when board area is tight and dense pixel arrays matter (POV displays, jewelry, fine wearable strips).",
+  "footprint_name": "LED-SMD_4P-L2.0-W2.0-TL_WS2812B-2020",
+  "kicad_version_min": "9.0.0",
+  "mpn": "WS2812B-2020",
+  "name": "ws2812b-2020",
+  "provenance": {
+    "added_at": "2026-05-22T18:32:44Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C965555"
+  },
+  "symbol_name": "WS2812B-2020",
+  "tags": [
+    "led",
+    "addressable",
+    "rgb",
+    "2020",
+    "ws2812",
+    "micro"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "2\u00d72 mm pads \u2014 hand-soldering is hard; design assuming reflow or hot-air. Same 5 V supply and 800 kbps protocol as full-size WS2812B. Tighter brightness/thermal margins; spread high-density strings across the PCB to avoid hotspots."
+}

@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:8c3324cab365d96efd24fabd9e002d95bdaaf4f1be7d74bb7caeb261064dc03c",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C2977777.pdf",
+  "description": "WCH CH340N \u2014 USB 2.0 full-speed to UART bridge, SOP-8 package, internal clock (no external crystal needed). 5 V or 3.3 V operation. The simplest possible USB-serial bridge for MCUs without native USB \u2014 drop-in cheaper and smaller than CH340G.",
+  "footprint_name": "SOP-8_L4.9-W3.9-P1.27-LS6.0-BL",
+  "kicad_version_min": "9.0.0",
+  "mpn": "CH340N",
+  "name": "ch340n",
+  "provenance": {
+    "added_at": "2026-05-22T18:32:45Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2977777"
+  },
+  "symbol_name": "CH340N_C2977777",
+  "tags": [
+    "usb",
+    "uart",
+    "serial",
+    "bridge",
+    "sop-8"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Requires Windows / Linux / macOS driver (WCH publishes one). TX/RX are 5 V or 3.3 V depending on VIO; tie VIO to the MCU rail to match logic levels. No DTR/RTS auto-reset circuit built in \u2014 for Arduino-style auto-reset, add the typical 100 nF + diode reset network."
+}

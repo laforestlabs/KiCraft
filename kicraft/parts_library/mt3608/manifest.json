@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:22df68d8d8ff14642540865ae488e7bed299fdae064fa1f0ee915c9b4786fb70",
+  "datasheet_url": "https://lcsc.com/product-detail/DC-DC-Converters_MT3608_C84817.html",
+  "description": "XI'AN Aerosemi MT3608 \u2014 boost (step-up) DC-DC converter, up to 2 A continuous, 1.2 MHz fixed switching, Vout up to 28 V. SOT-23-6. The maker default for 3.7 V \u2192 5 V or 5 V \u2192 12 V boost rails on battery-powered projects.",
+  "footprint_name": "SOT-23-6_L2.9-W1.6-P0.95-LS2.8-BL",
+  "kicad_version_min": "9.0.0",
+  "mpn": "MT3608",
+  "name": "mt3608",
+  "provenance": {
+    "added_at": "2026-05-22T18:32:45Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C84817"
+  },
+  "symbol_name": "MT3608",
+  "tags": [
+    "regulator",
+    "boost",
+    "step-up",
+    "switcher",
+    "sot-23"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Needs a low-V_f Schottky diode (SS14 or similar) and a \u22654.7 \u00b5H inductor rated for at least 1.5 \u00d7 peak switching current. Output cap should be low-ESR (10-22 \u00b5F X5R/X7R). Vfb is 0.6 V \u2014 output divider sets Vout (Vout = 0.6 \u00d7 (1 + Rtop/Rbot)). Soft-start not built in; inrush at startup can exceed steady-state by 2-3\u00d7."
+}

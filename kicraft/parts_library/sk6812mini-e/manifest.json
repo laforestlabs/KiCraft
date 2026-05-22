@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:45e9e2b263ad03a1ae9a617c85751cb711c4d9e977d89d2473de2883cd79ce85",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C5149201.pdf",
+  "description": "Opsco SK6812MINI-E \u2014 3.5\u00d73.5 mm addressable RGB LED, reverse-mount variant that illuminates through the PCB via a cut-out. WS2812 protocol-compatible. Common keyboard / wearable choice when you want light coming from the bottom side of the board.",
+  "footprint_name": "LED-SMD_4P-L3.2-W2.8-LS5.9_SK6812MINI-E",
+  "kicad_version_min": "9.0.0",
+  "mpn": "SK6812MINI-E",
+  "name": "sk6812mini-e",
+  "provenance": {
+    "added_at": "2026-05-22T18:26:39Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C5149201"
+  },
+  "symbol_name": "SK6812MINI-E_C5149201",
+  "tags": [
+    "led",
+    "addressable",
+    "rgb",
+    "3535",
+    "reverse-mount",
+    "sk6812"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Reverse-mount: requires a PCB cut-out under each LED so the light is visible from the back side. 5 V supply, WS2812 protocol (single-wire 800 kbps). For top-emitting in the same package, use SK6812MINI (without the -E suffix)."
+}

@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:2c201186d9388b2cc541cbe323a23d8d5855773da4273bad2a0e951a47e830fd",
+  "datasheet_url": "https://lcsc.com/product-detail/Light-Emitting-Diodes-LED_5050-RGBIntegrated-Light-4Pin_C114586.html",
+  "description": "Worldsemi WS2812B 5050 \u2014 addressable RGB LED with integrated controller. 800 kbps single-wire protocol, cascadable, 24-bit color per pixel. The classic maker addressable LED.",
+  "footprint_name": "LED-SMD_4P-L5.0-W5.0-BL_TC5050RGB",
+  "kicad_version_min": "9.0.0",
+  "mpn": "WS2812B-B/W",
+  "name": "ws2812b",
+  "provenance": {
+    "added_at": "2026-05-22T18:26:38Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C114586"
+  },
+  "symbol_name": "WS2812B-B",
+  "tags": [
+    "led",
+    "addressable",
+    "rgb",
+    "5050",
+    "ws2812"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "5 V supply (4.5-5.5 V); cascading direction matters (DIN on first LED, DOUT chains to next DIN). Add a 100 nF decoupling cap on each LED's VDD pin. Data line should be impedance-matched to ~50 \u03a9 over long runs; a 100-470 \u03a9 series resistor at the source mitigates ringing."
+}

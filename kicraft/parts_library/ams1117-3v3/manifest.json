@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:6a7dad54d7119854cd8bca5d42cf2a866f79c30f82a49309026d680539169bd9",
+  "datasheet_url": "https://lcsc.com/product-detail/Low-Dropout-Regulators-LDO_AMS_AMS1117-3-3_AMS1117-3-3_C6186.html",
+  "description": "Advanced Monolithic Systems AMS1117-3.3 \u2014 3.3 V fixed LDO regulator, 1 A max, SOT-223 package. Ubiquitous, cheap, and good enough for most digital rails. Use when you want to drop 5 V \u2192 3.3 V without a switcher.",
+  "footprint_name": "SOT-223-3_L6.5-W3.4-P2.30-LS7.0-BR",
+  "kicad_version_min": "9.0.0",
+  "mpn": "AMS1117-3.3",
+  "name": "ams1117-3v3",
+  "provenance": {
+    "added_at": "2026-05-22T18:26:40Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C6186"
+  },
+  "symbol_name": "AMS1117-3.3",
+  "tags": [
+    "regulator",
+    "ldo",
+    "linear",
+    "3v3",
+    "sot-223"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Dropout ~1.1-1.3 V at 1 A \u2014 needs Vin \u2265 4.4 V for 3.3 V out at full load. Inefficient (linear): power dissipated as heat is (Vin - 3.3) \u00d7 Iout. 22 \u00b5F output cap minimum for stability. For battery-powered low-Iq projects use AP2112K instead (much lower quiescent)."
+}
