@@ -411,6 +411,7 @@ class ArtifactPaths(BaseModel):
     kicad_pro: Path
     autoplacer_json: Path
     custom_footprint_dir: Path | None = None
+    status: str = "ok"  # "ok" if all §9 checks passed, else "failed"
 
 
 # ---------- Conversation state ----------

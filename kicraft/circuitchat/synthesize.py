@@ -32,8 +32,8 @@ from .synthesis.kicad_pro import write_kicad_pro
 from .synthesis.validation import (
     CheckResult,
     SynthesisValidationError,
+    collect_validations,
     run_solve_subcircuits_smoke,
-    run_validations,
 )
 
 logger = logging.getLogger(__name__)
@@ -195,17 +195,9 @@ def run(
     )
     write_empty_pcb(project_dir, state.project_stem, state.bom)
 
-    results = run_validations(project_dir, state.project_stem, bom=state.bom)
-    if smoke:
-        results.append(
-            run_solve_subcircuits_smoke(
-                project_dir, state.project_stem, timeout_s=smoke_timeout_s
-            )
-        )
-    failures = [r for r in results if not r.ok]
-    if failures:
-        raise SynthesisValidationError(failures)
-
+    # Build the artifact record now — the files exist on disk regardless of
+    # whether the §9 checks pass — so a validation failure can still report
+    # what was written (with status="failed").
     artifacts = ArtifactPaths(
         project_dir=project_dir,
         project_stem=state.project_stem,
@@ -214,4 +206,19 @@ def run(
         kicad_pro=pro,
         autoplacer_json=ap,
     )
+
+    results = collect_validations(project_dir, state.project_stem, bom=state.bom)
+    if smoke:
+        results.append(
+            run_solve_subcircuits_smoke(
+                project_dir, state.project_stem, timeout_s=smoke_timeout_s
+            )
+        )
+    failures = [r for r in results if not r.ok]
+    if failures:
+        raise SynthesisValidationError(
+            failures,
+            artifacts=artifacts.model_copy(update={"status": "failed"}),
+            results=results,
+        )
     return artifacts, results

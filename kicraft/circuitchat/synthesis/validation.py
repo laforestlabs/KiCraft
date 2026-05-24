@@ -46,8 +46,13 @@ class CheckResult:
 class SynthesisValidationError(RuntimeError):
     """Aggregates one or more failed validation checks."""
 
-    def __init__(self, failures: list[CheckResult]):
+    def __init__(self, failures: list[CheckResult], *, artifacts=None, results=None):
         self.failures = failures
+        # artifacts: the ArtifactPaths for the files that WERE written (with
+        # status="failed"); results: every check that ran (not only failures).
+        # Both let the caller persist a useful record despite the failure.
+        self.artifacts = artifacts
+        self.results = results if results is not None else list(failures)
         lines = [f"synthesis validation failed ({len(failures)} check(s)):"]
         for f in failures:
             lines.append(f"  - {f.name}: {f.message}")
@@ -637,6 +642,7 @@ def check_erc(project_dir: Path, project_stem: str) -> CheckResult:
     try:
         proc = subprocess.run(
             ["kicad-cli", "sch", "erc",
+             "--format", "json",
              "--output", str(out_path), str(root_sch)],
             capture_output=True, text=True, timeout=60.0,
         )
@@ -685,12 +691,12 @@ def check_erc(project_dir: Path, project_stem: str) -> CheckResult:
 # ---------- aggregator ----------
 
 
-def run_validations(
+def collect_validations(
     project_dir: Path,
     project_stem: str,
     bom=None,
 ) -> list[CheckResult]:
-    """Run §9.1-§9.8 and raise SynthesisValidationError if any failed.
+    """Run §9.1-§9.12 and return ALL results (does not raise).
 
     When ``bom`` is provided AND has a non-empty ``connections`` list,
     §9.10 (pin existence), §9.11 (net coverage), §9.9 (connectivity),
@@ -713,6 +719,17 @@ def run_validations(
         results.append(check_net_coverage(bom))
         results.append(check_connectivity(project_dir, project_stem))
         results.append(check_erc(project_dir, project_stem))
+    return results
+
+
+def run_validations(
+    project_dir: Path,
+    project_stem: str,
+    bom=None,
+) -> list[CheckResult]:
+    """Run §9.1-§9.12 (see ``collect_validations``) and raise
+    ``SynthesisValidationError`` if any check failed."""
+    results = collect_validations(project_dir, project_stem, bom=bom)
     failures = [r for r in results if not r.ok]
     if failures:
         raise SynthesisValidationError(failures)

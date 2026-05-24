@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from kicraft.circuitchat.cli_app import main
+from kicraft.circuitchat.synthesis.parts_lookup import DEFAULT_KICAD_FOOTPRINT_DIR
 from kicraft.circuitchat.synthesis.symbol_library import DEFAULT_KICAD_SYMBOL_DIR
 
 
@@ -444,3 +445,79 @@ def test_stage_commit_archive_writes_into_archive_root(tmp_path, capsys):
     assert subdirs, "expected an archive subdirectory to be created"
     assert (subdirs[0] / "state.json").exists()
     assert (subdirs[0] / "manifest.json").exists()
+
+
+# ---------- stage-commit bom: footprint resolution (Tier 2.1) ----------
+
+
+_footprints_installed = pytest.mark.skipif(
+    not DEFAULT_KICAD_FOOTPRINT_DIR.is_dir(),
+    reason="KiCad footprint libraries not installed at the default path",
+)
+
+
+def _commit_chain_through_arch(tmp_path, capsys) -> Path:
+    """Commit intent -> functional_spec -> architecture; return the state path."""
+    state_path = tmp_path / "state.json"
+    for slot_name, stage, data in (
+        ("intent", "intent", _valid_intent()),
+        ("fs", "functional_spec", _valid_functional_spec()),
+        ("arch", "architecture", _valid_architecture()),
+    ):
+        slot = _write_slot(tmp_path, slot_name, data)
+        rc, payload = _run(
+            capsys, "stage-commit", stage, "--slot-file", str(slot),
+            "--project-stem", "TEST", "--no-archive", str(state_path),
+        )
+        assert rc == 0, payload
+    return state_path
+
+
+@_footprints_installed
+def test_stage_commit_bom_rejects_unresolvable_footprint(tmp_path, capsys):
+    state_path = _commit_chain_through_arch(tmp_path, capsys)
+    bad = _valid_bom()
+    # Plausible truncation of the real SW_SPST_PTS645Sx43SMTR92.kicad_mod —
+    # the library exists but this exact footprint name does not.
+    bad["parts"][0]["footprint"] = "Button_Switch_SMD:SW_SPST_PTS645"
+    bom_slot = _write_slot(tmp_path, "bom", bad)
+    rc, payload = _run(
+        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
+        "--no-archive", str(state_path),
+    )
+    assert rc == 3
+    assert payload["ok"] is False
+    assert any("SW_SPST_PTS645" in off for off in payload["offenders"]), payload
+
+
+@_footprints_installed
+def test_stage_commit_bom_accepts_resolvable_footprints(tmp_path, capsys):
+    state_path = _commit_chain_through_arch(tmp_path, capsys)
+    bom_slot = _write_slot(tmp_path, "bom", _valid_bom())
+    rc, payload = _run(
+        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
+        "--no-archive", str(state_path),
+    )
+    assert rc == 0, payload
+    assert payload["ok"] is True
+
+
+@_footprints_installed
+def test_stage_prep_wiring_fails_loudly_on_unresolved_symbol(tmp_path, capsys):
+    # A bogus symbol (with a valid footprint) commits fine at bom stage --
+    # symbol checks are gated on connections, which are empty there. But
+    # stage-prep wiring must then fail loudly rather than emitting a partial
+    # pinout dict the sub-agent would work around by reading symbol files.
+    state_path = _commit_chain_through_arch(tmp_path, capsys)
+    bom = _valid_bom()
+    bom["parts"][0]["symbol"] = "NoSuchLib:DefinitelyMissing"
+    bom_slot = _write_slot(tmp_path, "bom", bom)
+    rc, _ = _run(
+        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
+        "--no-archive", str(state_path),
+    )
+    assert rc == 0  # bad symbol is not caught at bom commit
+    rc, payload = _run(capsys, "stage-prep", "wiring", str(state_path))
+    assert rc == 4
+    assert payload["ok"] is False
+    assert any("NoSuchLib" in off for off in payload["offenders"]), payload

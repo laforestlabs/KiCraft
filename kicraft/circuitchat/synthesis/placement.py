@@ -24,39 +24,26 @@ from ..models import BOM, BomPart, Sheet
 from .symbol_pinout import SymbolNotFoundError, lookup_pins
 
 
-# A4 portrait page (210×297 mm). Center coordinates snapped to the
-# 2.54 mm grid that KiCad uses for schematic placement.
+# A4 portrait page (210 × 297 mm). Parts are laid out in a grid within the
+# usable region, each origin snapped to the 2.54 mm grid so pins land on
+# the 1.27 mm grid KiCad expects.
 SHEET_W_MM = 210.0
 SHEET_H_MM = 297.0
-ANCHOR_X_MM = 101.6    # 40 * 2.54
-ANCHOR_Y_MM = 149.86   # 59 * 2.54
 GRID_MM = 2.54
 
-PERIPHERAL_X_MM = 175.26  # 69 * 2.54
-PERIPHERAL_START_Y_MM = 30.48
-PERIPHERAL_PITCH_MM = 12.7
+USABLE_LEFT_MM = 38.1     # 15 * 2.54
+USABLE_RIGHT_MM = 190.0
+USABLE_TOP_MM = 38.1
+# Padding around each part's pin bounding box so neither the power symbols
+# that hang ±5.08 mm off a pin nor the net labels collide with a neighbour.
+PAD_X_MM = 11.43          # 9 * 1.27 — label room left/right
+PAD_Y_MM = 8.89           # 7 * 1.27 — covers the ±5.08 mm power-symbol stub
+COL_GAP_MM = 5.08
+ROW_GAP_MM = 7.62
 
 
-# 8 first-ring positions at 7.62 mm (3-grid) pitch.
-_FIRST_RING_OFFSETS: tuple[tuple[float, float], ...] = (
-    (0.0, -7.62),    # N
-    (7.62, -7.62),   # NE
-    (7.62, 0.0),     # E
-    (7.62, 7.62),    # SE
-    (0.0, 7.62),     # S
-    (-7.62, 7.62),   # SW
-    (-7.62, 0.0),    # W
-    (-7.62, -7.62),  # NW
-)
-
-# 16 second-ring positions at 15.24 mm (6-grid) pitch.
-_SECOND_RING_OFFSETS: tuple[tuple[float, float], ...] = (
-    (0.0, -15.24), (7.62, -15.24), (15.24, -15.24),
-    (15.24, -7.62), (15.24, 0.0), (15.24, 7.62), (15.24, 15.24),
-    (7.62, 15.24), (0.0, 15.24), (-7.62, 15.24), (-15.24, 15.24),
-    (-15.24, 7.62), (-15.24, 0.0), (-15.24, -7.62), (-15.24, -15.24),
-    (-7.62, -15.24),
-)
+def _snap(value: float, grid: float = GRID_MM) -> float:
+    return round(value / grid) * grid
 
 
 @dataclass(frozen=True)
@@ -74,77 +61,61 @@ def place_sheet(
     sheet_parts: list[BomPart],
     bom: BOM,
 ) -> list[PlacedPart]:
-    """Place every part on a sheet. Returns same order as ``sheet_parts``."""
+    """Place every part on a sheet, bbox-aware so nothing overlaps.
+
+    Connectivity is label-based (see ``router``), so placement only has to
+    keep parts — and the power symbols / labels that hang off their pins —
+    from overlapping. Parts are laid out left-to-right, top-to-bottom in a
+    grid sized by each part's pin bounding box plus padding. Returns the
+    same order as ``sheet_parts``.
+    """
     if not sheet_parts:
         return []
 
-    # Pin counts; missing symbols become count=0 so they don't anchor.
+    # Pin counts (missing symbols → 0 so they don't anchor) and the
+    # padded half-extent of each part's pin bounding box.
     pin_counts: dict[str, int] = {}
+    half_extent: dict[str, tuple[float, float]] = {}
     for part in sheet_parts:
         try:
-            info = lookup_pins(part.symbol)
-            pin_counts[part.ref] = len(info["pins"])
+            pins = lookup_pins(part.symbol)["pins"]
         except (SymbolNotFoundError, ValueError):
-            pin_counts[part.ref] = 0
-
-    anchor = sorted(
-        sheet_parts,
-        key=lambda p: (-pin_counts.get(p.ref, 0), p.ref),
-    )[0]
-
-    sheet_refs = {p.ref for p in sheet_parts}
-    ring_members = [
-        ref for ref in bom.ic_groups.get(anchor.ref, [])
-        if ref in sheet_refs and ref != anchor.ref
-    ]
-    ring_member_set = set(ring_members)
-    peripherals = [
-        p for p in sheet_parts
-        if p.ref != anchor.ref and p.ref not in ring_member_set
-    ]
-
-    placed_by_ref: dict[str, PlacedPart] = {
-        anchor.ref: PlacedPart(
-            ref=anchor.ref,
-            x_mm=ANCHOR_X_MM,
-            y_mm=ANCHOR_Y_MM,
-            rotation_deg=0,
-            mirror=None,
-            role="anchor",
-        )
-    }
-
-    for i, ref in enumerate(ring_members):
-        if i < len(_FIRST_RING_OFFSETS):
-            ox, oy = _FIRST_RING_OFFSETS[i]
-            role = "ring1"
-        elif i - len(_FIRST_RING_OFFSETS) < len(_SECOND_RING_OFFSETS):
-            ox, oy = _SECOND_RING_OFFSETS[i - len(_FIRST_RING_OFFSETS)]
-            role = "ring2"
+            pins = []
+        pin_counts[part.ref] = len(pins)
+        if pins:
+            xs = [p["position"]["x"] for p in pins]
+            ys = [p["position"]["y"] for p in pins]
+            hw = (max(xs) - min(xs)) / 2.0 + PAD_X_MM
+            hh = (max(ys) - min(ys)) / 2.0 + PAD_Y_MM
         else:
-            # Overflow beyond second ring: treat as peripheral.
-            for p in sheet_parts:
-                if p.ref == ref:
-                    peripherals.append(p)
-                    break
-            continue
-        placed_by_ref[ref] = PlacedPart(
-            ref=ref,
-            x_mm=ANCHOR_X_MM + ox,
-            y_mm=ANCHOR_Y_MM + oy,
-            rotation_deg=0,
-            mirror=None,
-            role=role,
-        )
+            hw, hh = PAD_X_MM, PAD_Y_MM
+        half_extent[part.ref] = (hw, hh)
 
-    for i, part in enumerate(peripherals):
+    # Highest pin-count part first (the IC anchors the top-left), ties by ref.
+    order = sorted(sheet_parts, key=lambda p: (-pin_counts[p.ref], p.ref))
+
+    placed_by_ref: dict[str, PlacedPart] = {}
+    cursor_x = USABLE_LEFT_MM
+    row_top = USABLE_TOP_MM
+    row_height = 0.0
+    for idx, part in enumerate(order):
+        hw, hh = half_extent[part.ref]
+        cell_w = 2.0 * hw
+        # Wrap to a new row when the cell would overrun the usable width
+        # (but never wrap an already-empty row).
+        if cursor_x + cell_w > USABLE_RIGHT_MM and cursor_x > USABLE_LEFT_MM:
+            row_top += row_height + ROW_GAP_MM
+            cursor_x = USABLE_LEFT_MM
+            row_height = 0.0
         placed_by_ref[part.ref] = PlacedPart(
             ref=part.ref,
-            x_mm=PERIPHERAL_X_MM,
-            y_mm=PERIPHERAL_START_Y_MM + i * PERIPHERAL_PITCH_MM,
+            x_mm=_snap(cursor_x + hw),
+            y_mm=_snap(row_top + hh),
             rotation_deg=0,
             mirror=None,
-            role="peripheral",
+            role="anchor" if idx == 0 else "grid",
         )
+        cursor_x += cell_w + COL_GAP_MM
+        row_height = max(row_height, 2.0 * hh)
 
     return [placed_by_ref[p.ref] for p in sheet_parts]

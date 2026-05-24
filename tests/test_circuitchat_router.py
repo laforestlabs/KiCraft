@@ -1,9 +1,10 @@
 """Tests for circuitchat.synthesis.router.
 
-Verifies the comb-stub router's structural properties:
-- 2-pin nets produce 0 junctions
-- N-pin local nets produce N-2 interior junctions (or 0 if collinear)
-- Power nets produce one PowerSymbol per endpoint, no trunk wires
+Verifies the label-based router's structural properties:
+- signal nets emit one short stub + one label per pin (no trunks/junctions)
+- inter-sheet signal nets use hierarchical labels; power nets use power
+  symbols (never a hierarchical label)
+- power nets produce one PowerSymbol per endpoint on a straight stub
 - no_connect_pins land at pin positions
 
 Touches real KiCad stock libraries via lookup_pins. Skip when symbols
@@ -121,7 +122,7 @@ def test_ground_net_emits_power_symbols_no_trunk() -> None:
     assert routed.labels == []
 
 
-def test_two_pin_local_net_no_interior_junction() -> None:
+def test_two_pin_local_net_labels_each_pin() -> None:
     routed = _do_route(
         connections=[
             NetConnection(
@@ -134,17 +135,14 @@ def test_two_pin_local_net_no_interior_junction() -> None:
             )
         ]
     )
+    # Label-based connectivity: one local label per pin, no junctions/trunk.
     assert routed.junctions == []
-    # ≥1 wire segment (stub + trunk or trunk alone).
-    assert len(routed.wires) >= 1
-    # No labels (<3 pins, not inter-sheet).
-    assert routed.labels == []
+    assert [lab.text for lab in routed.labels] == ["VOUT_LOCAL", "VOUT_LOCAL"]
+    # One short stub wire per pin.
+    assert len(routed.wires) == 2
 
 
-def test_three_pin_local_net_interior_junctions() -> None:
-    # U1.pin1 (VIN, x ≈ 94), C1.pin1 (cap top, x ≈ 102), C2.pin1 (x ≈ 109)
-    # — three distinct stub xs after placement, so exactly one interior
-    # junction (the middle x).
+def test_local_net_emits_one_label_per_pin_at_distinct_positions() -> None:
     routed = _do_route(
         connections=[
             NetConnection(
@@ -158,16 +156,19 @@ def test_three_pin_local_net_interior_junctions() -> None:
             )
         ]
     )
-    # Three endpoints with distinct xs → exactly one interior junction.
-    # If placement ever pushes two endpoints to the same x (an edge case
-    # the comb-stub algorithm doesn't handle), this would relax to 0;
-    # the assertion is the algorithm's contract for well-spread endpoints.
-    assert 0 <= len(routed.junctions) <= 1
-    # Net label emitted because endpoints >= 3 and not inter-sheet/power.
-    assert any(lab.text == "FB_SENSE" for lab in routed.labels)
+    labels = [lab for lab in routed.labels if lab.text == "FB_SENSE"]
+    assert len(labels) == 3
+    # No two pins share a node, so the three labels sit at distinct points.
+    coords = {(lab.x_mm, lab.y_mm) for lab in labels}
+    assert len(coords) == 3
+    assert routed.junctions == []
 
 
-def test_inter_sheet_net_emits_hier_label() -> None:
+def test_power_inter_sheet_net_uses_power_symbol_not_hier_label() -> None:
+    # VBUS is both a power net and an inter_sheet net. Power nets connect
+    # globally via power symbols, so the router emits a power symbol and NOT
+    # a hierarchical label (and the root emitter likewise omits a sheet pin
+    # for power nets — see emitter RC3a).
     routed = _do_route(
         connections=[
             NetConnection(
@@ -177,9 +178,8 @@ def test_inter_sheet_net_emits_hier_label() -> None:
             )
         ]
     )
-    # VBUS is an inter_sheet net in the fixture architecture.
-    assert len(routed.hier_labels) == 1
-    assert routed.hier_labels[0].name == "VBUS"
+    assert routed.hier_labels == []
+    assert [p.lib_id for p in routed.power_symbols] == ["power:VBUS"]
 
 
 def test_no_connect_pins_emit_markers() -> None:
@@ -194,24 +194,3 @@ def test_no_connect_pins_emit_markers() -> None:
         no_connect=[PinEndpoint(ref="U1", pin="4")],  # NC pin on AP2112K
     )
     assert len(routed.no_connects) == 1
-
-
-def test_junctions_at_distinct_positions() -> None:
-    routed = _do_route(
-        connections=[
-            NetConnection(
-                net_name="FB",
-                endpoints=[
-                    PinEndpoint(ref="U1", pin="1"),
-                    PinEndpoint(ref="C1", pin="1"),
-                    PinEndpoint(ref="C2", pin="1"),
-                ],
-                sheet="LDO 3V3",
-            )
-        ]
-    )
-    # Comb-stub invariant: junctions live at unique (x, y) positions —
-    # no two junctions at the same coordinate, which avoids the
-    # ambiguous "wires touch but don't connect" pattern.
-    coords = {(j.x_mm, j.y_mm) for j in routed.junctions}
-    assert len(coords) == len(routed.junctions)

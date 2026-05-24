@@ -20,6 +20,8 @@
   "tags": [
     "switch",
     "tactile",
+    "tact",
+    "momentary",
     "button",
     "smd"
   ],

@@ -47,6 +47,10 @@ from .models import (
 )
 from .synthesize import SynthesisInputError, run as run_synth
 from .synthesis.symbol_pinout import SymbolNotFoundError, lookup_pins
+from .synthesis.parts_lookup import (
+    LibraryNotFoundError,
+    resolve_footprint_library_path,
+)
 from .synthesis.validation import (
     CheckResult,
     SynthesisValidationError,
@@ -66,6 +70,34 @@ def _default_archive_root() -> Path:
 
 def _utc_compact_now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _unresolved_footprints(bom, project_root: Path) -> list[str]:
+    """Return a human-readable list of BOM parts whose ``footprint`` does
+    not resolve to a real ``.kicad_mod`` on disk (across the four parts-
+    library tiers + stock KiCad). An empty list means every footprint
+    resolves. Catches LLM footprint-name hallucination (e.g. a plausible
+    truncation like ``SW_SPST_PTS645`` for ``SW_SPST_PTS645Sx43SMTR92``).
+    """
+    bad: list[str] = []
+    for part in bom.parts:
+        fp = part.footprint or ""
+        library, _, name = fp.partition(":")
+        if not library or not name:
+            bad.append(f"{part.ref}: footprint {fp!r} is not 'Library:Name'")
+            continue
+        try:
+            pretty = resolve_footprint_library_path(library, project_root=project_root)
+        except LibraryNotFoundError:
+            bad.append(
+                f"{part.ref}: footprint library {library!r} not found (footprint {fp!r})"
+            )
+            continue
+        if not (pretty / f"{name}.kicad_mod").is_file():
+            bad.append(
+                f"{part.ref}: no '{name}.kicad_mod' in {pretty} (footprint {fp!r})"
+            )
+    return bad
 
 
 def _read_or_create_session_id(state_dir: Path, state: ConversationState) -> str:
@@ -249,6 +281,83 @@ def _cmd_list_parts(_: argparse.Namespace) -> int:
         return 0
     print(block)
     return 0
+
+
+def _pick_lcsc(mpn: str, results: list[dict]) -> dict | None:
+    """Choose the single best JLCPCB search result for `mpn`, or None if
+    ambiguous. Prefer an exact (case-insensitive) match on the part's
+    model/MPN, breaking ties by stock (desc) then Basic-over-Extended. With
+    no exact match but exactly one result, take it; otherwise return None so
+    the caller surfaces the candidate list rather than guessing wrong."""
+    target = (mpn or "").strip().upper()
+    exact = [r for r in results if (r.get("model") or "").strip().upper() == target]
+    if exact:
+        exact.sort(key=lambda r: (-(r.get("stock") or 0), r.get("type") != "Basic"))
+        return exact[0]
+    if len(results) == 1:
+        return results[0]
+    return None
+
+
+def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
+    """Resolve a manufacturer part number to an LCSC part number.
+
+    Checks the parts-library manifests first (offline, authoritative), then
+    falls back to a JLCPCB keyword search. Prints JSON; exits 0 when a single
+    LCSC id is resolved, 4 otherwise (with a candidate list to choose from).
+    Lets the BOM sub-agent own MPN->LCSC resolution without the main thread
+    reaching for WebSearch.
+    """
+    mpn = args.mpn
+    target = mpn.strip().upper()
+
+    # 1. Parts-library manifests — authoritative and offline.
+    active, _broken = _load_library_parts(Path.cwd())
+    for part in active:
+        m = part.manifest
+        if (m.mpn or "").strip().upper() == target:
+            lcsc = (m.sourcing or {}).get("lcsc")
+            if lcsc:
+                print(json.dumps(
+                    {"ok": True, "mpn": mpn, "lcsc": lcsc,
+                     "source": "parts-library", "name": m.name},
+                    indent=2,
+                ))
+                return 0
+
+    # 2. JLCPCB keyword search — network, best-effort. search_jlcpcb_components
+    #    already degrades to an empty result list on any network/parse error.
+    try:
+        from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
+    except ImportError as e:
+        print(json.dumps(
+            {"ok": False, "mpn": mpn, "candidates": [],
+             "error": f"easyeda2kicad not installed: {e}"},
+            indent=2,
+        ))
+        return 4
+
+    results = (
+        EasyedaApi().search_jlcpcb_components(keyword=mpn, page_size=10).get("results", [])
+    )
+    fields = ("lcsc", "model", "brand", "package", "stock", "type")
+    best = _pick_lcsc(mpn, results)
+    if best and best.get("lcsc"):
+        print(json.dumps(
+            {"ok": True, "mpn": mpn, "lcsc": best["lcsc"], "source": "jlcpcb",
+             "match": {k: best.get(k) for k in fields}},
+            indent=2,
+        ))
+        return 0
+
+    print(json.dumps(
+        {"ok": False, "mpn": mpn,
+         "candidates": [{k: r.get(k) for k in fields} for r in results[:10]],
+         "hint": "no unambiguous LCSC id; pick a candidate and pass it to "
+                 "add-part --from-lcsc C<NNNNN>"},
+        indent=2,
+    ))
+    return 4
 
 
 def _slugify_libname(s: str) -> str:
@@ -890,14 +999,42 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
             )
             return 4
         pinouts: dict[str, dict] = {}
+        unresolved: list[str] = []
+        seen: set[str] = set()
         for part in state.bom.parts:
             sym = part.symbol
-            if sym in pinouts:
+            if sym in seen:
                 continue
+            seen.add(sym)
             try:
-                pinouts[sym] = lookup_pins(sym)
+                info = lookup_pins(sym)
             except (SymbolNotFoundError, ValueError) as e:
-                pinouts[sym] = {"error": str(e)}
+                unresolved.append(f"{sym}: {e}")
+                continue
+            if not info.get("pins"):
+                unresolved.append(f"{sym}: resolved but exposes no pins")
+                continue
+            pinouts[sym] = info
+        # Fail loudly rather than emitting a partial dict with {"error": ...}
+        # entries: a silent gap is what drove the wiring sub-agent to read
+        # /usr/share/kicad/symbols directly (a hard-rule violation). The
+        # sub-agent must fix the BOM (re-fetch / correct the symbol) and
+        # retry, or surface a question — never fall back to Read.
+        if unresolved:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": [
+                            "stage-prep wiring could not resolve a pinout for "
+                            "every BOM symbol; correct the BOM and retry"
+                        ],
+                        "offenders": unresolved,
+                    },
+                    indent=2,
+                )
+            )
+            return 4
         extras["symbol_pinouts"] = pinouts
 
     output = {
@@ -1032,6 +1169,25 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                 )
                 return 3
 
+    # Every footprint must resolve to a real .kicad_mod before the BOM is
+    # committed — otherwise the bad name only surfaces at synthesis/PCB time.
+    if stage == "bom" and state.bom is not None:
+        bad_fps = _unresolved_footprints(
+            state.bom, state_path.resolve().parent.parent
+        )
+        if bad_fps:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": ["footprint(s) do not resolve to a real .kicad_mod"],
+                        "offenders": bad_fps[:20],
+                    },
+                    indent=2,
+                )
+            )
+            return 3
+
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(state.model_dump_json(indent=2) + "\n")
 
@@ -1065,6 +1221,38 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _persist_artifacts(state, state_path: Path, artifacts) -> None:
+    """Record `artifacts` on the state and persist state.json, so downstream
+    tooling sees the produced paths + status even when checks failed."""
+    state.artifacts = artifacts
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(state.model_dump_json(indent=2) + "\n")
+
+
+def _write_synthesis_check(
+    state_path: Path, project_stem: str | None, results, *, ok: bool
+) -> None:
+    """Write `<.kicraft>/synthesis_check.json` summarizing every check run."""
+    summary = {
+        "project_stem": project_stem,
+        "status": "ok" if ok else "failed",
+        "checked_at": _utc_compact_now(),
+        "failed_checks": [r.name for r in results if not r.ok],
+        "checks": [
+            {
+                "name": r.name,
+                "ok": r.ok,
+                "message": r.message,
+                "offenders": r.offenders[:20],
+            }
+            for r in results
+        ],
+    }
+    out = state_path.parent / "synthesis_check.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(summary, indent=2, default=str) + "\n")
+
+
 def _cmd_synthesize(args: argparse.Namespace) -> int:
     state_path = Path(args.state)
     out_dir = Path(args.out_dir)
@@ -1088,8 +1276,17 @@ def _cmd_synthesize(args: argparse.Namespace) -> int:
         print(f"synthesis input error: {e}", file=sys.stderr)
         return 4
     except SynthesisValidationError as e:
+        # Files were written before the checks ran; persist the artifact
+        # record (status="failed") and the check summary so the failure is
+        # inspectable, then surface it and exit non-zero.
+        if e.artifacts is not None:
+            _persist_artifacts(state, state_path, e.artifacts)
+        _write_synthesis_check(state_path, state.project_stem, e.results, ok=False)
         print(str(e), file=sys.stderr)
         return 5
+
+    _persist_artifacts(state, state_path, artifacts)
+    _write_synthesis_check(state_path, state.project_stem, results, ok=True)
 
     print(f"wrote {artifacts.project_dir}")
     for r in results:
@@ -1145,6 +1342,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     p_list_parts.set_defaults(func=_cmd_list_parts)
+
+    p_lcsc = sub.add_parser(
+        "lookup-lcsc-id",
+        help=(
+            "resolve a manufacturer part number (MPN) to an LCSC part number "
+            "via the parts library, then a JLCPCB keyword search"
+        ),
+    )
+    p_lcsc.add_argument("mpn", help="manufacturer part number to resolve")
+    p_lcsc.set_defaults(func=_cmd_lookup_lcsc_id)
 
     p_add_part = sub.add_parser(
         "add-part",
