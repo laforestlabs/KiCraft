@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:03a902902d32df26481f3cbfb7747364ed89568a0c8f41d68510fbeba3ca8225",
+  "datasheet_url": "https://lcsc.com/product-detail/Low-Dropout-Regulators-LDO_DIODES_AP2112K-3-3TRG1_AP2112K-3-3TRG1_C51118.html",
+  "description": "Diodes Incorporated AP2112K-3.3 \u2014 3.3 V fixed LDO regulator, 600 mA, SOT-23-5. Low quiescent current (~55 \u00b5A) makes it the battery-powered alternative to AMS1117-3.3. ~250-400 mV dropout at 600 mA; integrated EN pin lets the MCU shut the rail down for sleep.",
+  "footprint_name": "SOT-25-5_L2.9-W1.6-P0.95-LS2.8-BL",
+  "kicad_version_min": "9.0.0",
+  "mpn": "AP2112K-3.3TRG1",
+  "name": "ap2112k-3v3",
+  "provenance": {
+    "added_at": "2026-05-22T23:20:39Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C51118"
+  },
+  "symbol_name": "AP2112K-3.3TRG1",
+  "tags": [
+    "regulator",
+    "ldo",
+    "linear",
+    "low-iq",
+    "3v3",
+    "sot-23-5"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "EN (pin 3) is active-HIGH \u2014 tie to Vin if unused, or you'll get no output. Requires 1 \u00b5F input + 1 \u00b5F output ceramic caps minimum (X5R/X7R) for stability. ~250-400 mV dropout means it works down to Vin \u2248 3.7 V for a full single-LiPo discharge. For higher current (>600 mA) step up to NCP1117 / RT9013 / TPS7A03 families."
+}

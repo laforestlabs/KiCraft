@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:4d418cc0e53cfa150ece49b355449acdded2194cf8c9391e1e4ab018aa198ea4",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C454188.pdf",
+  "description": "Monolithic Power Systems MP1584EN \u2014 3 A step-down (buck) converter, 4.5-28 V in \u2192 0.8-25 V out, 1.5 MHz fixed switching. SOIC-8 with exposed thermal pad. The maker default for step-down rails when AMS1117 would dissipate too much heat (e.g., 12 V \u2192 5 V or 9 V \u2192 3.3 V at >300 mA). Used in countless ebay/Amazon mini-buck modules.",
+  "footprint_name": "SOIC-8_L4.9-W3.9-P1.27-LS6.0-BL-EP3.3",
+  "kicad_version_min": "9.0.0",
+  "mpn": "MP1584EN",
+  "name": "mp1584en",
+  "provenance": {
+    "added_at": "2026-05-23T00:03:24Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C454188"
+  },
+  "symbol_name": "MP1584EN",
+  "tags": [
+    "regulator",
+    "buck",
+    "step-down",
+    "switcher",
+    "soic-8"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Vfb is 0.8 V \u2014 output divider sets Vout = 0.8 \u00d7 (1 + Rtop/Rbot). Exposed pad MUST be soldered to a copper pour with \u22652 thermal vias to ground or the part derates hard above 1 A. Inductor: 10-22 \u00b5H (depends on Vout and ripple), rated \u22654 A peak. Output cap: 22 \u00b5F low-ESR (X5R/X7R). Bootstrap cap (10 nF) between BS and SW is required for the high-side gate driver. Hard 28 V input ceiling \u2014 for higher voltage step up to MP2315 (24 V) or MP2307 (28 V improved) or use a transformer pre-stage."
+}

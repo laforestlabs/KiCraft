@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:a8e4073a0c4108fea501dccf8a63f175b77e2b1317aebc9bf0cacd3c3b5928c0",
+  "datasheet_url": "https://lcsc.com/product-detail/Others_PUOLOP-DW01_C351410.html",
+  "description": "PUOLOP DW01A \u2014 single-cell Li-ion/LiPo protection controller, SOT-23-6. Overcharge cut at ~4.30 V, overdischarge cut at ~2.40 V, overcurrent/short-circuit detection. Drives an external back-to-back N-channel pair (FS8205A or equivalent) to disconnect the cell on fault. The cheap-and-cheerful single-cell BMS companion to TP4056 chargers.",
+  "footprint_name": "SOT-23-6_L2.9-W1.6-P0.95-LS2.8-BL",
+  "kicad_version_min": "9.0.0",
+  "mpn": "DW01A",
+  "name": "dw01a",
+  "provenance": {
+    "added_at": "2026-05-22T23:57:17Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C351410"
+  },
+  "symbol_name": "DW01A",
+  "tags": [
+    "protection",
+    "lipo",
+    "li-ion",
+    "battery",
+    "single-cell",
+    "sot-23-6"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "DW01A is JUST the controller \u2014 you also need a dual N-FET in SOT-23-6 (FS8205A is the standard companion) to act as the switch elements. Trip current is set by the FETs' Rds(on), NOT by the DW01A. Auto-recovery from overdischarge happens only after the load is removed and the cell rebounds above ~3.0 V \u2014 many cheap LiPo packs feel 'dead' but recover after a few minutes off-load. Keep gate traces short between DW01A pins 3/5 and the FET gates."
+}

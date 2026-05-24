@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:8f90b9c7fd26d0ceea30a66159ab52ae48412db424d5c8ef237b207ee9940830",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C2830320.pdf",
+  "description": "TECH PUBLIC FS8205A \u2014 dual N-channel MOSFET, 20 V / 6 A, SOT-23-6. Source-tied internal back-to-back FET pair. The de-facto switch IC paired with DW01A for single-cell Li-ion/LiPo protection \u2014 together they make the cheap LiPo BMS found in nearly every Chinese power bank.",
+  "footprint_name": "SOT-23-6_L2.9-W1.6-P0.95-LS2.8-BR",
+  "kicad_version_min": "9.0.0",
+  "mpn": "FS8205A",
+  "name": "fs8205a",
+  "provenance": {
+    "added_at": "2026-05-23T00:00:16Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2830320"
+  },
+  "symbol_name": "FS8205A",
+  "tags": [
+    "mosfet",
+    "dual-nfet",
+    "battery-protection",
+    "sot-23-6"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "NOT a general-purpose dual NFET \u2014 the internal sources are tied together (back-to-back drain-source-source-drain layout), so you can't use it for two independent low-side switches. The arrangement blocks reverse current through one body diode regardless of charge/discharge direction. Pair with DW01A (or a stacked-cell equivalent). Rds(on) is ~25 m\u03a9 per FET so the cell's safe discharge current is limited not by the FET breakdown (20 V) but by I\u00b2R heating and the controller's overcurrent trip threshold."
+}

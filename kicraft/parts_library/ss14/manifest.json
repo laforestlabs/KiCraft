@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:e6bd61b9e2444bb29cf55d9bbf1fef1af3a2a53afb68df62d5bfe58d6d8e87c0",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C2837270.pdf",
+  "description": "Generic SS14 \u2014 40 V / 1 A Schottky diode in SMA (DO-214AC). SMD equivalent of 1N5819. The maker-default freewheel diode for boost converters (MT3608, etc), reverse-polarity protection on logic-level rails, and freewheel for low-current relay/motor coils.",
+  "footprint_name": "SMA_L4.3-W2.6-LS5.0-RD",
+  "kicad_version_min": "9.0.0",
+  "mpn": "SS14",
+  "name": "ss14",
+  "provenance": {
+    "added_at": "2026-05-22T23:56:12Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2837270"
+  },
+  "symbol_name": "SS14",
+  "tags": [
+    "diode",
+    "schottky",
+    "sma",
+    "do-214ac"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Vf \u2248 0.45-0.55 V at 1 A \u2014 significantly lower than a silicon diode but not zero; budget ~0.5 W dissipation at 1 A continuous and provide copper area at the cathode pad for heat. Reverse leakage is higher than silicon (tens of \u00b5A), so avoid SS14 on very-low-current circuits where leakage matters. Cathode marked with a band on the body. For >1 A continuous step up to SS24 (2 A) or SS34 (3 A) in the same SMA outline."
+}

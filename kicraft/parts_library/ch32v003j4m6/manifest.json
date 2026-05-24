@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:9847dbbc40ea7ea046e6a136dcd6c4cbdb44aeb9527f7416acb571a250b734ca",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C5346354.pdf",
+  "description": "WCH Jiangsu Qin Heng CH32V003J4M6 \u2014 32-bit RISC-V (RV32EC) MCU, 48 MHz, 16 KB flash, 2 KB SRAM, SOP-8 package. The cheapest microcontroller in the world (~$0.10) with an actual modern ISA. Six GPIOs (one shared with single-wire-debug PD1), one UART, one I\u00b2C, one SPI, one 8-channel 10-bit ADC, several 16-bit timers. The tiny-MCU complement to ESP32-S3 for cost-sensitive / space-constrained / no-wireless designs.",
+  "footprint_name": "SOP-8_L4.9-W3.8-P1.27-LS6.0-BL",
+  "kicad_version_min": "9.0.0",
+  "mpn": "CH32V003J4M6",
+  "name": "ch32v003j4m6",
+  "provenance": {
+    "added_at": "2026-05-23T00:14:35Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C5346354"
+  },
+  "symbol_name": "CH32V003J4M6",
+  "tags": [
+    "mcu",
+    "microcontroller",
+    "risc-v",
+    "sop-8",
+    "cheap",
+    "wch"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Programming uses WCH's proprietary single-wire-debug (SWIO) on PD1 (pin 5) \u2014 needs a WCH-LinkE or compatible programmer (~$5). Arduino IDE supports the chip via the wch_riscv core; PlatformIO via the ch32v platform. Internal RC oscillator (~24 MHz scaled to 48 MHz via internal PLL) is \u00b12-5% \u2014 fine for UART up to 115200 baud, but for precise timing (USB, audio) you need an external crystal, which the SOP-8 doesn't pin out \u2014 for crystal access switch to TSSOP-20 (CH32V003F4P6). Reset (PD7) is shared with a GPIO \u2014 if you tie PD7 low at boot you get continuous resets. 3.3 V supply only (3.0-5.0 V absolute max); not 5 V tolerant on I/O. Toolchain: GCC for RISC-V (riscv-none-elf-gcc), available pre-built from WCH or Nuclei Studio."
+}

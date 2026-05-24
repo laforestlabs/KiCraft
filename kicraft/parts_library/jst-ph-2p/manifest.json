@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:602c549f0465ae570833cbba97f5e9bdfc17e2fdca8d9c0153f814d6c788f6e8",
+  "datasheet_url": "https://lcsc.com/product-detail/_JST-Sales-America_S2B-PH-SM4-TB-LF-SN_JST-Sales-America-S2B-PH-SM4-TB-LF-SN_C295747.html",
+  "description": "JST S2B-PH-SM4-TB(LF)(SN) \u2014 2-pin PH-series wire-to-board connector, 2.00 mm pitch, side-entry SMD with tape-and-reel packaging. The de-facto single-cell LiPo battery connector for makers (matches Adafruit / SparkFun / Pimoroni / Pololu boards). Side-entry orientation places the mating cable parallel to the PCB surface \u2014 natural for board-edge battery leads.",
+  "footprint_name": "CONN-SMD_P2.00_S2B-PH-SM4-TB-LF-SN",
+  "kicad_version_min": "9.0.0",
+  "mpn": "S2B-PH-SM4-TB(LF)(SN)",
+  "name": "jst-ph-2p",
+  "provenance": {
+    "added_at": "2026-05-23T00:07:17Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C295747"
+  },
+  "symbol_name": "S2B-PH-SM4-TB",
+  "tags": [
+    "connector",
+    "jst",
+    "ph",
+    "battery",
+    "lipo",
+    "2-pin"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "POLARITY: the maker convention (Adafruit / SparkFun / Pololu) is red = + on pin 1, black = \u2212 on pin 2. JST itself does not define this \u2014 verify your battery's wire-to-pin assignment with a multimeter before first plug-in, or you can blow up the downstream regulator/charger. Side-entry (S2B) vs top-entry (B2B): this is the S2B side-entry SMD variant; B2B is the top-entry equivalent. Mating connector is PHR-2 housing with SPH-002T-P0.5S crimp pins."
+}

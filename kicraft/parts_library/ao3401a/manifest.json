@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:af13f342bc9cc3d51f7495687f5568ff4bcd97db2f75946379df3ed4f4d0e9e3",
+  "datasheet_url": "https://lcsc.com/product-detail/MOSFET_AOS_AO3401A_AO3401A_C15127.html",
+  "description": "Alpha & Omega Semi AO3401A \u2014 P-channel MOSFET, 30 V, 4 A continuous in SOT-23. Logic-level Vgs(th) -0.4 to -1.0 V \u2014 drives directly from a 3.3 V GPIO. The universal high-side load switch and reverse-polarity-protection PFET for maker projects. P-channel complement to AO3400A.",
+  "footprint_name": "SOT-23_L2.9-W1.3-P1.90-LS2.4-BR",
+  "kicad_version_min": "9.0.0",
+  "mpn": "AO3401A",
+  "name": "ao3401a",
+  "provenance": {
+    "added_at": "2026-05-22T23:55:49Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C15127"
+  },
+  "symbol_name": "AO3401A",
+  "tags": [
+    "mosfet",
+    "pfet",
+    "p-channel",
+    "sot-23",
+    "logic-level"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "PFET conducts when Vgs is negative (gate below source). High-side load switch: source to Vin, drain to load, 10-100 k\u03a9 from gate to source, pull gate LOW with an NFET or open-drain GPIO to enable. Reverse-polarity protection: source to BAT+, drain to load, gate to GND \u2014 the body diode initially conducts on correct polarity then the channel takes over for low Vds. 4 A is the SOT-23 thermal limit; for more current step up to AO3415 or PMV20XPER. N-channel complement is AO3400A."
+}
