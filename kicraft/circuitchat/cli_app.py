@@ -750,8 +750,13 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
     if not fp.is_file():
         print(f"missing footprint file {fp}", file=sys.stderr)
         return 2
-    if "(footprint " not in fp.read_text():
-        print(f"footprint file {fp} does not contain a (footprint ...) block", file=sys.stderr)
+    fp_text = fp.read_text()
+    if "(footprint " not in fp_text and "(module " not in fp_text:
+        print(
+            f"footprint file {fp} does not contain a (footprint ...) or "
+            f"(module ...) block",
+            file=sys.stderr,
+        )
         return 2
 
     actual = compute_content_hash(part_dir)
