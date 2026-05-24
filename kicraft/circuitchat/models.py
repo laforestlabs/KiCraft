@@ -18,8 +18,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 REF_RE = re.compile(r"^[A-Z]+[0-9]+[A-Z0-9_-]*$")
-FOOTPRINT_RE = re.compile(r"^[A-Za-z0-9_]+:[A-Za-z0-9_.+-]+$")
-SYMBOL_RE = re.compile(r"^[A-Za-z0-9_]+:[A-Za-z0-9_.+-]+$")
+FOOTPRINT_RE = re.compile(r"^[A-Za-z0-9_.+-]+:[A-Za-z0-9_.+-]+$")
+SYMBOL_RE = re.compile(r"^[A-Za-z0-9_.+-]+:[A-Za-z0-9_.+-]+$")
 SHEET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9 ]*[A-Z0-9]$")
 SHEET_STEM_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 PIN_NUMBER_RE = re.compile(r"^[A-Za-z0-9+~_/.\-]+$")
