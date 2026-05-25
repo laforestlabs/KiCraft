@@ -20,18 +20,40 @@ KiCraft is a multi-layer pipeline. Top-down:
 ## Installation
 
 ```bash
-# Development install (editable)
+# Development install (editable). Synthesis imports KiCad 9's bundled
+# `pcbnew`; system Python already has it. For an isolated venv, create it
+# with `--system-site-packages` so `pcbnew` is visible (see pipx note below).
 pip install -e .
 
 # With GUI support
 pip install -e ".[gui]"
 
-# With CircuitChat helpers (pydantic + kicad-skip; the LLM stages run in
-# the Claude Code skill, not in this Python package — no API key needed)
+# With CircuitChat helpers (pydantic + kicad-skip + easyeda2kicad; the LLM
+# stages run in the Claude Code skill, not in this package — no API key needed)
 pip install -e ".[circuitchat]"
 
 # With all optional dependencies
 pip install -e ".[gui,scoring,experiment,circuitchat,dev]"
+```
+
+### End-user install (pipx)
+
+`kicraft-circuitchat synthesize` imports KiCad's bundled `pcbnew`, and
+`add-part --from-lcsc` imports `easyeda2kicad`. An isolated pipx venv sees
+neither by default, so install with `--system-site-packages` (exposes the
+system `pcbnew`) **and** the `[circuitchat]` extra (pulls in `easyeda2kicad`):
+
+```bash
+pipx install --system-site-packages "kicraft[circuitchat]"
+```
+
+Already installed without them? Symptoms are `add-part --from-lcsc` printing
+`easyeda2kicad not installed`, or `synthesize` raising
+`ModuleNotFoundError: pcbnew`. Remediate with:
+
+```bash
+pipx reinstall --system-site-packages kicraft
+pipx inject kicraft easyeda2kicad   # only if the [circuitchat] extra was omitted
 ```
 
 ## CircuitChat (chat -> KiCad files)

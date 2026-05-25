@@ -18,6 +18,9 @@ env/
 .coverage
 htmlcov/
 
+# Manual end-to-end CircuitChat test runs (one dir per run)
+/tests/manual-runs/
+
 # IDE
 .idea/
 .vscode/

@@ -32,10 +32,10 @@ from ..models import (
     InterSheetNet,
     Sheet,
     SheetPin,
+    is_power_or_ground_name,
 )
-from .placement import PlacedPart, place_sheet
+from .placement import place_sheet
 from .router import (
-    HierLabelPlacement,
     Junction,
     NetLabel,
     NoConnect,
@@ -115,16 +115,32 @@ def _emit_sheet_block(
     width: float,
     height: float,
     project_stem: str,
-) -> str:
-    """Emit one `(sheet ...)` block for the root file."""
+) -> tuple[str, list[tuple[str, float, float]]]:
+    """Emit one `(sheet ...)` block for the root file.
+
+    Returns ``(block_text, signal_pin_records)`` where each record is
+    ``(net_name, pin_x, pin_y)`` for a signal sheet pin on the right edge,
+    so the caller can wire same-named pins together on the root canvas.
+    """
     sheet = sheet_inst.sheet
     pin_lines: list[str] = []
-    # Distribute pins along the right edge.
-    n_pins = len(sheet_inst.inter_sheet_endpoints)
-    for i, (net, ep) in enumerate(sheet_inst.inter_sheet_endpoints):
+    pin_records: list[tuple[str, float, float]] = []
+    # Distribute pins along the right edge. Skip power/global nets: they
+    # connect across sheets via global power symbols in the leaves, so a
+    # root sheet pin for them would dangle (there is no matching leaf
+    # hierarchical label to connect down to).
+    signal_endpoints = [
+        (net, ep)
+        for (net, ep) in sheet_inst.inter_sheet_endpoints
+        if not is_power_or_ground_name(net.name)
+    ]
+    n_pins = len(signal_endpoints)
+    for i, (net, ep) in enumerate(signal_endpoints):
         # Spread pins evenly along the right edge.
         step = height / (n_pins + 1) if n_pins else 0
-        pin_y = y + step * (i + 1)
+        # Snap to the 1.27 mm grid so the pin (and its root stub) is on-grid.
+        pin_y = round((y + step * (i + 1)) / 1.27) * 1.27
+        pin_records.append((net.name, x + width, pin_y))
         pin_lines.append(
             f'\t\t(pin "{net.name}" {ep.direction}\n'
             f"\t\t\t(at {_fmt(x + width)} {_fmt(pin_y)} 0)\n"
@@ -132,7 +148,7 @@ def _emit_sheet_block(
             f'\t\t\t(uuid "{_uuid()}")\n'
             f"\t\t)"
         )
-    return (
+    block = (
         f"\t(sheet\n"
         f"\t\t(at {_fmt(x)} {_fmt(y)})\n"
         f"\t\t(size {_fmt(width)} {_fmt(height)})\n"
@@ -160,6 +176,7 @@ def _emit_sheet_block(
         f"\t\t)\n"
         f"\t)"
     )
+    return block, pin_records
 
 
 def _emit_root(
@@ -170,22 +187,46 @@ def _emit_root(
     project_title: str,
 ) -> Path:
     root_uuid = _uuid()
-    sheet_width = 40.0
-    sheet_height = 30.0
-    sheet_gap = 15.0
+    # Grid-aligned layout (1.27 mm multiples) so sheet pins — and the stubs
+    # and labels that connect them — land on grid (no endpoint_off_grid).
+    sheet_width = 38.1     # 30 * 1.27
+    sheet_height = 30.48   # 24 * 1.27
+    sheet_gap = 15.24      # 12 * 1.27
     rows: list[str] = []
     # Lay sheets out horizontally on A3 (420 x 297 mm).
-    start_x, start_y = 30.0, 40.0
+    start_x, start_y = 30.48, 38.1
     sheet_origins: dict[str, tuple[float, float]] = {}
+    pin_records: list[tuple[str, float, float]] = []
     for i, si in enumerate(sheet_insts):
         x = start_x + i * (sheet_width + sheet_gap)
         y = start_y
-        rows.append(_emit_sheet_block(si, x, y, sheet_width, sheet_height, project_stem))
+        block, recs = _emit_sheet_block(
+            si, x, y, sheet_width, sheet_height, project_stem
+        )
+        rows.append(block)
+        pin_records.extend(recs)
         sheet_origins[si.sheet.name] = (x, y)
 
-    # Optional: emit wires linking same-named pins across sheets. The pin Y
-    # coords aren't easily knowable here without re-deriving placement; we
-    # skip wires to keep the emitter simple. KiCraft does not need them.
+    # Connect same-named signal sheet pins across sheets: a short stub + a
+    # local label off each pin. Same-named local labels merge on the root
+    # canvas, so e.g. the SDA pin on MCU and the SDA pin on SENSOR become
+    # one net. (Power nets are not emitted as sheet pins — they connect
+    # globally via power symbols in the leaves.)
+    connect_rows: list[str] = []
+    for idx, (net_name, px, py) in enumerate(pin_records):
+        stub_end = px + sheet_gap * 0.5
+        connect_rows.append(
+            _emit_wire(
+                WireSegment(px, py, stub_end, py),
+                f"rootpin/wire/{idx}", project_stem,
+            )
+        )
+        connect_rows.append(
+            _emit_net_label(
+                NetLabel(text=net_name, x_mm=stub_end, y_mm=py),
+                f"rootpin/label/{idx}", project_stem,
+            )
+        )
 
     header = (
         "(kicad_sch\n"
@@ -204,7 +245,7 @@ def _emit_root(
         "\t(lib_symbols)\n"
         "\n"
     )
-    body = "\n".join(rows)
+    body = "\n".join(rows + connect_rows)
     # Required `(sheet_instances ...)` block ties this root sheet to /.
     tail = (
         "\n\n"
@@ -391,6 +432,7 @@ def _emit_leaf(
     sheet_inst: _SheetInstance,
     architecture: Architecture | None = None,
     bom: BOM | None = None,
+    flag_nets: frozenset[str] = frozenset(),
 ) -> Path:
     # Stage B runs place+route only when the wiring stage has populated
     # bom.connections. Otherwise fall back to the Stage A grid layout
@@ -412,6 +454,7 @@ def _emit_leaf(
             placed,
             bom,
             architecture,
+            flag_nets,
         )
     else:
         placed = None
@@ -476,7 +519,12 @@ def _emit_leaf(
     # Hierarchical labels: router-computed positions in Stage B, fallback
     # to the prior left-edge column in Stage A.
     hier_label_blocks: list[str] = []
-    if stage_b and routed.hier_labels:
+    if stage_b:
+        # Stage B emits only the router-placed hier labels (signal
+        # inter-sheet nets). Power/global inter-sheet nets connect via
+        # power symbols, so routed.hier_labels intentionally omits them —
+        # do NOT fall back to the Stage-A label set below, which would emit
+        # dangling power-net labels on power-only sheets.
         for hl in routed.hier_labels:
             hier_label_blocks.append(
                 _emit_hierarchical_label(
@@ -596,8 +644,28 @@ def emit_schematic(
         project_title=title or project_stem,
     )
     skip = skip_leaf_sheets or set()
+    # Assign each power net exactly one PWR_FLAG, on the first (non-skipped)
+    # sheet that connects it, so ERC sees the global power net as driven.
+    flag_by_sheet: dict[str, set[str]] = {}
+    seen_power: set[str] = set()
+    for si in sheet_insts:
+        if si.sheet.name in skip:
+            continue
+        for c in bom.connections:
+            if (
+                c.sheet == si.sheet.name
+                and is_power_or_ground_name(c.net_name)
+                and power_symbol_for(c.net_name) is not None
+                and c.net_name not in seen_power
+            ):
+                flag_by_sheet.setdefault(si.sheet.name, set()).add(c.net_name)
+                seen_power.add(c.net_name)
     leaves = [
-        _emit_leaf(project_dir, project_stem, si, architecture=architecture, bom=bom)
+        _emit_leaf(
+            project_dir, project_stem, si,
+            architecture=architecture, bom=bom,
+            flag_nets=frozenset(flag_by_sheet.get(si.sheet.name, ())),
+        )
         for si in sheet_insts
         if si.sheet.name not in skip
     ]

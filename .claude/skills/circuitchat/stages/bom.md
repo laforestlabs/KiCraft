@@ -37,13 +37,27 @@ For every part, you must resolve a real `symbol` and `footprint` reference. The 
 
 The `extras.parts_block` field from `stage-prep bom` is the **curated parts table**: every symbol+footprint bundle available to this project. Each row gives the exact strings to put in `BomPart.symbol` and `BomPart.footprint`. Use them verbatim. Do not invent variant spellings. If `parts_block` is null, the parts library is empty — skip directly to the stock-libraries paragraph.
 
-Beyond the parts block, the default-install KiCad 9 stock libraries at `/usr/share/kicad/{symbols,footprints}/` cover the obvious passives and packages: `Device` (R, C, L, LED, D_TVS, Thermistor_NTC, ...), `Resistor_SMD`, `Capacitor_SMD`, `Inductor_SMD`, `LED_SMD`, `Diode_SMD`, `Package_TO_SOT_SMD`, `Package_DFN_QFN`, `Connector_USB`, `Connector_PinHeader_2.54mm`, `Battery`, `Power_Protection`, `Switch`, etc. Use these freely.
+Beyond the parts block, the following default-install KiCad 9 stock libraries (at `/usr/share/kicad/{symbols,footprints}/`) are **first-tier** sources for obvious passives and packages — use them freely:
+
+- `Device` (R, C, L, LED, D, D_TVS, D_Schottky, D_Zener, Thermistor_NTC, Crystal, Ferrite_Bead)
+- `Resistor_SMD`, `Capacitor_SMD`, `Inductor_SMD`, `LED_SMD`, `Diode_SMD`, `Ferrite_Bead_SMD`
+- `Package_TO_SOT_SMD`, `Package_DFN_QFN`, `Package_SO`
+- `Connector_USB`, `Connector_PinHeader_2.54mm`, `Connector_PinHeader_1.27mm`, `Connector_JST`, `Connector_Generic`
+- `Battery`, `Power_Protection`, `Switch`
+
+**Any other stock-KiCad library — `Sensor_*`, `MCU_*`, `RF_*`, `Regulator_*`, `Interface_*`, `Amplifier_*`, vendor-named libraries — is NOT first-tier.** Treat a symbol from one of those exactly like a parts-block/fetch miss: route it through the section below (auto-fetch for beginner/intermediate, or a `material: true` question). Stock symbols for sensors, MCUs, regulators, and interface ICs are frequently out of date or differ from the part the user actually wants, so picking one silently is precisely the substitution this stage exists to prevent.
 
 ### When a needed part is in neither the parts block nor stock KiCad
 
 This is the case to handle deliberately — never silently substitute an inferior part. Route based on the captured `state.intent.inferred_expertise`:
 
-- **`beginner` or `intermediate`** — auto-fetch from LCSC (since the default fab is JLCPCB). If you know the LCSC part number from the architecture or a prior session, or you can identify a reasonable LCSC equivalent from the MPN, call:
+- **`beginner` or `intermediate`** — auto-fetch from LCSC (since the default fab is JLCPCB). First resolve the MPN to an LCSC part number — don't guess the `C<NNNNN>`:
+
+  ```
+  kicraft-circuitchat lookup-lcsc-id "<MPN>"
+  ```
+
+  On a clean hit it prints `{"ok": true, "lcsc": "C<NNNNN>", ...}`. If it returns `"ok": false` with a `candidates` list, choose the right one (or surface a `material: true` question if you can't tell). Then fetch:
 
   ```
   kicraft-circuitchat add-part --from-lcsc C<NNNNN> --into project

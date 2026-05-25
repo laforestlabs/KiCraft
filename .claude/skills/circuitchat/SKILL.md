@@ -9,6 +9,10 @@ You are running the KiCraft CircuitChat pipeline. The user is going to describe 
 
 **Your job in the main thread is the interview, not the typing.** Stage drafting happens inside a sub-agent so the user is never staring at a wall of permission prompts mid-stage. You read state, ask the user what's needed, decide when to run a stage, spawn the sub-agent that runs it, and relay the one-line summary back. That's it.
 
+**Hard rule (main thread): never use `cd`.** Claude Code's Bash CWD persists across calls, so a single `cd` silently changes the meaning of every later relative path and corrupts the session — CircuitChat is tightly per-CWD, and `.kicraft/state.json` lives in the user's project directory, which must remain the CWD for the whole session. To read KiCraft's own source (or any file outside the project), use an absolute path with Bash (`grep -nE 'pattern' /home/.../path`) or the Read tool — never `cd`.
+
+**Hard rule (main thread): never hand-edit `.kicraft/state.json` (no `Edit`/`Write` on it).** State is owned by `stage-commit`. If a committed slot has an error — e.g. `stage-commit bom`'s footprint check rejects a part, or synthesis surfaces a problem — fix it by re-running `stage-commit <stage>` with the corrected slot, not by editing the file by hand. Re-running the BOM stage deliberately re-runs wiring; that cascade is the consistency guarantee, not a cost to dodge. (Footprint typos are caught at `stage-commit bom` time, before wiring runs, so the fix usually has no cascade at all.)
+
 ## State file
 
 All structured output lives in `.kicraft/state.json` in the user's working directory. The schema is the `ConversationState` Pydantic model at `kicraft/circuitchat/models.py` in the installed KiCraft package — that file is the source of truth for field names, types, regex constraints, and cross-field validators.
@@ -107,7 +111,7 @@ The latest user message was:
 ## Hard rules
 
 - You may use only `Bash` (limited to `kicraft-circuitchat *` commands) and `Write` (limited to `/tmp/circuitchat_*`).
-- Do NOT use Read on `.kicraft/state.json` — `stage-prep` already gives you the state.
+- Do NOT use the Read tool at all — not on `.kicraft/state.json` (`stage-prep` gives you the state), and never on `/usr/share/kicad/symbols/**` or any symbol/footprint library. `stage-prep` batches every pinout you need; if one cannot be resolved it fails loudly with an `offenders` list so you fix the BOM, not read around it.
 - Do NOT call `kicraft-circuitchat lookup-symbol`, `validate`, or `archive` directly. `stage-prep` and `stage-commit` cover everything.
 - Do NOT touch any other CLI command or any other file.
 ```
@@ -143,6 +147,10 @@ For the silent-stage flow to work, the user's `.claude/settings.json` should pre
 - `Bash(kicraft-circuitchat stage-prep *)`
 - `Bash(kicraft-circuitchat stage-commit *)`
 - `Bash(kicraft-circuitchat synthesize *)`
+- `Bash(kicraft-circuitchat add-part *)` — the BOM stage's LCSC auto-fetch
+- `Bash(kicraft-circuitchat lookup-lcsc-id *)` — MPN → LCSC resolution (BOM stage)
+- `Bash(kicraft-circuitchat list-parts)` and `Bash(kicraft-circuitchat validate-part *)` — parts-library maintenance / post-fetch verification
+- `Bash(kicraft-circuitchat --help)`
 - `Read(./.kicraft/**)` and `Read(./.claude/skills/circuitchat/**)`
 - `Write(/tmp/circuitchat_*)`
 

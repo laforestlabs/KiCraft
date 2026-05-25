@@ -33,13 +33,6 @@ from .symbol_pinout import SymbolNotFoundError, lookup_pins
 
 GRID_MM = 2.54
 
-# Hierarchical label column positions (chosen to sit on the left or right
-# edge of the A4-portrait usable region, snapped to the 2.54 mm grid).
-HIER_LABEL_X_LEFT_MM = 25.4    # 10 * 2.54
-HIER_LABEL_X_RIGHT_MM = 185.42  # 73 * 2.54
-HIER_LABEL_START_Y_MM = 30.48
-HIER_LABEL_PITCH_MM = 10.16  # 4 * 2.54
-
 
 @dataclass(frozen=True)
 class WireSegment:
@@ -124,10 +117,6 @@ def power_symbol_for(net_name: str) -> str | None:
     return None
 
 
-def _snap(value: float, grid: float = GRID_MM) -> float:
-    return round(value / grid) * grid
-
-
 def _pin_position(placed: PlacedPart, pin: dict) -> tuple[float, float]:
     """Absolute (x, y) in schematic coords.
 
@@ -166,12 +155,30 @@ def _pin_exit_direction(pin: dict) -> str:
     return "right"
 
 
+def _stub_end(x: float, y: float, exit_dir: str) -> tuple[float, float, int]:
+    """Far end of a one-grid stub out of a pin, plus a label angle.
+
+    Connectivity is by label name, so the stub only needs to carry the pin
+    out to a point clear of the symbol body where the label sits and reads
+    away from the pin.
+    """
+    if exit_dir == "left":
+        return (x - GRID_MM, y, 180)
+    if exit_dir == "up":
+        return (x, y - GRID_MM, 90)
+    if exit_dir == "down":
+        return (x, y + GRID_MM, 270)
+    # "right" and any fallback
+    return (x + GRID_MM, y, 0)
+
+
 def route_sheet(
     sheet_stem: str,
     sheet_name: str,
     placed_parts: list[PlacedPart],
     bom: BOM,
     architecture: Architecture,
+    flag_nets: frozenset[str] = frozenset(),
 ) -> RoutedSheet:
     """Build the wire / junction / power / no-connect set for one leaf."""
     routed = RoutedSheet()
@@ -197,8 +204,6 @@ def route_sheet(
         n.name: n for n in architecture.inter_sheet_nets
     }
 
-    hier_label_index = 0
-
     for conn in sheet_connections:
         endpoints: list[tuple[float, float, str]] = []
         for ep in conn.endpoints:
@@ -207,7 +212,12 @@ def route_sheet(
             if pin is None or placed is None:
                 continue
             x, y = _pin_position(placed, pin)
-            endpoints.append((_snap(x), _snap(y), _pin_exit_direction(pin)))
+            # Do NOT snap pin coordinates to a coarse grid. Stock KiCad
+            # symbol pins sit on a 1.27 mm half-grid; rounding to 2.54 mm
+            # would displace every stub up to 1.27 mm off its pin and break
+            # all connectivity. The exact _pin_position value is what KiCad
+            # renders, so geometry built from it lands on the pins.
+            endpoints.append((x, y, _pin_exit_direction(pin)))
 
         if not endpoints:
             continue
@@ -223,91 +233,74 @@ def route_sheet(
             else None
         )
         if power_lib_id is not None:
-            is_gnd = "GND" in conn.net_name.upper()
+            # One power symbol per endpoint, on a short straight stub in the
+            # pin's exit direction. Straight (not L-shaped) stubs never cross
+            # a neighbouring pin's stub, so two power nets on adjacent pins of
+            # one IC cannot be shorted together (the failure mode of the old
+            # L-stub router). Connectivity is global-by-name via the symbol.
+            sym_angle = 0 if "GND" in conn.net_name.upper() else 180
+            flag_xy: tuple[float, float] | None = None
             for (x, y, exit_dir) in endpoints:
-                if is_gnd:
-                    sym_x, sym_y = x, _snap(y + 5.08)
-                    sym_angle = 0
-                else:
-                    sym_x, sym_y = x, _snap(y - 5.08)
-                    sym_angle = 180
-
-                if exit_dir == "right":
-                    turn_x = _snap(x + GRID_MM)
-                    routed.wires.append(WireSegment(x, y, turn_x, y))
-                    routed.wires.append(WireSegment(turn_x, y, turn_x, sym_y))
-                    sym_x = turn_x
-                elif exit_dir == "left":
-                    turn_x = _snap(x - GRID_MM)
-                    routed.wires.append(WireSegment(x, y, turn_x, y))
-                    routed.wires.append(WireSegment(turn_x, y, turn_x, sym_y))
-                    sym_x = turn_x
-                else:
-                    routed.wires.append(WireSegment(x, y, sym_x, sym_y))
-
+                ex, ey, _angle = _stub_end(x, y, exit_dir)
+                if flag_xy is None:
+                    flag_xy = (ex, ey)
+                routed.wires.append(WireSegment(x, y, ex, ey))
                 routed.power_symbols.append(
                     PowerSymbol(
                         lib_id=power_lib_id,
-                        x_mm=sym_x,
-                        y_mm=sym_y,
+                        x_mm=ex,
+                        y_mm=ey,
                         angle_deg=sym_angle,
+                    )
+                )
+            # One PWR_FLAG per power net (on the first sheet that connects
+            # it) marks the net as driven, so ERC doesn't flag the IC
+            # power-input pins as undriven. It carries a power-output pin and
+            # sits on the same node as the net's first power symbol.
+            if conn.net_name in flag_nets and flag_xy is not None:
+                routed.power_symbols.append(
+                    PowerSymbol(
+                        lib_id="power:PWR_FLAG",
+                        x_mm=flag_xy[0],
+                        y_mm=flag_xy[1],
+                        angle_deg=0,
                     )
                 )
             continue
 
-        # Signal / inter-sheet branch.
-        # Inter-sheet nets get a hier label on the appropriate edge.
-        if conn.net_name in inter_by_name:
+        # Signal / inter-sheet branch — label-based connectivity.
+        # Each pin gets a short stub in its exit direction plus a label
+        # carrying the net name. Same-named labels are one net, so nothing
+        # depends on trunk geometry and two nets cannot be shorted by a
+        # coincidental wire crossing (the failure mode of a comb router on
+        # multi-net IC sheets). Inter-sheet nets use hierarchical labels
+        # (which tie to the parent sheet pin); sheet-local nets use plain
+        # labels.
+        is_inter = conn.net_name in inter_by_name
+        hier_direction = "passive"
+        if is_inter:
             inter = inter_by_name[conn.net_name]
             this_pin = next(
                 (e for e in inter.endpoints if e.sheet == sheet_name), None
             )
-            direction = this_pin.direction if this_pin else "passive"
-            label_x = (
-                HIER_LABEL_X_LEFT_MM if direction == "input"
-                else HIER_LABEL_X_RIGHT_MM
-            )
-            label_y = _snap(HIER_LABEL_START_Y_MM + hier_label_index * HIER_LABEL_PITCH_MM)
-            routed.hier_labels.append(
-                HierLabelPlacement(
-                    name=conn.net_name,
-                    direction=direction,
-                    x_mm=label_x,
-                    y_mm=label_y,
+            hier_direction = this_pin.direction if this_pin else "passive"
+
+        for (x, y, exit_dir) in endpoints:
+            ex, ey, angle = _stub_end(x, y, exit_dir)
+            routed.wires.append(WireSegment(x, y, ex, ey))
+            if is_inter:
+                routed.hier_labels.append(
+                    HierLabelPlacement(
+                        name=conn.net_name,
+                        direction=hier_direction,
+                        x_mm=ex,
+                        y_mm=ey,
+                    )
                 )
-            )
-            hier_label_index += 1
-            endpoints.append((label_x, label_y, "right" if direction == "input" else "left"))
-
-        # Trunk row at the median y of all endpoints.
-        ys = sorted(y for _, y, _ in endpoints)
-        trunk_y = _snap(ys[len(ys) // 2])
-
-        stub_xs: list[float] = []
-        for (x, y, _exit) in endpoints:
-            stub_xs.append(x)
-            if y != trunk_y:
-                routed.wires.append(WireSegment(x, y, x, trunk_y))
-
-        x_min = min(stub_xs)
-        x_max = max(stub_xs)
-        if x_min != x_max:
-            routed.wires.append(WireSegment(x_min, trunk_y, x_max, trunk_y))
-
-        # Junctions only at interior stub-trunk joints; endpoints at
-        # x_min / x_max terminate the trunk and don't need a marker.
-        for sx in sorted({x for x in stub_xs if x_min < x < x_max}):
-            routed.junctions.append(Junction(x_mm=sx, y_mm=trunk_y))
-
-        # Net label only for sheet-local nets with ≥3 endpoints (R3).
-        if (
-            len(endpoints) >= 3
-            and conn.net_name not in inter_by_name
-            and not is_power_or_ground_name(conn.net_name)
-        ):
-            routed.labels.append(
-                NetLabel(text=conn.net_name, x_mm=x_min, y_mm=trunk_y)
-            )
+            else:
+                routed.labels.append(
+                    NetLabel(text=conn.net_name, x_mm=ex, y_mm=ey, angle_deg=angle)
+                )
 
     # no_connect markers.
     for ep in bom.no_connect_pins:
@@ -318,6 +311,6 @@ def route_sheet(
         if pin is None:
             continue
         x, y = _pin_position(placed, pin)
-        routed.no_connects.append(NoConnect(x_mm=_snap(x), y_mm=_snap(y)))
+        routed.no_connects.append(NoConnect(x_mm=x, y_mm=y))
 
     return routed
