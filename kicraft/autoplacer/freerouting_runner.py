@@ -273,8 +273,64 @@ def count_board_tracks(kicad_pcb_path: str) -> dict[str, float | int]:
     return json.loads(result.stdout.strip())
 
 
+def min_intra_footprint_pad_gap_mm(kicad_pcb_path: str) -> float | None:
+    """Smallest edge-to-edge gap between two *different-net* pads of the same
+    footprint, in mm.
+
+    Fine-pitch connectors (USB-C, board-to-board) carry pad gaps below the
+    default routing clearance; the autorouter then cannot escape a trace from
+    the pad field and the gaps show up as clearance DRC violations. This is
+    the signal used to lower the routing clearance for such boards.
+
+    Same-net pad pairs are skipped (they connect anyway, so their proximity is
+    not a routing constraint). Returns None when no footprint has two
+    different-net pads, or when pcbnew is unavailable.
+
+    Runs in subprocess to avoid pcbnew SWIG issues.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, pcbnew\n"
+            f"board = pcbnew.LoadBoard({kicad_pcb_path!r})\n"
+            "best = None\n"
+            "for fp in board.GetFootprints():\n"
+            "    pads = list(fp.Pads())\n"
+            "    for i in range(len(pads)):\n"
+            "        ba = pads[i].GetBoundingBox()\n"
+            "        na = pads[i].GetNetname()\n"
+            "        for j in range(i + 1, len(pads)):\n"
+            "            nb = pads[j].GetNetname()\n"
+            "            if na and na == nb:\n"
+            "                continue\n"
+            "            bb = pads[j].GetBoundingBox()\n"
+            "            dx = max(0, ba.GetLeft() - bb.GetRight(), bb.GetLeft() - ba.GetRight())\n"
+            "            dy = max(0, ba.GetTop() - bb.GetBottom(), bb.GetTop() - ba.GetBottom())\n"
+            "            g = (dx * dx + dy * dy) ** 0.5\n"
+            "            if best is None or g < best:\n"
+            "                best = g\n"
+            "print(json.dumps({'gap_mm': None if best is None else round(pcbnew.ToMM(int(best)), 4)}))\n",
+        ],
+        capture_output=True,
+        text=True,
+        env=_kicad_subprocess_env(),
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        return json.loads(result.stdout.strip()).get("gap_mm")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+
+
 def export_dsn(
-    kicad_pcb_path: str, dsn_path: str, lock_existing_traces: bool = False
+    kicad_pcb_path: str,
+    dsn_path: str,
+    lock_existing_traces: bool = False,
+    *,
+    target_clearance_um: int | None = None,
+    target_width_um: int | None = None,
 ) -> None:
     """Export Specctra DSN from a KiCad PCB file using pcbnew API.
 
@@ -283,6 +339,9 @@ def export_dsn(
 
     If lock_existing_traces is True, all existing tracks and vias are marked
     as locked before export so FreeRouting treats them as fixed pre-routes.
+
+    ``target_clearance_um`` / ``target_width_um`` (micrometres) override the
+    routing rule for fine-pitch boards -- see :func:`_patch_dsn_clearance`.
     """
     lock_script = ""
     if lock_existing_traces:
@@ -299,35 +358,69 @@ def export_dsn(
         f"board.Save({kicad_pcb_path!r})\n"
         f"pcbnew.ExportSpecctraDSN(board, {dsn_path!r})\n"
     )
-    # Post-process DSN: raise smd_smd clearance to match the global clearance.
-    # KiCad exports (clearance 50 (type smd_smd)) which is only 0.05mm,
-    # leading to DRC violations when KiCad checks with its 0.2mm rule.
-    _patch_dsn_clearance(dsn_path)
+    _patch_dsn_clearance(
+        dsn_path,
+        target_clearance_um=target_clearance_um,
+        target_width_um=target_width_um,
+    )
 
 
-def _patch_dsn_clearance(dsn_path: str) -> None:
-    """Raise ALL type-specific clearances in a DSN file to match the global clearance.
+def _patch_dsn_clearance(
+    dsn_path: str,
+    *,
+    target_clearance_um: int | None = None,
+    target_width_um: int | None = None,
+) -> None:
+    """Normalize the routing rule in a Specctra DSN before FreeRouting.
 
-    KiCad exports reduced clearances for certain types (e.g. smd_smd at 0.05mm,
-    smd_to_trace, etc.) which cause DRC violations when KiCad checks with its
-    actual design rules.  Replace every typed clearance with the global value.
+    Two modes:
+
+    * **Fine-pitch (lower)** -- when ``target_clearance_um`` is set and is
+      below the DSN's global clearance, LOWER the global + class clearance to
+      it (and, if ``target_width_um`` is given, lower the rule track width) so
+      the autorouter can escape dense pad fields (USB-C etc.). Already-tighter
+      typed clearances (e.g. KiCad's ``smd_smd`` 0.05 mm export) are left
+      untouched -- raising them is exactly what blocks fine-pitch escape.
+
+    * **Legacy (raise)** -- otherwise, raise every type-specific clearance up
+      to the global value. KiCad exports reduced clearances for certain types
+      (``smd_smd`` at 0.05 mm, etc.); on a normal board those under-cut the
+      design rule, so we bring them up to the global clearance.
     """
     with open(dsn_path) as f:
         content = f.read()
-    # Find global clearance value (first bare clearance line without a type qualifier)
+    # Global clearance = first bare clearance token (no type qualifier).
     m = re.search(r"\(clearance\s+(\d+)\)", content)
     if not m:
         return
-    global_clearance = m.group(1)
-    # Replace ALL type-specific clearances (smd_smd, smd_to_trace, etc.)
-    patched = re.sub(
-        r"\(clearance\s+\d+\s+\(type\s+(\w+)\)\)",
-        lambda match: f"(clearance {global_clearance} (type {match.group(1)}))",
-        content,
-    )
-    if patched != content:
-        with open(dsn_path, "w") as f:
-            f.write(patched)
+    global_clearance = int(m.group(1))
+
+    if target_clearance_um is not None and target_clearance_um < global_clearance:
+        tc = int(target_clearance_um)
+        # Lower every bare global clearance (structure rule + class rule).
+        content = re.sub(r"\(clearance\s+\d+\)", f"(clearance {tc})", content)
+        # Typed clearances: only ever lower, never raise above the target.
+        content = re.sub(
+            r"\(clearance\s+(\d+)\s+\(type\s+(\w+)\)\)",
+            lambda mm: f"(clearance {min(int(mm.group(1)), tc)} (type {mm.group(2)}))",
+            content,
+        )
+        if target_width_um is not None:
+            tw = int(target_width_um)
+            content = re.sub(
+                r"\(width\s+(\d+)\)",
+                lambda mm: f"(width {min(int(mm.group(1)), tw)})",
+                content,
+            )
+    else:
+        content = re.sub(
+            r"\(clearance\s+\d+\s+\(type\s+(\w+)\)\)",
+            lambda mm: f"(clearance {global_clearance} (type {mm.group(1)}))",
+            content,
+        )
+
+    with open(dsn_path, "w") as f:
+        f.write(content)
 
 
 def parse_freerouting_output(stdout: str, stderr: str, returncode: int) -> dict[str, Any]:
@@ -513,6 +606,52 @@ def _build_contact_sheet(image_paths: list[str], output_path: str) -> bool:
     return result.returncode == 0 and os.path.exists(output_path)
 
 
+def _resolve_fine_pitch_rule(
+    kicad_pcb_path: str, config: dict[str, Any]
+) -> tuple[int | None, int | None]:
+    """Decide the FreeRouting clearance / track-width override for a board.
+
+    Returns ``(clearance_um, width_um)`` where each is ``None`` to leave the
+    DSN's default rule alone. An explicit ``freerouting_clearance_mm`` forces
+    the clearance; otherwise the densest different-net pad gap on the board
+    drives auto-detection: if it is tighter than a normal clearance, the
+    routing clearance is lowered to clear it -- floored at
+    ``freerouting_min_clearance_mm`` for fab safety -- and the track width is
+    reduced to ``freerouting_fine_pitch_track_mm`` so a trace can escape.
+    """
+    normal_clearance_mm = 0.2  # board/DSN default the override compares against
+    floor_mm = float(config.get("freerouting_min_clearance_mm", 0.1))
+    fine_track_mm = float(config.get("freerouting_fine_pitch_track_mm", 0.15))
+
+    override = config.get("freerouting_clearance_mm")
+    target_clearance_mm: float | None = None
+    gap_mm: float | None = None
+    if override is not None:
+        target_clearance_mm = float(override)
+    else:
+        try:
+            gap_mm = min_intra_footprint_pad_gap_mm(kicad_pcb_path)
+        except Exception:  # noqa: BLE001 -- detection is best-effort
+            gap_mm = None
+        if gap_mm is not None and gap_mm < normal_clearance_mm:
+            target_clearance_mm = max(floor_mm, gap_mm)
+
+    if target_clearance_mm is None:
+        return (None, None)
+
+    target_track_mm = min(normal_clearance_mm, fine_track_mm)
+    why = (
+        f"override {target_clearance_mm:.3f} mm"
+        if override is not None
+        else f"min pad gap {gap_mm} mm"
+    )
+    print(
+        f"  fine-pitch routing rule ({why}): clearance "
+        f"{target_clearance_mm:.3f} mm, track {target_track_mm:.3f} mm"
+    )
+    return (int(round(target_clearance_mm * 1000)), int(round(target_track_mm * 1000)))
+
+
 def route_with_freerouting(
     kicad_pcb_path: str, output_path: str, jar_path: str, config: dict[str, Any]
 ) -> dict[str, Any]:
@@ -553,6 +692,16 @@ def route_with_freerouting(
     timeout_s = config.get("freerouting_timeout_s", 120)
     hide_window = bool(config.get("freerouting_hide_window", True))
 
+    # Fine-pitch clearance handling: the DSN inherits the board's default
+    # clearance (0.2 mm), which is wider than a dense connector's pad gaps, so
+    # the autorouter cannot escape its pad field. Detect that case and lower
+    # the routing clearance (and track width) to a fab-safe floor that clears
+    # the densest part. An explicit `freerouting_clearance_mm` overrides the
+    # auto-detection. See _patch_dsn_clearance.
+    target_clearance_um, target_width_um = _resolve_fine_pitch_rule(
+        kicad_pcb_path, config
+    )
+
     for attempt in range(2):
         with tempfile.TemporaryDirectory() as tmpdir:
             dsn_path = os.path.join(tmpdir, "board.dsn")
@@ -562,6 +711,8 @@ def route_with_freerouting(
                 kicad_pcb_path,
                 dsn_path,
                 lock_existing_traces=preserve_existing_copper,
+                target_clearance_um=target_clearance_um,
+                target_width_um=target_width_um,
             )
 
             passes = max_passes if attempt == 0 else max(10, max_passes // 2)
@@ -707,6 +858,8 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
         "copper_edge_clearance": 0,
         "courtyard": 0,
         "solder_mask_bridge": 0,
+        "annular_width": 0,
+        "padstack": 0,
         "total": 0,
         "violations": [],
         "report_path": None,
@@ -781,6 +934,10 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
                 counts["courtyard"] += 1
             elif vtype == "solder_mask_bridge":
                 counts["solder_mask_bridge"] += 1
+            elif vtype == "annular_width":
+                counts["annular_width"] += 1
+            elif vtype == "padstack":
+                counts["padstack"] += 1
     except subprocess.TimeoutExpired:
         counts["timed_out"] = True
     except FileNotFoundError:
@@ -899,6 +1056,34 @@ def validate_routed_board(
             )
         else:
             validation["obviously_illegal_routed_geometry"] = True
+
+    # Connector-shield through-hole pads (USB-C shield tabs, etc.) are zero- or
+    # low-annular by footprint design, so KiCad reports annular_width / padstack
+    # items on them. These are intrinsic to the part, not a routing fault, and
+    # are normally waived. Label them as footprint-internal when confined to
+    # edge/ignorable connector refs. This does NOT change acceptance -- these
+    # types were never blockers -- it just surfaces them as intentionally
+    # waived rather than as unexplained DRC noise.
+    for _drc_type, _label in (
+        ("annular_width", "footprint_internal_annular_count"),
+        ("padstack", "footprint_internal_padstack_count"),
+    ):
+        if drc.get(_drc_type, 0) > 0:
+            report_text = str(drc.get("report_text", ""))
+            _refs = set(_extract_violation_footprint_refs(report_text, {_drc_type}))
+            ignorable_refs = set(cfg.get("ignorable_footprint_refs", [])) if cfg else set()
+            edge_component_refs = {
+                ref
+                for ref, zone in (cfg.get("component_zones", {}) if cfg else {}).items()
+                if isinstance(zone, dict) and zone.get("edge")
+            }
+            if _refs and _refs <= (ignorable_refs | edge_component_refs):
+                validation[_label] = int(drc.get(_drc_type, 0))
+                validation.setdefault("waived_connector_shield_refs", [])
+                validation["waived_connector_shield_refs"] = sorted(
+                    set(validation["waived_connector_shield_refs"]) | _refs
+                )
+
     if drc.get("timed_out"):
         validation["rejection_reasons"].append("drc_timeout")
     if drc.get("missing_cli"):

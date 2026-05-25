@@ -173,6 +173,17 @@ DEFAULT_CONFIG = {
     # xvfb-run when xvfb-run is on PATH (install xorg-x11-server-Xvfb).
     # If neither path is available the window still appears.
     "freerouting_hide_window": True,
+    # Fine-pitch clearance handling. The DSN inherits the board's default
+    # 0.2 mm clearance, which is wider than a dense connector's pad gaps
+    # (USB-C ~0.10 mm), so the autorouter cannot escape its pad field. When
+    # freerouting_clearance_mm is None, the router auto-detects the densest
+    # different-net pad gap and, if it is below 0.2 mm, lowers the routing
+    # clearance to clear it -- floored at freerouting_min_clearance_mm for fab
+    # safety -- and reduces the track width to freerouting_fine_pitch_track_mm
+    # so a trace can escape. Set freerouting_clearance_mm to force a value.
+    "freerouting_clearance_mm": None,
+    "freerouting_min_clearance_mm": 0.1,
+    "freerouting_fine_pitch_track_mm": 0.15,
     # GND zone pour — automatically created/updated to cover full board.
     # Set gnd_zone_net to "" to disable automatic zone creation.
     "gnd_zone_net": "GND",
