@@ -1926,6 +1926,104 @@ def _compact_routed_validation(validation: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _repair_parent_outline(
+    state: ParentCompositionState,
+    *,
+    margin_mm: float = 2.0,
+) -> dict[str, Any]:
+    """Grow the parent board outline so it encloses all placed geometry.
+
+    The constraint-aware outline (``_compute_final_outline``) snaps
+    edge-constrained sides to their anchor coordinate and can therefore come
+    out *smaller* than the placed-content bbox, leaving footprints, pads or
+    stamped leaf copper outside ``Edge.Cuts``. FreeRouting cannot produce an
+    SES for a board with copper outside the outline (``rc=-1``), so we repair
+    the outline before validation/stamping.
+
+    The required extent mirrors the rule enforced by
+    :func:`_validate_parent_geometry`:
+
+    * every non-edge-constrained component **body** (courtyard) must fit,
+    * **all** pad copper must fit (edge connectors included),
+    * every stamped trace and via must fit,
+
+    with ``margin_mm`` of copper-to-edge breathing room. Edge-constrained
+    component *bodies* are exempt (their housing legitimately mounts past the
+    PCB edge), so such refs contribute only their pads -- which, for a
+    correctly flush-mounted connector, already sit inboard and do not push the
+    edge out. The outline is only ever **grown**, never shrunk, so a
+    constraint-aware outline that already encloses everything (the normal
+    case) is left untouched and flush edge-mounting is preserved.
+
+    Mutates ``state.composition.board_state.board_outline`` in place when a
+    grow is needed; :func:`_stamp_parent_board` then derives ``Edge.Cuts``
+    from it, keeping the artifact and in-memory state in sync. Returns a small
+    dict describing whether the outline changed and its old/new size.
+    """
+    composition = state.composition
+    if composition is None:
+        return {"repaired": False, "reason": "no composition"}
+    outline = composition.board_state.board_outline
+    if not outline or len(outline) < 2:
+        return {"repaired": False, "reason": "no outline"}
+
+    tl, br = outline
+    edge_constrained = set(state.edge_constrained_refs or ())
+
+    req_min_x = float("inf")
+    req_min_y = float("inf")
+    req_max_x = float("-inf")
+    req_max_y = float("-inf")
+
+    def _grow(p_tl: Point, p_br: Point) -> None:
+        nonlocal req_min_x, req_min_y, req_max_x, req_max_y
+        req_min_x = min(req_min_x, p_tl.x)
+        req_min_y = min(req_min_y, p_tl.y)
+        req_max_x = max(req_max_x, p_br.x)
+        req_max_y = max(req_max_y, p_br.y)
+
+    for ref, comp in (composition.board_state.components or {}).items():
+        if ref not in edge_constrained:
+            b_tl, b_br = comp.bbox()
+            _grow(b_tl, b_br)
+        for pad in comp.pads:
+            p_tl, p_br = pad.bbox()
+            _grow(p_tl, p_br)
+
+    for trace in composition.board_state.traces or []:
+        _grow(
+            Point(min(trace.start.x, trace.end.x), min(trace.start.y, trace.end.y)),
+            Point(max(trace.start.x, trace.end.x), max(trace.start.y, trace.end.y)),
+        )
+    for via in composition.board_state.vias or []:
+        _grow(via.pos, via.pos)
+
+    if req_min_x == float("inf"):
+        return {"repaired": False, "reason": "no geometry"}
+
+    req_min_x -= margin_mm
+    req_min_y -= margin_mm
+    req_max_x += margin_mm
+    req_max_y += margin_mm
+
+    new_tl = Point(min(tl.x, req_min_x), min(tl.y, req_min_y))
+    new_br = Point(max(br.x, req_max_x), max(br.y, req_max_y))
+
+    changed = (
+        abs(new_tl.x - tl.x) > 1e-6
+        or abs(new_tl.y - tl.y) > 1e-6
+        or abs(new_br.x - br.x) > 1e-6
+        or abs(new_br.y - br.y) > 1e-6
+    )
+    if changed:
+        composition.board_state.board_outline = (new_tl, new_br)
+    return {
+        "repaired": changed,
+        "old_size_mm": [round(br.x - tl.x, 2), round(br.y - tl.y, 2)],
+        "new_size_mm": [round(new_br.x - new_tl.x, 2), round(new_br.y - new_tl.y, 2)],
+    }
+
+
 def _validate_parent_geometry(
     state: ParentCompositionState,
 ) -> dict[str, Any]:
@@ -3288,8 +3386,15 @@ def main(argv: list[str] | None = None) -> int:
         # Resolve project clearance early so the composer's pad-margin can adapt
         # to the project's design rules even on plain compose runs without
         # --stamp/--route.
-        from kicraft.autoplacer.config import discover_project_config, load_project_config
-        compose_cfg: dict[str, Any] = {}
+        from kicraft.autoplacer.config import (
+            DEFAULT_CONFIG,
+            discover_project_config,
+            load_project_config,
+        )
+        # Seed from DEFAULT_CONFIG so defaults (clearances, margins, jar path)
+        # are present without requiring --config, matching
+        # solve_subcircuits._load_config.
+        compose_cfg: dict[str, Any] = {**DEFAULT_CONFIG}
         if project_dir:
             proj_cfg_path = discover_project_config(str(project_dir))
             if proj_cfg_path:
@@ -3385,10 +3490,17 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
-        # Build config: project config -> --config overlay -> --jar override
-        from kicraft.autoplacer.config import discover_project_config, load_project_config
+        # Build config: DEFAULT_CONFIG base -> project config -> --config
+        # overlay -> --jar override. Seeding DEFAULT_CONFIG ensures
+        # freerouting_jar (and other defaults) are present so --route works
+        # without --jar, matching solve_subcircuits._load_config.
+        from kicraft.autoplacer.config import (
+            DEFAULT_CONFIG,
+            discover_project_config,
+            load_project_config,
+        )
 
-        cfg: dict[str, Any] = {"pcb_path": str(pcb_path)}
+        cfg: dict[str, Any] = {**DEFAULT_CONFIG, "pcb_path": str(pcb_path)}
         proj_cfg_path = discover_project_config(str(project_dir))
         if proj_cfg_path:
             cfg.update(load_project_config(str(proj_cfg_path)))
@@ -3398,6 +3510,19 @@ def main(argv: list[str] | None = None) -> int:
             cfg["freerouting_jar"] = args.jar
 
         try:
+            # Grow the parent outline to enclose all placed geometry before
+            # validating/stamping. The constraint-aware outline can snap
+            # smaller than the placed-content bbox (edge-anchored sides),
+            # which leaves copper outside Edge.Cuts and makes FreeRouting
+            # return no SES (rc=-1). Repairing here keeps the in-memory state
+            # and the stamped Edge.Cuts in sync.
+            outline_repair = _repair_parent_outline(state)
+            if outline_repair.get("repaired"):
+                print(
+                    "parent_outline_repaired: "
+                    f"{outline_repair['old_size_mm']} -> {outline_repair['new_size_mm']} mm "
+                    "(grown to enclose placed geometry)"
+                )
             geometry_validation = _validate_parent_geometry(state)
             geometry_accepted = bool(geometry_validation.get("accepted", False))
 
