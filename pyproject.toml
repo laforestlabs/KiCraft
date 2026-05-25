@@ -92,6 +92,10 @@ target-version = "py310"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: long-running tests (real FreeRouting / kicad-cli runs)",
+    "e2e: end-to-end pipeline tests requiring external tooling; opt-in via KICRAFT_RUN_E2E=1",
+]
 
 [tool.ruff.lint]
 ignore = ["E402", "E702", "E741"]

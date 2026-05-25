@@ -125,5 +125,47 @@ def write_empty_pcb(
                 continue
             pad.SetNetCode(net_code)
 
+    _draw_board_outline(pcbnew, board, fps_by_ref.values())
+
     board.Save(str(out))
     return out
+
+
+def _draw_board_outline(pcbnew_mod, board, footprints, *, margin_mm: float = 5.0) -> None:
+    """Draw an Edge.Cuts rectangle enclosing every placed footprint + margin.
+
+    Downstream tools (``compose-subcircuits``, FreeRouting) require a non-zero
+    board outline: without one the seed board's edge bbox is ``0×0`` and the
+    parent composer under-sizes the board, leaving footprints outside the
+    edges so the router produces no SES. This is a *seed* outline — compose
+    re-sizes the parent properly; the stub only needs a valid enclosure so the
+    geometry is well-formed at every stage.
+    """
+    bbox = None
+    for fp in footprints:
+        try:
+            fbb = fp.GetBoundingBox()
+        except TypeError:
+            # Older pcbnew signatures require explicit include-text flags.
+            fbb = fp.GetBoundingBox(True, False)
+        if bbox is None:
+            bbox = fbb
+        else:
+            bbox.Merge(fbb)
+
+    if bbox is None:
+        return
+
+    margin = pcbnew_mod.FromMM(margin_mm)
+    left = bbox.GetLeft() - margin
+    top = bbox.GetTop() - margin
+    right = bbox.GetRight() + margin
+    bottom = bbox.GetBottom() + margin
+
+    rect = pcbnew_mod.PCB_SHAPE(board)
+    rect.SetShape(pcbnew_mod.SHAPE_T_RECT)
+    rect.SetStart(pcbnew_mod.VECTOR2I(left, top))
+    rect.SetEnd(pcbnew_mod.VECTOR2I(right, bottom))
+    rect.SetLayer(pcbnew_mod.Edge_Cuts)
+    rect.SetWidth(pcbnew_mod.FromMM(0.1))
+    board.Add(rect)
