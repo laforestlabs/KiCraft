@@ -81,6 +81,13 @@ def _kicad_subprocess_env() -> dict[str, str]:
     return env
 
 
+# Printed by a pcbnew script after its work (incl. board.Save) completes
+# successfully. _retry_pcbnew_run uses it to tell a post-work teardown crash
+# (pcbnew/wx static-destructor SIGSEGV at interpreter shutdown, AFTER the board
+# was saved) apart from a real failure mid-work. See _retry_pcbnew_run.
+_PCBNEW_OK_SENTINEL = "__KICRAFT_PCBNEW_OK__"
+
+
 def _run_pcbnew_script(script: str) -> None:
     """Run a pcbnew script string in a fresh subprocess.
 
@@ -88,6 +95,14 @@ def _run_pcbnew_script(script: str) -> None:
     for any nontrivial workload so import-time errors fire when the
     file is parsed instead of being concealed inside a runtime blob.
     """
+    # Emit the success sentinel as the script's last act so a teardown SIGSEGV
+    # after a successful Save is not mistaken for a failed operation.
+    script = (
+        script
+        + "\nimport sys as _kicraft_sys\n"
+        + f"print({_PCBNEW_OK_SENTINEL!r})\n"
+        + "_kicraft_sys.stdout.flush()\n"
+    )
     return _retry_pcbnew_run([sys.executable, "-c", script])
 
 
@@ -121,6 +136,22 @@ def _retry_pcbnew_run(cmd: list[str]) -> None:
         )
         last_result = result
         if result.returncode == 0:
+            return
+        # Post-work teardown crash: the script ran to completion and emitted
+        # its success sentinel, but the process was then killed by a signal
+        # (negative returncode) -- e.g. a pcbnew/wx static-destructor SIGSEGV
+        # at interpreter teardown. The board was already saved, so the output
+        # is intact; treat it as success rather than failing the whole route.
+        # A crash *before* the sentinel (mid-work) has no sentinel in stdout
+        # and still falls through to the failure path below.
+        stdout = getattr(result, "stdout", "") or ""
+        if result.returncode < 0 and _PCBNEW_OK_SENTINEL in stdout:
+            print(
+                f"warning: pcbnew subprocess completed (success sentinel seen) "
+                f"but exited on signal {-result.returncode} during teardown; "
+                f"output is intact, treating as success",
+                file=sys.stderr,
+            )
             return
         stderr = result.stderr or ""
         if "Failed to load board:" not in stderr or attempt == attempts - 1:

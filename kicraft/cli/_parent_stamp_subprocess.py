@@ -7,7 +7,8 @@ string in ``compose_subcircuits.py`` so import-time errors fire
 when the file is parsed and so linters / IDEs can see the pcbnew
 API calls the way they see normal Python.
 
-Output: ``OK`` on stdout when the parent .kicad_pcb is saved.
+Output: the ``__KICRAFT_PCBNEW_OK__`` success sentinel on stdout when the
+parent .kicad_pcb is saved.
 """
 
 from __future__ import annotations
@@ -224,7 +225,11 @@ def main(argv: list[str]) -> int:
 
     board.BuildConnectivity()
     board.Save(_out_path)
-    print("OK")
+    # Success sentinel (must match freerouting_runner._PCBNEW_OK_SENTINEL) so a
+    # pcbnew/wx teardown SIGSEGV after this successful Save is not mistaken for
+    # a stamping failure by _retry_pcbnew_run.
+    print("__KICRAFT_PCBNEW_OK__")
+    sys.stdout.flush()
     return 0
 
 
