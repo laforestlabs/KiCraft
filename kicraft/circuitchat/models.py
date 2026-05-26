@@ -411,6 +411,8 @@ class ArtifactPaths(BaseModel):
     kicad_pro: Path
     autoplacer_json: Path
     custom_footprint_dir: Path | None = None
+    routed_pcb: Path | None = None  # set by `build`: promoted fully-routed board
+    fab_zip: Path | None = None  # set by `build`: zipped Gerber/drill/CPL/BOM package
     status: str = "ok"  # "ok" if all §9 checks passed, else "failed"
 
 
