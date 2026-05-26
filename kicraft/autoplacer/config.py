@@ -193,6 +193,15 @@ DEFAULT_CONFIG = {
     "zone_min_thickness_mm": 0.25,
     "zone_thermal_gap_mm": 0.5,
     "zone_thermal_spoke_mm": 0.5,
+    # Full bottom-layer GND plane (default on): after routing, pour a B.Cu GND
+    # zone over the whole board (the ZONE_FILLER keeps it clear of rule-area
+    # keepouts like the WROOM antenna) and stitch large GND/thermal pads into it
+    # with a dense thermal-via array, so the plane connects and boxed-in center
+    # pads (e.g. the WROOM exposed pad) escape to ground.
+    "gnd_plane_enabled": True,
+    "thermal_via_pitch_mm": 1.2,
+    "thermal_via_inset_mm": 0.5,
+    "thermal_pad_area_mm2": 4.0,
     # Ignorable DRC patterns — list of regex strings.  During post-route
     # DRC validation, if ALL significant violations match at least one
     # pattern (searched against the violation description text), they are

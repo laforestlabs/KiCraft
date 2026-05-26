@@ -1866,8 +1866,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--rounds",
         "-n",
         type=int,
-        default=10,
-        help="Number of hierarchical experiment rounds",
+        default=3,
+        help="Number of hierarchical experiment rounds (default 3; 3x3 leaf attempts with --leaf-rounds)",
     )
     parser.add_argument(
         "--workers",
@@ -1913,8 +1913,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--leaf-rounds",
         type=int,
-        default=1,
-        help="Leaf solve rounds per experiment round",
+        default=3,
+        help="Leaf solve rounds per experiment round (default 3; 3 rounds x 3 leaf-rounds = 9 leaf attempts)",
     )
 
     parser.add_argument(

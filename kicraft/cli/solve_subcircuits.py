@@ -564,10 +564,27 @@ def _solve_one_round(
             routed=False,
             timing_breakdown=round_timing,
         )
+    # Combine placement quality with routing success so an unrouted or shorted
+    # leaf can never out-score a cleanly routed one. Placement contributes up to
+    # half (0-50, from the now 0-100-normalized placement total); the other half
+    # is full routing credit eroded by each unconnected net (-10) and each short
+    # (-25). Clamped to [0, 100]; reaching 100 requires a perfect placement AND a
+    # defect-free route, so it is effectively unreachable. When routing is
+    # disabled, fall back to the placement score alone.
+    if route and not routing.get("failed", False):
+        _val = routing.get("validation", {}) or {}
+        _drc = _val.get("drc", {}) or {}
+        _shorts = int(_drc.get("shorts", _val.get("shorts", 0)) or 0)
+        _unconnected = int(_drc.get("unconnected", _val.get("unconnected", 0)) or 0)
+        _placement_part = 0.5 * max(0.0, min(100.0, placement.total))
+        _routing_part = 50.0 - 10.0 * _unconnected - 25.0 * _shorts
+        round_score = max(0.0, min(100.0, _placement_part + _routing_part))
+    else:
+        round_score = max(0.0, min(100.0, placement.total))
     return SolveRoundResult(
         round_index=round_index,
         seed=seed,
-        score=placement.total,
+        score=round_score,
         placement=placement,
         components=solved_components,
         routing=routing,
