@@ -183,7 +183,14 @@ DEFAULT_CONFIG = {
     # so a trace can escape. Set freerouting_clearance_mm to force a value.
     "freerouting_clearance_mm": None,
     "freerouting_min_clearance_mm": 0.1,
-    "freerouting_fine_pitch_track_mm": 0.15,
+    # Fine-pitch escape track width. It is written to the DSN as integer microns
+    # (int(round(mm*1000))), and KiCad's track-width DRC floor is
+    # min_track_width = 0.1524 mm (6 mil, the OSH Park 2-layer minimum). 0.15 mm
+    # rounds to 150 µm and 0.1524 mm rounds to 152 µm -- both BELOW the 152.4 µm
+    # floor, so every fine-pitch escape became a track_width violation. 0.153 mm
+    # rounds to 153 µm (>= floor, fab-legal) while staying narrower than the
+    # 0.2 mm default so it still escapes dense pad fields.
+    "freerouting_fine_pitch_track_mm": 0.153,
     # GND zone pour — automatically created/updated to cover full board.
     # Set gnd_zone_net to "" to disable automatic zone creation.
     "gnd_zone_net": "GND",
