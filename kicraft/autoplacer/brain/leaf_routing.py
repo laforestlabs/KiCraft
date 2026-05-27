@@ -113,13 +113,24 @@ def route_local_subcircuit(
     build_comparison_contact_sheet = bool(
         cfg.get("subcircuit_build_comparison_contact_sheet", not fast_smoke_mode)
     )
-    if not extraction.internal_net_names:
-        # Trivial leaf: no nets to route, but we still stamp the placed
+    # A leaf must fully route the on-leaf span of EVERY net that touches it,
+    # including nets that also connect to other sheets -- their inter-sheet hop
+    # is completed at the parent stage. extraction.local_state.nets already holds
+    # those external nets filtered to their on-leaf pads (see _partition_nets /
+    # _filter_net_to_components), so routing the board connects them locally.
+    # Only a leaf with no net having >=2 pads on it (e.g. a pass-through
+    # connector where every net has a single on-leaf pad) is genuinely trivial.
+    routable_on_leaf_nets = [
+        name
+        for name, net in extraction.local_state.nets.items()
+        if len(net.pad_refs) >= 2
+    ]
+    if not routable_on_leaf_nets:
+        # Trivial leaf: nothing to route, but we still stamp the placed
         # components onto a real PCB so the leaf flows through the same
         # workflow as every other leaf -- pin_best_leaves can promote it,
         # the GUI snapshot picker shows its rounds, and the composer reads
-        # uniformly from leaf_routed.kicad_pcb. The "routed" board is
-        # identical to the pre-route board because there's nothing to add.
+        # uniformly from leaf_routed.kicad_pcb.
         return _stamp_trivial_leaf(
             extraction=extraction,
             solved_components=solved_components,
@@ -533,6 +544,30 @@ def route_local_subcircuit(
     route_timing["silk_post_route_stamp_s"] = round(
         max(0.0, time.monotonic() - silk_stamp_start), 3
     )
+
+    # Ground-plane finishing (default on): pour a full B.Cu GND plane -- the
+    # ZONE_FILLER keeps it clear of rule-area keepouts like the WROOM antenna --
+    # and stitch large GND/thermal pads into it with a dense thermal-via array so
+    # the plane connects and the boxed-in center pad escapes to ground. Run after
+    # the silk re-stamp (the last write to routed_board) and before acceptance
+    # validation, so the now-connected center pad is reflected in shorts/unconnected.
+    if cfg.get("gnd_plane_enabled", True):
+        gnd_pour_start = time.monotonic()
+        try:
+            from kicraft.autoplacer.brain.gnd_pour import (
+                add_gnd_pour_and_thermal_vias,
+            )
+
+            _gnd = add_gnd_pour_and_thermal_vias(str(routed_board), cfg)
+            print(
+                f"  GND plane: {_gnd.get('thermal_vias_added', 0)} thermal via(s) "
+                f"under {_gnd.get('gnd_pads_stitched', 0)} pad(s); B.Cu pour filled"
+            )
+        except Exception as exc:  # finishing step must never fail the leaf
+            print(f"  WARNING: GND plane step failed: {exc}")
+        route_timing["gnd_pour_s"] = round(
+            max(0.0, time.monotonic() - gnd_pour_start), 3
+        )
 
     routed_validation_start = time.monotonic()
     validation = validate_routed_board(

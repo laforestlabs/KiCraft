@@ -182,8 +182,20 @@ DEFAULT_CONFIG = {
     # safety -- and reduces the track width to freerouting_fine_pitch_track_mm
     # so a trace can escape. Set freerouting_clearance_mm to force a value.
     "freerouting_clearance_mm": None,
-    "freerouting_min_clearance_mm": 0.1,
-    "freerouting_fine_pitch_track_mm": 0.15,
+    # Floor for the fine-pitch clearance auto-lower. Must be >= the fab spacing
+    # floor (OSH Park 6 mil = 0.1524 mm). 0.1 let the auto-lower route the WHOLE
+    # board down to ~0.10 mm (sub-floor, unmanufacturable) just to escape the
+    # USB-C. 0.153 mm rounds to 153 µm in the DSN (>= 6 mil). USB-C pads tighter
+    # than this need a LOCAL clearance exception, not a global sub-floor drop.
+    "freerouting_min_clearance_mm": 0.153,
+    # Fine-pitch escape track width. It is written to the DSN as integer microns
+    # (int(round(mm*1000))), and KiCad's track-width DRC floor is
+    # min_track_width = 0.1524 mm (6 mil, the OSH Park 2-layer minimum). 0.15 mm
+    # rounds to 150 µm and 0.1524 mm rounds to 152 µm -- both BELOW the 152.4 µm
+    # floor, so every fine-pitch escape became a track_width violation. 0.153 mm
+    # rounds to 153 µm (>= floor, fab-legal) while staying narrower than the
+    # 0.2 mm default so it still escapes dense pad fields.
+    "freerouting_fine_pitch_track_mm": 0.153,
     # GND zone pour — automatically created/updated to cover full board.
     # Set gnd_zone_net to "" to disable automatic zone creation.
     "gnd_zone_net": "GND",
@@ -193,6 +205,15 @@ DEFAULT_CONFIG = {
     "zone_min_thickness_mm": 0.25,
     "zone_thermal_gap_mm": 0.5,
     "zone_thermal_spoke_mm": 0.5,
+    # Full bottom-layer GND plane (default on): after routing, pour a B.Cu GND
+    # zone over the whole board (the ZONE_FILLER keeps it clear of rule-area
+    # keepouts like the WROOM antenna) and stitch large GND/thermal pads into it
+    # with a dense thermal-via array, so the plane connects and boxed-in center
+    # pads (e.g. the WROOM exposed pad) escape to ground.
+    "gnd_plane_enabled": True,
+    "thermal_via_pitch_mm": 1.2,
+    "thermal_via_inset_mm": 0.5,
+    "thermal_pad_area_mm2": 4.0,
     # Ignorable DRC patterns — list of regex strings.  During post-route
     # DRC validation, if ALL significant violations match at least one
     # pattern (searched against the violation description text), they are

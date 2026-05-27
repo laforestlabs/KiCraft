@@ -1,0 +1,23 @@
+{
+  "content_hash": "sha256:a7c46aea0397f16a8309b7508d1d7abbc7356598ee8819382d4618864005a327",
+  "datasheet_url": "https://lcsc.com/product-detail/WIFI-Modules_Espressif-Systems-ESP32-WROOM-32E-4MB_C701341.html",
+  "description": "ESPRESSIF(\u4e50\u946b) ESP32-WROOM-32E-N4",
+  "footprint_name": "WIFI-SMD_ESP32-WROOM-32E",
+  "kicad_version_min": "9.0.0",
+  "mpn": "ESP32-WROOM-32E-N4",
+  "name": "esp32-wroom-32e-n4",
+  "provenance": {
+    "added_at": "2026-05-25T15:57:06Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C701341"
+  },
+  "symbol_name": "ESP32-WROOM-32E",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

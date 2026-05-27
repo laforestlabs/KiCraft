@@ -2319,6 +2319,17 @@ def _stamp_parent_board(
                 "font_thickness": elem.font_thickness,
             })
 
+    # Grow the parent outline to enclose all placed geometry BEFORE deriving
+    # Edge.Cuts and validating. The constraint-aware outline can snap smaller
+    # than the placed-content bbox (edge-anchored sides snap to their anchor),
+    # leaving a few footprints/pads/traces outside Edge.Cuts. That fails geometry
+    # validation, which gates routing -- so every candidate goes un-routed and
+    # the parent is rejected as illegal_routed_geometry. Repairing here (grow
+    # only) makes geometry valid for every candidate, so the search judges
+    # placements on quality (overlap/packing/net-distance) rather than on
+    # overflowing a too-small outline, and FreeRouting gets a valid board.
+    _repair_parent_outline(state)
+
     # Compute the board outline from the composition
     outline = board_state.board_outline
     outline_data = None

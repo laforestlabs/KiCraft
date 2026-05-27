@@ -361,7 +361,14 @@ class PlacementScore:
             # higher weight here paired with a stronger force-phase
             # attraction. Track as follow-up.
         }
-        self.total = sum(getattr(self, k) * v for k, v in w.items())
+        # Normalize by the weight sum so total is a true 0-100 weighted
+        # average. The literal weights above sum to ~1.14, so without this
+        # a strong placement can score >100 (observed: 103.67), which both
+        # breaks the "0-100 scale" contract and lets an unrouted leaf
+        # out-score a routed one. Dividing by the weight sum preserves the
+        # relative ordering SA optimizes while bounding the result to 100.
+        weight_sum = sum(w.values()) or 1.0
+        self.total = sum(getattr(self, k) * v for k, v in w.items()) / weight_sum
         return self.total
 
 

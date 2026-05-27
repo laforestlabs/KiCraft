@@ -1312,6 +1312,164 @@ def _cmd_synthesize(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- build orchestrator: synthesize -> optimize+route -> promote -> gate -> fab -
+
+_QUALITY_PRESETS = {
+    "fast": {"engine": "solve-hierarchy", "rounds": 1},
+    "good": {"engine": "autoexperiment", "rounds": 3},
+    "best": {"engine": "autoexperiment", "rounds": 6},
+}
+
+
+def _run_layout(quality: str, root_sch: Path, pcb: Path) -> int:
+    """Run the placement+routing engine in-process (inherits this env's pcbnew)."""
+    preset = _QUALITY_PRESETS.get(quality, _QUALITY_PRESETS["good"])
+    if preset["engine"] == "solve-hierarchy":
+        from kicraft.cli.solve_hierarchy import main as _solve_hierarchy_main
+
+        return _solve_hierarchy_main([str(root_sch), "--pcb", str(pcb), "--route"])
+    from kicraft.cli.autoexperiment import main as _autoexperiment_main
+
+    return _autoexperiment_main(
+        [str(pcb), "--schematic", str(root_sch), "--rounds", str(preset["rounds"])]
+    )
+
+
+def _find_routed_parent(project_dir: Path) -> Path | None:
+    """Locate the best routed parent board produced by the layout engine."""
+    try:
+        from kicraft.cli.solve_hierarchy import _find_parent_artifact
+
+        art = _find_parent_artifact(project_dir)
+        if art is not None:
+            routed = Path(art) / "parent_routed.kicad_pcb"
+            if routed.exists():
+                return routed
+    except Exception:
+        pass
+    hits = sorted(project_dir.glob("**/parent_routed.kicad_pcb"))
+    return hits[-1] if hits else None
+
+
+def _verify_routed_board(pcb: Path) -> dict:
+    """Acceptance gate: no shorts, no unconnected (connector-shield items waived)."""
+    from kicraft.autoplacer.config import DEFAULT_CONFIG
+    from kicraft.autoplacer.freerouting_runner import validate_routed_board
+
+    v = validate_routed_board(str(pcb), cfg=dict(DEFAULT_CONFIG))
+    drc = v.get("drc", {}) or {}
+    shorts = int(drc.get("shorts", 0) or 0)
+    unconnected = int(drc.get("unconnected", 0) or 0)
+    return {
+        "ok": bool(v.get("accepted", False)) and shorts == 0 and unconnected == 0,
+        "shorts": shorts,
+        "unconnected": unconnected,
+        "reasons": v.get("rejection_reasons", []),
+        "tracks": v.get("track_summary", {}) or {},
+    }
+
+
+def _cmd_build(args: argparse.Namespace) -> int:
+    state_path = Path(args.state)
+    out_dir = Path(args.out_dir)
+    try:
+        state = _load_state(state_path)
+    except ValidationError as e:
+        print(f"schema validation failed:\n{e}", file=sys.stderr)
+        return 2
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"could not read {state_path}: {e}", file=sys.stderr)
+        return 2
+
+    if state.bom is None or not state.bom.connections:
+        print(
+            "error: build needs a fully-staged state with wiring "
+            "(bom.connections). Run the CircuitChat stages first.",
+            file=sys.stderr,
+        )
+        return 3
+    if state.project_stem and out_dir.name != state.project_stem:
+        out_dir = out_dir / state.project_stem
+
+    # 1. Synthesize: schematic + seed PCB + ERC gate.
+    print("[build] 1/5 synthesize (schematic + seed PCB + ERC) ...")
+    try:
+        artifacts, results = run_synth(state, out_dir, smoke=False)
+    except SynthesisInputError as e:
+        print(f"synthesis input error: {e}", file=sys.stderr)
+        return 4
+    except SynthesisValidationError as e:
+        if e.artifacts is not None:
+            _persist_artifacts(state, state_path, e.artifacts)
+        _write_synthesis_check(state_path, state.project_stem, e.results, ok=False)
+        print(f"synthesis checks failed (not ERC-clean):\n{e}", file=sys.stderr)
+        return 5
+    _persist_artifacts(state, state_path, artifacts)
+    _write_synthesis_check(state_path, state.project_stem, results, ok=True)
+
+    stem = state.project_stem
+    project_dir = Path(artifacts.project_dir)
+    root_sch = Path(artifacts.root_sch)
+    pcb = project_dir / f"{stem}.kicad_pcb"
+    print(f"[build]     synthesized {project_dir} (ERC clean)")
+
+    # 2. Optimize placement + route (leaves then parent) via the layout engine.
+    print(f"[build] 2/5 place + route (quality={args.quality}) -- may take minutes ...")
+    rc = _run_layout(args.quality, root_sch, pcb)
+    if rc != 0:
+        print(f"error: layout/route engine exited {rc}", file=sys.stderr)
+        return 6
+
+    # 3. Promote the routed parent to the project's main PCB.
+    routed = _find_routed_parent(project_dir)
+    if routed is None:
+        print(
+            "error: the layout engine produced no routed parent board -- the "
+            "parent compose/route failed (board not routable as placed). "
+            "Inspect .experiments/.../_search for rejected candidates.",
+            file=sys.stderr,
+        )
+        return 6
+    shutil.copy2(routed, pcb)
+    print(f"[build] 3/5 promoted routed parent -> {pcb.name}")
+
+    # 4. Verification gate: no shorts, no unconnected.
+    gate = _verify_routed_board(pcb)
+    print(
+        f"[build] 4/5 verify: shorts={gate['shorts']} unconnected={gate['unconnected']} "
+        f"traces={gate['tracks'].get('traces', '?')}"
+    )
+    if not gate["ok"]:
+        print(
+            f"error: routed board is NOT fab-ready -- shorts={gate['shorts']}, "
+            f"unconnected={gate['unconnected']}, reasons={gate['reasons']}",
+            file=sys.stderr,
+        )
+        return 7
+
+    # 5. Export the fab package (Gerbers + drill + CPL + BOM, zipped).
+    print("[build] 5/5 export fab package (Gerbers + drill + CPL + BOM) ...")
+    from kicraft.circuitchat.synthesis.fab_export import export_fab
+
+    bom_parts = [p.model_dump() for p in state.bom.parts]
+    fab = export_fab(str(pcb), str(project_dir), stem, bom_parts=bom_parts)
+
+    artifacts.routed_pcb = pcb
+    artifacts.fab_zip = Path(fab["zip"])
+    _persist_artifacts(state, state_path, artifacts)
+
+    print()
+    print(f"BUILD COMPLETE: {stem}")
+    print(f"  routed PCB : {pcb}")
+    print(
+        f"  DRC        : 0 shorts, 0 unconnected "
+        f"({gate['tracks'].get('traces', '?')} traces, {gate['tracks'].get('vias', '?')} vias)"
+    )
+    print(f"  fab package: {fab['zip']}")
+    print(f"  contents   : {', '.join(fab['files'])}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="kicraft-circuitchat",
@@ -1499,6 +1657,22 @@ def main(argv: list[str] | None = None) -> int:
         help="skip the post-synthesis session archive",
     )
     p_syn.set_defaults(func=_cmd_synthesize)
+
+    p_build = sub.add_parser(
+        "build",
+        help="one shot: synthesize + place + route + verify + export fab package",
+    )
+    p_build.add_argument("state", help="path to state.json")
+    p_build.add_argument(
+        "out_dir", help="output directory (project_stem appended if absent)"
+    )
+    p_build.add_argument(
+        "--quality",
+        choices=["fast", "good", "best"],
+        default="good",
+        help="fast=single-pass solve-hierarchy; good/best=autoexperiment optimization",
+    )
+    p_build.set_defaults(func=_cmd_build)
 
     p_prep = sub.add_parser(
         "stage-prep",

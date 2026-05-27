@@ -432,6 +432,7 @@ def _score_round(
     leaf_total: int,
     parent_routed: bool,
     parent_output_json: Path,
+    parent_routed_validation: dict[str, Any] | None = None,
     timing_breakdown: dict[str, float] | None = None,
 ) -> tuple[float, dict[str, float], list[str], str]:
     """Absolute score 0-100 with three functional tiers.
@@ -442,11 +443,14 @@ def _score_round(
 
     Tiers:
       - "partial_leaves": some leaves failed. Score = leaf_ratio * 15 (0-15).
-      - "not_routed": all leaves ok but parent failed to route.
-            Score = 20 - stamp_short_penalty - stamp_clearance_penalty
-            (range 0-20, graded so search can descend toward fewer
-            pre-route violations).
-      - "functional": routed. Score = composer_score (realistic range ~50-90).
+      - "not_routed": all leaves ok but the parent produced no usable route
+            (no traces, or shorts/unconnected). Score = 20 - stamp penalties.
+      - "routed_dirty": parent is electrically complete (traces present, 0
+            shorts, 0 unconnected) but was rejected on soft DRC (clearance/
+            dangling). Score = 40 + composer slice - DRC penalty, banded ~25-70:
+            above not_routed and graded by remaining DRC so the search descends
+            toward a clean board instead of seeing a cliff for a 99%-routed one.
+      - "functional": routed AND accepted. Score = composer_score (~50-90).
 
     Returns (score, breakdown, notes, tier).
     """
@@ -462,24 +466,63 @@ def _score_round(
         ]
         tier = "partial_leaves"
     elif not parent_routed:
-        stamp_shorts, stamp_clearance = _read_stamp_drc(parent_output_json)
-        short_penalty = min(15.0, stamp_shorts * 0.5)
-        clearance_penalty = min(5.0, stamp_clearance * 0.1)
-        base = 20.0
-        score = round(max(0.0, base - short_penalty - clearance_penalty), 3)
-        breakdown = {
-            "not_routed_base": base,
-            "stamp_short_penalty": -short_penalty,
-            "stamp_clearance_penalty": -clearance_penalty,
-        }
-        notes = [
-            "tier=not_routed",
-            f"leaf_accepted={leaf_accepted}/{leaf_total}",
-            "parent_routed=False",
-            f"stamp_shorts={stamp_shorts}",
-            f"stamp_clearance={stamp_clearance}",
-        ]
-        tier = "not_routed"
+        # parent_routed is False because the compose subprocess exited non-zero
+        # -- usually validate_routed_board rejecting the parent. But it may have
+        # ROUTED electrically (traces present, 0 shorts, 0 unconnected) and failed
+        # acceptance only on soft DRC (clearance/dangling). Grade that case well
+        # above a true no-route, and by remaining DRC, so the optimizer keeps and
+        # descends toward the cleanest near-complete parent -- no scoring cliff
+        # for a 99%-routed board.
+        rv = parent_routed_validation or {}
+        rdrc = rv.get("drc", {}) or {}
+        rts = rv.get("track_summary", {}) or {}
+        routed_traces = int(rts.get("traces", 0) or 0)
+        routed_shorts = int(rdrc.get("shorts", 0) or 0)
+        routed_unconnected = int(rdrc.get("unconnected", 0) or 0)
+        if routed_traces > 0 and routed_shorts == 0 and routed_unconnected == 0:
+            composer_score, composer_breakdown = _read_composer_quality_score(
+                parent_output_json
+            )
+            drc_total = int(rdrc.get("total", 0) or 0)
+            drc_penalty = min(15.0, drc_total * 0.2)
+            score = round(
+                min(70.0, max(25.0, 40.0 + 0.20 * composer_score - drc_penalty)), 3
+            )
+            breakdown = {
+                "routed_dirty_base": 40.0,
+                "composer_component": round(0.20 * composer_score, 3),
+                "drc_penalty": -drc_penalty,
+                "drc_total": drc_total,
+            }
+            breakdown.update(composer_breakdown)
+            notes = [
+                "tier=routed_dirty",
+                f"routed_traces={routed_traces}",
+                "shorts=0",
+                "unconnected=0",
+                f"drc_total={drc_total}",
+                f"composer_score={composer_score:.3f}",
+            ]
+            tier = "routed_dirty"
+        else:
+            stamp_shorts, stamp_clearance = _read_stamp_drc(parent_output_json)
+            short_penalty = min(15.0, stamp_shorts * 0.5)
+            clearance_penalty = min(5.0, stamp_clearance * 0.1)
+            base = 20.0
+            score = round(max(0.0, base - short_penalty - clearance_penalty), 3)
+            breakdown = {
+                "not_routed_base": base,
+                "stamp_short_penalty": -short_penalty,
+                "stamp_clearance_penalty": -clearance_penalty,
+            }
+            notes = [
+                "tier=not_routed",
+                f"leaf_accepted={leaf_accepted}/{leaf_total}",
+                "parent_routed=False",
+                f"stamp_shorts={stamp_shorts}",
+                f"stamp_clearance={stamp_clearance}",
+            ]
+            tier = "not_routed"
     else:
         composer_score, composer_breakdown = _read_composer_quality_score(
             parent_output_json
@@ -1866,8 +1909,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--rounds",
         "-n",
         type=int,
-        default=10,
-        help="Number of hierarchical experiment rounds",
+        default=3,
+        help="Number of hierarchical experiment rounds (default 3; 3x3 leaf attempts with --leaf-rounds)",
     )
     parser.add_argument(
         "--workers",
@@ -1913,8 +1956,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--leaf-rounds",
         type=int,
-        default=1,
-        help="Leaf solve rounds per experiment round",
+        default=3,
+        help="Leaf solve rounds per experiment round (default 3; 3 rounds x 3 leaf-rounds = 9 leaf attempts)",
     )
 
     parser.add_argument(
@@ -2647,6 +2690,7 @@ def main(argv: list[str] | None = None) -> int:
             leaf_total=len(all_leafs),
             parent_routed=parent_routed,
             parent_output_json=parent_output_json,
+            parent_routed_validation=parent_routed_validation,
             timing_breakdown=dict(round_timing_breakdown),
         )
         score_round_elapsed_s = _record_timing(
