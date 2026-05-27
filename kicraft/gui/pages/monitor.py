@@ -50,6 +50,14 @@ def monitor_page():
     # value, and the local clock visibly snaps back -- the 0s/1s toggle.
     run_timing: dict = {"start_monotonic": None, "last_backend_elapsed": -1.0}
 
+    # Cache key (mtime_ns, size) for experiments.jsonl so the full
+    # re-read+parse in _update_status is skipped on ticks where the file is
+    # unchanged. That read is the dominant per-tick cost and a major
+    # contributor to the event-loop stalls that trip spurious websocket
+    # disconnects (which used to freeze the dashboard -- see the timer
+    # pause/resume note below).
+    jsonl_stat: dict = {"key": None}
+
     # Parent-round selection: None = auto-track best; int = user pinned a round.
     selected_parent_round: dict = {"value": None, "user_pinned": False}
     prev_parent_score_fp: dict = {"value": ""}
@@ -488,31 +496,45 @@ def monitor_page():
                 parent_only_tooltip.text = tip
                 parent_only_tooltip.update()
 
-        # Full re-read every poll. experiments.jsonl is unconditionally
-        # truncated by autoexperiment at startup, so reading the whole file
-        # always reflects the current run. The previous incremental
-        # `read_latest_rounds(since_round=N)` optimization saved ~50KB of I/O
-        # but silently kept stale rounds from prior runs cached in
-        # `live_rounds` whenever a new run started outside the GUI (CLI).
-        fresh_rounds = runner.read_latest_rounds(0)
+        # Re-read experiments.jsonl only when it actually changed
+        # (mtime+size). The full re-read+parse is the heaviest part of each
+        # tick; doing it unconditionally every 2s is a primary cause of a
+        # round-end tick overrunning the ping timeout. When unchanged, keep
+        # the cached live_rounds untouched.
+        #
+        # experiments.jsonl is unconditionally truncated by autoexperiment at
+        # startup, so a full read always reflects the current run -- and the
+        # mtime/size change from that truncation (and from each appended
+        # round) is exactly what re-triggers the read here. The full read
+        # (vs incremental read_latest_rounds(since_round=N)) also avoids
+        # silently keeping stale rounds cached when a run starts via the CLI.
+        jsonl_path = state.experiments_dir / "experiments.jsonl"
+        try:
+            _st = jsonl_path.stat()
+            jsonl_key = (_st.st_mtime_ns, _st.st_size)
+        except OSError:
+            jsonl_key = None
+        if jsonl_key != jsonl_stat["key"]:
+            jsonl_stat["key"] = jsonl_key
+            fresh_rounds = runner.read_latest_rounds(0)
 
-        # Detect new run via identity: round count or first-round seed
-        # changed. On change, drop the in-memory cache and reset selection.
-        cached_signature = (
-            len(live_rounds),
-            live_rounds[0].get("seed") if live_rounds else None,
-        )
-        fresh_signature = (
-            len(fresh_rounds),
-            fresh_rounds[0].get("seed") if fresh_rounds else None,
-        )
-        if cached_signature != fresh_signature:
-            live_rounds.clear()
-            live_rounds.extend(fresh_rounds)
-            if not selected_parent_round["user_pinned"]:
-                selected_parent_round["value"] = pick_best_round(live_rounds)
-            # Force chart redraw next pass.
-            prev_parent_score_fp["value"] = ""
+            # Detect new run via identity: round count or first-round seed
+            # changed. On change, drop the in-memory cache and reset selection.
+            cached_signature = (
+                len(live_rounds),
+                live_rounds[0].get("seed") if live_rounds else None,
+            )
+            fresh_signature = (
+                len(fresh_rounds),
+                fresh_rounds[0].get("seed") if fresh_rounds else None,
+            )
+            if cached_signature != fresh_signature:
+                live_rounds.clear()
+                live_rounds.extend(fresh_rounds)
+                if not selected_parent_round["user_pinned"]:
+                    selected_parent_round["value"] = pick_best_round(live_rounds)
+                # Force chart redraw next pass.
+                prev_parent_score_fp["value"] = ""
 
         # Redraw the parent chart only when its contents changed (new rounds,
         # selection flip, or pin state change).
@@ -617,21 +639,36 @@ def monitor_page():
 
     timing_timer = ui.timer(1.0, _update_timing)
 
-    # Stop the timers when the client disconnects so their _run_in_loop
-    # doesn't tick into a deleted parent_slot weakref and spam
-    # "The parent slot of the element has been deleted" tracebacks
-    # to the terminal on every page reload. NiceGUI's own _should_stop
-    # check happens AFTER _get_context() inside the loop, so a fresh
-    # tick whose parent was GC'd between _can_start() and
-    # _get_context() always raises before the stop check runs.
-    def _stop_timers() -> None:
+    # PAUSE (don't cancel) the timers while the websocket is disconnected,
+    # then RESUME them on reconnect. NiceGUI fires on_disconnect handlers
+    # immediately on any socket drop (client.handle_disconnect) -- including
+    # the transient drop a heavy round-end tick causes when it blocks the
+    # event loop past the Socket.IO ping timeout. Timer.cancel() is
+    # PERMANENT (activate() asserts `not _is_canceled`), so cancelling here
+    # froze the dashboard after such a reconnect until a full page reload
+    # built new timers -- the "stalls after the first round" symptom.
+    # deactivate()/activate() is the pausable API: ticking stops while
+    # disconnected and resumes when the browser reconnects, so live updates
+    # survive the reconnect. (The "deleted parent_slot" traceback the old
+    # cancel() guarded against no longer occurs: NiceGUI 3.x
+    # Timer._get_context() returns nullcontext() and never touches
+    # parent_slot.)
+    def _pause_timers() -> None:
         for t in (status_timer, timing_timer):
             try:
-                t.cancel()
+                t.deactivate()
             except Exception:
                 pass
 
-    ui.context.client.on_disconnect(_stop_timers)
+    def _resume_timers() -> None:
+        for t in (status_timer, timing_timer):
+            try:
+                t.activate()
+            except Exception:
+                pass
+
+    ui.context.client.on_disconnect(_pause_timers)
+    ui.context.client.on_connect(_resume_timers)
 
     async def _start(phase: str | None = None):
         try:

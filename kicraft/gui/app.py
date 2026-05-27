@@ -58,8 +58,14 @@ def _mount_experiment_assets() -> None:
     """
     state = get_state()
     experiments_dir = state.experiments_dir
-    if experiments_dir.is_dir():
-        app.add_static_files("/experiments", str(experiments_dir))
+    # Create the dir before mounting so the static route is ALWAYS
+    # registered. add_static_files runs once at startup; if .experiments/
+    # does not exist yet (fresh project, GUI launched before the first
+    # run), a guarded mount is skipped and every render <img> 404s even
+    # after a later run creates the dir. mkdir keeps the mount
+    # unconditional; it is idempotent when the dir already exists.
+    experiments_dir.mkdir(parents=True, exist_ok=True)
+    app.add_static_files("/experiments", str(experiments_dir))
 
 
 _mount_experiment_assets()
