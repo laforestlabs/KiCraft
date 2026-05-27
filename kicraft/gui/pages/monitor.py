@@ -617,21 +617,36 @@ def monitor_page():
 
     timing_timer = ui.timer(1.0, _update_timing)
 
-    # Stop the timers when the client disconnects so their _run_in_loop
-    # doesn't tick into a deleted parent_slot weakref and spam
-    # "The parent slot of the element has been deleted" tracebacks
-    # to the terminal on every page reload. NiceGUI's own _should_stop
-    # check happens AFTER _get_context() inside the loop, so a fresh
-    # tick whose parent was GC'd between _can_start() and
-    # _get_context() always raises before the stop check runs.
-    def _stop_timers() -> None:
+    # PAUSE (don't cancel) the timers while the websocket is disconnected,
+    # then RESUME them on reconnect. NiceGUI fires on_disconnect handlers
+    # immediately on any socket drop (client.handle_disconnect) -- including
+    # the transient drop a heavy round-end tick causes when it blocks the
+    # event loop past the Socket.IO ping timeout. Timer.cancel() is
+    # PERMANENT (activate() asserts `not _is_canceled`), so cancelling here
+    # froze the dashboard after such a reconnect until a full page reload
+    # built new timers -- the "stalls after the first round" symptom.
+    # deactivate()/activate() is the pausable API: ticking stops while
+    # disconnected and resumes when the browser reconnects, so live updates
+    # survive the reconnect. (The "deleted parent_slot" traceback the old
+    # cancel() guarded against no longer occurs: NiceGUI 3.x
+    # Timer._get_context() returns nullcontext() and never touches
+    # parent_slot.)
+    def _pause_timers() -> None:
         for t in (status_timer, timing_timer):
             try:
-                t.cancel()
+                t.deactivate()
             except Exception:
                 pass
 
-    ui.context.client.on_disconnect(_stop_timers)
+    def _resume_timers() -> None:
+        for t in (status_timer, timing_timer):
+            try:
+                t.activate()
+            except Exception:
+                pass
+
+    ui.context.client.on_disconnect(_pause_timers)
+    ui.context.client.on_connect(_resume_timers)
 
     async def _start(phase: str | None = None):
         try:

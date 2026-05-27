@@ -18,4 +18,12 @@ ui.run(
     port=8080,
     reload=False,
     show=True,
+    # A heavy round-end tick on the Monitor page can block the event loop
+    # for a few seconds. NiceGUI derives the Socket.IO ping timeout from
+    # this value (ping_timeout = max(reconnect_timeout*0.4, 2)), so the
+    # default 3s yields a ~2s timeout and such a tick trips a spurious
+    # disconnect/reconnect. Widening the window keeps the socket alive
+    # across those stalls; monitor.py's timer pause/resume makes any
+    # reconnect that does happen non-fatal.
+    reconnect_timeout=8.0,
 )
