@@ -182,7 +182,12 @@ DEFAULT_CONFIG = {
     # safety -- and reduces the track width to freerouting_fine_pitch_track_mm
     # so a trace can escape. Set freerouting_clearance_mm to force a value.
     "freerouting_clearance_mm": None,
-    "freerouting_min_clearance_mm": 0.1,
+    # Floor for the fine-pitch clearance auto-lower. Must be >= the fab spacing
+    # floor (OSH Park 6 mil = 0.1524 mm). 0.1 let the auto-lower route the WHOLE
+    # board down to ~0.10 mm (sub-floor, unmanufacturable) just to escape the
+    # USB-C. 0.153 mm rounds to 153 µm in the DSN (>= 6 mil). USB-C pads tighter
+    # than this need a LOCAL clearance exception, not a global sub-floor drop.
+    "freerouting_min_clearance_mm": 0.153,
     # Fine-pitch escape track width. It is written to the DSN as integer microns
     # (int(round(mm*1000))), and KiCad's track-width DRC floor is
     # min_track_width = 0.1524 mm (6 mil, the OSH Park 2-layer minimum). 0.15 mm

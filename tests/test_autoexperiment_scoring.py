@@ -144,6 +144,72 @@ class TestScoreRoundTiers:
         assert breakdown["stamp_short_penalty"] == -15.0
         assert breakdown["stamp_clearance_penalty"] == -5.0
 
+    def test_routed_dirty_tier_scores_above_not_routed(self, tmp_path: Path):
+        # Electrically complete (traces, 0 shorts, 0 unconnected) but rejected on
+        # soft DRC -> routed_dirty tier, scored well above the not_routed cap (20)
+        # so the optimizer keeps a 99%-routed parent instead of discarding it.
+        path = _write_parent_pipeline(tmp_path, 80.0)
+        rv = {
+            "track_summary": {"traces": 286},
+            "drc": {"shorts": 0, "unconnected": 0, "total": 50},
+        }
+        score, breakdown, notes, tier = _score_round(
+            leaf_accepted=6,
+            leaf_total=6,
+            parent_routed=False,
+            parent_output_json=path,
+            parent_routed_validation=rv,
+        )
+        assert tier == "routed_dirty"
+        assert score > 20.0
+        # 40 + 0.20*80 - min(15, 50*0.2=10) = 40 + 16 - 10 = 46
+        assert score == pytest.approx(46.0)
+        assert any("tier=routed_dirty" in n for n in notes)
+
+    def test_routed_dirty_grades_by_remaining_drc(self, tmp_path: Path):
+        # Fewer post-route DRC violations -> higher score: a gradient to descend
+        # toward a clean board (the whole point -- no flat cliff).
+        path = _write_parent_pipeline(tmp_path, 80.0)
+
+        def rv(total):
+            return {
+                "track_summary": {"traces": 286},
+                "drc": {"shorts": 0, "unconnected": 0, "total": total},
+            }
+
+        dirty, *_ = _score_round(
+            leaf_accepted=6,
+            leaf_total=6,
+            parent_routed=False,
+            parent_output_json=path,
+            parent_routed_validation=rv(60),
+        )
+        cleaner, *_ = _score_round(
+            leaf_accepted=6,
+            leaf_total=6,
+            parent_routed=False,
+            parent_output_json=path,
+            parent_routed_validation=rv(5),
+        )
+        assert cleaner > dirty
+
+    def test_routed_with_unconnected_is_not_routed_dirty(self, tmp_path: Path):
+        # Not electrically complete (unconnected nets) stays not_routed --
+        # routed_dirty is reserved for a fully-connected parent.
+        path = _write_parent_pipeline(tmp_path, 80.0)
+        rv = {
+            "track_summary": {"traces": 200},
+            "drc": {"shorts": 0, "unconnected": 3, "total": 10},
+        }
+        _, _, _, tier = _score_round(
+            leaf_accepted=6,
+            leaf_total=6,
+            parent_routed=False,
+            parent_output_json=path,
+            parent_routed_validation=rv,
+        )
+        assert tier == "not_routed"
+
     def test_partial_leaves_tier_proportional(self, tmp_path: Path):
         path = _write_parent_pipeline(tmp_path, 75.0)
         score, breakdown, _, tier = _score_round(
