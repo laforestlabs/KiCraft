@@ -61,17 +61,35 @@ def _resolve_pcb_path(
 
     if experiments_dir is None:
         return None
+    # If the displayed render is the pre-route stamped view, open the
+    # matching pre-FR board; otherwise default to the routed board.
+    want_stamped = "parent_stamped" in (displayed_src or "")
+    stem = "parent_pre_freerouting" if want_stamped else "parent_routed"
+    pcb_name = f"{stem}.kicad_pcb"
     round_num = _displayed_round_from_path(displayed_src)
     if round_num is not None:
         # Per-round parent PCBs live in the parent-composition
         # subcircuit dir (named ``subcircuit__<hash>``), alongside the
-        # canonical ``parent_routed.kicad_pcb``.
+        # canonical parent PCBs. Round-prefixed snapshots are emitted
+        # only when an artifact promotion path runs; the canonical
+        # files are present after every compose round.
         for snap in (experiments_dir / "subcircuits").glob(
-            f"subcircuit__*/round_{round_num:04d}_parent_routed.kicad_pcb"
+            f"subcircuit__*/round_{round_num:04d}_{stem}.kicad_pcb"
         ):
             if snap.is_file():
                 return snap
-    return experiments_dir / "best" / "parent_routed.kicad_pcb"
+    best = experiments_dir / "best" / pcb_name
+    if best.is_file():
+        return best
+    # Last resort: the canonical parent PCB in any subcircuit__* dir
+    # (the latest compose run's output, present even when the round
+    # was rejected and never promoted to best/).
+    for snap in (experiments_dir / "subcircuits").glob(
+        f"subcircuit__*/{pcb_name}"
+    ):
+        if snap.is_file():
+            return snap
+    return None
 
 
 def _open_in_kicad(pcb_path: Path | None) -> None:

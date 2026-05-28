@@ -437,9 +437,14 @@ def gather_pipeline_state(
     # The four-layer fallback (per-round dir -> run_status preview_paths ->
     # hierarchical_pipeline canonical -> last-resort subcircuits scan) lives
     # in RenderIndex.parent_render so this site no longer re-implements it.
+    # Always prefer the routed render when it exists -- FR can produce a
+    # post-route PNG even on rejected rounds (accept-gate rejections, dirty
+    # DRC, single-net failures), and that geometry is what the user needs
+    # to see. parent_render falls back to the stamped PNG automatically
+    # when the routed one is missing (e.g. FR skipped on stamp_shorts).
     _parent_path = render_index.parent_render(
         round_index=status_round,
-        prefer_routed=round_parent_routed is not False,
+        prefer_routed=True,
         preview_paths=preview_paths,
     )
     if _parent_path is not None:
