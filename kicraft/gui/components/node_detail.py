@@ -66,29 +66,43 @@ def _resolve_pcb_path(
     want_stamped = "parent_stamped" in (displayed_src or "")
     stem = "parent_pre_freerouting" if want_stamped else "parent_routed"
     pcb_name = f"{stem}.kicad_pcb"
+    subcircuits_dir = experiments_dir / "subcircuits"
+
+    def _newest(pattern: str) -> Path | None:
+        # Most-recently-modified match. Path.glob has no defined ordering,
+        # and after a re-synth that flips the parent-composition hash
+        # multiple subcircuit__* dirs can coexist -- mtime breaks the tie
+        # deterministically toward the latest compose output.
+        matches = [p for p in subcircuits_dir.glob(pattern) if p.is_file()]
+        if not matches:
+            return None
+        return max(matches, key=lambda p: p.stat().st_mtime)
+
+    # Tier 1: round-prefixed snapshot for the displayed round, when an
+    # artifact-promotion path emitted one. Common case falls through.
     round_num = _displayed_round_from_path(displayed_src)
     if round_num is not None:
-        # Per-round parent PCBs live in the parent-composition
-        # subcircuit dir (named ``subcircuit__<hash>``), alongside the
-        # canonical parent PCBs. Round-prefixed snapshots are emitted
-        # only when an artifact promotion path runs; the canonical
-        # files are present after every compose round.
-        for snap in (experiments_dir / "subcircuits").glob(
-            f"subcircuit__*/round_{round_num:04d}_{stem}.kicad_pcb"
-        ):
-            if snap.is_file():
-                return snap
-    best = experiments_dir / "best" / pcb_name
-    if best.is_file():
-        return best
-    # Last resort: the canonical parent PCB in any subcircuit__* dir
-    # (the latest compose run's output, present even when the round
-    # was rejected and never promoted to best/).
-    for snap in (experiments_dir / "subcircuits").glob(
-        f"subcircuit__*/{pcb_name}"
-    ):
-        if snap.is_file():
+        snap = _newest(f"subcircuit__*/round_{round_num:04d}_{stem}.kicad_pcb")
+        if snap is not None:
             return snap
+
+    # Tier 2: newest canonical parent PCB across all subcircuit__* dirs --
+    # the latest compose run's output, present even when the round was
+    # rejected and never promoted to best/. Preferred over best/ so that
+    # clicking Open on a rejected round's render opens that round's PCB,
+    # not the last *accepted* round's.
+    canonical = _newest(f"subcircuit__*/{pcb_name}")
+    if canonical is not None:
+        return canonical
+
+    # Tier 3: best/ holds the last accepted routed board. Only routed
+    # boards are promoted to best/ (autoexperiment never writes a
+    # parent_pre_freerouting there), so this tier is skipped for the
+    # stamped view.
+    if not want_stamped:
+        best = experiments_dir / "best" / pcb_name
+        if best.is_file():
+            return best
     return None
 
 
