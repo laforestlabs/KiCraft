@@ -120,10 +120,14 @@ def write_empty_pcb(
             fp = fps_by_ref.get(ep.ref)
             if fp is None:
                 continue
-            pad = fp.FindPadByNumber(ep.pin)
-            if pad is None:
-                continue
-            pad.SetNetCode(net_code)
+            # KiCad treats every pad sharing a number as electrically one node
+            # (split thermal pads, dual-terminal tactile switches, etc.);
+            # FindPadByNumber returns only the first match and leaves the
+            # remaining instances on no net, which trips DRC against any
+            # copper that legitimately occupies the shared area.
+            for pad in fp.Pads():
+                if pad.GetNumber() == ep.pin:
+                    pad.SetNetCode(net_code)
 
     _draw_board_outline(pcbnew, board, fps_by_ref.values())
 

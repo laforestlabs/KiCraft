@@ -95,6 +95,24 @@ def main(argv: list[str]) -> int:
     _all_tracks = list(board.GetTracks())
     _all_zones = list(board.Zones())
 
+    # Propagate net codes across same-numbered pads. KiCad treats every pad
+    # sharing a number (split thermal pads, dual-terminal tactile switches)
+    # as one electrical node, but boards generated through FindPadByNumber
+    # leave the duplicate instances on no net; DRC then flags them against
+    # the copper that legitimately covers the shared area.
+    for _fp in _all_footprints:
+        _pads = list(_fp.Pads())
+        _net_for_num: dict[str, int] = {}
+        for _pad in _pads:
+            _nc = _pad.GetNetCode()
+            if _nc:
+                _net_for_num.setdefault(_pad.GetNumber(), _nc)
+        for _pad in _pads:
+            if _pad.GetNetCode() == 0:
+                _nc = _net_for_num.get(_pad.GetNumber())
+                if _nc:
+                    _pad.SetNetCode(_nc)
+
     # --- rewrite board outline (Edge.Cuts) ---
     # Strip every loose drawing -- we rebuild Edge.Cuts + silk from
     # the payload below.
