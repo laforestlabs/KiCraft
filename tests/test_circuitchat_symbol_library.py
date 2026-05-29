@@ -5,6 +5,7 @@ Skip the file if that directory isn't present (e.g. on machines without KiCad).
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,35 @@ def test_extract_resolves_extends_chain() -> None:
     text = extract_symbol_block("Device", "C_Small")
     assert text.startswith('(symbol "Device:C_Small"')
     assert "(extends " not in text
+
+
+def test_extract_renames_inherited_subunits() -> None:
+    # A derived (extends) symbol inherits the base's unit/body-style
+    # sub-symbols, which KiCad names `<parent>_<unit>_<body>`. They MUST be
+    # re-prefixed with the DERIVED name, or KiCad rejects the embedded symbol
+    # and the sheet that uses it loads empty (no components, dangling
+    # inter-sheet labels). Regression: Device:C_Small extends Device:C, so its
+    # bodies must be `C_Small_*`, never the base `C_0_*`/`C_1_*`.
+    text = extract_symbol_block("Device", "C_Small")
+    subunits = re.findall(r'\(symbol "([A-Za-z0-9_.+\-]+_\d+_\d+)"', text)
+    assert subunits, "expected unit/body sub-symbols in a multi-unit symbol"
+    assert all(su.startswith("C_Small_") for su in subunits), subunits
+    # the base-named bodies must not survive the rename
+    assert '(symbol "C_0_' not in text
+    assert '(symbol "C_1_' not in text
+
+
+def test_extract_renames_subunits_when_base_differs() -> None:
+    # USBLC6-2SC6 extends USBLC6-2P6 in the stock Power_Protection lib — the
+    # case that originally broke synthesis. The derived name does NOT begin
+    # with the base name, so this guards the non-prefix path.
+    if not (DEFAULT_KICAD_SYMBOL_DIR / "Power_Protection.kicad_sym").is_file():
+        pytest.skip("Power_Protection library not installed")
+    text = extract_symbol_block("Power_Protection", "USBLC6-2SC6")
+    subunits = re.findall(r'\(symbol "([A-Za-z0-9_.+\-]+_\d+_\d+)"', text)
+    assert subunits
+    assert all(su.startswith("USBLC6-2SC6_") for su in subunits), subunits
+    assert '(symbol "USBLC6-2P6' not in text
 
 
 def test_extract_does_not_prefix_match() -> None:
