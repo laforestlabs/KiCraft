@@ -18,6 +18,7 @@ import pytest
 from kicraft.circuitchat.models import (
     BOM,
     Architecture,
+    ArraySpec,
     BomPart,
     ConversationState,
     FunctionalBlock,
@@ -146,6 +147,41 @@ def test_synthesis_passes_all_validations(tmp_path, llups_like_state) -> None:
     run(llups_like_state, tmp_path)
     # Re-run the aggregator on disk; it raises on failure.
     run_validations(tmp_path, "DEMO33")
+
+
+def _led_array_arch_bom() -> tuple[Architecture, BOM]:
+    arch = Architecture(
+        sheets=[Sheet(name="LED MATRIX", stem="LED_MATRIX", function="LED array")],
+        power_nets=["VBUS", "GND"],
+        inter_sheet_nets=[],
+    )
+    parts = [
+        BomPart(ref=f"D{i}", value="LED", symbol="L:LED", footprint="L:LED",
+                sheet="LED MATRIX")
+        for i in range(1, 5)
+    ]
+    return arch, BOM(parts=parts)
+
+
+def test_autoplacer_json_includes_arrays(tmp_path) -> None:
+    from kicraft.circuitchat.synthesis.autoplacer import write_autoplacer_json
+
+    arch, bom = _led_array_arch_bom()
+    bom.arrays = [ArraySpec(refs=["D1", "D2", "D3", "D4"], rows=2, cols=2, pitch_mm=3.0)]
+    out = write_autoplacer_json(tmp_path, "DEMO", arch, bom)
+    data = json.loads(out.read_text())
+    assert data["arrays"] == [
+        {"refs": ["D1", "D2", "D3", "D4"], "rows": 2, "cols": 2,
+         "pitch_mm": 3.0, "serpentine": True}
+    ]
+
+
+def test_autoplacer_json_omits_arrays_when_empty(tmp_path) -> None:
+    from kicraft.circuitchat.synthesis.autoplacer import write_autoplacer_json
+
+    arch, bom = _led_array_arch_bom()
+    out = write_autoplacer_json(tmp_path, "DEMO", arch, bom)
+    assert "arrays" not in json.loads(out.read_text())
 
 
 def test_synthesis_refs_match_autoplacer_named_refs(tmp_path, llups_like_state) -> None:

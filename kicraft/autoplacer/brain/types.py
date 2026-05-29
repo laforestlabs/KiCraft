@@ -109,6 +109,12 @@ class Component:
     height_mm: float  # courtyard bbox height
     pads: list[Pad] = field(default_factory=list)
     locked: bool = False
+    # True for members of a programmatically-placed array/matrix grid (see
+    # brain/array_placement.py). Such grids are intentionally positioned and
+    # self-legal by construction; the overlap legalizer must NOT try to resolve
+    # overlaps among them (a dense locked grid would thrash the O(n^2) escape
+    # passes and never reach a "legal" state).
+    array_member: bool = False
     kind: str = ""  # "connector", "mounting_hole", "ic", "passive", "misc"
     is_through_hole: bool = False  # True if footprint has PTH pads
     body_center: Point | None = None  # courtyard/body bbox center (absolute coords)

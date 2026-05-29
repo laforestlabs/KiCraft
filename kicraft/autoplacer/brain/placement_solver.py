@@ -633,6 +633,29 @@ class PlacementSolver:
         work_state = copy.copy(self.state)
         work_state.components = comps
 
+        # Matrix/array leaves: place repeated-component grids (e.g. an LED
+        # matrix) deterministically as a serpentine grid and skip the
+        # force/SA solver, which does not converge at array scale. The array
+        # hint rides in cfg["arrays"] (from autoplacer.json). Members are
+        # locked; when only simple passives remain they're placed in a strip
+        # and the whole leaf is handled here.
+        from kicraft.autoplacer.brain.array_placement import place_array_leaves
+
+        array_refs, array_fully_handled = place_array_leaves(
+            comps, self.cfg.get("arrays", []) or [], self.cfg
+        )
+        if array_refs:
+            print(
+                f"  Grid-placed {len(array_refs)} array member(s)"
+                + (
+                    "; only passives remain -> skipping force/SA"
+                    if array_fully_handled
+                    else " (locked, excluded from force/SA)"
+                )
+            )
+        if array_fully_handled:
+            return comps
+
         # Detect alignment groups from the INITIAL component positions.
         # SA refinement happily scrambles paired components (parallel
         # batteries, header arrays, LED rows) far enough apart that
@@ -3185,6 +3208,15 @@ class PlacementSolver:
                     if b.locked and getattr(a, "block_stacked_anchor", None) == refs[j]:
                         continue
 
+                    # Array-grid members are intentionally placed on a fixed
+                    # grid and are self-legal by construction; never escape one
+                    # grid member from another. A dense locked array would
+                    # otherwise thrash this O(n^2) escape loop indefinitely.
+                    if getattr(a, "array_member", False) and getattr(
+                        b, "array_member", False
+                    ):
+                        continue
+
                     if a.locked and b.locked:
                         zones = self.cfg.get("component_zones", {})
                         a_pinned = refs[i] in zones and (
@@ -3261,6 +3293,10 @@ class PlacementSolver:
                 b_tl, b_br = _effective_bbox(b, half_gap)
                 ox, oy = _bbox_overlap_xy(a_tl, a_br, b_tl, b_br)
                 if ox > 0.0 and oy > 0.0:
+                    # Intentional array-grid neighbours: their clearance-zone
+                    # overlap is by design, not an illegality.
+                    if a.array_member and b.array_member:
+                        continue
                     involves_locked = a.locked or b.locked
                     if involves_locked:
                         locked_overlap_count += 1

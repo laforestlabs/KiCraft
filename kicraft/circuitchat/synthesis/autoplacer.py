@@ -80,6 +80,23 @@ def write_autoplacer_json(
     if component_zones:
         body["component_zones"] = component_zones
 
+    # Matrix/array placement hints. The autoplacer grids these members
+    # programmatically (serpentine) instead of running force/SA over them.
+    # autoplacer.json is the project config, so this key merges straight into
+    # the solver cfg (see autoplacer/config.discover_project_config).
+    arrays = [
+        {
+            "refs": list(spec.refs),
+            "rows": spec.rows,
+            "cols": spec.cols,
+            "pitch_mm": spec.pitch_mm,
+            "serpentine": spec.serpentine,
+        }
+        for spec in bom.arrays
+    ]
+    if arrays:
+        body["arrays"] = arrays
+
     if library_leaves:
         body["library_leaves"] = library_leaves
 
