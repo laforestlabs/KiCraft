@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import re
 import shutil
 import time
 from pathlib import Path
 from typing import Any
 
+from kicraft.autoplacer.brain.array_placement import leaf_is_fully_array
 from kicraft.autoplacer.brain.leaf_geometry import repair_leaf_placement_legality
 from kicraft.autoplacer.brain.subcircuit_artifacts import resolve_artifact_paths
 from kicraft.autoplacer.brain.subcircuit_extractor import ExtractedSubcircuitBoard
@@ -79,6 +82,37 @@ def _outline_around_geometry(
         Point(bbox["min_x"] - edge_margin, bbox["min_y"] - edge_margin),
         Point(bbox["max_x"] + edge_margin, bbox["max_y"] + edge_margin),
     )
+
+
+def _deterministic_route_signature(
+    board_state: Any, cfg: dict[str, Any], jar_path: Any
+) -> str:
+    """Stable hash of a leaf's placement + routing-relevant config.
+
+    Two solves of a deterministic leaf with the same grid placement and the
+    same routing knobs produce identical copper, so they share a cache key and
+    freerouting runs only once. ``freerouting_timeout_s`` is excluded — it only
+    bounds how long the router may run, not the result.
+    """
+    comps = sorted(board_state.components.values(), key=lambda c: c.ref)
+    placement = [
+        (c.ref, round(c.pos.x, 3), round(c.pos.y, 3),
+         round(float(c.rotation), 1), int(c.layer))
+        for c in comps
+    ]
+    tl, br = board_state.board_outline
+    route_keys = {
+        k: v for k, v in cfg.items()
+        if (("freerouting" in k and "timeout" not in k)
+            or "clearance" in k or "track" in k)
+    }
+    blob = json.dumps(
+        [placement,
+         [round(tl.x, 3), round(tl.y, 3), round(br.x, 3), round(br.y, 3)],
+         Path(str(jar_path)).name, route_keys],
+        sort_keys=True, default=str,
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
 def route_local_subcircuit(
@@ -400,12 +434,39 @@ def route_local_subcircuit(
     leaf_routing_cfg["freerouting_timeout_s"] = min(
         _timeout_cap, max(_base_timeout, int(_n_leaf_comps * _per_comp))
     )
-    freerouting_stats = route_with_freerouting(
-        str(pre_route_board),
-        str(routed_board),
-        str(jar_path),
-        leaf_routing_cfg,
-    )
+    # Route cache: a deterministic leaf (e.g. an array grid) has the same
+    # placement every round, so re-running freerouting on it is wasted minutes.
+    # Key a cache on the placement + routing-relevant config and reuse the
+    # routed board on a hit. Gated to deterministic leaves so normal (force/SA)
+    # leaves — whose placement varies each round by design — are unaffected.
+    _cache_pcb = None
+    _cache_meta = None
+    if leaf_is_fully_array(route_input_board.components, cfg.get("arrays", [])):
+        _sig = _deterministic_route_signature(
+            route_input_board, leaf_routing_cfg, jar_path
+        )
+        _cache_dir = Path(artifact_paths.artifact_dir) / "route_cache"
+        _cache_pcb = _cache_dir / f"{_sig}.kicad_pcb"
+        _cache_meta = _cache_dir / f"{_sig}.json"
+    if _cache_pcb is not None and _cache_pcb.exists() and _cache_meta.exists():
+        shutil.copyfile(_cache_pcb, routed_board)
+        freerouting_stats = json.loads(_cache_meta.read_text())
+        freerouting_stats["route_cache_hit"] = True
+        print(
+            "  [route-cache] deterministic leaf unchanged -> reused routed "
+            "board (skipped freerouting)"
+        )
+    else:
+        freerouting_stats = route_with_freerouting(
+            str(pre_route_board),
+            str(routed_board),
+            str(jar_path),
+            leaf_routing_cfg,
+        )
+        if _cache_pcb is not None:
+            _cache_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(routed_board, _cache_pcb)
+            _cache_meta.write_text(json.dumps(freerouting_stats))
     route_timing["freerouting_s"] = round(
         max(0.0, time.monotonic() - freerouting_start), 3
     )

@@ -40,6 +40,28 @@ def _pitch(members: list[Component], spec: dict, gap: float) -> tuple[float, flo
     return px, py
 
 
+def leaf_is_fully_array(comps: dict[str, Component], arrays: list[dict]) -> bool:
+    """True if this leaf is one or more full array grids plus only simple
+    two-terminal passives — i.e. ``place_array_leaves`` would fully handle it.
+
+    Such a leaf is placed deterministically (grid, no force/SA), so its routing
+    is identical every round; callers use this to avoid re-routing it. Pure
+    predicate — does not mutate ``comps``.
+    """
+    covered: set[str] = set()
+    for spec in arrays or []:
+        refs = list(spec.get("refs", []))
+        rows = int(spec.get("rows", 0))
+        cols = int(spec.get("cols", 0))
+        if (refs and rows > 0 and cols > 0 and rows * cols == len(refs)
+                and all(r in comps for r in refs)):
+            covered.update(refs)
+    if not covered:
+        return False
+    remaining = [r for r in comps if r not in covered]
+    return all(len(comps[r].pads) <= 2 for r in remaining)
+
+
 def place_array_leaves(
     comps: dict[str, Component], arrays: list[dict], cfg: dict
 ) -> tuple[set[str], bool]:
