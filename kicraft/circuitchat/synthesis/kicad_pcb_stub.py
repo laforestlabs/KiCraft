@@ -112,22 +112,30 @@ def write_empty_pcb(
         board.Add(fp)
         fps_by_ref[part.ref] = fp
 
+    # Precompute pads grouped by (ref, number) once so the inner endpoint
+    # loop is O(1) hashed lookup instead of O(P) linear scan. KiCad treats
+    # every pad sharing a number as electrically one node (split thermal
+    # pads, dual-terminal tactile switches), so all matching instances --
+    # not just the first -- must carry the net or DRC flags the shared
+    # copper. Empty-number pads (mounting holes / NPTH) are excluded so
+    # unrelated standoffs never get bucketed together.
+    pads_by_ref_num: dict[str, dict[str, list]] = {}
+    for ref, fp in fps_by_ref.items():
+        by_num: dict[str, list] = {}
+        for pad in list(fp.Pads()):
+            num = pad.GetNumber()
+            if not num:
+                continue
+            by_num.setdefault(num, []).append(pad)
+        pads_by_ref_num[ref] = by_num
+
     for conn in bom.connections:
         net = pcbnew.NETINFO_ITEM(board, conn.net_name)
         board.Add(net)
         net_code = net.GetNetCode()
         for ep in conn.endpoints:
-            fp = fps_by_ref.get(ep.ref)
-            if fp is None:
-                continue
-            # KiCad treats every pad sharing a number as electrically one node
-            # (split thermal pads, dual-terminal tactile switches, etc.);
-            # FindPadByNumber returns only the first match and leaves the
-            # remaining instances on no net, which trips DRC against any
-            # copper that legitimately occupies the shared area.
-            for pad in fp.Pads():
-                if pad.GetNumber() == ep.pin:
-                    pad.SetNetCode(net_code)
+            for pad in pads_by_ref_num.get(ep.ref, {}).get(ep.pin, ()):
+                pad.SetNetCode(net_code)
 
     _draw_board_outline(pcbnew, board, fps_by_ref.values())
 

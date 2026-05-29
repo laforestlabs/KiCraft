@@ -63,37 +63,25 @@ def _have_external_tools() -> bool:
 
 
 def _extract_footprint_centers(pcb: Path) -> list[tuple[str, float, float]]:
-    """Return ``[(ref, x_mm, y_mm), ...]`` from the .kicad_pcb. Uses the
-    same s-expression walk as ``tools/render_diff.py`` -- kept inline so
-    the test has no dependency on a script under tools/."""
-    import re
-
-    text = pcb.read_text(encoding="utf-8")
+    """Return ``[(ref, x_mm, y_mm), ...]`` for front-side footprints in
+    the .kicad_pcb. Uses ``pcbnew.LoadBoard`` so the test's ground truth
+    is the same parser KiCad itself uses -- no inline s-expression walker
+    to drift against format changes, no regex fragility around parens
+    inside property strings or long property tables. Back-side footprints
+    are excluded because the front_all render preset doesn't draw
+    B.SilkS / B.CrtYd, so projecting their centers would compare against
+    pure substrate."""
+    board = pcbnew.LoadBoard(str(pcb))
     out: list[tuple[str, float, float]] = []
-    i = 0
-    while True:
-        m = re.search(r"\(footprint ", text[i:])
-        if not m:
-            break
-        start = i + m.start()
-        depth = 0
-        fp = ""
-        for j in range(start, len(text)):
-            if text[j] == "(":
-                depth += 1
-            elif text[j] == ")":
-                depth -= 1
-                if depth == 0:
-                    fp = text[start:j + 1]
-                    i = j + 1
-                    break
-        else:
-            break
-        ref_m = re.search(r'\(property "Reference" "([^"]+)"', fp)
-        at_m = re.search(r"\(at ([\d.-]+) ([\d.-]+)", fp[:400])
-        if not (ref_m and at_m):
+    for fp in board.GetFootprints():
+        if fp.IsFlipped():
             continue
-        out.append((ref_m.group(1), float(at_m.group(1)), float(at_m.group(2))))
+        pos = fp.GetPosition()
+        out.append((
+            fp.GetReference(),
+            pcbnew.ToMM(pos.x),
+            pcbnew.ToMM(pos.y),
+        ))
     return out
 
 
@@ -114,6 +102,9 @@ def test_gui_render_projects_footprints_to_correct_pixels(tmp_path):
     assert aabb is not None, "fixture PCB has no Edge.Cuts geometry"
     x0, y0, x1, y1 = aabb
     w_mm, h_mm = x1 - x0, y1 - y0
+    assert w_mm > 0 and h_mm > 0, (
+        f"degenerate Edge.Cuts AABB {aabb} -- fixture is broken"
+    )
 
     results = render_views(PARENT_PCB, tmp_path, views=["front_all"])
     gui_png = results.get("front_all")

@@ -27,10 +27,22 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
+
+# Make the project package importable when the tool is run as a script
+# from a working directory other than the repo root. Idempotent: a
+# duplicate sys.path entry is harmless.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# SVG default namespace -- registered so ET.write() emits the SVG without
+# the "ns0:" prefix it would otherwise stamp on every element.
+ET.register_namespace("", "http://www.w3.org/2000/svg")
+ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
 
 
 # Layer set the KiCad PCB editor shows by default for a fresh board.
@@ -51,6 +63,25 @@ KICAD_DEFAULT_LAYERS = (
 GUI_PRESET_LAYERS = "B.Cu,F.Cu,F.SilkS,Edge.Cuts"
 
 
+def _label_font(size: int = 16) -> ImageFont.ImageFont:
+    """Return a TrueType font for crosshair labels and side-by-side
+    captions. PIL's default bitmap font is ~6px tall and unreadable at
+    200 DPI; we try a few common TTFs and fall back to the bitmap font
+    only when no TrueType is on the system."""
+    for candidate in (
+        "DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "Arial.ttf",
+        "Helvetica.ttf",
+    ):
+        try:
+            return ImageFont.truetype(candidate, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
 def render_via_kicad_cli(
     pcb: Path, out_png: Path, layers: str, *, dpi: int, viewbox: tuple[float, float, float, float] | None = None,
 ) -> None:
@@ -59,8 +90,6 @@ def render_via_kicad_cli(
     Edge.Cuts-AABB clipping) so renders can be compared apples-to-apples
     at the same framing; otherwise use --fit-page-to-board's natural
     page sizing (closer to what users see in the editor)."""
-    import re as _re
-
     with tempfile.TemporaryDirectory() as td:
         svg = Path(td) / "out.svg"
         cmd = [
@@ -79,16 +108,15 @@ def render_via_kicad_cli(
         if viewbox is not None:
             x0, y0, x1, y1 = viewbox
             w, h = x1 - x0, y1 - y0
-            text = svg.read_text(encoding="utf-8")
-            new_text, n = _re.subn(
-                r'width="[^"]*"\s+height="[^"]*"\s+viewBox="[^"]*"',
-                f'width="{w:.4f}mm" height="{h:.4f}mm" '
-                f'viewBox="{x0:.4f} {y0:.4f} {w:.4f} {h:.4f}"',
-                text, count=1,
-            )
-            if n != 1:
-                raise RuntimeError("could not rewrite kicad-cli SVG viewBox")
-            svg.write_text(new_text, encoding="utf-8")
+            # Set attributes on the parsed SVG root rather than substituting
+            # over a regex that assumed an attribute order kicad-cli is
+            # free to change between releases.
+            tree = ET.parse(svg)
+            root = tree.getroot()
+            root.set("width", f"{w:.4f}mm")
+            root.set("height", f"{h:.4f}mm")
+            root.set("viewBox", f"{x0:.4f} {y0:.4f} {w:.4f} {h:.4f}")
+            tree.write(svg, encoding="utf-8", xml_declaration=True)
 
         subprocess.run(
             [
@@ -114,6 +142,7 @@ def annotate_footprints(
     on its component; misaligned crosshairs are bugs."""
     img = Image.open(png).convert("RGBA")
     draw = ImageDraw.Draw(img)
+    font = _label_font(16)
     x0, y0, x1, y1 = viewbox
     w_mm, h_mm = x1 - x0, y1 - y0
     iw, ih = img.size
@@ -130,7 +159,7 @@ def annotate_footprints(
         r = 8
         draw.line([(px - r, py), (px + r, py)], fill=(0, 255, 255, 255), width=2)
         draw.line([(px, py - r), (px, py + r)], fill=(0, 255, 255, 255), width=2)
-        draw.text((px + r + 2, py - 6), fp["ref"], fill=(0, 255, 255, 255))
+        draw.text((px + r + 2, py - 8), fp["ref"], fill=(0, 255, 255, 255), font=font)
     img.save(out_png)
 
 
@@ -138,7 +167,6 @@ def render_via_gui_path(pcb: Path, out_png: Path) -> None:
     """Invoke the same render path the Experiment Manager uses for parent
     / leaf previews. Equivalent to what is written to
     ``round_NNNN/parent_stamped.png`` / ``parent_routed.png``."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from kicraft.render import render_views
 
     with tempfile.TemporaryDirectory() as td:
@@ -179,8 +207,9 @@ def composite_side_by_side(
     combined.paste(img_a, (pad, pad + 24))
     combined.paste(img_b, (img_a.width + 2 * pad, pad + 24))
     draw = ImageDraw.Draw(combined)
-    draw.text((pad, 8), label_a, fill=(255, 255, 255, 255))
-    draw.text((img_a.width + 2 * pad, 8), label_b, fill=(255, 255, 255, 255))
+    font = _label_font(18)
+    draw.text((pad, 8), label_a, fill=(255, 255, 255, 255), font=font)
+    draw.text((img_a.width + 2 * pad, 8), label_b, fill=(255, 255, 255, 255), font=font)
     combined.save(out)
 
 
@@ -227,43 +256,33 @@ def pixel_diff(
 
 
 def extract_footprints(pcb: Path) -> list[dict]:
-    """Pull every top-level ``(footprint ...)`` block's ref, position,
-    rotation, and footprint-side layer. The same regex / paren-walk used
-    by the earlier diagnostic; copied here so the tool stays standalone."""
-    import re
+    """Pull every footprint's ref, position, rotation, and side via
+    ``pcbnew.LoadBoard`` -- the same parser KiCad uses to read the board
+    on disk. Avoids the regex fragility of an inline s-expression walker
+    (parens inside quoted property values, long property tables pushing
+    the placement past a fixed byte window, locale-dependent file
+    reads)."""
+    import pcbnew
 
-    text = pcb.read_text()
+    board = pcbnew.LoadBoard(str(pcb))
     out: list[dict] = []
-    i = 0
-    while True:
-        m = re.search(r"\(footprint ", text[i:])
-        if not m:
-            break
-        start = i + m.start()
-        depth = 0
-        fp = ""
-        for j in range(start, len(text)):
-            if text[j] == "(":
-                depth += 1
-            elif text[j] == ")":
-                depth -= 1
-                if depth == 0:
-                    fp = text[start:j + 1]
-                    i = j + 1
-                    break
-        else:
-            break
-        ref_m = re.search(r'\(property "Reference" "([^"]+)"', fp)
-        if not ref_m:
-            continue
-        at_m = re.search(r"\(at ([\d.-]+) ([\d.-]+)(?: ([\d.-]+))?\)", fp[:400])
-        layer_m = re.search(r'\(layer "([^"]+)"\)', fp[:400])
+    for fp in board.GetFootprints():
+        pos = fp.GetPosition()
+        # GetLayerName returns the canonical KiCad layer string
+        # ("F.Cu" / "B.Cu"); the .kicad_pcb's (layer "...") record uses
+        # the same name, so this matches the previous regex output.
+        layer = board.GetLayerName(fp.GetLayer())
+        try:
+            rot_deg = float(fp.GetOrientation().AsDegrees())
+        except AttributeError:
+            # Older pcbnew bindings: GetOrientationDegrees() returns float
+            rot_deg = float(fp.GetOrientationDegrees())
         out.append({
-            "ref": ref_m.group(1),
-            "x_mm": float(at_m.group(1)) if at_m else None,
-            "y_mm": float(at_m.group(2)) if at_m else None,
-            "rot_deg": float(at_m.group(3)) if at_m and at_m.group(3) else 0.0,
-            "layer": layer_m.group(1) if layer_m else None,
+            "ref": fp.GetReference(),
+            "x_mm": pcbnew.ToMM(pos.x),
+            "y_mm": pcbnew.ToMM(pos.y),
+            "rot_deg": rot_deg,
+            "layer": layer,
         })
     return out
 
@@ -311,20 +330,31 @@ def main(argv: list[str]) -> int:
     # Render kicad-cli twice: once at its natural fit-to-board framing (what
     # the user sees in the editor), and once clipped to the SAME Edge.Cuts
     # viewBox as the GUI so we can compare component positions directly.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    # The two calls are independent; run them in parallel since each
+    # spawns kicad-cli + magick and the SVG-export step dominates wall time.
     from kicraft.render.edge_cuts import parse_edge_cuts_aabb
     ec = parse_edge_cuts_aabb(args.pcb)
     print(f"Edge.Cuts AABB: {ec}")
 
-    print(f"rendering via kicad-cli (natural framing) -> {kicad_png}")
-    render_via_kicad_cli(args.pcb, kicad_png, KICAD_DEFAULT_LAYERS, dpi=args.dpi)
     kicad_clipped_png = args.out_dir / "kicad_edgecuts_clip.png"
+    print(f"rendering via kicad-cli (natural framing) -> {kicad_png}")
     if ec is not None:
         print(f"rendering via kicad-cli (Edge.Cuts viewBox) -> {kicad_clipped_png}")
-        render_via_kicad_cli(
-            args.pcb, kicad_clipped_png, KICAD_DEFAULT_LAYERS,
-            dpi=args.dpi, viewbox=ec,
-        )
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futures = [
+            ex.submit(
+                render_via_kicad_cli,
+                args.pcb, kicad_png, KICAD_DEFAULT_LAYERS, dpi=args.dpi,
+            ),
+        ]
+        if ec is not None:
+            futures.append(ex.submit(
+                render_via_kicad_cli,
+                args.pcb, kicad_clipped_png, KICAD_DEFAULT_LAYERS,
+                dpi=args.dpi, viewbox=ec,
+            ))
+        for f in futures:
+            f.result()  # surface any exception from the worker
 
     composite_side_by_side(
         gui_png, kicad_png, sxs_png,
