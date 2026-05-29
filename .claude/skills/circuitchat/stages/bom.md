@@ -20,6 +20,7 @@ Additional top-level fields (still inside the BOM slot):
 - `thermal_refs`: list of refs that dissipate significant heat (regulators, power MOSFETs).
 - `signal_flow_order`: IC refs in the order signals flow through them (input → ... → output).
 - `component_zones`: per-ref placement hints, e.g. `{"J1": {"edge": "left"}, "BT1": {"zone": "bottom"}, "H4": {"corner": "top-left"}}`.
+- `arrays`: list of regular matrix/array blocks of repeated, identical components (e.g. an addressable-LED matrix, a keypad, a resistor-network bank). Each entry is `{"refs": [...], "rows": R, "cols": C, "pitch_mm": <optional>, "serpentine": true}`. The downstream autoplacer lays these out **programmatically as a serpentine grid** instead of running the force/simulated-annealing solver over them (which does not converge at array scale). **List `refs` in data-chain / logical order** (e.g. `D1, D2, … D200` following the DIN→DOUT chain) so the serpentine fill keeps consecutive parts physically adjacent and routing short. `rows*cols` MUST equal `len(refs)`; take the dimensions from the intent (a "10x20" matrix → `rows: 10, cols: 20`, 200 refs). Omit `pitch_mm` to let the placer derive it from the footprint courtyard. Only include genuine repeated grids here — not ordinary clusters (use `ic_groups` for those).
 - `assumptions`: defaults applied, each ending `(defaulted)`.
 
 DO NOT include `connections` or `no_connect_pins` in the BOM slot. Those fields are owned by the wiring stage; `stage-commit bom` preserves any pre-existing values automatically.
@@ -29,6 +30,7 @@ Constraints (enforced by Pydantic):
 - Refs unique across the whole BOM.
 - Every `ic_groups` key and member must be in `parts`.
 - Every entry in `thermal_refs`, `signal_flow_order`, and `component_zones` keys must be in `parts`.
+- Every `arrays[*].refs` entry must be in `parts`, no ref may appear in two arrays, and `rows*cols == len(refs)`.
 - `ref` / `symbol` / `footprint` shapes match the regexes above.
 
 ## Symbol & footprint sources

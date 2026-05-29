@@ -30,6 +30,10 @@ DEFAULT_CONFIG = {
     "power_nets": set(),
     # Placement (spread components — room to route, no courtyard overlaps)
     "placement_grid_mm": 1.20,
+    # Gap added to a component's courtyard to derive the grid pitch when an
+    # array/matrix leaf is placed programmatically (see
+    # brain/array_placement.py). Only used when an ArraySpec omits pitch_mm.
+    "array_gap_mm": 0.6,
     "edge_margin_mm": 6.0,
     "force_attract_k": 0.02,
     "force_repel_k": 200.0,
@@ -164,6 +168,13 @@ DEFAULT_CONFIG = {
     "freerouting_jar": os.path.expanduser("~/.local/lib/freerouting-1.9.0.jar"),
     "freerouting_timeout_s": 60,
     "freerouting_max_passes": 20,
+    # Leaf freerouting timeout scales with component count: a large array leaf
+    # (e.g. a 200-LED matrix, ~600 nets) routes fine but takes minutes, and the
+    # fixed 60s default cut freerouting off mid-route. The leaf budget is
+    # max(freerouting_timeout_s, n_components * s_per_component), capped. Small
+    # leaves are unaffected (they finish in seconds well under the floor).
+    "leaf_freerouting_s_per_component": 4.0,
+    "leaf_freerouting_timeout_cap_s": 1200,
     # Separate pass cap for leaf routing. Leaves are smaller and need
     # less optimization than the parent board, so we keep this lower by
     # default. When unset, leaves fall back to freerouting_max_passes.

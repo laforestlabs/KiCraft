@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from kicraft.circuitchat.models import (
     Architecture,
+    ArraySpec,
     BOM,
     BomPart,
     ConversationState,
@@ -394,3 +395,59 @@ def test_bom_no_connect_pin_unknown_ref_rejected() -> None:
 def test_bom_no_connect_pin_valid() -> None:
     bom = _two_part_bom_with_conn(no_connect_pins=[PinEndpoint(ref="U1", pin="4")])
     assert len(bom.no_connect_pins) == 1
+
+
+# ---------- ArraySpec / BOM.arrays ----------
+
+
+def _led_parts(n: int) -> list[BomPart]:
+    return [
+        BomPart(ref=f"D{i}", value="LED", symbol="L:LED", footprint="L:LED",
+                sheet="LED MATRIX")
+        for i in range(1, n + 1)
+    ]
+
+
+def test_arrayspec_valid() -> None:
+    spec = ArraySpec(refs=[f"D{i}" for i in range(1, 7)], rows=2, cols=3)
+    assert spec.serpentine is True and spec.pitch_mm is None
+
+
+def test_arrayspec_shape_mismatch_rejected() -> None:
+    with pytest.raises(ValidationError):
+        ArraySpec(refs=["D1", "D2"], rows=2, cols=3)
+
+
+def test_arrayspec_duplicate_refs_rejected() -> None:
+    with pytest.raises(ValidationError):
+        ArraySpec(refs=["D1", "D1"], rows=1, cols=2)
+
+
+def test_arrayspec_nonpositive_dims_rejected() -> None:
+    with pytest.raises(ValidationError):
+        ArraySpec(refs=["D1"], rows=0, cols=1)
+
+
+def test_bom_arrays_valid() -> None:
+    bom = BOM(parts=_led_parts(4),
+              arrays=[ArraySpec(refs=["D1", "D2", "D3", "D4"], rows=2, cols=2)])
+    assert len(bom.arrays) == 1
+
+
+def test_bom_arrays_unknown_ref_rejected() -> None:
+    with pytest.raises(ValidationError):
+        BOM(parts=_led_parts(2),
+            arrays=[ArraySpec(refs=["D1", "D9"], rows=1, cols=2)])
+
+
+def test_bom_ref_in_two_arrays_rejected() -> None:
+    with pytest.raises(ValidationError):
+        BOM(parts=_led_parts(3),
+            arrays=[
+                ArraySpec(refs=["D1", "D2"], rows=1, cols=2),
+                ArraySpec(refs=["D2", "D3"], rows=1, cols=2),
+            ])
+
+
+def test_bom_arrays_default_empty() -> None:
+    assert BOM(parts=_led_parts(1)).arrays == []

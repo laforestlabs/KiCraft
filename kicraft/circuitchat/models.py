@@ -328,6 +328,42 @@ class NetConnection(BaseModel):
         return self
 
 
+class ArraySpec(BaseModel):
+    """A regular matrix/array of repeated components (e.g. an LED matrix).
+
+    Carries the grid shape from design intent through synthesis into the
+    autoplacer, which lays the members out programmatically as a serpentine
+    grid instead of running the force/simulated-annealing solver over them
+    (which does not converge at array scale).
+
+    ``refs`` are listed in data-chain / logical order; the placer fills the
+    grid in that order (serpentine when set), so consecutive members are
+    physical neighbours and the daisy-chain routes stay short.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    refs: list[str]
+    rows: int = Field(gt=0)
+    cols: int = Field(gt=0)
+    pitch_mm: float | None = None  # None -> derive from footprint courtyard + gap
+    serpentine: bool = True
+
+    @model_validator(mode="after")
+    def _shape_matches(self):
+        if self.rows * self.cols != len(self.refs):
+            raise ValueError(
+                f"ArraySpec rows*cols ({self.rows}x{self.cols}="
+                f"{self.rows * self.cols}) != len(refs) ({len(self.refs)})"
+            )
+        if len(self.refs) != len(set(self.refs)):
+            dupes = sorted({r for r in self.refs if self.refs.count(r) > 1})
+            raise ValueError(f"ArraySpec has duplicate refs: {dupes}")
+        if self.pitch_mm is not None and self.pitch_mm <= 0:
+            raise ValueError(f"ArraySpec pitch_mm must be > 0, got {self.pitch_mm}")
+        return self
+
+
 class BOM(BaseModel):
     parts: list[BomPart]
     ic_groups: dict[str, list[str]] = Field(default_factory=dict)
@@ -335,6 +371,7 @@ class BOM(BaseModel):
     thermal_refs: list[str] = Field(default_factory=list)
     signal_flow_order: list[str] = Field(default_factory=list)
     component_zones: dict[str, dict[str, str]] = Field(default_factory=dict)
+    arrays: list[ArraySpec] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     connections: list[NetConnection] = Field(default_factory=list)
     no_connect_pins: list[PinEndpoint] = Field(default_factory=list)
@@ -370,6 +407,16 @@ class BOM(BaseModel):
         for ref in self.component_zones:
             if ref not in ref_set:
                 raise ValueError(f"component_zones entry {ref!r} not in BOM parts")
+        seen_array_refs: set[str] = set()
+        for spec in self.arrays:
+            for ref in spec.refs:
+                if ref not in ref_set:
+                    raise ValueError(f"arrays ref {ref!r} not in BOM parts")
+                if ref in seen_array_refs:
+                    raise ValueError(
+                        f"arrays ref {ref!r} appears in more than one array"
+                    )
+                seen_array_refs.add(ref)
         return self
 
     @model_validator(mode="after")

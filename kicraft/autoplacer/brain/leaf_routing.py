@@ -389,6 +389,17 @@ def route_local_subcircuit(
     leaf_passes = cfg.get("leaf_freerouting_max_passes")
     if leaf_passes is not None:
         leaf_routing_cfg["freerouting_max_passes"] = int(leaf_passes)
+    # Scale the leaf freerouting timeout with component count. A large array
+    # leaf (200-LED matrix, ~600 nets) routes successfully but takes minutes;
+    # the fixed default timeout killed freerouting mid-route (rc=-1). Small
+    # leaves keep the base timeout (they finish in seconds anyway).
+    _n_leaf_comps = len(route_input_board.components)
+    _base_timeout = int(cfg.get("freerouting_timeout_s", 120))
+    _per_comp = float(cfg.get("leaf_freerouting_s_per_component", 4.0))
+    _timeout_cap = int(cfg.get("leaf_freerouting_timeout_cap_s", 1200))
+    leaf_routing_cfg["freerouting_timeout_s"] = min(
+        _timeout_cap, max(_base_timeout, int(_n_leaf_comps * _per_comp))
+    )
     freerouting_stats = route_with_freerouting(
         str(pre_route_board),
         str(routed_board),
