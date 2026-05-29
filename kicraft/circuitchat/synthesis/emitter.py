@@ -327,7 +327,7 @@ _DIRECTION_TO_SHAPE = {
 
 
 def _emit_hierarchical_label(
-    name: str, direction: str, x: float, y: float,
+    name: str, direction: str, x: float, y: float, angle: int = 0,
     *, salt: str | None = None, project_stem: str | None = None,
 ) -> str:
     shape = _DIRECTION_TO_SHAPE.get(direction, "passive")
@@ -337,7 +337,7 @@ def _emit_hierarchical_label(
         uuid_str = _uuid()
     return (
         f'\t(hierarchical_label "{name}" (shape {shape})\n'
-        f"\t\t(at {_fmt(x)} {_fmt(y)} 0)\n"
+        f"\t\t(at {_fmt(x)} {_fmt(y)} {angle})\n"
         "\t\t(effects (font (size 1.27 1.27)) (justify left))\n"
         f'\t\t(uuid "{uuid_str}")\n'
         "\t)"
@@ -528,7 +528,7 @@ def _emit_leaf(
         for hl in routed.hier_labels:
             hier_label_blocks.append(
                 _emit_hierarchical_label(
-                    hl.name, hl.direction, hl.x_mm, hl.y_mm,
+                    hl.name, hl.direction, hl.x_mm, hl.y_mm, hl.angle_deg,
                     salt=f"{sheet_stem}/hier/{hl.name}",
                     project_stem=project_stem,
                 )

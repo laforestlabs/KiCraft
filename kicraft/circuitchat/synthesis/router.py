@@ -76,6 +76,7 @@ class HierLabelPlacement:
     direction: str
     x_mm: float
     y_mm: float
+    angle_deg: int = 0
 
 
 @dataclass
@@ -295,6 +296,7 @@ def route_sheet(
                         direction=hier_direction,
                         x_mm=ex,
                         y_mm=ey,
+                        angle_deg=angle,
                     )
                 )
             else:

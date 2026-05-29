@@ -101,10 +101,22 @@ def _resolve_extends_chain(lib_text: str, symbol_name: str) -> str:
         return derived
 
     base_resolved = _resolve_extends_chain(lib_text, base_name)
-    # Rename the base symbol header to the derived name. Use the exact bytes
+    # KiCad names a symbol's unit/body-style sub-symbols `<name>_<unit>_<body>`
+    # and rejects the whole symbol (the embedded `(lib_symbols ...)` fails to
+    # load, leaving the sheet empty) if a sub-symbol's prefix doesn't match the
+    # parent. The inherited graphics carry the BASE name's sub-symbols
+    # (e.g. `USBLC6-2P6_0_1`), so rename their prefix to the derived name.
+    # Do this BEFORE renaming the header: while the header is still the exact
+    # `(symbol "<base>"`, the `(symbol "<base>_` pattern can't match it — which
+    # matters when the derived name itself begins with `<base>_` (e.g. the base
+    # `C` and the derivative `C_Small`).
+    merged = base_resolved.replace(
+        f'(symbol "{base_name}_', f'(symbol "{symbol_name}_'
+    )
+    # Now rename the base symbol header to the derived name. Use the exact bytes
     # `(symbol "<base_name>"` so we don't substring-match inside other symbols
     # in the chain.
-    merged = base_resolved.replace(
+    merged = merged.replace(
         f'(symbol "{base_name}"', f'(symbol "{symbol_name}"', 1
     )
     derived_props = _extract_properties(derived)
