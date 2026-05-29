@@ -130,3 +130,36 @@ def test_legalizer_skips_array_members() -> None:
     before = {r: (c.pos.x, c.pos.y) for r, c in comps.items()}
     solver._resolve_overlaps(comps)
     assert {r: (c.pos.x, c.pos.y) for r, c in comps.items()} == before
+
+
+def test_leaf_is_fully_array_gate() -> None:
+    from kicraft.autoplacer.brain.array_placement import leaf_is_fully_array
+    comps = {f"D{i}": _comp(f"D{i}", "LED", 1.5, 1.5, 4) for i in range(1, 5)}
+    comps["C1"] = _comp("C1", "100nF", 1.0, 0.5, 2)
+    arrays = [{"refs": ["D1", "D2", "D3", "D4"], "rows": 2, "cols": 2}]
+    assert leaf_is_fully_array(comps, arrays) is True          # grid + passive
+    comps["U1"] = _comp("U1", "IC", 5.0, 5.0, 8)
+    assert leaf_is_fully_array(comps, arrays) is False         # extra non-passive
+    assert leaf_is_fully_array({"R1": _comp("R1", "10k", 1.0, 0.5, 2)}, []) is False
+
+
+def test_deterministic_route_signature() -> None:
+    # The route cache reuses a routed board only when placement + routing knobs
+    # match; the freerouting *timeout* must not affect the key.
+    from kicraft.autoplacer.brain.leaf_routing import _deterministic_route_signature
+    comps = {f"D{i}": _comp(f"D{i}", "LED", 1.5, 1.5, 4) for i in range(1, 5)}
+    place_array_leaves(
+        comps, [{"refs": ["D1", "D2", "D3", "D4"], "rows": 2, "cols": 2,
+                 "pitch_mm": 3.0}], {})
+    state = BoardState(components=comps, nets={})
+    cfg = {"freerouting_max_passes": 4, "freerouting_timeout_s": 60}
+    sig = _deterministic_route_signature(state, cfg, "freerouting-1.9.0.jar")
+    # timeout-only change -> same key (does not affect copper)
+    assert sig == _deterministic_route_signature(
+        state, {**cfg, "freerouting_timeout_s": 999}, "freerouting-1.9.0.jar")
+    # routing-knob change -> different key
+    assert sig != _deterministic_route_signature(
+        state, {**cfg, "freerouting_max_passes": 12}, "freerouting-1.9.0.jar")
+    # placement change -> different key
+    comps["D1"].pos = Point(comps["D1"].pos.x + 1.0, comps["D1"].pos.y)
+    assert sig != _deterministic_route_signature(state, cfg, "freerouting-1.9.0.jar")
