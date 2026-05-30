@@ -15,6 +15,7 @@ from pathlib import Path
 import pcbnew
 
 from kicraft.autoplacer.brain.types import BoardState, Component, Layer, Net, Pad, Point, TraceSegment, Via
+from kicraft.autoplacer.hardware.keepout_extract import extract_keepout_rects
 
 # Generic power net names used as fallback when config doesn't specify power_nets.
 # Project-specific power nets should be listed in the project's autoplacer config.
@@ -548,6 +549,7 @@ class KiCadAdapter:
             traces=traces,
             vias=vias,
             board_outline=(tl, br),
+            keepout_rects=extract_keepout_rects(board, self.cfg),
         )
 
     def apply_placement(

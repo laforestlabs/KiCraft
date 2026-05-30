@@ -126,6 +126,34 @@ DEFAULT_CONFIG = {
             "size_mm": 4.0,
         },
     },
+    # RF antenna near-field keep-clear, enforced at PLACEMENT time (deliberately
+    # NOT baked into the .kicad_mod, where it would bloat the footprint and the
+    # copper pour). Keyed by a footprint-name glob (fnmatch, case-insensitive)
+    # -> antenna-end rect in the footprint's own LOCAL frame (mm).
+    # hardware.keepout_extract synthesizes this rect for any placed footprint
+    # whose name matches, transforms it to board coords by the footprint's
+    # placed position/rotation, and the placer keeps other parts out of it
+    # (the matched footprint itself is exempt). A matched footprint's own
+    # internal keep-out (e.g. Fix 0's on-module antenna strip) is also honored;
+    # the two are unioned, so both the on-module strip and the near-field hold.
+    # Geometry covers the antenna end of the module plus a near-field margin
+    # beyond it; tune per module. Frames (measured from the library footprints):
+    #   ESP32-S3-WROOM-1 (WIRELM): long axis +y, antenna at -y, body x[-9,9].
+    #   ESP32-WROOM-32x  (WIFI):   long axis +x, antenna at -x, body y[-9,9].
+    "antenna_keepouts": {
+        "*ESP32-S3-WROOM-1*": {
+            "x_min": -12.0,
+            "y_min": -24.0,
+            "x_max": 12.0,
+            "y_max": -9.0,
+        },
+        "*ESP32-WROOM-32*": {
+            "x_min": -24.0,
+            "y_min": -12.0,
+            "x_max": -9.0,
+            "y_max": 12.0,
+        },
+    },
     # Orderedness — how strongly passives are snapped into neat rows/columns.
     # 0.0 = organic/force-directed layout, 1.0 = full grid alignment.
     # Intermediate values blend proportionally.  Searchable by autoexperiment.

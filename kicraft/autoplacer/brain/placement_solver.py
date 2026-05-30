@@ -1011,6 +1011,15 @@ class PlacementSolver:
                     break
                 self._resolve_overlaps(best_comps)
 
+            # Step 9.2: Push unlocked parts out of antenna keep-out rects (RF
+            # near-field, from BoardState.keepout_rects). Same bounded
+            # convergence shape as the keep-in pass; the owner footprint is
+            # exempt so the ESP32 itself is never pushed off its own antenna.
+            for _ in range(3):
+                if self._resolve_keepout_rects(best_comps) == 0:
+                    break
+                self._resolve_overlaps(best_comps)
+
         with _timed_phase(phase_t, "solve_legalize_ms", capture_comps=lambda: best_comps):
             # Step 9.5: Comprehensive legalization repair for subcircuit mode
             if prefer_legal:
@@ -2249,18 +2258,74 @@ class PlacementSolver:
 
         return max_disp
 
+    def _push_out_of_rect(
+        self,
+        comps: dict[str, Component],
+        r_tl: Point,
+        r_br: Point,
+        owner_ref: str | None,
+    ) -> int:
+        """Push every unlocked, non-owner component out of rect [r_tl, r_br].
+
+        Shared by the keep-in (mounting-hole) and keep-out (antenna near-field)
+        passes. Each overlapping component is moved along whichever of the four
+        cardinal exits is smallest *while keeping the part inside the board
+        outline*. Unlike a radial push-from-center, this behaves correctly for
+        a keep-out that straddles the board edge -- e.g. an ESP32 whose antenna
+        faces off-board, where a radial push would shove a neighbour toward the
+        edge and the board clamp would pin it back inside the rect. If no exit
+        keeps the part on-board (the rect spans the board in both axes) the
+        smallest exit is taken and the residue is left for legality_diagnostics
+        to flag. ``owner_ref`` is exempt. Returns the number of components moved.
+        """
+        tl, br = self.state.board_outline
+        slack = 0.5  # extra so the DRC / clearance margin holds after the push
+        corrections = 0
+        for ref, comp in comps.items():
+            if comp.locked or ref == owner_ref:
+                continue
+            c_tl, c_br = comp.bbox(0.0)
+            ox = min(c_br.x, r_br.x) - max(c_tl.x, r_tl.x)
+            oy = min(c_br.y, r_br.y) - max(c_tl.y, r_tl.y)
+            if ox <= 0.0 or oy <= 0.0:
+                continue  # no overlap
+            # cardinal exits: delta that moves comp fully clear of the rect
+            candidates = [
+                (r_tl.x - c_br.x - slack, 0.0),  # exit left
+                (r_br.x - c_tl.x + slack, 0.0),  # exit right
+                (0.0, r_tl.y - c_br.y - slack),  # exit up
+                (0.0, r_br.y - c_tl.y + slack),  # exit down
+            ]
+            on_board = [
+                (dx, dy)
+                for (dx, dy) in candidates
+                if c_tl.x + dx >= tl.x
+                and c_br.x + dx <= br.x
+                and c_tl.y + dy >= tl.y
+                and c_br.y + dy <= br.y
+            ]
+            dx, dy = min(on_board or candidates, key=lambda d: math.hypot(d[0], d[1]))
+            # Translate pos + body_center + pads together so bbox() (centered on
+            # body_center) reflects the move and repeated passes converge.
+            # (_move_component leaves body_center stale, which would defeat the
+            # overlap test on the next iteration.)
+            comp.pos = Point(comp.pos.x + dx, comp.pos.y + dy)
+            if comp.body_center is not None:
+                comp.body_center = Point(comp.body_center.x + dx, comp.body_center.y + dy)
+            for pad in comp.pads:
+                pad.pos = Point(pad.pos.x + dx, pad.pos.y + dy)
+            corrections += 1
+        return corrections
+
     def _resolve_keep_in_rects(self, comps: dict[str, Component]) -> int:
         """Push unlocked components out of parent-local keep-in zones.
 
-        Each entry in cfg["parent_keep_in_rects"] is {ref, margin_mm}.
-        The keep-in rect is the protected component's bbox grown by
-        margin_mm. Other unlocked components must not overlap this rect.
-
-        Without this pass, SA refine + the post-stack reorderings can
-        drift unlocked leaves into mounting-hole keep-ins, producing
-        stamped-DRC items_not_allowed violations (the keep-in is
-        ultimately rendered as a KiCad keepout zone). Returns the count
-        of corrections applied so callers can log convergence.
+        Each entry in cfg["parent_keep_in_rects"] is {ref, margin_mm}: the
+        protected component's bbox grown by margin_mm is a rect other unlocked
+        components must not overlap (rendered as a KiCad keepout zone). Without
+        this pass, SA refine + post-stack reorderings drift unlocked leaves into
+        mounting-hole keep-ins, producing stamped-DRC items_not_allowed
+        violations. Returns the count of corrections applied.
         """
         specs = self.cfg.get("parent_keep_in_rects", [])
         if not specs:
@@ -2273,34 +2338,20 @@ class PlacementSolver:
             if protected is None:
                 continue
             p_tl, p_br = protected.bbox(margin)
-            cx = (p_tl.x + p_br.x) / 2.0
-            cy = (p_tl.y + p_br.y) / 2.0
-            for ref, comp in comps.items():
-                if comp.locked or ref == protected_ref:
-                    continue
-                c_tl, c_br = comp.bbox(0.0)
-                ox = max(0.0, min(c_br.x, p_br.x) - max(c_tl.x, p_tl.x))
-                oy = max(0.0, min(c_br.y, p_br.y) - max(c_tl.y, p_tl.y))
-                if ox <= 0.0 or oy <= 0.0:
-                    continue
-                old_pos = Point(comp.pos.x, comp.pos.y)
-                dx = comp.pos.x - cx
-                dy = comp.pos.y - cy
-                mag = math.hypot(dx, dy)
-                if mag < 0.01:
-                    dx, dy, mag = 1.0, 0.0, 1.0
-                push_dist = min(ox, oy) + 0.5  # extra slack so DRC margin holds
-                new_x = comp.pos.x + (dx / mag) * push_dist
-                new_y = comp.pos.y + (dy / mag) * push_dist
-                # Clamp to board so we don't push off-edge
-                tl, br = self.state.board_outline
-                hw = comp.width_mm / 2.0
-                hh = comp.height_mm / 2.0
-                new_x = max(tl.x + hw, min(br.x - hw, new_x))
-                new_y = max(tl.y + hh, min(br.y - hh, new_y))
-                comp.pos = Point(new_x, new_y)
-                _update_pad_positions(comp, old_pos, comp.rotation)
-                corrections += 1
+            corrections += self._push_out_of_rect(comps, p_tl, p_br, protected_ref)
+        return corrections
+
+    def _resolve_keepout_rects(self, comps: dict[str, Component]) -> int:
+        """Push unlocked, non-owner components out of antenna keep-out rects.
+
+        Reads BoardState.keepout_rects (populated by adapter.load via
+        hardware.keepout_extract). The owner footprint -- the part whose antenna
+        the rect protects -- is exempt. Returns the count of corrections applied.
+        """
+        rects = getattr(self.state, "keepout_rects", None) or []
+        corrections = 0
+        for kr in rects:
+            corrections += self._push_out_of_rect(comps, kr.tl, kr.br, kr.owner_ref)
         return corrections
 
     def _sa_refine(
@@ -3310,12 +3361,34 @@ class PlacementSolver:
                             "involves_locked": involves_locked,
                         }
                     )
+        # Antenna keep-out overlaps (RF near-field). Reported for visibility;
+        # deliberately NOT folded into ``legal`` so this does not change solver
+        # acceptance for boards that previously placed without keep-out modeling.
+        keepout_overlaps: list[dict[str, object]] = []
+        for kr in getattr(self.state, "keepout_rects", None) or []:
+            for ref, comp in comps.items():
+                if ref == kr.owner_ref:
+                    continue
+                c_tl, c_br = comp.bbox(half_gap)
+                ox = min(c_br.x, kr.br.x) - max(c_tl.x, kr.tl.x)
+                oy = min(c_br.y, kr.br.y) - max(c_tl.y, kr.tl.y)
+                if ox > 0.0 and oy > 0.0:
+                    keepout_overlaps.append(
+                        {
+                            "ref": ref,
+                            "owner": kr.owner_ref,
+                            "source": kr.source,
+                            "overlap_area_mm2": round(ox * oy, 4),
+                        }
+                    )
         return {
             "pads_outside_board": pads_outside,
             "overlaps": overlaps,
             "pad_outside_count": len(pads_outside),
             "overlap_count": len(overlaps),
             "locked_overlap_count": locked_overlap_count,
+            "keepout_overlaps": keepout_overlaps,
+            "keepout_overlap_count": len(keepout_overlaps),
             "legal": not pads_outside and not overlaps,
         }
 

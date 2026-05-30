@@ -259,6 +259,23 @@ class SilkscreenElement:
     font_thickness: float = 0.15
 
 
+@dataclass(slots=True)
+class KeepoutRect:
+    """Axis-aligned keep-out region (board coords) the placer keeps parts out of.
+
+    Used for RF antenna near-field clearances (and any future keep-clear). The
+    ``owner_ref`` component is exempt -- it is the part the keep-out belongs to
+    (e.g. the ESP32 whose antenna this protects), so its own courtyard may
+    overlap. ``source`` is "preserve" (a footprint-internal rule-area) or
+    "inject" (a config antenna_keepouts family-spec rect), for diagnostics.
+    """
+
+    tl: Point
+    br: Point
+    owner_ref: str
+    source: str = ""
+
+
 @dataclass
 class BoardState:
     """Complete snapshot -- the interchange format between Brain and Hardware."""
@@ -271,6 +288,9 @@ class BoardState:
     board_outline: tuple[Point, Point] = field(
         default_factory=lambda: (Point(0, 0), Point(90, 58))
     )
+    # RF antenna keep-clear rects (board coords), populated by adapter.load via
+    # hardware.keepout_extract. The placer pushes non-owner parts out of each.
+    keepout_rects: list[KeepoutRect] = field(default_factory=list)
 
     @property
     def board_width(self) -> float:
