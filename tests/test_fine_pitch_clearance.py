@@ -85,15 +85,15 @@ def test_resolve_rule_honors_explicit_override(monkeypatch):
     cfg = {**DEFAULT_CONFIG, "freerouting_clearance_mm": 0.12}
     clearance_um, width_um = fr._resolve_fine_pitch_rule("board.kicad_pcb", cfg)
     assert clearance_um == 120
-    assert width_um == 150  # min(0.2, fine_pitch_track 0.15) * 1000
+    assert width_um == 153  # min(0.2, fine_pitch_track 0.153) * 1000 (fab floor)
 
 
 def test_resolve_rule_auto_detects_and_floors(monkeypatch):
-    # Densest gap 0.08mm is below the 0.1mm fab floor -> clamp up to floor.
+    # Densest gap 0.08mm is below the fab clearance floor -> clamp up to floor.
     monkeypatch.setattr(fr, "min_intra_footprint_pad_gap_mm", lambda *_a, **_k: 0.08)
     clearance_um, width_um = fr._resolve_fine_pitch_rule("b.kicad_pcb", dict(DEFAULT_CONFIG))
-    assert clearance_um == 100  # floored at 0.1mm
-    assert width_um == 150
+    assert clearance_um == 153  # floored at freerouting_min_clearance_mm 0.153
+    assert width_um == 153
 
 
 def test_resolve_rule_noop_for_coarse_board(monkeypatch):
@@ -188,4 +188,4 @@ def test_real_usb_c_detected_as_fine_pitch(fp_name):
     assert gap is not None and gap < 0.2, f"expected fine pitch, got {gap}"
     clearance_um, width_um = fr._resolve_fine_pitch_rule(pcb, dict(DEFAULT_CONFIG))
     assert clearance_um is not None and clearance_um <= 200
-    assert width_um == 150
+    assert width_um == 153
