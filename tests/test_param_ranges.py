@@ -14,7 +14,6 @@ All tests use synthetic data only; no pcbnew or NiceGUI dependency.
 from __future__ import annotations
 
 import json
-import math
 import random
 import tempfile
 from pathlib import Path
@@ -378,9 +377,10 @@ class TestParamRangesMerging:
     def test_int_param_range_rounded(self):
         """Integer params are rounded after clamping (covers any int-typed
         entry in CONFIG_SEARCH_SPACE; previously checked freerouting_timeout_s
-        which is no longer a search-space knob)."""
+        which is no longer a search-space knob). The requested min 100 is below
+        sa_refine_iterations' domain min (250), so it clamps up to 250."""
         result = normalize_bounds("sa_refine_iterations", 100.0, 5000.0)
-        assert result == (100, 5000)
+        assert result == (250, 5000)
         spec = CONFIG_SEARCH_SPACE["sa_refine_iterations"]
         assert spec["type"] == "int"
 
