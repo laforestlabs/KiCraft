@@ -34,9 +34,10 @@ def test_parent_stamp_script_creates_rule_area_keepouts_on_both_copper_layers():
         "cannot place a track or via on either side through a mounting hole."
     )
     assert "_zone.SetIsRuleArea(True)" in script, (
-        "Keepout zones must be marked as rule areas so "
-        "freerouting_runner.strip_zones() preserves them (it only keeps "
-        "GetIsRuleArea()==True zones)."
+        "Keepout zones must be marked as rule areas: ExportSpecctraDSN emits "
+        "rule areas as DSN (keepout) regions, and the parent route preserves "
+        "board zones (freerouting_clear_zones=False) so they reach the DSN. "
+        "See tests/test_dsn_keepout_survival.py."
     )
     # Pads are intentionally NOT disallowed: the keepout rect is bbox(comp)
     # + inward_keep_in_mm, which by construction covers the protected
