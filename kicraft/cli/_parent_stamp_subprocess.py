@@ -196,10 +196,13 @@ def main(argv: list[str]) -> int:
             board.Add(_txt)
 
     # --- stamp parent-local rule-area keepouts (mounting holes etc.) ---
-    # These zones survive freerouting_runner.strip_zones() because
-    # that helper preserves GetIsRuleArea()==True zones. The DSN
-    # export for FreeRouting reads rule-area keepouts so no track or
-    # via can be placed inside them.
+    # Rule-area zones are what ExportSpecctraDSN emits as DSN (keepout)
+    # regions, so FreeRouting won't place a track or via inside them. They
+    # reach the DSN because the parent route preserves board zones
+    # (freerouting_clear_zones=False in compose_subcircuits); the leaf route's
+    # clear_zones() would strip board-level zones, but the parent route does
+    # not call it. (Footprint-internal keep-outs are robust on either path:
+    # they are not board zones, so clear_zones() never sees them.)
     _KEEPOUT_LAYERS = [pcbnew.F_Cu, pcbnew.B_Cu]
     for _ko in _keepouts:
         for _layer in _KEEPOUT_LAYERS:
