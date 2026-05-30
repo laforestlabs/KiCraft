@@ -32,6 +32,7 @@ import traceback as _traceback
 import pcbnew
 
 from kicraft.autoplacer.hardware._pad_nets import propagate_pad_nets
+from kicraft.autoplacer.hardware.silk_refdes import legalize_refdes
 
 
 def _diag_dump(_path: str) -> dict:
@@ -271,6 +272,13 @@ def main(argv: list[str]) -> int:
             _txt.SetTextThickness(pcbnew.FromMM(_silk.get("font_thickness", 0.15)))
             _txt.SetHorizJustify(pcbnew.GR_TEXT_H_ALIGN_LEFT)
             board.Add(_txt)
+
+    # Legalize silkscreen reference designators before save (cosmetic,
+    # best-effort -- never break stamping).
+    try:
+        legalize_refdes(board, _data.get("cfg") or {})
+    except Exception as _silk_err:  # pragma: no cover - defensive
+        print(f"silk_refdes legalization skipped: {_silk_err}", file=sys.stderr)
 
     # Do NOT call board.BuildConnectivity() here: pcbnew Save() silently
     # returns False (no file written, no exception) on ~half of attempts

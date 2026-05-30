@@ -19,6 +19,7 @@ import sys
 import pcbnew
 
 from kicraft.autoplacer.hardware._pad_nets import propagate_pad_nets
+from kicraft.autoplacer.hardware.silk_refdes import legalize_refdes
 
 
 def main(argv: list[str]) -> int:
@@ -229,6 +230,15 @@ def main(argv: list[str]) -> int:
             _zo.Append(_x2, _y2)
             _zo.Append(_x1, _y2)
             board.Add(_zone)
+
+    # Legalize silkscreen reference designators (shrink-to-fit + centre on the
+    # courtyard; move oversized/overlapping ones to Fab so they survive for
+    # assembly without cluttering silk). Cosmetic and best-effort -- a failure
+    # here must never break stamping.
+    try:
+        legalize_refdes(board, _data.get("cfg") or {})
+    except Exception as _silk_err:  # pragma: no cover - defensive
+        print(f"silk_refdes legalization skipped: {_silk_err}", file=sys.stderr)
 
     board.BuildConnectivity()
     board.Save(_out_path)
