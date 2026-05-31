@@ -1,0 +1,89 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CircuitChat skill-eval run report",
+  "description": "Machine sidecar for one eval run. Written by score_run.py (Class-C + script gates), completed by the observer (Class-J levels + observer gates), then totaled by score_run.py finalize. The RUN_REPORT.md narrative must stay consistent with this file.",
+  "type": "object",
+  "required": ["scenario", "run_id", "rubric_version", "rubric_sha256", "metrics", "dimensions", "gates", "score"],
+  "properties": {
+    "scenario": {"type": ["string", "null"], "description": "scenario id, e.g. S02"},
+    "run_id": {"type": "string"},
+    "run_dir": {"type": "string"},
+    "scored_at": {"type": "string", "description": "UTC compact timestamp"},
+    "finalized_at": {"type": "string"},
+    "rubric_version": {"type": "integer"},
+    "rubric_sha256": {"type": "string", "description": "scores comparable only within one hash"},
+    "target_mode": {"type": ["string", "null"], "enum": ["release", "dev", null]},
+    "metrics": {
+      "type": "object",
+      "description": "deterministic signals; nulls where a source (usually the transcript) was absent",
+      "properties": {
+        "synthesized": {"type": "boolean"},
+        "synthesis_status": {"type": ["string", "null"]},
+        "failed_checks": {"type": ["array", "null"], "items": {"type": "string"}},
+        "erc_errors": {"type": ["integer", "null"]},
+        "erc_warnings": {"type": ["integer", "null"]},
+        "latency_min": {"type": ["number", "null"]},
+        "latency_approx": {"type": "boolean"},
+        "user_questions": {"type": ["integer", "null"]},
+        "failed_commits": {"type": ["integer", "null"]},
+        "crashes": {"type": ["integer", "null"]},
+        "history_len": {"type": ["integer", "null"]},
+        "open_questions": {"type": ["integer", "null"]},
+        "bom_parts": {"type": ["integer", "null"]},
+        "permission_floor": {"type": "integer"},
+        "permission_excess": {"type": "integer"},
+        "expected_question_band": {"type": ["array", "null"]},
+        "transcript_present": {"type": "boolean"}
+      }
+    },
+    "dimensions": {
+      "type": "object",
+      "description": "exactly the 10 rubric dimension ids",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["class", "weight", "level", "by"],
+        "properties": {
+          "class": {"type": "string", "enum": ["C", "J"]},
+          "weight": {"type": "integer"},
+          "level": {"type": ["integer", "null"], "minimum": 0, "maximum": 4,
+                    "description": "null until graded; script fills C, observer fills J"},
+          "partial": {"type": "boolean", "description": "scored on incomplete signals"},
+          "by": {"type": "string", "enum": ["script", "observer"]},
+          "rationale": {"type": "string"}
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "properties": {
+        "triggered": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "cap"],
+            "properties": {
+              "id": {"type": "string"},
+              "cap": {"type": "integer"},
+              "by": {"type": "string", "enum": ["script", "observer"]},
+              "why": {"type": "string"}
+            }
+          }
+        },
+        "observer_todo": {"type": "array", "items": {"type": "string"},
+                          "description": "observer-detectable gate ids to evaluate while grading"}
+      }
+    },
+    "score": {
+      "type": "object",
+      "properties": {
+        "weighted": {"type": ["number", "null"], "description": "sum(weight*level/4)"},
+        "final": {"type": ["number", "null"], "description": "min(weighted, lowest gate cap)"},
+        "grade": {"type": ["string", "null"], "enum": ["A", "B", "C", "D", "F", null]},
+        "verdict": {"type": ["string", "null"]},
+        "gates_applied": {"type": "array"},
+        "pending_dimensions": {"type": "array", "items": {"type": "string"}},
+        "note": {"type": "string"}
+      }
+    }
+  }
+}

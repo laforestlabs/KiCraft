@@ -1,0 +1,4 @@
+{"project_stem":"DEMO","status":"failed","checked_at":"20260524T230000Z",
+ "failed_checks":["9.12 ERC","9.11 net coverage"],
+ "checks":[{"name":"9.12 ERC","ok":false,"message":"61 errors","offenders":[]},
+           {"name":"9.11 net coverage","ok":false,"message":"gaps","offenders":[]}]}

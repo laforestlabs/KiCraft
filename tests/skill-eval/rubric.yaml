@@ -1,0 +1,247 @@
+# KiCraft CircuitChat skill-eval rubric - CANONICAL machine-readable scoring contract.
+#
+# This file is the source of truth for the per-run score. RUBRIC.md is a human-readable
+# mirror generated from it; if the two disagree, THIS file wins.
+#
+# Hashing: the score's rubric_sha256 is computed over the PARSED semantic content of this
+# file with meta.sha256 removed (see bin/rubric_hash.py). Reordering keys, editing comments,
+# or reflowing whitespace does NOT change the hash; changing any weight, anchor, gate, or
+# band DOES. Bump meta.version by hand on an intentional change; the hash is the automatic
+# tripwire for an unversioned edit. Scores are only comparable within one sha256.
+#
+# Scoring model: 5 deterministic Class-C dimensions (scored by bin/score_run.py) + 5
+# judgment Class-J dimensions (scored by the observer agent), weights summing to 100, each
+# on an anchored 0-4 level. Hard-fail gates cap the final score. This YAML is generated;
+# edit it directly (it stays valid) and re-run rubric_hash.py compute --write.
+
+meta:
+  version: 1
+  sha256: "62eb668ec1721f08c659edb4edaaf99bd81293a3fabbddc5efd9033b06b491e7"
+  scale_note: 'Every dimension is scored on an anchored 0-4 level. Weighted score = sum(weight_i * level_i
+    / 4) over all dimensions; weights sum to 100, so a flawless run scores 100. The final score is then
+    capped by the lowest hard-fail gate that triggered: final = min(weighted, min(triggered gate caps)).'
+dimensions:
+- id: pipeline_completion
+  class: C
+  weight: 12
+  scored_by: script
+  summary: How far down the pipeline the run actually got, and whether it landed.
+  sources:
+  - state.json slots
+  - synthesis_check.json status
+  anchors:
+    0: No state.json, or only intent committed.
+    1: Some slots committed but never reached bom + wiring (no bom.connections).
+    2: All four slots + wiring committed, but synthesize never run.
+    3: Synthesized, files written, but synthesis_check.status != ok (failed checks).
+    4: Synthesized with synthesis_check.status == ok and all artifact files present.
+- id: computing_error_cleanliness
+  class: C
+  weight: 16
+  scored_by: script
+  summary: Literal machine errors - ERC errors, failed synthesis checks, CLI crashes.
+  sources:
+  - '*_erc.rpt severity counts'
+  - synthesis_check.json failed_checks
+  - transcript tool errors / non-zero exits / tracebacks
+  anchors:
+    0: A synthesis-blocking crash (traceback, ModuleNotFound, non-zero synthesize exit) OR ERC errors
+      > 10.
+    1: 1-10 ERC errors, or 2+ failed synthesis checks.
+    2: Exactly 1 failed synthesis check, or a non-fatal CLI error the agent recovered from.
+    3: 0 ERC errors and 0 failed checks, but ERC warnings present (e.g. lib-table / Unspecified-pin noise).
+    4: 0 ERC errors, 0 failed checks, 0 ERC warnings.
+- id: convergence_efficiency
+  class: C
+  weight: 8
+  scored_by: script
+  summary: Did it converge cleanly, or thrash through re-commits / aborts / retries?
+  sources:
+  - state.json history
+  - 'transcript: stage-commit re-runs, failed commits, part swaps'
+  notes: A re-commit driven by a genuine user revision is NOT a penalty; only count re-commits caused
+    by the agent's own errors (validator rejects, bad part, footprint/symbol resolution failure). Requires
+    the transcript to separate the two; without a transcript, score from history length and flag as partial.
+  anchors:
+    0: 4+ error-driven re-commits/aborts, or the run got stuck and never converged.
+    1: 3 error-driven re-commits/aborts.
+    2: 2 error-driven re-commits/aborts.
+    3: Exactly 1 error-driven re-commit (e.g. one footprint typo caught at commit).
+    4: Clean single pass per stage; re-commits, if any, were user-driven revisions.
+- id: latency
+  class: C
+  weight: 6
+  scored_by: script
+  summary: Wall-clock from session start to a synthesized project.
+  sources:
+  - 'transcript: first user msg -> synthesize tool result'
+  - 'fallback: history[0].timestamp -> synthesis_check.checked_at'
+  notes: Time is expected to vary by scenario; bands are deliberately generous and exist to catch pathological
+    stalls, not to reward speed-running.
+  anchors:
+    0: Over 60 min, or never synthesized.
+    1: 30-60 min.
+    2: 15-30 min.
+    3: 8-15 min.
+    4: 8 min or under.
+- id: interaction_friction
+  class: C
+  weight: 8
+  scored_by: script
+  summary: User questions asked + permission prompts, judged against the scenario's expectation.
+  sources:
+  - 'transcript: AskUserQuestion / clarification turns'
+  - settings.local.json permission floor
+  - scenario.expected_question_band
+  notes: 'Friction is contextual. Score user_questions against the scenario''s declared expected_question_band:
+    asking when the brief is genuinely ambiguous is GOOD; asking nothing on an ambiguous brief, or interrogating
+    a fully-specified one, is BAD. Permission prompts above the documented allowlist floor are always
+    friction.'
+  anchors:
+    0: Questions far outside the expected band (interrogated a clear brief, or skipped a needed interview)
+      AND many excess permission prompts.
+    1: Questions outside the expected band, OR more than 3 excess permission prompts.
+    2: Questions slightly off the band, or 2-3 excess permission prompts.
+    3: Questions within band; at most 1 excess permission prompt.
+    4: Questions squarely within band; zero permission prompts beyond the documented floor.
+- id: spec_compliance
+  class: J
+  weight: 10
+  scored_by: observer
+  summary: Did the agent obey SKILL.md and the stage specs?
+  reference:
+  - .claude/skills/circuitchat/SKILL.md
+  - .claude/skills/circuitchat/stages/*.md
+  examples_of_violation:
+  - Edit/Write on .kicraft/state.json
+  - sub-agent used the Read tool
+  - cd in the main thread
+  - silent substitution despite the BOM do-not-substitute rule
+  - hand-patched state to dodge a cascade
+  anchors:
+    0: A violation that corrupted state or silently broke the consistency guarantee (e.g. hand-edited
+      state.json).
+    1: Multiple clear spec violations.
+    2: One clear spec violation, recovered.
+    3: A borderline deviation (e.g. used cat where the Read tool was implied) with no consequence.
+    4: Fully spec-compliant throughout.
+- id: intent_fidelity
+  class: J
+  weight: 10
+  scored_by: observer
+  summary: Does the output honor what the user actually asked for?
+  sources:
+  - scenario opening prompt + user-script
+  - intent.constraints
+  - the delivered BOM/architecture
+  examples:
+  - low-Iq LDO actually low-Iq
+  - SMT-assembly-friendly honored
+  - cost/BOM target respected
+  - target fab respected
+  - named parts used
+  anchors:
+    0: Core stated intent contradicted (built the wrong thing, or violated a hard constraint).
+    1: A material stated constraint silently dropped or violated.
+    2: Intent mostly met; one stated preference quietly defaulted away without recording it.
+    3: Intent met; minor preferences defaulted but recorded in assumptions.
+    4: Every stated constraint and preference honored or explicitly surfaced for the user.
+- id: electrical_soundness
+  class: J
+  weight: 16
+  scored_by: observer
+  summary: The gotcha dimension - is the design electrically correct and complete? The schematic can be
+    ERC-clean and still be a bad circuit.
+  checklist:
+  - grounding topology / no ground loops
+  - decoupling/bypass present and sized
+  - MCU first-flash programming path
+  - input/ESD protection (TVS) where warranted
+  - strap/pull resistors for MCU boot/EN
+  - regulator thermal headroom
+  - rail current sizing
+  - polarity/orientation of diodes & polarized caps
+  - analog/digital separation on mixed-signal
+  anchors:
+    0: A defect that bricks the board or risks damage (unprogrammable MCU not surfaced, reversed power,
+      no current limiting where required).
+    1: A serious omission (missing decoupling on an IC, no protection on an exposed input, unaddressed
+      ground loop).
+    2: Functional but with a real weakness a reviewer would flag (marginal thermal, sub-optimal grounding).
+    3: Sound design; only nitpicks (a nice-to-have protection part omitted and noted).
+    4: 'Textbook-clean: grounding, decoupling, programming, protection, thermal all correct and deliberate.'
+- id: part_selection_quality
+  class: J
+  weight: 8
+  scored_by: observer
+  summary: Were the right parts chosen, from the right source, with sane symbols/footprints?
+  sources:
+  - bom.parts provenance (library vs LCSC vs stock)
+  - scenario traps
+  examples:
+  - used a library bundle when one existed instead of a guessed stock part
+  - no inferior silent substitution
+  - footprints resolve and match the package
+  - part ratings fit the rails
+  anchors:
+    0: An inferior/incorrect part silently substituted for what the user asked, reaching synthesis.
+    1: A questionable substitution or a part whose rating/package is wrong for the job.
+    2: Acceptable parts, but a library bundle that should have been used was bypassed for a stock guess.
+    3: Good selections; a minor provenance or footprint-precision nit.
+    4: Every part well-chosen, correctly sourced, ratings and footprints appropriate.
+- id: failure_honesty
+  class: J
+  weight: 6
+  scored_by: observer
+  summary: When something went wrong or was uncertain, did the run surface it - or hide it behind a healthy-looking
+    finish?
+  sources:
+  - open_questions truthfulness
+  - assumptions log
+  - whether the agent stopped cleanly on synth failure vs grinding into source-debugging
+  anchors:
+    0: 'Looks-healthy-isn''t: completed with open_q=0 while silently dropping coverage the scenario required.'
+    1: A real problem was buried in an assumption that reads as routine.
+    2: Surfaced problems late or incompletely.
+    3: Surfaced the important issues; open_questions mostly truthful.
+    4: Every uncertainty/limitation surfaced clearly; stopped cleanly on hard failure instead of improvising.
+gates:
+- id: synthesis_broken
+  detected_by: script
+  cap: 25
+  condition: synthesize crashed or produced no project files.
+- id: erc_errors
+  detected_by: script
+  cap: 45
+  condition: ERC reports 1+ error (warnings do not trigger this gate).
+- id: silent_substitution
+  detected_by: observer
+  cap: 55
+  condition: An inferior part was substituted for one the user asked for, without surfacing it, and reached
+    synthesis.
+- id: unprogrammable_mcu
+  detected_by: observer
+  cap: 50
+  condition: An MCU is present but has no first-flash programming path and the gap was not surfaced to
+    the user.
+- id: state_corruption
+  detected_by: observer
+  cap: 60
+  condition: state.json was hand-edited (Edit/Write), bypassing the stage-commit consistency guarantee.
+bands:
+- min: 90
+  grade: A
+  verdict: SHIP
+- min: 75
+  grade: B
+  verdict: SHIP-WITH-FIXES
+- min: 60
+  grade: C
+  verdict: REWORK
+- min: 40
+  grade: D
+  verdict: NOT-READY
+- min: 0
+  grade: F
+  verdict: BROKEN
+
