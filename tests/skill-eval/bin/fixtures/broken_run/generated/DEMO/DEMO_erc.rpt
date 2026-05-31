@@ -1,0 +1,5 @@
+{"$schema":"https://schemas.kicad.org/erc.v1.json","sheets":[{"path":"/","violations":[
+ {"severity":"error","type":"pin_not_connected"},
+ {"severity":"error","type":"pin_not_connected"},
+ {"severity":"error","type":"label_dangling"},
+ {"severity":"warning","type":"footprint_link_issues"}]}]}

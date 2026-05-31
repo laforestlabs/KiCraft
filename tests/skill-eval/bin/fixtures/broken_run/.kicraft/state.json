@@ -1,0 +1,11 @@
+{"project_stem":"DEMO","intent":{"goal":"x"},"functional_spec":{"blocks":[]},
+ "architecture":{"sheets":[]},"bom":{"parts":[{"ref":"U1"}],"connections":[{"net":"VBUS"}]},
+ "open_questions":[],"history":[
+   {"role":"assistant","content":"intent","timestamp":"2026-05-24T16:56:04"},
+   {"role":"assistant","content":"fs","timestamp":"2026-05-24T16:57:04"},
+   {"role":"assistant","content":"arch","timestamp":"2026-05-24T16:58:04"},
+   {"role":"assistant","content":"bom","timestamp":"2026-05-24T16:59:04"},
+   {"role":"assistant","content":"bom2","timestamp":"2026-05-24T17:05:04"},
+   {"role":"assistant","content":"bom3","timestamp":"2026-05-24T17:09:04"},
+   {"role":"assistant","content":"wiring","timestamp":"2026-05-24T17:10:04"}],
+ "artifacts":null}
