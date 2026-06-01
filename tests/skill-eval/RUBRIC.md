@@ -1,12 +1,12 @@
-# CircuitChat skill-eval rubric
+# KiCraft skill-eval rubric
 
-> **Rubric v1 — `sha256:62eb668ec1721f08c659edb4edaaf99bd81293a3fabbddc5efd9033b06b491e7`**
+> **Rubric v1 — `sha256:df90130898218fba9dd75e19af5f6703b641c14607303c4e7bcbfc9948a6e5e9`**
 >
 > Human-readable mirror of [`rubric.yaml`](./rubric.yaml), which is the canonical
 > source of truth. If the two ever disagree, **`rubric.yaml` wins.** Regenerate the
 > stamp above with `bin/rubric_hash.py compute` after any scoring change.
 
-This rubric scores a single **CircuitChat run** — one subject `claude` session
+This rubric scores a single **KiCraft run** — one subject `claude` session
 that took a PCB brief through the pipeline. It does **not** score PCB-layout
 quality (that is `kicraft/scoring/`, a different thing).
 
@@ -99,4 +99,4 @@ gates are set when grading the relevant dimension.
 
 ### Changelog
 
-- **v1** (`62eb668e…`) — initial rubric. 10 dimensions (50 C / 50 J), 5 gates, 5 bands.
+- **v1** (`df901308…`) — initial rubric. 10 dimensions (50 C / 50 J), 5 gates, 5 bands.

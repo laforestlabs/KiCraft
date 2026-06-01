@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic (Class-C) scorer for a CircuitChat skill-eval run record.
+"""Deterministic (Class-C) scorer for a KiCraft skill-eval run record.
 
 Two modes:
 
@@ -169,7 +169,7 @@ def analyze_transcript(run_dir: Path) -> dict:
             failed_commits += 1
         if "AskUserQuestion" in line:
             ask_questions += 1
-        if "kicraft-circuitchat synthesize" in line or '"synthesize"' in line:
+        if "kicraft synthesize" in line or '"synthesize"' in line:
             synth_attempts += 1
             if ts:
                 synth_ts = ts

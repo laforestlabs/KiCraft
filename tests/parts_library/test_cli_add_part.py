@@ -25,7 +25,7 @@ from kicraft.parts_library import (
 
 def _run_cli(*args: str, cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, "-m", "kicraft.circuitchat.cli_app", *args],
+        [sys.executable, "-m", "kicraft.design.cli_app", *args],
         cwd=str(cwd),
         capture_output=True,
         text=True,

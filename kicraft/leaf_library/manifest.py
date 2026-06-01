@@ -29,7 +29,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-# Re-defined here rather than imported from circuitchat.models so the
+# Re-defined here rather than imported from kicraft.models so the
 # leaf_library package stays self-contained. A test asserts the two
 # definitions stay in sync.
 PinDirection = Literal["input", "output", "bidirectional", "passive"]

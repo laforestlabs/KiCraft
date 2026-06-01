@@ -25,7 +25,7 @@ experiment = [
     "flask>=3.0",
     "structlog>=23.0",
 ]
-circuitchat = [
+design = [
     "pydantic>=2.6",
     "kicad-skip>=0.2",
     "easyeda2kicad>=1.0",
@@ -66,8 +66,8 @@ add-group-labels = "kicraft.cli.add_group_labels:main"
 cleanup-routing = "kicraft.cli.cleanup_routing:main"
 split-schematic = "kicraft.cli.split_schematic:main"
 
-# CircuitChat — deterministic helpers; LLM stages run in the Claude Code skill
-kicraft-circuitchat = "kicraft.circuitchat.cli_app:main"
+# KiCraft design CLI: deterministic helpers; LLM stages run in the Claude Code skill
+kicraft = "kicraft.design.cli_app:main"
 
 # Leaf library (read-only — promotion is GUI-driven)
 kicraft-leaf = "kicraft.cli.leaf:main"

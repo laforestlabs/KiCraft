@@ -1,4 +1,4 @@
-# KiCraft CircuitChat skill-eval rubric - CANONICAL machine-readable scoring contract.
+# KiCraft skill-eval rubric - CANONICAL machine-readable scoring contract.
 #
 # This file is the source of truth for the per-run score. RUBRIC.md is a human-readable
 # mirror generated from it; if the two disagree, THIS file wins.
@@ -16,7 +16,7 @@
 
 meta:
   version: 1
-  sha256: "62eb668ec1721f08c659edb4edaaf99bd81293a3fabbddc5efd9033b06b491e7"
+  sha256: "df90130898218fba9dd75e19af5f6703b641c14607303c4e7bcbfc9948a6e5e9"
   scale_note: 'Every dimension is scored on an anchored 0-4 level. Weighted score = sum(weight_i * level_i
     / 4) over all dimensions; weights sum to 100, so a flawless run scores 100. The final score is then
     capped by the lowest hard-fail gate that triggered: final = min(weighted, min(triggered gate caps)).'
@@ -110,8 +110,8 @@ dimensions:
   scored_by: observer
   summary: Did the agent obey SKILL.md and the stage specs?
   reference:
-  - .claude/skills/circuitchat/SKILL.md
-  - .claude/skills/circuitchat/stages/*.md
+  - .claude/skills/kicraft/SKILL.md
+  - .claude/skills/kicraft/stages/*.md
   examples_of_violation:
   - Edit/Write on .kicraft/state.json
   - sub-agent used the Read tool

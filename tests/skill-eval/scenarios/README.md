@@ -1,6 +1,6 @@
 # Scenario library
 
-Each scenario is one reproducible CircuitChat use case. A scenario is the
+Each scenario is one reproducible KiCraft use case. A scenario is the
 *controlled input* to a run: the same opening prompt + user-script should drive
 comparable runs, so scores trend meaningfully.
 

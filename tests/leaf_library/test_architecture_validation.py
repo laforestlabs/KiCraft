@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import pytest
 
-from kicraft.circuitchat.models import (
+from kicraft.design.models import (
     Architecture,
     InterSheetNet,
     Sheet,
     SheetPin,
 )
-from kicraft.circuitchat.library import (
+from kicraft.design.library import (
     ArchitectureLibraryError,
     _format_available_leaves_block,
     _validate_library_picks,

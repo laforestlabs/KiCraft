@@ -1,6 +1,6 @@
-# CircuitChat skill-eval
+# KiCraft skill-eval
 
-A repeatable way to **test the CircuitChat skill the way a user actually runs it**,
+A repeatable way to **test the KiCraft skill the way a user actually runs it**,
 score each run against a versioned rubric, and hand an implementation agent a
 concrete fix-plan. This is the formalization of the ad-hoc `tests/manual-runs/`
 prototype (`observer_notes.md` / `MONITOR_REPORT.md` / `fix_plan.md`).
@@ -18,7 +18,7 @@ repo. This separates three concerns:
    the workflow, the rubric, the scenario library, the report templates, and the
    scripts. Reviewed in PRs; evolves with the skill.
 2. **Workspace** — a throwaway dir **outside the repo** (`~/kicraft-eval/workspaces/<id>/`)
-   where the subject `claude` session actually runs `/circuitchat`, exactly like a
+   where the subject `claude` session actually runs `/kicraft`, exactly like a
    real user's project. Disposable. No KiCraft source nearby.
 3. **Run record** — the harvested evidence + the written report for one run, also
    **outside the repo** (`~/kicraft-eval/runs/<id>/`). Disposable; only a report is
@@ -64,7 +64,7 @@ claude            # paste scenarios/S02 opening prompt, follow its user-script
 
 # 2. harvest + deterministic score (see templates/observer_prompt.md)
 $PY $REPO/tests/skill-eval/bin/harvest_run.py --workspace ~/kicraft-eval/workspaces/S02-run1 \
-    --scenario S02 --target-mode release --skill-dir ~/.claude/skills/circuitchat
+    --scenario S02 --target-mode release --skill-dir ~/.claude/skills/kicraft
 $PY $REPO/tests/skill-eval/bin/score_run.py score ~/kicraft-eval/runs/S02-<stamp> --scenario S02
 
 # 3. observer grades Class-J in report.json, then:

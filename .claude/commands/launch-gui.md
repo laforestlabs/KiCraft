@@ -5,7 +5,7 @@ argument-hint: "[project path or name] (optional)"
 
 Launch the KiCraft Experiment Manager (NiceGUI app, `python -m kicraft.gui`) for a project. The requested project is: `$ARGUMENTS` (may be empty).
 
-Key fact that makes this work: the GUI picks its project by walking **upward** from the current working directory for the first `*.kicad_pro` file (`kicraft/gui/state.py:_project_root`). So you must launch it with cwd set to the directory that *directly contains* the `.kicad_pro`. For CircuitChat output that file is nested, e.g. `tests/manual-runs/<proj>/generated/<NAME>/<NAME>.kicad_pro` — not at the folder the user usually names. Resolve it, don't assume.
+Key fact that makes this work: the GUI picks its project by walking **upward** from the current working directory for the first `*.kicad_pro` file (`kicraft/gui/state.py:_project_root`). So you must launch it with cwd set to the directory that *directly contains* the `.kicad_pro`. For KiCraft output that file is nested, e.g. `tests/manual-runs/<proj>/generated/<NAME>/<NAME>.kicad_pro` — not at the folder the user usually names. Resolve it, don't assume.
 
 Follow this runbook. Print a short note before each step (per the user's global preference for visible reasoning), keep tool fan-out small.
 

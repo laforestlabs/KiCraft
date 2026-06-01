@@ -1,6 +1,6 @@
 # Launching a subject session
 
-The **subject** is a fresh `claude` session that runs CircuitChat as a real user
+The **subject** is a fresh `claude` session that runs KiCraft as a real user
 would. It is the thing under test; it must know nothing about this eval harness,
 the rubric, or that it is being observed. Do not coach it.
 
@@ -8,14 +8,14 @@ the rubric, or that it is being observed. Do not coach it.
 
 | mode | CLI | skill | use when |
 |---|---|---|---|
-| **release** (default) | pipx `kicraft-circuitchat` | global `~/.claude/skills/circuitchat` | simulating a real user; catches packaging/install bugs |
-| **dev** | repo `.venv/bin/kicraft-circuitchat` | working-tree `.claude/skills/circuitchat` synced to global | verifying an unreleased fix |
+| **release** (default) | pipx `kicraft` | global `~/.claude/skills/kicraft` | simulating a real user; catches packaging/install bugs |
+| **dev** | repo `.venv/bin/kicraft` | working-tree `.claude/skills/kicraft` synced to global | verifying an unreleased fix |
 
 For **dev** mode, sync the skill so the global copy matches the working tree, and
 record it:
 
 ```
-diff -rq <repo>/.claude/skills/circuitchat ~/.claude/skills/circuitchat   # confirm/sync
+diff -rq <repo>/.claude/skills/kicraft ~/.claude/skills/kicraft   # confirm/sync
 ```
 
 The observer records the resulting `skill_sha256` via `harvest_run.py --skill-dir`.

@@ -12,7 +12,7 @@ KiCad library prefix equals ``<name>``, and a ``<name>.pretty/`` directory
 holding the footprint. See ``manifest.py`` for the full on-disk schema.
 
 This package only owns the loader; symbol/footprint extraction for KiCad
-synthesis lives in ``kicraft.circuitchat.synthesis.parts_lookup``.
+synthesis lives in ``kicraft.design.synthesis.parts_lookup``.
 """
 
 from .loader import (
