@@ -1,7 +1,7 @@
 # Leaf Library — Implementation Spec (v1)
 
 A curated, hand-promoted library of trusted "golden leaves" that the
-CircuitChat pipeline reuses verbatim when they match a user's project,
+KiCraft pipeline reuses verbatim when they match a user's project,
 collapsing leaf-level LLM design surface to a vetted, pinned solution.
 
 This document is the implementation brief for the next session. The
@@ -16,7 +16,7 @@ be treated as fixed unless explicitly revisited.
 
 - Allow a user to promote a pinned, tested leaf from a working project
   into a global library on disk.
-- Allow CircuitChat to automatically reuse a library leaf — schematic,
+- Allow KiCraft to automatically reuse a library leaf — schematic,
   pinned PCB layout, and BOM, verbatim — whenever the LLM judges it a
   match for the current project's functional spec.
 - Support multiple independent instances of the same leaf in one
@@ -40,7 +40,7 @@ be treated as fixed unless explicitly revisited.
 - An "edit a leaf in place" affordance (re-promote a new version).
 - Auto-stamping a leaf based on autoexperiment score.
 - A "force from-scratch" per-project override.
-- Capturing originating CircuitChat slots, scores, or DRC numbers in
+- Capturing originating KiCraft slots, scores, or DRC numbers in
   the manifest (renders are kept; everything else is dropped).
 
 ---
@@ -149,7 +149,7 @@ A loader rejects a manifest if any of the following fail:
    `^[A-Z][A-Z0-9_]*$`.
 7. Every `interface.hierarchical_labels[*].direction` is one of
    `input | output | bidirectional | passive` (matches existing
-   `PinDirection` literal in `kicraft/circuitchat/models.py`).
+   `PinDirection` literal in `kicraft/design/models.py`).
 8. The `schematic.kicad_sch`'s hierarchical labels exactly match the
    manifest's declared interface (set equality on names + directions).
 9. Every ref in `refs` appears at least once in `schematic.kicad_sch`
@@ -289,11 +289,11 @@ seeds its inputs.
 
 ---
 
-## 4. CircuitChat integration
+## 4. KiCraft integration
 
 ### Sheet model changes
 
-Edit `kicraft/circuitchat/models.py`. Add two optional fields to
+Edit `kicraft/design/models.py`. Add two optional fields to
 `Sheet`:
 
 ```python
@@ -311,8 +311,8 @@ set. For non-library sheets both are None.
 
 ### Architecture stage retrieval
 
-Edit `kicraft/circuitchat/stages/architecture.py` and
-`kicraft/circuitchat/prompts/architecture.md`.
+Edit `kicraft/design/stages/architecture.py` and
+`kicraft/design/prompts/architecture.md`.
 
 Before each architecture-stage LLM call:
 
@@ -375,7 +375,7 @@ become from-scratch sheets and vice versa.
 
 ### BOM stage handling
 
-Edit `kicraft/circuitchat/stages/bom.py`. Before the LLM call:
+Edit `kicraft/design/stages/bom.py`. Before the LLM call:
 
 1. Partition sheets into `library_sheets` (have `from_library`)
    and `generated_sheets`.
@@ -397,8 +397,8 @@ map.
 
 ### Synthesis stage
 
-Edit `kicraft/circuitchat/synthesis/emitter.py` and
-`kicraft/circuitchat/synthesis/autoplacer.py`.
+Edit `kicraft/design/synthesis/emitter.py` and
+`kicraft/design/synthesis/autoplacer.py`.
 
 For each `Sheet`:
 
@@ -446,7 +446,7 @@ treated as pre-solved by every downstream stage.
 
 ## 5. Synthesis validation additions
 
-Extend `kicraft/circuitchat/synthesis/validation.py`.
+Extend `kicraft/design/synthesis/validation.py`.
 
 Two new checks:
 
@@ -498,7 +498,7 @@ No `extract`, `promote`, `remove`, `pack`, or `unpack` in v1.
 ## 7. GUI — Leaf Library tab
 
 New top-level tab. Register in `kicraft/gui/app.py` alongside the
-existing tabs (CircuitChat, Setup, Analysis, etc.). Implementation
+existing tabs (KiCraft, Setup, Analysis, etc.). Implementation
 file: `kicraft/gui/pages/leaf_library.py`.
 
 ### Tab layout — two sections
@@ -574,9 +574,9 @@ deletes the leaf directory.
 
 No "edit" affordance. To change a leaf, promote a new version.
 
-### Banner in the CircuitChat tab
+### Banner in the KiCraft tab
 
-Edit `kicraft/gui/pages/circuitchat.py`. When the state's
+Edit `kicraft/gui/pages/kicraft.py`. When the state's
 `architecture` contains one or more sheets with `from_library`
 set, render a small status line above the chat input:
 
@@ -608,17 +608,17 @@ refreshes the state-slot panel).
 
 | Path | Change |
 |---|---|
-| `kicraft/circuitchat/models.py` | Add `from_library`, `library_instance` to `Sheet`. Add optional `source_leaf` to `BomPart`. Add cross-field validators. |
-| `kicraft/circuitchat/prompts/architecture.md` | Add the "Available leaves" injection point + behavioral directive. |
-| `kicraft/circuitchat/stages/architecture.py` | Load library, inject leaf summaries into the system prompt, validate `from_library` and `library_instance` against the loaded library + against `inter_sheet_nets`. |
-| `kicraft/circuitchat/stages/bom.py` | Partition sheets; merge library-sourced BOM rows; flag with `source_leaf`. |
-| `kicraft/circuitchat/synthesis/emitter.py` | Route library-backed sheets through the installer; route others through the existing emitter path. |
-| `kicraft/circuitchat/synthesis/autoplacer.py` | Merge library autoplacer fragments (renumber-mapped) into the project autoplacer JSON. Write the `library_leaves` map. |
-| `kicraft/circuitchat/synthesis/validation.py` | SS9.7 (ref uniqueness), SS9.8 (library interface match). |
+| `kicraft/design/models.py` | Add `from_library`, `library_instance` to `Sheet`. Add optional `source_leaf` to `BomPart`. Add cross-field validators. |
+| `kicraft/design/prompts/architecture.md` | Add the "Available leaves" injection point + behavioral directive. |
+| `kicraft/design/stages/architecture.py` | Load library, inject leaf summaries into the system prompt, validate `from_library` and `library_instance` against the loaded library + against `inter_sheet_nets`. |
+| `kicraft/design/stages/bom.py` | Partition sheets; merge library-sourced BOM rows; flag with `source_leaf`. |
+| `kicraft/design/synthesis/emitter.py` | Route library-backed sheets through the installer; route others through the existing emitter path. |
+| `kicraft/design/synthesis/autoplacer.py` | Merge library autoplacer fragments (renumber-mapped) into the project autoplacer JSON. Write the `library_leaves` map. |
+| `kicraft/design/synthesis/validation.py` | SS9.7 (ref uniqueness), SS9.8 (library interface match). |
 | `kicraft/gui/app.py` | Register the Leaf Library tab. |
-| `kicraft/gui/pages/circuitchat.py` | Banner for library-backed reuse. |
+| `kicraft/gui/pages/kicraft.py` | Banner for library-backed reuse. |
 | `pyproject.toml` | Add `kicraft-leaf` console_script. |
-| `README.md` | One section describing the Leaf Library — location, how to promote via GUI, how reuse is automatic during CircuitChat. |
+| `README.md` | One section describing the Leaf Library — location, how to promote via GUI, how reuse is automatic during KiCraft. |
 
 ---
 
@@ -653,7 +653,7 @@ refreshes the state-slot panel).
 
 ### Integration tests
 
-- `tests/circuitchat/test_library_reuse.py`
+- `tests/kicraft/test_library_reuse.py`
   - Populate `$KICRAFT_LEAF_LIB` with a fixture leaf.
   - Run the architecture stage with a spec that should match;
     assert `Sheet.from_library` is set on the matched sheet.
@@ -664,7 +664,7 @@ refreshes the state-slot panel).
     a pins.json entry, and the `library_leaves` map in
     autoplacer.json.
   - SS9.7 and SS9.8 pass on the emitted project.
-- `tests/circuitchat/test_library_reevaluation.py`
+- `tests/kicraft/test_library_reevaluation.py`
   - Run architecture once with a matching spec -> leaf picked.
   - Mutate the spec so the leaf no longer fits.
   - Run architecture again -> `Sheet.from_library` is None.
@@ -673,9 +673,9 @@ refreshes the state-slot panel).
 
 1. Promote the existing `llups` project's `CHARGER` leaf via the
    GUI Leaf Library tab.
-2. Start a fresh CircuitChat conversation with a similar project
+2. Start a fresh KiCraft conversation with a similar project
    description ("USB-C 5V to 1S LiPo with status LED + 3.3V LDO").
-3. Verify the CircuitChat banner shows the reused leaf.
+3. Verify the KiCraft banner shows the reused leaf.
 4. Run `--synthesize` and inspect the emitted project: the
    CHARGER sheet's refs are renumbered to fit the new project,
    the pinned pcb shows up under `.experiments/subcircuits/CHARGER/`,
@@ -695,7 +695,7 @@ A suggested order that keeps the system runnable at each step:
    `kicraft-leaf list / show / path`. Nothing depends on this yet
    but it can be tested standalone.
 2. **Extractor + GUI promote wizard.** Lets the user populate the
-   library from a real project. CircuitChat reuse not yet wired.
+   library from a real project. KiCraft reuse not yet wired.
 3. **GUI Leaf Library tab (installed leaves list + remove).**
    Read-side of the GUI is now complete.
 4. **Renumber + installer.** Pure functions, tested in isolation.
@@ -705,7 +705,7 @@ A suggested order that keeps the system runnable at each step:
 6. **BOM stage partition.** Library sheets are now correctly
    excluded from BOM generation.
 7. **Synthesis stage emitter + autoplacer merge.** Library
-   reuse is now end-to-end. Banner in CircuitChat tab.
+   reuse is now end-to-end. Banner in KiCraft tab.
 8. **Validation SS9.7 / SS9.8.**
 9. **README section + smoke test.**
 

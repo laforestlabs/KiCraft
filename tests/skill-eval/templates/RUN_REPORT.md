@@ -5,7 +5,7 @@ markdown is the human narrative. Keep the two consistent — the scorecard here 
 match report.json's dimensions/score.
 Delete these comments when filling in.
 -->
-# CircuitChat run report — <scenario id>: <title>
+# KiCraft run report — <scenario id>: <title>
 
 | field | value |
 |---|---|
@@ -90,7 +90,7 @@ permission floor   : …   (excess …)
 
 For each of intent / functional_spec / architecture / bom / wiring / synthesis:
 **PASS / FAIL** + one paragraph judged against
-`.claude/skills/circuitchat/stages/<stage>.md`.
+`.claude/skills/kicraft/stages/<stage>.md`.
 
 - **intent** — PASS/FAIL: …
 - **functional_spec** — …

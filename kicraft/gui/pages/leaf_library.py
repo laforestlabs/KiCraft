@@ -9,9 +9,9 @@ Two sections:
 
 The promote wizard requires the source project to have:
 - ``.experiments/subcircuits/<leaf_key>/round_NNNN_*`` complete triads
-- A ``<project_stem>_circuitchat_state.json`` so we can slice BOM rows
+- A ``<project_stem>_kicraft_state.json`` so we can slice BOM rows
   and the autoplacer fragment for the chosen sheet. (Projects synthesized
-  via CircuitChat write this; hand-rolled projects must save state
+  via KiCraft write this; hand-rolled projects must save state
   alongside before promoting.)
 """
 
@@ -155,10 +155,10 @@ def _discover_candidates(proj_dir: Path) -> list[dict[str, Any]]:
 
 
 def _find_state_json(proj_dir: Path) -> Path | None:
-    """Locate a CircuitChat state.json next to the project."""
+    """Locate a KiCraft state.json next to the project."""
     for candidate in [
-        proj_dir / f"{proj_dir.name}_circuitchat_state.json",
-        proj_dir / "circuitchat_state.json",
+        proj_dir / f"{proj_dir.name}_kicraft_state.json",
+        proj_dir / "kicraft_state.json",
         proj_dir / "state.json",
     ]:
         if candidate.exists():

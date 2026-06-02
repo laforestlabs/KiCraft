@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Harvest a finished subject run from its external workspace into a run record.
 
-A CircuitChat eval run happens in a throwaway *workspace* outside the repo
+A KiCraft eval run happens in a throwaway *workspace* outside the repo
 (e.g. ~/kicraft-eval/workspaces/<id>/). When the subject session finishes, this
 copies the evidence into a *run record* (~/kicraft-eval/runs/<id>/), locates the
 subject's Claude Code transcript, and stamps run.json with provenance so the run
@@ -10,7 +10,7 @@ is reproducible. score_run.py then reads the run record.
     .venv/bin/python tests/skill-eval/bin/harvest_run.py \\
         --workspace ~/kicraft-eval/workspaces/S02-20260530-1 \\
         --scenario S02 --target-mode release \\
-        [--skill-dir ~/.claude/skills/circuitchat] [--runs-root ~/kicraft-eval/runs]
+        [--skill-dir ~/.claude/skills/kicraft] [--runs-root ~/kicraft-eval/runs]
 
 Copies: .kicraft/, generated/, .claude/settings.local.json. Finds the transcript
 under ~/.claude/projects/<mangled-workspace-path>/*.jsonl (newest, or --session).
@@ -58,9 +58,9 @@ def dir_content_hash(d: Path) -> str | None:
 
 
 def cli_info() -> dict:
-    info = {"path": shutil.which("kicraft-circuitchat")}
+    info = {"path": shutil.which("kicraft")}
     try:
-        out = subprocess.run(["kicraft-circuitchat", "--help"], capture_output=True,
+        out = subprocess.run(["kicraft", "--help"], capture_output=True,
                              text=True, timeout=30)
         info["help_ok"] = out.returncode == 0
     except (OSError, subprocess.SubprocessError):

@@ -6,7 +6,7 @@ subject — it watches, grades, and writes the report.
 
 ---
 
-You are the **observer** for a KiCraft CircuitChat skill-eval run. A separate
+You are the **observer** for a KiCraft skill-eval run. A separate
 `claude` session (the *subject*) is designing a PCB in an external workspace; you
 evaluate it. You do not design anything and you never message the subject.
 
@@ -21,7 +21,7 @@ evaluate it. You do not design anything and you never message the subject.
 ## 0. Preflight (once, before/at subject start)
 - `bin/rubric_hash.py check` → must be OK.
 - Confirm the skill under test. For **release**: the subject uses
-  `~/.claude/skills/circuitchat`. For **dev**: `diff -rq` the working-tree skill
+  `~/.claude/skills/kicraft`. For **dev**: `diff -rq` the working-tree skill
   against the global one and confirm they match (no drift), so you're grading the
   intended version.
 - Confirm the workspace is clean (no pre-existing `.kicraft/` or `generated/`).

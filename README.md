@@ -7,14 +7,14 @@ experiment management for KiCad projects via the pcbnew Python API.
 
 KiCraft is a multi-layer pipeline. Top-down:
 
-1. **CircuitChat** (Claude Code skill + Python helpers) -- turns a natural-
+1. **KiCraft** (Claude Code skill + Python helpers) -- turns a natural-
    language project description into the hierarchical KiCad 9 file set
    (root + leaf `.kicad_sch`, `.kicad_pro`, `_autoplacer.json`). The LLM-
    driven stages (intent / functional_spec / architecture / bom) run as a
-   Claude Code skill at `.claude/skills/circuitchat/`, so a Claude Code
+   Claude Code skill at `.claude/skills/kicraft/`, so a Claude Code
    subscription pays for inference and no API key is required. The
-   deterministic synthesis step is a Python CLI (`kicraft-circuitchat
-   synthesize`). See [CircuitChat](#circuitchat-chat--kicad-files) below.
+   deterministic synthesis step is a Python CLI (`kicraft
+   synthesize`). See [KiCraft](#kicraft-chat--kicad-files) below.
 2. **placement + routing + scoring** (Python, this repo) -- everything below.
 
 ## Installation
@@ -28,23 +28,23 @@ pip install -e .
 # With GUI support
 pip install -e ".[gui]"
 
-# With CircuitChat helpers (pydantic + kicad-skip + easyeda2kicad; the LLM
+# With KiCraft helpers (pydantic + kicad-skip + easyeda2kicad; the LLM
 # stages run in the Claude Code skill, not in this package — no API key needed)
-pip install -e ".[circuitchat]"
+pip install -e ".[kicraft]"
 
 # With all optional dependencies
-pip install -e ".[gui,scoring,experiment,circuitchat,dev]"
+pip install -e ".[gui,scoring,experiment,kicraft,dev]"
 ```
 
 ### End-user install (pipx)
 
-`kicraft-circuitchat synthesize` imports KiCad's bundled `pcbnew`, and
+`kicraft synthesize` imports KiCad's bundled `pcbnew`, and
 `add-part --from-lcsc` imports `easyeda2kicad`. An isolated pipx venv sees
 neither by default, so install with `--system-site-packages` (exposes the
-system `pcbnew`) **and** the `[circuitchat]` extra (pulls in `easyeda2kicad`):
+system `pcbnew`) **and** the `[kicraft]` extra (pulls in `easyeda2kicad`):
 
 ```bash
-pipx install --system-site-packages "kicraft[circuitchat]"
+pipx install --system-site-packages "kicraft[kicraft]"
 ```
 
 Already installed without them? Symptoms are `add-part --from-lcsc` printing
@@ -53,10 +53,10 @@ Already installed without them? Symptoms are `add-part --from-lcsc` printing
 
 ```bash
 pipx reinstall --system-site-packages kicraft
-pipx inject kicraft easyeda2kicad   # only if the [circuitchat] extra was omitted
+pipx inject kicraft easyeda2kicad   # only if the [kicraft] extra was omitted
 ```
 
-## CircuitChat (chat -> KiCad files)
+## KiCraft (chat -> KiCad files)
 
 A multi-turn chat that takes a project description in plain English and
 emits the hierarchical KiCad 9 file set that the placement / routing
@@ -67,29 +67,29 @@ the conversation runs inside Claude Code on the user's subscription.
 
 - The four LLM stages (intent / functional_spec / architecture / bom)
   and the per-turn orchestrator are a Claude Code skill at
-  `.claude/skills/circuitchat/`. Claude reads/writes a `.kicraft/state.json`
+  `.claude/skills/kicraft/`. Claude reads/writes a `.kicraft/state.json`
   file matching the `ConversationState` Pydantic schema.
 - The deterministic synthesis step (state.json → file set + SS9.1-SS9.6
-  checks) is the `kicraft-circuitchat` CLI.
+  checks) is the `kicraft` CLI.
 
 ### Run it
 
 From inside this repo (or any project that has copied the skill into its
-own `.claude/skills/circuitchat/`):
+own `.claude/skills/kicraft/`):
 
 ```bash
 claude                 # start a Claude Code session
-/circuitchat           # invokes the skill (or just say "I want to design a PCB")
+/kicraft           # invokes the skill (or just say "I want to design a PCB")
 ```
 
 Describe your project ("USB-C powered 3.3V regulator with status LED,
 JLCPCB target, under $5 BOM"). Claude steps through the stages, writes
 `.kicraft/state.json` as it goes, and validates after every slot update
-via `kicraft-circuitchat validate`. When all four slots are filled, ask
+via `kicraft validate`. When all four slots are filled, ask
 it to synthesize and it will run:
 
 ```bash
-kicraft-circuitchat synthesize .kicraft/state.json ./generated
+kicraft synthesize .kicraft/state.json ./generated
 ```
 
 ### Using the skill in your own project
@@ -97,17 +97,17 @@ kicraft-circuitchat synthesize .kicraft/state.json ./generated
 Copy the skill directory into your project's `.claude/`:
 
 ```bash
-cp -r /path/to/KiCraft/.claude/skills/circuitchat your-project/.claude/skills/
-cp /path/to/KiCraft/.claude/commands/circuitchat.md your-project/.claude/commands/
+cp -r /path/to/KiCraft/.claude/skills/kicraft your-project/.claude/skills/
+cp /path/to/KiCraft/.claude/commands/kicraft.md your-project/.claude/commands/
 ```
 
-Then `pip install -e /path/to/KiCraft[circuitchat]` so the
-`kicraft-circuitchat` CLI is on PATH. The skill activates the next time
+Then `pip install -e /path/to/KiCraft[kicraft]` so the
+`kicraft` CLI is on PATH. The skill activates the next time
 you run `claude` inside your project.
 
 ### Permission model
 
-CircuitChat now runs each stage in a sub-agent that uses only two bundled CLI
+KiCraft now runs each stage in a sub-agent that uses only two bundled CLI
 commands — `stage-prep` (read-only collector) and `stage-commit` (atomic
 validate + merge + archive). With those pre-allowed in `~/.claude/settings.json`,
 the user only sees interview-style questions, not a stream of permission prompts
@@ -116,51 +116,51 @@ for every tool call. Recommended allowlist entries:
 ```jsonc
 "permissions": {
   "allow": [
-    "Bash(kicraft-circuitchat stage-prep *)",
-    "Bash(kicraft-circuitchat stage-commit *)",
-    "Bash(kicraft-circuitchat synthesize *)",
-    "Bash(kicraft-circuitchat validate *)",
-    "Bash(kicraft-circuitchat archive *)",
-    "Bash(kicraft-circuitchat list-leaves)",
-    "Bash(kicraft-circuitchat lookup-symbol *)",
-    "Write(/tmp/circuitchat_*.json)",
-    "Write(/tmp/claude/circuitchat_*.json)"
+    "Bash(kicraft stage-prep *)",
+    "Bash(kicraft stage-commit *)",
+    "Bash(kicraft synthesize *)",
+    "Bash(kicraft validate *)",
+    "Bash(kicraft archive *)",
+    "Bash(kicraft list-leaves)",
+    "Bash(kicraft lookup-symbol *)",
+    "Write(/tmp/kicraft_*.json)",
+    "Write(/tmp/claude/kicraft_*.json)"
   ]
 }
 ```
 
 Install once via `/update-config` or edit the file directly; the patterns are
-narrow (kicraft-circuitchat CLI only).
+narrow (kicraft CLI only).
 
 ### CLI reference
 
 ```bash
-kicraft-circuitchat stage-prep <stage> [STATE]
+kicraft stage-prep <stage> [STATE]
 # Single-shot collector. Returns JSON: {state, extras} where extras carries
 # the leaf-library output for architecture and BATCHED symbol pinouts for
 # wiring (replacing N per-part lookup-symbol calls with one).
 
-kicraft-circuitchat stage-commit <stage> --slot-file F.json \
+kicraft stage-commit <stage> --slot-file F.json \
   [--questions-file Q.json] [--history-message M] [--project-stem S] \
   [STATE] [--no-archive] [--archive-root DIR]
 # Atomic: validate the proposed slot, merge into state.json, append history,
 # archive. Returns {"ok": true, ...} or {"ok": false, "errors": [...]} so the
 # sub-agent can self-correct on validation failures.
 
-kicraft-circuitchat validate .kicraft/state.json
+kicraft validate .kicraft/state.json
 # prints {ok, project_stem, slots_filled, open_questions, blocking_questions}
 # exit codes: 0 ok, 2 schema error, 3 library validation error
 
-kicraft-circuitchat list-leaves
+kicraft list-leaves
 # prints the "Available leaves" markdown block. The architecture stage
 # receives this via stage-prep's extras; this command is for ad-hoc inspection.
 
-kicraft-circuitchat lookup-symbol Library:Name
+kicraft lookup-symbol Library:Name
 # prints one symbol's pin inventory. The wiring stage receives all needed
 # pinouts via stage-prep's batched extras; this command is for ad-hoc lookup.
 
-kicraft-circuitchat synthesize .kicraft/state.json ./generated [--smoke]
-# wraps kicraft.circuitchat.synthesize.run; --smoke adds the (slow)
+kicraft synthesize .kicraft/state.json ./generated [--smoke]
+# wraps kicraft.design.synthesize.run; --smoke adds the (slow)
 # solve-subcircuits check
 ```
 
@@ -187,7 +187,7 @@ autoexperiment MYPROJ.kicad_pcb --schematic MYPROJ.kicad_sch --rounds 20
 ### Validation
 
 Every synthesis run executes SS9.1-SS9.6 from
-`docs/circuitchat_schematic_prompt.md` against the written files
+`docs/kicraft_schematic_prompt.md` against the written files
 (schematic version, footprints non-empty, pin directions valid,
 Sheetfile refs resolve, autoplacer JSON valid, every named ref in
 the schematic). Synthesis raises `SynthesisValidationError` and prints
@@ -206,7 +206,7 @@ the failing check rather than shipping a broken file set.
 A *leaf* is a single hierarchical sheet — a pre-routed PCB fragment plus
 its schematic, BOM, and autoplacer settings. Once you've solved one
 ("USB-C 1S LiPo charger") and pinned a round you trust, you can promote
-it into the global Leaf Library. The CircuitChat pipeline then reuses
+it into the global Leaf Library. The KiCraft pipeline then reuses
 it verbatim every time the LLM judges it a match for a new project,
 collapsing leaf-level design surface to a vetted, pinned solution.
 
@@ -251,13 +251,13 @@ content-addressed hash, and atomically writes the new directory into
 (e.g. `0.1.0 -> 0.1.1` for a patch, `0.2.0` for additive interface
 changes, `1.0.0` for breaking ones).
 
-### Automatic reuse during CircuitChat
+### Automatic reuse during KiCraft
 
 When the skill enters the architecture stage it runs
-`kicraft-circuitchat list-leaves` and reads the result so the model can
+`kicraft list-leaves` and reads the result so the model can
 see the curated catalog. Claude picks any matches by setting
 `Sheet.from_library = "<name>@<version>"` and `Sheet.library_instance = N`.
-`kicraft-circuitchat validate` then verifies the leaf's hierarchical-
+`kicraft validate` then verifies the leaf's hierarchical-
 label interface matches the sheet's endpoints exactly. Synthesis then:
 
 1. Skips the LLM-generated leaf schematic for that sheet.
@@ -512,15 +512,15 @@ from the command line.
 
 ## CLI Commands
 
-### CircuitChat
-- `kicraft-circuitchat validate STATE.json` — Validate a `.kicraft/state.json`
+### KiCraft
+- `kicraft validate STATE.json` — Validate a `.kicraft/state.json`
   against the `ConversationState` schema + library-pick rules.
-- `kicraft-circuitchat list-leaves` — Print the "Available leaves" markdown
+- `kicraft list-leaves` — Print the "Available leaves" markdown
   block the architecture stage shows to the model.
-- `kicraft-circuitchat synthesize STATE.json OUT_DIR [--smoke]` — Emit the
+- `kicraft synthesize STATE.json OUT_DIR [--smoke]` — Emit the
   KiCad file set from a complete state. The LLM-driven chat itself runs in
-  the Claude Code skill at `.claude/skills/circuitchat/`. See
-  [CircuitChat](#circuitchat-chat--kicad-files).
+  the Claude Code skill at `.claude/skills/kicraft/`. See
+  [KiCraft](#kicraft-chat--kicad-files).
 
 ### Core Pipeline
 - `solve-subcircuits` — Hierarchical subcircuit placement and routing
@@ -563,14 +563,14 @@ from the command line.
 
 ```
 kicraft/
-├── circuitchat/               # Chat -> KiCad file set
+├── kicraft/               # Chat -> KiCad file set
 │   ├── models.py        # Pydantic state slots (intent / functional_spec / architecture / bom)
 │   ├── library.py       # Leaf-library helpers (list / validate picks)
 │   ├── synthesize.py    # Deterministic state -> file set step
 │   ├── synthesis/       # .kicad_sch / .kicad_pro / autoplacer.json emitters + §9 checks
-│   └── cli_app.py       # `kicraft-circuitchat` validate / list-leaves / synthesize
+│   └── cli_app.py       # `kicraft` validate / list-leaves / synthesize
 │   # The LLM-driven stages and per-turn orchestrator live in the
-│   # Claude Code skill at .claude/skills/circuitchat/ (not in this package).
+│   # Claude Code skill at .claude/skills/kicraft/ (not in this package).
 ├── autoplacer/          # Placement and routing engine
 │   ├── config.py        # Default config + project config loader
 │   ├── freerouting_runner.py

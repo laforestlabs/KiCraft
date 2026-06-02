@@ -5,12 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from kicraft.circuitchat.synthesis.parts_lookup import (
+from kicraft.design.synthesis.parts_lookup import (
     LibraryNotFoundError,
     resolve_footprint_library_path,
     resolve_symbol_library_path,
 )
-from kicraft.circuitchat.synthesis.symbol_library import (
+from kicraft.design.synthesis.symbol_library import (
     SymbolNotFoundError,
     extract_symbol_block,
 )

@@ -134,7 +134,6 @@ DEFAULT_TOGGLES = {
 
 
 DEFAULT_GUI_CLEANUP = {
-    "show_analysis_tab": True,
     "show_legacy_presets": False,
 }
 

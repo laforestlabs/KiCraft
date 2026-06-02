@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "CircuitChat skill-eval run report",
+  "title": "KiCraft skill-eval run report",
   "description": "Machine sidecar for one eval run. Written by score_run.py (Class-C + script gates), completed by the observer (Class-J levels + observer gates), then totaled by score_run.py finalize. The RUN_REPORT.md narrative must stay consistent with this file.",
   "type": "object",
   "required": ["scenario", "run_id", "rubric_version", "rubric_sha256", "metrics", "dimensions", "gates", "score"],

@@ -14,8 +14,8 @@ import pytest
 
 pcbnew = pytest.importorskip("pcbnew")
 
-from kicraft.circuitchat.models import BOM, BomPart, NetConnection, PinEndpoint
-from kicraft.circuitchat.synthesis.kicad_pcb_stub import write_empty_pcb
+from kicraft.design.models import BOM, BomPart, NetConnection, PinEndpoint
+from kicraft.design.synthesis.kicad_pcb_stub import write_empty_pcb
 
 
 def _demo_bom() -> BOM:

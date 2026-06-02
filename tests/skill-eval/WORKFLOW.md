@@ -1,6 +1,6 @@
-# CircuitChat skill-eval — workflow
+# KiCraft skill-eval — workflow
 
-The end-to-end process for running, scoring, and reporting one CircuitChat eval.
+The end-to-end process for running, scoring, and reporting one KiCraft eval.
 Read `README.md` first for the three-way split and the role definitions.
 
 A run has two agents: a **subject** (under test) and an **observer** (evaluator),
@@ -16,8 +16,8 @@ preflight ─▶ launch subject ─▶ watch live ─▶ harvest ─▶ score (C
    rubric was edited without re-stamping — fix that before scoring anything, or all
    scores are meaningless.
 2. **Choose the target** (what's under test) and record it:
-   - **release** (default, true-user sim): pipx `kicraft-circuitchat` + global
-     `~/.claude/skills/circuitchat`. Catches install/packaging bugs.
+   - **release** (default, true-user sim): pipx `kicraft` + global
+     `~/.claude/skills/kicraft`. Catches install/packaging bugs.
    - **dev** (verify an unreleased fix): repo `.venv` CLI + working-tree skill. Sync
      the skill to global and `diff -rq` to confirm no drift, so you grade the
      version you think you're grading.

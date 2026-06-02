@@ -1,7 +1,7 @@
 """Fix 3b: deterministic edge-zone fallback for edge-mount connectors."""
 from __future__ import annotations
 
-from kicraft.circuitchat.synthesis.autoplacer import (
+from kicraft.design.synthesis.autoplacer import (
     DEFAULT_EDGE_CONNECTOR_ZONE,
     _edge_connector_zone_injections,
 )

@@ -20,7 +20,7 @@ from .conftest import write_valid_part
 def _run_cli(*args: str, cwd: Path) -> subprocess.CompletedProcess:
     """Invoke the cli_app entry point in a subprocess, returning the result."""
     return subprocess.run(
-        [sys.executable, "-m", "kicraft.circuitchat.cli_app", *args],
+        [sys.executable, "-m", "kicraft.design.cli_app", *args],
         cwd=str(cwd),
         capture_output=True,
         text=True,
