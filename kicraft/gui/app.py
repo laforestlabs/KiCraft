@@ -41,7 +41,6 @@ def _patch_timer_context() -> None:
 _patch_timer_context()
 
 from .components.pipeline_tracker import pipeline_tracker
-from .pages.analysis import analysis_page
 from .pages.design import design_page
 from .pages.leaf_library import leaf_library_page
 from .pages.manual_layout import manual_layout_page
@@ -209,17 +208,12 @@ def index() -> None:
     with ui.row().classes("w-full px-6 pb-1 border-b border-gray-800"):
         pipeline_tracker(state.project_root)
 
-    show_analysis_tab = bool(state.gui_cleanup.get("show_analysis_tab", True))
-
     with ui.tabs().classes("w-full") as tabs:
         design_tab = ui.tab("Design", icon="schema")
         leaf_library_tab = ui.tab("Leaf Library", icon="library_books")
         setup_tab = ui.tab("Setup", icon="tune")
         monitor_tab = ui.tab("Monitor", icon="monitor")
         manual_tab = ui.tab("Manual Layout", icon="open_with")
-        analysis_tab = None
-        if show_analysis_tab:
-            analysis_tab = ui.tab("Analysis", icon="analytics")
 
     with ui.tab_panels(tabs, value=setup_tab).classes("w-full px-4"):
         with ui.tab_panel(design_tab):
@@ -232,6 +226,3 @@ def index() -> None:
             monitor_page()
         with ui.tab_panel(manual_tab).classes("ml-tab-panel"):
             manual_layout_page()
-        if analysis_tab is not None:
-            with ui.tab_panel(analysis_tab):
-                analysis_page()

@@ -48,7 +48,7 @@ monitor surfaces.
 | `renders/parent_stamped.png` | `compose_subcircuits._render_parent_board_views` via `render_views` after stamping | monitor root node when routing failed (`RenderIndex.parent_render(prefer_routed=False)`) | `run_started_at` floor |
 | `renders/parent_routed.png` | Same, after routing | monitor root node when routing succeeded | Same |
 | `hierarchical_autoexperiment/round_NNNN/parent_*.png` | `autoexperiment.py` snapshot-copies the per-round canonical parent renders | per-round root-node thumbnail (first probe layer in `RenderIndex.parent_render`) | `run_started_at` floor |
-| `frames/frame_NNNN.png`, `frame_latest.png` | `autoexperiment.py` copies the best preview from each round | Progression viewer scrubber | none (always picks latest) |
+| `frames/frame_NNNN.png`, `frame_latest.png` | `autoexperiment.py` copies the best preview from each round | none (Progression viewer removed; frames still written to disk) | none (always picks latest) |
 | `best_preview.png` | Same | Promoted top-level preview | none |
 | `inspect/annotated_top.png` | `render.inspector_overlay.render_annotated_top` (PIL, NOT kicad-cli) | `inspect_parent` CLI Markdown summary | none — generated on demand |
 | `inspect/stacking_heatmap.png` | `render.inspector_overlay.render_stacking_heatmap` (PIL, NOT kicad-cli) | Same | none |
