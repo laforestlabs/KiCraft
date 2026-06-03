@@ -1,0 +1,19 @@
+# KiCraft reverse proxy with automatic HTTPS (Let's Encrypt via Caddy).
+#
+# Prerequisites:
+#   - DNS A (and AAAA) records for kicraft.io point at this server's IP.
+#   - Ports 80 and 443 are open in the firewall.
+#   - The app is running on 127.0.0.1:8080 (see kicraft-web.service).
+#
+# Install: /etc/caddy/Caddyfile  ->  sudo systemctl reload caddy
+# Caddy obtains and renews the TLS cert automatically once DNS resolves here.
+
+kicraft.io {
+	encode zstd gzip
+	# NiceGUI uses WebSockets; Caddy upgrades them through reverse_proxy by default.
+	reverse_proxy 127.0.0.1:8080
+}
+
+www.kicraft.io {
+	redir https://kicraft.io{uri} permanent
+}

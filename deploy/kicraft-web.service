@@ -1,0 +1,32 @@
+# systemd unit for the KiCraft web app.
+# Install: /etc/systemd/system/kicraft-web.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now kicraft-web
+# Logs:   journalctl -u kicraft-web -f
+#
+# The app reads its config (OPENROUTER_API_KEY, caps, KICRAFT_ACCESS_PASSWORD,
+# KICRAFT_STORAGE_SECRET, KICRAFT_WEB_HOST/PORT) from the .env file in
+# WorkingDirectory. Keep .env mode 600 and owned by the service user.
+
+[Unit]
+Description=KiCraft web app (gated agent loop over OpenRouter, spend-capped)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kicraft
+Group=kicraft
+WorkingDirectory=/home/kicraft/KiCraft
+ExecStart=/home/kicraft/KiCraft/.venv/bin/python -m kicraft.server.web
+Restart=on-failure
+RestartSec=5
+# Bind to localhost only; Caddy terminates TLS and proxies in.
+Environment=KICRAFT_WEB_HOST=127.0.0.1
+Environment=KICRAFT_WEB_PORT=8080
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
