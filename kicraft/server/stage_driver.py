@@ -209,7 +209,9 @@ def _commit(stage, slot, state_path, brief, project_stem=None, workspace=None) -
     sf = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
     json.dump(slot, sf)
     sf.close()
-    cmd = KICRAFT + ["stage-commit", stage, "--slot-file", sf.name, str(state_path), "--no-archive"]
+    # Positionals (stage, state) BEFORE options: Python 3.12's argparse won't bind a
+    # trailing optional positional that follows an option (e.g. --slot-file).
+    cmd = KICRAFT + ["stage-commit", stage, str(state_path), "--slot-file", sf.name, "--no-archive"]
     if stage == "intent":
         cmd += ["--project-stem", project_stem or _fallback_stem(brief)]
     proc = _run(cmd, workspace)
