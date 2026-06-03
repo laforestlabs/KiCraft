@@ -25,7 +25,11 @@ from .config import Settings
 from .spend_guard import SpendGuard
 from .stage_driver import DESIGN_STAGES, KICRAFT, drive_chain
 
-ACCESS_PASSWORD = os.environ.get("KICRAFT_ACCESS_PASSWORD", "")
+def _access_password() -> str:
+    """Read the gate password live. os.environ is populated from .env in main()
+    (after this module is imported), so reading it at import time would capture
+    an empty string. Read it per request instead."""
+    return os.environ.get("KICRAFT_ACCESS_PASSWORD", "")
 
 
 def _authed() -> bool:
@@ -82,10 +86,11 @@ def login_page():
         pw = ui.input("Access password", password=True, password_toggle_button=True).classes("w-full")
 
         def submit():
-            if ACCESS_PASSWORD and hmac.compare_digest(pw.value or "", ACCESS_PASSWORD):
+            access_pw = _access_password()
+            if access_pw and hmac.compare_digest(pw.value or "", access_pw):
                 app.storage.user["authed"] = True
                 ui.navigate.to("/")
-            elif not ACCESS_PASSWORD:
+            elif not access_pw:
                 ui.notify("Access is not configured (set KICRAFT_ACCESS_PASSWORD).",
                           color="negative")
             else:
@@ -175,8 +180,8 @@ def index():
 
 
 def main() -> None:
-    Settings.from_env()  # fail fast if OPENROUTER_API_KEY is missing
-    if not ACCESS_PASSWORD:
+    Settings.from_env()  # fail fast if OPENROUTER_API_KEY is missing; also loads .env
+    if not _access_password():
         print("WARNING: KICRAFT_ACCESS_PASSWORD is not set; the site will refuse logins. "
               "Set it before exposing kicraft.io.")
     ui.run(
