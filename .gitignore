@@ -8,6 +8,11 @@ build/
 .eggs/
 *.egg
 
+# Secrets and local config (never commit)
+.env
+.env.*
+!.env.example
+
 # Virtual environments
 .venv/
 venv/

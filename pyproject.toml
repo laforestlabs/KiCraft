@@ -30,6 +30,9 @@ design = [
     "kicad-skip>=0.2",
     "easyeda2kicad>=1.0",
 ]
+server = [
+    "requests>=2.31",
+]
 dev = [
     "pytest>=7.0",
     "ruff>=0.1",
@@ -57,6 +60,9 @@ diff-rounds = "kicraft.cli.diff_rounds:main"
 generate-report = "kicraft.cli.generate_report:main"
 plot-results = "kicraft.cli.plot_results:main"
 token-report = "kicraft.cli.token_report:main"
+
+# Server (capped agent-loop backend)
+kicraft-smoketest = "kicraft.server.smoketest:main"
 
 # Board manipulation
 move-component = "kicraft.cli.move_component:main"
