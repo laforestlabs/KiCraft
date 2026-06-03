@@ -23,8 +23,13 @@ Wait until `dig +short kicraft.io` returns your box IP before step 5 (DNS propag
 ## 2. System dependencies (on the box, as a sudo user)
 ```bash
 sudo apt-get update
-# KiCad provides pcbnew (the Python module synthesis needs) + the stock symbol/footprint libraries
-sudo apt-get install -y kicad git python3-venv python3-pip
+sudo apt-get install -y software-properties-common git python3-venv python3-pip
+# KiCad 9 provides pcbnew (the Python module synthesis needs) + the stock symbol/footprint
+# libraries. KiCraft emits and processes KiCad 9 files, and the Ubuntu 24.04 universe package
+# is KiCad 8 (too old), so install KiCad 9 from the official KiCad PPA.
+sudo add-apt-repository --yes ppa:kicad/kicad-9.0-releases
+sudo apt-get update
+sudo apt-get install -y kicad
 # Caddy (automatic HTTPS reverse proxy)
 sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
@@ -43,8 +48,8 @@ cd KiCraft
 python3 -m venv --system-site-packages .venv
 .venv/bin/pip install -U pip
 .venv/bin/pip install -e ".[server,design]"
-# sanity: pcbnew must import inside the venv
-.venv/bin/python -c "import pcbnew, nicegui, kicraft.server.web; print('deps OK')"
+# sanity: pcbnew must import inside the venv AND be KiCad 9
+.venv/bin/python -c "import pcbnew; v=pcbnew.GetBuildVersion(); print('KiCad', v); assert v.startswith('9.'), 'KiCraft needs KiCad 9'; import nicegui, kicraft.server.web; print('deps OK')"
 ```
 
 Create `~/KiCraft/.env` (mode 600). Use `.env.example` as the template and fill in:
