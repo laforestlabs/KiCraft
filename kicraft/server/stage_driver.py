@@ -44,6 +44,8 @@ SLOT_MODEL = {
     "architecture": models.Architecture,
     "bom": models.BOM,
 }
+# wiring is not a standalone slot model: it sets bom.connections + bom.no_connect_pins.
+SUPPORTED_STAGES = (*SLOT_MODEL.keys(), "wiring")
 
 # Tools exposed to the model during the BOM stage (OpenAI tool-spec form).
 BOM_TOOLS = [
@@ -107,12 +109,36 @@ def _stage_extra(stage: str) -> str:
             "'Resistor_SMD:R_0603_1608Metric', 'LED_SMD:LED_0603_1608Metric').\n"
             "- Every symbol AND footprint MUST resolve to a real file. When finished, output "
             "ONLY the BOM slot JSON.")
+    if stage == "wiring":
+        return (
+            "\n- NET COVERAGE IS ENFORCED: every (ref, pin) of every part listed in "
+            "extras.symbol_pinouts MUST appear either in a connections[].endpoints entry or "
+            "in no_connect_pins. Omitting any pin fails the commit.\n"
+            "- Use exact pin NUMBERS from extras.symbol_pinouts (never pin names).\n"
+            "- Put genuinely-unused pins (USB-C SBU1/SBU2, shield, spare CC) in no_connect_pins.\n"
+            "- net_name should match an architecture power_net or inter_sheet_net verbatim "
+            "where applicable; connection.sheet must equal a bom part's sheet.")
     return ""
+
+
+def _schema_for(stage: str) -> str:
+    if stage == "wiring":
+        return json.dumps({
+            "type": "object",
+            "properties": {
+                "connections": {"type": "array",
+                                "items": models.NetConnection.model_json_schema()},
+                "no_connect_pins": {"type": "array",
+                                    "items": models.PinEndpoint.model_json_schema()},
+            },
+            "required": ["connections", "no_connect_pins"],
+        })
+    return json.dumps(SLOT_MODEL[stage].model_json_schema())
 
 
 def build_system(stage: str) -> str:
     spec = _spec_text(stage)
-    schema = json.dumps(SLOT_MODEL[stage].model_json_schema())
+    schema = _schema_for(stage)
     return (
         f"You are the '{stage}' stage of KiCraft, a PCB design assistant running as a server "
         f"(not Claude Code). Draft the '{stage}' slot of the design state.\n\n"
@@ -177,14 +203,14 @@ def _bom_executor(workspace: Path):
     return execute
 
 
-def _commit(stage, slot, state_path, brief, project_stem=None) -> tuple[bool, dict]:
+def _commit(stage, slot, state_path, brief, project_stem=None, workspace=None) -> tuple[bool, dict]:
     sf = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
     json.dump(slot, sf)
     sf.close()
     cmd = KICRAFT + ["stage-commit", stage, "--slot-file", sf.name, str(state_path), "--no-archive"]
     if stage == "intent":
         cmd += ["--project-stem", project_stem or _fallback_stem(brief)]
-    proc = _run(cmd)
+    proc = _run(cmd, workspace)
     Path(sf.name).unlink(missing_ok=True)
     try:
         out = json.loads(proc.stdout)
@@ -194,17 +220,19 @@ def _commit(stage, slot, state_path, brief, project_stem=None) -> tuple[bool, di
 
 
 def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, max_retries=2) -> dict:
-    prep = _run(KICRAFT + ["stage-prep", stage, str(state_path)])
+    prep = _run(KICRAFT + ["stage-prep", stage, str(state_path)], workspace)
     if prep.returncode != 0:
+        err = (prep.stderr.strip() or prep.stdout.strip())[:600]
         return {"stage": stage, "commit_ok": False, "cost_usd": 0.0,
-                "error": f"stage-prep failed: {prep.stderr.strip()}"}
+                "error": f"stage-prep failed: {err}"}
     prep_json = json.loads(prep.stdout)
     extras = prep_json.get("extras") or {}
 
     user = (f"PROJECT BRIEF:\n{brief}\n\n"
             f"CURRENT DESIGN STATE (JSON):\n{json.dumps(prep_json['state'])}")
     if extras:
-        user += f"\n\nSTAGE EXTRAS (reference data from stage-prep):\n{json.dumps(extras)[:24000]}"
+        budget = 40000 if stage == "wiring" else 24000
+        user += f"\n\nSTAGE EXTRAS (reference data from stage-prep):\n{json.dumps(extras)[:budget]}"
     user += f"\n\nProduce the {stage} slot JSON now."
 
     messages = [{"role": "system", "content": build_system(stage)},
@@ -234,7 +262,7 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
             continue
 
         project_stem = obj.pop("project_stem", None)
-        ok, out = _commit(stage, dict(obj), state_path, brief, project_stem)
+        ok, out = _commit(stage, dict(obj), state_path, brief, project_stem, workspace)
         if ok:
             return {"stage": stage, "commit_ok": True, "cost_usd": total_cost,
                     "attempts": attempt + 1, "rounds": rounds, "commit": out, "slot": obj}
@@ -284,9 +312,9 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     stages = [s.strip() for s in args.stages.split(",") if s.strip()]
-    bad = [s for s in stages if s not in SLOT_MODEL]
+    bad = [s for s in stages if s not in SUPPORTED_STAGES]
     if bad:
-        ap.error(f"unsupported stage(s): {bad}; supported: {sorted(SLOT_MODEL)}")
+        ap.error(f"unsupported stage(s): {bad}; supported: {list(SUPPORTED_STAGES)}")
 
     print(f"driving {stages} for: {args.brief!r}\n")
     results, guard, state_path = drive_chain(
