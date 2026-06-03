@@ -59,5 +59,6 @@ brief, or skipping a needed interview, is penalized. Set the band to the count o
 | S03 | moderate | WiFi MCU; programming path; rail sizing for current bursts |
 | S04 | hard | deliberately ambiguous → interview quality, no silent big-defaults |
 | S05 | hard | mixed-signal grounding/analog front-end → electrical-soundness |
+| S06 | hard | LED array-leaf grid placement + route-cache (PR#8/#9); I²C accelerometer LCSC fetch; WiFi MCU programming path; GPIO-budget soundness |
 
 Add scenarios freely; keep ids monotonic and update this table.
