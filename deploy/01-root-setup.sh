@@ -11,6 +11,10 @@ export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 # --- non-root sudo user, with your SSH key copied over ---
 id kicraft &>/dev/null || adduser --disabled-password --gecos "" kicraft
 usermod -aG sudo kicraft
+# The user is SSH-key-only (no password), so plain `sudo` would have no password
+# to prompt for in the later deploy stages. Grant passwordless sudo.
+echo 'kicraft ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/kicraft
+chmod 440 /etc/sudoers.d/kicraft
 install -d -m700 -o kicraft -g kicraft /home/kicraft/.ssh
 cp /root/.ssh/authorized_keys /home/kicraft/.ssh/authorized_keys
 chown kicraft:kicraft /home/kicraft/.ssh/authorized_keys
