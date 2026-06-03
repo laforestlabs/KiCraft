@@ -32,6 +32,7 @@ design = [
 ]
 server = [
     "requests>=2.31",
+    "nicegui>=1.4",
 ]
 dev = [
     "pytest>=7.0",
@@ -63,6 +64,7 @@ token-report = "kicraft.cli.token_report:main"
 
 # Server (capped agent-loop backend)
 kicraft-smoketest = "kicraft.server.smoketest:main"
+kicraft-web = "kicraft.server.web:main"
 
 # Board manipulation
 move-component = "kicraft.cli.move_component:main"

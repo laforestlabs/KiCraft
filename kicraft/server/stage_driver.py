@@ -46,6 +46,8 @@ SLOT_MODEL = {
 }
 # wiring is not a standalone slot model: it sets bom.connections + bom.no_connect_pins.
 SUPPORTED_STAGES = (*SLOT_MODEL.keys(), "wiring")
+# Full design order from a brief to a synthesizable state.
+DESIGN_STAGES = ("intent", "functional_spec", "architecture", "bom", "wiring")
 
 # Tools exposed to the model during the BOM stage (OpenAI tool-spec form).
 BOM_TOOLS = [
@@ -278,7 +280,7 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
             "attempts": max_retries + 1, **last}
 
 
-def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2):
+def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_stage=None):
     ws = Path(workspace)
     (ws / ".kicraft").mkdir(parents=True, exist_ok=True)
     state_path = ws / ".kicraft" / "state.json"
@@ -287,6 +289,8 @@ def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2):
     for stage in stages:
         r = drive_stage(client, stage, brief, state_path, ws, max_tokens, max_retries)
         results.append(r)
+        if on_stage:
+            on_stage(r)
         cost = r.get("cost_usd")
         cstr = f"${cost:.6f}" if isinstance(cost, (int, float)) else "n/a"
         tag = "ok  " if r.get("commit_ok") else "FAIL"
