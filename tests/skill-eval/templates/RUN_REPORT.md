@@ -59,6 +59,7 @@ latency            : … min
 user questions     : …   (band …)
 failed_commits     : …   crashes : …
 permission floor   : …   (excess …)
+token usage        : … tok over … call(s)  est ~$…
 ```
 
 ## Findings

@@ -46,6 +46,10 @@ One weighted **0–100** score (+ hard-fail gates) per run, from two halves:
 - **Class J — judgment** (observer agent): grounding/ground-loops, part selection,
   electrical soundness, intent fidelity, spec compliance. The gotcha layer.
 
+The scorer also records per-session **token usage + estimated cost** (parsed from
+the transcript into `report.json` `metrics.token_usage`). It is an observability
+metric, not a scored dimension, so it never affects the score or the rubric hash.
+
 The score is stamped with the **rubric content hash**, so scores are only ever
 compared within one rubric version. See `RUBRIC.md`.
 

@@ -542,6 +542,7 @@ from the command line.
 - `plot-results` — Plot experiment or scoring dashboards (auto-detects format)
 - `diff-rounds` — Diff between experiment rounds
 - `generate-report` — Generate scoring report
+- `token-report`: Token usage + estimated cost for a KiCraft design session, parsed from its Claude Code transcript
 
 ### Board Manipulation
 - `move-component` — Move a component to absolute position

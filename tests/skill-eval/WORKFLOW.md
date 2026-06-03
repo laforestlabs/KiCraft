@@ -72,7 +72,7 @@ bin/score_run.py score <run-dir> --scenario <S0x>
 ```
 
 Writes `<run-dir>/report.json` with the five **Class-C** dimensions + script gates
-scored, and prints the metrics block. Class-J levels are left `null`. If the
+scored, and prints the metrics block (which also reports per-session token usage + estimated cost, `metrics.token_usage`, an observability figure that does not affect the score). Class-J levels are left `null`. If the
 transcript was missing, latency/convergence/friction come back `partial` — note it.
 
 ## Phase 5 — Judgment grade, Class J (observer)

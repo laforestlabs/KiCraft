@@ -56,6 +56,7 @@ render-failure-heatmap = "kicraft.cli.render_failure_heatmap:main"
 diff-rounds = "kicraft.cli.diff_rounds:main"
 generate-report = "kicraft.cli.generate_report:main"
 plot-results = "kicraft.cli.plot_results:main"
+token-report = "kicraft.cli.token_report:main"
 
 # Board manipulation
 move-component = "kicraft.cli.move_component:main"

@@ -33,7 +33,22 @@
         "permission_floor": {"type": "integer"},
         "permission_excess": {"type": "integer"},
         "expected_question_band": {"type": ["array", "null"]},
-        "transcript_present": {"type": "boolean"}
+        "transcript_present": {"type": "boolean"},
+        "token_usage": {
+          "type": ["object", "null"],
+          "description": "LLM token totals + estimated USD cost for the session, summed across main + sub-agent turns and de-duped by requestId. Observability only, NOT a scored dimension, so it does not affect the rubric hash. Source: kicraft.cli.token_report.",
+          "properties": {
+            "input_tokens": {"type": "integer"},
+            "output_tokens": {"type": "integer"},
+            "cache_read_tokens": {"type": "integer"},
+            "cache_creation_tokens": {"type": "integer"},
+            "total_tokens": {"type": "integer"},
+            "turns": {"type": "integer"},
+            "estimated_cost_usd": {"type": ["number", "null"]},
+            "cost_known": {"type": "boolean"},
+            "by_model": {"type": "object"}
+          }
+        }
       }
     },
     "dimensions": {

@@ -190,6 +190,29 @@ def analyze_transcript(run_dir: Path) -> dict:
     }
 
 
+def summarize_token_usage(transcript: dict) -> dict | None:
+    """Token totals + estimated cost for the run, or None when unavailable.
+
+    Reuses kicraft.cli.token_report so pricing and requestId de-duplication live
+    in one place. Imported lazily and defensively: a missing kicraft install (or
+    a parse error) degrades to None, like every other optional signal here,
+    rather than crashing the scorer.
+    """
+    if not transcript.get("present") or not transcript.get("path"):
+        return None
+    try:
+        from kicraft.cli.token_report import summarize_transcripts
+    except ImportError:
+        print("note: kicraft.cli.token_report not importable; token_usage skipped",
+              file=sys.stderr)
+        return None
+    try:
+        return summarize_transcripts([transcript["path"]])
+    except (OSError, ValueError) as e:
+        print(f"note: token-usage summary failed: {e}", file=sys.stderr)
+        return None
+
+
 def _parse_ts(s: str | None):
     if not s:
         return None
@@ -384,11 +407,13 @@ def collect_metrics(run_dir: Path, scenario_id: str | None, perm_baseline: int) 
     perm = perm_floor(run_dir, perm_baseline)
     transcript = analyze_transcript(run_dir)
     latency = compute_latency_min(transcript, state, synth)
+    token_usage = summarize_token_usage(transcript)
     run_meta = _load_json(_find_one(run_dir, "run.json")) or {}
     band = read_scenario_band(scenario_id or run_meta.get("scenario"))
     return {
         "state": state, "synth": synth, "erc": erc, "generated": generated,
         "perm": perm, "transcript": transcript, "latency": latency,
+        "token_usage": token_usage,
         "expected_question_band": band, "run_meta": run_meta,
         "scenario": scenario_id or run_meta.get("scenario"),
         "target_mode": run_meta.get("target_mode"),
@@ -469,6 +494,7 @@ def _public_metrics(m) -> dict:
         "permission_excess": m["perm"]["excess"],
         "expected_question_band": m["expected_question_band"],
         "transcript_present": tr.get("present", False),
+        "token_usage": m.get("token_usage"),
     }
 
 
@@ -541,6 +567,13 @@ def _print_score_summary(report, rubric, final=False):
     print(f"  history / open_q   : {m['history_len']} / {m['open_questions']}   bom_parts={m['bom_parts']}")
     print(f"  permission floor   : {m['permission_floor']} (excess {m['permission_excess']})")
     print(f"  transcript present : {m['transcript_present']}")
+    tu = m.get("token_usage")
+    if tu:
+        cost = tu.get("estimated_cost_usd")
+        cstr = f"~${cost:,.2f}" if cost is not None else "n/a"
+        print(f"  token usage        : {tu['total_tokens']:,} tok over {tu['turns']} call(s)  est {cstr}")
+    else:
+        print("  token usage        : (no transcript)")
 
     print("\n-- scorecard --")
     print(f"  {'dimension':28} {'cls':3} {'wt':>3} {'lvl':>3} {'pts':>5}")
