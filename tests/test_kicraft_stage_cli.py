@@ -503,20 +503,40 @@ def test_stage_commit_bom_accepts_resolvable_footprints(tmp_path, capsys):
 
 
 @_footprints_installed
-def test_stage_prep_wiring_fails_loudly_on_unresolved_symbol(tmp_path, capsys):
-    # A bogus symbol (with a valid footprint) commits fine at bom stage --
-    # symbol checks are gated on connections, which are empty there. But
-    # stage-prep wiring must then fail loudly rather than emitting a partial
-    # pinout dict the sub-agent would work around by reading symbol files.
+def test_stage_commit_bom_rejects_unresolvable_symbol(tmp_path, capsys):
+    # A hallucinated symbol name is now caught at BOM commit -- where the model
+    # still has the lookup tools -- instead of cascading to wiring stage-prep.
     state_path = _commit_chain_through_arch(tmp_path, capsys)
     bom = _valid_bom()
     bom["parts"][0]["symbol"] = "NoSuchLib:DefinitelyMissing"
     bom_slot = _write_slot(tmp_path, "bom", bom)
+    rc, payload = _run(
+        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
+        "--no-archive", str(state_path),
+    )
+    assert rc == 3
+    assert payload["ok"] is False
+    assert any("NoSuchLib" in off for off in payload["offenders"]), payload
+
+
+@_footprints_installed
+def test_stage_prep_wiring_fails_loudly_on_unresolved_symbol(tmp_path, capsys):
+    # Defense in depth: even if a bad symbol reaches committed state by some other
+    # path (it can no longer come through bom stage-commit), wiring stage-prep must
+    # still fail loudly rather than emit a partial pinout dict the sub-agent would
+    # work around by reading symbol files.
+    state_path = _commit_chain_through_arch(tmp_path, capsys)
+    bom_slot = _write_slot(tmp_path, "bom", _valid_bom())
     rc, _ = _run(
         capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
         "--no-archive", str(state_path),
     )
-    assert rc == 0  # bad symbol is not caught at bom commit
+    assert rc == 0
+    # Inject a bogus symbol directly into committed state, bypassing the
+    # bom-commit symbol check that would otherwise reject it.
+    data = json.loads(state_path.read_text())
+    data["bom"]["parts"][0]["symbol"] = "NoSuchLib:DefinitelyMissing"
+    state_path.write_text(json.dumps(data))
     rc, payload = _run(capsys, "stage-prep", "wiring", str(state_path))
     assert rc == 4
     assert payload["ok"] is False

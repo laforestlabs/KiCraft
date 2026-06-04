@@ -5,7 +5,11 @@ and the per-stage retry budget that help the wiring stage converge.
 """
 from __future__ import annotations
 
-from kicraft.server.stage_driver import _retry_feedback, _stage_max_retries
+from kicraft.server.stage_driver import (
+    _retry_feedback,
+    _stage_max_retries,
+    _stage_max_tokens,
+)
 
 
 def test_retry_feedback_includes_errors_and_offenders():
@@ -33,3 +37,9 @@ def test_wiring_gets_more_retries_than_the_simple_stages():
 def test_caller_default_wins_when_higher_than_the_floor():
     assert _stage_max_retries("wiring", 6) == 6
     assert _stage_max_retries("intent", 6) == 6
+
+
+def test_wiring_gets_a_larger_token_budget():
+    assert _stage_max_tokens("wiring", 4096) >= 8192   # wiring floors higher
+    assert _stage_max_tokens("intent", 4096) == 4096   # simple stages keep default
+    assert _stage_max_tokens("wiring", 16000) == 16000  # a higher caller default wins

@@ -233,6 +233,16 @@ def _stage_max_retries(stage: str, default: int) -> int:
     return max(default, _STAGE_MIN_RETRIES.get(stage, 0))
 
 
+# Per-stage output token budget. Wiring emits the whole-board netlist in one slot;
+# on a complex board that overflows the default cap and truncates into invalid
+# JSON ("no JSON in reply"), so wiring floors higher.
+_STAGE_MIN_TOKENS = {"wiring": 8192}
+
+
+def _stage_max_tokens(stage: str, default: int) -> int:
+    return max(default, _STAGE_MIN_TOKENS.get(stage, 0))
+
+
 def _retry_feedback(out: dict) -> str:
     """Self-correction message fed back to the model after a rejected commit.
 
@@ -332,7 +342,8 @@ def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_sta
     client = CappedOpenRouterClient(Settings.from_env())
     results = []
     for stage in stages:
-        r = drive_stage(client, stage, brief, state_path, ws, max_tokens,
+        r = drive_stage(client, stage, brief, state_path, ws,
+                        _stage_max_tokens(stage, max_tokens),
                         _stage_max_retries(stage, max_retries), progress=progress)
         results.append(r)
         if on_stage:
