@@ -20,11 +20,13 @@ supplied separately via ``set_inspector(stage, spec)`` (the page reads
 ``state.json`` and builds the spec; this module only renders it).
 
 Event kinds handled (shapes unchanged from the agent loop):
-  stage_start{stage} reasoning_delta{text} tool{name,args} tool_result{output}
-  retry{stage,errors} stage_done{stage,ok,cost}
+  stage_start{stage} reasoning_delta{text} answer_delta{text} tool{name,args}
+  tool_result{output} retry{stage,errors} stage_done{stage,ok,cost}
   build_start build_log{text} build_done{ok}
-``answer_delta`` (the JSON draft) is ignored on purpose: it is the result, not
-the thinking, and belongs in the downloaded project.
+Both ``reasoning_delta`` (the model's reasoning channel) and ``answer_delta`` (its
+content draft) stream into the Thinking window so it fills live even for models /
+tool-free stages that only emit content; the committed result still lands,
+structured, in the Project State window.
 """
 from __future__ import annotations
 
@@ -160,7 +162,12 @@ class StagePanel:
 
     def push(self, e: dict) -> None:
         k = e.get("kind")
-        if k == "reasoning_delta":
+        if k in ("reasoning_delta", "answer_delta"):
+            # Both the model's reasoning channel AND its content draft stream into
+            # the Thinking window. Many models (e.g. deepseek-v4-flash) and the
+            # tool-free stages emit only `content` (answer_delta), so without this
+            # the window stays empty for the whole stage; streaming the draft keeps
+            # it filling live with the work in progress.
             self._on_reasoning(e.get("text", ""))
         elif k == "tool":
             self._on_tool(e.get("name", ""), e.get("args") or {})
