@@ -223,10 +223,15 @@ def _commit(stage, slot, state_path, brief, project_stem=None, workspace=None) -
     return (proc.returncode == 0 and bool(out.get("ok"))), out
 
 
-def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, max_retries=2) -> dict:
+def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, max_retries=2,
+                progress=None) -> dict:
+    if progress:
+        progress({"kind": "stage_start", "stage": stage})
     prep = _run(KICRAFT + ["stage-prep", stage, str(state_path)], workspace)
     if prep.returncode != 0:
         err = (prep.stderr.strip() or prep.stdout.strip())[:600]
+        if progress:
+            progress({"kind": "stage_done", "stage": stage, "ok": False})
         return {"stage": stage, "commit_ok": False, "cost_usd": 0.0,
                 "error": f"stage-prep failed: {err}"}
     prep_json = json.loads(prep.stdout)
@@ -248,11 +253,12 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
     last: dict = {}
     for attempt in range(max_retries + 1):
         if tools:
-            r = client.chat_with_tools(messages, tools, executor, max_tokens=max_tokens)
+            r = client.chat_with_tools(messages, tools, executor, max_tokens=max_tokens,
+                                       progress=progress)
             raw, rounds = r["text"], r.get("rounds")
             total_cost += r["cost_usd"]
         else:
-            res = client.chat(messages, max_tokens=max_tokens)
+            res = client.chat(messages, max_tokens=max_tokens, progress=progress)
             raw, rounds = (res["text"] or res.get("reasoning") or ""), None
             total_cost += res["cost_usd"]
             messages.append({"role": "assistant", "content": raw})
@@ -268,9 +274,14 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         project_stem = obj.pop("project_stem", None)
         ok, out = _commit(stage, dict(obj), state_path, brief, project_stem, workspace)
         if ok:
+            if progress:
+                progress({"kind": "stage_done", "stage": stage, "ok": True,
+                          "cost": total_cost, "attempts": attempt + 1})
             return {"stage": stage, "commit_ok": True, "cost_usd": total_cost,
                     "attempts": attempt + 1, "rounds": rounds, "commit": out, "slot": obj}
         last = {"commit": out}
+        if progress:
+            progress({"kind": "retry", "stage": stage, "errors": out.get("errors")})
         msg = (f"stage-commit rejected that with errors: {json.dumps(out.get('errors'))}")
         if out.get("offenders"):
             msg += f"  offenders: {json.dumps(out.get('offenders'))}"
@@ -278,18 +289,22 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
                 "footprint did not resolve) and output ONLY the corrected slot JSON.")
         messages.append({"role": "user", "content": msg})
 
+    if progress:
+        progress({"kind": "stage_done", "stage": stage, "ok": False, "cost": total_cost})
     return {"stage": stage, "commit_ok": False, "cost_usd": total_cost,
             "attempts": max_retries + 1, **last}
 
 
-def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_stage=None):
+def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_stage=None,
+                progress=None):
     ws = Path(workspace)
     (ws / ".kicraft").mkdir(parents=True, exist_ok=True)
     state_path = ws / ".kicraft" / "state.json"
     client = CappedOpenRouterClient(Settings.from_env())
     results = []
     for stage in stages:
-        r = drive_stage(client, stage, brief, state_path, ws, max_tokens, max_retries)
+        r = drive_stage(client, stage, brief, state_path, ws, max_tokens, max_retries,
+                        progress=progress)
         results.append(r)
         if on_stage:
             on_stage(r)

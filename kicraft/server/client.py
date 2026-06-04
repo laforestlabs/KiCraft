@@ -67,7 +67,7 @@ class CappedOpenRouterClient:
         self.guard.record(payload["model"], in_tok, out_tok, cost, meta=body.get("_meta", "chat"))
         return data, cost
 
-    def chat(self, messages, model=None, max_tokens=None, temperature=0.2) -> dict:
+    def chat(self, messages, model=None, max_tokens=None, temperature=0.2, progress=None) -> dict:
         body = {"messages": messages, "temperature": temperature}
         if model:
             body["model"] = model
@@ -77,19 +77,26 @@ class CappedOpenRouterClient:
         choices = data.get("choices") or []
         msg = (choices[0].get("message") or {}) if choices else {}
         finish = choices[0].get("finish_reason") if choices else None
-        return {"text": msg.get("content") or "", "reasoning": msg.get("reasoning"),
+        reasoning, text = msg.get("reasoning"), msg.get("content") or ""
+        if progress:
+            if reasoning:
+                progress({"kind": "reasoning", "text": reasoning})
+            if text:
+                progress({"kind": "answer", "text": text})
+        return {"text": text, "reasoning": reasoning,
                 "finish_reason": finish, "model": data.get("model"),
                 "usage": data.get("usage") or {}, "cost_usd": cost,
                 "guard": self.guard.status()}
 
     def chat_with_tools(self, messages, tools, executor, model=None, max_tokens=None,
-                        temperature=0.2, max_rounds=12) -> dict:
+                        temperature=0.2, max_rounds=12, progress=None) -> dict:
         """Tool-use loop. `tools` = OpenAI tool specs; `executor(name, args) -> str`.
 
         Mutates `messages` in place (appends each assistant turn and the tool
         results) so a caller can continue the same conversation afterwards.
-        Returns the final assistant text once the model stops calling tools (or
-        when max_rounds is hit). Every round is a capped completion.
+        `progress(event)` is called as work happens with events of kind
+        "reasoning" / "tool" / "tool_result" / "answer". Every round is a capped
+        completion.
         """
         total_cost = 0.0
         n_tool_calls = 0
@@ -105,6 +112,9 @@ class CappedOpenRouterClient:
             choices = data.get("choices") or []
             msg = (choices[0].get("message") or {}) if choices else {}
 
+            if progress and msg.get("reasoning"):
+                progress({"kind": "reasoning", "text": msg["reasoning"]})
+
             assistant = {"role": "assistant", "content": msg.get("content")}
             tcs = msg.get("tool_calls") or []
             if tcs:
@@ -112,6 +122,8 @@ class CappedOpenRouterClient:
             messages.append(assistant)
 
             if not tcs:
+                if progress and msg.get("content"):
+                    progress({"kind": "answer", "text": msg["content"]})
                 return {"text": msg.get("content") or "", "cost_usd": total_cost,
                         "rounds": rnd + 1, "tool_calls": n_tool_calls,
                         "guard": self.guard.status()}
@@ -124,10 +136,14 @@ class CappedOpenRouterClient:
                     args = json.loads(fn.get("arguments") or "{}")
                 except json.JSONDecodeError:
                     args = {}
+                if progress:
+                    progress({"kind": "tool", "name": name, "args": args})
                 try:
                     result = executor(name, args)
                 except Exception as e:  # surface tool errors to the model, don't crash
                     result = f"tool error: {e}"
+                if progress:
+                    progress({"kind": "tool_result", "name": name, "output": str(result)[:600]})
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                  "name": name, "content": str(result)[:4000]})
 

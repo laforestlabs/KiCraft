@@ -11,6 +11,7 @@ Run locally:   KICRAFT_ACCESS_PASSWORD=secret python -m kicraft.server.web
 from __future__ import annotations
 
 import hmac
+import json
 import os
 import shutil
 import subprocess
@@ -48,29 +49,33 @@ def _design_worker(brief: str, state: dict) -> None:
     """Run the full pipeline in a background thread, streaming into `state`."""
     ws = Path(tempfile.mkdtemp(prefix="kicraft_web_"))
     state["ws"] = str(ws)
+
+    def progress(ev):
+        state["events"].append(ev)
+
     try:
-        results, guard, _ = drive_chain(
-            list(DESIGN_STAGES), brief, ws,
-            on_stage=lambda r: state["events"].append(r),
-        )
+        results, guard, _ = drive_chain(list(DESIGN_STAGES), brief, ws, progress=progress)
         state["spend"] = guard.get("spent_total_usd")
         if not all(r.get("commit_ok") for r in results):
             state["ok"] = False
             return
         # Deterministic synthesize (zero LLM) -> KiCad files.
+        progress({"kind": "stage_start", "stage": "synthesize"})
         syn = subprocess.run(
             KICRAFT + ["synthesize", ".kicraft/state.json", "generated", "--no-archive"],
             cwd=str(ws), capture_output=True, text=True, timeout=600)
         if syn.returncode != 0:
-            state["events"].append({"stage": "synthesize", "commit_ok": False,
-                                    "error": (syn.stdout or syn.stderr)[-400:]})
+            progress({"kind": "tool_result", "name": "synthesize",
+                      "output": (syn.stdout or syn.stderr)[-500:]})
+            progress({"kind": "stage_done", "stage": "synthesize", "ok": False})
             state["ok"] = False
             return
-        state["events"].append({"stage": "synthesize", "commit_ok": True})
+        progress({"kind": "stage_done", "stage": "synthesize", "ok": True})
         state["zip"] = _zip_generated(ws)
         state["ok"] = bool(state["zip"])
     except Exception as e:  # surface, never crash the UI thread
-        state["events"].append({"stage": "error", "commit_ok": False, "error": str(e)})
+        progress({"kind": "tool_result", "name": "error", "output": str(e)})
+        progress({"kind": "stage_done", "stage": "error", "ok": False})
         state["ok"] = False
     finally:
         state["done"] = True
@@ -128,7 +133,7 @@ def index():
         design_btn = ui.button("Design")
         status = ui.label("").classes("text-sm")
         spend = ui.label("").classes("text-sm text-grey")
-        log = ui.column().classes("w-full gap-1 font-mono text-sm")
+        log = ui.log(max_lines=4000).classes("w-full h-96 text-xs")
         download_holder = ui.row()
 
         def start():
@@ -148,20 +153,31 @@ def index():
 
         design_btn.on_click(start)
 
+        def _fmt(e):
+            k = e.get("kind")
+            if k == "stage_start":
+                return f"\n=== {e.get('stage')} ==="
+            if k == "reasoning":
+                return f"  [thinking] {e.get('text', '')}"
+            if k == "answer":
+                return f"  [draft] {str(e.get('text', ''))[:600]}"
+            if k == "tool":
+                return f"  > {e.get('name')}({json.dumps(e.get('args', {}))[:140]})"
+            if k == "tool_result":
+                return f"    -> {str(e.get('output', ''))[:240]}"
+            if k == "retry":
+                return f"  ! retry {e.get('stage')}: {json.dumps(e.get('errors'))[:200]}"
+            if k == "stage_done":
+                c = e.get("cost")
+                cs = f"  (${c:.4f})" if isinstance(c, (int, float)) else ""
+                return f"{'[OK]' if e.get('ok') else '[FAIL]'} {e.get('stage')}{cs}"
+            return str(e)[:200]
+
         def render():
             evs = state["events"]
             while state["rendered"] < len(evs):
-                e = evs[state["rendered"]]
+                log.push(_fmt(evs[state["rendered"]]))
                 state["rendered"] += 1
-                ok = e.get("commit_ok")
-                mark, color = ("✓", "text-green-700") if ok else ("✗", "text-red-700")
-                cost = e.get("cost_usd")
-                cost_str = f"  (${cost:.4f})" if isinstance(cost, (int, float)) else ""
-                with log:
-                    ui.label(f"{mark} {e.get('stage')}{cost_str}").classes(color)
-                    if not ok and (e.get("error") or e.get("commit")):
-                        ui.label(str(e.get("error") or e.get("commit"))[:300]).classes(
-                            "text-xs text-grey ml-4")
             if state["spend"] is not None:
                 spend.text = f"Spent this design: ${state['spend']:.4f}"
             if state["done"]:
@@ -174,9 +190,9 @@ def index():
                             ui.button("Download KiCad project (.zip)", icon="download",
                                       on_click=lambda: ui.download(state["zip"])).props("color=positive")
                 else:
-                    status.text = "Stopped. See the stage that failed above."
+                    status.text = "Stopped. See the log above."
 
-        ui.timer(0.6, render)
+        ui.timer(0.5, render)
 
 
 def main() -> None:
