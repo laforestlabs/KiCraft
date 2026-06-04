@@ -430,8 +430,10 @@ if os.environ.get("KICRAFT_WEB_DEMO"):
                     pushed += 1
                 feed.flush()
                 feed_scroll.scroll_to(percent=1.0)
+                if d["i"] >= len(evs):
+                    timer.cancel()  # replay finished; stop ticking
 
-            ui.timer(0.25, step)
+            timer = ui.timer(0.25, step)
 
 
 def main() -> None:
