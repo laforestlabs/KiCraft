@@ -150,6 +150,7 @@ class CappedOpenRouterClient:
         """
         total_cost = 0.0
         n_tool_calls = 0
+        seen: dict[str, int] = {}  # (name, args) signature -> times requested
         on_delta = self._delta_progress(progress)
         for rnd in range(max_rounds):
             body = {"messages": messages, "tools": tools, "tool_choice": "auto",
@@ -186,11 +187,38 @@ class CappedOpenRouterClient:
                     result = executor(name, args)
                 except Exception as e:  # surface tool errors to the model, don't crash
                     result = f"tool error: {e}"
+                # Break identical-call thrash: a weak model can repeat the exact same
+                # failing call for rounds on end. The result will not change, so tell
+                # it to stop and converge instead of silently re-running.
+                sig = name + "|" + json.dumps(args, sort_keys=True)
+                seen[sig] = seen.get(sig, 0) + 1
+                if seen[sig] >= 2:
+                    result = (f"NOTE: you have already made this identical call "
+                              f"{seen[sig]} times; the result will not change. Stop "
+                              f"repeating it: change the arguments or output your final "
+                              f"JSON answer now.\n{result}")
                 if progress:
                     progress({"kind": "tool_result", "name": name, "output": str(result)[:600]})
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                  "name": name, "content": str(result)[:4000]})
 
-        return {"text": "", "cost_usd": total_cost, "rounds": max_rounds,
-                "tool_calls": n_tool_calls, "guard": self.guard.status(),
-                "max_rounds_hit": True}
+        # Tool-round budget exhausted. Returning empty text here reads upstream as
+        # "no JSON in reply" (a silent, expensive failure). Instead force one final
+        # tool-free completion so the model commits to an answer we can parse.
+        messages.append({"role": "user", "content":
+                         "You have used your entire tool-call budget. Do NOT call any "
+                         "more tools. Output your final answer now as a single JSON "
+                         "object only."})
+        body = {"messages": messages, "tools": tools, "tool_choice": "none",
+                "temperature": temperature, "_meta": "tools-final"}
+        if model:
+            body["model"] = model
+        if max_tokens:
+            body["max_tokens"] = max_tokens
+        msg, cost = self._stream(body, on_delta=on_delta)
+        total_cost += cost
+        messages.append({"role": "assistant", "content": msg.get("content")})
+        return {"text": msg.get("content") or "", "cost_usd": total_cost,
+                "rounds": max_rounds, "tool_calls": n_tool_calls,
+                "guard": self.guard.status(), "max_rounds_hit": True,
+                "forced_final": True}
