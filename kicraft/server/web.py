@@ -26,6 +26,7 @@ from pathlib import Path
 from nicegui import app, ui
 from starlette.responses import FileResponse, PlainTextResponse, RedirectResponse
 
+from .accounts import AccountStore
 from .config import Settings
 from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView, kicanvas_head
 from .spend_guard import SpendGuard
@@ -42,15 +43,34 @@ _PROJECT_TOKENS: dict[str, Path] = {}
 _ALLOWED_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_pro")
 
 
-def _access_password() -> str:
-    """Read the gate password live. os.environ is populated from .env in main()
-    (after this module is imported), so reading it at import time would capture
-    an empty string. Read it per request instead."""
-    return os.environ.get("KICRAFT_ACCESS_PASSWORD", "")
+_STORE: AccountStore | None = None
 
 
-def _authed() -> bool:
-    return bool(app.storage.user.get("authed"))
+def _store() -> AccountStore:
+    """The shared accounts store, built once per process from settings."""
+    global _STORE
+    if _STORE is None:
+        s = Settings.from_env()
+        _STORE = AccountStore(s.users_db_path, s.projects_dir)
+    return _STORE
+
+
+def _signup_code() -> str:
+    """The invite code required to register, read live (env loads in main(), so
+    reading it at import time would capture an empty string). Falls back to
+    KICRAFT_ACCESS_PASSWORD so an already-deployed box keeps working until its
+    env is updated to the new KICRAFT_SIGNUP_CODE."""
+    return (os.environ.get("KICRAFT_SIGNUP_CODE")
+            or os.environ.get("KICRAFT_ACCESS_PASSWORD", "")).strip()
+
+
+def _current_user():
+    """The logged-in User for this page session, or None. Must be called inside a
+    page/connection context (it reads app.storage.user)."""
+    uid = app.storage.user.get("user_id")
+    if not uid:
+        return None
+    return _store().get_user(int(uid))
 
 
 def _register_project_dir(project_dir: Path) -> str:
@@ -297,6 +317,56 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
     return []
 
 
+def _persist_project(ws: Path | None, state: dict) -> None:
+    """Copy the run's durable artifacts out of the tempdir and finalize the row.
+
+    Best-effort: a persistence failure must never crash the worker. Captures the
+    brief, the full event stream (events.jsonl, 100% of input), the committed
+    state.json, and the generated KiCad tree + zip under
+    projects_dir/<user_id>/<project_id>/, then records the projects-table row.
+    """
+    pid = state.get("project_id")
+    uid = state.get("user_id")
+    if not pid or not uid:
+        return
+    store = _store()
+    status = "ok" if state.get("ok") else "failed"
+    stem = state.get("stem")
+    dir_path = None
+    zip_path = None
+    try:
+        base = store.projects_dir / str(uid) / str(pid)
+        base.mkdir(parents=True, exist_ok=True)
+        dir_path = str(base)
+        (base / "brief.txt").write_text(state.get("brief", "") or "", encoding="utf-8")
+        with (base / "events.jsonl").open("w", encoding="utf-8") as f:
+            for ev in state.get("events", []):
+                f.write(json.dumps(ev, ensure_ascii=False, default=str) + "\n")
+        if ws is not None:
+            sj = ws / ".kicraft" / "state.json"
+            if sj.is_file():
+                shutil.copy2(sj, base / "state.json")
+            gen = ws / "generated"
+            if gen.is_dir():
+                dst = base / "generated"
+                shutil.rmtree(dst, ignore_errors=True)
+                shutil.copytree(gen, dst)
+            src_zip = state.get("zip")
+            if src_zip and Path(src_zip).is_file():
+                zip_path = str(base / "kicraft_project.zip")
+                shutil.copy2(src_zip, zip_path)
+                state["zip"] = zip_path  # serve downloads from the durable copy
+    except Exception as e:  # never crash the worker on persistence
+        state.setdefault("events", []).append(
+            {"kind": "build_log", "text": f"persist error: {e}"})
+    finally:
+        try:
+            store.finish_project(pid, status, stem=stem, cost_usd=state.get("spend"),
+                                 dir_path=dir_path, zip_path=zip_path)
+        except Exception:
+            pass
+
+
 def _design_worker(brief: str, state: dict) -> None:
     """Run the full pipeline in a background thread, streaming into `state`.
 
@@ -306,6 +376,7 @@ def _design_worker(brief: str, state: dict) -> None:
     """
     ws = Path(tempfile.mkdtemp(prefix="kicraft_web_"))
     state["ws"] = str(ws)
+    state["brief"] = brief
 
     def progress(ev):
         state["events"].append(ev)
@@ -352,6 +423,7 @@ def _design_worker(brief: str, state: dict) -> None:
         progress({"kind": "build_log", "text": f"error: {e}"})
         state["ok"] = False
     finally:
+        _persist_project(ws, state)
         state["done"] = True
         state["running"] = False
 
@@ -363,29 +435,73 @@ def login_page():
     with ui.card().classes("absolute-center w-96") \
             .style("background:#0f172a;border:1px solid #1e293b"):
         ui.label("KiCraft").classes("text-2xl font-bold text-white")
-        ui.label("Enter the access password to design a board.") \
-            .classes("text-sm").style("color:#94a3b8")
-        pw = ui.input("Access password", password=True, password_toggle_button=True).classes("w-full")
+        ui.label("Sign in to design a board.").classes("text-sm").style("color:#94a3b8")
+        email = ui.input("Email").classes("w-full")
+        pw = ui.input("Password", password=True, password_toggle_button=True).classes("w-full")
 
         def submit():
-            access_pw = _access_password()
-            if access_pw and hmac.compare_digest(pw.value or "", access_pw):
-                app.storage.user["authed"] = True
+            user = _store().authenticate(email.value or "", pw.value or "")
+            if user:
+                app.storage.user["user_id"] = user.id
+                app.storage.user["email"] = user.email
                 ui.navigate.to("/")
-            elif not access_pw:
-                ui.notify("Access is not configured (set KICRAFT_ACCESS_PASSWORD).",
-                          color="negative")
             else:
-                ui.notify("Wrong password.", color="negative")
+                ui.notify("Wrong email or password.", color="negative")
 
         pw.on("keydown.enter", submit)
-        ui.button("Enter", on_click=submit).classes("w-full")
+        ui.button("Sign in", on_click=submit).classes("w-full")
+        ui.separator().style("background:#1e293b")
+        with ui.row().classes("items-center justify-between w-full"):
+            ui.label("New to KiCraft?").classes("text-xs").style("color:#94a3b8")
+            ui.button("Create an account", on_click=lambda: ui.navigate.to("/signup")) \
+                .props("flat dense")
+
+
+@ui.page("/signup")
+def signup_page():
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    with ui.card().classes("absolute-center w-96") \
+            .style("background:#0f172a;border:1px solid #1e293b"):
+        ui.label("Create your account").classes("text-2xl font-bold text-white")
+        ui.label("Free tier: one design per week. No credit card.") \
+            .classes("text-sm").style("color:#94a3b8")
+        email = ui.input("Email").classes("w-full")
+        pw = ui.input("Password", password=True, password_toggle_button=True).classes("w-full")
+        code = ui.input("Invite code", password=True).classes("w-full")
+
+        def submit():
+            want = _signup_code()
+            if not want:
+                ui.notify("Signup is not configured (set KICRAFT_SIGNUP_CODE).",
+                          color="negative")
+                return
+            if not hmac.compare_digest((code.value or "").strip(), want):
+                ui.notify("Invalid invite code.", color="negative")
+                return
+            try:
+                user = _store().create_user(email.value or "", pw.value or "")
+            except ValueError as e:
+                ui.notify(str(e), color="negative")
+                return
+            app.storage.user["user_id"] = user.id
+            app.storage.user["email"] = user.email
+            ui.navigate.to("/")
+
+        pw.on("keydown.enter", submit)
+        code.on("keydown.enter", submit)
+        ui.button("Create account", on_click=submit).classes("w-full")
+        with ui.row().classes("items-center justify-between w-full"):
+            ui.label("Already registered?").classes("text-xs").style("color:#94a3b8")
+            ui.button("Sign in", on_click=lambda: ui.navigate.to("/login")).props("flat dense")
 
 
 @ui.page("/")
 def index():
-    if not _authed():
+    user = _current_user()
+    if user is None:
         return RedirectResponse("/login")
+    q0 = _store().quota_status(user)
 
     kicanvas_head()
     ui.dark_mode().enable()
@@ -396,12 +512,23 @@ def index():
         "token": None, "project_dir": None, "stem": None, "pcb_ready": False,
         "sch_view": None, "pcb_view": None, "pcb_mtime": None,
         "state_mtime": None, "run_mtime": None, "build_lines": [],
+        "user_id": None, "project_id": None, "brief": "", "account_refreshed": False,
     }
+
+    def logout():
+        for k in ("user_id", "email"):
+            app.storage.user.pop(k, None)
+        ui.navigate.to("/login")
 
     with ui.header().classes("items-center justify-between") \
             .style("background:#0f172a;border-bottom:1px solid #1e293b"):
-        ui.label("KiCraft").classes("text-xl font-bold text-white")
-        ui.label("design a PCB from a sentence").classes("text-sm").style("color:#94a3b8")
+        with ui.row().classes("items-center gap-2"):
+            ui.label("KiCraft").classes("text-xl font-bold text-white")
+            ui.label("design a PCB from a sentence").classes("text-sm").style("color:#94a3b8")
+        with ui.row().classes("items-center gap-3"):
+            ui.label(user.email).classes("text-xs").style("color:#cbd5e1")
+            tier_badge = ui.badge(q0["label"], color="primary")
+            ui.button("Log out", on_click=logout).props("flat dense color=white").classes("text-xs")
 
     with ui.column().classes("w-full max-w-7xl mx-auto p-4 gap-3"):
         try:
@@ -410,6 +537,8 @@ def index():
                      f"of ${budget['daily_ceiling_usd']:.0f}").classes("text-xs").style("color:#64748b")
         except Exception:
             ui.label("").classes("hidden")
+
+        quota_label = ui.label().classes("text-xs").style("color:#94a3b8")
 
         brief = ui.textarea(
             "Describe your board",
@@ -425,17 +554,72 @@ def index():
         # KiCad schematic/board (KiCanvas) and the download land in the build tabs.
         tabs = StageTabs()
 
+        with ui.expansion("Your projects").classes("w-full mt-2") \
+                .style("background:#0f172a;border:1px solid #1e293b"):
+            proj_container = ui.column().classes("w-full gap-1 p-2")
+
+        def build_projects():
+            proj_container.clear()
+            with proj_container:
+                projs = _store().list_projects(user.id)
+                if not projs:
+                    ui.label("No projects yet. Describe a board above to begin.") \
+                        .classes("text-xs").style("color:#64748b")
+                for p in projs:
+                    with ui.row().classes("items-center gap-3 w-full"):
+                        ui.label(p.project_stem or "(building...)") \
+                            .classes("text-sm").style("color:#e2e8f0")
+                        ui.label(p.status).classes("text-xs").style("color:#94a3b8")
+                        ui.label(p.created_at[:19].replace("T", " ")) \
+                            .classes("text-xs").style("color:#64748b")
+                        if p.zip_path and Path(p.zip_path).is_file():
+                            ui.button("Download", icon="download",
+                                      on_click=lambda zp=p.zip_path: ui.download(zp)) \
+                                .props("flat dense")
+
+        def refresh_account_ui():
+            u = _current_user()
+            if u is None:
+                return
+            q = _store().quota_status(u)
+            period = "week" if q["window_days"] <= 7 else "month"
+            quota_label.text = (f"{q['label']} tier: {q['remaining']} of {q['limit']} "
+                                f"designs left this {period}.")
+            tier_badge.text = q["label"]
+            if q["remaining"] <= 0:
+                design_btn.disable()
+                quota_label.style("color:#f59e0b")
+            else:
+                if not state["running"]:
+                    design_btn.enable()
+                quota_label.style("color:#94a3b8")
+            build_projects()
+
         def start():
             if state["running"]:
+                return
+            u = _current_user()
+            if u is None:
+                ui.navigate.to("/login")
                 return
             if not (brief.value or "").strip():
                 ui.notify("Enter a brief first.", color="warning")
                 return
+            q = _store().quota_status(u)
+            if q["remaining"] <= 0:
+                period = "week" if q["window_days"] <= 7 else "month"
+                ui.notify(f"You've used your {q['limit']} design(s) this {period}. "
+                          "Upgrade for more.", color="warning")
+                return
+            pid = _store().create_project(u.id, brief.value)
             state.update(events=[], rendered=0, running=True, done=False, ok=None,
                          spend=None, zip=None, fab_done=False, ws=None, token=None,
                          project_dir=None, stem=None, pcb_ready=False, sch_view=None,
                          pcb_view=None, pcb_mtime=None, state_mtime=None, run_mtime=None,
-                         build_lines=[])
+                         build_lines=[], account_refreshed=False)
+            state["user_id"] = u.id
+            state["project_id"] = pid
+            state["brief"] = brief.value
             tabs.reset()
             status.text = ("Designing... (intent -> functional_spec -> architecture -> bom -> "
                            "wiring -> synthesize -> place/route -> fab)")
@@ -512,6 +696,9 @@ def index():
 
             if state["done"]:
                 design_btn.enable()
+                if not state["account_refreshed"]:
+                    state["account_refreshed"] = True
+                    refresh_account_ui()
                 if state["ok"]:
                     status.text = "Done. Your KiCad project is ready."
                     if not state["fab_done"]:
@@ -529,6 +716,7 @@ def index():
                 elif state["ok"] is False:
                     status.text = "Stopped. See the failing stage's tab."
 
+        refresh_account_ui()
         ui.timer(0.2, render)
 
 
@@ -617,9 +805,9 @@ if os.environ.get("KICRAFT_WEB_DEMO"):
 
 def main() -> None:
     Settings.from_env()  # fail fast if OPENROUTER_API_KEY is missing; also loads .env
-    if not _access_password():
-        print("WARNING: KICRAFT_ACCESS_PASSWORD is not set; the site will refuse logins. "
-              "Set it before exposing kicraft.io.")
+    if not _signup_code():
+        print("WARNING: neither KICRAFT_SIGNUP_CODE nor KICRAFT_ACCESS_PASSWORD is set; "
+              "no one can register. Set KICRAFT_SIGNUP_CODE before exposing kicraft.io.")
     ui.run(
         host=os.environ.get("KICRAFT_WEB_HOST", "0.0.0.0"),
         port=int(os.environ.get("KICRAFT_WEB_PORT", "8080")),

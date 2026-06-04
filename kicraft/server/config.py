@@ -43,6 +43,8 @@ class Settings:
     daily_usd_ceiling: float = 5.0
     total_usd_ceiling: float = 50.0
     ledger_path: Path = Path.home() / ".kicraft" / "spend_ledger.db"
+    users_db_path: Path = Path.home() / ".kicraft" / "accounts.db"
+    projects_dir: Path = Path.home() / ".kicraft" / "projects"
     kill_switch: bool = False
     request_timeout_s: int = 120
 
@@ -66,6 +68,8 @@ class Settings:
             total_usd_ceiling=float(
                 os.environ.get("KICRAFT_TOTAL_USD_CEILING", cls.total_usd_ceiling)),
             ledger_path=Path(os.environ.get("KICRAFT_SPEND_LEDGER", str(cls.ledger_path))),
+            users_db_path=Path(os.environ.get("KICRAFT_USERS_DB", str(cls.users_db_path))),
+            projects_dir=Path(os.environ.get("KICRAFT_PROJECTS_DIR", str(cls.projects_dir))),
             kill_switch=_env_bool("KICRAFT_KILL_SWITCH"),
         )
 

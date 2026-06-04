@@ -49,7 +49,7 @@ python3 -m venv --system-site-packages .venv
 .venv/bin/pip install -U pip
 .venv/bin/pip install -e ".[server,design]"
 # sanity: pcbnew must import inside the venv AND be KiCad 9
-.venv/bin/python -c "import pcbnew; v=pcbnew.GetBuildVersion(); print('KiCad', v); assert v.startswith('9.'), 'KiCraft needs KiCad 9'; import nicegui, kicraft.server.web; print('deps OK')"
+.venv/bin/python -c "import pcbnew; v=pcbnew.GetBuildVersion(); print('KiCad', v); assert v.startswith('9.'), 'KiCraft needs KiCad 9'; import nicegui, kicraft.server.web, kicraft.server.accounts; print('deps OK')"
 ```
 
 Create `~/KiCraft/.env` (mode 600). Use `.env.example` as the template and fill in:
@@ -61,7 +61,7 @@ KICRAFT_MODEL=deepseek/deepseek-v4-flash
 KICRAFT_DAILY_USD_CEILING=5
 KICRAFT_TOTAL_USD_CEILING=50
 KICRAFT_MAX_TOKENS_PER_CALL=4096
-KICRAFT_ACCESS_PASSWORD=pick-a-strong-shared-password
+KICRAFT_SIGNUP_CODE=pick-a-strong-invite-code
 KICRAFT_STORAGE_SECRET=long-random-string-for-session-cookies
 ENV
 chmod 600 .env
@@ -84,14 +84,19 @@ journalctl -u caddy -f                 # watch it obtain the kicraft.io certific
 ```
 Caddy fetches a Let's Encrypt cert automatically once DNS resolves to the box and 80/443 are open.
 
-## 6. Verify
-- Browse to `https://kicraft.io` -> the access-password page.
-- Enter the password -> the design page. Try a brief, watch the stages stream, download the zip.
+## 6. Create your account and verify
+- Browse to `https://kicraft.io` -> Sign in -> "Create an account".
+- Register with your email, a password, and the `KICRAFT_SIGNUP_CODE` invite code.
+- On the design page, try a brief, watch the stages stream, download the zip. It
+  also appears under "Your projects" and is saved under `~/.kicraft/projects/`.
+- Grant yourself a higher tier (Stripe is not wired yet, so tiers are manual):
+  `~/KiCraft/.venv/bin/kicraft-accounts set-tier you@example.com max`
+  (`kicraft-accounts list` shows everyone and their tier.)
 
 ## Cost-safety on the live box (recap)
 - Spend is capped in code (`KICRAFT_DAILY_USD_CEILING` / `KICRAFT_TOTAL_USD_CEILING`) on top of your prepaid OpenRouter balance with auto top-up OFF. The worst case is bounded by the smaller of those.
 - Kill switch: `KICRAFT_KILL_SWITCH=1` in `.env` then `sudo systemctl restart kicraft-web` halts all model calls instantly.
-- Access is gated by `KICRAFT_ACCESS_PASSWORD`; only people you share it with can spend the balance.
+- Registration is gated by `KICRAFT_SIGNUP_CODE`; only people you give the code to can create an account and spend the balance. Per-user tier quotas (free 1/week, pro 5/month, max 25/month) bound each account on top of the global ceilings.
 - The box is fixed-price; load turns into a queue, not a bigger bill.
 
 ## Updating

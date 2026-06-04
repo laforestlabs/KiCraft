@@ -65,6 +65,7 @@ token-report = "kicraft.cli.token_report:main"
 # Server (capped agent-loop backend)
 kicraft-smoketest = "kicraft.server.smoketest:main"
 kicraft-web = "kicraft.server.web:main"
+kicraft-accounts = "kicraft.server.accounts_cli:main"
 
 # Board manipulation
 move-component = "kicraft.cli.move_component:main"
