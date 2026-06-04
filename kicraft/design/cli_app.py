@@ -46,6 +46,7 @@ from .models import (
     Question,
 )
 from .synthesize import SynthesisInputError, run as run_synth
+from .synthesis.symbol_library import search_symbols
 from .synthesis.symbol_pinout import SymbolNotFoundError, lookup_pins
 from .synthesis.parts_lookup import (
     LibraryNotFoundError,
@@ -286,6 +287,17 @@ def _cmd_lookup_symbol(args: argparse.Namespace) -> int:
         print(str(e), file=sys.stderr)
         return 2
     print(json.dumps(info, indent=2))
+    return 0
+
+
+def _cmd_search_symbols(args: argparse.Namespace) -> int:
+    matches = search_symbols(args.query, limit=args.limit)
+    if not matches:
+        print(f"no stock KiCad symbols match {args.query!r}; try fewer or broader terms",
+              file=sys.stderr)
+        return 0
+    for sym in matches:
+        print(sym)
     return 0
 
 
@@ -1694,6 +1706,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_look.add_argument("symbol", help="KiCad symbol id, e.g. 'Device:R'")
     p_look.set_defaults(func=_cmd_lookup_symbol)
+
+    p_search = sub.add_parser(
+        "search-symbols",
+        help="list stock KiCad symbols whose Library:Name matches keywords",
+    )
+    p_search.add_argument("query", help="keywords, e.g. 'conn 02x08' or 'crystal'")
+    p_search.add_argument("--limit", type=int, default=40)
+    p_search.set_defaults(func=_cmd_search_symbols)
 
     p_syn = sub.add_parser(
         "synthesize",
