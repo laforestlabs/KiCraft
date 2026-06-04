@@ -223,6 +223,35 @@ def _commit(stage, slot, state_path, brief, project_stem=None, workspace=None) -
     return (proc.returncode == 0 and bool(out.get("ok"))), out
 
 
+# Per-stage self-correction budget. Wiring must satisfy whole-board net coverage
+# (§9.11) in a single slot; on a complex board the model needs more correction
+# passes than the simpler, smaller-slot stages, so wiring floors higher.
+_STAGE_MIN_RETRIES = {"wiring": 4}
+
+
+def _stage_max_retries(stage: str, default: int) -> int:
+    return max(default, _STAGE_MIN_RETRIES.get(stage, 0))
+
+
+def _retry_feedback(out: dict) -> str:
+    """Self-correction message fed back to the model after a rejected commit.
+
+    Names the exact errors and offending pins, then instructs a *preserving patch*
+    (keep every already-valid entry, change only the flagged ones) rather than a
+    full redraft. On large list-shaped slots like wiring, re-emitting the whole slot
+    each attempt tends to regress already-correct connections (whack-a-mole), so the
+    preservation instruction is the lever that helps a weaker model converge.
+    """
+    msg = f"stage-commit rejected that with errors: {json.dumps(out.get('errors'))}"
+    if out.get("offenders"):
+        msg += f"  offenders: {json.dumps(out.get('offenders'))}"
+    msg += (". Return the COMPLETE corrected slot JSON, preserving every entry that was "
+            "already valid and changing ONLY the items listed above (use the tools to "
+            "resolve real symbols/footprints if a footprint did not resolve). Do not drop "
+            "or alter parts of the slot that were not flagged. Output ONLY the slot JSON.")
+    return msg
+
+
 def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, max_retries=2,
                 progress=None) -> dict:
     if progress:
@@ -285,13 +314,9 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
                     "commit": out, "slot": obj}
         last = {"commit": out}
         if progress:
-            progress({"kind": "retry", "stage": stage, "errors": out.get("errors")})
-        msg = (f"stage-commit rejected that with errors: {json.dumps(out.get('errors'))}")
-        if out.get("offenders"):
-            msg += f"  offenders: {json.dumps(out.get('offenders'))}"
-        msg += (". Fix exactly those (use the tools to resolve real symbols/footprints if a "
-                "footprint did not resolve) and output ONLY the corrected slot JSON.")
-        messages.append({"role": "user", "content": msg})
+            progress({"kind": "retry", "stage": stage, "errors": out.get("errors"),
+                      "offenders": out.get("offenders")})
+        messages.append({"role": "user", "content": _retry_feedback(out)})
 
     if progress:
         progress({"kind": "stage_done", "stage": stage, "ok": False, "cost": total_cost})
@@ -307,8 +332,8 @@ def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_sta
     client = CappedOpenRouterClient(Settings.from_env())
     results = []
     for stage in stages:
-        r = drive_stage(client, stage, brief, state_path, ws, max_tokens, max_retries,
-                        progress=progress)
+        r = drive_stage(client, stage, brief, state_path, ws, max_tokens,
+                        _stage_max_retries(stage, max_retries), progress=progress)
         results.append(r)
         if on_stage:
             on_stage(r)
