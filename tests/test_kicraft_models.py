@@ -288,7 +288,11 @@ def test_pin_endpoint_valid() -> None:
     assert ep.pin == "3"
 
 
-@pytest.mark.parametrize("pin", ["3", "A1", "B12", "VBAT", "+3V3", "~RESET", "GPIO0"])
+# "1'"/"2'" are prime-notation pins from real symbols (e.g. the EVQ-P7A01P
+# tactile switch, whose paired terminals are 1/1' and 2/2'); the wiring stage
+# must be able to reference them.
+@pytest.mark.parametrize(
+    "pin", ["3", "A1", "B12", "VBAT", "+3V3", "~RESET", "GPIO0", "1'", "2'"])
 def test_pin_endpoint_pin_accepts_real_kicad_pin_tokens(pin: str) -> None:
     ep = PinEndpoint(ref="U1", pin=pin)
     assert ep.pin == pin

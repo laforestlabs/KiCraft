@@ -22,7 +22,10 @@ FOOTPRINT_RE = re.compile(r"^[A-Za-z0-9_.+-]+:[A-Za-z0-9_.+-]+$")
 SYMBOL_RE = re.compile(r"^[A-Za-z0-9_.+-]+:[A-Za-z0-9_.+-]+$")
 SHEET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9 ]*[A-Z0-9]$")
 SHEET_STEM_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
-PIN_NUMBER_RE = re.compile(r"^[A-Za-z0-9+~_/.\-]+$")
+# `'` allows prime-notation pin numbers (e.g. a transformer's 1'/2', or LCSC
+# symbols that label mirrored pads 1'/2'); the net-coverage check still enforces
+# that the pin actually exists on the symbol, so widening this can't mask a typo.
+PIN_NUMBER_RE = re.compile(r"^[A-Za-z0-9+~_/.\-']+$")
 
 POWER_NET_PATTERNS = [
     re.compile(r"^[+]?\d+\.?\d*V$", re.IGNORECASE),
