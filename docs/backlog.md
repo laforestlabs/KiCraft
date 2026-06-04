@@ -35,6 +35,12 @@ References: memory `project-kicraft-commercialization`; full plan at
 with its projects, and save 100% of user input, which is very valuable for
 guiding the product.
 
+**Status (2026-06-04, branch `feat/user-accounts`): IN PROGRESS.** Accounts
+(email + password, invite-code signup), per-user project persistence + full
+input capture, and the three tiers with rolling-window quota enforcement are
+implemented in `kicraft/server/`; tiers are admin-assigned via
+`kicraft-accounts set-tier` until Stripe. Real payment stays deferred to item 3.
+
 This is the foundation the other two items lean on. Three layers:
 
 - **Identity / auth.** Replace the single shared password with real per-user
