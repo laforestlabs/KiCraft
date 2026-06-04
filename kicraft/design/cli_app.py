@@ -100,6 +100,32 @@ def _unresolved_footprints(bom, project_root: Path) -> list[str]:
     return bad
 
 
+def _unresolved_symbols(bom) -> list[str]:
+    """Return BOM parts whose ``symbol`` does not resolve to a real pin inventory.
+
+    Runs the SAME check the wiring stage-prep runs (``lookup_pins`` over each
+    distinct symbol), but at BOM-commit time, so a hallucinated symbol name is
+    rejected while the model still has the BOM lookup tools to fix it, instead of
+    cascading into an unrecoverable wiring stage-prep failure. Empty list means
+    every symbol resolves.
+    """
+    bad: list[str] = []
+    seen: set[str] = set()
+    for part in bom.parts:
+        sym = part.symbol
+        if sym in seen:
+            continue
+        seen.add(sym)
+        try:
+            info = lookup_pins(sym)
+        except (SymbolNotFoundError, ValueError) as e:
+            bad.append(f"{part.ref}: symbol {sym!r} did not resolve ({e})")
+            continue
+        if not info.get("pins"):
+            bad.append(f"{part.ref}: symbol {sym!r} resolved but exposes no pins")
+    return bad
+
+
 def _read_or_create_session_id(state_dir: Path, state: ConversationState) -> str:
     sid_path = state_dir / "session_id"
     if sid_path.exists():
@@ -1182,6 +1208,28 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                         "ok": False,
                         "errors": ["footprint(s) do not resolve to a real .kicad_mod"],
                         "offenders": bad_fps[:20],
+                    },
+                    indent=2,
+                )
+            )
+            return 3
+
+    # Every symbol must likewise resolve to a real pin inventory before commit,
+    # mirroring the footprint check. A hallucinated symbol name otherwise only
+    # surfaces at wiring stage-prep, where the model can no longer fix it with the
+    # BOM lookup tools.
+    if stage == "bom" and state.bom is not None:
+        bad_syms = _unresolved_symbols(state.bom)
+        if bad_syms:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": [
+                            "symbol(s) do not resolve to a pin inventory; "
+                            "use the lookup tools to fix the BOM"
+                        ],
+                        "offenders": bad_syms[:20],
                     },
                     indent=2,
                 )
