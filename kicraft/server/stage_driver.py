@@ -252,10 +252,12 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
     total_cost = 0.0
     last: dict = {}
     for attempt in range(max_retries + 1):
+        tool_calls_ct = None
         if tools:
             r = client.chat_with_tools(messages, tools, executor, max_tokens=max_tokens,
                                        progress=progress)
             raw, rounds = r["text"], r.get("rounds")
+            tool_calls_ct = r.get("tool_calls")
             total_cost += r["cost_usd"]
         else:
             res = client.chat(messages, max_tokens=max_tokens, progress=progress)
@@ -266,7 +268,8 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         try:
             obj = _extract_json(raw)
         except (json.JSONDecodeError, ValueError):
-            last = {"error": "no JSON in reply", "reply_head": (raw or "")[:200], "rounds": rounds}
+            last = {"error": "no JSON in reply", "reply_head": (raw or "")[:200],
+                    "rounds": rounds, "tool_calls": tool_calls_ct}
             messages.append({"role": "user", "content":
                              "That was not a single valid JSON object. Output ONLY the slot JSON."})
             continue
@@ -278,7 +281,8 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
                 progress({"kind": "stage_done", "stage": stage, "ok": True,
                           "cost": total_cost, "attempts": attempt + 1})
             return {"stage": stage, "commit_ok": True, "cost_usd": total_cost,
-                    "attempts": attempt + 1, "rounds": rounds, "commit": out, "slot": obj}
+                    "attempts": attempt + 1, "rounds": rounds, "tool_calls": tool_calls_ct,
+                    "commit": out, "slot": obj}
         last = {"commit": out}
         if progress:
             progress({"kind": "retry", "stage": stage, "errors": out.get("errors")})
@@ -292,7 +296,7 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
     if progress:
         progress({"kind": "stage_done", "stage": stage, "ok": False, "cost": total_cost})
     return {"stage": stage, "commit_ok": False, "cost_usd": total_cost,
-            "attempts": max_retries + 1, **last}
+            "attempts": max_retries + 1, "tool_calls": tool_calls_ct, **last}
 
 
 def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_stage=None,
@@ -312,9 +316,13 @@ def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_sta
         cstr = f"${cost:.6f}" if isinstance(cost, (int, float)) else "n/a"
         tag = "ok  " if r.get("commit_ok") else "FAIL"
         extra = f" rounds={r['rounds']}" if r.get("rounds") else ""
+        if r.get("tool_calls") is not None:
+            extra += f" tools={r['tool_calls']}"
         line = f"  [{tag}] {stage:<16} cost={cstr}  attempts={r.get('attempts', '-')}{extra}"
         if not r.get("commit_ok"):
             line += f"\n         -> {r.get('error') or r.get('commit')}"
+            if r.get("reply_head"):
+                line += f"\n         reply_head: {r['reply_head']!r}"
         print(line)
         if not r.get("commit_ok"):
             break
