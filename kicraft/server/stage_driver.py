@@ -64,6 +64,14 @@ BOM_TOOLS = [
             "symbol": {"type": "string", "description": "e.g. 'Device:R' or "
                        "'usb-c-16p:TYPE-C-31-M-12'"}}, "required": ["symbol"]}}},
     {"type": "function", "function": {
+        "name": "search_symbols",
+        "description": "Find the correct stock KiCad symbol id by keyword when you do not know "
+                       "the exact 'Library:Name'. Returns matching 'Library:Name' ids to use "
+                       "verbatim. Use this instead of guessing a symbol name.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "keywords, e.g. 'conn 02x08', 'crystal', "
+                      "'n-channel mosfet'"}}, "required": ["query"]}}},
+    {"type": "function", "function": {
         "name": "lookup_lcsc_id",
         "description": "Resolve a manufacturer part number or search keyword to an LCSC part "
                        "number (C#####). Returns {ok, lcsc} or a candidates list.",
@@ -98,9 +106,13 @@ def _stage_extra(stage: str) -> str:
     if stage == "bom":
         return (
             "\n- TOOLS available this stage: list_parts (curated bundles + exact symbol/"
-            "footprint strings); lookup_symbol (verify a 'Library:Name' symbol exists + pins); "
+            "footprint strings); search_symbols (find a stock KiCad symbol id by keyword); "
+            "lookup_symbol (verify a 'Library:Name' symbol exists + pins); "
             "lookup_lcsc_id (MPN/keyword -> LCSC C-number); add_part_from_lcsc (fetch a real "
             "symbol+footprint bundle into the project).\n"
+            "- NEVER guess a stock symbol 'Library:Name'. If unsure of the exact id, call "
+            "search_symbols by keyword (e.g. 'conn 02x08') to find it; a symbol that does not "
+            "resolve is rejected at commit.\n"
             "- Use a library bundle VERBATIM when one matches (e.g. usb-c-16p for a USB-C "
             "receptacle): symbol '<name>:<sym>', footprint '<name>:<fp>'.\n"
             "- For any connector/switch/IC NOT in the library and NOT a trivial passive, DO NOT "
@@ -190,6 +202,9 @@ def _bom_executor(workspace: Path):
         if name == "lookup_symbol":
             r = _run(KICRAFT + ["lookup-symbol", str(args.get("symbol", ""))], workspace)
             return (r.stdout or r.stderr)[:3000]
+        if name == "search_symbols":
+            r = _run(KICRAFT + ["search-symbols", str(args.get("query", ""))], workspace)
+            return (r.stdout or r.stderr)[:3000]
         if name == "lookup_lcsc_id":
             r = _run(KICRAFT + ["lookup-lcsc-id", str(args.get("mpn", ""))], workspace)
             return (r.stdout or r.stderr)[:3000]
@@ -225,8 +240,9 @@ def _commit(stage, slot, state_path, brief, project_stem=None, workspace=None) -
 
 # Per-stage self-correction budget. Wiring must satisfy whole-board net coverage
 # (§9.11) in a single slot; on a complex board the model needs more correction
-# passes than the simpler, smaller-slot stages, so wiring floors higher.
-_STAGE_MIN_RETRIES = {"wiring": 4}
+# passes than the simpler, smaller-slot stages, so they floor higher (BOM must
+# also resolve every symbol/footprint to a real library entry within its budget).
+_STAGE_MIN_RETRIES = {"wiring": 4, "bom": 4}
 
 
 def _stage_max_retries(stage: str, default: int) -> int:

@@ -170,6 +170,46 @@ def extract_symbol_block(
     return _qualify_with_prefix(resolved, symbol_name, library)
 
 
+def search_symbols(
+    query: str,
+    *,
+    stock_dir: Path = DEFAULT_KICAD_SYMBOL_DIR,
+    limit: int = 40,
+) -> list[str]:
+    """Return up to ``limit`` stock KiCad ``Library:Name`` symbol ids whose id
+    contains every whitespace-separated term in ``query`` (case-insensitive).
+
+    Lets a stage discover the correct symbol name by keyword instead of guessing
+    it (e.g. ``"conn 02x08"`` -> ``Connector_Generic:Conn_02x08_Odd_Even``). KiCad
+    unit / body-style sub-symbols (``<name>_<n>_<m>``) are skipped so only real
+    top-level symbols are returned.
+    """
+    terms = [t.lower() for t in (query or "").split() if t.strip()]
+    if not terms or not stock_dir.is_dir():
+        return []
+    matches: list[str] = []
+    seen: set[str] = set()
+    for lib in sorted(stock_dir.glob("*.kicad_sym")):
+        libname = lib.stem
+        try:
+            text = lib.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for m in re.finditer(r'\(symbol "([^"]+)"', text):
+            name = m.group(1)
+            if re.search(r"_\d+_\d+$", name):  # unit / body-style sub-symbol
+                continue
+            sym_id = f"{libname}:{name}"
+            key = sym_id.lower()
+            if sym_id in seen or not all(t in key for t in terms):
+                continue
+            seen.add(sym_id)
+            matches.append(sym_id)
+            if len(matches) >= limit:
+                return matches
+    return matches
+
+
 def build_lib_symbols_block(
     pairs: list[tuple[str, str]],
     project_root: Path | None = None,

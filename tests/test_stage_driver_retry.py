@@ -6,6 +6,7 @@ and the per-stage retry budget that help the wiring stage converge.
 from __future__ import annotations
 
 from kicraft.server.stage_driver import (
+    BOM_TOOLS,
     _retry_feedback,
     _stage_max_retries,
     _stage_max_tokens,
@@ -31,7 +32,7 @@ def test_retry_feedback_without_offenders_omits_that_line():
 def test_wiring_gets_more_retries_than_the_simple_stages():
     assert _stage_max_retries("wiring", 2) >= 4   # wiring floors higher than default
     assert _stage_max_retries("intent", 2) == 2   # simple stages keep the default
-    assert _stage_max_retries("bom", 2) == 2
+    assert _stage_max_retries("functional_spec", 2) == 2
 
 
 def test_caller_default_wins_when_higher_than_the_floor():
@@ -43,3 +44,14 @@ def test_wiring_gets_a_larger_token_budget():
     assert _stage_max_tokens("wiring", 4096) >= 8192   # wiring floors higher
     assert _stage_max_tokens("intent", 4096) == 4096   # simple stages keep default
     assert _stage_max_tokens("wiring", 16000) == 16000  # a higher caller default wins
+
+
+def test_bom_gets_more_retries_for_symbol_resolution():
+    assert _stage_max_retries("bom", 2) >= 4           # bom floors higher now
+    assert _stage_max_retries("architecture", 2) == 2
+
+
+def test_bom_has_a_symbol_search_tool():
+    names = {t["function"]["name"] for t in BOM_TOOLS}
+    assert "search_symbols" in names                   # discover, do not guess
+    assert {"list_parts", "lookup_symbol", "lookup_lcsc_id", "add_part_from_lcsc"} <= names
