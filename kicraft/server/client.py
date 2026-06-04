@@ -41,31 +41,91 @@ class CappedOpenRouterClient:
         self.s = settings or Settings.from_env()
         self.guard = guard or SpendGuard(self.s)
 
-    def _complete(self, body: dict) -> tuple[dict, float]:
-        """One capped completion: preflight -> POST -> record actual cost.
+    def _stream(self, body: dict, on_delta=None) -> tuple[dict, float]:
+        """One capped streaming completion (SSE).
 
-        Returns (response_json, cost_usd). Every spend in the product flows
-        through here, so a single enforcement point covers chat and tool use.
+        Calls on_delta({"reasoning"|"content": <partial text>}) as tokens arrive,
+        accumulates content / reasoning / tool_calls from the deltas, and records
+        the real cost from the final usage chunk. Returns (assembled_message,
+        cost). preflight() runs before any spend, so the caps still apply.
         """
         self.guard.preflight()  # hard cap check BEFORE any spend
-        payload = {**body, "usage": {"include": True}}
+        payload = {**body, "stream": True, "stream_options": {"include_usage": True},
+                   "usage": {"include": True}}
         payload.setdefault("model", self.s.model)
         payload.setdefault("max_tokens", self.s.max_tokens_per_call)
-        resp = requests.post(
+        content, reasoning = [], []
+        tool_calls: dict = {}
+        finish = None
+        usage: dict = {}
+        with requests.post(
             f"{self.s.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.s.api_key}",
                      "Content-Type": "application/json", "X-Title": "KiCraft"},
-            json=payload, timeout=self.s.request_timeout_s,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        usage = data.get("usage") or {}
+            json=payload, timeout=self.s.request_timeout_s, stream=True,
+        ) as resp:
+            resp.raise_for_status()
+            for raw in resp.iter_lines(decode_unicode=True):
+                if not raw or not raw.startswith("data:"):
+                    continue
+                data = raw[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
+                for ch in chunk.get("choices") or []:
+                    if ch.get("finish_reason"):
+                        finish = ch["finish_reason"]
+                    delta = ch.get("delta") or {}
+                    if delta.get("reasoning"):
+                        reasoning.append(delta["reasoning"])
+                        if on_delta:
+                            on_delta({"reasoning": delta["reasoning"]})
+                    if delta.get("content"):
+                        content.append(delta["content"])
+                        if on_delta:
+                            on_delta({"content": delta["content"]})
+                    for tcd in delta.get("tool_calls") or []:
+                        slot = tool_calls.setdefault(tcd.get("index", 0),
+                                                     {"id": None, "name": "", "args": ""})
+                        if tcd.get("id"):
+                            slot["id"] = tcd["id"]
+                        fn = tcd.get("function") or {}
+                        if fn.get("name"):
+                            slot["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            slot["args"] += fn["arguments"]
+
+        msg = {"role": "assistant", "content": "".join(content) or None,
+               "reasoning": "".join(reasoning) or None, "finish_reason": finish}
+        if tool_calls:
+            msg["tool_calls"] = [
+                {"id": tc["id"], "type": "function",
+                 "function": {"name": tc["name"], "arguments": tc["args"]}}
+                for tc in (tool_calls[i] for i in sorted(tool_calls))]
+
         in_tok, out_tok = usage.get("prompt_tokens"), usage.get("completion_tokens")
         cost = float(usage.get("cost") or 0.0)
         if cost <= 0.0:  # never record 0 for real spend, or the ceiling under-counts
             cost = estimate_cost(payload["model"], in_tok, out_tok)
-        self.guard.record(payload["model"], in_tok, out_tok, cost, meta=body.get("_meta", "chat"))
-        return data, cost
+        self.guard.record(payload["model"], in_tok, out_tok, cost, meta=body.get("_meta", "stream"))
+        return msg, cost
+
+    @staticmethod
+    def _delta_progress(progress):
+        """Wrap a progress callback to forward streaming token deltas."""
+        def on_delta(d):
+            if not progress:
+                return
+            if d.get("reasoning"):
+                progress({"kind": "reasoning_delta", "text": d["reasoning"]})
+            elif d.get("content"):
+                progress({"kind": "answer_delta", "text": d["content"]})
+        return on_delta
 
     def chat(self, messages, model=None, max_tokens=None, temperature=0.2, progress=None) -> dict:
         body = {"messages": messages, "temperature": temperature}
@@ -73,20 +133,10 @@ class CappedOpenRouterClient:
             body["model"] = model
         if max_tokens:
             body["max_tokens"] = max_tokens
-        data, cost = self._complete(body)
-        choices = data.get("choices") or []
-        msg = (choices[0].get("message") or {}) if choices else {}
-        finish = choices[0].get("finish_reason") if choices else None
-        reasoning, text = msg.get("reasoning"), msg.get("content") or ""
-        if progress:
-            if reasoning:
-                progress({"kind": "reasoning", "text": reasoning})
-            if text:
-                progress({"kind": "answer", "text": text})
-        return {"text": text, "reasoning": reasoning,
-                "finish_reason": finish, "model": data.get("model"),
-                "usage": data.get("usage") or {}, "cost_usd": cost,
-                "guard": self.guard.status()}
+        msg, cost = self._stream(body, on_delta=self._delta_progress(progress))
+        return {"text": msg.get("content") or "", "reasoning": msg.get("reasoning"),
+                "finish_reason": msg.get("finish_reason"), "model": None,
+                "usage": {}, "cost_usd": cost, "guard": self.guard.status()}
 
     def chat_with_tools(self, messages, tools, executor, model=None, max_tokens=None,
                         temperature=0.2, max_rounds=12, progress=None) -> dict:
@@ -100,6 +150,7 @@ class CappedOpenRouterClient:
         """
         total_cost = 0.0
         n_tool_calls = 0
+        on_delta = self._delta_progress(progress)
         for rnd in range(max_rounds):
             body = {"messages": messages, "tools": tools, "tool_choice": "auto",
                     "temperature": temperature, "_meta": "tools"}
@@ -107,13 +158,8 @@ class CappedOpenRouterClient:
                 body["model"] = model
             if max_tokens:
                 body["max_tokens"] = max_tokens
-            data, cost = self._complete(body)
+            msg, cost = self._stream(body, on_delta=on_delta)
             total_cost += cost
-            choices = data.get("choices") or []
-            msg = (choices[0].get("message") or {}) if choices else {}
-
-            if progress and msg.get("reasoning"):
-                progress({"kind": "reasoning", "text": msg["reasoning"]})
 
             assistant = {"role": "assistant", "content": msg.get("content")}
             tcs = msg.get("tool_calls") or []
@@ -122,8 +168,6 @@ class CappedOpenRouterClient:
             messages.append(assistant)
 
             if not tcs:
-                if progress and msg.get("content"):
-                    progress({"kind": "answer", "text": msg["content"]})
                 return {"text": msg.get("content") or "", "cost_usd": total_cost,
                         "rounds": rnd + 1, "tool_calls": n_tool_calls,
                         "guard": self.guard.status()}

@@ -111,7 +111,7 @@ def index():
         return RedirectResponse("/login")
 
     state: dict = {"events": [], "rendered": 0, "running": False, "done": False,
-                   "ok": None, "spend": None, "zip": None, "dl_added": False}
+                   "ok": None, "spend": None, "zip": None, "dl_added": False, "transcript": ""}
 
     with ui.header().classes("items-center justify-between bg-slate-800"):
         ui.label("KiCraft").classes("text-xl font-bold text-white")
@@ -133,7 +133,8 @@ def index():
         design_btn = ui.button("Design")
         status = ui.label("").classes("text-sm")
         spend = ui.label("").classes("text-sm text-grey")
-        log = ui.log(max_lines=4000).classes("w-full h-96 text-xs")
+        with ui.scroll_area().classes("w-full h-96 border rounded bg-slate-50") as scroll:
+            transcript = ui.label("").classes("whitespace-pre-wrap font-mono text-xs")
         download_holder = ui.row()
 
         def start():
@@ -143,8 +144,8 @@ def index():
                 ui.notify("Enter a brief first.", color="warning")
                 return
             state.update(events=[], rendered=0, running=True, done=False, ok=None,
-                         spend=None, zip=None, dl_added=False)
-            log.clear()
+                         spend=None, zip=None, dl_added=False, transcript="")
+            transcript.set_text("")
             download_holder.clear()
             status.text = "Designing... (intent -> functional_spec -> architecture -> bom -> "\
                           "wiring -> synthesize)"
@@ -153,31 +154,36 @@ def index():
 
         design_btn.on_click(start)
 
-        def _fmt(e):
+        def _frag(e):
             k = e.get("kind")
+            if k == "reasoning_delta":
+                return e.get("text", "")
+            if k == "answer_delta":
+                return ""  # the JSON draft is the result, not "thinking"; keep it out of the feed
             if k == "stage_start":
-                return f"\n=== {e.get('stage')} ==="
-            if k == "reasoning":
-                return f"  [thinking] {e.get('text', '')}"
-            if k == "answer":
-                return f"  [draft] {str(e.get('text', ''))[:600]}"
+                return f"\n\n=== {e.get('stage')} ===\n"
             if k == "tool":
-                return f"  > {e.get('name')}({json.dumps(e.get('args', {}))[:140]})"
+                return f"\n> {e.get('name')}({json.dumps(e.get('args', {}))[:140]})\n"
             if k == "tool_result":
-                return f"    -> {str(e.get('output', ''))[:240]}"
+                return f"  -> {str(e.get('output', ''))[:240]}\n"
             if k == "retry":
-                return f"  ! retry {e.get('stage')}: {json.dumps(e.get('errors'))[:200]}"
+                return f"\n! retry {e.get('stage')}: {json.dumps(e.get('errors'))[:200]}\n"
             if k == "stage_done":
                 c = e.get("cost")
                 cs = f"  (${c:.4f})" if isinstance(c, (int, float)) else ""
-                return f"{'[OK]' if e.get('ok') else '[FAIL]'} {e.get('stage')}{cs}"
-            return str(e)[:200]
+                return f"\n[{'OK' if e.get('ok') else 'FAIL'} {e.get('stage')}]{cs}\n"
+            return ""
 
         def render():
             evs = state["events"]
+            changed = False
             while state["rendered"] < len(evs):
-                log.push(_fmt(evs[state["rendered"]]))
+                state["transcript"] += _frag(evs[state["rendered"]])
                 state["rendered"] += 1
+                changed = True
+            if changed:
+                transcript.set_text(state["transcript"])
+                scroll.scroll_to(percent=1.0)
             if state["spend"] is not None:
                 spend.text = f"Spent this design: ${state['spend']:.4f}"
             if state["done"]:
@@ -192,7 +198,7 @@ def index():
                 else:
                     status.text = "Stopped. See the log above."
 
-        ui.timer(0.5, render)
+        ui.timer(0.2, render)
 
 
 def main() -> None:
