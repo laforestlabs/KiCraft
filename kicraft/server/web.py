@@ -749,6 +749,16 @@ def _legal_footer() -> None:
             .classes("text-xs").style("color:#64748b")
 
 
+def _laforest_footer() -> None:
+    """Subtle parent-company branding: a quiet link out to LaForest Labs,
+    KiCraft's parent. Used on the app-shell footer and the auth cards."""
+    with ui.row().classes("items-center justify-center gap-1 w-full"):
+        ui.label("A").classes("text-xs").style("color:#475569")
+        ui.link("LaForest Labs", "https://laforestlabs.com", new_tab=True) \
+            .classes("text-xs").style("color:#64748b")
+        ui.label("product").classes("text-xs").style("color:#475569")
+
+
 def _legal_page(title: str, name: str) -> None:
     """Render a legal document. Public: no login required, so prospective users
     can read the Terms and Privacy Policy before signing up."""
@@ -861,6 +871,8 @@ def signup_page():
         with ui.row().classes("items-center justify-between w-full"):
             ui.label("Already registered?").classes("text-xs").style("color:#94a3b8")
             ui.button("Sign in", on_click=lambda: ui.navigate.to("/login")).props("flat dense")
+        ui.separator().style("background:#1e293b")
+        _laforest_footer()
 
 
 @ui.page("/consent")
@@ -1518,6 +1530,10 @@ def index():
 
         refresh_account_ui()
         ui.timer(0.2, render)
+
+    with ui.footer().classes("justify-center py-1") \
+            .style("background:#0b1120;border-top:1px solid #1e293b"):
+        _laforest_footer()
 
 
 if os.environ.get("KICRAFT_WEB_DEMO"):
