@@ -2924,6 +2924,18 @@ def _route_parent_board(
         required_anchor_names=[],
     )
 
+    # A parent must close every net. Unlike a leaf -- whose interface ports are
+    # legitimately open, so validate_routed_board waives unconnected -- unrouted
+    # nets on the parent mean an unusable board (the final build verify requires
+    # 0 unconnected). Reject here so the search keeps trying other rounds for a
+    # fully-routed parent instead of promoting one the verify gate would fail.
+    unconnected = int((validation.get("drc") or {}).get("unconnected", 0) or 0)
+    if unconnected > 0:
+        validation["accepted"] = False
+        reasons = validation.setdefault("rejection_reasons", [])
+        if "unconnected_nets" not in reasons:
+            reasons.append("unconnected_nets")
+
     return {
         "failed": False,
         "routed_board_path": str(routed_pcb),
