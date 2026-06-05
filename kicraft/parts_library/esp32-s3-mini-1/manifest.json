@@ -1,0 +1,35 @@
+{
+  "content_hash": "sha256:6a24fed229719cfd62cf84b546d74f6a1134cf9b7692eb4b07c12adf58490fb0",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C2913206.pdf",
+  "description": "ESPRESSIF(\u4e50\u946b) ESP32-S3-MINI-1-N8",
+  "footprint_name": "BULETM-SMD_ESP32-S3-MINI-1-N8",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "ESP32-S3-MINI-1-N8",
+  "name": "esp32-s3-mini-1",
+  "provenance": {
+    "added_at": "2026-06-05T14:42:58Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2913206"
+  },
+  "symbol_name": "ESP32-S3-MINI-1-N8",
+  "tags": [
+    "mcu",
+    "microcontroller",
+    "wifi",
+    "bluetooth",
+    "esp32",
+    "esp32-s3",
+    "module",
+    "native-usb",
+    "mini",
+    "small"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "ESP32-S3 with native USB: flash directly over USB, no UART bridge needed. Smaller than ESP32-S3-WROOM-1 (~15.4x20mm vs 18x25.5mm) but breaks out fewer GPIO, so a pin-hungry design (parallel-RGB panel, lots of I/O) may still need the WROOM-1. PCB-antenna keep-out is enforced via the autoplacer 'antenna_keepouts' config (footprint frame: long axis y, antenna at -y); that rect is geometry-derived, verify it against the ESP32-S3-MINI-1 datasheet keep-out for RF-critical or high-volume builds."
+}

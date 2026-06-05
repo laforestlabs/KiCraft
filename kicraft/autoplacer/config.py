@@ -139,6 +139,8 @@ DEFAULT_CONFIG = {
     # Geometry covers the antenna end of the module plus a near-field margin
     # beyond it; tune per module. Frames (measured from the library footprints):
     #   ESP32-S3-WROOM-1 (WIRELM): long axis +y, antenna at -y, body x[-9,9].
+    #   ESP32-S3-MINI-1  (BULETM): long axis +y, antenna at -y, body x[-7.7,7.8]
+    #     (rect geometry-derived from the footprint; verify vs the datasheet keep-out).
     #   ESP32-WROOM-32x  (WIFI):   long axis +x, antenna at -x, body y[-9,9].
     "antenna_keepouts": {
         "*ESP32-S3-WROOM-1*": {
@@ -146,6 +148,12 @@ DEFAULT_CONFIG = {
             "y_min": -24.0,
             "x_max": 12.0,
             "y_max": -9.0,
+        },
+        "*ESP32-S3-MINI-1*": {
+            "x_min": -10.0,
+            "y_min": -20.0,
+            "x_max": 10.0,
+            "y_max": -6.0,
         },
         "*ESP32-WROOM-32*": {
             "x_min": -24.0,
