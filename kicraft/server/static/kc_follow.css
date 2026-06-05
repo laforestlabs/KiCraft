@@ -1,0 +1,10 @@
+/* Native scrollbar styling for the tail-follow streaming panes (kc_follow.js),
+   matching the dark theme (slate thumb on a transparent track). */
+.kc-follow {
+  scrollbar-width: thin;
+  scrollbar-color: #334155 transparent;
+}
+.kc-follow::-webkit-scrollbar { width: 10px; height: 10px; }
+.kc-follow::-webkit-scrollbar-thumb { background: #334155; border-radius: 5px; }
+.kc-follow::-webkit-scrollbar-thumb:hover { background: #475569; }
+.kc-follow::-webkit-scrollbar-track { background: transparent; }

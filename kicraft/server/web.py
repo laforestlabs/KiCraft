@@ -1373,8 +1373,6 @@ def index():
                 changed = True
             if changed:
                 tabs.flush()
-                if state["running"]:  # keep the live tab pinned to its newest output
-                    tabs.scroll_active_to_bottom()
             if state["spend"] is not None:
                 spend.text = f"Spent this design: ${state['spend']:.4f}"
 
@@ -1544,7 +1542,6 @@ if os.environ.get("KICRAFT_WEB_DEMO"):
                     d["i"] += 1
                     pushed += 1
                 tabs.flush()
-                tabs.scroll_active_to_bottom()
                 if d["i"] >= len(evs):
                     timer.cancel()  # replay finished; stop ticking
 
