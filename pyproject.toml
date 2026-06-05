@@ -61,6 +61,7 @@ diff-rounds = "kicraft.cli.diff_rounds:main"
 generate-report = "kicraft.cli.generate_report:main"
 plot-results = "kicraft.cli.plot_results:main"
 token-report = "kicraft.cli.token_report:main"
+web-cost-report = "kicraft.cli.web_cost_report:main"
 
 # Server (capped agent-loop backend)
 kicraft-smoketest = "kicraft.server.smoketest:main"

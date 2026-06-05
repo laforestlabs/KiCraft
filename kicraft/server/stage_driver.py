@@ -141,6 +141,10 @@ def _stage_extra(stage: str) -> str:
             "pick a stock symbol/footprint. Resolve the real part: lookup_lcsc_id then "
             "add_part_from_lcsc, then list_parts to read the exact '<name>:<sym>' / '<name>:<fp>' "
             "strings. Substituting a generic stock part for a specific IC is wrong.\n"
+            "- EFFICIENCY: when you need several independent lookups (e.g. several "
+            "search_footprints, search_symbols, or lookup_lcsc_id for different parts), "
+            "request them TOGETHER in a single turn (emit multiple tool calls at once) "
+            "instead of one per turn. It is faster and far cheaper.\n"
             "- Every symbol AND footprint MUST resolve to a real file. When finished, output "
             "ONLY the BOM slot JSON.")
     if stage == "wiring":
@@ -344,7 +348,7 @@ def _attach_questions(state_path, stage: str, questions: list[dict]) -> None:
 
 
 def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, max_retries=2,
-                progress=None, answers=None, instruction=None) -> dict:
+                progress=None, answers=None, instruction=None, meta_ctx=None) -> dict:
     if progress:
         progress({"kind": "stage_start", "stage": stage})
     prep = _run(KICRAFT + ["stage-prep", stage, str(state_path)], workspace)
@@ -377,17 +381,21 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
 
     total_cost = 0.0
     last: dict = {}
+    cur_max_tokens = max_tokens
     for attempt in range(max_retries + 1):
+        ctx = {**(meta_ctx or {}), "stage": stage, "attempt": attempt}
         tool_calls_ct = None
         if tools:
-            r = client.chat_with_tools(messages, tools, executor, max_tokens=max_tokens,
-                                       progress=progress)
+            r = client.chat_with_tools(messages, tools, executor, max_tokens=cur_max_tokens,
+                                       progress=progress, meta_ctx=ctx)
             raw, rounds = r["text"], r.get("rounds")
             tool_calls_ct = r.get("tool_calls")
+            finish = r.get("finish_reason")
             total_cost += r["cost_usd"]
         else:
-            res = client.chat(messages, max_tokens=max_tokens, progress=progress)
+            res = client.chat(messages, max_tokens=cur_max_tokens, progress=progress, meta_ctx=ctx)
             raw, rounds = (res["text"] or res.get("reasoning") or ""), None
+            finish = res.get("finish_reason")
             total_cost += res["cost_usd"]
             messages.append({"role": "assistant", "content": raw})
 
@@ -396,8 +404,18 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         except (json.JSONDecodeError, ValueError):
             last = {"error": "no JSON in reply", "reply_head": (raw or "")[:200],
                     "rounds": rounds, "tool_calls": tool_calls_ct}
-            messages.append({"role": "user", "content":
-                             "That was not a single valid JSON object. Output ONLY the slot JSON."})
+            if finish == "length":
+                # The reply hit the output cap and came back as truncated, invalid
+                # JSON. A plain "try again" just truncates at the same spot, burning
+                # another full-context call; give it more room for the next attempt.
+                cur_max_tokens = min(cur_max_tokens * 2, 16384)
+                messages.append({"role": "user", "content":
+                                 "Your reply was cut off at the output token limit, so the "
+                                 "JSON was truncated and invalid. The limit has been raised; "
+                                 "output ONLY the slot JSON and keep it compact."})
+            else:
+                messages.append({"role": "user", "content":
+                                 "That was not a single valid JSON object. Output ONLY the slot JSON."})
             continue
 
         # A clarifying-question payload parks the stage (no slot this turn). No slot
@@ -440,12 +458,13 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
 
 
 def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_stage=None,
-                progress=None, client=None, answers=None, instruction=None):
+                progress=None, client=None, answers=None, instruction=None, run_id=None):
     ws = Path(workspace)
     (ws / ".kicraft").mkdir(parents=True, exist_ok=True)
     state_path = ws / ".kicraft" / "state.json"
     if client is None:
         client = CappedOpenRouterClient(Settings.from_env())
+    base_ctx = {"run_id": run_id} if run_id else {}
     results = []
     for i, stage in enumerate(stages):
         # answers/instruction belong to the stage being resumed or edited, which
@@ -454,7 +473,8 @@ def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_sta
                         _stage_max_tokens(stage, max_tokens),
                         _stage_max_retries(stage, max_retries), progress=progress,
                         answers=(answers if i == 0 else None),
-                        instruction=(instruction if i == 0 else None))
+                        instruction=(instruction if i == 0 else None),
+                        meta_ctx=base_ctx)
         results.append(r)
         if on_stage:
             on_stage(r)

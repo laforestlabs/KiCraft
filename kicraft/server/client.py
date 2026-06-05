@@ -41,6 +41,39 @@ class CappedOpenRouterClient:
         self.s = settings or Settings.from_env()
         self.guard = guard or SpendGuard(self.s)
 
+    def _provider_block(self) -> dict | None:
+        """OpenRouter `provider` routing block (cost safety). Prefers the caching
+        backend(s) in `provider_order`, allows bounded fallbacks, and caps the
+        per-Mtok price so no single call can hit the expensive-backend tail."""
+        prov: dict = {}
+        if self.s.provider_order:
+            prov["order"] = list(self.s.provider_order)
+        prov["allow_fallbacks"] = self.s.provider_allow_fallbacks
+        mp = {}
+        if self.s.max_price_prompt > 0:
+            mp["prompt"] = self.s.max_price_prompt
+        if self.s.max_price_completion > 0:
+            mp["completion"] = self.s.max_price_completion
+        if mp:
+            prov["max_price"] = mp
+        return prov or None
+
+    @staticmethod
+    def _apply_cache_control(messages: list) -> None:
+        """Mark the system prompt (the large, stable spec+schema prefix that is
+        re-sent on every tool round and retry) with an ephemeral cache breakpoint
+        in OpenAI content-parts form. Honored by caching providers, ignored by the
+        rest; DeepSeek caches automatically regardless. Idempotent (skips content
+        that is already structured)."""
+        for m in messages:
+            if m.get("role") != "system":
+                continue
+            content = m.get("content")
+            if isinstance(content, str) and content:
+                m["content"] = [{"type": "text", "text": content,
+                                 "cache_control": {"type": "ephemeral"}}]
+            break
+
     def _stream(self, body: dict, on_delta=None) -> tuple[dict, float]:
         """One capped streaming completion (SSE).
 
@@ -50,13 +83,24 @@ class CappedOpenRouterClient:
         cost). preflight() runs before any spend, so the caps still apply.
         """
         self.guard.preflight()  # hard cap check BEFORE any spend
-        payload = {**body, "stream": True, "stream_options": {"include_usage": True},
-                   "usage": {"include": True}}
+        # Internal "_"-prefixed keys (_meta, _meta_ctx) are control data, not API
+        # fields: keep them out of the request body sent to OpenRouter.
+        meta_phase = body.get("_meta", "stream")
+        meta_ctx = body.get("_meta_ctx") if isinstance(body.get("_meta_ctx"), dict) else {}
+        payload = {k: v for k, v in body.items() if not k.startswith("_")}
+        payload.update({"stream": True, "stream_options": {"include_usage": True},
+                        "usage": {"include": True}})
         payload.setdefault("model", self.s.model)
         payload.setdefault("max_tokens", self.s.max_tokens_per_call)
+        prov = self._provider_block()
+        if prov:
+            payload["provider"] = prov
+        if self.s.enable_prompt_cache and isinstance(payload.get("messages"), list):
+            self._apply_cache_control(payload["messages"])
         content, reasoning = [], []
         tool_calls: dict = {}
         finish = None
+        provider = None
         usage: dict = {}
         with requests.post(
             f"{self.s.base_url}/chat/completions",
@@ -75,6 +119,8 @@ class CappedOpenRouterClient:
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                if chunk.get("provider"):
+                    provider = chunk["provider"]
                 if chunk.get("usage"):
                     usage = chunk["usage"]
                 for ch in chunk.get("choices") or []:
@@ -109,10 +155,13 @@ class CappedOpenRouterClient:
                 for tc in (tool_calls[i] for i in sorted(tool_calls))]
 
         in_tok, out_tok = usage.get("prompt_tokens"), usage.get("completion_tokens")
+        cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
         cost = float(usage.get("cost") or 0.0)
         if cost <= 0.0:  # never record 0 for real spend, or the ceiling under-counts
             cost = estimate_cost(payload["model"], in_tok, out_tok)
-        self.guard.record(payload["model"], in_tok, out_tok, cost, meta=body.get("_meta", "stream"))
+        rec_meta = {"phase": meta_phase, "provider": provider, "finish_reason": finish,
+                    "cached_tokens": int(cached or 0), **meta_ctx}
+        self.guard.record(payload["model"], in_tok, out_tok, cost, meta=rec_meta)
         return msg, cost
 
     @staticmethod
@@ -127,19 +176,22 @@ class CappedOpenRouterClient:
                 progress({"kind": "answer_delta", "text": d["content"]})
         return on_delta
 
-    def chat(self, messages, model=None, max_tokens=None, temperature=0.2, progress=None) -> dict:
+    def chat(self, messages, model=None, max_tokens=None, temperature=0.2, progress=None,
+             meta_ctx=None) -> dict:
         body = {"messages": messages, "temperature": temperature}
         if model:
             body["model"] = model
         if max_tokens:
             body["max_tokens"] = max_tokens
+        if meta_ctx:
+            body["_meta_ctx"] = meta_ctx
         msg, cost = self._stream(body, on_delta=self._delta_progress(progress))
         return {"text": msg.get("content") or "", "reasoning": msg.get("reasoning"),
                 "finish_reason": msg.get("finish_reason"), "model": None,
                 "usage": {}, "cost_usd": cost, "guard": self.guard.status()}
 
     def chat_with_tools(self, messages, tools, executor, model=None, max_tokens=None,
-                        temperature=0.2, max_rounds=12, progress=None) -> dict:
+                        temperature=0.2, max_rounds=12, progress=None, meta_ctx=None) -> dict:
         """Tool-use loop. `tools` = OpenAI tool specs; `executor(name, args) -> str`.
 
         Mutates `messages` in place (appends each assistant turn and the tool
@@ -154,7 +206,8 @@ class CappedOpenRouterClient:
         on_delta = self._delta_progress(progress)
         for rnd in range(max_rounds):
             body = {"messages": messages, "tools": tools, "tool_choice": "auto",
-                    "temperature": temperature, "_meta": "tools"}
+                    "parallel_tool_calls": True, "temperature": temperature,
+                    "_meta": "tools", "_meta_ctx": {**(meta_ctx or {}), "round": rnd}}
             if model:
                 body["model"] = model
             if max_tokens:
@@ -171,6 +224,7 @@ class CappedOpenRouterClient:
             if not tcs:
                 return {"text": msg.get("content") or "", "cost_usd": total_cost,
                         "rounds": rnd + 1, "tool_calls": n_tool_calls,
+                        "finish_reason": msg.get("finish_reason"),
                         "guard": self.guard.status()}
 
             for tc in tcs:
@@ -210,7 +264,8 @@ class CappedOpenRouterClient:
                          "more tools. Output your final answer now as a single JSON "
                          "object only."})
         body = {"messages": messages, "tools": tools, "tool_choice": "none",
-                "temperature": temperature, "_meta": "tools-final"}
+                "temperature": temperature, "_meta": "tools-final",
+                "_meta_ctx": {**(meta_ctx or {}), "round": "final"}}
         if model:
             body["model"] = model
         if max_tokens:
@@ -220,5 +275,6 @@ class CappedOpenRouterClient:
         messages.append({"role": "assistant", "content": msg.get("content")})
         return {"text": msg.get("content") or "", "cost_usd": total_cost,
                 "rounds": max_rounds, "tool_calls": n_tool_calls,
+                "finish_reason": msg.get("finish_reason"),
                 "guard": self.guard.status(), "max_rounds_hit": True,
                 "forced_final": True}
