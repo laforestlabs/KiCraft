@@ -184,6 +184,15 @@ def test_running_design_reserves_a_slot(store):
     assert store.quota_status(u)["remaining"] == 0  # reserved before it finishes
 
 
+def test_awaiting_input_holds_the_slot(store):
+    u = store.create_user("park@e.st", "pw")
+    pid = store.create_project(u.id, "parked on a question")
+    store.update_project_status(pid, "awaiting_input")
+    assert store.quota_status(u)["remaining"] == 0  # a parked run still holds the slot
+    store.finish_project(pid, "failed")  # abandoning the design frees it
+    assert store.quota_status(u)["remaining"] == 1
+
+
 def test_failed_designs_do_not_count(store):
     store.create_user("fail@e.st", "pw")
     u = store.set_tier("fail@e.st", "pro")

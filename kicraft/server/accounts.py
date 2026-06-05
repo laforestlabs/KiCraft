@@ -317,6 +317,12 @@ class AccountStore:
                 "dir_path=?, zip_path=?, finished_at=? WHERE id=?",
                 (status, stem, cost_usd, dir_path, zip_path, _utcnow_iso(), project_id))
 
+    def update_project_status(self, project_id: int, status: str) -> None:
+        """Set just the status (e.g. 'awaiting_input' when a run parks on a
+        question, or back to 'running' when it resumes). Leaves artifacts intact."""
+        with self._conn() as conn:
+            conn.execute("UPDATE projects SET status=? WHERE id=?", (status, project_id))
+
     def get_project(self, project_id: int) -> Project | None:
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM projects WHERE id=?",
@@ -334,13 +340,14 @@ class AccountStore:
 
     def count_active_designs(self, user_id: int, window_days: int) -> int:
         """Designs that consume quota in the trailing window: a started run
-        ('running') reserves a slot and a success ('ok') keeps it; a 'failed'
-        build frees it. ISO-8601 UTC timestamps compare lexicographically."""
+        ('running'), a run parked on a clarifying question ('awaiting_input'),
+        and a success ('ok') each hold a slot; a 'failed' build frees it.
+        ISO-8601 UTC timestamps compare lexicographically."""
         cutoff = (_utcnow() - dt.timedelta(days=window_days)).isoformat()
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) FROM projects WHERE user_id=? "
-                "AND status IN ('running','ok') AND created_at >= ?",
+                "AND status IN ('running','ok','awaiting_input') AND created_at >= ?",
                 (user_id, cutoff)).fetchone()
         return int(row[0] or 0)
 
