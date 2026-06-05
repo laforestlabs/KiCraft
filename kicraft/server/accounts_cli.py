@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -68,6 +70,47 @@ def _cmd_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_export(args: argparse.Namespace) -> int:
+    """Export a user's account + project metadata and stored files (data request)."""
+    store = _store()
+    u = store.get_user_by_email(args.email)
+    if u is None:
+        print(f"no user with email {args.email!r}", file=sys.stderr)
+        return 1
+    data = store.export_user(u.id)
+    out = Path(args.out) if args.out else Path(f"kicraft_export_{u.id}")
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "account.json").write_text(
+        json.dumps(data, indent=2, default=str), encoding="utf-8")
+    src = store.projects_dir / str(u.id)
+    n_files = 0
+    if src.is_dir():
+        dst = out / "projects"
+        shutil.rmtree(dst, ignore_errors=True)
+        shutil.copytree(src, dst)
+        n_files = sum(1 for p in dst.rglob("*") if p.is_file())
+    print(f"exported {u.email} to {out} "
+          f"({len(data['projects'])} project rows, {n_files} files)")
+    return 0
+
+
+def _cmd_delete(args: argparse.Namespace) -> int:
+    """Delete a user, their project rows, and their stored files (deletion right)."""
+    store = _store()
+    u = store.get_user_by_email(args.email)
+    if u is None:
+        print(f"no user with email {args.email!r}", file=sys.stderr)
+        return 1
+    if not args.yes:
+        print(f"refusing to delete {u.email} (id {u.id}) without --yes "
+              "(this is irreversible)", file=sys.stderr)
+        return 1
+    purged = store.delete_user(u.id)
+    tail = f"; removed {purged}" if purged else ""
+    print(f"deleted {u.email} (id {u.id}) and their projects{tail}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="kicraft-accounts",
@@ -88,6 +131,20 @@ def main(argv: list[str] | None = None) -> int:
     cp.add_argument("--password", default=None,
                     help="set non-interactively; prompts securely if omitted")
     cp.set_defaults(func=_cmd_create)
+
+    ep = sub.add_parser("export",
+                        help="export a user's account + projects (data/access request)")
+    ep.add_argument("email")
+    ep.add_argument("--out", default=None,
+                    help="output dir (default: kicraft_export_<id>)")
+    ep.set_defaults(func=_cmd_export)
+
+    dp = sub.add_parser("delete",
+                        help="delete a user, their projects, and stored data")
+    dp.add_argument("email")
+    dp.add_argument("--yes", action="store_true",
+                    help="required: confirm irreversible deletion")
+    dp.set_defaults(func=_cmd_delete)
 
     args = p.parse_args(argv)
     return args.func(args)

@@ -10,6 +10,25 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+# Version of the legal documents in docs/legal/. Stamped into each user's consent
+# record at signup; bumping it (here and in the documents) forces existing users
+# to re-accept on their next visit. See docs/legal/README.md.
+LEGAL_VERSION = "2026-06-04"
+
+# Canonical location of the Terms / Privacy markdown, served at /terms and
+# /privacy. Resolves to the repo's docs/legal relative to this package; the box
+# runs an editable install tracking repo HEAD, so the path is present there.
+_DEFAULT_LEGAL_DIR = Path(__file__).resolve().parents[2] / "docs" / "legal"
+
+
+def default_legal_dir() -> Path:
+    """Resolve the legal-docs directory from the env (or the packaged default).
+
+    Standalone of Settings so the public /terms and /privacy pages can read the
+    documents without an OPENROUTER_API_KEY.
+    """
+    return Path(os.environ.get("KICRAFT_LEGAL_DIR", str(_DEFAULT_LEGAL_DIR)))
+
 
 def load_dotenv(path: str | os.PathLike = ".env") -> None:
     """Load KEY=VALUE lines from a .env file into os.environ (no override).
@@ -45,6 +64,7 @@ class Settings:
     ledger_path: Path = Path.home() / ".kicraft" / "spend_ledger.db"
     users_db_path: Path = Path.home() / ".kicraft" / "accounts.db"
     projects_dir: Path = Path.home() / ".kicraft" / "projects"
+    legal_dir: Path = _DEFAULT_LEGAL_DIR
     kill_switch: bool = False
     request_timeout_s: int = 120
 
@@ -70,6 +90,7 @@ class Settings:
             ledger_path=Path(os.environ.get("KICRAFT_SPEND_LEDGER", str(cls.ledger_path))),
             users_db_path=Path(os.environ.get("KICRAFT_USERS_DB", str(cls.users_db_path))),
             projects_dir=Path(os.environ.get("KICRAFT_PROJECTS_DIR", str(cls.projects_dir))),
+            legal_dir=Path(os.environ.get("KICRAFT_LEGAL_DIR", str(cls.legal_dir))),
             kill_switch=_env_bool("KICRAFT_KILL_SWITCH"),
         )
 
