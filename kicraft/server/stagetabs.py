@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 import time
 
-from nicegui import ui
+from nicegui import app, ui
 
 # Phase identity: (key, label, Material icon, accent hex). Order is the pipeline
 # order and drives both the tab row and each panel's accenting. The first five
@@ -63,6 +63,24 @@ _STATUS_COLOR = {
     "failed": "#f87171",
 }
 _RESULT_FOLD_OVER = 300  # tool results longer than this fold into an expansion
+
+
+def _follow_head() -> None:
+    """Inject the tail-follow assets (static/kc_follow.*) once per client.
+
+    Idempotent within a client connection via app.storage.client, so building a
+    StageTabs adds a single <link>/<script>. Must be called inside a @ui.page
+    handler (where the client context exists)."""
+    try:
+        flag = app.storage.client
+    except Exception:
+        flag = None
+    if flag is not None:
+        if flag.get("_kc_follow_head"):
+            return
+        flag["_kc_follow_head"] = True
+    ui.add_head_html('<link rel="stylesheet" href="/static/kc_follow.css">')
+    ui.add_head_html('<script src="/static/kc_follow.js" defer></script>')
 
 
 class _Run:
@@ -99,10 +117,6 @@ class StagePanel:
         self._open_run: _Run | None = None
         self._build_log: _Run | None = None
         self._dirty: set[_Run] = set()
-        # Autoscroll "stick to bottom" per window; cleared when the user scrolls up
-        # so they can read while tokens stream, restored when they return to bottom.
-        self._think_stick = True
-        self._act_stick = True
 
         with ui.column().classes("w-full gap-2 p-2"):
             # Status bar: a spinner while the stage runs, a result pill when done.
@@ -129,26 +143,23 @@ class StagePanel:
                         self._insp = ui.column().classes("w-full p-2 gap-3")
 
                 # RIGHT: thinking (top, the star of the show) over activity/log.
+                # Plain overflow containers (not ui.scroll_area) so native scroll
+                # events fire only on real position changes; tail-follow to the
+                # bottom is handled client-side by kc_follow.js (.kc-follow).
                 with ui.column().classes("gap-1").style("flex:1;min-width:0;height:100%"):
                     ui.label("Thinking").classes(
                         "text-xs font-bold uppercase tracking-wide").style(f"color:{_DIM}")
-                    think = ui.scroll_area(
-                        on_scroll=lambda e: self._track_stick("think", e)).classes(
-                        "w-full rounded").style(
-                        "height:58%;background:#0f172a;border:1px solid #1e293b")
-                    with think:
+                    with ui.element("div").classes("w-full rounded kc-follow").style(
+                            "height:58%;overflow-y:auto;"
+                            "background:#0f172a;border:1px solid #1e293b"):
                         self._think = ui.column().classes("w-full p-2 gap-0")
-                    self._think_scroll = think
 
                     ui.label("Activity / log").classes(
                         "text-xs font-bold uppercase tracking-wide mt-1").style(f"color:{_DIM}")
-                    act = ui.scroll_area(
-                        on_scroll=lambda e: self._track_stick("act", e)).classes(
-                        "w-full rounded").style(
-                        "flex:1;min-height:0;background:#0f172a;border:1px solid #1e293b")
-                    with act:
+                    with ui.element("div").classes("w-full rounded kc-follow").style(
+                            "flex:1;min-height:0;overflow-y:auto;"
+                            "background:#0f172a;border:1px solid #1e293b"):
                         self._act = ui.column().classes("w-full p-2 gap-1")
-                    self._act_scroll = act
 
         self.clear()
 
@@ -159,8 +170,6 @@ class StagePanel:
         self._open_run = None
         self._build_log = None
         self._dirty.clear()
-        self._think_stick = True
-        self._act_stick = True
         # Live project-state draft (the slot JSON the model is writing).
         self._draft_buf = ""
         self._draft_dirty = False
@@ -438,26 +447,6 @@ class StagePanel:
             ui.label(body).classes(
                 "text-xs font-mono whitespace-pre-wrap").style(f"color:{_DIM}")
 
-    # ---- autoscroll ---------------------------------------------------------
-    def _track_stick(self, which: str, e) -> None:
-        """Pin/unpin autoscroll for a window from a scroll event: stuck while the
-        user is at (or near) the bottom, or while the content does not overflow (so
-        a programmatic scroll on a short pane never wedges autoscroll off)."""
-        overflow = (e.vertical_size or 0) - (e.vertical_container_size or 0)
-        stick = overflow <= 2 or (e.vertical_percentage or 0) >= 0.95
-        if which == "think":
-            self._think_stick = stick
-        else:
-            self._act_stick = stick
-
-    def autoscroll(self) -> None:
-        """Scroll each window to the bottom only while it is still pinned."""
-        if self._think_stick:
-            self._think_scroll.scroll_to(percent=1.0)
-        if self._act_stick:
-            self._act_scroll.scroll_to(percent=1.0)
-
-
 def _render_section(sec: dict, accent: str) -> None:
     title = sec.get("title", "")
     if title:
@@ -571,6 +560,7 @@ class StageTabs:
     """
 
     def __init__(self) -> None:
+        _follow_head()
         self.panels: dict[str, StagePanel] = {}
         self._tab_el: dict[str, ui.tab] = {}
         self._current: str | None = None
@@ -658,10 +648,6 @@ class StageTabs:
     def view_slot(self, key: str):
         """The empty column at the top of a panel's inspector for KiCanvas/download."""
         return self.panels[key].view_slot
-
-    def scroll_active_to_bottom(self) -> None:
-        if self._current and self._current in self.panels:
-            self.panels[self._current].autoscroll()
 
     def reset(self) -> None:
         self._current = None
