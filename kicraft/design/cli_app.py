@@ -25,6 +25,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
+from typing import get_args
 
 from pydantic import ValidationError
 
@@ -65,6 +66,8 @@ from .synthesis.validation import (
     check_pin_existence,
     check_sheets_have_parts,
 )
+from kicraft.parts_library import Maturity
+from kicraft.parts_library.query_log import record as _log_query
 
 KNOWN_STAGES = ("intent", "functional_spec", "architecture", "bom", "wiring")
 
@@ -297,21 +300,36 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _lib_prefix(ref: str) -> str | None:
+    """The 'Library' part of a 'Library:Name' id, or None if unprefixed.
+
+    Lets the query log attribute a symbol/footprint lookup to a specific
+    library: a curated bundle name, or a stock KiCad lib like 'Device'."""
+    return ref.split(":", 1)[0] if ref and ":" in ref else None
+
+
 def _cmd_lookup_symbol(args: argparse.Namespace) -> int:
     try:
         info = lookup_pins(args.symbol)
     except SymbolNotFoundError as e:
+        _log_query("lookup_symbol", outcome="miss", query=args.symbol,
+                   lib=_lib_prefix(args.symbol))
         print(str(e), file=sys.stderr)
         return 2
     except ValueError as e:
+        _log_query("lookup_symbol", outcome="error", query=args.symbol)
         print(str(e), file=sys.stderr)
         return 2
+    _log_query("lookup_symbol", outcome="hit", query=args.symbol,
+               lib=_lib_prefix(args.symbol))
     print(json.dumps(info, indent=2))
     return 0
 
 
 def _cmd_search_symbols(args: argparse.Namespace) -> int:
     matches = search_symbols(args.query, limit=args.limit)
+    _log_query("search_symbols", outcome=("hit" if matches else "miss"),
+               query=args.query, n_matches=len(matches))
     if not matches:
         print(f"no stock KiCad symbols match {args.query!r}; try fewer or broader terms",
               file=sys.stderr)
@@ -325,17 +343,24 @@ def _cmd_lookup_footprint(args: argparse.Namespace) -> int:
     try:
         info = lookup_footprint(args.footprint)
     except FootprintNotFoundError as e:
+        _log_query("lookup_footprint", outcome="miss", query=args.footprint,
+                   lib=_lib_prefix(args.footprint))
         print(str(e), file=sys.stderr)
         return 2
     except ValueError as e:
+        _log_query("lookup_footprint", outcome="error", query=args.footprint)
         print(str(e), file=sys.stderr)
         return 2
+    _log_query("lookup_footprint", outcome="hit", query=args.footprint,
+               lib=_lib_prefix(args.footprint))
     print(json.dumps(info, indent=2))
     return 0
 
 
 def _cmd_search_footprints(args: argparse.Namespace) -> int:
     matches = search_footprints(args.query, limit=args.limit)
+    _log_query("search_footprints", outcome=("hit" if matches else "miss"),
+               query=args.query, n_matches=len(matches))
     if not matches:
         print(f"no stock KiCad footprints match {args.query!r}; try fewer or broader terms",
               file=sys.stderr)
@@ -357,6 +382,7 @@ def _cmd_list_leaves(_: argparse.Namespace) -> int:
 
 def _cmd_list_parts(_: argparse.Namespace) -> int:
     active, _broken = _load_library_parts(Path.cwd())
+    _log_query("list_parts", outcome="listed", n_active=len(active))
     block = _format_available_parts_block(active)
     if block is None:
         print("(no parts available in the library)")
@@ -400,6 +426,8 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
         if (m.mpn or "").strip().upper() == target:
             lcsc = (m.sourcing or {}).get("lcsc")
             if lcsc:
+                _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=lcsc,
+                           source="parts-library", library_name=m.name)
                 print(json.dumps(
                     {"ok": True, "mpn": mpn, "lcsc": lcsc,
                      "source": "parts-library", "name": m.name},
@@ -412,6 +440,8 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
     try:
         from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
     except ImportError as e:
+        _log_query("lookup_lcsc_id", outcome="error", query=mpn,
+                   error="easyeda2kicad-missing")
         print(json.dumps(
             {"ok": False, "mpn": mpn, "candidates": [],
              "error": f"easyeda2kicad not installed: {e}"},
@@ -425,6 +455,8 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
     fields = ("lcsc", "model", "brand", "package", "stock", "type")
     best = _pick_lcsc(mpn, results)
     if best and best.get("lcsc"):
+        _log_query("lookup_lcsc_id", outcome="resolved", query=mpn,
+                   lcsc=best["lcsc"], source="jlcpcb")
         print(json.dumps(
             {"ok": True, "mpn": mpn, "lcsc": best["lcsc"], "source": "jlcpcb",
              "match": {k: best.get(k) for k in fields}},
@@ -432,6 +464,8 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
         ))
         return 0
 
+    _log_query("lookup_lcsc_id", outcome="miss", query=mpn,
+               n_candidates=len(results))
     print(json.dumps(
         {"ok": False, "mpn": mpn,
          "candidates": [{k: r.get(k) for k in fields} for r in results[:10]],
@@ -691,6 +725,7 @@ def _add_part_from_files(args: argparse.Namespace) -> int:
         datasheet_url=args.datasheet_url,
         tags=list(args.tag or []),
         watch_out_for=args.watch_out_for,
+        maturity=args.maturity,
         symbol_name=symbol_name,
         footprint_name=footprint_name,
         kicad_version_min="9.0.0",
@@ -712,7 +747,8 @@ def _add_part_from_files(args: argparse.Namespace) -> int:
         f"  footprint: {libname}:{footprint_name}\n"
         f"  mpn:       {manifest.mpn}\n"
         f"  sourcing:  {', '.join(f'{k}:{v}' for k, v in sourcing.items()) or '—'}\n"
-        f"  tier:      {args.into}"
+        f"  tier:      {args.into}\n"
+        f"  maturity:  {manifest.maturity}"
     )
     return 0
 
@@ -890,6 +926,7 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
         datasheet_url=datasheet,
         tags=list(args.tag or []),
         watch_out_for=args.watch_out_for,
+        maturity=args.maturity,
         symbol_name=symbol_name,
         footprint_name=footprint_name,
         kicad_version_min="9.0.0",
@@ -904,6 +941,8 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
         ),
     )
     _finalize_part_bundle(part_dir, manifest)
+    _log_query("add_part_from_lcsc", outcome="fetched", query=lcsc_id, lcsc=lcsc_id,
+               library_name=libname, into=args.into, maturity=manifest.maturity)
 
     print(
         f"OK added {libname}@0.1.0 -> {part_dir}\n"
@@ -911,8 +950,69 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
         f"  footprint: {libname}:{footprint_name}\n"
         f"  mpn:       {manifest.mpn}\n"
         f"  sourcing:  {', '.join(f'{k}:{v}' for k, v in sourcing.items())}\n"
-        f"  tier:      {args.into}"
+        f"  tier:      {args.into}\n"
+        f"  maturity:  {manifest.maturity}"
     )
+    return 0
+
+
+def _cmd_promote_part(args: argparse.Namespace) -> int:
+    """Raise a bundle's maturity badge.
+
+    Recomputes ``content_hash`` from the current files while it writes the new
+    badge, so promoting to ``production`` right after dropping in a 3D model
+    re-blesses the bundle in one step (a stale hash would otherwise mark it
+    broken). With files unchanged the hash is identical, so a plain
+    prototype -> reviewed bump is effectively metadata-only. Promoting to
+    ``production`` requires a real 3D model (``3d/*.step|stp|wrl``).
+    """
+    from kicraft.parts_library import compute_content_hash, dump_manifest, load_manifest
+    from kicraft.parts_library.loader import (
+        home_parts_dir,
+        project_parts_dir,
+        vendored_parts_dir,
+    )
+
+    base = {
+        "project": lambda: project_parts_dir(Path.cwd()),
+        "home": home_parts_dir,
+        "vendored": vendored_parts_dir,
+    }[args.tier]()
+    part_dir = base / args.name
+    if not (part_dir / "manifest.json").is_file():
+        print(f"no bundle {args.name!r} in {args.tier} tier ({part_dir})", file=sys.stderr)
+        return 2
+    try:
+        manifest = load_manifest(part_dir)
+    except Exception as exc:  # noqa: BLE001
+        print(f"could not read manifest for {args.name!r}: {exc}", file=sys.stderr)
+        return 2
+
+    if args.to == "production":
+        model_dir = part_dir / "3d"
+        models = (
+            [p for p in model_dir.glob("*") if p.suffix.lower() in {".step", ".stp", ".wrl"}]
+            if model_dir.is_dir()
+            else []
+        )
+        if not models:
+            print(
+                f"refusing to promote {args.name!r} to production: no 3D model found "
+                f"(expected {part_dir}/3d/*.step|*.stp|*.wrl). Add one first.",
+                file=sys.stderr,
+            )
+            return 2
+
+    old = manifest.maturity
+    new_hash = compute_content_hash(part_dir)
+    if old == args.to and manifest.content_hash == new_hash:
+        print(f"{args.name} is already {args.to} ({part_dir})")
+        return 0
+    dump_manifest(
+        manifest.model_copy(update={"maturity": args.to, "content_hash": new_hash}),
+        part_dir,
+    )
+    print(f"promoted {args.name}: {old} -> {args.to}  ({part_dir})")
     return 0
 
 
@@ -1842,6 +1942,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="replace an existing part directory with the same slug",
     )
+    p_add_part.add_argument(
+        "--maturity",
+        choices=list(get_args(Maturity)),
+        default="prototype",
+        help=(
+            "quality badge for the new bundle (default: prototype). "
+            "prototype=auto-fetched/unreviewed; reviewed=human-checked; "
+            "production=polished + verified"
+        ),
+    )
     p_add_part.set_defaults(func=_cmd_add_part)
 
     p_val_part = sub.add_parser(
@@ -1858,6 +1968,25 @@ def main(argv: list[str] | None = None) -> int:
         help="recompute content_hash and rewrite the manifest instead of failing",
     )
     p_val_part.set_defaults(func=_cmd_validate_part)
+
+    p_promote = sub.add_parser(
+        "promote-part",
+        help="raise a bundle's maturity badge (prototype -> reviewed -> production)",
+    )
+    p_promote.add_argument("name", help="bundle name (library slug)")
+    p_promote.add_argument(
+        "--to",
+        required=True,
+        choices=["reviewed", "production"],
+        help="target maturity; production requires a 3D model present in the bundle",
+    )
+    p_promote.add_argument(
+        "--tier",
+        choices=["project", "home", "vendored"],
+        default="home",
+        help="which tier's copy to promote (default: home)",
+    )
+    p_promote.set_defaults(func=_cmd_promote_part)
 
     p_look = sub.add_parser(
         "lookup-symbol",

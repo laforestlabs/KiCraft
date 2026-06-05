@@ -4,6 +4,7 @@
   "description": "Panasonic EVQ-P7A01P \u2014 6.0 \u00d7 6.0 \u00d7 3.5 mm low-profile SMD tactile switch. 100 gf actuation force, 100 000 cycle life, gull-wing leads, exposed metal cap. The premium maker reset/user-button choice \u2014 cleaner click and longer life than the dollar-store 6\u00d76 generics. Direct drop-in for many through-hole layouts thanks to the standard 6 mm body footprint.",
   "footprint_name": "SW-SMD_EVQP7A01P",
   "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
   "mpn": "EVQP7A01P",
   "name": "evq-p7a01p",
   "provenance": {

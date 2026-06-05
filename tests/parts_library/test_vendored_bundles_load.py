@@ -13,7 +13,7 @@ manifest hash fails CI instead of degrading silently.
 It deliberately bypasses `conftest.py`'s autouse `mask_vendored_tier` fixture
 (which points `vendored_parts_dir()` at an empty tmp dir) by deriving the real
 vendored directory from the loader module's own location and iterating it
-directly -- so it is hermetic w.r.t. the home/project/extra tiers.
+directly, so it is hermetic w.r.t. the home/project/extra tiers.
 """
 from __future__ import annotations
 

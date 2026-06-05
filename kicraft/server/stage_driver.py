@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -221,7 +222,11 @@ def _fallback_stem(brief: str) -> str:
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True,
+    # Tag part-query telemetry from the web path so part-query-report can split
+    # hosted vs offline usage (query_log reads $KICRAFT_CALLER). Honors an
+    # explicit override if the environment already set one.
+    env = {**os.environ, "KICRAFT_CALLER": os.environ.get("KICRAFT_CALLER", "web")}
+    return subprocess.run(cmd, capture_output=True, text=True, env=env,
                           cwd=(str(cwd) if cwd else None))
 
 
@@ -247,7 +252,11 @@ def _bom_executor(workspace: Path):
             r = _run(KICRAFT + ["lookup-lcsc-id", str(args.get("mpn", ""))], workspace)
             return (r.stdout or r.stderr)[:3000]
         if name == "add_part_from_lcsc":
-            cmd = ["add-part", "--from-lcsc", str(args.get("lcsc_id", "")), "--into", "project"]
+            # Persist fetched parts to the shared HOME tier (not project): a part
+            # the model needs once is then reused by every later design as a
+            # `prototype`-badged bundle, so the catalog self-grows and repeated
+            # LCSC fetches (the dominant BOM cost) amortize away.
+            cmd = ["add-part", "--from-lcsc", str(args.get("lcsc_id", "")), "--into", "home"]
             if args.get("name"):
                 cmd += ["--name", str(args["name"])]
             r = _run(KICRAFT + cmd, workspace)

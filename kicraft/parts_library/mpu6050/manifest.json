@@ -4,6 +4,7 @@
   "description": "TDK InvenSense MPU-6050 \u2014 6-axis motion-tracking IC with 3-axis MEMS gyroscope (\u00b1250 to \u00b12000 \u00b0/s) and 3-axis MEMS accelerometer (\u00b12 to \u00b116 g), 16-bit ADCs, on-chip DMP (Digital Motion Processor) for sensor fusion, I\u00b2C interface up to 400 kHz, QFN-24 4\u00d74 mm. The most-used maker IMU by a wide margin \u2014 drones, gimbals, segway-bots, gesture controllers, head trackers. Officially obsoleted by InvenSense in favor of MPU-6500/9250 but still widely cloned and stocked.",
   "footprint_name": "QFN-24_L4.0-W4.0-P0.50-BL-EP2.7",
   "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
   "mpn": "MPU-6050",
   "name": "mpu6050",
   "provenance": {

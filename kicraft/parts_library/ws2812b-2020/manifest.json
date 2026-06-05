@@ -4,6 +4,7 @@
   "description": "Worldsemi WS2812B-2020 \u2014 2\u00d72 mm addressable RGB LED in the smallest standard package. WS2812 protocol-compatible. Use when board area is tight and dense pixel arrays matter (POV displays, jewelry, fine wearable strips).",
   "footprint_name": "LED-SMD_4P-L2.0-W2.0-TL_WS2812B-2020",
   "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
   "mpn": "WS2812B-2020",
   "name": "ws2812b-2020",
   "provenance": {

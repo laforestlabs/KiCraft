@@ -4,6 +4,7 @@
   "description": "Alpha & Omega Semi AO3400A \u2014 N-channel MOSFET, 30 V, 5.7 A continuous in SOT-23. True logic-level Vgs(th) 0.7-1.5 V \u2014 drives directly from a 3.3 V GPIO. The universal small-signal NFET for load switches, level shifters, and gate drivers in maker projects.",
   "footprint_name": "SOT-23-3_L2.9-W1.3-P1.90-LS2.4-BR",
   "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
   "mpn": "AO3400A",
   "name": "ao3400a",
   "provenance": {

@@ -4,6 +4,7 @@
   "description": "Worldsemi WS2812B 5050 \u2014 addressable RGB LED with integrated controller. 800 kbps single-wire protocol, cascadable, 24-bit color per pixel. The classic maker addressable LED.",
   "footprint_name": "LED-SMD_4P-L5.0-W5.0-BL_TC5050RGB",
   "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
   "mpn": "WS2812B-B/W",
   "name": "ws2812b",
   "provenance": {

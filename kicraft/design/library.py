@@ -175,9 +175,14 @@ def _format_available_parts_block(loaded_parts: list) -> str | None:
         "`<name>:<footprint_name>` — both verbatim from the rows below.\n"
     )
     lines.append(
-        "| name | mpn | sourcing | tags | symbol | footprint | tier |"
+        "The `badge` column is the bundle's maturity: `reviewed` and `production` "
+        "are human-vetted; `prototype` was auto-fetched and not yet reviewed "
+        "(usable, but verify it before relying on it).\n"
     )
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append(
+        "| name | mpn | sourcing | tags | symbol | footprint | tier | badge |"
+    )
+    lines.append("|---|---|---|---|---|---|---|---|")
     for part in loaded_parts:
         m = part.manifest
         sourcing = (
@@ -189,7 +194,7 @@ def _format_available_parts_block(loaded_parts: list) -> str | None:
         lines.append(
             f"| `{m.name}` | {m.mpn} | {sourcing} | {tags} | "
             f"`{m.name}:{m.symbol_name}` | "
-            f"`{m.name}:{m.footprint_name}` | {part.tier.value} |"
+            f"`{m.name}:{m.footprint_name}` | {part.tier.value} | {m.maturity} |"
         )
     # Watch-out notes for parts that have them — easy to miss in the table.
     flagged = [p for p in loaded_parts if p.manifest.watch_out_for]

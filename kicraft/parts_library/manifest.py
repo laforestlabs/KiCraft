@@ -34,6 +34,14 @@ PART_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*[a-z0-9]$")
 SOURCING_KEY_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 
+# Quality/trust tier of a bundle, orthogonal to the storage tier it lives in
+# (project/home/vendored/extra). Lets an auto-fetched part be reused for the cost
+# win while staying visibly flagged until a human vets it.
+#   prototype  = auto-fetched (e.g. via add-part --from-lcsc); validated but unreviewed.
+#   reviewed   = a human checked it; the curated vendored bundles sit here.
+#   production = polished and verified (e.g. a real 3D model present).
+Maturity = Literal["prototype", "reviewed", "production"]
+
 
 class Provenance(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -57,6 +65,10 @@ class PartManifest(BaseModel):
     datasheet_url: str | None = None
     tags: list[str] = Field(default_factory=list)
     watch_out_for: str | None = None
+    # Defaults to the most conservative tier so an unmarked or freshly fetched
+    # bundle is treated as experimental until explicitly promoted. Editing this
+    # never changes content_hash (which excludes manifest.json).
+    maturity: Maturity = "prototype"
     symbol_name: str  # symbol name inside <name>.kicad_sym
     footprint_name: str  # footprint name inside <name>.pretty/ (without .kicad_mod)
     kicad_version_min: str
@@ -202,6 +214,7 @@ __all__ = [
     "PART_NAME_RE",
     "SEMVER_RE",
     "SOURCING_KEY_RE",
+    "Maturity",
     "PartManifest",
     "Provenance",
     "compute_content_hash",
