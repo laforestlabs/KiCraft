@@ -356,10 +356,15 @@ def _attach_questions(state_path, stage: str, questions: list[dict]) -> None:
     Path(state_path).write_text(json.dumps(sj, indent=2) + "\n", encoding="utf-8")
 
 
+def _client_model(client) -> str | None:
+    """Best-effort display name of the model a client will call (shown in the UI)."""
+    return getattr(getattr(client, "s", None), "model", None)
+
+
 def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, max_retries=2,
                 progress=None, answers=None, instruction=None, meta_ctx=None) -> dict:
     if progress:
-        progress({"kind": "stage_start", "stage": stage})
+        progress({"kind": "stage_start", "stage": stage, "model": _client_model(client)})
     prep = _run(KICRAFT + ["stage-prep", stage, str(state_path)], workspace)
     if prep.returncode != 0:
         err = (prep.stderr.strip() or prep.stdout.strip())[:600]

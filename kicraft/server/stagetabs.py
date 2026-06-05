@@ -31,6 +31,7 @@ structured, in the Project State window.
 from __future__ import annotations
 
 import json
+import time
 
 from nicegui import ui
 
@@ -92,11 +93,16 @@ class StagePanel:
 
     def __init__(self, key: str, label: str, icon: str, accent: str) -> None:
         self.key = key
+        self.label = label
         self.accent = accent
         self._active_run: _Run | None = None
         self._open_run: _Run | None = None
         self._build_log: _Run | None = None
         self._dirty: set[_Run] = set()
+        # Autoscroll "stick to bottom" per window; cleared when the user scrolls up
+        # so they can read while tokens stream, restored when they return to bottom.
+        self._think_stick = True
+        self._act_stick = True
 
         with ui.column().classes("w-full gap-2 p-2"):
             # Status bar: a spinner while the stage runs, a result pill when done.
@@ -106,7 +112,11 @@ class StagePanel:
                     .style(f"color:{accent}")
                 self._status_slot = ui.row().classes("items-center gap-2")
 
-            with ui.row().classes("w-full no-wrap gap-3").style("height:62vh"):
+            # Fill the viewport under the tab row: the windows used to be a short
+            # 62vh band with a large empty area below. min-height keeps them usable
+            # on short screens.
+            with ui.row().classes("w-full no-wrap gap-3").style(
+                    "height:calc(100vh - 340px);min-height:480px"):
                 # LEFT: project-state inspector (+ view slot for KiCanvas/download).
                 with ui.column().classes("gap-1").style(
                         "width:42%;min-width:300px;height:100%"):
@@ -118,19 +128,23 @@ class StagePanel:
                         self.view_slot = ui.column().classes("w-full p-2 gap-2")
                         self._insp = ui.column().classes("w-full p-2 gap-3")
 
-                # RIGHT: thinking (top) over activity/log (bottom).
+                # RIGHT: thinking (top, the star of the show) over activity/log.
                 with ui.column().classes("gap-1").style("flex:1;min-width:0;height:100%"):
                     ui.label("Thinking").classes(
                         "text-xs font-bold uppercase tracking-wide").style(f"color:{_DIM}")
-                    think = ui.scroll_area().classes("w-full rounded").style(
-                        "height:38%;background:#0f172a;border:1px solid #1e293b")
+                    think = ui.scroll_area(
+                        on_scroll=lambda e: self._track_stick("think", e)).classes(
+                        "w-full rounded").style(
+                        "height:58%;background:#0f172a;border:1px solid #1e293b")
                     with think:
                         self._think = ui.column().classes("w-full p-2 gap-0")
                     self._think_scroll = think
 
                     ui.label("Activity / log").classes(
                         "text-xs font-bold uppercase tracking-wide mt-1").style(f"color:{_DIM}")
-                    act = ui.scroll_area().classes("w-full rounded").style(
+                    act = ui.scroll_area(
+                        on_scroll=lambda e: self._track_stick("act", e)).classes(
+                        "w-full rounded").style(
                         "flex:1;min-height:0;background:#0f172a;border:1px solid #1e293b")
                     with act:
                         self._act = ui.column().classes("w-full p-2 gap-1")
@@ -145,6 +159,20 @@ class StagePanel:
         self._open_run = None
         self._build_log = None
         self._dirty.clear()
+        self._think_stick = True
+        self._act_stick = True
+        # Live project-state draft (the slot JSON the model is writing).
+        self._draft_buf = ""
+        self._draft_dirty = False
+        self._committed = False
+        self._saw_reasoning = False
+        # Activity diagnostic line (model / elapsed / chars / tool calls).
+        self._live = None
+        self._live_done = False
+        self._t0 = None
+        self._chars = 0
+        self._tools = 0
+        self._model = None
         self._status_slot.clear()
         self.view_slot.clear()
         self._insp.clear()
@@ -162,13 +190,14 @@ class StagePanel:
 
     def push(self, e: dict) -> None:
         k = e.get("kind")
-        if k in ("reasoning_delta", "answer_delta"):
-            # Both the model's reasoning channel AND its content draft stream into
-            # the Thinking window. Many models (e.g. deepseek-v4-flash) and the
-            # tool-free stages emit only `content` (answer_delta), so without this
-            # the window stays empty for the whole stage; streaming the draft keeps
-            # it filling live with the work in progress.
+        if k == "reasoning_delta":
+            # The model's reasoning channel -> Thinking window.
             self._on_reasoning(e.get("text", ""))
+        elif k == "answer_delta":
+            # The model's content draft = the slot JSON it is writing -> a live
+            # preview in Project state (and Thinking too for content-only models
+            # that emit no reasoning, so that window never stays empty).
+            self._on_answer(e.get("text", ""))
         elif k == "tool":
             self._on_tool(e.get("name", ""), e.get("args") or {})
         elif k == "tool_result":
@@ -181,21 +210,45 @@ class StagePanel:
 
     def flush(self) -> None:
         """Write coalesced streamed text once per tick (one DOM update per growing
-        block instead of one per token)."""
+        block instead of one per token), refresh the live project-state draft, and
+        tick the activity diagnostic line."""
         for run in self._dirty:
             run.label.set_text(run.buf)
             n = run.buf.count("\n") if run.mode == "lines" else len(run.buf)
             unit = "lines" if run.mode == "lines" else "chars"
             run.exp.set_text(f"{run.head} · {n:,} {unit}")
         self._dirty.clear()
+        if self._draft_dirty and not self._committed:
+            self._draft_dirty = False
+            self._render_draft()
+        if self._live is not None and not self._live_done:
+            self._live.set_text(self._live_text())
 
     # ---- status -------------------------------------------------------------
-    def mark_running(self) -> None:
+    def mark_running(self, model: str | None = None) -> None:
         self._status_slot.clear()
         with self._status_slot:
             ui.spinner(size="sm").style(f"color:{self.accent}")
+        # Build sub-phases stream a build log instead of per-token diagnostics.
+        if self.key in _BUILD_STAGES:
+            return
+        # Seed the activity diagnostic so the (tool-free) early stages are never an
+        # empty pane: a start line + a live "streaming ..." line updated each flush.
+        self._model = model
+        self._t0 = time.monotonic()
+        self._chars = 0
+        self._tools = 0
+        self._live_done = False
+        self._act_ready()
+        with self._act:
+            head = f"▶ {self.label} started"
+            if model:
+                head += f"  ·  {model}"
+            ui.label(head).classes("text-xs font-mono").style(f"color:{self.accent}")
+            self._live = ui.label("streaming…").classes("text-xs font-mono") \
+                .style(f"color:{_DIMMER}")
 
-    def set_status(self, ok: bool, cost=None) -> None:
+    def set_status(self, ok: bool, cost=None, attempts=None) -> None:
         self._status_slot.clear()
         with self._status_slot:
             if ok:
@@ -206,11 +259,49 @@ class StagePanel:
             else:
                 ui.icon("cancel").style(f"color:{_FAIL};font-size:1.1rem")
                 ui.label("failed").classes("text-xs").style(f"color:{_FAIL}")
+        # Freeze the activity diagnostic line into a final per-stage summary.
+        if self._live is not None and not self._live_done:
+            self._live_done = True
+            self._live.set_text(self._live_text(done=True, ok=ok, cost=cost, attempts=attempts))
+            self._live.style(f"color:{_OK if ok else _FAIL}")
+
+    def _live_text(self, done=False, ok=True, cost=None, attempts=None) -> str:
+        elapsed = (time.monotonic() - self._t0) if self._t0 else 0.0
+        head = ("✓ committed" if ok else "✗ failed") if done else "streaming"
+        parts = [head, f"{elapsed:.1f}s"]
+        if done and isinstance(cost, (int, float)):
+            parts.append(f"${cost:.4f}")
+        parts.append(f"{self._chars:,} chars")
+        if self._tools:
+            parts.append(f"{self._tools} tool calls")
+        if done and isinstance(attempts, int) and attempts > 1:
+            parts.append(f"{attempts} attempts")
+        return "  ·  ".join(parts)
 
     # ---- thinking -----------------------------------------------------------
     def _on_reasoning(self, text: str) -> None:
         if not text:
             return
+        self._saw_reasoning = True
+        self._append_thinking(text)
+
+    def _on_answer(self, text: str) -> None:
+        """The model's content draft is the slot JSON being written. Feed it to the
+        live Project-state preview; mirror it into Thinking only when the model
+        emitted no reasoning channel (so content-only models still fill that pane)."""
+        if not text:
+            return
+        self._draft_buf += text
+        self._draft_dirty = True
+        self._chars += len(text)
+        if not self._saw_reasoning:
+            self._append_thinking(text, count=False)
+
+    def _append_thinking(self, text: str, count: bool = True) -> None:
+        if not text:
+            return
+        if count:
+            self._chars += len(text)
         if self._think_ph is not None:
             self._think_ph.delete()
             self._think_ph = None
@@ -222,7 +313,7 @@ class StagePanel:
                                              'header-class="text-xs text-grey-5"')
                 with exp:
                     lab = ui.label("").classes(
-                        "text-xs font-mono whitespace-pre-wrap leading-relaxed") \
+                        "text-sm font-mono whitespace-pre-wrap leading-relaxed") \
                         .style(f"color:{_DIM}")
             self._active_run = _Run(exp, lab)
             self._open_run = self._active_run
@@ -247,6 +338,7 @@ class StagePanel:
 
     def _on_tool(self, name: str, args: dict) -> None:
         self._active_run = None  # a tool ends the current thinking run
+        self._tools += 1
         self._act_ready()
         preview = json.dumps(args)[:140] if args else ""
         with self._act:
@@ -311,15 +403,59 @@ class StagePanel:
           {"type": "kv",    "title": str, "rows": [(k, v), ...]}
           {"type": "list",  "title": str, "items": [str, ...]}
           {"type": "table", "title": str, "columns": [str, ...], "rows": [[...], ...]}
+
+        Empty `sections` means "nothing committed yet": keep an in-progress live
+        draft on screen rather than wiping it back to the placeholder (the draft
+        owns the pane until this stage commits). Non-empty sections are the
+        validated result and supersede the draft.
         """
-        self._insp.clear()
-        with self._insp:
-            if not sections:
+        if not sections:
+            if self._draft_buf and not self._committed:
+                return
+            self._insp.clear()
+            with self._insp:
                 ui.label("No data committed for this stage yet.") \
                     .classes("text-xs italic").style(f"color:{_DIMMER}")
-                return
+            return
+        self._committed = True
+        self._draft_buf = ""
+        self._draft_dirty = False
+        self._insp.clear()
+        with self._insp:
             for sec in sections:
                 _render_section(sec, self.accent)
+
+    def _render_draft(self) -> None:
+        """Show the slot JSON the model is currently writing as a live, uncommitted
+        preview in the Project-state window (pretty-printed when it parses, else the
+        raw streaming text). Replaced by the validated view once the stage commits."""
+        pretty = _loose_pretty(self._draft_buf)
+        body = pretty if pretty is not None else self._draft_buf
+        self._insp.clear()
+        with self._insp:
+            ui.label(f"● writing {self.key} slot…  ·  {len(self._draft_buf):,} chars") \
+                .classes("text-xs font-semibold").style(f"color:{self.accent}")
+            ui.label(body).classes(
+                "text-xs font-mono whitespace-pre-wrap").style(f"color:{_DIM}")
+
+    # ---- autoscroll ---------------------------------------------------------
+    def _track_stick(self, which: str, e) -> None:
+        """Pin/unpin autoscroll for a window from a scroll event: stuck while the
+        user is at (or near) the bottom, or while the content does not overflow (so
+        a programmatic scroll on a short pane never wedges autoscroll off)."""
+        overflow = (e.vertical_size or 0) - (e.vertical_container_size or 0)
+        stick = overflow <= 2 or (e.vertical_percentage or 0) >= 0.95
+        if which == "think":
+            self._think_stick = stick
+        else:
+            self._act_stick = stick
+
+    def autoscroll(self) -> None:
+        """Scroll each window to the bottom only while it is still pinned."""
+        if self._think_stick:
+            self._think_scroll.scroll_to(percent=1.0)
+        if self._act_stick:
+            self._act_scroll.scroll_to(percent=1.0)
 
 
 def _render_section(sec: dict, accent: str) -> None:
@@ -363,6 +499,68 @@ def _render_section(sec: dict, accent: str) -> None:
                                 .style(f"color:{_DIM}")
 
 
+def _loose_pretty(buf: str) -> str | None:
+    """Best-effort pretty-print of a partial slot-JSON draft (the model's streaming
+    content). Returns indented JSON when the buffer parses, whole or after closing
+    its unbalanced brackets/strings; else None so the caller shows the raw text.
+    Never raises."""
+    if not buf:
+        return None
+    try:
+        s = buf.strip()
+        if s.startswith("```"):
+            s = s.split("\n", 1)[1] if "\n" in s else s.lstrip("`")
+            if s.endswith("```"):
+                s = s[:-3]
+        i = s.find("{")
+        if i < 0:
+            return None
+        s = s[i:]
+        try:
+            return json.dumps(json.loads(s), indent=2)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        repaired = _close_json(s)
+        if repaired is None:
+            return None
+        return json.dumps(json.loads(repaired), indent=2)
+    except Exception:
+        return None
+
+
+def _close_json(s: str) -> str | None:
+    """Append the minimal closers to make a truncated JSON object parseable: finish
+    an open string, drop a dangling trailing comma, then close open `[`/`{` in
+    stack order. Returns None when nothing is open (so a balanced-but-invalid buffer
+    falls through to the raw-text path)."""
+    stack: list[str] = []
+    in_str = esc = False
+    for ch in s:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "[{":
+            stack.append(ch)
+        elif ch in "]}" and stack:
+            stack.pop()
+    if not stack and not in_str:
+        return None
+    out = s + ('"' if in_str else "")
+    tail = out.rstrip()
+    if tail.endswith(","):
+        out = tail[:-1]
+    closers = {"[": "]", "{": "}"}
+    out += "".join(closers[c] for c in reversed(stack))
+    return out
+
+
 class StageTabs:
     """The tab row + tab panels, with event routing and status-coloured tabs.
 
@@ -401,7 +599,7 @@ class StageTabs:
         # Resume auto-follow only while the user is parked on the live stage.
         self._auto_follow = (getattr(e, "value", None) == self._current)
 
-    def _set_current(self, key: str | None) -> None:
+    def _set_current(self, key: str | None, model: str | None = None) -> None:
         if key is None or key not in self.panels:
             return
         # Finishing one stage and entering the next: fold the previous panel's runs.
@@ -409,7 +607,7 @@ class StageTabs:
             self.panels[self._current].end_runs()
         self._current = key
         self._set_tab_status(key, "active")
-        self.panels[key].mark_running()
+        self.panels[key].mark_running(model)
         if self._auto_follow:
             self.tabs.set_value(key)
 
@@ -417,9 +615,10 @@ class StageTabs:
     def push(self, e: dict) -> None:
         k = e.get("kind")
         if k == "stage_start":
-            self._set_current(e.get("stage"))
+            self._set_current(e.get("stage"), e.get("model"))
         elif k == "stage_done":
-            self._finish(e.get("stage") or self._current, bool(e.get("ok")), e.get("cost"))
+            self._finish(e.get("stage") or self._current, bool(e.get("ok")),
+                         e.get("cost"), e.get("attempts"))
         elif k == "build_start":
             self._set_current("synthesize")
         elif k == "build_log":
@@ -439,11 +638,11 @@ class StageTabs:
                 self._set_current("intent")
             self.panels[self._current].push(e)
 
-    def _finish(self, key: str | None, ok: bool, cost) -> None:
+    def _finish(self, key: str | None, ok: bool, cost, attempts=None) -> None:
         if key is None or key not in self.panels:
             return
         self.panels[key].end_runs()
-        self.panels[key].set_status(ok, cost)
+        self.panels[key].set_status(ok, cost, attempts)
         self._set_tab_status(key, "done" if ok else "failed")
 
     def flush(self) -> None:
@@ -462,8 +661,7 @@ class StageTabs:
 
     def scroll_active_to_bottom(self) -> None:
         if self._current and self._current in self.panels:
-            self.panels[self._current]._act_scroll.scroll_to(percent=1.0)
-            self.panels[self._current]._think_scroll.scroll_to(percent=1.0)
+            self.panels[self._current].autoscroll()
 
     def reset(self) -> None:
         self._current = None
@@ -496,27 +694,43 @@ def demo_events() -> list[dict]:
     def think(*chunks: str) -> list[dict]:
         return [{"kind": "reasoning_delta", "text": c} for c in chunks]
 
+    def answer(*chunks: str) -> list[dict]:
+        return [{"kind": "answer_delta", "text": c} for c in chunks]
+
+    _MODEL = "demo/opus-preview"
     ev: list[dict] = []
-    ev.append({"kind": "stage_start", "stage": "intent"})
+    ev.append({"kind": "stage_start", "stage": "intent", "model": _MODEL})
     ev += think("The brief is a flashlight powered by an 18650 cell with USB-C ",
                 "recharging. Core functions: USB-C 5V input, a Li-ion charger, the ",
                 "18650 cell, a high-power white LED with a constant-current driver, ",
                 "and a push-button to cycle modes. No microcontroller is required.")
+    ev += answer('{"goal": "USB-C rechargeable 18650 flashlight, no microcontroller",',
+                 ' "inferred_expertise": "intermediate",',
+                 ' "named_parts": ["TP4056", "18650 cell"],',
+                 ' "assumptions": ["USB-C 5V input (defaulted)"],',
+                 ' "project_stem": "FLASHLIGHT"}')
     ev.append({"kind": "stage_done", "stage": "intent", "ok": True, "cost": 0.0021})
 
-    ev.append({"kind": "stage_start", "stage": "functional_spec"})
+    ev.append({"kind": "stage_start", "stage": "functional_spec", "model": _MODEL})
     ev += think("Blocks: USB_C_INPUT, CHARGER, BATTERY, LED_DRIVER, LED, CONTROL. ",
                 "Rails: VBUS 5.0V from USB, VBAT ~4.2V max from the cell. The driver ",
                 "boosts VBAT to the LED forward voltage under constant current.")
+    ev += answer('{"blocks": [{"name": "USB_C_INPUT", "category": "power", ',
+                 '"purpose": "5V from USB-C"}, {"name": "CHARGER", "category": "power", ',
+                 '"purpose": "TP4056 Li-ion charger"}], ',
+                 '"assumptions": ["1A charge current (defaulted)"]}')
     ev.append({"kind": "stage_done", "stage": "functional_spec", "ok": True, "cost": 0.0034})
 
-    ev.append({"kind": "stage_start", "stage": "architecture"})
+    ev.append({"kind": "stage_start", "stage": "architecture", "model": _MODEL})
     ev += think("Single sheet is fine for this part count. Power nets: VBUS, VBAT, ",
                 "GND, plus the switched LED node. TP4056 for the charger, a boost ",
                 "constant-current driver for the LED, debounced push-button on CONTROL.")
+    ev += answer('{"sheets": [{"name": "MAIN", "stem": "FLASHLIGHT", "function": "all"}], ',
+                 '"power_nets": ["VBUS", "VBAT", "GND"], ',
+                 '"rail_voltages": {"VBUS": 5.0, "VBAT": 4.2}, "mcu_present": false}')
     ev.append({"kind": "stage_done", "stage": "architecture", "ok": True, "cost": 0.0048})
 
-    ev.append({"kind": "stage_start", "stage": "bom"})
+    ev.append({"kind": "stage_start", "stage": "bom", "model": _MODEL})
     ev += think("I need real symbols and footprints. Start from the curated library, ",
                 "then resolve the charger and USB-C connector from LCSC.")
     ev.append({"kind": "tool", "name": "list_parts", "args": {}})
@@ -537,9 +751,13 @@ def demo_events() -> list[dict]:
                          "CURRENT PARTS LIBRARY:\n  tp4056:TP4056   tp4056:SOP-8_3.9x4.9\n"
                          "  usb-c-16p:TYPE-C-31-M-12 ...   (15 bundles total)"})
     ev += think("Good, all symbols and footprints resolve. Emit the BOM slot JSON.")
+    ev += answer('{"parts": [{"ref": "U1", "value": "TP4056", ',
+                 '"symbol": "tp4056:TP4056", "footprint": "tp4056:SOP-8", "sheet": "MAIN"}, ',
+                 '{"ref": "J1", "value": "USB-C", "symbol": "usb-c-16p:TYPE-C-31-M-12", ',
+                 '"footprint": "usb-c-16p:TYPE-C", "sheet": "MAIN"}]}')
     ev.append({"kind": "stage_done", "stage": "bom", "ok": True, "cost": 0.0431, "attempts": 1})
 
-    ev.append({"kind": "stage_start", "stage": "wiring"})
+    ev.append({"kind": "stage_start", "stage": "wiring", "model": _MODEL})
     ev += think("Connect VBUS from USB-C to the charger input, VBAT to the cell and ",
                 "the driver input, the LED node through the driver, and CONTROL to the ",
                 "button. Tie unused USB-C pins (SBU1/SBU2, shield) to no_connect.")
@@ -547,6 +765,9 @@ def demo_events() -> list[dict]:
                "errors": ["pin (U1,4) of TP4056 not covered by a connection or no_connect"]})
     ev += think("Missed the TP4056 PROG pin. Add R_prog from PROG to GND to set the ",
                 "charge current, which also covers that pin.")
+    ev += answer('{"connections": [{"net_name": "VBUS", "sheet": "MAIN", ',
+                 '"endpoints": [{"ref": "J1", "pin": "A4"}, {"ref": "U1", "pin": "4"}]}], ',
+                 '"no_connect_pins": [{"ref": "J1", "pin": "A8"}]}')
     ev.append({"kind": "stage_done", "stage": "wiring", "ok": True, "cost": 0.0508, "attempts": 2})
 
     ev.append({"kind": "build_start"})
