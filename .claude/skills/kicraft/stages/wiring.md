@@ -24,6 +24,8 @@ Drafting strategy (per sheet in `architecture.sheets`):
 2. a net connecting the programming pin(s) to a labeled test point / pad, recorded in `assumptions` with a user-facing note (e.g. `"flash via the Vcc/Gnd/SWIO pads next to U1 (defaulted)"`);
 3. a `material: true` open question naming the shared pin — e.g. *"MCU programming pin PD1/SWIO is shared with active GPIO X; how do you want to program this board the first time?"* — leaving the programming net out of `connections`.
 
+When the architecture stage has already provided a programming interface (e.g. an onboard CH340N USB-UART bridge, or a programming header) in the BOM, you MUST connect it per (1) and MUST NOT ask: a USB-UART bridge wired to UART0 with DTR/RTS auto-reset to EN/IO0 satisfies (1). Reserve (3) for the genuine case where no interface exists and a programming pin is shared with an active GPIO.
+
 Silently omitting the programming path is forbidden, even when the package shares its programming pin with an active GPIO. Single-wire SWIO parts (e.g. the CH32V003) **always** expose programming on a shared GPIO — that is the norm, not a reason to drop the net.
 
 Net coverage (enforced by stage-commit):

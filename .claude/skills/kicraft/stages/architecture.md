@@ -41,4 +41,11 @@ Library reuse — additional rules enforced by `stage-commit`:
 
 Reminder: every block from the Functional Spec gets a Sheet — don't drop any. Every functional-spec `connection` either appears in `inter_sheet_nets` or is entirely local to one sheet if you reorganized.
 
+**Programming interface (when `mcu_present` and the MCU needs external first-time flashing).** An MCU like an ESP32 cannot self-program: its USB or UART0 (TXD0/RXD0) + EN + IO0 (or SWD/JTAG on other parts) need a path to the outside world. DECIDE this here, not at wiring, so it flows into the BOM and gets connected without a late blocking question (which forces a BOM re-run). If the intent/spec already names a part or method, honor it. Otherwise:
+
+- **Prefer an MCU variant with native USB (default recommendation).** When the user asked for a family generically ("an ESP32") without pinning a specific part, pick a native-USB variant: an ESP32-S3 / C3 / S2 / C6 module such as the vendored `esp32-s3-wroom-1`. Flash over its built-in USB by routing the board's USB data lines straight to the MCU's native USB pins. No bridge chip, fewest parts, simplest board.
+- **CH340N bridge only for the classic ESP32.** If the design specifically needs the classic ESP32 (ESP32-WROOM-32, which has no native USB), default to an onboard USB-to-UART bridge: the vendored `ch340n` with DTR/RTS auto-reset to EN/IO0 (so it still flashes over USB with no button dance), sharing the board's USB data lines.
+
+Record the choice in `assumptions` ending `(defaulted)` (e.g. `"MCU: ESP32-S3, flashed over native USB, no bridge (defaulted)"` or `"Programming: onboard CH340N USB-UART, auto-reset to EN/IO0 (defaulted)"`) and reflect it in `topologies` (plus a sheet if it is its own block). BOM then adds any bridge/auto-reset parts; wiring connects the path.
+
 Open-question discipline matches earlier stages.
