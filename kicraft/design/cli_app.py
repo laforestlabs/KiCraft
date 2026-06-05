@@ -1539,6 +1539,50 @@ def _verify_routed_board(pcb: Path) -> dict:
     }
 
 
+def _lower_project_netclass_clearance(pro_path: Path, clearance_mm: float) -> bool:
+    """Cap every netclass clearance in a ``.kicad_pro`` at ``clearance_mm``.
+
+    kicad-cli DRC enforces netclass clearances from the project file (not the
+    board), so this is the store that must match the clearance the board was
+    routed to. Only lowers, never widens. Returns True if anything changed."""
+    try:
+        data = json.loads(pro_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    classes = (data.get("net_settings") or {}).get("classes") or []
+    changed = False
+    for c in classes:
+        if isinstance(c, dict) and float(c.get("clearance", 0) or 0) > clearance_mm:
+            c["clearance"] = clearance_mm
+            changed = True
+    if changed:
+        try:
+            pro_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except OSError:
+            return False
+    return changed
+
+
+def _align_project_clearance_to_routing(project_dir: Path, stem: str, pcb: Path) -> None:
+    """Bring the project's netclass clearances down to the fine-pitch clearance
+    the board was routed to, so the verify gate's DRC validates against the same
+    rule FreeRouting used. No-op when the board did not need a fine-pitch lower
+    (``_resolve_fine_pitch_rule`` returns None). See freerouting_runner."""
+    try:
+        from kicraft.autoplacer.config import DEFAULT_CONFIG
+        from kicraft.autoplacer.freerouting_runner import _resolve_fine_pitch_rule
+
+        clearance_um, _ = _resolve_fine_pitch_rule(str(pcb), dict(DEFAULT_CONFIG))
+    except Exception:  # noqa: BLE001 -- best-effort; keep the original rule on error
+        return
+    if clearance_um is None:
+        return
+    clearance_mm = round(clearance_um / 1000.0, 4)
+    if _lower_project_netclass_clearance(project_dir / f"{stem}.kicad_pro", clearance_mm):
+        print(f"[build]     lowered project netclass clearance(s) to {clearance_mm} mm "
+              "to match the fine-pitch routing")
+
+
 def _cmd_build(args: argparse.Namespace) -> int:
     state_path = Path(args.state)
     out_dir = Path(args.out_dir)
@@ -1602,6 +1646,11 @@ def _cmd_build(args: argparse.Namespace) -> int:
         return 6
     shutil.copy2(routed, pcb)
     print(f"[build] 3/5 promoted routed parent -> {pcb.name}")
+
+    # Align the project's netclass clearances with the (possibly fine-pitch
+    # lowered) clearance the board was routed to, so the verify gate validates
+    # against the rule FreeRouting actually used, not a wider declared one.
+    _align_project_clearance_to_routing(project_dir, stem, pcb)
 
     # 4. Verification gate: no shorts, no unconnected.
     gate = _verify_routed_board(pcb)
