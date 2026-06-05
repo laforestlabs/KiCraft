@@ -57,6 +57,18 @@ class NetLabel:
 
 
 @dataclass(frozen=True)
+class GlobalLabel:
+    """A hierarchy-wide label: ties same-named nets together across every
+    sheet without sheet pins. Used for power/ground nets that have no stock
+    KiCad power symbol (e.g. VBAT, VSYS, a +3V coin-cell rail), so the net
+    keeps its exact name and stays connected across sheets."""
+    text: str
+    x_mm: float
+    y_mm: float
+    angle_deg: int = 0
+
+
+@dataclass(frozen=True)
 class PowerSymbol:
     lib_id: str
     x_mm: float
@@ -87,11 +99,16 @@ class RoutedSheet:
     power_symbols: list[PowerSymbol] = field(default_factory=list)
     no_connects: list[NoConnect] = field(default_factory=list)
     hier_labels: list[HierLabelPlacement] = field(default_factory=list)
+    global_labels: list[GlobalLabel] = field(default_factory=list)
 
 
 _POWER_SYMBOL_MAP: tuple[tuple[str, str], ...] = (
+    # Every entry's target MUST exist in stock KiCad's power library: a name
+    # that maps to a non-existent symbol (the old PGND/VBAT/VSYS entries)
+    # crashes synthesis with SymbolNotFoundError before ERC runs. A power net
+    # with no stock symbol is rendered as a global label + PWR_FLAG instead
+    # (see route_sheet); test_power_symbol_map_targets_exist guards this.
     ("GND", "power:GND"),
-    ("PGND", "power:PGND"),
     ("AGND", "power:GNDA"),
     ("DGND", "power:GNDD"),
     ("+3V3", "power:+3V3"),
@@ -102,8 +119,6 @@ _POWER_SYMBOL_MAP: tuple[tuple[str, str], ...] = (
     ("+12V", "power:+12V"),
     ("12V", "power:+12V"),
     ("VBUS", "power:VBUS"),
-    ("VBAT", "power:VBAT"),
-    ("VSYS", "power:VSYS"),
     ("VCC", "power:VCC"),
     ("VDD", "power:VDD"),
 )
@@ -223,49 +238,46 @@ def route_sheet(
         if not endpoints:
             continue
 
-        # Power-net branch. Only fires when the name maps to a stock
-        # power symbol; otherwise we fall through to render as a signal
-        # net so the connection isn't silently dropped from the
-        # schematic. (The PCB still has the net regardless, since
-        # kicad_pcb_stub.py works directly from bom.connections.)
-        power_lib_id = (
-            power_symbol_for(conn.net_name)
-            if is_power_or_ground_name(conn.net_name)
-            else None
-        )
-        if power_lib_id is not None:
-            # One power symbol per endpoint, on a short straight stub in the
-            # pin's exit direction. Straight (not L-shaped) stubs never cross
-            # a neighbouring pin's stub, so two power nets on adjacent pins of
-            # one IC cannot be shorted together (the failure mode of the old
-            # L-stub router). Connectivity is global-by-name via the symbol.
+        # Power-net branch: any power/ground net gets global, by-name
+        # connectivity (it ties together across the whole hierarchy without
+        # sheet pins). Two renderings:
+        #   1. a stock KiCad power symbol exists for the name -> one symbol per
+        #      endpoint (the nice, conventional power port);
+        #   2. it does NOT (e.g. VBAT, VSYS, a +3V coin-cell rail) -> a global
+        #      label carrying the exact net name. The old code mapped case 2 to
+        #      a power:<name> symbol that does not exist in stock KiCad, which
+        #      crashed synthesis (SymbolNotFoundError) before ERC ran. The
+        #      global label keeps the name, connects across sheets, and never
+        #      references a missing symbol.
+        # Straight (not L-shaped) stubs never cross a neighbouring pin's stub,
+        # so two power nets on adjacent IC pins cannot be shorted together.
+        if is_power_or_ground_name(conn.net_name):
+            power_lib_id = power_symbol_for(conn.net_name)
             sym_angle = 0 if "GND" in conn.net_name.upper() else 180
             flag_xy: tuple[float, float] | None = None
             for (x, y, exit_dir) in endpoints:
-                ex, ey, _angle = _stub_end(x, y, exit_dir)
+                ex, ey, lab_angle = _stub_end(x, y, exit_dir)
                 if flag_xy is None:
                     flag_xy = (ex, ey)
                 routed.wires.append(WireSegment(x, y, ex, ey))
-                routed.power_symbols.append(
-                    PowerSymbol(
-                        lib_id=power_lib_id,
-                        x_mm=ex,
-                        y_mm=ey,
-                        angle_deg=sym_angle,
+                if power_lib_id is not None:
+                    routed.power_symbols.append(
+                        PowerSymbol(lib_id=power_lib_id, x_mm=ex, y_mm=ey,
+                                    angle_deg=sym_angle)
                     )
-                )
-            # One PWR_FLAG per power net (on the first sheet that connects
-            # it) marks the net as driven, so ERC doesn't flag the IC
-            # power-input pins as undriven. It carries a power-output pin and
-            # sits on the same node as the net's first power symbol.
+                else:
+                    routed.global_labels.append(
+                        GlobalLabel(text=conn.net_name, x_mm=ex, y_mm=ey,
+                                    angle_deg=lab_angle)
+                    )
+            # One PWR_FLAG per power net (on the first sheet that connects it)
+            # marks the net as driven, so ERC doesn't flag IC power-input pins
+            # as undriven. It carries a power-output pin and sits on the node of
+            # the net's first power symbol / global label.
             if conn.net_name in flag_nets and flag_xy is not None:
                 routed.power_symbols.append(
-                    PowerSymbol(
-                        lib_id="power:PWR_FLAG",
-                        x_mm=flag_xy[0],
-                        y_mm=flag_xy[1],
-                        angle_deg=0,
-                    )
+                    PowerSymbol(lib_id="power:PWR_FLAG", x_mm=flag_xy[0],
+                                y_mm=flag_xy[1], angle_deg=0)
                 )
             continue
 

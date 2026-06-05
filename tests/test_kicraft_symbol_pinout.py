@@ -108,3 +108,22 @@ def test_custom_symbol_dir(tmp_path: Path) -> None:
     info = lookup_pins("Fake:Widget", stock_dir=tmp_path)
     assert {p["number"] for p in info["pins"]} == {"1", "2"}
     assert {p["electrical_type"] for p in info["pins"]} == {"input", "output"}
+
+
+def test_ne555_includes_shared_power_pins() -> None:
+    """The NE555's VCC (8) / GND (1) live in the NE555D_0_0 sub-symbol -- unit 0,
+    body style 0 -- shared across units/styles. They MUST be returned: dropping
+    them left the router unable to wire the power pins, so KiCad ERC failed with
+    'Pin not connected' on VCC/GND for every stock-symbol IC like the 555."""
+    info = lookup_pins("Timer:NE555D")
+    by_num = {p["number"]: p for p in info["pins"]}
+    assert set(by_num) == {"1", "2", "3", "4", "5", "6", "7", "8"}
+    assert by_num["8"]["name"] == "VCC" and by_num["8"]["electrical_type"] == "power_in"
+    assert by_num["1"]["name"] == "GND" and by_num["1"]["electrical_type"] == "power_in"
+
+
+def test_demorgan_body_style_pins_not_duplicated() -> None:
+    """A logic gate carries a DeMorgan body style (_<unit>_2) that repeats the
+    same pin numbers; the extractor must dedupe by number, not double them."""
+    nums = [p["number"] for p in lookup_pins("74xx:74LS00")["pins"]]
+    assert len(nums) == len(set(nums)), f"duplicate pins: {nums}"

@@ -36,13 +36,13 @@ from ..models import (
 )
 from .placement import place_sheet
 from .router import (
+    GlobalLabel,
     Junction,
     NetLabel,
     NoConnect,
     PowerSymbol,
     RoutedSheet,
     WireSegment,
-    power_symbol_for,
     route_sheet,
 )
 from .symbol_library import build_lib_symbols_block
@@ -379,6 +379,26 @@ def _emit_net_label(lab: NetLabel, salt: str, project_stem: str) -> str:
     )
 
 
+def _emit_global_label(lab: GlobalLabel, salt: str, project_stem: str) -> str:
+    """A global label ties same-named nets together across the whole
+    hierarchy (no sheet pins needed). Used for power/ground nets that lack a
+    stock KiCad power symbol, so the net keeps its exact name and connects
+    across sheets without referencing a symbol that may not exist."""
+    return (
+        f'\t(global_label "{lab.text}"\n'
+        "\t\t(shape bidirectional)\n"
+        f"\t\t(at {_fmt(lab.x_mm)} {_fmt(lab.y_mm)} {lab.angle_deg})\n"
+        "\t\t(fields_autoplaced yes)\n"
+        "\t\t(effects (font (size 1.27 1.27)) (justify left))\n"
+        f'\t\t(uuid "{_uuid_seeded(salt, project_stem)}")\n'
+        '\t\t(property "Intersheetrefs" "${INTERSHEET_REFS}"\n'
+        f"\t\t\t(at {_fmt(lab.x_mm)} {_fmt(lab.y_mm)} 0)\n"
+        "\t\t\t(effects (font (size 1.27 1.27)) (hide yes))\n"
+        "\t\t)\n"
+        "\t)"
+    )
+
+
 def _emit_no_connect(nc: NoConnect, salt: str, project_stem: str) -> str:
     return (
         "\t(no_connect\n"
@@ -504,6 +524,10 @@ def _emit_leaf(
         _emit_net_label(lab, f"{sheet_stem}/label/{i}", project_stem)
         for i, lab in enumerate(routed.labels)
     ]
+    global_label_blocks = [
+        _emit_global_label(gl, f"{sheet_stem}/glabel/{i}", project_stem)
+        for i, gl in enumerate(routed.global_labels)
+    ]
     power_blocks = [
         _emit_power_symbol(
             ps, sheet_inst.leaf_uuid, project_stem,
@@ -556,6 +580,7 @@ def _emit_leaf(
         + wire_blocks
         + junction_blocks
         + label_blocks
+        + global_label_blocks
         + noconn_blocks
         + hier_label_blocks
     )
@@ -652,10 +677,12 @@ def emit_schematic(
         if si.sheet.name in skip:
             continue
         for c in bom.connections:
+            # Every power/ground net gets exactly one PWR_FLAG, whether the
+            # router renders it as a stock power symbol or as a global label
+            # (the no-stock-symbol fallback) -- both can carry the flag.
             if (
                 c.sheet == si.sheet.name
                 and is_power_or_ground_name(c.net_name)
-                and power_symbol_for(c.net_name) is not None
                 and c.net_name not in seen_power
             ):
                 flag_by_sheet.setdefault(si.sheet.name, set()).add(c.net_name)
