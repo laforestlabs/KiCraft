@@ -26,7 +26,11 @@ from pathlib import Path
 
 from .models import ArtifactPaths, ConversationState
 from .synthesis.autoplacer import write_autoplacer_json
-from .synthesis.emitter import build_sheet_instances, emit_schematic
+from .synthesis.emitter import (
+    build_sheet_instances,
+    emit_schematic,
+    ensure_leaf_stems_distinct,
+)
 from .synthesis.kicad_pcb_stub import write_empty_pcb
 from .synthesis.kicad_pro import write_kicad_pro
 from .synthesis.validation import (
@@ -159,6 +163,12 @@ def run(
 
     project_dir = project_dir.resolve()
     project_dir.mkdir(parents=True, exist_ok=True)
+
+    # Guard the root/leaf filename collision (a leaf stem equal to the project
+    # stem would clobber the root, or be clobbered by it) BEFORE building sheet
+    # instances or installing library leaves, so the installer, the root sheet
+    # pins, and the leaf file all agree on the renamed stem.
+    ensure_leaf_stems_distinct(state.project_stem, state.architecture.sheets)
 
     sheet_instances = build_sheet_instances(state.architecture, state.bom)
 
