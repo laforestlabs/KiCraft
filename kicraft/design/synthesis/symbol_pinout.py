@@ -25,7 +25,11 @@ from .symbol_library import (
 )
 
 
-_SUB_SYMBOL_RE = re.compile(r'\(symbol\s+"([^"]+)_(\d+)_1"')
+# Sub-symbols are named "<base>_<unit>_<bodystyle>". Match ANY body style, not
+# just _1: KiCad keeps pins common to every unit/style in the _<unit>_0
+# sub-symbol (e.g. the NE555's VCC/GND live in NE555D_0_0), and the old _1-only
+# pattern skipped exactly those, dropping the power pins.
+_SUB_SYMBOL_RE = re.compile(r'\(symbol\s+"([^"]+)_(\d+)_(\d+)"')
 _PIN_HEADER_RE = re.compile(r"\(pin\s+(\w+)\s+\w+")
 _AT_RE = re.compile(r"\(at\s+(-?\d+\.?\d*)\s+(-?\d+\.?\d*)\s+(-?\d+\.?\d*)\)")
 _LENGTH_RE = re.compile(r"\(length\s+(-?\d+\.?\d*)\)")
@@ -68,9 +72,13 @@ def _lookup_cached(
     lib_text = lib_path.read_text()
     resolved = _resolve_extends_chain(lib_text, name)
 
-    # Find every (symbol "<base>_<unit>_1" ...) sub-block. Unit 0 is the
-    # graphics-only sub-symbol (rectangles, polylines); units 1+ carry
-    # the pin definitions.
+    # Find every (symbol "<base>_<unit>_1" ...) sub-block. The "_0_1" sub-symbol
+    # (unit 0) is NOT just graphics: KiCad parks pins COMMON to every unit there,
+    # and for a great many ICs that is the shared power pins (VCC/GND on the
+    # NE555, op-amps, logic families). Parse unit 0 too -- skipping it dropped
+    # those power pins, so the router never wired them and KiCad ERC failed with
+    # "Pin not connected" on VCC/GND. Pin-less unit-0 graphics blocks parse to []
+    # and are harmless.
     pins_by_unit: dict[int, list[dict]] = {}
     pos = 0
     while True:
@@ -80,10 +88,9 @@ def _lookup_cached(
         unit_num = int(m.group(2))
         sub_start = m.start()
         sub_block = _match_block(resolved, sub_start)
-        if unit_num >= 1:
-            sub_pins = _parse_pins(sub_block)
-            if sub_pins:
-                pins_by_unit.setdefault(unit_num, []).extend(sub_pins)
+        sub_pins = _parse_pins(sub_block)
+        if sub_pins:
+            pins_by_unit.setdefault(unit_num, []).extend(sub_pins)
         pos = sub_start + len(sub_block)
 
     if not pins_by_unit:
@@ -94,10 +101,19 @@ def _lookup_cached(
         if outer_pins:
             pins_by_unit[1] = outer_pins
 
-    unit_count = max(pins_by_unit) if pins_by_unit else 1
-    unit_1_pins = [
-        {**p, "unit": 1} for p in pins_by_unit.get(1, [])
-    ]
+    # v1 instantiates a single unit: return the shared unit-0 pins together with
+    # unit 1's, deduped by pin number (a symbol with a DeMorgan body style
+    # repeats the same pins in its _<unit>_2 sub-symbol). unit_count reflects the
+    # functional (>=1) units only.
+    func_units = [u for u in pins_by_unit if u >= 1]
+    unit_count = max(func_units) if func_units else 1
+    seen_numbers: set[str] = set()
+    unit_1_pins: list[dict] = []
+    for p in pins_by_unit.get(0, []) + pins_by_unit.get(1, []):
+        if p["number"] in seen_numbers:
+            continue
+        seen_numbers.add(p["number"])
+        unit_1_pins.append({**p, "unit": 1})
 
     return {
         "symbol": f"{library}:{name}",
