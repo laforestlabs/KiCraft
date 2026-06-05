@@ -78,18 +78,21 @@ class Settings:
     request_timeout_s: int = 120
 
     # --- OpenRouter provider routing + caching (cost safety) -----------------
-    # The same model id (e.g. deepseek/deepseek-v4-flash) is served by several
-    # backends at wildly different prices, and only some cache. Left to its own
-    # devices OpenRouter occasionally routes a call to a backend 40-60x more
-    # expensive than the cheapest, and a non-caching one (so the re-sent prefix
-    # is billed in full). `provider_order` keeps us on the caching backend,
-    # `max_price` is a hard per-Mtok ceiling that bounds any fallback, and
-    # `allow_fallbacks` keeps the service up if the preferred backend is down.
-    # All are USD per million tokens. A 0.0 price cap means "omit" (no ceiling).
-    provider_order: list[str] = field(default_factory=lambda: ["deepseek"])
+    # The model id is served by ~14 backends at a tight price band, but only some
+    # cache our long, re-sent system prefix (the dominant cost). The DeepSeek
+    # first-party backend is excluded by this account's data policy: pinning
+    # `deepseek` returns 404, so the previous pin silently fell through to
+    # OpenRouter's default, a poorly-caching backend (Baidu, ~46% warm hit). We
+    # instead pin an ordered set of verified fp8 backends that actually cache the
+    # prefix (92-100% warm), benchmarked via `provider-bench` and led by the
+    # lowest-latency ones. `allow_fallbacks` keeps the service up if those are
+    # down, and `max_price` is a hard per-Mtok ceiling that bounds any fallback to
+    # the cheap caching tier. All are USD per million tokens; 0.0 means "omit".
+    provider_order: list[str] = field(
+        default_factory=lambda: ["novita/fp8", "siliconflow/fp8", "streamlake"])
     provider_allow_fallbacks: bool = True
-    max_price_prompt: float = 0.40
-    max_price_completion: float = 1.50
+    max_price_prompt: float = 0.18
+    max_price_completion: float = 0.35
     enable_prompt_cache: bool = True
 
     @classmethod
@@ -117,7 +120,8 @@ class Settings:
             legal_dir=Path(os.environ.get("KICRAFT_LEGAL_DIR", str(cls.legal_dir))),
             kill_switch=_env_bool("KICRAFT_KILL_SWITCH"),
             provider_order=[p.strip() for p in os.environ.get(
-                "KICRAFT_PROVIDER_ORDER", "deepseek").split(",") if p.strip()],
+                "KICRAFT_PROVIDER_ORDER",
+                "novita/fp8,siliconflow/fp8,streamlake").split(",") if p.strip()],
             provider_allow_fallbacks=_env_bool_default(
                 "KICRAFT_PROVIDER_ALLOW_FALLBACKS", True),
             max_price_prompt=float(

@@ -63,6 +63,7 @@ plot-results = "kicraft.cli.plot_results:main"
 token-report = "kicraft.cli.token_report:main"
 web-cost-report = "kicraft.cli.web_cost_report:main"
 part-query-report = "kicraft.cli.part_query_report:main"
+provider-bench = "kicraft.cli.provider_bench:main"
 
 # Server (capped agent-loop backend)
 kicraft-smoketest = "kicraft.server.smoketest:main"

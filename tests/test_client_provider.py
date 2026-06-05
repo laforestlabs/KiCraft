@@ -70,9 +70,9 @@ def _usage_chunk(cached=0, cost=0.001, intok=1000, outtok=50):
 def test_provider_block_from_settings():
     c = CappedOpenRouterClient(Settings(api_key="k"), guard=_RecordingGuard())
     pb = c._provider_block()
-    assert pb["order"] == ["deepseek"]
+    assert pb["order"] == ["novita/fp8", "siliconflow/fp8", "streamlake"]
     assert pb["allow_fallbacks"] is True
-    assert pb["max_price"] == {"prompt": 0.40, "completion": 1.50}
+    assert pb["max_price"] == {"prompt": 0.18, "completion": 0.35}
 
 
 def test_provider_block_omits_zero_price_cap():
@@ -114,8 +114,8 @@ def test_stream_sends_provider_block_and_records_structured_meta(monkeypatch):
         "_meta": "tools", "_meta_ctx": {"run_id": "r1", "stage": "bom", "attempt": 0}})
 
     p = captured["payload"]
-    assert p["provider"]["order"] == ["deepseek"]                # routing pinned
-    assert p["provider"]["max_price"]["prompt"] == 0.40          # spike ceiling
+    assert p["provider"]["order"] == ["novita/fp8", "siliconflow/fp8", "streamlake"]  # routing pinned
+    assert p["provider"]["max_price"]["prompt"] == 0.18          # spike ceiling
     assert "_meta" not in p and "_meta_ctx" not in p             # control keys stripped
     assert isinstance(p["messages"][0]["content"], list)        # cache breakpoint applied
     assert p["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
