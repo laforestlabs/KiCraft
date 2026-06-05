@@ -135,9 +135,14 @@ def _stage_extra(stage: str) -> str:
             "receptacle): symbol '<name>:<sym>', footprint '<name>:<fp>'.\n"
             "- Trivial / generic parts from STOCK KiCad: discrete passives (R, C, L, LED, diode) "
             "AND generic mechanical/connectors (pin headers, barrel jacks, battery holders, basic "
-            "switches). Use Device:R / Device:C / Device:L / Device:LED for passives, and call "
-            "search_footprints to get the EXACT footprint id (e.g. 'Resistor_SMD:R_0603_1608Metric', "
-            "'Connector_PinHeader_2.54mm:PinHeader_2x08_P2.54mm_Vertical'). Do not guess these.\n"
+            "switches). Use Device:R / Device:C / Device:L / Device:LED for passives. For their "
+            "footprints use these DEFAULTS VERBATIM (already verified -- do NOT call a tool to "
+            "check them): R -> Resistor_SMD:R_0805_2012Metric, C -> Capacitor_SMD:C_0805_2012Metric, "
+            "L -> Inductor_SMD:L_0805_2012Metric, LED -> LED_SMD:LED_0805_2012Metric, "
+            "diode -> Diode_SMD:D_SOD-123. Only call search_footprints for a passive if the board "
+            "needs a DIFFERENT package (e.g. 0402, or through-hole 'LED_THT:LED_D5.0mm...'). For "
+            "connectors/mechanical, call search_footprints for the exact id (e.g. "
+            "'Connector_PinHeader_2.54mm:PinHeader_2x08_P2.54mm_Vertical').\n"
             "- ICs, sensors, MCUs, regulators, or ANY part where a specific MPN matters: do NOT "
             "pick a stock symbol/footprint. Resolve the real part: lookup_lcsc_id then "
             "add_part_from_lcsc, then list_parts to read the exact '<name>:<sym>' / '<name>:<fp>' "
@@ -296,6 +301,14 @@ def _stage_max_retries(stage: str, default: int) -> int:
     return max(default, _STAGE_MIN_RETRIES.get(stage, 0))
 
 
+# Tool-loop round budget for the BOM stage. The default (12) lets a weak model
+# burn a dozen round-trips re-verifying a trivial 9-part BOM; 6 is plenty to
+# resolve real parts, and client.chat_with_tools converges earlier when the
+# model thrashes (identical-call cache + forced-final). Each stage attempt gets
+# its own loop, so this is per-attempt.
+_BOM_MAX_ROUNDS = 6
+
+
 # Per-stage output token budget. Wiring emits the whole-board netlist in one slot;
 # on a complex board that overflows the default cap and truncates into invalid
 # JSON ("no JSON in reply"), so wiring floors higher.
@@ -401,7 +414,8 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         tool_calls_ct = None
         if tools:
             r = client.chat_with_tools(messages, tools, executor, max_tokens=cur_max_tokens,
-                                       progress=progress, meta_ctx=ctx)
+                                       max_rounds=_BOM_MAX_ROUNDS, progress=progress,
+                                       meta_ctx=ctx)
             raw, rounds = r["text"], r.get("rounds")
             tool_calls_ct = r.get("tool_calls")
             finish = r.get("finish_reason")
