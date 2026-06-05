@@ -139,6 +139,20 @@ def _zip_generated(ws: Path) -> str | None:
     return shutil.make_archive(base, "zip", root_dir=str(gen))
 
 
+def _erc_offenders(ws: Path) -> list[str]:
+    """The §9.12 ERC error descriptions from the build's synthesis_check.json, or
+    [] if ERC was not the failing check (so recovery only fires for real ERC
+    errors, not other synth failures). check_erc stores up to 20 offenders."""
+    try:
+        sc = json.loads((ws / ".kicraft" / "synthesis_check.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    for c in sc.get("checks") or []:
+        if "ERC" in str(c.get("name", "")) and not c.get("ok"):
+            return [str(o) for o in (c.get("offenders") or [])]
+    return []
+
+
 def _read_project_stem(ws: Path) -> str | None:
     """The project_stem committed by the intent stage (UPPER_SNAKE_CASE)."""
     try:
@@ -488,13 +502,16 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
           else Path(tempfile.mkdtemp(prefix="kicraft_web_")))
     state["ws"] = str(ws)
     state["status"] = None  # reset; set to awaiting_input only if we park
+    # Stamp every model call of this run with a stable id so the spend ledger can
+    # attribute cost per run/stage (see kicraft.cli.web_cost_report).
+    run_id = f"p{state.get('project_id')}-{int(time.time())}"
 
     def progress(ev):
         state["events"].append(ev)
 
     try:
         res = run_session(ws, state.get("brief", ""), stages, answers=answers,
-                          instruction=instruction, progress=progress)
+                          instruction=instruction, progress=progress, run_id=run_id)
         if res.get("guard"):
             state["spend"] = res["guard"].get("spent_total_usd")
 
@@ -522,21 +539,45 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
             state["stem"] = stem
             state["project_dir"] = str(project_dir)
             state["token"] = _register_project_dir(project_dir)
-        progress({"kind": "build_start"})
 
-        proc = subprocess.Popen(
-            KICRAFT + ["build", ".kicraft/state.json", "generated", "--no-archive"],
-            cwd=str(ws), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1)
-        started = time.monotonic()
-        for line in proc.stdout or []:
-            progress({"kind": "build_log", "text": line.rstrip()[:500]})
-            if time.monotonic() - started > 1800:  # hard wall-clock bound
-                proc.kill()
-                progress({"kind": "build_log", "text": "[build exceeded 30m, killed]"})
-                break
-        rc = proc.wait()
-        progress({"kind": "build_done", "ok": rc == 0})
+        def _run_build() -> int:
+            progress({"kind": "build_start"})
+            proc = subprocess.Popen(
+                KICRAFT + ["build", ".kicraft/state.json", "generated", "--no-archive"],
+                cwd=str(ws), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1)
+            started = time.monotonic()
+            for line in proc.stdout or []:
+                progress({"kind": "build_log", "text": line.rstrip()[:500]})
+                if time.monotonic() - started > 1800:  # hard wall-clock bound
+                    proc.kill()
+                    progress({"kind": "build_log", "text": "[build exceeded 30m, killed]"})
+                    break
+            rc = proc.wait()
+            progress({"kind": "build_done", "ok": rc == 0})
+            return rc
+
+        rc = _run_build()
+        # Bounded ERC recovery: build fails (exit 5) at the §9.12 ERC gate when the
+        # wiring slot leaves a real electrical error. Feed the concrete ERC errors
+        # back into ONE wiring re-drive, then rebuild once. Capped at a single pass
+        # (a flag, not a loop) so recovery can never run away on cost.
+        if rc != 0 and not state.get("erc_recovered"):
+            offenders = _erc_offenders(ws)
+            if offenders:
+                state["erc_recovered"] = True
+                progress({"kind": "build_log",
+                          "text": f"[erc-recover] {len(offenders)} ERC error(s); "
+                                  "re-driving wiring once to fix them"})
+                instr = ("The synthesized board failed KiCad ERC with the errors below. "
+                         "Adjust connections / no_connect_pins to resolve them, keeping "
+                         "every other net consistent:\n- " + "\n- ".join(offenders[:20]))
+                rr = run_session(ws, state.get("brief", ""), ["wiring"],
+                                 instruction=instr, progress=progress, run_id=run_id)
+                if rr.get("guard"):
+                    state["spend"] = rr["guard"].get("spent_total_usd")
+                if rr.get("status") == "ok":
+                    rc = _run_build()
         if rc != 0:
             state["ok"] = False
             return

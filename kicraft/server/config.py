@@ -7,7 +7,7 @@ touched (defense in depth behind the prepaid + virtual-card limits).
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # Version of the legal documents in docs/legal/. Stamped into each user's consent
@@ -51,6 +51,15 @@ def _env_bool(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_bool_default(name: str, default: bool) -> bool:
+    """Like `_env_bool` but returns `default` when the variable is unset/blank
+    (for flags that default ON, where absence must not read as False)."""
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
 @dataclass
 class Settings:
     """Resolved server configuration. Build with `Settings.from_env()`."""
@@ -67,6 +76,21 @@ class Settings:
     legal_dir: Path = _DEFAULT_LEGAL_DIR
     kill_switch: bool = False
     request_timeout_s: int = 120
+
+    # --- OpenRouter provider routing + caching (cost safety) -----------------
+    # The same model id (e.g. deepseek/deepseek-v4-flash) is served by several
+    # backends at wildly different prices, and only some cache. Left to its own
+    # devices OpenRouter occasionally routes a call to a backend 40-60x more
+    # expensive than the cheapest, and a non-caching one (so the re-sent prefix
+    # is billed in full). `provider_order` keeps us on the caching backend,
+    # `max_price` is a hard per-Mtok ceiling that bounds any fallback, and
+    # `allow_fallbacks` keeps the service up if the preferred backend is down.
+    # All are USD per million tokens. A 0.0 price cap means "omit" (no ceiling).
+    provider_order: list[str] = field(default_factory=lambda: ["deepseek"])
+    provider_allow_fallbacks: bool = True
+    max_price_prompt: float = 0.40
+    max_price_completion: float = 1.50
+    enable_prompt_cache: bool = True
 
     @classmethod
     def from_env(cls, dotenv: bool = True) -> "Settings":
@@ -92,6 +116,15 @@ class Settings:
             projects_dir=Path(os.environ.get("KICRAFT_PROJECTS_DIR", str(cls.projects_dir))),
             legal_dir=Path(os.environ.get("KICRAFT_LEGAL_DIR", str(cls.legal_dir))),
             kill_switch=_env_bool("KICRAFT_KILL_SWITCH"),
+            provider_order=[p.strip() for p in os.environ.get(
+                "KICRAFT_PROVIDER_ORDER", "deepseek").split(",") if p.strip()],
+            provider_allow_fallbacks=_env_bool_default(
+                "KICRAFT_PROVIDER_ALLOW_FALLBACKS", True),
+            max_price_prompt=float(
+                os.environ.get("KICRAFT_MAX_PRICE_PROMPT", cls.max_price_prompt)),
+            max_price_completion=float(
+                os.environ.get("KICRAFT_MAX_PRICE_COMPLETION", cls.max_price_completion)),
+            enable_prompt_cache=_env_bool_default("KICRAFT_ENABLE_PROMPT_CACHE", True),
         )
 
     def redacted(self) -> dict:
@@ -104,4 +137,9 @@ class Settings:
             "total_usd_ceiling": self.total_usd_ceiling,
             "ledger_path": str(self.ledger_path),
             "kill_switch": self.kill_switch,
+            "provider_order": self.provider_order,
+            "provider_allow_fallbacks": self.provider_allow_fallbacks,
+            "max_price_prompt": self.max_price_prompt,
+            "max_price_completion": self.max_price_completion,
+            "enable_prompt_cache": self.enable_prompt_cache,
         }

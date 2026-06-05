@@ -98,7 +98,7 @@ def null_downstream(ws, stage: str) -> list[str]:
 
 
 def run_session(ws, brief: str, stages, answers=None, instruction=None,
-                client=None, progress=None) -> dict:
+                client=None, progress=None, run_id=None) -> dict:
     """Drive `stages` over the workspace's state.json.
 
     Returns {status, results, guard, questions, last_stage} where status is:
@@ -115,7 +115,7 @@ def run_session(ws, brief: str, stages, answers=None, instruction=None,
                 "questions": None, "last_stage": None}
     results, guard, state_path = drive_chain(
         stages, brief, Path(ws), progress=progress, client=client,
-        answers=answers, instruction=instruction)
+        answers=answers, instruction=instruction, run_id=run_id)
     last = results[-1] if results else None
     if last and last.get("needs_input"):
         status = "awaiting_input"

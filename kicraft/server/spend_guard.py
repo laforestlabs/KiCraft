@@ -9,6 +9,7 @@ is a single small overshoot past a ceiling, never an unbounded bill.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import sqlite3
 from pathlib import Path
 
@@ -97,11 +98,17 @@ class SpendGuard:
                 f"${self.s.daily_usd_ceiling:.2f}; refusing.")
 
     def record(self, model: str, input_tokens, output_tokens, cost_usd: float,
-               meta: str = "") -> None:
+               meta="") -> None:
+        """Append one billed call. `meta` may be a bare phase string (legacy) or a
+        dict of structured context (run_id/stage/attempt/provider/cached_tokens/
+        finish_reason); a dict is stored as a compact JSON blob so the cost report
+        can attribute spend per run/stage/provider. Old bare-string rows still
+        parse (the report treats them as {"phase": <str>})."""
+        meta_str = meta if isinstance(meta, str) else json.dumps(meta, sort_keys=True, default=str)
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO spend (ts, model, input_tokens, output_tokens, cost_usd, meta) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (_utcnow_iso(), model, int(input_tokens or 0), int(output_tokens or 0),
-                 float(cost_usd or 0.0), meta),
+                 float(cost_usd or 0.0), meta_str),
             )
