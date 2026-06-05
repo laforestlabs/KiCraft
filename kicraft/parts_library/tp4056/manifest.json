@@ -4,6 +4,7 @@
   "description": "Top Power TP4056-42-ESOP8 \u2014 single-cell Li-ion/LiPo linear charger IC with constant-current/constant-voltage profile and thermal shutdown. 4.2 V termination, charge current set by PROG resistor (1.2 V / I_charge). The default cheap-and-cheerful maker LiPo charger.",
   "footprint_name": "ESOP-8_L4.9-W3.9-P1.27-LS6.0-BL-EP",
   "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
   "mpn": "TP4056-42-ESOP8",
   "name": "tp4056",
   "provenance": {

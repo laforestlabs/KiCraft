@@ -4,6 +4,7 @@
   "description": "Korean Hroparts TYPE-C-31-M-12 \u2014 16-pin USB-C receptacle, surface-mount with through-hole shield-retention tabs. 5 A / 20 V rated, 10 000 mating cycles. The most common low-cost USB-C connector for maker boards; KiCad ships a matching footprint as USB_C_Receptacle_HRO_TYPE-C-31-M-12.",
   "footprint_name": "USB-C_SMD-TYPE-C-31-M-12_1",
   "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
   "mpn": "TYPE-C-31-M-12",
   "name": "usb-c-16p",
   "provenance": {

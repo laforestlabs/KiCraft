@@ -4,6 +4,7 @@
   "description": "Bidirectional USB-PD 3.0 buck-boost power-bank IC. Negotiates PD source (discharge) and sink (charge) on a single USB-C port. External 4-switch H-bridge for the buck-boost stage; integrated charger control and LED bar driver.",
   "footprint_name": "QFN-48-1EP_7x7mm_P0.5mm_EP5.1x5.1mm",
   "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
   "mpn": "IP2368-BZ",
   "name": "ip2368",
   "provenance": {

@@ -4,6 +4,7 @@
   "description": "Alpha & Omega Semi AO3401A \u2014 P-channel MOSFET, 30 V, 4 A continuous in SOT-23. Logic-level Vgs(th) -0.4 to -1.0 V \u2014 drives directly from a 3.3 V GPIO. The universal high-side load switch and reverse-polarity-protection PFET for maker projects. P-channel complement to AO3400A.",
   "footprint_name": "SOT-23_L2.9-W1.3-P1.90-LS2.4-BR",
   "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
   "mpn": "AO3401A",
   "name": "ao3401a",
   "provenance": {
