@@ -131,6 +131,30 @@ def serve_project_file(token: str, filename: str):
     )
 
 
+@app.get("/project/{token}/render/{subpath:path}")
+def serve_project_render(token: str, subpath: str):
+    """Serve a render PNG from a tokened project dir's `.experiments` tree.
+
+    KiCanvas only renders KiCad files, so the place/route progress gallery shows
+    the layout engine's per-leaf preview PNGs via plain <img>. These live in deep
+    subpaths (`.experiments/subcircuits/<uuid>/renders/*.png`) that
+    `serve_project_file` rejects, so this endpoint allows a relative subpath but
+    keeps the same defense: the resolved target must stay inside the project dir,
+    be a `.png`, and exist. `no-store` so an overwritten render is re-fetched."""
+    base = _PROJECT_TOKENS.get(token)
+    if base is None:
+        return PlainTextResponse("not found", status_code=404)
+    target = (base / subpath).resolve()
+    if (not target.is_relative_to(base.resolve())
+            or target.suffix != ".png" or not target.is_file()):
+        return PlainTextResponse("not found", status_code=404)
+    return FileResponse(
+        str(target),
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def _zip_generated(ws: Path) -> str | None:
     gen = ws / "generated"
     if not gen.is_dir():
@@ -183,6 +207,119 @@ def _read_run_status(project_dir: Path) -> dict:
         return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _latest_render(renders: Path, kind: str) -> Path | None:
+    """Newest `<kind>.png` or `round_*_<kind>.png` in a leaf's renders dir.
+
+    The layout engine writes a stable `<kind>.png` plus a per-round
+    `round_NNNN_<kind>.png`; the newest by mtime is the current preview."""
+    cands = list(renders.glob(f"round_*_{kind}.png"))
+    direct = renders / f"{kind}.png"
+    if direct.is_file():
+        cands.append(direct)
+    if not cands:
+        return None
+    return max(cands, key=lambda p: p.stat().st_mtime)
+
+
+def _leaf_meta(leaf_dir: Path) -> tuple[str | None, int | None, int | None]:
+    """(sheet_name, trace_count, via_count) from a leaf's metadata.json, or Nones
+    if it is absent or mid-write (metadata is finalized only when the leaf solves)."""
+    try:
+        m = json.loads((leaf_dir / "metadata.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, None, None
+    return (m.get("sheet_name"),
+            m.get("internal_trace_count"),
+            m.get("internal_via_count"))
+
+
+def _leaf_layout_progress(project_dir: Path, token: str) -> list[dict]:
+    """Per-leaf placement/route progress for the Place/Route gallery.
+
+    The layout engine solves each leaf (placement, then routing) and writes
+    preview PNGs under `.experiments/subcircuits/<uuid>/renders/`. We surface the
+    *placement* preview (produced before routing) so the build shows progress
+    early, upgrading to the routed preview once it exists. Best-effort: dirs
+    without a render yet are skipped. URLs carry `?v=<mtime>` so an overwritten
+    render is re-fetched."""
+    sub = project_dir / ".experiments" / "subcircuits"
+    if not sub.is_dir():
+        return []
+    out: list[dict] = []
+    for leaf_dir in sorted(sub.iterdir()):
+        renders = leaf_dir / "renders"
+        if not renders.is_dir():
+            continue
+        placement = _latest_render(renders, "pre_route_front_all")
+        routed = _latest_render(renders, "routed_front_all")
+        img = routed or placement
+        if img is None:
+            continue
+        sheet_name, traces, vias = _leaf_meta(leaf_dir)
+        rel = img.relative_to(project_dir).as_posix()
+        out.append({
+            "sheet_name": sheet_name or leaf_dir.name.split("__")[0][:8],
+            "status": "Routed" if routed else "Placed",
+            "url": f"/project/{token}/render/{rel}?v={int(img.stat().st_mtime)}",
+            "traces": traces,
+            "vias": vias,
+        })
+    out.sort(key=lambda d: d["sheet_name"])
+    return out
+
+
+def _render_synth_view(srcs: list[tuple[str, str]], stem: str) -> KiCanvasView:
+    """Sheet selector + KiCanvas for the Synthesize tab. `srcs` is (url, filename),
+    root-first. One button per sheet (root='Overview', leaves by name) swaps the
+    embed to that single sheet via `set_sources`, so KiCanvas renders it directly.
+    Defaults to the first leaf so a readable schematic (not the block-diagram root)
+    is what the user sees first."""
+    root_file = f"{stem}.kicad_sch"
+
+    def _label(fname: str) -> str:
+        if fname == root_file:
+            return "Overview"
+        return fname[:-len(".kicad_sch")] if fname.endswith(".kicad_sch") else fname
+
+    default_idx = 1 if len(srcs) > 1 else 0  # first leaf when present, else root
+    ui.label("Schematic").classes("text-xs font-medium").style("color:#94a3b8")
+    selector = ui.row().classes("w-full flex-wrap gap-1")
+    view = KiCanvasView(
+        [KiCanvasSource(srcs[default_idx][0], srcs[default_idx][1])], height="h-[360px]")
+    with selector:
+        for url, fname in srcs:
+            ui.button(_label(fname),
+                      on_click=lambda u=url, f=fname:
+                      view.set_sources([KiCanvasSource(u, f)])) \
+                .props("flat dense no-caps").classes("text-xs")
+    return view
+
+
+def _render_leaf_gallery(prog: list[dict], run_status: dict) -> None:
+    """Per-leaf placement/route thumbnails for the Place/Route tab, so the build
+    communicates progress (placement renders appear before routing). Built inside
+    the place_route view_slot; the caller clears the slot before each rebuild."""
+    h = run_status.get("hierarchy") or {}
+    lw = h.get("leaf_workers") or {}
+    total = h.get("leaf_total")
+    action = h.get("current_action") or run_status.get("current_action") or ""
+    head = "Leaf layout progress"
+    if total:
+        head += f"  ({lw.get('completed') or 0}/{total} leaves)"
+    ui.label(head).classes("text-xs font-medium").style("color:#94a3b8")
+    if action:
+        ui.label(str(action)).classes("text-xs").style("color:#64748b")
+    with ui.row().classes("w-full flex-wrap gap-2"):
+        for d in prog:
+            chip = "#34d399" if d["status"] == "Routed" else "#fbbf24"
+            with ui.column().classes("gap-0 items-center").style("width:118px"):
+                ui.image(d["url"]).classes("w-full rounded border border-slate-700") \
+                    .style("background:#0b1120")
+                ui.label(d["sheet_name"]).classes("text-xs truncate w-full text-center") \
+                    .style("color:#cbd5e1")
+                ui.label(d["status"]).classes("text-xs").style(f"color:{chip}")
 
 
 def _mtime(path: Path) -> float | None:
@@ -783,7 +920,7 @@ def index():
         "events": [], "rendered": 0, "running": False, "done": False, "ok": None,
         "spend": None, "zip": None, "fab_done": False, "ws": None,
         "token": None, "project_dir": None, "stem": None, "pcb_ready": False,
-        "sch_view": None, "pcb_view": None, "pcb_mtime": None,
+        "sch_view": None, "pcb_view": None, "pcb_mtime": None, "leaf_progress_sig": None,
         "state_mtime": None, "run_mtime": None, "build_lines": [],
         "user_id": None, "project_id": None, "brief": "", "account_refreshed": False,
         "status": None, "awaiting_input": False, "questions": [], "questions_rendered": None,
@@ -1207,25 +1344,35 @@ def index():
                     tabs.set_inspector("synthesize", _inspector_spec(
                         "synthesize", sj, {}, project_dir, state["build_lines"]))
                     with tabs.view_slot("synthesize"):
-                        ui.label("Schematic").classes("text-xs font-medium").style("color:#94a3b8")
-                        state["sch_view"] = KiCanvasView(
-                            [KiCanvasSource(u, f) for u, f in srcs], height="h-[360px]")
+                        state["sch_view"] = _render_synth_view(srcs, state["stem"])
 
-            # Place/route inspector (on run_status change) + the board in its tab.
+            # Place/route: a per-leaf placement gallery streams progress while the
+            # board builds; the routed parent replaces it once the build succeeds.
             if project_dir is not None:
                 rmt = _mtime(project_dir / ".experiments" / "run_status.json")
                 if rmt and rmt != state["run_mtime"]:
                     state["run_mtime"] = rmt
+                    rs = _read_run_status(project_dir)
                     tabs.set_inspector("place_route", _inspector_spec(
-                        "place_route", {}, _read_run_status(project_dir), project_dir,
-                        state["build_lines"]))
+                        "place_route", {}, rs, project_dir, state["build_lines"]))
+                    if not state["pcb_ready"] and state["token"]:
+                        prog = _leaf_layout_progress(project_dir, state["token"])
+                        sig = tuple((d["sheet_name"], d["status"]) for d in prog)
+                        if prog and sig != state["leaf_progress_sig"]:
+                            state["leaf_progress_sig"] = sig
+                            slot = tabs.view_slot("place_route")
+                            slot.clear()
+                            with slot:
+                                _render_leaf_gallery(prog, rs)
                 if state["pcb_ready"]:
                     pcb_name = f"{state['stem']}.kicad_pcb"
                     pcb_path = project_dir / pcb_name
                     pcb_url = f"/project/{state['token']}/{pcb_name}"
                     if state["pcb_view"] is None:
                         state["pcb_mtime"] = _mtime(pcb_path)
-                        with tabs.view_slot("place_route"):
+                        slot = tabs.view_slot("place_route")
+                        slot.clear()  # drop the progress gallery; show the final board
+                        with slot:
                             ui.label("PCB").classes("text-xs font-medium").style("color:#94a3b8")
                             state["pcb_view"] = KiCanvasView(
                                 [KiCanvasSource(pcb_url, pcb_name)], height="h-[420px]")
