@@ -205,6 +205,17 @@ class CappedOpenRouterClient:
         seen: dict[str, int] = {}  # (name, args) signature -> times requested
         on_delta = self._delta_progress(progress)
         for rnd in range(max_rounds):
+            if rnd == max_rounds - 1:
+                # Final tool round: ask the model to finish on THIS call. It keeps
+                # tool_choice="auto", so the prompt-cache prefix still matches the loop
+                # and the call is cache-warm. If the model complies we return via the
+                # normal no-tool-calls path below and skip the separate forced-final,
+                # which sets tool_choice="none", a request shape the serving provider
+                # does not prompt-cache (observed cache_tok=0), making it the single
+                # most expensive call in a maxed-out BOM stage.
+                messages.append({"role": "user", "content":
+                                 "This is your FINAL tool round. Stop calling tools and "
+                                 "output ONLY the final JSON answer now."})
             body = {"messages": messages, "tools": tools, "tool_choice": "auto",
                     "parallel_tool_calls": True, "temperature": temperature,
                     "_meta": "tools", "_meta_ctx": {**(meta_ctx or {}), "round": rnd}}

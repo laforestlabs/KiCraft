@@ -2,6 +2,13 @@ Stage 4: BOM. You are running inside the KiCraft stage sub-agent. Your job is to
 
 Given the `architecture` (available in the `state` field of stage-prep's output), pick real parts and assign each to a sheet.
 
+**Programming interface.** Reflect the architecture's programming decision:
+
+- **Native-USB MCU** (an ESP32-S3 / C3 / S2 / C6, the default): no bridge part. The MCU's native USB pins connect to the board's USB connector (wiring handles it); nothing extra to add here beyond the MCU itself.
+- **Classic ESP32 with a CH340N bridge**: include the `ch340n` bridge (vendored, in the parts block), two small-signal NPN transistors + base resistors for the DTR/RTS auto-reset to EN/IO0, and the bridge's decoupling. Cluster them with the bridge in `ic_groups`.
+
+Either way the wiring stage connects the path, so no programming question reaches it.
+
 Slot shape (`BOM`):
 
 - `parts`: list of `BomPart`. Each MUST have:
