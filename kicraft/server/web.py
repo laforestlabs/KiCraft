@@ -941,7 +941,7 @@ def index():
             tier_badge = ui.badge(q0["label"], color="primary")
             ui.button("Log out", on_click=logout).props("flat dense color=white").classes("text-xs")
 
-    with ui.column().classes("w-full max-w-7xl mx-auto p-4 gap-3"):
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1600px"):
         try:
             budget = SpendGuard(Settings.from_env()).status()
             ui.label(f"Daily budget remaining: ${budget['daily_remaining_usd']:.2f} "
@@ -1459,7 +1459,7 @@ if os.environ.get("KICRAFT_WEB_DEMO"):
                 .style("background:#0f172a;border-bottom:1px solid #1e293b"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
             ui.label("design preview (demo)").classes("text-sm").style("color:#94a3b8")
-        with ui.column().classes("w-full max-w-7xl mx-auto p-4 gap-3"):
+        with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1600px"):
             ui.label("Replaying a canned design to preview the per-stage tabs.") \
                 .classes("text-sm").style("color:#94a3b8")
             tabs = StageTabs()
