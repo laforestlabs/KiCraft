@@ -55,3 +55,9 @@ def test_bom_has_a_symbol_search_tool():
     names = {t["function"]["name"] for t in BOM_TOOLS}
     assert "search_symbols" in names                   # discover, do not guess
     assert {"list_parts", "lookup_symbol", "lookup_lcsc_id", "add_part_from_lcsc"} <= names
+
+
+def test_bom_has_a_footprint_search_tool():
+    names = {t["function"]["name"] for t in BOM_TOOLS}
+    assert "search_footprints" in names                # footprint discovery, do not guess
+    assert "lookup_footprint" in names                 # verify a footprint exists + pad count
