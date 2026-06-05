@@ -15,6 +15,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import random
 import secrets
 import shutil
 import subprocess
@@ -30,6 +31,7 @@ from starlette.responses import FileResponse, PlainTextResponse, RedirectRespons
 
 from .accounts import AccountStore
 from .config import LEGAL_VERSION, Settings, default_legal_dir
+from .examples import CHIP_PROMPTS, EXAMPLE_PROMPTS
 from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView, kicanvas_head
 from .session import (
     commit_slot,
@@ -914,8 +916,17 @@ def index():
     q0 = _store().quota_status(user)
 
     kicanvas_head()
+    ui.add_head_html('<link rel="stylesheet" href="/static/kc_onboarding.css">')
+    ui.add_head_html(
+        f"<script>window.KICRAFT_PROMPTS={json.dumps(EXAMPLE_PROMPTS)};"
+        f"window.KICRAFT_PLACEHOLDER_FALLBACK="
+        f"{json.dumps('Describe your board, big or small. Be bold.')};</script>")
+    ui.add_head_html('<script src="/static/kc_onboarding.js" defer></script>')
     ui.dark_mode().enable()
     ui.query("body").style("background:#0b1120")
+    first_run = not _store().list_projects(user.id)
+    welcome_card = None
+    arrow_hint = None
     state: dict = {
         "events": [], "rendered": 0, "running": False, "done": False, "ok": None,
         "spend": None, "zip": None, "fab_done": False, "ws": None,
@@ -951,16 +962,61 @@ def index():
 
         quota_label = ui.label().classes("text-xs").style("color:#94a3b8")
 
+        if first_run:
+            with ui.row().classes("w-full items-start justify-between kc-welcome") \
+                    .style("background:#0f172a;border:1px solid #1e293b;"
+                           "border-radius:8px;padding:12px 14px") as welcome_card:
+                with ui.column().classes("gap-1"):
+                    ui.label("Welcome to KiCraft") \
+                        .classes("text-base font-semibold text-white")
+                    ui.label("Describe a board in a sentence and KiCraft turns it into "
+                             "real KiCad files: schematic, real parts, placed and routed. "
+                             "Be bold: the bigger the ask, the better the demo.") \
+                        .classes("text-sm").style("color:#94a3b8")
+
+                def dismiss_welcome():
+                    welcome_card.set_visibility(False)
+                    ui.run_javascript("localStorage.setItem('kc_welcome_dismissed','1')")
+
+                ui.button(icon="close", on_click=dismiss_welcome) \
+                    .props("flat dense round color=white")
+
         brief = ui.textarea(
             "Describe your board",
-            placeholder="e.g. A USB-C powered LED night light with a slide switch and "
-                        "three white LEDs, no microcontroller.").props("rows=4").classes("w-full")
+            placeholder="Describe your board, big or small. Be bold.") \
+            .props("rows=4 stack-label").classes("w-full kc-brief")
+
+        # One-click inspiration: chips drop a full brief into the box (the cycling
+        # placeholder in kc_onboarding.js supplies passive ideas). Created here for
+        # position, populated below once the Design button exists so use_prompt can
+        # nudge it.
+        chips_row = ui.row().classes("items-center gap-2 kc-chips")
 
         with ui.row().classes("items-center gap-2"):
-            design_btn = ui.button("Design").props("color=primary unelevated")
+            design_btn = ui.button("Design").props("color=primary unelevated") \
+                .classes("kc-design")
             continue_btn = ui.button("Continue design", icon="play_arrow") \
                 .props("color=primary outline")
             continue_btn.set_visibility(False)
+            if first_run:
+                design_btn.classes(add="kc-pulse")
+                with ui.row().classes("items-center kc-arrow") as arrow_hint:
+                    ui.icon("arrow_back").classes("kc-arrow-icon")
+                    ui.label("click to start")
+
+        def use_prompt(text: str):
+            brief.value = text
+            brief.run_method("focus")
+            design_btn.classes(add="kc-pulse")  # draw the eye to the next click
+
+        with chips_row:
+            for _chip in CHIP_PROMPTS:
+                ui.button(_chip["label"],
+                          on_click=lambda p=_chip["prompt"]: use_prompt(p)) \
+                    .props("outline rounded dense no-caps").classes("kc-chip")
+            ui.button("Surprise me", icon="casino",
+                      on_click=lambda: use_prompt(random.choice(EXAMPLE_PROMPTS))) \
+                .props("flat rounded dense no-caps").classes("kc-chip")
         status = ui.label("").classes("text-sm").style("color:#e2e8f0")
         spend = ui.label("").classes("text-sm").style("color:#64748b")
         question_box = ui.column().classes("w-full")
@@ -1297,6 +1353,10 @@ def index():
             status.text = ("Designing... (intent -> functional_spec -> architecture -> bom -> "
                            "wiring -> synthesize -> place/route -> fab)")
             design_btn.disable()
+            design_btn.classes(remove="kc-pulse")
+            for _chrome in (welcome_card, chips_row, arrow_hint):
+                if _chrome is not None:
+                    _chrome.set_visibility(False)
             threading.Thread(target=_design_worker, args=(brief.value, state), daemon=True).start()
 
         design_btn.on_click(start)
