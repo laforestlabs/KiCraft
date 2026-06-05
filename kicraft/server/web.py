@@ -27,7 +27,7 @@ from nicegui import app, ui
 from starlette.responses import FileResponse, PlainTextResponse, RedirectResponse
 
 from .accounts import AccountStore
-from .config import Settings
+from .config import LEGAL_VERSION, Settings, default_legal_dir
 from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView, kicanvas_head
 from .spend_guard import SpendGuard
 from .stage_driver import DESIGN_STAGES, KICRAFT, drive_chain
@@ -71,6 +71,20 @@ def _current_user():
     if not uid:
         return None
     return _store().get_user(int(uid))
+
+
+_LEGAL_DOCS = {"terms-of-service": "Terms of Service", "privacy-policy": "Privacy Policy"}
+
+
+def _legal_markdown(name: str) -> str:
+    """Load a legal document's markdown from the configured docs dir (public)."""
+    if name not in _LEGAL_DOCS:
+        return "# Not found"
+    try:
+        return (default_legal_dir() / f"{name}.md").read_text(encoding="utf-8")
+    except OSError:
+        return (f"# {_LEGAL_DOCS[name]} unavailable\n\nThis document could not be "
+                "loaded. Please contact support.")
 
 
 def _register_project_dir(project_dir: Path) -> str:
@@ -428,6 +442,40 @@ def _design_worker(brief: str, state: dict) -> None:
         state["running"] = False
 
 
+def _legal_footer() -> None:
+    """Public links to the Terms and Privacy Policy (shown on auth cards)."""
+    with ui.row().classes("items-center gap-3 w-full justify-center"):
+        ui.link("Terms of Service", "/terms", new_tab=True) \
+            .classes("text-xs").style("color:#64748b")
+        ui.link("Privacy Policy", "/privacy", new_tab=True) \
+            .classes("text-xs").style("color:#64748b")
+
+
+def _legal_page(title: str, name: str) -> None:
+    """Render a legal document. Public: no login required, so prospective users
+    can read the Terms and Privacy Policy before signing up."""
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    with ui.column().classes("w-full max-w-3xl mx-auto p-6 gap-3"):
+        with ui.row().classes("items-center justify-between w-full"):
+            ui.label(f"KiCraft {title}").classes("text-2xl font-bold text-white")
+            ui.button("Back", icon="arrow_back",
+                      on_click=lambda: ui.navigate.to("/login")) \
+                .props("flat dense color=white")
+        with ui.card().classes("w-full").style("background:#0f172a;border:1px solid #1e293b"):
+            ui.markdown(_legal_markdown(name)).classes("w-full").style("color:#cbd5e1")
+
+
+@ui.page("/terms")
+def terms_page():
+    _legal_page("Terms of Service", "terms-of-service")
+
+
+@ui.page("/privacy")
+def privacy_page():
+    _legal_page("Privacy Policy", "privacy-policy")
+
+
 @ui.page("/login")
 def login_page():
     ui.dark_mode().enable()
@@ -455,6 +503,7 @@ def login_page():
             ui.label("New to KiCraft?").classes("text-xs").style("color:#94a3b8")
             ui.button("Create an account", on_click=lambda: ui.navigate.to("/signup")) \
                 .props("flat dense")
+        _legal_footer()
 
 
 @ui.page("/signup")
@@ -470,6 +519,19 @@ def signup_page():
         pw = ui.input("Password", password=True, password_toggle_button=True).classes("w-full")
         code = ui.input("Invite code", password=True).classes("w-full")
 
+        agree = ui.checkbox("I agree to the Terms of Service and Privacy Policy") \
+            .classes("text-sm")
+        with ui.row().classes("items-center gap-3 -mt-2"):
+            ui.link("Terms of Service", "/terms", new_tab=True) \
+                .classes("text-xs").style("color:#60a5fa")
+            ui.link("Privacy Policy", "/privacy", new_tab=True) \
+                .classes("text-xs").style("color:#60a5fa")
+        allow_training = ui.checkbox(
+            "Allow KiCraft to use my designs to improve its AI models", value=True) \
+            .classes("text-sm")
+        ui.label("Optional, and changeable later in Account & privacy.") \
+            .classes("text-xs -mt-2").style("color:#64748b")
+
         def submit():
             want = _signup_code()
             if not want:
@@ -479,8 +541,15 @@ def signup_page():
             if not hmac.compare_digest((code.value or "").strip(), want):
                 ui.notify("Invalid invite code.", color="negative")
                 return
+            if not agree.value:
+                ui.notify("Please accept the Terms of Service and Privacy Policy "
+                          "to create an account.", color="warning")
+                return
             try:
-                user = _store().create_user(email.value or "", pw.value or "")
+                user = _store().create_user(
+                    email.value or "", pw.value or "",
+                    accepted_terms_version=LEGAL_VERSION,
+                    allow_training=bool(allow_training.value))
             except ValueError as e:
                 ui.notify(str(e), color="negative")
                 return
@@ -496,11 +565,56 @@ def signup_page():
             ui.button("Sign in", on_click=lambda: ui.navigate.to("/login")).props("flat dense")
 
 
+@ui.page("/consent")
+def consent_page():
+    """Re-consent gate: shown when a logged-in user's accepted Terms version is
+    missing or older than the current LEGAL_VERSION (a fresh box account, or a
+    terms bump). Index redirects here until they accept."""
+    user = _current_user()
+    if user is None:
+        return RedirectResponse("/login")
+    if user.accepted_terms_version == LEGAL_VERSION:
+        return RedirectResponse("/")
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    with ui.card().classes("absolute-center w-96") \
+            .style("background:#0f172a;border:1px solid #1e293b"):
+        ui.label("Please review our terms").classes("text-2xl font-bold text-white")
+        ui.label("We've updated our Terms of Service and Privacy Policy. Please "
+                 "accept to continue.").classes("text-sm").style("color:#94a3b8")
+        with ui.row().classes("items-center gap-3"):
+            ui.link("Terms of Service", "/terms", new_tab=True) \
+                .classes("text-xs").style("color:#60a5fa")
+            ui.link("Privacy Policy", "/privacy", new_tab=True) \
+                .classes("text-xs").style("color:#60a5fa")
+        agree = ui.checkbox("I agree to the Terms of Service and Privacy Policy") \
+            .classes("text-sm")
+
+        def accept():
+            if not agree.value:
+                ui.notify("Please accept to continue.", color="warning")
+                return
+            _store().record_consent(user.id, LEGAL_VERSION)
+            ui.navigate.to("/")
+
+        ui.button("Accept and continue", on_click=accept).classes("w-full")
+
+        def logout():
+            for k in ("user_id", "email"):
+                app.storage.user.pop(k, None)
+            ui.navigate.to("/login")
+
+        ui.button("Log out", on_click=logout).props("flat dense color=white") \
+            .classes("text-xs")
+
+
 @ui.page("/")
 def index():
     user = _current_user()
     if user is None:
         return RedirectResponse("/login")
+    if user.accepted_terms_version != LEGAL_VERSION:
+        return RedirectResponse("/consent")
     q0 = _store().quota_status(user)
 
     kicanvas_head()
@@ -557,6 +671,22 @@ def index():
         with ui.expansion("Your projects").classes("w-full mt-2") \
                 .style("background:#0f172a;border:1px solid #1e293b"):
             proj_container = ui.column().classes("w-full gap-1 p-2")
+
+        with ui.expansion("Account & privacy").classes("w-full") \
+                .style("background:#0f172a;border:1px solid #1e293b"):
+            with ui.column().classes("w-full gap-1 p-2"):
+                train_sw = ui.switch(
+                    "Allow KiCraft to use my designs to improve its AI models",
+                    value=user.allow_training)
+                train_sw.on_value_change(
+                    lambda e: _store().set_training_pref(user.id, bool(e.value)))
+                with ui.row().classes("items-center gap-3"):
+                    ui.link("Terms of Service", "/terms", new_tab=True) \
+                        .classes("text-xs").style("color:#60a5fa")
+                    ui.link("Privacy Policy", "/privacy", new_tab=True) \
+                        .classes("text-xs").style("color:#60a5fa")
+                ui.label("To export or delete all your data, contact "
+                         "[CONTACT EMAIL].").classes("text-xs").style("color:#64748b")
 
         def build_projects():
             proj_container.clear()

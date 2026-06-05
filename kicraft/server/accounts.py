@@ -17,8 +17,9 @@ import hashlib
 import hmac
 import os
 import secrets
+import shutil
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 # Tier definitions. `price_usd` is display-only until Stripe lands (backlog item
@@ -73,6 +74,13 @@ class User:
     tier: str
     created_at: str
     last_login_at: str | None = None
+    # Consent + data-use preference (see docs/legal/). A user whose
+    # accepted_terms_version is None or older than the current LEGAL_VERSION is
+    # re-prompted to accept before they can continue. allow_training gates the
+    # model-training use only (operate/analytics are not opt-out).
+    accepted_terms_version: str | None = None
+    accepted_terms_at: str | None = None
+    allow_training: bool = True
 
 
 @dataclass
@@ -117,8 +125,12 @@ class AccountStore:
                 "password_hash TEXT NOT NULL,"
                 "tier TEXT NOT NULL DEFAULT 'free',"
                 "created_at TEXT NOT NULL,"
-                "last_login_at TEXT)"
+                "last_login_at TEXT,"
+                "accepted_terms_version TEXT,"
+                "accepted_terms_at TEXT,"
+                "allow_training INTEGER NOT NULL DEFAULT 1)"
             )
+            self._ensure_columns(conn)
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS projects ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -138,6 +150,25 @@ class AccountStore:
                 "ON projects(user_id, created_at)"
             )
 
+    @staticmethod
+    def _ensure_columns(conn: sqlite3.Connection) -> None:
+        """Additively migrate a pre-consent users table.
+
+        A DB created before consent tracking has none of the consent columns; the
+        CREATE TABLE IF NOT EXISTS above leaves it untouched. ALTER the missing
+        columns in so an already-deployed box upgrades without losing its rows.
+        Existing rows get NULL consent (so they are re-prompted) and allow_training
+        defaults to 1.
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
+        if "accepted_terms_version" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN accepted_terms_version TEXT")
+        if "accepted_terms_at" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN accepted_terms_at TEXT")
+        if "allow_training" not in cols:
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN allow_training INTEGER NOT NULL DEFAULT 1")
+
     # ---- users ------------------------------------------------------------
 
     @staticmethod
@@ -147,9 +178,14 @@ class AccountStore:
     @staticmethod
     def _row_to_user(row: sqlite3.Row) -> User:
         return User(id=row["id"], email=row["email"], tier=row["tier"],
-                    created_at=row["created_at"], last_login_at=row["last_login_at"])
+                    created_at=row["created_at"], last_login_at=row["last_login_at"],
+                    accepted_terms_version=row["accepted_terms_version"],
+                    accepted_terms_at=row["accepted_terms_at"],
+                    allow_training=bool(row["allow_training"]))
 
-    def create_user(self, email: str, password: str, tier: str = DEFAULT_TIER) -> User:
+    def create_user(self, email: str, password: str, tier: str = DEFAULT_TIER, *,
+                    accepted_terms_version: str | None = None,
+                    allow_training: bool = True) -> User:
         em = self._norm_email(email)
         if not em or "@" not in em:
             raise ValueError("a valid email is required")
@@ -158,15 +194,21 @@ class AccountStore:
         if tier not in TIERS:
             raise ValueError(f"unknown tier {tier!r}")
         now = _utcnow_iso()
+        accepted_at = now if accepted_terms_version else None
         try:
             with self._conn() as conn:
                 cur = conn.execute(
-                    "INSERT INTO users (email, password_hash, tier, created_at) "
-                    "VALUES (?, ?, ?, ?)", (em, hash_password(password), tier, now))
+                    "INSERT INTO users (email, password_hash, tier, created_at, "
+                    "accepted_terms_version, accepted_terms_at, allow_training) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (em, hash_password(password), tier, now,
+                     accepted_terms_version, accepted_at, 1 if allow_training else 0))
                 uid = cur.lastrowid
         except sqlite3.IntegrityError as e:
             raise ValueError(f"email {em!r} is already registered") from e
-        return User(id=int(uid), email=em, tier=tier, created_at=now)
+        return User(id=int(uid), email=em, tier=tier, created_at=now,
+                    accepted_terms_version=accepted_terms_version,
+                    accepted_terms_at=accepted_at, allow_training=allow_training)
 
     def get_user(self, user_id: int) -> User | None:
         with self._conn() as conn:
@@ -204,6 +246,49 @@ class AccountStore:
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
         return [self._row_to_user(r) for r in rows]
+
+    # ---- consent + data controls -----------------------------------------
+
+    def record_consent(self, user_id: int, version: str) -> None:
+        """Stamp acceptance of a Terms version (signup, or re-consent on a bump)."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE users SET accepted_terms_version=?, accepted_terms_at=? "
+                "WHERE id=?", (version, _utcnow_iso(), user_id))
+
+    def set_training_pref(self, user_id: int, allow: bool) -> None:
+        """Toggle the model-training opt-out (Terms 5c / Privacy 5)."""
+        with self._conn() as conn:
+            conn.execute("UPDATE users SET allow_training=? WHERE id=?",
+                         (1 if allow else 0, user_id))
+
+    def export_user(self, user_id: int) -> dict | None:
+        """A JSON-able copy of the user's account + project metadata (no password
+        hash). The on-disk project tree is copied separately by the admin CLI."""
+        user = self.get_user(user_id)
+        if user is None:
+            return None
+        return {
+            "exported_at": _utcnow_iso(),
+            "user": asdict(user),
+            "projects": [asdict(p) for p in self.list_projects(user_id)],
+            "projects_dir": str(self.projects_dir / str(user_id)),
+        }
+
+    def delete_user(self, user_id: int) -> str | None:
+        """Delete the user, their project rows, and their on-disk project tree.
+
+        Honors the deletion right the Privacy Policy promises. Returns the
+        filesystem path that was purged (for logging), or None if there was none.
+        """
+        with self._conn() as conn:
+            conn.execute("DELETE FROM projects WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        tree = self.projects_dir / str(user_id)
+        if tree.exists():
+            shutil.rmtree(tree, ignore_errors=True)
+            return str(tree)
+        return None
 
     # ---- projects ---------------------------------------------------------
 

@@ -5,6 +5,7 @@ Pure stdlib + sqlite (no pcbnew, no network), so it runs fast anywhere.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import sqlite3
 
 import pytest
@@ -74,6 +75,89 @@ def test_set_tier(store):
         store.set_tier("carol@example.com", "platinum")  # unknown tier
     with pytest.raises(ValueError):
         store.set_tier("ghost@example.com", "pro")  # no such user
+
+
+# ---- consent + data controls ----------------------------------------------
+
+def test_consent_recorded_on_create(store):
+    u = store.create_user("c@e.st", "pw",
+                          accepted_terms_version="2026-06-04", allow_training=False)
+    assert u.accepted_terms_version == "2026-06-04"
+    assert u.accepted_terms_at is not None
+    assert u.allow_training is False
+    got = store.get_user(u.id)  # round-trips through the DB
+    assert got.accepted_terms_version == "2026-06-04"
+    assert got.allow_training is False
+
+
+def test_consent_defaults_when_omitted(store):
+    u = store.create_user("c2@e.st", "pw")
+    assert u.accepted_terms_version is None  # so the re-consent gate fires
+    assert u.accepted_terms_at is None
+    assert u.allow_training is True  # training defaults on
+
+
+def test_record_consent_stamps_version(store):
+    u = store.create_user("r@e.st", "pw")  # signed up before this terms version
+    assert store.get_user(u.id).accepted_terms_version is None
+    store.record_consent(u.id, "2026-06-04")
+    got = store.get_user(u.id)
+    assert got.accepted_terms_version == "2026-06-04"
+    assert got.accepted_terms_at is not None
+
+
+def test_set_training_pref_toggles(store):
+    u = store.create_user("t@e.st", "pw")
+    store.set_training_pref(u.id, False)
+    assert store.get_user(u.id).allow_training is False
+    store.set_training_pref(u.id, True)
+    assert store.get_user(u.id).allow_training is True
+
+
+def test_legacy_db_upgrades_without_losing_rows(tmp_path):
+    """A DB created before consent tracking gains the columns on open, keeps rows."""
+    db = tmp_path / "accounts.db"
+    with sqlite3.connect(db) as conn:  # pre-consent users schema
+        conn.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,"
+            "tier TEXT NOT NULL DEFAULT 'free', created_at TEXT NOT NULL,"
+            "last_login_at TEXT)")
+        conn.execute(
+            "INSERT INTO users (email, password_hash, tier, created_at) "
+            "VALUES ('old@e.st', 'scrypt$x', 'pro', '2026-01-01T00:00:00+00:00')")
+    store = AccountStore(db, tmp_path / "projects")  # _ensure_columns migrates
+    u = store.get_user_by_email("old@e.st")
+    assert u is not None and u.tier == "pro"  # existing data preserved
+    assert u.accepted_terms_version is None  # legacy user is re-prompted
+    assert u.allow_training is True  # backfilled default
+
+
+def test_export_user_dumps_metadata_without_password(store):
+    u = store.create_user("exp@e.st", "pw",
+                          accepted_terms_version="2026-06-04", allow_training=False)
+    store.finish_project(store.create_project(u.id, "board one"), "ok", stem="ONE")
+    data = store.export_user(u.id)
+    assert data["user"]["email"] == "exp@e.st"
+    assert data["user"]["allow_training"] is False
+    assert "password_hash" not in data["user"]  # User dataclass omits it
+    assert "password" not in json.dumps(data)
+    assert len(data["projects"]) == 1
+    assert data["projects"][0]["brief"] == "board one"
+
+
+def test_delete_user_purges_rows_and_files(store):
+    u = store.create_user("del@e.st", "pw")
+    pid = store.create_project(u.id, "x")
+    store.finish_project(pid, "ok", stem="X")
+    tree = store.projects_dir / str(u.id) / str(pid)  # simulate persisted files
+    tree.mkdir(parents=True, exist_ok=True)
+    (tree / "brief.txt").write_text("hi", encoding="utf-8")
+    purged = store.delete_user(u.id)
+    assert purged is not None
+    assert not (store.projects_dir / str(u.id)).exists()  # tree gone
+    assert store.get_user(u.id) is None  # row gone
+    assert store.list_projects(u.id) == []  # projects gone
 
 
 # ---- quota metering -------------------------------------------------------
