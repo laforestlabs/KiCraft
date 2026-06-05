@@ -827,7 +827,7 @@ def signup_page():
         allow_training = ui.checkbox(
             "Allow KiCraft to use my designs to improve its AI models", value=True) \
             .classes("text-sm")
-        ui.label("Optional, and changeable later in Account & privacy.") \
+        ui.label("Optional, and changeable later in your profile.") \
             .classes("text-xs -mt-2").style("color:#64748b")
 
         def submit():
@@ -906,6 +906,73 @@ def consent_page():
             .classes("text-xs")
 
 
+@ui.page("/profile")
+def profile_page():
+    """The user's profile: an account summary plus the privacy and data controls
+    that used to sit in an expander on the main workspace. Reached by clicking
+    your email in the header, which keeps the work GUI uncluttered."""
+    user = _current_user()
+    if user is None:
+        return RedirectResponse("/login")
+    if user.accepted_terms_version != LEGAL_VERSION:
+        return RedirectResponse("/consent")
+    q = _store().quota_status(user)
+
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+
+    def logout():
+        for k in ("user_id", "email"):
+            app.storage.user.pop(k, None)
+        ui.navigate.to("/login")
+
+    with ui.header().classes("items-center justify-between") \
+            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+        with ui.row().classes("items-center gap-2"):
+            ui.label("KiCraft").classes("text-xl font-bold text-white")
+            ui.label("your profile").classes("text-sm").style("color:#94a3b8")
+        ui.button("Back to workspace", icon="arrow_back",
+                  on_click=lambda: ui.navigate.to("/")) \
+            .props("flat dense no-caps color=white").classes("text-xs")
+
+    with ui.column().classes("w-full max-w-2xl mx-auto p-6 gap-4"):
+        ui.label("Profile").classes("text-2xl font-bold text-white")
+
+        with ui.card().classes("w-full gap-2") \
+                .style("background:#0f172a;border:1px solid #1e293b"):
+            ui.label("Account").classes("text-base font-semibold text-white")
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("mail").style("color:#94a3b8")
+                ui.label(user.email).classes("text-sm").style("color:#e2e8f0")
+            period = "week" if q["window_days"] <= 7 else "month"
+            with ui.row().classes("items-center gap-2"):
+                ui.badge(q["label"], color="primary")
+                ui.label(f"{q['remaining']} of {q['limit']} designs left this "
+                         f"{period}.").classes("text-sm").style("color:#94a3b8")
+            ui.label(f"Member since {user.created_at[:10]}.") \
+                .classes("text-xs").style("color:#64748b")
+
+        with ui.card().classes("w-full gap-2") \
+                .style("background:#0f172a;border:1px solid #1e293b"):
+            ui.label("Privacy & data").classes("text-base font-semibold text-white")
+            train_sw = ui.switch(
+                "Allow KiCraft to use my designs to improve its AI models",
+                value=user.allow_training)
+            train_sw.on_value_change(
+                lambda e: _store().set_training_pref(user.id, bool(e.value)))
+            with ui.row().classes("items-center gap-3"):
+                ui.link("Terms of Service", "/terms", new_tab=True) \
+                    .classes("text-xs").style("color:#60a5fa")
+                ui.link("Privacy Policy", "/privacy", new_tab=True) \
+                    .classes("text-xs").style("color:#60a5fa")
+            ui.label("To export or delete all your data, contact "
+                     "[CONTACT EMAIL].").classes("text-xs").style("color:#64748b")
+
+        with ui.row().classes("w-full justify-end"):
+            ui.button("Log out", icon="logout", on_click=logout) \
+                .props("flat dense no-caps color=white").classes("text-xs")
+
+
 @ui.page("/")
 def index():
     user = _current_user()
@@ -948,7 +1015,10 @@ def index():
             ui.label("KiCraft").classes("text-xl font-bold text-white")
             ui.label("design a PCB from a sentence").classes("text-sm").style("color:#94a3b8")
         with ui.row().classes("items-center gap-3"):
-            ui.label(user.email).classes("text-xs").style("color:#cbd5e1")
+            ui.button(user.email, icon="account_circle",
+                      on_click=lambda: ui.navigate.to("/profile")) \
+                .props("flat dense no-caps color=white").classes("text-xs") \
+                .tooltip("Profile & account settings")
             tier_badge = ui.badge(q0["label"], color="primary")
             ui.button("Log out", on_click=logout).props("flat dense color=white").classes("text-xs")
 
@@ -1029,22 +1099,6 @@ def index():
         with ui.expansion("Your projects").classes("w-full mt-2") \
                 .style("background:#0f172a;border:1px solid #1e293b"):
             proj_container = ui.column().classes("w-full gap-1 p-2")
-
-        with ui.expansion("Account & privacy").classes("w-full") \
-                .style("background:#0f172a;border:1px solid #1e293b"):
-            with ui.column().classes("w-full gap-1 p-2"):
-                train_sw = ui.switch(
-                    "Allow KiCraft to use my designs to improve its AI models",
-                    value=user.allow_training)
-                train_sw.on_value_change(
-                    lambda e: _store().set_training_pref(user.id, bool(e.value)))
-                with ui.row().classes("items-center gap-3"):
-                    ui.link("Terms of Service", "/terms", new_tab=True) \
-                        .classes("text-xs").style("color:#60a5fa")
-                    ui.link("Privacy Policy", "/privacy", new_tab=True) \
-                        .classes("text-xs").style("color:#60a5fa")
-                ui.label("To export or delete all your data, contact "
-                         "[CONTACT EMAIL].").classes("text-xs").style("color:#64748b")
 
         with ui.expansion("Edit a stage & re-run").classes("w-full") \
                 .style("background:#0f172a;border:1px solid #1e293b"):
