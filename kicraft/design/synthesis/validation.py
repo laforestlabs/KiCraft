@@ -13,8 +13,11 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from kicraft.design.models import is_power_or_ground_name
 
 
 REQUIRED_SCHEMATIC_VERSION = 20250114
@@ -569,6 +572,88 @@ def check_net_coverage(bom) -> CheckResult:
         ok=not bad,
         message=(
             "every part pin accounted for" if not bad else "uncovered pin(s)"
+        ),
+        offenders=bad,
+    )
+
+
+# ---------- §9.13 sheet population + §9.14 inter-sheet net coverage ----------
+#
+# Cross-stage model-data checks (architecture x bom) run at the BOM and wiring
+# stage commits, so a weak model gets a precise retry signal BEFORE the
+# schematic is emitted. Without them, an architecture inter-sheet net that the
+# wiring stage never realizes is caught only by §9.12 ERC at synthesis time --
+# "sheet pin <NET> has no matching hierarchical label inside the sheet" -- which
+# aborts the build with no actionable per-stage feedback.
+
+
+def check_sheets_have_parts(architecture, bom) -> CheckResult:
+    """§9.13 -- every from-scratch sheet has at least one BOM part.
+
+    An architecture sheet with no parts emits a blank leaf; if any
+    inter-sheet net routes through it, its sheet pins have no pin to land a
+    hierarchical label on (the empty COIL DRIVER sheet on the wireless
+    charger). Library-backed sheets (``from_library`` set) are exempt:
+    their parts come from the leaf installer, and §9.8 checks their
+    interface separately.
+    """
+    parts_per_sheet = Counter(p.sheet for p in bom.parts)
+    bad = [
+        f"{s.name!r} (stem {s.stem}) has no parts"
+        for s in architecture.sheets
+        if s.from_library is None and parts_per_sheet.get(s.name, 0) == 0
+    ]
+    return CheckResult(
+        name="9.13 sheet population",
+        ok=not bad,
+        message=(
+            "every from-scratch sheet has parts"
+            if not bad
+            else f"{len(bad)} sheet(s) declared in architecture but left empty by the BOM"
+        ),
+        offenders=bad,
+    )
+
+
+def check_inter_sheet_nets_realized(architecture, bom) -> CheckResult:
+    """§9.14 -- every SIGNAL inter-sheet net endpoint is realized by a
+    same-named NetConnection in that sheet.
+
+    The emitter draws a sheet pin on the parent for each signal (non-power)
+    inter-sheet endpoint, and a matching hierarchical label inside the leaf
+    only where a connection of that ``net_name`` wires a real pin in that
+    sheet. An endpoint with no such connection leaves the sheet pin
+    dangling -> KiCad ERC "sheet pin <NET> has no matching hierarchical
+    label inside the sheet" (the PWM_H / PWM_L / COIL_OUT failures on the
+    wireless charger).
+
+    Power/ground inter-sheet nets are exempt: the emitter connects them via
+    global power symbols in the leaves, not sheet pins (see
+    ``emitter._emit_sheet_block``), so they never produce this ERC class;
+    their per-pin coverage is enforced by §9.11 instead.
+    """
+    realized: dict[tuple[str, str], int] = defaultdict(int)
+    for c in bom.connections:
+        realized[(c.net_name, c.sheet)] += len(c.endpoints)
+    bad: list[str] = []
+    for net in architecture.inter_sheet_nets:
+        if is_power_or_ground_name(net.name):
+            continue
+        for ep in net.endpoints:
+            if realized.get((net.name, ep.sheet), 0) < 1:
+                bad.append(
+                    f"net {net.name!r} crosses into sheet {ep.sheet!r} but no "
+                    f"connections[] entry wires it there (add net_name={net.name!r}, "
+                    f"sheet={ep.sheet!r} with the pin that carries it)"
+                )
+    return CheckResult(
+        name="9.14 inter-sheet net coverage",
+        ok=not bad,
+        message=(
+            "every signal inter-sheet net is wired on both sides"
+            if not bad
+            else f"{len(bad)} inter-sheet endpoint(s) have a sheet pin but no "
+            "hierarchical label"
         ),
         offenders=bad,
     )

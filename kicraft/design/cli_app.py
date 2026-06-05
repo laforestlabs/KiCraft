@@ -60,8 +60,10 @@ from .synthesis.parts_lookup import (
 from .synthesis.validation import (
     CheckResult,
     SynthesisValidationError,
+    check_inter_sheet_nets_realized,
     check_net_coverage,
     check_pin_existence,
+    check_sheets_have_parts,
 )
 
 KNOWN_STAGES = ("intent", "functional_spec", "architecture", "bom", "wiring")
@@ -253,8 +255,21 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                 print(f"library validation failed: {e}", file=sys.stderr)
                 return 3
 
+    if state.architecture is not None and state.bom is not None:
+        sp = check_sheets_have_parts(state.architecture, state.bom)
+        if not sp.ok:
+            print(f"{sp.name}: {sp.message}", file=sys.stderr)
+            for o in sp.offenders[:20]:
+                print(f"  - {o}", file=sys.stderr)
+            return 3
+
     if state.bom is not None and state.bom.connections:
-        for check in (check_pin_existence(state.bom), check_net_coverage(state.bom)):
+        checks = [check_pin_existence(state.bom), check_net_coverage(state.bom)]
+        if state.architecture is not None:
+            checks.append(
+                check_inter_sheet_nets_realized(state.architecture, state.bom)
+            )
+        for check in checks:
             if not check.ok:
                 print(f"{check.name}: {check.message}", file=sys.stderr)
                 for o in check.offenders[:20]:
@@ -1261,7 +1276,16 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                 return 3
 
     if state.bom is not None and state.bom.connections:
-        for check in (check_pin_existence(state.bom), check_net_coverage(state.bom)):
+        checks = [check_pin_existence(state.bom), check_net_coverage(state.bom)]
+        if state.architecture is not None:
+            # Architecture declared these inter-sheet nets; the wiring stage
+            # must realize each signal endpoint, or the emitter leaves a sheet
+            # pin with no hierarchical label (caught only by §9.12 ERC at
+            # synthesis time otherwise).
+            checks.append(
+                check_inter_sheet_nets_realized(state.architecture, state.bom)
+            )
+        for check in checks:
             if not check.ok:
                 print(
                     json.dumps(
@@ -1277,6 +1301,24 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
 
     # Every footprint must resolve to a real .kicad_mod before the BOM is
     # committed — otherwise the bad name only surfaces at synthesis/PCB time.
+    # Architecture sheets the BOM left empty produce blank leaves and, where an
+    # inter-sheet net crosses them, orphan sheet pins. Catch it at BOM commit,
+    # where the model can still add the missing parts.
+    if stage == "bom" and state.bom is not None and state.architecture is not None:
+        sp = check_sheets_have_parts(state.architecture, state.bom)
+        if not sp.ok:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": [f"{sp.name}: {sp.message}"],
+                        "offenders": sp.offenders[:20],
+                    },
+                    indent=2,
+                )
+            )
+            return 3
+
     if stage == "bom" and state.bom is not None:
         bad_fps = _unresolved_footprints(
             state.bom, state_path.resolve().parent.parent
