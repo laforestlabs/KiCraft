@@ -21,6 +21,8 @@ import subprocess
 import tempfile
 import threading
 import time
+import types
+import typing
 from pathlib import Path
 
 from nicegui import app, ui
@@ -29,8 +31,17 @@ from starlette.responses import FileResponse, PlainTextResponse, RedirectRespons
 from .accounts import AccountStore
 from .config import LEGAL_VERSION, Settings, default_legal_dir
 from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView, kicanvas_head
+from .session import (
+    commit_slot,
+    downstream_stages,
+    null_downstream,
+    read_state,
+    record_answers,
+    remaining_stages,
+    run_session,
+)
 from .spend_guard import SpendGuard
-from .stage_driver import DESIGN_STAGES, KICRAFT, drive_chain
+from .stage_driver import DESIGN_STAGES, KICRAFT, SLOT_MODEL
 from .stagetabs import StageTabs, demo_events
 
 # Self-host the KiCanvas ES module bundle so the browser fetches it same-origin.
@@ -344,7 +355,9 @@ def _persist_project(ws: Path | None, state: dict) -> None:
     if not pid or not uid:
         return
     store = _store()
-    status = "ok" if state.get("ok") else "failed"
+    # An explicit status (e.g. "awaiting_input" when a run parks on a question)
+    # wins; otherwise derive ok/failed from the run outcome.
+    status = state.get("status") or ("ok" if state.get("ok") else "failed")
     stem = state.get("stem")
     dir_path = None
     zip_path = None
@@ -357,6 +370,15 @@ def _persist_project(ws: Path | None, state: dict) -> None:
             for ev in state.get("events", []):
                 f.write(json.dumps(ev, ensure_ascii=False, default=str) + "\n")
         if ws is not None:
+            # Save the WHOLE .kicraft/ (state.json + parts/ + check files) so a
+            # later resume or edit-and-rebuild has the fetched LCSC bundles, not
+            # just the state. Keep a top-level state.json copy too, for readers
+            # that expect it and for legacy projects predating the kicraft/ tree.
+            kdir = ws / ".kicraft"
+            if kdir.is_dir():
+                kdst = base / "kicraft"
+                shutil.rmtree(kdst, ignore_errors=True)
+                shutil.copytree(kdir, kdst)
             sj = ws / ".kicraft" / "state.json"
             if sj.is_file():
                 shutil.copy2(sj, base / "state.json")
@@ -381,30 +403,119 @@ def _persist_project(ws: Path | None, state: dict) -> None:
             pass
 
 
-def _design_worker(brief: str, state: dict) -> None:
-    """Run the full pipeline in a background thread, streaming into `state`.
+def _rehydrate_workspace(project) -> Path:
+    """Recreate a working tempdir from a saved project's durable .kicraft/ (state +
+    fetched parts) and generated tree, so the session can resume, edit, or rebuild
+    against it. Falls back to the top-level state.json for legacy projects that
+    predate the saved kicraft/ tree."""
+    ws = Path(tempfile.mkdtemp(prefix="kicraft_resume_"))
+    base = Path(project.dir_path) if project.dir_path else None
+    if base and (base / "kicraft").is_dir():
+        shutil.copytree(base / "kicraft", ws / ".kicraft")
+    elif base and (base / "state.json").is_file():
+        (ws / ".kicraft").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(base / "state.json", ws / ".kicraft" / "state.json")
+    if base and (base / "generated").is_dir():
+        shutil.copytree(base / "generated", ws / "generated")
+    return ws
+
+
+def _anno_kind(anno) -> tuple[str, list | None]:
+    """Classify a Pydantic field annotation for the structured slot editor: one of
+    'str' / 'bool' / 'list_str' / 'enum' / 'json' (the catch-all for nested types)."""
+    origin = typing.get_origin(anno)
+    args = typing.get_args(anno)
+    if origin in (typing.Union, types.UnionType):  # unwrap Optional[X]
+        non_none = [a for a in args if a is not type(None)]
+        if len(non_none) == 1:
+            return _anno_kind(non_none[0])
+    if anno is str:
+        return ("str", None)
+    if anno is bool:
+        return ("bool", None)
+    if origin is list and args and args[0] is str:
+        return ("list_str", None)
+    if origin is typing.Literal:
+        return ("enum", [str(a) for a in args])
+    return ("json", None)
+
+
+def _render_slot_form(model, slot: dict):
+    """Render one editable widget per model field; return getter() -> slot dict.
+    Simple fields (str / bool / list[str] / enum) get native widgets; nested
+    fields (lists of objects, dicts) fall back to a JSON box. The getter may raise
+    json.JSONDecodeError if a JSON field is left malformed."""
+    getters: dict = {}
+    for name, field in model.model_fields.items():
+        kind, choices = _anno_kind(field.annotation)
+        cur = slot.get(name)
+        with ui.row().classes("w-full items-start gap-2"):
+            ui.label(name).classes("text-xs w-40 pt-2").style("color:#94a3b8")
+            if kind == "str":
+                w = ui.input(value=("" if cur is None else str(cur))).classes("flex-grow")
+                getters[name] = lambda w=w: (w.value or "")
+            elif kind == "bool":
+                w = ui.switch(value=bool(cur))
+                getters[name] = lambda w=w: bool(w.value)
+            elif kind == "list_str":
+                ui.label("(one per line)").classes("text-xs pt-2").style("color:#64748b")
+                w = ui.textarea(value="\n".join(cur or [])).props("rows=3").classes("flex-grow")
+                getters[name] = lambda w=w: [s.strip() for s in (w.value or "").splitlines()
+                                             if s.strip()]
+            elif kind == "enum":
+                val = cur if cur in (choices or []) else (choices[0] if choices else None)
+                w = ui.select(choices or [], value=val).classes("flex-grow")
+                getters[name] = lambda w=w: w.value
+            else:  # nested model/list/dict -> JSON box
+                w = ui.textarea(value=(json.dumps(cur, indent=2) if cur is not None else "")) \
+                    .props("rows=4").classes("flex-grow text-xs")
+                getters[name] = lambda w=w: (json.loads(w.value) if (w.value or "").strip()
+                                             else None)
+    return lambda: {n: g() for n, g in getters.items()}
+
+
+def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
+    """Drive `stages` for this page's session, streaming progress into `state`,
+    then (on success) run the deterministic build. Shared by the initial design,
+    resume/continue, edit-and-rerun, and answering a parked question.
 
     The thread only mutates `state` (appends progress events, sets flags); every
     NiceGUI element update happens in the page render timer (elements must not be
-    touched off the UI context).
+    touched off the UI context). `answers` / `instruction` apply to the first of
+    `stages` (the stage being resumed or edited).
     """
-    ws = Path(tempfile.mkdtemp(prefix="kicraft_web_"))
+    ws = (Path(state["ws"]) if state.get("ws")
+          else Path(tempfile.mkdtemp(prefix="kicraft_web_")))
     state["ws"] = str(ws)
-    state["brief"] = brief
+    state["status"] = None  # reset; set to awaiting_input only if we park
 
     def progress(ev):
         state["events"].append(ev)
 
     try:
-        results, guard, _ = drive_chain(list(DESIGN_STAGES), brief, ws, progress=progress)
-        state["spend"] = guard.get("spent_total_usd")
-        if not all(r.get("commit_ok") for r in results):
+        res = run_session(ws, state.get("brief", ""), stages, answers=answers,
+                          instruction=instruction, progress=progress)
+        if res.get("guard"):
+            state["spend"] = res["guard"].get("spent_total_usd")
+
+        if res["status"] == "awaiting_input":
+            # Park: the run is saved as awaiting_input and the question surfaces in
+            # the UI; the user can answer now or reopen the project later.
+            state["status"] = "awaiting_input"
+            state["awaiting_input"] = True
+            state["questions"] = res.get("questions") or []
+            state["ok"] = None
+            return
+
+        state["awaiting_input"] = False
+        state["questions"] = []
+        if res["status"] != "ok":
             state["ok"] = False
             return
 
-        # Hand off to the deterministic (zero-LLM) build: synthesize -> place ->
-        # route -> verify -> fab. `build` re-runs synthesize as its first step, so
-        # the schematic appears as soon as that step writes the sheets.
+        # Deterministic (zero-LLM) build: synthesize -> place -> route -> verify ->
+        # fab. `build` re-runs synthesize first, so the schematic appears as soon
+        # as that step writes the sheets.
         stem = _read_project_stem(ws)
         if stem:
             project_dir = ws / "generated" / stem
@@ -440,6 +551,13 @@ def _design_worker(brief: str, state: dict) -> None:
         _persist_project(ws, state)
         state["done"] = True
         state["running"] = False
+
+
+def _design_worker(brief: str, state: dict) -> None:
+    """Initial design from a brief: a fresh workspace, all schematic stages, build."""
+    state["brief"] = brief
+    state["ws"] = None  # force a fresh tempdir
+    _run_design(state, list(DESIGN_STAGES))
 
 
 def _legal_footer() -> None:
@@ -627,6 +745,7 @@ def index():
         "sch_view": None, "pcb_view": None, "pcb_mtime": None,
         "state_mtime": None, "run_mtime": None, "build_lines": [],
         "user_id": None, "project_id": None, "brief": "", "account_refreshed": False,
+        "status": None, "awaiting_input": False, "questions": [], "questions_rendered": None,
     }
 
     def logout():
@@ -659,9 +778,14 @@ def index():
             placeholder="e.g. A USB-C powered LED night light with a slide switch and "
                         "three white LEDs, no microcontroller.").props("rows=4").classes("w-full")
 
-        design_btn = ui.button("Design").props("color=primary unelevated")
+        with ui.row().classes("items-center gap-2"):
+            design_btn = ui.button("Design").props("color=primary unelevated")
+            continue_btn = ui.button("Continue design", icon="play_arrow") \
+                .props("color=primary outline")
+            continue_btn.set_visibility(False)
         status = ui.label("").classes("text-sm").style("color:#e2e8f0")
         spend = ui.label("").classes("text-sm").style("color:#64748b")
+        question_box = ui.column().classes("w-full")
 
         # Per-stage tabs: each phase gets its own tab with a project-state inspector
         # (left) over the LLM thinking + activity/log windows (right). The native
@@ -688,6 +812,11 @@ def index():
                 ui.label("To export or delete all your data, contact "
                          "[CONTACT EMAIL].").classes("text-xs").style("color:#64748b")
 
+        with ui.expansion("Edit a stage & re-run").classes("w-full") \
+                .style("background:#0f172a;border:1px solid #1e293b"):
+            edit_box = ui.column().classes("w-full gap-2 p-2")
+        edit_ctx: dict = {"getter": None, "raw": None, "instr": None}
+
         def build_projects():
             proj_container.clear()
             with proj_container:
@@ -702,10 +831,243 @@ def index():
                         ui.label(p.status).classes("text-xs").style("color:#94a3b8")
                         ui.label(p.created_at[:19].replace("T", " ")) \
                             .classes("text-xs").style("color:#64748b")
+                        if p.dir_path:
+                            ui.button("Open", icon="folder_open",
+                                      on_click=lambda pp=p: open_project(pp)).props("flat dense")
                         if p.zip_path and Path(p.zip_path).is_file():
                             ui.button("Download", icon="download",
                                       on_click=lambda zp=p.zip_path: ui.download(zp)) \
                                 .props("flat dense")
+
+        def build_question_panel():
+            """(Re)build the clarifying-question panel for a parked run. Always
+            offers a freeform text answer; suggested options just fill it in."""
+            question_box.clear()
+            state["questions_rendered"] = state.get("questions")
+            qs = state.get("questions") or []
+            if not (state.get("awaiting_input") and qs):
+                return
+            stage = qs[0].get("stage", "")
+            with question_box:
+                with ui.card().classes("w-full") \
+                        .style("background:#1f1300;border:1px solid #92400e"):
+                    ui.label("The agent needs your input").classes("text-base font-bold") \
+                        .style("color:#fbbf24")
+                    if stage:
+                        ui.label(f"Stage: {stage}").classes("text-xs").style("color:#d4d4d8")
+                    widgets = []
+                    for q in qs:
+                        ui.label(q.get("text", "")).classes("text-sm mt-2").style("color:#fde68a")
+                        ans = ui.input(placeholder="Type your answer (or pick a suggestion)") \
+                            .classes("w-full")
+                        for opt in (q.get("options") or []):
+                            ui.button(opt, on_click=lambda o=opt, a=ans: a.set_value(o)) \
+                                .props("flat dense").classes("text-xs")
+                        widgets.append((q, ans))
+
+                    def submit_answers():
+                        answers = [{"text": q.get("text", ""),
+                                    "answer": (a.value or "").strip()} for q, a in widgets]
+                        if not any(x["answer"] for x in answers):
+                            ui.notify("Type or pick at least one answer.", color="warning")
+                            return
+                        _answer_and_resume(stage, answers)
+
+                    ui.button("Submit answer & continue", icon="send", color="primary",
+                              on_click=submit_answers).classes("mt-2")
+
+        def _answer_and_resume(stage, answers):
+            if state["running"]:
+                return
+            ws = state["ws"]
+            if not ws:
+                ui.notify("No open design.", color="warning")
+                return
+            record_answers(ws, stage, answers)
+            runs = [stage] + downstream_stages(stage)
+            if state["project_id"]:  # same project, no new quota slot
+                _store().update_project_status(state["project_id"], "running")
+            state.update(running=True, done=False, ok=None, fab_done=False,
+                         account_refreshed=False, awaiting_input=False, questions=[],
+                         questions_rendered=None)
+            question_box.clear()
+            continue_btn.set_visibility(False)
+            design_btn.disable()
+            status.text = f"Got it. Continuing from {stage} with your answer..."
+            threading.Thread(target=_run_design, args=(state, runs),
+                             kwargs={"answers": answers}, daemon=True).start()
+
+        def build_edit_panel():
+            """(Re)build the stage editor for the currently open design."""
+            edit_box.clear()
+            with edit_box:
+                if not state["ws"]:
+                    ui.label("Open or run a design first, then edit a stage here.") \
+                        .classes("text-xs").style("color:#64748b")
+                    return
+                sj = read_state(state["ws"])
+                editable = [s for s in ("intent", "functional_spec", "architecture", "bom")
+                            if sj.get(s)]
+                if not editable:
+                    ui.label("No committed stages to edit yet.") \
+                        .classes("text-xs").style("color:#64748b")
+                    return
+                ui.label("Editing a stage re-runs the stages after it (spends tokens).") \
+                    .classes("text-xs").style("color:#94a3b8")
+                stage_sel = ui.select(editable, value=editable[0], label="Stage").classes("w-64")
+                form_holder = ui.column().classes("w-full gap-2")
+
+                def render_form():
+                    form_holder.clear()
+                    with form_holder:
+                        stg = stage_sel.value
+                        edit_ctx["getter"] = _render_slot_form(SLOT_MODEL[stg], sj.get(stg) or {})
+                        with ui.expansion("Advanced: raw slot JSON").classes("w-full"):
+                            edit_ctx["raw"] = ui.textarea(value=json.dumps(sj.get(stg), indent=2)) \
+                                .props("rows=8").classes("w-full text-xs")
+                        edit_ctx["instr"] = ui.textarea(
+                            "Or tell the agent what to change",
+                            placeholder="e.g. use a USB-C connector, not micro-USB") \
+                            .props("rows=2").classes("w-full")
+                        with ui.row().classes("gap-2 flex-wrap"):
+                            ui.button("Save form & re-run", icon="save",
+                                      on_click=lambda s=stg: _confirm_edit(s, "form")) \
+                                .props("color=primary")
+                            ui.button("Save JSON & re-run", icon="data_object",
+                                      on_click=lambda s=stg: _confirm_edit(s, "json")) \
+                                .props("outline color=white")
+                            ui.button("Ask agent & re-run", icon="auto_fix_high",
+                                      on_click=lambda s=stg: _confirm_edit(s, "instruction")) \
+                                .props("outline color=white")
+
+                stage_sel.on_value_change(render_form)
+                render_form()
+
+        def _confirm_edit(stage, mode):
+            slot_dict = None
+            instruction = None
+            try:
+                if mode == "form":
+                    slot_dict = edit_ctx["getter"]() if edit_ctx["getter"] else None
+                elif mode == "json":
+                    slot_dict = json.loads((edit_ctx["raw"].value if edit_ctx["raw"] else "") or "{}")
+                else:
+                    instruction = ((edit_ctx["instr"].value if edit_ctx["instr"] else "") or "").strip()
+                    if not instruction:
+                        ui.notify("Type an instruction first.", color="warning")
+                        return
+            except json.JSONDecodeError as e:
+                ui.notify(f"Invalid JSON: {e}", color="negative")
+                return
+            down = downstream_stages(stage)
+            runs = ([stage] + down) if instruction else down
+            verb = f"Re-draft {stage} and re-run " if instruction else "Re-run "
+            tail = ", ".join(down) if down else "nothing downstream"
+            with ui.dialog() as dlg, ui.card() \
+                    .style("background:#0f172a;border:1px solid #1e293b"):
+                ui.label("Re-run stages?").classes("text-lg font-bold text-white")
+                ui.label(verb + tail + ". LLM stages spend tokens.") \
+                    .classes("text-sm").style("color:#94a3b8")
+                with ui.row().classes("gap-2 justify-end w-full"):
+                    ui.button("Cancel", on_click=dlg.close).props("flat color=white")
+                    ui.button("Confirm & run", color="primary",
+                              on_click=lambda: (dlg.close(),
+                                                _do_rerun(stage, slot_dict, instruction, runs)))
+            dlg.open()
+
+        def _do_rerun(stage, slot_dict, instruction, runs):
+            if state["running"]:
+                ui.notify("A run is already in progress.", color="warning")
+                return
+            ws = state["ws"]
+            if not ws:
+                ui.notify("No open design.", color="warning")
+                return
+            if slot_dict is not None:  # structured / raw-JSON edit: commit it first
+                sj = read_state(ws)
+                ok, out = commit_slot(ws, stage, slot_dict, brief=state.get("brief", ""),
+                                      project_stem=sj.get("project_stem"))
+                if not ok:
+                    ui.notify(f"Edit rejected: {out.get('errors')}", color="negative")
+                    return
+            null_downstream(ws, stage)
+            if state["project_id"]:
+                _store().update_project_status(state["project_id"], "running")
+            state.update(running=True, done=False, ok=None, fab_done=False,
+                         account_refreshed=False, pcb_ready=False, sch_view=None,
+                         pcb_view=None, pcb_mtime=None, state_mtime=None, run_mtime=None,
+                         awaiting_input=False, questions=[])
+            continue_btn.set_visibility(False)
+            design_btn.disable()
+            status.text = "Re-running: " + " -> ".join(runs) + " ..."
+            threading.Thread(target=_run_design, args=(state, runs),
+                             kwargs={"instruction": instruction}, daemon=True).start()
+
+        def _continue():
+            """Run the stages still missing from the current (reopened) design."""
+            if state["running"]:
+                return
+            sj = read_state(state["ws"]) if state["ws"] else {}
+            rem = remaining_stages(sj)
+            if not rem:
+                ui.notify("Nothing left to run for this design.", color="info")
+                return
+            if state["project_id"]:  # same project, no new quota slot
+                _store().update_project_status(state["project_id"], "running")
+            state.update(running=True, done=False, ok=None, fab_done=False,
+                         account_refreshed=False)
+            continue_btn.set_visibility(False)
+            design_btn.disable()
+            status.text = "Continuing: " + " -> ".join(rem) + " ..."
+            threading.Thread(target=_run_design, args=(state, rem), daemon=True).start()
+
+        continue_btn.on_click(_continue)
+
+        def open_project(p):
+            """Reopen a saved project: rehydrate its workspace and render its current
+            slots, so the user can continue, edit, answer a parked question, or
+            re-download. Reuses the same project_id (no new quota slot)."""
+            if state["running"]:
+                ui.notify("Wait for the current run to finish before opening another.",
+                          color="warning")
+                return
+            ws = _rehydrate_workspace(p)
+            sj = read_state(ws)
+            zip_ok = bool(p.zip_path and Path(p.zip_path).is_file())
+            completed = p.status == "ok"
+            state.update(events=[], rendered=0, running=False, done=completed,
+                         ok=(True if completed else None), spend=p.cost_usd,
+                         zip=(p.zip_path if zip_ok else None), fab_done=False,
+                         ws=str(ws), token=None, project_dir=None, stem=p.project_stem,
+                         pcb_ready=False, sch_view=None, pcb_view=None, pcb_mtime=None,
+                         state_mtime=None, run_mtime=None, build_lines=[],
+                         account_refreshed=True,
+                         status=("awaiting_input" if p.status == "awaiting_input" else None),
+                         awaiting_input=(p.status == "awaiting_input"), questions_rendered=None,
+                         questions=[q for q in (sj.get("open_questions") or [])
+                                    if not q.get("answer")])
+            state["user_id"] = user.id
+            state["project_id"] = p.id
+            state["brief"] = p.brief or ""
+            tabs.reset()
+            if p.project_stem:  # wire restored artifacts so the schematic/PCB render
+                project_dir = ws / "generated" / p.project_stem
+                if project_dir.is_dir():
+                    state["project_dir"] = str(project_dir)
+                    state["token"] = _register_project_dir(project_dir)
+                    state["pcb_ready"] = (project_dir / f"{p.project_stem}.kicad_pcb").is_file()
+            rem = remaining_stages(sj)
+            continue_btn.set_visibility(bool(rem) and not state["awaiting_input"])
+            if state["awaiting_input"]:
+                status.text = "Reopened. This design is waiting for your answer below."
+            elif rem:
+                status.text = ("Reopened. Remaining: " + " -> ".join(rem)
+                               + ". Click Continue design when ready.")
+            else:
+                status.text = ("Reopened. Design complete: download below, "
+                               "or edit a stage to revise.")
+            refresh_account_ui()
+            ui.notify(f"Opened {p.project_stem or 'project'}.", color="positive")
 
         def refresh_account_ui():
             u = _current_user()
@@ -724,6 +1086,7 @@ def index():
                     design_btn.enable()
                 quota_label.style("color:#94a3b8")
             build_projects()
+            build_edit_panel()
 
         def start():
             if state["running"]:
@@ -746,7 +1109,9 @@ def index():
                          spend=None, zip=None, fab_done=False, ws=None, token=None,
                          project_dir=None, stem=None, pcb_ready=False, sch_view=None,
                          pcb_view=None, pcb_mtime=None, state_mtime=None, run_mtime=None,
-                         build_lines=[], account_refreshed=False)
+                         build_lines=[], account_refreshed=False, status=None,
+                         awaiting_input=False, questions=[], questions_rendered=None)
+            continue_btn.set_visibility(False)
             state["user_id"] = u.id
             state["project_id"] = pid
             state["brief"] = brief.value
@@ -774,6 +1139,11 @@ def index():
                     tabs.scroll_active_to_bottom()
             if state["spend"] is not None:
                 spend.text = f"Spent this design: ${state['spend']:.4f}"
+
+            # Clarifying-question panel: (re)build only when the question set changes
+            # (a worker parks the run from its thread; this picks it up next tick).
+            if state.get("questions") != state.get("questions_rendered"):
+                build_question_panel()
 
             # Design-stage inspectors: rebuild from state.json whenever it changes.
             if state["ws"]:

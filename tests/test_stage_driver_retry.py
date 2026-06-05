@@ -5,11 +5,16 @@ and the per-stage retry budget that help the wiring stage converge.
 """
 from __future__ import annotations
 
+import json
+
 from kicraft.server.stage_driver import (
     BOM_TOOLS,
+    _attach_questions,
+    _normalize_questions,
     _retry_feedback,
     _stage_max_retries,
     _stage_max_tokens,
+    build_system,
 )
 
 
@@ -61,3 +66,42 @@ def test_bom_has_a_footprint_search_tool():
     names = {t["function"]["name"] for t in BOM_TOOLS}
     assert "search_footprints" in names                # footprint discovery, do not guess
     assert "lookup_footprint" in names                 # verify a footprint exists + pad count
+
+
+# ---- clarifying questions -------------------------------------------------
+
+def test_normalize_questions_shapes_and_drops_junk():
+    qs = _normalize_questions(
+        [{"text": "Battery chemistry?", "options": ["LiPo", "18650"], "blocking": True},
+         {"text": "   ", "blocking": True},   # dropped: blank text
+         {"nope": 1}],                        # dropped: not a question
+        "intent")
+    assert len(qs) == 1
+    q = qs[0]
+    assert q["stage"] == "intent" and q["blocking"] is True
+    assert q["options"] == ["LiPo", "18650"] and q["answer"] is None
+
+
+def test_attach_questions_writes_open_questions(tmp_path):
+    sp = tmp_path / ".kicraft" / "state.json"  # not yet created (a first-stage question)
+    qs = _normalize_questions([{"text": "Q1", "blocking": True}], "intent")
+    _attach_questions(sp, "intent", qs)
+    sj = json.loads(sp.read_text())
+    assert sj["open_questions"][0]["text"] == "Q1"
+    assert sj["open_questions"][0]["stage"] == "intent"
+
+
+def test_attach_questions_replaces_only_that_stage(tmp_path):
+    sp = tmp_path / ".kicraft" / "state.json"
+    sp.parent.mkdir(parents=True)
+    sp.write_text(json.dumps({"open_questions": [
+        {"text": "old-intent", "stage": "intent"}, {"text": "keep-arch", "stage": "architecture"}]}))
+    _attach_questions(sp, "intent", _normalize_questions([{"text": "new-intent"}], "intent"))
+    texts = {q["text"] for q in json.loads(sp.read_text())["open_questions"]}
+    assert texts == {"new-intent", "keep-arch"}  # intent replaced, architecture kept
+
+
+def test_build_system_offers_clarifying_questions():
+    sysmsg = build_system("intent")
+    assert '"questions"' in sysmsg   # the model is told it may ask
+    assert "blocking" in sysmsg

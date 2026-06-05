@@ -186,7 +186,15 @@ def build_system(stage: str) -> str:
         "- Output only the slot JSON object.\n"
         "- Use only allowed enum values; honor every naming pattern and uniqueness/reference "
         "constraint.\n"
-        '- Every "assumptions" entry must end with "(defaulted)".'
+        '- Every "assumptions" entry must end with "(defaulted)".\n'
+        "- CLARIFYING QUESTIONS: if the brief is too ambiguous to make a sound choice that "
+        "materially changes the board, you MAY ask the user instead of guessing. To ask, "
+        "output ONLY this shape (no slot this turn):\n"
+        '  {"questions": [{"text": "...", "options": ["a suggested answer", "..."], '
+        '"blocking": true}]}\n'
+        "Ask at most 3 genuinely blocking questions, and only when a wrong guess would waste "
+        "a real board; otherwise choose a sensible default, record it in \"assumptions\", and "
+        "output the slot."
         f"{_stage_extra(stage)}"
     )
 
@@ -304,8 +312,39 @@ def _retry_feedback(out: dict) -> str:
     return msg
 
 
+def _normalize_questions(raw_list, stage: str) -> list[dict]:
+    """Coerce a model-emitted questions payload into Question-shaped dicts (so the
+    state.json open_questions list stays schema-valid). Caps count and lengths."""
+    out = []
+    for q in raw_list:
+        if isinstance(q, dict) and str(q.get("text", "")).strip():
+            out.append({
+                "text": str(q["text"]).strip()[:500],
+                "stage": stage,
+                "blocking": bool(q.get("blocking", True)),
+                "material": bool(q.get("material", True)),
+                "options": [str(o)[:200] for o in (q.get("options") or [])][:6],
+                "answer": None,
+            })
+    return out[:5]
+
+
+def _attach_questions(state_path, stage: str, questions: list[dict]) -> None:
+    """Write the stage's clarifying questions into state.json's open_questions
+    (replacing any prior ones for this stage), so a reopened/parked project shows
+    them. Tolerates a not-yet-created state.json (a first-stage question)."""
+    try:
+        sj = json.loads(Path(state_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        sj = {}
+    kept = [q for q in (sj.get("open_questions") or []) if q.get("stage") != stage]
+    sj["open_questions"] = kept + list(questions)
+    Path(state_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(state_path).write_text(json.dumps(sj, indent=2) + "\n", encoding="utf-8")
+
+
 def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, max_retries=2,
-                progress=None) -> dict:
+                progress=None, answers=None, instruction=None) -> dict:
     if progress:
         progress({"kind": "stage_start", "stage": stage})
     prep = _run(KICRAFT + ["stage-prep", stage, str(state_path)], workspace)
@@ -323,6 +362,12 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
     if extras:
         budget = 40000 if stage == "wiring" else 24000
         user += f"\n\nSTAGE EXTRAS (reference data from stage-prep):\n{json.dumps(extras)[:budget]}"
+    if answers:
+        qa = "\n".join(f"Q: {a.get('text', '')}\nA: {a.get('answer', '')}" for a in answers)
+        user += f"\n\nThe user answered your earlier clarifying question(s):\n{qa}"
+    if instruction:
+        user += (f"\n\nThe user requests this change to the {stage}: {instruction}\n"
+                 "Re-draft the slot to honor it, keeping everything else consistent.")
     user += f"\n\nProduce the {stage} slot JSON now."
 
     messages = [{"role": "system", "content": build_system(stage)},
@@ -355,6 +400,24 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
                              "That was not a single valid JSON object. Output ONLY the slot JSON."})
             continue
 
+        # A clarifying-question payload parks the stage (no slot this turn). No slot
+        # model has a top-level "questions" key, so the shape is unambiguous. Never
+        # re-park right after an answer (caps the back-and-forth at one round/stage).
+        qpayload = obj.get("questions") if isinstance(obj, dict) else None
+        if isinstance(qpayload, list) and qpayload:
+            qs = _normalize_questions(qpayload, stage)
+            if any(q["blocking"] for q in qs) and not answers:
+                _attach_questions(state_path, stage, qs)
+                if progress:
+                    progress({"kind": "question", "stage": stage, "questions": qs})
+                return {"stage": stage, "commit_ok": False, "needs_input": True,
+                        "questions": qs, "cost_usd": total_cost, "attempts": attempt + 1}
+            messages.append({"role": "user", "content":
+                             "Do not ask more questions. Apply sensible defaults (record each "
+                             "in assumptions, ending '(defaulted)') and output ONLY the slot "
+                             "JSON now."})
+            continue
+
         project_stem = obj.pop("project_stem", None)
         ok, out = _commit(stage, dict(obj), state_path, brief, project_stem, workspace)
         if ok:
@@ -377,16 +440,21 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
 
 
 def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_stage=None,
-                progress=None):
+                progress=None, client=None, answers=None, instruction=None):
     ws = Path(workspace)
     (ws / ".kicraft").mkdir(parents=True, exist_ok=True)
     state_path = ws / ".kicraft" / "state.json"
-    client = CappedOpenRouterClient(Settings.from_env())
+    if client is None:
+        client = CappedOpenRouterClient(Settings.from_env())
     results = []
-    for stage in stages:
+    for i, stage in enumerate(stages):
+        # answers/instruction belong to the stage being resumed or edited, which
+        # is the first stage of this chain; downstream stages re-draft cleanly.
         r = drive_stage(client, stage, brief, state_path, ws,
                         _stage_max_tokens(stage, max_tokens),
-                        _stage_max_retries(stage, max_retries), progress=progress)
+                        _stage_max_retries(stage, max_retries), progress=progress,
+                        answers=(answers if i == 0 else None),
+                        instruction=(instruction if i == 0 else None))
         results.append(r)
         if on_stage:
             on_stage(r)
@@ -401,8 +469,10 @@ def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_sta
             line += f"\n         -> {r.get('error') or r.get('commit')}"
             if r.get("reply_head"):
                 line += f"\n         reply_head: {r['reply_head']!r}"
+        if r.get("needs_input"):
+            line += "\n         -> parked: awaiting a clarifying answer from the user"
         print(line)
-        if not r.get("commit_ok"):
+        if not r.get("commit_ok") or r.get("needs_input"):
             break
     return results, client.guard.status(), str(state_path)
 

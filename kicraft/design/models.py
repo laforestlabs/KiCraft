@@ -63,6 +63,10 @@ class Question(BaseModel):
     cosmetic questions (blocking=False, material=False) are silently
     defaulted; the chosen default is recorded in default_applied AND in the
     owning slot's `assumptions` list.
+
+    options: suggested answers the UI may offer as buttons. The UI always also
+    offers a freeform text answer, so options are never exhaustive.
+    answer: the user's response once given (None while still open).
     """
 
     text: str
@@ -70,6 +74,8 @@ class Question(BaseModel):
     blocking: bool = False
     material: bool = True
     default_applied: str | None = None
+    options: list[str] = Field(default_factory=list)
+    answer: str | None = None
 
 
 class ChatMsg(BaseModel):
