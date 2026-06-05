@@ -47,6 +47,11 @@ from .models import (
 )
 from .synthesize import SynthesisInputError, run as run_synth
 from .synthesis.symbol_library import search_symbols
+from .synthesis.footprint_library import (
+    FootprintNotFoundError,
+    lookup_footprint,
+    search_footprints,
+)
 from .synthesis.symbol_pinout import SymbolNotFoundError, lookup_pins
 from .synthesis.parts_lookup import (
     LibraryNotFoundError,
@@ -301,6 +306,30 @@ def _cmd_search_symbols(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_lookup_footprint(args: argparse.Namespace) -> int:
+    try:
+        info = lookup_footprint(args.footprint)
+    except FootprintNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    print(json.dumps(info, indent=2))
+    return 0
+
+
+def _cmd_search_footprints(args: argparse.Namespace) -> int:
+    matches = search_footprints(args.query, limit=args.limit)
+    if not matches:
+        print(f"no stock KiCad footprints match {args.query!r}; try fewer or broader terms",
+              file=sys.stderr)
+        return 0
+    for fp in matches:
+        print(fp)
+    return 0
+
+
 def _cmd_list_leaves(_: argparse.Namespace) -> int:
     leaves = _load_library_leaves()
     block = _format_available_leaves_block(leaves)
@@ -472,6 +501,32 @@ def _normalize_symbol_text(text: str, original_name: str, target_name: str) -> s
     )
 
 
+_KICAD_NAME_ILLEGAL_RE = re.compile(r"[^A-Za-z0-9_.+-]")
+
+
+def _sanitize_kicad_name(name: str) -> str:
+    """Strip characters illegal in a KiCad 'Library:Name' segment.
+
+    A fetched part's symbol/footprint name comes from EasyEDA/LCSC (or a user
+    file) and can contain characters outside the ``[A-Za-z0-9_.+-]`` set that
+    ``BomPart``'s SYMBOL_RE / FOOTPRINT_RE allow — most commonly the ``#`` in
+    EasyEDA symbol names like ``DS3231SN#_C722469`` — which makes the resulting
+    ``Library:Name`` reference unusable in a BOM. Remove them so the reference
+    (and the on-disk name it must match) is always legal.
+    """
+    return _KICAD_NAME_ILLEGAL_RE.sub("", name or "")
+
+
+def _sanitize_footprint_text(fp_text: str, raw_name: str) -> tuple[str, str]:
+    """Return (sanitized_name, fp_text) with the in-file ``(footprint "...")``
+    header rewritten to match, so the on-disk name stays consistent with the
+    ``Library:Name`` the manifest declares."""
+    name = _sanitize_kicad_name(raw_name)
+    if name != raw_name:
+        fp_text = fp_text.replace(f'(footprint "{raw_name}"', f'(footprint "{name}"', 1)
+    return name, fp_text
+
+
 def _parse_sourcing_args(entries: list[str]) -> dict[str, str]:
     """Parse repeated ``--sourcing vendor=part_number`` into a dict.
 
@@ -554,7 +609,7 @@ def _add_part_from_files(args: argparse.Namespace) -> int:
     # The bundle's symbol_name is unprefixed — the bundle's library prefix is
     # the directory name, not whatever the source file used.
     stripped_symbol_name = raw_symbol_name.split(":", 1)[-1]
-    symbol_name = args.symbol_name or stripped_symbol_name
+    symbol_name = _sanitize_kicad_name(args.symbol_name or stripped_symbol_name)
 
     footprint_name = _scan_footprint_name(fp_text)
     if footprint_name is None:
@@ -563,6 +618,7 @@ def _add_part_from_files(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    footprint_name, fp_text = _sanitize_footprint_text(fp_text, footprint_name)
 
     try:
         sourcing = _parse_sourcing_args(args.sourcing or [])
@@ -765,15 +821,27 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
     ):
         print(f"failed to write symbol for {lcsc_id}", file=sys.stderr)
         return 2
-    symbol_name = ee_symbol.info.name
+    # EasyEDA symbol names can carry characters illegal in a KiCad 'Library:Name'
+    # (e.g. the '#' in 'DS3231SN#_C722469'), which fails BomPart's SYMBOL_RE. Sanitize
+    # the reference and rewrite the on-disk (symbol "...") header to match.
+    raw_symbol_name = ee_symbol.info.name
+    symbol_name = _sanitize_kicad_name(raw_symbol_name)
+    if symbol_name != raw_symbol_name:
+        sym_path.write_text(
+            _normalize_symbol_text(sym_path.read_text(), raw_symbol_name, symbol_name)
+        )
 
     # Footprint: write into the .pretty dir. 3D model path is left empty
     # (no .step yet); user can re-fetch with a 3D flag in a follow-up.
-    footprint_name = ee_footprint.info.name
+    raw_footprint_name = ee_footprint.info.name
+    footprint_name = _sanitize_kicad_name(raw_footprint_name)
     fp_path = pretty_dir / f"{footprint_name}.kicad_mod"
     ExporterFootprintKicad(footprint=ee_footprint).export(
         footprint_full_path=str(fp_path), model_3d_path=""
     )
+    if footprint_name != raw_footprint_name:
+        _, fp_fixed = _sanitize_footprint_text(fp_path.read_text(), raw_footprint_name)
+        fp_path.write_text(fp_fixed)
 
     # Compose the manifest, then compute content_hash and rewrite once.
     sourcing: dict[str, str] = {"lcsc": lcsc_id}
@@ -1714,6 +1782,23 @@ def main(argv: list[str] | None = None) -> int:
     p_search.add_argument("query", help="keywords, e.g. 'conn 02x08' or 'crystal'")
     p_search.add_argument("--limit", type=int, default=40)
     p_search.set_defaults(func=_cmd_search_symbols)
+
+    p_look_fp = sub.add_parser(
+        "lookup-footprint",
+        help="verify a stock KiCad footprint (Library:Name) exists and report its pad count",
+    )
+    p_look_fp.add_argument(
+        "footprint", help="KiCad footprint id, e.g. 'Resistor_SMD:R_0603_1608Metric'"
+    )
+    p_look_fp.set_defaults(func=_cmd_lookup_footprint)
+
+    p_search_fp = sub.add_parser(
+        "search-footprints",
+        help="list stock KiCad footprints whose Library:Name matches keywords",
+    )
+    p_search_fp.add_argument("query", help="keywords, e.g. 'pinheader 2x08' or 'barreljack'")
+    p_search_fp.add_argument("--limit", type=int, default=40)
+    p_search_fp.set_defaults(func=_cmd_search_footprints)
 
     p_syn = sub.add_parser(
         "synthesize",

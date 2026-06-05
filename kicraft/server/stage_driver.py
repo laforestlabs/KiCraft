@@ -72,6 +72,21 @@ BOM_TOOLS = [
             "query": {"type": "string", "description": "keywords, e.g. 'conn 02x08', 'crystal', "
                       "'n-channel mosfet'"}}, "required": ["query"]}}},
     {"type": "function", "function": {
+        "name": "search_footprints",
+        "description": "Find the correct stock KiCad footprint id by keyword when you do not know "
+                       "the exact 'Library:Name'. Returns matching 'Library:Name' ids to use "
+                       "verbatim. Use this instead of guessing a footprint name.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "keywords, e.g. 'pinheader 2x08', "
+                      "'barreljack', 'sot-23'"}}, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "lookup_footprint",
+        "description": "Verify a KiCad footprint in 'Library:Name' form exists and report its "
+                       "pad count.",
+        "parameters": {"type": "object", "properties": {
+            "footprint": {"type": "string", "description": "e.g. "
+                          "'Resistor_SMD:R_0603_1608Metric'"}}, "required": ["footprint"]}}},
+    {"type": "function", "function": {
         "name": "lookup_lcsc_id",
         "description": "Resolve a manufacturer part number or search keyword to an LCSC part "
                        "number (C#####). Returns {ok, lcsc} or a candidates list.",
@@ -106,21 +121,26 @@ def _stage_extra(stage: str) -> str:
     if stage == "bom":
         return (
             "\n- TOOLS available this stage: list_parts (curated bundles + exact symbol/"
-            "footprint strings); search_symbols (find a stock KiCad symbol id by keyword); "
-            "lookup_symbol (verify a 'Library:Name' symbol exists + pins); "
-            "lookup_lcsc_id (MPN/keyword -> LCSC C-number); add_part_from_lcsc (fetch a real "
-            "symbol+footprint bundle into the project).\n"
-            "- NEVER guess a stock symbol 'Library:Name'. If unsure of the exact id, call "
-            "search_symbols by keyword (e.g. 'conn 02x08') to find it; a symbol that does not "
+            "footprint strings); search_symbols / search_footprints (find a stock KiCad symbol / "
+            "footprint id by keyword); lookup_symbol (verify a 'Library:Name' symbol exists + "
+            "pins); lookup_footprint (verify a footprint exists + pad count); lookup_lcsc_id "
+            "(MPN/keyword -> LCSC C-number); add_part_from_lcsc (fetch a real symbol+footprint "
+            "bundle into the project).\n"
+            "- NEVER guess a stock 'Library:Name'. If unsure of the exact symbol OR footprint id, "
+            "call search_symbols / search_footprints by keyword (e.g. 'conn 02x08', "
+            "'pinheader 2x08', 'barreljack') to find it; a symbol or footprint that does not "
             "resolve is rejected at commit.\n"
             "- Use a library bundle VERBATIM when one matches (e.g. usb-c-16p for a USB-C "
             "receptacle): symbol '<name>:<sym>', footprint '<name>:<fp>'.\n"
-            "- For any connector/switch/IC NOT in the library and NOT a trivial passive, DO NOT "
-            "guess a footprint name. Resolve it: lookup_lcsc_id then add_part_from_lcsc, then "
-            "list_parts to read the exact strings.\n"
-            "- For trivial passives (R, C, L, LED, diode) use stock KiCad: Device:R / Device:LED "
-            "/ Device:C with Resistor_SMD / LED_SMD / Capacitor_SMD footprints (e.g. "
-            "'Resistor_SMD:R_0603_1608Metric', 'LED_SMD:LED_0603_1608Metric').\n"
+            "- Trivial / generic parts from STOCK KiCad: discrete passives (R, C, L, LED, diode) "
+            "AND generic mechanical/connectors (pin headers, barrel jacks, battery holders, basic "
+            "switches). Use Device:R / Device:C / Device:L / Device:LED for passives, and call "
+            "search_footprints to get the EXACT footprint id (e.g. 'Resistor_SMD:R_0603_1608Metric', "
+            "'Connector_PinHeader_2.54mm:PinHeader_2x08_P2.54mm_Vertical'). Do not guess these.\n"
+            "- ICs, sensors, MCUs, regulators, or ANY part where a specific MPN matters: do NOT "
+            "pick a stock symbol/footprint. Resolve the real part: lookup_lcsc_id then "
+            "add_part_from_lcsc, then list_parts to read the exact '<name>:<sym>' / '<name>:<fp>' "
+            "strings. Substituting a generic stock part for a specific IC is wrong.\n"
             "- Every symbol AND footprint MUST resolve to a real file. When finished, output "
             "ONLY the BOM slot JSON.")
     if stage == "wiring":
@@ -204,6 +224,12 @@ def _bom_executor(workspace: Path):
             return (r.stdout or r.stderr)[:3000]
         if name == "search_symbols":
             r = _run(KICRAFT + ["search-symbols", str(args.get("query", ""))], workspace)
+            return (r.stdout or r.stderr)[:3000]
+        if name == "search_footprints":
+            r = _run(KICRAFT + ["search-footprints", str(args.get("query", ""))], workspace)
+            return (r.stdout or r.stderr)[:3000]
+        if name == "lookup_footprint":
+            r = _run(KICRAFT + ["lookup-footprint", str(args.get("footprint", ""))], workspace)
             return (r.stdout or r.stderr)[:3000]
         if name == "lookup_lcsc_id":
             r = _run(KICRAFT + ["lookup-lcsc-id", str(args.get("mpn", ""))], workspace)
