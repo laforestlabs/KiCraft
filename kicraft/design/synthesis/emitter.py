@@ -105,6 +105,38 @@ def _split_lib_id(value: str) -> tuple[str, str]:
     return library, name
 
 
+def ensure_leaf_stems_distinct(project_stem: str, sheets: list[Sheet]) -> None:
+    """Rename any leaf sheet whose stem collides with the project (root) stem.
+
+    The root schematic is emitted to ``<project_stem>.kicad_sch`` and each leaf
+    to ``<sheet.stem>.kicad_sch``. A leaf whose stem equals the project stem
+    therefore writes to the SAME path as the root, so one write clobbers the
+    other and the user is left with a single non-readable block-diagram root
+    (the cyan blob on kicraft.io) instead of a component schematic. Architecture
+    validation keeps leaf stems unique among themselves but never compares them
+    to the project stem, so guard the collision here.
+
+    Mutates the colliding sheet's ``stem`` in place to a unique, shape-valid
+    variant (``<STEM>_SHEET``, then ``_SHEET2`` ...). Idempotent: a second call
+    finds no collision. Must run BEFORE sheet instances are built and before any
+    leaf file is written (incl. the leaf-library installer), so the installer,
+    the root sheet pins, and the leaf file all agree on the new stem.
+    """
+    root = (project_stem or "").upper()
+    taken = {root} | {s.stem.upper() for s in sheets}
+    for s in sheets:
+        if s.stem.upper() != root:
+            continue
+        i = 1
+        while True:
+            cand = f"{s.stem}_SHEET" if i == 1 else f"{s.stem}_SHEET{i}"
+            if cand.upper() not in taken:
+                break
+            i += 1
+        taken.add(cand.upper())
+        s.stem = cand
+
+
 # ---------- root schematic ----------
 
 
@@ -660,6 +692,9 @@ def emit_schematic(
     Returns (root_path, [leaf_paths]).
     """
     project_dir.mkdir(parents=True, exist_ok=True)
+    # A leaf stem equal to the project stem would write to the root's own file;
+    # guard it before any path is derived (no-op if run() already deduped).
+    ensure_leaf_stems_distinct(project_stem, architecture.sheets)
     sheet_insts = sheet_instances if sheet_instances is not None else _build_sheet_instances(architecture, bom)
     root = _emit_root(
         project_stem,

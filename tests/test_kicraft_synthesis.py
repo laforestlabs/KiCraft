@@ -268,3 +268,69 @@ def test_validation_failure_raises(tmp_path, llups_like_state) -> None:
     (tmp_path / "DEMO33_autoplacer.json").write_text("{not json")
     with pytest.raises(SynthesisValidationError):
         run_validations(tmp_path, "DEMO33")
+
+
+# ---------- root/leaf schematic filename collision (the 'cyan blob') ----------
+
+
+def _stem_collision_state() -> ConversationState:
+    """A single-sheet design whose only sheet stem equals the project stem.
+
+    This is the shape that produced the cyan blob on kicraft.io: the root is
+    emitted to ``<project_stem>.kicad_sch`` and the leaf to ``<sheet.stem>``
+    ``.kicad_sch`` -- the SAME path when they are equal. One write clobbers the
+    other, so instead of a readable component schematic the user is left with a
+    lone non-readable block-diagram root (which KiCanvas auto-fits and paints as
+    a solid fill).
+    """
+    intent = IntentSlot(goal="Garden soil-moisture sensor", inferred_expertise="beginner")
+    spec = FunctionalSpec(
+        blocks=[FunctionalBlock(name="SENSOR", category="sense", purpose="soil moisture")]
+    )
+    architecture = Architecture(
+        sheets=[Sheet(name="GARDEN SENSOR", stem="GARDEN_SENSOR", function="all")],
+        power_nets=["VCC", "GND"],
+        inter_sheet_nets=[],
+    )
+    bom = BOM(
+        parts=[
+            BomPart(ref="U1", value="NE555P", symbol="Timer:NE555P",
+                    footprint="Package_DIP:DIP-8_W7.62mm", sheet="GARDEN SENSOR"),
+            BomPart(ref="R1", value="10k", symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric", sheet="GARDEN SENSOR"),
+            BomPart(ref="C1", value="10nF", symbol="Device:C",
+                    footprint="Capacitor_SMD:C_0603_1608Metric", sheet="GARDEN SENSOR"),
+        ]
+    )
+    return ConversationState(
+        project_stem="GARDEN_SENSOR",
+        intent=intent,
+        functional_spec=spec,
+        architecture=architecture,
+        bom=bom,
+    )
+
+
+def test_single_sheet_stem_collision_keeps_readable_leaf(tmp_path) -> None:
+    """Regression: a sheet whose stem equals the project stem must not collapse
+    the project to a single block-diagram root. The root (``<stem>.kicad_sch``)
+    and the leaf must land in DISTINCT files, so the user sees a human-readable
+    component schematic and not the cyan-blob block diagram."""
+    run(_stem_collision_state(), tmp_path)
+
+    schs = sorted(p.name for p in tmp_path.glob("*.kicad_sch"))
+    root = "GARDEN_SENSOR.kicad_sch"
+    # Root + exactly one leaf, as separate files (no filename collision).
+    assert len(schs) == 2, f"root/leaf filename collision; on disk: {schs}"
+    assert root in schs
+    leaf_names = [n for n in schs if n != root]
+    assert len(leaf_names) == 1, schs
+
+    # The root stays a hierarchical block diagram that references its leaf.
+    root_txt = (tmp_path / root).read_text(encoding="utf-8")
+    assert "Sheetfile" in root_txt, "root schematic is not a hierarchy (was clobbered by the leaf)"
+
+    # The leaf is the human-readable component schematic.
+    leaf_txt = (tmp_path / leaf_names[0]).read_text(encoding="utf-8")
+    assert "(symbol" in leaf_txt and "Timer:NE555P" in leaf_txt, \
+        "leaf schematic lacks component symbols (was clobbered by the root block diagram)"
