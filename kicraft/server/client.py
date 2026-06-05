@@ -25,6 +25,13 @@ _FALLBACK_PRICES = {
 }
 _FALLBACK_DEFAULT = (10.0, 30.0)  # unknown model: assume expensive
 
+# Tool-loop convergence caps. A weak model (e.g. deepseek-flash) fills the whole
+# round budget re-verifying parts it already resolved, repeating identical
+# lookups for rounds on end. Once it has reused enough cached results -- or made
+# enough total tool calls -- stop offering tools and force the final JSON.
+_MAX_REDUNDANT_TOOL_CALLS = 3
+_MAX_TOTAL_TOOL_CALLS = 16
+
 
 def estimate_cost(model: str, input_tokens, output_tokens) -> float:
     mid = (model or "").lower()
@@ -203,20 +210,23 @@ class CappedOpenRouterClient:
         total_cost = 0.0
         n_tool_calls = 0
         seen: dict[str, int] = {}  # (name, args) signature -> times requested
+        cache: dict[str, str] = {}  # signature -> first result (reused on repeats)
+        redundant = 0  # identical calls served from cache
+        force_final = False  # thrash detected -> hard-stop tools next round
         on_delta = self._delta_progress(progress)
         for rnd in range(max_rounds):
-            if rnd == max_rounds - 1:
-                # Final tool round: ask the model to finish on THIS call. It keeps
-                # tool_choice="auto", so the prompt-cache prefix still matches the loop
-                # and the call is cache-warm. If the model complies we return via the
-                # normal no-tool-calls path below and skip the separate forced-final,
-                # which sets tool_choice="none", a request shape the serving provider
-                # does not prompt-cache (observed cache_tok=0), making it the single
-                # most expensive call in a maxed-out BOM stage.
+            last_round = rnd == max_rounds - 1
+            if force_final or last_round:
+                # Ask the model to commit to the final JSON. On the normal budget
+                # edge (last_round) we keep tool_choice="auto" below so the
+                # prompt-cache prefix still matches and the call is cache-warm.
+                # When we detected thrash (force_final) we additionally HARD-stop
+                # with tool_choice="none" so the model cannot keep calling tools.
                 messages.append({"role": "user", "content":
                                  "This is your FINAL tool round. Stop calling tools and "
                                  "output ONLY the final JSON answer now."})
-            body = {"messages": messages, "tools": tools, "tool_choice": "auto",
+            body = {"messages": messages, "tools": tools,
+                    "tool_choice": "none" if force_final else "auto",
                     "parallel_tool_calls": True, "temperature": temperature,
                     "_meta": "tools", "_meta_ctx": {**(meta_ctx or {}), "round": rnd}}
             if model:
@@ -248,20 +258,29 @@ class CappedOpenRouterClient:
                     args = {}
                 if progress:
                     progress({"kind": "tool", "name": name, "args": args})
-                try:
-                    result = executor(name, args)
-                except Exception as e:  # surface tool errors to the model, don't crash
-                    result = f"tool error: {e}"
-                # Break identical-call thrash: a weak model can repeat the exact same
-                # failing call for rounds on end. The result will not change, so tell
-                # it to stop and converge instead of silently re-running.
+                # Break identical-call thrash. A weak model repeats the exact same
+                # call for rounds on end; the result cannot change, so reuse the
+                # cached one instead of re-running the tool (saves the subprocess)
+                # and tell it to converge.
                 sig = name + "|" + json.dumps(args, sort_keys=True)
                 seen[sig] = seen.get(sig, 0) + 1
+                if sig in cache:
+                    result = cache[sig]
+                    redundant += 1
+                else:
+                    try:
+                        result = executor(name, args)
+                    except Exception as e:  # surface tool errors, don't crash
+                        result = f"tool error: {e}"
+                    cache[sig] = result
                 if seen[sig] >= 2:
-                    result = (f"NOTE: you have already made this identical call "
-                              f"{seen[sig]} times; the result will not change. Stop "
-                              f"repeating it: change the arguments or output your final "
-                              f"JSON answer now.\n{result}")
+                    result = (f"NOTE: identical call repeated ({seen[sig]}x); the cached "
+                              f"result is reused and will not change. Stop verifying and "
+                              f"output the final JSON now.\n{result}")
+                # Too many redundant or total tool calls -> stop offering tools next
+                # round and force the model to commit to an answer.
+                if redundant >= _MAX_REDUNDANT_TOOL_CALLS or n_tool_calls >= _MAX_TOTAL_TOOL_CALLS:
+                    force_final = True
                 if progress:
                     progress({"kind": "tool_result", "name": name, "output": str(result)[:600]})
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"),
