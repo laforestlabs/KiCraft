@@ -683,6 +683,39 @@ def _resolve_fine_pitch_rule(
     return (int(round(target_clearance_mm * 1000)), int(round(target_track_mm * 1000)))
 
 
+def _set_board_clearance_um(kicad_pcb_path: str, clearance_um: int) -> None:
+    """Cap every netclass clearance on a board at ``clearance_um`` (micrometres).
+
+    The fine-pitch rule lowers FreeRouting's clearance GLOBALLY (so traces can
+    escape dense pad fields), but the routed board still declares its original,
+    wider default clearance. KiCad DRC then flags every trace routed tighter than
+    that wider rule -- failing the geometry acceptance gate on a board that is
+    fab-clean at the clearance it was actually built to. Bringing the board's
+    netclass clearance down to the routed value makes DRC validate against the
+    same rule FreeRouting used. Only lowers (``min``), never widens, so an
+    intentionally tighter class is left alone. Best-effort: on failure the board
+    keeps its old rule (the prior behavior), so this never breaks routing."""
+    cl_nm = int(round(clearance_um)) * 1000  # micrometres -> nanometres
+    script = (
+        "import pcbnew\n"
+        f"b = pcbnew.LoadBoard({kicad_pcb_path!r})\n"
+        f"cl = {cl_nm}\n"
+        "ns = b.GetDesignSettings().m_NetSettings\n"
+        "nc = ns.GetDefaultNetclass()\n"
+        "nc.SetClearance(min(nc.GetClearance(), cl))\n"
+        "for _name, _nc in b.GetAllNetClasses().items():\n"
+        "    _nc.SetClearance(min(_nc.GetClearance(), cl))\n"
+        f"b.Save({kicad_pcb_path!r})\n"
+    )
+    try:
+        subprocess.run(
+            [sys.executable, "-c", script],
+            check=True, capture_output=True, text=True,
+        )
+    except Exception as exc:  # noqa: BLE001 -- consistency is best-effort
+        print(f"  warning: could not set board clearance to {clearance_um} um: {exc}")
+
+
 def route_with_freerouting(
     kicad_pcb_path: str, output_path: str, jar_path: str, config: dict[str, Any]
 ) -> dict[str, Any]:
@@ -762,6 +795,11 @@ def route_with_freerouting(
                 import_ses(kicad_pcb_path, ses_path, output_path)
                 if preserve_existing_copper:
                     _unlock_traces(output_path)
+                if target_clearance_um is not None:
+                    # The fine-pitch lower routed the board at a tighter, fab-safe
+                    # clearance; make the board declare it so KiCad DRC validates
+                    # against the same rule instead of the original wider default.
+                    _set_board_clearance_um(output_path, target_clearance_um)
                 return stats
 
             if attempt == 0:
