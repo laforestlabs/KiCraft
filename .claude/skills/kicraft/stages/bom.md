@@ -40,6 +40,10 @@ Constraints (enforced by Pydantic):
 - Every `arrays[*].refs` entry must be in `parts`, no ref may appear in two arrays, and `rows*cols == len(refs)`.
 - `ref` / `symbol` / `footprint` shapes match the regexes above.
 
+## Part selection
+
+**Prefer the smaller stocked variant.** When a part comes in several package or module sizes that are all stocked on LCSC and electrically suitable, pick the physically smaller one (e.g. `esp32-s3-mini-1` over `esp32-s3-wroom-1`) to save board area, UNLESS a stated constraint overrides it: a cost driver, the smaller part dropping pins / IO / power rating the design needs, or (for passives) the assembly method favoring a larger hand-solderable size.
+
 ## Symbol & footprint sources
 
 For every part, you must resolve a real `symbol` and `footprint` reference. The resolver searches **four parts-library tiers** before falling back to stock KiCad — and `stage-prep` has already done the lookup for you.
