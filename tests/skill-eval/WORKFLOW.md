@@ -130,7 +130,7 @@ the prototype `fix_plan.md` directly actionable.
 
 ## When the rubric changes
 
-Edit `rubric.yaml`, bump `meta.version`, `bin/rubric_hash.py compute --write`,
+Edit `kicraft/eval/rubric.yaml`, bump `meta.version`, `bin/rubric_hash.py compute --write`,
 update `RUBRIC.md` (stamp + changelog), `bin/rubric_hash.py check`. Scores from
 before the change keep their old hash and are **not** comparable to new ones — start
 a fresh cohort.

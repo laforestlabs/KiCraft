@@ -70,6 +70,9 @@ kicraft-smoketest = "kicraft.server.smoketest:main"
 kicraft-web = "kicraft.server.web:main"
 kicraft-accounts = "kicraft.server.accounts_cli:main"
 
+# Evaluation (admin web self-eval; shares the kicraft.eval core with the offline harness)
+kicraft-eval-web = "kicraft.eval.run_web:main"
+
 # Board manipulation
 move-component = "kicraft.cli.move_component:main"
 align-components = "kicraft.cli.align_components:main"
@@ -98,6 +101,7 @@ include = ["kicraft*"]
 
 [tool.setuptools.package-data]
 "kicraft.cli" = ["program.md"]
+"kicraft.eval" = ["rubric.yaml"]
 
 [tool.ruff]
 line-length = 100

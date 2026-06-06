@@ -77,6 +77,20 @@ class Settings:
     kill_switch: bool = False
     request_timeout_s: int = 120
 
+    # --- Outbound email + public URL (password-reset delivery) ---------------
+    # public_url is the externally reachable origin (e.g. https://kicraft.io); it
+    # is used to build absolute reset links so they never depend on a request's
+    # (spoofable) Host header. The smtp_* fields configure the reset mailer; when
+    # smtp_host is empty the mailer logs the link instead of sending (local dev).
+    public_url: str = "http://localhost:8080"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_starttls: bool = True
+    smtp_ssl: bool = False
+
     # --- OpenRouter provider routing + caching (cost safety) -----------------
     # The model id is served by ~14 backends at a tight price band, but only some
     # cache our long, re-sent system prefix (the dominant cost). The DeepSeek
@@ -94,6 +108,14 @@ class Settings:
     max_price_prompt: float = 0.18
     max_price_completion: float = 0.35
     enable_prompt_cache: bool = True
+
+    # --- Class-J self-evaluation judge (admin-only web feature) ---------------
+    # The design loop runs a deliberately cheap/weak model; grading a finished run
+    # wants a stronger one. None means "reuse the design model" (`model`), which
+    # always works with the provider routing above. Point KICRAFT_EVAL_JUDGE_MODEL
+    # at a more capable id for better judgments; that is an admin action, since a
+    # different model may need its own provider routing.
+    eval_judge_model: str | None = None
 
     @classmethod
     def from_env(cls, dotenv: bool = True) -> "Settings":
@@ -119,6 +141,16 @@ class Settings:
             projects_dir=Path(os.environ.get("KICRAFT_PROJECTS_DIR", str(cls.projects_dir))),
             legal_dir=Path(os.environ.get("KICRAFT_LEGAL_DIR", str(cls.legal_dir))),
             kill_switch=_env_bool("KICRAFT_KILL_SWITCH"),
+            public_url=os.environ.get(
+                "KICRAFT_PUBLIC_URL", cls.public_url).strip().rstrip("/") or cls.public_url,
+            smtp_host=os.environ.get("KICRAFT_SMTP_HOST", "").strip(),
+            smtp_port=int(os.environ.get("KICRAFT_SMTP_PORT", cls.smtp_port)),
+            smtp_username=os.environ.get("KICRAFT_SMTP_USERNAME", "").strip(),
+            smtp_password=os.environ.get("KICRAFT_SMTP_PASSWORD", ""),
+            smtp_from=(os.environ.get("KICRAFT_SMTP_FROM", "").strip()
+                       or os.environ.get("KICRAFT_SMTP_USERNAME", "").strip()),
+            smtp_starttls=_env_bool_default("KICRAFT_SMTP_STARTTLS", True),
+            smtp_ssl=_env_bool("KICRAFT_SMTP_SSL"),
             provider_order=[p.strip() for p in os.environ.get(
                 "KICRAFT_PROVIDER_ORDER",
                 "novita/fp8,siliconflow/fp8,streamlake").split(",") if p.strip()],
@@ -129,6 +161,7 @@ class Settings:
             max_price_completion=float(
                 os.environ.get("KICRAFT_MAX_PRICE_COMPLETION", cls.max_price_completion)),
             enable_prompt_cache=_env_bool_default("KICRAFT_ENABLE_PROMPT_CACHE", True),
+            eval_judge_model=(os.environ.get("KICRAFT_EVAL_JUDGE_MODEL", "").strip() or None),
         )
 
     def redacted(self) -> dict:
@@ -141,9 +174,16 @@ class Settings:
             "total_usd_ceiling": self.total_usd_ceiling,
             "ledger_path": str(self.ledger_path),
             "kill_switch": self.kill_switch,
+            "public_url": self.public_url,
+            "smtp_host": self.smtp_host,
+            "smtp_port": self.smtp_port,
+            "smtp_from": self.smtp_from,
+            "smtp_starttls": self.smtp_starttls,
+            "smtp_ssl": self.smtp_ssl,
             "provider_order": self.provider_order,
             "provider_allow_fallbacks": self.provider_allow_fallbacks,
             "max_price_prompt": self.max_price_prompt,
             "max_price_completion": self.max_price_completion,
             "enable_prompt_cache": self.enable_prompt_cache,
+            "eval_judge_model": self.eval_judge_model,
         }
