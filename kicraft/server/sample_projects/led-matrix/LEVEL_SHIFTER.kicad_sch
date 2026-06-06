@@ -1,0 +1,730 @@
+(kicad_sch
+	(version 20250114)
+	(generator "eeschema")
+	(generator_version "9.0")
+	(uuid "84772276-20da-46f9-bcf8-ccdf60376444")
+	(paper "A4")
+
+	(lib_symbols
+		(symbol "ahct1g125:74AHCT1G125GV"
+    (in_bom yes)
+    (on_board yes)
+    (property
+      "Reference"
+      "U"
+      (id 0)
+      (at 0 7.62 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Value"
+      "74AHCT1G125GV"
+      (id 1)
+      (at 0 -7.62 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Footprint"
+      "ahct1g125:SOT-23-5_L3.0-W1.7-P0.95-LS2.8-BL"
+      (id 2)
+      (at 0 -10.16 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Datasheet"
+      "https://www.lcsc.com/datasheet/C52140417.pdf"
+      (id 3)
+      (at 0 -12.70 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Manufacturer"
+      "MDD(辰达半导体)"
+      (id 4)
+      (at 0 -15.24 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "MPN"
+      "74AHCT1G125GV"
+      (id 5)
+      (at 0 -17.78 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "LCSC Part"
+      "C52140417"
+      (id 6)
+      (at 0 -20.32 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (symbol "74AHCT1G125GV_0_1"
+      (rectangle
+        (start -6.35 5.08)
+        (end 6.35 -5.08)
+        (stroke (width 0) (type default))
+        (fill (type background))
+      )
+      (circle
+        (center -5.08 3.81)
+        (radius 0.38)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (pin unspecified line
+        (at -8.89 2.54 0)
+        (length 2.54)
+        (name "~{OE}" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -8.89 -0.00 0)
+        (length 2.54)
+        (name "A" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -8.89 -2.54 0)
+        (length 2.54)
+        (name "GND" (effects (font (size 1.27 1.27))))
+        (number "3" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 8.89 -2.54 180)
+        (length 2.54)
+        (name "Y" (effects (font (size 1.27 1.27))))
+        (number "4" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 8.89 2.54 180)
+        (length 2.54)
+        (name "VCC" (effects (font (size 1.27 1.27))))
+        (number "5" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )
+		(symbol "Device:C"
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0.254)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "C"
+			(at 0.635 2.54 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "C"
+			(at 0.635 -2.54 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" ""
+			(at 0.9652 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Unpolarized capacitor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "cap capacitor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_fp_filters" "C_*"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "C_0_1"
+			(polyline
+				(pts
+					(xy -2.032 0.762) (xy 2.032 0.762)
+				)
+				(stroke
+					(width 0.508)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy -2.032 -0.762) (xy 2.032 -0.762)
+				)
+				(stroke
+					(width 0.508)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "C_1_1"
+			(pin passive line
+				(at 0 3.81 270)
+				(length 2.794)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 0 -3.81 90)
+				(length 2.794)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+		(symbol "power:GND"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -6.35 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "GND_0_1"
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 -1.27) (xy 1.27 -1.27) (xy 0 -2.54) (xy -1.27 -1.27) (xy 0 -1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "GND_1_1"
+			(pin power_in line
+				(at 0 0 270)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+		(symbol "power:VBUS"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "VBUS"
+			(at 0 3.556 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"VBUS\""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "VBUS_0_1"
+			(polyline
+				(pts
+					(xy -0.762 1.27) (xy 0 2.54)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0 2.54) (xy 0.762 1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 2.54)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "VBUS_1_1"
+			(pin power_in line
+				(at 0 0 90)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+	)
+
+	(symbol
+		(lib_id "ahct1g125:74AHCT1G125GV")
+		(at 58.42 50.8 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "acf16040-3aa0-56d3-9570-781d69a05e1a")
+		(property "Reference" "U3"
+			(at 58.42 45.8 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "74AHCT1G125GV"
+			(at 58.42 55.8 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "ahct1g125:SOT-23-5_L3.0-W1.7-P0.95-LS2.8-BL"
+			(at 58.42 57.8 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 58.42 50.8 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "lcsc:C52140417 (single-gate SOT-23-5)"
+			(at 58.42 50.8 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "ESP32_LED_MATRIX"
+				(path "/84772276-20da-46f9-bcf8-ccdf60376444"
+					(reference "U3")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 96.52 50.8 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "c72a5f5c-490a-51f6-b3c3-1660805f4b57")
+		(property "Reference" "C8"
+			(at 96.52 45.8 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "100nF"
+			(at 96.52 55.8 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "Capacitor_SMD:C_0402_1005Metric"
+			(at 96.52 57.8 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 96.52 50.8 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "VBUS decap"
+			(at 96.52 50.8 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "ESP32_LED_MATRIX"
+				(path "/84772276-20da-46f9-bcf8-ccdf60376444"
+					(reference "C8")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:VBUS")
+		(at 69.85 48.26 180)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "52daaec6-57d9-5d63-ba4a-4036e427ef32")
+		(property "Reference" "#PWR96422"
+			(at 69.85 45.26 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "VBUS"
+			(at 69.85 51.26 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "ESP32_LED_MATRIX"
+				(path "/84772276-20da-46f9-bcf8-ccdf60376444"
+					(reference "#PWR96422")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:VBUS")
+		(at 96.52 44.45 180)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "601703c6-b434-57c4-ae77-76e7f7c45d19")
+		(property "Reference" "#PWR35066"
+			(at 96.52 41.45 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "VBUS"
+			(at 96.52 47.45 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "ESP32_LED_MATRIX"
+				(path "/84772276-20da-46f9-bcf8-ccdf60376444"
+					(reference "#PWR35066")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 46.99 53.34 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "7eefe016-1d4e-5261-adb6-18d6038585f4")
+		(property "Reference" "#PWR91431"
+			(at 46.99 50.34 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 46.99 56.34 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "ESP32_LED_MATRIX"
+				(path "/84772276-20da-46f9-bcf8-ccdf60376444"
+					(reference "#PWR91431")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 46.99 48.26 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "b7cb066b-e43c-5b18-b673-d28037df6f26")
+		(property "Reference" "#PWR94566"
+			(at 46.99 45.26 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 46.99 51.26 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "ESP32_LED_MATRIX"
+				(path "/84772276-20da-46f9-bcf8-ccdf60376444"
+					(reference "#PWR94566")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 96.52 57.15 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "e8eb85a8-32fd-50c0-a2d5-dd5ceefe1492")
+		(property "Reference" "#PWR93752"
+			(at 96.52 54.15 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 96.52 60.15 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "ESP32_LED_MATRIX"
+				(path "/84772276-20da-46f9-bcf8-ccdf60376444"
+					(reference "#PWR93752")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(wire
+		(pts (xy 49.53 50.8) (xy 46.99 50.8))
+		(stroke (width 0) (type default))
+		(uuid "fc521bc1-2d5d-5aa8-968c-54ee4504183c")
+	)
+	(wire
+		(pts (xy 67.31 48.26) (xy 69.85 48.26))
+		(stroke (width 0) (type default))
+		(uuid "632a84bf-057c-5d9e-aa85-db7f4ae37869")
+	)
+	(wire
+		(pts (xy 96.52 46.99) (xy 96.52 44.45))
+		(stroke (width 0) (type default))
+		(uuid "3354092c-03ba-56e0-b8f7-be7d835dbe53")
+	)
+	(wire
+		(pts (xy 49.53 53.34) (xy 46.99 53.34))
+		(stroke (width 0) (type default))
+		(uuid "456f642d-4537-5e49-9ac7-cc4d08d3229a")
+	)
+	(wire
+		(pts (xy 49.53 48.26) (xy 46.99 48.26))
+		(stroke (width 0) (type default))
+		(uuid "8d2e5e18-1485-54a2-9a4c-0e59c71d32fe")
+	)
+	(wire
+		(pts (xy 96.52 54.61) (xy 96.52 57.15))
+		(stroke (width 0) (type default))
+		(uuid "2fb8020c-0467-5b32-9d37-99484b88afa2")
+	)
+	(wire
+		(pts (xy 67.31 53.34) (xy 69.85 53.34))
+		(stroke (width 0) (type default))
+		(uuid "76069f51-aecc-5a23-9050-1aa13e6a49c3")
+	)
+	(hierarchical_label "LED_DATA_3V3" (shape input)
+		(at 46.99 50.8 180)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "60879377-6265-5267-836c-d5d39f5e0823")
+	)
+	(hierarchical_label "LED_DATA_5V" (shape output)
+		(at 69.85 53.34 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "167b95a8-2942-53ca-8cfb-0f0ef6d2ee4b")
+	)
+
+	(sheet_instances
+		(path "/30073560-a0aa-4aee-8483-07ff1be02d18"
+			(page "LEVEL_SHIFTER")
+		)
+	)
+)
