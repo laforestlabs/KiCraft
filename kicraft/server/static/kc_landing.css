@@ -1,0 +1,393 @@
+/* Public landing page for KiCraft (see web._render_landing + kc_landing.js).
+   Dark-theme tokens mirror web.py / kc_onboarding.css:
+     bg #0b1120 . panel #0f172a . border #1e293b
+     primary #60a5fa . violet #a78bfa . text #e2e8f0 . muted #94a3b8 / #64748b
+   Everything is scoped under .kc-landing so it never leaks into the auth cards. */
+
+.kc-landing {
+  --kc-bg: #0b1120;
+  --kc-panel: #0f172a;
+  --kc-border: #1e293b;
+  --kc-blue: #60a5fa;
+  --kc-violet: #a78bfa;
+  --kc-text: #e2e8f0;
+  --kc-muted: #94a3b8;
+  --kc-dim: #64748b;
+  color: var(--kc-text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.55;
+  overflow-x: hidden;
+}
+
+.kc-landing a { text-decoration: none; color: inherit; }
+.kc-landing section { position: relative; }
+
+/* Centered content column, generous gutters, capped width. */
+.kc-wrap {
+  width: 100%;
+  max-width: 1140px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ---- top nav: sticky, translucent, blurs the page behind it ---------------- */
+.kc-nav {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: rgba(11, 17, 32, 0.72);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--kc-border);
+}
+.kc-nav-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 62px;
+}
+.kc-brand { display: flex; align-items: baseline; gap: 10px; }
+.kc-brand .kc-logo { font-size: 1.3rem; font-weight: 800; letter-spacing: -0.01em; }
+.kc-brand .kc-tag { font-size: 0.8rem; color: var(--kc-muted); }
+.kc-nav-actions { display: flex; align-items: center; gap: 14px; }
+
+/* ---- buttons -------------------------------------------------------------- */
+.kc-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  border-radius: 10px;
+  padding: 11px 20px;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.2s ease, background 0.2s ease,
+              border-color 0.2s ease;
+  white-space: nowrap;
+}
+.kc-btn-primary {
+  color: #0b1120;
+  background: linear-gradient(135deg, var(--kc-blue), var(--kc-violet));
+  box-shadow: 0 8px 24px -8px rgba(96, 165, 250, 0.6);
+}
+.kc-btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 30px -8px rgba(124, 137, 250, 0.75);
+}
+.kc-btn-ghost {
+  color: var(--kc-text);
+  border: 1px solid var(--kc-border);
+  background: rgba(255, 255, 255, 0.02);
+}
+.kc-btn-ghost:hover { border-color: var(--kc-blue); color: #fff; }
+.kc-btn-lg { font-size: 1.05rem; padding: 14px 26px; }
+.kc-nav-signin { font-size: 0.92rem; color: var(--kc-muted); font-weight: 600; }
+.kc-nav-signin:hover { color: #fff; }
+
+/* ---- hero ----------------------------------------------------------------- */
+.kc-hero { padding: 70px 0 56px; }
+.kc-hero-grid {
+  display: grid;
+  grid-template-columns: 1.05fr 0.95fr;
+  gap: 48px;
+  align-items: center;
+}
+.kc-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--kc-blue);
+  background: rgba(96, 165, 250, 0.1);
+  border: 1px solid rgba(96, 165, 250, 0.25);
+  padding: 5px 12px;
+  border-radius: 999px;
+}
+.kc-h1 {
+  font-size: clamp(2.3rem, 5vw, 3.5rem);
+  line-height: 1.05;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin: 20px 0 0;
+}
+.kc-grad {
+  background: linear-gradient(110deg, var(--kc-blue) 10%, var(--kc-violet) 70%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.kc-sub {
+  font-size: 1.12rem;
+  color: var(--kc-muted);
+  margin: 18px 0 0;
+  max-width: 33em;
+}
+.kc-cta-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 28px;
+  flex-wrap: wrap;
+}
+.kc-trust { margin-top: 14px; font-size: 0.86rem; color: var(--kc-dim); }
+.kc-trust b { color: var(--kc-muted); font-weight: 600; }
+
+/* Faux prompt console: the typewriter types example briefs into it. */
+.kc-console {
+  margin-top: 26px;
+  background: #0a0f1e;
+  border: 1px solid var(--kc-border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  font-size: 0.92rem;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+}
+.kc-console-bar { display: flex; gap: 6px; margin-bottom: 10px; }
+.kc-console-bar i {
+  width: 11px; height: 11px; border-radius: 50%; display: inline-block;
+  background: #334155;
+}
+.kc-console-bar i:nth-child(1) { background: #ef4444aa; }
+.kc-console-bar i:nth-child(2) { background: #f59e0baa; }
+.kc-console-bar i:nth-child(3) { background: #22c55eaa; }
+.kc-console-line { color: var(--kc-text); min-height: 1.5em; }
+.kc-console-line .kc-prompt { color: var(--kc-blue); margin-right: 8px; }
+.kc-caret {
+  display: inline-block;
+  width: 8px;
+  background: var(--kc-blue);
+  margin-left: 2px;
+  animation: kc-blink 1.05s steps(1) infinite;
+}
+@keyframes kc-blink { 50% { opacity: 0; } }
+
+/* Hero board: the featured 3D render, floating with a violet glow. */
+.kc-hero-art { position: relative; display: flex; justify-content: center; }
+.kc-hero-art::before {
+  content: "";
+  position: absolute;
+  inset: -6% -2% 6% -2%;
+  background: radial-gradient(60% 55% at 50% 45%,
+              rgba(124, 137, 250, 0.32), transparent 70%);
+  filter: blur(14px);
+  z-index: 0;
+}
+.kc-board {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 560px;
+  filter: drop-shadow(0 26px 40px rgba(0, 0, 0, 0.55));
+  animation: kc-float 7s ease-in-out infinite;
+}
+@keyframes kc-float {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50%      { transform: translateY(-12px) rotate(-0.4deg); }
+}
+
+/* Ambient page glow blobs (behind sections). */
+.kc-glow {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(90px);
+  opacity: 0.5;
+  pointer-events: none;
+  z-index: 0;
+}
+.kc-glow-a { top: -120px; right: -80px; width: 420px; height: 420px;
+  background: radial-gradient(circle, rgba(96,165,250,0.5), transparent 70%); }
+.kc-glow-b { top: 380px; left: -140px; width: 460px; height: 460px;
+  background: radial-gradient(circle, rgba(167,139,250,0.42), transparent 70%); }
+
+/* ---- generic section heading ---------------------------------------------- */
+.kc-section { padding: 56px 0; }
+.kc-kicker {
+  font-size: 0.8rem; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--kc-violet); text-align: center;
+}
+.kc-h2 {
+  font-size: clamp(1.7rem, 3vw, 2.3rem);
+  font-weight: 800; letter-spacing: -0.02em; text-align: center;
+  margin: 8px 0 0;
+}
+.kc-lead {
+  text-align: center; color: var(--kc-muted); font-size: 1.05rem;
+  max-width: 40em; margin: 14px auto 0;
+}
+
+/* ---- pipeline stepper ----------------------------------------------------- */
+.kc-pipe {
+  display: flex; align-items: stretch; justify-content: center;
+  flex-wrap: wrap; gap: 10px; margin-top: 36px;
+}
+.kc-step {
+  position: relative;
+  flex: 1 1 150px;
+  max-width: 180px;
+  background: var(--kc-panel);
+  border: 1px solid var(--kc-border);
+  border-radius: 12px;
+  padding: 16px 14px;
+  text-align: center;
+}
+.kc-step .kc-step-n {
+  font-family: ui-monospace, monospace; font-size: 0.72rem; color: var(--kc-dim);
+}
+.kc-step .kc-step-name { font-weight: 700; margin-top: 4px; font-size: 0.96rem; }
+.kc-step .kc-step-d { font-size: 0.8rem; color: var(--kc-muted); margin-top: 4px; }
+.kc-step.kc-step-build { border-color: rgba(124, 137, 250, 0.45); }
+
+/* ---- feature cards -------------------------------------------------------- */
+.kc-grid-4 {
+  display: grid; gap: 18px; margin-top: 38px;
+  grid-template-columns: repeat(2, 1fr);
+}
+.kc-card {
+  background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0));
+  border: 1px solid var(--kc-border);
+  border-radius: 14px;
+  padding: 22px;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.2s ease;
+}
+.kc-card:hover {
+  transform: translateY(-4px);
+  border-color: rgba(96, 165, 250, 0.45);
+  box-shadow: 0 18px 40px -22px rgba(96, 165, 250, 0.55);
+}
+.kc-card .kc-ic {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 42px; height: 42px; border-radius: 10px; margin-bottom: 12px;
+  background: rgba(96, 165, 250, 0.12); color: var(--kc-blue);
+  border: 1px solid rgba(96, 165, 250, 0.25);
+}
+.kc-card .kc-ic .material-icons { font-size: 22px; }
+.kc-card h3 { font-size: 1.06rem; font-weight: 700; margin: 0 0 6px; }
+.kc-card p { font-size: 0.92rem; color: var(--kc-muted); margin: 0; }
+
+/* ---- sample gallery ------------------------------------------------------- */
+.kc-gallery {
+  display: grid; gap: 22px; margin-top: 38px;
+  grid-template-columns: repeat(3, 1fr);
+}
+.kc-sample {
+  display: flex; flex-direction: column;
+  background: var(--kc-panel);
+  border: 1px solid var(--kc-border);
+  border-radius: 16px;
+  overflow: hidden;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.2s ease;
+}
+.kc-sample:hover {
+  transform: translateY(-5px);
+  border-color: rgba(167, 139, 250, 0.5);
+  box-shadow: 0 24px 50px -26px rgba(124, 137, 250, 0.7);
+}
+.kc-sample-art {
+  position: relative;
+  background:
+    radial-gradient(70% 80% at 50% 30%, rgba(96,165,250,0.16), transparent 70%),
+    #0a0f1e;
+  padding: 20px 18px 8px;
+  display: flex; align-items: center; justify-content: center;
+  min-height: 168px;
+}
+.kc-sample-art img {
+  width: 100%; max-height: 180px; object-fit: contain;
+  filter: drop-shadow(0 14px 22px rgba(0,0,0,0.5));
+}
+.kc-badge {
+  position: absolute; top: 12px; left: 12px;
+  font-size: 0.7rem; font-weight: 700; letter-spacing: 0.03em;
+  color: var(--kc-blue); background: rgba(11,17,32,0.7);
+  border: 1px solid rgba(96,165,250,0.3); border-radius: 999px;
+  padding: 3px 10px;
+}
+.kc-sample-body { padding: 16px 18px 20px; display: flex; flex-direction: column; flex: 1; }
+.kc-sample-body h3 { font-size: 1.08rem; font-weight: 700; margin: 0; }
+.kc-sample-stats { font-size: 0.76rem; color: var(--kc-dim); margin: 6px 0 0;
+  font-family: ui-monospace, monospace; }
+.kc-sample-body p { font-size: 0.9rem; color: var(--kc-muted); margin: 10px 0 0; }
+.kc-sample-prompt {
+  margin-top: 12px; font-size: 0.84rem; color: var(--kc-text);
+  background: rgba(255,255,255,0.03); border: 1px dashed var(--kc-border);
+  border-radius: 8px; padding: 9px 11px; font-style: italic;
+}
+.kc-sample-cta {
+  margin-top: auto; padding-top: 16px;
+  display: inline-flex; align-items: center; gap: 6px;
+  font-weight: 600; font-size: 0.92rem; color: var(--kc-blue);
+}
+.kc-sample-cta .material-icons { font-size: 18px; transition: transform 0.18s ease; }
+.kc-sample:hover .kc-sample-cta .material-icons { transform: translateX(4px); }
+
+/* ---- how it works --------------------------------------------------------- */
+.kc-steps3 { display: grid; gap: 20px; margin-top: 38px;
+  grid-template-columns: repeat(3, 1fr); }
+.kc-how {
+  background: var(--kc-panel); border: 1px solid var(--kc-border);
+  border-radius: 14px; padding: 24px;
+}
+.kc-how .kc-num {
+  font-size: 2rem; font-weight: 800; line-height: 1;
+  background: linear-gradient(135deg, var(--kc-blue), var(--kc-violet));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.kc-how h3 { font-size: 1.1rem; font-weight: 700; margin: 12px 0 6px; }
+.kc-how p { font-size: 0.92rem; color: var(--kc-muted); margin: 0; }
+
+/* ---- final CTA band ------------------------------------------------------- */
+.kc-cta-band {
+  margin: 18px auto 0;
+  text-align: center;
+  background:
+    radial-gradient(80% 140% at 50% 0%, rgba(124,137,250,0.18), transparent 70%),
+    var(--kc-panel);
+  border: 1px solid rgba(124, 137, 250, 0.35);
+  border-radius: 20px;
+  padding: 48px 28px;
+}
+.kc-cta-band h2 { font-size: clamp(1.6rem, 3vw, 2.2rem); font-weight: 800; margin: 0; }
+.kc-cta-band p { color: var(--kc-muted); margin: 12px 0 24px; }
+
+/* ---- footer --------------------------------------------------------------- */
+.kc-foot {
+  margin-top: 64px; border-top: 1px solid var(--kc-border);
+  padding: 28px 0 40px;
+}
+.kc-foot-inner {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 14px;
+}
+.kc-foot a, .kc-foot span { font-size: 0.84rem; color: var(--kc-dim); }
+.kc-foot a:hover { color: var(--kc-muted); }
+.kc-foot-links { display: flex; gap: 18px; flex-wrap: wrap; }
+
+/* ---- scroll reveal -------------------------------------------------------- */
+.kc-reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+  will-change: opacity, transform;
+}
+.kc-reveal.kc-in { opacity: 1; transform: none; }
+
+/* ---- responsive ----------------------------------------------------------- */
+@media (max-width: 880px) {
+  .kc-hero-grid { grid-template-columns: 1fr; gap: 30px; }
+  .kc-hero-art { order: -1; }
+  .kc-grid-4 { grid-template-columns: 1fr; }
+  .kc-gallery { grid-template-columns: 1fr; }
+  .kc-steps3 { grid-template-columns: 1fr; }
+  .kc-brand .kc-tag { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kc-board { animation: none; }
+  .kc-caret { animation: none; }
+  .kc-reveal { opacity: 1; transform: none; transition: none; }
+  .kc-btn:hover, .kc-card:hover, .kc-sample:hover { transform: none; }
+}

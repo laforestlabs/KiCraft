@@ -26,6 +26,7 @@ import time
 import types
 import typing
 from pathlib import Path
+from urllib.parse import quote
 
 from nicegui import app, ui
 from starlette.responses import FileResponse, PlainTextResponse, RedirectResponse
@@ -35,6 +36,7 @@ from .config import LEGAL_VERSION, Settings, default_legal_dir
 from .examples import CHIP_PROMPTS, EXAMPLE_PROMPTS
 from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView, kicanvas_head
 from .mailer import send_reset_email
+from .samples import SAMPLES_DIR, available_samples, featured_sample
 from .session import (
     commit_slot,
     downstream_stages,
@@ -50,6 +52,11 @@ from .stagetabs import StageTabs, demo_events
 
 # Self-host the KiCanvas ES module bundle so the browser fetches it same-origin.
 app.add_static_files("/static", str(KICANVAS_ASSET.parent))
+
+# Prebuilt sample projects (preview renders + raw KiCad files) for the public
+# landing showcase and the logged-in explorer. Public on purpose: these are
+# curated, finished demos, so serving them costs nothing and needs no auth.
+app.add_static_files("/samples", str(SAMPLES_DIR))
 
 # Raw-file serving: a capability token encodes the project dir, HMAC-signed with
 # the server secret, so it gates access without app.storage.user (whose getter can
@@ -961,7 +968,7 @@ def privacy_page():
 
 
 @ui.page("/login")
-def login_page():
+def login_page(prompt: str = ""):
     ui.dark_mode().enable()
     ui.query("body").style("background:#0b1120")
     with ui.card().classes("absolute-center w-96") \
@@ -977,6 +984,8 @@ def login_page():
                 app.storage.user["user_id"] = user.id
                 app.storage.user["email"] = user.email
                 app.storage.user["session_epoch"] = user.session_epoch
+                if prompt:  # carry a sample's brief through into the workspace
+                    app.storage.user["pending_prompt"] = prompt
                 ui.navigate.to("/")
             else:
                 ui.notify("Wrong email or password.", color="negative")
@@ -990,13 +999,15 @@ def login_page():
         ui.separator().style("background:#1e293b")
         with ui.row().classes("items-center justify-between w-full"):
             ui.label("New to KiCraft?").classes("text-xs").style("color:#94a3b8")
-            ui.button("Create an account", on_click=lambda: ui.navigate.to("/signup")) \
+            ui.button("Create an account",
+                      on_click=lambda: ui.navigate.to(
+                          f"/signup?prompt={quote(prompt)}" if prompt else "/signup")) \
                 .props("flat dense")
         _legal_footer()
 
 
 @ui.page("/signup")
-def signup_page():
+def signup_page(prompt: str = ""):
     ui.dark_mode().enable()
     ui.query("body").style("background:#0b1120")
     with ui.card().classes("absolute-center w-96") \
@@ -1004,6 +1015,10 @@ def signup_page():
         ui.label("Create your account").classes("text-2xl font-bold text-white")
         ui.label("Free tier: one design per week. No credit card.") \
             .classes("text-sm").style("color:#94a3b8")
+        if prompt:  # arrived from a sample card: show what they'll build first
+            ui.label(f'You will start with: "{prompt}"') \
+                .classes("text-xs") \
+                .style("color:#cbd5e1;border-left:3px solid #60a5fa;padding-left:8px")
         email = ui.input("Email").classes("w-full")
         pw = ui.input("Password", password=True, password_toggle_button=True).classes("w-full")
         code = ui.input("Invite code", password=True).classes("w-full")
@@ -1045,6 +1060,8 @@ def signup_page():
             app.storage.user["user_id"] = user.id
             app.storage.user["email"] = user.email
             app.storage.user["session_epoch"] = user.session_epoch
+            if prompt:  # carry a sample's brief through into the workspace
+                app.storage.user["pending_prompt"] = prompt
             ui.navigate.to("/")
 
         pw.on("keydown.enter", submit)
@@ -1052,7 +1069,10 @@ def signup_page():
         ui.button("Create account", on_click=submit).classes("w-full")
         with ui.row().classes("items-center justify-between w-full"):
             ui.label("Already registered?").classes("text-xs").style("color:#94a3b8")
-            ui.button("Sign in", on_click=lambda: ui.navigate.to("/login")).props("flat dense")
+            ui.button("Sign in",
+                      on_click=lambda: ui.navigate.to(
+                          f"/login?prompt={quote(prompt)}" if prompt else "/login")) \
+                .props("flat dense")
         ui.separator().style("background:#1e293b")
         _laforest_footer()
 
@@ -1257,11 +1277,322 @@ def profile_page():
                 .props("flat dense no-caps color=white").classes("text-xs")
 
 
-@ui.page("/")
-def index():
+@ui.page("/samples")
+def samples_page():
+    """Logged-in explorer for the showcase boards: open any sample's real schematic
+    and routed PCB in KiCanvas, or send its brief into the workspace as a starting
+    point. Same login + consent gating as the rest of the app. Reuses the app's own
+    KiCanvas helpers (_render_synth_view / KiCanvasView), and the files are served
+    from the public /samples static mount."""
     user = _current_user()
     if user is None:
         return RedirectResponse("/login")
+    if user.accepted_terms_version != LEGAL_VERSION:
+        return RedirectResponse("/consent")
+
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    kicanvas_head()
+
+    with ui.header().classes("items-center justify-between") \
+            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+        with ui.row().classes("items-center gap-2"):
+            ui.label("KiCraft").classes("text-xl font-bold text-white")
+            ui.label("example boards").classes("text-sm").style("color:#94a3b8")
+        ui.button("Back to workspace", icon="arrow_back",
+                  on_click=lambda: ui.navigate.to("/")) \
+            .props("flat dense no-caps color=white").classes("text-xs")
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1200px"):
+        ui.label("Boards KiCraft designed").classes("text-2xl font-bold text-white")
+        ui.label("Open one to explore its real schematic and routed board, or use "
+                 "its brief as a starting point for your own design.") \
+            .classes("text-sm").style("color:#94a3b8")
+
+        samples = available_samples()
+        if not samples:
+            ui.label("No sample boards are available right now.") \
+                .classes("text-sm").style("color:#64748b")
+            return
+
+        grid = ui.row().classes("w-full flex-wrap gap-4")
+        viewer = ui.column().classes("w-full kc-viewer gap-2")
+
+        def open_sample(s):
+            viewer.clear()
+            with viewer:
+                with ui.row().classes("items-center justify-between w-full mt-2"):
+                    ui.label(s.title).classes("text-lg font-bold text-white")
+                    ui.button("Use as a starting point", icon="bolt",
+                              on_click=lambda ss=s: ui.navigate.to(
+                                  f"/?prompt={quote(ss.prompt)}")) \
+                        .props("color=primary unelevated")
+                ui.label(s.blurb).classes("text-sm").style("color:#94a3b8")
+                # Schematic and board are both rendered visible (not in tabs/dialogs):
+                # a KiCanvas WebGL canvas built inside a hidden container can size to
+                # zero and never repaint, so keeping both on-screen avoids that.
+                with ui.card().classes("w-full") \
+                        .style("background:#0f172a;border:1px solid #1e293b"):
+                    _render_synth_view(s.schematic_sources(), s.stem)
+                with ui.card().classes("w-full") \
+                        .style("background:#0f172a;border:1px solid #1e293b"):
+                    ui.label("Board").classes("text-xs font-medium").style("color:#94a3b8")
+                    url, name = s.board_source()
+                    KiCanvasView([KiCanvasSource(url, name)], height="h-[520px]")
+            ui.run_javascript(
+                "document.querySelector('.kc-viewer')?."
+                "scrollIntoView({behavior:'smooth',block:'start'})")
+
+        with grid:
+            for s in samples:
+                card = ui.card().classes("w-72 gap-1 cursor-pointer") \
+                    .style("background:#0f172a;border:1px solid #1e293b")
+                with card:
+                    ui.image(s.board_png_url).props("fit=contain") \
+                        .style("height:150px;background:#0a0f1e").classes("w-full rounded")
+                    ui.label(s.title).classes("text-base font-semibold text-white")
+                    ui.label(f"{s.sheets} sheets / {s.parts} parts / routed") \
+                        .classes("text-xs").style("color:#64748b")
+                    ui.label(s.blurb).classes("text-xs").style("color:#94a3b8")
+                card.on("click", lambda ss=s: open_sample(ss))
+
+
+# ---------------------------------------------------------------------------
+# Public landing page (shown at / to logged-out visitors).
+# ---------------------------------------------------------------------------
+
+# User-facing pipeline shown as a stepper. The first four mirror DESIGN_STAGES
+# (intent/functional_spec/architecture/bom); the last three are the deterministic
+# build phases. `True` marks the build half (accented).
+_LANDING_PIPELINE = [
+    ("01", "Intent", "What you're building", False),
+    ("02", "Functional spec", "Blocks, rails, interfaces", False),
+    ("03", "Architecture", "Topologies &amp; sheet plan", False),
+    ("04", "Real BOM", "Actual orderable parts", False),
+    ("05", "Synthesize", "Hierarchical schematic", True),
+    ("06", "Place &amp; route", "Placed, routed, DRC-clean", True),
+    ("07", "Fab files", "Gerbers + KiCad project", True),
+]
+
+# Inline SVG icons (Heroicons-style) so the page needs no icon font or CDN.
+_SVG_CPU = ('<path stroke-linecap="round" stroke-linejoin="round" d="M8.25 3v1.5M4.5 '
+            '8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 '
+            '3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 0 0 '
+            '2.25-2.25V6.75a2.25 2.25 0 0 0-2.25-2.25H6.75A2.25 2.25 0 0 0 4.5 '
+            '6.75v10.5a2.25 2.25 0 0 0 2.25 2.25Zm.75-12h9v9h-9v-9Z"/>')
+_SVG_STACK = ('<path stroke-linecap="round" stroke-linejoin="round" d="M16.5 8.25V6a2.25 '
+              '2.25 0 0 0-2.25-2.25H6A2.25 2.25 0 0 0 3.75 6v8.25A2.25 2.25 0 0 0 6 '
+              '16.5h2.25m8.25-8.25H18a2.25 2.25 0 0 1 2.25 2.25V18A2.25 2.25 0 0 1 18 '
+              '20.25h-7.5A2.25 2.25 0 0 1 8.25 18v-1.5m8.25-8.25h-6a2.25 2.25 0 0 '
+              '0-2.25 2.25v6"/>')
+_SVG_DOWNLOAD = ('<path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 '
+                 '2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 '
+                 '16.5m0 0L7.5 12m4.5 4.5V3"/>')
+_SVG_TUNE = ('<path stroke-linecap="round" stroke-linejoin="round" d="M10.5 6h9.75M10.5 '
+             '6a1.5 1.5 0 1 1-3 0m3 0a1.5 1.5 0 1 0-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 '
+             '1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 '
+             '0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-9.75 0h9.75"/>')
+_SVG_ARROW = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+              'stroke-width="2" width="16" height="16" aria-hidden="true">'
+              '<path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 '
+              '12m0 0-7.5 7.5M21 12H3"/></svg>')
+
+_LANDING_FEATURES = [
+    (_SVG_CPU, "Real parts, not placeholders",
+     "Every line of the BOM is a real, orderable component with a real footprint, "
+     "resolved to LCSC / JLCPCB part numbers."),
+    (_SVG_STACK, "Schematic and layout",
+     "A hierarchical, ERC-checked schematic, then a board that is actually placed, "
+     "routed, and DRC-clean. Not just a netlist."),
+    (_SVG_DOWNLOAD, "Native KiCad, no lock-in",
+     "Download a real .kicad_pro project plus Gerbers. Open it in KiCad, change "
+     "anything, send it to any fab."),
+    (_SVG_TUNE, "You stay in control",
+     "Edit any stage and re-run only what changed. KiCraft asks you when a design "
+     "choice is yours to make."),
+]
+
+_LANDING_HOW = [
+    ("1", "Describe your board",
+     "One sentence or a detailed brief. Big or small: be bold."),
+    ("2", "Watch it design",
+     "Follow the agent's thinking live as the schematic and the board take shape."),
+    ("3", "Download &amp; build",
+     "Grab the KiCad files and Gerbers, then order the PCB from any fab."),
+]
+
+
+def _svg_icon(path: str) -> str:
+    return ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+            'stroke-width="1.6" width="22" height="22" aria-hidden="true">'
+            f'{path}</svg>')
+
+
+def _landing_sample_card(s) -> str:
+    badge = '<span class="kc-badge">Featured</span>' if s.featured else ""
+    href = f"/signup?prompt={quote(s.prompt)}"
+    return (
+        f'<a class="kc-sample kc-reveal" href="{href}">'
+        f'<div class="kc-sample-art">{badge}'
+        f'<img src="{s.board_png_url}" alt="{s.title} board, designed by KiCraft" '
+        f'loading="lazy"></div>'
+        f'<div class="kc-sample-body">'
+        f'<h3>{s.title}</h3>'
+        f'<div class="kc-sample-stats">{s.sheets} sheets &middot; {s.parts} parts '
+        f'&middot; routed</div>'
+        f'<p>{s.blurb}</p>'
+        f'<div class="kc-sample-prompt">&ldquo;{s.prompt}&rdquo;</div>'
+        f'<span class="kc-sample-cta">Explore this board {_SVG_ARROW}</span>'
+        f'</div></a>'
+    )
+
+
+def _render_landing() -> None:
+    """The public marketing page at / for logged-out visitors: a hero, the pipeline,
+    feature cards, a gallery of real boards KiCraft designed, and CTAs that route to
+    signup. Pure static content: the showcase boards are prebuilt assets, so nothing
+    here calls a model (no token spend before a valid email signup)."""
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    ui.add_head_html('<link rel="stylesheet" href="/static/kc_landing.css">')
+    ui.add_head_html('<style>html{scroll-behavior:smooth}</style>')
+    ui.add_head_html(
+        f"<script>window.KICRAFT_PROMPTS={json.dumps(EXAMPLE_PROMPTS)};</script>")
+    ui.add_head_html('<script src="/static/kc_landing.js" defer></script>')
+
+    samples = available_samples()
+    hero = featured_sample()
+
+    pipeline = "".join(
+        f'<div class="kc-step{" kc-step-build" if b else ""}">'
+        f'<div class="kc-step-n">{n}</div>'
+        f'<div class="kc-step-name">{name}</div>'
+        f'<div class="kc-step-d">{desc}</div></div>'
+        for n, name, desc, b in _LANDING_PIPELINE)
+
+    features = "".join(
+        f'<div class="kc-card kc-reveal"><div class="kc-ic">{_svg_icon(svg)}</div>'
+        f'<h3>{title}</h3><p>{desc}</p></div>'
+        for svg, title, desc in _LANDING_FEATURES)
+
+    how = "".join(
+        f'<div class="kc-how kc-reveal"><div class="kc-num">{n}</div>'
+        f'<h3>{title}</h3><p>{desc}</p></div>'
+        for n, title, desc in _LANDING_HOW)
+
+    # Seed the console with a real brief so it is never blank (the typewriter takes
+    # over once the JS and the client-injected markup are both ready).
+    seed = EXAMPLE_PROMPTS[0] if EXAMPLE_PROMPTS else "Describe your board. Be bold."
+    seed_html = seed.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    gallery = "".join(_landing_sample_card(s) for s in samples)
+    hero_art = (f'<div class="kc-hero-art"><img class="kc-board" '
+                f'src="{hero.board_png_url}" alt="A PCB designed by KiCraft"></div>'
+                if hero else "")
+    gallery_block = (
+        f'<section class="kc-section" id="samples" style="scroll-margin-top:80px">'
+        f'<div class="kc-wrap">'
+        f'<div class="kc-kicker">Real output</div>'
+        f'<h2 class="kc-h2">Boards KiCraft designed</h2>'
+        f'<p class="kc-lead">Each of these started as a single sentence. Open one to '
+        f'see the schematic and the routed board, or build your own version.</p>'
+        f'<div class="kc-gallery">{gallery}</div></div></section>'
+    ) if samples else ""
+
+    html = f"""
+<div class="kc-landing">
+  <div class="kc-nav"><div class="kc-wrap kc-nav-inner">
+    <div class="kc-brand"><span class="kc-logo kc-grad">KiCraft</span>
+      <span class="kc-tag">design a PCB from a sentence</span></div>
+    <div class="kc-nav-actions">
+      <a class="kc-nav-signin" href="/login">Sign in</a>
+      <a class="kc-btn kc-btn-primary" href="/signup">Start building</a>
+    </div>
+  </div></div>
+
+  <section class="kc-hero">
+    <div class="kc-glow kc-glow-a"></div>
+    <div class="kc-glow kc-glow-b"></div>
+    <div class="kc-wrap kc-hero-grid">
+      <div class="kc-hero-copy">
+        <span class="kc-eyebrow">AI PCB design &middot; powered by KiCad</span>
+        <h1 class="kc-h1">Describe a board.<br><span class="kc-grad">Get real KiCad files.</span></h1>
+        <p class="kc-sub">KiCraft turns one sentence into a finished design: a
+          hierarchical schematic, real orderable parts, and a board that is placed,
+          routed, and fab-ready.</p>
+        <div class="kc-console">
+          <div class="kc-console-bar"><i></i><i></i><i></i></div>
+          <div class="kc-console-line"><span class="kc-prompt">&gt;</span><span
+            class="kc-type">{seed_html}</span><span class="kc-caret">&nbsp;</span></div>
+        </div>
+        <div class="kc-cta-row">
+          <a class="kc-btn kc-btn-primary kc-btn-lg" href="/signup">Start building free</a>
+          <a class="kc-btn kc-btn-ghost kc-btn-lg" href="#samples">See the boards</a>
+        </div>
+        <p class="kc-trust"><b>Free tier:</b> one full design a week. No credit card.</p>
+      </div>
+      {hero_art}
+    </div>
+  </section>
+
+  <section class="kc-section">
+    <div class="kc-wrap">
+      <div class="kc-kicker">The pipeline</div>
+      <h2 class="kc-h2">From a sentence to a fabricable board</h2>
+      <p class="kc-lead">KiCraft runs the whole flow an engineer would, one
+        reviewable stage at a time.</p>
+      <div class="kc-pipe">{pipeline}</div>
+    </div>
+  </section>
+
+  <section class="kc-section">
+    <div class="kc-wrap">
+      <div class="kc-kicker">Why it's different</div>
+      <h2 class="kc-h2">Designs you can actually build</h2>
+      <div class="kc-grid-4">{features}</div>
+    </div>
+  </section>
+
+  {gallery_block}
+
+  <section class="kc-section">
+    <div class="kc-wrap">
+      <div class="kc-kicker">How it works</div>
+      <h2 class="kc-h2">Three steps to a PCB</h2>
+      <div class="kc-steps3">{how}</div>
+    </div>
+  </section>
+
+  <section class="kc-section">
+    <div class="kc-wrap">
+      <div class="kc-cta-band kc-reveal">
+        <h2>Ready to build your board?</h2>
+        <p>Describe it in a sentence. KiCraft does the rest.</p>
+        <a class="kc-btn kc-btn-primary kc-btn-lg" href="/signup">Start building free</a>
+      </div>
+    </div>
+  </section>
+
+  <footer class="kc-foot"><div class="kc-wrap kc-foot-inner">
+    <span>&copy; KiCraft &middot; A <a href="https://laforestlabs.com" target="_blank"
+      rel="noopener">LaForest Labs</a> product</span>
+    <div class="kc-foot-links">
+      <a href="/terms" target="_blank" rel="noopener">Terms of Service</a>
+      <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>
+      <a href="/login">Sign in</a>
+    </div>
+  </div></footer>
+</div>
+"""
+    ui.html(html, sanitize=False)
+
+
+@ui.page("/")
+def index(prompt: str = ""):
+    user = _current_user()
+    if user is None:
+        _render_landing()
+        return
     if user.accepted_terms_version != LEGAL_VERSION:
         return RedirectResponse("/consent")
     q0 = _store().quota_status(user)
@@ -1299,6 +1630,10 @@ def index():
             ui.label("KiCraft").classes("text-xl font-bold text-white")
             ui.label("design a PCB from a sentence").classes("text-sm").style("color:#94a3b8")
         with ui.row().classes("items-center gap-3"):
+            ui.button("Examples", icon="dashboard",
+                      on_click=lambda: ui.navigate.to("/samples")) \
+                .props("flat dense no-caps color=white").classes("text-xs") \
+                .tooltip("Explore boards KiCraft designed")
             ui.button(user.email, icon="account_circle",
                       on_click=lambda: ui.navigate.to("/profile")) \
                 .props("flat dense no-caps color=white").classes("text-xs") \
@@ -1327,6 +1662,9 @@ def index():
                              "real KiCad files: schematic, real parts, placed and routed. "
                              "Be bold: the bigger the ask, the better the demo.") \
                         .classes("text-sm").style("color:#94a3b8")
+                    ui.button("Explore example boards", icon="dashboard",
+                              on_click=lambda: ui.navigate.to("/samples")) \
+                        .props("flat dense no-caps color=primary").classes("text-xs mt-1")
 
                 def dismiss_welcome():
                     welcome_card.set_visibility(False)
@@ -1371,6 +1709,14 @@ def index():
             ui.button("Surprise me", icon="casino",
                       on_click=lambda: use_prompt(random.choice(EXAMPLE_PROMPTS))) \
                 .props("flat rounded dense no-caps").classes("kc-chip")
+
+        # Prefill from a sample the visitor chose before signing up (carried via the
+        # ?prompt= query or stashed across the signup hop). No run starts: the user
+        # still clicks Design themselves, so no model is called without a signup.
+        prefill = (prompt or app.storage.user.pop("pending_prompt", "") or "").strip()
+        if prefill:
+            use_prompt(prefill)
+
         status = ui.label("").classes("text-sm").style("color:#e2e8f0")
         spend = ui.label("").classes("text-sm").style("color:#64748b")
         question_box = ui.column().classes("w-full")
