@@ -29,6 +29,22 @@ def _backdate(store, project_id, days_ago):
         conn.execute("UPDATE projects SET created_at=? WHERE id=?", (ts, project_id))
 
 
+def _set_reset_times(store, *, created_secs_ago=None, expires_secs_from_now=None):
+    """Rewrite every password_resets row's created_at / expires_at to a relative
+    time, so tests can step past the cooldown or force a token to expire without
+    sleeping. A negative expires_secs_from_now puts expiry in the past."""
+    now = dt.datetime.now(dt.timezone.utc)
+    sets, params = [], []
+    if created_secs_ago is not None:
+        sets.append("created_at=?")
+        params.append((now - dt.timedelta(seconds=created_secs_ago)).isoformat())
+    if expires_secs_from_now is not None:
+        sets.append("expires_at=?")
+        params.append((now + dt.timedelta(seconds=expires_secs_from_now)).isoformat())
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(f"UPDATE password_resets SET {', '.join(sets)}", params)
+
+
 # ---- password hashing -----------------------------------------------------
 
 def test_password_roundtrip():
@@ -131,6 +147,7 @@ def test_legacy_db_upgrades_without_losing_rows(tmp_path):
     assert u is not None and u.tier == "pro"  # existing data preserved
     assert u.accepted_terms_version is None  # legacy user is re-prompted
     assert u.allow_training is True  # backfilled default
+    assert u.session_epoch == 0  # backfilled so existing sessions stay valid
 
 
 def test_export_user_dumps_metadata_without_password(store):
@@ -234,3 +251,100 @@ def test_projects_listed_newest_first(store):
     assert [p.id for p in projs] == [p2, p1]
     first = store.get_project(p1)
     assert first.project_stem == "FIRST" and first.zip_path == "/tmp/f.zip"
+
+
+# ---- password reset + session epoch ---------------------------------------
+
+def test_reset_token_roundtrip(store):
+    store.create_user("reset@e.st", "oldpw")
+    token = store.create_reset_token("reset@e.st")
+    assert token and len(token) > 20
+    assert store.verify_reset_token(token).email == "reset@e.st"  # resolves the user
+    updated = store.consume_reset_token(token, "newpw")
+    assert updated is not None
+    assert store.authenticate("reset@e.st", "oldpw") is None  # old password dead
+    assert store.authenticate("reset@e.st", "newpw") is not None  # new one works
+
+
+def test_reset_token_is_single_use(store):
+    store.create_user("once@e.st", "pw")
+    token = store.create_reset_token("once@e.st")
+    assert store.consume_reset_token(token, "first") is not None
+    assert store.consume_reset_token(token, "second") is None  # already spent
+    assert store.verify_reset_token(token) is None
+    assert store.authenticate("once@e.st", "first") is not None  # second never applied
+
+
+def test_reset_token_expires(store):
+    store.create_user("exp@e.st", "pw")
+    token = store.create_reset_token("exp@e.st")
+    _set_reset_times(store, expires_secs_from_now=-1)  # already expired
+    assert store.verify_reset_token(token) is None
+    assert store.consume_reset_token(token, "newpw") is None
+    assert store.authenticate("exp@e.st", "pw") is not None  # unchanged
+
+
+def test_new_reset_token_invalidates_prior(store):
+    store.create_user("rotate@e.st", "pw")
+    first = store.create_reset_token("rotate@e.st")
+    _set_reset_times(store, created_secs_ago=120)  # step past the cooldown
+    second = store.create_reset_token("rotate@e.st")
+    assert second and second != first
+    assert store.verify_reset_token(first) is None  # the old link is dead
+    assert store.verify_reset_token(second).email == "rotate@e.st"
+
+
+def test_create_reset_token_unknown_email_returns_none(store):
+    assert store.create_reset_token("ghost@e.st") is None  # no enumeration signal
+
+
+def test_create_reset_token_cooldown(store):
+    store.create_user("cool@e.st", "pw")
+    assert store.create_reset_token("cool@e.st") is not None
+    assert store.create_reset_token("cool@e.st") is None  # within the cooldown window
+    _set_reset_times(store, created_secs_ago=120)
+    assert store.create_reset_token("cool@e.st") is not None  # cooldown elapsed
+
+
+def test_reset_garbage_and_empty_token(store):
+    assert store.verify_reset_token("not-a-real-token") is None
+    assert store.verify_reset_token("") is None
+    assert store.consume_reset_token("not-a-real-token", "pw") is None
+    assert store.consume_reset_token("", "pw") is None
+
+
+def test_consume_empty_password_raises_and_keeps_token(store):
+    store.create_user("e@e.st", "pw")
+    token = store.create_reset_token("e@e.st")
+    with pytest.raises(ValueError):
+        store.consume_reset_token(token, "")  # rejected before the token is spent
+    assert store.verify_reset_token(token) is not None  # still usable
+
+
+def test_set_password_bumps_session_epoch(store):
+    u = store.create_user("epoch@e.st", "pw")
+    assert u.session_epoch == 0
+    store.set_password(u.id, "pw2")
+    assert store.get_user(u.id).session_epoch == 1  # every change rotates the epoch
+    assert store.authenticate("epoch@e.st", "pw2") is not None
+
+
+def test_set_password_validates(store):
+    u = store.create_user("v@e.st", "pw")
+    with pytest.raises(ValueError):
+        store.set_password(u.id, "")  # empty rejected
+    with pytest.raises(ValueError):
+        store.set_password(999999, "pw")  # no such user
+
+
+def test_consume_bumps_session_epoch(store):
+    u = store.create_user("ce@e.st", "pw")
+    token = store.create_reset_token("ce@e.st")
+    updated = store.consume_reset_token(token, "newpw")
+    assert updated.session_epoch == 1  # reset evicts other sessions via the epoch
+
+
+def test_session_epoch_defaults_to_zero(store):
+    u = store.create_user("z@e.st", "pw")
+    assert u.session_epoch == 0
+    assert store.get_user(u.id).session_epoch == 0  # round-trips through the DB

@@ -82,8 +82,7 @@ Full process: **`WORKFLOW.md`**.
 
 ```
 WORKFLOW.md            step-by-step process + the error taxonomy
-RUBRIC.md              human-readable rubric (mirror of rubric.yaml)
-rubric.yaml            CANONICAL scoring contract (hashed)
+RUBRIC.md              human-readable rubric (mirror of kicraft/eval/rubric.yaml)
 scenarios/             the use-case library (S01..S05) + schema
 templates/
   subject_brief.md     how to launch a subject
@@ -91,11 +90,18 @@ templates/
   RUN_REPORT.md        the report template
   report.schema.json   shape of report.json
 bin/
-  rubric_hash.py       compute/check the rubric hash
-  score_run.py         Class-C scorer + finalize
+  rubric_hash.py       compute/check the rubric hash (CLI over kicraft.eval.rubric)
+  score_run.py         harness front-end: builds metrics from a claude transcript,
+                       drives the shared kicraft.eval scorer + finalize
   harvest_run.py       workspace -> run record + provenance
   fixtures/            scorer regression fixtures
 ```
+
+The CANONICAL scoring contract and the scorer core now live in the shippable
+package `kicraft/eval/` (`rubric.yaml`, `scoring.py`, `artifacts.py`,
+`rubric.py`), shared with the in-app web self-evaluation. Moving the rubric out of
+`tests/` is hash-preserving (the hash is over parsed content), so cohorts stay
+comparable; `rubric_hash.py check` is the tripwire.
 
 ## Conventions
 

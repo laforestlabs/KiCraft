@@ -25,17 +25,37 @@ from pathlib import Path
 # Tier definitions. `price_usd` is display-only until Stripe lands (backlog item
 # 3); `limit` designs per rolling `window_days` is what count_active_designs
 # enforces. "free" = 1/week, "pro" = 5/month ($5), "max" = 25/month ($10).
+# "admin" is an internal access level (not purchasable) that unlocks the self-
+# evaluation tools; it is assigned out-of-band via the admin CLI and carries a
+# high design limit so an operator is never quota-blocked while testing.
 TIERS: dict[str, dict] = {
     "free": {"label": "Free", "price_usd": 0, "limit": 1, "window_days": 7},
     "pro": {"label": "Pro", "price_usd": 5, "limit": 5, "window_days": 30},
     "max": {"label": "Max", "price_usd": 10, "limit": 25, "window_days": 30},
+    "admin": {"label": "Admin", "price_usd": 0, "limit": 1000, "window_days": 30},
 }
 DEFAULT_TIER = "free"
+ADMIN_TIER = "admin"
+
+
+def is_admin(user) -> bool:
+    """Whether a user holds the admin level that unlocks the self-evaluation tools.
+
+    Gating is tier-based (no separate column): grant it out-of-band with
+    `kicraft-accounts set-tier <email> admin`. Duck-typed on `.tier` so a User or
+    any object carrying a tier works."""
+    return bool(user is not None and getattr(user, "tier", None) == ADMIN_TIER)
 
 # scrypt work factors (RFC 7914). Bounded so a hash is sub-100ms but not trivial.
 _SCRYPT_N = 2 ** 14
 _SCRYPT_R = 8
 _SCRYPT_P = 1
+
+# Password-reset tokens: short-lived and single-use. The window is deliberately
+# tight (an hour) so a leaked link is useless after lunch; the cooldown stops the
+# public /forgot page from being turned into an email-spam relay.
+_RESET_TTL_SECONDS = 3600
+_RESET_COOLDOWN_SECONDS = 60
 
 
 def _utcnow() -> dt.datetime:
@@ -81,6 +101,11 @@ class User:
     accepted_terms_version: str | None = None
     accepted_terms_at: str | None = None
     allow_training: bool = True
+    # Bumped on every password change (set_password). The web session stores the
+    # epoch it logged in with; an authed page that sees a newer epoch on the row
+    # force-logs-out, so a password reset evicts every other live session (the
+    # point of recovering an account someone else got into).
+    session_epoch: int = 0
 
 
 @dataclass
@@ -128,9 +153,24 @@ class AccountStore:
                 "last_login_at TEXT,"
                 "accepted_terms_version TEXT,"
                 "accepted_terms_at TEXT,"
-                "allow_training INTEGER NOT NULL DEFAULT 1)"
+                "allow_training INTEGER NOT NULL DEFAULT 1,"
+                "session_epoch INTEGER NOT NULL DEFAULT 0)"
             )
             self._ensure_columns(conn)
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS password_resets ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "user_id INTEGER NOT NULL,"
+                "token_hash TEXT NOT NULL,"
+                "created_at TEXT NOT NULL,"
+                "expires_at TEXT NOT NULL,"
+                "used_at TEXT,"
+                "FOREIGN KEY(user_id) REFERENCES users(id))"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_password_resets_token "
+                "ON password_resets(token_hash)"
+            )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS projects ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -168,6 +208,9 @@ class AccountStore:
         if "allow_training" not in cols:
             conn.execute(
                 "ALTER TABLE users ADD COLUMN allow_training INTEGER NOT NULL DEFAULT 1")
+        if "session_epoch" not in cols:
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0")
 
     # ---- users ------------------------------------------------------------
 
@@ -181,7 +224,8 @@ class AccountStore:
                     created_at=row["created_at"], last_login_at=row["last_login_at"],
                     accepted_terms_version=row["accepted_terms_version"],
                     accepted_terms_at=row["accepted_terms_at"],
-                    allow_training=bool(row["allow_training"]))
+                    allow_training=bool(row["allow_training"]),
+                    session_epoch=int(row["session_epoch"]))
 
     def create_user(self, email: str, password: str, tier: str = DEFAULT_TIER, *,
                     accepted_terms_version: str | None = None,
@@ -246,6 +290,108 @@ class AccountStore:
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
         return [self._row_to_user(r) for r in rows]
+
+    # ---- password reset + account recovery -------------------------------
+
+    @staticmethod
+    def _hash_token(token: str) -> str:
+        """SHA-256 of a reset token. Tokens are 256-bit random, so a fast hash is
+        enough to make the stored value useless if the DB leaks (no rainbow-table
+        risk at that entropy); we never store the raw token."""
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def set_password(self, user_id: int, new_password: str) -> None:
+        """Set a new password and evict every existing session.
+
+        The single chokepoint for changing a password: bumping session_epoch in
+        the same statement force-logs-out any other live session (an attacker who
+        still holds a valid cookie included), which is what makes this recovery and
+        not just a password swap. Used by the reset flow and the admin CLI."""
+        if not new_password:
+            raise ValueError("a password is required")
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE users SET password_hash=?, session_epoch=session_epoch+1 "
+                "WHERE id=?", (hash_password(new_password), user_id))
+            if cur.rowcount == 0:
+                raise ValueError(f"no user with id {user_id!r}")
+
+    def create_reset_token(self, email: str) -> str | None:
+        """Mint a single-use, time-limited password-reset token for `email`.
+
+        Returns the raw token for the caller to deliver out-of-band (only its hash
+        is stored). Returns None when no such user exists, so the caller can stay
+        silent and not leak which emails are registered; also returns None inside
+        the cooldown window, so the public /forgot page can't be used as an
+        email-spam relay. Minting a token invalidates the user's prior unused ones.
+        """
+        user = self.get_user_by_email(email)
+        if user is None:
+            return None
+        now = _utcnow()
+        with self._conn() as conn:
+            recent = conn.execute(
+                "SELECT created_at FROM password_resets WHERE user_id=? "
+                "AND used_at IS NULL ORDER BY id DESC LIMIT 1", (user.id,)).fetchone()
+            if recent is not None:
+                try:
+                    created = dt.datetime.fromisoformat(recent["created_at"])
+                    if (now - created).total_seconds() < _RESET_COOLDOWN_SECONDS:
+                        return None  # a fresh link is already in flight
+                except ValueError:
+                    pass  # unparseable timestamp: fall through and mint a new one
+            token = secrets.token_urlsafe(32)
+            expires = (now + dt.timedelta(seconds=_RESET_TTL_SECONDS)).isoformat()
+            conn.execute(
+                "UPDATE password_resets SET used_at=? WHERE user_id=? "
+                "AND used_at IS NULL", (now.isoformat(), user.id))
+            conn.execute(
+                "INSERT INTO password_resets "
+                "(user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                (user.id, self._hash_token(token), now.isoformat(), expires))
+        return token
+
+    def verify_reset_token(self, token: str) -> User | None:
+        """The user a valid (unused, unexpired) reset token belongs to, else None.
+
+        Read-only: use it to render the reset form before the user has chosen a new
+        password. ISO-8601 UTC timestamps compare lexicographically."""
+        if not token:
+            return None
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT user_id FROM password_resets WHERE token_hash=? "
+                "AND used_at IS NULL AND expires_at >= ?",
+                (self._hash_token(token), _utcnow_iso())).fetchone()
+        return self.get_user(int(row["user_id"])) if row else None
+
+    def consume_reset_token(self, token: str, new_password: str) -> User | None:
+        """Spend a reset token: set the new password and mark the token used, in one
+        transaction. Returns the refreshed user (session_epoch already bumped, so
+        other sessions are now evicted) or None if the token is invalid, expired, or
+        already used. Raises ValueError on an empty password (before touching the
+        token, so the user can retry the link)."""
+        if not new_password:
+            raise ValueError("a password is required")
+        if not token:
+            return None
+        now = _utcnow().isoformat()
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT id, user_id FROM password_resets WHERE token_hash=? "
+                "AND used_at IS NULL AND expires_at >= ?",
+                (self._hash_token(token), now)).fetchone()
+            if row is None:
+                return None
+            user_id = int(row["user_id"])
+            # Inlined (not set_password) so the password change and the token
+            # consumption commit atomically in this one transaction.
+            conn.execute(
+                "UPDATE users SET password_hash=?, session_epoch=session_epoch+1 "
+                "WHERE id=?", (hash_password(new_password), user_id))
+            conn.execute("UPDATE password_resets SET used_at=? WHERE id=?",
+                         (now, row["id"]))
+        return self.get_user(user_id)
 
     # ---- consent + data controls -----------------------------------------
 

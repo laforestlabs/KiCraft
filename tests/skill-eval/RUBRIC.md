@@ -2,7 +2,7 @@
 
 > **Rubric v1 — `sha256:df90130898218fba9dd75e19af5f6703b641c14607303c4e7bcbfc9948a6e5e9`**
 >
-> Human-readable mirror of [`rubric.yaml`](./rubric.yaml), which is the canonical
+> Human-readable mirror of [`rubric.yaml`](../../kicraft/eval/rubric.yaml), which is the canonical
 > source of truth. If the two ever disagree, **`rubric.yaml` wins.** Regenerate the
 > stamp above with `bin/rubric_hash.py compute` after any scoring change.
 
@@ -89,7 +89,7 @@ gates are set when grading the relevant dimension.
 
 ## Changing the rubric
 
-1. Edit `rubric.yaml` (weights, anchors, gates, bands).
+1. Edit `kicraft/eval/rubric.yaml` (weights, anchors, gates, bands).
 2. Bump `meta.version`.
 3. `bin/rubric_hash.py compute --write` to refresh `meta.sha256`.
 4. Update this file's stamp + any changed anchors, then `bin/rubric_hash.py check`

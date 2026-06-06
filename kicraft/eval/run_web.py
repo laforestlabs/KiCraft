@@ -1,0 +1,222 @@
+"""Evaluate a finished KiCraft web design project end to end.
+
+Ties the pieces together for the in-app, admin-only self-evaluation:
+
+    collect_web_metrics  ->  Class-C scorers + script gates   (deterministic)
+    build_run_digest     ->  grade_class_j (LLM judge)        (judgment)
+    finalize_report      ->  weighted, gate-capped, graded
+
+and persists the result to ``<project_dir>/eval/report.json`` (the same
+``report.schema.json`` shape the harness uses) so it is durable and re-viewable
+without re-running the judge.
+
+``evaluate_project`` takes an injected client (the web app passes its capped
+OpenRouter client), so this module imports the server only inside ``main`` (the
+``kicraft-eval-web`` CLI). ``--no-judge`` scores Class-C only and needs no network
+or API key, which is the headless verification path.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import sqlite3
+from pathlib import Path
+
+from .artifacts import _find_one, _load_json
+from .judge import grade_class_j
+from .metrics_web import collect_web_metrics
+from .rubric import load_rubric
+from .scoring import eval_script_gates, finalize_report, metrics_block, score_class_c_dims
+
+
+def _now() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def build_run_digest(project_dir, m, *, budget: int = 16000) -> str:
+    """A compact, evidence-only text digest for the judge: the brief, the whole
+    committed design state (minus the noisy history log), and the pipeline result.
+    Dumping the state wholesale (rather than cherry-picking fields) keeps the judge
+    from missing a constraint the design recorded somewhere unexpected."""
+    pd = Path(project_dir)
+    parts: list[str] = []
+
+    brief = pd / "brief.txt"
+    if brief.is_file():
+        text = brief.read_text(errors="replace").strip()
+        if text:
+            parts.append("BRIEF (what the user asked for):\n" + text[:2000])
+
+    state = _load_json(_find_one(pd, "state.json"))
+    if isinstance(state, dict):
+        trimmed = {k: v for k, v in state.items() if k != "history"}
+        parts.append("COMMITTED DESIGN STATE (intent, spec, architecture, bom, wiring, "
+                     "assumptions, open_questions):\n"
+                     + json.dumps(trimmed, indent=2, default=str)[:budget])
+
+    synth, erc, tr, gen = m["synth"], m["erc"], m["transcript"], m["generated"]
+    parts.append(
+        "PIPELINE RESULT (deterministic facts):\n"
+        f"  synthesized: {gen['synthesized']} (pcb={gen['pcb']} sch={gen['sch']})\n"
+        f"  synthesis_check.status: {synth.get('status')}; failed_checks: {synth.get('failed_checks')}\n"
+        f"  ERC: {erc.get('errors')} error(s) / {erc.get('warnings')} warning(s)\n"
+        f"  run-trace: {tr.get('failed_commits')} error-driven re-commit(s), "
+        f"{tr.get('ask_questions')} clarifying question(s), crashes={tr.get('crashes')}"
+    )
+    return "\n\n".join(parts)
+
+
+def evaluate_project(project_dir, client, *, rubric: dict | None = None,
+                     judge_model: str | None = None, ledger_path=None,
+                     started_at: str | None = None, finished_at: str | None = None,
+                     skip_judge: bool = False) -> dict:
+    """Score one finished web project and write ``eval/report.json``.
+
+    Class-C is always scored from artifacts. Class-J is graded by the injected
+    client's judge unless ``skip_judge`` (or no client) is given, in which case the
+    judgment dimensions stay null and the run is not finalized (Class-C only).
+    """
+    rubric = rubric or load_rubric()
+    pd = Path(project_dir)
+
+    m = collect_web_metrics(pd, ledger_path=ledger_path,
+                            started_at=started_at, finished_at=finished_at)
+    dims = score_class_c_dims(m, rubric)
+    gates = eval_script_gates(m, rubric)
+
+    judge = None
+    if not skip_judge and client is not None:
+        digest = build_run_digest(pd, m)
+        judge = grade_class_j(client, digest, rubric, model=judge_model)
+        for did, jv in judge["dimensions"].items():
+            if did in dims:
+                dims[did]["level"] = jv["level"]
+                dims[did]["rationale"] = jv.get("evidence", "")
+                dims[did]["by"] = "observer"  # the automated judge plays the observer role
+        have = {g["id"] for g in gates}
+        for g in judge["gates"]:
+            if g["id"] not in have:
+                gates.append(g)
+                have.add(g["id"])
+
+    report = {
+        "scenario": None,
+        "run_id": pd.name,
+        "run_dir": str(pd),
+        "scored_at": _now(),
+        "rubric_version": rubric["meta"]["version"],
+        "rubric_sha256": rubric["_computed_sha256"],
+        "target_mode": "web",
+        "metrics": metrics_block(m),
+        "dimensions": dims,
+        "gates": {"triggered": gates, "observer_todo": []},
+        "judge": {
+            "ran": judge is not None,
+            "ok": (judge["ok"] if judge else None),
+            "model": judge_model,
+            "error": (judge["error"] if judge else None),
+            "cost_usd": (round(judge["cost_usd"], 6) if judge else None),
+        },
+        "score": {"weighted": None, "final": None, "grade": None, "verdict": None,
+                  "pending_dimensions": [k for k, v in dims.items() if v["level"] is None],
+                  "note": ""},
+    }
+
+    if judge is not None and judge["ok"]:
+        try:
+            finalize_report(report, rubric)
+        except ValueError as e:  # a Class-C dim came back unscored (e.g. latency)
+            report["score"]["note"] = f"not finalized: {e}"
+    elif judge is not None and not judge["ok"]:
+        report["score"]["note"] = (f"Class-J judge failed ({judge['error']}); "
+                                   "Class-C scored, final grade withheld.")
+    else:
+        report["score"]["note"] = "Class-C only (judge skipped); final grade withheld."
+
+    out_dir = pd / "eval"
+    out_dir.mkdir(exist_ok=True)
+    (out_dir / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+    return report
+
+
+def _project_times(project_dir, users_db_path=None) -> tuple[str | None, str | None]:
+    """Best-effort (created_at, finished_at) for a precise latency, read straight
+    from the accounts DB. The project dir is ``.../<uid>/<pid>``; we look up the
+    row by id. Fully guarded: any failure yields (None, None) and latency falls
+    back to the state-history heuristic."""
+    pd = Path(project_dir)
+    db = Path(users_db_path) if users_db_path else (Path.home() / ".kicraft" / "accounts.db")
+    if not db.is_file() or not pd.name.isdigit():
+        return None, None
+    try:
+        conn = sqlite3.connect(str(db))
+        try:
+            row = conn.execute(
+                "SELECT created_at, finished_at FROM projects WHERE id=?",
+                (int(pd.name),)).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None, None
+    if not row:
+        return None, None
+    return row[0], row[1]
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Evaluate a finished KiCraft web project (Class-C + automated Class-J).")
+    ap.add_argument("project_dir", help="projects_dir/<uid>/<pid> of a finished design")
+    ap.add_argument("--model", help="judge model override "
+                    "(default: Settings.eval_judge_model, else the design model)")
+    ap.add_argument("--no-judge", action="store_true",
+                    help="score Class-C only; skip the LLM judge (no network / API key)")
+    ap.add_argument("--print", dest="show", action="store_true",
+                    help="also print the full report JSON")
+    args = ap.parse_args(argv)
+
+    pd = Path(args.project_dir)
+    if not pd.is_dir():
+        raise SystemExit(f"not a directory: {pd}")
+
+    client = None
+    judge_model = args.model
+    ledger_path = None
+    users_db = None
+
+    if args.no_judge:
+        # Offline: attribute token usage from the default ledger if it happens to
+        # exist, but never require an API key.
+        default_ledger = Path.home() / ".kicraft" / "spend_ledger.db"
+        ledger_path = default_ledger if default_ledger.is_file() else None
+    else:
+        from kicraft.server.client import CappedOpenRouterClient
+        from kicraft.server.config import Settings
+        s = Settings.from_env()
+        client = CappedOpenRouterClient(s)
+        judge_model = args.model or getattr(s, "eval_judge_model", None) or s.model
+        ledger_path = s.ledger_path
+        users_db = s.users_db_path
+
+    started_at, finished_at = _project_times(pd, users_db)
+    report = evaluate_project(pd, client, judge_model=judge_model, ledger_path=ledger_path,
+                              started_at=started_at, finished_at=finished_at,
+                              skip_judge=args.no_judge)
+
+    s = report["score"]
+    j = report["judge"]
+    print(f"{pd.name}: weighted={s['weighted']} final={s['final']} "
+          f"grade={s['grade']} {s['verdict'] or ''}".rstrip())
+    if j["ran"] and not j["ok"]:
+        print(f"  judge error: {j['error']}")
+    if s["note"]:
+        print(f"  note: {s['note']}")
+    print(f"wrote {pd / 'eval' / 'report.json'}")
+    if args.show:
+        print(json.dumps(report, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """Deterministic (Class-C) scorer for a KiCraft skill-eval run record.
 
+The scoring contract (rubric), the Class-C dimension scorers, the script gates,
+and the finalize math now live in the shippable :mod:`kicraft.eval` package, so
+the offline harness and the in-app web self-evaluation score identically. This
+script is the harness front-end: it builds the metrics dict ``m`` from a harvested
+run record (whose run-trace is a ``claude`` ``transcript.jsonl``) and drives the
+shared scorer.
+
 Two modes:
 
   score    Read a run-record dir, compute the deterministic metrics, score the
-           five Class-C dimensions against rubric.yaml, fire script-detectable
+           five Class-C dimensions against the rubric, fire script-detectable
            gates, and write report.json with the Class-J dimensions left null
            for the observer. Prints a human-readable metrics block + partial
            scorecard. Does NOT produce a final number (Class-J pending).
@@ -12,9 +19,10 @@ Two modes:
   finalize Read a report.json whose Class-J levels (and any observer gates) the
            observer has filled in, compute the weighted total, apply every
            triggered gate, assign grade + verdict, and write it back. The final
-           number is computed by code here, never by the observer's mental math.
+           number is computed by code (kicraft.eval.scoring), never by the
+           observer's mental math.
 
-Run with the repo venv (PyYAML)::
+Run with the repo venv (kicraft + PyYAML)::
 
     .venv/bin/python tests/skill-eval/bin/score_run.py score   <run-dir> [--scenario S02] [-o report.json]
     .venv/bin/python tests/skill-eval/bin/score_run.py finalize <report.json>
@@ -37,100 +45,30 @@ import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rubric_hash import load_rubric  # noqa: E402
+from kicraft.eval.artifacts import (
+    _find_glob,
+    _find_one,
+    _load_json,
+    analyze_state,
+    count_generated,
+    parse_erc,
+    parse_synthesis_check,
+)
+from kicraft.eval.rubric import load_rubric
+from kicraft.eval.scoring import (
+    compute_latency_min,
+    eval_script_gates,
+    finalize_report,
+    metrics_block,
+    score_class_c_dims,
+)
 
 SKILL_EVAL_DIR = Path(__file__).resolve().parent.parent
-CANONICAL_STAGES = 5  # intent, functional_spec, architecture, bom, wiring
 
 
 # --------------------------------------------------------------------------- #
-# artifact discovery + parsing
+# permission floor (claude-only signal; no web analog)
 # --------------------------------------------------------------------------- #
-def _find_one(run_dir: Path, name: str) -> Path | None:
-    """First match of an exact filename anywhere under run_dir (shallowest wins)."""
-    hits = sorted(run_dir.rglob(name), key=lambda p: len(p.parts))
-    return hits[0] if hits else None
-
-
-def _find_glob(run_dir: Path, pattern: str) -> Path | None:
-    hits = sorted(run_dir.rglob(pattern), key=lambda p: len(p.parts))
-    return hits[0] if hits else None
-
-
-def _load_json(path: Path | None):
-    if not path or not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
-def parse_erc(path: Path | None) -> dict:
-    """Count error/warning violations from a KiCad erc.v1.json report."""
-    if not path or not path.exists():
-        return {"present": False, "errors": None, "warnings": None}
-    data = _load_json(path)
-    if not isinstance(data, dict):
-        return {"present": True, "errors": None, "warnings": None, "note": "unparseable"}
-    errors = warnings = 0
-    for sheet in data.get("sheets", []):
-        for v in sheet.get("violations", []):
-            sev = v.get("severity")
-            if sev == "error":
-                errors += 1
-            elif sev == "warning":
-                warnings += 1
-    return {"present": True, "errors": errors, "warnings": warnings}
-
-
-def parse_synthesis_check(path: Path | None) -> dict:
-    data = _load_json(path)
-    if not isinstance(data, dict):
-        return {"present": False, "status": None, "failed_checks": None, "checked_at": None}
-    checks = data.get("checks", []) or []
-    failed = data.get("failed_checks")
-    if failed is None:
-        failed = [c.get("name") for c in checks if c.get("ok") is False]
-    return {
-        "present": True,
-        "status": data.get("status"),
-        "failed_checks": failed,
-        "failed_count": len(failed),
-        "checked_at": data.get("checked_at"),
-        "checks": checks,
-    }
-
-
-def analyze_state(path: Path | None) -> dict:
-    s = _load_json(path)
-    if not isinstance(s, dict):
-        return {"present": False}
-    bom = s.get("bom") or {}
-    connections = bom.get("connections") or []
-    history = s.get("history") or []
-    slots = {k: s.get(k) is not None for k in ("intent", "functional_spec", "architecture", "bom")}
-    return {
-        "present": True,
-        "slots": slots,
-        "all_slots": all(slots.values()),
-        "wiring_done": bool(connections),
-        "history_len": len(history),
-        "history_first_ts": (history[0].get("timestamp") if history else None),
-        "open_questions": len(s.get("open_questions") or []),
-        "bom_parts": len(bom.get("parts") or []),
-        "project_stem": s.get("project_stem"),
-    }
-
-
-def count_generated(run_dir: Path) -> dict:
-    pcb = list(run_dir.rglob("*.kicad_pcb"))
-    sch = list(run_dir.rglob("*.kicad_sch"))
-    pro = list(run_dir.rglob("*.kicad_pro"))
-    return {"pcb": len(pcb), "sch": len(sch), "pro": len(pro), "synthesized": bool(pcb or sch)}
-
-
 def perm_floor(run_dir: Path, baseline: int) -> dict:
     p = _find_one(run_dir, "settings.local.json")
     data = _load_json(p)
@@ -213,178 +151,6 @@ def summarize_token_usage(transcript: dict) -> dict | None:
         return None
 
 
-def _parse_ts(s: str | None):
-    if not s:
-        return None
-    s = s.strip()
-    try:
-        if s.endswith("Z") and "T" in s and "-" not in s.split("T")[0][4:]:
-            # compact UTC like 20260524T225920Z
-            return dt.datetime.strptime(s, "%Y%m%dT%H%M%SZ").replace(tzinfo=dt.timezone.utc)
-        return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def compute_latency_min(transcript: dict, state: dict, synth: dict) -> tuple[float | None, bool]:
-    """Return (minutes, is_approximate). Prefer transcript (consistent tz)."""
-    if transcript.get("present"):
-        a = _parse_ts(transcript.get("first_ts"))
-        b = _parse_ts(transcript.get("synth_ts") or transcript.get("last_ts"))
-        if a and b and b > a:
-            return round((b - a).total_seconds() / 60, 1), False
-    # fallback: history start -> synth checked_at (tz-mismatched -> approximate)
-    a = _parse_ts(state.get("history_first_ts"))
-    b = _parse_ts(synth.get("checked_at"))
-    if a and b:
-        if a.tzinfo is None:
-            a = a.replace(tzinfo=dt.timezone.utc)
-        if b.tzinfo is None:
-            b = b.replace(tzinfo=dt.timezone.utc)
-        mins = (b - a).total_seconds() / 60
-        if mins >= 0:
-            return round(mins, 1), True
-    return None, True
-
-
-# --------------------------------------------------------------------------- #
-# Class-C dimension scorers  ->  (level|None, partial, rationale)
-# --------------------------------------------------------------------------- #
-def score_pipeline_completion(m) -> tuple[int | None, bool, str]:
-    st = m["state"]
-    if not st.get("present"):
-        return 0, False, "no state.json"
-    slots = st["slots"]
-    if not any(slots.values()) or (slots.get("intent") and sum(slots.values()) == 1):
-        return 0, False, "no slots beyond intent"
-    if not (st["all_slots"] and st["wiring_done"]):
-        return 1, False, "incomplete: missing a slot or bom.connections"
-    if not m["generated"]["synthesized"]:
-        return 2, False, "all slots + wiring, but not synthesized"
-    status = m["synth"].get("status")
-    if status != "ok":
-        return 3, False, f"synthesized but synthesis_check.status={status!r}"
-    return 4, False, "synthesized, status ok, files present"
-
-
-def score_computing_cleanliness(m) -> tuple[int | None, bool, str]:
-    erc = m["erc"]
-    synth = m["synth"]
-    tr = m["transcript"]
-    errors = erc.get("errors")
-    warnings = erc.get("warnings")
-    failed = synth.get("failed_count")
-    crashed = bool(tr.get("crashes")) if tr.get("present") else False
-
-    if not m["generated"]["synthesized"]:
-        if crashed:
-            return 0, False, "synthesis-blocking crash (traceback in transcript)"
-        return 2, True, "synthesis not reached; cleanliness unconfirmed (partial)"
-
-    # synthesized: prefer ERC counts; fall back to synth_check failures
-    if crashed or (errors is not None and errors > 10):
-        return 0, False, f"crash={crashed}, erc_errors={errors}"
-    if (errors is not None and errors >= 1) or (failed is not None and failed >= 2):
-        return 1, False, f"erc_errors={errors}, failed_checks={failed}"
-    if failed == 1:
-        return 2, False, "exactly 1 failed synthesis check"
-    if errors is None and failed is None:
-        return 2, True, "synthesized but no ERC/check signal found (partial)"
-    if (warnings or 0) > 0:
-        return 3, False, f"clean errors/checks; {warnings} ERC warnings"
-    return 4, False, "0 errors, 0 failed checks, 0 warnings"
-
-
-def score_convergence(m) -> tuple[int | None, bool, str]:
-    tr = m["transcript"]
-    if tr.get("present"):
-        err_recommits = tr.get("failed_commits", 0)
-        level = {0: 4, 1: 3, 2: 2, 3: 1}.get(err_recommits, 0)
-        return level, False, f"{err_recommits} failed/error-driven commit(s) in transcript"
-    extra = max(0, m["state"].get("history_len", 0) - CANONICAL_STAGES)
-    if extra == 0:
-        return 4, True, "history==5 canonical stages; no transcript to confirm (partial)"
-    level = max(0, 4 - extra)
-    return level, True, f"{extra} extra history commit(s); cannot classify error vs user-driven without transcript (partial)"
-
-
-def score_latency(m) -> tuple[int | None, bool, str]:
-    mins, approx = m["latency"]
-    if mins is None:
-        return None, True, "no usable timestamps (transcript absent); unscored"
-    # The fallback (history -> synth checked_at) is tz-mismatched and, on archived
-    # multi-session records, can span days. Don't let an untrustworthy absolute
-    # value drive the score — leave it for the observer to read off the transcript.
-    if approx and mins > 60:
-        return None, True, (f"fallback latency {mins} min implausible "
-                            f"(tz-mismatch / multi-session archive); unscored — use transcript")
-    for lvl, hi in ((4, 8), (3, 15), (2, 30), (1, 60)):
-        if mins <= hi:
-            return lvl, approx, f"{mins} min{' (approx, tz-mismatched fallback)' if approx else ''}"
-    return 0, approx, f"{mins} min (>60)"
-
-
-def score_friction(m) -> tuple[int | None, bool, str]:
-    tr = m["transcript"]
-    perm = m["perm"]
-    band = m["expected_question_band"]  # (lo, hi) or None
-    excess = perm["excess"]
-    q = tr.get("ask_questions") if tr.get("present") else None
-
-    # question component vs band
-    q_state = "unknown"
-    if q is not None and band is not None:
-        lo, hi = band
-        if lo <= q <= hi:
-            q_state = "in_band"
-        elif abs(q - lo) <= 1 or abs(q - hi) <= 1:
-            q_state = "near_band"
-        else:
-            q_state = "out_of_band"
-
-    partial = q is None or band is None
-    # combine with permission excess
-    if q_state == "out_of_band" and excess > 3:
-        return 0, partial, f"questions out of band (asked {q}, band {band}) and {excess} excess prompts"
-    if q_state == "out_of_band" or excess > 3:
-        return 1, partial, f"q={q} band={band} ({q_state}); excess_prompts={excess}"
-    if q_state == "near_band" or 2 <= excess <= 3:
-        return 2, partial, f"q={q} band={band} ({q_state}); excess_prompts={excess}"
-    if excess <= 1 and q_state in ("in_band", "unknown"):
-        if q_state == "in_band" and excess == 0:
-            return 4, partial, f"questions in band ({q}), zero excess prompts"
-        return 3, partial, f"q={q} band={band} ({q_state}); excess_prompts={excess}"
-    return 2, True, f"q={q} band={band} ({q_state}); excess_prompts={excess} (partial)"
-
-
-CLASS_C_SCORERS = {
-    "pipeline_completion": score_pipeline_completion,
-    "computing_error_cleanliness": score_computing_cleanliness,
-    "convergence_efficiency": score_convergence,
-    "latency": score_latency,
-    "interaction_friction": score_friction,
-}
-
-
-# --------------------------------------------------------------------------- #
-# gates (script-detectable)
-# --------------------------------------------------------------------------- #
-def eval_script_gates(m, rubric) -> list[dict]:
-    fired = []
-    caps = {g["id"]: g["cap"] for g in rubric["gates"]}
-    erc_errors = m["erc"].get("errors")
-    if erc_errors is not None and erc_errors >= 1:
-        fired.append({"id": "erc_errors", "cap": caps["erc_errors"], "by": "script",
-                      "why": f"{erc_errors} ERC error(s)"})
-    # synthesis_broken only on positive evidence of a failed attempt
-    tr = m["transcript"]
-    attempted = (tr.get("present") and tr.get("synth_attempts", 0) > 0)
-    if attempted and not m["generated"]["synthesized"]:
-        fired.append({"id": "synthesis_broken", "cap": caps["synthesis_broken"], "by": "script",
-                      "why": "synthesize attempted (transcript) but no project files produced"})
-    return fired
-
-
 # --------------------------------------------------------------------------- #
 # build / score
 # --------------------------------------------------------------------------- #
@@ -420,29 +186,14 @@ def collect_metrics(run_dir: Path, scenario_id: str | None, perm_baseline: int) 
     }
 
 
-def dim_by_id(rubric):
-    return {d["id"]: d for d in rubric["dimensions"]}
-
-
 def do_score(args) -> int:
     rubric = load_rubric()
     run_dir = Path(args.run_dir).resolve()
     if not run_dir.is_dir():
         sys.exit(f"not a directory: {run_dir}")
     m = collect_metrics(run_dir, args.scenario, args.perm_baseline)
-    dims = dim_by_id(rubric)
 
-    report_dims = {}
-    for d in rubric["dimensions"]:
-        did = d["id"]
-        if d["class"] == "C":
-            level, partial, why = CLASS_C_SCORERS[did](m)
-            report_dims[did] = {"class": "C", "weight": d["weight"], "level": level,
-                                "partial": partial, "by": "script", "rationale": why}
-        else:
-            report_dims[did] = {"class": "J", "weight": d["weight"], "level": None,
-                                "partial": False, "by": "observer", "rationale": ""}
-
+    report_dims = score_class_c_dims(m, rubric)
     gates = eval_script_gates(m, rubric)
     pending = [k for k, v in report_dims.items() if v["level"] is None]
 
@@ -454,7 +205,7 @@ def do_score(args) -> int:
         "rubric_version": rubric["meta"]["version"],
         "rubric_sha256": rubric["_computed_sha256"],
         "target_mode": m["target_mode"],
-        "metrics": _public_metrics(m),
+        "metrics": metrics_block(m),
         "dimensions": report_dims,
         "gates": {"triggered": gates, "observer_todo": [g["id"] for g in rubric["gates"]
                                                           if g["detected_by"] == "observer"]},
@@ -467,47 +218,14 @@ def do_score(args) -> int:
     out.write_text(json.dumps(report, indent=2))
     _print_score_summary(report, rubric)
     print(f"\nwrote {out}")
-    print("Class-J dimensions pending observer — grade them, then run: "
+    print("Class-J dimensions pending observer; grade them, then run: "
           f"score_run.py finalize {out}")
     return 0
-
-
-def _public_metrics(m) -> dict:
-    tr, st, synth, erc = m["transcript"], m["state"], m["synth"], m["erc"]
-    return {
-        "synthesized": m["generated"]["synthesized"],
-        "generated_files": m["generated"],
-        "synthesis_status": synth.get("status"),
-        "failed_checks": synth.get("failed_checks"),
-        "erc_errors": erc.get("errors"),
-        "erc_warnings": erc.get("warnings"),
-        "latency_min": m["latency"][0],
-        "latency_approx": m["latency"][1],
-        "user_questions": tr.get("ask_questions") if tr.get("present") else None,
-        "stage_commit_calls": tr.get("stage_commit_calls") if tr.get("present") else None,
-        "failed_commits": tr.get("failed_commits") if tr.get("present") else None,
-        "crashes": tr.get("crashes") if tr.get("present") else None,
-        "history_len": st.get("history_len"),
-        "open_questions": st.get("open_questions"),
-        "bom_parts": st.get("bom_parts"),
-        "permission_floor": m["perm"]["count"],
-        "permission_excess": m["perm"]["excess"],
-        "expected_question_band": m["expected_question_band"],
-        "transcript_present": tr.get("present", False),
-        "token_usage": m.get("token_usage"),
-    }
 
 
 # --------------------------------------------------------------------------- #
 # finalize
 # --------------------------------------------------------------------------- #
-def grade_for(score: float, rubric) -> dict:
-    for band in rubric["bands"]:
-        if score >= band["min"]:
-            return {"grade": band["grade"], "verdict": band["verdict"]}
-    return {"grade": "F", "verdict": "BROKEN"}
-
-
 def do_finalize(args) -> int:
     rubric = load_rubric()
     report_path = Path(args.report).resolve()
@@ -516,31 +234,11 @@ def do_finalize(args) -> int:
         sys.exit(f"cannot read report: {report_path}")
     if report.get("rubric_sha256") != rubric["_computed_sha256"]:
         print(f"WARN: report was scored under rubric {report.get('rubric_sha256','?')[:12]} "
-              f"but current rubric is {rubric['_computed_sha256'][:12]} — not comparable.")
-
-    dims = report["dimensions"]
-    missing = [k for k, v in dims.items() if v.get("level") is None]
-    if missing:
-        sys.exit(f"cannot finalize: {len(missing)} dimension(s) ungraded: {', '.join(missing)}")
-
-    points = sum(v["weight"] * v["level"] / 4 for v in dims.values())
-    weighted = round(points, 1)
-
-    # gates: script-fired + any observer-fired present in report
-    fired = list(report.get("gates", {}).get("triggered", []))
-    caps = [g["cap"] for g in fired]
-    final = round(min([weighted] + caps), 1)
-    g = grade_for(final, rubric)
-
-    report["score"] = {
-        "weighted": weighted,
-        "final": final,
-        "grade": g["grade"],
-        "verdict": g["verdict"],
-        "gates_applied": [{"id": x["id"], "cap": x["cap"]} for x in fired],
-        "pending_dimensions": [],
-    }
-    report["finalized_at"] = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+              f"but current rubric is {rubric['_computed_sha256'][:12]} (not comparable).")
+    try:
+        finalize_report(report, rubric)
+    except ValueError as e:
+        sys.exit(str(e))
     report_path.write_text(json.dumps(report, indent=2))
     _print_score_summary(report, rubric, final=True)
     print(f"\nfinalized {report_path}")

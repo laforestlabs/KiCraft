@@ -5,9 +5,12 @@ Until Stripe (backlog item 3) lands, tier changes are manual:
     kicraft-accounts list
     kicraft-accounts create alice@example.com --tier pro
     kicraft-accounts set-tier alice@example.com max
+    kicraft-accounts reset-password alice@example.com          # print a reset link
+    kicraft-accounts reset-password alice@example.com --set    # set a password now
 
 Resolves the DB / projects paths from the same env vars the web app uses
-(KICRAFT_USERS_DB, KICRAFT_PROJECTS_DIR), so it needs no OPENROUTER_API_KEY.
+(KICRAFT_USERS_DB, KICRAFT_PROJECTS_DIR), so most commands need no
+OPENROUTER_API_KEY (only `reset-password --send`, which emails via SMTP, does).
 """
 from __future__ import annotations
 
@@ -19,7 +22,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from .accounts import TIERS, AccountStore
+from .accounts import _RESET_TTL_SECONDS, TIERS, AccountStore
 
 
 def _default_db() -> Path:
@@ -30,6 +33,14 @@ def _default_db() -> Path:
 def _default_projects_dir() -> Path:
     return Path(os.environ.get(
         "KICRAFT_PROJECTS_DIR", str(Path.home() / ".kicraft" / "projects")))
+
+
+def _default_public_url() -> str:
+    """Origin used to build reset links, matching the web app's KICRAFT_PUBLIC_URL
+    (so a link printed here resolves on the deployed site). Read directly, not via
+    Settings, so the print path needs no OPENROUTER_API_KEY."""
+    url = os.environ.get("KICRAFT_PUBLIC_URL", "http://localhost:8080").strip().rstrip("/")
+    return url or "http://localhost:8080"
 
 
 def _store() -> AccountStore:
@@ -111,6 +122,53 @@ def _cmd_delete(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_reset_password(args: argparse.Namespace) -> int:
+    """Recover an account: print a reset link, email it (--send), or set a new
+    password now (--set). All paths that change the password evict existing
+    sessions, since set_password bumps the user's session epoch."""
+    store = _store()
+    u = store.get_user_by_email(args.email)
+    if u is None:
+        print(f"no user with email {args.email!r}", file=sys.stderr)
+        return 1
+
+    if args.set:  # set a password directly, the guaranteed path when SMTP is down
+        pw = getpass.getpass("new password: ")
+        if not pw:
+            print("aborted: empty password", file=sys.stderr)
+            return 1
+        if pw != getpass.getpass("confirm new password: "):
+            print("aborted: passwords did not match", file=sys.stderr)
+            return 1
+        store.set_password(u.id, pw)
+        print(f"password for {u.email} updated; all existing sessions were signed out")
+        return 0
+
+    token = store.create_reset_token(u.email)
+    if token is None:
+        print("a reset link was issued moments ago; wait a minute and retry",
+              file=sys.stderr)
+        return 1
+    url = f"{_default_public_url()}/reset?token={token}"
+    ttl_min = _RESET_TTL_SECONDS // 60
+
+    if args.send:
+        # Emailing needs Settings (SMTP config + an API key); import lazily so the
+        # default print path above stays usable without OPENROUTER_API_KEY.
+        from . import mailer
+        from .config import Settings
+        if mailer.send_reset_email(Settings.from_env(), u.email, url, ttl_min):
+            print(f"reset link emailed to {u.email} (valid ~{ttl_min} min)")
+            return 0
+        print("could not send email (SMTP unconfigured or failed); relay this link "
+              f"manually:\n  {url}", file=sys.stderr)
+        return 1
+
+    print(f"reset link for {u.email} (valid ~{ttl_min} min, single use):")
+    print(f"  {url}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="kicraft-accounts",
@@ -145,6 +203,18 @@ def main(argv: list[str] | None = None) -> int:
     dp.add_argument("--yes", action="store_true",
                     help="required: confirm irreversible deletion")
     dp.set_defaults(func=_cmd_delete)
+
+    rp = sub.add_parser(
+        "reset-password",
+        help="recover an account: issue a reset link or set a new password")
+    rp.add_argument("email")
+    grp = rp.add_mutually_exclusive_group()
+    grp.add_argument("--send", action="store_true",
+                     help="email the link via SMTP (needs KICRAFT_SMTP_* and "
+                          "OPENROUTER_API_KEY); otherwise the link is printed")
+    grp.add_argument("--set", action="store_true",
+                     help="set a new password now via a prompt (no email)")
+    rp.set_defaults(func=_cmd_reset_password)
 
     args = p.parse_args(argv)
     return args.func(args)

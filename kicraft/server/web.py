@@ -29,10 +29,11 @@ from pathlib import Path
 from nicegui import app, ui
 from starlette.responses import FileResponse, PlainTextResponse, RedirectResponse
 
-from .accounts import AccountStore
+from .accounts import _RESET_TTL_SECONDS, AccountStore, is_admin
 from .config import LEGAL_VERSION, Settings, default_legal_dir
 from .examples import CHIP_PROMPTS, EXAMPLE_PROMPTS
 from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView, kicanvas_head
+from .mailer import send_reset_email
 from .session import (
     commit_slot,
     downstream_stages,
@@ -54,6 +55,9 @@ app.add_static_files("/static", str(KICANVAS_ASSET.parent))
 # app.storage.user (whose getter can assert outside the page/connection flow).
 _PROJECT_TOKENS: dict[str, Path] = {}
 _ALLOWED_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_pro")
+
+# Shown in the reset email; derived from the token TTL so the two never drift.
+_RESET_TTL_MINUTES = _RESET_TTL_SECONDS // 60
 
 
 _STORE: AccountStore | None = None
@@ -83,7 +87,18 @@ def _current_user():
     uid = app.storage.user.get("user_id")
     if not uid:
         return None
-    return _store().get_user(int(uid))
+    user = _store().get_user(int(uid))
+    if user is None:
+        return None
+    # Session invalidation: a password reset bumps the user's session_epoch, so a
+    # session that logged in before the reset (an attacker's included) no longer
+    # matches and is treated as logged out. Sessions predating this feature have no
+    # stored epoch; the default 0 matches a never-reset account, so they persist.
+    if app.storage.user.get("session_epoch", 0) != user.session_epoch:
+        for k in ("user_id", "email", "session_epoch"):
+            app.storage.user.pop(k, None)
+        return None
+    return user
 
 
 _LEGAL_DOCS = {"terms-of-service": "Terms of Service", "privacy-policy": "Privacy Policy"}
@@ -740,6 +755,135 @@ def _design_worker(brief: str, state: dict) -> None:
     _run_design(state, list(DESIGN_STAGES))
 
 
+# --------------------------------------------------------------------------- #
+# Admin-only self-evaluation (Class-C deterministic + Class-J LLM judge)
+# --------------------------------------------------------------------------- #
+_GRADE_COLORS = {"A": "#16a34a", "B": "#65a30d", "C": "#ca8a04",
+                 "D": "#ea580c", "F": "#dc2626"}
+
+
+def _run_eval(project_dir: Path) -> dict:
+    """Blocking: build the capped client from settings and self-evaluate one
+    persisted project dir (Class-C from artifacts + Class-J via the LLM judge)."""
+    from kicraft.eval.run_web import _project_times, evaluate_project
+
+    from .client import CappedOpenRouterClient
+    s = Settings.from_env()
+    client = CappedOpenRouterClient(s)
+    judge_model = getattr(s, "eval_judge_model", None) or s.model
+    started, finished = _project_times(project_dir, s.users_db_path)
+    return evaluate_project(project_dir, client, judge_model=judge_model,
+                            ledger_path=s.ledger_path, started_at=started,
+                            finished_at=finished)
+
+
+def _render_scorecard(container, report: dict) -> None:
+    """Render a self-eval report.json into `container` (called in a UI context)."""
+    container.clear()
+    s = report.get("score") or {}
+    j = report.get("judge") or {}
+    m = report.get("metrics") or {}
+    tu = m.get("token_usage") or {}
+    with container:
+        with ui.row().classes("items-center gap-3"):
+            grade = s.get("grade")
+            if grade:
+                ui.label(grade).classes("text-3xl font-bold") \
+                    .style(f"color:{_GRADE_COLORS.get(grade, '#94a3b8')}")
+                ui.label(f"{s.get('final')} / 100   {s.get('verdict') or ''}") \
+                    .classes("text-lg").style("color:#e2e8f0")
+            else:
+                ui.label("Class-C only").classes("text-lg font-bold") \
+                    .style("color:#94a3b8")
+            ui.label(f"rubric v{report.get('rubric_version')}") \
+                .classes("text-xs").style("color:#64748b")
+        if s.get("note"):
+            ui.label(s["note"]).classes("text-xs").style("color:#94a3b8")
+        ui.label(
+            f"synth={m.get('synthesis_status')}  "
+            f"ERC={m.get('erc_errors')}e/{m.get('erc_warnings')}w  "
+            f"latency={m.get('latency_min')}min  "
+            f"tokens={tu.get('total_tokens', '-')}  "
+            f"est=${tu.get('estimated_cost_usd', '-')}  "
+            f"judge={j.get('model') or '-'} "
+            f"({'ok' if j.get('ok') else (j.get('error') or 'n/a')})"
+        ).classes("text-xs font-mono").style("color:#94a3b8")
+
+        with ui.row().classes("w-full items-center gap-2 text-xs font-bold mt-1") \
+                .style("color:#64748b"):
+            ui.label("dimension").style("width:220px")
+            ui.label("cls").style("width:26px")
+            ui.label("wt").style("width:26px")
+            ui.label("lvl").style("width:26px")
+            ui.label("pts").style("width:38px")
+            ui.label("rationale").classes("flex-1")
+        for did, v in (report.get("dimensions") or {}).items():
+            lvl = v.get("level")
+            pts = f"{v['weight'] * lvl / 4:.1f}" if lvl is not None else "-"
+            with ui.row().classes("w-full items-start gap-2 text-xs"):
+                ui.label(did).style("width:220px;color:#e2e8f0")
+                ui.label(v.get("class")).style(
+                    f"width:26px;color:{'#60a5fa' if v.get('class') == 'C' else '#f0abfc'}")
+                ui.label(str(v.get("weight"))).style("width:26px;color:#cbd5e1")
+                ui.label("-" if lvl is None else str(lvl)).style("width:26px;color:#cbd5e1")
+                ui.label(pts).style("width:38px;color:#cbd5e1")
+                ui.label(v.get("rationale") or "").classes("flex-1").style("color:#94a3b8")
+
+        gates = (report.get("gates") or {}).get("triggered") or []
+        if gates:
+            ui.label("Gates capped: "
+                     + ", ".join(f"{g['id']}≤{g['cap']}" for g in gates)) \
+                .classes("text-xs").style("color:#f87171")
+
+
+def open_eval_dialog(project_dir, title: str) -> None:
+    """Admin action: pop a dialog, run the self-eval in a worker thread, and render
+    the scorecard when it lands (mirrors the design worker + render-timer idiom)."""
+    if not is_admin(_current_user()):  # defense in depth; never trust UI-gating alone
+        ui.notify("Admin access required.", color="warning")
+        return
+    project_dir = Path(project_dir)
+    holder = {"done": False, "rendered": False, "report": None, "error": None}
+
+    def worker():
+        try:
+            holder["report"] = _run_eval(project_dir)
+        except Exception as e:  # surface in the dialog, never crash the page
+            holder["error"] = str(e)
+        finally:
+            holder["done"] = True
+
+    with ui.dialog() as dlg, ui.card().classes("w-[780px] max-w-[95vw]") \
+            .style("background:#0f172a;border:1px solid #1e293b"):
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label(f"Self-evaluation: {title}").classes("text-base font-bold") \
+                .style("color:#e2e8f0")
+            ui.button(icon="close", on_click=dlg.close).props("flat dense round")
+        status = ui.row().classes("items-center gap-2")
+        with status:
+            ui.spinner(size="sm")
+            ui.label("Scoring Class-C and grading Class-J (LLM judge)...") \
+                .classes("text-sm").style("color:#94a3b8")
+        body = ui.column().classes("w-full gap-1")
+
+    def tick():
+        if not holder["done"] or holder["rendered"]:
+            return
+        holder["rendered"] = True
+        tmr.active = False
+        status.clear()
+        if holder["error"]:
+            with body:
+                ui.label(f"Evaluation failed: {holder['error']}") \
+                    .classes("text-sm").style("color:#f87171")
+        else:
+            _render_scorecard(body, holder["report"])
+
+    tmr = ui.timer(0.3, tick)
+    threading.Thread(target=worker, daemon=True).start()
+    dlg.open()
+
+
 def _legal_footer() -> None:
     """Public links to the Terms and Privacy Policy (shown on auth cards)."""
     with ui.row().classes("items-center gap-3 w-full justify-center"):
@@ -800,12 +944,17 @@ def login_page():
             if user:
                 app.storage.user["user_id"] = user.id
                 app.storage.user["email"] = user.email
+                app.storage.user["session_epoch"] = user.session_epoch
                 ui.navigate.to("/")
             else:
                 ui.notify("Wrong email or password.", color="negative")
 
         pw.on("keydown.enter", submit)
         ui.button("Sign in", on_click=submit).classes("w-full")
+        with ui.row().classes("w-full justify-end -mt-1"):
+            ui.button("Forgot password?",
+                      on_click=lambda: ui.navigate.to("/forgot")) \
+                .props("flat dense no-caps").classes("text-xs")
         ui.separator().style("background:#1e293b")
         with ui.row().classes("items-center justify-between w-full"):
             ui.label("New to KiCraft?").classes("text-xs").style("color:#94a3b8")
@@ -863,6 +1012,7 @@ def signup_page():
                 return
             app.storage.user["user_id"] = user.id
             app.storage.user["email"] = user.email
+            app.storage.user["session_epoch"] = user.session_epoch
             ui.navigate.to("/")
 
         pw.on("keydown.enter", submit)
@@ -873,6 +1023,96 @@ def signup_page():
             ui.button("Sign in", on_click=lambda: ui.navigate.to("/login")).props("flat dense")
         ui.separator().style("background:#1e293b")
         _laforest_footer()
+
+
+@ui.page("/forgot")
+def forgot_page():
+    """Public: request a password-reset link. Always shows the same neutral
+    confirmation, so it never reveals whether an email is registered."""
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    with ui.card().classes("absolute-center w-96") \
+            .style("background:#0f172a;border:1px solid #1e293b"):
+        ui.label("Reset your password").classes("text-2xl font-bold text-white")
+        ui.label("Enter your account email and we'll send a link to set a new "
+                 "password.").classes("text-sm").style("color:#94a3b8")
+        email = ui.input("Email").classes("w-full")
+
+        def submit():
+            addr = (email.value or "").strip()
+            # Mint + send only for a real account, but never surface success or
+            # failure differently: the message below is identical either way, so an
+            # attacker can't probe which emails exist.
+            if addr:
+                try:
+                    token = _store().create_reset_token(addr)
+                    if token:
+                        s = Settings.from_env()
+                        url = f"{s.public_url}/reset?token={token}"
+                        send_reset_email(s, addr, url, _RESET_TTL_MINUTES)
+                except Exception:
+                    pass
+            ui.notify("If that email has an account, a reset link is on its way. "
+                      "The link expires in an hour.", color="positive")
+
+        email.on("keydown.enter", submit)
+        ui.button("Send reset link", on_click=submit).classes("w-full")
+        ui.separator().style("background:#1e293b")
+        with ui.row().classes("items-center justify-between w-full"):
+            ui.label("Remembered it?").classes("text-xs").style("color:#94a3b8")
+            ui.button("Back to sign in",
+                      on_click=lambda: ui.navigate.to("/login")).props("flat dense")
+        _legal_footer()
+
+
+@ui.page("/reset")
+def reset_page(token: str = ""):
+    """Public: consume a reset token and set a new password. On success the user is
+    auto-signed-in; the new session carries the bumped epoch, so every other
+    session (an attacker's included) is evicted."""
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    user = _store().verify_reset_token(token)
+    with ui.card().classes("absolute-center w-96") \
+            .style("background:#0f172a;border:1px solid #1e293b"):
+        if user is None:
+            ui.label("Reset link invalid or expired") \
+                .classes("text-2xl font-bold text-white")
+            ui.label("Reset links are single-use and expire after an hour. Request "
+                     "a fresh one to continue.").classes("text-sm").style("color:#94a3b8")
+            ui.button("Request a new link",
+                      on_click=lambda: ui.navigate.to("/forgot")).classes("w-full")
+            _legal_footer()
+            return
+        ui.label("Choose a new password").classes("text-2xl font-bold text-white")
+        ui.label(f"for {user.email}").classes("text-sm").style("color:#94a3b8")
+        pw = ui.input("New password", password=True,
+                      password_toggle_button=True).classes("w-full")
+        pw2 = ui.input("Confirm new password", password=True).classes("w-full")
+
+        def submit():
+            if not (pw.value or ""):
+                ui.notify("Please enter a new password.", color="warning")
+                return
+            if pw.value != pw2.value:
+                ui.notify("Those passwords don't match.", color="warning")
+                return
+            updated = _store().consume_reset_token(token, pw.value)
+            if updated is None:
+                ui.notify("That reset link just expired. Please request a new one.",
+                          color="negative")
+                return
+            app.storage.user["user_id"] = updated.id
+            app.storage.user["email"] = updated.email
+            app.storage.user["session_epoch"] = updated.session_epoch
+            ui.notify("Password updated. You're signed in, and other devices have "
+                      "been signed out.", color="positive")
+            ui.navigate.to("/")
+
+        pw.on("keydown.enter", submit)
+        pw2.on("keydown.enter", submit)
+        ui.button("Set new password and sign in", on_click=submit).classes("w-full")
+        _legal_footer()
 
 
 @ui.page("/consent")
@@ -1138,6 +1378,12 @@ def index():
                             ui.button("Download", icon="download",
                                       on_click=lambda zp=p.zip_path: ui.download(zp)) \
                                 .props("flat dense")
+                        if p.dir_path and is_admin(user):
+                            ui.button("Evaluate", icon="fact_check",
+                                      on_click=lambda pp=p: open_eval_dialog(
+                                          pp.dir_path,
+                                          pp.project_stem or f"project {pp.id}")) \
+                                .props("flat dense").style("color:#a78bfa")
 
         def build_question_panel():
             """(Re)build the clarifying-question panel for a parked run. Always
