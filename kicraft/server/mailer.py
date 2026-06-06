@@ -1,10 +1,14 @@
 """Outbound email for the KiCraft web app, used to deliver password-reset links.
 
-Stdlib smtplib only, so there is no third-party dependency to add or audit. The
-mailer is intentionally tiny and fail-soft: when SMTP is not configured (no
-smtp_host) it logs the message that would have been sent and returns False, so
-local development and the test suite exercise the full reset flow without a mail
-server. In production the box sets the KICRAFT_SMTP_* vars and real mail goes out.
+No third-party dependency: SMTP goes through stdlib smtplib, and the Resend
+backend posts JSON with stdlib urllib. The mailer is tiny and fail-soft: with no
+backend configured it logs the message that would have been sent and returns
+False, so local dev and the test suite exercise the full reset flow without a mail
+server. In production the box configures one backend.
+
+Two backends, selected by config (Resend wins if both are set):
+  - Resend HTTP API  -> settings.resend_api_key
+  - SMTP             -> settings.smtp_host (+ the other smtp_* fields)
 
 The send functions never raise on mail trouble; they return a bool. Callers
 (/forgot) show the same neutral message either way, so a delivery failure does not
@@ -12,9 +16,12 @@ leak whether an account exists.
 """
 from __future__ import annotations
 
+import json
 import logging
 import smtplib
 import ssl
+import urllib.error
+import urllib.request
 from email.message import EmailMessage
 
 from .config import Settings
@@ -22,6 +29,13 @@ from .config import Settings
 log = logging.getLogger("kicraft.mailer")
 
 _RESET_SUBJECT = "Reset your KiCraft password"
+_RESEND_ENDPOINT = "https://api.resend.com/emails"
+
+
+def _from_addr(settings: Settings) -> str:
+    """The sender address, provider-agnostic. email_from is the canonical setting;
+    fall back to the SMTP sender/login for back-compat."""
+    return settings.email_from or settings.smtp_from or settings.smtp_username
 
 
 def build_reset_email(to_addr: str, from_addr: str, reset_url: str,
@@ -46,30 +60,65 @@ def build_reset_email(to_addr: str, from_addr: str, reset_url: str,
 def send_reset_email(settings: Settings, to_addr: str, reset_url: str,
                      ttl_minutes: int = 60) -> bool:
     """Compose and send the reset email. See `send_email` for the return contract."""
-    from_addr = settings.smtp_from or settings.smtp_username
-    return _send(settings, build_reset_email(to_addr, from_addr, reset_url, ttl_minutes))
+    msg = build_reset_email(to_addr, _from_addr(settings), reset_url, ttl_minutes)
+    return _send(settings, msg)
 
 
 def send_email(settings: Settings, to_addr: str, subject: str, body: str) -> bool:
-    """Send one plain-text email via SMTP. Returns True on success.
+    """Send one plain-text email. Returns True on success.
 
-    Returns False (and logs) when SMTP is unconfigured or sending fails, so the
+    Returns False (and logs) when no backend is configured or sending fails, so the
     caller never crashes a request over mail trouble."""
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = settings.smtp_from or settings.smtp_username
+    msg["From"] = _from_addr(settings)
     msg["To"] = to_addr
     msg.set_content(body)
     return _send(settings, msg)
 
 
 def _send(settings: Settings, msg: EmailMessage) -> bool:
-    if not settings.smtp_host:
-        # Dev / unconfigured path: no mail server, so surface the message (which
-        # for a reset contains the link) in the log for the operator to relay.
-        log.warning("SMTP not configured (KICRAFT_SMTP_HOST unset); email to %s not "
-                    "sent. Message follows:\n%s", msg["To"], msg.get_content())
+    if settings.resend_api_key:
+        return _send_via_resend(settings, msg)
+    if settings.smtp_host:
+        return _send_via_smtp(settings, msg)
+    # Dev / unconfigured path: no backend, so surface the message (which for a
+    # reset contains the link) in the log for the operator to relay.
+    log.warning("no email backend configured (set KICRAFT_RESEND_API_KEY or "
+                "KICRAFT_SMTP_HOST); email to %s not sent. Message follows:\n%s",
+                msg["To"], msg.get_content())
+    return False
+
+
+def _send_via_resend(settings: Settings, msg: EmailMessage) -> bool:
+    """POST the message to the Resend HTTP API (stdlib urllib, no SDK dependency)."""
+    payload = json.dumps({
+        "from": msg["From"],
+        "to": [msg["To"]],
+        "subject": msg["Subject"],
+        "text": msg.get_content(),
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        _RESEND_ENDPOINT, data=payload, method="POST",
+        headers={"Authorization": f"Bearer {settings.resend_api_key}",
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return 200 <= resp.status < 300
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:300]
+        except OSError:
+            pass
+        log.error("Resend API error sending to %s: HTTP %s %s", msg["To"], e.code, detail)
         return False
+    except (urllib.error.URLError, OSError) as e:
+        log.error("failed to reach Resend sending to %s: %s", msg["To"], e)
+        return False
+
+
+def _send_via_smtp(settings: Settings, msg: EmailMessage) -> bool:
     try:
         if settings.smtp_ssl:
             with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=30,

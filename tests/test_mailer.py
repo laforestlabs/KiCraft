@@ -5,6 +5,10 @@ monkeypatch, so no socket or mail server is needed.
 """
 from __future__ import annotations
 
+import io
+import json
+import urllib.error
+
 from kicraft.server import mailer
 from kicraft.server.config import Settings
 
@@ -100,3 +104,73 @@ def test_send_returns_false_on_smtp_error(monkeypatch):
     monkeypatch.setattr(mailer.smtplib, "SMTP", BoomSMTP)
     s = _settings(smtp_host="smtp.example.com", smtp_port=587)
     assert mailer.send_email(s, "user@e.st", "Hi", "body") is False  # caught, not raised
+
+
+# ---- Resend backend -------------------------------------------------------
+
+def test_send_via_resend_posts_to_api(monkeypatch):
+    captured: dict = {}
+
+    class FakeResp:
+        status = 202
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=0):
+        captured["url"] = req.full_url
+        captured["headers"] = {k.lower(): v for k, v in req.header_items()}
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeResp()
+
+    monkeypatch.setattr(mailer.urllib.request, "urlopen", fake_urlopen)
+    s = _settings(resend_api_key="re_test123", email_from="no-reply@kicraft.io")
+    ok = mailer.send_reset_email(s, "user@e.st", "https://kicraft.io/reset?token=ABC")
+    assert ok is True
+    assert captured["url"] == "https://api.resend.com/emails"
+    assert captured["headers"]["authorization"] == "Bearer re_test123"
+    assert captured["body"]["from"] == "no-reply@kicraft.io"
+    assert captured["body"]["to"] == ["user@e.st"]
+    assert "kicraft.io/reset?token=ABC" in captured["body"]["text"]
+
+
+def test_resend_takes_precedence_over_smtp(monkeypatch):
+    used: dict = {}
+
+    class FakeResp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=0):
+        used["resend"] = True
+        return FakeResp()
+
+    def boom(*a, **k):
+        raise AssertionError("SMTP must not be used when Resend is configured")
+
+    monkeypatch.setattr(mailer.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(mailer.smtplib, "SMTP", boom)
+    monkeypatch.setattr(mailer.smtplib, "SMTP_SSL", boom)
+    s = _settings(resend_api_key="re_x", smtp_host="smtp.example.com",
+                  email_from="no-reply@kicraft.io")
+    assert mailer.send_email(s, "u@e.st", "Hi", "body") is True
+    assert used.get("resend") is True
+
+
+def test_resend_http_error_returns_false(monkeypatch):
+    def fake_urlopen(req, timeout=0):
+        raise urllib.error.HTTPError(
+            req.full_url, 422, "Unprocessable Entity", {},
+            io.BytesIO(b'{"message":"domain not verified"}'))
+
+    monkeypatch.setattr(mailer.urllib.request, "urlopen", fake_urlopen)
+    s = _settings(resend_api_key="re_x", email_from="no-reply@kicraft.io")
+    assert mailer.send_reset_email(s, "u@e.st", "https://x/reset?token=A") is False
