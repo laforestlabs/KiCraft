@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 from .accounts import _RESET_TTL_SECONDS, TIERS, AccountStore
+from .config import load_dotenv
 
 
 def _default_db() -> Path:
@@ -126,6 +127,7 @@ def _cmd_reset_password(args: argparse.Namespace) -> int:
     """Recover an account: print a reset link, email it (--send), or set a new
     password now (--set). All paths that change the password evict existing
     sessions, since set_password bumps the user's session epoch."""
+    load_dotenv()  # read KICRAFT_PUBLIC_URL (and any paths) from .env in the CWD
     store = _store()
     u = store.get_user_by_email(args.email)
     if u is None:

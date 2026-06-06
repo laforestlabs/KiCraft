@@ -30,6 +30,10 @@ log = logging.getLogger("kicraft.mailer")
 
 _RESET_SUBJECT = "Reset your KiCraft password"
 _RESEND_ENDPOINT = "https://api.resend.com/emails"
+# A descriptive User-Agent is required: the Resend API is fronted by Cloudflare,
+# which 403s the stdlib default "Python-urllib/x.y" signature (Cloudflare error
+# 1010, "banned browser signature"). Any real UA gets through.
+_USER_AGENT = "KiCraft/1.0 (+https://kicraft.io)"
 
 
 def _from_addr(settings: Settings) -> str:
@@ -101,7 +105,9 @@ def _send_via_resend(settings: Settings, msg: EmailMessage) -> bool:
     req = urllib.request.Request(
         _RESEND_ENDPOINT, data=payload, method="POST",
         headers={"Authorization": f"Bearer {settings.resend_api_key}",
-                 "Content-Type": "application/json"})
+                 "Content-Type": "application/json",
+                 "Accept": "application/json",
+                 "User-Agent": _USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return 200 <= resp.status < 300
