@@ -34,6 +34,9 @@ GRID_MM = 2.54
 USABLE_LEFT_MM = 38.1     # 15 * 2.54
 USABLE_RIGHT_MM = 190.0
 USABLE_TOP_MM = 38.1
+# Single-row top: parts hang from this line so the wired router has a uniform
+# clear band BELOW the row for its per-net trunk lanes.
+ROW_TOP_MM = 50.8
 # Padding around each part's pin bounding box so neither the power symbols
 # that hang ±5.08 mm off a pin nor the net labels collide with a neighbour.
 PAD_X_MM = 11.43          # 9 * 1.27 — label room left/right
@@ -94,28 +97,24 @@ def place_sheet(
     # Highest pin-count part first (the IC anchors the top-left), ties by ref.
     order = sorted(sheet_parts, key=lambda p: (-pin_counts[p.ref], p.ref))
 
+    # Single row, left to right. The wired router (see ``router``) connects
+    # pins with real trunk wires in a clear band BELOW the row, so a single row
+    # keeps every routing channel clear of component pins (no riser crosses a
+    # foreign part). Origins are TOP-aligned on ROW_TOP_MM so the band below is
+    # uniform. Parts are ordered highest-pin-count first (the IC anchors the
+    # left). Determinism + distinct pin coordinates are preserved.
     placed_by_ref: dict[str, PlacedPart] = {}
     cursor_x = USABLE_LEFT_MM
-    row_top = USABLE_TOP_MM
-    row_height = 0.0
     for idx, part in enumerate(order):
         hw, hh = half_extent[part.ref]
-        cell_w = 2.0 * hw
-        # Wrap to a new row when the cell would overrun the usable width
-        # (but never wrap an already-empty row).
-        if cursor_x + cell_w > USABLE_RIGHT_MM and cursor_x > USABLE_LEFT_MM:
-            row_top += row_height + ROW_GAP_MM
-            cursor_x = USABLE_LEFT_MM
-            row_height = 0.0
         placed_by_ref[part.ref] = PlacedPart(
             ref=part.ref,
             x_mm=_snap(cursor_x + hw),
-            y_mm=_snap(row_top + hh),
+            y_mm=_snap(ROW_TOP_MM + hh),
             rotation_deg=0,
             mirror=None,
             role="anchor" if idx == 0 else "grid",
         )
-        cursor_x += cell_w + COL_GAP_MM
-        row_height = max(row_height, 2.0 * hh)
+        cursor_x += 2.0 * hw + COL_GAP_MM
 
     return [placed_by_ref[p.ref] for p in sheet_parts]
