@@ -1634,6 +1634,33 @@ def _find_routed_parent(project_dir: Path) -> Path | None:
     return hits[-1] if hits else None
 
 
+def _count_leaf_subcircuits(root_sch: Path) -> int:
+    """Number of non-root leaf subcircuits the hierarchical layout engine would
+    place. 0 means a degenerate hierarchy -- the root schematic references no child
+    sheets (a flat or stale synth), so there is nothing to compose/route. Mirrors the
+    engine's own selection (solve_subcircuits: non-root nodes that are leaves)."""
+    from kicraft.autoplacer.brain.hierarchy_parser import parse_hierarchy
+
+    graph = parse_hierarchy(project_dir=root_sch.parent, top_schematic=root_sch)
+    return len(graph.leaf_nodes()) - (1 if graph.root.is_leaf else 0)
+
+
+def _degenerate_hierarchy_error(root_sch: Path) -> str | None:
+    """An actionable error string if the hierarchy has 0 leaf subcircuits, else None.
+
+    `build` checks this BEFORE the minutes-long layout run, so a degenerate design
+    fails fast with the real cause instead of the late, misleading "board not
+    routable as placed" (which the engine reaches when the parent compose, given no
+    leaves, produces no routed board)."""
+    if _count_leaf_subcircuits(root_sch) == 0:
+        return (
+            "the synthesized design has no leaf subcircuits to place/route -- the root "
+            "schematic references no child sheets (a degenerate or stale hierarchy). "
+            "Re-run synthesis so the components are organized into sheets."
+        )
+    return None
+
+
 def _verify_routed_board(pcb: Path) -> dict:
     """Acceptance gate: no shorts, no unconnected (connector-shield items waived)."""
     from kicraft.autoplacer.config import DEFAULT_CONFIG
@@ -1739,6 +1766,13 @@ def _cmd_build(args: argparse.Namespace) -> int:
     root_sch = Path(artifacts.root_sch)
     pcb = project_dir / f"{stem}.kicad_pcb"
     print(f"[build]     synthesized {project_dir} (ERC clean)")
+
+    # Fail fast on a degenerate (0-leaf) hierarchy with an actionable message, before
+    # the minutes-long layout run reaches the misleading "board not routable as placed".
+    degenerate = _degenerate_hierarchy_error(root_sch)
+    if degenerate:
+        print(f"error: {degenerate}", file=sys.stderr)
+        return 6
 
     # 2. Optimize placement + route (leaves then parent) via the layout engine.
     print(f"[build] 2/5 place + route (quality={args.quality}) -- may take minutes ...")

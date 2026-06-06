@@ -10,6 +10,7 @@ synthesizes the project, and verifies:
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -334,3 +335,38 @@ def test_single_sheet_stem_collision_keeps_readable_leaf(tmp_path) -> None:
     leaf_txt = (tmp_path / leaf_names[0]).read_text(encoding="utf-8")
     assert "(symbol" in leaf_txt and "Timer:NE555P" in leaf_txt, \
         "leaf schematic lacks component symbols (was clobbered by the root block diagram)"
+
+
+def _at_rotations(text: str) -> list[float]:
+    """Every explicit rotation from `(at x y ROT)` triples in a schematic."""
+    return [float(m.group(1)) for m in
+            re.finditer(r"\(at\s+-?[\d.]+\s+-?[\d.]+\s+(-?[\d.]+)\)", text)]
+
+
+def test_synthesis_emits_only_cardinal_rotations(tmp_path, llups_like_state) -> None:
+    """KiCanvas (the in-browser schematic viewer) THROWS on a non-cardinal symbol,
+    pin, or label rotation (e.g. ``unexpected rotation 45``), aborts before painting,
+    and shows its aqua ``<kicanvas-embed>`` background -- the reported "teal blob".
+    Guard that synthesis only ever emits rotations that are multiples of 90 so the
+    viewer can render every sheet."""
+    run(llups_like_state, tmp_path)
+    for sch in tmp_path.glob("*.kicad_sch"):
+        bad = [r for r in _at_rotations(sch.read_text(encoding="utf-8")) if r % 90 != 0]
+        assert not bad, f"{sch.name} has non-cardinal rotations {bad} (KiCanvas blanks to teal)"
+
+
+def test_resynthesis_removes_stale_orphan_sheets(tmp_path, llups_like_state) -> None:
+    """A resumable-session stage rerun re-synthesizes into the same project dir.
+    Synthesis must clear the prior generated sheets first, or an orphan leaf from a
+    previous architecture lingers -- showing up as a phantom sheet in the web sheet
+    list and leaving the hierarchy degenerate (the parent no longer references it,
+    which is what produced ``leafs=0/0`` at place/route)."""
+    run(llups_like_state, tmp_path)
+    assert (tmp_path / "USB_INPUT.kicad_sch").is_file()
+    orphan = tmp_path / "OLD_MOTOR_DRIVER.kicad_sch"
+    orphan.write_text("(kicad_sch (version 20250114))\n", encoding="utf-8")
+
+    run(llups_like_state, tmp_path)  # the rerun
+    assert not orphan.exists(), "stale orphan leaf survived re-synthesis"
+    assert (tmp_path / "USB_INPUT.kicad_sch").is_file()  # real leaf re-emitted
+    assert (tmp_path / "DEMO33.kicad_sch").is_file()  # root re-emitted

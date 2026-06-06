@@ -78,9 +78,14 @@ def _embed_html(sources: list[KiCanvasSource], *, controls: str = "full") -> str
         f'<kicanvas-source src="{_attr(s.url)}" name="{_attr(s.filename)}"></kicanvas-source>'
         for s in sources
     )
+    # `background` overrides the bundle's `:host{background-color:aqua}` (an inline
+    # style beats a shadow `:host` rule). Without it, any pre-paint failure (a source
+    # 404, an unsupported construct) leaves the embed a bright-cyan "teal blob"; with
+    # it, a failed render is a neutral dark panel that blends with the app.
     return (
         f'<kicanvas-embed controls="{_attr(controls)}" '
-        f'style="display:block;width:100%;height:100%;">{children}</kicanvas-embed>'
+        f'style="display:block;width:100%;height:100%;background:#0b1220;">'
+        f'{children}</kicanvas-embed>'
     )
 
 

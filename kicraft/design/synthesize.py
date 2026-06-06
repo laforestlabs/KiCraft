@@ -164,6 +164,19 @@ def run(
     project_dir = project_dir.resolve()
     project_dir.mkdir(parents=True, exist_ok=True)
 
+    # Re-synthesis (a resumable-session stage rerun) emits into the same dir; clear
+    # the prior generated top-level files first so an orphan leaf from a PREVIOUS
+    # architecture cannot linger. A stale `*.kicad_sch` the new root no longer
+    # references would surface as a phantom sheet in the web sheet list and leave the
+    # hierarchy degenerate (the place/route engine then finds 0 leaf subcircuits and
+    # fails). Scoped to this dir's own generated files by extension -- the
+    # `.experiments/` and `.kicraft/` trees (subdirectories) are untouched.
+    for pat in ("*.kicad_sch", "*.kicad_pcb", "*.kicad_pro", "*.kicad_prl",
+                "*_autoplacer.json", "*_erc.rpt"):
+        for stale in project_dir.glob(pat):
+            if stale.is_file():
+                stale.unlink()
+
     # Guard the root/leaf filename collision (a leaf stem equal to the project
     # stem would clobber the root, or be clobbered by it) BEFORE building sheet
     # instances or installing library leaves, so the installer, the root sheet
