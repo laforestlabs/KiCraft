@@ -80,9 +80,16 @@ class Settings:
     # --- Outbound email + public URL (password-reset delivery) ---------------
     # public_url is the externally reachable origin (e.g. https://kicraft.io); it
     # is used to build absolute reset links so they never depend on a request's
-    # (spoofable) Host header. The smtp_* fields configure the reset mailer; when
-    # smtp_host is empty the mailer logs the link instead of sending (local dev).
+    # (spoofable) Host header. email_from is the sender shown on reset mail.
+    #
+    # Two delivery backends, picked by whichever is configured (Resend wins if
+    # both are set):
+    #   - Resend HTTP API: set resend_api_key (KICRAFT_RESEND_API_KEY).
+    #   - SMTP: set smtp_host (+ the other smtp_* fields).
+    # With neither set, the mailer logs the link instead of sending (local dev).
     public_url: str = "http://localhost:8080"
+    email_from: str = ""
+    resend_api_key: str = ""
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_username: str = ""
@@ -143,6 +150,10 @@ class Settings:
             kill_switch=_env_bool("KICRAFT_KILL_SWITCH"),
             public_url=os.environ.get(
                 "KICRAFT_PUBLIC_URL", cls.public_url).strip().rstrip("/") or cls.public_url,
+            email_from=(os.environ.get("KICRAFT_EMAIL_FROM", "").strip()
+                        or os.environ.get("KICRAFT_SMTP_FROM", "").strip()
+                        or os.environ.get("KICRAFT_SMTP_USERNAME", "").strip()),
+            resend_api_key=os.environ.get("KICRAFT_RESEND_API_KEY", "").strip(),
             smtp_host=os.environ.get("KICRAFT_SMTP_HOST", "").strip(),
             smtp_port=int(os.environ.get("KICRAFT_SMTP_PORT", cls.smtp_port)),
             smtp_username=os.environ.get("KICRAFT_SMTP_USERNAME", "").strip(),
@@ -175,6 +186,8 @@ class Settings:
             "ledger_path": str(self.ledger_path),
             "kill_switch": self.kill_switch,
             "public_url": self.public_url,
+            "email_from": self.email_from,
+            "resend_configured": bool(self.resend_api_key),
             "smtp_host": self.smtp_host,
             "smtp_port": self.smtp_port,
             "smtp_from": self.smtp_from,
