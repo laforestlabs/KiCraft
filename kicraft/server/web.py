@@ -12,11 +12,12 @@ Run locally:   KICRAFT_ACCESS_PASSWORD=secret python -m kicraft.server.web
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import hmac
 import json
 import os
 import random
-import secrets
 import shutil
 import subprocess
 import tempfile
@@ -50,10 +51,13 @@ from .stagetabs import StageTabs, demo_events
 # Self-host the KiCanvas ES module bundle so the browser fetches it same-origin.
 app.add_static_files("/static", str(KICANVAS_ASSET.parent))
 
-# Raw-file serving: a capability token maps to a project dir. The token is minted
-# only inside the authed page, so it gates access without depending on
-# app.storage.user (whose getter can assert outside the page/connection flow).
-_PROJECT_TOKENS: dict[str, Path] = {}
+# Raw-file serving: a capability token encodes the project dir, HMAC-signed with
+# the server secret, so it gates access without app.storage.user (whose getter can
+# assert outside the page/connection flow). The token is STATELESS -- it carries
+# its own (signed) project path -- so serving survives a server restart and needs
+# no in-memory map. An in-memory map used to back this; a `kicraft-web` restart
+# (a deploy) wiped it, so every still-open tab 404'd on its schematic fetches and
+# KiCanvas painted its aqua fallback (the "teal blob"). See _resolve_project_token.
 _ALLOWED_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_pro")
 
 # Shown in the reset email; derived from the token TTL so the two never drift.
@@ -115,15 +119,43 @@ def _legal_markdown(name: str) -> str:
                 "loaded. Please contact support.")
 
 
+def _project_secret() -> bytes:
+    """The HMAC key for project-file tokens: the same stable storage secret used to
+    sign the session cookie (env in the box .env, default for local dev). Stable
+    across restarts, so a token minted before a deploy still verifies afterwards."""
+    return os.environ.get("KICRAFT_STORAGE_SECRET", "kicraft-dev-secret").encode("utf-8")
+
+
+def _b64e(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64d(txt: str) -> bytes:
+    return base64.urlsafe_b64decode(txt + "=" * (-len(txt) % 4))
+
+
 def _register_project_dir(project_dir: Path) -> str:
-    """Mint an unguessable token for a project dir so the browser can fetch its raw
-    KiCad files. Cap the map so a long-lived server does not grow without bound."""
-    token = secrets.token_urlsafe(16)
-    _PROJECT_TOKENS[token] = project_dir
-    if len(_PROJECT_TOKENS) > 256:
-        for old in list(_PROJECT_TOKENS)[:-128]:
-            _PROJECT_TOKENS.pop(old, None)
-    return token
+    """Mint a stateless, signed token that the browser uses to fetch the project's
+    raw KiCad files. The token carries the (absolute) project path plus an HMAC over
+    it, so any process holding the secret can verify it -- no in-memory map, nothing
+    to evict, and it survives a restart. Forgery needs the secret (HMAC)."""
+    payload = _b64e(str(project_dir.resolve()).encode("utf-8"))
+    sig = _b64e(hmac.new(_project_secret(), payload.encode("ascii"), hashlib.sha256).digest())
+    return f"{payload}.{sig}"
+
+
+def _resolve_project_token(token: str) -> Path | None:
+    """The project dir a token authorizes, or None if it is malformed or its HMAC
+    does not verify. Path containment/suffix checks stay with the serve handlers."""
+    try:
+        payload, sig = token.split(".", 1)
+        expected = hmac.new(
+            _project_secret(), payload.encode("ascii"), hashlib.sha256).digest()
+        if not hmac.compare_digest(_b64d(sig), expected):
+            return None
+        return Path(_b64d(payload).decode("utf-8"))
+    except Exception:  # malformed token / bad base64 / bad utf-8 -> unauthorized
+        return None
 
 
 @app.get("/project/{token}/{filename}")
@@ -134,7 +166,7 @@ def serve_project_file(token: str, filename: str):
     suffix whitelist, and a check that the resolved target sits directly in the
     project dir. `no-store` so a rewritten board is always re-fetched.
     """
-    base = _PROJECT_TOKENS.get(token)
+    base = _resolve_project_token(token)
     name = Path(filename).name
     if base is None or name != filename or not name.endswith(_ALLOWED_SUFFIXES):
         return PlainTextResponse("not found", status_code=404)
@@ -158,7 +190,7 @@ def serve_project_render(token: str, subpath: str):
     `serve_project_file` rejects, so this endpoint allows a relative subpath but
     keeps the same defense: the resolved target must stay inside the project dir,
     be a `.png`, and exist. `no-store` so an overwritten render is re-fetched."""
-    base = _PROJECT_TOKENS.get(token)
+    base = _resolve_project_token(token)
     if base is None:
         return PlainTextResponse("not found", status_code=404)
     target = (base / subpath).resolve()
