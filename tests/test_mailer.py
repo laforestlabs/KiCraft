@@ -132,6 +132,9 @@ def test_send_via_resend_posts_to_api(monkeypatch):
     assert ok is True
     assert captured["url"] == "https://api.resend.com/emails"
     assert captured["headers"]["authorization"] == "Bearer re_test123"
+    # A real UA is required or Cloudflare 403s the default urllib signature (1010).
+    assert captured["headers"]["user-agent"] == "KiCraft/1.0 (+https://kicraft.io)"
+    assert "urllib" not in captured["headers"]["user-agent"].lower()
     assert captured["body"]["from"] == "no-reply@kicraft.io"
     assert captured["body"]["to"] == ["user@e.st"]
     assert "kicraft.io/reset?token=ABC" in captured["body"]["text"]
