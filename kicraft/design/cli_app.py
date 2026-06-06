@@ -1756,7 +1756,17 @@ def _cmd_build(args: argparse.Namespace) -> int:
         if e.artifacts is not None:
             _persist_artifacts(state, state_path, e.artifacts)
         _write_synthesis_check(state_path, state.project_stem, e.results, ok=False)
-        print(f"synthesis checks failed (not ERC-clean):\n{e}", file=sys.stderr)
+        # The schematics ARE written (synthesis emits them before the check
+        # gate), so they remain viewable in the Synthesize tab. List each failed
+        # check and its offenders so the exact problem (which pin/wire/net) is
+        # visible in the live build log, not just a pass/fail count.
+        print("synthesis checks failed (schematics were written and are viewable "
+              "in the Synthesize tab):", file=sys.stderr)
+        for r in (e.results or []):
+            if not r.ok:
+                print(f"  [{r.name}] {r.message}", file=sys.stderr)
+                for o in (r.offenders or [])[:20]:
+                    print(f"      - {o}", file=sys.stderr)
         return 5
     _persist_artifacts(state, state_path, artifacts)
     _write_synthesis_check(state_path, state.project_stem, results, ok=True)
