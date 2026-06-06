@@ -220,6 +220,92 @@ def route_sheet(
         n.name: n for n in architecture.inter_sheet_nets
     }
 
+    # Every pin coordinate on the sheet — a signal trunk or riser that passes
+    # through a pin NOT on its own net would connect them (a short), so a net
+    # with no short-safe trunk falls back to stub+label connectivity.
+    all_pin_xy: list[tuple[float, float]] = []
+    for ref, part in parts_by_ref.items():
+        placed = placed_by_ref.get(ref)
+        if placed is None:
+            continue
+        try:
+            info = lookup_pins(part.symbol)
+        except (SymbolNotFoundError, ValueError, KeyError):
+            info = {"pins": []}
+        for p in info["pins"]:
+            all_pin_xy.append(_pin_position(placed, p))
+
+    # Geometry already committed this sheet, so each net is routed against the
+    # ones before it. Distinct trunk Y per net + these checks guarantee two
+    # different nets never overlap or share a junction (only ever cross, which
+    # is not a connection in KiCad) — the fix for the shorts that drove the old
+    # comb router to abandon trunks for labels.
+    placed_trunks: list[tuple[float, float, float]] = []  # (y, x_min, x_max)
+    placed_risers: list[tuple[float, float, float]] = []  # (x, y_min, y_max)
+    placed_juncs: set[tuple[float, float]] = set()
+
+    def _key(x: float, y: float) -> tuple[float, float]:
+        return (round(x, 2), round(y, 2))
+
+    def _col_free(x: float, y_min: float, y_max: float,
+                  own: set[tuple[float, float]]) -> bool:
+        """A vertical drop at column x from y_min..y_max is short-safe iff it
+        hits no FOREIGN pin and overlaps no earlier net's drop. (It may freely
+        cross other nets' trunks/drops — a crossing without a junction is not a
+        connection in KiCad.)"""
+        for (px, py) in all_pin_xy:
+            if (abs(px - x) < 0.01 and y_min - 0.01 <= py <= y_max + 0.01
+                    and _key(px, py) not in own):
+                return False
+        return not any(
+            abs(rx - x) < 0.01 and not (y_max < a - 0.01 or b < y_min - 0.01)
+            for (rx, a, b) in placed_risers
+        )
+
+    # One horizontal trunk LANE per net, stacked in the clear band BELOW the
+    # single component row. The band has no pins, so every trunk is short-safe
+    # by construction; a distinct lane Y per net means no two trunks overlap.
+    # Each pin stubs out in its exit direction, then drops straight to its net's
+    # lane. A net whose drop would cross a foreign pin falls back to stub+label.
+    band_top = max((py for (_px, py) in all_pin_xy), default=150.0) + 7.62
+    lane = {"y": band_top}
+
+    def _draw_trunk(net_name: str, endpoints: list[tuple[float, float, str]],
+                    is_inter: bool, hier_direction: str) -> bool:
+        if len(endpoints) < 2:
+            return False  # single-pin (inter-sheet stub) — label path handles it
+        ty = lane["y"]
+        own = {_key(x, y) for (x, y, _e) in endpoints}
+        drops: list[tuple[float, float, float, float, float]] = []
+        for (x, y, exit_dir) in endpoints:
+            ex, ey, _a = _stub_end(x, y, exit_dir)
+            lo, hi = sorted((ey, ty))
+            if not _col_free(ex, lo, hi, own):
+                return False
+            drops.append((ex, ey, x, y, ty))
+        for (ex, ey, x, y, ty_) in drops:
+            if (abs(ex - x) >= 0.01 or abs(ey - y) >= 0.01):
+                routed.wires.append(WireSegment(x, y, ex, ey))  # exit-dir stub
+            if abs(ey - ty) >= 0.01:
+                routed.wires.append(WireSegment(ex, ey, ex, ty))  # drop to lane
+                placed_risers.append((ex, min(ey, ty), max(ey, ty)))
+        exs = [d[0] for d in drops]
+        x_min, x_max = min(exs), max(exs)
+        if abs(x_max - x_min) >= 0.01:
+            routed.wires.append(WireSegment(x_min, ty, x_max, ty))  # the lane trunk
+            placed_trunks.append((ty, x_min, x_max))
+        for ex in sorted({e for e in exs if x_min + 0.01 < e < x_max - 0.01}):
+            routed.junctions.append(Junction(x_mm=ex, y_mm=ty))
+            placed_juncs.add(_key(ex, ty))
+        if is_inter:
+            routed.hier_labels.append(HierLabelPlacement(
+                name=net_name, direction=hier_direction,
+                x_mm=x_min, y_mm=ty, angle_deg=0))
+        elif len(endpoints) >= 3:
+            routed.labels.append(NetLabel(text=net_name, x_mm=x_min, y_mm=ty))
+        lane["y"] = ty + GRID_MM  # next net takes the next lane down
+        return True
+
     for conn in sheet_connections:
         endpoints: list[tuple[float, float, str]] = []
         for ep in conn.endpoints:
@@ -281,14 +367,13 @@ def route_sheet(
                 )
             continue
 
-        # Signal / inter-sheet branch — label-based connectivity.
-        # Each pin gets a short stub in its exit direction plus a label
-        # carrying the net name. Same-named labels are one net, so nothing
-        # depends on trunk geometry and two nets cannot be shorted by a
-        # coincidental wire crossing (the failure mode of a comb router on
-        # multi-net IC sheets). Inter-sheet nets use hierarchical labels
-        # (which tie to the parent sheet pin); sheet-local nets use plain
-        # labels.
+        # Signal / inter-sheet branch. Prefer REAL WIRES: a unique-Y horizontal
+        # trunk + vertical risers + junctions (the readable, traceable look of
+        # the original comb-stub router). Each net gets its own trunk Y and is
+        # verified clear of foreign pins/junctions, so two nets can never short
+        # (the failure that drove the regression to labels). A net with no
+        # short-safe trunk falls back to the stub+label connectivity below, so
+        # the sheet is always ERC-clean.
         is_inter = conn.net_name in inter_by_name
         hier_direction = "passive"
         if is_inter:
@@ -297,6 +382,9 @@ def route_sheet(
                 (e for e in inter.endpoints if e.sheet == sheet_name), None
             )
             hier_direction = this_pin.direction if this_pin else "passive"
+
+        if _draw_trunk(conn.net_name, endpoints, is_inter, hier_direction):
+            continue
 
         for (x, y, exit_dir) in endpoints:
             ex, ey, angle = _stub_end(x, y, exit_dir)
