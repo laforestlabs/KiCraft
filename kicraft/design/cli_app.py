@@ -63,6 +63,7 @@ from .synthesis.validation import (
     SynthesisValidationError,
     check_inter_sheet_nets_realized,
     check_net_coverage,
+    check_no_dangling_signal_nets,
     check_pin_existence,
     check_sheets_have_parts,
 )
@@ -271,6 +272,12 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         if state.architecture is not None:
             checks.append(
                 check_inter_sheet_nets_realized(state.architecture, state.bom)
+            )
+            # §9.15 inverse: a signal net wired to a single pin that was never
+            # declared inter-sheet connects to nothing (the SOIL_MOISTURE_BLE
+            # USB D+/D- dangle).
+            checks.append(
+                check_no_dangling_signal_nets(state.architecture, state.bom)
             )
         for check in checks:
             if not check.ok:
@@ -1384,6 +1391,12 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             # synthesis time otherwise).
             checks.append(
                 check_inter_sheet_nets_realized(state.architecture, state.bom)
+            )
+            # The inverse failure: a signal net wired to a single pin that was
+            # never declared inter-sheet dangles ("Label not connected to
+            # anything") -- the SOIL_MOISTURE_BLE USB D+/D- build failure.
+            checks.append(
+                check_no_dangling_signal_nets(state.architecture, state.bom)
             )
         for check in checks:
             if not check.ok:

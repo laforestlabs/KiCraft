@@ -27,6 +27,7 @@ from kicraft.design.synthesis.validation import (
     check_footprints_nonempty,
     check_inter_sheet_nets_realized,
     check_named_refs_exist,
+    check_no_dangling_signal_nets,
     check_pin_directions,
     check_schematic_version,
     check_sheetfile_refs_resolve,
@@ -440,3 +441,146 @@ def test_wireless_charger_regression() -> None:
     sp = check_sheets_have_parts(arch, bom)
     assert not sp.ok
     assert len(sp.offenders) == 1 and "COIL DRIVER" in sp.offenders[0]
+
+
+# ---------- §9.15 no dangling signal nets (SOIL_MOISTURE_BLE USB regression) ----------
+
+
+def _soil_like_design(fixed: bool = False) -> tuple[Architecture, BOM]:
+    """Mirror the SOIL_MOISTURE_BLE topology: a USB-C connector sheet and an
+    ESP32 sheet whose USB D+/D- must join across the sheet boundary, alongside a
+    correctly-declared ANALOG_OUT inter-sheet net and ordinary 2-pin local nets
+    (CC1, EN) that must NOT be flagged.
+
+    ``fixed=False`` reproduces the live bug: the USB data lines are four disjoint
+    single-pin local nets (USB_DP_POWER/USB_DN_POWER on the connector,
+    USB_DP_ESP32/USB_DN_ESP32 on the MCU) -- named inconsistently and never
+    declared inter-sheet -- so each label connects to nothing.
+
+    ``fixed=True`` carries each line as one declared inter-sheet net wired on
+    both sides (USB_DP, USB_DN), which is how the design should have been wired.
+    """
+    inter = [
+        InterSheetNet(name="GND", endpoints=[
+            SheetPin(sheet=s, direction="bidirectional")
+            for s in ("USB POWER", "ESP32", "CAP SENSOR")]),
+        InterSheetNet(name="VCC_3V3", endpoints=[
+            SheetPin(sheet="ESP32", direction="bidirectional"),
+            SheetPin(sheet="CAP SENSOR", direction="bidirectional")]),
+        InterSheetNet(name="ANALOG_OUT", endpoints=[
+            SheetPin(sheet="CAP SENSOR", direction="output"),
+            SheetPin(sheet="ESP32", direction="input")]),
+    ]
+    conns = [
+        # Power (exempt) + a healthy 2-pin local net on the connector sheet.
+        NetConnection(net_name="VBUS", sheet="USB POWER",
+                      endpoints=[PinEndpoint(ref="J1", pin="A4")]),
+        NetConnection(net_name="GND", sheet="USB POWER",
+                      endpoints=[PinEndpoint(ref="J1", pin="A1"),
+                                 PinEndpoint(ref="R1", pin="2")]),
+        NetConnection(net_name="CC1", sheet="USB POWER",
+                      endpoints=[PinEndpoint(ref="J1", pin="A5"),
+                                 PinEndpoint(ref="R1", pin="1")]),
+        # ESP32 sheet: power + a healthy 2-pin local net (EN) + the ANALOG_OUT
+        # inter-sheet stub (single local pin, but joins across sheets -> OK).
+        NetConnection(net_name="VCC_3V3", sheet="ESP32",
+                      endpoints=[PinEndpoint(ref="U2", pin="3"),
+                                 PinEndpoint(ref="R3", pin="1")]),
+        NetConnection(net_name="EN", sheet="ESP32",
+                      endpoints=[PinEndpoint(ref="U2", pin="45"),
+                                 PinEndpoint(ref="R3", pin="2")]),
+        NetConnection(net_name="ANALOG_OUT", sheet="ESP32",
+                      endpoints=[PinEndpoint(ref="U2", pin="8")]),
+        # CAP SENSOR sheet: the other ANALOG_OUT stub + power.
+        NetConnection(net_name="ANALOG_OUT", sheet="CAP SENSOR",
+                      endpoints=[PinEndpoint(ref="J2", pin="3")]),
+        NetConnection(net_name="VCC_3V3", sheet="CAP SENSOR",
+                      endpoints=[PinEndpoint(ref="J2", pin="1")]),
+    ]
+    if fixed:
+        inter += [
+            InterSheetNet(name="USB_DP", endpoints=[
+                SheetPin(sheet="USB POWER", direction="bidirectional"),
+                SheetPin(sheet="ESP32", direction="bidirectional")]),
+            InterSheetNet(name="USB_DN", endpoints=[
+                SheetPin(sheet="USB POWER", direction="bidirectional"),
+                SheetPin(sheet="ESP32", direction="bidirectional")]),
+        ]
+        conns += [
+            NetConnection(net_name="USB_DP", sheet="USB POWER",
+                          endpoints=[PinEndpoint(ref="J1", pin="A6")]),
+            NetConnection(net_name="USB_DP", sheet="ESP32",
+                          endpoints=[PinEndpoint(ref="U2", pin="24")]),
+            NetConnection(net_name="USB_DN", sheet="USB POWER",
+                          endpoints=[PinEndpoint(ref="J1", pin="A7")]),
+            NetConnection(net_name="USB_DN", sheet="ESP32",
+                          endpoints=[PinEndpoint(ref="U2", pin="23")]),
+        ]
+    else:
+        conns += [
+            NetConnection(net_name="USB_DP_POWER", sheet="USB POWER",
+                          endpoints=[PinEndpoint(ref="J1", pin="A6")]),
+            NetConnection(net_name="USB_DN_POWER", sheet="USB POWER",
+                          endpoints=[PinEndpoint(ref="J1", pin="A7")]),
+            NetConnection(net_name="USB_DP_ESP32", sheet="ESP32",
+                          endpoints=[PinEndpoint(ref="U2", pin="24")]),
+            NetConnection(net_name="USB_DN_ESP32", sheet="ESP32",
+                          endpoints=[PinEndpoint(ref="U2", pin="23")]),
+        ]
+    arch = Architecture(
+        sheets=[
+            Sheet(name="USB POWER", stem="USB_POWER", function="usb input"),
+            Sheet(name="ESP32", stem="ESP32", function="mcu"),
+            Sheet(name="CAP SENSOR", stem="CAP_SENSOR", function="sensor"),
+        ],
+        power_nets=["VBUS", "VCC_3V3", "GND"],
+        inter_sheet_nets=inter,
+    )
+    bom = BOM(
+        parts=[_part("J1", "USB POWER"), _part("R1", "USB POWER"),
+               _part("U2", "ESP32"), _part("R3", "ESP32"),
+               _part("J2", "CAP SENSOR")],
+        connections=conns,
+    )
+    return arch, bom
+
+
+def test_dangling_signal_nets_flags_soil_usb() -> None:
+    """The live SOIL_MOISTURE_BLE failure: four disjoint single-pin USB nets,
+    each a 'Label not connected to anything' ERC error."""
+    arch, bom = _soil_like_design(fixed=False)
+    r = check_no_dangling_signal_nets(arch, bom)
+    assert not r.ok
+    # Exactly the four USB data nets, and nothing else.
+    assert len(r.offenders) == 4
+    blob = " ".join(r.offenders)
+    for net in ("USB_DP_POWER", "USB_DN_POWER", "USB_DP_ESP32", "USB_DN_ESP32"):
+        assert net in blob
+    # The healthy 2-pin local nets, the inter-sheet stub, and power must NOT
+    # be flagged.
+    for ok_net in ("CC1", "EN", "ANALOG_OUT", "VBUS", "VCC_3V3", "GND"):
+        assert ok_net not in blob
+
+
+def test_dangling_signal_nets_pass_when_usb_declared_intersheet() -> None:
+    """Carrying USB_DP/USB_DN as declared inter-sheet nets wired on both sides
+    clears §9.15 (and §9.14 stays happy)."""
+    arch, bom = _soil_like_design(fixed=True)
+    assert check_no_dangling_signal_nets(arch, bom).ok
+    assert check_inter_sheet_nets_realized(arch, bom).ok
+
+
+def test_dangling_signal_nets_ignore_power_and_intersheet() -> None:
+    """A design whose only single-stub nets are power or declared inter-sheet
+    (the §9.14 fixture) has nothing dangling."""
+    arch, bom = _two_sheet_design()
+    assert check_no_dangling_signal_nets(arch, bom).ok
+
+
+def test_dangling_signal_nets_offender_names_the_pin() -> None:
+    """The message is actionable: it names the orphaned pin so the wiring stage
+    knows exactly what to fix."""
+    arch, bom = _soil_like_design(fixed=False)
+    offenders = check_no_dangling_signal_nets(arch, bom).offenders
+    assert any("J1.A6" in o for o in offenders)
+    assert any("U2.23" in o for o in offenders)

@@ -659,6 +659,61 @@ def check_inter_sheet_nets_realized(architecture, bom) -> CheckResult:
     )
 
 
+def check_no_dangling_signal_nets(architecture, bom) -> CheckResult:
+    """§9.15 -- every sheet-local SIGNAL net wires at least two distinct pins.
+
+    The inverse of §9.14. §9.14 checks the forward direction (each *declared*
+    inter-sheet net is realized on both sides); this catches the failure a weak
+    wiring stage hits more often: a non-power net wired to a single pin that was
+    never declared inter-sheet, so its label connects to nothing.
+
+    That is exactly the SOIL_MOISTURE_BLE build failure -- the ESP32-S3's native
+    USB D+/D- were split into four disjoint single-pin nets (USB_DP_POWER /
+    USB_DN_POWER on the connector sheet, USB_DP_ESP32 / USB_DN_ESP32 on the MCU
+    sheet), named inconsistently and absent from inter_sheet_nets. The emitter
+    drew four hierarchical labels with nothing else on their nets -> four KiCad
+    ERC "Label not connected to anything" errors that aborted the build with no
+    per-stage signal (§9.12 ERC is slow, runs only after files are written, and
+    does not say which pin or how to fix it).
+
+    Exemptions, so the check flags only true orphans:
+      - power/ground nets join globally via power symbols, so a lone pin still
+        ties to the rail (their per-pin coverage is §9.11's job);
+      - declared inter-sheet nets are owned by §9.14 -- they join across sheets,
+        so a single local stub is correct (e.g. ANALOG_OUT: one pin on CAP
+        SENSOR, one on ESP32).
+    Everything else is sheet-local: a (net_name, sheet) wiring fewer than two
+    distinct pins is a dangling label.
+    """
+    inter_sheet_names = {n.name for n in architecture.inter_sheet_nets}
+    local_pins: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for c in bom.connections:
+        if is_power_or_ground_name(c.net_name) or c.net_name in inter_sheet_names:
+            continue
+        for ep in c.endpoints:
+            local_pins[(c.net_name, c.sheet)].append(f"{ep.ref}.{ep.pin}")
+    bad: list[str] = []
+    for (net, sheet), pins in sorted(local_pins.items()):
+        if len(set(pins)) < 2:
+            bad.append(
+                f"net {net!r} on sheet {sheet!r} wires only {pins[0]} and is "
+                f"neither a power net nor a declared inter-sheet net, so it "
+                f"connects to nothing (wire it to a second pin, mark it "
+                f"no_connect, or declare an inter-sheet net to carry it to "
+                f"another sheet)"
+            )
+    return CheckResult(
+        name="9.15 no dangling signal nets",
+        ok=not bad,
+        message=(
+            "every sheet-local signal net wires >=2 pins"
+            if not bad
+            else f"{len(bad)} signal net(s) wire a single pin with nowhere to go"
+        ),
+        offenders=bad,
+    )
+
+
 # ---------- §9.9 connectivity (Stage B) ----------
 
 
