@@ -85,6 +85,20 @@ def _store() -> AccountStore:
     return _STORE
 
 
+def _project_spend_usd(project_id) -> float | None:
+    """This project's true spend: the sum of its own ledger-recorded model calls
+    (each tagged run_id='p<id>-...'), across however many runs it took. Replaces the
+    old `spent_total_usd`, which was the site-wide running total -- so every project
+    used to record the whole site's cumulative spend, not its own cost. Returns None
+    if the ledger can't be read."""
+    if project_id is None:
+        return None
+    try:
+        return SpendGuard(Settings.from_env()).spent_for_project(project_id)
+    except Exception:  # never let a billing read-back crash the run worker
+        return None
+
+
 def _signup_code() -> str:
     """The invite code required to register, read live (env loads in main(), so
     reading it at import time would capture an empty string). Falls back to
@@ -986,7 +1000,7 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
         res = run_session(ws, state.get("brief", ""), stages, answers=answers,
                           instruction=instruction, progress=progress, run_id=run_id)
         if res.get("guard"):
-            state["spend"] = res["guard"].get("spent_total_usd")
+            state["spend"] = _project_spend_usd(state.get("project_id"))
 
         if res["status"] == "awaiting_input":
             # Park: the run is saved as awaiting_input and the question surfaces in
@@ -1048,7 +1062,7 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
                 rr = run_session(ws, state.get("brief", ""), ["wiring"],
                                  instruction=instr, progress=progress, run_id=run_id)
                 if rr.get("guard"):
-                    state["spend"] = rr["guard"].get("spent_total_usd")
+                    state["spend"] = _project_spend_usd(state.get("project_id"))
                 if rr.get("status") == "ok":
                     rc = _run_build()
         if rc != 0:
