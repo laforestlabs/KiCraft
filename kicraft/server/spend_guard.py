@@ -84,6 +84,21 @@ class SpendGuard:
             "WHERE json_valid(meta) AND json_extract(meta, '$.run_id') LIKE ?",
             (f"p{int(project_id)}-%",))
 
+    def spent_by_day(self, days: int = 30) -> list[tuple[str, float]]:
+        """(YYYY-MM-DD, cost) for the trailing `days`, summing EVERY ledger call
+        (project + non-project, e.g. eval/judge/smoketest). This is the true site
+        spend and matches the OpenRouter dashboard; contrast
+        AccountStore.spend_per_day, which counts only project-attributed spend.
+        ts is ISO-8601 UTC, so substr(ts,1,10) slices to a calendar day."""
+        cutoff = (dt.datetime.now(dt.timezone.utc)
+                  - dt.timedelta(days=days)).date().isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT substr(ts, 1, 10) AS d, COALESCE(SUM(cost_usd), 0) AS c "
+                "FROM spend WHERE substr(ts, 1, 10) >= ? GROUP BY d ORDER BY d",
+                (cutoff,)).fetchall()
+        return [(r[0], float(r[1] or 0.0)) for r in rows]
+
     def status(self) -> dict:
         day, total = self.spent_today(), self.spent_total()
         return {
