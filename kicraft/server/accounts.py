@@ -22,29 +22,35 @@ import sqlite3
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-# Tier definitions. `price_usd` is display-only until Stripe lands (backlog item
-# 3); `limit` designs per rolling `window_days` is what count_active_designs
-# enforces. "free" = 1/week, "pro" = 5/month ($5), "max" = 25/month ($10).
-# "admin" is an internal access level (not purchasable) that unlocks the self-
-# evaluation tools; it is assigned out-of-band via the admin CLI and carries a
-# high design limit so an operator is never quota-blocked while testing.
+# Billing tier definitions. `price_usd` is display-only until Stripe lands
+# (backlog item 3); `limit` designs per rolling `window_days` is what
+# count_active_designs enforces. "free" = 1/week, "pro" = 5/month ($5),
+# "max" = 25/month ($10). Admin access is no longer a tier -- it is a separate
+# `role` (see ROLES below), so a user can hold any billing tier and still be
+# staff, and staff bypass the quota outright (see quota_status / can_design).
 TIERS: dict[str, dict] = {
     "free": {"label": "Free", "price_usd": 0, "limit": 1, "window_days": 7},
     "pro": {"label": "Pro", "price_usd": 5, "limit": 5, "window_days": 30},
     "max": {"label": "Max", "price_usd": 10, "limit": 25, "window_days": 30},
-    "admin": {"label": "Admin", "price_usd": 0, "limit": 1000, "window_days": 30},
 }
 DEFAULT_TIER = "free"
-ADMIN_TIER = "admin"
+
+# Access roles, orthogonal to the billing tier above. Extensible: 'support' or
+# 'superadmin' can be added here later without touching the call sites that gate
+# on is_admin(). 'user' is the default everyone signs up with.
+ROLES: frozenset[str] = frozenset({"user", "admin"})
+DEFAULT_ROLE = "user"
+ADMIN_ROLE = "admin"
 
 
 def is_admin(user) -> bool:
-    """Whether a user holds the admin level that unlocks the self-evaluation tools.
+    """Whether a user holds a staff role (currently 'admin') that unlocks the
+    admin dashboard and the self-evaluation tools.
 
-    Gating is tier-based (no separate column): grant it out-of-band with
-    `kicraft-accounts set-tier <email> admin`. Duck-typed on `.tier` so a User or
-    any object carrying a tier works."""
-    return bool(user is not None and getattr(user, "tier", None) == ADMIN_TIER)
+    Decoupled from the billing tier: grant it out-of-band with
+    `kicraft-accounts grant-admin <email>` or from the /admin/users UI. Duck-typed
+    on `.role` so a User or any object carrying a role works."""
+    return bool(user is not None and getattr(user, "role", None) == ADMIN_ROLE)
 
 # scrypt work factors (RFC 7914). Bounded so a hash is sub-100ms but not trivial.
 _SCRYPT_N = 2 ** 14
@@ -94,6 +100,9 @@ class User:
     tier: str
     created_at: str
     last_login_at: str | None = None
+    # Access role, orthogonal to the billing tier ('user' | 'admin'). Gated on by
+    # is_admin(); granted out-of-band (CLI) or from the /admin/users dashboard.
+    role: str = DEFAULT_ROLE
     # Consent + data-use preference (see docs/legal/). A user whose
     # accepted_terms_version is None or older than the current LEGAL_VERSION is
     # re-prompted to accept before they can continue. allow_training gates the
@@ -149,6 +158,7 @@ class AccountStore:
                 "email TEXT UNIQUE NOT NULL,"
                 "password_hash TEXT NOT NULL,"
                 "tier TEXT NOT NULL DEFAULT 'free',"
+                "role TEXT NOT NULL DEFAULT 'user',"
                 "created_at TEXT NOT NULL,"
                 "last_login_at TEXT,"
                 "accepted_terms_version TEXT,"
@@ -192,13 +202,15 @@ class AccountStore:
 
     @staticmethod
     def _ensure_columns(conn: sqlite3.Connection) -> None:
-        """Additively migrate a pre-consent users table.
+        """Additively migrate an older users table.
 
-        A DB created before consent tracking has none of the consent columns; the
+        A DB created before a column was introduced has none of it; the
         CREATE TABLE IF NOT EXISTS above leaves it untouched. ALTER the missing
         columns in so an already-deployed box upgrades without losing its rows.
         Existing rows get NULL consent (so they are re-prompted) and allow_training
-        defaults to 1.
+        defaults to 1. When the `role` column is first introduced, any user still
+        on the retired 'admin' billing tier is promoted to the admin role and reset
+        to the free tier (see the inline note for why the backfill is idempotent).
         """
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
         if "accepted_terms_version" not in cols:
@@ -211,6 +223,16 @@ class AccountStore:
         if "session_epoch" not in cols:
             conn.execute(
                 "ALTER TABLE users ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0")
+        if "role" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
+            # One-time backfill: the retired 'admin' billing tier becomes the admin
+            # ROLE, so a deployed operator account keeps staff access across the
+            # upgrade. Promote the role first, then clear the tier. Guarded by the
+            # ADD COLUMN above (runs only when the column is introduced) and ordered
+            # so that even a re-run matches nothing -- there are no tier='admin' rows
+            # left after the second statement, so it is idempotent.
+            conn.execute("UPDATE users SET role='admin' WHERE tier='admin'")
+            conn.execute("UPDATE users SET tier='free' WHERE tier='admin'")
 
     # ---- users ------------------------------------------------------------
 
@@ -222,6 +244,7 @@ class AccountStore:
     def _row_to_user(row: sqlite3.Row) -> User:
         return User(id=row["id"], email=row["email"], tier=row["tier"],
                     created_at=row["created_at"], last_login_at=row["last_login_at"],
+                    role=row["role"],
                     accepted_terms_version=row["accepted_terms_version"],
                     accepted_terms_at=row["accepted_terms_at"],
                     allow_training=bool(row["allow_training"]),
@@ -251,6 +274,7 @@ class AccountStore:
         except sqlite3.IntegrityError as e:
             raise ValueError(f"email {em!r} is already registered") from e
         return User(id=int(uid), email=em, tier=tier, created_at=now,
+                    role=DEFAULT_ROLE,
                     accepted_terms_version=accepted_terms_version,
                     accepted_terms_at=accepted_at, allow_training=allow_training)
 
@@ -285,6 +309,36 @@ class AccountStore:
                 raise ValueError(f"no user with email {email!r}")
             row = conn.execute("SELECT * FROM users WHERE email=?", (em,)).fetchone()
         return self._row_to_user(row)
+
+    def set_role(self, email_or_id, role: str) -> User:
+        """Grant or revoke an access role, addressing the user by email (str) or id
+        (int). Unlike set_password this does NOT bump session_epoch: a role change
+        takes effect on the target's next page load and does not force them out of
+        their existing session."""
+        if role not in ROLES:
+            raise ValueError(
+                f"unknown role {role!r}; choose from {', '.join(sorted(ROLES))}")
+        with self._conn() as conn:
+            if isinstance(email_or_id, int):
+                cur = conn.execute("UPDATE users SET role=? WHERE id=?",
+                                   (role, email_or_id))
+                sel = ("SELECT * FROM users WHERE id=?", (email_or_id,))
+            else:
+                em = self._norm_email(email_or_id)
+                cur = conn.execute("UPDATE users SET role=? WHERE email=?",
+                                   (role, em))
+                sel = ("SELECT * FROM users WHERE email=?", (em,))
+            if cur.rowcount == 0:
+                raise ValueError(f"no user matching {email_or_id!r}")
+            row = conn.execute(*sel).fetchone()
+        return self._row_to_user(row)
+
+    def count_role(self, role: str) -> int:
+        """How many users hold `role`. Backs the last-admin lockout guard so the
+        system is never left with zero admins."""
+        with self._conn() as conn:
+            return int(conn.execute(
+                "SELECT COUNT(*) FROM users WHERE role=?", (role,)).fetchone()[0])
 
     def list_users(self) -> list[User]:
         with self._conn() as conn:
@@ -500,6 +554,20 @@ class AccountStore:
     def quota_status(self, user: User) -> dict:
         tier = TIERS.get(user.tier, TIERS[DEFAULT_TIER])
         used = self.count_active_designs(user.id, tier["window_days"])
+        if is_admin(user):
+            # Staff bypass the quota entirely so an operator is never blocked; this
+            # replaces the retired admin-tier limit=1000 trick. `unlimited` lets the
+            # UI render "Unlimited" instead of doing arithmetic on the None limit.
+            return {
+                "tier": user.tier,
+                "label": tier["label"],
+                "price_usd": tier["price_usd"],
+                "limit": None,
+                "window_days": tier["window_days"],
+                "used": used,
+                "remaining": float("inf"),
+                "unlimited": True,
+            }
         return {
             "tier": user.tier,
             "label": tier["label"],
@@ -508,7 +576,92 @@ class AccountStore:
             "window_days": tier["window_days"],
             "used": used,
             "remaining": max(0, tier["limit"] - used),
+            "unlimited": False,
         }
 
     def can_design(self, user: User) -> bool:
-        return self.quota_status(user)["remaining"] > 0
+        return is_admin(user) or self.quota_status(user)["remaining"] > 0
+
+    # ---- admin stats ------------------------------------------------------
+
+    def overview_stats(self, *, window_days: int = 30) -> dict:
+        """Headline counts for the admin dashboard in a handful of aggregate
+        queries (no per-user fan-out). `*_new` counts rows created in the trailing
+        window; cost/latency aggregates ignore NULLs (free or unfinished runs) and
+        come back None when there is nothing to average."""
+        cutoff = (_utcnow() - dt.timedelta(days=window_days)).isoformat()
+        with self._conn() as conn:
+            users_total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            users_new = conn.execute(
+                "SELECT COUNT(*) FROM users WHERE created_at >= ?", (cutoff,)).fetchone()[0]
+            admins = conn.execute(
+                "SELECT COUNT(*) FROM users WHERE role=?", (ADMIN_ROLE,)).fetchone()[0]
+            proj_total = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+            proj_new = conn.execute(
+                "SELECT COUNT(*) FROM projects WHERE created_at >= ?", (cutoff,)).fetchone()[0]
+            spend = conn.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0), AVG(cost_usd) "
+                "FROM projects WHERE cost_usd IS NOT NULL").fetchone()
+            latency = conn.execute(
+                "SELECT AVG((julianday(finished_at) - julianday(created_at)) * 86400.0) "
+                "FROM projects WHERE finished_at IS NOT NULL").fetchone()[0]
+        return {
+            "users_total": int(users_total),
+            "users_new": int(users_new),
+            "admins": int(admins),
+            "projects_total": int(proj_total),
+            "projects_new": int(proj_new),
+            "spend_total_usd": float(spend[0] or 0.0),
+            "spend_avg_usd": (float(spend[1]) if spend[1] is not None else None),
+            "avg_latency_s": (float(latency) if latency is not None else None),
+            "window_days": window_days,
+        }
+
+    def tier_distribution(self) -> list[tuple[str, int]]:
+        """(tier, count) over all users, busiest first."""
+        with self._conn() as conn:
+            return [(r["tier"], int(r["n"])) for r in conn.execute(
+                "SELECT tier, COUNT(*) AS n FROM users GROUP BY tier ORDER BY n DESC")]
+
+    def status_distribution(self) -> list[tuple[str, int]]:
+        """(status, count) over all projects (running/ok/awaiting_input/failed)."""
+        with self._conn() as conn:
+            return [(r["status"], int(r["n"])) for r in conn.execute(
+                "SELECT status, COUNT(*) AS n FROM projects "
+                "GROUP BY status ORDER BY n DESC")]
+
+    def _per_day(self, table: str, expr: str, days: int) -> list[tuple[str, float]]:
+        """Shared YYYY-MM-DD time-series helper. `expr` is the per-day aggregate
+        (e.g. 'COUNT(*)' or 'COALESCE(SUM(cost_usd),0)'). Buckets on
+        substr(created_at,1,10), valid because created_at is ISO-8601 UTC (it slices
+        to a calendar day and compares lexicographically). `table`/`expr` are
+        code-controlled constants, never user input -- no injection surface."""
+        cutoff = (_utcnow() - dt.timedelta(days=days)).date().isoformat()
+        sql = (f"SELECT substr(created_at, 1, 10) AS d, {expr} AS v FROM {table} "
+               "WHERE substr(created_at, 1, 10) >= ? GROUP BY d ORDER BY d")
+        with self._conn() as conn:
+            return [(r["d"], r["v"]) for r in conn.execute(sql, (cutoff,))]
+
+    def signups_per_day(self, days: int = 30) -> list[tuple[str, int]]:
+        return [(d, int(v)) for d, v in self._per_day("users", "COUNT(*)", days)]
+
+    def projects_per_day(self, days: int = 30) -> list[tuple[str, int]]:
+        return [(d, int(v)) for d, v in self._per_day("projects", "COUNT(*)", days)]
+
+    def spend_per_day(self, days: int = 30) -> list[tuple[str, float]]:
+        return [(d, float(v or 0.0)) for d, v in
+                self._per_day("projects", "COALESCE(SUM(cost_usd), 0)", days)]
+
+    def users_with_project_counts(self) -> list[dict]:
+        """One row per user with project_count, total spend, and most-recent project
+        time, via a single LEFT JOIN (keeps zero-project users; no N+1). Backs the
+        /admin/users table and the overview 'top users' panel. Newest users first."""
+        sql = (
+            "SELECT u.id, u.email, u.tier, u.role, u.created_at, u.last_login_at, "
+            "COUNT(p.id) AS project_count, "
+            "COALESCE(SUM(p.cost_usd), 0) AS spend_usd, "
+            "MAX(p.created_at) AS last_project_at "
+            "FROM users u LEFT JOIN projects p ON p.user_id = u.id "
+            "GROUP BY u.id ORDER BY u.created_at DESC")
+        with self._conn() as conn:
+            return [{k: r[k] for k in r.keys()} for r in conn.execute(sql).fetchall()]
