@@ -332,9 +332,11 @@ def _retry_feedback(out: dict) -> str:
     if out.get("offenders"):
         msg += f"  offenders: {json.dumps(out.get('offenders'))}"
     msg += (". Return the COMPLETE corrected slot JSON, preserving every entry that was "
-            "already valid and changing ONLY the items listed above (use the tools to "
-            "resolve real symbols/footprints if a footprint did not resolve). Do not drop "
-            "or alter parts of the slot that were not flagged. Output ONLY the slot JSON.")
+            "already valid and changing ONLY the items listed above. When an offender lists "
+            "'real options: ...', replace the bad id with ONE of those exact ids verbatim "
+            "(do not invent or abbreviate); otherwise call search_symbols / search_footprints "
+            "to find a real id. Do not drop or alter parts of the slot that were not flagged. "
+            "Output ONLY the slot JSON.")
     return msg
 
 
