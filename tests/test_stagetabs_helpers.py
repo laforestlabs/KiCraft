@@ -82,6 +82,16 @@ def test_table_html_escapes_cell_and_header_text():
     assert "&lt;col&gt;" in h
 
 
+def test_table_html_renders_footer_rows():
+    # The BOM total lives in a <tfoot> so it sits below the body, set off by CSS.
+    h = _table_html(["ref", "cost"], [["R1", "$0.01"]],
+                    foot=[["TOTAL", "$2.41"]])
+    assert "<tfoot>" in h and "<td>TOTAL</td>" in h and "<td>$2.41</td>" in h
+    assert h.index("<tbody>") < h.index("<tfoot>")  # footer after the body
+    # no footer -> no <tfoot>
+    assert "<tfoot>" not in _table_html(["a"], [["1"]])
+
+
 def test_cell_html_renders_https_link_new_tab():
     cell = {"text": "C2687116",
             "href": "https://www.lcsc.com/product-detail/C2687116.html"}

@@ -476,7 +476,10 @@ def _render_section(sec: dict, accent: str) -> None:
         cols = sec.get("columns", [])
         rows = sec.get("rows", [])
         with ui.element("div").classes("w-full").style("overflow-x:auto"):
-            ui.html(_table_html(cols, rows), sanitize=False)
+            ui.html(_table_html(cols, rows, sec.get("foot")), sanitize=False)
+        note = sec.get("note")
+        if note:
+            ui.label(str(note)).classes("text-xs italic mt-0.5").style(f"color:{_DIMMER}")
 
 
 def _cell_html(cell) -> str:
@@ -494,18 +497,19 @@ def _cell_html(cell) -> str:
     return escape("" if cell is None else str(cell))
 
 
-def _table_html(cols: list, rows: list) -> str:
+def _table_html(cols: list, rows: list, foot: list | None = None) -> str:
     """A real <table> for an inspector section so columns line up across every row
     (the prior per-row flex layout sized each row independently, so they didn't).
-    All dynamic text is HTML-escaped; only hrefs the page supplies -- vendor URLs
-    we build ourselves in web._vendor_cell -- become links."""
+    Optional ``foot`` rows render in a <tfoot> (e.g. the BOM total). All dynamic
+    text is HTML-escaped; only hrefs the page supplies -- vendor URLs we build
+    ourselves in web._vendor_cell -- become links."""
+    def trow(r):
+        return "<tr>" + "".join(f"<td>{_cell_html(c)}</td>" for c in r) + "</tr>"
     head = "".join(f"<th>{escape(str(c))}</th>" for c in cols)
-    body = "".join(
-        "<tr>" + "".join(f"<td>{_cell_html(c)}</td>" for c in r) + "</tr>"
-        for r in rows
-    )
+    body = "".join(trow(r) for r in rows)
+    tfoot = f"<tfoot>{''.join(trow(r) for r in foot)}</tfoot>" if foot else ""
     return (f'<table class="kc-table"><thead><tr>{head}</tr></thead>'
-            f"<tbody>{body}</tbody></table>")
+            f"<tbody>{body}</tbody>{tfoot}</table>")
 
 
 def _loose_pretty(buf: str) -> str | None:
