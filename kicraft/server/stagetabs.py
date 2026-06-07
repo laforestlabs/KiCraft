@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import time
+from html import escape
 
 from nicegui import app, ui
 
@@ -475,17 +476,36 @@ def _render_section(sec: dict, accent: str) -> None:
         cols = sec.get("columns", [])
         rows = sec.get("rows", [])
         with ui.element("div").classes("w-full").style("overflow-x:auto"):
-            with ui.column().classes("gap-0").style("min-width:max-content"):
-                with ui.row().classes("no-wrap gap-3 px-1 py-0.5 rounded") \
-                        .style("background:rgba(148,163,184,0.08)"):
-                    for c in cols:
-                        ui.label(str(c)).classes("text-xs font-mono font-bold") \
-                            .style(f"color:{_DIM}")
-                for r in rows:
-                    with ui.row().classes("no-wrap gap-3 px-1"):
-                        for cell in r:
-                            ui.label(str(cell)).classes("text-xs font-mono whitespace-nowrap") \
-                                .style(f"color:{_DIM}")
+            ui.html(_table_html(cols, rows), sanitize=False)
+
+
+def _cell_html(cell) -> str:
+    """One <td> body. A cell is either a scalar (rendered as escaped text) or a
+    ``{"text", "href"}`` dict (rendered as a new-tab link, e.g. a vendor lookup)."""
+    if isinstance(cell, dict):
+        text = escape(str(cell.get("text", "")))
+        href = str(cell.get("href") or "")
+        # Only emit real web links; anything else (javascript:, data:, ...) falls
+        # back to plain text so a cell can never inject a clickable script URL.
+        if href[:7].lower() == "http://" or href[:8].lower() == "https://":
+            return (f'<a href="{escape(href)}" target="_blank" '
+                    f'rel="noopener noreferrer">{text}</a>')
+        return text
+    return escape("" if cell is None else str(cell))
+
+
+def _table_html(cols: list, rows: list) -> str:
+    """A real <table> for an inspector section so columns line up across every row
+    (the prior per-row flex layout sized each row independently, so they didn't).
+    All dynamic text is HTML-escaped; only hrefs the page supplies -- vendor URLs
+    we build ourselves in web._vendor_cell -- become links."""
+    head = "".join(f"<th>{escape(str(c))}</th>" for c in cols)
+    body = "".join(
+        "<tr>" + "".join(f"<td>{_cell_html(c)}</td>" for c in r) + "</tr>"
+        for r in rows
+    )
+    return (f'<table class="kc-table"><thead><tr>{head}</tr></thead>'
+            f"<tbody>{body}</tbody></table>")
 
 
 def _loose_pretty(buf: str) -> str | None:

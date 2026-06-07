@@ -8,3 +8,38 @@
 .kc-follow::-webkit-scrollbar-thumb { background: #334155; border-radius: 5px; }
 .kc-follow::-webkit-scrollbar-thumb:hover { background: #475569; }
 .kc-follow::-webkit-scrollbar-track { background: transparent; }
+
+/* Inspector data tables (the "Project state" sections, e.g. the BOM parts list).
+   A real <table> so columns align vertically across every row instead of each
+   row sizing itself; rendered by stagetabs._table_html. Monospace + dim slate to
+   match the surrounding feed; clickable cells (vendor links) use sky-400. */
+.kc-table {
+  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+.kc-table th {
+  text-align: left;
+  font-weight: 700;
+  color: #94a3b8;
+  background: rgba(148, 163, 184, 0.08);
+  padding: 0.3rem 0.7rem;
+  white-space: nowrap;
+}
+.kc-table td {
+  color: #94a3b8;
+  padding: 0.24rem 0.7rem;
+  white-space: nowrap;
+  vertical-align: top;
+  border-top: 1px solid rgba(148, 163, 184, 0.08);
+}
+.kc-table tbody tr:hover td { background: rgba(148, 163, 184, 0.06); }
+.kc-table a {
+  color: #38bdf8;
+  text-decoration: none;
+  border-bottom: 1px dotted rgba(56, 189, 248, 0.5);
+}
+.kc-table a:hover { color: #7dd3fc; border-bottom-color: #7dd3fc; }

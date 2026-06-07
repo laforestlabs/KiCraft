@@ -18,6 +18,7 @@ import hmac
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import tempfile
@@ -461,6 +462,38 @@ def _build_lines_for(stage: str, lines: list[str]) -> list[str]:
     return out
 
 
+# LCSC part id baked into a vendored symbol/footprint name (e.g.
+# "USBLC6-2SC6_C2687116"); the negative lookbehind keeps it off footprint tokens
+# like "C_0805" where the C is a package-class prefix, not a catalogue id.
+_LCSC_ID_RE = re.compile(r"(?<![A-Za-z0-9])C\d{4,}")
+# Imperial package size in a footprint leaf, e.g. the 0805 in "C_0805_2012Metric".
+_FP_SIZE_RE = re.compile(r"_(\d{3,4})(?:_|$)")
+
+
+def _vendor_cell(p: dict) -> dict | str:
+    """A clickable LCSC lookup for one BOM part, best-effort by what's known:
+    an LCSC id baked into the symbol/footprint name (vendored easyeda parts) ->
+    the product page; else the manufacturer part number -> an LCSC search; else a
+    generic passive -> a search by value + package size. Returns a
+    ``{"text", "href"}`` link cell (consumed by stagetabs._cell_html), or "" when
+    there's nothing to search on."""
+    sym = p.get("symbol") or ""
+    fp = p.get("footprint") or ""
+    m = _LCSC_ID_RE.search(sym) or _LCSC_ID_RE.search(fp)
+    if m:
+        cid = m.group(0)
+        return {"text": cid, "href": f"https://www.lcsc.com/product-detail/{cid}.html"}
+    mpn = (p.get("mpn") or "").strip()
+    if mpn:
+        return {"text": mpn, "href": "https://www.lcsc.com/search?q=" + quote(mpn)}
+    val = (p.get("value") or "").strip()
+    size = _FP_SIZE_RE.search(fp.split(":", 1)[-1])
+    terms = " ".join(t for t in (val, size.group(1) if size else "") if t)
+    if terms:
+        return {"text": "search", "href": "https://www.lcsc.com/search?q=" + quote(terms)}
+    return ""
+
+
 def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | None,
                     build_lines: list[str]) -> list[dict]:
     """Build the structured project-state spec for a stage's inspector window.
@@ -530,9 +563,10 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
             return []
         secs = [{"type": "kv", "title": "Summary", "rows": [("parts", len(parts))]},
                 {"type": "table", "title": "Parts",
-                 "columns": ["ref", "value", "symbol", "footprint", "sheet"],
-                 "rows": [[p.get("ref"), p.get("value"), p.get("symbol"),
-                           p.get("footprint"), p.get("sheet")] for p in parts]}]
+                 "columns": ["ref", "value", "vendor", "footprint", "sheet", "symbol"],
+                 "rows": [[p.get("ref"), p.get("value"), _vendor_cell(p),
+                           p.get("footprint"), p.get("sheet"), p.get("symbol")]
+                          for p in parts]}]
         return secs
 
     if stage == "wiring":
