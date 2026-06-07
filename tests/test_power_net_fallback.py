@@ -25,6 +25,7 @@ from kicraft.design.models import (
     PinEndpoint,
     Sheet,
 )
+from kicraft.design.synthesis.emitter import _power_nets_with_driver
 from kicraft.design.synthesis.placement import place_sheet
 from kicraft.design.synthesis.router import _POWER_SYMBOL_MAP, route_sheet
 from kicraft.design.synthesis.symbol_library import (
@@ -99,6 +100,61 @@ def _minimal_vbat_state() -> ConversationState:
         architecture=arch,
         bom=BOM(parts=parts, connections=conns),
     )
+
+
+def _regulated_rail_state() -> ConversationState:
+    """An AMS1117 LDO: +5V in (connector-fed, undriven), +3V3 out (driven by the
+    regulator's power-output VO pin), GND. The +3V3 rail is the regression case —
+    it already has a real driver and must NOT also get a PWR_FLAG."""
+    sheet = Sheet(name="REG", stem="REG", function="3v3 ldo")
+    arch = Architecture(sheets=[sheet], power_nets=["+5V", "+3V3", "GND"],
+                        inter_sheet_nets=[])
+    parts = [
+        BomPart(ref="U1", value="AMS1117-3.3", symbol="Regulator_Linear:AMS1117-3.3",
+                footprint="Package_TO_SOT_SMD:SOT-223-3_TabPin2", sheet="REG"),
+        BomPart(ref="C1", value="10uF", symbol="Device:C",
+                footprint="Capacitor_SMD:C_0805_2012Metric", sheet="REG"),
+        BomPart(ref="C2", value="22uF", symbol="Device:C",
+                footprint="Capacitor_SMD:C_0805_2012Metric", sheet="REG"),
+    ]
+    conns = [
+        NetConnection(net_name="+5V", sheet="REG", endpoints=[      # power_in only
+            PinEndpoint(ref="U1", pin="3"), PinEndpoint(ref="C1", pin="1")]),
+        NetConnection(net_name="+3V3", sheet="REG", endpoints=[     # U1.2 VO = power_out
+            PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="C2", pin="1")]),
+        NetConnection(net_name="GND", sheet="REG", endpoints=[
+            PinEndpoint(ref="U1", pin="1"), PinEndpoint(ref="C1", pin="2"),
+            PinEndpoint(ref="C2", pin="2")]),
+    ]
+    return ConversationState(
+        project_stem="LDO_3V3",
+        intent=IntentSlot(goal="3v3 supply"),
+        functional_spec=FunctionalSpec(blocks=[
+            FunctionalBlock(name="POWER", category="power", purpose="AMS1117 3v3")]),
+        architecture=arch,
+        bom=BOM(parts=parts, connections=conns),
+    )
+
+
+def test_driven_power_rail_excluded_from_pwr_flag() -> None:
+    """Only the rail with a real power-output driver (+3V3, fed by the LDO's VO
+    pin) is reported as driven; connector/passive-fed rails (+5V, GND) are not.
+    A PWR_FLAG on a driven net would short ERC ('Power output and Power output
+    are connected') — the exact failure seen on a charger's V_BAT output rail."""
+    bom = _regulated_rail_state().bom
+    assert _power_nets_with_driver(bom) == {"+3V3"}
+
+
+@pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="kicad-cli not installed")
+def test_driven_rail_synthesizes_erc_clean_no_power_output_short(tmp_path) -> None:
+    """End-to-end: a regulator-driven rail must be ERC-clean. With the old
+    'flag every power net' logic the LDO's VO (power_out) plus the rail's
+    PWR_FLAG (also power_out) tripped a power-output short; the driver-aware
+    flag assignment fixes it without leaving +5V/GND undriven."""
+    _artifacts, results = run(_regulated_rail_state(), tmp_path)
+
+    erc = next((r for r in results if r.name.startswith("9.12")), None)
+    assert erc is not None and erc.ok, f"ERC: {erc.message if erc else 'missing'}"
 
 
 @pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="kicad-cli not installed")
