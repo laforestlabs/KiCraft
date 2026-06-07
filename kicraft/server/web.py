@@ -386,8 +386,13 @@ def _render_synth_view(srcs: list[tuple[str, str]], stem: str) -> KiCanvasView:
     default_idx = 1 if len(srcs) > 1 else 0  # first leaf when present, else root
     ui.label("Schematic").classes("text-xs font-medium").style("color:#94a3b8")
     selector = ui.row().classes("w-full flex-wrap gap-1")
+    # Fill (nearly) the whole inspector column so the schematic is large enough to
+    # read; the 460px offset leaves room for the labels + sheet selector above it,
+    # and the floor keeps it usable (and never smaller than the old fixed height)
+    # on short screens. The structured sheet/synthesis data scrolls below.
     view = KiCanvasView(
-        [KiCanvasSource(srcs[default_idx][0], srcs[default_idx][1])], height="h-[360px]")
+        [KiCanvasSource(srcs[default_idx][0], srcs[default_idx][1])],
+        height="", style="height:calc(100vh - 460px);min-height:360px")
     with selector:
         for url, fname in srcs:
             ui.button(_label(fname),
@@ -491,14 +496,20 @@ def _resolve_part(p: dict) -> tuple[str, str] | None:
     return ("kw", terms) if terms else None
 
 
-def _vendor_cell(p: dict) -> dict | str:
-    """A clickable LCSC lookup for one BOM part: an LCSC id -> the product page;
-    an MPN or generic passive -> an LCSC search. Returns a ``{"text", "href"}``
-    link cell (consumed by stagetabs._cell_html), or "" when nothing resolves."""
+def _vendor_cell(p: dict, prices: dict | None = None) -> dict | str:
+    """A clickable LCSC link for one BOM part. When the part has been priced, link
+    to the exact product we priced (its LCSC id) so the link and the cost column
+    always agree and the price is verifiable; otherwise an LCSC id -> the product
+    page, an MPN or generic passive -> an LCSC search. "" when nothing resolves."""
     r = _resolve_part(p)
     if not r:
         return ""
     kind, q = r
+    if prices is not None:
+        res = prices.get(f"{kind}:{q}")
+        if isinstance(res, dict) and res.get("lcsc"):
+            cid = res["lcsc"]
+            return {"text": cid, "href": f"https://www.lcsc.com/product-detail/{cid}.html"}
     if kind == "id":
         return {"text": q, "href": f"https://www.lcsc.com/product-detail/{q}.html"}
     return {"text": q if kind == "mpn" else "search",
@@ -516,6 +527,9 @@ _PRICE_INFLIGHT: set[str] = set()
 _PRICE_LOCK = threading.Lock()
 _PRICE_FILE = "bom_prices.json"
 _FETCH_ERROR = object()  # sentinel: fetch raised; don't cache, allow a later retry
+# Bump when _pick_price changes so persisted prices from the old logic are dropped
+# and re-fetched (v2: cheapest-in-stock for MPN, not first-in-stock).
+_PRICE_SCHEMA = 2
 
 
 def _price_key(p: dict) -> str | None:
@@ -524,10 +538,12 @@ def _price_key(p: dict) -> str | None:
 
 
 def _pick_price(kind: str, query: str, results: list[dict]) -> dict | None:
-    """Choose one JLCPCB search result and pull its unit price: for an LCSC id the
-    exact id (else the first priced); for an MPN the first in-stock; for a keyword
-    (a generic passive) the cheapest in-stock. Returns ``{"unit_price","lcsc",
-    "stock"}`` or None when nothing usable came back. Pure: no network."""
+    """Choose one JLCPCB search result and pull its unit price. For an LCSC id the
+    exact id wins (it names a specific part); otherwise the cheapest in-stock match.
+    Cheapest (not first) matters because a vague MPN/keyword pulls in false
+    positives: e.g. "USB1046" returns both $4+ TI TUSB1046 muxes and the $0.84 GCT
+    USB connector, and the connector is the one we want. Returns ``{"unit_price",
+    "lcsc","stock"}`` or None when nothing usable came back. Pure: no network."""
     def price_of(r):
         try:
             return float(r.get("price"))
@@ -536,15 +552,12 @@ def _pick_price(kind: str, query: str, results: list[dict]) -> dict | None:
     priced = [r for r in results if (price_of(r) or 0) > 0]
     if not priced:
         return None
+    pool = [x for x in priced if (x.get("stock") or 0) > 0] or priced
     if kind == "id":
-        r = next((x for x in priced
-                  if str(x.get("lcsc", "")).upper() == query.upper()), priced[0])
-    elif kind == "mpn":
-        instock = [x for x in priced if (x.get("stock") or 0) > 0]
-        r = (instock or priced)[0]
-    else:  # kw -> cheapest in-stock
-        instock = [x for x in priced if (x.get("stock") or 0) > 0]
-        r = min(instock or priced, key=price_of)
+        r = next((x for x in pool if str(x.get("lcsc", "")).upper() == query.upper()),
+                 min(pool, key=price_of))
+    else:
+        r = min(pool, key=price_of)  # cheapest in-stock for both MPN and keyword
     return {"unit_price": price_of(r), "lcsc": r.get("lcsc"), "stock": r.get("stock")}
 
 
@@ -576,26 +589,32 @@ def _fmt_total(x: float) -> str:
 
 
 def _load_price_cache(ws: Path) -> None:
-    """Merge a project's persisted prices into the process cache (best-effort)."""
+    """Merge a project's persisted prices into the process cache (best-effort).
+    Files written by an older pricing schema (or the pre-schema flat format) are
+    ignored so a _pick_price change re-fetches instead of serving stale prices."""
     try:
         data = json.loads((ws / ".kicraft" / _PRICE_FILE).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return
-    if isinstance(data, dict):
-        with _PRICE_LOCK:
-            for k, v in data.items():
-                if k not in _PRICE_CACHE:
-                    _PRICE_CACHE[k] = v if isinstance(v, dict) else None
+    if not isinstance(data, dict) or data.get("_schema") != _PRICE_SCHEMA:
+        return
+    with _PRICE_LOCK:
+        for k, v in (data.get("prices") or {}).items():
+            if k not in _PRICE_CACHE:
+                _PRICE_CACHE[k] = v if isinstance(v, dict) else None
 
 
 def _save_price_cache(ws: Path, keys: set[str]) -> None:
-    """Persist this project's resolved keys so a reopen/restart is instant."""
+    """Persist this project's resolved keys (tagged with the pricing schema) so a
+    reopen/restart is instant."""
     with _PRICE_LOCK:
         snap = {k: _PRICE_CACHE[k] for k in keys if k in _PRICE_CACHE}
     try:
         d = ws / ".kicraft"
         d.mkdir(parents=True, exist_ok=True)
-        (d / _PRICE_FILE).write_text(json.dumps(snap, indent=2), encoding="utf-8")
+        (d / _PRICE_FILE).write_text(
+            json.dumps({"_schema": _PRICE_SCHEMA, "prices": snap}, indent=2),
+            encoding="utf-8")
     except OSError:
         pass
 
@@ -718,7 +737,7 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
             else:
                 cost = "..."  # fetch in flight
                 pending = True
-            rows.append([p.get("ref"), p.get("value"), cost, _vendor_cell(p),
+            rows.append([p.get("ref"), p.get("value"), cost, _vendor_cell(p, prices),
                          p.get("footprint"), p.get("sheet"), p.get("symbol")])
         if pending and priced == 0:
             total_txt, note = "pricing...", "fetching live JLCPCB prices..."
@@ -2414,7 +2433,8 @@ def index(prompt: str = ""):
                         with slot:
                             ui.label("PCB").classes("text-xs font-medium").style("color:#94a3b8")
                             state["pcb_view"] = KiCanvasView(
-                                [KiCanvasSource(pcb_url, pcb_name)], height="h-[420px]")
+                                [KiCanvasSource(pcb_url, pcb_name)],
+                                height="", style="height:calc(100vh - 460px);min-height:360px")
                             state["pcb_revealed"] = tabs.active() == "place_route"
                     else:
                         mt = _mtime(pcb_path)

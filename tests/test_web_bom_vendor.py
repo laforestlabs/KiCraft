@@ -61,7 +61,8 @@ def test_bom_inspector_spec_adds_vendor_column_with_links():
         {"ref": "R1", "value": "5.1k", "symbol": "Device:R",
          "footprint": "Resistor_SMD:R_0402_1005Metric", "sheet": "USB"},
     ]}}
-    secs = web._inspector_spec("bom", sj, {}, None, [])
+    # prices={} -> unpriced, so vendor cells use the static resolution (deterministic).
+    secs = web._inspector_spec("bom", sj, {}, None, [], prices={})
     parts = next(s for s in secs if s.get("title") == "Parts")
     assert parts["columns"] == ["ref", "value", "cost", "vendor",
                                 "footprint", "sheet", "symbol"]
