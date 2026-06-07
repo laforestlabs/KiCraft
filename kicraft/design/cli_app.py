@@ -84,31 +84,76 @@ def _utc_compact_now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def _resemble_candidates(ident: str, search_fn, limit: int = 6) -> list[str]:
+    """Real ids resembling an unresolved ``Library:Name``, kept in-category.
+
+    Surfaced in commit-rejection feedback so a weak model picks a real id in one
+    guided round instead of repeatedly guessing -- the dominant BOM-stage retry
+    cost. Queries most-specific first (the full name, catching a truncation like
+    ``SW_SPST_PTS645`` -> ``...PTS645Sx43SMTR92`` or a pin-count like
+    ``Conn_02x08``), then broadens to the library family token (``Inductor_THT``
+    -> ``Inductor``) so a hallucinated variant (``L_Radial_D50.0mm``) returns
+    real *inductors*, not whatever shares a generic word.
+    """
+    library, _, name = ident.partition(":")
+    lib_fam = re.split(r"[^A-Za-z]+", library)[0] if library else ""
+    name_toks = [t for t in re.split(r"[^A-Za-z0-9]+", name or ident) if len(t) > 1]
+    alpha = [t for t in name_toks if not any(c.isdigit() for c in t)]
+    queries: list[str] = []
+    if name_toks:
+        queries.append(" ".join(name_toks))               # exact-ish: truncation / pin-count
+    if lib_fam and alpha:
+        queries.append(" ".join([lib_fam] + alpha[:2]))   # category + family word
+    if lib_fam:
+        queries.append(lib_fam)                           # category only
+    if alpha:
+        queries.append(" ".join(alpha[:2]))
+    for q in queries:
+        hits = search_fn(q, limit=limit)
+        if hits:
+            return hits[:limit]
+    return []
+
+
+def _footprint_candidates(fp: str, limit: int = 6) -> list[str]:
+    return _resemble_candidates(fp, search_footprints, limit)
+
+
+def _symbol_candidates(sym: str, limit: int = 6) -> list[str]:
+    return _resemble_candidates(sym, search_symbols, limit)
+
+
+def _candidate_hint(cands: list[str]) -> str:
+    return f" -- real options: {', '.join(cands)}" if cands else ""
+
+
 def _unresolved_footprints(bom, project_root: Path) -> list[str]:
     """Return a human-readable list of BOM parts whose ``footprint`` does
     not resolve to a real ``.kicad_mod`` on disk (across the four parts-
     library tiers + stock KiCad). An empty list means every footprint
     resolves. Catches LLM footprint-name hallucination (e.g. a plausible
     truncation like ``SW_SPST_PTS645`` for ``SW_SPST_PTS645Sx43SMTR92``).
+
+    Each offender carries up to a few real look-alike footprint ids so the
+    commit-rejection feedback can steer the model to a valid pick in one round.
     """
     bad: list[str] = []
     for part in bom.parts:
         fp = part.footprint or ""
         library, _, name = fp.partition(":")
         if not library or not name:
-            bad.append(f"{part.ref}: footprint {fp!r} is not 'Library:Name'")
+            bad.append(f"{part.ref}: footprint {fp!r} is not 'Library:Name'"
+                       + _candidate_hint(_footprint_candidates(fp)))
             continue
         try:
             pretty = resolve_footprint_library_path(library, project_root=project_root)
         except LibraryNotFoundError:
-            bad.append(
-                f"{part.ref}: footprint library {library!r} not found (footprint {fp!r})"
-            )
+            bad.append(f"{part.ref}: footprint library {library!r} not found (footprint {fp!r})"
+                       + _candidate_hint(_footprint_candidates(fp)))
             continue
         if not (pretty / f"{name}.kicad_mod").is_file():
-            bad.append(
-                f"{part.ref}: no '{name}.kicad_mod' in {pretty} (footprint {fp!r})"
-            )
+            bad.append(f"{part.ref}: no '{name}.kicad_mod' in {pretty} (footprint {fp!r})"
+                       + _candidate_hint(_footprint_candidates(fp)))
     return bad
 
 
@@ -131,7 +176,8 @@ def _unresolved_symbols(bom) -> list[str]:
         try:
             info = lookup_pins(sym)
         except (SymbolNotFoundError, ValueError) as e:
-            bad.append(f"{part.ref}: symbol {sym!r} did not resolve ({e})")
+            bad.append(f"{part.ref}: symbol {sym!r} did not resolve ({e})"
+                       + _candidate_hint(_symbol_candidates(sym)))
             continue
         if not info.get("pins"):
             bad.append(f"{part.ref}: symbol {sym!r} resolved but exposes no pins")
