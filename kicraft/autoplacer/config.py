@@ -202,6 +202,11 @@ DEFAULT_CONFIG = {
     "thermal_radius_mm": 3.0,
     # FreeRouting
     "freerouting_jar": os.path.expanduser("~/.local/lib/freerouting-1.9.0.jar"),
+    # Java runtime used to launch the FreeRouting jar. "java" resolves via PATH;
+    # the runner additionally searches ~/.local/lib and /usr/lib/jvm so a
+    # user-local JRE works even under the minimal PATH a systemd unit runs with.
+    # Set to an absolute path to pin a specific JRE.
+    "java_bin": "java",
     "freerouting_timeout_s": 60,
     "freerouting_max_passes": 20,
     # Leaf freerouting timeout scales with component count: a large array leaf

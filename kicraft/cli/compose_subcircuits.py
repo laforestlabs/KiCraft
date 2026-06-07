@@ -2434,6 +2434,28 @@ def _stamp_parent_board(
         except OSError:
             pass
 
+    # KiCad's board.Save() in the stamp subprocess emits a *default* sidecar
+    # .kicad_pro (Default netclass 0.20 mm), dropping the project's real
+    # netclasses (e.g. Power 0.30 mm). Overwrite it with the source project's
+    # .kicad_pro so the stamped board carries the true netclass clearances and
+    # patterns; otherwise FreeRouting routes power nets at the default clearance
+    # and the promoted board fails DRC against the real Power rule
+    # (illegal_routed_geometry). freerouting_runner._inject_netclass_clearances
+    # then carries these into the DSN handed to FreeRouting.
+    try:
+        src_pro = Path(pcb_path).with_suffix(".kicad_pro")
+        if not src_pro.is_file():
+            src_pro = next(iter(sorted(project_dir.glob("*.kicad_pro"))), None)
+        sibling_pro = output_pcb.with_suffix(".kicad_pro")
+        if (
+            src_pro
+            and src_pro.is_file()
+            and src_pro.resolve() != sibling_pro.resolve()
+        ):
+            shutil.copy2(str(src_pro), str(sibling_pro))
+    except OSError:
+        pass
+
     print(f"Parent board stamped to {output_pcb} (subprocess)")
     return output_pcb
 
@@ -2893,6 +2915,29 @@ def _route_parent_board(
     route_cfg["freerouting_clear_existing_copper"] = False
     route_cfg["freerouting_clear_zones"] = False
 
+    # Ground handling: route signals first, pour ground last (standard practice,
+    # and what the leaves already do). The stamped parent carries each leaf's GND
+    # as a web of F.Cu traces; that saturates the signal layer so FreeRouting
+    # cannot complete a cross-block signal interconnect (a lone MCU pin to a
+    # sensor net stays unrouted while the dense GND web blocks every path). So
+    # strip the GND copper and pour a B.Cu GND plane up front: GND pads then
+    # connect via the plane, FreeRouting skips GND, and F.Cu is clear for the
+    # signal interconnects. The plane is refilled after routing to close around
+    # the new traces and tie in every GND pad.
+    from kicraft.autoplacer.brain.gnd_pour import (
+        add_gnd_pour_and_thermal_vias,
+        pour_gnd_planes,
+    )
+    from kicraft.autoplacer.freerouting_runner import strip_net_copper
+
+    gnd_net = cfg.get("gnd_zone_net", "GND")
+    if gnd_net:
+        strip_net_copper(str(stamped_pcb), gnd_net)
+        # Pour a B.Cu GND plane (+ IC thermal vias) before routing so FreeRouting
+        # ties GND to the plane with short drops instead of re-creating the dense
+        # cross-block GND web that saturates F.Cu and blocks signal interconnects.
+        add_gnd_pour_and_thermal_vias(str(stamped_pcb), cfg)
+
     try:
         freerouting_stats = route_with_freerouting(
             kicad_pcb_path=str(stamped_pcb),
@@ -2910,6 +2955,13 @@ def _route_parent_board(
             "validation": {},
             "freerouting_stats": {},
         }
+
+    # Pour GND on BOTH layers, closing around the freshly-routed interconnects.
+    # The F.Cu pour is what ties in every F.Cu GND pad via thermal relief on its
+    # own layer (a B.Cu-only plane can't reach an F.Cu SMD pad without a via),
+    # tied down to the B.Cu plane through the thermal vias placed pre-route.
+    if gnd_net:
+        pour_gnd_planes(str(routed_pcb), cfg, layers=("B.Cu", "F.Cu"))
 
     # Import all copper from the routed board (child + new parent traces)
     copper = import_routed_copper(str(routed_pcb))

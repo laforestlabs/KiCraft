@@ -35,6 +35,88 @@ def _grid_positions(center_nm: int, half_nm: int, pitch_nm: int) -> list[int]:
     return [center_nm - half_nm + i * step for i in range(intervals + 1)]
 
 
+def pour_gnd_planes(
+    pcb_path: str,
+    cfg: dict[str, Any] | None = None,
+    layers: tuple[str, ...] = ("B.Cu",),
+) -> dict[str, Any]:
+    """Create/reuse a GND zone on each given layer and fill them (no vias).
+
+    Used after routing to tie every GND pad to ground via **thermal relief on
+    its own layer**: an F.Cu SMD GND pad can't reach a B.Cu-only plane, so we
+    pour F.Cu as well. Layer-stitching vias (F.Cu<->B.Cu) come from
+    :func:`add_gnd_pour_and_thermal_vias`; this only manages the zones + fill,
+    so it is safe to call repeatedly (idempotent w.r.t. zones, adds no vias).
+    """
+    cfg = cfg or {}
+    gnd_name = cfg.get("gnd_zone_net", "GND")
+    if not gnd_name:
+        return {"zones": 0}
+    board = pcbnew.LoadBoard(pcb_path)
+    gnd_net = board.GetNetInfo().GetNetItem(gnd_name)
+    if not gnd_net or gnd_net.GetNetCode() == 0:
+        return {"zones": 0, "error": f"net {gnd_name!r} not found"}
+
+    margin = pcbnew.FromMM(float(cfg.get("gnd_zone_margin_mm", 0.5)))
+    rect = board.GetBoardEdgesBoundingBox()
+    x1, y1 = rect.GetX() + margin, rect.GetY() + margin
+    x2 = rect.GetX() + rect.GetWidth() - margin
+    y2 = rect.GetY() + rect.GetHeight() - margin
+    layer_map = {"B.Cu": pcbnew.B_Cu, "F.Cu": pcbnew.F_Cu}
+
+    zones = 0
+    for lname in layers:
+        target_layer = layer_map.get(lname)
+        if target_layer is None:
+            continue
+        zone = None
+        for z in board.Zones():
+            if (
+                z.GetLayer() == target_layer
+                and z.GetNetname() == gnd_name
+                and not z.GetIsRuleArea()
+            ):
+                zone = z
+                break
+        if zone is None:
+            zone = pcbnew.ZONE(board)
+            zone.SetNet(gnd_net)
+            zone.SetLayer(target_layer)
+            zone.SetIsRuleArea(False)
+            zone.SetLocalClearance(
+                pcbnew.FromMM(float(cfg.get("zone_clearance_mm", 0.3)))
+            )
+            zone.SetMinThickness(
+                pcbnew.FromMM(float(cfg.get("zone_min_thickness_mm", 0.25)))
+            )
+            zone.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL)
+            zone.SetThermalReliefGap(
+                pcbnew.FromMM(float(cfg.get("zone_thermal_gap_mm", 0.5)))
+            )
+            zone.SetThermalReliefSpokeWidth(
+                pcbnew.FromMM(float(cfg.get("zone_thermal_spoke_mm", 0.5)))
+            )
+            zone.SetAssignedPriority(0)
+            board.Add(zone)
+            try:
+                zone.SetIslandRemovalMode(pcbnew.ISLAND_REMOVAL_MODE_ALWAYS)
+            except Exception:
+                try:
+                    zone.SetIslandRemovalMode(0)
+                except Exception:
+                    pass
+        outline = zone.Outline()
+        outline.RemoveAllContours()
+        outline.NewOutline()
+        for px, py in ((x1, y1), (x2, y1), (x2, y2), (x1, y2)):
+            outline.Append(int(px), int(py))
+        zones += 1
+
+    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    board.Save(pcb_path)
+    return {"zones": zones}
+
+
 def add_gnd_pour_and_thermal_vias(
     pcb_path: str,
     cfg: dict[str, Any] | None = None,
