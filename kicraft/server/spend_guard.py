@@ -70,6 +70,20 @@ class SpendGuard:
     def spent_total(self) -> float:
         return self._sum()
 
+    def spent_for_project(self, project_id) -> float:
+        """The total cost attributed to one web project: the sum of every model call
+        tagged run_id='p<project_id>-<ts>' in `meta`. A project can span several runs
+        (initial build, ERC recovery, a later reopen/continue) that all share the
+        'p<id>-' prefix, so this is the project's true incremental spend -- NOT the
+        global running total (`spent_total`), which is what every project's cost_usd
+        used to be stamped with. Legacy bare-string meta rows carry no run_id and are
+        skipped by json_valid()."""
+        if project_id is None:
+            return 0.0
+        return self._sum(
+            "WHERE json_valid(meta) AND json_extract(meta, '$.run_id') LIKE ?",
+            (f"p{int(project_id)}-%",))
+
     def status(self) -> dict:
         day, total = self.spent_today(), self.spent_total()
         return {
