@@ -8,8 +8,10 @@ live Project-state draft, and the demo event stream that drives the new windows.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from kicraft.server.stagetabs import (
+    StageTabs,
     _cell_html,
     _close_json,
     _loose_pretty,
@@ -132,3 +134,26 @@ def test_demo_answer_deltas_assemble_into_valid_slots():
             assert _loose_pretty(buf) is not None, f"unparseable draft for {stage}"
             seen += 1
     assert seen >= 3  # several stages exercise the draft path
+
+
+# ------------------------------------------------- tab-reveal hook (KiCanvas re-fit)
+
+def test_on_tab_change_runs_show_hook_and_toggles_follow():
+    """Revealing a tab runs its registered on_show hook (used to re-fit a KiCanvas
+    view built while its tab was hidden, which would otherwise stay a blank panel),
+    and auto-follow resumes only on the live stage. Driven on a stub self so the
+    method's logic is covered without a UI context."""
+    fired = []
+    stub = SimpleNamespace(
+        _current="bom",
+        _auto_follow=True,
+        _on_show={"synthesize": lambda: fired.append("synthesize")},
+    )
+    # Reveal a non-live tab that has a hook: the hook fires, auto-follow turns off.
+    StageTabs._on_tab_change(stub, SimpleNamespace(value="synthesize"))
+    assert fired == ["synthesize"]
+    assert stub._auto_follow is False
+    # Reveal a hookless tab that IS the live stage: no-op hook, auto-follow resumes.
+    StageTabs._on_tab_change(stub, SimpleNamespace(value="bom"))
+    assert fired == ["synthesize"]
+    assert stub._auto_follow is True

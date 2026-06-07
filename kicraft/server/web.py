@@ -1805,6 +1805,17 @@ def index(prompt: str = ""):
         # KiCad schematic/board (KiCanvas) and the download land in the build tabs.
         tabs = StageTabs()
 
+        # A KiCanvas view built while its tab is hidden sizes its WebGL canvas to zero
+        # and never repaints; re-fit it the first time the user reveals that tab. The
+        # flag is reset when each view is (re)created (see the render loop below).
+        def _reveal_view(view_key: str, seen_flag: str) -> None:
+            v = state.get(view_key)
+            if v is not None and not state.get(seen_flag):
+                state[seen_flag] = True
+                v.refresh()
+        tabs.on_show("synthesize", lambda: _reveal_view("sch_view", "sch_revealed"))
+        tabs.on_show("place_route", lambda: _reveal_view("pcb_view", "pcb_revealed"))
+
         with ui.expansion("Your projects").classes("w-full mt-2") \
                 .style("background:#0f172a;border:1px solid #1e293b"):
             proj_container = ui.column().classes("w-full gap-1 p-2")
@@ -2183,6 +2194,9 @@ def index(prompt: str = ""):
                         "synthesize", sj, {}, project_dir, state["build_lines"]))
                     with tabs.view_slot("synthesize"):
                         state["sch_view"] = _render_synth_view(srcs, state["stem"])
+                    # Painted already if synthesize is the visible tab now; otherwise
+                    # mark it for a re-fit when the user first reveals it.
+                    state["sch_revealed"] = tabs.active() == "synthesize"
 
             # Place/route: a per-leaf placement gallery streams progress while the
             # board builds; the routed parent replaces it once the build succeeds.
@@ -2214,6 +2228,7 @@ def index(prompt: str = ""):
                             ui.label("PCB").classes("text-xs font-medium").style("color:#94a3b8")
                             state["pcb_view"] = KiCanvasView(
                                 [KiCanvasSource(pcb_url, pcb_name)], height="h-[420px]")
+                            state["pcb_revealed"] = tabs.active() == "place_route"
                     else:
                         mt = _mtime(pcb_path)
                         if mt != state["pcb_mtime"]:
