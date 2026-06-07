@@ -148,6 +148,7 @@ from kicraft.autoplacer.brain.types import (
 )
 from kicraft.autoplacer.config import DEFAULT_CONFIG, load_project_config
 from kicraft.autoplacer.hardware.adapter import KiCadAdapter, StampSubprocessError
+from kicraft.autoplacer.freerouting_runner import FreeroutingUnavailableError
 
 
 @dataclass(slots=True)
@@ -502,6 +503,11 @@ def _solve_one_round(
             # so autoexperiment surfaces it as a hard run failure
             # instead of degrading to routing_exception (which would
             # let cached on-disk leaves keep masquerading as accepted).
+            raise
+        except FreeroutingUnavailableError:
+            # Missing Java/jar is a host misconfig, not a per-leaf routing
+            # failure -- re-raise so it surfaces as one clear hard failure
+            # instead of being masked as routing_exception on every leaf.
             raise
         except Exception as exc:
             print(f"  WARNING: unexpected routing error in round {round_index}: {exc}")

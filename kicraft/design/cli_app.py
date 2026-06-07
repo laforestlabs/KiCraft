@@ -1784,6 +1784,20 @@ def _cmd_build(args: argparse.Namespace) -> int:
         print(f"error: {degenerate}", file=sys.stderr)
         return 6
 
+    # Preflight the routing toolchain (Java + FreeRouting jar) so a misconfigured
+    # host fails immediately with an actionable message instead of after the
+    # minutes-long placement that then can't route ("board not routable as placed").
+    from kicraft.autoplacer.freerouting_runner import (
+        FreeroutingUnavailableError,
+        preflight_routing_toolchain,
+    )
+
+    try:
+        preflight_routing_toolchain()
+    except FreeroutingUnavailableError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 6
+
     # 2. Optimize placement + route (leaves then parent) via the layout engine.
     print(f"[build] 2/5 place + route (quality={args.quality}) -- may take minutes ...")
     rc = _run_layout(args.quality, root_sch, pcb)

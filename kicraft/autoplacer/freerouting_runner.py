@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import collections
+import glob
 import os
 import re
 import shutil
@@ -35,6 +36,78 @@ from pathlib import Path
 from typing import Any
 
 from kicraft.autoplacer.brain.types import Layer, Point, TraceSegment, Via
+
+
+class FreeroutingUnavailableError(RuntimeError):
+    """The routing toolchain (Java JRE and/or the FreeRouting jar) is missing.
+
+    Raised up front (and from run_freerouting) so a host without Java or the
+    jar fails with one clear, actionable message instead of every leaf quietly
+    degrading to a generic ``routing_exception`` and the build ending in the
+    misleading "board not routable as placed".
+    """
+
+
+def resolve_java(java_bin: str = "java") -> str | None:
+    """Locate a usable ``java`` executable, or return None.
+
+    Resolution order:
+      1. ``java_bin`` as an explicit path (absolute or containing a separator)
+      2. ``java_bin`` looked up on PATH
+      3. common JVM install roots -- ~/.local/lib, /usr/lib/jvm, /opt -- so a
+         user-local JRE is found even under the minimal PATH a systemd unit
+         runs with.
+    """
+    jb = os.path.expanduser(java_bin or "java")
+    if os.path.sep in jb:
+        return jb if os.path.isfile(jb) and os.access(jb, os.X_OK) else None
+    found = shutil.which(jb)
+    if found:
+        return found
+    preferred = os.path.expanduser("~/.local/lib/jre/bin/java")
+    if os.path.isfile(preferred) and os.access(preferred, os.X_OK):
+        return preferred
+    candidates: list[str] = []
+    for root in (os.path.expanduser("~/.local/lib"), "/usr/lib/jvm", "/opt"):
+        candidates.extend(glob.glob(os.path.join(root, "*", "bin", "java")))
+        candidates.extend(glob.glob(os.path.join(root, "*", "*", "bin", "java")))
+    candidates = [c for c in candidates if os.path.isfile(c) and os.access(c, os.X_OK)]
+    return sorted(candidates, reverse=True)[0] if candidates else None
+
+
+def preflight_routing_toolchain(
+    config: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Verify Java + the FreeRouting jar are present before a build routes.
+
+    Returns ``(java_path, jar_path)`` or raises FreeroutingUnavailableError with
+    an actionable message naming exactly what to install/set.
+    """
+    if config is None:
+        from kicraft.autoplacer.config import DEFAULT_CONFIG
+
+        config = DEFAULT_CONFIG
+    java_bin = config.get("java_bin", "java")
+    jar_path = os.path.expanduser(config.get("freerouting_jar", "") or "")
+    problems: list[str] = []
+    java = resolve_java(java_bin)
+    if java is None:
+        problems.append(
+            f"  - Java runtime not found (java_bin={java_bin!r}; searched PATH, "
+            "~/.local/lib, /usr/lib/jvm). Install a JRE "
+            "(apt install default-jre-headless) or set 'java_bin' to a JRE path."
+        )
+    if not jar_path or not os.path.isfile(jar_path):
+        problems.append(
+            f"  - FreeRouting jar not found at {jar_path or '(unset)'}. Download "
+            "freerouting-1.9.0.jar to that path or set 'freerouting_jar'."
+        )
+    if problems:
+        raise FreeroutingUnavailableError(
+            "PCB routing toolchain unavailable -- the board cannot be routed:\n"
+            + "\n".join(problems)
+        )
+    return java, jar_path  # type: ignore[return-value]
 
 
 def _kicad_subprocess_env() -> dict[str, str]:
@@ -250,6 +323,27 @@ def clear_zones(kicad_pcb_path: str) -> None:
     )
 
 
+def strip_net_copper(kicad_pcb_path: str, net_name: str) -> None:
+    """Remove all tracks/vias and copper zones belonging to a single net.
+
+    Used to clear a net (e.g. GND) so it can be re-handled by one copper plane.
+    The leaf-composed GND trace web saturates the signal layer and blocks the
+    parent's cross-block signal routing; stripping it lets signals route on a
+    clear layer before ground is poured back as a plane.
+    """
+    _run_pcbnew_script(
+        "import pcbnew\n"
+        f"board = pcbnew.LoadBoard({kicad_pcb_path!r})\n"
+        f"net = {net_name!r}\n"
+        "for t in list(board.GetTracks()):\n"
+        "    if t.GetNetname() == net: board.Remove(t)\n"
+        "for z in list(board.Zones()):\n"
+        "    if z.GetNetname() == net: board.Remove(z)\n"
+        "board.BuildConnectivity()\n"
+        f"board.Save({kicad_pcb_path!r})\n"
+    )
+
+
 def _unlock_traces(kicad_pcb_path: str) -> None:
     """Unlock all traces and vias in the board file."""
     _run_pcbnew_script(
@@ -381,19 +475,35 @@ def export_dsn(
             "for track in board.GetTracks():\n"
             "    track.SetLocked(True)\n"
         )
+    netclass_json = dsn_path + ".netclasses.json"
     _run_pcbnew_script(
-        "import pcbnew\n"
+        "import pcbnew, json\n"
         f"board = pcbnew.LoadBoard({kicad_pcb_path!r})\n"
         + lock_script
         + "board.BuildConnectivity()\n"
         f"board.Save({kicad_pcb_path!r})\n"
         f"pcbnew.ExportSpecctraDSN(board, {dsn_path!r})\n"
+        # Capture netclass clearances + net->class so _inject_netclass_clearances
+        # can restore the per-class rules KiCad's DSN export drops (it lumps every
+        # net into one kicad_default class at the default clearance).
+        "_info = {'classes': {}, 'net_class': {}}\n"
+        "for _n, _nc in board.GetAllNetClasses().items():\n"
+        "    try:\n"
+        "        _info['classes'][str(_n)] = int(round(_nc.GetClearance() / 1000))\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "for _net in board.GetNetInfo().NetsByName().values():\n"
+        "    _nm = _net.GetNetname()\n"
+        "    if _nm:\n"
+        "        _info['net_class'][_nm] = str(_net.GetNetClassName())\n"
+        f"open({netclass_json!r}, 'w').write(json.dumps(_info))\n"
     )
     _patch_dsn_clearance(
         dsn_path,
         target_clearance_um=target_clearance_um,
         target_width_um=target_width_um,
     )
+    _inject_netclass_clearances(dsn_path)
 
 
 def _patch_dsn_clearance(
@@ -452,6 +562,137 @@ def _patch_dsn_clearance(
 
     with open(dsn_path, "w") as f:
         f.write(content)
+
+
+def _split_dsn_tokens(s: str) -> list[str]:
+    """Split a DSN token run, keeping ``"quoted net names"`` intact."""
+    return re.findall(r'"[^"]*"|\S+', s)
+
+
+def _inject_netclass_clearances(dsn_path: str) -> None:
+    """Restore per-netclass clearances that KiCad's Specctra DSN export drops.
+
+    ``pcbnew.ExportSpecctraDSN`` lumps every net into a single ``kicad_default``
+    class at the board default clearance, discarding wider netclass rules (e.g. a
+    0.3 mm Power class). FreeRouting then routes those nets too tight and the
+    post-route DRC -- which validates against the real netclass rule -- rejects
+    the board (``illegal_routed_geometry``). This re-splits the single DSN class
+    into one class per board netclass, raising each to
+    ``max(dsn_default, netclass_clearance)`` so wider classes (power) are honored
+    while nothing routes tighter than before. It runs after
+    :func:`_patch_dsn_clearance`, so the default it reads already reflects any
+    fine-pitch lowering.
+
+    Best-effort: reads the ``<dsn>.netclasses.json`` sidecar written by
+    :func:`export_dsn`; any missing data or parse failure leaves the DSN as-is.
+    """
+    sidecar = dsn_path + ".netclasses.json"
+    try:
+        with open(sidecar) as f:
+            info = json.load(f)
+    except Exception:
+        return
+    finally:
+        try:
+            os.remove(sidecar)
+        except OSError:
+            pass
+    classes_um = {str(k): int(v) for k, v in (info.get("classes") or {}).items()}
+    net_class = {str(k): str(v) for k, v in (info.get("net_class") or {}).items()}
+    if not classes_um or not net_class:
+        return
+
+    try:
+        with open(dsn_path) as f:
+            content = f.read()
+        start = content.find("(class kicad_default")
+        if start < 0:
+            return
+        # Balanced-paren scan for the end of this (class ...) block.
+        depth, i = 0, start
+        while i < len(content):
+            if content[i] == "(":
+                depth += 1
+            elif content[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if depth != 0:
+            return
+        block = content[start : i + 1]
+        hdr_end = block.find("(", len("(class"))
+        if hdr_end < 0:
+            return
+        # tokens after the class name are the member nets
+        nets = _split_dsn_tokens(block[len("(class") : hdr_end])[1:]
+        rest = block[hdr_end:-1]
+        rule_start = rest.rfind("(rule")
+        if rule_start < 0:
+            return
+        circuit = rest[:rule_start].strip()  # (circuit (use_via ...)) -- preserved
+        rule_text = rest[rule_start:]
+        mclr = re.search(r"\(clearance\s+(\d+)\)", rule_text)
+        if not mclr:
+            return
+        default_um = int(mclr.group(1))
+        mwid = re.search(r"\(width\s+(\d+)\)", rule_text)
+        width = mwid.group(1) if mwid else "200"
+
+        groups: dict[str, dict[str, Any]] = {}
+        order = 0
+        for tok in nets:
+            name = tok[1:-1] if len(tok) >= 2 and tok[0] == '"' == tok[-1] else tok
+            cls = net_class.get(name)
+            if cls is None:
+                cls_token, um = "kicad_default", default_um
+            else:
+                cls_token = re.sub(r"[^A-Za-z0-9_]+", "_", cls) or "class"
+                um = max(default_um, classes_um.get(cls, default_um))
+            g = groups.get(cls_token)
+            if g is None:
+                groups[cls_token] = {"nets": [tok], "um": um, "order": order}
+                order += 1
+            else:
+                g["nets"].append(tok)
+        # Nothing wider than the default -> leave the DSN byte-for-byte unchanged.
+        if all(g["um"] == default_um for g in groups.values()):
+            return
+
+        blocks = []
+        for cls_token, g in sorted(groups.items(), key=lambda kv: kv[1]["order"]):
+            nets_str = " ".join(g["nets"])
+            circ = f"\n      {circuit}" if circuit else ""
+            blocks.append(
+                f"(class {cls_token} {nets_str}{circ}\n"
+                f"      (rule\n        (width {width})\n"
+                f"        (clearance {g['um']})\n      )\n    )"
+            )
+        content = content[:start] + "\n  ".join(blocks) + content[i + 1 :]
+        with open(dsn_path, "w") as f:
+            f.write(content)
+    except Exception as exc:  # noqa: BLE001 -- never break routing over this
+        print(f"  warning: netclass clearance injection skipped: {exc}")
+
+
+def _propagate_sibling_pro(src_pcb_path: str, dst_pcb_path: str) -> None:
+    """Copy ``src``'s sibling ``.kicad_pro`` onto ``dst``'s, when present.
+
+    pcbnew's ``board.Save()`` emits a *default* sidecar ``.kicad_pro`` (Default
+    netclass 0.20 mm), dropping the project's real netclasses. Carrying the
+    source project forward keeps the real netclass clearances/patterns on a
+    freshly-written board so post-route DRC validates against the same rules
+    FreeRouting was given. Best-effort.
+    """
+    src_pro = os.path.splitext(src_pcb_path)[0] + ".kicad_pro"
+    dst_pro = os.path.splitext(dst_pcb_path)[0] + ".kicad_pro"
+    try:
+        if os.path.isfile(src_pro) and os.path.abspath(src_pro) != os.path.abspath(
+            dst_pro
+        ):
+            shutil.copy2(src_pro, dst_pro)
+    except OSError:
+        pass
 
 
 def parse_freerouting_output(stdout: str, stderr: str, returncode: int) -> dict[str, Any]:
@@ -517,6 +758,7 @@ def run_freerouting(
     max_passes: int = 40,
     work_dir: str | None = None,
     hide_window: bool = True,
+    java_bin: str = "java",
 ) -> dict[str, Any]:
     """Run FreeRouting CLI and return result metadata.
 
@@ -533,8 +775,19 @@ def run_freerouting(
         window.
     """
     jar_path = os.path.expanduser(jar_path)
+    java = resolve_java(java_bin)
+    if java is None:
+        raise FreeroutingUnavailableError(
+            f"Java runtime not found (java_bin={java_bin!r}); cannot launch "
+            "FreeRouting. Install a JRE or set 'java_bin' to a JRE path."
+        )
+    if not os.path.isfile(jar_path):
+        raise FreeroutingUnavailableError(
+            f"FreeRouting jar not found at {jar_path!r}; download "
+            "freerouting-1.9.0.jar there or set 'freerouting_jar'."
+        )
     java_cmd = [
-        "java",
+        java,
         "-jar",
         jar_path,
         "-de",
@@ -787,12 +1040,17 @@ def route_with_freerouting(
                 timeout_s=timeout_s,
                 max_passes=passes,
                 hide_window=hide_window,
+                java_bin=config.get("java_bin", "java"),
             )
             stats["preserved_existing_copper"] = preserve_existing_copper
             stats["cleared_zones_before_export"] = clear_existing_zones
 
             if os.path.exists(ses_path):
                 import_ses(kicad_pcb_path, ses_path, output_path)
+                # import_ses saved a fresh board -> default sidecar .kicad_pro;
+                # carry the input board's project (real netclasses) forward so
+                # post-route DRC validates against the rules FR actually used.
+                _propagate_sibling_pro(kicad_pcb_path, output_path)
                 if preserve_existing_copper:
                     _unlock_traces(output_path)
                 if target_clearance_um is not None:
