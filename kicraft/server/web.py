@@ -26,6 +26,7 @@ import threading
 import time
 import types
 import typing
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote
 
@@ -470,38 +471,178 @@ _LCSC_ID_RE = re.compile(r"(?<![A-Za-z0-9])C\d{4,}")
 _FP_SIZE_RE = re.compile(r"_(\d{3,4})(?:_|$)")
 
 
-def _vendor_cell(p: dict) -> dict | str:
-    """A clickable LCSC lookup for one BOM part, best-effort by what's known:
-    an LCSC id baked into the symbol/footprint name (vendored easyeda parts) ->
-    the product page; else the manufacturer part number -> an LCSC search; else a
-    generic passive -> a search by value + package size. Returns a
-    ``{"text", "href"}`` link cell (consumed by stagetabs._cell_html), or "" when
-    there's nothing to search on."""
+def _resolve_part(p: dict) -> tuple[str, str] | None:
+    """How to find this part at a vendor, as ``(kind, query)``: an LCSC id baked
+    into the symbol/footprint name ("id", vendored easyeda parts); else the
+    manufacturer part number ("mpn"); else a keyword from value + package size
+    ("kw", generic passives). None when there is nothing to go on. Shared by the
+    vendor link and the price lookup so both point at the same part."""
     sym = p.get("symbol") or ""
     fp = p.get("footprint") or ""
     m = _LCSC_ID_RE.search(sym) or _LCSC_ID_RE.search(fp)
     if m:
-        cid = m.group(0)
-        return {"text": cid, "href": f"https://www.lcsc.com/product-detail/{cid}.html"}
+        return ("id", m.group(0))
     mpn = (p.get("mpn") or "").strip()
     if mpn:
-        return {"text": mpn, "href": "https://www.lcsc.com/search?q=" + quote(mpn)}
+        return ("mpn", mpn)
     val = (p.get("value") or "").strip()
     size = _FP_SIZE_RE.search(fp.split(":", 1)[-1])
     terms = " ".join(t for t in (val, size.group(1) if size else "") if t)
-    if terms:
-        return {"text": "search", "href": "https://www.lcsc.com/search?q=" + quote(terms)}
-    return ""
+    return ("kw", terms) if terms else None
+
+
+def _vendor_cell(p: dict) -> dict | str:
+    """A clickable LCSC lookup for one BOM part: an LCSC id -> the product page;
+    an MPN or generic passive -> an LCSC search. Returns a ``{"text", "href"}``
+    link cell (consumed by stagetabs._cell_html), or "" when nothing resolves."""
+    r = _resolve_part(p)
+    if not r:
+        return ""
+    kind, q = r
+    if kind == "id":
+        return {"text": q, "href": f"https://www.lcsc.com/product-detail/{q}.html"}
+    return {"text": q if kind == "mpn" else "search",
+            "href": "https://www.lcsc.com/search?q=" + quote(q)}
+
+
+# ---- BOM part pricing (live JLCPCB/LCSC lookups, cached) ---------------------
+# Resolved unit prices keyed by a part's lookup key ("id:C123" / "mpn:.." /
+# "kw:.."). Shared process-wide (a key like "kw:5.1k 0402" is project-independent)
+# and persisted per project to .kicraft/bom_prices.json so a reopen is instant. A
+# value is a dict (priced) or None (looked up, no match); a missing key means "not
+# fetched yet" -> shown as "..." while a background fetch runs.
+_PRICE_CACHE: dict[str, dict | None] = {}
+_PRICE_INFLIGHT: set[str] = set()
+_PRICE_LOCK = threading.Lock()
+_PRICE_FILE = "bom_prices.json"
+_FETCH_ERROR = object()  # sentinel: fetch raised; don't cache, allow a later retry
+
+
+def _price_key(p: dict) -> str | None:
+    r = _resolve_part(p)
+    return f"{r[0]}:{r[1]}" if r else None
+
+
+def _pick_price(kind: str, query: str, results: list[dict]) -> dict | None:
+    """Choose one JLCPCB search result and pull its unit price: for an LCSC id the
+    exact id (else the first priced); for an MPN the first in-stock; for a keyword
+    (a generic passive) the cheapest in-stock. Returns ``{"unit_price","lcsc",
+    "stock"}`` or None when nothing usable came back. Pure: no network."""
+    def price_of(r):
+        try:
+            return float(r.get("price"))
+        except (TypeError, ValueError):
+            return None
+    priced = [r for r in results if (price_of(r) or 0) > 0]
+    if not priced:
+        return None
+    if kind == "id":
+        r = next((x for x in priced
+                  if str(x.get("lcsc", "")).upper() == query.upper()), priced[0])
+    elif kind == "mpn":
+        instock = [x for x in priced if (x.get("stock") or 0) > 0]
+        r = (instock or priced)[0]
+    else:  # kw -> cheapest in-stock
+        instock = [x for x in priced if (x.get("stock") or 0) > 0]
+        r = min(instock or priced, key=price_of)
+    return {"unit_price": price_of(r), "lcsc": r.get("lcsc"), "stock": r.get("stock")}
+
+
+def _search_jlcpcb(query: str) -> list[dict]:
+    """JLCPCB/LCSC keyword search via easyeda2kicad. Network; may raise."""
+    from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
+    res = EasyedaApi().search_jlcpcb_components(keyword=query, page_size=10) or {}
+    return res.get("results") or []
+
+
+def _fetch_price(key: str) -> dict | None:
+    kind, _, query = key.partition(":")
+    return _pick_price(kind, query, _search_jlcpcb(query))
+
+
+def _safe_fetch(key: str):
+    try:
+        return _fetch_price(key)
+    except Exception:
+        return _FETCH_ERROR
+
+
+def _fmt_price(x: float) -> str:
+    return f"${x:.4f}"
+
+
+def _fmt_total(x: float) -> str:
+    return f"${x:,.2f}" if x >= 0.10 else f"${x:.4f}"
+
+
+def _load_price_cache(ws: Path) -> None:
+    """Merge a project's persisted prices into the process cache (best-effort)."""
+    try:
+        data = json.loads((ws / ".kicraft" / _PRICE_FILE).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if isinstance(data, dict):
+        with _PRICE_LOCK:
+            for k, v in data.items():
+                if k not in _PRICE_CACHE:
+                    _PRICE_CACHE[k] = v if isinstance(v, dict) else None
+
+
+def _save_price_cache(ws: Path, keys: set[str]) -> None:
+    """Persist this project's resolved keys so a reopen/restart is instant."""
+    with _PRICE_LOCK:
+        snap = {k: _PRICE_CACHE[k] for k in keys if k in _PRICE_CACHE}
+    try:
+        d = ws / ".kicraft"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / _PRICE_FILE).write_text(json.dumps(snap, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _ensure_bom_prices(parts: list[dict], ws: str | None, state: dict) -> None:
+    """Kick a background fetch for any not-yet-priced parts, then bump
+    ``state['prices_rev']`` so the render loop re-renders the BOM with the prices.
+    No-op when everything is already cached or in flight."""
+    keys = {k for p in parts if (k := _price_key(p))}
+    if not keys:
+        return
+    with _PRICE_LOCK:
+        todo = [k for k in keys if k not in _PRICE_CACHE and k not in _PRICE_INFLIGHT]
+        _PRICE_INFLIGHT.update(todo)
+    if not todo:
+        return
+
+    def work():
+        try:
+            with ThreadPoolExecutor(max_workers=6) as ex:
+                for k, r in zip(todo, ex.map(_safe_fetch, todo)):
+                    if r is not _FETCH_ERROR:
+                        with _PRICE_LOCK:
+                            _PRICE_CACHE[k] = r
+        finally:
+            with _PRICE_LOCK:
+                _PRICE_INFLIGHT.difference_update(todo)
+            if ws:
+                _save_price_cache(Path(ws), keys)
+            state["prices_rev"] = state.get("prices_rev", 0) + 1
+
+    threading.Thread(target=work, daemon=True).start()
 
 
 def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | None,
-                    build_lines: list[str]) -> list[dict]:
+                    build_lines: list[str], *, prices: dict | None = None) -> list[dict]:
     """Build the structured project-state spec for a stage's inspector window.
 
     Pure-data stages read their committed slot from `sj` (state.json); the build
     stages read filesystem signals (sheets, run_status, build log). Returns the
     section list consumed by StagePanel.set_inspector; [] means "nothing yet".
+
+    `prices` is the part-price lookup the BOM cost column reads (defaults to the
+    process-wide `_PRICE_CACHE`; the demo passes a canned map so it needs no
+    network).
     """
+    prices = _PRICE_CACHE if prices is None else prices
     if stage == "intent":
         sl = sj.get("intent") or {}
         if not sl:
@@ -561,12 +702,37 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
         parts = sl.get("parts") or []
         if not parts:
             return []
+        rows, total, priced, pending = [], 0.0, 0, False
+        for p in parts:
+            key = _price_key(p)
+            if key is None:
+                cost = "n/a"
+            elif key in prices:
+                res = prices[key]
+                if isinstance(res, dict):
+                    total += res["unit_price"]
+                    priced += 1
+                    cost = _fmt_price(res["unit_price"])
+                else:
+                    cost = "n/a"  # looked up, no match
+            else:
+                cost = "..."  # fetch in flight
+                pending = True
+            rows.append([p.get("ref"), p.get("value"), cost, _vendor_cell(p),
+                         p.get("footprint"), p.get("sheet"), p.get("symbol")])
+        if pending and priced == 0:
+            total_txt, note = "pricing...", "fetching live JLCPCB prices..."
+        else:
+            total_txt = _fmt_total(total)
+            note = f"est. = cheapest in-stock JLCPCB match ({priced}/{len(parts)} priced)"
+            if pending:
+                note = f"fetching live JLCPCB prices... ({priced}/{len(parts)} so far)"
         secs = [{"type": "kv", "title": "Summary", "rows": [("parts", len(parts))]},
                 {"type": "table", "title": "Parts",
-                 "columns": ["ref", "value", "vendor", "footprint", "sheet", "symbol"],
-                 "rows": [[p.get("ref"), p.get("value"), _vendor_cell(p),
-                           p.get("footprint"), p.get("sheet"), p.get("symbol")]
-                          for p in parts]}]
+                 "columns": ["ref", "value", "cost", "vendor", "footprint", "sheet", "symbol"],
+                 "rows": rows,
+                 "foot": [["", "TOTAL (est.)", total_txt, "", "", "", ""]],
+                 "note": note}]
         return secs
 
     if stage == "wiring":
@@ -1696,6 +1862,7 @@ def index(prompt: str = ""):
         "state_mtime": None, "run_mtime": None, "build_lines": [],
         "user_id": None, "project_id": None, "brief": "", "account_refreshed": False,
         "status": None, "awaiting_input": False, "questions": [], "questions_rendered": None,
+        "prices_rev": 0, "prices_rev_seen": 0, "prices_loaded_ws": None,
     }
 
     def logout():
@@ -2124,7 +2291,8 @@ def index(prompt: str = ""):
                          project_dir=None, stem=None, pcb_ready=False, sch_view=None,
                          pcb_view=None, pcb_mtime=None, state_mtime=None, run_mtime=None,
                          build_lines=[], account_refreshed=False, status=None,
-                         awaiting_input=False, questions=[], questions_rendered=None)
+                         awaiting_input=False, questions=[], questions_rendered=None,
+                         prices_rev=0, prices_rev_seen=0, prices_loaded_ws=None)
             continue_btn.set_visibility(False)
             state["user_id"] = u.id
             state["project_id"] = pid
@@ -2163,6 +2331,11 @@ def index(prompt: str = ""):
 
             # Design-stage inspectors: rebuild from state.json whenever it changes.
             if state["ws"]:
+                # Seed the price cache from this project's persisted prices once
+                # (so a reopen shows costs immediately, before any new fetch).
+                if state.get("prices_loaded_ws") != state["ws"]:
+                    state["prices_loaded_ws"] = state["ws"]
+                    _load_price_cache(Path(state["ws"]))
                 mt = _mtime(Path(state["ws"]) / ".kicraft" / "state.json")
                 if mt and mt != state["state_mtime"]:
                     state["state_mtime"] = mt
@@ -2171,6 +2344,20 @@ def index(prompt: str = ""):
                         spec = _inspector_spec(stg, sj, {}, None, state["build_lines"])
                         if spec:
                             tabs.set_inspector(stg, spec)
+                    # Live-price any BOM parts in the background (fills in the cost
+                    # column + total once the fetch lands; cached parts are instant).
+                    bom_parts = (sj.get("bom") or {}).get("parts") or []
+                    if bom_parts:
+                        _ensure_bom_prices(bom_parts, state["ws"], state)
+
+            # Prices arrive on a background thread; re-render the BOM when they do.
+            if state["ws"] and state.get("prices_rev") != state.get("prices_rev_seen"):
+                state["prices_rev_seen"] = state.get("prices_rev")
+                spec = _inspector_spec(
+                    "bom", _read_state_json(Path(state["ws"])), {}, None,
+                    state["build_lines"])
+                if spec:
+                    tabs.set_inspector("bom", spec)
 
             # Even when the build later FAILS, show the schematic as soon as synthesis
             # writes the sheets: discover the generated dir from the workspace so the
@@ -2306,6 +2493,14 @@ if os.environ.get("KICRAFT_WEB_DEMO"):
         "artifacts": {"status": "ok", "fab_zip": "FLASHLIGHT_fab.zip"},
     }
 
+    # Canned prices for the demo BOM (keyed by _price_key) so the cost column +
+    # total render with no network (the demo never calls JLCPCB).
+    _DEMO_PRICES = {
+        "kw:TP4056": {"unit_price": 0.18, "lcsc": "C16581", "stock": 9999},
+        "kw:USB-C": {"unit_price": 0.0667, "lcsc": "C165948", "stock": 9999},
+        "kw:white LED 0603": {"unit_price": 0.014, "lcsc": "C72043", "stock": 9999},
+    }
+
     @ui.page("/demo")
     def demo_page():
         """Dev-only: replay a canned design through the per-stage tabs so the layout
@@ -2333,7 +2528,8 @@ if os.environ.get("KICRAFT_WEB_DEMO"):
                     tabs.push(e)
                     if e.get("kind") == "stage_done":
                         stg = e.get("stage")
-                        tabs.set_inspector(stg, _inspector_spec(stg, _DEMO_STATE, {}, None, []))
+                        tabs.set_inspector(stg, _inspector_spec(
+                            stg, _DEMO_STATE, {}, None, [], prices=_DEMO_PRICES))
                     elif e.get("kind") == "build_done":
                         rs = {"phase": "done", "progress_percent": 100}
                         for stg in ("synthesize", "place_route", "fab"):

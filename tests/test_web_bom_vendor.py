@@ -63,7 +63,8 @@ def test_bom_inspector_spec_adds_vendor_column_with_links():
     ]}}
     secs = web._inspector_spec("bom", sj, {}, None, [])
     parts = next(s for s in secs if s.get("title") == "Parts")
-    assert parts["columns"] == ["ref", "value", "vendor", "footprint", "sheet", "symbol"]
+    assert parts["columns"] == ["ref", "value", "cost", "vendor",
+                                "footprint", "sheet", "symbol"]
     vendor_idx = parts["columns"].index("vendor")
     # every row's vendor cell is a {"text","href"} link dict here
     u4 = parts["rows"][0]
