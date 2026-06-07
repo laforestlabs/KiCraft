@@ -585,6 +585,7 @@ class StageTabs:
         self._tab_el: dict[str, ui.tab] = {}
         self._current: str | None = None
         self._auto_follow = True
+        self._on_show: dict[str, object] = {}
 
         with ui.tabs().classes("w-full").props("dense inline-label") as self.tabs:
             for key, label, icon, accent in PHASES:
@@ -606,8 +607,14 @@ class StageTabs:
             t.style(f"color:{_STATUS_COLOR[status]}")
 
     def _on_tab_change(self, e) -> None:
+        val = getattr(e, "value", None)
         # Resume auto-follow only while the user is parked on the live stage.
-        self._auto_follow = (getattr(e, "value", None) == self._current)
+        self._auto_follow = (val == self._current)
+        # Re-fit any view built while this tab was hidden: a hidden KiCanvas WebGL
+        # canvas sizes to zero and never repaints, so it would show blank otherwise.
+        cb = self._on_show.get(val)
+        if cb is not None:
+            cb()
 
     def _set_current(self, key: str | None, model: str | None = None) -> None:
         if key is None or key not in self.panels:
@@ -668,6 +675,14 @@ class StageTabs:
     def view_slot(self, key: str):
         """The empty column at the top of a panel's inspector for KiCanvas/download."""
         return self.panels[key].view_slot
+
+    def on_show(self, key: str, fn) -> None:
+        """Run `fn` when `key`'s tab becomes the visible one (see _on_tab_change)."""
+        self._on_show[key] = fn
+
+    def active(self) -> str | None:
+        """The currently selected tab key."""
+        return self.tabs.value
 
     def reset(self) -> None:
         self._current = None
