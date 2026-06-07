@@ -103,14 +103,20 @@ class KiCanvasView:
         *,
         controls: str = "full",
         height: str = "h-[520px]",
+        style: str = "",
     ) -> None:
         self._sources = list(sources)
         self._controls = controls
         self._gen = 0
         # sanitize=False is REQUIRED (see module docstring) or the embed is stripped.
+        # `height` is a Tailwind class (fixed pixel heights only); pass `style` (e.g.
+        # "height:calc(100vh - 460px)") for a viewport-relative height instead, since
+        # an inline style is reliable where a Tailwind arbitrary calc() may not be.
         self._html = ui.html(self._render(), sanitize=False).classes(
             f"w-full {height} border border-slate-700 rounded overflow-hidden bg-black"
         )
+        if style:
+            self._html.style(style)
 
     def _render(self) -> str:
         self._gen += 1
