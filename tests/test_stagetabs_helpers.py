@@ -9,7 +9,13 @@ from __future__ import annotations
 
 import json
 
-from kicraft.server.stagetabs import _close_json, _loose_pretty, demo_events
+from kicraft.server.stagetabs import (
+    _cell_html,
+    _close_json,
+    _loose_pretty,
+    _table_html,
+    demo_events,
+)
 
 
 def test_loose_pretty_full_object():
@@ -56,6 +62,47 @@ def test_loose_pretty_never_raises():
 def test_close_json_balanced_returns_none():
     # Nothing open -> caller keeps the raw text instead of re-deriving valid JSON.
     assert _close_json('{"a": 1}') is None
+
+
+# --------------------------------------------------- inspector tables (kc-table)
+
+def test_table_html_is_one_aligned_table():
+    # A single real <table> (so columns line up) with a header + one <tr> per row;
+    # None renders as an empty cell, not the literal "None".
+    h = _table_html(["name", "purpose"], [["MCU", "brains"], ["PWR", None]])
+    assert h.startswith('<table class="kc-table">')
+    assert h.count("<table") == 1
+    assert h.count("<th>") == 2 and h.count("<tr>") == 3  # 1 header + 2 body
+    assert "<td></td>" in h and "None" not in h
+
+
+def test_table_html_escapes_cell_and_header_text():
+    h = _table_html(["<col>"], [["<b>x</b>"]])
+    assert "&lt;b&gt;x&lt;/b&gt;" in h and "<b>" not in h
+    assert "&lt;col&gt;" in h
+
+
+def test_cell_html_renders_https_link_new_tab():
+    cell = {"text": "C2687116",
+            "href": "https://www.lcsc.com/product-detail/C2687116.html"}
+    out = _cell_html(cell)
+    assert out.startswith('<a href="https://www.lcsc.com/product-detail/C2687116.html"')
+    assert 'target="_blank"' in out and 'rel="noopener noreferrer"' in out
+    assert ">C2687116</a>" in out
+
+
+def test_cell_html_drops_non_http_scheme():
+    # javascript:/data: hrefs must never become a clickable link; text stays escaped.
+    for bad in ("javascript:alert(1)", "data:text/html,<b>", "", "/relative"):
+        out = _cell_html({"text": "<x>", "href": bad})
+        assert "<a " not in out
+        assert out == "&lt;x&gt;"
+
+
+def test_cell_html_scalar_and_none():
+    assert _cell_html(None) == ""
+    assert _cell_html("R_0805") == "R_0805"
+    assert _cell_html("<b>") == "&lt;b&gt;"
 
 
 # ------------------------------------------------------------------ demo stream
