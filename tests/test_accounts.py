@@ -11,8 +11,10 @@ import sqlite3
 import pytest
 
 from kicraft.server.accounts import (
+    TIERS,
     AccountStore,
     hash_password,
+    is_admin,
     verify_password,
 )
 
@@ -348,3 +350,168 @@ def test_session_epoch_defaults_to_zero(store):
     u = store.create_user("z@e.st", "pw")
     assert u.session_epoch == 0
     assert store.get_user(u.id).session_epoch == 0  # round-trips through the DB
+
+
+# ---- roles, admin gate, and the retired admin tier ------------------------
+
+def test_new_user_defaults_to_user_role(store):
+    u = store.create_user("r@e.st", "pw")
+    assert u.role == "user"
+    assert is_admin(u) is False
+
+
+def test_set_role_grants_and_revokes_admin(store):
+    promoted = store.set_role(store.create_user("r@e.st", "pw").email, "admin")
+    assert promoted.role == "admin" and is_admin(promoted)
+    assert is_admin(store.get_user_by_email("r@e.st"))  # round-trips through the DB
+    demoted = store.set_role("r@e.st", "user")
+    assert demoted.role == "user" and not is_admin(demoted)
+    by_id = store.set_role(promoted.id, "admin")  # addressable by id (dashboard path)
+    assert by_id.role == "admin"
+
+
+def test_set_role_validates(store):
+    store.create_user("r@e.st", "pw")
+    with pytest.raises(ValueError):
+        store.set_role("r@e.st", "wizard")     # unknown role
+    with pytest.raises(ValueError):
+        store.set_role("ghost@e.st", "admin")  # no such user
+
+
+def test_is_admin_handles_none(store):
+    assert is_admin(None) is False
+
+
+def test_count_role(store):
+    store.create_user("a@e.st", "pw")
+    store.create_user("b@e.st", "pw")
+    assert store.count_role("admin") == 0
+    store.set_role("a@e.st", "admin")
+    assert store.count_role("admin") == 1
+    assert store.count_role("user") == 1
+
+
+def test_admin_is_no_longer_a_billing_tier(store):
+    assert "admin" not in TIERS
+    store.create_user("a@e.st", "pw")
+    with pytest.raises(ValueError):
+        store.set_tier("a@e.st", "admin")  # admin is a role now, not a tier
+
+
+def test_staff_bypass_quota(store):
+    u = store.create_user("op@e.st", "pw")  # free tier: 1/week
+    store.create_project(u.id, "b1")        # consume the one slot
+    assert store.can_design(u) is False
+    assert store.quota_status(u)["unlimited"] is False
+    u = store.set_role("op@e.st", "admin")
+    assert store.can_design(u) is True
+    q = store.quota_status(u)
+    assert q["unlimited"] is True
+    assert q["limit"] is None and q["remaining"] == float("inf")
+
+
+def test_legacy_admin_tier_migrates_to_role(tmp_path):
+    """A user on the retired 'admin' billing tier is promoted to the admin role and
+    reset to free when the role column is introduced; a paid customer is untouched;
+    re-opening the DB changes nothing (idempotent backfill)."""
+    db = tmp_path / "accounts.db"
+    with sqlite3.connect(db) as conn:  # pre-role users schema
+        conn.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,"
+            "tier TEXT NOT NULL DEFAULT 'free', created_at TEXT NOT NULL,"
+            "last_login_at TEXT)")
+        conn.execute("INSERT INTO users (email, password_hash, tier, created_at) "
+                     "VALUES ('op@e.st', 'scrypt$x', 'admin', '2026-01-01T00:00:00+00:00')")
+        conn.execute("INSERT INTO users (email, password_hash, tier, created_at) "
+                     "VALUES ('cust@e.st', 'scrypt$x', 'max', '2026-01-02T00:00:00+00:00')")
+    store = AccountStore(db, tmp_path / "projects")  # _ensure_columns migrates
+    op = store.get_user_by_email("op@e.st")
+    assert op.role == "admin" and op.tier == "free" and is_admin(op)  # promoted, reset
+    cust = store.get_user_by_email("cust@e.st")
+    assert cust.role == "user" and cust.tier == "max"  # paid customer untouched
+
+    reopened = AccountStore(db, tmp_path / "projects")  # idempotent on re-open
+    op2 = reopened.get_user_by_email("op@e.st")
+    assert op2.role == "admin" and op2.tier == "free"
+    assert reopened.count_role("admin") == 1
+
+
+# ---- admin stats ----------------------------------------------------------
+
+def _add_project(store, user_id, status="ok", cost=None, days_ago=0):
+    """Create + finish a project, optionally back-dating it to exercise day buckets."""
+    pid = store.create_project(user_id, "brief")
+    store.finish_project(pid, status, "stem" if status == "ok" else None, cost)
+    if days_ago:
+        ts = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days_ago)).isoformat()
+        with sqlite3.connect(store.path) as conn:
+            conn.execute("UPDATE projects SET created_at=?, finished_at=? WHERE id=?",
+                         (ts, ts, pid))
+    return pid
+
+
+def test_overview_stats(store):
+    a = store.create_user("a@e.st", "pw")
+    b = store.create_user("b@e.st", "pw")
+    store.set_tier("b@e.st", "max")
+    store.set_role("a@e.st", "admin")
+    _add_project(store, a.id, "ok", 1.50)
+    _add_project(store, a.id, "failed", None)
+    _add_project(store, b.id, "ok", 2.00)
+    s = store.overview_stats(window_days=30)
+    assert s["users_total"] == 2 and s["admins"] == 1
+    assert s["projects_total"] == 3
+    assert s["spend_total_usd"] == pytest.approx(3.50)
+    assert s["spend_avg_usd"] == pytest.approx(1.75)  # mean of the two non-null costs
+    assert s["avg_latency_s"] is not None
+
+
+def test_overview_stats_empty_db(store):
+    s = store.overview_stats()
+    assert s["users_total"] == 0 and s["projects_total"] == 0
+    assert s["spend_total_usd"] == 0.0
+    assert s["spend_avg_usd"] is None and s["avg_latency_s"] is None
+
+
+def test_distributions(store):
+    a = store.create_user("a@e.st", "pw")
+    store.create_user("b@e.st", "pw")
+    store.set_tier("b@e.st", "max")
+    _add_project(store, a.id, "ok", 1.0)
+    _add_project(store, a.id, "failed", None)
+    assert dict(store.tier_distribution()) == {"free": 1, "max": 1}
+    assert dict(store.status_distribution()) == {"ok": 1, "failed": 1}
+
+
+def test_per_day_series_bucket_by_date(store):
+    u = store.create_user("a@e.st", "pw")
+    _add_project(store, u.id, "ok", 1.0, days_ago=0)
+    _add_project(store, u.id, "ok", 3.0, days_ago=0)
+    _add_project(store, u.id, "ok", 5.0, days_ago=10)
+    today = dt.date.today().isoformat()
+    ppd = dict(store.projects_per_day(60))
+    assert ppd[today] == 2 and sum(ppd.values()) == 3
+    spd = dict(store.spend_per_day(60))
+    assert spd[today] == pytest.approx(4.0)  # 1.0 + 3.0 on the same day
+    assert sum(spd.values()) == pytest.approx(9.0)
+    assert sum(dict(store.projects_per_day(5)).values()) == 2  # 10d-ago is outside 5d
+
+
+def test_signups_per_day(store):
+    store.create_user("a@e.st", "pw")
+    store.create_user("b@e.st", "pw")
+    assert dict(store.signups_per_day(30))[dt.date.today().isoformat()] == 2
+
+
+def test_users_with_project_counts_left_join(store):
+    a = store.create_user("a@e.st", "pw")
+    store.create_user("zero@e.st", "pw")  # no projects
+    _add_project(store, a.id, "ok", 2.50)
+    _add_project(store, a.id, "ok", 1.50)
+    rows = {r["email"]: r for r in store.users_with_project_counts()}
+    assert rows["a@e.st"]["project_count"] == 2
+    assert rows["a@e.st"]["spend_usd"] == pytest.approx(4.0)
+    assert rows["a@e.st"]["last_project_at"] is not None
+    assert rows["zero@e.st"]["project_count"] == 0  # LEFT JOIN keeps zero-project user
+    assert rows["zero@e.st"]["spend_usd"] == 0

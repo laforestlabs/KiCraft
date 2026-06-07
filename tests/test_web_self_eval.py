@@ -243,17 +243,17 @@ def test_evaluate_project_erc_gate_caps_grade(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# admin tier gate
+# admin role gate
 # --------------------------------------------------------------------------- #
-def test_admin_tier_and_is_admin(tmp_path):
+def test_admin_role_and_is_admin(tmp_path):
     from kicraft.server.accounts import TIERS, AccountStore, is_admin
 
-    assert "admin" in TIERS and TIERS["admin"]["label"] == "Admin"
+    assert "admin" not in TIERS  # admin is a role now, orthogonal to the billing tier
     store = AccountStore(tmp_path / "accounts.db", tmp_path / "projects")
     u = store.create_user("a@example.com", "pw")
     assert not is_admin(u)
-    promoted = store.set_tier("a@example.com", "admin")   # accepted because admin is a TIER
-    assert promoted.tier == "admin" and is_admin(promoted)
+    promoted = store.set_role("a@example.com", "admin")  # grant the role, not a tier
+    assert promoted.role == "admin" and is_admin(promoted)
 
     other = store.create_user("b@example.com", "pw")
     assert is_admin(other) is False

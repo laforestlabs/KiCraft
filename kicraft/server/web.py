@@ -114,6 +114,22 @@ def _current_user():
     return user
 
 
+def _require_admin():
+    """Gate an admin-only page. Returns (user, None) for staff, or (None, response)
+    for the page to return immediately. An authed non-admin is bounced to / rather
+    than shown a 403/404 -- the /admin routes are only ever advertised to staff (the
+    header link is is_admin-gated), so we don't confirm the route exists to anyone
+    else. Mutating handlers re-check is_admin() on their own (defense in depth)."""
+    user = _current_user()
+    if user is None:
+        return None, RedirectResponse("/login")
+    if user.accepted_terms_version != LEGAL_VERSION:
+        return None, RedirectResponse("/consent")
+    if not is_admin(user):
+        return None, RedirectResponse("/")
+    return user, None
+
+
 _LEGAL_DOCS = {"terms-of-service": "Terms of Service", "privacy-policy": "Privacy Policy"}
 
 
@@ -1499,9 +1515,15 @@ def profile_page():
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
             ui.label("your profile").classes("text-sm").style("color:#94a3b8")
-        ui.button("Back to workspace", icon="arrow_back",
-                  on_click=lambda: ui.navigate.to("/")) \
-            .props("flat dense no-caps color=white").classes("text-xs")
+        with ui.row().classes("items-center gap-2"):
+            if is_admin(user):
+                ui.button("Admin", icon="admin_panel_settings",
+                          on_click=lambda: ui.navigate.to("/admin")) \
+                    .props("flat dense no-caps color=white").classes("text-xs") \
+                    .tooltip("Admin dashboard")
+            ui.button("Back to workspace", icon="arrow_back",
+                      on_click=lambda: ui.navigate.to("/")) \
+                .props("flat dense no-caps color=white").classes("text-xs")
 
     with ui.column().classes("w-full max-w-2xl mx-auto p-6 gap-4"):
         ui.label("Profile").classes("text-2xl font-bold text-white")
@@ -1515,8 +1537,12 @@ def profile_page():
             period = "week" if q["window_days"] <= 7 else "month"
             with ui.row().classes("items-center gap-2"):
                 ui.badge(q["label"], color="primary")
-                ui.label(f"{q['remaining']} of {q['limit']} designs left this "
-                         f"{period}.").classes("text-sm").style("color:#94a3b8")
+                if q.get("unlimited"):
+                    ui.label("Unlimited designs (staff).") \
+                        .classes("text-sm").style("color:#94a3b8")
+                else:
+                    ui.label(f"{q['remaining']} of {q['limit']} designs left this "
+                             f"{period}.").classes("text-sm").style("color:#94a3b8")
             ui.label(f"Member since {user.created_at[:10]}.") \
                 .classes("text-xs").style("color:#64748b")
 
@@ -1539,6 +1565,337 @@ def profile_page():
         with ui.row().classes("w-full justify-end"):
             ui.button("Log out", icon="logout", on_click=logout) \
                 .props("flat dense no-caps color=white").classes("text-xs")
+
+
+# --------------------------------------------------------------------------- #
+# Admin dashboard (stats/trends + user management). Gated by _require_admin();
+# charts use the ECharts primitive bundled with NiceGUI (the web server ships
+# under the `server` extra, which has no plotly -- that is a `gui`-extra dep).
+# --------------------------------------------------------------------------- #
+_CHART_AXIS = "#94a3b8"
+_CHART_GRID = "#1e293b"
+
+
+def _echart_bar(labels, values, *, title: str, color: str = "#60a5fa") -> dict:
+    """ECharts bar-chart option dict. Pure (plain lists in, dict out) so it is
+    unit-testable without a UI/connection context."""
+    return {
+        "backgroundColor": "transparent",
+        "title": {"text": title, "textStyle": {"color": "#e2e8f0", "fontSize": 13}},
+        "tooltip": {"trigger": "axis"},
+        "grid": {"left": 50, "right": 16, "top": 44, "bottom": 56},
+        "xAxis": {"type": "category", "data": list(labels),
+                  "axisLabel": {"color": _CHART_AXIS, "fontSize": 10, "rotate": 45}},
+        "yAxis": {"type": "value", "axisLabel": {"color": _CHART_AXIS},
+                  "splitLine": {"lineStyle": {"color": _CHART_GRID}}},
+        "series": [{"type": "bar", "data": list(values),
+                    "itemStyle": {"color": color}}],
+    }
+
+
+def _echart_line(labels, values, *, title: str, color: str = "#34d399") -> dict:
+    """ECharts line/area-chart option dict (pure; see _echart_bar)."""
+    opt = _echart_bar(labels, values, title=title, color=color)
+    opt["series"] = [{"type": "line", "data": list(values), "smooth": True,
+                      "showSymbol": False, "itemStyle": {"color": color},
+                      "areaStyle": {"color": color, "opacity": 0.15}}]
+    return opt
+
+
+def _echart_pie(pairs, *, title: str) -> dict:
+    """ECharts donut option dict from (name, value) pairs (pure; see _echart_bar)."""
+    return {
+        "backgroundColor": "transparent",
+        "title": {"text": title, "textStyle": {"color": "#e2e8f0", "fontSize": 13}},
+        "tooltip": {"trigger": "item"},
+        "legend": {"bottom": 0, "textStyle": {"color": _CHART_AXIS}},
+        "series": [{"type": "pie", "radius": ["38%", "66%"], "center": ["50%", "46%"],
+                    "data": [{"name": str(n), "value": v} for n, v in pairs],
+                    "label": {"color": "#cbd5e1"}}],
+    }
+
+
+def _admin_header(active: str) -> None:
+    """Shared header for the admin pages; `active` names the current sub-page."""
+    with ui.header().classes("items-center justify-between") \
+            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+        with ui.row().classes("items-center gap-2"):
+            ui.label("KiCraft").classes("text-xl font-bold text-white")
+            ui.label(f"admin · {active}").classes("text-sm").style("color:#94a3b8")
+        with ui.row().classes("items-center gap-2"):
+            ui.button("Overview", icon="insights",
+                      on_click=lambda: ui.navigate.to("/admin")) \
+                .props("flat dense no-caps color=white").classes("text-xs")
+            ui.button("Users", icon="group",
+                      on_click=lambda: ui.navigate.to("/admin/users")) \
+                .props("flat dense no-caps color=white").classes("text-xs")
+            ui.button("Back to workspace", icon="arrow_back",
+                      on_click=lambda: ui.navigate.to("/")) \
+                .props("flat dense no-caps color=white").classes("text-xs")
+
+
+def _admin_card_style() -> str:
+    return "background:#0f172a;border:1px solid #1e293b;min-width:380px"
+
+
+@ui.page("/admin")
+def admin_overview_page():
+    """Admin overview: headline stat cards + trend/distribution charts + top users.
+    Read-only snapshot per load; the header's Overview button re-navigates to refresh."""
+    user, redirect = _require_admin()
+    if redirect is not None:
+        return redirect
+
+    store = _store()
+    stats = store.overview_stats()
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    _admin_header("overview")
+
+    def money(x):
+        return "—" if x is None else f"${x:,.2f}"
+
+    def latency(x):
+        if x is None:
+            return "—"
+        return f"{x / 60:.1f} min" if x >= 60 else f"{x:.0f} s"
+
+    with ui.column().classes("w-full mx-auto p-4 gap-4").style("max-width:1400px"):
+        ui.label("Admin dashboard").classes("text-2xl font-bold text-white")
+
+        def card(label: str, value: str, hint: str = "") -> None:
+            with ui.card().classes("gap-0 items-start") \
+                    .style("background:#0f172a;border:1px solid #1e293b;min-width:150px"):
+                ui.label(value).classes("text-2xl font-bold").style("color:#e2e8f0")
+                ui.label(label).classes("text-xs").style("color:#94a3b8")
+                if hint:
+                    ui.label(hint).classes("text-xs").style("color:#64748b")
+
+        w = stats["window_days"]
+        with ui.row().classes("w-full flex-wrap gap-3"):
+            card("Total users", str(stats["users_total"]), f"+{stats['users_new']} in {w}d")
+            card("Admins", str(stats["admins"]))
+            card("Total projects", str(stats["projects_total"]),
+                 f"+{stats['projects_new']} in {w}d")
+            card("Total spend", money(stats["spend_total_usd"]))
+            card("Avg / design", money(stats["spend_avg_usd"]))
+            card("Avg latency", latency(stats["avg_latency_s"]))
+
+        pp = store.projects_per_day(30)
+        su = store.signups_per_day(30)
+        sp = store.spend_per_day(30)
+        with ui.row().classes("w-full flex-wrap gap-4"):
+            with ui.card().classes("flex-1").style(_admin_card_style()):
+                ui.echart(_echart_line([d for d, _ in pp], [v for _, v in pp],
+                                       title="Projects / day (30d)")) \
+                    .classes("w-full").style("height:260px")
+            with ui.card().classes("flex-1").style(_admin_card_style()):
+                ui.echart(_echart_line([d for d, _ in su], [v for _, v in su],
+                                       title="Signups / day (30d)", color="#60a5fa")) \
+                    .classes("w-full").style("height:260px")
+        with ui.row().classes("w-full flex-wrap gap-4"):
+            with ui.card().classes("flex-1").style(_admin_card_style()):
+                ui.echart(_echart_bar([d for d, _ in sp], [round(v, 2) for _, v in sp],
+                                      title="Spend / day (30d)", color="#fbbf24")) \
+                    .classes("w-full").style("height:260px")
+            with ui.card().classes("flex-1").style(_admin_card_style()):
+                ui.echart(_echart_pie(store.status_distribution(),
+                                      title="Project status")) \
+                    .classes("w-full").style("height:260px")
+            with ui.card().classes("flex-1").style(_admin_card_style()):
+                ui.echart(_echart_pie(store.tier_distribution(), title="User tiers")) \
+                    .classes("w-full").style("height:260px")
+
+        ui.label("Top users by projects") \
+            .classes("text-base font-semibold text-white mt-2")
+        top = sorted(store.users_with_project_counts(),
+                     key=lambda r: r["project_count"], reverse=True)[:10]
+        with ui.column().classes("w-full gap-1"):
+            for r in top:
+                with ui.row().classes("w-full items-center gap-3 text-xs") \
+                        .style("border-top:1px solid #1e293b;padding:3px 0"):
+                    ui.label(r["email"]).style("width:260px;color:#e2e8f0")
+                    ui.badge(r["tier"], color="primary")
+                    if r["role"] == "admin":
+                        ui.badge("admin", color="purple")
+                    ui.label(f"{r['project_count']} projects").style("color:#94a3b8")
+                    ui.label(f"${r['spend_usd']:.2f}").style("color:#64748b")
+
+
+@ui.page("/admin/users")
+def admin_users_page():
+    """User management: one row per user (tier, role, project_count, spend) with
+    actions -- change tier, grant/revoke admin, issue a reset link, export JSON,
+    delete. Every mutating handler re-checks is_admin() (defense in depth), and the
+    self-demotion / last-admin guards keep the system from losing all its admins."""
+    user, redirect = _require_admin()
+    if redirect is not None:
+        return redirect
+
+    store = _store()
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    _admin_header("users")
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1400px"):
+        ui.label("User management").classes("text-2xl font-bold text-white")
+        search = ui.input(placeholder="Filter by email…").props("dense clearable") \
+            .classes("w-72").style("color:#e2e8f0")
+        container = ui.column().classes("w-full gap-0")
+
+        def guard() -> bool:
+            """Defense in depth: never trust the page-load gate for a mutation."""
+            if not is_admin(_current_user()):
+                ui.notify("Admin access required.", color="warning")
+                return False
+            return True
+
+        def do_set_tier(email: str, value: str) -> None:
+            if not guard():
+                return
+            try:
+                store.set_tier(email, value)
+                ui.notify(f"{email}: tier set to {value}.", color="positive")
+            except ValueError as e:
+                ui.notify(str(e), color="negative")
+            build_users()
+
+        def do_toggle_admin(row: dict) -> None:
+            if not guard():
+                return
+            me = _current_user()
+            making = row["role"] != "admin"
+            if not making:
+                if me is not None and row["id"] == me.id:
+                    ui.notify("You can't revoke your own admin access.", color="warning")
+                    return
+                if store.count_role("admin") <= 1:
+                    ui.notify("Refusing to remove the last admin.", color="warning")
+                    return
+            store.set_role(row["id"], "admin" if making else "user")
+            ui.notify(f"{row['email']} is now {'an admin' if making else 'a user'}.",
+                      color="positive")
+            build_users()
+
+        def do_reset_link(email: str) -> None:
+            if not guard():
+                return
+            token = store.create_reset_token(email)
+            if token is None:
+                ui.notify("A reset link was issued moments ago; wait a minute and retry.",
+                          color="warning")
+                return
+            url = f"{Settings.from_env().public_url}/reset?token={token}"
+            with ui.dialog() as dlg, ui.card() \
+                    .style("background:#0f172a;border:1px solid #1e293b;min-width:520px"):
+                ui.label(f"Password-reset link for {email}") \
+                    .classes("text-sm font-bold").style("color:#e2e8f0")
+                ui.label(f"Valid ~{_RESET_TTL_SECONDS // 60} min, single use. "
+                         "Relay it to the user out-of-band.") \
+                    .classes("text-xs").style("color:#94a3b8")
+                ui.input(value=url).props("readonly outlined dense") \
+                    .classes("w-full").style("color:#e2e8f0")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("Close", on_click=dlg.close).props("flat dense")
+            dlg.open()
+
+        def do_export(uid: int) -> None:
+            if not guard():
+                return
+            data = store.export_user(uid)
+            if data is None:
+                ui.notify("No such user.", color="negative")
+                return
+            payload = json.dumps(data, indent=2, default=str).encode("utf-8")
+            ui.download(payload, f"kicraft_export_{uid}.json", "application/json")
+
+        def do_delete(row: dict) -> None:
+            if not guard():
+                return
+            me = _current_user()
+            if me is not None and row["id"] == me.id:
+                ui.notify("You can't delete your own account here.", color="warning")
+                return
+            if row["role"] == "admin" and store.count_role("admin") <= 1:
+                ui.notify("Refusing to delete the last admin.", color="warning")
+                return
+
+            def confirm() -> None:
+                if not guard():
+                    dlg.close()
+                    return
+                store.delete_user(row["id"])
+                dlg.close()
+                ui.notify(f"Deleted {row['email']}.", color="positive")
+                build_users()
+
+            with ui.dialog() as dlg, ui.card() \
+                    .style("background:#0f172a;border:1px solid #1e293b;min-width:420px"):
+                ui.label(f"Delete {row['email']}?") \
+                    .classes("text-base font-bold").style("color:#e2e8f0")
+                ui.label("Removes their account, project rows, and stored files. "
+                         "This is irreversible.").classes("text-xs").style("color:#f87171")
+                with ui.row().classes("w-full justify-end gap-2"):
+                    ui.button("Cancel", on_click=dlg.close).props("flat dense")
+                    ui.button("Delete", color="negative", on_click=confirm).props("dense")
+            dlg.open()
+
+        def build_users() -> None:
+            container.clear()
+            me = _current_user()
+            flt = (search.value or "").strip().lower()
+            rows = store.users_with_project_counts()
+            if flt:
+                rows = [r for r in rows if flt in r["email"].lower()]
+            with container:
+                with ui.row().classes("w-full items-center gap-2 text-xs font-bold") \
+                        .style("color:#64748b;padding:2px 0"):
+                    ui.label("email").style("width:230px")
+                    ui.label("tier").style("width:96px")
+                    ui.label("role").style("width:70px")
+                    ui.label("proj").style("width:48px")
+                    ui.label("spend").style("width:64px")
+                    ui.label("joined").style("width:84px")
+                    ui.label("actions").classes("flex-1")
+                if not rows:
+                    ui.label("No users match.").classes("text-sm").style("color:#94a3b8")
+                for r in rows:
+                    is_admin_row = r["role"] == "admin"
+                    is_self = me is not None and r["id"] == me.id
+                    with ui.row().classes("w-full items-center gap-2 text-xs") \
+                            .style("border-top:1px solid #1e293b;padding:4px 0"):
+                        ui.label(r["email"] + ("  (you)" if is_self else "")) \
+                            .style("width:230px;color:#e2e8f0")
+                        ui.select({"free": "Free", "pro": "Pro", "max": "Max"},
+                                  value=r["tier"],
+                                  on_change=lambda e, em=r["email"]: do_set_tier(em, e.value)) \
+                            .props("dense options-dense").style("width:96px")
+                        ui.label(r["role"]).style(
+                            f"width:70px;color:{'#a78bfa' if is_admin_row else '#64748b'}")
+                        ui.label(str(r["project_count"])).style("width:48px;color:#cbd5e1")
+                        ui.label(f"${r['spend_usd']:.2f}").style("width:64px;color:#cbd5e1")
+                        ui.label((r["created_at"] or "")[:10]) \
+                            .style("width:84px;color:#64748b")
+                        with ui.row().classes("flex-1 gap-1 items-center"):
+                            ui.button("Revoke" if is_admin_row else "Make admin",
+                                      icon="remove_moderator" if is_admin_row
+                                      else "admin_panel_settings",
+                                      on_click=lambda row=r: do_toggle_admin(row)) \
+                                .props("flat dense no-caps").classes("text-xs")
+                            ui.button("Reset link", icon="link",
+                                      on_click=lambda em=r["email"]: do_reset_link(em)) \
+                                .props("flat dense no-caps").classes("text-xs")
+                            ui.button("Export", icon="download",
+                                      on_click=lambda uid=r["id"]: do_export(uid)) \
+                                .props("flat dense no-caps").classes("text-xs") \
+                                .tooltip("Account + project metadata as JSON "
+                                         "(on-disk files via the CLI)")
+                            ui.button("Delete", icon="delete", color="negative",
+                                      on_click=lambda row=r: do_delete(row)) \
+                                .props("flat dense no-caps").classes("text-xs")
+
+        search.on_value_change(lambda: build_users())
+        build_users()
 
 
 @ui.page("/samples")
@@ -1899,6 +2256,11 @@ def index(prompt: str = ""):
                       on_click=lambda: ui.navigate.to("/samples")) \
                 .props("flat dense no-caps color=white").classes("text-xs") \
                 .tooltip("Explore boards KiCraft designed")
+            if is_admin(user):
+                ui.button("Admin", icon="admin_panel_settings",
+                          on_click=lambda: ui.navigate.to("/admin")) \
+                    .props("flat dense no-caps color=white").classes("text-xs") \
+                    .tooltip("Admin dashboard")
             ui.button(user.email, icon="account_circle",
                       on_click=lambda: ui.navigate.to("/profile")) \
                 .props("flat dense no-caps color=white").classes("text-xs") \
@@ -2275,8 +2637,11 @@ def index(prompt: str = ""):
                 return
             q = _store().quota_status(u)
             period = "week" if q["window_days"] <= 7 else "month"
-            quota_label.text = (f"{q['label']} tier: {q['remaining']} of {q['limit']} "
-                                f"designs left this {period}.")
+            if q.get("unlimited"):
+                quota_label.text = f"{q['label']} tier: unlimited designs (staff)."
+            else:
+                quota_label.text = (f"{q['label']} tier: {q['remaining']} of {q['limit']} "
+                                    f"designs left this {period}.")
             tier_badge.text = q["label"]
             if q["remaining"] <= 0:
                 design_btn.disable()

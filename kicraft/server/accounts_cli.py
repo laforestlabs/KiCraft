@@ -1,10 +1,15 @@
-"""Admin CLI for KiCraft accounts: list users, grant tiers, seed accounts.
+"""Admin CLI for KiCraft accounts: list users, grant tiers/roles, seed accounts.
 
-Until Stripe (backlog item 3) lands, tier changes are manual:
+Until Stripe (backlog item 3) lands, tier changes are manual. Admin access is a
+ROLE, orthogonal to the billing tier; grant it here to bootstrap the first admin
+before the /admin dashboard is reachable (the dashboard itself requires an admin):
 
     kicraft-accounts list
     kicraft-accounts create alice@example.com --tier pro
-    kicraft-accounts set-tier alice@example.com max
+    kicraft-accounts create boss@example.com --admin           # seed a staff admin
+    kicraft-accounts set-tier alice@example.com max            # billing tier only
+    kicraft-accounts grant-admin alice@example.com             # promote to admin
+    kicraft-accounts revoke-admin alice@example.com            # demote to user
     kicraft-accounts reset-password alice@example.com          # print a reset link
     kicraft-accounts reset-password alice@example.com --set    # set a password now
 
@@ -54,10 +59,11 @@ def _cmd_list(args: argparse.Namespace) -> int:
     if not users:
         print("(no users yet)")
         return 0
-    print(f"{'id':>3}  {'email':<32} {'tier':<5} {'projects':>8}  created")
+    print(f"{'id':>3}  {'email':<32} {'tier':<5} {'role':<6} {'projects':>8}  created")
     for u in users:
         n = len(store.list_projects(u.id))
-        print(f"{u.id:>3}  {u.email:<32} {u.tier:<5} {n:>8}  {u.created_at[:19]}")
+        print(f"{u.id:>3}  {u.email:<32} {u.tier:<5} {u.role:<6} {n:>8}  "
+              f"{u.created_at[:19]}")
     return 0
 
 
@@ -73,12 +79,45 @@ def _cmd_set_tier(args: argparse.Namespace) -> int:
 
 def _cmd_create(args: argparse.Namespace) -> int:
     pw = args.password or getpass.getpass("password: ")
+    store = _store()
     try:
-        u = _store().create_user(args.email, pw, tier=args.tier)
+        u = store.create_user(args.email, pw, tier=args.tier)
+        if args.admin:
+            u = store.set_role(u.email, "admin")
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 1
-    print(f"created {u.email} (tier {u.tier}, id {u.id})")
+    print(f"created {u.email} (tier {u.tier}, role {u.role}, id {u.id})")
+    return 0
+
+
+def _cmd_grant_admin(args: argparse.Namespace) -> int:
+    try:
+        u = _store().set_role(args.email, "admin")
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    print(f"{u.email} is now an admin")
+    return 0
+
+
+def _cmd_revoke_admin(args: argparse.Namespace) -> int:
+    store = _store()
+    target = store.get_user_by_email(args.email)
+    if target is None:
+        print(f"no user with email {args.email!r}", file=sys.stderr)
+        return 1
+    # Last-admin guard mirrors the dashboard: never leave the system with zero
+    # admins (that would force a CLI re-bootstrap to regain access).
+    if target.role == "admin" and store.count_role("admin") <= 1:
+        print("refusing to remove the last admin", file=sys.stderr)
+        return 1
+    try:
+        u = store.set_role(args.email, "user")
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    print(f"{u.email} is no longer an admin")
     return 0
 
 
@@ -179,7 +218,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("list", help="list all users").set_defaults(func=_cmd_list)
 
-    sp = sub.add_parser("set-tier", help="change a user's tier")
+    sp = sub.add_parser("set-tier",
+                        help="change a user's billing tier (admin is a role: "
+                             "see grant-admin)")
     sp.add_argument("email")
     sp.add_argument("tier", choices=sorted(TIERS), help="one of: " + ", ".join(TIERS))
     sp.set_defaults(func=_cmd_set_tier)
@@ -188,9 +229,19 @@ def main(argv: list[str] | None = None) -> int:
     cp.add_argument("email")
     cp.add_argument("--tier", default="free", choices=sorted(TIERS),
                     help="default: free")
+    cp.add_argument("--admin", action="store_true",
+                    help="also grant the admin role (staff access)")
     cp.add_argument("--password", default=None,
                     help="set non-interactively; prompts securely if omitted")
     cp.set_defaults(func=_cmd_create)
+
+    gp = sub.add_parser("grant-admin", help="grant a user the admin role")
+    gp.add_argument("email")
+    gp.set_defaults(func=_cmd_grant_admin)
+
+    vp = sub.add_parser("revoke-admin", help="revoke a user's admin role")
+    vp.add_argument("email")
+    vp.set_defaults(func=_cmd_revoke_admin)
 
     ep = sub.add_parser("export",
                         help="export a user's account + projects (data/access request)")
