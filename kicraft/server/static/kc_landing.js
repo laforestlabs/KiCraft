@@ -15,7 +15,6 @@
   function typewriter() {
     var el = document.querySelector(".kc-type");
     if (!el) return;
-    var scroller = el.closest(".kc-scroll") || el.parentNode;  // single-line, scrolls
     var prompts = (window.KICRAFT_PROMPTS || []).filter(Boolean);
     if (!prompts.length) { return; }            // server seeds a first line already
     if (reduce) { el.textContent = prompts[0]; return; }
@@ -31,7 +30,6 @@
     function tick() {
       var full = prompts[i];
       el.textContent = full.slice(0, j);
-      if (scroller) { scroller.scrollLeft = scroller.scrollWidth; }  // follow the caret
       var delay;
       if (!deleting) {
         j++;

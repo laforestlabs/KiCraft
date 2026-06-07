@@ -1568,8 +1568,7 @@ def _render_landing() -> None:
         <div class="kc-console">
           <div class="kc-console-bar"><i></i><i></i><i></i></div>
           <div class="kc-console-line"><span class="kc-prompt">&gt;</span><span
-            class="kc-scroll"><span class="kc-type">{seed_html}</span><span
-            class="kc-caret">&nbsp;</span></span></div>
+            class="kc-type">{seed_html}</span><span class="kc-caret">&nbsp;</span></div>
         </div>
         <div class="kc-cta-row">
           <a class="kc-btn kc-btn-primary kc-btn-lg" href="/signup">Start building free</a>

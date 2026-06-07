@@ -154,22 +154,17 @@
 .kc-console-bar i:nth-child(1) { background: #ef4444aa; }
 .kc-console-bar i:nth-child(2) { background: #f59e0baa; }
 .kc-console-bar i:nth-child(3) { background: #22c55eaa; }
-/* One fixed-height line: the typed brief scrolls horizontally (terminal style)
-   instead of wrapping, so the console never grows and the page below never
-   shifts, no matter how long the brief or how narrow the viewport. */
+/* Reserve room for the longest brief (it wraps to ~3 lines) so the console is a
+   fixed size: as the typewriter cycles briefs the box never resizes and the page
+   below never shifts. The brief wraps and stays fully readable; shorter briefs
+   just leave blank space below, like a real terminal. */
 .kc-console-line {
   color: var(--kc-text);
-  display: flex;
-  align-items: center;
-  height: 1.6em;
-  overflow: hidden;
+  min-height: 4.65em;          /* ~3 wrapped lines at the console line-height */
 }
-.kc-console-line .kc-prompt { color: var(--kc-blue); margin-right: 8px; flex: 0 0 auto; }
-.kc-console-line .kc-scroll {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
+.kc-console-line .kc-prompt { color: var(--kc-blue); margin-right: 8px; }
+@media (max-width: 440px) {
+  .kc-console-line { min-height: 6.2em; }   /* narrow phones wrap to ~4 lines */
 }
 .kc-caret {
   display: inline-block;
@@ -418,7 +413,4 @@
   .kc-caret { animation: none; }
   .kc-reveal { opacity: 1; transform: none; transition: none; }
   .kc-btn:hover, .kc-card:hover, .kc-sample:hover { transform: none; }
-  /* Nothing animates, so show the full brief wrapped rather than clipped. */
-  .kc-console-line { height: auto; display: block; }
-  .kc-console-line .kc-scroll { display: inline; white-space: normal; overflow: visible; }
 }
