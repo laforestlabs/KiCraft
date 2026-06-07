@@ -5,6 +5,8 @@ paths, so a SimpleNamespace stands in for a full Settings object.
 """
 from __future__ import annotations
 
+import datetime as dt
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -44,3 +46,19 @@ def test_spent_for_project_ignores_legacy_bare_meta(guard):
 
 def test_spent_for_project_none_is_zero(guard):
     assert guard.spent_for_project(None) == 0.0
+
+
+def test_spent_by_day_counts_all_calls(guard):
+    _rec(guard, "p1-1", 0.02)
+    _rec(guard, "p1-1", 0.03)                       # two project calls today
+    guard.record("m", 1, 1, 0.05, meta="eval")      # a NON-project call counts too
+    old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=10)).isoformat()
+    with sqlite3.connect(guard.path) as c:          # backdate one row 10 days
+        c.execute("INSERT INTO spend (ts, model, input_tokens, output_tokens, "
+                  "cost_usd, meta) VALUES (?, 'm', 0, 0, 0.07, 'x')", (old,))
+    series = dict(guard.spent_by_day(30))
+    assert series[dt.date.today().isoformat()] == pytest.approx(0.10)  # incl. non-project
+    assert sum(series.values()) == pytest.approx(0.17)                 # + backdated 0.07
+    # ...and the all-day total equals the ledger total (matches OpenRouter)
+    assert sum(series.values()) == pytest.approx(guard.spent_total())
+    assert sum(dict(guard.spent_by_day(5)).values()) == pytest.approx(0.10)  # window

@@ -1662,6 +1662,18 @@ def admin_overview_page():
 
     store = _store()
     stats = store.overview_stats()
+    # Headline spend (Total spend card + Spend/day chart) comes from the SpendGuard
+    # ledger, so it matches the OpenRouter dashboard exactly -- it counts every model
+    # call, including non-project ones (eval/judge/smoketest). The per-user / per-
+    # project / avg figures below stay project-attributed. Fall back to the project
+    # numbers if the ledger can't be read.
+    try:
+        _guard = SpendGuard(Settings.from_env())
+        ledger_total = _guard.spent_total()
+        ledger_by_day = _guard.spent_by_day(30)
+    except Exception:
+        ledger_total = None
+        ledger_by_day = store.spend_per_day(30)
     ui.dark_mode().enable()
     ui.query("body").style("background:#0b1120")
     _admin_header("overview")
@@ -1691,13 +1703,16 @@ def admin_overview_page():
             card("Admins", str(stats["admins"]))
             card("Total projects", str(stats["projects_total"]),
                  f"+{stats['projects_new']} in {w}d")
-            card("Total spend", money(stats["spend_total_usd"]))
+            spend_total = ledger_total if ledger_total is not None \
+                else stats["spend_total_usd"]
+            card("Total spend", money(spend_total),
+                 f"${stats['spend_total_usd']:,.2f} on user projects")
             card("Avg / design", money(stats["spend_avg_usd"]))
             card("Avg latency", latency(stats["avg_latency_s"]))
 
         pp = store.projects_per_day(30)
         su = store.signups_per_day(30)
-        sp = store.spend_per_day(30)
+        sp = ledger_by_day  # ledger (all calls) -> matches the OpenRouter daily chart
         with ui.row().classes("w-full flex-wrap gap-4"):
             with ui.card().classes("flex-1").style(_admin_card_style()):
                 ui.echart(_echart_line([d for d, _ in pp], [v for _, v in pp],
