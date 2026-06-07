@@ -247,6 +247,48 @@ def _read_project_stem(ws: Path) -> str | None:
     return None
 
 
+def _discover_generated_dir(ws: Path | None) -> Path | None:
+    """The synthesized project dir (``generated/<STEM>/``) in a workspace, found by
+    inspection so the schematic stays viewable even when a run FAILS and no
+    project_stem was recorded. Prefers the committed stem, then any subdir that
+    actually holds schematic sheets. None until synthesis has written a sheet."""
+    if ws is None:
+        return None
+    gen = ws / "generated"
+    if not gen.is_dir():
+        return None
+    stem = _read_project_stem(ws)
+    if stem and any((gen / stem).glob("*.kicad_sch")):
+        return gen / stem
+    for d in sorted(gen.iterdir()):
+        if d.is_dir() and any(d.glob("*.kicad_sch")):
+            return d
+    return None
+
+
+def _synth_check_failures(ws: Path | None) -> list[str]:
+    """Failing synthesis-check lines (check name + each offender) from the build's
+    synthesis_check.json, so a FAILED run shows WHAT broke -- e.g. the 9.12 ERC
+    dangling-wire list -- right next to the schematic. [] if all passed or absent."""
+    if ws is None:
+        return []
+    try:
+        sc = json.loads((ws / ".kicraft" / "synthesis_check.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    out: list[str] = []
+    for c in sc.get("checks") or []:
+        if c.get("ok"):
+            continue
+        name = str(c.get("name", "check"))
+        offenders = [str(o) for o in (c.get("offenders") or [])]
+        if offenders:
+            out.extend(f"{name}: {o}" for o in offenders)
+        else:
+            out.append(f"{name}: {c.get('message', 'failed')}")
+    return out
+
+
 def _schematic_sources(project_dir: Path, stem: str, token: str) -> list[tuple[str, str]]:
     """(url, filename) for the root schematic + every leaf sheet, root sheet first."""
     schs = list(project_dir.glob("*.kicad_sch"))
@@ -518,6 +560,9 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
             sheets = sorted(p.name for p in project_dir.glob("*.kicad_sch"))
             if sheets:
                 secs.append({"type": "list", "title": "Schematic sheets", "items": sheets})
+            fails = _synth_check_failures(project_dir.parent.parent)
+            if fails:  # WHY a failed run is failed -- shown even after reopen (no log)
+                secs.append({"type": "list", "title": "Checks failed", "items": fails})
         log = _build_lines_for("synthesize", build_lines)
         if log:
             secs.append({"type": "list", "title": "Synthesis", "items": log})
@@ -1975,12 +2020,12 @@ def index(prompt: str = ""):
             state["project_id"] = p.id
             state["brief"] = p.brief or ""
             tabs.reset()
-            if p.project_stem:  # wire restored artifacts so the schematic/PCB render
-                project_dir = ws / "generated" / p.project_stem
-                if project_dir.is_dir():
-                    state["project_dir"] = str(project_dir)
-                    state["token"] = _register_project_dir(project_dir)
-                    state["pcb_ready"] = (project_dir / f"{p.project_stem}.kicad_pcb").is_file()
+            project_dir = _discover_generated_dir(ws)  # restored artifacts -> schematic /
+            if project_dir is not None:                # PCB render, even if the run FAILED
+                state["stem"] = project_dir.name
+                state["project_dir"] = str(project_dir)
+                state["token"] = _register_project_dir(project_dir)
+                state["pcb_ready"] = (project_dir / f"{project_dir.name}.kicad_pcb").is_file()
             rem = remaining_stages(sj)
             continue_btn.set_visibility(bool(rem) and not state["awaiting_input"])
             if state["awaiting_input"]:
@@ -2083,6 +2128,17 @@ def index(prompt: str = ""):
                         if spec:
                             tabs.set_inspector(stg, spec)
 
+            # Even when the build later FAILS, show the schematic as soon as synthesis
+            # writes the sheets: discover the generated dir from the workspace so the
+            # viewer never depends on a project_stem being recorded or on the pre-build
+            # wiring having found one. Self-heals on both live and reopened runs.
+            if state["project_dir"] is None and state["ws"]:
+                pd = _discover_generated_dir(Path(state["ws"]))
+                if pd is not None:
+                    state["stem"] = pd.name
+                    state["project_dir"] = str(pd)
+                    state["token"] = _register_project_dir(pd)
+
             project_dir = Path(state["project_dir"]) if state["project_dir"] else None
 
             # Schematic appears in the Synthesize tab once synth writes the sheets.
@@ -2151,7 +2207,8 @@ def index(prompt: str = ""):
                                           on_click=lambda: ui.download(state["zip"])) \
                                     .props("color=positive")
                 elif state["ok"] is False:
-                    status.text = "Stopped. See the failing stage's tab."
+                    status.text = ("Build failed. The synthesized schematic is shown in "
+                                   "the Synthesize tab (red) for review.")
 
         refresh_account_ui()
         ui.timer(0.2, render)
