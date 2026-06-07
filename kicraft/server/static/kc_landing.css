@@ -154,8 +154,23 @@
 .kc-console-bar i:nth-child(1) { background: #ef4444aa; }
 .kc-console-bar i:nth-child(2) { background: #f59e0baa; }
 .kc-console-bar i:nth-child(3) { background: #22c55eaa; }
-.kc-console-line { color: var(--kc-text); min-height: 1.5em; }
-.kc-console-line .kc-prompt { color: var(--kc-blue); margin-right: 8px; }
+/* One fixed-height line: the typed brief scrolls horizontally (terminal style)
+   instead of wrapping, so the console never grows and the page below never
+   shifts, no matter how long the brief or how narrow the viewport. */
+.kc-console-line {
+  color: var(--kc-text);
+  display: flex;
+  align-items: center;
+  height: 1.6em;
+  overflow: hidden;
+}
+.kc-console-line .kc-prompt { color: var(--kc-blue); margin-right: 8px; flex: 0 0 auto; }
+.kc-console-line .kc-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
 .kc-caret {
   display: inline-block;
   width: 8px;
@@ -220,14 +235,19 @@
 }
 
 /* ---- pipeline stepper ----------------------------------------------------- */
+/* A 7-stage pipeline. 7 is prime, so any wrapped layout strands one card; we use
+   an exact-count grid so every row is full, and let the final stage span its row
+   as a deliberate capstone (never a lone, centered orphan). One clean row on wide
+   screens; 3-up on tablets; 2-up on phones. */
 .kc-pipe {
-  display: flex; align-items: stretch; justify-content: center;
-  flex-wrap: wrap; gap: 10px; margin-top: 36px;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  align-items: stretch;
+  gap: 10px;
+  margin-top: 36px;
 }
 .kc-step {
   position: relative;
-  flex: 1 1 150px;
-  max-width: 180px;
   background: var(--kc-panel);
   border: 1px solid var(--kc-border);
   border-radius: 12px;
@@ -237,9 +257,17 @@
 .kc-step .kc-step-n {
   font-family: ui-monospace, monospace; font-size: 0.72rem; color: var(--kc-dim);
 }
-.kc-step .kc-step-name { font-weight: 700; margin-top: 4px; font-size: 0.96rem; }
+.kc-step .kc-step-name { font-weight: 700; margin-top: 4px; font-size: 0.92rem; }
 .kc-step .kc-step-d { font-size: 0.8rem; color: var(--kc-muted); margin-top: 4px; }
 .kc-step.kc-step-build { border-color: rgba(124, 137, 250, 0.45); }
+
+@media (max-width: 1000px) {
+  .kc-pipe { grid-template-columns: repeat(3, 1fr); }   /* 3 + 3 + capstone */
+  .kc-step:last-child { grid-column: 1 / -1; }
+}
+@media (max-width: 620px) {
+  .kc-pipe { grid-template-columns: repeat(2, 1fr); }   /* 2 + 2 + 2 + capstone */
+}
 
 /* ---- feature cards -------------------------------------------------------- */
 .kc-grid-4 {
@@ -390,4 +418,7 @@
   .kc-caret { animation: none; }
   .kc-reveal { opacity: 1; transform: none; transition: none; }
   .kc-btn:hover, .kc-card:hover, .kc-sample:hover { transform: none; }
+  /* Nothing animates, so show the full brief wrapped rather than clipped. */
+  .kc-console-line { height: auto; display: block; }
+  .kc-console-line .kc-scroll { display: inline; white-space: normal; overflow: visible; }
 }
