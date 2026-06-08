@@ -20,12 +20,15 @@ import os
 import random
 import re
 import shutil
+import ssl
 import subprocess
 import tempfile
 import threading
 import time
 import types
 import typing
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote
@@ -549,21 +552,57 @@ def _build_lines_for(stage: str, lines: list[str]) -> list[str]:
 # "USBLC6-2SC6_C2687116"); the negative lookbehind keeps it off footprint tokens
 # like "C_0805" where the C is a package-class prefix, not a catalogue id.
 _LCSC_ID_RE = re.compile(r"(?<![A-Za-z0-9])C\d{4,}")
+# A bare LCSC catalogue id (full string), e.g. a manifest's "C16581".
+_LCSC_CODE_RE = re.compile(r"C\d{4,}$")
 # Imperial package size in a footprint leaf, e.g. the 0805 in "C_0805_2012Metric".
 _FP_SIZE_RE = re.compile(r"_(\d{3,4})(?:_|$)")
+# Curated parts-library bundle name -> its LCSC code (or None), memoized. A
+# bundle's symbol/footprint id is "<name>:<...>" with no embedded catalogue id,
+# but its manifest records the exact LCSC part it was built from.
+_LIB_LCSC_CACHE: dict[str, str | None] = {}
+
+
+def _lib_lcsc(lib: str) -> str | None:
+    """The LCSC C-number for a curated parts-library bundle named ``lib``, else
+    None. Cached by name (one catalog probe per distinct library, memoized), so
+    it is cheap to call from the per-row resolution path."""
+    if not lib or ":" in lib:
+        return None
+    if lib in _LIB_LCSC_CACHE:
+        return _LIB_LCSC_CACHE[lib]
+    code = None
+    try:
+        part = get_part(lib)
+        if part is not None:
+            c = (part.manifest.sourcing or {}).get("lcsc", "").strip().upper()
+            if _LCSC_CODE_RE.match(c):
+                code = c
+    except Exception:  # pragma: no cover - a catalog probe must never break pricing
+        code = None
+    _LIB_LCSC_CACHE[lib] = code
+    return code
 
 
 def _resolve_part(p: dict) -> tuple[str, str] | None:
     """How to find this part at a vendor, as ``(kind, query)``: an LCSC id baked
-    into the symbol/footprint name ("id", vendored easyeda parts); else the
-    manufacturer part number ("mpn"); else a keyword from value + package size
-    ("kw", generic passives). None when there is nothing to go on. Shared by the
-    vendor link and the price lookup so both point at the same part."""
+    into the symbol/footprint name ("id", vendored easyeda parts); else the exact
+    LCSC id from a curated-bundle manifest ("id"); else the manufacturer part
+    number ("mpn"); else a keyword from value + package size ("kw", generic
+    passives). None when there is nothing to go on. Shared by the vendor link and
+    the price lookup so both point at the same part."""
     sym = p.get("symbol") or ""
     fp = p.get("footprint") or ""
     m = _LCSC_ID_RE.search(sym) or _LCSC_ID_RE.search(fp)
     if m:
         return ("id", m.group(0))
+    # A part drawn from a curated parts-library bundle ("<lib>:<name>"): price by
+    # the bundle's exact LCSC id from its manifest. More precise than an MPN
+    # keyword search and, crucially, it resolves through the still-working
+    # easyeda.com endpoint instead of the WAF-blocked JLCPCB keyword search.
+    for ref in (sym, fp):
+        code = _lib_lcsc(ref.split(":", 1)[0])
+        if code:
+            return ("id", code)
     mpn = (p.get("mpn") or "").strip()
     if mpn:
         return ("mpn", mpn)
@@ -593,20 +632,48 @@ def _vendor_cell(p: dict, prices: dict | None = None) -> dict | str:
             "href": "https://www.lcsc.com/search?q=" + quote(q)}
 
 
-# ---- BOM part pricing (live JLCPCB/LCSC lookups, cached) ---------------------
+# ---- BOM part pricing (live LCSC lookups, cached) ---------------------------
 # Resolved unit prices keyed by a part's lookup key ("id:C123" / "mpn:.." /
 # "kw:.."). Shared process-wide (a key like "kw:5.1k 0402" is project-independent)
 # and persisted per project to .kicraft/bom_prices.json so a reopen is instant. A
-# value is a dict (priced) or None (looked up, no match); a missing key means "not
-# fetched yet" -> shown as "..." while a background fetch runs.
-_PRICE_CACHE: dict[str, dict | None] = {}
+# cached value is a dict (priced), None (looked up, genuinely no price), or
+# _UNAVAILABLE (every pricing source was unreachable -- e.g. the JLCPCB keyword API
+# is WAF-blocked); a missing key means "not fetched yet" -> shown as "..." while a
+# background fetch runs.
+_PRICE_CACHE: dict[str, dict | None | object] = {}
 _PRICE_INFLIGHT: set[str] = set()
 _PRICE_LOCK = threading.Lock()
 _PRICE_FILE = "bom_prices.json"
-_FETCH_ERROR = object()  # sentinel: fetch raised; don't cache, allow a later retry
-# Bump when _pick_price changes so persisted prices from the old logic are dropped
-# and re-fetched (v2: cheapest-in-stock for MPN, not first-in-stock).
-_PRICE_SCHEMA = 2
+_FETCH_ERROR = object()  # sentinel: fetch raised unexpectedly; don't cache, retry later
+# sentinel: a source was reachable-but-blocked / nothing could price this part.
+# Cached (so we don't hammer a dead endpoint every render) but NOT persisted, so a
+# reopen re-tries and it self-heals when the blocked source comes back.
+_UNAVAILABLE = object()
+
+
+class _SourceUnavailable(Exception):
+    """A pricing source could not be reached (transport/HTTP error, or the only
+    source for this part is currently blocked) -> cache as _UNAVAILABLE."""
+
+
+# Bump when the pricing logic changes so persisted prices from the old logic are
+# dropped and re-fetched. v3: price LCSC ids via the easyeda.com product endpoint
+# (the JLCPCB keyword API is WAF-blocked); this also drops the frozen $0.00 caches
+# written while every lookup was returning "no match".
+_PRICE_SCHEMA = 3
+
+# easyeda.com product endpoint: serves the same data KiCraft fetches symbols and
+# footprints from, and -- unlike jlcpcb.com's keyword-search API -- is NOT behind
+# the Akamai WAF, so it is the one LCSC price source that still resolves. It
+# carries a single unit price (no quantity ladder).
+_SSL_CTX = ssl.create_default_context()
+_EASYEDA_PRODUCT_URL = "https://easyeda.com/api/products/{cid}/components"
+_EASYEDA_HEADERS = {
+    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://easyeda.com/",
+}
 
 
 def _price_key(p: dict) -> str | None:
@@ -639,20 +706,75 @@ def _pick_price(kind: str, query: str, results: list[dict]) -> dict | None:
 
 
 def _search_jlcpcb(query: str) -> list[dict]:
-    """JLCPCB/LCSC keyword search via easyeda2kicad. Network; may raise."""
+    """JLCPCB/LCSC keyword search via easyeda2kicad. The only source for parts
+    with no LCSC id (un-vendored MPNs, generic passives); its jlcpcb.com endpoint
+    is currently WAF-blocked, so it degrades to an empty list. Network; may raise."""
     from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
     res = EasyedaApi().search_jlcpcb_components(keyword=query, page_size=10) or {}
     return res.get("results") or []
 
 
-def _fetch_price(key: str) -> dict | None:
+def _easyeda_lcsc_price(cid: str) -> dict | None:
+    """Unit price + stock for an LCSC ``C####`` via the easyeda.com product API.
+
+    Prefers the in-stock LCSC tier. Returns ``{"unit_price","lcsc","stock"}`` or
+    None when the part carries no price. Raises ``_SourceUnavailable`` on any
+    transport/HTTP error so a transient block is retried, not frozen as 'no price'.
+    The endpoint exposes a single unit price (no quantity ladder)."""
+    req = urllib.request.Request(_EASYEDA_PRODUCT_URL.format(cid=cid),
+                                 headers=_EASYEDA_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=15, context=_SSL_CTX) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        raise _SourceUnavailable(f"easyeda {cid}: {e}") from e
+    result = (data or {}).get("result") or {}
+    best = None
+    for tier in ("lcsc", "szlcsc"):  # global LCSC first, then the China catalogue
+        d = result.get(tier) or {}
+        try:
+            price = float(d.get("price"))
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        cand = {"unit_price": price, "lcsc": str(d.get("number") or cid).upper(),
+                "stock": int(d.get("stock") or 0)}
+        if best is None or (cand["stock"] > 0 and best["stock"] == 0):
+            best = cand
+    return best
+
+
+def _fetch_price(key: str) -> dict:
+    """Resolve one price key to ``{"unit_price","lcsc","stock"}``, or raise
+    ``_SourceUnavailable`` when nothing can price it right now.
+
+    ``id:`` keys (curated-library + easyeda-vendored parts, which dominate BOM
+    cost) price via the still-working easyeda.com endpoint. ``mpn:``/``kw:`` keys
+    (un-vendored MPNs, generic passives) have no LCSC id, so their only source is
+    the JLCPCB keyword search -- currently WAF-blocked."""
     kind, _, query = key.partition(":")
-    return _pick_price(kind, query, _search_jlcpcb(query))
+    if kind == "id":
+        pick = _easyeda_lcsc_price(query)
+        if pick is not None:
+            return pick
+        # easyeda carries no inline price for this C#; the only backstop (a JLCPCB
+        # keyword search by the id) is currently blocked.
+        pick = _pick_price("id", query, _search_jlcpcb(query))
+        if pick is not None:
+            return pick
+        raise _SourceUnavailable(f"no price source for {query}")
+    pick = _pick_price(kind, query, _search_jlcpcb(query))
+    if pick is None:
+        raise _SourceUnavailable(f"keyword pricing unavailable for {query!r}")
+    return pick
 
 
 def _safe_fetch(key: str):
     try:
         return _fetch_price(key)
+    except _SourceUnavailable:
+        return _UNAVAILABLE
     except Exception:
         return _FETCH_ERROR
 
@@ -683,9 +805,12 @@ def _load_price_cache(ws: Path) -> None:
 
 def _save_price_cache(ws: Path, keys: set[str]) -> None:
     """Persist this project's resolved keys (tagged with the pricing schema) so a
-    reopen/restart is instant."""
+    reopen/restart is instant. Only stable results (a price dict or a genuine
+    'no price' None) are persisted; an _UNAVAILABLE (source blocked) is skipped so
+    the reopen re-tries it and pricing self-heals when the source comes back."""
     with _PRICE_LOCK:
-        snap = {k: _PRICE_CACHE[k] for k in keys if k in _PRICE_CACHE}
+        snap = {k: _PRICE_CACHE[k] for k in keys
+                if k in _PRICE_CACHE and _PRICE_CACHE[k] is not _UNAVAILABLE}
     try:
         d = ws / ".kicraft"
         d.mkdir(parents=True, exist_ok=True)
@@ -722,6 +847,31 @@ def _ensure_bom_prices(parts: list[dict], ws: str | None, state: dict) -> None:
             if ws:
                 _save_price_cache(Path(ws), keys)
             state["prices_rev"] = state.get("prices_rev", 0) + 1
+
+
+def _price_for_lcsc(cid: str):
+    """Cached price for one LCSC ``C####`` (the part-library detail view).
+
+    Returns a price dict, ``_UNAVAILABLE``, or None ("not fetched yet" -> a
+    background fetch is running; poll again). Reuses the shared BOM price cache, so
+    a part priced here is already priced when it appears in a BOM and vice versa."""
+    key = f"id:{cid}"
+    with _PRICE_LOCK:
+        if key in _PRICE_CACHE:
+            return _PRICE_CACHE[key]
+        if key in _PRICE_INFLIGHT:
+            return None
+        _PRICE_INFLIGHT.add(key)
+
+    def work():
+        r = _safe_fetch(key)
+        with _PRICE_LOCK:
+            if r is not _FETCH_ERROR:
+                _PRICE_CACHE[key] = r
+            _PRICE_INFLIGHT.discard(key)
+
+    threading.Thread(target=work, daemon=True).start()
+    return None
 
     threading.Thread(target=work, daemon=True).start()
 
@@ -798,7 +948,7 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
         parts = sl.get("parts") or []
         if not parts:
             return []
-        rows, total, priced, pending = [], 0.0, 0, False
+        rows, total, priced, pending, blocked = [], 0.0, 0, False, 0
         for p in parts:
             key = _price_key(p)
             if key is None:
@@ -809,20 +959,25 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
                     total += res["unit_price"]
                     priced += 1
                     cost = _fmt_price(res["unit_price"])
+                elif res is _UNAVAILABLE:
+                    cost = "—"  # priced source unreachable -> not free, just unknown
+                    blocked += 1
                 else:
-                    cost = "n/a"  # looked up, no match
+                    cost = "n/a"  # looked up, genuinely no price
             else:
                 cost = "..."  # fetch in flight
                 pending = True
             rows.append([p.get("ref"), p.get("value"), cost, _vendor_cell(p, prices),
                          p.get("footprint"), p.get("sheet"), p.get("symbol")])
         if pending and priced == 0:
-            total_txt, note = "pricing...", "fetching live JLCPCB prices..."
+            total_txt, note = "pricing...", f"fetching live LCSC prices... (0/{len(parts)} so far)"
         else:
             total_txt = _fmt_total(total)
-            note = f"est. = cheapest in-stock JLCPCB match ({priced}/{len(parts)} priced)"
+            note = f"est. unit price, cheapest in-stock LCSC match ({priced}/{len(parts)} priced)"
             if pending:
-                note = f"fetching live JLCPCB prices... ({priced}/{len(parts)} so far)"
+                note = f"fetching live LCSC prices... ({priced}/{len(parts)} so far)"
+            elif blocked:
+                note += f"; {blocked} unavailable (live qty-break vendor API blocked)"
         secs = [{"type": "kv", "title": "Summary", "rows": [("parts", len(parts))]},
                 {"type": "table", "title": "Parts",
                  "columns": ["ref", "value", "cost", "vendor", "footprint", "sheet", "symbol"],
@@ -2143,6 +2298,10 @@ def parts_page():
                             "-webkit-box-orient:vertical;overflow:hidden")
                         _tier_badge(p.tier)
                         ui.badge(m.maturity, color="grey-7")
+                        code = (m.sourcing or {}).get("lcsc", "").strip().upper()
+                        if _LCSC_CODE_RE.match(code):
+                            ui.label(code).classes("text-xs font-mono rounded") \
+                                .style("background:#1e293b;color:#94a3b8;padding:2px 8px")
                     row.on("click",
                            lambda pp=p: ui.navigate.to(f"/parts/{pp.manifest.name}"))
 
@@ -2220,6 +2379,56 @@ def part_detail_page(name: str):
                 ui.button("View on LCSC", icon="shopping_cart",
                           on_click=lambda u=url: ui.navigate.to(u, new_tab=True)) \
                     .props("outline no-caps color=white")
+
+        # Live LCSC pricing: the C-number plus a unit price from the easyeda.com
+        # endpoint. The qty-break ladder source (JLCPCB) is WAF-blocked, so the
+        # 10/100-pc columns show "n/a" rather than a guessed number.
+        code = (m.sourcing or {}).get("lcsc", "").strip().upper()
+        if _LCSC_CODE_RE.match(code):
+            with ui.card().classes("w-full") \
+                    .style("background:#0f172a;border:1px solid #1e293b"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.label("LCSC pricing").classes("text-sm font-medium") \
+                        .style("color:#94a3b8")
+                    ui.label(code).classes("text-xs font-mono rounded") \
+                        .style("background:#1e293b;color:#cbd5e1;padding:2px 8px")
+                price_row = ui.row().classes("items-center gap-6")
+                with price_row:
+                    ui.label("Loading live price…").classes("text-sm") \
+                        .style("color:#64748b")
+
+                def _fill_price(row=price_row, cid=code) -> bool:
+                    res = _price_for_lcsc(cid)
+                    if res is None:
+                        return False  # still fetching -> keep polling
+                    row.clear()
+                    with row:
+                        if isinstance(res, dict):
+                            for qty, val in (("1", res["unit_price"]),
+                                             ("10", None), ("100", None)):
+                                with ui.column().classes("gap-0 items-start"):
+                                    ui.label(f"@{qty} pc").classes("text-xs") \
+                                        .style("color:#64748b")
+                                    ui.label(_fmt_price(val) if val is not None
+                                             else "n/a") \
+                                        .classes("text-sm font-mono text-white")
+                            with ui.column().classes("gap-0 items-start"):
+                                ui.label("in stock").classes("text-xs") \
+                                    .style("color:#64748b")
+                                ui.label(f"{res.get('stock') or 0:,}") \
+                                    .classes("text-sm font-mono text-white")
+                        else:  # _UNAVAILABLE
+                            ui.label("Live pricing unavailable (vendor API "
+                                     "blocked).").classes("text-sm") \
+                                .style("color:#f59e0b")
+                    return True
+
+                if not _fill_price():
+                    timer = ui.timer(1.0,
+                                     lambda: _fill_price() and timer.deactivate())
+                ui.label("Unit price from LCSC at qty 1. Live 10/100-pc break "
+                         "pricing is currently unavailable.").classes("text-xs") \
+                    .style("color:#64748b")
 
         with ui.card().classes("w-full") \
                 .style("background:#0f172a;border:1px solid #1e293b"):
@@ -3131,10 +3340,11 @@ if os.environ.get("KICRAFT_WEB_DEMO"):
     }
 
     # Canned prices for the demo BOM (keyed by _price_key) so the cost column +
-    # total render with no network (the demo never calls JLCPCB).
+    # total render with no network. TP4056/USB-C come from curated bundles, so
+    # they resolve to their manifest LCSC id (id:C…); the LED is a generic passive.
     _DEMO_PRICES = {
-        "kw:TP4056": {"unit_price": 0.18, "lcsc": "C16581", "stock": 9999},
-        "kw:USB-C": {"unit_price": 0.0667, "lcsc": "C165948", "stock": 9999},
+        "id:C16581": {"unit_price": 0.18, "lcsc": "C16581", "stock": 9999},
+        "id:C165948": {"unit_price": 0.0667, "lcsc": "C165948", "stock": 9999},
         "kw:white LED 0603": {"unit_price": 0.014, "lcsc": "C72043", "stock": 9999},
     }
 

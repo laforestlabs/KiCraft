@@ -21,11 +21,22 @@ def test_vendor_cell_embedded_lcsc_id_links_to_product_page():
 
 
 def test_vendor_cell_mpn_falls_back_to_search():
+    # A part NOT drawn from a curated bundle, but with an MPN, links to an MPN search.
+    p = {"value": "Foo", "symbol": "x:CHIP", "footprint": "x:QFN", "mpn": "SOMEMPN-123"}
+    cell = web._vendor_cell(p)
+    assert cell["text"] == "SOMEMPN-123"
+    assert cell["href"] == "https://www.lcsc.com/search?q=SOMEMPN-123"
+
+
+def test_vendor_cell_library_part_links_to_manifest_lcsc():
+    # A part from a curated bundle ("tp4056:…") resolves to that bundle's exact
+    # LCSC id from its manifest, so the link points at the precise product even
+    # with no live price -- and ahead of the (less precise) MPN it also carries.
     p = {"value": "TP4056", "symbol": "tp4056:TP4056",
          "footprint": "tp4056:ESOP-8", "mpn": "TP4056-42-ESOP8"}
     cell = web._vendor_cell(p)
-    assert cell["text"] == "TP4056-42-ESOP8"
-    assert cell["href"] == "https://www.lcsc.com/search?q=TP4056-42-ESOP8"
+    assert cell == {"text": "C16581",
+                    "href": "https://www.lcsc.com/product-detail/C16581.html"}
 
 
 def test_vendor_cell_passive_searches_by_value_and_size():
