@@ -2,20 +2,17 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 pcbnew = pytest.importorskip("pcbnew")
 
 from kicraft.autoplacer.brain.breakout_stubs import (  # noqa: E402
     BreakoutSpec,
+    _segment_clears_pads,
     add_breakout_stubs,
     auto_power_tie_specs,
     auto_signal_escape_specs,
     perimeter_tie_specs,
-    radial_breakout_specs,
-    radial_escape_point,
 )
 
 _mm = pcbnew.FromMM
@@ -56,17 +53,6 @@ def _board(path, fp_center, pad_nets):
         fp.Add(pad)
     board.Save(path)
     return path
-
-
-def test_radial_escape_point_extends_along_center_to_pad_ray():
-    # Centre (5,5), pad (8,5): escape is +x by length.
-    assert radial_escape_point((5, 5), (8, 5), 2.0) == pytest.approx((10.0, 5.0))
-    # Degenerate pad-at-centre falls back to +x.
-    assert radial_escape_point((5, 5), (5, 5), 1.5) == pytest.approx((6.5, 5.0))
-    # Diagonal direction preserved, length honoured.
-    ex, ey = radial_escape_point((0, 0), (3, 4), 5.0)  # unit (0.6,0.8)
-    assert math.hypot(ex - 3, ey - 4) == pytest.approx(5.0)
-    assert (ex, ey) == pytest.approx((6.0, 8.0))
 
 
 def test_radial_stub_is_single_locked_segment_outward(tmp_path):
@@ -192,6 +178,86 @@ def test_perimeter_tie_routes_around_bbox(tmp_path):
     )
 
 
+def test_perimeter_tie_uses_pad_field_not_inflated_bbox(tmp_path):
+    # Regression for the U1 power-leaf short. An LDO ties VIN+EN (both VBUS) in a
+    # left pad column; +3V3 and an NC pad sit in a right column. A courtyard/silk
+    # graphic inflates fp.GetBoundingBox() on three sides (but not right), so the
+    # nearest border for the VBUS pads lands on the RIGHT and a naive walk drives
+    # the lead-in legs straight across the +3V3 / NC pads -- a short. Tying off the
+    # pad field instead keeps every segment clear.
+    path = str(tmp_path / "b.kicad_pcb")
+    board = pcbnew.NewBoard(path)
+    for name in ("VBUS", "GND", "P3V3"):
+        board.Add(pcbnew.NETINFO_ITEM(board, name))
+    fp = pcbnew.FOOTPRINT(board)
+    fp.SetReference("U1")
+    fp.SetPosition(pcbnew.VECTOR2I(_mm(10.0), _mm(10.0)))
+    board.Add(fp)
+    pads = {
+        "1": ("VBUS", 9.5, 9.0),   # VIN
+        "2": ("GND", 9.5, 10.0),   # GND, between the two VBUS pads
+        "3": ("VBUS", 9.5, 11.0),  # EN tied to VIN
+        "4": ("", 10.5, 11.0),     # NC, no net
+        "5": ("P3V3", 10.5, 9.0),  # VOUT
+    }
+    for num, (netname, x, y) in pads.items():
+        pad = pcbnew.PAD(fp)
+        pad.SetSize(pcbnew.VECTOR2I(_mm(0.6), _mm(1.1)))
+        pad.SetPosition(pcbnew.VECTOR2I(_mm(x), _mm(y)))
+        pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        pad.SetLayerSet(pcbnew.PAD.SMDMask())
+        pad.SetNumber(num)
+        if netname:
+            pad.SetNet(board.GetNetInfo().GetNetItem(netname))
+        fp.Add(pad)
+    # Tall silk line far to the left -> inflates the footprint bbox left/top/bottom
+    # (as a generous courtyard does) without touching the pad field.
+    sh = pcbnew.PCB_SHAPE(fp)
+    sh.SetShape(pcbnew.SHAPE_T_SEGMENT)
+    sh.SetStart(pcbnew.VECTOR2I(_mm(5.0), _mm(5.0)))
+    sh.SetEnd(pcbnew.VECTOR2I(_mm(5.0), _mm(15.0)))
+    sh.SetLayer(pcbnew.F_SilkS)
+    fp.Add(sh)
+    board.Save(path)
+
+    board = pcbnew.LoadBoard(path)
+    specs = perimeter_tie_specs(board, "U1", net_names=["VBUS"], margin_mm=1.0)
+    assert len(specs) == 1
+    s = specs[0]
+    fp = next(f for f in board.GetFootprints() if f.GetReferenceAsString() == "U1")
+    foreign = [p for p in fp.Pads() if p.GetNetname() != "VBUS"]
+    start = fp.FindPadByNumber(s.pad).GetPosition()
+    points = [(pcbnew.ToMM(start.x), pcbnew.ToMM(start.y)), *s.waypoints]
+    assert all(
+        _segment_clears_pads(foreign, a, b, 0.1)
+        for a, b in zip(points, points[1:])
+    )
+
+
+def test_waypoint_spec_crossing_foreign_pad_is_dropped(tmp_path):
+    # The hard invariant: add_breakout_stubs never stamps a waypoint path that
+    # runs across a pad of another net. A straight tie from the CC2 pad to (12,10)
+    # passes through the GND pad at (9,10) -> the whole spec is dropped, unshorted.
+    path = str(tmp_path / "b.kicad_pcb")
+    _board(
+        path,
+        (5.0, 10.0),
+        {"B5": ("CC2", 6.0, 10.0), "BLK": ("GND", 9.0, 10.0)},
+    )
+    res = add_breakout_stubs(
+        path, [BreakoutSpec(ref="J1", pad="B5", waypoints=[(12.0, 10.0)])]
+    )
+    assert res["stubs"] == 0
+    assert any("waypoint_crosses_pad" in s for s in res["skipped"])
+    board = pcbnew.LoadBoard(path)
+    segs = [
+        t
+        for t in board.GetTracks()
+        if isinstance(t, pcbnew.PCB_TRACK) and not isinstance(t, pcbnew.PCB_VIA)
+    ]
+    assert segs == []
+
+
 def test_auto_power_tie_detects_connector_and_skips_gnd(tmp_path):
     path = str(tmp_path / "b.kicad_pcb")
     _board(
@@ -309,23 +375,3 @@ def test_auto_signal_escape_disable_and_exclude(tmp_path):
     board = pcbnew.LoadBoard(path)
     assert auto_signal_escape_specs(board, {"auto_signal_escape": False}) == []
     assert auto_signal_escape_specs(board, {"signal_escape_exclude_refs": ["J1"]}) == []
-
-
-def test_radial_breakout_specs_filters(tmp_path):
-    path = str(tmp_path / "b.kicad_pcb")
-    _board(
-        path,
-        (5.0, 10.0),
-        {
-            "B5": ("CC2", 8.0, 10.0),
-            "A5": ("CC1", 8.0, 11.0),
-            "S1": ("", 8.0, 12.0),
-        },
-    )
-    board = pcbnew.LoadBoard(path)
-    # nets_only restricts to CC2; unnetted S1 always skipped.
-    specs = radial_breakout_specs(board, "J1", nets_only=["CC2"])
-    assert [s.pad for s in specs] == ["B5"]
-    # default: all netted pads.
-    specs_all = radial_breakout_specs(board, "J1")
-    assert {s.pad for s in specs_all} == {"B5", "A5"}

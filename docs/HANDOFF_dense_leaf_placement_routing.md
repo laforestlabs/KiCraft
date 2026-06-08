@@ -1,176 +1,122 @@
-# Handoff: dense power-leaf sprawls / doesn't route (USB-C + LDO)
+# Handoff: dense power-leaf shorts / doesn't route (USB-C + LDO)
 
-**Status:** diagnosed end-to-end, not fixed. One build-orchestration change landed
-(`feat/build-two-phase-leaf-parent`, two-phase `_run_layout`) — necessary but not
-sufficient. This doc is the full diagnosis + a prioritized fix plan for the next
-agent.
+**Status: RESOLVED** (2026-06-08). The shorting copper is gone at its source; the
+fix is general (every dense leaf, not just POWER) and covered by regression tests.
+This doc records the *correct* diagnosis and the fix. An earlier version of this
+handoff misdiagnosed the cause — see "What the first diagnosis got wrong" below, so
+the next engineer doesn't re-derive the dead end.
 
-**Symptom (user-reported):** generated PCBs "look terrible" — a sparse power leaf
-(USB-C receptacle + LDO + ESD + CC resistors + decoupling) is placed strung-out
-across a ~150 mm strip, and `kicraft build` exits **rc=6** (parent compose/route
-fails). Multi-IC sensor boards reportedly placed compactly before.
+**Symptom (user-reported):** generated PCBs "look terrible" — the USB-C + LDO power
+leaf is placed strung-out across a ~150 mm strip, and `kicraft build` exits **rc=6**.
 
-**Canonical repro design:** the ESP32-S3 plant monitor (5 sheets: `POWER`,
-`ESP32 S3`, `BME280`, `OLED`, `SOIL MOISTURE`). A saved `state.json` exists under
-`logs/self_eval/20260608T151858Z_rerun/run_01_AN_ESP32_S3/.kicraft/state.json`
-(logs/ is gitignored; regenerate via the kicraft pipeline if absent). The `POWER`
-sheet = `J1` USB-C `TYPE-C-31-M-12`, `U1` LDO `AP2112K-3.3`, `D1` ESD `USBLC6`,
-`R1`/`R2` 5.1k CC pulldowns, `C1`–`C4` caps. 2 interface ports, low net density.
-
----
-
-## TL;DR of the root cause
-
-It is **not** that force-directed/SA placement is off, and **not** (only) that the
-scorer prefers sprawl. The real chain:
-
-1. The leaf solver produces BOTH tight (~16 mm) and sprawled (~104 mm) placements
-   across its rounds. Placement works.
-2. The leaf **round score** discards any routing-FAILED round (`-inf`):
-   `solve_subcircuits.py:562-572`. A round is "failed" when the routed board is
-   rejected for `illegal_routed_geometry`.
-3. The **tight placements fail routing** — FreeRouting routes a **VBUS track
-   straight across the LDO `U1`'s pads** (a real short), so every tight round is
-   `-inf` and thrown out.
-4. The **sprawl routes "well enough"** (no shorts, ~5 unconnected) → it gets a real
-   score and is **pinned by default** (`autoexperiment.py:_auto_pin_best_leaves`,
-   line 231, ranks by `(routed, score)`, skips `-inf`).
-5. So the pinned `POWER` leaf is the sprawl → parent can't compose → rc=6.
-
-So "A" (scoring prefers tight) and "B" (route the tight cluster) collapse into one
-problem: **the router shorts on the tight placement, so the tight placement is
-(correctly) rejected and the sprawl wins**. The fix must make the tight, compact
-placement *route cleanly* — not just bias the score toward it (biasing alone would
-pin a shorting board).
+**Canonical repro:** the ESP32-S3 plant monitor, `POWER` sheet = `J1` USB-C
+`TYPE-C-31-M-12`, `U1` LDO `AP2112K-3.3`, `D1` ESD `USBLC6`, `R1`/`R2` CC pulldowns,
+`C1`–`C4`. Saved boards under
+`logs/self_eval/fixtest_20260608T170355Z/.../subcircuits/4ac73ca7…__65aa31e6f3/`
+(`round_*_leaf_pre_freerouting.kicad_pcb` = post-placement, post-stamp;
+`round_*_leaf_routed.kicad_pcb` = after FreeRouting). `logs/` is gitignored.
 
 ---
 
-## Evidence
+## Root cause
 
-Re-solve just the `POWER` leaf to reproduce (fast, ~1 min, no full build):
+A **VBUS perimeter power-tie was stamped straight across `U1`'s own pads**, before
+FreeRouting ran, with no collision check.
 
-```bash
-# project_dir = a generated/<stem>/ tree with the root + child .kicad_sch and the seed .kicad_pcb
-solve-subcircuits <root>.kicad_sch --pcb <seed>.kicad_pcb --only "POWER" --rounds 6 --route
-```
+1. `U1` (AP2112K) has **two VBUS pads** — pin 1 (VIN) and pin 3 (EN tied to VIN for
+   always-on). Two pads on one power net is the "spread power connector" signature
+   `auto_power_tie_specs` keys on, so it fired a VBUS tie on the LDO.
+2. `perimeter_tie_specs` connected those two pads with a path that walks around the
+   footprint's bounding box. It used **`fp.GetBoundingBox()`**, which silkscreen,
+   courtyard and the reference designator inflate well beyond the copper and make
+   **asymmetric**. For `U1` the inflated box put the *nearest* border on the far
+   (right) side, so the lead-in legs ran from the VBUS pads (left column) straight
+   across pad 5 (+3V3) and pad 4 (NC) in the right column — a short.
+3. `add_breakout_stubs` stamped the tie as **locked** copper and routing ran with
+   `freerouting_preserve_existing_copper=True`, so the short was preserved into the
+   routed board (DRC: `Track [VBUS] ↔ Pad 5 [+3V3]` and `↔ Pad 4 [<no net>]`).
 
-Observed:
+Because the tie crosses `U1`'s *own* pads, the short is **placement-independent** —
+it reproduced identically on the tight (~16 mm) *and* the sprawled (~104 mm) rounds.
+Every round was rejected for `illegal_routed_geometry` (shorts > 0) and scored
+`-inf`, so the auto-pin had only bad options and the board failed to compose.
 
-- Per-round placement is good (`Final placement score: 67–77`), spans ~16 mm.
-- Every routed round: `Routed DRC rejected placement: ... illegal_routed_geometry`.
-- `kicad-cli pcb drc` on a tight round's `round_NNNN_leaf_routed.kicad_pcb`:
-  - **`shorting_items` / `solder_mask_bridge` (the killers):**
-    `Track [VBUS] on F.Cu ↔ Pad 4 [<no net>] of U1` and `↔ Pad 5 [+3V3] of U1`.
-    → FreeRouting routed a VBUS track **across U1's pads**. A router must never
-    cross a pad of another (or no) net — so **U1's pads are not obstacles** in the
-    routing for this leaf.
-  - **`clearance` (15, mostly false positives):** the bulk reference a single
-    footprint `J1` (USB-C) — its own intrinsic fine-pitch pads (`B8`, `A4B9`,
-    `A1B12`, `B4A9`, …) sitting closer than the 2.84 mm placement clearance. A few
-    are inter-track (USB_DP_RAW/USB_DN_RAW/VBUS density). These are largely benign.
+## The fix (`kicraft/autoplacer/brain/breakout_stubs.py`)
 
-For comparison, in the full build the per-round `POWER` placements were:
-`round0 = 17 mm (tight)`, `round1 = 16 mm (tight)`, `round2 = 104 mm (sprawl)` — and
-the **104 mm sprawl was pinned** because rounds 0/1 routed-failed (illegal geometry).
+1. **`perimeter_tie_specs` walks the *pad field*, not `fp.GetBoundingBox()`.** New
+   `_pads_bbox_mm()` returns the union of pad boxes (+margin). It hugs the copper
+   symmetrically, so the nearest border is genuinely nearest and the lead-in legs
+   from the two farthest same-net pads (always convex-hull-extremal) stay clear of
+   every pad. This makes the `U1` tie route correctly instead of across its pads.
+2. **`add_breakout_stubs` enforces a hard invariant for *every* waypoint path:** a
+   segment that comes within clearance of a pad on another net (or a no-net pad) is
+   a short, so the whole spec is dropped (`…:waypoint_crosses_pad`). Previously only
+   the *radial* branch was guarded; the waypoint branch trusted the caller ("the
+   caller owns collision-avoidance"). New `_foreign_pads()` / `_segment_clears_pads()`
+   are shared by this guard and the radial `_safe_radial_length()`.
+3. **Dead code removed:** `radial_escape_point` and `radial_breakout_specs` were
+   test-only (no production caller; the radial path is built inline). Gone, with
+   their tests.
 
-The accepted MCU leaf (`ESP32 S3`, net-dense) clusters to 43×43 mm and routes — so
-the engine is fine on dense leaves; the sparse, connector-heavy power leaf is the
-hard case.
+(1) makes the tie correct on the placements we want to win; (2) is the universal
+backstop that catches anything (1) can't see — e.g. a *neighbouring* footprint's
+pad in the tie path. Together they hold the invariant for all leaves and any future
+waypoint producer (incl. the curated `cfg['breakout_specs']` path).
 
----
+> Note on the originally-planned "Step 3" (choose the perimeter side that crosses
+> the fewest pads): it is **unnecessary**. With a pad-field box + margin, the
+> border walk is outside every pad regardless of side, so there is nothing to
+> choose. Adding a side-selection pass would have been redundant.
 
-## How the pieces fit (file/line map)
+## Verification
 
-| Concern | Location |
-|---|---|
-| Build → layout entry (now two-phase) | `kicraft/design/cli_app.py` `_run_layout` (~1653), `_QUALITY_PRESETS` (~1646) |
-| Leaf solve, per-leaf seed search | `kicraft/cli/solve_subcircuits.py` `main` (~1414); `--rounds` = attempts/leaf (seeds, no param mutation) |
-| **Round score blend** | `solve_subcircuits.py:580-589`: `score = 0.5*placement.total + (50 - 10*unconnected - 25*shorts)`; **routing-failed round → `-inf`** at `562-572` |
-| Auto-pin best per leaf | `kicraft/cli/autoexperiment.py` `_auto_pin_best_leaves` (231-320): ranks `(routed, score)`, skips `-inf`. **Only runs under `--leaves-only`** (line 2979-2982) |
-| Param mutation (autoexperiment only) | `autoexperiment.py` `_mutate_config` (~1749); applied per parent round, passed to the leaf solve via `--config` |
-| **Routed-board validation / illegal-geometry** | `kicraft/autoplacer/freerouting_runner.py` `validate_routed_board` (~1330-1490): `shorts>0 → illegal` at **1369 (no footprint-internal escape)**; clearance footprint-internal handling at **1372-1400**; copper-edge at 1401-1420 |
-| Leaf acceptance gates | `kicraft/autoplacer/brain/leaf_acceptance.py`: `_gate_no_unconnected` (`max_unconnected=0`), `_gate_no_illegal_geometry` (255), `allow_footprint_internal_clearance` |
-| Placement scorer (compactness OK) | `kicraft/autoplacer/brain/placement_scorer.py`: `_score_compactness` (87, divides by *seed* area → constant), `_score_bbox_packing` (98, rewards tight placed bbox — works), aspect-ratio (44-50) |
-| Leaf canvas/envelope | `kicraft/autoplacer/brain/subcircuit_extractor.py` `_derive_local_envelope`: canvas = bbox of the leaf's parts (at seed positions) + margin |
-| Seed placement | `kicraft/design/synthesis/kicad_pcb_stub.py:88-108`: scatters ALL parts on a 200×150 grid by index → every leaf starts on a wide canvas |
-| DSN export / routing setup | `freerouting_runner.py` — `route_with_freerouting`, the Specctra DSN export, `_inject_netclass_clearances` (~579). **This is where pad keepouts must be enforced.** |
+- `pytest tests/test_breakout_stubs.py` — 14 pass, incl. two new regression tests:
+  `test_perimeter_tie_uses_pad_field_not_inflated_bbox` (reproduces the U1 inflated-
+  bbox geometry; old path crosses 2 pads, new path 0) and
+  `test_waypoint_spec_crossing_foreign_pad_is_dropped` (the invariant).
+- Re-stamped the **real** POWER `round_*_leaf_pre_freerouting` boards through the
+  actual `auto_power_tie_specs → auto_signal_escape_specs → add_breakout_stubs`
+  sequence, then `kicad-cli pcb drc`: **0 `shorting_items`, 0 `solder_mask_bridge`**
+  on all three rounds (was 2 + 2 each). Round 0000/0001 (tight) stamp the tie
+  cleanly; round 0002 (sprawl) the guard drops it (a neighbour pad intrudes) — both
+  short-free.
 
----
+Fast inner loop (no FreeRouting): re-stamp a `round_*_leaf_pre_freerouting.kicad_pcb`
+and `kicad-cli pcb drc`. Full routed build (`kicraft build … --no-archive`) needs
+`java` on PATH (currently absent here); the short lived in the *stamped* copper, so
+removing it pre-route removes it from the routed board.
 
-## Fix plan (prioritized for the implementing agent)
+## What the first diagnosis got wrong
 
-### 1. (HIGHEST LEVERAGE) Make every pad a routing keepout in the DSN export
-The decisive bug: a `VBUS` track was routed **over `U1` pad 4 `[<no net>]`** and
-near pad 5 `[+3V3]`. The autorouter is treating same-board pads (especially
-**no-net** pads, and pads of other nets) as free copper. Fix the Specctra DSN
-export in `freerouting_runner.py` so that **all footprint pads are obstacles** for
-nets that don't own them (no-net pads must be keepouts on all layers). A track
-crossing another part's pad should be physically impossible.
-- This is the real "B", and it fixes shorts on **every** dense leaf, not just POWER.
-- Verify: after the fix, a tight `POWER` round routes with **0 shorts**; it then
-  gets a real (non-`-inf`) score and is pinned — so **A falls out for free**.
-- Watch for: FreeRouting DSN representation of THT/shield pads, no-net pads, and
-  multi-net connector pads. Confirm KiCad's DRC `shorting_items` goes to 0.
+The original handoff claimed FreeRouting routed VBUS over `U1`'s pads because the
+pads "are not obstacles in the DSN", and prescribed "make every pad a routing
+keepout in the DSN export". Both are false:
 
-### 2. Give the router channels on tight placements
-Even with pad keepouts, a maximally-packed placement may leave no routable channel
-for the cross-net trace (e.g. VBUS J1→U1). Options:
-- A placement term / constraint that keeps a clearance channel around dense ICs
-  (the LDO, the connector) — i.e. tight, but not *touching*.
-- Bump `placement_clearance_mm` for connector/IC-adjacent passives only.
-- Re-route after a small "spread just enough" relaxation when a tight round
-  route-fails, instead of discarding it outright.
+- `export_dsn` uses KiCad's native `pcbnew.ExportSpecctraDSN`, which emits **every**
+  pad (incl. no-net) as a `padstack` obstacle — confirmed by reading the exported
+  DSN (`U1`'s image lists all 5 pins). There is nothing to "make a keepout".
+- The shorting track is **pre-stamped, fixed-length (4.1525 mm) copper**, identical
+  on every round — FreeRouting never routed it. The "tight fails, sprawl routes
+  clean → sprawl pinned" chain was wrong: the sprawl shorts too.
 
-### 3. Footprint-internal escape for the *shorts* gate (secondary cleanup)
-`freerouting_runner.py:1369` flags `shorts>0 → illegal` with **no** footprint-internal
-escape (unlike `clearance`, which has one at 1372-1400). Genuinely intrinsic
-connector geometry can produce nuisance short/mask flags. Add the same
-single-footprint escape used for clearance. NOTE: the POWER `U1` short here is a
-*real* routing error, so this alone will NOT fix POWER — it's a robustness cleanup
-to avoid false rejections on legal fine-pitch parts.
+Do **not** add a footprint-internal escape to the *shorts* gate (a tempting earlier
+idea) — that would teach acceptance to ignore a real short and ship a non-fab board.
 
-### 4. Don't bias the score toward "tight" (anti-goal)
-The scorer's compactness/`bbox_packing` terms already reward tight placements and
-work. Do **not** "fix A" by down-weighting routing or up-weighting tightness — that
-would pin shorting, non-fab-able boards. The tight rounds are *correctly* rejected
-until #1 makes them route.
+## Secondary issues (not this bug; track separately)
 
-### 5. Fallback: a curated USB-C power-input leaf in the library
-If #1–#2 prove too hard for this connector class, a pre-routed `from_library`
-USB-C+LDO power-input leaf is exactly what the leaf library is for — it sidesteps
-the autorouter for the hard block. Lower-effort, higher-reliability, but one-off.
+- **Global fine-pitch clearance collapse.** `_resolve_fine_pitch_rule`
+  (`freerouting_runner.py`) lowers the routing clearance **board-wide** to the
+  0.1 mm floor (and track to 0.15 mm) whenever `min_intra_footprint_pad_gap_mm`
+  finds a sub-0.2 mm gap — which J1's *intrinsic* USB-C pad pitch always triggers.
+  That relaxes clearance far from the connector too. Not the cause of this short,
+  but a fab-margin risk worth localizing (relax only around the dense part).
+- **~5 remaining `unconnected_items`** on the routed POWER leaf (interface/CC nets).
+  With `max_unconnected=0`, clearing the short is necessary but may not be
+  sufficient for rc=0 — this is the next layer once a full routed build can run.
 
----
+## Already-landed context
 
-## What already changed (committed)
-
-- **`feat/build-two-phase-leaf-parent` (merged):** `kicraft build`'s autoexperiment
-  qualities now run **leaf phase (`--leaves-only`, auto-pin best per leaf) → parent
-  phase (`--parents-only`)** instead of one combined loop. `good = 3×3 leaf / 3
-  parent`, `best = 6×3 leaf / 6 parent`. This is the manual `solve-leaves → pin →
-  compose` flow the user trusted, and it correctly pins each leaf's best — but on
-  its own it does NOT fix the sprawl (the best non-failed round is still the
-  sprawl, because the tight rounds route-fail per #1).
-
-Earlier, related (already on `main`): bidirectional IC-domain sheet partitioning
-(`architecture.md`), the connector signal-pad escape + interface-net leaf gate
-(`breakout_stubs.auto_signal_escape_specs`, `leaf_acceptance` interface exclusion),
-and the `/self-eval` harness + admin dashboard. The signal-pad escape helped CC1
-route but not CC2 on the sprawled placement.
-
----
-
-## Definition of done / verification
-
-Re-run `kicraft build <state.json> <out> --no-archive` on the plant monitor.
-Success criteria:
-1. `POWER` leaf routes with **0 shorts and 0 unconnected** → passes
-   `leaf_acceptance` (`max_unconnected=0`) → **accepted**, not rejected.
-2. The auto-pin pins the **tight** (~16–25 mm) `POWER` placement, not the sprawl.
-3. Parent composes + routes → build **rc=0** (fab-ready).
-4. Render the `POWER` leaf (`kicad-cli pcb export svg ... | convert` or
-   `kicad-cli pcb render`) and confirm it's a compact, clean power-input block.
-
-Fast inner loop (no full build): `solve-subcircuits <root>.kicad_sch --pcb
-<seed>.kicad_pcb --only "POWER" --rounds 6 --route` and check that tight rounds
-route with 0 shorts (no `illegal_routed_geometry` rejection).
+`feat/build-two-phase-leaf-parent` (merged): `kicraft build` runs leaf phase
+(`--leaves-only`, auto-pin best per leaf) → parent phase (`--parents-only`).
+Necessary plumbing; with the tie short gone, the tight rounds now score for real and
+the auto-pin selects a compact POWER placement instead of the sprawl.
