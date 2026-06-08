@@ -35,6 +35,7 @@ from ..models import (
     is_power_or_ground_name,
 )
 from .placement import place_sheet
+from .sch_geometry import pin_abs_position
 from .router import (
     GlobalLabel,
     Junction,
@@ -297,6 +298,40 @@ def _emit_root(
 # ---------- leaf schematics ----------
 
 
+def _text_anchors(
+    part: BomPart, x: float, y: float, rotation_deg: int
+) -> tuple[tuple[float, float, str], tuple[float, float, str]]:
+    """Where to put the Reference and Value text so they don't collide with the
+    symbol, its wires, or the power/ground symbols hanging off its pins.
+
+    Returns ``((ref_x, ref_y, ref_justify), (val_x, val_y, val_justify))``.
+    A 2-pin passive gets both fields stacked to the RIGHT of its body (clear of
+    the rail/ground symbols that sit directly above/below it); a multi-pin part
+    gets them stacked ABOVE the body (clear of any bottom pin like GND).
+    """
+    try:
+        pins = lookup_pins(part.symbol)["pins"]
+    except (SymbolNotFoundError, ValueError, KeyError):
+        pins = []
+    if not pins:
+        return ((x, y - 5.0, ""), (x, y + 5.0, ""))
+    xs, ys = [], []
+    for p in pins:
+        ax, ay = pin_abs_position(x, y, rotation_deg, p)
+        xs.append(ax)
+        ys.append(ay)
+    right, top = max(xs), min(ys)
+    if len(pins) == 2:
+        tx = right + 1.778
+        return ((tx, y - 1.27, "left"), (tx, y + 1.27, "left"))
+    return ((x, top - 2.54, ""), (x, top - 5.08, ""))
+
+
+def _visible_effects(justify: str) -> str:
+    j = f" (justify {justify})" if justify else ""
+    return f"(effects (font (size 1.27 1.27)){j})"
+
+
 def _emit_symbol_instance(
     part: BomPart,
     x: float,
@@ -309,6 +344,7 @@ def _emit_symbol_instance(
 ) -> str:
     """Emit one component `(symbol ...)` instance inside a leaf."""
     uuid_str = _uuid_seeded(salt, project_stem) if salt else _uuid()
+    (rx, ry, rj), (vx, vy, vj) = _text_anchors(part, x, y, rotation_deg)
     return (
         "\t(symbol\n"
         f'\t\t(lib_id "{part.symbol}")\n'
@@ -320,12 +356,12 @@ def _emit_symbol_instance(
         "\t\t(dnp no)\n"
         f'\t\t(uuid "{uuid_str}")\n'
         f'\t\t(property "Reference" "{part.ref}"\n'
-        f"\t\t\t(at {_fmt(x)} {_fmt(y - 5)} 0)\n"
-        "\t\t\t(effects (font (size 1.27 1.27)))\n"
+        f"\t\t\t(at {_fmt(rx)} {_fmt(ry)} 0)\n"
+        f"\t\t\t{_visible_effects(rj)}\n"
         "\t\t)\n"
         f'\t\t(property "Value" "{part.value}"\n'
-        f"\t\t\t(at {_fmt(x)} {_fmt(y + 5)} 0)\n"
-        "\t\t\t(effects (font (size 1.27 1.27)))\n"
+        f"\t\t\t(at {_fmt(vx)} {_fmt(vy)} 0)\n"
+        f"\t\t\t{_visible_effects(vj)}\n"
         "\t\t)\n"
         f'\t\t(property "Footprint" "{part.footprint}"\n'
         f"\t\t\t(at {_fmt(x)} {_fmt(y + 7)} 0)\n"
@@ -449,6 +485,9 @@ def _emit_power_symbol(
 ) -> str:
     pwr_ref = _power_ref_for_salt(salt)
     value = ps.lib_id.split(":", 1)[1] if ":" in ps.lib_id else ps.lib_id
+    # PWR_FLAG carries no rail name worth showing — its label just collides with
+    # the rail/ground symbol it sits on. Keep the flag graphic, hide the word.
+    value_hide = " (hide yes)" if value == "PWR_FLAG" else ""
     return (
         "\t(symbol\n"
         f'\t\t(lib_id "{ps.lib_id}")\n'
@@ -465,7 +504,7 @@ def _emit_power_symbol(
         "\t\t)\n"
         f'\t\t(property "Value" "{value}"\n'
         f"\t\t\t(at {_fmt(ps.x_mm)} {_fmt(ps.y_mm + 3)} 0)\n"
-        "\t\t\t(effects (font (size 1.27 1.27)))\n"
+        f"\t\t\t(effects (font (size 1.27 1.27)){value_hide})\n"
         "\t\t)\n"
         "\t\t(instances\n"
         f'\t\t\t(project "{project_stem}"\n'

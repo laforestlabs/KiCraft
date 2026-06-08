@@ -40,6 +40,18 @@ GND_NET_PATTERNS = [
 
 PinDirection = Literal["input", "output", "bidirectional", "passive"]
 BlockCategory = Literal["sense", "process", "drive", "power", "interface"]
+# How a 2-pin passive relates to the IC it serves — drives schematic placement
+# (which side of the anchor it sits on, which way it's rotated, and what its far
+# pin ties to). See PlacementHint and synthesis/placement.py.
+PlacementRole = Literal[
+    "decoupling",  # local bypass cap: rail pin <-> gnd pin, hugs a power pin
+    "bulk",        # large reservoir cap: rail <-> gnd, like decoupling
+    "pullup",      # resistor: signal pin <-> a positive rail
+    "pulldown",    # resistor: signal pin <-> ground
+    "series",      # in-line R/L/ferrite in a signal/power path
+    "feedback",    # divider / compensation around the IC
+    "other",       # cluster near the anchor, no special orientation
+]
 SignalType = Literal["power", "ground", "digital", "analog", "clock", "bus", "rf", "other"]
 EdgeZone = Literal["left", "right", "top", "bottom"]
 CornerZone = Literal["top-left", "top-right", "bottom-left", "bottom-right"]
@@ -373,6 +385,39 @@ class ArraySpec(BaseModel):
         return self
 
 
+class PlacementHint(BaseModel):
+    """Schematic-placement intent for one 2-pin passive (optional).
+
+    The deterministic placer (synthesis/placement.py) clusters each passive
+    next to the anchor pin it serves and rotates it so its far pin points
+    into open space. It can INFER all of this from ``connections``; a hint
+    just makes the intent explicit when inference would be ambiguous (a cap
+    between two rails, an RC where the "served" pin isn't obvious, a passive
+    that should hug a different IC than the netlist implies).
+
+    Every field except ``ref``/``role`` is optional — the placer fills any
+    gap from the netlist. ``anchor_ref`` is the IC the passive belongs with;
+    ``anchor_pin`` is the specific pin number on that IC it sits beside;
+    ``rail_net`` is the power/ground net its far pin ties to (for pull-ups
+    and decoupling caps, so the placer points it at the rail).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str
+    role: PlacementRole
+    anchor_ref: str | None = None
+    anchor_pin: str | None = None
+    rail_net: str | None = None
+
+    @field_validator("ref", "anchor_ref")
+    @classmethod
+    def _ref_pattern(cls, v: str | None) -> str | None:
+        if v is not None and not REF_RE.match(v):
+            raise ValueError(f"PlacementHint ref {v!r} must match {REF_RE.pattern}")
+        return v
+
+
 class BOM(BaseModel):
     parts: list[BomPart]
     ic_groups: dict[str, list[str]] = Field(default_factory=dict)
@@ -381,6 +426,7 @@ class BOM(BaseModel):
     signal_flow_order: list[str] = Field(default_factory=list)
     component_zones: dict[str, dict[str, str]] = Field(default_factory=dict)
     arrays: list[ArraySpec] = Field(default_factory=list)
+    placement_hints: list[PlacementHint] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
     connections: list[NetConnection] = Field(default_factory=list)
     no_connect_pins: list[PinEndpoint] = Field(default_factory=list)
@@ -426,6 +472,14 @@ class BOM(BaseModel):
                         f"arrays ref {ref!r} appears in more than one array"
                     )
                 seen_array_refs.add(ref)
+        for hint in self.placement_hints:
+            if hint.ref not in ref_set:
+                raise ValueError(f"placement_hints ref {hint.ref!r} not in BOM parts")
+            if hint.anchor_ref is not None and hint.anchor_ref not in ref_set:
+                raise ValueError(
+                    f"placement_hints[{hint.ref!r}].anchor_ref "
+                    f"{hint.anchor_ref!r} not in BOM parts"
+                )
         return self
 
     @model_validator(mode="after")
