@@ -1845,6 +1845,9 @@ def _admin_header(active: str) -> None:
             ui.button("Users", icon="group",
                       on_click=lambda: ui.navigate.to("/admin/users")) \
                 .props("flat dense no-caps color=white").classes("text-xs")
+            ui.button("Self-Eval", icon="science",
+                      on_click=lambda: ui.navigate.to("/admin/self-eval")) \
+                .props("flat dense no-caps color=white").classes("text-xs")
             ui.button("Back to workspace", icon="arrow_back",
                       on_click=lambda: ui.navigate.to("/")) \
                 .props("flat dense no-caps color=white").classes("text-xs")
@@ -1852,6 +1855,305 @@ def _admin_header(active: str) -> None:
 
 def _admin_card_style() -> str:
     return "background:#0f172a;border:1px solid #1e293b;min-width:380px"
+
+
+# --------------------------------------------------------------------------- #
+# Admin: self-eval batch over the curated example briefs.
+#
+# Drives kicraft.eval.self_eval (the /self-eval harness) as a subprocess writing
+# to a fresh out dir, then polls that dir to show live per-brief progress, the
+# A-F scorecard (reusing _render_scorecard), and on-demand kicad-cli renders of
+# each leaf board so a failed route can be inspected in-page. One batch at a time
+# (it shares the spend guard and is heavy); state lives at module scope so every
+# admin client + every timer tick sees the same run.
+# --------------------------------------------------------------------------- #
+_SELF_EVAL: dict = {"proc": None, "out": None, "started_at": None, "args": {}}
+
+
+def _self_eval_out_root() -> Path:
+    base = Path(getattr(Settings.from_env(), "projects_dir",
+                        Path.home() / ".kicraft" / "projects"))
+    return base.parent / "self_eval"
+
+
+def _self_eval_selected(args: dict) -> list:
+    from kicraft.eval.self_eval import _select
+    return _select(list(EXAMPLE_PROMPTS), args.get("limit"), args.get("only"))
+
+
+def _self_eval_running() -> bool:
+    p = _SELF_EVAL.get("proc")
+    return bool(p is not None and p.poll() is None)
+
+
+def _self_eval_launch(limit, only, no_judge) -> str:
+    """Start the batch harness as a subprocess; return the out dir ('' if busy)."""
+    if _self_eval_running():
+        return ""
+    import datetime as _dt
+    ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out = _self_eval_out_root() / ts
+    out.mkdir(parents=True, exist_ok=True)
+    cmd = [KICRAFT[0], "-m", "kicraft.eval.self_eval", "--out", str(out)]
+    if limit:
+        cmd += ["--limit", str(int(limit))]
+    if only:
+        cmd += ["--only", str(only)]
+    if no_judge:
+        cmd += ["--no-judge"]
+    logf = (out / "run.log").open("w")
+    proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
+                            env={**os.environ, "KICRAFT_CALLER": "web"},
+                            cwd=str(Path(__file__).resolve().parents[2]))
+    _SELF_EVAL.update(proc=proc, out=out, started_at=time.time(),
+                      args={"limit": limit, "only": only, "no_judge": no_judge})
+    return str(out)
+
+
+def _self_eval_brief_status(out: Path, idx: int, prompt: str) -> dict:
+    """Parse one brief's live status from its run dir under `out`."""
+    hits = sorted(out.glob(f"run_{idx:02d}_*"))
+    rd = hits[0] if hits else None
+    base = {"index": idx, "prompt": prompt, "rundir": (str(rd) if rd else None)}
+    if rd is None:
+        return {**base, "status": "pending"}
+    stage = build_label = None
+    ev = rd / "events.jsonl"
+    if ev.is_file():
+        for line in ev.read_text(errors="replace").splitlines():
+            try:
+                e = json.loads(line)
+            except Exception:
+                continue
+            k = e.get("kind")
+            if k == "stage_start":
+                stage = e.get("stage")
+            elif k == "stage_done" and e.get("ok"):
+                stage = (e.get("stage") or "") + " ✓"
+            elif k == "build_start":
+                build_label = "building…"
+            elif k == "build_done":
+                build_label = "fab-ready" if e.get("ok") else f"build rc={e.get('rc')}"
+    rep = rd / "eval" / "report.json"
+    if rep.is_file():
+        try:
+            r = json.loads(rep.read_text())
+        except Exception:
+            r = None
+        if r:
+            sc = r.get("score") or {}
+            gates = [g.get("id") for g in (r.get("gates") or {}).get("triggered", [])]
+            return {**base, "status": "done", "grade": sc.get("grade"),
+                    "final": sc.get("final"), "verdict": sc.get("verdict"),
+                    "gates": gates, "build": build_label}
+    return {**base, "status": "running", "stage": stage, "build": build_label}
+
+
+def _self_eval_render_boards(run_dir: Path) -> list:
+    """Render the run's parent + per-leaf boards to PNGs (kicad-cli, cached) under
+    run_dir/_webrender/. Returns [{label, accepted, rel}] for token-served <img>."""
+    run_dir = Path(run_dir)
+    rdir = run_dir / "_webrender"
+    rdir.mkdir(exist_ok=True)
+    targets: list = []
+    parents = sorted(run_dir.glob("generated/*/*.kicad_pcb"))
+    if parents:
+        targets.append(("parent board", parents[0], None))
+    for leaf in sorted(run_dir.glob(
+            "generated/*/.experiments/subcircuits/*/leaf_routed.kicad_pcb"))[:8]:
+        accepted = (leaf.parent / "solved_layout.json").is_file()
+        targets.append((f"leaf {leaf.parent.name[:8]}", leaf, accepted))
+    out = []
+    for label, pcb, accepted in targets:
+        png = rdir / (re.sub(r"[^A-Za-z0-9_.-]", "_", label) + ".png")
+        if not png.is_file() or png.stat().st_mtime < pcb.stat().st_mtime:
+            try:
+                subprocess.run(["kicad-cli", "pcb", "render", "--side", "top",
+                                "--quality", "basic", "-w", "1400", "-h", "480",
+                                "-o", str(png), str(pcb)],
+                               capture_output=True, timeout=60)
+            except Exception:
+                continue
+        if png.is_file():
+            out.append({"label": label, "accepted": accepted,
+                        "rel": f"_webrender/{png.name}"})
+    return out
+
+
+def _open_self_eval_run(s: dict) -> None:
+    """Dialog: the brief's scorecard + rendered boards (parent + leaves w/ accept
+    state) + artifact paths, so a failed route is inspectable in-page."""
+    if not is_admin(_current_user()):
+        ui.notify("Admin access required.", color="warning")
+        return
+    run_dir = Path(s["rundir"])
+    token = _register_project_dir(run_dir)
+    holder = {"boards": None, "rendered": False}
+
+    def worker():
+        try:
+            holder["boards"] = _self_eval_render_boards(run_dir)
+        except Exception:
+            holder["boards"] = []
+
+    with ui.dialog() as dlg, ui.card().classes("w-[1000px] max-w-[97vw]") \
+            .style("background:#0f172a;border:1px solid #1e293b"):
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label(f"#{s['index']}  {s['prompt'][:72]}") \
+                .classes("text-base font-bold").style("color:#e2e8f0")
+            ui.button(icon="close", on_click=dlg.close).props("flat dense round")
+        rep = run_dir / "eval" / "report.json"
+        if rep.is_file():
+            try:
+                _render_scorecard(ui.column().classes("w-full gap-1"),
+                                  json.loads(rep.read_text()))
+            except Exception:
+                ui.label("(could not load report.json)").classes("text-xs") \
+                    .style("color:#f87171")
+        else:
+            ui.label("Not scored yet.").classes("text-sm").style("color:#94a3b8")
+        ui.separator()
+        ui.label("Boards (top view) — a ✗ leaf is where a failed route lives:") \
+            .classes("text-xs").style("color:#94a3b8")
+        board_status = ui.row().classes("items-center gap-2")
+        with board_status:
+            ui.spinner(size="sm")
+            ui.label("Rendering boards (kicad-cli)…").classes("text-xs") \
+                .style("color:#94a3b8")
+        gallery = ui.row().classes("w-full flex-wrap gap-3")
+        ui.label(f"artifacts: {run_dir}").classes("text-xs font-mono mt-2") \
+            .style("color:#64748b")
+        ui.label(f"deep DRC inspection: kicraft-gui {run_dir}/generated") \
+            .classes("text-xs font-mono").style("color:#64748b")
+
+    def tick():
+        if holder["boards"] is None or holder["rendered"]:
+            return
+        holder["rendered"] = True
+        tmr.active = False
+        board_status.clear()
+        gallery.clear()
+        with gallery:
+            if not holder["boards"]:
+                ui.label("No boards rendered (the build may not have produced a PCB).") \
+                    .classes("text-xs").style("color:#94a3b8")
+            for b in holder["boards"]:
+                with ui.column().classes("gap-1 items-center"):
+                    lab = b["label"]
+                    col = "#cbd5e1"
+                    if b["accepted"] is True:
+                        lab += "  ✓"; col = "#4ade80"
+                    elif b["accepted"] is False:
+                        lab += "  ✗ rejected"; col = "#f87171"
+                    ui.label(lab).classes("text-xs font-mono").style(f"color:{col}")
+                    ui.image(f"/project/{token}/render/{b['rel']}") \
+                        .style("width:460px;border:1px solid #1e293b")
+
+    tmr = ui.timer(0.3, tick)
+    threading.Thread(target=worker, daemon=True).start()
+    dlg.open()
+
+
+@ui.page("/admin/self-eval")
+def admin_self_eval_page():
+    """Admin: start the self-eval batch over the example briefs, watch live
+    per-brief progress + grades, and inspect each run's boards (incl. failed)."""
+    user, redirect = _require_admin()
+    if redirect is not None:
+        return redirect
+    ui.dark_mode().enable()
+    _admin_header("self-eval")
+
+    n_avail = len(EXAMPLE_PROMPTS)
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
+        ui.label("Self-evaluation").classes("text-2xl font-bold text-white")
+        ui.label("Drive every curated example brief end to end (auto-answering "
+                 "clarifying questions with the model's suggested option) and grade "
+                 "each with the kicraft.eval rubric. Runs in the background and "
+                 "SPENDS real money via the capped client; the spend guard still caps "
+                 "the day.").classes("text-sm").style("color:#94a3b8")
+        with ui.row().classes("items-end gap-3 flex-wrap"):
+            limit_in = ui.number("Limit (first N)", value=1, min=0, max=n_avail,
+                                 format="%d").props("dense outlined dark").classes("w-40")
+            only_in = ui.input("Only (e.g. 1,3,5)").props("dense outlined dark") \
+                .classes("w-44")
+            judge_sw = ui.switch("LLM judge (A–F)", value=True)
+            run_btn = ui.button("Run self-eval", icon="play_arrow").props("color=primary")
+            ui.label(f"{n_avail} briefs available").classes("text-xs") \
+                .style("color:#64748b")
+        head = ui.row().classes("items-center gap-4 text-sm font-mono") \
+            .style("color:#cbd5e1")
+        table_holder = ui.column().classes("w-full gap-0")
+
+    def start():
+        if _self_eval_running():
+            ui.notify("A self-eval batch is already running.", color="warning")
+            return
+        limit = int(limit_in.value) if limit_in.value else None
+        only = (only_in.value or "").strip() or None
+        out = _self_eval_launch(limit, only, not judge_sw.value)
+        ui.notify(f"Started → {out}" if out else "Could not start.",
+                  color=("positive" if out else "warning"))
+    run_btn.on_click(start)
+
+    def render():
+        running = _self_eval_running()
+        run_btn.set_enabled(not running)
+        out = _SELF_EVAL.get("out")
+        head.clear()
+        table_holder.clear()
+        if not out:
+            with head:
+                ui.label("No run yet — configure above and press Run.") \
+                    .style("color:#64748b")
+            return
+        out = Path(out)
+        args = _SELF_EVAL.get("args") or {}
+        selected = _self_eval_selected(args)
+        statuses = [_self_eval_brief_status(out, idx, p) for idx, p in selected]
+        done = [s for s in statuses if s["status"] == "done"]
+        graded = [s for s in done if isinstance(s.get("final"), (int, float))]
+        fab = sum(1 for s in done if s.get("build") == "fab-ready")
+        with head:
+            ui.label(("RUNNING " if running else "DONE ") + out.name) \
+                .style("color:%s" % ("#fbbf24" if running else "#4ade80"))
+            ui.label(f"{len(done)}/{len(selected)} scored")
+            if graded:
+                ui.label(f"mean {round(sum(s['final'] for s in graded) / len(graded), 1)}")
+            ui.label(f"fab-ready {fab}/{len(selected)}")
+            ui.label(f"judge {'off' if args.get('no_judge') else 'on'}")
+        with table_holder:
+            with ui.row().classes("w-full items-center gap-2 text-xs font-bold") \
+                    .style("color:#64748b;padding-bottom:2px"):
+                ui.label("#").style("width:24px")
+                ui.label("status").style("width:96px")
+                ui.label("grade").style("width:60px")
+                ui.label("build").style("width:118px")
+                ui.label("brief").classes("flex-1")
+                ui.label("").style("width:56px")
+            for s in statuses:
+                st = s["status"]
+                color = {"done": "#4ade80", "running": "#fbbf24",
+                         "pending": "#64748b", "error": "#f87171"}.get(st, "#94a3b8")
+                with ui.row().classes("w-full items-center gap-2 text-xs") \
+                        .style("border-top:1px solid #1e293b;padding:3px 0"):
+                    ui.label(str(s["index"])).style("width:24px;color:#cbd5e1")
+                    ui.label(s.get("stage") or st if st == "running" else st) \
+                        .style(f"width:96px;color:{color}")
+                    g = s.get("grade")
+                    ui.label(f"{g} {s.get('final')}" if g
+                             else ("—" if st == "done" else "")) \
+                        .style("width:60px;color:#e2e8f0")
+                    ui.label(s.get("build") or "").style("width:118px;color:#94a3b8")
+                    ui.label(s["prompt"][:84]).classes("flex-1").style("color:#cbd5e1")
+                    if s.get("rundir"):
+                        ui.button("view",
+                                  on_click=lambda _e=None, s=s: _open_self_eval_run(s)) \
+                            .props("flat dense no-caps color=primary") \
+                            .classes("text-xs").style("width:56px")
+                    else:
+                        ui.label("").style("width:56px")
+    ui.timer(1.0, render)
 
 
 @ui.page("/admin")
