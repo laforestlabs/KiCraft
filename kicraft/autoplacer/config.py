@@ -248,6 +248,13 @@ DEFAULT_CONFIG = {
     # rounds to 153 µm (>= floor, fab-legal) while staying narrower than the
     # 0.2 mm default so it still escapes dense pad fields.
     "freerouting_fine_pitch_track_mm": 0.153,
+    # Leaf acceptance: a leaf must route all of its *signal* nets. Power/ground
+    # nets are excluded automatically (they close on the post-route pour, not on
+    # leaf routing). Set to None to disable (historical lenient behaviour). This
+    # makes leaf_accepted reflect reality instead of accepting unrouted leaves
+    # (e.g. a USB-C connector whose CC pin never escaped its pad field) that then
+    # silently fail parent routing.
+    "leaf_acceptance_max_unconnected": 0,
     # GND zone pour — automatically created/updated to cover full board.
     # Set gnd_zone_net to "" to disable automatic zone creation.
     "gnd_zone_net": "GND",
@@ -263,6 +270,25 @@ DEFAULT_CONFIG = {
     # with a dense thermal-via array, so the plane connects and boxed-in center
     # pads (e.g. the WROOM exposed pad) escape to ground.
     "gnd_plane_enabled": True,
+    # Power-plane pour (default on): after routing, pour the primary power rail
+    # (auto-detected as the power net with the most pads, e.g. VBUS on a USB
+    # board) as a plane on the layer opposite GND. This ties paired connector
+    # power pads, the regulator input, and bulk caps through copper instead of
+    # asking the autorouter to thread pad-to-pad traces through a dense pad
+    # field. Poured at a higher priority than GND so the two coexist on a layer.
+    # Set power_plane_nets to an explicit list to override auto-detection.
+    "power_plane_enabled": True,
+    "power_plane_layer": "F.Cu",
+    "power_plane_nets": None,
+    "power_plane_max_nets": 1,
+    "power_plane_priority": 1,
+    # Auto power-tie (default on): before routing, route a locked tie around any
+    # connector whose spread power pads (e.g. USB-C VBUS on both sides) would
+    # otherwise fragment the power pour into disconnected islands. The tie runs
+    # around the footprint bounding box so it never crosses other pads.
+    "auto_power_tie": True,
+    "power_tie_margin_mm": 1.0,
+    "power_tie_exclude_refs": [],
     "thermal_via_pitch_mm": 1.2,
     "thermal_via_inset_mm": 0.5,
     "thermal_pad_area_mm2": 4.0,

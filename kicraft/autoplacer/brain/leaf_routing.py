@@ -28,6 +28,36 @@ from kicraft.autoplacer.freerouting_runner import (
 from kicraft.autoplacer.hardware.adapter import KiCadAdapter
 
 
+def _resolve_breakout_specs(cfg: dict[str, Any]) -> list:
+    """Build :class:`BreakoutSpec` objects from ``cfg['breakout_specs']``.
+
+    Each entry is a dict ``{ref, pad, waypoints?, length_mm?, width_mm?,
+    layer?, via_at_end?}``. Returns ``[]`` when none are configured. Specs whose
+    footprint isn't on the leaf are harmlessly skipped by ``add_breakout_stubs``.
+    """
+    raw = cfg.get("breakout_specs")
+    if not raw:
+        return []
+    from kicraft.autoplacer.brain.breakout_stubs import BreakoutSpec
+
+    specs = []
+    for d in raw:
+        if not d.get("ref") or d.get("pad") is None:
+            continue
+        specs.append(
+            BreakoutSpec(
+                ref=str(d["ref"]),
+                pad=str(d["pad"]),
+                waypoints=[tuple(p) for p in d.get("waypoints", [])],
+                length_mm=float(d.get("length_mm", 1.5)),
+                width_mm=d.get("width_mm"),
+                layer=d.get("layer", "F.Cu"),
+                via_at_end=bool(d.get("via_at_end", False)),
+            )
+        )
+    return specs
+
+
 def _silk_for_leaf(
     extraction: ExtractedSubcircuitBoard,
     components: dict[str, Component],
@@ -434,6 +464,40 @@ def route_local_subcircuit(
     leaf_routing_cfg["freerouting_timeout_s"] = min(
         _timeout_cap, max(_base_timeout, int(_n_leaf_comps * _per_comp))
     )
+
+    # Deliberate breakout stubs (default off): pre-route locked escape traces for
+    # configured footprints -- fine-pitch connectors whose inner pins the
+    # autorouter can't escape its pad field. Added to the pre-route board and
+    # preserved through routing so FreeRouting finishes from the breakout points.
+    _breakout_specs = _resolve_breakout_specs(cfg)
+    # Auto power-tie (default on): route a tie around any connector whose spread
+    # power pads (e.g. USB-C VBUS) would otherwise fragment the power pour.
+    if cfg.get("auto_power_tie", True):
+        try:
+            import pcbnew
+
+            from kicraft.autoplacer.brain.breakout_stubs import auto_power_tie_specs
+
+            _tie_board = pcbnew.LoadBoard(str(pre_route_board))
+            _breakout_specs = _breakout_specs + auto_power_tie_specs(_tie_board, cfg)
+            del _tie_board
+        except Exception as exc:  # never fail the leaf on a finishing helper
+            print(f"  WARNING: auto power-tie spec gen failed: {exc}")
+    if _breakout_specs:
+        try:
+            from kicraft.autoplacer.brain.breakout_stubs import add_breakout_stubs
+
+            _bo = add_breakout_stubs(
+                str(pre_route_board), _breakout_specs, cfg=cfg
+            )
+            if _bo["stubs"] > 0:
+                leaf_routing_cfg["freerouting_preserve_existing_copper"] = True
+                print(
+                    f"  Breakout stubs: {_bo['stubs']} pad(s), "
+                    f"{_bo['segments']} segment(s), {_bo['vias']} via(s)"
+                )
+        except Exception as exc:  # finishing step must never fail the leaf
+            print(f"  WARNING: breakout stub step failed: {exc}")
     # Route cache: a deterministic leaf (e.g. an array grid) has the same
     # placement every round, so re-running freerouting on it is wasted minutes.
     # Key a cache on the placement + routing-relevant config and reuse the
@@ -637,6 +701,27 @@ def route_local_subcircuit(
             )
         except Exception as exc:  # finishing step must never fail the leaf
             print(f"  WARNING: GND plane step failed: {exc}")
+
+    # Power-plane finishing (default on): pour the primary power rail on the
+    # layer opposite GND so paired connector power pads / regulator input / bulk
+    # caps connect through copper. Runs before acceptance so the now-connected
+    # power pads are reflected in the unconnected count.
+    if cfg.get("power_plane_enabled", True):
+        try:
+            from kicraft.autoplacer.brain.gnd_pour import pour_power_planes
+
+            _pwr = pour_power_planes(
+                str(routed_board),
+                cfg,
+                layers=(cfg.get("power_plane_layer", "F.Cu"),),
+            )
+            if _pwr.get("nets"):
+                print(
+                    f"  Power plane: poured {_pwr['nets']} on "
+                    f"{cfg.get('power_plane_layer', 'F.Cu')}"
+                )
+        except Exception as exc:  # finishing step must never fail the leaf
+            print(f"  WARNING: power plane step failed: {exc}")
         route_timing["gnd_pour_s"] = round(
             max(0.0, time.monotonic() - gnd_pour_start), 3
         )

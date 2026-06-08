@@ -1176,11 +1176,45 @@ def import_routed_copper(kicad_pcb_path: str) -> dict[str, Any]:
     }
 
 
+def _parse_unconnected_nets(report_text: str) -> list[str]:
+    """Net names with at least one unconnected (ratsnest) item.
+
+    In a ``kicad-cli pcb drc`` text report each ``[unconnected_items]:`` header
+    is followed by indented item lines that name the net in brackets, e.g.::
+
+        [unconnected_items]: Missing connection between items
+            @(8.10 mm, 9.78 mm): Pad A4B9 [VBUS] of J1 on F.Cu
+            @(8.10 mm, 14.58 mm): Pad B4A9 [VBUS] of J1 on F.Cu
+
+    Returns the de-duplicated nets (order preserved) so callers can tell a
+    poured power/ground net (closes on zone fill) from a real signal-net miss.
+    """
+    nets: list[str] = []
+    seen: set[str] = set()
+    in_block = False
+    for line in report_text.splitlines():
+        header = re.match(r"^\[(\w+)\]:", line)
+        if header:
+            in_block = header.group(1) == "unconnected_items"
+            continue
+        if not in_block or "@(" not in line:
+            continue
+        for net in re.findall(r"\[([^\]]+)\]", line):
+            # Guard against any "[Net 3]"-style token that is not a net name.
+            if re.match(r"(?i)^net\s+\d+$", net):
+                continue
+            if net not in seen:
+                seen.add(net)
+                nets.append(net)
+    return nets
+
+
 def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, Any]:
     """Run KiCad CLI DRC and return parsed violation counts."""
     counts: dict[str, Any] = {
         "shorts": 0,
         "unconnected": 0,
+        "unconnected_nets": [],
         "clearance": 0,
         "copper_edge_clearance": 0,
         "courtyard": 0,
@@ -1219,6 +1253,7 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
         else:
             report = ""
         counts["report_text"] = report
+        counts["unconnected_nets"] = _parse_unconnected_nets(report)
 
         for line in report.splitlines():
             m = re.match(r"^\[(\w+)\]:", line)
