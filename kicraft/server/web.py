@@ -1876,9 +1876,16 @@ def _self_eval_out_root() -> Path:
     return base.parent / "self_eval"
 
 
-def _self_eval_selected(args: dict) -> list:
+def _self_eval_selected(out, args: dict) -> list:
     from kicraft.eval.self_eval import _select
-    return _select(list(EXAMPLE_PROMPTS), args.get("limit"), args.get("only"))
+    if "no_judge" in args:  # args from a launch / _args.json are authoritative
+        return _select(list(EXAMPLE_PROMPTS), args.get("limit"), args.get("only"))
+    # Legacy run (pre _args.json): derive the brief set from the run dirs on disk.
+    idxs = sorted({int(p.name.split("_")[1]) for p in Path(out).glob("run_[0-9][0-9]_*")
+                   if p.name.split("_")[1].isdigit()})
+    return ([(i, EXAMPLE_PROMPTS[i - 1]) for i in idxs
+             if 1 <= i <= len(EXAMPLE_PROMPTS)]
+            or _select(list(EXAMPLE_PROMPTS), None, None))
 
 
 def _self_eval_running() -> bool:
@@ -1894,6 +1901,10 @@ def _self_eval_launch(limit, only, no_judge) -> str:
     ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = _self_eval_out_root() / ts
     out.mkdir(parents=True, exist_ok=True)
+    # Persist the run args so the page can re-adopt this batch after a server
+    # restart (the harness keeps running as a detached subprocess).
+    (out / "_args.json").write_text(
+        json.dumps({"limit": limit, "only": only, "no_judge": no_judge}))
     cmd = [KICRAFT[0], "-m", "kicraft.eval.self_eval", "--out", str(out)]
     if limit:
         cmd += ["--limit", str(int(limit))]
@@ -1908,6 +1919,35 @@ def _self_eval_launch(limit, only, no_judge) -> str:
     _SELF_EVAL.update(proc=proc, out=out, started_at=time.time(),
                       args={"limit": limit, "only": only, "no_judge": no_judge})
     return str(out)
+
+
+def _self_eval_adopt_latest() -> None:
+    """When no run is tracked in this process (e.g. after a server restart), adopt
+    the most recent batch on disk so its progress + artifacts stay viewable. Never
+    overrides a run we launched this process (proc still alive)."""
+    if _self_eval_running():
+        return
+    cur = _SELF_EVAL.get("out")
+    if cur and Path(cur).is_dir():
+        return  # already pointing at a real run; keep it
+    root = _self_eval_out_root()
+    if not root.is_dir():
+        return
+    # A batch dir is adoptable if it has persisted args OR any run_NN subdir (a
+    # legacy run launched before _args.json existed).
+    cands = [d for d in root.iterdir() if d.is_dir() and (
+        (d / "_args.json").is_file() or any(d.glob("run_[0-9][0-9]_*")))]
+    if not cands:
+        return
+    latest = max(cands, key=lambda d: d.stat().st_mtime)
+    args: dict = {}
+    ap = latest / "_args.json"
+    if ap.is_file():
+        try:
+            args = json.loads(ap.read_text())
+        except Exception:
+            args = {}
+    _SELF_EVAL.update(proc=None, out=latest, args=args)
 
 
 def _self_eval_brief_status(out: Path, idx: int, prompt: str) -> dict:
@@ -2083,7 +2123,48 @@ def admin_self_eval_page():
                 .style("color:#64748b")
         head = ui.row().classes("items-center gap-4 text-sm font-mono") \
             .style("color:#cbd5e1")
-        table_holder = ui.column().classes("w-full gap-0")
+        table = ui.column().classes("w-full gap-0")
+
+    # Per-client element refs, built ONCE (not every timer tick). Rebuilding the
+    # table each second would replace the 'view' buttons mid-click, so a click
+    # would land on a deleted element and do nothing. Build rows once; update
+    # their text in place; only rebuild when the selected set changes.
+    rows: dict = {}
+    latest: dict = {}
+    sig = {"sel": None}
+    _SE_COLORS = {"done": "#4ade80", "running": "#fbbf24",
+                  "pending": "#64748b", "error": "#f87171"}
+
+    def open_run(idx):
+        s = latest.get(idx)
+        if s and s.get("rundir"):
+            _open_self_eval_run(s)
+
+    def build_rows(selected):
+        table.clear()
+        rows.clear()
+        with table:
+            with ui.row().classes("w-full items-center gap-2 text-xs font-bold") \
+                    .style("color:#64748b;padding-bottom:2px"):
+                ui.label("#").style("width:24px")
+                ui.label("status").style("width:108px")
+                ui.label("grade").style("width:60px")
+                ui.label("build").style("width:118px")
+                ui.label("brief").classes("flex-1")
+                ui.label("").style("width:56px")
+            for idx, prompt in selected:
+                with ui.row().classes("w-full items-center gap-2 text-xs") \
+                        .style("border-top:1px solid #1e293b;padding:3px 0"):
+                    ui.label(str(idx)).style("width:24px;color:#cbd5e1")
+                    st_l = ui.label("pending").style("width:108px;color:#64748b")
+                    gr_l = ui.label("").style("width:60px;color:#e2e8f0")
+                    bd_l = ui.label("").style("width:118px;color:#94a3b8")
+                    ui.label(prompt[:84]).classes("flex-1").style("color:#cbd5e1")
+                    btn = ui.button("view", on_click=lambda _e=None, i=idx: open_run(i)) \
+                        .props("flat dense no-caps color=primary").classes("text-xs") \
+                        .style("width:56px")
+                    btn.set_visibility(False)
+                    rows[idx] = {"status": st_l, "grade": gr_l, "build": bd_l, "btn": btn}
 
     def start():
         if _self_eval_running():
@@ -2097,62 +2178,53 @@ def admin_self_eval_page():
     run_btn.on_click(start)
 
     def render():
-        running = _self_eval_running()
-        run_btn.set_enabled(not running)
+        _self_eval_adopt_latest()
+        run_btn.set_enabled(not _self_eval_running())
         out = _SELF_EVAL.get("out")
         head.clear()
-        table_holder.clear()
         if not out:
             with head:
                 ui.label("No run yet — configure above and press Run.") \
                     .style("color:#64748b")
+            if sig["sel"] is not None:
+                table.clear()
+                rows.clear()
+                sig["sel"] = None
             return
         out = Path(out)
         args = _SELF_EVAL.get("args") or {}
-        selected = _self_eval_selected(args)
+        selected = _self_eval_selected(out, args)
+        sel_key = tuple(i for i, _ in selected)
+        if sel_key != sig["sel"]:
+            build_rows(selected)
+            sig["sel"] = sel_key
         statuses = [_self_eval_brief_status(out, idx, p) for idx, p in selected]
         done = [s for s in statuses if s["status"] == "done"]
         graded = [s for s in done if isinstance(s.get("final"), (int, float))]
         fab = sum(1 for s in done if s.get("build") == "fab-ready")
+        summary_done = (out / "summary.json").is_file()
         with head:
-            ui.label(("RUNNING " if running else "DONE ") + out.name) \
-                .style("color:%s" % ("#fbbf24" if running else "#4ade80"))
+            ui.label(("DONE " if summary_done else "RUNNING ") + out.name) \
+                .style("color:%s" % ("#4ade80" if summary_done else "#fbbf24"))
             ui.label(f"{len(done)}/{len(selected)} scored")
             if graded:
                 ui.label(f"mean {round(sum(s['final'] for s in graded) / len(graded), 1)}")
             ui.label(f"fab-ready {fab}/{len(selected)}")
             ui.label(f"judge {'off' if args.get('no_judge') else 'on'}")
-        with table_holder:
-            with ui.row().classes("w-full items-center gap-2 text-xs font-bold") \
-                    .style("color:#64748b;padding-bottom:2px"):
-                ui.label("#").style("width:24px")
-                ui.label("status").style("width:96px")
-                ui.label("grade").style("width:60px")
-                ui.label("build").style("width:118px")
-                ui.label("brief").classes("flex-1")
-                ui.label("").style("width:56px")
-            for s in statuses:
-                st = s["status"]
-                color = {"done": "#4ade80", "running": "#fbbf24",
-                         "pending": "#64748b", "error": "#f87171"}.get(st, "#94a3b8")
-                with ui.row().classes("w-full items-center gap-2 text-xs") \
-                        .style("border-top:1px solid #1e293b;padding:3px 0"):
-                    ui.label(str(s["index"])).style("width:24px;color:#cbd5e1")
-                    ui.label(s.get("stage") or st if st == "running" else st) \
-                        .style(f"width:96px;color:{color}")
-                    g = s.get("grade")
-                    ui.label(f"{g} {s.get('final')}" if g
-                             else ("—" if st == "done" else "")) \
-                        .style("width:60px;color:#e2e8f0")
-                    ui.label(s.get("build") or "").style("width:118px;color:#94a3b8")
-                    ui.label(s["prompt"][:84]).classes("flex-1").style("color:#cbd5e1")
-                    if s.get("rundir"):
-                        ui.button("view",
-                                  on_click=lambda _e=None, s=s: _open_self_eval_run(s)) \
-                            .props("flat dense no-caps color=primary") \
-                            .classes("text-xs").style("width:56px")
-                    else:
-                        ui.label("").style("width:56px")
+        for s in statuses:
+            idx = s["index"]
+            latest[idx] = s
+            r = rows.get(idx)
+            if not r:
+                continue
+            st = s["status"]
+            r["status"].set_text((s.get("stage") or st) if st == "running" else st)
+            r["status"].style("color:" + _SE_COLORS.get(st, "#94a3b8"))
+            g = s.get("grade")
+            r["grade"].set_text(f"{g} {s.get('final')}" if g
+                                else ("—" if st == "done" else ""))
+            r["build"].set_text(s.get("build") or "")
+            r["btn"].set_visibility(bool(s.get("rundir")))
     ui.timer(1.0, render)
 
 
