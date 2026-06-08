@@ -12,15 +12,23 @@ from kicraft.server import web
 
 # ------------------------------------------------------ _resolve_part / _price_key
 
-def test_resolve_part_three_tiers_and_none():
+def test_resolve_part_embedded_id_manifest_mpn_kw_and_none():
+    # 1. an embedded LCSC id in the symbol name wins outright
     assert web._resolve_part(
         {"symbol": "u:USBLC6-2SC6_C2687116", "footprint": "u:SOT-23-6"}) == ("id", "C2687116")
+    # 2. a curated-bundle part ("<lib>:<name>") resolves to its manifest LCSC id --
+    #    the exact part -- ahead of an MPN keyword search (which is also blocked).
     assert web._resolve_part(
         {"symbol": "tp4056:TP4056", "footprint": "tp4056:ESOP-8",
-         "mpn": "TP4056-42-ESOP8"}) == ("mpn", "TP4056-42-ESOP8")
+         "mpn": "TP4056-42-ESOP8"}) == ("id", "C16581")
+    # 3. a non-bundle part with an MPN falls back to an MPN search
+    assert web._resolve_part(
+        {"symbol": "x:CHIP", "footprint": "x:QFN", "mpn": "SOMEMPN-123"}) == ("mpn", "SOMEMPN-123")
+    # 4. a generic passive -> value + package-size keyword
     assert web._resolve_part(
         {"symbol": "Device:R", "footprint": "Resistor_SMD:R_0402_1005Metric",
          "value": "5.1k"}) == ("kw", "5.1k 0402")
+    # 5. nothing to go on
     assert web._resolve_part(
         {"value": "", "symbol": "Device:X", "footprint": "Foo:BAR"}) is None
 
