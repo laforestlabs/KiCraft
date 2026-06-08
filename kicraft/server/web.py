@@ -38,6 +38,17 @@ from .config import LEGAL_VERSION, Settings, default_legal_dir
 from .examples import CHIP_PROMPTS, EXAMPLE_PROMPTS
 from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView, kicanvas_head
 from .mailer import send_reset_email
+from ..parts_library import PART_NAME_RE, Tier
+from .parts_catalog import (
+    catalog,
+    footprint_svg,
+    get_part,
+    kicad_cli_available,
+    lcsc_url,
+    symbol_svgs,
+    tier_label,
+    usage_markdown,
+)
 from .samples import SAMPLES_DIR, available_samples, featured_sample
 from .session import (
     commit_slot,
@@ -239,6 +250,42 @@ def serve_project_render(token: str, subpath: str):
     return FileResponse(
         str(target),
         media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# Part-library previews: KiCanvas can't render a bare .kicad_sym/.kicad_mod, so the
+# /parts catalog shows symbols and footprints as SVGs produced by kicad-cli and cached
+# by content-hash (see parts_catalog). These are library reference assets (no per-user
+# data), so like the /samples static files they need no auth; the /parts *page* is gated.
+@app.get("/part-preview/{name}/{asset}")
+def serve_part_preview(name: str, asset: str):
+    """Serve a cached symbol/footprint SVG for a library part, generating on demand.
+
+    ``asset`` is ``symbol-<n>.svg`` (1-based unit) or ``footprint.svg``. The name is
+    validated and must resolve to a real bundle, so junk or a traversal name 404s.
+    """
+    if not PART_NAME_RE.match(name):
+        return PlainTextResponse("not found", status_code=404)
+    part = get_part(name)
+    if part is None:
+        return PlainTextResponse("not found", status_code=404)
+
+    target: Path | None = None
+    if asset == "footprint.svg":
+        target = footprint_svg(part)
+    else:
+        m = re.fullmatch(r"symbol-(\d+)\.svg", asset)
+        if m:
+            svgs = symbol_svgs(part)
+            idx = int(m.group(1)) - 1
+            if 0 <= idx < len(svgs):
+                target = svgs[idx]
+    if target is None or not target.is_file():
+        return PlainTextResponse("not found", status_code=404)
+    return FileResponse(
+        str(target),
+        media_type="image/svg+xml",
         headers={"Cache-Control": "no-store"},
     )
 
@@ -2007,6 +2054,178 @@ def samples_page():
                 card.on("click", lambda ss=s: open_sample(ss))
 
 
+def _parts_header(subtitle_btn_label: str, subtitle_btn_target: str) -> None:
+    """The shared dark header for the /parts pages: brand + a single back button."""
+    with ui.header().classes("items-center justify-between") \
+            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+        with ui.row().classes("items-center gap-2"):
+            ui.label("KiCraft").classes("text-xl font-bold text-white")
+            ui.label("part library").classes("text-sm").style("color:#94a3b8")
+        ui.button(subtitle_btn_label, icon="arrow_back",
+                  on_click=lambda: ui.navigate.to(subtitle_btn_target)) \
+            .props("flat dense no-caps color=white").classes("text-xs")
+
+
+def _tier_badge(tier) -> None:
+    """A small badge marking a part as Standard (vendored) vs the user's own."""
+    ui.badge(tier_label(tier),
+             color="primary" if tier == Tier.VENDORED else "teal")
+
+
+@ui.page("/parts")
+def parts_page():
+    """Logged-in browser for the part library: every standard (vendored) part plus
+    anything the user added, listed by part number. Clicking a row opens its detail
+    page. Same login + consent gating as the rest of the app; no model is ever called,
+    so this is pure reference content."""
+    user = _current_user()
+    if user is None:
+        return RedirectResponse("/login")
+    if user.accepted_terms_version != LEGAL_VERSION:
+        return RedirectResponse("/consent")
+
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    _parts_header("Back to workspace", "/")
+
+    parts = catalog()
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1100px"):
+        ui.label("Part library").classes("text-2xl font-bold text-white")
+        ui.label("Browse the standard library and parts you've added. Click a part to "
+                 "see its symbol, footprint, how to use it, and where to buy it.") \
+            .classes("text-sm").style("color:#94a3b8")
+
+        if not parts:
+            ui.label("No parts are available right now.") \
+                .classes("text-sm").style("color:#64748b")
+            return
+
+        with ui.row().classes("w-full items-center gap-3"):
+            search = ui.input(placeholder="Search by part number, name, tag...") \
+                .props("dense outlined clearable dark").classes("flex-grow") \
+                .style("min-width:240px")
+            tier_filter = ui.toggle(["All", "Standard", "Yours"], value="All") \
+                .props("dense no-caps")
+        count_label = ui.label().classes("text-xs").style("color:#64748b")
+        results = ui.column().classes("w-full gap-2")
+
+        def matches(p) -> bool:
+            is_std = p.tier == Tier.VENDORED
+            if tier_filter.value == "Standard" and not is_std:
+                return False
+            if tier_filter.value == "Yours" and is_std:
+                return False
+            q = (search.value or "").strip().lower()
+            if not q:
+                return True
+            m = p.manifest
+            hay = " ".join([m.mpn, m.name, m.description, " ".join(m.tags)]).lower()
+            return all(term in hay for term in q.split())
+
+        def render() -> None:
+            results.clear()
+            shown = [p for p in parts if matches(p)]
+            count_label.text = f"{len(shown)} of {len(parts)} parts"
+            with results:
+                for p in shown:
+                    m = p.manifest
+                    row = ui.row().classes(
+                        "w-full items-center gap-3 cursor-pointer p-3 rounded "
+                        "hover:bg-slate-800").style(
+                        "background:#0f172a;border:1px solid #1e293b")
+                    with row:
+                        with ui.column().classes("gap-0").style("min-width:170px"):
+                            ui.label(m.mpn).classes("text-sm font-bold text-white")
+                            ui.label(m.name).classes("text-xs").style("color:#64748b")
+                        ui.label(m.description).classes("text-xs flex-grow").style(
+                            "color:#94a3b8;display:-webkit-box;-webkit-line-clamp:2;"
+                            "-webkit-box-orient:vertical;overflow:hidden")
+                        _tier_badge(p.tier)
+                        ui.badge(m.maturity, color="grey-7")
+                    row.on("click",
+                           lambda pp=p: ui.navigate.to(f"/parts/{pp.manifest.name}"))
+
+        search.on_value_change(lambda: render())
+        tier_filter.on_value_change(lambda: render())
+        render()
+
+
+@ui.page("/parts/{name}")
+def part_detail_page(name: str):
+    """Detail view for one library part: its symbol and footprint (rendered to SVG by
+    kicad-cli, shown on light cards), a how-to-use doc built from the manifest, and
+    datasheet + LCSC links."""
+    user = _current_user()
+    if user is None:
+        return RedirectResponse("/login")
+    if user.accepted_terms_version != LEGAL_VERSION:
+        return RedirectResponse("/consent")
+
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    _parts_header("Back to library", "/parts")
+
+    part = get_part(name)
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1100px"):
+        if part is None:
+            ui.label("Part not found").classes("text-2xl font-bold text-white")
+            ui.label(f"No library part named '{name}'.").classes("text-sm") \
+                .style("color:#94a3b8")
+            ui.button("Back to library", on_click=lambda: ui.navigate.to("/parts")) \
+                .props("color=primary unelevated")
+            return
+
+        m = part.manifest
+        with ui.row().classes("items-center gap-3 flex-wrap"):
+            ui.label(m.mpn).classes("text-2xl font-bold text-white")
+            _tier_badge(part.tier)
+            ui.badge(m.maturity, color="grey-7")
+        ui.label(m.name).classes("text-sm").style("color:#64748b")
+
+        # Symbol + footprint on light cards (the white-canvas look users know from KiCad).
+        img_style = "height:260px;background:#ffffff;padding:10px"
+        with ui.row().classes("w-full gap-4 flex-wrap"):
+            with ui.card().classes("flex-grow").style(
+                    "background:#0f172a;border:1px solid #1e293b;min-width:300px"):
+                ui.label("Symbol").classes("text-xs font-medium").style("color:#94a3b8")
+                syms = symbol_svgs(part) if kicad_cli_available() else []
+                if syms:
+                    for i in range(len(syms)):
+                        ui.image(f"/part-preview/{m.name}/symbol-{i + 1}.svg") \
+                            .props("fit=contain").classes("w-full rounded").style(img_style)
+                else:
+                    ui.label("Preview unavailable").classes("text-xs") \
+                        .style("color:#64748b;padding:16px")
+            with ui.card().classes("flex-grow").style(
+                    "background:#0f172a;border:1px solid #1e293b;min-width:300px"):
+                ui.label("Footprint").classes("text-xs font-medium") \
+                    .style("color:#94a3b8")
+                fp = footprint_svg(part) if kicad_cli_available() else None
+                if fp:
+                    ui.image(f"/part-preview/{m.name}/footprint.svg") \
+                        .props("fit=contain").classes("w-full rounded").style(img_style)
+                else:
+                    ui.label("Preview unavailable").classes("text-xs") \
+                        .style("color:#64748b;padding:16px")
+
+        with ui.row().classes("w-full gap-3 flex-wrap"):
+            if m.datasheet_url:
+                ui.button("Datasheet", icon="description",
+                          on_click=lambda u=m.datasheet_url:
+                          ui.navigate.to(u, new_tab=True)) \
+                    .props("outline no-caps color=white")
+            url = lcsc_url(m)
+            if url:
+                ui.button("View on LCSC", icon="shopping_cart",
+                          on_click=lambda u=url: ui.navigate.to(u, new_tab=True)) \
+                    .props("outline no-caps color=white")
+
+        with ui.card().classes("w-full") \
+                .style("background:#0f172a;border:1px solid #1e293b"):
+            ui.markdown(usage_markdown(part)).classes("w-full").style("color:#cbd5e1")
+
+
 # ---------------------------------------------------------------------------
 # Public landing page (shown at / to logged-out visitors).
 # ---------------------------------------------------------------------------
@@ -2285,6 +2504,10 @@ def index(prompt: str = ""):
                       on_click=lambda: ui.navigate.to("/samples")) \
                 .props("flat dense no-caps color=white").classes("text-xs") \
                 .tooltip("Explore boards KiCraft designed")
+            ui.button("Part library", icon="memory",
+                      on_click=lambda: ui.navigate.to("/parts")) \
+                .props("flat dense no-caps color=white").classes("text-xs") \
+                .tooltip("Browse the standard library and parts you've added")
             if is_admin(user):
                 ui.button("Admin", icon="admin_panel_settings",
                           on_click=lambda: ui.navigate.to("/admin")) \
