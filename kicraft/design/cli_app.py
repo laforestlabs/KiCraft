@@ -1644,14 +1644,32 @@ def _cmd_synthesize(args: argparse.Namespace) -> int:
 # --- build orchestrator: synthesize -> optimize+route -> promote -> gate -> fab -
 
 _QUALITY_PRESETS = {
-    "fast": {"engine": "solve-hierarchy", "rounds": 1},
-    "good": {"engine": "autoexperiment", "rounds": 3},
-    "best": {"engine": "autoexperiment", "rounds": 6},
+    "fast": {"engine": "solve-hierarchy"},
+    "good": {"engine": "autoexperiment", "leaf_rounds": 3, "leaf_attempts": 3,
+             "parent_rounds": 3},
+    "best": {"engine": "autoexperiment", "leaf_rounds": 6, "leaf_attempts": 3,
+             "parent_rounds": 6},
 }
 
 
 def _run_layout(quality: str, root_sch: Path, pcb: Path) -> int:
-    """Run the placement+routing engine in-process (inherits this env's pcbnew)."""
+    """Run the placement+routing engine in-process (inherits this env's pcbnew).
+
+    autoexperiment qualities run in TWO phases instead of one combined loop:
+
+      1. LEAF phase (``--leaves-only``): solve every leaf with a parameter-
+         mutation search -- ``leaf_rounds`` mutated configs x ``leaf_attempts``
+         seeds = N designs per leaf -- then **auto-pin each leaf's best**.
+      2. PARENT phase (``--parents-only``): compose + route the parent for
+         ``parent_rounds``, using the pinned leaves.
+
+    The old single combined loop kept the best *parent round* and never
+    independently pinned a leaf's best, so a sparse leaf (e.g. a USB-C+LDO power
+    sheet) inherited whatever sprawled placement the winning parent round had.
+    Decoupling lets each leaf find AND keep its tight cluster before the parent
+    runs -- which is the manual ``solve-leaves -> pin -> compose`` flow that
+    reliably placed these boards.
+    """
     preset = _QUALITY_PRESETS.get(quality, _QUALITY_PRESETS["good"])
     if preset["engine"] == "solve-hierarchy":
         from kicraft.cli.solve_hierarchy import main as _solve_hierarchy_main
@@ -1659,9 +1677,17 @@ def _run_layout(quality: str, root_sch: Path, pcb: Path) -> int:
         return _solve_hierarchy_main([str(root_sch), "--pcb", str(pcb), "--route"])
     from kicraft.cli.autoexperiment import main as _autoexperiment_main
 
-    return _autoexperiment_main(
-        [str(pcb), "--schematic", str(root_sch), "--rounds", str(preset["rounds"])]
-    )
+    common = [str(pcb), "--schematic", str(root_sch)]
+    print(f"[build]   leaf phase: {preset['leaf_rounds']}x{preset['leaf_attempts']} "
+          f"designs/leaf + auto-pin best ...")
+    leaf_rc = _autoexperiment_main(common + [
+        "--leaves-only", "--rounds", str(preset["leaf_rounds"]),
+        "--leaf-rounds", str(preset["leaf_attempts"])])
+    if leaf_rc != 0:
+        return leaf_rc
+    print(f"[build]   parent phase: {preset['parent_rounds']} round(s) from pinned leaves ...")
+    return _autoexperiment_main(common + [
+        "--parents-only", "--rounds", str(preset["parent_rounds"])])
 
 
 def _find_routed_parent(project_dir: Path) -> Path | None:
