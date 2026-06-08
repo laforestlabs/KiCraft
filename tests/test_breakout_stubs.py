@@ -12,6 +12,7 @@ from kicraft.autoplacer.brain.breakout_stubs import (  # noqa: E402
     BreakoutSpec,
     add_breakout_stubs,
     auto_power_tie_specs,
+    auto_signal_escape_specs,
     perimeter_tie_specs,
     radial_breakout_specs,
     radial_escape_point,
@@ -216,6 +217,98 @@ def test_auto_power_tie_respects_exclude(tmp_path):
     _board(path, (10.0, 10.0), {"1": ("VBUS", 6.0, 10.0), "2": ("VBUS", 14.0, 10.0)})
     board = pcbnew.LoadBoard(path)
     assert auto_power_tie_specs(board, {"power_tie_exclude_refs": ["J1"]}) == []
+
+
+def _conn_resistor_board(path, conn_pads, res_pads):
+    """A 30x30 board with a J1 connector + an R1 resistor (each num -> (net,x,y))
+    so a signal net can span two pads (connector pin -> resistor)."""
+    board = pcbnew.NewBoard(path)
+    all_pads = {**conn_pads, **res_pads}
+    for name in {v[0] for v in all_pads.values() if v[0]}:
+        board.Add(pcbnew.NETINFO_ITEM(board, name))
+
+    def net(n):
+        return board.GetNetInfo().GetNetItem(n)
+
+    corners = [(0, 0), (30, 0), (30, 30), (0, 30), (0, 0)]
+    for (x1, y1), (x2, y2) in zip(corners, corners[1:]):
+        seg = pcbnew.PCB_SHAPE(board)
+        seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        seg.SetStart(pcbnew.VECTOR2I(_mm(x1), _mm(y1)))
+        seg.SetEnd(pcbnew.VECTOR2I(_mm(x2), _mm(y2)))
+        seg.SetLayer(pcbnew.Edge_Cuts)
+        board.Add(seg)
+
+    def add_fp(ref, center, pads):
+        fp = pcbnew.FOOTPRINT(board)
+        fp.SetReference(ref)
+        fp.SetPosition(pcbnew.VECTOR2I(_mm(center[0]), _mm(center[1])))
+        board.Add(fp)
+        for num, (netname, x, y) in pads.items():
+            pad = pcbnew.PAD(fp)
+            pad.SetSize(pcbnew.VECTOR2I(_mm(0.3), _mm(1.0)))
+            pad.SetPosition(pcbnew.VECTOR2I(_mm(x), _mm(y)))
+            pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+            pad.SetLayerSet(pcbnew.PAD.SMDMask())
+            pad.SetNumber(num)
+            if netname:
+                pad.SetNet(net(netname))
+            fp.Add(pad)
+
+    add_fp("J1", (5.0, 10.0), conn_pads)
+    add_fp("R1", (20.0, 10.0), res_pads)
+    board.Save(path)
+    return path
+
+
+def _j1_escaped_nets(board, specs):
+    fp = next(f for f in board.GetFootprints() if f.GetReferenceAsString() == "J1")
+    return {fp.FindPadByNumber(s.pad).GetNetname() for s in specs}
+
+
+def test_auto_signal_escape_escapes_connector_signal_pads(tmp_path):
+    # USB-C-like connector: spread VBUS (2 pads) marks it dense; its CC1/CC2
+    # signal pins each reach a resistor pad (2-pad nets) and must escape; VBUS/GND
+    # (power) and a single-pad interface pin (SBU1) are left alone.
+    path = str(tmp_path / "b.kicad_pcb")
+    _conn_resistor_board(
+        path,
+        conn_pads={
+            "A4": ("VBUS", 6.0, 9.0), "B9": ("VBUS", 6.0, 11.0),
+            "A1": ("GND", 7.0, 9.0), "B12": ("GND", 7.0, 11.0),
+            "A5": ("CC1", 5.0, 9.0), "B5": ("CC2", 5.0, 11.0),
+            "A8": ("SBU1", 4.0, 9.0),  # single pad on the board -> skipped
+        },
+        res_pads={"1": ("CC1", 20.0, 9.0), "2": ("CC2", 20.0, 11.0)},
+    )
+    board = pcbnew.LoadBoard(path)
+    specs = auto_signal_escape_specs(board, {"gnd_zone_net": "GND"})
+    assert all(s.ref == "J1" for s in specs)  # resistor (no spread power) untouched
+    assert _j1_escaped_nets(board, specs) == {"CC1", "CC2"}
+
+
+def test_auto_signal_escape_skips_footprint_without_spread_power(tmp_path):
+    # Only one VBUS pad -> not a dense connector -> no signal escapes.
+    path = str(tmp_path / "b.kicad_pcb")
+    _conn_resistor_board(
+        path,
+        conn_pads={"1": ("VBUS", 6.0, 10.0), "5": ("CC2", 5.0, 11.0)},
+        res_pads={"1": ("CC2", 20.0, 11.0)},
+    )
+    board = pcbnew.LoadBoard(path)
+    assert auto_signal_escape_specs(board, {"gnd_zone_net": "GND"}) == []
+
+
+def test_auto_signal_escape_disable_and_exclude(tmp_path):
+    path = str(tmp_path / "b.kicad_pcb")
+    _conn_resistor_board(
+        path,
+        conn_pads={"A4": ("VBUS", 6.0, 9.0), "B9": ("VBUS", 6.0, 11.0), "B5": ("CC2", 5.0, 11.0)},
+        res_pads={"1": ("CC2", 20.0, 11.0)},
+    )
+    board = pcbnew.LoadBoard(path)
+    assert auto_signal_escape_specs(board, {"auto_signal_escape": False}) == []
+    assert auto_signal_escape_specs(board, {"signal_escape_exclude_refs": ["J1"]}) == []
 
 
 def test_radial_breakout_specs_filters(tmp_path):
