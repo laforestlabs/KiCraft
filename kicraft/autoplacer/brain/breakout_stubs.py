@@ -178,6 +178,170 @@ def radial_breakout_specs(
     return specs
 
 
+def _nearest_on_rect(
+    px: float, py: float, x1: float, y1: float, x2: float, y2: float
+) -> tuple[float, float]:
+    """Nearest point on the rectangle border to an interior point."""
+    dl, dr, dt, db = px - x1, x2 - px, py - y1, y2 - py
+    m = min(dl, dr, dt, db)
+    if m == dl:
+        return (x1, py)
+    if m == dr:
+        return (x2, py)
+    if m == dt:
+        return (px, y1)
+    return (px, y2)
+
+
+def _rect_perimeter_path(
+    b1: tuple[float, float],
+    b2: tuple[float, float],
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+) -> list[tuple[float, float]]:
+    """Waypoints walking the rectangle border from b1 to b2 the short way.
+
+    Both endpoints lie on the border; the returned list is the corner points
+    strictly between them (exclusive of b1/b2), in travel order. Staying on the
+    border keeps the path outside everything the rectangle encloses.
+    """
+    w, h = x2 - x1, y2 - y1
+    per = 2 * (w + h)
+    corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+
+    def pos(p):
+        x, y = p
+        if abs(y - y1) <= abs(y - y2) and abs(y - y1) <= min(abs(x - x1), abs(x - x2)):
+            return x - x1  # top edge
+        if abs(x - x2) <= abs(x - x1) and abs(x - x2) <= min(abs(y - y1), abs(y - y2)):
+            return w + (y - y1)  # right edge
+        if abs(y - y2) <= abs(y - y1):
+            return w + h + (x2 - x)  # bottom edge
+        return 2 * w + h + (y2 - y)  # left edge
+
+    corner_pos = [0.0, w, w + h, 2 * w + h]
+    p1, p2 = pos(b1), pos(b2)
+    cw = (p2 - p1) % per
+    ccw = per - cw
+    out = []
+    if cw <= ccw:
+        for cpos, c in zip(corner_pos, corners):
+            if (cpos - p1) % per < cw and (cpos - p1) % per > 1e-9:
+                out.append((c, (cpos - p1) % per))
+        out.sort(key=lambda t: t[1])
+    else:
+        for cpos, c in zip(corner_pos, corners):
+            if (p1 - cpos) % per < ccw and (p1 - cpos) % per > 1e-9:
+                out.append((c, (p1 - cpos) % per))
+        out.sort(key=lambda t: t[1])
+    return [c for c, _ in out]
+
+
+def perimeter_tie_specs(
+    board: "pcbnew.BOARD",
+    ref: str,
+    net_names: list[str] | None = None,
+    *,
+    margin_mm: float = 1.0,
+    layer: str = "F.Cu",
+    min_pads: int = 2,
+) -> list[BreakoutSpec]:
+    """Tie a footprint's same-net pads with a path routed around its bbox.
+
+    For each net that has >= *min_pads* pads on *ref* (restrict with
+    *net_names*), connect the two farthest-apart pads with a waypoint path that
+    leaves each pad, hops just outside the footprint's bounding box, and walks
+    the box perimeter between them. That keeps a power pour from fragmenting:
+    the connector's spread power pads (e.g. USB-C VBUS) become one net island.
+    """
+    specs: list[BreakoutSpec] = []
+    fp = next(
+        (f for f in board.GetFootprints() if f.GetReferenceAsString() == ref), None
+    )
+    if fp is None:
+        return specs
+    bb = fp.GetBoundingBox()
+    m = margin_mm
+    x1 = pcbnew.ToMM(bb.GetX()) - m
+    y1 = pcbnew.ToMM(bb.GetY()) - m
+    x2 = pcbnew.ToMM(bb.GetX() + bb.GetWidth()) + m
+    y2 = pcbnew.ToMM(bb.GetY() + bb.GetHeight()) + m
+
+    by_net: dict[str, list] = {}
+    for pad in fp.Pads():
+        n = pad.GetNetname()
+        if not n or (net_names is not None and n not in net_names):
+            continue
+        by_net.setdefault(n, []).append(pad)
+
+    for net, pads in by_net.items():
+        if len(pads) < min_pads:
+            continue
+        pts = [(pcbnew.ToMM(p.GetPosition().x), pcbnew.ToMM(p.GetPosition().y)) for p in pads]
+        # Farthest-apart pair.
+        i, j, best = 0, 1, -1.0
+        for a in range(len(pts)):
+            for b in range(a + 1, len(pts)):
+                d = (pts[a][0] - pts[b][0]) ** 2 + (pts[a][1] - pts[b][1]) ** 2
+                if d > best:
+                    best, i, j = d, a, b
+        p1, p2 = pts[i], pts[j]
+        b1 = _nearest_on_rect(p1[0], p1[1], x1, y1, x2, y2)
+        b2 = _nearest_on_rect(p2[0], p2[1], x1, y1, x2, y2)
+        corners = _rect_perimeter_path(b1, b2, x1, y1, x2, y2)
+        waypoints = [b1, *corners, b2, p2]
+        specs.append(
+            BreakoutSpec(
+                ref=ref, pad=pads[i].GetNumber(), waypoints=waypoints, layer=layer
+            )
+        )
+    return specs
+
+
+def auto_power_tie_specs(
+    board: "pcbnew.BOARD",
+    cfg: dict[str, Any] | None = None,
+) -> list[BreakoutSpec]:
+    """Perimeter-tie specs for every footprint with spread power-net pads.
+
+    Auto-detects the case a power pour can't close on a 2-layer board: a
+    footprint (typically a connector) with >= 2 pads on a power rail that signal
+    traces fragment the pour around. Skips GND (handled by the GND plane +
+    thermal vias) and single-power-pad parts. Footprint refs in
+    ``power_tie_exclude_refs`` are skipped.
+    """
+    cfg = cfg or {}
+    gnd_name = cfg.get("gnd_zone_net", "GND")
+    exclude = set(cfg.get("power_tie_exclude_refs", []) or [])
+    margin = float(cfg.get("power_tie_margin_mm", 1.0))
+    from kicraft.design.models import is_power_or_ground_name
+
+    specs: list[BreakoutSpec] = []
+    for fp in board.GetFootprints():
+        ref = fp.GetReferenceAsString()
+        if ref in exclude:
+            continue
+        power_nets = set()
+        counts: dict[str, int] = {}
+        for pad in fp.Pads():
+            n = pad.GetNetname()
+            if not n or n == gnd_name:
+                continue
+            if is_power_or_ground_name(n):
+                counts[n] = counts.get(n, 0) + 1
+        power_nets = {n for n, c in counts.items() if c >= 2}
+        if not power_nets:
+            continue
+        specs.extend(
+            perimeter_tie_specs(
+                board, ref, net_names=sorted(power_nets), margin_mm=margin
+            )
+        )
+    return specs
+
+
 def add_breakout_stubs(
     pcb_path: str,
     specs: list[BreakoutSpec],

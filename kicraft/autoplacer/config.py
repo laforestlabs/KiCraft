@@ -282,6 +282,13 @@ DEFAULT_CONFIG = {
     "power_plane_nets": None,
     "power_plane_max_nets": 1,
     "power_plane_priority": 1,
+    # Auto power-tie (default on): before routing, route a locked tie around any
+    # connector whose spread power pads (e.g. USB-C VBUS on both sides) would
+    # otherwise fragment the power pour into disconnected islands. The tie runs
+    # around the footprint bounding box so it never crosses other pads.
+    "auto_power_tie": True,
+    "power_tie_margin_mm": 1.0,
+    "power_tie_exclude_refs": [],
     "thermal_via_pitch_mm": 1.2,
     "thermal_via_inset_mm": 0.5,
     "thermal_pad_area_mm2": 4.0,

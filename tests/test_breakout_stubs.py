@@ -11,6 +11,8 @@ pcbnew = pytest.importorskip("pcbnew")
 from kicraft.autoplacer.brain.breakout_stubs import (  # noqa: E402
     BreakoutSpec,
     add_breakout_stubs,
+    auto_power_tie_specs,
+    perimeter_tie_specs,
     radial_breakout_specs,
     radial_escape_point,
 )
@@ -160,6 +162,60 @@ def test_radial_escape_skipped_when_no_safe_room(tmp_path):
     )
     assert res["stubs"] == 0
     assert any("no_safe_radial_escape" in s for s in res["skipped"])
+
+
+def test_perimeter_tie_routes_around_bbox(tmp_path):
+    # Two VBUS pads at opposite ends of the connector + an obstacle pad between
+    # them. The tie must route around the bbox (not straight through the middle).
+    path = str(tmp_path / "b.kicad_pcb")
+    _board(
+        path,
+        (10.0, 10.0),
+        {
+            "L": ("VBUS", 6.0, 10.0),
+            "MID": ("CC2", 10.0, 10.0),
+            "R": ("VBUS", 14.0, 10.0),
+        },
+    )
+    board = pcbnew.LoadBoard(path)
+    specs = perimeter_tie_specs(board, "J1", net_names=["VBUS"], margin_mm=1.0)
+    assert len(specs) == 1
+    s = specs[0]
+    # Ends on the far VBUS pad.
+    assert s.waypoints[-1] == pytest.approx((14.0, 10.0))
+    # Detours off the pad row (corner waypoints well above/below y=10)...
+    assert any(abs(y - 10.0) > 0.8 for _, y in s.waypoints)
+    # ...and never lands on the obstacle (CC2 pad at (10,10)).
+    assert not any(
+        abs(x - 10.0) < 0.5 and abs(y - 10.0) < 0.5 for x, y in s.waypoints
+    )
+
+
+def test_auto_power_tie_detects_connector_and_skips_gnd(tmp_path):
+    path = str(tmp_path / "b.kicad_pcb")
+    _board(
+        path,
+        (10.0, 10.0),
+        {
+            "1": ("VBUS", 6.0, 10.0),
+            "2": ("VBUS", 14.0, 10.0),
+            "3": ("GND", 6.0, 12.0),
+            "4": ("GND", 14.0, 12.0),
+            "5": ("CC2", 10.0, 10.0),
+        },
+    )
+    board = pcbnew.LoadBoard(path)
+    specs = auto_power_tie_specs(board, {"gnd_zone_net": "GND"})
+    # VBUS (2 pads) tied; GND excluded (handled by GND plane); CC2 (1 pad) skipped.
+    nets = {board.GetFootprints()[0].FindPadByNumber(s.pad).GetNetname() for s in specs}
+    assert nets == {"VBUS"}
+
+
+def test_auto_power_tie_respects_exclude(tmp_path):
+    path = str(tmp_path / "b.kicad_pcb")
+    _board(path, (10.0, 10.0), {"1": ("VBUS", 6.0, 10.0), "2": ("VBUS", 14.0, 10.0)})
+    board = pcbnew.LoadBoard(path)
+    assert auto_power_tie_specs(board, {"power_tie_exclude_refs": ["J1"]}) == []
 
 
 def test_radial_breakout_specs_filters(tmp_path):

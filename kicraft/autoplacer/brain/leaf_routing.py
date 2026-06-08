@@ -470,6 +470,19 @@ def route_local_subcircuit(
     # autorouter can't escape its pad field. Added to the pre-route board and
     # preserved through routing so FreeRouting finishes from the breakout points.
     _breakout_specs = _resolve_breakout_specs(cfg)
+    # Auto power-tie (default on): route a tie around any connector whose spread
+    # power pads (e.g. USB-C VBUS) would otherwise fragment the power pour.
+    if cfg.get("auto_power_tie", True):
+        try:
+            import pcbnew
+
+            from kicraft.autoplacer.brain.breakout_stubs import auto_power_tie_specs
+
+            _tie_board = pcbnew.LoadBoard(str(pre_route_board))
+            _breakout_specs = _breakout_specs + auto_power_tie_specs(_tie_board, cfg)
+            del _tie_board
+        except Exception as exc:  # never fail the leaf on a finishing helper
+            print(f"  WARNING: auto power-tie spec gen failed: {exc}")
     if _breakout_specs:
         try:
             from kicraft.autoplacer.brain.breakout_stubs import add_breakout_stubs
