@@ -58,6 +58,16 @@ class LeafAcceptanceConfig:
         If set, reject when the (adjusted) clearance violation count exceeds
         this threshold.  ``None`` (default) means clearance violations alone
         never cause rejection.
+    max_unconnected:
+        If set, reject when the number of *signal* nets with an unconnected
+        (ratsnest) item exceeds this threshold.  Power/ground nets are excluded
+        because they close on the post-route copper pour, not on leaf routing
+        (see *poured_nets*).  ``None`` (default) means unconnected items never
+        cause rejection -- the historical lenient behaviour.
+    poured_nets:
+        Extra net names (beyond the automatic power/ground classification) that
+        are connected by a copper pour at compose time and therefore must not
+        count against *max_unconnected* when left unrouted on the leaf.
     require_routed_board:
         When ``True`` (default), the routed board file must exist on disk.
     require_no_python_exception:
@@ -70,6 +80,8 @@ class LeafAcceptanceConfig:
     require_anchor_completeness: bool = False
     max_shorts: int = 0
     max_clearance_violations: int | None = None
+    max_unconnected: int | None = None
+    poured_nets: frozenset[str] = frozenset()
     require_routed_board: bool = True
     require_no_python_exception: bool = True
 
@@ -162,6 +174,63 @@ def _gate_no_shorts(
         "passed": passed,
         "shorts": shorts,
         "max_shorts": cfg.max_shorts,
+    }
+
+
+def _is_poured_net(net: str, cfg: LeafAcceptanceConfig) -> bool:
+    """A net connected by a copper pour at compose time (so leaf-level
+    unconnected items on it are expected and harmless)."""
+    if net in cfg.poured_nets:
+        return True
+    # Lazy import keeps this module free of heavier package imports at load.
+    from kicraft.design.models import is_power_or_ground_name
+
+    return is_power_or_ground_name(net)
+
+
+def _gate_no_unconnected(
+    validation: dict[str, Any],
+    _anchor: dict[str, Any],
+    cfg: LeafAcceptanceConfig,
+) -> tuple[bool, dict[str, Any]]:
+    """Gate: signal nets must be fully routed within the leaf.
+
+    Power/ground nets (and any configured *poured_nets*) are excluded because
+    they are connected by the post-route pour at compose, not by leaf routing.
+    When *max_unconnected* is ``None`` the gate is skipped entirely.
+    """
+    drc = validation.get("drc", {})
+    raw = int(drc.get("unconnected", 0))
+    nets = list(drc.get("unconnected_nets", []) or [])
+
+    if cfg.max_unconnected is None:
+        return True, {
+            "passed": True,
+            "skipped": True,
+            "reason": "max_unconnected is None",
+            "unconnected_total": raw,
+            "unconnected_nets": nets,
+        }
+
+    poured = [n for n in nets if _is_poured_net(n, cfg)]
+    signal = [n for n in nets if not _is_poured_net(n, cfg)]
+
+    # With net names available, gate on unrouted *signal* nets only. If the
+    # report had unconnected items but no parsable net names (format drift),
+    # fall back to the raw count so the miss is surfaced rather than hidden.
+    if nets:
+        count = len(signal)
+    else:
+        count = raw
+    passed = count <= cfg.max_unconnected
+
+    return passed, {
+        "passed": passed,
+        "unconnected_total": raw,
+        "unconnected_nets": nets,
+        "signal_unconnected_nets": signal,
+        "ignored_poured_nets": poured,
+        "max_unconnected": cfg.max_unconnected,
     }
 
 
@@ -307,6 +376,7 @@ _GATES: list[tuple[str, Any]] = [
     ("board_exists", _gate_board_exists),
     ("no_python_exception", _gate_no_python_exception),
     ("no_shorts", _gate_no_shorts),
+    ("no_unconnected", _gate_no_unconnected),
     ("no_illegal_geometry", _gate_no_illegal_geometry),
     ("drc_clearance", _gate_drc_clearance),
     ("anchor_completeness", _gate_anchor_completeness),
@@ -360,6 +430,8 @@ def evaluate_leaf_acceptance(
     drc = validation.get("drc", {})
     result.drc_summary = {
         "shorts": int(drc.get("shorts", 0)),
+        "unconnected": int(drc.get("unconnected", 0)),
+        "unconnected_nets": list(drc.get("unconnected_nets", []) or []),
         "clearance": int(drc.get("clearance", 0)),
         "footprint_internal_clearance_count": int(
             validation.get("footprint_internal_clearance_count", 0)
@@ -434,6 +506,8 @@ def acceptance_config_from_dict(cfg: dict[str, Any]) -> LeafAcceptanceConfig:
     - ``leaf_acceptance_require_anchor_completeness`` (bool)
     - ``leaf_acceptance_max_shorts`` (int)
     - ``leaf_acceptance_max_clearance_violations`` (int or None)
+    - ``leaf_acceptance_max_unconnected`` (int or None)
+    - ``leaf_acceptance_poured_nets`` (list of net names)
     - ``leaf_acceptance_require_routed_board`` (bool)
     - ``leaf_acceptance_require_no_python_exception`` (bool)
 
@@ -480,5 +554,12 @@ def acceptance_config_from_dict(cfg: dict[str, Any]) -> LeafAcceptanceConfig:
     if "leaf_acceptance_max_clearance_violations" in cfg:
         raw = cfg["leaf_acceptance_max_clearance_violations"]
         kwargs["max_clearance_violations"] = None if raw is None else int(raw)
+
+    if "leaf_acceptance_max_unconnected" in cfg:
+        raw = cfg["leaf_acceptance_max_unconnected"]
+        kwargs["max_unconnected"] = None if raw is None else int(raw)
+
+    if "leaf_acceptance_poured_nets" in cfg:
+        kwargs["poured_nets"] = frozenset(cfg["leaf_acceptance_poured_nets"] or [])
 
     return LeafAcceptanceConfig(**kwargs)

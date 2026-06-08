@@ -117,6 +117,135 @@ def pour_gnd_planes(
     return {"zones": zones}
 
 
+def _detect_power_nets(board: Any, cfg: dict[str, Any]) -> list[str]:
+    """Power rails to pour, in priority order.
+
+    Honours an explicit ``power_plane_nets`` list; otherwise auto-detects nets
+    that classify as power (but not the GND pour net), ranked by pad count so
+    the dominant rail (e.g. VBUS on a USB board) is poured first. Limited to
+    ``power_plane_max_nets`` to avoid fragmenting one layer between rivals.
+    """
+    explicit = cfg.get("power_plane_nets")
+    gnd_name = cfg.get("gnd_zone_net", "GND")
+    if explicit:
+        return [n for n in explicit if n and n != gnd_name]
+
+    from kicraft.design.models import is_power_or_ground_name
+
+    pad_counts: dict[str, int] = {}
+    for fp in board.GetFootprints():
+        for pad in fp.Pads():
+            name = pad.GetNetname()
+            if not name or name == gnd_name:
+                continue
+            if is_power_or_ground_name(name):
+                pad_counts[name] = pad_counts.get(name, 0) + 1
+    ranked = sorted(pad_counts, key=lambda n: (-pad_counts[n], n))
+    max_nets = int(cfg.get("power_plane_max_nets", 1))
+    return ranked[:max_nets]
+
+
+def pour_power_planes(
+    pcb_path: str,
+    cfg: dict[str, Any] | None = None,
+    layers: tuple[str, ...] = ("F.Cu",),
+) -> dict[str, Any]:
+    """Pour the primary power rail(s) as a plane on ``layers`` and fill.
+
+    Power pads on a dense connector (paired USB-C VBUS pads, a regulator input,
+    bulk caps) are tedious for the autorouter to tie together pad-to-pad. A
+    power plane connects them through copper instead -- the same trick the GND
+    pour uses for ground. Poured at a higher priority than the GND plane so the
+    two coexist on a shared layer (power wins its region, GND fills the rest).
+
+    Idempotent w.r.t. zones (reuses an existing same-net/layer zone); adds no
+    vias. Returns ``{nets, zones}``.
+    """
+    cfg = cfg or {}
+    summary: dict[str, Any] = {"nets": [], "zones": 0}
+    if not cfg.get("power_plane_enabled", True):
+        return summary
+
+    board = pcbnew.LoadBoard(pcb_path)
+    power_nets = _detect_power_nets(board, cfg)
+    if not power_nets:
+        return summary
+
+    margin = pcbnew.FromMM(float(cfg.get("gnd_zone_margin_mm", 0.5)))
+    rect = board.GetBoardEdgesBoundingBox()
+    x1, y1 = rect.GetX() + margin, rect.GetY() + margin
+    x2 = rect.GetX() + rect.GetWidth() - margin
+    y2 = rect.GetY() + rect.GetHeight() - margin
+    layer_map = {"B.Cu": pcbnew.B_Cu, "F.Cu": pcbnew.F_Cu}
+    priority = int(cfg.get("power_plane_priority", 1))
+
+    for net_name in power_nets:
+        net = board.GetNetInfo().GetNetItem(net_name)
+        if not net or net.GetNetCode() == 0:
+            continue
+        for lname in layers:
+            target_layer = layer_map.get(lname)
+            if target_layer is None:
+                continue
+            zone = None
+            for z in board.Zones():
+                if (
+                    z.GetLayer() == target_layer
+                    and z.GetNetname() == net_name
+                    and not z.GetIsRuleArea()
+                ):
+                    zone = z
+                    break
+            if zone is None:
+                zone = pcbnew.ZONE(board)
+                zone.SetNet(net)
+                zone.SetLayer(target_layer)
+                zone.SetIsRuleArea(False)
+                zone.SetLocalClearance(
+                    pcbnew.FromMM(float(cfg.get("zone_clearance_mm", 0.3)))
+                )
+                zone.SetMinThickness(
+                    pcbnew.FromMM(float(cfg.get("zone_min_thickness_mm", 0.25)))
+                )
+                # Solid pad connection (not thermal): thermal-relief spokes need
+                # a gap wider than a dense connector's pad pitch, so they never
+                # form and the power pad stays isolated from the plane. A power
+                # plane wants the low-impedance solid tie anyway.
+                if str(cfg.get("power_plane_pad_connection", "full")).lower() == "thermal":
+                    zone.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL)
+                    zone.SetThermalReliefGap(
+                        pcbnew.FromMM(float(cfg.get("zone_thermal_gap_mm", 0.5)))
+                    )
+                    zone.SetThermalReliefSpokeWidth(
+                        pcbnew.FromMM(float(cfg.get("zone_thermal_spoke_mm", 0.5)))
+                    )
+                else:
+                    zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)
+                board.Add(zone)
+            # Higher priority than GND (0) so power wins its region on a shared
+            # layer; GND fills around it.
+            zone.SetAssignedPriority(priority)
+            try:
+                zone.SetIslandRemovalMode(pcbnew.ISLAND_REMOVAL_MODE_ALWAYS)
+            except Exception:
+                try:
+                    zone.SetIslandRemovalMode(0)
+                except Exception:
+                    pass
+            outline = zone.Outline()
+            outline.RemoveAllContours()
+            outline.NewOutline()
+            for px, py in ((x1, y1), (x2, y1), (x2, y2), (x1, y2)):
+                outline.Append(int(px), int(py))
+            summary["zones"] += 1
+        summary["nets"].append(net_name)
+
+    # Fill every zone together so priorities resolve power vs. GND overlap.
+    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    board.Save(pcb_path)
+    return summary
+
+
 def add_gnd_pour_and_thermal_vias(
     pcb_path: str,
     cfg: dict[str, Any] | None = None,
