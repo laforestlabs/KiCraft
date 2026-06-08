@@ -1,21 +1,27 @@
-"""Comb-stub router for KiCraft Stage B.
+"""Connectivity renderer for KiCraft Stage B.
 
-For each NetConnection:
+Turns the wiring stage's pin-to-net map (``bom.connections``) into the
+wires, junctions, power symbols, and labels a leaf .kicad_sch needs.
+Works hand-in-hand with the cluster ``placement``: because each passive
+is already sitting next to the pin it serves and rotated the right way,
+this router can draw the human thing instead of label salad:
 
-- **Power nets** → emit a ``power:<NAME>`` symbol at each endpoint, with a
-  short stub from the pin to the symbol when the pin doesn't exit
-  vertically. No long wire trunks for power.
-- **Signal / inter-sheet nets** → pick a horizontal trunk row at the
-  median pin y, each endpoint draws a vertical stub from its pin
-  position to the trunk, then a single horizontal trunk segment connects
-  the leftmost and rightmost stub joints. Each stub joins at a distinct
-  x, so 4-way junctions cannot exist by construction.
-- **no_connect_pins** → emit a ``(no_connect …)`` marker at the pin.
+- **Power / ground nets** → a short stub out of each pin in its exit
+  direction, with a stock power symbol (or, for a rail with no stock
+  symbol, a global label) at the stub end, oriented so the symbol points
+  away from the wire (rails up, grounds down). One PWR_FLAG per undriven
+  rail so ERC sees it as driven.
+- **Local signal nets with two pins** → a real wire: a straight segment
+  or an L between the two pins, but only when that path is *short-safe*
+  (crosses no foreign pin, so it can't short two nets). This is the
+  series resistor / pull-up link that used to be a pair of labels.
+- **Everything else** (3+ pin signal nets, anything whose direct wire
+  isn't short-safe, every inter-sheet net) → a stub + a label per pin
+  (hierarchical label for inter-sheet nets, local label otherwise).
 
-This is uglier than a Steiner tree + A* router but always succeeds, is
-deterministic, and is easy to verify. v1's "human readable enough" bar is
-satisfied by the power symbols + visible signal trunks; the precise tree
-shape doesn't matter for ERC or for the downstream pipeline.
+Connectivity is verified against KiCad ERC: every emitted geometry lands
+on a pin, and a net with no safe wire still connects by label, so the
+sheet is always ERC-clean.
 """
 from __future__ import annotations
 
@@ -28,10 +34,23 @@ from ..models import (
     is_power_or_ground_name,
 )
 from .placement import PlacedPart
+from .sch_geometry import pin_abs_position, pin_exit_direction, step
 from .symbol_pinout import SymbolNotFoundError, lookup_pins
 
-
 GRID_MM = 2.54
+EPS = 0.01
+# A direct pin-to-pin wire is only drawn for genuinely local nets; beyond this
+# Manhattan span a label is cleaner (and the net is almost certainly
+# cross-cluster anyway).
+MAX_LINK_MM = 60.0
+
+# Power-symbol rotation per wire exit direction (verified vs kicad-cli):
+# a rail symbol (power:+3V3, VBUS, …) points UP at angle 0; a ground symbol
+# points DOWN at angle 0. Both: left=90, right=270.
+_RAIL_ANGLE = {"up": 0, "left": 90, "down": 180, "right": 270}
+_GND_ANGLE = {"down": 0, "left": 90, "up": 180, "right": 270}
+# Label angle so the text reads outward along the stub direction.
+_LABEL_ANGLE = {"right": 0, "up": 90, "left": 180, "down": 270}
 
 
 @dataclass(frozen=True)
@@ -73,7 +92,7 @@ class PowerSymbol:
     lib_id: str
     x_mm: float
     y_mm: float
-    angle_deg: int  # 0 = symbol pointing up (rail); 180 = pointing down (GND)
+    angle_deg: int  # oriented so the symbol points away from the wire
 
 
 @dataclass(frozen=True)
@@ -104,10 +123,10 @@ class RoutedSheet:
 
 _POWER_SYMBOL_MAP: tuple[tuple[str, str], ...] = (
     # Every entry's target MUST exist in stock KiCad's power library: a name
-    # that maps to a non-existent symbol (the old PGND/VBAT/VSYS entries)
-    # crashes synthesis with SymbolNotFoundError before ERC runs. A power net
-    # with no stock symbol is rendered as a global label + PWR_FLAG instead
-    # (see route_sheet); test_power_symbol_map_targets_exist guards this.
+    # that maps to a non-existent symbol crashes synthesis with
+    # SymbolNotFoundError before ERC runs. A power net with no stock symbol is
+    # rendered as a global label + PWR_FLAG instead (see route_sheet);
+    # test_power_symbol_map_targets_exist guards this.
     ("GND", "power:GND"),
     ("AGND", "power:GNDA"),
     ("DGND", "power:GNDD"),
@@ -133,59 +152,17 @@ def power_symbol_for(net_name: str) -> str | None:
     return None
 
 
-def _pin_position(placed: PlacedPart, pin: dict) -> tuple[float, float]:
-    """Absolute (x, y) in schematic coords.
-
-    Symbol-local pin coords use +y up (math convention); KiCad
-    schematics use +y down — so we negate y. Rotation is always 0 in v1.
-    """
-    return (placed.x_mm + pin["position"]["x"], placed.y_mm - pin["position"]["y"])
+def _is_ground(net_name: str) -> bool:
+    return "GND" in net_name.upper() or net_name.lstrip("/").upper() in {"VSS", "VEE"}
 
 
-def _pin_exit_direction(pin: dict) -> str:
-    """Direction the wire should exit the pin's connection point in
-    schematic coordinates (+x right, +y down).
-
-    In a .kicad_sym, ``(at x y orientation)`` gives the pin's connection
-    point and the angle at which the pin BODY extends into the symbol
-    body (math convention: +y up). The wire attaches at (x, y) and
-    continues in the OPPOSITE direction. After converting to schematic
-    coords (y flipped):
-
-      orientation 0   → body +x, wire exits -x  → "left"
-      orientation 90  → body +y in sym (up)     → wire exits -y in sym
-                                                = +y in schematic → "down"
-      orientation 180 → body -x, wire exits +x  → "right"
-      orientation 270 → body -y in sym (down)   → wire exits +y in sym
-                                                = -y in schematic → "up"
-    """
-    o = pin.get("orientation", 0) % 360
-    if o == 0:
-        return "left"
-    if o == 90:
-        return "down"
-    if o == 180:
-        return "right"
-    if o == 270:
-        return "up"
-    return "right"
-
-
-def _stub_end(x: float, y: float, exit_dir: str) -> tuple[float, float, int]:
-    """Far end of a one-grid stub out of a pin, plus a label angle.
-
-    Connectivity is by label name, so the stub only needs to carry the pin
-    out to a point clear of the symbol body where the label sits and reads
-    away from the pin.
-    """
-    if exit_dir == "left":
-        return (x - GRID_MM, y, 180)
-    if exit_dir == "up":
-        return (x, y - GRID_MM, 90)
-    if exit_dir == "down":
-        return (x, y + GRID_MM, 270)
-    # "right" and any fallback
-    return (x + GRID_MM, y, 0)
+@dataclass(frozen=True)
+class _Endpoint:
+    x: float
+    y: float
+    exit: str
+    ref: str
+    pin: str
 
 
 def route_sheet(
@@ -196,13 +173,13 @@ def route_sheet(
     architecture: Architecture,
     flag_nets: frozenset[str] = frozenset(),
 ) -> RoutedSheet:
-    """Build the wire / junction / power / no-connect set for one leaf."""
+    """Build the wire / junction / power / label set for one leaf."""
     routed = RoutedSheet()
     placed_by_ref: dict[str, PlacedPart] = {p.ref: p for p in placed_parts}
     parts_by_ref = {p.ref: p for p in bom.parts if p.ref in placed_by_ref}
     pin_info_cache: dict[str, dict] = {}
 
-    def _get_pin(ref: str, pin_number: str) -> dict | None:
+    def _pins(ref: str) -> list[dict]:
         info = pin_info_cache.get(ref)
         if info is None:
             try:
@@ -210,209 +187,153 @@ def route_sheet(
             except (SymbolNotFoundError, ValueError, KeyError):
                 info = {"pins": []}
             pin_info_cache[ref] = info
-        for p in info["pins"]:
+        return info["pins"]
+
+    def _get_pin(ref: str, pin_number: str) -> dict | None:
+        for p in _pins(ref):
             if p["number"] == pin_number:
                 return p
         return None
+
+    # Every pin coordinate on the sheet, with the (ref, pin) that owns it — used
+    # to keep a direct wire from passing through (and shorting to) a foreign pin.
+    all_pins: list[tuple[float, float, str, str]] = []
+    for ref in parts_by_ref:
+        placed = placed_by_ref[ref]
+        for p in _pins(ref):
+            x, y = pin_abs_position(placed.x_mm, placed.y_mm, placed.rotation_deg, p)
+            all_pins.append((x, y, ref, p["number"]))
 
     sheet_connections = [c for c in bom.connections if c.sheet == sheet_name]
     inter_by_name: dict[str, InterSheetNet] = {
         n.name: n for n in architecture.inter_sheet_nets
     }
 
-    # Every pin coordinate on the sheet — a signal trunk or riser that passes
-    # through a pin NOT on its own net would connect them (a short), so a net
-    # with no short-safe trunk falls back to stub+label connectivity.
-    all_pin_xy: list[tuple[float, float]] = []
-    for ref, part in parts_by_ref.items():
-        placed = placed_by_ref.get(ref)
-        if placed is None:
-            continue
-        try:
-            info = lookup_pins(part.symbol)
-        except (SymbolNotFoundError, ValueError, KeyError):
-            info = {"pins": []}
-        for p in info["pins"]:
-            all_pin_xy.append(_pin_position(placed, p))
-
-    # Geometry already committed this sheet, so each net is routed against the
-    # ones before it. Distinct trunk Y per net + these checks guarantee two
-    # different nets never overlap or share a junction (only ever cross, which
-    # is not a connection in KiCad) — the fix for the shorts that drove the old
-    # comb router to abandon trunks for labels.
-    placed_trunks: list[tuple[float, float, float]] = []  # (y, x_min, x_max)
-    placed_risers: list[tuple[float, float, float]] = []  # (x, y_min, y_max)
-    placed_juncs: set[tuple[float, float]] = set()
-
-    def _key(x: float, y: float) -> tuple[float, float]:
-        return (round(x, 2), round(y, 2))
-
-    def _col_free(x: float, y_min: float, y_max: float,
-                  own: set[tuple[float, float]]) -> bool:
-        """A vertical drop at column x from y_min..y_max is short-safe iff it
-        hits no FOREIGN pin and overlaps no earlier net's drop. (It may freely
-        cross other nets' trunks/drops — a crossing without a junction is not a
-        connection in KiCad.)"""
-        for (px, py) in all_pin_xy:
-            if (abs(px - x) < 0.01 and y_min - 0.01 <= py <= y_max + 0.01
-                    and _key(px, py) not in own):
-                return False
-        return not any(
-            abs(rx - x) < 0.01 and not (y_max < a - 0.01 or b < y_min - 0.01)
-            for (rx, a, b) in placed_risers
-        )
-
-    # One horizontal trunk LANE per net, stacked in the clear band BELOW the
-    # single component row. The band has no pins, so every trunk is short-safe
-    # by construction; a distinct lane Y per net means no two trunks overlap.
-    # Each pin stubs out in its exit direction, then drops straight to its net's
-    # lane. A net whose drop would cross a foreign pin falls back to stub+label.
-    band_top = max((py for (_px, py) in all_pin_xy), default=150.0) + 7.62
-    lane = {"y": band_top}
-
-    def _draw_trunk(net_name: str, endpoints: list[tuple[float, float, str]],
-                    is_inter: bool, hier_direction: str) -> bool:
-        if len(endpoints) < 2:
-            return False  # single-pin (inter-sheet stub) — label path handles it
-        ty = lane["y"]
-        own = {_key(x, y) for (x, y, _e) in endpoints}
-        drops: list[tuple[float, float, float, float, float]] = []
-        for (x, y, exit_dir) in endpoints:
-            ex, ey, _a = _stub_end(x, y, exit_dir)
-            lo, hi = sorted((ey, ty))
-            if not _col_free(ex, lo, hi, own):
-                return False
-            drops.append((ex, ey, x, y, ty))
-        for (ex, ey, x, y, ty_) in drops:
-            if (abs(ex - x) >= 0.01 or abs(ey - y) >= 0.01):
-                routed.wires.append(WireSegment(x, y, ex, ey))  # exit-dir stub
-            if abs(ey - ty) >= 0.01:
-                routed.wires.append(WireSegment(ex, ey, ex, ty))  # drop to lane
-                placed_risers.append((ex, min(ey, ty), max(ey, ty)))
-        exs = [d[0] for d in drops]
-        x_min, x_max = min(exs), max(exs)
-        if abs(x_max - x_min) >= 0.01:
-            routed.wires.append(WireSegment(x_min, ty, x_max, ty))  # the lane trunk
-            placed_trunks.append((ty, x_min, x_max))
-        for ex in sorted({e for e in exs if x_min + 0.01 < e < x_max - 0.01}):
-            routed.junctions.append(Junction(x_mm=ex, y_mm=ty))
-            placed_juncs.add(_key(ex, ty))
-        if is_inter:
-            routed.hier_labels.append(HierLabelPlacement(
-                name=net_name, direction=hier_direction,
-                x_mm=x_min, y_mm=ty, angle_deg=0))
-        elif len(endpoints) >= 3:
-            routed.labels.append(NetLabel(text=net_name, x_mm=x_min, y_mm=ty))
-        lane["y"] = ty + GRID_MM  # next net takes the next lane down
-        return True
-
     for conn in sheet_connections:
-        endpoints: list[tuple[float, float, str]] = []
+        eps: list[_Endpoint] = []
         for ep in conn.endpoints:
             pin = _get_pin(ep.ref, ep.pin)
             placed = placed_by_ref.get(ep.ref)
             if pin is None or placed is None:
                 continue
-            x, y = _pin_position(placed, pin)
-            # Do NOT snap pin coordinates to a coarse grid. Stock KiCad
-            # symbol pins sit on a 1.27 mm half-grid; rounding to 2.54 mm
-            # would displace every stub up to 1.27 mm off its pin and break
-            # all connectivity. The exact _pin_position value is what KiCad
-            # renders, so geometry built from it lands on the pins.
-            endpoints.append((x, y, _pin_exit_direction(pin)))
-
-        if not endpoints:
+            x, y = pin_abs_position(placed.x_mm, placed.y_mm, placed.rotation_deg, pin)
+            eps.append(_Endpoint(
+                x, y, pin_exit_direction(placed.rotation_deg, pin), ep.ref, ep.pin))
+        if not eps:
             continue
 
-        # Power-net branch: any power/ground net gets global, by-name
-        # connectivity (it ties together across the whole hierarchy without
-        # sheet pins). Two renderings:
-        #   1. a stock KiCad power symbol exists for the name -> one symbol per
-        #      endpoint (the nice, conventional power port);
-        #   2. it does NOT (e.g. VBAT, VSYS, a +3V coin-cell rail) -> a global
-        #      label carrying the exact net name. The old code mapped case 2 to
-        #      a power:<name> symbol that does not exist in stock KiCad, which
-        #      crashed synthesis (SymbolNotFoundError) before ERC ran. The
-        #      global label keeps the name, connects across sheets, and never
-        #      references a missing symbol.
-        # Straight (not L-shaped) stubs never cross a neighbouring pin's stub,
-        # so two power nets on adjacent IC pins cannot be shorted together.
         if is_power_or_ground_name(conn.net_name):
-            power_lib_id = power_symbol_for(conn.net_name)
-            sym_angle = 0 if "GND" in conn.net_name.upper() else 180
-            flag_xy: tuple[float, float] | None = None
-            for (x, y, exit_dir) in endpoints:
-                ex, ey, lab_angle = _stub_end(x, y, exit_dir)
-                if flag_xy is None:
-                    flag_xy = (ex, ey)
-                routed.wires.append(WireSegment(x, y, ex, ey))
-                if power_lib_id is not None:
-                    routed.power_symbols.append(
-                        PowerSymbol(lib_id=power_lib_id, x_mm=ex, y_mm=ey,
-                                    angle_deg=sym_angle)
-                    )
-                else:
-                    routed.global_labels.append(
-                        GlobalLabel(text=conn.net_name, x_mm=ex, y_mm=ey,
-                                    angle_deg=lab_angle)
-                    )
-            # One PWR_FLAG per power net (on the first sheet that connects it)
-            # marks the net as driven, so ERC doesn't flag IC power-input pins
-            # as undriven. It carries a power-output pin and sits on the node of
-            # the net's first power symbol / global label.
-            if conn.net_name in flag_nets and flag_xy is not None:
-                routed.power_symbols.append(
-                    PowerSymbol(lib_id="power:PWR_FLAG", x_mm=flag_xy[0],
-                                y_mm=flag_xy[1], angle_deg=0)
-                )
+            _route_power(routed, conn.net_name, eps, flag_nets)
             continue
 
-        # Signal / inter-sheet branch. Prefer REAL WIRES: a unique-Y horizontal
-        # trunk + vertical risers + junctions (the readable, traceable look of
-        # the original comb-stub router). Each net gets its own trunk Y and is
-        # verified clear of foreign pins/junctions, so two nets can never short
-        # (the failure that drove the regression to labels). A net with no
-        # short-safe trunk falls back to the stub+label connectivity below, so
-        # the sheet is always ERC-clean.
         is_inter = conn.net_name in inter_by_name
-        hier_direction = "passive"
+        hier_dir = "passive"
         if is_inter:
-            inter = inter_by_name[conn.net_name]
-            this_pin = next(
-                (e for e in inter.endpoints if e.sheet == sheet_name), None
-            )
-            hier_direction = this_pin.direction if this_pin else "passive"
+            this = next(
+                (e for e in inter_by_name[conn.net_name].endpoints
+                 if e.sheet == sheet_name), None)
+            hier_dir = this.direction if this else "passive"
 
-        if _draw_trunk(conn.net_name, endpoints, is_inter, hier_direction):
-            continue
+        # Local 2-pin signal net: try a real short wire between the two pins.
+        # The wire also carries one net label — a bare (unnamed) wire is
+        # flagged dangling by kicad-cli ERC, and the name keeps it legible.
+        if not is_inter and len(eps) == 2:
+            segs = _safe_link(eps[0], eps[1], all_pins)
+            if segs is not None:
+                routed.wires.extend(segs)
+                lx, ly = _label_anchor(segs)
+                routed.labels.append(NetLabel(
+                    text=conn.net_name, x_mm=lx, y_mm=ly, angle_deg=0))
+                continue
 
-        for (x, y, exit_dir) in endpoints:
-            ex, ey, angle = _stub_end(x, y, exit_dir)
-            routed.wires.append(WireSegment(x, y, ex, ey))
+        # Fallback: a stub + a label per pin (hierarchical for inter-sheet).
+        for e in eps:
+            ex, ey = step(e.x, e.y, e.exit, GRID_MM)
+            routed.wires.append(WireSegment(e.x, e.y, ex, ey))
+            angle = _LABEL_ANGLE[e.exit]
             if is_inter:
-                routed.hier_labels.append(
-                    HierLabelPlacement(
-                        name=conn.net_name,
-                        direction=hier_direction,
-                        x_mm=ex,
-                        y_mm=ey,
-                        angle_deg=angle,
-                    )
-                )
+                routed.hier_labels.append(HierLabelPlacement(
+                    name=conn.net_name, direction=hier_dir,
+                    x_mm=ex, y_mm=ey, angle_deg=angle))
             else:
-                routed.labels.append(
-                    NetLabel(text=conn.net_name, x_mm=ex, y_mm=ey, angle_deg=angle)
-                )
+                routed.labels.append(NetLabel(
+                    text=conn.net_name, x_mm=ex, y_mm=ey, angle_deg=angle))
 
     # no_connect markers.
     for ep in bom.no_connect_pins:
         placed = placed_by_ref.get(ep.ref)
-        if placed is None:
+        pin = _get_pin(ep.ref, ep.pin) if placed else None
+        if placed is None or pin is None:
             continue
-        pin = _get_pin(ep.ref, ep.pin)
-        if pin is None:
-            continue
-        x, y = _pin_position(placed, pin)
+        x, y = pin_abs_position(placed.x_mm, placed.y_mm, placed.rotation_deg, pin)
         routed.no_connects.append(NoConnect(x_mm=x, y_mm=y))
 
     return routed
+
+
+def _route_power(
+    routed: RoutedSheet,
+    net_name: str,
+    eps: list[_Endpoint],
+    flag_nets: frozenset[str],
+) -> None:
+    """A short stub + power symbol (or global label) at every pin of a power
+    net, oriented to point away from the wire."""
+    power_lib = power_symbol_for(net_name)
+    angle_table = _GND_ANGLE if _is_ground(net_name) else _RAIL_ANGLE
+    flag_xy: tuple[float, float] | None = None
+    for e in eps:
+        ex, ey = step(e.x, e.y, e.exit, GRID_MM)
+        routed.wires.append(WireSegment(e.x, e.y, ex, ey))
+        if flag_xy is None:
+            flag_xy = (ex, ey)
+        if power_lib is not None:
+            routed.power_symbols.append(PowerSymbol(
+                lib_id=power_lib, x_mm=ex, y_mm=ey, angle_deg=angle_table[e.exit]))
+        else:
+            routed.global_labels.append(GlobalLabel(
+                text=net_name, x_mm=ex, y_mm=ey, angle_deg=_LABEL_ANGLE[e.exit]))
+    # One PWR_FLAG per undriven rail marks it as driven for ERC.
+    if net_name in flag_nets and flag_xy is not None:
+        routed.power_symbols.append(PowerSymbol(
+            lib_id="power:PWR_FLAG", x_mm=flag_xy[0], y_mm=flag_xy[1], angle_deg=0))
+
+
+def _safe_link(
+    a: _Endpoint, b: _Endpoint, all_pins: list[tuple[float, float, str, str]]
+) -> list[WireSegment] | None:
+    """A straight or single-corner wire between pins ``a`` and ``b`` that
+    passes through no foreign pin (so it can't short two nets), or None."""
+    if abs(a.x - b.x) + abs(a.y - b.y) > MAX_LINK_MM:
+        return None
+    own = {(a.ref, a.pin), (b.ref, b.pin)}
+
+    def seg_clear(x1: float, y1: float, x2: float, y2: float) -> bool:
+        for (px, py, ref, pin) in all_pins:
+            if (ref, pin) in own:
+                continue
+            if abs(y1 - y2) < EPS and abs(py - y1) < EPS:  # horizontal
+                if min(x1, x2) - EPS <= px <= max(x1, x2) + EPS:
+                    return False
+            elif abs(x1 - x2) < EPS and abs(px - x1) < EPS:  # vertical
+                if min(y1, y2) - EPS <= py <= max(y1, y2) + EPS:
+                    return False
+        return True
+
+    if abs(a.x - b.x) < EPS or abs(a.y - b.y) < EPS:
+        if seg_clear(a.x, a.y, b.x, b.y):
+            return [WireSegment(a.x, a.y, b.x, b.y)]
+        return None
+    for cx, cy in ((b.x, a.y), (a.x, b.y)):  # two L corners
+        if seg_clear(a.x, a.y, cx, cy) and seg_clear(cx, cy, b.x, b.y):
+            return [WireSegment(a.x, a.y, cx, cy), WireSegment(cx, cy, b.x, b.y)]
+    return None
+
+
+def _label_anchor(segs: list[WireSegment]) -> tuple[float, float]:
+    """A point on the wire to anchor its net label: the corner of an L, or
+    the midpoint of a straight run."""
+    if len(segs) >= 2:
+        return (segs[0].x2_mm, segs[0].y2_mm)
+    s = segs[0]
+    return ((s.x1_mm + s.x2_mm) / 2.0, (s.y1_mm + s.y2_mm) / 2.0)
