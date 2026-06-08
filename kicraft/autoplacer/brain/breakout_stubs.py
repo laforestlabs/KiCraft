@@ -69,6 +69,54 @@ def _find_pad(board: "pcbnew.BOARD", ref: str, pad_number: str):
     return None, None
 
 
+def _foreign_pads(board: "pcbnew.BOARD", net_code: int, *, exclude=None) -> list:
+    """Every pad that copper on *net_code* must stay clear of.
+
+    A same-net pad is a valid landing (a stub may touch it), so it is not an
+    obstacle. A no-net pad (code 0) is foreign to everything -- it is an NC or
+    mechanical pad a trace must never cross. *exclude* drops one pad (the escape
+    source) for the degenerate case of a no-net source pad.
+    """
+    out = []
+    for fp in board.GetFootprints():
+        for pad in fp.Pads():
+            if pad is exclude:
+                continue
+            if net_code and pad.GetNetCode() == net_code:
+                continue
+            out.append(pad)
+    return out
+
+
+def _segment_clears_pads(
+    pads: list,
+    a_mm: tuple[float, float],
+    b_mm: tuple[float, float],
+    clearance_mm: float,
+    *,
+    step_mm: float = 0.1,
+) -> bool:
+    """True when the segment *a*->*b* keeps >= *clearance_mm* from every pad.
+
+    Samples the segment at ``step_mm`` and rejects it if any sample falls within
+    a pad grown by the clearance (``HitTest`` margin). Conservative by design --
+    a near-miss counts as a hit -- so a stub is dropped rather than shorted.
+    """
+    margin = int(pcbnew.FromMM(clearance_mm))
+    ax, ay = a_mm
+    bx, by = b_mm
+    steps = max(1, int(((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5 / step_mm))
+    for k in range(steps + 1):
+        t = k / steps
+        pt = pcbnew.VECTOR2I(
+            int(pcbnew.FromMM(ax + (bx - ax) * t)),
+            int(pcbnew.FromMM(ay + (by - ay) * t)),
+        )
+        if any(pad.HitTest(pt, margin) for pad in pads):
+            return False
+    return True
+
+
 def _safe_radial_length(
     board: "pcbnew.BOARD",
     src_pad,
@@ -82,19 +130,10 @@ def _safe_radial_length(
     A radial escape on a dense connector can run straight across a neighbouring
     pad (a different net, or an NC pad) -- which the autorouter then reports as a
     short. March along the ray and stop just before the first point that falls
-    within *clearance_mm* of any pad other than the source pad. Returns 0.0 when
-    even the first step collides (no safe escape in this direction).
+    within *clearance_mm* of any foreign pad. Returns 0.0 when even the first
+    step collides (no safe escape in this direction).
     """
-    others = []
-    src_net = src_pad.GetNetCode()
-    for fp in board.GetFootprints():
-        for pad in fp.Pads():
-            if pad is src_pad:
-                continue
-            # A same-net pad is a valid landing, not an obstacle.
-            if pad.GetNetCode() == src_net and src_net != 0:
-                continue
-            others.append(pad)
+    others = _foreign_pads(board, src_pad.GetNetCode(), exclude=src_pad)
     if not others:
         return requested_mm
 
@@ -108,74 +147,11 @@ def _safe_radial_length(
         pt = pcbnew.VECTOR2I(
             int(pcbnew.FromMM(sx + ux * d)), int(pcbnew.FromMM(sy + uy * d))
         )
-        # HitTest with an accuracy margin ~ clearance treats each pad as slightly
-        # grown, so we stop before violating clearance to it.
         if any(pad.HitTest(pt, margin) for pad in others):
             break
         safe = d
         d += step
     return safe
-
-
-def radial_escape_point(
-    fp_center_mm: tuple[float, float],
-    pad_mm: tuple[float, float],
-    length_mm: float,
-) -> tuple[float, float]:
-    """Point ``length_mm`` beyond the pad along the centre->pad ray.
-
-    That direction points out of the pad field for an edge/connector pad, so a
-    segment to this point clears the footprint without crossing its other pads.
-    Degenerate (pad at centre) falls back to a straight +x escape.
-    """
-    cx, cy = fp_center_mm
-    px, py = pad_mm
-    dx, dy = px - cx, py - cy
-    norm = (dx * dx + dy * dy) ** 0.5
-    if norm < 1e-6:
-        return (px + length_mm, py)
-    ux, uy = dx / norm, dy / norm
-    return (px + ux * length_mm, py + uy * length_mm)
-
-
-def radial_breakout_specs(
-    board: "pcbnew.BOARD",
-    ref: str,
-    pad_numbers: list[str] | None = None,
-    *,
-    length_mm: float = 1.5,
-    layer: str = "F.Cu",
-    via_at_end: bool = False,
-    nets_only: list[str] | None = None,
-) -> list[BreakoutSpec]:
-    """Build radial-escape specs for a footprint's pads.
-
-    By default every netted pad on *ref* gets a radial escape. Restrict with
-    *pad_numbers* (specific pads) or *nets_only* (pads on these nets).
-    """
-    specs: list[BreakoutSpec] = []
-    for fp in board.GetFootprints():
-        if fp.GetReferenceAsString() != ref:
-            continue
-        for pad in fp.Pads():
-            num = pad.GetNumber()
-            net = pad.GetNetname()
-            if pad_numbers is not None and num not in pad_numbers:
-                continue
-            if nets_only is not None and net not in nets_only:
-                continue
-            if not net:
-                continue
-            specs.append(
-                BreakoutSpec(
-                    ref=ref,
-                    pad=num,
-                    length_mm=length_mm,
-                    layer=layer,
-                    via_at_end=via_at_end,
-                )
-            )
-    return specs
 
 
 def _nearest_on_rect(
@@ -239,6 +215,24 @@ def _rect_perimeter_path(
     return [c for c, _ in out]
 
 
+def _pads_bbox_mm(
+    pads: list, margin_mm: float = 0.0
+) -> tuple[float, float, float, float]:
+    """``(x1, y1, x2, y2)`` in mm enclosing every pad's box, grown by *margin_mm*.
+
+    This is the footprint's *pad field* -- deliberately not ``fp.GetBoundingBox()``,
+    which silkscreen, courtyard and the reference designator inflate well beyond
+    the copper and make asymmetric.
+    """
+    boxes = [p.GetBoundingBox() for p in pads]
+    return (
+        min(pcbnew.ToMM(b.GetLeft()) for b in boxes) - margin_mm,
+        min(pcbnew.ToMM(b.GetTop()) for b in boxes) - margin_mm,
+        max(pcbnew.ToMM(b.GetRight()) for b in boxes) + margin_mm,
+        max(pcbnew.ToMM(b.GetBottom()) for b in boxes) + margin_mm,
+    )
+
+
 def perimeter_tie_specs(
     board: "pcbnew.BOARD",
     ref: str,
@@ -262,12 +256,16 @@ def perimeter_tie_specs(
     )
     if fp is None:
         return specs
-    bb = fp.GetBoundingBox()
-    m = margin_mm
-    x1 = pcbnew.ToMM(bb.GetX()) - m
-    y1 = pcbnew.ToMM(bb.GetY()) - m
-    x2 = pcbnew.ToMM(bb.GetX() + bb.GetWidth()) + m
-    y2 = pcbnew.ToMM(bb.GetY() + bb.GetHeight()) + m
+    pads_all = list(fp.Pads())
+    if not pads_all:
+        return specs
+    # Walk the *pad field*, not fp.GetBoundingBox(): the latter is grown and made
+    # asymmetric by silkscreen, courtyard and the reference designator, which can
+    # put the nearest border on the far side of the part and send a tie's lead-in
+    # leg straight across its other pads (a short). The two farthest same-net pads
+    # are always hull-extremal, so their perpendicular lead-ins to a box that hugs
+    # the copper -- and the border walk itself -- stay clear of every pad.
+    x1, y1, x2, y2 = _pads_bbox_mm(pads_all, margin_mm)
 
     by_net: dict[str, list] = {}
     for pad in fp.Pads():
@@ -454,8 +452,20 @@ def add_breakout_stubs(
         pad_pos = pad.GetPosition()
         start_mm = (pcbnew.ToMM(pad_pos.x), pcbnew.ToMM(pad_pos.y))
         if spec.waypoints:
-            # Explicit (curated) path -- the caller owns collision-avoidance.
             points = [start_mm, *spec.waypoints]
+            # Hard invariant: never stamp a path that crosses a pad of another
+            # net (or a no-net pad) -- that is a short. The tie geometry routes
+            # clear of the source footprint's own pads, but a curated path or a
+            # neighbour the geometry could not see may still intrude. A partial
+            # tie is useless, so drop the whole spec rather than clip it.
+            clearance = float(cfg.get("freerouting_min_clearance_mm", 0.153))
+            obstacles = _foreign_pads(board, net_code)
+            if not all(
+                _segment_clears_pads(obstacles, a, b, clearance)
+                for a, b in zip(points, points[1:])
+            ):
+                summary["skipped"].append(f"{spec.ref}.{spec.pad}:waypoint_crosses_pad")
+                continue
         else:
             fc = fp.GetPosition()
             cx, cy = pcbnew.ToMM(fc.x), pcbnew.ToMM(fc.y)
