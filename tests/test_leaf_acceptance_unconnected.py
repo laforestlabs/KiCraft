@@ -66,6 +66,32 @@ def test_power_ground_only_unconnected_is_accepted():
     assert res.rejection_reasons == []
 
 
+def test_interface_net_unconnected_is_excluded_but_local_still_rejects():
+    # An interface (inter-sheet) net routes at parent compose, not in-leaf, so an
+    # unconnected SDA is ignored; a *local* signal miss (CC2) still rejects.
+    cfg = LeafAcceptanceConfig(max_unconnected=0)
+    val = _validation(2, ["SDA", "CC2"])
+    val["interface_port_names"] = ["SDA"]
+    res = evaluate_leaf_acceptance(val, {}, cfg)
+    gate = res.gate_results["no_unconnected"]
+    assert gate["signal_unconnected_nets"] == ["CC2"]
+    assert gate["ignored_interface_nets"] == ["SDA"]
+    assert res.accepted is False  # CC2 (local) still fails
+
+
+def test_interface_only_unconnected_passes():
+    # When every open net is an interface net, the leaf's local routing is done.
+    cfg = LeafAcceptanceConfig(max_unconnected=0)
+    val = _validation(2, ["USB_D+", "SOIL_ADC"])
+    val["interface_port_names"] = ["USB_D+", "SOIL_ADC"]
+    res = evaluate_leaf_acceptance(val, {}, cfg)
+    gate = res.gate_results["no_unconnected"]
+    assert gate["passed"] is True
+    assert gate["signal_unconnected_nets"] == []
+    assert set(gate["ignored_interface_nets"]) == {"USB_D+", "SOIL_ADC"}
+    assert res.accepted is True
+
+
 def test_none_threshold_skips_gate():
     cfg = LeafAcceptanceConfig(max_unconnected=None)
     res = evaluate_leaf_acceptance(_validation(5, ["CC2", "UART_TX"]), {}, cfg)

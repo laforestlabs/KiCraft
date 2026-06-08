@@ -342,6 +342,71 @@ def auto_power_tie_specs(
     return specs
 
 
+def auto_signal_escape_specs(
+    board: "pcbnew.BOARD",
+    cfg: dict[str, Any] | None = None,
+) -> list[BreakoutSpec]:
+    """Radial escape stubs for the *signal* pads of dense connectors.
+
+    Companion to :func:`auto_power_tie_specs`. A fine-pitch connector (USB-C,
+    board-to-board) boxes its inner signal pins in among its power/ground pads,
+    so a gridless autorouter abandons a net like a USB-C CC pin -> its pulldown
+    resistor even though a short escape would free it. For every footprint dense
+    enough to need help -- the same signal ``auto_power_tie_specs`` keys on: a
+    connector with >= 2 pads on a non-GND power rail (spread VBUS) -- this emits a
+    short radial escape out of each *multi-pad signal* net's pad on that
+    footprint, so FreeRouting finishes from open copper. Excluded: power/ground
+    pads (left to the pour + perimeter tie), single-pad signal nets (an interface
+    net with nothing to route to in-leaf -- it closes at compose), and refs in
+    ``signal_escape_exclude_refs``. The collision guard in
+    :func:`add_breakout_stubs` clips or drops any escape that would cross a
+    neighbour pad, so this never introduces a short.
+    """
+    cfg = cfg or {}
+    if not cfg.get("auto_signal_escape", True):
+        return []
+    gnd_name = cfg.get("gnd_zone_net", "GND")
+    exclude = set(cfg.get("signal_escape_exclude_refs", []) or [])
+    length = float(cfg.get("signal_escape_length_mm", 1.5))
+    layer = cfg.get("signal_escape_layer", "F.Cu")
+    from kicraft.design.models import is_power_or_ground_name
+
+    # net -> pad count across the whole leaf. A single-pad net has nothing to
+    # route to on the leaf (it's an interface net that closes at compose), so an
+    # escape on it would be wasted.
+    net_pads: dict[str, int] = {}
+    for fp in board.GetFootprints():
+        for pad in fp.Pads():
+            n = pad.GetNetname()
+            if n:
+                net_pads[n] = net_pads.get(n, 0) + 1
+
+    specs: list[BreakoutSpec] = []
+    for fp in board.GetFootprints():
+        ref = fp.GetReferenceAsString()
+        if ref in exclude:
+            continue
+        power_counts: dict[str, int] = {}
+        signal_pads: list[str] = []
+        for pad in fp.Pads():
+            n = pad.GetNetname()
+            if not n:
+                continue
+            if is_power_or_ground_name(n):
+                if n != gnd_name:
+                    power_counts[n] = power_counts.get(n, 0) + 1
+            elif net_pads.get(n, 0) >= 2:
+                signal_pads.append(pad.GetNumber())
+        # Only a spread-power connector (>= 2 pads on one non-GND power net -- the
+        # USB-C VBUS signature) is treated as dense enough to need escapes; plain
+        # 2-pin connectors and ICs route fine without them.
+        if not any(c >= 2 for c in power_counts.values()):
+            continue
+        for num in signal_pads:
+            specs.append(BreakoutSpec(ref=ref, pad=num, length_mm=length, layer=layer))
+    return specs
+
+
 def add_breakout_stubs(
     pcb_path: str,
     specs: list[BreakoutSpec],

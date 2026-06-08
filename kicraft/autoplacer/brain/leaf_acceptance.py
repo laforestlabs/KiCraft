@@ -59,11 +59,14 @@ class LeafAcceptanceConfig:
         this threshold.  ``None`` (default) means clearance violations alone
         never cause rejection.
     max_unconnected:
-        If set, reject when the number of *signal* nets with an unconnected
-        (ratsnest) item exceeds this threshold.  Power/ground nets are excluded
-        because they close on the post-route copper pour, not on leaf routing
-        (see *poured_nets*).  ``None`` (default) means unconnected items never
-        cause rejection -- the historical lenient behaviour.
+        If set, reject when the number of *local signal* nets with an
+        unconnected (ratsnest) item exceeds this threshold.  Power/ground nets
+        are excluded because they close on the post-route copper pour (see
+        *poured_nets*), and interface (inter-sheet) nets -- supplied via
+        ``validation["interface_port_names"]`` -- are excluded because they are
+        routed across the parent at compose, not within the leaf.  ``None``
+        (default) means unconnected items never cause rejection -- the historical
+        lenient behaviour.
     poured_nets:
         Extra net names (beyond the automatic power/ground classification) that
         are connected by a copper pour at compose time and therefore must not
@@ -193,11 +196,14 @@ def _gate_no_unconnected(
     _anchor: dict[str, Any],
     cfg: LeafAcceptanceConfig,
 ) -> tuple[bool, dict[str, Any]]:
-    """Gate: signal nets must be fully routed within the leaf.
+    """Gate: local signal nets must be fully routed within the leaf.
 
-    Power/ground nets (and any configured *poured_nets*) are excluded because
-    they are connected by the post-route pour at compose, not by leaf routing.
-    When *max_unconnected* is ``None`` the gate is skipped entirely.
+    Excluded from the count (their unconnected items at the leaf are expected):
+    power/ground nets (and any configured *poured_nets*) close on the post-route
+    pour at compose; **interface (inter-sheet) nets** -- listed in
+    ``validation["interface_port_names"]`` -- are routed across the *parent* at
+    compose, not within the leaf. Only the remaining *local* signal nets must
+    route in-leaf. When *max_unconnected* is ``None`` the gate is skipped.
     """
     drc = validation.get("drc", {})
     raw = int(drc.get("unconnected", 0))
@@ -212,10 +218,14 @@ def _gate_no_unconnected(
             "unconnected_nets": nets,
         }
 
+    interface = set(validation.get("interface_port_names", []) or [])
     poured = [n for n in nets if _is_poured_net(n, cfg)]
-    signal = [n for n in nets if not _is_poured_net(n, cfg)]
+    # Interface nets that are not already counted as poured/power.
+    iface = [n for n in nets if n in interface and not _is_poured_net(n, cfg)]
+    excluded = set(poured) | set(iface)
+    signal = [n for n in nets if n not in excluded]
 
-    # With net names available, gate on unrouted *signal* nets only. If the
+    # With net names available, gate on unrouted *local signal* nets only. If the
     # report had unconnected items but no parsable net names (format drift),
     # fall back to the raw count so the miss is surfaced rather than hidden.
     if nets:
@@ -230,6 +240,7 @@ def _gate_no_unconnected(
         "unconnected_nets": nets,
         "signal_unconnected_nets": signal,
         "ignored_poured_nets": poured,
+        "ignored_interface_nets": iface,
         "max_unconnected": cfg.max_unconnected,
     }
 

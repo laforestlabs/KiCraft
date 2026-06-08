@@ -483,6 +483,20 @@ def route_local_subcircuit(
             del _tie_board
         except Exception as exc:  # never fail the leaf on a finishing helper
             print(f"  WARNING: auto power-tie spec gen failed: {exc}")
+    # Auto signal-escape (default on): radial escapes for the signal pads of a
+    # dense connector (USB-C CC pins etc.) the autorouter can't escape from the
+    # pad field. Same connector signature as the power-tie above.
+    if cfg.get("auto_signal_escape", True):
+        try:
+            import pcbnew
+
+            from kicraft.autoplacer.brain.breakout_stubs import auto_signal_escape_specs
+
+            _esc_board = pcbnew.LoadBoard(str(pre_route_board))
+            _breakout_specs = _breakout_specs + auto_signal_escape_specs(_esc_board, cfg)
+            del _esc_board
+        except Exception as exc:  # never fail the leaf on a finishing helper
+            print(f"  WARNING: auto signal-escape spec gen failed: {exc}")
     if _breakout_specs:
         try:
             from kicraft.autoplacer.brain.breakout_stubs import add_breakout_stubs
@@ -737,6 +751,14 @@ def route_local_subcircuit(
         ],
         timeout_s=int(cfg.get("subcircuit_validation_timeout_s", 30)),
     )
+    # Always record the leaf's interface (inter-sheet) net names so the
+    # unconnected-acceptance gate can exclude them: an interface net is routed
+    # across the parent at compose, not within the leaf, so an unconnected item
+    # on it must not count against the leaf (mirrors poured power/GND nets).
+    # Previously set only on the reject path, leaving normal-path leaves blind.
+    validation["interface_port_names"] = [
+        port.name for port in extraction.interface_ports
+    ]
     route_timing["routed_validation_s"] = round(
         max(0.0, time.monotonic() - routed_validation_start), 3
     )

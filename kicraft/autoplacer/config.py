@@ -289,6 +289,14 @@ DEFAULT_CONFIG = {
     "auto_power_tie": True,
     "power_tie_margin_mm": 1.0,
     "power_tie_exclude_refs": [],
+    # Auto signal-escape (default on): before routing, pre-route short locked
+    # radial escapes out of the *signal* pads of a dense connector (the same
+    # >=2-spread-power-pad signature auto_power_tie uses) so the autorouter can
+    # finish nets like a USB-C CC pin -> its pulldown resistor from open copper
+    # instead of abandoning them boxed-in. Collision-guarded, so it never shorts.
+    "auto_signal_escape": True,
+    "signal_escape_exclude_refs": [],
+    "signal_escape_length_mm": 1.5,
     "thermal_via_pitch_mm": 1.2,
     "thermal_via_inset_mm": 0.5,
     "thermal_pad_area_mm2": 4.0,
