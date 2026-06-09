@@ -228,6 +228,32 @@ def _accepted_leaf_artifacts(project_dir: Path) -> list[dict[str, Any]]:
     return accepted
 
 
+def _board_only_leaf_dirs(project_dir: Path) -> list[Path]:
+    """Leaf dirs that routed round boards but never serialized a result.
+
+    A leaf solve can die after routing its rounds but before writing its
+    ``metadata.json`` / ``solved_layout.json`` (e.g. legality repair fails
+    partway). Such a dir is invisible to :func:`_all_leaf_artifacts`, so without
+    recovery auto-pin never pins it and the parent compose silently DROPS the
+    leaf -- stranding its components off-board. This finds those dirs so the
+    best routed round can be pinned straight from disk instead.
+    """
+    root = project_dir / ".experiments" / "subcircuits"
+    if not root.exists():
+        return []
+    out: list[Path] = []
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+        if (child / "metadata.json").exists() and (
+            child / "solved_layout.json"
+        ).exists():
+            continue  # serialized -> handled by the normal scored path
+        if any(child.glob("round_*_leaf_routed.kicad_pcb")):
+            out.append(child)
+    return out
+
+
 def _auto_pin_best_leaves(project_dir: Path) -> None:
     """Pin each leaf to its highest-scoring round of THIS run.
 
@@ -318,6 +344,23 @@ def _auto_pin_best_leaves(project_dir: Path) -> None:
         except FileNotFoundError as exc:
             print(f"  pin failed for {leaf_key}: {exc}")
             skipped += 1
+
+    # Safety net: a leaf that routed boards but serialized no result
+    # (metadata/solved_layout) is invisible to _all_leaf_artifacts and would be
+    # silently dropped by the parent compose -- stranding its components
+    # off-board (a board missing, e.g., its whole power-regulator block). The
+    # solver now persists a best-effort result for every leaf that routed, so
+    # this should never happen; fail loudly if it does rather than ship a board
+    # silently missing a leaf.
+    dropped = [d.name for d in _board_only_leaf_dirs(project_dir)]
+    if dropped:
+        raise RuntimeError(
+            "leaf(s) routed but serialized no result, so they would be silently "
+            "dropped from the parent board: "
+            + ", ".join(dropped)
+            + " -- solver serialization bug; refusing to compose an incomplete "
+            "board"
+        )
 
     print(f"Auto-pin summary: {pinned} pinned, {cleared} cleared, {skipped} skipped")
 
