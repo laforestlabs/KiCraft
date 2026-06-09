@@ -101,6 +101,51 @@ def test_build_lib_symbols_empty_returns_short_form() -> None:
     assert "(lib_symbols)" in block
 
 
+def test_passive_device_input_pins_retyped_passive(tmp_path: Path) -> None:
+    # easyeda2kicad imports switch/connector contacts typed `input`, which
+    # trips KiCad ERC pin_not_driven ("Input pin not driven by any Output
+    # pins") on every non-power net. extract_symbol_block must retype them
+    # `passive` (how KiCad's own Switch:/Connector: symbols model a contact),
+    # keyed off the symbol's intrinsic Reference prefix.
+    lib = tmp_path / "Sw.kicad_sym"
+    lib.write_text(
+        '(kicad_symbol_lib (version 20211014)\n'
+        '\t(symbol "DSW"\n'
+        '\t\t(property "Reference" "SW" (at 0 0 0))\n'
+        '\t\t(symbol "DSW_0_1"\n'
+        '\t\t\t(pin input line (at -10 2.54 0) (length 5)'
+        ' (name "A1") (number "1"))\n'
+        '\t\t\t(pin input line (at 10 2.54 180) (length 5)'
+        ' (name "B1") (number "6"))\n'
+        '\t\t)\n'
+        '\t)\n'
+        ')\n'
+    )
+    block = extract_symbol_block("Sw", "DSW", stock_dir=tmp_path)
+    assert "(pin input" not in block
+    assert block.count("(pin passive") == 2
+
+
+def test_active_device_input_pins_preserved(tmp_path: Path) -> None:
+    # Active devices (Reference "U", "Q", ...) keep their `input` pins: a
+    # genuinely floating IC input SHOULD trip ERC, so the normalizer must not
+    # touch them. Guards against the retype being too broad.
+    lib = tmp_path / "Ic.kicad_sym"
+    lib.write_text(
+        '(kicad_symbol_lib (version 20211014)\n'
+        '\t(symbol "GATE"\n'
+        '\t\t(property "Reference" "U" (at 0 0 0))\n'
+        '\t\t(symbol "GATE_0_1"\n'
+        '\t\t\t(pin input line (at -10 0 0) (length 5)'
+        ' (name "IN") (number "1"))\n'
+        '\t\t)\n'
+        '\t)\n'
+        ')\n'
+    )
+    block = extract_symbol_block("Ic", "GATE", stock_dir=tmp_path)
+    assert "(pin input" in block
+
+
 def test_custom_symbol_dir(tmp_path: Path) -> None:
     fake_lib = tmp_path / "Fake.kicad_sym"
     fake_lib.write_text(
