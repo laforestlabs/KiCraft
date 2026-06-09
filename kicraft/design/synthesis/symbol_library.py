@@ -134,6 +134,65 @@ def _qualify_with_prefix(symbol_text: str, symbol_name: str, library: str) -> st
     )
 
 
+# Reference-designator prefixes for device classes whose pins are *passive*
+# contacts in correct KiCad modeling -- switches, connectors, and discrete
+# passives. KiCad's own libraries type every pin of these `passive`
+# (Switch:SW_DIP_x03, Connector:*, Device:R/C/L/D ...). Parts imported from
+# LCSC via easyeda2kicad, however, inherit EasyEDA's careless pin metadata and
+# routinely arrive typed `input`. KiCad ERC then demands an Output driver for
+# every `input` pin and raises "Input pin not driven by any Output pins"
+# (pin_not_driven) on any net that isn't power-flagged -- even though a switch
+# contact or connector terminal neither drives nor is driven. None of these
+# classes owns a logic input that legitimately needs a driver, so retyping their
+# `input` pins to `passive` only ever corrects an import artifact; it can never
+# mask a real floating-input error. Active devices (ICs: U/Q/...) and
+# crystals/oscillators (Y/X, whose enable IS a driven input) are deliberately
+# excluded.
+_PASSIVE_DEVICE_REF_PREFIXES = frozenset({
+    "SW", "BTN", "PB", "KEY",                  # switches / buttons
+    "J", "P", "CN", "CON", "JP",               # connectors / headers / jumpers
+    "R", "RN", "RV", "RT", "RP", "VR", "POT",  # resistors / networks / thermistors / pots
+    "C",                                       # capacitors
+    "L", "FB", "FL",                           # inductors / ferrite beads
+    "D", "LED", "CR", "DZ", "TVS",             # diodes / LEDs / TVS
+    "F", "FU",                                 # fuses
+    "TP",                                      # test points
+    "LS", "SP", "BZ", "MK", "MIC",             # transducers (speaker / buzzer / mic)
+    "ANT", "AE",                               # antennas
+    "MH",                                      # mounting holes
+})
+
+_REFERENCE_PROP_RE = re.compile(r'\(property\s+"Reference"\s+"([^"]*)"')
+_REF_ALPHA_PREFIX_RE = re.compile(r"[A-Za-z]+")
+_PIN_INPUT_RE = re.compile(r"(\(pin\s+)input\b")
+
+
+def _normalize_passive_device_pins(symbol_text: str) -> str:
+    """Retype `input` pins as `passive` on passive/electromechanical symbols.
+
+    easyeda2kicad-imported switches, connectors, and discrete passives often
+    carry EasyEDA's bogus `input` pin type. KiCad ERC then flags those pins
+    ``pin_not_driven`` ("Input pin not driven by any Output pins") on every
+    non-power net, because an `input` pin requires an Output driver and a
+    switch/connector contact has none. KiCad's stock libraries model these
+    contacts as `passive` (which needs no driver), so we do the same.
+
+    The device class is read from the symbol's own ``Reference`` prefix
+    (intrinsic to the library symbol, e.g. ``SW``/``J``/``R``); only classes in
+    :data:`_PASSIVE_DEVICE_REF_PREFIXES` -- none of which has a logic input that
+    legitimately needs a driver -- are touched, so this can never mask a real
+    floating-input error on an IC. A no-op on correctly-typed symbols (KiCad
+    stock passives already carry no `input` pins).
+    """
+    m = _REFERENCE_PROP_RE.search(symbol_text)
+    if not m:
+        return symbol_text
+    pm = _REF_ALPHA_PREFIX_RE.match(m.group(1))
+    if not pm or pm.group(0).upper() not in _PASSIVE_DEVICE_REF_PREFIXES:
+        return symbol_text
+    return _PIN_INPUT_RE.sub(r"\1passive", symbol_text)
+
+
 # ---------- public API ----------
 
 
@@ -167,7 +226,8 @@ def extract_symbol_block(
         raise SymbolNotFoundError(str(exc)) from exc
     lib_text = lib_path.read_text()
     resolved = _resolve_extends_chain(lib_text, symbol_name)
-    return _qualify_with_prefix(resolved, symbol_name, library)
+    qualified = _qualify_with_prefix(resolved, symbol_name, library)
+    return _normalize_passive_device_pins(qualified)
 
 
 def search_symbols(
