@@ -1,6 +1,6 @@
 # KiCraft Privacy Policy
 
-**Version: 2026-06-04**
+**Version: 2026-06-09**
 
 > **DRAFT, pending attorney review.** This document is a first-draft template. It
 > has not been reviewed by a lawyer. Replace every `[BRACKETED]` placeholder and
@@ -42,7 +42,12 @@ b. **Improve the product**: analyze prompts and usage patterns to understand wha
 c. **Train and improve machine-learning models**, using your prompts and designs
    as training data. **You can opt out of this use** (Section 5);
 d. **Publish de-identified examples**: show anonymized designs and prompts, with
-   identifying details removed, in galleries, documentation, or marketing.
+   identifying details removed, in galleries, documentation, or marketing;
+e. **Community sharing (free tier)**: if you are on the free tier, your completed
+   designs are published to the in-app community browser, where other signed-in
+   users can view them and clone them into their own accounts. Unlike (d), these
+   are **not** de-identified beyond your email being hidden from non-staff viewers.
+   Paid tiers can keep projects private. See the Terms of Service, Section 5.
 
 ## 3. Who we share it with
 
@@ -94,7 +99,10 @@ cannot afford to have exposed.
 Because we store your full input and may use it as described above, **do not
 upload circuit designs or other intellectual property you are not permitted to
 share or that you need to keep secret.** Prompts are also sent to third-party
-model providers (Section 3).
+model providers (Section 3). This matters most on the **free tier**, where your
+completed projects are public in the community browser and can be cloned by other
+users (Section 2e); never put confidential or proprietary content into a free-tier
+project. Upgrade to a paid tier if you need projects to stay private.
 
 ## 8. Children
 

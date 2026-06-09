@@ -13,7 +13,7 @@ from pathlib import Path
 # Version of the legal documents in docs/legal/. Stamped into each user's consent
 # record at signup; bumping it (here and in the documents) forces existing users
 # to re-accept on their next visit. See docs/legal/README.md.
-LEGAL_VERSION = "2026-06-04"
+LEGAL_VERSION = "2026-06-09"
 
 # Canonical location of the Terms / Privacy markdown, served at /terms and
 # /privacy. Resolves to the repo's docs/legal relative to this package; the box
