@@ -330,18 +330,29 @@ def strip_net_copper(kicad_pcb_path: str, net_name: str) -> None:
     The leaf-composed GND trace web saturates the signal layer and blocks the
     parent's cross-block signal routing; stripping it lets signals route on a
     clear layer before ground is poured back as a plane.
+
+    Each pass -- track removal, zone removal, connectivity rebuild -- runs in its
+    OWN short-lived pcbnew subprocess. Doing all three in a single process
+    reliably SIGSEGVs pcbnew on a composed parent board (each pass alone is fine;
+    the combination corrupts pcbnew's internal state). One process per pass, each
+    reloading from the file the previous one saved, sidesteps the crash.
     """
+    load = f"board = pcbnew.LoadBoard({kicad_pcb_path!r})\n"
+    save = f"board.Save({kicad_pcb_path!r})\n"
+    # 1) tracks/vias on the net
     _run_pcbnew_script(
-        "import pcbnew\n"
-        f"board = pcbnew.LoadBoard({kicad_pcb_path!r})\n"
-        f"net = {net_name!r}\n"
+        "import pcbnew\n" + load + f"net = {net_name!r}\n"
         "for t in list(board.GetTracks()):\n"
-        "    if t.GetNetname() == net: board.Remove(t)\n"
-        "for z in list(board.Zones()):\n"
-        "    if z.GetNetname() == net: board.Remove(z)\n"
-        "board.BuildConnectivity()\n"
-        f"board.Save({kicad_pcb_path!r})\n"
+        "    if t.GetNetname() == net: board.Remove(t)\n" + save
     )
+    # 2) copper zones on the net
+    _run_pcbnew_script(
+        "import pcbnew\n" + load + f"net = {net_name!r}\n"
+        "for z in list(board.Zones()):\n"
+        "    if z.GetNetname() == net: board.Remove(z)\n" + save
+    )
+    # 3) rebuild connectivity from the trimmed board
+    _run_pcbnew_script("import pcbnew\n" + load + "board.BuildConnectivity()\n" + save)
 
 
 def _unlock_traces(kicad_pcb_path: str) -> None:
