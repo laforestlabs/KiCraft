@@ -2931,14 +2931,19 @@ def _route_parent_board(
     from kicraft.autoplacer.freerouting_runner import strip_net_copper
 
     gnd_net = cfg.get("gnd_zone_net", "GND")
-    if gnd_net:
-        strip_net_copper(str(stamped_pcb), gnd_net)
-        # Pour a B.Cu GND plane (+ IC thermal vias) before routing so FreeRouting
-        # ties GND to the plane with short drops instead of re-creating the dense
-        # cross-block GND web that saturates F.Cu and blocks signal interconnects.
-        add_gnd_pour_and_thermal_vias(str(stamped_pcb), cfg)
-
+    # The pre-route GND strip/pour and the route itself all shell out to pcbnew;
+    # any of them can fail (e.g. a pcbnew SIGSEGV mid-strip). Guard the whole
+    # block so a failure returns a discardable result and the search tries the
+    # next round, instead of an uncaught exception killing the compose subprocess
+    # and taking the entire build down with it.
     try:
+        if gnd_net:
+            # Strip the leaf-composed GND web and pour a B.Cu GND plane (+ IC
+            # thermal vias) before routing, so FreeRouting ties GND to the plane
+            # with short drops instead of re-creating the dense cross-block GND
+            # web that saturates F.Cu and blocks signal interconnects.
+            strip_net_copper(str(stamped_pcb), gnd_net)
+            add_gnd_pour_and_thermal_vias(str(stamped_pcb), cfg)
         freerouting_stats = route_with_freerouting(
             kicad_pcb_path=str(stamped_pcb),
             output_path=str(routed_pcb),
