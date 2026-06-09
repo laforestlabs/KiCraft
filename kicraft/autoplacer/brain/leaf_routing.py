@@ -114,6 +114,28 @@ def _outline_around_geometry(
     )
 
 
+def _center_on_leaf_page(
+    tl: Point, br: Point, cfg: dict[str, Any]
+) -> tuple[Point, tuple[Point, Point]]:
+    """Translation that centers the ``[tl, br]`` content box on a standard A4 leaf
+    page, plus the resulting centered Edge.Cuts outline.
+
+    Mirrors the parent's A4 centering (compose_subcircuits._stamp_parent_board) so a
+    standalone leaf opens centered in the title block instead of crammed against the
+    top-left origin. Position on the page is free: the parent composer re-bases each
+    leaf to its own outline origin on load (subcircuit_instances._layout_from_artifact_payload),
+    so a centered leaf composes identically to one anchored at (0, 0). Returns
+    ``(delta, (new_tl, new_br))``.
+    """
+    page_w = float(cfg.get("leaf_page_width_mm", cfg.get("parent_page_width_mm", 297.0)))
+    page_h = float(cfg.get("leaf_page_height_mm", cfg.get("parent_page_height_mm", 210.0)))
+    w = br.x - tl.x
+    h = br.y - tl.y
+    dx = (page_w - w) / 2.0 - tl.x
+    dy = (page_h - h) / 2.0 - tl.y
+    return Point(dx, dy), (Point(tl.x + dx, tl.y + dy), Point(br.x + dx, br.y + dy))
+
+
 def _deterministic_route_signature(
     board_state: Any, cfg: dict[str, Any], jar_path: Any
 ) -> str:
@@ -641,13 +663,15 @@ def route_local_subcircuit(
     silk_stamp_start = time.monotonic()
     silk_adapter = KiCadAdapter(str(routed_board), config=cfg)
     routed_state_for_silk = silk_adapter.load()
-    # Shrink Edge.Cuts to hug the post-route geometry the silk hugs, and
-    # translate all geometry so the new outline starts at (0, 0). Without
-    # the translate, the parent composer (which rotates each leaf around
-    # local origin and assumes outline TL is at (0, 0)) silently misplaces
-    # the leaf by (tl.x, tl.y). Without the shrink, the yellow outline
-    # stays at whatever size-reduction accepted (or the raw extractor
-    # envelope), and the rounded silk sits inside a much larger sharp rect.
+    # Shrink Edge.Cuts to hug the post-route geometry the silk hugs, and center
+    # the whole leaf on a standard A4 page so the standalone board opens centered in
+    # the title block instead of crammed against the top-left origin. Centering is
+    # safe for composition: the parent composer re-bases each leaf to its own outline
+    # origin on load (subcircuit_instances._layout_from_artifact_payload) before it
+    # rotates around (0, 0) and translates by the placement origin, so leaf page
+    # position is free. Without the shrink, the yellow outline stays at whatever
+    # size-reduction accepted (or the raw extractor envelope), and the rounded silk
+    # sits inside a much larger sharp rect.
     _new_outline = _outline_around_geometry(
         routed_state_for_silk.components,
         cfg,
@@ -656,13 +680,13 @@ def route_local_subcircuit(
     )
     if _new_outline is not None:
         _new_tl, _new_br = _new_outline
-        if abs(_new_tl.x) > 1e-6 or abs(_new_tl.y) > 1e-6:
+        _delta, _centered_outline = _center_on_leaf_page(_new_tl, _new_br, cfg)
+        if abs(_delta.x) > 1e-6 or abs(_delta.y) > 1e-6:
             from kicraft.autoplacer.brain.leaf_geometry import (
                 copy_components_with_translation,
                 copy_traces_with_translation,
                 copy_vias_with_translation,
             )
-            _delta = Point(-_new_tl.x, -_new_tl.y)
             routed_state_for_silk.components = copy_components_with_translation(
                 routed_state_for_silk.components, _delta
             )
@@ -672,11 +696,8 @@ def route_local_subcircuit(
             routed_state_for_silk.vias = copy_vias_with_translation(
                 routed_state_for_silk.vias, _delta
             )
-        routed_state_for_silk.board_outline = (
-            Point(0.0, 0.0),
-            Point(_new_br.x - _new_tl.x, _new_br.y - _new_tl.y),
-        )
-    # Silk is computed AFTER the translate so it lands in the (0, 0)-anchored frame.
+        routed_state_for_silk.board_outline = _centered_outline
+    # Silk is computed AFTER the translate so it lands in the centered frame.
     routed_state_for_silk.silkscreen = _silk_for_leaf(
         extraction,
         routed_state_for_silk.components,
@@ -1119,25 +1140,22 @@ def _stamp_trivial_leaf(
     route_input_board.components = copy.deepcopy(repaired_components)
     route_input_board.traces = []
     route_input_board.vias = []
-    # Trivial leaves skip FreeRouting, so the pre-route stamp is also the
-    # final stamp. Apply the same shrink-and-translate as the main-path
-    # silk re-stamp so the rounded silk hugs Edge.Cuts and the parent
-    # composer can place the leaf consistently.
+    # Trivial leaves skip FreeRouting, so the pre-route stamp is also the final
+    # stamp. Apply the same shrink-and-center as the main-path silk re-stamp so the
+    # rounded silk hugs Edge.Cuts and the standalone leaf opens centered on its A4
+    # page (the parent composer re-bases each leaf on load, so this is placement-safe).
     _new_outline = _outline_around_geometry(route_input_board.components, cfg)
     if _new_outline is not None:
         _new_tl, _new_br = _new_outline
-        if abs(_new_tl.x) > 1e-6 or abs(_new_tl.y) > 1e-6:
+        _delta, _centered_outline = _center_on_leaf_page(_new_tl, _new_br, cfg)
+        if abs(_delta.x) > 1e-6 or abs(_delta.y) > 1e-6:
             from kicraft.autoplacer.brain.leaf_geometry import (
                 copy_components_with_translation,
             )
-            _delta = Point(-_new_tl.x, -_new_tl.y)
             route_input_board.components = copy_components_with_translation(
                 route_input_board.components, _delta
             )
-        route_input_board.board_outline = (
-            Point(0.0, 0.0),
-            Point(_new_br.x - _new_tl.x, _new_br.y - _new_tl.y),
-        )
+        route_input_board.board_outline = _centered_outline
     route_input_board.silkscreen = _silk_for_leaf(
         extraction, route_input_board.components, cfg
     )
