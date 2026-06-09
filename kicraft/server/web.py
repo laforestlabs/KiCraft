@@ -1104,6 +1104,16 @@ def _persist_project(ws: Path | None, state: dict) -> None:
                                  dir_path=dir_path, zip_path=zip_path)
         except Exception:
             pass
+        # Catalog: stamp the quality badge and (re)index for the community browser.
+        # reindex_search indexes only public, completed projects and removes anything
+        # else, so a failed/awaiting/private run is correctly kept out. Best-effort:
+        # a catalog hiccup must never crash the worker.
+        try:
+            if status == "ok" and dir_path:
+                store.set_quality(pid, _quality_badge_from_ws(ws))
+            store.reindex_search(pid)
+        except Exception:
+            pass
 
 
 def _rehydrate_workspace(project) -> Path:
@@ -1777,6 +1787,42 @@ def profile_page():
                     .classes("text-xs").style("color:#60a5fa")
             ui.label("To export or delete all your data, contact "
                      "[CONTACT EMAIL].").classes("text-xs").style("color:#64748b")
+
+        with ui.card().classes("w-full gap-2") \
+                .style("background:#0f172a;border:1px solid #1e293b"):
+            ui.label("Community visibility").classes("text-base font-semibold text-white")
+            if _can_make_private(user):
+                ui.label("Choose which of your completed projects appear in the "
+                         "community browser.").classes("text-xs").style("color:#94a3b8")
+                ok_projs = [p for p in _store().list_projects(user.id) if p.status == "ok"]
+                if not ok_projs:
+                    ui.label("You have no completed projects yet.") \
+                        .classes("text-xs").style("color:#64748b")
+                for p in ok_projs:
+                    with ui.row().classes("w-full items-center gap-2"):
+                        ui.label(p.project_stem or f"project {p.id}") \
+                            .classes("text-sm flex-grow").style("color:#e2e8f0")
+                        sw = ui.switch("Public", value=p.is_public)
+
+                        def _flip(e, pid=p.id):
+                            # Re-check tier server-side: a downgraded/forged session
+                            # must not be able to hide a project from the catalog.
+                            if not _can_make_private(_current_user()):
+                                ui.notify("Only paid plans can change visibility.",
+                                          color="warning")
+                                return
+                            _store().set_visibility(pid, bool(e.value))
+                            _store().reindex_search(pid)
+                            ui.notify("Visibility updated.", color="positive")
+
+                        sw.on_value_change(_flip)
+            else:
+                ui.label("Your projects are public and appear in the community "
+                         "browser. Upgrade to Pro to keep projects private.") \
+                    .classes("text-xs").style("color:#94a3b8")
+            ui.button("Open community browser", icon="travel_explore",
+                      on_click=lambda: ui.navigate.to("/browse")) \
+                .props("flat dense no-caps color=primary").classes("text-xs mt-1")
 
         with ui.row().classes("w-full justify-end"):
             ui.button("Log out", icon="logout", on_click=logout) \
@@ -2704,6 +2750,482 @@ def admin_users_page():
         build_users()
 
 
+# --------------------------------------------------------------------------- #
+# Public project browser: a searchable, cross-user catalog of public, completed
+# designs. Free users' projects are public; paid users' are private by default
+# (toggle on /profile). Anyone can clone a public project into their own account.
+# Reuses the samples card grid, the parts search idiom, the KiCanvas helpers, and
+# the capability-token file serving -- the privacy boundary is that a file token
+# is only ever minted for a project that passes _public_project_or_none.
+# --------------------------------------------------------------------------- #
+_QUALITY_CHIP = {
+    "fab_ready": ("Fab-ready", "#34d399"),
+    "erc_errors": ("Has ERC issues", "#fbbf24"),
+    "unverified": ("Unverified", "#64748b"),
+}
+
+
+def _quality_chip(quality) -> None:
+    """A small colored badge for a project's build quality."""
+    label, color = _QUALITY_CHIP.get(quality or "unverified", _QUALITY_CHIP["unverified"])
+    ui.label(label).classes("text-xs rounded").style(
+        f"background:#0b1120;border:1px solid {color};color:{color};padding:1px 8px")
+
+
+def _stat_icon(icon: str, n) -> None:
+    """An icon + count pair (views / clones / likes) for a card or detail header."""
+    with ui.row().classes("items-center gap-1").style("color:#64748b"):
+        ui.icon(icon).style("font-size:15px")
+        ui.label(str(n or 0)).classes("text-xs")
+
+
+def _can_make_private(user) -> bool:
+    """Whether a user's plan may keep a project private. Free projects are always
+    public (the community rule); only paid (pro/max) plans can opt out. Re-checked
+    server-side on every visibility/clone mutation, not just in the UI."""
+    return bool(user is not None and getattr(user, "tier", None) in ("pro", "max"))
+
+
+def _quality_badge_from_ws(ws: Path | None) -> str:
+    """Derive the catalog quality badge from a finished run's synthesis check (in
+    the workspace): 'fab_ready' = passed clean, 'erc_errors' = ran but failed,
+    'unverified' = no readable check. Mirrors eval.artifacts.parse_synthesis_check
+    without importing the eval layer into the server."""
+    if ws is None:
+        return "unverified"
+    try:
+        sc = json.loads(
+            (ws / ".kicraft" / "synthesis_check.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "unverified"
+    if not isinstance(sc, dict) or sc.get("status") is None:
+        return "unverified"
+    failed = sc.get("failed_checks")
+    if failed is None:
+        failed = [c.get("name") for c in (sc.get("checks") or []) if c.get("ok") is False]
+    return "fab_ready" if (sc.get("status") == "ok" and not failed) else "erc_errors"
+
+
+def _persisted_generated_dir(dir_path, stem) -> Path | None:
+    """The generated KiCad dir (`generated/<STEM>/`) inside a persisted project, by
+    stem first then by inspection, so it resolves even for legacy/odd-named runs."""
+    if not dir_path:
+        return None
+    base = Path(dir_path)
+    if stem and (base / "generated" / stem).is_dir() \
+            and any((base / "generated" / stem).glob("*.kicad_sch")):
+        return base / "generated" / stem
+    return _discover_generated_dir(base)
+
+
+def _board_thumb_url(dir_path, stem) -> str | None:
+    """A small board-preview URL for a browse card: the routed front render of the
+    project's first leaf (falling back to its placement render), served via a signed
+    token. None when no render exists yet (the card shows a placeholder)."""
+    gen = _persisted_generated_dir(dir_path, stem)
+    if gen is None:
+        return None
+    sub = gen / ".experiments" / "subcircuits"
+    if not sub.is_dir():
+        return None
+    best = None
+    for leaf in sorted(sub.iterdir()):
+        renders = leaf / "renders"
+        if not renders.is_dir():
+            continue
+        routed = _latest_render(renders, "routed_front_all")
+        if routed is not None:
+            best = routed
+            break
+        if best is None:
+            best = _latest_render(renders, "pre_route_front_all")
+    if best is None:
+        return None
+    tok = _register_project_dir(gen)
+    rel = best.relative_to(gen).as_posix()
+    return f"/project/{tok}/render/{rel}?v={int(best.stat().st_mtime)}"
+
+
+def _board_source(gen: Path, stem: str, token: str):
+    """(url, filename) for the project's board PCB, or None. Prefers <stem>.kicad_pcb
+    (the file KiCanvas + serve_project_file expect in the dir root)."""
+    cand = gen / f"{stem}.kicad_pcb"
+    if cand.is_file():
+        return (f"/project/{token}/{cand.name}", cand.name)
+    pcbs = sorted(gen.glob("*.kicad_pcb"))
+    if pcbs:
+        return (f"/project/{token}/{pcbs[0].name}", pcbs[0].name)
+    return None
+
+
+def _load_persisted_state(dir_path) -> dict | None:
+    """Read a persisted project's state.json (top-level copy, or the kicraft/ copy),
+    for the detail page's BOM. None if neither is readable."""
+    if not dir_path:
+        return None
+    base = Path(dir_path)
+    for cand in (base / "state.json", base / "kicraft" / "state.json"):
+        if cand.is_file():
+            try:
+                return json.loads(cand.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
+    return None
+
+
+def _public_project_or_none(project_id):
+    """The project for a public, completed id, else None. This is the detail page's
+    privacy gate: a file token is minted only for a non-None result, so a private,
+    failed, or missing project's files are never served through the public page."""
+    try:
+        pid = int(project_id)
+    except (TypeError, ValueError):
+        return None
+    p = _store().get_project(pid)
+    if p is None or p.status != "ok" or not p.is_public:
+        return None
+    return p
+
+
+def _clone_project(source, cloner, make_private: bool):
+    """Copy a public project into `cloner`'s account as a new, re-runnable project.
+
+    Returns (new_project_id, None) on success or (None, reason) on failure. Consumes
+    a quota slot like a normal design (it is an owned, re-runnable copy). The copied
+    tree keeps the kicraft/ + generated/ layout so open_project -> _rehydrate_workspace
+    works unchanged. events.jsonl is NOT copied: the clone starts a fresh history."""
+    store = _store()
+    if not store.can_design(cloner):
+        return None, "quota"
+    make_private = bool(make_private and _can_make_private(cloner))
+    src = Path(source.dir_path) if source.dir_path else None
+    if src is None or not src.is_dir():
+        return None, "missing"
+    pid = store.create_project(cloner.id, source.brief or "", is_public=not make_private)
+    dst = store.projects_dir / str(cloner.id) / str(pid)
+    zip_path = None
+    try:
+        dst.mkdir(parents=True, exist_ok=True)
+        for fname in ("brief.txt", "state.json"):
+            if (src / fname).is_file():
+                shutil.copy2(src / fname, dst / fname)
+        for sub in ("kicraft", "generated"):
+            if (src / sub).is_dir():
+                shutil.copytree(src / sub, dst / sub, dirs_exist_ok=True)
+        if (src / "kicraft_project.zip").is_file():
+            zip_path = str(dst / "kicraft_project.zip")
+            shutil.copy2(src / "kicraft_project.zip", zip_path)
+    except Exception:
+        shutil.rmtree(dst, ignore_errors=True)
+        try:
+            store.finish_project(pid, "failed")  # free the reserved quota slot
+        except Exception:
+            pass
+        return None, "copy_error"
+    store.finish_project(pid, "ok", stem=source.project_stem, cost_usd=None,
+                         dir_path=str(dst), zip_path=zip_path)
+    store.set_cloned_from(pid, source.id)
+    if source.quality:
+        store.set_quality(pid, source.quality)
+    store.increment_clone_count(source.id)
+    try:
+        store.reindex_search(pid)  # make the clone searchable if it is public
+    except Exception:
+        pass
+    return pid, None
+
+
+def _project_card(r: dict) -> None:
+    """One browse-grid card for a public project dict (from list_public_projects)."""
+    stem = r.get("project_stem") or "Untitled board"
+    thumb = _board_thumb_url(r.get("dir_path"), r.get("project_stem"))
+    card = ui.card().classes("w-72 gap-1 cursor-pointer") \
+        .style("background:#0f172a;border:1px solid #1e293b")
+    with card:
+        if thumb:
+            ui.image(thumb).props("fit=contain") \
+                .style("height:150px;background:#0a0f1e").classes("w-full rounded")
+        else:
+            with ui.element("div").classes("w-full rounded flex items-center justify-center") \
+                    .style("height:150px;background:#0a0f1e"):
+                ui.icon("developer_board").style("color:#334155;font-size:46px")
+        with ui.row().classes("w-full items-center justify-between gap-1"):
+            ui.label(stem).classes("text-base font-semibold text-white")
+            _quality_chip(r.get("quality"))
+        with ui.row().classes("items-center gap-3"):
+            _stat_icon("visibility", r.get("view_count"))
+            _stat_icon("content_copy", r.get("clone_count"))
+            _stat_icon("favorite", r.get("like_count"))
+        brief = (r.get("brief") or "").strip()
+        if brief:
+            ui.label(brief).classes("text-xs").style(
+                "color:#94a3b8;display:-webkit-box;-webkit-line-clamp:2;"
+                "-webkit-box-orient:vertical;overflow:hidden")
+    card.on("click", lambda rr=r: ui.navigate.to(f"/p/{rr['id']}"))
+
+
+@ui.page("/browse")
+def browse_page():
+    """The community browser: every public, completed design, searchable by part or
+    function and sortable by popularity / newest / most-cloned. Login + consent gated
+    like the rest of the app; cloning and liking happen on a project's detail page."""
+    user = _current_user()
+    if user is None:
+        return RedirectResponse("/login")
+    if user.accepted_terms_version != LEGAL_VERSION:
+        return RedirectResponse("/consent")
+
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+
+    with ui.header().classes("items-center justify-between") \
+            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+        with ui.row().classes("items-center gap-2"):
+            ui.label("KiCraft").classes("text-xl font-bold text-white")
+            ui.label("community browser").classes("text-sm").style("color:#94a3b8")
+        ui.button("Back to workspace", icon="arrow_back",
+                  on_click=lambda: ui.navigate.to("/")) \
+            .props("flat dense no-caps color=white").classes("text-xs")
+
+    PAGE = 24
+    state = {"offset": 0, "deb": None}
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1200px"):
+        ui.label("Community projects").classes("text-2xl font-bold text-white")
+        ui.label("Browse boards the KiCraft community has built. Search by a part "
+                 "(like esp32) or by what it does (like plant watering), then open "
+                 "one to view it and clone it into your own workspace.") \
+            .classes("text-sm").style("color:#94a3b8")
+
+        with ui.row().classes("w-full items-center gap-3"):
+            search = ui.input(
+                placeholder="Search by part (esp32) or function (plant watering)…") \
+                .props("dense outlined clearable dark").classes("flex-grow") \
+                .style("min-width:240px")
+            sort_toggle = ui.toggle(
+                {"popularity": "Popular", "new": "New", "clones": "Most clones"},
+                value="popularity").props("dense no-caps")
+            badge_toggle = ui.toggle(
+                {"all": "All", "fab_ready": "Fab-ready", "erc_errors": "Has ERC issues"},
+                value="all").props("dense no-caps")
+        count_label = ui.label().classes("text-xs").style("color:#64748b")
+        grid = ui.row().classes("w-full flex-wrap gap-4")
+        more_row = ui.row().classes("w-full justify-center")
+
+        def _q():
+            return (search.value or "").strip() or None
+
+        def _badge():
+            return None if badge_toggle.value == "all" else badge_toggle.value
+
+        def _maybe_more(total):
+            more_row.clear()
+            if state["offset"] < total:
+                with more_row:
+                    ui.button(f"Load more ({total - state['offset']} more)",
+                              on_click=load_more).props("flat no-caps color=primary")
+
+        def add_cards(rows):
+            with grid:
+                for r in rows:
+                    _project_card(r)
+
+        def render():
+            grid.clear()
+            state["offset"] = 0
+            q, badge = _q(), _badge()
+            total = _store().count_public_projects(query=q, badge=badge)
+            rows = _store().list_public_projects(
+                sort=sort_toggle.value, query=q, badge=badge, limit=PAGE, offset=0)
+            suffix = " found" if (q or badge) else ""
+            count_label.text = f"{total} project{'' if total == 1 else 's'}{suffix}"
+            add_cards(rows)
+            state["offset"] = len(rows)
+            _maybe_more(total)
+
+        def load_more():
+            q, badge = _q(), _badge()
+            rows = _store().list_public_projects(
+                sort=sort_toggle.value, query=q, badge=badge,
+                limit=PAGE, offset=state["offset"])
+            add_cards(rows)
+            state["offset"] += len(rows)
+            _maybe_more(_store().count_public_projects(query=q, badge=badge))
+
+        def schedule_render():
+            if state["deb"] is not None:
+                state["deb"].cancel()
+            state["deb"] = ui.timer(0.25, render, once=True)  # debounce typing
+
+        search.on_value_change(lambda: schedule_render())
+        sort_toggle.on_value_change(lambda: render())
+        badge_toggle.on_value_change(lambda: render())
+        render()
+
+
+@ui.page("/p/{project_id}")
+def public_project_page(project_id: str):
+    """A public project's detail page: schematic + board (KiCanvas), BOM, community
+    metrics, and the Like + Clone actions. Login + consent gated. A private, failed,
+    or missing project renders a neutral 'not available' panel and mints no token."""
+    user = _current_user()
+    if user is None:
+        return RedirectResponse("/login")
+    if user.accepted_terms_version != LEGAL_VERSION:
+        return RedirectResponse("/consent")
+
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    kicanvas_head()
+
+    with ui.header().classes("items-center justify-between") \
+            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+        with ui.row().classes("items-center gap-2"):
+            ui.label("KiCraft").classes("text-xl font-bold text-white")
+            ui.label("community project").classes("text-sm").style("color:#94a3b8")
+        ui.button("Back to browse", icon="arrow_back",
+                  on_click=lambda: ui.navigate.to("/browse")) \
+            .props("flat dense no-caps color=white").classes("text-xs")
+
+    p = _public_project_or_none(project_id)
+    if p is None:
+        with ui.column().classes("w-full mx-auto p-8 gap-2 items-center") \
+                .style("max-width:760px"):
+            ui.icon("lock").style("color:#64748b;font-size:40px")
+            ui.label("This project isn't available.").classes("text-lg text-white")
+            ui.label("It may be private, still building, or no longer exists.") \
+                .classes("text-sm").style("color:#94a3b8")
+            ui.button("Browse community projects", icon="travel_explore",
+                      on_click=lambda: ui.navigate.to("/browse")).props("flat no-caps")
+        return
+
+    # One view per browser session per project, so a refresh doesn't inflate the count.
+    viewed = app.storage.user.setdefault("viewed_projects", [])
+    if p.id not in viewed:
+        try:
+            _store().record_view(p.id)
+        except Exception:
+            pass
+        viewed.append(p.id)
+        app.storage.user["viewed_projects"] = viewed
+
+    gen = _persisted_generated_dir(p.dir_path, p.project_stem)
+    token = _register_project_dir(gen) if gen else None
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1200px"):
+        with ui.row().classes("w-full items-center justify-between gap-2"):
+            ui.label(p.project_stem or "Untitled board") \
+                .classes("text-2xl font-bold text-white")
+            _quality_chip(p.quality)
+        if (p.brief or "").strip():
+            ui.label(p.brief).classes("text-sm").style("color:#94a3b8")
+
+        with ui.row().classes("items-center gap-4 flex-wrap"):
+            _stat_icon("visibility", p.view_count)
+            _stat_icon("content_copy", p.clone_count)
+            like_state = {"liked": _store().has_liked(user.id, p.id), "n": p.like_count}
+
+            def _refresh_like():
+                like_btn.props(
+                    f"icon={'favorite' if like_state['liked'] else 'favorite_border'}")
+                like_btn.set_text(str(like_state["n"]))
+
+            def _on_like():
+                like_state["liked"] = _store().toggle_like(user.id, p.id)
+                fresh = _store().get_project(p.id)
+                like_state["n"] = fresh.like_count if fresh else like_state["n"]
+                _refresh_like()
+
+            like_btn = ui.button(on_click=_on_like) \
+                .props("flat dense no-caps color=white").classes("text-xs")
+            _refresh_like()
+            _clone_button(p, user)
+            ui.label("Community project").classes("text-xs").style("color:#64748b")
+
+        if gen and token:
+            srcs = _schematic_sources(gen, p.project_stem or "", token)
+            if srcs:
+                with ui.card().classes("w-full") \
+                        .style("background:#0f172a;border:1px solid #1e293b"):
+                    _render_synth_view(srcs, p.project_stem or "")
+            board = _board_source(gen, p.project_stem or "", token)
+            if board:
+                with ui.card().classes("w-full") \
+                        .style("background:#0f172a;border:1px solid #1e293b"):
+                    ui.label("Board").classes("text-xs font-medium").style("color:#94a3b8")
+                    KiCanvasView([KiCanvasSource(board[0], board[1])], height="h-[520px]")
+        else:
+            ui.label("This project's files aren't available to preview.") \
+                .classes("text-sm").style("color:#64748b")
+
+        _render_bom_table(_load_persisted_state(p.dir_path))
+
+
+def _clone_button(source, user) -> None:
+    """Render the Clone action: paid users get a 'make private' dialog (private by
+    default), free users clone publicly in one click. The tier gate is re-checked in
+    _clone_project, so the dialog is convenience, not the security boundary."""
+    def do_clone(make_private):
+        pid, err = _clone_project(source, user, make_private)
+        if err == "quota":
+            ui.notify("You've used your design quota for this period. Upgrade for more.",
+                      color="warning")
+            return
+        if err is not None or pid is None:
+            ui.notify("Couldn't clone this project. Please try again.", color="negative")
+            return
+        ui.notify("Cloned into your workspace — open it under “Your projects.”",
+                  color="positive")
+        ui.navigate.to("/")
+
+    if _can_make_private(user):
+        def open_dialog():
+            with ui.dialog() as dlg, ui.card().classes("gap-2") \
+                    .style("background:#0f172a;border:1px solid #1e293b"):
+                ui.label("Clone this project").classes("text-base font-bold text-white")
+                ui.label("A copy lands in your workspace; you can open and re-run it.") \
+                    .classes("text-xs").style("color:#94a3b8")
+                priv = ui.switch("Make my clone private", value=True)
+                with ui.row().classes("w-full justify-end gap-2"):
+                    ui.button("Cancel", on_click=dlg.close).props("flat no-caps")
+                    ui.button("Clone",
+                              on_click=lambda: (dlg.close(), do_clone(priv.value))) \
+                        .props("color=primary unelevated no-caps")
+            dlg.open()
+        ui.button("Clone", icon="content_copy", on_click=open_dialog) \
+            .props("color=primary unelevated no-caps")
+    else:
+        ui.button("Clone", icon="content_copy", on_click=lambda: do_clone(False)) \
+            .props("color=primary unelevated no-caps")
+
+
+def _render_bom_table(state) -> None:
+    """A compact, read-only bill of materials for the detail page."""
+    parts = (((state or {}).get("bom") or {}).get("parts")) or []
+    with ui.card().classes("w-full gap-1") \
+            .style("background:#0f172a;border:1px solid #1e293b"):
+        ui.label(f"Bill of materials ({len(parts)} parts)") \
+            .classes("text-xs font-medium").style("color:#94a3b8")
+        if not parts:
+            ui.label("No parts listed.").classes("text-xs").style("color:#64748b")
+            return
+        with ui.row().classes("w-full items-center gap-2 text-xs font-bold") \
+                .style("color:#64748b"):
+            ui.label("ref").style("width:64px")
+            ui.label("value").style("width:170px")
+            ui.label("mpn / sourcing").classes("flex-grow")
+            ui.label("sheet").style("width:120px")
+        for prt in parts:
+            with ui.row().classes("w-full items-center gap-2 text-xs") \
+                    .style("border-top:1px solid #1e293b;padding:3px 0"):
+                ui.label(str(prt.get("ref") or "")).classes("font-mono") \
+                    .style("width:64px;color:#e2e8f0")
+                ui.label(str(prt.get("value") or "")).style("width:170px;color:#cbd5e1")
+                ui.label(str(prt.get("mpn") or prt.get("sourcing_note") or "")) \
+                    .classes("flex-grow font-mono").style("color:#94a3b8")
+                ui.label(str(prt.get("sheet") or "")).style("width:120px;color:#64748b")
+
+
 @ui.page("/samples")
 def samples_page():
     """Logged-in explorer for the showcase boards: open any sample's real schematic
@@ -3292,6 +3814,10 @@ def index(prompt: str = ""):
                       on_click=lambda: ui.navigate.to("/parts")) \
                 .props("flat dense no-caps color=white").classes("text-xs") \
                 .tooltip("Browse the standard library and parts you've added")
+            ui.button("Browse", icon="travel_explore",
+                      on_click=lambda: ui.navigate.to("/browse")) \
+                .props("flat dense no-caps color=white").classes("text-xs") \
+                .tooltip("Browse and clone community projects")
             if is_admin(user):
                 ui.button("Admin", icon="admin_panel_settings",
                           on_click=lambda: ui.navigate.to("/admin")) \
