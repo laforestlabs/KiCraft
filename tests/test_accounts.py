@@ -13,6 +13,7 @@ import pytest
 from kicraft.server.accounts import (
     TIERS,
     AccountStore,
+    grant_expiry,
     hash_password,
     is_admin,
     verify_password,
@@ -150,6 +151,7 @@ def test_legacy_db_upgrades_without_losing_rows(tmp_path):
     assert u.accepted_terms_version is None  # legacy user is re-prompted
     assert u.allow_training is True  # backfilled default
     assert u.session_epoch == 0  # backfilled so existing sessions stay valid
+    assert u.tier_expires_at is None  # backfilled: existing tiers never lapse
 
 
 def test_export_user_dumps_metadata_without_password(store):
@@ -502,6 +504,142 @@ def test_signups_per_day(store):
     store.create_user("a@e.st", "pw")
     store.create_user("b@e.st", "pw")
     assert dict(store.signups_per_day(30))[dt.date.today().isoformat()] == 2
+
+
+# ---- invite codes -----------------------------------------------------------
+
+def test_create_and_check_invite_code(store):
+    c = store.create_invite_code("FREEMAX", "max", duration_days=30, max_uses=5)
+    assert (c["code"], c["tier"], c["duration_days"], c["max_uses"]) \
+        == ("FREEMAX", "max", 30, 5)
+    assert c["enabled"] is True and c["use_count"] == 0
+    got = store.check_invite_code("FREEMAX")
+    assert got is not None and got["tier"] == "max"
+    assert store.check_invite_code("freemax") is not None  # case-insensitive
+    assert store.check_invite_code("  FREEMAX  ") is not None  # whitespace-tolerant
+    assert store.check_invite_code("NOPE") is None
+    assert store.check_invite_code("") is None
+
+
+def test_create_invite_code_validates(store):
+    with pytest.raises(ValueError):
+        store.create_invite_code("has space", "free")  # charset
+    with pytest.raises(ValueError):
+        store.create_invite_code("ab", "free")  # too short
+    with pytest.raises(ValueError):
+        store.create_invite_code("OK_CODE", "platinum")  # unknown tier
+    with pytest.raises(ValueError):
+        store.create_invite_code("OK_CODE", "free", duration_days=0)
+    with pytest.raises(ValueError):
+        store.create_invite_code("OK_CODE", "free", max_uses=0)
+    store.create_invite_code("DUPE", "free")
+    with pytest.raises(ValueError):
+        store.create_invite_code("dupe", "pro")  # duplicate, case-insensitively
+
+
+def test_disable_and_reenable_invite_code(store):
+    c = store.create_invite_code("BETA", "pro")
+    store.set_invite_code_enabled(c["id"], False)
+    assert store.check_invite_code("BETA") is None  # disabled codes don't redeem
+    listed = store.list_invite_codes()[0]
+    assert listed["enabled"] is False and listed["disabled_at"] is not None
+    store.set_invite_code_enabled(c["id"], True)
+    assert store.check_invite_code("BETA") is not None
+    assert store.list_invite_codes()[0]["disabled_at"] is None
+    with pytest.raises(ValueError):
+        store.set_invite_code_enabled(99999, False)  # no such code
+
+
+def test_invite_code_max_uses_exhausts(store):
+    c = store.create_invite_code("TWICE", "pro", max_uses=2)
+    store.record_invite_use(c["id"])
+    assert store.check_invite_code("TWICE") is not None  # 1 of 2 used
+    store.record_invite_use(c["id"])
+    assert store.check_invite_code("TWICE") is None  # used up
+    listed = store.list_invite_codes()[0]
+    assert listed["use_count"] == 2 and listed["last_used_at"] is not None
+
+
+def test_invite_codes_listed_newest_first(store):
+    store.create_invite_code("FIRST", "free")
+    store.create_invite_code("SECOND", "max", duration_days=7)
+    assert [c["code"] for c in store.list_invite_codes()] == ["SECOND", "FIRST"]
+
+
+# ---- tier expiry ------------------------------------------------------------
+
+def _past_iso(days=1):
+    return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
+
+
+def test_grant_expiry():
+    assert grant_expiry(None) is None  # forever
+    assert grant_expiry(0) is None
+    soon = grant_expiry(7)
+    assert soon > dt.datetime.now(dt.timezone.utc).isoformat()  # in the future
+
+
+def test_code_granted_tier_lapses_on_read(store):
+    u = store.create_user("comp@e.st", "pw", tier="max",
+                          tier_expires_at=_past_iso())
+    got = store.get_user(u.id)
+    assert got.tier == "free" and got.tier_expires_at is None  # lapsed + cleared
+    with sqlite3.connect(store.path) as conn:  # persisted, not just in the object
+        row = conn.execute("SELECT tier, tier_expires_at FROM users WHERE id=?",
+                           (u.id,)).fetchone()
+    assert row == ("free", None)
+
+
+def test_unexpired_grant_keeps_tier(store):
+    u = store.create_user("max@e.st", "pw", tier="max",
+                          tier_expires_at=grant_expiry(30))
+    got = store.get_user(u.id)
+    assert got.tier == "max" and got.tier_expires_at is not None
+    assert store.quota_status(got)["limit"] == TIERS["max"]["limit"]
+
+
+def test_authenticate_downgrades_expired_grant(store):
+    store.create_user("auth@e.st", "pw", tier="pro", tier_expires_at=_past_iso())
+    got = store.authenticate("auth@e.st", "pw")
+    assert got is not None and got.tier == "free"
+
+
+def test_expire_due_tiers_sweep(store):
+    store.create_user("a@e.st", "pw", tier="max", tier_expires_at=_past_iso())
+    store.create_user("b@e.st", "pw", tier="max", tier_expires_at=grant_expiry(30))
+    store.create_user("c@e.st", "pw")  # plain free, no expiry
+    assert store.expire_due_tiers() == 1  # only the lapsed grant
+    assert dict(store.tier_distribution()) == {"free": 2, "max": 1}
+    tiers = {u.email: u.tier for u in store.list_users()}
+    assert tiers == {"a@e.st": "free", "b@e.st": "max", "c@e.st": "free"}
+
+
+def test_set_tier_clears_expiry(store):
+    u = store.create_user("man@e.st", "pw", tier="pro",
+                          tier_expires_at=grant_expiry(7))
+    got = store.set_tier(u.email, "max")  # manual assignment = indefinite
+    assert got.tier == "max" and got.tier_expires_at is None
+
+
+# ---- site settings ----------------------------------------------------------
+
+def test_signup_defaults_closed(store):
+    assert store.signup_open() is False  # invite-only until flipped at launch
+
+
+def test_signup_open_roundtrip(store):
+    store.set_signup_open(True)
+    assert store.signup_open() is True
+    store.set_signup_open(False)
+    assert store.signup_open() is False
+
+
+def test_get_setting_default(store):
+    assert store.get_setting("missing") is None
+    assert store.get_setting("missing", "fallback") == "fallback"
+    store.set_setting("k", "v1")
+    store.set_setting("k", "v2")  # upsert overwrites
+    assert store.get_setting("k") == "v2"
 
 
 def test_users_with_project_counts_left_join(store):

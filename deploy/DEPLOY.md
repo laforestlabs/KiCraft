@@ -61,7 +61,7 @@ KICRAFT_MODEL=deepseek/deepseek-v4-flash
 KICRAFT_DAILY_USD_CEILING=5
 KICRAFT_TOTAL_USD_CEILING=50
 KICRAFT_MAX_TOKENS_PER_CALL=4096
-KICRAFT_SIGNUP_CODE=pick-a-strong-invite-code
+KICRAFT_SIGNUP_CODE=pick-a-strong-invite-code   # bootstrap only; mint real codes at /admin/invites
 KICRAFT_STORAGE_SECRET=long-random-string-for-session-cookies
 ENV
 chmod 600 .env
@@ -96,7 +96,7 @@ Caddy fetches a Let's Encrypt cert automatically once DNS resolves to the box an
 ## Cost-safety on the live box (recap)
 - Spend is capped in code (`KICRAFT_DAILY_USD_CEILING` / `KICRAFT_TOTAL_USD_CEILING`) on top of your prepaid OpenRouter balance with auto top-up OFF. The worst case is bounded by the smaller of those.
 - Kill switch: `KICRAFT_KILL_SWITCH=1` in `.env` then `sudo systemctl restart kicraft-web` halts all model calls instantly.
-- Registration is gated by `KICRAFT_SIGNUP_CODE`; only people you give the code to can create an account and spend the balance. Per-user tier quotas (free 1/week, pro 5/month, max 25/month) bound each account on top of the global ceilings.
+- Registration is invite-only by default: signups need either a code minted at `/admin/invites` (codes can grant a tier for N days or forever, carry a max-use cap, and can be disabled) or the legacy `KICRAFT_SIGNUP_CODE` env code (plain Free tier). The same page has the public-launch switch that lets the Free tier register with no code. Per-user tier quotas (free 1/week, pro 5/month, max 25/month) bound each account on top of the global ceilings.
 - The box is fixed-price; load turns into a queue, not a bigger bill.
 
 ## Updating
