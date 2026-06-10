@@ -976,6 +976,8 @@ def _ensure_bom_prices(parts: list[dict], ws: str | None, state: dict) -> None:
                 _save_price_cache(Path(ws), keys)
             state["prices_rev"] = state.get("prices_rev", 0) + 1
 
+    threading.Thread(target=work, daemon=True).start()
+
 
 def _price_for_lcsc(cid: str):
     """Cached price for one LCSC ``C####`` (the part-library detail view).
@@ -1324,6 +1326,52 @@ def _render_slot_form(model, slot: dict):
     return lambda: {n: g() for n, g in getters.items()}
 
 
+# Live design runs, keyed by project id. A run's worker registers its state dict
+# here so a later page load (a reload, navigating back from /parts, a second tab)
+# can re-attach to the in-flight run and stream its progress, instead of landing
+# on a blank composer. Parked (awaiting_input) runs stay registered so answering
+# from any page resumes the ONE live workspace; terminal runs are evicted once
+# their artifacts are persisted (the saved project row takes over from there).
+# Single-process registry: ui.run() serves from one process (reload=False), and
+# dict get/set/pop are atomic under the GIL, so no lock is needed.
+_LIVE_RUNS: dict[int, dict] = {}
+
+
+def _fresh_run_state() -> dict:
+    """A blank per-design run state. This dict is the unit of a design run: the
+    page that starts a run shares it with the worker thread (and, via
+    _LIVE_RUNS, with any other page attached to the same run), so pages must
+    never recycle one for a different design -- they re-bind to a fresh dict
+    (see open_project / start in index). Page-local render bookkeeping (event
+    cursor, view handles, mtime caches) lives in the page's own `view` dict."""
+    return {
+        "events": [], "running": False, "done": False, "ok": None,
+        "spend": None, "zip": None, "ws": None, "token": None,
+        "project_dir": None, "stem": None, "pcb_ready": False,
+        "user_id": None, "project_id": None, "brief": "",
+        "status": None, "awaiting_input": False, "questions": [],
+        "prices_rev": 0,
+    }
+
+
+def _pick_default_project(user_id: int):
+    """The project the workspace should open by default: the newest parked run
+    (it is blocked on the user), else the newest live run, else the newest
+    finished design whose result the user has not seen yet. None = nothing
+    needs attention -> show the blank composer."""
+    projs = _store().list_projects(user_id)  # newest first
+    for p in projs:
+        if p.status == "awaiting_input" and (p.id in _LIVE_RUNS or p.dir_path):
+            return p
+    for p in projs:
+        if p.status == "running" and p.id in _LIVE_RUNS:
+            return p
+    for p in projs:
+        if p.status in ("ok", "failed") and p.dir_path and not p.viewed_at:
+            return p
+    return None
+
+
 def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
     """Drive `stages` for this page's session, streaming progress into `state`,
     then (on success) run the deterministic build. Shared by the initial design,
@@ -1338,6 +1386,9 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
           else _new_workspace("kicraft_web_"))
     state["ws"] = str(ws)
     state["status"] = None  # reset; set to awaiting_input only if we park
+    pid = state.get("project_id")
+    if pid:
+        _LIVE_RUNS[pid] = state
     # Stamp every model call of this run with a stable id so the spend ledger can
     # attribute cost per run/stage (see kicraft.cli.web_cost_report).
     run_id = f"p{state.get('project_id')}-{int(time.time())}"
@@ -1486,6 +1537,13 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
         _persist_project(ws, state)
         state["done"] = True
         state["running"] = False
+        # Terminal runs leave the live registry (their persisted project row,
+        # written above, takes over). A parked run stays registered, so a reload
+        # re-attaches to the live workspace and an answer resumes it in place.
+        # Identity-guarded: never evict a newer run of the same project.
+        if (pid and state.get("status") != "awaiting_input"
+                and _LIVE_RUNS.get(pid) is state):
+            _LIVE_RUNS.pop(pid, None)
 
 
 def _design_worker(brief: str, state: dict) -> None:
@@ -3555,9 +3613,10 @@ def _clone_button(source, user) -> None:
         if err is not None or pid is None:
             ui.notify("Couldn't clone this project. Please try again.", color="negative")
             return
-        ui.notify("Cloned into your workspace — open it under “Your projects.”",
-                  color="positive")
-        ui.navigate.to("/")
+        ui.notify("Cloned into your workspace.", color="positive")
+        # Deep-link straight into the fresh copy: a plain "/" runs the default
+        # pick, where an older parked run would outrank the new clone.
+        ui.navigate.to(f"/?project={pid}")
 
     if _can_make_private(user):
         def open_dialog():
@@ -4144,7 +4203,7 @@ def _render_landing() -> None:
 
 
 @ui.page("/")
-def index(prompt: str = "", project: int = 0):
+def index(prompt: str = "", project: str = ""):
     user = _current_user()
     if user is None:
         _render_landing()
@@ -4165,16 +4224,31 @@ def index(prompt: str = "", project: int = 0):
     first_run = not _store().list_projects(user.id)
     welcome_card = None
     arrow_hint = None
-    state: dict = {
-        "events": [], "rendered": 0, "running": False, "done": False, "ok": None,
-        "spend": None, "zip": None, "fab_done": False, "ws": None,
-        "token": None, "project_dir": None, "stem": None, "pcb_ready": False,
-        "sch_view": None, "pcb_view": None, "pcb_mtime": None, "leaf_progress_sig": None,
-        "state_mtime": None, "run_mtime": None, "build_lines": [],
-        "user_id": None, "project_id": None, "brief": "", "account_refreshed": False,
-        "status": None, "awaiting_input": False, "questions": [], "questions_rendered": None,
-        "prices_rev": 0, "prices_rev_seen": 0, "prices_loaded_ws": None,
-    }
+    # The open design's run state. Shared with the worker thread while a run is
+    # live (and with other pages attached to the same run via _LIVE_RUNS), so
+    # opening a different design RE-BINDS this name to another dict (nonlocal in
+    # open_project/start/start_fresh) -- it is never recycled in place.
+    state: dict = _fresh_run_state()
+
+    # Page-local render bookkeeping: this page's event cursor, widget handles
+    # and mtime caches. Kept OUT of `state` so two pages can watch the same run
+    # without fighting over the cursor or refreshing each other's widgets. The
+    # dict object is stable (closures capture it); only its contents reset.
+    view: dict = {}
+
+    def _reset_view():
+        live_sig = view.get("live_sig")  # page-level, survives project switches
+        view.clear()
+        view.update(rendered=0, build_lines=[], fab_done=False,
+                    sch_view=None, pcb_view=None,
+                    sch_revealed=False, pcb_revealed=False,
+                    pcb_mtime=None, state_mtime=None, run_mtime=None,
+                    leaf_progress_sig=None, questions_rendered=None,
+                    prices_rev_seen=0, prices_loaded_ws=None,
+                    account_refreshed=False, viewed_marked=False,
+                    live_sig=live_sig)
+
+    _reset_view()
 
     def logout():
         for k in ("user_id", "email"):
@@ -4260,6 +4334,14 @@ def index(prompt: str = "", project: int = 0):
             continue_btn = ui.button("Continue design", icon="play_arrow") \
                 .props("color=primary outline")
             continue_btn.set_visibility(False)
+            # Escape hatch from the auto-opened design: detach to a blank
+            # composer so a second design can run in parallel (the open one
+            # keeps running in the background, reachable from Your projects).
+            new_btn = ui.button("New design", icon="add") \
+                .props("outline color=white") \
+                .tooltip("Start a fresh design. The open one keeps running in "
+                         "the background and stays under Your projects.")
+            new_btn.set_visibility(False)
             if first_run:
                 design_btn.classes(add="kc-pulse")
                 with ui.row().classes("items-center kc-arrow") as arrow_hint:
@@ -4308,9 +4390,9 @@ def index(prompt: str = "", project: int = 0):
         # and never repaints; re-fit it the first time the user reveals that tab. The
         # flag is reset when each view is (re)created (see the render loop below).
         def _reveal_view(view_key: str, seen_flag: str) -> None:
-            v = state.get(view_key)
-            if v is not None and not state.get(seen_flag):
-                state[seen_flag] = True
+            v = view.get(view_key)
+            if v is not None and not view.get(seen_flag):
+                view[seen_flag] = True
                 v.refresh()
         tabs.on_show("synthesize", lambda: _reveal_view("sch_view", "sch_revealed"))
         tabs.on_show("place_route", lambda: _reveal_view("pcb_view", "pcb_revealed"))
@@ -4332,13 +4414,24 @@ def index(prompt: str = "", project: int = 0):
                     ui.label("No projects yet. Describe a board above to begin.") \
                         .classes("text-xs").style("color:#64748b")
                 for p in projs:
+                    live = _LIVE_RUNS.get(p.id)
                     with ui.row().classes("items-center gap-3 w-full"):
                         ui.label(p.project_stem or "(building...)") \
                             .classes("text-sm").style("color:#e2e8f0")
-                        ui.label(p.status).classes("text-xs").style("color:#94a3b8")
+                        # A 'running' row with no live worker is a run the
+                        # server lost (restart/crash mid-run): say so instead
+                        # of showing a phantom run forever.
+                        shown = p.status
+                        if p.status == "running" and live is None:
+                            shown = "interrupted"
+                        ui.label(shown).classes("text-xs").style(
+                            "color:#4ade80" if live is not None else "color:#94a3b8")
                         ui.label(p.created_at[:19].replace("T", " ")) \
                             .classes("text-xs").style("color:#64748b")
-                        if p.dir_path:
+                        # Open attaches to the live run when there is one, so
+                        # the button exists from the first second of a run --
+                        # not only once artifacts are persisted (dir_path).
+                        if p.dir_path or live is not None:
                             ui.button("Open", icon="folder_open",
                                       on_click=lambda pp=p: open_project(pp)).props("flat dense")
                         if p.zip_path and Path(p.zip_path).is_file():
@@ -4356,7 +4449,7 @@ def index(prompt: str = "", project: int = 0):
             """(Re)build the clarifying-question panel for a parked run. Always
             offers a freeform text answer; suggested options just fill it in."""
             question_box.clear()
-            state["questions_rendered"] = state.get("questions")
+            view["questions_rendered"] = state.get("questions")
             qs = state.get("questions") or []
             if not (state.get("awaiting_input") and qs):
                 return
@@ -4400,9 +4493,10 @@ def index(prompt: str = "", project: int = 0):
             runs = [stage] + downstream_stages(stage)
             if state["project_id"]:  # same project, no new quota slot
                 _store().update_project_status(state["project_id"], "running")
-            state.update(running=True, done=False, ok=None, fab_done=False,
-                         account_refreshed=False, awaiting_input=False, questions=[],
-                         questions_rendered=None)
+            state.update(running=True, done=False, ok=None,
+                         awaiting_input=False, questions=[])
+            view.update(fab_done=False, account_refreshed=False,
+                        viewed_marked=False, questions_rendered=None)
             question_box.clear()
             continue_btn.set_visibility(False)
             design_btn.disable()
@@ -4506,10 +4600,11 @@ def index(prompt: str = "", project: int = 0):
             null_downstream(ws, stage)
             if state["project_id"]:
                 _store().update_project_status(state["project_id"], "running")
-            state.update(running=True, done=False, ok=None, fab_done=False,
-                         account_refreshed=False, pcb_ready=False, sch_view=None,
-                         pcb_view=None, pcb_mtime=None, state_mtime=None, run_mtime=None,
+            state.update(running=True, done=False, ok=None, pcb_ready=False,
                          awaiting_input=False, questions=[])
+            view.update(fab_done=False, account_refreshed=False, viewed_marked=False,
+                        sch_view=None, pcb_view=None, pcb_mtime=None,
+                        state_mtime=None, run_mtime=None)
             continue_btn.set_visibility(False)
             design_btn.disable()
             status.text = "Re-running: " + " -> ".join(runs) + " ..."
@@ -4527,8 +4622,8 @@ def index(prompt: str = "", project: int = 0):
                 return
             if state["project_id"]:  # same project, no new quota slot
                 _store().update_project_status(state["project_id"], "running")
-            state.update(running=True, done=False, ok=None, fab_done=False,
-                         account_refreshed=False)
+            state.update(running=True, done=False, ok=None)
+            view.update(fab_done=False, account_refreshed=False, viewed_marked=False)
             continue_btn.set_visibility(False)
             design_btn.disable()
             status.text = "Continuing: " + " -> ".join(rem) + " ..."
@@ -4536,33 +4631,55 @@ def index(prompt: str = "", project: int = 0):
 
         continue_btn.on_click(_continue)
 
-        def open_project(p):
-            """Reopen a saved project: rehydrate its workspace and render its current
-            slots, so the user can continue, edit, answer a parked question, or
-            re-download. Reuses the same project_id (no new quota slot)."""
-            if state["running"]:
-                ui.notify("Wait for the current run to finish before opening another.",
-                          color="warning")
+        def open_project(p, *, notify=True):
+            """Open a project. If its run is live in this process, attach to the
+            running state dict so progress streams into this page; otherwise
+            rehydrate the saved workspace and render its committed slots. Either
+            way the design this page was showing keeps any background worker it
+            had (its dict stays in _LIVE_RUNS, reopenable from the list), and
+            the same project_id is reused (no new quota slot)."""
+            nonlocal state
+            live = _LIVE_RUNS.get(p.id)
+            if live is not None:
+                state = live
+                _reset_view()
+                tabs.reset()
+                continue_btn.set_visibility(False)
+                new_btn.set_visibility(True)
+                if state.get("running"):
+                    design_btn.disable()
+                    what = p.project_stem or (p.brief or "design")[:60]
+                    status.text = (f'Designing "{what}" -- live progress is in '
+                                   "the tabs below.")
+                elif state.get("awaiting_input"):
+                    view["account_refreshed"] = True
+                    status.text = "Reopened. This design is waiting for your answer below."
+                # Notify BEFORE refresh_account_ui: rebuilding the projects list
+                # deletes the clicked Open button's slot, and ui.notify resolves
+                # the client through that slot -- notifying after the rebuild
+                # raises "parent element ... has been deleted" (seen live).
+                if notify:
+                    ui.notify(f"Attached to {p.project_stem or 'your running design'}.",
+                              color="positive")
+                refresh_account_ui()
                 return
             ws = _rehydrate_workspace(p)
             sj = read_state(ws)
             zip_ok = bool(p.zip_path and Path(p.zip_path).is_file())
             completed = p.status == "ok"
-            state.update(events=[], rendered=0, running=False, done=completed,
-                         ok=(True if completed else None), spend=p.cost_usd,
-                         zip=(p.zip_path if zip_ok else None), fab_done=False,
-                         ws=str(ws), token=None, project_dir=None, stem=p.project_stem,
-                         pcb_ready=False, sch_view=None, pcb_view=None, pcb_mtime=None,
-                         state_mtime=None, run_mtime=None, build_lines=[],
-                         account_refreshed=True,
+            state = _fresh_run_state()
+            state.update(done=completed, ok=(True if completed else None),
+                         spend=p.cost_usd, zip=(p.zip_path if zip_ok else None),
+                         ws=str(ws), stem=p.project_stem,
+                         user_id=user.id, project_id=p.id, brief=p.brief or "",
                          status=("awaiting_input" if p.status == "awaiting_input" else None),
-                         awaiting_input=(p.status == "awaiting_input"), questions_rendered=None,
+                         awaiting_input=(p.status == "awaiting_input"),
                          questions=[q for q in (sj.get("open_questions") or [])
                                     if not q.get("answer")])
-            state["user_id"] = user.id
-            state["project_id"] = p.id
-            state["brief"] = p.brief or ""
+            _reset_view()
+            view["account_refreshed"] = True
             tabs.reset()
+            new_btn.set_visibility(True)
             project_dir = _discover_generated_dir(ws)  # restored artifacts -> schematic /
             if project_dir is not None:                # PCB render, even if the run FAILED
                 state["stem"] = project_dir.name
@@ -4579,8 +4696,13 @@ def index(prompt: str = "", project: int = 0):
             else:
                 status.text = ("Reopened. Design complete: download below, "
                                "or edit a stage to revise.")
+            if p.status in ("ok", "failed"):
+                view["viewed_marked"] = True
+                _store().mark_viewed(p.id)
+            # Notify BEFORE refresh_account_ui (see the attach branch above).
+            if notify:
+                ui.notify(f"Opened {p.project_stem or 'project'}.", color="positive")
             refresh_account_ui()
-            ui.notify(f"Opened {p.project_stem or 'project'}.", color="positive")
 
         def refresh_account_ui():
             u = _current_user()
@@ -4604,7 +4726,25 @@ def index(prompt: str = "", project: int = 0):
             build_projects()
             build_edit_panel()
 
+        def start_fresh():
+            """Detach from the open design and reset to a blank composer. A
+            still-running design keeps its worker and its _LIVE_RUNS entry, so
+            this is how a second design gets started in parallel."""
+            nonlocal state
+            state = _fresh_run_state()
+            _reset_view()
+            tabs.reset()
+            brief.value = ""
+            status.text = ""
+            spend.text = ""
+            continue_btn.set_visibility(False)
+            new_btn.set_visibility(False)
+            refresh_account_ui()  # re-enables Design when quota allows
+
+        new_btn.on_click(start_fresh)
+
         def start():
+            nonlocal state
             if state["running"]:
                 return
             u = _current_user()
@@ -4621,17 +4761,12 @@ def index(prompt: str = "", project: int = 0):
                           "Upgrade for more.", color="warning")
                 return
             pid = _store().create_project(u.id, brief.value)
-            state.update(events=[], rendered=0, running=True, done=False, ok=None,
-                         spend=None, zip=None, fab_done=False, ws=None, token=None,
-                         project_dir=None, stem=None, pcb_ready=False, sch_view=None,
-                         pcb_view=None, pcb_mtime=None, state_mtime=None, run_mtime=None,
-                         build_lines=[], account_refreshed=False, status=None,
-                         awaiting_input=False, questions=[], questions_rendered=None,
-                         prices_rev=0, prices_rev_seen=0, prices_loaded_ws=None)
+            state = _fresh_run_state()
+            state.update(running=True, user_id=u.id, project_id=pid,
+                         brief=brief.value)
+            _reset_view()
             continue_btn.set_visibility(False)
-            state["user_id"] = u.id
-            state["project_id"] = pid
-            state["brief"] = brief.value
+            new_btn.set_visibility(True)
             tabs.reset()
             status.text = ("Designing... (intent -> functional_spec -> architecture -> bom -> "
                            "wiring -> synthesize -> place/route -> fab)")
@@ -4644,42 +4779,58 @@ def index(prompt: str = "", project: int = 0):
 
         design_btn.on_click(start)
 
+        def _live_sig():
+            # Includes the running flag so a run parking on a question (it stays
+            # registered) still refreshes the list's status label.
+            return tuple(sorted(
+                (pid, bool(st.get("running")))
+                for pid, st in _LIVE_RUNS.items() if st.get("user_id") == user.id))
+
         def render():
             # This timer only ticks while the page's websocket is connected, so it
             # is the "still watching" signal that suppresses walk-away emails.
             notify.mark_active(state.get("user_id"))
             evs = state["events"]
             changed = False
-            while state["rendered"] < len(evs):
-                e = evs[state["rendered"]]
+            while view["rendered"] < len(evs):
+                e = evs[view["rendered"]]
                 if e.get("kind") == "build_log":
-                    state["build_lines"].append(e.get("text", ""))
+                    view["build_lines"].append(e.get("text", ""))
                 tabs.push(e)
-                state["rendered"] += 1
+                view["rendered"] += 1
                 changed = True
             if changed:
                 tabs.flush()
             if state["spend"] is not None:
                 spend.text = f"Spent this design: ${state['spend']:.4f}"
 
+            # A background run starting or ending (this page's, another tab's,
+            # or one this page detached from) changes what the project list
+            # should offer (Open/Download, status), so rebuild it on roster
+            # changes -- this is what used to need a manual page reload.
+            sig = _live_sig()
+            if sig != view.get("live_sig"):
+                view["live_sig"] = sig
+                refresh_account_ui()
+
             # Clarifying-question panel: (re)build only when the question set changes
             # (a worker parks the run from its thread; this picks it up next tick).
-            if state.get("questions") != state.get("questions_rendered"):
+            if state.get("questions") != view.get("questions_rendered"):
                 build_question_panel()
 
             # Design-stage inspectors: rebuild from state.json whenever it changes.
             if state["ws"]:
                 # Seed the price cache from this project's persisted prices once
                 # (so a reopen shows costs immediately, before any new fetch).
-                if state.get("prices_loaded_ws") != state["ws"]:
-                    state["prices_loaded_ws"] = state["ws"]
+                if view.get("prices_loaded_ws") != state["ws"]:
+                    view["prices_loaded_ws"] = state["ws"]
                     _load_price_cache(Path(state["ws"]))
                 mt = _mtime(Path(state["ws"]) / ".kicraft" / "state.json")
-                if mt and mt != state["state_mtime"]:
-                    state["state_mtime"] = mt
+                if mt and mt != view["state_mtime"]:
+                    view["state_mtime"] = mt
                     sj = _read_state_json(Path(state["ws"]))
                     for stg in ("intent", "functional_spec", "architecture", "bom", "wiring"):
-                        spec = _inspector_spec(stg, sj, {}, None, state["build_lines"])
+                        spec = _inspector_spec(stg, sj, {}, None, view["build_lines"])
                         if spec:
                             tabs.set_inspector(stg, spec)
                     # Live-price any BOM parts in the background (fills in the cost
@@ -4689,11 +4840,11 @@ def index(prompt: str = "", project: int = 0):
                         _ensure_bom_prices(bom_parts, state["ws"], state)
 
             # Prices arrive on a background thread; re-render the BOM when they do.
-            if state["ws"] and state.get("prices_rev") != state.get("prices_rev_seen"):
-                state["prices_rev_seen"] = state.get("prices_rev")
+            if state["ws"] and state.get("prices_rev") != view.get("prices_rev_seen"):
+                view["prices_rev_seen"] = state.get("prices_rev")
                 spec = _inspector_spec(
                     "bom", _read_state_json(Path(state["ws"])), {}, None,
-                    state["build_lines"])
+                    view["build_lines"])
                 if spec:
                     tabs.set_inspector("bom", spec)
 
@@ -4711,32 +4862,32 @@ def index(prompt: str = "", project: int = 0):
             project_dir = Path(state["project_dir"]) if state["project_dir"] else None
 
             # Schematic appears in the Synthesize tab once synth writes the sheets.
-            if project_dir is not None and state["sch_view"] is None:
+            if project_dir is not None and view["sch_view"] is None:
                 srcs = _schematic_sources(project_dir, state["stem"], state["token"])
                 if srcs:
                     sj = _read_state_json(Path(state["ws"])) if state["ws"] else {}
                     tabs.set_inspector("synthesize", _inspector_spec(
-                        "synthesize", sj, {}, project_dir, state["build_lines"]))
+                        "synthesize", sj, {}, project_dir, view["build_lines"]))
                     with tabs.view_slot("synthesize"):
-                        state["sch_view"] = _render_synth_view(srcs, state["stem"])
+                        view["sch_view"] = _render_synth_view(srcs, state["stem"])
                     # Painted already if synthesize is the visible tab now; otherwise
                     # mark it for a re-fit when the user first reveals it.
-                    state["sch_revealed"] = tabs.active() == "synthesize"
+                    view["sch_revealed"] = tabs.active() == "synthesize"
 
             # Place/route: a per-leaf placement gallery streams progress while the
             # board builds; the routed parent replaces it once the build succeeds.
             if project_dir is not None:
                 rmt = _mtime(project_dir / ".experiments" / "run_status.json")
-                if rmt and rmt != state["run_mtime"]:
-                    state["run_mtime"] = rmt
+                if rmt and rmt != view["run_mtime"]:
+                    view["run_mtime"] = rmt
                     rs = _read_run_status(project_dir)
                     tabs.set_inspector("place_route", _inspector_spec(
-                        "place_route", {}, rs, project_dir, state["build_lines"]))
+                        "place_route", {}, rs, project_dir, view["build_lines"]))
                     if not state["pcb_ready"] and state["token"]:
                         prog = _leaf_layout_progress(project_dir, state["token"])
                         sig = tuple((d["sheet_name"], d["status"]) for d in prog)
-                        if prog and sig != state["leaf_progress_sig"]:
-                            state["leaf_progress_sig"] = sig
+                        if prog and sig != view["leaf_progress_sig"]:
+                            view["leaf_progress_sig"] = sig
                             slot = tabs.view_slot("place_route")
                             slot.clear()
                             with slot:
@@ -4745,36 +4896,46 @@ def index(prompt: str = "", project: int = 0):
                     pcb_name = f"{state['stem']}.kicad_pcb"
                     pcb_path = project_dir / pcb_name
                     pcb_url = f"/project/{state['token']}/{pcb_name}"
-                    if state["pcb_view"] is None:
-                        state["pcb_mtime"] = _mtime(pcb_path)
+                    if view["pcb_view"] is None:
+                        view["pcb_mtime"] = _mtime(pcb_path)
                         slot = tabs.view_slot("place_route")
                         slot.clear()  # drop the progress gallery; show the final board
                         with slot:
                             ui.label("PCB").classes("text-xs font-medium").style("color:#94a3b8")
-                            state["pcb_view"] = KiCanvasView(
+                            view["pcb_view"] = KiCanvasView(
                                 [KiCanvasSource(pcb_url, pcb_name)],
                                 height="", style="height:calc(100vh - 460px);min-height:360px")
-                            state["pcb_revealed"] = tabs.active() == "place_route"
+                            view["pcb_revealed"] = tabs.active() == "place_route"
                     else:
                         mt = _mtime(pcb_path)
-                        if mt != state["pcb_mtime"]:
-                            state["pcb_mtime"] = mt
-                            state["pcb_view"].refresh()
+                        if mt != view["pcb_mtime"]:
+                            view["pcb_mtime"] = mt
+                            view["pcb_view"].refresh()
 
             if state["done"]:
                 design_btn.enable()
-                if not state["account_refreshed"]:
-                    state["account_refreshed"] = True
+                if not view["account_refreshed"]:
+                    view["account_refreshed"] = True
                     refresh_account_ui()
+                # The user is looking at the finished result, so it no longer
+                # counts as "unseen" for the auto-open default. Parked runs are
+                # done=True too but not terminal -- their result is still owed.
+                if (state["project_id"] and not view["viewed_marked"]
+                        and state.get("status") != "awaiting_input"):
+                    view["viewed_marked"] = True
+                    try:
+                        _store().mark_viewed(state["project_id"])
+                    except Exception:
+                        pass
                 if state["ok"]:
                     status.text = "Done. Your KiCad project is ready."
-                    if not state["fab_done"]:
-                        state["fab_done"] = True
+                    if not view["fab_done"]:
+                        view["fab_done"] = True
                         sj = _read_state_json(Path(state["ws"])) if state["ws"] else {}
                         rs = _read_run_status(project_dir) if project_dir else {}
                         for stg in ("synthesize", "place_route", "fab"):  # finalize build logs
                             tabs.set_inspector(stg, _inspector_spec(
-                                stg, sj, rs, project_dir, state["build_lines"]))
+                                stg, sj, rs, project_dir, view["build_lines"]))
                         if state["zip"]:
                             with tabs.view_slot("fab"):
                                 ui.button("Download KiCad project (.zip)", icon="download",
@@ -4785,12 +4946,24 @@ def index(prompt: str = "", project: int = 0):
                                    "the Synthesize tab (red) for review.")
 
         refresh_account_ui()
-        # Deep link from notification emails: /?project=<id> reopens the user's
-        # own project (continue, answer the parked question, or download).
-        if project:
-            p = _store().get_project(int(project))
-            if p is not None and p.user_id == user.id:
-                open_project(p)
+        view["live_sig"] = _live_sig()
+        # Default view: an explicit /?project=<id> deep link (the clone flow and
+        # the notification emails) wins; otherwise surface the design that needs
+        # the user instead of a blank composer -- a run still going (or parked on
+        # a question) first, else the newest finished design they haven't seen.
+        # Arriving with a prefilled brief (?prompt= / a sample picked before
+        # signup) means "start a new one", so that keeps the composer.
+        requested = None
+        if project.strip().isdigit():
+            rp = _store().get_project(int(project.strip()))
+            if rp is not None and rp.user_id == user.id:  # own projects only
+                requested = rp
+        if requested is not None:
+            open_project(requested, notify=False)
+        elif not prefill:
+            _auto = _pick_default_project(user.id)
+            if _auto is not None:
+                open_project(_auto, notify=False)
         ui.timer(0.2, render)
 
     with ui.footer().classes("justify-center py-1") \

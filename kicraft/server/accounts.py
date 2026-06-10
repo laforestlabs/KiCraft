@@ -201,6 +201,9 @@ class Project:
     cost_usd: float | None
     dir_path: str | None
     zip_path: str | None
+    # When the owner last opened this project in the workspace. NULL on a
+    # freshly finished run = "result not yet seen"; the workspace auto-opens it.
+    viewed_at: str | None = None
     # Public-browser fields (community catalog). Defaults keep existing
     # constructors and tests valid; _row_to_project fills them from the row.
     is_public: bool = True
@@ -332,6 +335,7 @@ class AccountStore:
                 "cost_usd REAL,"
                 "dir_path TEXT,"
                 "zip_path TEXT,"
+                "viewed_at TEXT,"
                 "is_public INTEGER NOT NULL DEFAULT 1,"
                 "cloned_from_id INTEGER,"
                 "view_count INTEGER NOT NULL DEFAULT 0,"
@@ -468,6 +472,13 @@ class AccountStore:
                 "ALTER TABLE projects ADD COLUMN like_count INTEGER NOT NULL DEFAULT 0")
         if "quality" not in cols:
             conn.execute("ALTER TABLE projects ADD COLUMN quality TEXT")
+        if "viewed_at" not in cols:
+            conn.execute("ALTER TABLE projects ADD COLUMN viewed_at TEXT")
+            # One-time backfill: anything already finished counts as seen, so the
+            # workspace's "auto-open your newest unseen result" default only
+            # fires for runs that finish after this column ships.
+            conn.execute("UPDATE projects SET viewed_at=finished_at "
+                         "WHERE finished_at IS NOT NULL")
 
     def _maybe_backfill_search(self) -> None:
         """One-time: populate the FTS index the first time it appears on a DB that
@@ -797,7 +808,7 @@ class AccountStore:
                        project_stem=row["project_stem"], status=row["status"],
                        created_at=row["created_at"], finished_at=row["finished_at"],
                        cost_usd=row["cost_usd"], dir_path=row["dir_path"],
-                       zip_path=row["zip_path"],
+                       zip_path=row["zip_path"], viewed_at=row["viewed_at"],
                        is_public=bool(row["is_public"]),
                        cloned_from_id=row["cloned_from_id"],
                        view_count=row["view_count"], clone_count=row["clone_count"],
@@ -832,9 +843,23 @@ class AccountStore:
 
     def update_project_status(self, project_id: int, status: str) -> None:
         """Set just the status (e.g. 'awaiting_input' when a run parks on a
-        question, or back to 'running' when it resumes). Leaves artifacts intact."""
+        question, or back to 'running' when it resumes). Leaves artifacts intact.
+        Moving back to 'running' means a new result is in the making, so the
+        seen-marker resets and the workspace will auto-open the eventual result."""
         with self._conn() as conn:
-            conn.execute("UPDATE projects SET status=? WHERE id=?", (status, project_id))
+            if status == "running":
+                conn.execute("UPDATE projects SET status=?, viewed_at=NULL WHERE id=?",
+                             (status, project_id))
+            else:
+                conn.execute("UPDATE projects SET status=? WHERE id=?",
+                             (status, project_id))
+
+    def mark_viewed(self, project_id: int) -> None:
+        """Stamp that the owner has the project open in the workspace; the index
+        page's auto-open then stops treating its result as unseen."""
+        with self._conn() as conn:
+            conn.execute("UPDATE projects SET viewed_at=? WHERE id=?",
+                         (_utcnow_iso(), project_id))
 
     def get_project(self, project_id: int) -> Project | None:
         with self._conn() as conn:
