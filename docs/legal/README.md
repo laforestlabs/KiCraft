@@ -6,7 +6,7 @@ app serves these at `/terms` and `/privacy` (rendered from this directory; see
 
 ## Current version
 
-`LEGAL_VERSION = 2026-06-04`
+`LEGAL_VERSION = 2026-06-09`
 
 This string is defined in `kicraft/server/config.py` and stamped into each user's
 consent record (`accepted_terms_version`) at signup. Bumping the version date in
@@ -24,6 +24,10 @@ not finished legal text. Before exposing the Service to any external user:
 2. **Have qualified counsel review both documents.** Pay particular attention to:
    - the model-training license grant and the publication-of-anonymized-examples
      grant (Terms Section 5, Privacy Section 2);
+   - the free-tier public-projects grant and the cross-user view/clone license
+     (Terms Section 5 "Public projects and the community browser", Privacy Section
+     2e): free users' completed designs are published to other signed-in users and
+     are cloneable by default, and are not de-identified beyond hiding the email;
    - the manufacture / safety liability disclaimer (Terms Section 8): boards that
      get physically built create real product-liability exposure;
    - GDPR / CCPA obligations if any user may be in the EU, UK, or California

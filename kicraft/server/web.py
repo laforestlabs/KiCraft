@@ -20,12 +20,15 @@ import os
 import random
 import re
 import shutil
+import ssl
 import subprocess
 import tempfile
 import threading
 import time
 import types
 import typing
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote
@@ -558,21 +561,57 @@ def _build_lines_for(stage: str, lines: list[str]) -> list[str]:
 # "USBLC6-2SC6_C2687116"); the negative lookbehind keeps it off footprint tokens
 # like "C_0805" where the C is a package-class prefix, not a catalogue id.
 _LCSC_ID_RE = re.compile(r"(?<![A-Za-z0-9])C\d{4,}")
+# A bare LCSC catalogue id (full string), e.g. a manifest's "C16581".
+_LCSC_CODE_RE = re.compile(r"C\d{4,}$")
 # Imperial package size in a footprint leaf, e.g. the 0805 in "C_0805_2012Metric".
 _FP_SIZE_RE = re.compile(r"_(\d{3,4})(?:_|$)")
+# Curated parts-library bundle name -> its LCSC code (or None), memoized. A
+# bundle's symbol/footprint id is "<name>:<...>" with no embedded catalogue id,
+# but its manifest records the exact LCSC part it was built from.
+_LIB_LCSC_CACHE: dict[str, str | None] = {}
+
+
+def _lib_lcsc(lib: str) -> str | None:
+    """The LCSC C-number for a curated parts-library bundle named ``lib``, else
+    None. Cached by name (one catalog probe per distinct library, memoized), so
+    it is cheap to call from the per-row resolution path."""
+    if not lib or ":" in lib:
+        return None
+    if lib in _LIB_LCSC_CACHE:
+        return _LIB_LCSC_CACHE[lib]
+    code = None
+    try:
+        part = get_part(lib)
+        if part is not None:
+            c = (part.manifest.sourcing or {}).get("lcsc", "").strip().upper()
+            if _LCSC_CODE_RE.match(c):
+                code = c
+    except Exception:  # pragma: no cover - a catalog probe must never break pricing
+        code = None
+    _LIB_LCSC_CACHE[lib] = code
+    return code
 
 
 def _resolve_part(p: dict) -> tuple[str, str] | None:
     """How to find this part at a vendor, as ``(kind, query)``: an LCSC id baked
-    into the symbol/footprint name ("id", vendored easyeda parts); else the
-    manufacturer part number ("mpn"); else a keyword from value + package size
-    ("kw", generic passives). None when there is nothing to go on. Shared by the
-    vendor link and the price lookup so both point at the same part."""
+    into the symbol/footprint name ("id", vendored easyeda parts); else the exact
+    LCSC id from a curated-bundle manifest ("id"); else the manufacturer part
+    number ("mpn"); else a keyword from value + package size ("kw", generic
+    passives). None when there is nothing to go on. Shared by the vendor link and
+    the price lookup so both point at the same part."""
     sym = p.get("symbol") or ""
     fp = p.get("footprint") or ""
     m = _LCSC_ID_RE.search(sym) or _LCSC_ID_RE.search(fp)
     if m:
         return ("id", m.group(0))
+    # A part drawn from a curated parts-library bundle ("<lib>:<name>"): price by
+    # the bundle's exact LCSC id from its manifest. More precise than an MPN
+    # keyword search and, crucially, it resolves through the still-working
+    # easyeda.com endpoint instead of the WAF-blocked JLCPCB keyword search.
+    for ref in (sym, fp):
+        code = _lib_lcsc(ref.split(":", 1)[0])
+        if code:
+            return ("id", code)
     mpn = (p.get("mpn") or "").strip()
     if mpn:
         return ("mpn", mpn)
@@ -602,20 +641,48 @@ def _vendor_cell(p: dict, prices: dict | None = None) -> dict | str:
             "href": "https://www.lcsc.com/search?q=" + quote(q)}
 
 
-# ---- BOM part pricing (live JLCPCB/LCSC lookups, cached) ---------------------
+# ---- BOM part pricing (live LCSC lookups, cached) ---------------------------
 # Resolved unit prices keyed by a part's lookup key ("id:C123" / "mpn:.." /
 # "kw:.."). Shared process-wide (a key like "kw:5.1k 0402" is project-independent)
 # and persisted per project to .kicraft/bom_prices.json so a reopen is instant. A
-# value is a dict (priced) or None (looked up, no match); a missing key means "not
-# fetched yet" -> shown as "..." while a background fetch runs.
-_PRICE_CACHE: dict[str, dict | None] = {}
+# cached value is a dict (priced), None (looked up, genuinely no price), or
+# _UNAVAILABLE (every pricing source was unreachable -- e.g. the JLCPCB keyword API
+# is WAF-blocked); a missing key means "not fetched yet" -> shown as "..." while a
+# background fetch runs.
+_PRICE_CACHE: dict[str, dict | None | object] = {}
 _PRICE_INFLIGHT: set[str] = set()
 _PRICE_LOCK = threading.Lock()
 _PRICE_FILE = "bom_prices.json"
-_FETCH_ERROR = object()  # sentinel: fetch raised; don't cache, allow a later retry
-# Bump when _pick_price changes so persisted prices from the old logic are dropped
-# and re-fetched (v2: cheapest-in-stock for MPN, not first-in-stock).
-_PRICE_SCHEMA = 2
+_FETCH_ERROR = object()  # sentinel: fetch raised unexpectedly; don't cache, retry later
+# sentinel: a source was reachable-but-blocked / nothing could price this part.
+# Cached (so we don't hammer a dead endpoint every render) but NOT persisted, so a
+# reopen re-tries and it self-heals when the blocked source comes back.
+_UNAVAILABLE = object()
+
+
+class _SourceUnavailable(Exception):
+    """A pricing source could not be reached (transport/HTTP error, or the only
+    source for this part is currently blocked) -> cache as _UNAVAILABLE."""
+
+
+# Bump when the pricing logic changes so persisted prices from the old logic are
+# dropped and re-fetched. v3: price LCSC ids via the easyeda.com product endpoint
+# (the JLCPCB keyword API is WAF-blocked); this also drops the frozen $0.00 caches
+# written while every lookup was returning "no match".
+_PRICE_SCHEMA = 3
+
+# easyeda.com product endpoint: serves the same data KiCraft fetches symbols and
+# footprints from, and -- unlike jlcpcb.com's keyword-search API -- is NOT behind
+# the Akamai WAF, so it is the one LCSC price source that still resolves. It
+# carries a single unit price (no quantity ladder).
+_SSL_CTX = ssl.create_default_context()
+_EASYEDA_PRODUCT_URL = "https://easyeda.com/api/products/{cid}/components"
+_EASYEDA_HEADERS = {
+    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://easyeda.com/",
+}
 
 
 def _price_key(p: dict) -> str | None:
@@ -648,20 +715,75 @@ def _pick_price(kind: str, query: str, results: list[dict]) -> dict | None:
 
 
 def _search_jlcpcb(query: str) -> list[dict]:
-    """JLCPCB/LCSC keyword search via easyeda2kicad. Network; may raise."""
+    """JLCPCB/LCSC keyword search via easyeda2kicad. The only source for parts
+    with no LCSC id (un-vendored MPNs, generic passives); its jlcpcb.com endpoint
+    is currently WAF-blocked, so it degrades to an empty list. Network; may raise."""
     from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
     res = EasyedaApi().search_jlcpcb_components(keyword=query, page_size=10) or {}
     return res.get("results") or []
 
 
-def _fetch_price(key: str) -> dict | None:
+def _easyeda_lcsc_price(cid: str) -> dict | None:
+    """Unit price + stock for an LCSC ``C####`` via the easyeda.com product API.
+
+    Prefers the in-stock LCSC tier. Returns ``{"unit_price","lcsc","stock"}`` or
+    None when the part carries no price. Raises ``_SourceUnavailable`` on any
+    transport/HTTP error so a transient block is retried, not frozen as 'no price'.
+    The endpoint exposes a single unit price (no quantity ladder)."""
+    req = urllib.request.Request(_EASYEDA_PRODUCT_URL.format(cid=cid),
+                                 headers=_EASYEDA_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=15, context=_SSL_CTX) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        raise _SourceUnavailable(f"easyeda {cid}: {e}") from e
+    result = (data or {}).get("result") or {}
+    best = None
+    for tier in ("lcsc", "szlcsc"):  # global LCSC first, then the China catalogue
+        d = result.get(tier) or {}
+        try:
+            price = float(d.get("price"))
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        cand = {"unit_price": price, "lcsc": str(d.get("number") or cid).upper(),
+                "stock": int(d.get("stock") or 0)}
+        if best is None or (cand["stock"] > 0 and best["stock"] == 0):
+            best = cand
+    return best
+
+
+def _fetch_price(key: str) -> dict:
+    """Resolve one price key to ``{"unit_price","lcsc","stock"}``, or raise
+    ``_SourceUnavailable`` when nothing can price it right now.
+
+    ``id:`` keys (curated-library + easyeda-vendored parts, which dominate BOM
+    cost) price via the still-working easyeda.com endpoint. ``mpn:``/``kw:`` keys
+    (un-vendored MPNs, generic passives) have no LCSC id, so their only source is
+    the JLCPCB keyword search -- currently WAF-blocked."""
     kind, _, query = key.partition(":")
-    return _pick_price(kind, query, _search_jlcpcb(query))
+    if kind == "id":
+        pick = _easyeda_lcsc_price(query)
+        if pick is not None:
+            return pick
+        # easyeda carries no inline price for this C#; the only backstop (a JLCPCB
+        # keyword search by the id) is currently blocked.
+        pick = _pick_price("id", query, _search_jlcpcb(query))
+        if pick is not None:
+            return pick
+        raise _SourceUnavailable(f"no price source for {query}")
+    pick = _pick_price(kind, query, _search_jlcpcb(query))
+    if pick is None:
+        raise _SourceUnavailable(f"keyword pricing unavailable for {query!r}")
+    return pick
 
 
 def _safe_fetch(key: str):
     try:
         return _fetch_price(key)
+    except _SourceUnavailable:
+        return _UNAVAILABLE
     except Exception:
         return _FETCH_ERROR
 
@@ -692,9 +814,12 @@ def _load_price_cache(ws: Path) -> None:
 
 def _save_price_cache(ws: Path, keys: set[str]) -> None:
     """Persist this project's resolved keys (tagged with the pricing schema) so a
-    reopen/restart is instant."""
+    reopen/restart is instant. Only stable results (a price dict or a genuine
+    'no price' None) are persisted; an _UNAVAILABLE (source blocked) is skipped so
+    the reopen re-tries it and pricing self-heals when the source comes back."""
     with _PRICE_LOCK:
-        snap = {k: _PRICE_CACHE[k] for k in keys if k in _PRICE_CACHE}
+        snap = {k: _PRICE_CACHE[k] for k in keys
+                if k in _PRICE_CACHE and _PRICE_CACHE[k] is not _UNAVAILABLE}
     try:
         d = ws / ".kicraft"
         d.mkdir(parents=True, exist_ok=True)
@@ -731,6 +856,31 @@ def _ensure_bom_prices(parts: list[dict], ws: str | None, state: dict) -> None:
             if ws:
                 _save_price_cache(Path(ws), keys)
             state["prices_rev"] = state.get("prices_rev", 0) + 1
+
+
+def _price_for_lcsc(cid: str):
+    """Cached price for one LCSC ``C####`` (the part-library detail view).
+
+    Returns a price dict, ``_UNAVAILABLE``, or None ("not fetched yet" -> a
+    background fetch is running; poll again). Reuses the shared BOM price cache, so
+    a part priced here is already priced when it appears in a BOM and vice versa."""
+    key = f"id:{cid}"
+    with _PRICE_LOCK:
+        if key in _PRICE_CACHE:
+            return _PRICE_CACHE[key]
+        if key in _PRICE_INFLIGHT:
+            return None
+        _PRICE_INFLIGHT.add(key)
+
+    def work():
+        r = _safe_fetch(key)
+        with _PRICE_LOCK:
+            if r is not _FETCH_ERROR:
+                _PRICE_CACHE[key] = r
+            _PRICE_INFLIGHT.discard(key)
+
+    threading.Thread(target=work, daemon=True).start()
+    return None
 
     threading.Thread(target=work, daemon=True).start()
 
@@ -807,7 +957,7 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
         parts = sl.get("parts") or []
         if not parts:
             return []
-        rows, total, priced, pending = [], 0.0, 0, False
+        rows, total, priced, pending, blocked = [], 0.0, 0, False, 0
         for p in parts:
             key = _price_key(p)
             if key is None:
@@ -818,20 +968,25 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
                     total += res["unit_price"]
                     priced += 1
                     cost = _fmt_price(res["unit_price"])
+                elif res is _UNAVAILABLE:
+                    cost = "—"  # priced source unreachable -> not free, just unknown
+                    blocked += 1
                 else:
-                    cost = "n/a"  # looked up, no match
+                    cost = "n/a"  # looked up, genuinely no price
             else:
                 cost = "..."  # fetch in flight
                 pending = True
             rows.append([p.get("ref"), p.get("value"), cost, _vendor_cell(p, prices),
                          p.get("footprint"), p.get("sheet"), p.get("symbol")])
         if pending and priced == 0:
-            total_txt, note = "pricing...", "fetching live JLCPCB prices..."
+            total_txt, note = "pricing...", f"fetching live LCSC prices... (0/{len(parts)} so far)"
         else:
             total_txt = _fmt_total(total)
-            note = f"est. = cheapest in-stock JLCPCB match ({priced}/{len(parts)} priced)"
+            note = f"est. unit price, cheapest in-stock LCSC match ({priced}/{len(parts)} priced)"
             if pending:
-                note = f"fetching live JLCPCB prices... ({priced}/{len(parts)} so far)"
+                note = f"fetching live LCSC prices... ({priced}/{len(parts)} so far)"
+            elif blocked:
+                note += f"; {blocked} unavailable (live qty-break vendor API blocked)"
         secs = [{"type": "kv", "title": "Summary", "rows": [("parts", len(parts))]},
                 {"type": "table", "title": "Parts",
                  "columns": ["ref", "value", "cost", "vendor", "footprint", "sheet", "symbol"],
@@ -956,6 +1111,16 @@ def _persist_project(ws: Path | None, state: dict) -> None:
         try:
             store.finish_project(pid, status, stem=stem, cost_usd=state.get("spend"),
                                  dir_path=dir_path, zip_path=zip_path)
+        except Exception:
+            pass
+        # Catalog: stamp the quality badge and (re)index for the community browser.
+        # reindex_search indexes only public, completed projects and removes anything
+        # else, so a failed/awaiting/private run is correctly kept out. Best-effort:
+        # a catalog hiccup must never crash the worker.
+        try:
+            if status == "ok" and dir_path:
+                store.set_quality(pid, _quality_badge_from_ws(ws))
+            store.reindex_search(pid)
         except Exception:
             pass
 
@@ -1650,6 +1815,42 @@ def profile_page():
             ui.label("To export or delete all your data, contact "
                      "[CONTACT EMAIL].").classes("text-xs").style("color:#64748b")
 
+        with ui.card().classes("w-full gap-2") \
+                .style("background:#0f172a;border:1px solid #1e293b"):
+            ui.label("Community visibility").classes("text-base font-semibold text-white")
+            if _can_make_private(user):
+                ui.label("Choose which of your completed projects appear in the "
+                         "community browser.").classes("text-xs").style("color:#94a3b8")
+                ok_projs = [p for p in _store().list_projects(user.id) if p.status == "ok"]
+                if not ok_projs:
+                    ui.label("You have no completed projects yet.") \
+                        .classes("text-xs").style("color:#64748b")
+                for p in ok_projs:
+                    with ui.row().classes("w-full items-center gap-2"):
+                        ui.label(p.project_stem or f"project {p.id}") \
+                            .classes("text-sm flex-grow").style("color:#e2e8f0")
+                        sw = ui.switch("Public", value=p.is_public)
+
+                        def _flip(e, pid=p.id):
+                            # Re-check tier server-side: a downgraded/forged session
+                            # must not be able to hide a project from the catalog.
+                            if not _can_make_private(_current_user()):
+                                ui.notify("Only paid plans can change visibility.",
+                                          color="warning")
+                                return
+                            _store().set_visibility(pid, bool(e.value))
+                            _store().reindex_search(pid)
+                            ui.notify("Visibility updated.", color="positive")
+
+                        sw.on_value_change(_flip)
+            else:
+                ui.label("Your projects are public and appear in the community "
+                         "browser. Upgrade to Pro to keep projects private.") \
+                    .classes("text-xs").style("color:#94a3b8")
+            ui.button("Open community browser", icon="travel_explore",
+                      on_click=lambda: ui.navigate.to("/browse")) \
+                .props("flat dense no-caps color=primary").classes("text-xs mt-1")
+
         with ui.row().classes("w-full justify-end"):
             ui.button("Log out", icon="logout", on_click=logout) \
                 .props("flat dense no-caps color=white").classes("text-xs")
@@ -1720,6 +1921,9 @@ def _admin_header(active: str) -> None:
             ui.button("Invites", icon="vpn_key",
                       on_click=lambda: ui.navigate.to("/admin/invites")) \
                 .props("flat dense no-caps color=white").classes("text-xs")
+            ui.button("Self-Eval", icon="science",
+                      on_click=lambda: ui.navigate.to("/admin/self-eval")) \
+                .props("flat dense no-caps color=white").classes("text-xs")
             ui.button("Back to workspace", icon="arrow_back",
                       on_click=lambda: ui.navigate.to("/")) \
                 .props("flat dense no-caps color=white").classes("text-xs")
@@ -1727,6 +1931,578 @@ def _admin_header(active: str) -> None:
 
 def _admin_card_style() -> str:
     return "background:#0f172a;border:1px solid #1e293b;min-width:380px"
+
+
+# --------------------------------------------------------------------------- #
+# Admin: self-eval batch over the curated example briefs.
+#
+# Drives kicraft.eval.self_eval (the /self-eval harness) as a subprocess writing
+# to a fresh out dir, then polls that dir to show live per-brief progress, the
+# A-F scorecard (reusing _render_scorecard), and on-demand kicad-cli renders of
+# each leaf board so a failed route can be inspected in-page. One batch at a time
+# (it shares the spend guard and is heavy); state lives at module scope so every
+# admin client + every timer tick sees the same run.
+# --------------------------------------------------------------------------- #
+_SELF_EVAL: dict = {"proc": None, "out": None, "started_at": None, "args": {}}
+
+
+def _self_eval_out_root() -> Path:
+    """Where the GUI *launches* new batches (and the harness defaults to): a
+    ``self_eval/`` sibling of the configured projects dir."""
+    base = Path(getattr(Settings.from_env(), "projects_dir",
+                        Path.home() / ".kicraft" / "projects"))
+    return base.parent / "self_eval"
+
+
+def _self_eval_out_roots() -> list[Path]:
+    """Every root a self-eval batch can live under, so the page lists *all* runs --
+    those started from this page as well as those an agent drove from the command
+    line:
+
+      * ``<projects_dir>/../self_eval`` -- the GUI/harness default (where Run writes);
+      * ``<repo>/logs/self_eval`` -- where the ``/self-eval`` command writes when the
+        batch is launched from the CLI.
+
+    Existing dirs only, de-duplicated by resolved path (the two roots coincide when
+    the projects dir is the repo)."""
+    roots = [_self_eval_out_root(),
+             Path(__file__).resolve().parents[2] / "logs" / "self_eval"]
+    out: list[Path] = []
+    seen: set = set()
+    for r in roots:
+        try:
+            rp = r.resolve()
+        except OSError:
+            continue
+        if rp not in seen and r.is_dir():
+            seen.add(rp)
+            out.append(r)
+    return out
+
+
+def _self_eval_root_label(out: Path) -> str:
+    """A short tag for which root a batch lives under, so the list distinguishes a
+    Run-from-here batch from a CLI/agent one."""
+    try:
+        local = _self_eval_out_root().resolve()
+        return "this page" if Path(out).resolve().parent == local else "command line"
+    except OSError:
+        return ""
+
+
+def _self_eval_batch_dirs() -> list[Path]:
+    """Every adoptable batch dir across all roots, newest first. A dir qualifies if
+    it carries persisted launch args, a finished summary, or any ``run_NN_*``
+    subdir (so an in-flight or CLI batch is listed too). Capped so a long-lived box
+    never builds an unbounded list."""
+    cands: list[Path] = []
+    for root in _self_eval_out_roots():
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for d in entries:
+            if d.is_dir() and (
+                    (d / "_args.json").is_file()
+                    or (d / "summary.json").is_file()
+                    or any(d.glob("run_[0-9][0-9]_*"))):
+                cands.append(d)
+    cands.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+    return cands[:50]
+
+
+def _self_eval_args_for(out: Path) -> dict:
+    """The persisted launch args for a batch (``_args.json``), or {} for a CLI batch
+    that has none -- {} makes _self_eval_selected derive the brief set from the run
+    dirs on disk."""
+    ap = Path(out) / "_args.json"
+    if ap.is_file():
+        try:
+            return json.loads(ap.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+    return {}
+
+
+def _self_eval_batch_overview(out: Path) -> dict:
+    """Headline stats for one batch dir, for the runs list. Prefers the finished
+    ``summary.json``; else derives counts from the per-brief reports so an in-flight
+    or CLI batch still shows useful totals (fab-ready needs the summary, so it is
+    None until the batch finishes)."""
+    out = Path(out)
+    info = {"path": str(out), "name": out.name, "label": _self_eval_root_label(out),
+            "mtime": out.stat().st_mtime, "n": 0, "scored": 0, "fab_ready": None,
+            "mean": None, "grades": {}, "done": (out / "summary.json").is_file()}
+    sj = out / "summary.json"
+    if sj.is_file():
+        try:
+            s = json.loads(sj.read_text())
+            info.update(n=s.get("n") or 0, scored=s.get("graded_n") or 0,
+                        fab_ready=s.get("fab_ready"), mean=s.get("mean_final"),
+                        grades=s.get("grade_counts") or {})
+            return info
+        except (OSError, json.JSONDecodeError):
+            pass
+    runs = sorted(out.glob("run_[0-9][0-9]_*"))
+    info["n"] = len(runs)
+    finals: list = []
+    for rd in runs:
+        rep = rd / "eval" / "report.json"
+        if not rep.is_file():
+            continue
+        try:
+            sc = json.loads(rep.read_text()).get("score") or {}
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(sc.get("final"), (int, float)):
+            finals.append(sc["final"])
+        if sc.get("grade"):
+            info["grades"][sc["grade"]] = info["grades"].get(sc["grade"], 0) + 1
+    info["scored"] = len(finals)
+    info["mean"] = round(sum(finals) / len(finals), 1) if finals else None
+    return info
+
+
+def _self_eval_selected(out, args: dict) -> list:
+    from kicraft.eval.self_eval import _select
+    if "no_judge" in args:  # args from a launch / _args.json are authoritative
+        return _select(list(EXAMPLE_PROMPTS), args.get("limit"), args.get("only"))
+    # Legacy run (pre _args.json): derive the brief set from the run dirs on disk.
+    idxs = sorted({int(p.name.split("_")[1]) for p in Path(out).glob("run_[0-9][0-9]_*")
+                   if p.name.split("_")[1].isdigit()})
+    return ([(i, EXAMPLE_PROMPTS[i - 1]) for i in idxs
+             if 1 <= i <= len(EXAMPLE_PROMPTS)]
+            or _select(list(EXAMPLE_PROMPTS), None, None))
+
+
+def _self_eval_running() -> bool:
+    p = _SELF_EVAL.get("proc")
+    return bool(p is not None and p.poll() is None)
+
+
+def _self_eval_launch(limit, only, no_judge) -> str:
+    """Start the batch harness as a subprocess; return the out dir ('' if busy)."""
+    if _self_eval_running():
+        return ""
+    import datetime as _dt
+    ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out = _self_eval_out_root() / ts
+    out.mkdir(parents=True, exist_ok=True)
+    # Persist the run args so the page can re-adopt this batch after a server
+    # restart (the harness keeps running as a detached subprocess).
+    (out / "_args.json").write_text(
+        json.dumps({"limit": limit, "only": only, "no_judge": no_judge}))
+    cmd = [KICRAFT[0], "-m", "kicraft.eval.self_eval", "--out", str(out)]
+    if limit:
+        cmd += ["--limit", str(int(limit))]
+    if only:
+        cmd += ["--only", str(only)]
+    if no_judge:
+        cmd += ["--no-judge"]
+    logf = (out / "run.log").open("w")
+    proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
+                            env={**os.environ, "KICRAFT_CALLER": "web"},
+                            cwd=str(Path(__file__).resolve().parents[2]))
+    _SELF_EVAL.update(proc=proc, out=out, started_at=time.time(),
+                      args={"limit": limit, "only": only, "no_judge": no_judge})
+    return str(out)
+
+
+def _self_eval_adopt_latest() -> None:
+    """When no run is tracked in this process (e.g. after a server restart), adopt
+    the most recent batch on disk so its progress + artifacts stay viewable. Never
+    overrides a run we launched this process (proc still alive)."""
+    if _self_eval_running():
+        return
+    cur = _SELF_EVAL.get("out")
+    if cur and Path(cur).is_dir():
+        return  # already pointing at a real run; keep it
+    cands = _self_eval_batch_dirs()  # newest first, across every root
+    if not cands:
+        return
+    latest = cands[0]
+    _SELF_EVAL.update(proc=None, out=latest, args=_self_eval_args_for(latest))
+
+
+def _self_eval_brief_status(out: Path, idx: int, prompt: str) -> dict:
+    """Parse one brief's live status from its run dir under `out`."""
+    hits = sorted(out.glob(f"run_{idx:02d}_*"))
+    rd = hits[0] if hits else None
+    base = {"index": idx, "prompt": prompt, "rundir": (str(rd) if rd else None)}
+    if rd is None:
+        return {**base, "status": "pending"}
+    stage = build_label = None
+    ev = rd / "events.jsonl"
+    if ev.is_file():
+        for line in ev.read_text(errors="replace").splitlines():
+            try:
+                e = json.loads(line)
+            except Exception:
+                continue
+            k = e.get("kind")
+            if k == "stage_start":
+                stage = e.get("stage")
+            elif k == "stage_done" and e.get("ok"):
+                stage = (e.get("stage") or "") + " ✓"
+            elif k == "build_start":
+                build_label = "building…"
+            elif k == "build_done":
+                build_label = "fab-ready" if e.get("ok") else f"build rc={e.get('rc')}"
+    rep = rd / "eval" / "report.json"
+    if rep.is_file():
+        try:
+            r = json.loads(rep.read_text())
+        except Exception:
+            r = None
+        if r:
+            sc = r.get("score") or {}
+            gates = [g.get("id") for g in (r.get("gates") or {}).get("triggered", [])]
+            return {**base, "status": "done", "grade": sc.get("grade"),
+                    "final": sc.get("final"), "verdict": sc.get("verdict"),
+                    "gates": gates, "build": build_label}
+    return {**base, "status": "running", "stage": stage, "build": build_label}
+
+
+def _self_eval_leaf_boards(gen_dir: Path) -> list:
+    """Interactive-viewer descriptors for each per-leaf routed board: a per-leaf
+    signed token (each leaf lives in a nested ``.experiments/subcircuits/<uuid>/``
+    dir, which the flat ``/project/<token>/<file>`` route can't reach under the gen
+    token) + the leaf's accept state. KiCanvas renders ``leaf_routed.kicad_pcb``
+    directly, so a failed route is zoomable in-page even after the live ``renders/``
+    previews have been cleaned up on a finished batch."""
+    out = []
+    for leaf in sorted(Path(gen_dir).glob(
+            ".experiments/subcircuits/*/leaf_routed.kicad_pcb")):
+        leafdir = leaf.parent
+        tok = _register_project_dir(leafdir)
+        out.append({
+            # "accepted" == produced a solved_layout.json (routed cleanly enough to be
+            # composed into the parent); a ✗ leaf is where a bad route lives.
+            "label": f"leaf {leafdir.name.split('__')[0][:8]}",
+            "accepted": (leafdir / "solved_layout.json").is_file(),
+            "url": f"/project/{tok}/{leaf.name}",
+            "filename": leaf.name,
+        })
+    return out
+
+
+@ui.page("/admin/self-eval")
+def admin_self_eval_page():
+    """Admin: start a self-eval batch over the example briefs, browse *every* batch
+    (those launched here and those an agent drove from the command line), watch live
+    per-brief progress + grades, and open any run's schematic + boards."""
+    user, redirect = _require_admin()
+    if redirect is not None:
+        return redirect
+    ui.dark_mode().enable()
+    _admin_header("self-eval")
+
+    n_avail = len(EXAMPLE_PROMPTS)
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
+        ui.label("Self-evaluation").classes("text-2xl font-bold text-white")
+        ui.label("Drive every curated example brief end to end (auto-answering "
+                 "clarifying questions with the model's suggested option) and grade "
+                 "each with the kicraft.eval rubric. Runs in the background and "
+                 "SPENDS real money via the capped client; the spend guard still caps "
+                 "the day.").classes("text-sm").style("color:#94a3b8")
+        with ui.row().classes("items-end gap-3 flex-wrap"):
+            limit_in = ui.number("Limit (first N)", value=1, min=0, max=n_avail,
+                                 format="%d").props("dense outlined dark").classes("w-40")
+            only_in = ui.input("Only (e.g. 1,3,5)").props("dense outlined dark") \
+                .classes("w-44")
+            judge_sw = ui.switch("LLM judge (A–F)", value=True)
+            run_btn = ui.button("Run self-eval", icon="play_arrow").props("color=primary")
+            ui.label(f"{n_avail} briefs available").classes("text-xs") \
+                .style("color:#64748b")
+
+        # Every batch on disk, across both roots (this page's and the CLI's), so a
+        # run an agent launched from the command line is listed here too. Click one
+        # to drive the per-brief table below it.
+        ui.label("All runs").classes("text-sm font-bold mt-2").style("color:#cbd5e1")
+        runs_box = ui.column().classes("w-full gap-0")
+
+        ui.separator().style("background:#1e293b;margin-top:6px")
+        head = ui.row().classes("items-center gap-4 text-sm font-mono") \
+            .style("color:#cbd5e1")
+        table = ui.column().classes("w-full gap-0")
+
+    # Per-client element refs, built ONCE (not every timer tick). Rebuilding the
+    # table each second would replace the 'view' buttons mid-click, so a click
+    # would land on a deleted element and do nothing. Build rows once; update
+    # their text in place; only rebuild when the selected set changes.
+    rows: dict = {}
+    latest: dict = {}
+    sig = {"sel": None}
+    runs_sig = {"key": None}
+    # Which batch the brief table shows. Follows the live/most-recent run until the
+    # user clicks a row to pin one (so a finished CLI batch stays put for review).
+    view = {"dir": None, "pinned": False}
+    _SE_COLORS = {"done": "#4ade80", "running": "#fbbf24",
+                  "pending": "#64748b", "error": "#f87171"}
+
+    def select_batch(path: str):
+        view["dir"] = path
+        view["pinned"] = True
+        sig["sel"] = None       # force the brief table to rebuild for the new batch
+        runs_sig["key"] = None  # re-highlight the selected row
+
+    def open_run(idx):
+        s = latest.get(idx)
+        if s and s.get("rundir"):
+            tok = _register_project_dir(Path(s["rundir"]))
+            ui.navigate.to(f"/admin/self-eval/run?run={quote(tok)}")
+
+    def build_runs(batches):
+        runs_box.clear()
+        with runs_box:
+            if not batches:
+                ui.label("No self-eval runs yet — configure above and press Run.") \
+                    .classes("text-xs").style("color:#64748b")
+                return
+            for b in batches:
+                selected = (b["path"] == view["dir"])
+                bg = "#13233f" if selected else "transparent"
+                row = ui.row().classes("w-full items-center gap-3 text-xs cursor-pointer") \
+                    .style(f"border-top:1px solid #1e293b;padding:4px 6px;background:{bg}")
+                row.on("click", lambda _e=None, p=b["path"]: select_batch(p))
+                with row:
+                    ui.icon("check_circle" if b["done"] else "play_circle") \
+                        .style("color:%s" % ("#4ade80" if b["done"] else "#fbbf24"))
+                    ui.label(b["name"]).classes("font-mono") \
+                        .style("width:188px;color:#e2e8f0")
+                    ui.label(b["label"]).style("width:104px;color:#94a3b8")
+                    ui.label(f"{b['n']} briefs").style("width:74px;color:#cbd5e1")
+                    fr = "—" if b["fab_ready"] is None else f"{b['fab_ready']}/{b['n']}"
+                    ui.label(f"fab {fr}").style("width:84px;color:#cbd5e1")
+                    ui.label("mean —" if b["mean"] is None else f"mean {b['mean']}") \
+                        .style("width:84px;color:#cbd5e1")
+                    grds = "  ".join(f"{g}:{n}" for g, n in sorted(b["grades"].items()))
+                    ui.label(grds).classes("flex-1 truncate").style("color:#64748b")
+
+    def build_rows(selected):
+        table.clear()
+        rows.clear()
+        with table:
+            with ui.row().classes("w-full items-center gap-2 text-xs font-bold") \
+                    .style("color:#64748b;padding-bottom:2px"):
+                ui.label("#").style("width:24px")
+                ui.label("status").style("width:108px")
+                ui.label("grade").style("width:60px")
+                ui.label("build").style("width:118px")
+                ui.label("brief").classes("flex-1")
+                ui.label("").style("width:56px")
+            for idx, prompt in selected:
+                with ui.row().classes("w-full items-center gap-2 text-xs") \
+                        .style("border-top:1px solid #1e293b;padding:3px 0"):
+                    ui.label(str(idx)).style("width:24px;color:#cbd5e1")
+                    st_l = ui.label("pending").style("width:108px;color:#64748b")
+                    gr_l = ui.label("").style("width:60px;color:#e2e8f0")
+                    bd_l = ui.label("").style("width:118px;color:#94a3b8")
+                    ui.label(prompt[:84]).classes("flex-1").style("color:#cbd5e1")
+                    btn = ui.button("view", on_click=lambda _e=None, i=idx: open_run(i)) \
+                        .props("flat dense no-caps color=primary").classes("text-xs") \
+                        .style("width:56px")
+                    btn.set_visibility(False)
+                    rows[idx] = {"status": st_l, "grade": gr_l, "build": bd_l, "btn": btn}
+
+    def start():
+        if _self_eval_running():
+            ui.notify("A self-eval batch is already running.", color="warning")
+            return
+        limit = int(limit_in.value) if limit_in.value else None
+        only = (only_in.value or "").strip() or None
+        out = _self_eval_launch(limit, only, not judge_sw.value)
+        if out:
+            view["pinned"] = False   # follow the run we just launched
+            runs_sig["key"] = None   # rebuild the list so it appears immediately
+        ui.notify(f"Started → {out}" if out else "Could not start.",
+                  color=("positive" if out else "warning"))
+    run_btn.on_click(start)
+
+    def render():
+        _self_eval_adopt_latest()
+        running = _self_eval_running()
+        run_btn.set_enabled(not running)
+        live_out = _SELF_EVAL.get("out")
+        batches = [_self_eval_batch_overview(d) for d in _self_eval_batch_dirs()]
+
+        # Default selection follows the live/most-recent run until the user pins one;
+        # a pinned dir that was deleted falls back to the default.
+        default = str(live_out) if live_out else (batches[0]["path"] if batches else None)
+        if not view["pinned"] or (view["dir"] and not Path(view["dir"]).is_dir()):
+            view["pinned"] = False
+            view["dir"] = default
+
+        rkey = tuple((b["path"], b["done"], b["n"], b["scored"],
+                      b["path"] == view["dir"]) for b in batches)
+        if rkey != runs_sig["key"]:
+            build_runs(batches)
+            runs_sig["key"] = rkey
+
+        head.clear()
+        if not view["dir"]:
+            with head:
+                ui.label("No run yet — configure above and press Run.") \
+                    .style("color:#64748b")
+            if sig["sel"] is not None:
+                table.clear()
+                rows.clear()
+                sig["sel"] = None
+            return
+        out = Path(view["dir"])
+        args = _self_eval_args_for(out)
+        selected = _self_eval_selected(out, args)
+        sel_key = (str(out),) + tuple(i for i, _ in selected)
+        if sel_key != sig["sel"]:
+            build_rows(selected)
+            sig["sel"] = sel_key
+        statuses = [_self_eval_brief_status(out, idx, p) for idx, p in selected]
+        done = [s for s in statuses if s["status"] == "done"]
+        graded = [s for s in done if isinstance(s.get("final"), (int, float))]
+        fab = sum(1 for s in done if s.get("build") == "fab-ready")
+        summary_done = (out / "summary.json").is_file()
+        is_live = bool(live_out and str(live_out) == str(out) and running)
+        if is_live:
+            state, col = "RUNNING ", "#fbbf24"
+        elif summary_done:
+            state, col = "DONE ", "#4ade80"
+        else:
+            state, col = "PARTIAL ", "#94a3b8"
+        with head:
+            ui.label(state + out.name).style(f"color:{col}")
+            ui.label(f"{len(done)}/{len(selected)} scored")
+            if graded:
+                ui.label(f"mean {round(sum(s['final'] for s in graded) / len(graded), 1)}")
+            ui.label(f"fab-ready {fab}/{len(selected)}")
+            ui.label(f"judge {'off' if args.get('no_judge') else 'on'}")
+        for s in statuses:
+            idx = s["index"]
+            latest[idx] = s
+            r = rows.get(idx)
+            if not r:
+                continue
+            st = s["status"]
+            r["status"].set_text((s.get("stage") or st) if st == "running" else st)
+            r["status"].style("color:" + _SE_COLORS.get(st, "#94a3b8"))
+            g = s.get("grade")
+            r["grade"].set_text(f"{g} {s.get('final')}" if g
+                                else ("—" if st == "done" else ""))
+            r["build"].set_text(s.get("build") or "")
+            r["btn"].set_visibility(bool(s.get("rundir")))
+    ui.timer(1.0, render)
+
+
+@ui.page("/admin/self-eval/run")
+def admin_self_eval_run_page(run: str = ""):
+    """Admin: one self-eval brief's scorecard, its interactive schematic (KiCanvas),
+    the composed parent board, and each per-leaf routed board -- so a failed route or
+    a bad schematic is inspectable in-page. ``run`` is a signed project token for the
+    brief's run dir, minted by the runs table."""
+    user, redirect = _require_admin()
+    if redirect is not None:
+        return redirect
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    kicanvas_head()
+    _admin_header("self-eval")
+
+    run_dir = _resolve_project_token(run) if run else None
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
+        ui.button("← All runs", icon="arrow_back",
+                  on_click=lambda: ui.navigate.to("/admin/self-eval")) \
+            .props("flat dense no-caps color=white").classes("text-xs")
+        if run_dir is None or not run_dir.is_dir():
+            ui.label("Run not found (the link may be stale or the run was deleted).") \
+                .classes("text-sm").style("color:#f87171")
+            return
+
+        brief = ""
+        bf = run_dir / "brief.txt"
+        if bf.is_file():
+            try:
+                brief = bf.read_text(errors="replace").strip()
+            except OSError:
+                brief = ""
+        ui.label(brief[:160] or run_dir.name).classes("text-lg font-bold") \
+            .style("color:#e2e8f0")
+
+        rep = run_dir / "eval" / "report.json"
+        if rep.is_file():
+            try:
+                _render_scorecard(ui.column().classes("w-full gap-1"),
+                                  json.loads(rep.read_text()))
+            except (OSError, json.JSONDecodeError, KeyError, TypeError):
+                ui.label("(could not load report.json)").classes("text-xs") \
+                    .style("color:#f87171")
+        else:
+            ui.label("Not scored yet.").classes("text-sm").style("color:#94a3b8")
+
+        gen = _discover_generated_dir(run_dir)
+        if gen is None:
+            ui.label("No synthesized project — the design stages did not produce "
+                     "schematic sheets for this brief.").classes("text-sm mt-2") \
+                .style("color:#94a3b8")
+            ui.label(f"artifacts: {run_dir}").classes("text-xs font-mono mt-2") \
+                .style("color:#64748b")
+            return
+        token = _register_project_dir(gen)
+        stem = gen.name
+
+        # Schematic (interactive). Kept on-screen (not in a tab/dialog) because a
+        # KiCanvas WebGL canvas built in a hidden / zero-size container never repaints.
+        with ui.card().classes("w-full") \
+                .style("background:#0f172a;border:1px solid #1e293b"):
+            srcs = _schematic_sources(gen, stem, token)
+            if srcs:
+                _render_synth_view(srcs, stem)
+            else:
+                ui.label("No schematic sheets found.").classes("text-xs") \
+                    .style("color:#94a3b8")
+
+        # Parent board (interactive): the composed <stem>.kicad_pcb. Absent if the
+        # build failed before composing a parent.
+        parent_pcb = gen / f"{stem}.kicad_pcb"
+        with ui.card().classes("w-full") \
+                .style("background:#0f172a;border:1px solid #1e293b"):
+            ui.label("Parent board").classes("text-xs font-medium").style("color:#94a3b8")
+            if parent_pcb.is_file():
+                KiCanvasView([KiCanvasSource(f"/project/{token}/{parent_pcb.name}",
+                                             parent_pcb.name)], height="h-[520px]")
+            else:
+                ui.label("No composed parent board (the build did not reach parent "
+                         "routing).").classes("text-xs").style("color:#94a3b8")
+
+        # Per-leaf routed boards, each interactive (KiCanvas) so the actual routing is
+        # zoomable -- not a flat thumbnail. Every leaf lives in its own nested
+        # .experiments/subcircuits/<uuid>/ dir, so it carries its own signed token
+        # (the flat /project/<token>/<file> route only serves files sitting directly
+        # under the token dir). A ✗ leaf is where a rejected route lives.
+        leaves = _self_eval_leaf_boards(gen)
+        ui.label("Leaf boards — a ✗ leaf is where a rejected route lives") \
+            .classes("text-sm font-bold mt-2").style("color:#cbd5e1")
+        if not leaves:
+            ui.label("No per-leaf routed boards (single-leaf design, or the leaves "
+                     "were composed into the parent).").classes("text-xs") \
+                .style("color:#94a3b8")
+        for b in leaves[:8]:
+            with ui.card().classes("w-full") \
+                    .style("background:#0f172a;border:1px solid #1e293b"):
+                lab, col = b["label"], "#cbd5e1"
+                if b["accepted"]:
+                    lab += "  ✓ accepted"; col = "#4ade80"
+                else:
+                    lab += "  ✗ rejected"; col = "#f87171"
+                ui.label(lab).classes("text-xs font-mono").style(f"color:{col}")
+                KiCanvasView([KiCanvasSource(b["url"], b["filename"])],
+                             height="h-[460px]")
+        if len(leaves) > 8:
+            ui.label(f"(+{len(leaves) - 8} more leaves not shown)") \
+                .classes("text-xs").style("color:#64748b")
+
+        ui.label(f"artifacts: {run_dir}").classes("text-xs font-mono mt-2") \
+            .style("color:#64748b")
+        ui.label(f"deep DRC inspection: kicraft-gui {gen}") \
+            .classes("text-xs font-mono").style("color:#64748b")
 
 
 @ui.page("/admin")
@@ -2169,6 +2945,482 @@ def admin_invites_page():
                      ".env to retire it.").classes("text-xs").style("color:#64748b")
 
 
+# --------------------------------------------------------------------------- #
+# Public project browser: a searchable, cross-user catalog of public, completed
+# designs. Free users' projects are public; paid users' are private by default
+# (toggle on /profile). Anyone can clone a public project into their own account.
+# Reuses the samples card grid, the parts search idiom, the KiCanvas helpers, and
+# the capability-token file serving -- the privacy boundary is that a file token
+# is only ever minted for a project that passes _public_project_or_none.
+# --------------------------------------------------------------------------- #
+_QUALITY_CHIP = {
+    "fab_ready": ("Fab-ready", "#34d399"),
+    "erc_errors": ("Has ERC issues", "#fbbf24"),
+    "unverified": ("Unverified", "#64748b"),
+}
+
+
+def _quality_chip(quality) -> None:
+    """A small colored badge for a project's build quality."""
+    label, color = _QUALITY_CHIP.get(quality or "unverified", _QUALITY_CHIP["unverified"])
+    ui.label(label).classes("text-xs rounded").style(
+        f"background:#0b1120;border:1px solid {color};color:{color};padding:1px 8px")
+
+
+def _stat_icon(icon: str, n) -> None:
+    """An icon + count pair (views / clones / likes) for a card or detail header."""
+    with ui.row().classes("items-center gap-1").style("color:#64748b"):
+        ui.icon(icon).style("font-size:15px")
+        ui.label(str(n or 0)).classes("text-xs")
+
+
+def _can_make_private(user) -> bool:
+    """Whether a user's plan may keep a project private. Free projects are always
+    public (the community rule); only paid (pro/max) plans can opt out. Re-checked
+    server-side on every visibility/clone mutation, not just in the UI."""
+    return bool(user is not None and getattr(user, "tier", None) in ("pro", "max"))
+
+
+def _quality_badge_from_ws(ws: Path | None) -> str:
+    """Derive the catalog quality badge from a finished run's synthesis check (in
+    the workspace): 'fab_ready' = passed clean, 'erc_errors' = ran but failed,
+    'unverified' = no readable check. Mirrors eval.artifacts.parse_synthesis_check
+    without importing the eval layer into the server."""
+    if ws is None:
+        return "unverified"
+    try:
+        sc = json.loads(
+            (ws / ".kicraft" / "synthesis_check.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "unverified"
+    if not isinstance(sc, dict) or sc.get("status") is None:
+        return "unverified"
+    failed = sc.get("failed_checks")
+    if failed is None:
+        failed = [c.get("name") for c in (sc.get("checks") or []) if c.get("ok") is False]
+    return "fab_ready" if (sc.get("status") == "ok" and not failed) else "erc_errors"
+
+
+def _persisted_generated_dir(dir_path, stem) -> Path | None:
+    """The generated KiCad dir (`generated/<STEM>/`) inside a persisted project, by
+    stem first then by inspection, so it resolves even for legacy/odd-named runs."""
+    if not dir_path:
+        return None
+    base = Path(dir_path)
+    if stem and (base / "generated" / stem).is_dir() \
+            and any((base / "generated" / stem).glob("*.kicad_sch")):
+        return base / "generated" / stem
+    return _discover_generated_dir(base)
+
+
+def _board_thumb_url(dir_path, stem) -> str | None:
+    """A small board-preview URL for a browse card: the routed front render of the
+    project's first leaf (falling back to its placement render), served via a signed
+    token. None when no render exists yet (the card shows a placeholder)."""
+    gen = _persisted_generated_dir(dir_path, stem)
+    if gen is None:
+        return None
+    sub = gen / ".experiments" / "subcircuits"
+    if not sub.is_dir():
+        return None
+    best = None
+    for leaf in sorted(sub.iterdir()):
+        renders = leaf / "renders"
+        if not renders.is_dir():
+            continue
+        routed = _latest_render(renders, "routed_front_all")
+        if routed is not None:
+            best = routed
+            break
+        if best is None:
+            best = _latest_render(renders, "pre_route_front_all")
+    if best is None:
+        return None
+    tok = _register_project_dir(gen)
+    rel = best.relative_to(gen).as_posix()
+    return f"/project/{tok}/render/{rel}?v={int(best.stat().st_mtime)}"
+
+
+def _board_source(gen: Path, stem: str, token: str):
+    """(url, filename) for the project's board PCB, or None. Prefers <stem>.kicad_pcb
+    (the file KiCanvas + serve_project_file expect in the dir root)."""
+    cand = gen / f"{stem}.kicad_pcb"
+    if cand.is_file():
+        return (f"/project/{token}/{cand.name}", cand.name)
+    pcbs = sorted(gen.glob("*.kicad_pcb"))
+    if pcbs:
+        return (f"/project/{token}/{pcbs[0].name}", pcbs[0].name)
+    return None
+
+
+def _load_persisted_state(dir_path) -> dict | None:
+    """Read a persisted project's state.json (top-level copy, or the kicraft/ copy),
+    for the detail page's BOM. None if neither is readable."""
+    if not dir_path:
+        return None
+    base = Path(dir_path)
+    for cand in (base / "state.json", base / "kicraft" / "state.json"):
+        if cand.is_file():
+            try:
+                return json.loads(cand.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
+    return None
+
+
+def _public_project_or_none(project_id):
+    """The project for a public, completed id, else None. This is the detail page's
+    privacy gate: a file token is minted only for a non-None result, so a private,
+    failed, or missing project's files are never served through the public page."""
+    try:
+        pid = int(project_id)
+    except (TypeError, ValueError):
+        return None
+    p = _store().get_project(pid)
+    if p is None or p.status != "ok" or not p.is_public:
+        return None
+    return p
+
+
+def _clone_project(source, cloner, make_private: bool):
+    """Copy a public project into `cloner`'s account as a new, re-runnable project.
+
+    Returns (new_project_id, None) on success or (None, reason) on failure. Consumes
+    a quota slot like a normal design (it is an owned, re-runnable copy). The copied
+    tree keeps the kicraft/ + generated/ layout so open_project -> _rehydrate_workspace
+    works unchanged. events.jsonl is NOT copied: the clone starts a fresh history."""
+    store = _store()
+    if not store.can_design(cloner):
+        return None, "quota"
+    make_private = bool(make_private and _can_make_private(cloner))
+    src = Path(source.dir_path) if source.dir_path else None
+    if src is None or not src.is_dir():
+        return None, "missing"
+    pid = store.create_project(cloner.id, source.brief or "", is_public=not make_private)
+    dst = store.projects_dir / str(cloner.id) / str(pid)
+    zip_path = None
+    try:
+        dst.mkdir(parents=True, exist_ok=True)
+        for fname in ("brief.txt", "state.json"):
+            if (src / fname).is_file():
+                shutil.copy2(src / fname, dst / fname)
+        for sub in ("kicraft", "generated"):
+            if (src / sub).is_dir():
+                shutil.copytree(src / sub, dst / sub, dirs_exist_ok=True)
+        if (src / "kicraft_project.zip").is_file():
+            zip_path = str(dst / "kicraft_project.zip")
+            shutil.copy2(src / "kicraft_project.zip", zip_path)
+    except Exception:
+        shutil.rmtree(dst, ignore_errors=True)
+        try:
+            store.finish_project(pid, "failed")  # free the reserved quota slot
+        except Exception:
+            pass
+        return None, "copy_error"
+    store.finish_project(pid, "ok", stem=source.project_stem, cost_usd=None,
+                         dir_path=str(dst), zip_path=zip_path)
+    store.set_cloned_from(pid, source.id)
+    if source.quality:
+        store.set_quality(pid, source.quality)
+    store.increment_clone_count(source.id)
+    try:
+        store.reindex_search(pid)  # make the clone searchable if it is public
+    except Exception:
+        pass
+    return pid, None
+
+
+def _project_card(r: dict) -> None:
+    """One browse-grid card for a public project dict (from list_public_projects)."""
+    stem = r.get("project_stem") or "Untitled board"
+    thumb = _board_thumb_url(r.get("dir_path"), r.get("project_stem"))
+    card = ui.card().classes("w-72 gap-1 cursor-pointer") \
+        .style("background:#0f172a;border:1px solid #1e293b")
+    with card:
+        if thumb:
+            ui.image(thumb).props("fit=contain") \
+                .style("height:150px;background:#0a0f1e").classes("w-full rounded")
+        else:
+            with ui.element("div").classes("w-full rounded flex items-center justify-center") \
+                    .style("height:150px;background:#0a0f1e"):
+                ui.icon("developer_board").style("color:#334155;font-size:46px")
+        with ui.row().classes("w-full items-center justify-between gap-1"):
+            ui.label(stem).classes("text-base font-semibold text-white")
+            _quality_chip(r.get("quality"))
+        with ui.row().classes("items-center gap-3"):
+            _stat_icon("visibility", r.get("view_count"))
+            _stat_icon("content_copy", r.get("clone_count"))
+            _stat_icon("favorite", r.get("like_count"))
+        brief = (r.get("brief") or "").strip()
+        if brief:
+            ui.label(brief).classes("text-xs").style(
+                "color:#94a3b8;display:-webkit-box;-webkit-line-clamp:2;"
+                "-webkit-box-orient:vertical;overflow:hidden")
+    card.on("click", lambda rr=r: ui.navigate.to(f"/p/{rr['id']}"))
+
+
+@ui.page("/browse")
+def browse_page():
+    """The community browser: every public, completed design, searchable by part or
+    function and sortable by popularity / newest / most-cloned. Login + consent gated
+    like the rest of the app; cloning and liking happen on a project's detail page."""
+    user = _current_user()
+    if user is None:
+        return RedirectResponse("/login")
+    if user.accepted_terms_version != LEGAL_VERSION:
+        return RedirectResponse("/consent")
+
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+
+    with ui.header().classes("items-center justify-between") \
+            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+        with ui.row().classes("items-center gap-2"):
+            ui.label("KiCraft").classes("text-xl font-bold text-white")
+            ui.label("community browser").classes("text-sm").style("color:#94a3b8")
+        ui.button("Back to workspace", icon="arrow_back",
+                  on_click=lambda: ui.navigate.to("/")) \
+            .props("flat dense no-caps color=white").classes("text-xs")
+
+    PAGE = 24
+    state = {"offset": 0, "deb": None}
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1200px"):
+        ui.label("Community projects").classes("text-2xl font-bold text-white")
+        ui.label("Browse boards the KiCraft community has built. Search by a part "
+                 "(like esp32) or by what it does (like plant watering), then open "
+                 "one to view it and clone it into your own workspace.") \
+            .classes("text-sm").style("color:#94a3b8")
+
+        with ui.row().classes("w-full items-center gap-3"):
+            search = ui.input(
+                placeholder="Search by part (esp32) or function (plant watering)…") \
+                .props("dense outlined clearable dark").classes("flex-grow") \
+                .style("min-width:240px")
+            sort_toggle = ui.toggle(
+                {"popularity": "Popular", "new": "New", "clones": "Most clones"},
+                value="popularity").props("dense no-caps")
+            badge_toggle = ui.toggle(
+                {"all": "All", "fab_ready": "Fab-ready", "erc_errors": "Has ERC issues"},
+                value="all").props("dense no-caps")
+        count_label = ui.label().classes("text-xs").style("color:#64748b")
+        grid = ui.row().classes("w-full flex-wrap gap-4")
+        more_row = ui.row().classes("w-full justify-center")
+
+        def _q():
+            return (search.value or "").strip() or None
+
+        def _badge():
+            return None if badge_toggle.value == "all" else badge_toggle.value
+
+        def _maybe_more(total):
+            more_row.clear()
+            if state["offset"] < total:
+                with more_row:
+                    ui.button(f"Load more ({total - state['offset']} more)",
+                              on_click=load_more).props("flat no-caps color=primary")
+
+        def add_cards(rows):
+            with grid:
+                for r in rows:
+                    _project_card(r)
+
+        def render():
+            grid.clear()
+            state["offset"] = 0
+            q, badge = _q(), _badge()
+            total = _store().count_public_projects(query=q, badge=badge)
+            rows = _store().list_public_projects(
+                sort=sort_toggle.value, query=q, badge=badge, limit=PAGE, offset=0)
+            suffix = " found" if (q or badge) else ""
+            count_label.text = f"{total} project{'' if total == 1 else 's'}{suffix}"
+            add_cards(rows)
+            state["offset"] = len(rows)
+            _maybe_more(total)
+
+        def load_more():
+            q, badge = _q(), _badge()
+            rows = _store().list_public_projects(
+                sort=sort_toggle.value, query=q, badge=badge,
+                limit=PAGE, offset=state["offset"])
+            add_cards(rows)
+            state["offset"] += len(rows)
+            _maybe_more(_store().count_public_projects(query=q, badge=badge))
+
+        def schedule_render():
+            if state["deb"] is not None:
+                state["deb"].cancel()
+            state["deb"] = ui.timer(0.25, render, once=True)  # debounce typing
+
+        search.on_value_change(lambda: schedule_render())
+        sort_toggle.on_value_change(lambda: render())
+        badge_toggle.on_value_change(lambda: render())
+        render()
+
+
+@ui.page("/p/{project_id}")
+def public_project_page(project_id: str):
+    """A public project's detail page: schematic + board (KiCanvas), BOM, community
+    metrics, and the Like + Clone actions. Login + consent gated. A private, failed,
+    or missing project renders a neutral 'not available' panel and mints no token."""
+    user = _current_user()
+    if user is None:
+        return RedirectResponse("/login")
+    if user.accepted_terms_version != LEGAL_VERSION:
+        return RedirectResponse("/consent")
+
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    kicanvas_head()
+
+    with ui.header().classes("items-center justify-between") \
+            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+        with ui.row().classes("items-center gap-2"):
+            ui.label("KiCraft").classes("text-xl font-bold text-white")
+            ui.label("community project").classes("text-sm").style("color:#94a3b8")
+        ui.button("Back to browse", icon="arrow_back",
+                  on_click=lambda: ui.navigate.to("/browse")) \
+            .props("flat dense no-caps color=white").classes("text-xs")
+
+    p = _public_project_or_none(project_id)
+    if p is None:
+        with ui.column().classes("w-full mx-auto p-8 gap-2 items-center") \
+                .style("max-width:760px"):
+            ui.icon("lock").style("color:#64748b;font-size:40px")
+            ui.label("This project isn't available.").classes("text-lg text-white")
+            ui.label("It may be private, still building, or no longer exists.") \
+                .classes("text-sm").style("color:#94a3b8")
+            ui.button("Browse community projects", icon="travel_explore",
+                      on_click=lambda: ui.navigate.to("/browse")).props("flat no-caps")
+        return
+
+    # One view per browser session per project, so a refresh doesn't inflate the count.
+    viewed = app.storage.user.setdefault("viewed_projects", [])
+    if p.id not in viewed:
+        try:
+            _store().record_view(p.id)
+        except Exception:
+            pass
+        viewed.append(p.id)
+        app.storage.user["viewed_projects"] = viewed
+
+    gen = _persisted_generated_dir(p.dir_path, p.project_stem)
+    token = _register_project_dir(gen) if gen else None
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1200px"):
+        with ui.row().classes("w-full items-center justify-between gap-2"):
+            ui.label(p.project_stem or "Untitled board") \
+                .classes("text-2xl font-bold text-white")
+            _quality_chip(p.quality)
+        if (p.brief or "").strip():
+            ui.label(p.brief).classes("text-sm").style("color:#94a3b8")
+
+        with ui.row().classes("items-center gap-4 flex-wrap"):
+            _stat_icon("visibility", p.view_count)
+            _stat_icon("content_copy", p.clone_count)
+            like_state = {"liked": _store().has_liked(user.id, p.id), "n": p.like_count}
+
+            def _refresh_like():
+                like_btn.props(
+                    f"icon={'favorite' if like_state['liked'] else 'favorite_border'}")
+                like_btn.set_text(str(like_state["n"]))
+
+            def _on_like():
+                like_state["liked"] = _store().toggle_like(user.id, p.id)
+                fresh = _store().get_project(p.id)
+                like_state["n"] = fresh.like_count if fresh else like_state["n"]
+                _refresh_like()
+
+            like_btn = ui.button(on_click=_on_like) \
+                .props("flat dense no-caps color=white").classes("text-xs")
+            _refresh_like()
+            _clone_button(p, user)
+            ui.label("Community project").classes("text-xs").style("color:#64748b")
+
+        if gen and token:
+            srcs = _schematic_sources(gen, p.project_stem or "", token)
+            if srcs:
+                with ui.card().classes("w-full") \
+                        .style("background:#0f172a;border:1px solid #1e293b"):
+                    _render_synth_view(srcs, p.project_stem or "")
+            board = _board_source(gen, p.project_stem or "", token)
+            if board:
+                with ui.card().classes("w-full") \
+                        .style("background:#0f172a;border:1px solid #1e293b"):
+                    ui.label("Board").classes("text-xs font-medium").style("color:#94a3b8")
+                    KiCanvasView([KiCanvasSource(board[0], board[1])], height="h-[520px]")
+        else:
+            ui.label("This project's files aren't available to preview.") \
+                .classes("text-sm").style("color:#64748b")
+
+        _render_bom_table(_load_persisted_state(p.dir_path))
+
+
+def _clone_button(source, user) -> None:
+    """Render the Clone action: paid users get a 'make private' dialog (private by
+    default), free users clone publicly in one click. The tier gate is re-checked in
+    _clone_project, so the dialog is convenience, not the security boundary."""
+    def do_clone(make_private):
+        pid, err = _clone_project(source, user, make_private)
+        if err == "quota":
+            ui.notify("You've used your design quota for this period. Upgrade for more.",
+                      color="warning")
+            return
+        if err is not None or pid is None:
+            ui.notify("Couldn't clone this project. Please try again.", color="negative")
+            return
+        ui.notify("Cloned into your workspace — open it under “Your projects.”",
+                  color="positive")
+        ui.navigate.to("/")
+
+    if _can_make_private(user):
+        def open_dialog():
+            with ui.dialog() as dlg, ui.card().classes("gap-2") \
+                    .style("background:#0f172a;border:1px solid #1e293b"):
+                ui.label("Clone this project").classes("text-base font-bold text-white")
+                ui.label("A copy lands in your workspace; you can open and re-run it.") \
+                    .classes("text-xs").style("color:#94a3b8")
+                priv = ui.switch("Make my clone private", value=True)
+                with ui.row().classes("w-full justify-end gap-2"):
+                    ui.button("Cancel", on_click=dlg.close).props("flat no-caps")
+                    ui.button("Clone",
+                              on_click=lambda: (dlg.close(), do_clone(priv.value))) \
+                        .props("color=primary unelevated no-caps")
+            dlg.open()
+        ui.button("Clone", icon="content_copy", on_click=open_dialog) \
+            .props("color=primary unelevated no-caps")
+    else:
+        ui.button("Clone", icon="content_copy", on_click=lambda: do_clone(False)) \
+            .props("color=primary unelevated no-caps")
+
+
+def _render_bom_table(state) -> None:
+    """A compact, read-only bill of materials for the detail page."""
+    parts = (((state or {}).get("bom") or {}).get("parts")) or []
+    with ui.card().classes("w-full gap-1") \
+            .style("background:#0f172a;border:1px solid #1e293b"):
+        ui.label(f"Bill of materials ({len(parts)} parts)") \
+            .classes("text-xs font-medium").style("color:#94a3b8")
+        if not parts:
+            ui.label("No parts listed.").classes("text-xs").style("color:#64748b")
+            return
+        with ui.row().classes("w-full items-center gap-2 text-xs font-bold") \
+                .style("color:#64748b"):
+            ui.label("ref").style("width:64px")
+            ui.label("value").style("width:170px")
+            ui.label("mpn / sourcing").classes("flex-grow")
+            ui.label("sheet").style("width:120px")
+        for prt in parts:
+            with ui.row().classes("w-full items-center gap-2 text-xs") \
+                    .style("border-top:1px solid #1e293b;padding:3px 0"):
+                ui.label(str(prt.get("ref") or "")).classes("font-mono") \
+                    .style("width:64px;color:#e2e8f0")
+                ui.label(str(prt.get("value") or "")).style("width:170px;color:#cbd5e1")
+                ui.label(str(prt.get("mpn") or prt.get("sourcing_note") or "")) \
+                    .classes("flex-grow font-mono").style("color:#94a3b8")
+                ui.label(str(prt.get("sheet") or "")).style("width:120px;color:#64748b")
+
+
 @ui.page("/samples")
 def samples_page():
     """Logged-in explorer for the showcase boards: open any sample's real schematic
@@ -2338,6 +3590,10 @@ def parts_page():
                             "-webkit-box-orient:vertical;overflow:hidden")
                         _tier_badge(p.tier)
                         ui.badge(m.maturity, color="grey-7")
+                        code = (m.sourcing or {}).get("lcsc", "").strip().upper()
+                        if _LCSC_CODE_RE.match(code):
+                            ui.label(code).classes("text-xs font-mono rounded") \
+                                .style("background:#1e293b;color:#94a3b8;padding:2px 8px")
                     row.on("click",
                            lambda pp=p: ui.navigate.to(f"/parts/{pp.manifest.name}"))
 
@@ -2415,6 +3671,56 @@ def part_detail_page(name: str):
                 ui.button("View on LCSC", icon="shopping_cart",
                           on_click=lambda u=url: ui.navigate.to(u, new_tab=True)) \
                     .props("outline no-caps color=white")
+
+        # Live LCSC pricing: the C-number plus a unit price from the easyeda.com
+        # endpoint. The qty-break ladder source (JLCPCB) is WAF-blocked, so the
+        # 10/100-pc columns show "n/a" rather than a guessed number.
+        code = (m.sourcing or {}).get("lcsc", "").strip().upper()
+        if _LCSC_CODE_RE.match(code):
+            with ui.card().classes("w-full") \
+                    .style("background:#0f172a;border:1px solid #1e293b"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.label("LCSC pricing").classes("text-sm font-medium") \
+                        .style("color:#94a3b8")
+                    ui.label(code).classes("text-xs font-mono rounded") \
+                        .style("background:#1e293b;color:#cbd5e1;padding:2px 8px")
+                price_row = ui.row().classes("items-center gap-6")
+                with price_row:
+                    ui.label("Loading live price…").classes("text-sm") \
+                        .style("color:#64748b")
+
+                def _fill_price(row=price_row, cid=code) -> bool:
+                    res = _price_for_lcsc(cid)
+                    if res is None:
+                        return False  # still fetching -> keep polling
+                    row.clear()
+                    with row:
+                        if isinstance(res, dict):
+                            for qty, val in (("1", res["unit_price"]),
+                                             ("10", None), ("100", None)):
+                                with ui.column().classes("gap-0 items-start"):
+                                    ui.label(f"@{qty} pc").classes("text-xs") \
+                                        .style("color:#64748b")
+                                    ui.label(_fmt_price(val) if val is not None
+                                             else "n/a") \
+                                        .classes("text-sm font-mono text-white")
+                            with ui.column().classes("gap-0 items-start"):
+                                ui.label("in stock").classes("text-xs") \
+                                    .style("color:#64748b")
+                                ui.label(f"{res.get('stock') or 0:,}") \
+                                    .classes("text-sm font-mono text-white")
+                        else:  # _UNAVAILABLE
+                            ui.label("Live pricing unavailable (vendor API "
+                                     "blocked).").classes("text-sm") \
+                                .style("color:#f59e0b")
+                    return True
+
+                if not _fill_price():
+                    timer = ui.timer(1.0,
+                                     lambda: _fill_price() and timer.deactivate())
+                ui.label("Unit price from LCSC at qty 1. Live 10/100-pc break "
+                         "pricing is currently unavailable.").classes("text-xs") \
+                    .style("color:#64748b")
 
         with ui.card().classes("w-full") \
                 .style("background:#0f172a;border:1px solid #1e293b"):
@@ -2703,6 +4009,10 @@ def index(prompt: str = ""):
                       on_click=lambda: ui.navigate.to("/parts")) \
                 .props("flat dense no-caps color=white").classes("text-xs") \
                 .tooltip("Browse the standard library and parts you've added")
+            ui.button("Browse", icon="travel_explore",
+                      on_click=lambda: ui.navigate.to("/browse")) \
+                .props("flat dense no-caps color=white").classes("text-xs") \
+                .tooltip("Browse and clone community projects")
             if is_admin(user):
                 ui.button("Admin", icon="admin_panel_settings",
                           on_click=lambda: ui.navigate.to("/admin")) \
@@ -3326,10 +4636,11 @@ if os.environ.get("KICRAFT_WEB_DEMO"):
     }
 
     # Canned prices for the demo BOM (keyed by _price_key) so the cost column +
-    # total render with no network (the demo never calls JLCPCB).
+    # total render with no network. TP4056/USB-C come from curated bundles, so
+    # they resolve to their manifest LCSC id (id:C…); the LED is a generic passive.
     _DEMO_PRICES = {
-        "kw:TP4056": {"unit_price": 0.18, "lcsc": "C16581", "stock": 9999},
-        "kw:USB-C": {"unit_price": 0.0667, "lcsc": "C165948", "stock": 9999},
+        "id:C16581": {"unit_price": 0.18, "lcsc": "C16581", "stock": 9999},
+        "id:C165948": {"unit_price": 0.0667, "lcsc": "C165948", "stock": 9999},
         "kw:white LED 0603": {"unit_price": 0.014, "lcsc": "C72043", "stock": 9999},
     }
 

@@ -1,51 +1,71 @@
-"""Sheet-level part placement for KiCraft Stage B.
+"""Sheet-level part placement for KiCraft Stage B — cluster placer.
 
-Simple deterministic placement, deliberately less clever than the prior
-spec's 8-orientation scoring + collision iteration:
+Lays each leaf out the way a human engineer would, instead of dumping
+every part in one row connected by net-label salad:
 
-- Anchor = the highest-pin-count part on the sheet (ties broken by ref).
-- Anchor placed at the sheet center.
-- Parts in ``bom.ic_groups[anchor.ref]`` tiled around the anchor in a
-  fixed 8-position ring at 7.62 mm pitch; second 16-position ring at
-  15.24 mm pitch for overflow.
-- Peripherals (parts not in any ic_group on this sheet) tiled in a
-  right-edge column at 12.7 mm pitch.
-- No orientation search. All parts placed at rotation 0.
+- **Anchors** (ICs / multi-pin parts) sit on a center line, ordered left
+  to right by ``signal_flow_order`` (input → output).
+- Each anchor's **2-pin passives** are clustered right next to the pin
+  they serve and rotated so the pin facing the anchor connects back to it
+  while the *far* pin points into open space — where a power symbol, a
+  ground symbol, or a label/wire attaches cleanly (the user's rule:
+  "place the resistor near the pin, rotated away from it").
+    * decoupling / bulk caps → a tidy row ABOVE the anchor, rail pin up,
+      ground pin down (power top, ground bottom — the convention).
+    * pull-ups → above (rail up, signal pin down toward the anchor).
+    * pull-downs → below (ground down, signal up toward the anchor).
+    * series / feedback → pin-aligned just outside the served pin, in the
+      signal-flow direction, far pin pointing onward.
+- Roles come from ``bom.placement_hints`` when present; otherwise they're
+  inferred from ``bom.connections`` (a cap on rail+gnd is decoupling, a
+  resistor on rail+signal is a pull-up, …) so the placer works on any
+  state, hinted or not.
+- Parts that don't cluster (lone connectors, unassignable passives) go in
+  a spaced row below everything, connected by labels.
 
-Trade-off: schematics aren't pretty, but they always succeed and are
-deterministic by construction. Stage B's primary success bar is
-"connectivity rendered + ERC clean," not visual polish.
+Everything snaps to the 1.27 mm grid and is deterministic. Connectivity
+is still owned by ``router`` — placement only decides positions and
+rotations; both share ``sch_geometry`` so the router finds the pins of a
+rotated part. Where a clean placement can't be found the part falls back
+to the free row, so the sheet is always emittable and ERC-clean.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from ..models import BOM, BomPart, Sheet
+from ..models import BOM, BomPart, Sheet, is_power_or_ground_name
+from .sch_geometry import (
+    pin_abs_position,
+    pin_exit_direction,
+    rotate_vec,
+    rotation_for_exit,
+)
 from .symbol_pinout import SymbolNotFoundError, lookup_pins
 
-
-# A4 portrait page (210 × 297 mm). Parts are laid out in a grid within the
-# usable region, each origin snapped to the 2.54 mm grid so pins land on
-# the 1.27 mm grid KiCad expects.
-SHEET_W_MM = 210.0
-SHEET_H_MM = 297.0
 GRID_MM = 2.54
+HALF_GRID_MM = 1.27
 
-USABLE_LEFT_MM = 38.1     # 15 * 2.54
-USABLE_RIGHT_MM = 190.0
-USABLE_TOP_MM = 38.1
-# Single-row top: parts hang from this line so the wired router has a uniform
-# clear band BELOW the row for its per-net trunk lanes.
-ROW_TOP_MM = 50.8
-# Padding around each part's pin bounding box so neither the power symbols
-# that hang ±5.08 mm off a pin nor the net labels collide with a neighbour.
-PAD_X_MM = 11.43          # 9 * 1.27 — label room left/right
-PAD_Y_MM = 8.89           # 7 * 1.27 — covers the ±5.08 mm power-symbol stub
-COL_GAP_MM = 5.08
-ROW_GAP_MM = 7.62
+# A4 portrait usable region; the anchor center line sits in the upper third
+# so cluster rows above/below and the free row below all fit. Every layout
+# constant is a multiple of 1.27 mm so derived pins stay on the connection grid.
+CENTER_Y_MM = 95.25        # 75 * 1.27
+USABLE_LEFT_MM = 30.48     # 24 * 1.27
+ANCHOR_GAP_MM = 20.32      # 16 * 1.27 — clear gap between adjacent clusters
+
+# Distance from an anchor's pin bounding box to the cluster row above/below.
+# Generous so the anchor's reference/value text, the member values, and the
+# rail/ground symbols (which hang ~5 mm off a pin and carry a net-name label)
+# all have clear air around them — the readability the whole rewrite is for.
+ROW_GAP_MM = 19.05         # 15 * 1.27
+MEMBER_PITCH_MM = 12.7     # 10 * 1.27 — column pitch within a cluster row
+SIDE_PITCH_MM = 10.16      # 8 * 1.27 — row pitch for stacked side members
+# Gap from the served pin to a pin-aligned member's near pin (room for its
+# connecting wire, net label, and the rail/ground symbol beyond it).
+PIN_LINK_GAP_MM = 10.16    # 8 * 1.27
+FREE_PITCH_MM = 25.4       # spacing in the un-clustered fallback row
 
 
-def _snap(value: float, grid: float = GRID_MM) -> float:
+def _snap(value: float, grid: float = HALF_GRID_MM) -> float:
     return round(value / grid) * grid
 
 
@@ -54,9 +74,56 @@ class PlacedPart:
     ref: str
     x_mm: float
     y_mm: float
-    rotation_deg: int   # 0 | 90 | 180 | 270 (always 0 in v1)
-    mirror: str | None  # None | "x" | "y" (always None in v1)
-    role: str           # anchor | ring1 | ring2 | peripheral
+    rotation_deg: int   # 0 | 90 | 180 | 270
+    mirror: str | None  # None | "x" | "y" (unused in v1, kept for the emitter)
+    role: str           # anchor | decoupling | pullup | ... | free
+
+
+@dataclass(frozen=True)
+class _Pins:
+    """Cached pin list + bounding box for one part, at rotation 0."""
+    by_number: dict[str, dict]
+    count: int
+
+
+@dataclass
+class _Anchor:
+    ref: str
+    part: BomPart
+    pins: _Pins
+    x: float = 0.0
+    y: float = 0.0
+    members: list["_Member"] = field(default_factory=list)
+
+
+@dataclass
+class _Member:
+    ref: str
+    part: BomPart
+    pins: _Pins
+    anchor_ref: str
+    role: str
+    near_pin: str            # passive pin toward the anchor / its served net
+    far_pin: str             # the other passive pin
+    served_pin: str | None   # anchor pin it sits beside (placement target)
+    # For row members (decoupling/pullup/pulldown): which pin points OUT to its
+    # rail/ground symbol (up in a rail row, down in a ground row) and which
+    # points back toward the anchor.
+    outer_pin: str | None = None
+    inner_pin: str | None = None
+
+
+def _load_pins(part: BomPart) -> _Pins:
+    try:
+        pins = lookup_pins(part.symbol)["pins"]
+    except (SymbolNotFoundError, ValueError, KeyError):
+        pins = []
+    return _Pins(by_number={p["number"]: p for p in pins}, count=len(pins))
+
+
+def _is_gnd(net: str) -> bool:
+    n = net.lstrip("/").upper()
+    return is_power_or_ground_name(net) and ("GND" in n or n in {"VSS", "VEE"})
 
 
 def place_sheet(
@@ -64,57 +131,395 @@ def place_sheet(
     sheet_parts: list[BomPart],
     bom: BOM,
 ) -> list[PlacedPart]:
-    """Place every part on a sheet, bbox-aware so nothing overlaps.
-
-    Connectivity is label-based (see ``router``), so placement only has to
-    keep parts — and the power symbols / labels that hang off their pins —
-    from overlapping. Parts are laid out left-to-right, top-to-bottom in a
-    grid sized by each part's pin bounding box plus padding. Returns the
-    same order as ``sheet_parts``.
-    """
+    """Place every part on a sheet. Returns one PlacedPart per input part,
+    in the same order as ``sheet_parts``."""
     if not sheet_parts:
         return []
 
-    # Pin counts (missing symbols → 0 so they don't anchor) and the
-    # padded half-extent of each part's pin bounding box.
-    pin_counts: dict[str, int] = {}
-    half_extent: dict[str, tuple[float, float]] = {}
+    parts_by_ref = {p.ref: p for p in sheet_parts}
+    pins_by_ref = {p.ref: _load_pins(p) for p in sheet_parts}
+
+    # pin -> net and net -> endpoints, restricted to this sheet's parts.
+    pin_net: dict[tuple[str, str], str] = {}
+    net_endpoints: dict[str, list[tuple[str, str]]] = {}
+    for conn in bom.connections:
+        for ep in conn.endpoints:
+            if ep.ref not in parts_by_ref:
+                continue
+            pin_net.setdefault((ep.ref, ep.pin), conn.net_name)
+            net_endpoints.setdefault(conn.net_name, []).append((ep.ref, ep.pin))
+
+    # Classify each net as gnd / rail / signal. A rail is recognised by name OR
+    # by touching a power pin — so a non-standard rail name (e.g. the CH340G's
+    # "V3" output) is still treated as a rail and its cap clusters correctly.
+    def _classify(net: str) -> str:
+        if _is_gnd(net):
+            return "gnd"
+        if is_power_or_ground_name(net):
+            return "rail"
+        for (ref, pn) in net_endpoints.get(net, []):
+            pin = pins_by_ref[ref].by_number.get(pn)
+            if pin and pin["electrical_type"] in ("power_in", "power_out"):
+                return "rail"
+        return "signal"
+    net_kind_map = {net: _classify(net) for net in net_endpoints}
+
+    hints_by_ref = {h.ref: h for h in bom.placement_hints if h.ref in parts_by_ref}
+    member_to_group_anchor: dict[str, str] = {}
+    for ic, members in bom.ic_groups.items():
+        if ic in parts_by_ref:
+            for m in members:
+                if m in parts_by_ref:
+                    member_to_group_anchor[m] = ic
+
+    # Anchors: 3+ pins, or named as an ic_groups leader.
+    anchor_refs = {
+        p.ref for p in sheet_parts
+        if pins_by_ref[p.ref].count >= 3 or p.ref in bom.ic_groups
+    }
+    anchors: dict[str, _Anchor] = {
+        ref: _Anchor(ref=ref, part=parts_by_ref[ref], pins=pins_by_ref[ref])
+        for ref in anchor_refs
+    }
+
+    placed: dict[str, PlacedPart] = {}
+    free_refs: list[str] = []
+
+    # --- assign each 2-pin passive to an anchor + role ---
     for part in sheet_parts:
-        try:
-            pins = lookup_pins(part.symbol)["pins"]
-        except (SymbolNotFoundError, ValueError):
-            pins = []
-        pin_counts[part.ref] = len(pins)
-        if pins:
-            xs = [p["position"]["x"] for p in pins]
-            ys = [p["position"]["y"] for p in pins]
-            hw = (max(xs) - min(xs)) / 2.0 + PAD_X_MM
-            hh = (max(ys) - min(ys)) / 2.0 + PAD_Y_MM
-        else:
-            hw, hh = PAD_X_MM, PAD_Y_MM
-        half_extent[part.ref] = (hw, hh)
-
-    # Highest pin-count part first (the IC anchors the top-left), ties by ref.
-    order = sorted(sheet_parts, key=lambda p: (-pin_counts[p.ref], p.ref))
-
-    # Single row, left to right. The wired router (see ``router``) connects
-    # pins with real trunk wires in a clear band BELOW the row, so a single row
-    # keeps every routing channel clear of component pins (no riser crosses a
-    # foreign part). Origins are TOP-aligned on ROW_TOP_MM so the band below is
-    # uniform. Parts are ordered highest-pin-count first (the IC anchors the
-    # left). Determinism + distinct pin coordinates are preserved.
-    placed_by_ref: dict[str, PlacedPart] = {}
-    cursor_x = USABLE_LEFT_MM
-    for idx, part in enumerate(order):
-        hw, hh = half_extent[part.ref]
-        placed_by_ref[part.ref] = PlacedPart(
-            ref=part.ref,
-            x_mm=_snap(cursor_x + hw),
-            y_mm=_snap(ROW_TOP_MM + hh),
-            rotation_deg=0,
-            mirror=None,
-            role="anchor" if idx == 0 else "grid",
+        if part.ref in anchor_refs:
+            continue
+        pins = pins_by_ref[part.ref]
+        if pins.count != 2:
+            free_refs.append(part.ref)
+            continue
+        member = _assign_member(
+            part, pins, anchors, hints_by_ref.get(part.ref),
+            member_to_group_anchor, pin_net, net_endpoints, anchor_refs,
+            net_kind_map,
         )
-        cursor_x += 2.0 * hw + COL_GAP_MM
+        if member is None:
+            free_refs.append(part.ref)
+        else:
+            anchors[member.anchor_ref].members.append(member)
 
-    return [placed_by_ref[p.ref] for p in sheet_parts]
+    # --- order + place anchors left to right ---
+    flow_index = {ref: i for i, ref in enumerate(bom.signal_flow_order)}
+    ordered = sorted(
+        anchors.values(),
+        key=lambda a: (flow_index.get(a.ref, len(flow_index)), a.ref),
+    )
+
+    cluster_bottom = CENTER_Y_MM
+    cursor_x = USABLE_LEFT_MM
+    for anchor in ordered:
+        width, bottom = _place_cluster(anchor, cursor_x, placed, pin_net)
+        cursor_x += width + ANCHOR_GAP_MM
+        cluster_bottom = max(cluster_bottom, bottom)
+
+    # --- free parts: a spaced row below every cluster (label-connected) ---
+    free_y = _snap(cluster_bottom + ROW_GAP_MM + GRID_MM)
+    fx = USABLE_LEFT_MM
+    for ref in sorted(free_refs):
+        placed[ref] = PlacedPart(
+            ref=ref, x_mm=_snap(fx), y_mm=free_y,
+            rotation_deg=0, mirror=None, role="free",
+        )
+        fx += FREE_PITCH_MM
+
+    return [placed[p.ref] for p in sheet_parts]
+
+
+def _other_pin(pins: _Pins, pin: str) -> str:
+    for n in pins.by_number:
+        if n != pin:
+            return n
+    return pin
+
+
+def _assign_member(
+    part: BomPart,
+    pins: _Pins,
+    anchors: dict[str, _Anchor],
+    hint,
+    member_to_group_anchor: dict[str, str],
+    pin_net: dict[tuple[str, str], str],
+    net_endpoints: dict[str, list[tuple[str, str]]],
+    anchor_refs: set[str],
+    net_kind_map: dict[str, str],
+) -> _Member | None:
+    """Decide which anchor this passive clusters with and its role/orientation.
+    Returns None if it can't be cleanly clustered (-> free row)."""
+    pin_numbers = sorted(pins.by_number)
+    if len(pin_numbers) != 2:
+        return None
+    pa, pb = pin_numbers
+    net_a = pin_net.get((part.ref, pa))
+    net_b = pin_net.get((part.ref, pb))
+    kind_a = net_kind_map.get(net_a, "none") if net_a else "none"
+    kind_b = net_kind_map.get(net_b, "none") if net_b else "none"
+
+    def anchor_on(net: str | None) -> tuple[str, str] | None:
+        """First (anchor_ref, anchor_pin) on ``net``, ic-group anchor preferred."""
+        if net is None:
+            return None
+        eps = [(r, pn) for (r, pn) in net_endpoints.get(net, []) if r in anchor_refs]
+        if not eps:
+            return None
+        pref = member_to_group_anchor.get(part.ref)
+        for r, pn in eps:
+            if r == pref:
+                return (r, pn)
+        return eps[0]
+
+    role = hint.role if hint else None
+
+    # Identify, by net kind, which pin is the "signal" side and which is the
+    # rail/ground side. For a cap on rail+gnd both are power; the rail pin is
+    # the near (served) pin.
+    rail_pin = gnd_pin = sig_pin = None
+    for pn, kind in ((pa, kind_a), (pb, kind_b)):
+        if kind == "rail" and rail_pin is None:
+            rail_pin = pn
+        elif kind == "gnd" and gnd_pin is None:
+            gnd_pin = pn
+        elif kind == "signal" and sig_pin is None:
+            sig_pin = pn
+
+    if role is None:
+        if kind_a in ("rail", "gnd") and kind_b in ("rail", "gnd"):
+            role = "decoupling"
+        elif "gnd" in (kind_a, kind_b) and "signal" in (kind_a, kind_b):
+            role = "pulldown"
+        elif "rail" in (kind_a, kind_b) and "signal" in (kind_a, kind_b):
+            role = "pullup"
+        elif kind_a == "signal" and kind_b == "signal":
+            role = "series"
+        else:
+            role = "other"
+
+    def net_of(pin: str | None) -> str | None:
+        if pin is None:
+            return None
+        return net_a if pin == pa else net_b
+
+    # Served net / anchor / near + outer/inner pins per role. ``outer`` points
+    # away to a rail/ground symbol; ``inner`` points back toward the anchor.
+    served: tuple[str, str] | None = None
+    near_pin = far_pin = outer_pin = inner_pin = None
+    if role in ("decoupling", "bulk"):
+        # A bypass cap hangs between a rail (up) and ground (down), hugging the
+        # anchor power pin it decouples.
+        outer_pin = rail_pin or pa            # rail pin -> points up
+        inner_pin = gnd_pin or _other_pin(pins, outer_pin)
+        near_pin, far_pin = inner_pin, outer_pin
+        served = anchor_on(net_of(rail_pin)) or anchor_on(net_of(gnd_pin))
+    elif role == "pullup":
+        outer_pin = rail_pin or pa            # rail up
+        inner_pin = sig_pin or _other_pin(pins, outer_pin)
+        near_pin, far_pin = inner_pin, outer_pin
+        served = anchor_on(net_of(sig_pin))
+    elif role == "pulldown":
+        outer_pin = gnd_pin or pa             # ground down
+        inner_pin = sig_pin or _other_pin(pins, outer_pin)
+        near_pin, far_pin = inner_pin, outer_pin
+        served = anchor_on(net_of(sig_pin))
+    else:  # series / feedback / other — pin-aligned to the anchor pin it touches
+        if anchor_on(net_a):
+            near_pin, served = pa, anchor_on(net_a)
+        elif anchor_on(net_b):
+            near_pin, served = pb, anchor_on(net_b)
+        else:
+            near_pin = pa
+        far_pin = _other_pin(pins, near_pin)
+
+    anchor_ref = None
+    if hint and hint.anchor_ref in anchors:
+        anchor_ref = hint.anchor_ref
+    elif served is not None:
+        anchor_ref = served[0]
+    elif part.ref in member_to_group_anchor:
+        anchor_ref = member_to_group_anchor[part.ref]
+    if anchor_ref is None or anchor_ref not in anchors:
+        return None
+
+    served_pin = (hint.anchor_pin if hint and hint.anchor_pin else
+                  (served[1] if served and served[0] == anchor_ref else None))
+
+    return _Member(
+        ref=part.ref, part=part, pins=pins, anchor_ref=anchor_ref, role=role,
+        near_pin=near_pin or pa, far_pin=far_pin or pb, served_pin=served_pin,
+        outer_pin=outer_pin, inner_pin=inner_pin,
+    )
+
+
+LEFT_RESERVE_MM = 19.05     # 15 * 1.27 — room left of the anchor for L/R members
+CLUSTER_MARGIN_MM = 6.35    # 5 * 1.27 — gap for the symbols/labels off cluster pins
+
+
+def _place_cluster(
+    anchor: _Anchor,
+    left_x: float,
+    placed: dict[str, PlacedPart],
+    pin_net: dict[tuple[str, str], str],
+) -> tuple[float, float]:
+    """Place an anchor and its members. Returns (cluster_width, cluster_bottom).
+
+    Decoupling/bulk caps go in a tidy rail row above the IC (rail up, ground
+    down) since they connect by power symbol. Pull-ups, pull-downs, and series
+    parts are placed pin-aligned at a stub off the exact pin they serve, so the
+    wire leaves that pin in its own exit direction and routes cleanly. The
+    whole cluster is then shifted so its leftmost element lands at ``left_x``.
+    """
+    # Anchor body top (rotation 0, sheet +y down) — the rail row hangs above it.
+    pins = list(anchor.pins.by_number.values())
+    body_top = min((-p["position"]["y"] for p in pins), default=0.0)
+
+    # Provisional origin; the cluster is shifted into place afterwards.
+    anchor.x = _snap(left_x + LEFT_RESERVE_MM)
+    anchor.y = CENTER_Y_MM
+    placed[anchor.ref] = PlacedPart(
+        ref=anchor.ref, x_mm=anchor.x, y_mm=anchor.y,
+        rotation_deg=0, mirror=None, role="anchor",
+    )
+
+    rail_row = [m for m in anchor.members if m.role in ("decoupling", "bulk")]
+    attached = [m for m in anchor.members
+                if m.role in ("pullup", "pulldown", "series", "feedback", "other")]
+
+    if rail_row:
+        row_y = _snap(anchor.y + body_top - ROW_GAP_MM)
+        _place_rail_row(rail_row, anchor, row_y, placed)
+
+    by_side: dict[str, list[_Member]] = {}
+    for m in attached:
+        by_side.setdefault(_served_dir(m, anchor), []).append(m)
+    for side, members in by_side.items():
+        _place_side_group(members, anchor, side, placed)
+
+    # Shift the whole cluster so its leftmost pin clears left_x by the margin.
+    refs = [anchor.ref] + [m.ref for m in anchor.members if m.ref in placed]
+    min_x, max_x, max_y = _cluster_bounds(refs, anchor, placed)
+    shift = _snap(left_x + CLUSTER_MARGIN_MM - min_x)
+    if abs(shift) > 1e-6:
+        for ref in refs:
+            pp = placed[ref]
+            placed[ref] = PlacedPart(
+                ref=pp.ref, x_mm=pp.x_mm + shift, y_mm=pp.y_mm,
+                rotation_deg=pp.rotation_deg, mirror=pp.mirror, role=pp.role,
+            )
+        anchor.x += shift
+        max_x += shift
+
+    width = (max_x + CLUSTER_MARGIN_MM) - left_x
+    cluster_bottom = max_y + CLUSTER_MARGIN_MM
+    return width, cluster_bottom
+
+
+def _cluster_bounds(
+    refs: list[str], anchor: _Anchor, placed: dict[str, PlacedPart]
+) -> tuple[float, float, float]:
+    """Min x / max x / max y over every pin of every part in the cluster."""
+    pins_by_ref = {anchor.ref: anchor.pins}
+    for m in anchor.members:
+        pins_by_ref[m.ref] = m.pins
+    xs: list[float] = []
+    ys: list[float] = []
+    for ref in refs:
+        pp = placed[ref]
+        for pin in pins_by_ref[ref].by_number.values():
+            x, y = pin_abs_position(pp.x_mm, pp.y_mm, pp.rotation_deg, pin)
+            xs.append(x)
+            ys.append(y)
+    if not xs:
+        return (anchor.x, anchor.x, anchor.y)
+    return (min(xs), max(xs), max(ys))
+
+
+def _place_rail_row(
+    members: list[_Member],
+    anchor: _Anchor,
+    row_y: float,
+    placed: dict[str, PlacedPart],
+) -> None:
+    """A row of vertical bypass caps above the IC, each over the power pin it
+    serves (input cap over VIN, output cap over VOUT, …), rail pin up / ground
+    pin down, nudged right to keep a clear pitch between neighbours."""
+    def desired_x(m: _Member) -> float:
+        if m.served_pin and m.served_pin in anchor.pins.by_number:
+            sx, _ = pin_abs_position(
+                anchor.x, anchor.y, 0, anchor.pins.by_number[m.served_pin])
+            return sx
+        return anchor.x
+
+    prev_x = None
+    for m in sorted(members, key=lambda m: (desired_x(m), m.ref)):
+        want = desired_x(m)
+        ox = want if prev_x is None else max(want, prev_x + MEMBER_PITCH_MM)
+        prev_x = ox
+        outer = m.pins.by_number.get(m.outer_pin or m.far_pin)
+        rot = rotation_for_exit(outer, "up") if outer else 0
+        placed[m.ref] = PlacedPart(
+            ref=m.ref, x_mm=_snap(ox), y_mm=_snap(row_y),
+            rotation_deg=rot, mirror=None, role=m.role,
+        )
+
+
+def _served_dir(m: _Member, anchor: _Anchor) -> str:
+    """Exit direction of the anchor pin a member serves (default right)."""
+    if m.served_pin and m.served_pin in anchor.pins.by_number:
+        return pin_exit_direction(0, anchor.pins.by_number[m.served_pin])
+    return "right"
+
+
+def _place_side_group(
+    members: list[_Member],
+    anchor: _Anchor,
+    side: str,
+    placed: dict[str, PlacedPart],
+) -> None:
+    """Place all attached members on one side of the anchor (the pull-ups,
+    pull-downs, and series parts whose served pins exit that way).
+
+    Each member's near pin taps its served pin (a stub ``gap`` out in the
+    pin's exit direction) and its far pin points further out — so a rail or
+    ground symbol on the far pin never lands back on the IC. Members are
+    spread along the side (in y for left/right, in x for top/bottom) with a
+    guaranteed pitch, so two parts on adjacent IC pins can't overlap; the
+    short offset wire back to each pin is drawn by the router.
+    """
+    stack_y = side in ("left", "right")
+
+    def served_xy(m: _Member) -> tuple[float, float]:
+        if m.served_pin and m.served_pin in anchor.pins.by_number:
+            return pin_abs_position(
+                anchor.x, anchor.y, 0, anchor.pins.by_number[m.served_pin])
+        return (anchor.x, anchor.y)
+
+    ordered = sorted(
+        members,
+        key=lambda m: (served_xy(m)[1] if stack_y else served_xy(m)[0], m.ref))
+    prev = None
+    for m in ordered:
+        sx, sy = served_xy(m)
+        if stack_y:
+            nx = sx + (PIN_LINK_GAP_MM if side == "right" else -PIN_LINK_GAP_MM)
+            ny = sy if prev is None else max(sy, prev + SIDE_PITCH_MM)
+            prev, ntx, nty = ny, nx, ny
+        else:
+            ny = sy + (PIN_LINK_GAP_MM if side == "down" else -PIN_LINK_GAP_MM)
+            nx = sx if prev is None else max(sx, prev + SIDE_PITCH_MM)
+            prev, ntx, nty = nx, nx, ny
+        near = (m.pins.by_number.get(m.near_pin)
+                or next(iter(m.pins.by_number.values())))
+        # Near pin faces back toward the anchor; far pin points outward.
+        rot = rotation_for_exit(near, _opp(side))
+        rx, ry = rotate_vec(near["position"]["x"], near["position"]["y"], rot)
+        placed[m.ref] = PlacedPart(
+            ref=m.ref, x_mm=_snap(ntx - rx), y_mm=_snap(nty + ry),
+            rotation_deg=rot, mirror=None, role=m.role,
+        )
+
+
+def _opp(d: str) -> str:
+    return {"left": "right", "right": "left", "up": "down", "down": "up"}[d]

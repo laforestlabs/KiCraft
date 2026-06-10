@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
@@ -150,6 +151,49 @@ class Project:
     cost_usd: float | None
     dir_path: str | None
     zip_path: str | None
+    # Public-browser fields (community catalog). Defaults keep existing
+    # constructors and tests valid; _row_to_project fills them from the row.
+    is_public: bool = True
+    cloned_from_id: int | None = None
+    view_count: int = 0
+    clone_count: int = 0
+    like_count: int = 0
+    quality: str | None = None  # 'fab_ready' | 'erc_errors' | 'unverified'
+
+
+def build_fts_document(brief: str | None, state: dict | None) -> dict:
+    """Flatten a project's brief + design state into the four search fields the
+    FTS index stores (brief / goal / parts / blocks).
+
+    Pure and tolerant: any missing slot becomes an empty string, so a half-built
+    or malformed state.json never breaks indexing. A part query ("esp32") lands
+    in `parts` (a BOM mpn/value) or `brief`; a function query ("plant watering")
+    lands in `goal` or `blocks`. Stays stdlib-only to match this module.
+    """
+    state = state or {}
+    intent = state.get("intent") or {}
+    bom = state.get("bom") or {}
+    fspec = state.get("functional_spec") or {}
+    arch = state.get("architecture") or {}
+
+    parts_bits: list = list(intent.get("named_parts") or [])
+    for p in (bom.get("parts") or []):
+        parts_bits += [p.get("mpn"), p.get("value"), p.get("sourcing_note")]
+    block_bits: list = []
+    for b in (fspec.get("blocks") or []):
+        block_bits += [b.get("name"), b.get("purpose")]
+    for s in (arch.get("sheets") or []):
+        block_bits.append(s.get("function"))
+
+    def _join(bits: list) -> str:
+        return " ".join(str(x) for x in bits if x)
+
+    return {
+        "brief": brief or "",
+        "goal": str(intent.get("goal") or ""),
+        "parts": _join(parts_bits),
+        "blocks": _join(block_bits),
+    }
 
 
 class AccountStore:
@@ -163,7 +207,9 @@ class AccountStore:
         self.path = Path(db_path)
         self.projects_dir = Path(projects_dir)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fts_enabled = False  # flipped on by _init_db once projects_fts exists
         self._init_db()
+        self._maybe_backfill_search()
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30)
@@ -235,12 +281,46 @@ class AccountStore:
                 "cost_usd REAL,"
                 "dir_path TEXT,"
                 "zip_path TEXT,"
+                "is_public INTEGER NOT NULL DEFAULT 1,"
+                "cloned_from_id INTEGER,"
+                "view_count INTEGER NOT NULL DEFAULT 0,"
+                "clone_count INTEGER NOT NULL DEFAULT 0,"
+                "like_count INTEGER NOT NULL DEFAULT 0,"
+                "quality TEXT,"
                 "FOREIGN KEY(user_id) REFERENCES users(id))"
             )
+            self._ensure_project_columns(conn)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_projects_user_created "
                 "ON projects(user_id, created_at)"
             )
+            # Per-user dedup of likes; the count is denormalized onto
+            # projects.like_count and kept in sync inside toggle_like's txn.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS project_likes ("
+                "user_id INTEGER NOT NULL,"
+                "project_id INTEGER NOT NULL,"
+                "created_at TEXT NOT NULL,"
+                "PRIMARY KEY (user_id, project_id),"
+                "FOREIGN KEY(user_id) REFERENCES users(id),"
+                "FOREIGN KEY(project_id) REFERENCES projects(id))"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_project_likes_project "
+                "ON project_likes(project_id)"
+            )
+            # Full-text search over the catalog. Guarded: a SQLite build without
+            # FTS5 degrades to a LIKE fallback (see _public_where) instead of
+            # crashing init. porter stemming makes "watering" match "water".
+            try:
+                conn.execute(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS projects_fts USING fts5("
+                    "project_id UNINDEXED, brief, goal, parts, blocks,"
+                    "tokenize='porter unicode61')"
+                )
+                self._fts_enabled = True
+            except sqlite3.OperationalError:
+                self._fts_enabled = False
 
     @staticmethod
     def _ensure_columns(conn: sqlite3.Connection) -> None:
@@ -278,6 +358,57 @@ class AccountStore:
             # left after the second statement, so it is idempotent.
             conn.execute("UPDATE users SET role='admin' WHERE tier='admin'")
             conn.execute("UPDATE users SET tier='free' WHERE tier='admin'")
+
+    @staticmethod
+    def _ensure_project_columns(conn: sqlite3.Connection) -> None:
+        """Additively migrate an older projects table for the public browser.
+
+        Mirrors _ensure_columns: a DB created before the browser feature lacks
+        these columns; the CREATE TABLE IF NOT EXISTS leaves an existing table
+        untouched, so ALTER the missing columns in. The is_public default of 1
+        enacts the product rule that free users' projects are public; the
+        one-time backfill (guarded by the ADD COLUMN, so it runs only when the
+        column is first introduced) then flips paid users' EXISTING projects back
+        to private, so we never retroactively expose paid work without consent.
+        Idempotent: a re-open finds the column present and skips the whole block.
+        """
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(projects)")}
+        if "is_public" not in cols:
+            conn.execute(
+                "ALTER TABLE projects ADD COLUMN is_public INTEGER NOT NULL DEFAULT 1")
+            conn.execute(
+                "UPDATE projects SET is_public=0 WHERE user_id IN "
+                "(SELECT id FROM users WHERE tier IN ('pro','max'))")
+        if "cloned_from_id" not in cols:
+            conn.execute("ALTER TABLE projects ADD COLUMN cloned_from_id INTEGER")
+        if "view_count" not in cols:
+            conn.execute(
+                "ALTER TABLE projects ADD COLUMN view_count INTEGER NOT NULL DEFAULT 0")
+        if "clone_count" not in cols:
+            conn.execute(
+                "ALTER TABLE projects ADD COLUMN clone_count INTEGER NOT NULL DEFAULT 0")
+        if "like_count" not in cols:
+            conn.execute(
+                "ALTER TABLE projects ADD COLUMN like_count INTEGER NOT NULL DEFAULT 0")
+        if "quality" not in cols:
+            conn.execute("ALTER TABLE projects ADD COLUMN quality TEXT")
+
+    def _maybe_backfill_search(self) -> None:
+        """One-time: populate the FTS index the first time it appears on a DB that
+        already has public completed projects (e.g. the live box on upgrade). Gated
+        on the index being empty, so it runs once and a normal restart is a no-op."""
+        if not self._fts_enabled:
+            return
+        with self._conn() as conn:
+            if conn.execute("SELECT COUNT(*) FROM projects_fts").fetchone()[0]:
+                return
+            ids = [r["id"] for r in conn.execute(
+                "SELECT id FROM projects WHERE status='ok' AND is_public=1")]
+        for pid in ids:
+            try:
+                self.reindex_search(pid)
+            except Exception:
+                pass  # best-effort: a single bad state.json never blocks startup
 
     # ---- users ------------------------------------------------------------
 
@@ -564,6 +695,15 @@ class AccountStore:
         filesystem path that was purged (for logging), or None if there was none.
         """
         with self._conn() as conn:
+            pids = [r["id"] for r in conn.execute(
+                "SELECT id FROM projects WHERE user_id=?", (user_id,))]
+            # Drop likes this user gave, plus likes + FTS rows on their projects,
+            # before the projects themselves so nothing dangles in the catalog.
+            conn.execute("DELETE FROM project_likes WHERE user_id=?", (user_id,))
+            for pid in pids:
+                conn.execute("DELETE FROM project_likes WHERE project_id=?", (pid,))
+                if self._fts_enabled:
+                    conn.execute("DELETE FROM projects_fts WHERE project_id=?", (pid,))
             conn.execute("DELETE FROM projects WHERE user_id=?", (user_id,))
             conn.execute("DELETE FROM users WHERE id=?", (user_id,))
         tree = self.projects_dir / str(user_id)
@@ -580,14 +720,28 @@ class AccountStore:
                        project_stem=row["project_stem"], status=row["status"],
                        created_at=row["created_at"], finished_at=row["finished_at"],
                        cost_usd=row["cost_usd"], dir_path=row["dir_path"],
-                       zip_path=row["zip_path"])
+                       zip_path=row["zip_path"],
+                       is_public=bool(row["is_public"]),
+                       cloned_from_id=row["cloned_from_id"],
+                       view_count=row["view_count"], clone_count=row["clone_count"],
+                       like_count=row["like_count"], quality=row["quality"])
 
-    def create_project(self, user_id: int, brief: str) -> int:
-        """Reserve a project row at status 'running' (consumes a quota slot)."""
+    def create_project(self, user_id: int, brief: str, *,
+                       is_public: bool | None = None) -> int:
+        """Reserve a project row at status 'running' (consumes a quota slot).
+
+        Visibility follows the owner's tier when not given explicitly: free users'
+        projects are public (the community-browser rule), paid (pro/max) users'
+        projects default private (they can publish later via set_visibility). Pass
+        is_public to override -- the clone path sets it directly for either tier."""
+        if is_public is None:
+            u = self.get_user(user_id)
+            is_public = (u is None) or (u.tier not in ("pro", "max"))
         with self._conn() as conn:
             cur = conn.execute(
-                "INSERT INTO projects (user_id, brief, status, created_at) "
-                "VALUES (?, ?, 'running', ?)", (user_id, brief, _utcnow_iso()))
+                "INSERT INTO projects (user_id, brief, status, created_at, is_public) "
+                "VALUES (?, ?, 'running', ?, ?)",
+                (user_id, brief, _utcnow_iso(), 1 if is_public else 0))
             return int(cur.lastrowid)
 
     def finish_project(self, project_id: int, status: str, stem: str | None = None,
@@ -617,6 +771,191 @@ class AccountStore:
                 "SELECT * FROM projects WHERE user_id=? ORDER BY id DESC",
                 (user_id,)).fetchall()
         return [self._row_to_project(r) for r in rows]
+
+    # ---- public browser: visibility, metrics, likes, clone ----------------
+
+    def set_visibility(self, project_id: int, is_public: bool) -> None:
+        """Set a project's catalog visibility. Mechanism only: the web layer
+        enforces that only paid (pro/max) users may make a project private (a free
+        user's project must stay public). Reindex search after calling this."""
+        with self._conn() as conn:
+            conn.execute("UPDATE projects SET is_public=? WHERE id=?",
+                         (1 if is_public else 0, project_id))
+
+    def set_quality(self, project_id: int, quality: str | None) -> None:
+        """Stamp the precomputed quality badge ('fab_ready' | 'erc_errors' |
+        'unverified') so the catalog can filter/sort in SQL without re-reading the
+        synthesis check per row."""
+        with self._conn() as conn:
+            conn.execute("UPDATE projects SET quality=? WHERE id=?",
+                         (quality, project_id))
+
+    def record_view(self, project_id: int) -> None:
+        """Increment the view counter. Per-session dedup is the web layer's job."""
+        with self._conn() as conn:
+            conn.execute("UPDATE projects SET view_count=view_count+1 WHERE id=?",
+                         (project_id,))
+
+    def has_liked(self, user_id: int, project_id: int) -> bool:
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT 1 FROM project_likes WHERE user_id=? AND project_id=?",
+                (user_id, project_id)).fetchone() is not None
+
+    def toggle_like(self, user_id: int, project_id: int) -> bool:
+        """Like or unlike, returning the resulting state (True = now liked). The
+        like row and the denormalized projects.like_count move together in one
+        transaction, so the count can never drift from the rows. A failed INSERT
+        (already liked) only rolls back that statement, leaving the txn live for
+        the unlike path."""
+        with self._conn() as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO project_likes (user_id, project_id, created_at) "
+                    "VALUES (?, ?, ?)", (user_id, project_id, _utcnow_iso()))
+                conn.execute("UPDATE projects SET like_count=like_count+1 WHERE id=?",
+                             (project_id,))
+                return True
+            except sqlite3.IntegrityError:
+                conn.execute(
+                    "DELETE FROM project_likes WHERE user_id=? AND project_id=?",
+                    (user_id, project_id))
+                conn.execute(
+                    "UPDATE projects SET like_count=MAX(0, like_count-1) WHERE id=?",
+                    (project_id,))
+                return False
+
+    def set_cloned_from(self, project_id: int, source_id: int) -> None:
+        with self._conn() as conn:
+            conn.execute("UPDATE projects SET cloned_from_id=? WHERE id=?",
+                         (source_id, project_id))
+
+    def increment_clone_count(self, project_id: int) -> None:
+        with self._conn() as conn:
+            conn.execute("UPDATE projects SET clone_count=clone_count+1 WHERE id=?",
+                         (project_id,))
+
+    # ---- public browser: search index -------------------------------------
+
+    def _load_project_state(self, project: Project) -> dict | None:
+        """Read a project's persisted design state for indexing. The web worker
+        writes a top-level state.json copy next to brief.txt; fall back to the
+        copy inside the kicraft/ subtree. Returns None if neither is readable."""
+        if not project or not project.dir_path:
+            return None
+        base = Path(project.dir_path)
+        for cand in (base / "state.json", base / "kicraft" / "state.json"):
+            if cand.is_file():
+                try:
+                    return json.loads(cand.read_text())
+                except (json.JSONDecodeError, OSError):
+                    return None
+        return None
+
+    def reindex_search(self, project_id: int) -> None:
+        """Refresh a project's FTS row. A project that is not BOTH public and 'ok'
+        is removed from the index, so private/failed projects are never searchable.
+        No-op when FTS5 is unavailable."""
+        if not self._fts_enabled:
+            return
+        p = self.get_project(project_id)
+        if p is None or p.status != "ok" or not p.is_public:
+            self.remove_from_search(project_id)
+            return
+        doc = build_fts_document(p.brief, self._load_project_state(p))
+        with self._conn() as conn:
+            conn.execute("DELETE FROM projects_fts WHERE project_id=?", (project_id,))
+            conn.execute(
+                "INSERT INTO projects_fts (project_id, brief, goal, parts, blocks) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (project_id, doc["brief"], doc["goal"], doc["parts"], doc["blocks"]))
+
+    def remove_from_search(self, project_id: int) -> None:
+        if not self._fts_enabled:
+            return
+        with self._conn() as conn:
+            conn.execute("DELETE FROM projects_fts WHERE project_id=?", (project_id,))
+
+    def backfill_search(self) -> int:
+        """Index every public, completed project. Returns the count indexed. Safe
+        to re-run; reindex_search is idempotent per project."""
+        if not self._fts_enabled:
+            return 0
+        with self._conn() as conn:
+            ids = [r["id"] for r in conn.execute(
+                "SELECT id FROM projects WHERE status='ok' AND is_public=1")]
+        for pid in ids:
+            self.reindex_search(pid)
+        return len(ids)
+
+    # ---- public browser: catalog query ------------------------------------
+
+    _PUBLIC_SORTS = {
+        "popularity": "(4*p.clone_count + 3*p.like_count + p.view_count) DESC, p.id DESC",
+        "new": "p.finished_at DESC, p.id DESC",
+        "clones": "p.clone_count DESC, p.id DESC",
+    }
+
+    @staticmethod
+    def _fts_match_query(query: str | None) -> str | None:
+        """Turn a raw search-box string into a safe FTS5 MATCH expression.
+
+        Each whitespace-separated term is reduced to word characters (plus the
+        ./-/_ common in MPNs) and emitted as a double-quoted prefix phrase, so no
+        FTS operator (", *, :, ^, parentheses, NEAR) can leak through and raise
+        OperationalError. A term with no alphanumeric content is dropped (it would
+        tokenize to an empty phrase, which IS a syntax error); if nothing usable
+        remains, returns None and the caller applies no text filter."""
+        terms = []
+        for raw in (query or "").split():
+            cleaned = re.sub(r"[^0-9A-Za-z._-]+", " ", raw).strip()
+            if any(ch.isalnum() for ch in cleaned):
+                terms.append(f'"{cleaned}"*')
+        return " ".join(terms) if terms else None
+
+    def _public_where(self, query: str | None, badge: str | None):
+        """Shared FROM/WHERE for the catalog: publish gate (public + ok) plus an
+        optional full-text match and quality badge. Returns (join, where, params).
+        Falls back to a brief LIKE scan when FTS5 is unavailable."""
+        where = ["p.status='ok'", "p.is_public=1"]
+        params: list = []
+        join = ""
+        if query and self._fts_enabled:
+            match = self._fts_match_query(query)
+            if match is not None:
+                join = "JOIN projects_fts ON projects_fts.project_id = p.id"
+                where.append("projects_fts MATCH ?")
+                params.append(match)
+        elif query:  # FTS unavailable: best-effort substring match on the brief
+            where.append("p.brief LIKE ?")
+            params.append(f"%{query}%")
+        if badge:
+            where.append("p.quality=?")
+            params.append(badge)
+        return join, " AND ".join(where), params
+
+    def list_public_projects(self, *, sort: str = "popularity", query: str | None = None,
+                             badge: str | None = None, limit: int = 24,
+                             offset: int = 0) -> list[dict]:
+        """The catalog query. Returns dicts (every project column + owner_email),
+        gated to public completed projects, optionally full-text filtered by
+        `query` (a part or a function) and by quality `badge`, ordered by the
+        `sort` preset ('popularity' | 'new' | 'clones')."""
+        join, where, params = self._public_where(query, badge)
+        order = self._PUBLIC_SORTS.get(sort, self._PUBLIC_SORTS["popularity"])
+        sql = (f"SELECT p.*, u.email AS owner_email FROM projects p "
+               f"JOIN users u ON u.id = p.user_id {join} "
+               f"WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?")
+        with self._conn() as conn:
+            rows = conn.execute(sql, (*params, limit, offset)).fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
+
+    def count_public_projects(self, *, query: str | None = None,
+                              badge: str | None = None) -> int:
+        join, where, params = self._public_where(query, badge)
+        sql = f"SELECT COUNT(*) FROM projects p {join} WHERE {where}"
+        with self._conn() as conn:
+            return int(conn.execute(sql, params).fetchone()[0])
 
     # ---- quota ------------------------------------------------------------
 

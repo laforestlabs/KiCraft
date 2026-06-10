@@ -2931,14 +2931,19 @@ def _route_parent_board(
     from kicraft.autoplacer.freerouting_runner import strip_net_copper
 
     gnd_net = cfg.get("gnd_zone_net", "GND")
-    if gnd_net:
-        strip_net_copper(str(stamped_pcb), gnd_net)
-        # Pour a B.Cu GND plane (+ IC thermal vias) before routing so FreeRouting
-        # ties GND to the plane with short drops instead of re-creating the dense
-        # cross-block GND web that saturates F.Cu and blocks signal interconnects.
-        add_gnd_pour_and_thermal_vias(str(stamped_pcb), cfg)
-
+    # The pre-route GND strip/pour and the route itself all shell out to pcbnew;
+    # any of them can fail (e.g. a pcbnew SIGSEGV mid-strip). Guard the whole
+    # block so a failure returns a discardable result and the search tries the
+    # next round, instead of an uncaught exception killing the compose subprocess
+    # and taking the entire build down with it.
     try:
+        if gnd_net:
+            # Strip the leaf-composed GND web and pour a B.Cu GND plane (+ IC
+            # thermal vias) before routing, so FreeRouting ties GND to the plane
+            # with short drops instead of re-creating the dense cross-block GND
+            # web that saturates F.Cu and blocks signal interconnects.
+            strip_net_copper(str(stamped_pcb), gnd_net)
+            add_gnd_pour_and_thermal_vias(str(stamped_pcb), cfg)
         freerouting_stats = route_with_freerouting(
             kicad_pcb_path=str(stamped_pcb),
             output_path=str(routed_pcb),
@@ -2962,6 +2967,17 @@ def _route_parent_board(
     # tied down to the B.Cu plane through the thermal vias placed pre-route.
     if gnd_net:
         pour_gnd_planes(str(routed_pcb), cfg, layers=("B.Cu", "F.Cu"))
+
+    # Pour the primary power rail (e.g. VBUS) as an F.Cu plane, post-route only:
+    # it lives on the signal layer, so pouring it before routing would saturate
+    # F.Cu. At higher priority than GND it wins its region; GND fills the rest.
+    # This ties paired connector power pads the autorouter can't thread together.
+    if cfg.get("power_plane_enabled", True):
+        from kicraft.autoplacer.brain.gnd_pour import pour_power_planes
+
+        pour_power_planes(
+            str(routed_pcb), cfg, layers=(cfg.get("power_plane_layer", "F.Cu"),)
+        )
 
     # Import all copper from the routed board (child + new parent traces)
     copper = import_routed_copper(str(routed_pcb))

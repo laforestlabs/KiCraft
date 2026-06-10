@@ -1,6 +1,6 @@
 # KiCraft Terms of Service
 
-**Version: 2026-06-04**
+**Version: 2026-06-09**
 
 > **DRAFT, pending attorney review.** This document is a first-draft template. It
 > has not been reviewed by a lawyer. Replace every `[BRACKETED]` placeholder and
@@ -72,12 +72,35 @@ content already incorporated into a trained model or a published anonymized
 example, it survives account deletion to the extent that content cannot
 practically be withdrawn.
 
+### Public projects and the community browser
+
+**If you are on the free tier, the projects you create are public.** When a design
+completes, it is added to the KiCraft community browser, where any other signed-in
+user can view it, see its bill of materials, and **clone it** into their own
+account to study or build upon. By using the free tier you grant other users a
+non-exclusive, royalty-free license to view and clone your completed designs for
+their own use, and you grant KiCraft the right to display them in the community
+browser. **Do not put anything you need to keep confidential into a free-tier
+project.**
+
+**Paid tiers (Pro, Max) may keep projects private.** A private project is not
+listed in the community browser and cannot be cloned by others. You choose whether
+each completed project is public or private in your account settings.
+
+Cloning copies the design files and starting state into the cloning user's account
+so they can iterate on it; it does not transfer ownership of, or any rights in,
+your original project beyond the view-and-clone license above. Likewise, when you
+clone another user's public project, you receive only that same view-and-clone
+license, not ownership of their work.
+
 ## 6. Your choices
 
 You can opt out of the use of Your Content to train models (Section 5c) in your
 account settings, and you can request export or deletion of your data as described
 in the Privacy Policy. Opting out of training does not affect uses (a), (b), or
-the publication of already de-identified examples.
+the publication of already de-identified examples. If you are on a paid tier, you
+can also choose whether each completed project is public in the community browser
+or kept private, in your account settings (see Section 5).
 
 ## 7. Third-party model providers
 

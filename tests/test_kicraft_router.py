@@ -122,24 +122,27 @@ def test_ground_net_emits_power_symbols_no_trunk() -> None:
     assert routed.labels == []
 
 
-def test_two_pin_local_net_labels_each_pin() -> None:
+def test_two_pin_local_net_draws_wire_and_one_label() -> None:
+    # A local 2-pin signal net is now a REAL wire between the pins, carrying a
+    # single net label (not two floating stub labels). "EN_LOCAL" is a signal
+    # name (not a power rail), so it routes as a wire, not power symbols.
     routed = _do_route(
         connections=[
             NetConnection(
-                net_name="VOUT_LOCAL",
+                net_name="EN_LOCAL",
                 endpoints=[
-                    PinEndpoint(ref="U1", pin="5"),  # VOUT
+                    PinEndpoint(ref="U1", pin="3"),  # EN
                     PinEndpoint(ref="C2", pin="1"),
                 ],
                 sheet="LDO 3V3",
             )
         ]
     )
-    # Label-based connectivity: one local label per pin, no junctions/trunk.
     assert routed.junctions == []
-    assert [lab.text for lab in routed.labels] == ["VOUT_LOCAL", "VOUT_LOCAL"]
-    # One short stub wire per pin.
-    assert len(routed.wires) == 2
+    # Exactly one net label names the wire (keeps kicad-cli ERC happy).
+    assert [lab.text for lab in routed.labels] == ["EN_LOCAL"]
+    # A real connecting wire exists (1-2 segments for a straight run or an L).
+    assert 1 <= len(routed.wires) <= 2
 
 
 def test_local_net_emits_one_label_per_pin_at_distinct_positions() -> None:

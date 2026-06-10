@@ -143,6 +143,7 @@ from kicraft.autoplacer.brain.types import (
     BoardState,
     Component,
     PlacementScore,
+    Point,
     SolveRoundResult,
     SubCircuitLayout,
 )
@@ -215,6 +216,28 @@ class SolvedLeafSubcircuit:
             solved_components = copy.deepcopy(routed_state.components)
             routed_traces = copy.deepcopy(routed_state.traces)
             routed_vias = copy.deepcopy(routed_state.vias)
+            # The standalone leaf board is centered on its A4 page for viewing
+            # (leaf_routing._center_on_leaf_page). Re-base its geometry back to its own
+            # outline origin (top-left -> (0,0)) before serializing solved_layout.json,
+            # so the parent composer -- which rotates each leaf around (0,0) and only
+            # then translates by the placement origin -- is invariant to where the leaf
+            # sits on its page. Using the board's own Edge.Cuts outline makes this the
+            # exact inverse of the centering: a no-op for a leaf already at (0,0) (so
+            # existing solved_layout.json / composes are byte-for-byte unchanged), and
+            # an exact un-center for a page-centered leaf.
+            _otl, _ = routed_state.board_outline
+            if abs(_otl.x) > 1e-6 or abs(_otl.y) > 1e-6:
+                from kicraft.autoplacer.brain.leaf_geometry import (
+                    copy_components_with_translation,
+                    copy_traces_with_translation,
+                    copy_vias_with_translation,
+                )
+                _rebase = Point(-_otl.x, -_otl.y)
+                solved_components = copy_components_with_translation(
+                    solved_components, _rebase
+                )
+                routed_traces = copy_traces_with_translation(routed_traces, _rebase)
+                routed_vias = copy_vias_with_translation(routed_vias, _rebase)
             bounding_box = (
                 routed_state.board_width,
                 routed_state.board_height,
@@ -629,6 +652,10 @@ def _solve_leaf_subcircuit(
 
     round_results: list[SolveRoundResult] = []
     best: SolveRoundResult | None = None
+    # Best ROUTED round regardless of acceptance. If no round passes the gate,
+    # the leaf is composed best-effort from this round rather than dropped --
+    # which would strand all its components off the parent board.
+    best_routed: SolveRoundResult | None = None
 
     # Within a single autoexperiment run, a leaf may be solved across
     # multiple parent rounds (one invocation per parent round). Each
@@ -767,6 +794,12 @@ def _solve_leaf_subcircuit(
             }
         )
 
+        # A routed round (even one the gate rejects) is a best-effort fallback.
+        if result.routed and (
+            best_routed is None or result.score > best_routed.score
+        ):
+            best_routed = result
+
         if accepted:
             accepted_round_count += 1
         else:
@@ -806,6 +839,20 @@ def _solve_leaf_subcircuit(
 
         if best is None or result.score > best.score:
             best = result
+
+    if best is None and best_routed is not None:
+        # No round passed acceptance, but at least one routed. Compose the leaf
+        # best-effort from its best routed round -- its residual unconnected nets
+        # are left for the parent route/pour to close -- rather than dropping the
+        # whole leaf and stranding its components off-board. The acceptance
+        # verdict (accepted=False) is still recorded downstream for quality.
+        best = best_routed
+        print(
+            f"  WARNING: no accepted round for "
+            f"{node.definition.id.instance_path}; composing best-effort from "
+            f"routed R{best.round_index} (score={best.score:.2f}) -- residual "
+            f"unconnected nets remain (closed at parent route/pour)"
+        )
 
     if best is None:
         # Append the failed rounds to debug.json before raising. Without
@@ -1116,7 +1163,16 @@ def _persist_solution(
     canonical_layout["size_reduction"] = size_reduction
 
     solved_layout_json: str | None = None
-    if full_acceptance.accepted:
+    # Persist the canonical solved_layout.json for any leaf with a routed board,
+    # not just an accepted one. A best-effort leaf (routed but gate-rejected for
+    # residual unconnected) must still serialize so it is discoverable, pinnable
+    # and composed -- otherwise the whole leaf is silently dropped and its
+    # components stranded off-board. The accepted=False verdict stays recorded in
+    # the validation block above.
+    has_routed_board = bool(
+        solved.best_round.routing.get("routed_board_path")
+    ) or solved.best_round.routing.get("reason") == "no_internal_nets"
+    if full_acceptance.accepted or has_routed_board:
         solved_layout_json = save_solved_layout_artifact(canonical_layout)
         metadata.artifact_paths["solved_layout_json"] = solved_layout_json
 

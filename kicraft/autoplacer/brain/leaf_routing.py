@@ -28,6 +28,36 @@ from kicraft.autoplacer.freerouting_runner import (
 from kicraft.autoplacer.hardware.adapter import KiCadAdapter
 
 
+def _resolve_breakout_specs(cfg: dict[str, Any]) -> list:
+    """Build :class:`BreakoutSpec` objects from ``cfg['breakout_specs']``.
+
+    Each entry is a dict ``{ref, pad, waypoints?, length_mm?, width_mm?,
+    layer?, via_at_end?}``. Returns ``[]`` when none are configured. Specs whose
+    footprint isn't on the leaf are harmlessly skipped by ``add_breakout_stubs``.
+    """
+    raw = cfg.get("breakout_specs")
+    if not raw:
+        return []
+    from kicraft.autoplacer.brain.breakout_stubs import BreakoutSpec
+
+    specs = []
+    for d in raw:
+        if not d.get("ref") or d.get("pad") is None:
+            continue
+        specs.append(
+            BreakoutSpec(
+                ref=str(d["ref"]),
+                pad=str(d["pad"]),
+                waypoints=[tuple(p) for p in d.get("waypoints", [])],
+                length_mm=float(d.get("length_mm", 1.5)),
+                width_mm=d.get("width_mm"),
+                layer=d.get("layer", "F.Cu"),
+                via_at_end=bool(d.get("via_at_end", False)),
+            )
+        )
+    return specs
+
+
 def _silk_for_leaf(
     extraction: ExtractedSubcircuitBoard,
     components: dict[str, Component],
@@ -82,6 +112,28 @@ def _outline_around_geometry(
         Point(bbox["min_x"] - edge_margin, bbox["min_y"] - edge_margin),
         Point(bbox["max_x"] + edge_margin, bbox["max_y"] + edge_margin),
     )
+
+
+def _center_on_leaf_page(
+    tl: Point, br: Point, cfg: dict[str, Any]
+) -> tuple[Point, tuple[Point, Point]]:
+    """Translation that centers the ``[tl, br]`` content box on a standard A4 leaf
+    page, plus the resulting centered Edge.Cuts outline.
+
+    Mirrors the parent's A4 centering (compose_subcircuits._stamp_parent_board) so a
+    standalone leaf opens centered in the title block instead of crammed against the
+    top-left origin. Position on the page is free: the parent composer re-bases each
+    leaf to its own outline origin on load (subcircuit_instances._layout_from_artifact_payload),
+    so a centered leaf composes identically to one anchored at (0, 0). Returns
+    ``(delta, (new_tl, new_br))``.
+    """
+    page_w = float(cfg.get("leaf_page_width_mm", cfg.get("parent_page_width_mm", 297.0)))
+    page_h = float(cfg.get("leaf_page_height_mm", cfg.get("parent_page_height_mm", 210.0)))
+    w = br.x - tl.x
+    h = br.y - tl.y
+    dx = (page_w - w) / 2.0 - tl.x
+    dy = (page_h - h) / 2.0 - tl.y
+    return Point(dx, dy), (Point(tl.x + dx, tl.y + dy), Point(br.x + dx, br.y + dy))
 
 
 def _deterministic_route_signature(
@@ -434,6 +486,54 @@ def route_local_subcircuit(
     leaf_routing_cfg["freerouting_timeout_s"] = min(
         _timeout_cap, max(_base_timeout, int(_n_leaf_comps * _per_comp))
     )
+
+    # Deliberate breakout stubs (default off): pre-route locked escape traces for
+    # configured footprints -- fine-pitch connectors whose inner pins the
+    # autorouter can't escape its pad field. Added to the pre-route board and
+    # preserved through routing so FreeRouting finishes from the breakout points.
+    _breakout_specs = _resolve_breakout_specs(cfg)
+    # Auto power-tie (default on): route a tie around any connector whose spread
+    # power pads (e.g. USB-C VBUS) would otherwise fragment the power pour.
+    if cfg.get("auto_power_tie", True):
+        try:
+            import pcbnew
+
+            from kicraft.autoplacer.brain.breakout_stubs import auto_power_tie_specs
+
+            _tie_board = pcbnew.LoadBoard(str(pre_route_board))
+            _breakout_specs = _breakout_specs + auto_power_tie_specs(_tie_board, cfg)
+            del _tie_board
+        except Exception as exc:  # never fail the leaf on a finishing helper
+            print(f"  WARNING: auto power-tie spec gen failed: {exc}")
+    # Auto signal-escape (default on): radial escapes for the signal pads of a
+    # dense connector (USB-C CC pins etc.) the autorouter can't escape from the
+    # pad field. Same connector signature as the power-tie above.
+    if cfg.get("auto_signal_escape", True):
+        try:
+            import pcbnew
+
+            from kicraft.autoplacer.brain.breakout_stubs import auto_signal_escape_specs
+
+            _esc_board = pcbnew.LoadBoard(str(pre_route_board))
+            _breakout_specs = _breakout_specs + auto_signal_escape_specs(_esc_board, cfg)
+            del _esc_board
+        except Exception as exc:  # never fail the leaf on a finishing helper
+            print(f"  WARNING: auto signal-escape spec gen failed: {exc}")
+    if _breakout_specs:
+        try:
+            from kicraft.autoplacer.brain.breakout_stubs import add_breakout_stubs
+
+            _bo = add_breakout_stubs(
+                str(pre_route_board), _breakout_specs, cfg=cfg
+            )
+            if _bo["stubs"] > 0:
+                leaf_routing_cfg["freerouting_preserve_existing_copper"] = True
+                print(
+                    f"  Breakout stubs: {_bo['stubs']} pad(s), "
+                    f"{_bo['segments']} segment(s), {_bo['vias']} via(s)"
+                )
+        except Exception as exc:  # finishing step must never fail the leaf
+            print(f"  WARNING: breakout stub step failed: {exc}")
     # Route cache: a deterministic leaf (e.g. an array grid) has the same
     # placement every round, so re-running freerouting on it is wasted minutes.
     # Key a cache on the placement + routing-relevant config and reuse the
@@ -563,13 +663,15 @@ def route_local_subcircuit(
     silk_stamp_start = time.monotonic()
     silk_adapter = KiCadAdapter(str(routed_board), config=cfg)
     routed_state_for_silk = silk_adapter.load()
-    # Shrink Edge.Cuts to hug the post-route geometry the silk hugs, and
-    # translate all geometry so the new outline starts at (0, 0). Without
-    # the translate, the parent composer (which rotates each leaf around
-    # local origin and assumes outline TL is at (0, 0)) silently misplaces
-    # the leaf by (tl.x, tl.y). Without the shrink, the yellow outline
-    # stays at whatever size-reduction accepted (or the raw extractor
-    # envelope), and the rounded silk sits inside a much larger sharp rect.
+    # Shrink Edge.Cuts to hug the post-route geometry the silk hugs, and center
+    # the whole leaf on a standard A4 page so the standalone board opens centered in
+    # the title block instead of crammed against the top-left origin. Centering is
+    # safe for composition: the parent composer re-bases each leaf to its own outline
+    # origin on load (subcircuit_instances._layout_from_artifact_payload) before it
+    # rotates around (0, 0) and translates by the placement origin, so leaf page
+    # position is free. Without the shrink, the yellow outline stays at whatever
+    # size-reduction accepted (or the raw extractor envelope), and the rounded silk
+    # sits inside a much larger sharp rect.
     _new_outline = _outline_around_geometry(
         routed_state_for_silk.components,
         cfg,
@@ -578,13 +680,13 @@ def route_local_subcircuit(
     )
     if _new_outline is not None:
         _new_tl, _new_br = _new_outline
-        if abs(_new_tl.x) > 1e-6 or abs(_new_tl.y) > 1e-6:
+        _delta, _centered_outline = _center_on_leaf_page(_new_tl, _new_br, cfg)
+        if abs(_delta.x) > 1e-6 or abs(_delta.y) > 1e-6:
             from kicraft.autoplacer.brain.leaf_geometry import (
                 copy_components_with_translation,
                 copy_traces_with_translation,
                 copy_vias_with_translation,
             )
-            _delta = Point(-_new_tl.x, -_new_tl.y)
             routed_state_for_silk.components = copy_components_with_translation(
                 routed_state_for_silk.components, _delta
             )
@@ -594,11 +696,8 @@ def route_local_subcircuit(
             routed_state_for_silk.vias = copy_vias_with_translation(
                 routed_state_for_silk.vias, _delta
             )
-        routed_state_for_silk.board_outline = (
-            Point(0.0, 0.0),
-            Point(_new_br.x - _new_tl.x, _new_br.y - _new_tl.y),
-        )
-    # Silk is computed AFTER the translate so it lands in the (0, 0)-anchored frame.
+        routed_state_for_silk.board_outline = _centered_outline
+    # Silk is computed AFTER the translate so it lands in the centered frame.
     routed_state_for_silk.silkscreen = _silk_for_leaf(
         extraction,
         routed_state_for_silk.components,
@@ -637,6 +736,27 @@ def route_local_subcircuit(
             )
         except Exception as exc:  # finishing step must never fail the leaf
             print(f"  WARNING: GND plane step failed: {exc}")
+
+    # Power-plane finishing (default on): pour the primary power rail on the
+    # layer opposite GND so paired connector power pads / regulator input / bulk
+    # caps connect through copper. Runs before acceptance so the now-connected
+    # power pads are reflected in the unconnected count.
+    if cfg.get("power_plane_enabled", True):
+        try:
+            from kicraft.autoplacer.brain.gnd_pour import pour_power_planes
+
+            _pwr = pour_power_planes(
+                str(routed_board),
+                cfg,
+                layers=(cfg.get("power_plane_layer", "F.Cu"),),
+            )
+            if _pwr.get("nets"):
+                print(
+                    f"  Power plane: poured {_pwr['nets']} on "
+                    f"{cfg.get('power_plane_layer', 'F.Cu')}"
+                )
+        except Exception as exc:  # finishing step must never fail the leaf
+            print(f"  WARNING: power plane step failed: {exc}")
         route_timing["gnd_pour_s"] = round(
             max(0.0, time.monotonic() - gnd_pour_start), 3
         )
@@ -652,6 +772,14 @@ def route_local_subcircuit(
         ],
         timeout_s=int(cfg.get("subcircuit_validation_timeout_s", 30)),
     )
+    # Always record the leaf's interface (inter-sheet) net names so the
+    # unconnected-acceptance gate can exclude them: an interface net is routed
+    # across the parent at compose, not within the leaf, so an unconnected item
+    # on it must not count against the leaf (mirrors poured power/GND nets).
+    # Previously set only on the reject path, leaving normal-path leaves blind.
+    validation["interface_port_names"] = [
+        port.name for port in extraction.interface_ports
+    ]
     route_timing["routed_validation_s"] = round(
         max(0.0, time.monotonic() - routed_validation_start), 3
     )
@@ -1012,25 +1140,22 @@ def _stamp_trivial_leaf(
     route_input_board.components = copy.deepcopy(repaired_components)
     route_input_board.traces = []
     route_input_board.vias = []
-    # Trivial leaves skip FreeRouting, so the pre-route stamp is also the
-    # final stamp. Apply the same shrink-and-translate as the main-path
-    # silk re-stamp so the rounded silk hugs Edge.Cuts and the parent
-    # composer can place the leaf consistently.
+    # Trivial leaves skip FreeRouting, so the pre-route stamp is also the final
+    # stamp. Apply the same shrink-and-center as the main-path silk re-stamp so the
+    # rounded silk hugs Edge.Cuts and the standalone leaf opens centered on its A4
+    # page (the parent composer re-bases each leaf on load, so this is placement-safe).
     _new_outline = _outline_around_geometry(route_input_board.components, cfg)
     if _new_outline is not None:
         _new_tl, _new_br = _new_outline
-        if abs(_new_tl.x) > 1e-6 or abs(_new_tl.y) > 1e-6:
+        _delta, _centered_outline = _center_on_leaf_page(_new_tl, _new_br, cfg)
+        if abs(_delta.x) > 1e-6 or abs(_delta.y) > 1e-6:
             from kicraft.autoplacer.brain.leaf_geometry import (
                 copy_components_with_translation,
             )
-            _delta = Point(-_new_tl.x, -_new_tl.y)
             route_input_board.components = copy_components_with_translation(
                 route_input_board.components, _delta
             )
-        route_input_board.board_outline = (
-            Point(0.0, 0.0),
-            Point(_new_br.x - _new_tl.x, _new_br.y - _new_tl.y),
-        )
+        route_input_board.board_outline = _centered_outline
     route_input_board.silkscreen = _silk_for_leaf(
         extraction, route_input_board.components, cfg
     )

@@ -72,6 +72,8 @@ kicraft-accounts = "kicraft.server.accounts_cli:main"
 
 # Evaluation (admin web self-eval; shares the kicraft.eval core with the offline harness)
 kicraft-eval-web = "kicraft.eval.run_web:main"
+# Batch self-eval: drive every curated example brief end to end and grade it (/self-eval)
+kicraft-eval-batch = "kicraft.eval.self_eval:main"
 
 # Board manipulation
 move-component = "kicraft.cli.move_component:main"

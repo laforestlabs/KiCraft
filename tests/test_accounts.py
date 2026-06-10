@@ -653,3 +653,172 @@ def test_users_with_project_counts_left_join(store):
     assert rows["a@e.st"]["last_project_at"] is not None
     assert rows["zero@e.st"]["project_count"] == 0  # LEFT JOIN keeps zero-project user
     assert rows["zero@e.st"]["spend_usd"] == 0
+
+
+# ---- public browser: visibility, metrics, likes, clone --------------------
+
+def _ok_public(store, user_id, brief="a board", stem="BOARD"):
+    """Create + finish a public, completed project; return its id."""
+    pid = store.create_project(user_id, brief)
+    store.finish_project(pid, "ok", stem=stem)
+    return pid
+
+
+def test_new_project_columns_default(store):
+    u = store.create_user("np@e.st", "pw")
+    p = store.get_project(store.create_project(u.id, "x"))
+    assert p.is_public is True               # public by default (community rule)
+    assert p.cloned_from_id is None
+    assert (p.view_count, p.clone_count, p.like_count) == (0, 0, 0)
+    assert p.quality is None
+
+
+def test_create_project_private_override(store):
+    u = store.create_user("priv@e.st", "pw")
+    pid = store.create_project(u.id, "x", is_public=False)  # paid private clone path
+    assert store.get_project(pid).is_public is False
+
+
+def test_project_visibility_follows_tier(store):
+    free = store.create_user("ff@e.st", "pw")
+    store.create_user("pp@e.st", "pw")
+    paid = store.set_tier("pp@e.st", "pro")
+    assert store.get_project(store.create_project(free.id, "x")).is_public is True
+    assert store.get_project(store.create_project(paid.id, "x")).is_public is False
+
+
+def test_set_visibility_roundtrips(store):
+    u = store.create_user("vis@e.st", "pw")
+    pid = _ok_public(store, u.id)
+    store.set_visibility(pid, False)
+    assert store.get_project(pid).is_public is False
+    store.set_visibility(pid, True)
+    assert store.get_project(pid).is_public is True
+
+
+def test_record_view_increments(store):
+    u = store.create_user("rv@e.st", "pw")
+    pid = _ok_public(store, u.id)
+    for _ in range(3):
+        store.record_view(pid)
+    assert store.get_project(pid).view_count == 3
+
+
+def test_toggle_like_dedup_and_count(store):
+    owner = store.create_user("o@e.st", "pw")
+    a = store.create_user("la@e.st", "pw")
+    b = store.create_user("lb@e.st", "pw")
+    pid = _ok_public(store, owner.id)
+    assert store.toggle_like(a.id, pid) is True        # like
+    assert store.has_liked(a.id, pid) is True
+    assert store.get_project(pid).like_count == 1
+    assert store.toggle_like(a.id, pid) is False       # same user unlikes (dedup)
+    assert store.has_liked(a.id, pid) is False
+    assert store.get_project(pid).like_count == 0
+    store.toggle_like(a.id, pid)                        # two distinct likers
+    store.toggle_like(b.id, pid)
+    assert store.get_project(pid).like_count == 2
+
+
+def test_clone_from_and_increment_clone_count(store):
+    u = store.create_user("cf@e.st", "pw")
+    src = _ok_public(store, u.id)
+    clone = store.create_project(u.id, "cloned")
+    store.set_cloned_from(clone, src)
+    store.increment_clone_count(src)
+    store.increment_clone_count(src)
+    assert store.get_project(clone).cloned_from_id == src
+    assert store.get_project(src).clone_count == 2
+
+
+def test_list_public_only_ok_and_public(store):
+    u = store.create_user("lp@e.st", "pw")
+    ok_pub = _ok_public(store, u.id, stem="OKPUB")
+    priv = _ok_public(store, u.id, stem="PRIV")
+    store.set_visibility(priv, False)                  # ok but private -> excluded
+    store.finish_project(store.create_project(u.id, "f"), "failed")  # failed -> excluded
+    store.create_project(u.id, "r")                    # running -> excluded
+    rows = store.list_public_projects()
+    assert [r["id"] for r in rows] == [ok_pub]
+    assert rows[0]["owner_email"] == "lp@e.st"         # join surfaces the owner
+    assert store.count_public_projects() == 1
+
+
+def test_popularity_ordering(store):
+    u = store.create_user("pop@e.st", "pw")
+    liker = store.create_user("lk@e.st", "pw")
+    a = _ok_public(store, u.id, stem="A")
+    b = _ok_public(store, u.id, stem="B")
+    c = _ok_public(store, u.id, stem="C")
+    for _ in range(5):
+        store.record_view(a)            # a score = 5  (view weight 1)
+    store.increment_clone_count(b)      # b score = 4  (clone weight 4)
+    store.toggle_like(liker.id, c)      # c score = 3  (like weight 3)
+    order = [r["id"] for r in store.list_public_projects(sort="popularity")]
+    assert order == [a, b, c]
+
+
+def test_sort_new_and_clones(store):
+    u = store.create_user("sn@e.st", "pw")
+    first = _ok_public(store, u.id, stem="FIRST")
+    second = _ok_public(store, u.id, stem="SECOND")
+    assert store.list_public_projects(sort="new")[0]["id"] == second  # newest finish
+    store.increment_clone_count(first)
+    assert store.list_public_projects(sort="clones")[0]["id"] == first
+
+
+def test_badge_filter(store):
+    u = store.create_user("bd@e.st", "pw")
+    fab = _ok_public(store, u.id, stem="FAB")
+    store.set_quality(fab, "fab_ready")
+    erc = _ok_public(store, u.id, stem="ERC")
+    store.set_quality(erc, "erc_errors")
+    assert [r["id"] for r in store.list_public_projects(badge="fab_ready")] == [fab]
+    assert store.count_public_projects(badge="fab_ready") == 1
+
+
+def test_migration_adds_project_columns_to_legacy_db(tmp_path):
+    """A projects table created before the browser feature gains the columns on
+    open; a free user's rows stay public, a paid user's rows backfill to private
+    (no retroactive exposure of paid work). Idempotent on re-open."""
+    db = tmp_path / "accounts.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,"
+            "tier TEXT NOT NULL DEFAULT 'free', created_at TEXT NOT NULL,"
+            "last_login_at TEXT)")
+        conn.execute("INSERT INTO users (email, password_hash, tier, created_at) "
+                     "VALUES ('free@e.st','scrypt$x','free','2026-01-01T00:00:00+00:00')")
+        conn.execute("INSERT INTO users (email, password_hash, tier, created_at) "
+                     "VALUES ('paid@e.st','scrypt$x','pro','2026-01-01T00:00:00+00:00')")
+        conn.execute(  # pre-browser projects schema (no new columns)
+            "CREATE TABLE projects (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "user_id INTEGER NOT NULL, brief TEXT NOT NULL, project_stem TEXT,"
+            "status TEXT NOT NULL DEFAULT 'running', created_at TEXT NOT NULL,"
+            "finished_at TEXT, cost_usd REAL, dir_path TEXT, zip_path TEXT)")
+        conn.execute("INSERT INTO projects (user_id, brief, status, created_at) "
+                     "VALUES (1,'free board','ok','2026-01-02T00:00:00+00:00')")
+        conn.execute("INSERT INTO projects (user_id, brief, status, created_at) "
+                     "VALUES (2,'paid board','ok','2026-01-02T00:00:00+00:00')")
+    store = AccountStore(db, tmp_path / "projects")  # _ensure_project_columns migrates
+    free_proj = store.list_projects(1)[0]
+    paid_proj = store.list_projects(2)[0]
+    assert free_proj.is_public is True       # free user's project stays public
+    assert paid_proj.is_public is False      # paid user's existing project privatized
+    assert free_proj.view_count == 0 and free_proj.quality is None  # defaults backfilled
+    reopened = AccountStore(db, tmp_path / "projects")  # idempotent
+    assert reopened.list_projects(2)[0].is_public is False
+
+
+def test_delete_user_purges_likes_and_keeps_others(store):
+    owner = store.create_user("own@e.st", "pw")
+    other = store.create_user("oth@e.st", "pw")
+    pid = _ok_public(store, owner.id)
+    other_pid = _ok_public(store, other.id, stem="OTHER")
+    store.toggle_like(other.id, pid)        # other likes owner's project
+    store.toggle_like(owner.id, other_pid)  # owner likes other's project
+    store.delete_user(owner.id)
+    assert store.get_project(pid) is None                 # owner's project gone
+    assert store.has_liked(owner.id, other_pid) is False  # owner's like cleaned up
+    assert store.get_project(other_pid) is not None       # other's project intact
