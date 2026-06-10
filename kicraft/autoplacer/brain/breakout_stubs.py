@@ -206,12 +206,11 @@ def _rect_perimeter_path(
         for cpos, c in zip(corner_pos, corners):
             if (cpos - p1) % per < cw and (cpos - p1) % per > 1e-9:
                 out.append((c, (cpos - p1) % per))
-        out.sort(key=lambda t: t[1])
     else:
         for cpos, c in zip(corner_pos, corners):
             if (p1 - cpos) % per < ccw and (p1 - cpos) % per > 1e-9:
                 out.append((c, (p1 - cpos) % per))
-        out.sort(key=lambda t: t[1])
+    out.sort(key=lambda t: t[1])
     return [c for c, _ in out]
 
 
@@ -233,6 +232,51 @@ def _pads_bbox_mm(
     )
 
 
+def _board_inner_box_mm(
+    board: "pcbnew.BOARD",
+) -> tuple[float, float, float, float] | None:
+    """``(x1, y1, x2, y2)`` in mm that stamped copper must stay inside.
+
+    The Edge.Cuts bounding box shrunk by the board's copper-to-edge clearance.
+    Locked copper outside the outline is fatal: FreeRouting 1.9.0 reads the
+    corner as "wire corner outside board" and hangs without producing a SES
+    (the brief-2 VOLTAGE SELECT leaf burned its whole build budget this way).
+    Exact for the rectangular outlines KiCraft generates; for a non-rectangular
+    outline the bbox is larger than the board, so this check can only
+    under-reject, never drop a valid stub. ``None`` when the board has no
+    outline yet (nothing to violate).
+    """
+    box = board.GetBoardEdgesBoundingBox()
+    if box.GetWidth() <= 0 or box.GetHeight() <= 0:
+        return None
+    try:
+        inset = max(pcbnew.ToMM(board.GetDesignSettings().m_CopperEdgeClearance), 0.05)
+    except AttributeError:
+        inset = 0.05
+    x1 = pcbnew.ToMM(box.GetLeft()) + inset
+    y1 = pcbnew.ToMM(box.GetTop()) + inset
+    x2 = pcbnew.ToMM(box.GetRight()) - inset
+    y2 = pcbnew.ToMM(box.GetBottom()) - inset
+    if x1 >= x2 or y1 >= y2:
+        return None
+    return (x1, y1, x2, y2)
+
+
+def _points_within_box_mm(
+    points: list[tuple[float, float]],
+    box: tuple[float, float, float, float] | None,
+) -> bool:
+    """True when every point lies inside *box* (or there is no box to violate).
+
+    Checking only the endpoints is sufficient: the box is convex, so a straight
+    segment between two contained points is contained too.
+    """
+    if box is None:
+        return True
+    x1, y1, x2, y2 = box
+    return all(x1 <= x <= x2 and y1 <= y <= y2 for x, y in points)
+
+
 def perimeter_tie_specs(
     board: "pcbnew.BOARD",
     ref: str,
@@ -241,14 +285,18 @@ def perimeter_tie_specs(
     margin_mm: float = 1.0,
     layer: str = "F.Cu",
     min_pads: int = 2,
+    clearance_mm: float = 0.153,
 ) -> list[BreakoutSpec]:
     """Tie a footprint's same-net pads with a path routed around its bbox.
 
     For each net that has >= *min_pads* pads on *ref* (restrict with
-    *net_names*), connect the two farthest-apart pads with a waypoint path that
-    leaves each pad, hops just outside the footprint's bounding box, and walks
-    the box perimeter between them. That keeps a power pour from fragmenting:
-    the connector's spread power pads (e.g. USB-C VBUS) become one net island.
+    *net_names*), connect the two farthest-apart pads: directly when the
+    straight segment crosses no foreign pad, otherwise with a waypoint path
+    that leaves each pad, hops just outside the footprint's bounding box, and
+    walks the box perimeter between them -- clamped to the board outline so no
+    locked copper is ever stamped off the board. That keeps a power pour from
+    fragmenting: the connector's spread power pads (e.g. USB-C VBUS) become
+    one net island.
     """
     specs: list[BreakoutSpec] = []
     fp = next(
@@ -274,6 +322,8 @@ def perimeter_tie_specs(
             continue
         by_net.setdefault(n, []).append(pad)
 
+    inner_box = _board_inner_box_mm(board)
+
     for net, pads in by_net.items():
         if len(pads) < min_pads:
             continue
@@ -286,9 +336,45 @@ def perimeter_tie_specs(
                 if d > best:
                     best, i, j = d, a, b
         p1, p2 = pts[i], pts[j]
-        b1 = _nearest_on_rect(p1[0], p1[1], x1, y1, x2, y2)
-        b2 = _nearest_on_rect(p2[0], p2[1], x1, y1, x2, y2)
-        corners = _rect_perimeter_path(b1, b2, x1, y1, x2, y2)
+        # A same-net pad is a valid landing, not an obstacle -- so when the
+        # straight farthest-pad segment clears every FOREIGN pad (e.g. a DIP
+        # switch's adjacent commons, where the only pad in between is on the
+        # same net), tie directly. Shortest copper, and immune to the off-board
+        # walk below. Both endpoints are placed pads, so the segment is always
+        # on the board.
+        obstacles = _foreign_pads(board, pads[i].GetNetCode())
+        if _segment_clears_pads(obstacles, p1, p2, clearance_mm):
+            specs.append(
+                BreakoutSpec(
+                    ref=ref, pad=pads[i].GetNumber(), waypoints=[p2], layer=layer
+                )
+            )
+            continue
+        # A pad field closer to the board edge than its margin puts part of the
+        # walk rectangle off the board -- and stamping locked off-board copper
+        # hangs FreeRouting. Clamp the rectangle to the inner box; valid only
+        # while the clamped border still clears every pad it must walk around
+        # (the raw pad bbox plus clearance). When even that fails, skip the tie
+        # loudly: FreeRouting still routes the net, the pour just may fragment.
+        rx1, ry1, rx2, ry2 = _pads_bbox_mm(pads_all, 0.0)
+        wx1, wy1, wx2, wy2 = x1, y1, x2, y2
+        if inner_box is not None:
+            wx1, wy1 = max(wx1, inner_box[0]), max(wy1, inner_box[1])
+            wx2, wy2 = min(wx2, inner_box[2]), min(wy2, inner_box[3])
+        if not (
+            wx1 <= rx1 - clearance_mm
+            and wy1 <= ry1 - clearance_mm
+            and wx2 >= rx2 + clearance_mm
+            and wy2 >= ry2 + clearance_mm
+        ):
+            print(
+                f"  WARNING: perimeter tie {ref} net {net} skipped: "
+                "pad field too close to the board edge for an on-board walk"
+            )
+            continue
+        b1 = _nearest_on_rect(p1[0], p1[1], wx1, wy1, wx2, wy2)
+        b2 = _nearest_on_rect(p2[0], p2[1], wx1, wy1, wx2, wy2)
+        corners = _rect_perimeter_path(b1, b2, wx1, wy1, wx2, wy2)
         waypoints = [b1, *corners, b2, p2]
         specs.append(
             BreakoutSpec(
@@ -334,7 +420,11 @@ def auto_power_tie_specs(
             continue
         specs.extend(
             perimeter_tie_specs(
-                board, ref, net_names=sorted(power_nets), margin_mm=margin
+                board,
+                ref,
+                net_names=sorted(power_nets),
+                margin_mm=margin,
+                clearance_mm=float(cfg.get("freerouting_min_clearance_mm", 0.153)),
             )
         )
     return specs
@@ -430,6 +520,7 @@ def add_breakout_stubs(
         return summary
 
     board = pcbnew.LoadBoard(pcb_path)
+    inner_box = _board_inner_box_mm(board)
 
     def _pt(xy: tuple[float, float]):
         return pcbnew.VECTOR2I(pcbnew.FromMM(xy[0]), pcbnew.FromMM(xy[1]))
@@ -490,6 +581,15 @@ def add_breakout_stubs(
                 start_mm[1] + dir_unit[1] * safe_len,
             )
             points = [start_mm, end]
+
+        # Hard invariant: never stamp locked copper outside the board outline.
+        # FreeRouting 1.9.0 hangs (no SES, no error) on a locked wire corner
+        # off the board, burning the leaf's whole routing budget. The start is
+        # exempt -- it is a placed pad's centre, the placement gate's job. The
+        # box is convex, so in-box endpoints mean in-box segments.
+        if not _points_within_box_mm(points[1:], inner_box):
+            summary["skipped"].append(f"{spec.ref}.{spec.pad}:off_board")
+            continue
 
         for a, b in zip(points, points[1:]):
             track = pcbnew.PCB_TRACK(board)
