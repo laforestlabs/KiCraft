@@ -9,7 +9,11 @@ stage CLIs is covered by tests/test_session.py.)
 from __future__ import annotations
 
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 from kicraft.eval import self_eval as se
 
@@ -182,6 +186,171 @@ def test_evaluate_one_isolates_exceptions(tmp_path, monkeypatch):
     rec = se.evaluate_one(object(), 3, "a brief", tmp_path, judge_model=None, skip_judge=True)
     assert "spend ceiling exceeded" in rec["error"]
     assert "duration_s" in rec and rec["index"] == 3
+
+
+# --------------------------------------------------------------------------- #
+# parallel execution + build gate + resume
+# --------------------------------------------------------------------------- #
+def _patch_llm_env(monkeypatch):
+    """main() imports Settings/CappedOpenRouterClient lazily; stub both so no env
+    or network is touched."""
+    from kicraft.server import client as client_mod
+    from kicraft.server import config as config_mod
+    monkeypatch.setattr(
+        config_mod.Settings, "from_env",
+        classmethod(lambda cls: SimpleNamespace(model="test-model", eval_judge_model=None)))
+    monkeypatch.setattr(client_mod, "CappedOpenRouterClient", lambda s: object())
+
+
+def _fake_rec(idx, prompt, out_dir, grade="A", **extra):
+    return {"index": idx, "prompt": prompt, "stem": se._stem_for(idx, prompt),
+            "rundir": str(Path(out_dir) / se._stem_for(idx, prompt)), "grade": grade,
+            "final": 90.0, "verdict": "SHIP", "build_rc": 0, "build_label": "fab-ready",
+            "questions": 0, "gates": [], "design_cost_usd": 0.01, "judge_cost_usd": 0.0,
+            "duration_s": 0.1, **extra}
+
+
+def test_evaluate_one_build_gate_caps_concurrent_builds(tmp_path, monkeypatch):
+    def fake_run_session(ws, brief, stages, **kw):
+        Path(ws, ".kicraft", "state.json").write_text(json.dumps(_FULL_STATE))
+        return {"status": "ok", "results": [{"cost_usd": 0.0}], "questions": None,
+                "last_stage": "wiring"}
+
+    state, lock = {"now": 0, "max": 0}, threading.Lock()
+
+    def fake_run_build(rundir, progress, timeout_s=1200):
+        with lock:
+            state["now"] += 1
+            state["max"] = max(state["max"], state["now"])
+        time.sleep(0.1)
+        with lock:
+            state["now"] -= 1
+        return 0
+
+    monkeypatch.setattr(se, "run_session", fake_run_session)
+    monkeypatch.setattr(se, "run_build", fake_run_build)
+    monkeypatch.setattr(se, "evaluate_project", lambda rd, client, **kw: _fake_report())
+
+    gate = threading.BoundedSemaphore(1)
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futs = [ex.submit(se.evaluate_one, object(), i, f"brief number {i}", tmp_path,
+                          judge_model=None, skip_judge=True, build_gate=gate)
+                for i in (1, 2, 3)]
+        recs = [f.result() for f in futs]
+
+    assert all(r["build_rc"] == 0 for r in recs)
+    assert state["max"] == 1          # the gate never let two builds overlap
+
+
+def test_main_parallel_overlaps_briefs_and_orders_records(tmp_path, monkeypatch):
+    monkeypatch.setattr(se, "EXAMPLE_PROMPTS", ["alpha brief", "beta brief", "gamma brief"])
+    _patch_llm_env(monkeypatch)
+    state, lock = {"now": 0, "max": 0}, threading.Lock()
+
+    def fake_evaluate_one(client, idx, prompt, out_dir, **kw):
+        with lock:
+            state["now"] += 1
+            state["max"] = max(state["max"], state["now"])
+        time.sleep(0.2 if idx == 1 else 0.05)   # brief 1 finishes LAST
+        with lock:
+            state["now"] -= 1
+        return _fake_rec(idx, prompt, out_dir)
+
+    monkeypatch.setattr(se, "evaluate_one", fake_evaluate_one)
+    assert se.main(["--parallel", "3", "--no-judge", "--out", str(tmp_path)]) == 0
+
+    summ = json.loads((tmp_path / "summary.json").read_text())
+    assert [r["index"] for r in summ["runs"]] == [1, 2, 3]   # index order, not finish order
+    assert state["max"] >= 2                                 # briefs genuinely overlapped
+    assert summ["parallel"] == 3 and summ["build_slots"] == 2
+    assert isinstance(summ["wall_s"], (int, float))
+
+
+def test_main_sequential_checkpoints_summary_after_each_brief(tmp_path, monkeypatch):
+    monkeypatch.setattr(se, "EXAMPLE_PROMPTS", ["alpha brief", "beta brief"])
+    _patch_llm_env(monkeypatch)
+    seen_runs_at_call = []
+
+    def fake_evaluate_one(client, idx, prompt, out_dir, **kw):
+        p = Path(out_dir) / "summary.json"
+        prior = json.loads(p.read_text())["runs"] if p.exists() else []
+        seen_runs_at_call.append(len(prior))
+        return _fake_rec(idx, prompt, out_dir)
+
+    monkeypatch.setattr(se, "evaluate_one", fake_evaluate_one)
+    assert se.main(["--parallel", "1", "--no-judge", "--out", str(tmp_path)]) == 0
+    assert seen_runs_at_call == [0, 1]        # brief 2 saw brief 1 already checkpointed
+
+
+def test_main_defaults_to_parallel(tmp_path, monkeypatch):
+    # every entry point (CLI, /self-eval, admin GUI) relies on the harness itself
+    # defaulting to the parallel sweet spot — no flags required
+    monkeypatch.setattr(se, "EXAMPLE_PROMPTS", ["alpha brief", "beta brief", "gamma brief"])
+    _patch_llm_env(monkeypatch)
+    monkeypatch.setattr(se, "evaluate_one",
+                        lambda client, idx, prompt, out_dir, **kw: _fake_rec(idx, prompt, out_dir))
+    assert se.main(["--no-judge", "--out", str(tmp_path)]) == 0
+    summ = json.loads((tmp_path / "summary.json").read_text())
+    assert summ["parallel"] == 3 and summ["build_slots"] == 2
+    assert [r["index"] for r in summ["runs"]] == [1, 2, 3]
+
+
+def test_main_resolves_relative_out_dir(tmp_path, monkeypatch):
+    # design stages run subprocesses with cwd=workspace, so a relative rundir would
+    # nest the .kicraft tree inside itself; main() must hand out an absolute out_dir
+    monkeypatch.setattr(se, "EXAMPLE_PROMPTS", ["alpha brief"])
+    _patch_llm_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    seen = {}
+
+    def fake_evaluate_one(client, idx, prompt, out_dir, **kw):
+        seen["out_dir"] = Path(out_dir)
+        return _fake_rec(idx, prompt, out_dir)
+
+    monkeypatch.setattr(se, "evaluate_one", fake_evaluate_one)
+    assert se.main(["--no-judge", "--out", "rel/batch"]) == 0
+    assert seen["out_dir"].is_absolute()
+    assert seen["out_dir"] == (tmp_path / "rel" / "batch").resolve()
+
+
+def test_main_resume_reuses_completed_and_reruns_failed(tmp_path, monkeypatch):
+    prompts = ["alpha brief", "beta brief"]
+    monkeypatch.setattr(se, "EXAMPLE_PROMPTS", prompts)
+    _patch_llm_env(monkeypatch)
+
+    # Prior batch: brief 1 completed (its eval report exists), brief 2 errored and
+    # left a stale workspace behind.
+    good = _fake_rec(1, prompts[0], tmp_path)
+    report = Path(good["rundir"]) / "eval" / "report.json"
+    report.parent.mkdir(parents=True)
+    report.write_text("{}")
+    good["report_path"] = str(report)
+    stale = tmp_path / se._stem_for(2, prompts[1]) / ".kicraft"
+    stale.mkdir(parents=True)
+    (stale / "state.json").write_text("{}")
+    bad = {"index": 2, "prompt": prompts[1], "stem": se._stem_for(2, prompts[1]),
+           "rundir": str(stale.parent), "error": "RuntimeError: boom", "design_cost_usd": 0.0}
+    se.compile_report([good, bad], tmp_path,
+                      {"started_at": "x", "out_dir": str(tmp_path),
+                       "design_model": "m", "judge": False})
+
+    ran = []
+
+    def fake_evaluate_one(client, idx, prompt, out_dir, **kw):
+        ran.append(idx)
+        # the failed brief's stale workspace must have been wiped before the re-run
+        assert not (Path(out_dir) / se._stem_for(idx, prompt)).exists()
+        return _fake_rec(idx, prompt, out_dir, grade="B")
+
+    monkeypatch.setattr(se, "evaluate_one", fake_evaluate_one)
+    assert se.main(["--resume", str(tmp_path), "--no-judge"]) == 0
+
+    assert ran == [2]                          # only the errored brief re-ran
+    summ = json.loads((tmp_path / "summary.json").read_text())
+    assert [r["index"] for r in summ["runs"]] == [1, 2]
+    assert summ["runs"][0]["grade"] == "A"     # reused untouched
+    assert summ["runs"][1]["grade"] == "B"     # error replaced by the re-run
+    assert summ["resumed_reused_n"] == 1 and summ["n_errored"] == 0
 
 
 # --------------------------------------------------------------------------- #

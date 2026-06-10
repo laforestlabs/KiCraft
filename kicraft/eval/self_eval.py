@@ -28,19 +28,31 @@ The dominant cost is the design pipelines themselves (BOM part resolution
 dominates), not the judge; ``--no-judge`` scores Class-C only and skips the LLM
 judge. The capped client's spend guard still applies, so a tripped ceiling fails
 the remaining briefs cheaply rather than overspending.
+
+Throughput: briefs run on ``--parallel`` worker threads (default 3 — the heavy
+work is build subprocesses and blocking HTTP, both GIL-releasing) with concurrent
+build subprocesses capped by ``--build-slots`` (default 2) so single-threaded
+routing JVMs don't oversubscribe the cores; every entry point (CLI, ``/self-eval``,
+the admin GUI) inherits these defaults. ``--parallel 1`` forces the strictly
+sequential baseline. ``summary.json`` is checkpointed after every brief, and
+``--resume <batch_dir>`` finishes an interrupted batch by reusing completed
+briefs and re-running only errored/missing ones.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import json
 import os
 import re
+import shutil
 import statistics
 import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from kicraft.server.examples import EXAMPLE_PROMPTS
@@ -200,9 +212,15 @@ def run_build(rundir: Path, progress, *, timeout_s: int = 1200) -> int:
 
 def evaluate_one(client, idx: int, prompt: str, out_dir: Path, *,
                  judge_model, skip_judge: bool, max_park_rounds: int = 12,
-                 build_timeout_s: int = 1200) -> dict:
+                 build_timeout_s: int = 1200, build_gate=None) -> dict:
     """Drive + build + score one brief into ``out_dir/<stem>/``. Never raises: any
-    failure is captured in the returned record so the batch continues."""
+    failure is captured in the returned record so the batch continues.
+
+    ``build_gate`` (a semaphore) caps how many build subprocesses run at once when
+    briefs execute concurrently: each route is a single-threaded JVM, so ungated
+    builds would oversubscribe the cores and let CPU contention push otherwise-fine
+    routes into ``--build-timeout``. The LLM design/judge phases stay ungated —
+    they are network-wait and overlap with other briefs' builds for free."""
     t0 = time.time()
     started_at = _now_iso()
     stem = _stem_for(idx, prompt)
@@ -219,8 +237,11 @@ def evaluate_one(client, idx: int, prompt: str, out_dir: Path, *,
         rec.update(design_status=d["status"], design_cost_usd=round(d["cost_usd"], 6),
                    questions=d["questions"], design_error=d["error"])
 
-        build_rc = run_build(rundir, progress, timeout_s=build_timeout_s) \
-            if d["status"] == "ok" else None
+        if d["status"] == "ok":
+            with (build_gate or contextlib.nullcontext()):
+                build_rc = run_build(rundir, progress, timeout_s=build_timeout_s)
+        else:
+            build_rc = None
         rec["build_rc"] = build_rc
         rec["build_label"] = (None if build_rc is None
                               else _BUILD_RC_LABEL.get(build_rc, f"rc={build_rc}"))
@@ -367,6 +388,29 @@ def _select(prompts: list[str], limit, only) -> list[tuple[int, str]]:
     return rows
 
 
+def _load_prior_records(out_dir: Path) -> dict[int, dict]:
+    """Per-brief records from an existing batch's ``summary.json``, keyed by brief
+    index. Empty when the batch never wrote a checkpoint (or it is unreadable)."""
+    path = out_dir / "summary.json"
+    if not path.exists():
+        return {}
+    try:
+        runs = json.loads(path.read_text(encoding="utf-8")).get("runs") or []
+        return {r["index"]: r for r in runs if isinstance(r.get("index"), int)}
+    except Exception:  # noqa: BLE001 - unreadable summary == nothing to reuse
+        return {}
+
+
+def _reusable(rec: dict | None) -> bool:
+    """Under ``--resume``, a prior record is kept iff it finished scoring: no harness
+    error and its eval report still on disk. Design failures and bad build rcs are
+    legitimate *results* (regression signal), not candidates for a re-run."""
+    if not rec or rec.get("error"):
+        return False
+    report = rec.get("report_path")
+    return bool(report) and Path(report).exists()
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Drive every curated example brief end to end and grade it "
@@ -384,6 +428,19 @@ def main(argv=None) -> int:
                     help="cap on park/auto-answer resume rounds per brief")
     ap.add_argument("--build-timeout", type=int, default=1200,
                     help="seconds before a stuck build is killed (per brief)")
+    ap.add_argument("--parallel", type=int, default=3,
+                    help="run N briefs concurrently (threads; default 3 — the measured "
+                         "sweet spot on a 2-core box; 1 forces the strictly sequential "
+                         "baseline). Spend ceilings can overshoot by up to N in-flight "
+                         "calls; per-brief semantics are otherwise unchanged.")
+    ap.add_argument("--build-slots", type=int, default=2,
+                    help="max concurrent build subprocesses under --parallel (each route "
+                         "is a single-threaded JVM; keep <= CPU cores so --build-timeout "
+                         "stays honest)")
+    ap.add_argument("--resume", default=None, metavar="BATCH_DIR",
+                    help="finish an existing batch dir: reuse completed briefs from its "
+                         "summary.json, wipe + re-run only errored/missing ones. Combine "
+                         "with --only/--limit to restrict the considered set.")
     args = ap.parse_args(argv)
 
     selected = _select(list(EXAMPLE_PROMPTS), args.limit, args.only)
@@ -397,8 +454,21 @@ def main(argv=None) -> int:
     client = CappedOpenRouterClient(s)
     judge_model = args.judge_model or getattr(s, "eval_judge_model", None) or getattr(s, "model", None)
 
-    out_dir = Path(args.out) if args.out else _default_out_dir()
+    # Resolve to an absolute path: design stages run subprocesses with cwd=workspace,
+    # so a relative rundir would make them resolve state/output paths against the
+    # wrong base (writing a nested <rundir>/<rundir>/.kicraft tree).
+    resume_dir = Path(args.resume).resolve() if args.resume else None
+    out_dir = (resume_dir if resume_dir
+               else (Path(args.out) if args.out else _default_out_dir())).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    prior = _load_prior_records(out_dir) if resume_dir else {}
+    if resume_dir and prior and not args.only and args.limit is None:
+        # default a resume to the batch's own brief set, not the whole catalog
+        selected = [(i, p) for i, p in selected if i in prior]
+    reused = {i: prior[i] for i, _ in selected if _reusable(prior.get(i))}
+    todo = [(i, p) for i, p in selected if i not in reused]
+    parallel = max(1, min(args.parallel, len(todo) or 1))
 
     meta = {
         "started_at": _now_iso(),
@@ -407,32 +477,97 @@ def main(argv=None) -> int:
         "judge": not args.no_judge,
         "judge_model": None if args.no_judge else judge_model,
         "rubric_version": None,
+        "parallel": parallel,
+        "build_slots": max(1, args.build_slots),
     }
-    print(f"self-eval: {len(selected)} brief(s) -> {out_dir}")
-    print(f"  design model={meta['design_model']}  "
-          f"judge={'off (Class-C only)' if args.no_judge else judge_model}")
-
-    records: list[dict] = []
-    for n, (idx, prompt) in enumerate(selected, start=1):
-        print(f"\n[{n}/{len(selected)}] #{idx}: {prompt}")
-        rec = evaluate_one(client, idx, prompt, out_dir, judge_model=judge_model,
-                           skip_judge=args.no_judge, max_park_rounds=args.max_park_rounds,
-                           build_timeout_s=args.build_timeout)
-        if rec.get("error"):
-            print(f"   ERROR: {rec['error']}")
-        else:
-            print(f"   grade={rec.get('grade') or '—'} final="
-                  f"{rec.get('final') if rec.get('final') is not None else '—'} "
-                  f"build={rec.get('build_label')} cost=${_run_cost(rec)} "
-                  f"({rec.get('duration_s')}s)")
-        records.append(rec)
-
-    meta["finished_at"] = _now_iso()
+    if resume_dir:
+        meta["resumed_reused_n"] = len(reused)
     try:
         from .rubric import load_rubric
         meta["rubric_version"] = load_rubric()["meta"]["version"]
     except Exception:  # noqa: BLE001
         pass
+
+    # flush every progress line: batches run for an hour-plus redirected to run.log,
+    # and block buffering would otherwise hide per-brief lines until exit
+    print(f"self-eval: {len(selected)} brief(s) -> {out_dir}", flush=True)
+    if resume_dir:
+        print(f"  resume: {len(reused)} reused · {len(todo)} to run", flush=True)
+    print(f"  design model={meta['design_model']}  "
+          f"judge={'off (Class-C only)' if args.no_judge else judge_model}"
+          + (f"  parallel={parallel} build_slots={meta['build_slots']}" if parallel > 1 else ""),
+          flush=True)
+
+    # A re-run brief must start from a clean slate: stale .kicraft state would make
+    # run_design resume mid-chain and stale events.jsonl would skew the Class-C scorers.
+    if resume_dir:
+        for idx, prompt in todo:
+            stale = out_dir / _stem_for(idx, prompt)
+            if stale.exists():
+                shutil.rmtree(stale)
+
+    t_mono = time.monotonic()
+    by_idx: dict[int, dict] = dict(reused)
+    ckpt_lock = threading.Lock()
+
+    def _checkpoint() -> None:
+        # Live partial summary after every brief: what --resume reads back when a
+        # batch is interrupted, and a progress view for the admin GUI. Call with
+        # ckpt_lock held.
+        recs = [by_idx[i] for i, _ in selected if i in by_idx]
+        compile_report(recs, out_dir, meta)
+
+    if parallel <= 1:
+        for n, (idx, prompt) in enumerate(todo, start=1):
+            print(f"\n[{n}/{len(todo)}] #{idx}: {prompt}", flush=True)
+            rec = evaluate_one(client, idx, prompt, out_dir, judge_model=judge_model,
+                               skip_judge=args.no_judge, max_park_rounds=args.max_park_rounds,
+                               build_timeout_s=args.build_timeout)
+            if rec.get("error"):
+                print(f"   ERROR: {rec['error']}", flush=True)
+            else:
+                print(f"   grade={rec.get('grade') or '—'} final="
+                      f"{rec.get('final') if rec.get('final') is not None else '—'} "
+                      f"build={rec.get('build_label')} cost=${_run_cost(rec)} "
+                      f"({rec.get('duration_s')}s)", flush=True)
+            with ckpt_lock:
+                by_idx[idx] = rec
+                _checkpoint()
+    else:
+        gate = threading.BoundedSemaphore(max(1, args.build_slots))
+        print_lock = threading.Lock()
+
+        def _worker(idx: int, prompt: str) -> dict:
+            # One client per brief: CappedOpenRouterClient instances are not safe to
+            # share across threads (construction is ~ms; the spend ledger is WAL sqlite).
+            wclient = CappedOpenRouterClient(s)
+            stem = _stem_for(idx, prompt)
+            with print_lock:
+                print(f"[{stem}] start: {prompt}", flush=True)
+            rec = evaluate_one(wclient, idx, prompt, out_dir, judge_model=judge_model,
+                               skip_judge=args.no_judge, max_park_rounds=args.max_park_rounds,
+                               build_timeout_s=args.build_timeout, build_gate=gate)
+            with print_lock:
+                if rec.get("error"):
+                    print(f"[{stem}] ERROR: {rec['error']}", flush=True)
+                else:
+                    print(f"[{stem}] done grade={rec.get('grade') or '—'} final="
+                          f"{rec.get('final') if rec.get('final') is not None else '—'} "
+                          f"build={rec.get('build_label')} cost=${_run_cost(rec)} "
+                          f"({rec.get('duration_s')}s)", flush=True)
+            return rec
+
+        with ThreadPoolExecutor(max_workers=parallel) as ex:
+            futures = [ex.submit(_worker, idx, prompt) for idx, prompt in todo]
+            for fut in as_completed(futures):
+                rec = fut.result()  # evaluate_one never raises
+                with ckpt_lock:
+                    by_idx[rec["index"]] = rec
+                    _checkpoint()
+
+    meta["finished_at"] = _now_iso()
+    meta["wall_s"] = round(time.monotonic() - t_mono, 1)
+    records = [by_idx[i] for i, _ in selected if i in by_idx]
     summary = compile_report(records, out_dir, meta)
 
     print(f"\n=== self-eval complete: {summary['graded_n']}/{summary['n']} graded · "
