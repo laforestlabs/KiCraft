@@ -25,6 +25,7 @@ import json
 import os
 import shutil
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from .accounts import _RESET_TTL_SECONDS, TIERS, AccountStore
@@ -210,6 +211,32 @@ def _cmd_reset_password(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_support_reports(args: argparse.Namespace) -> int:
+    """List support reports (web-filed error/user reports), or mark one
+    reviewed. --json emits the full rows (diagnostics included) so automated
+    review can consume them directly."""
+    store = _store()
+    if args.mark_reviewed is not None:
+        store.set_support_report_status(args.mark_reviewed, "reviewed")
+        print(f"report #{args.mark_reviewed} marked reviewed")
+        return 0
+    reports = store.list_support_reports(
+        status=(None if args.all else "new"), limit=args.limit)
+    if args.json:
+        print(json.dumps([asdict(r) for r in reports], indent=2,
+                         ensure_ascii=False))
+        return 0
+    if not reports:
+        print("(no support reports)" if args.all else "(no new support reports)")
+        return 0
+    print(f"{'id':>4}  {'created':<19}  {'board':<9} {'kind':<10} {'status':<8} message")
+    for r in reports:
+        msg = (r.message or "").replace("\n", " ")[:60]
+        print(f"{r.id:>4}  {r.created_at[:19]}  {(r.board_code or '-'):<9} "
+              f"{r.kind:<10} {r.status:<8} {msg}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="kicraft-accounts",
@@ -256,6 +283,18 @@ def main(argv: list[str] | None = None) -> int:
     dp.add_argument("--yes", action="store_true",
                     help="required: confirm irreversible deletion")
     dp.set_defaults(func=_cmd_delete)
+
+    srp = sub.add_parser(
+        "support-reports",
+        help="list support reports (new ones by default), or mark one reviewed")
+    srp.add_argument("--all", action="store_true",
+                     help="include reviewed reports, not just new ones")
+    srp.add_argument("--json", action="store_true",
+                     help="emit full rows as JSON (for automated review)")
+    srp.add_argument("--limit", type=int, default=50)
+    srp.add_argument("--mark-reviewed", type=int, metavar="ID", default=None,
+                     help="set a report's status to reviewed instead of listing")
+    srp.set_defaults(func=_cmd_support_reports)
 
     rp = sub.add_parser(
         "reset-password",

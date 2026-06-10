@@ -65,6 +65,21 @@ _SCRYPT_P = 1
 _RESET_TTL_SECONDS = 3600
 _RESET_COOLDOWN_SECONDS = 60
 
+# Board IDs: short, human-quotable codes (KC-7G4K2M) stamped on every project so
+# a user can read one off the workspace and quote it in a support report. The
+# alphabet drops 0/1/I/L/O so a code survives being read aloud or retyped.
+_BOARD_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+_BOARD_CODE_LENGTH = 6
+
+
+def new_board_code() -> str:
+    """Draw a fresh board id, e.g. 'KC-7G4K2M' (~900M combinations at length 6).
+    Uniqueness is enforced by the projects.board_code unique index; callers that
+    insert retry on the (vanishingly rare) collision."""
+    body = "".join(secrets.choice(_BOARD_CODE_ALPHABET)
+                   for _ in range(_BOARD_CODE_LENGTH))
+    return f"KC-{body}"
+
 
 def _utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
@@ -212,6 +227,27 @@ class Project:
     clone_count: int = 0
     like_count: int = 0
     quality: str | None = None  # 'fab_ready' | 'erc_errors' | 'unverified'
+    # Human-quotable unique id (KC-XXXXXX) shown in the workspace so a user can
+    # reference this exact board in a support report. See new_board_code().
+    board_code: str | None = None
+
+
+@dataclass
+class SupportReport:
+    """One troubleshooting report, written either automatically when a run fails
+    (kind='error_auto', logged even if nobody is watching) or by the user from
+    the Support button (kind='user'). `diagnostics` is the machine-readable
+    snapshot (build-log tail, failed checks, run status) that automated review
+    consumes; `message` is the user's optional freeform feedback."""
+    id: int
+    created_at: str
+    user_id: int | None
+    project_id: int | None
+    board_code: str | None
+    kind: str    # 'error_auto' | 'user'
+    status: str  # triage state: 'new' | 'reviewed'
+    message: str | None
+    diagnostics: dict
 
 
 def build_fts_document(brief: str | None, state: dict | None) -> dict:
@@ -342,12 +378,39 @@ class AccountStore:
                 "clone_count INTEGER NOT NULL DEFAULT 0,"
                 "like_count INTEGER NOT NULL DEFAULT 0,"
                 "quality TEXT,"
+                "board_code TEXT,"
                 "FOREIGN KEY(user_id) REFERENCES users(id))"
             )
             self._ensure_project_columns(conn)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_projects_user_created "
                 "ON projects(user_id, created_at)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_board_code "
+                "ON projects(board_code)"
+            )
+            # Support reports: one row per problem report, auto-filed on a failed
+            # run and user-filed from the Support button. Kept in the DB (not a
+            # log file) so automated review can query by status/board_code and an
+            # account deletion can purge the user's reports with their data.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS support_reports ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "created_at TEXT NOT NULL,"
+                "user_id INTEGER,"
+                "project_id INTEGER,"
+                "board_code TEXT,"
+                "kind TEXT NOT NULL DEFAULT 'user',"
+                "status TEXT NOT NULL DEFAULT 'new',"
+                "message TEXT,"
+                "diagnostics TEXT,"
+                "FOREIGN KEY(user_id) REFERENCES users(id),"
+                "FOREIGN KEY(project_id) REFERENCES projects(id))"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_support_reports_status "
+                "ON support_reports(status, id)"
             )
             # FIFO queue of deterministic builds (see BuildJob). Shared by the web
             # app and the standalone build worker, so it lives here with the rest
@@ -479,6 +542,20 @@ class AccountStore:
             # fires for runs that finish after this column ships.
             conn.execute("UPDATE projects SET viewed_at=finished_at "
                          "WHERE finished_at IS NOT NULL")
+        if "board_code" not in cols:
+            conn.execute("ALTER TABLE projects ADD COLUMN board_code TEXT")
+            # One-time backfill so EVERY project (including pre-existing ones)
+            # is quotable in a support report. Drawn collision-free in Python:
+            # the unique index is created right after this migration runs.
+            ids = [r["id"] for r in conn.execute("SELECT id FROM projects")]
+            seen: set = set()
+            for pid in ids:
+                code = new_board_code()
+                while code in seen:
+                    code = new_board_code()
+                seen.add(code)
+                conn.execute("UPDATE projects SET board_code=? WHERE id=?",
+                             (code, pid))
 
     def _maybe_backfill_search(self) -> None:
         """One-time: populate the FTS index the first time it appears on a DB that
@@ -773,6 +850,9 @@ class AccountStore:
             "exported_at": _utcnow_iso(),
             "user": asdict(user),
             "projects": [asdict(p) for p in self.list_projects(user_id)],
+            "support_reports": [asdict(r) for r in
+                                self.list_support_reports(user_id=user_id,
+                                                          limit=10000)],
             "projects_dir": str(self.projects_dir / str(user_id)),
         }
 
@@ -792,6 +872,7 @@ class AccountStore:
                 conn.execute("DELETE FROM project_likes WHERE project_id=?", (pid,))
                 if self._fts_enabled:
                     conn.execute("DELETE FROM projects_fts WHERE project_id=?", (pid,))
+            conn.execute("DELETE FROM support_reports WHERE user_id=?", (user_id,))
             conn.execute("DELETE FROM projects WHERE user_id=?", (user_id,))
             conn.execute("DELETE FROM users WHERE id=?", (user_id,))
         tree = self.projects_dir / str(user_id)
@@ -812,7 +893,8 @@ class AccountStore:
                        is_public=bool(row["is_public"]),
                        cloned_from_id=row["cloned_from_id"],
                        view_count=row["view_count"], clone_count=row["clone_count"],
-                       like_count=row["like_count"], quality=row["quality"])
+                       like_count=row["like_count"], quality=row["quality"],
+                       board_code=row["board_code"])
 
     def create_project(self, user_id: int, brief: str, *,
                        is_public: bool | None = None) -> int:
@@ -826,11 +908,20 @@ class AccountStore:
             u = self.get_user(user_id)
             is_public = (u is None) or (u.tier not in ("pro", "max"))
         with self._conn() as conn:
-            cur = conn.execute(
-                "INSERT INTO projects (user_id, brief, status, created_at, is_public) "
-                "VALUES (?, ?, 'running', ?, ?)",
-                (user_id, brief, _utcnow_iso(), 1 if is_public else 0))
-            return int(cur.lastrowid)
+            # Retried on IntegrityError: with no enforced FKs the only unique
+            # constraint in play is idx_projects_board_code, so a failure means
+            # the freshly drawn code collided; draw again.
+            for _ in range(5):
+                try:
+                    cur = conn.execute(
+                        "INSERT INTO projects (user_id, brief, status, created_at, "
+                        "is_public, board_code) VALUES (?, ?, 'running', ?, ?, ?)",
+                        (user_id, brief, _utcnow_iso(), 1 if is_public else 0,
+                         new_board_code()))
+                    return int(cur.lastrowid)
+                except sqlite3.IntegrityError:
+                    continue
+            raise RuntimeError("could not draw a unique board code")
 
     def finish_project(self, project_id: int, status: str, stem: str | None = None,
                        cost_usd: float | None = None, dir_path: str | None = None,
@@ -873,6 +964,70 @@ class AccountStore:
                 "SELECT * FROM projects WHERE user_id=? ORDER BY id DESC",
                 (user_id,)).fetchall()
         return [self._row_to_project(r) for r in rows]
+
+    # ---- support reports ---------------------------------------------------
+
+    @staticmethod
+    def _row_to_support_report(row: sqlite3.Row) -> SupportReport:
+        try:
+            diag = json.loads(row["diagnostics"] or "{}")
+        except json.JSONDecodeError:
+            diag = {}
+        return SupportReport(
+            id=row["id"], created_at=row["created_at"], user_id=row["user_id"],
+            project_id=row["project_id"], board_code=row["board_code"],
+            kind=row["kind"], status=row["status"], message=row["message"],
+            diagnostics=diag if isinstance(diag, dict) else {})
+
+    def create_support_report(self, *, user_id: int | None = None,
+                              project_id: int | None = None,
+                              board_code: str | None = None,
+                              kind: str = "user",
+                              message: str | None = None,
+                              diagnostics: dict | None = None) -> int:
+        """File a report and return its id (the user-facing reference when the
+        report has no board code, e.g. filed from a blank composer)."""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO support_reports (created_at, user_id, project_id, "
+                "board_code, kind, status, message, diagnostics) "
+                "VALUES (?, ?, ?, ?, ?, 'new', ?, ?)",
+                (_utcnow_iso(), user_id, project_id, board_code, kind, message,
+                 json.dumps(diagnostics or {}, ensure_ascii=False, default=str)))
+            return int(cur.lastrowid)
+
+    def set_support_report_message(self, report_id: int, message: str) -> None:
+        """Attach the user's freeform feedback to an auto-filed error report (the
+        run worker files the row; the dialog adds the human context later)."""
+        with self._conn() as conn:
+            conn.execute("UPDATE support_reports SET message=? WHERE id=?",
+                         (message, report_id))
+
+    def set_support_report_status(self, report_id: int, status: str) -> None:
+        with self._conn() as conn:
+            conn.execute("UPDATE support_reports SET status=? WHERE id=?",
+                         (status, report_id))
+
+    def list_support_reports(self, *, status: str | None = None,
+                             user_id: int | None = None,
+                             limit: int = 200) -> list[SupportReport]:
+        """Newest first; filterable by triage status (automated review polls
+        status='new') and by user (the data-export path)."""
+        where, params = [], []
+        if status is not None:
+            where.append("status=?")
+            params.append(status)
+        if user_id is not None:
+            where.append("user_id=?")
+            params.append(user_id)
+        sql = "SELECT * FROM support_reports"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(int(limit))
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [self._row_to_support_report(r) for r in rows]
 
     # ---- public browser: visibility, metrics, likes, clone ----------------
 

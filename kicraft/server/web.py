@@ -71,6 +71,7 @@ from .session import (
     run_session,
 )
 from .spend_guard import SpendGuard
+from kicraft import __version__ as KICRAFT_VERSION
 from kicraft.build_slots import ACQUIRED_MARKER, slot_count
 
 from . import notify
@@ -1173,6 +1174,57 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
     return []
 
 
+def _collect_support_diagnostics(state: dict) -> dict:
+    """Snapshot a run's troubleshooting context for a support report: what was
+    asked, how far the run got, and the concrete failure evidence (build-log
+    tail, failed synthesis checks, ERC offenders). Deliberately a bounded
+    summary, not the full event stream (which _persist_project already saves
+    per project): this payload is what automated review reads first."""
+    events = state.get("events") or []
+    build_tail = [e.get("text", "") for e in events
+                  if e.get("kind") == "build_log"][-60:]
+    stages_done = [e.get("stage") for e in events if e.get("kind") == "stage_done"]
+    ws = Path(state["ws"]) if state.get("ws") else None
+    if state.get("status"):
+        run_status = state["status"]
+    elif state.get("ok") is None:
+        run_status = "running"
+    else:
+        run_status = "ok" if state.get("ok") else "failed"
+    return {
+        "captured_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "app_version": KICRAFT_VERSION,
+        "board_code": state.get("board_code"),
+        "project_id": state.get("project_id"),
+        "user_id": state.get("user_id"),
+        "brief": (state.get("brief") or "")[:2000],
+        "stem": state.get("stem"),
+        "run_status": run_status,
+        "stages_done": stages_done,
+        "awaiting_input": bool(state.get("awaiting_input")),
+        "pcb_ready": bool(state.get("pcb_ready")),
+        "spend_usd": state.get("spend"),
+        "build_log_tail": build_tail,
+        "failed_checks": _synth_check_failures(ws),
+        "erc_errors": (_erc_offenders(ws) if ws else []),
+    }
+
+
+def _file_failure_report(state: dict) -> None:
+    """Auto-file a support report for a failed run, so every failure is queued
+    for automated review even when nobody is watching (a walk-away user, a
+    queued build). The row id lands in state["support_report_id"] so the
+    error dialog can attach the user's feedback to THIS report instead of
+    filing a duplicate. Best-effort: reporting must never crash the worker."""
+    try:
+        state["support_report_id"] = _store().create_support_report(
+            user_id=state.get("user_id"), project_id=state.get("project_id"),
+            board_code=state.get("board_code"), kind="error_auto",
+            diagnostics=_collect_support_diagnostics(state))
+    except Exception:
+        pass
+
+
 def _persist_project(ws: Path | None, state: dict) -> None:
     """Copy the run's durable artifacts out of the tempdir and finalize the row.
 
@@ -1351,6 +1403,9 @@ def _fresh_run_state() -> dict:
         "user_id": None, "project_id": None, "brief": "",
         "status": None, "awaiting_input": False, "questions": [],
         "prices_rev": 0,
+        # Support: the project's human-quotable id, and the auto-filed error
+        # report's row id once a failure has been logged (see _file_failure_report).
+        "board_code": None, "support_report_id": None,
     }
 
 
@@ -1535,6 +1590,8 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
         state["ok"] = False
     finally:
         _persist_project(ws, state)
+        if state.get("ok") is False:  # terminal failure (parked runs have ok=None)
+            _file_failure_report(state)
         state["done"] = True
         state["running"] = False
         # Terminal runs leave the live registry (their persisted project row,
@@ -4246,7 +4303,7 @@ def index(prompt: str = "", project: str = ""):
                     leaf_progress_sig=None, questions_rendered=None,
                     prices_rev_seen=0, prices_loaded_ws=None,
                     account_refreshed=False, viewed_marked=False,
-                    live_sig=live_sig)
+                    support_prompted=False, live_sig=live_sig)
 
     _reset_view()
 
@@ -4273,6 +4330,11 @@ def index(prompt: str = "", project: str = ""):
                       on_click=lambda: ui.navigate.to("/browse")) \
                 .props("flat dense no-caps color=white").classes("text-xs") \
                 .tooltip("Browse and clone community projects")
+            ui.button("Support", icon="support_agent",
+                      on_click=lambda: open_support_dialog(auto=False)) \
+                .props("flat dense no-caps color=white").classes("text-xs") \
+                .tooltip("Report a problem (the open board's ID and error "
+                         "details are attached automatically)")
             if is_admin(user):
                 ui.button("Admin", icon="admin_panel_settings",
                           on_click=lambda: ui.navigate.to("/admin")) \
@@ -4377,9 +4439,98 @@ def index(prompt: str = "", project: str = ""):
         if prefill:
             use_prompt(prefill)
 
-        status = ui.label("").classes("text-sm").style("color:#e2e8f0")
+        with ui.row().classes("items-center gap-3"):
+            status = ui.label("").classes("text-sm").style("color:#e2e8f0")
+            # The open design's unique, human-quotable id. Always on screen while
+            # a board is open so a user can quote it in any support report.
+            board_label = ui.label("").classes("text-xs font-mono cursor-pointer") \
+                .style("color:#94a3b8;border:1px solid #334155;"
+                       "border-radius:4px;padding:1px 8px") \
+                .tooltip("This board's unique ID. Click to copy; quote it when "
+                         "reporting an issue.")
+            board_label.set_visibility(False)
+
+            def _copy_board_code():
+                code = state.get("board_code")
+                if code:
+                    ui.run_javascript(
+                        f"navigator.clipboard.writeText({json.dumps(code)})")
+                    ui.notify(f"Copied {code}.", color="positive")
+            board_label.on("click", _copy_board_code)
         spend = ui.label("").classes("text-sm").style("color:#64748b")
         question_box = ui.column().classes("w-full")
+
+        support_dialog = ui.dialog()
+
+        def open_support_dialog(auto: bool = False):
+            """(Re)build and open the support dialog over the open design.
+
+            auto=True is the post-error flavor: the failure was ALREADY filed
+            for automated review by the run worker (_file_failure_report), so
+            submitting only attaches the user's optional feedback to that row.
+            The manual flavor (the header's Support button) files a fresh
+            report with the same diagnostics snapshot."""
+            diag = _collect_support_diagnostics(state)
+            code = state.get("board_code")
+            support_dialog.clear()
+            with support_dialog, ui.card().classes("w-[680px] max-w-[95vw] gap-2") \
+                    .style("background:#0f172a;border:1px solid #334155"):
+                ui.label("Something went wrong" if auto else "Contact support") \
+                    .classes("text-lg font-bold text-white")
+                if auto:
+                    ui.label("This run failed. The technical details below were "
+                             "logged for review. Anything you can add about what "
+                             "you were trying to build helps us fix it faster.") \
+                        .classes("text-sm").style("color:#94a3b8")
+                else:
+                    ui.label("Report a problem with the open design or the app. "
+                             "The technical details below are attached "
+                             "automatically.") \
+                        .classes("text-sm").style("color:#94a3b8")
+                with ui.row().classes("items-center gap-2"):
+                    ui.label("Board ID").classes("text-xs").style("color:#64748b")
+                    ui.label(code or "(no design open)") \
+                        .classes("text-sm font-mono font-bold") \
+                        .style("color:#e2e8f0" if code else "color:#64748b")
+                with ui.expansion("Details that will be sent").classes("w-full") \
+                        .style("background:#0b1120;border:1px solid #1e293b"):
+                    ui.label(json.dumps(diag, indent=2, ensure_ascii=False)) \
+                        .classes("text-xs font-mono whitespace-pre-wrap") \
+                        .style("color:#94a3b8;max-height:240px;overflow:auto")
+                feedback = ui.textarea(
+                    "Anything you'd like to add? (optional)",
+                    placeholder="What were you trying to build? What did you "
+                                "expect to happen?") \
+                    .props("rows=3").classes("w-full")
+
+                def submit():
+                    msg = (feedback.value or "").strip()
+                    rid = state.get("support_report_id") if auto else None
+                    try:
+                        if rid is None:
+                            rid = _store().create_support_report(
+                                user_id=user.id,
+                                project_id=state.get("project_id"),
+                                board_code=code,
+                                kind=("error_auto" if auto else "user"),
+                                message=(msg or None), diagnostics=diag)
+                        elif msg:
+                            _store().set_support_report_message(rid, msg)
+                    except Exception:
+                        ui.notify("Could not record the report. Please try "
+                                  "again.", color="negative")
+                        return
+                    support_dialog.close()
+                    ref = code or f"report #{rid}"
+                    ui.notify(f"Thanks, that's logged. Your reference is {ref}.",
+                              color="positive")
+
+                with ui.row().classes("justify-end gap-2 w-full"):
+                    ui.button("Close", on_click=support_dialog.close) \
+                        .props("flat color=white")
+                    ui.button("Send report", icon="send", on_click=submit) \
+                        .props("color=primary")
+            support_dialog.open()
 
         # Per-stage tabs: each phase gets its own tab with a project-state inspector
         # (left) over the LLM thinking + activity/log windows (right). The native
@@ -4418,6 +4569,10 @@ def index(prompt: str = "", project: str = ""):
                     with ui.row().classes("items-center gap-3 w-full"):
                         ui.label(p.project_stem or "(building...)") \
                             .classes("text-sm").style("color:#e2e8f0")
+                        if p.board_code:
+                            ui.label(p.board_code).classes("text-xs font-mono") \
+                                .style("color:#64748b") \
+                                .tooltip("Board ID. Quote it when reporting an issue.")
                         # A 'running' row with no live worker is a run the
                         # server lost (restart/crash mid-run): say so instead
                         # of showing a phantom run forever.
@@ -4496,7 +4651,8 @@ def index(prompt: str = "", project: str = ""):
             state.update(running=True, done=False, ok=None,
                          awaiting_input=False, questions=[])
             view.update(fab_done=False, account_refreshed=False,
-                        viewed_marked=False, questions_rendered=None)
+                        viewed_marked=False, questions_rendered=None,
+                        support_prompted=False)
             question_box.clear()
             continue_btn.set_visibility(False)
             design_btn.disable()
@@ -4604,7 +4760,7 @@ def index(prompt: str = "", project: str = ""):
                          awaiting_input=False, questions=[])
             view.update(fab_done=False, account_refreshed=False, viewed_marked=False,
                         sch_view=None, pcb_view=None, pcb_mtime=None,
-                        state_mtime=None, run_mtime=None)
+                        state_mtime=None, run_mtime=None, support_prompted=False)
             continue_btn.set_visibility(False)
             design_btn.disable()
             status.text = "Re-running: " + " -> ".join(runs) + " ..."
@@ -4623,7 +4779,8 @@ def index(prompt: str = "", project: str = ""):
             if state["project_id"]:  # same project, no new quota slot
                 _store().update_project_status(state["project_id"], "running")
             state.update(running=True, done=False, ok=None)
-            view.update(fab_done=False, account_refreshed=False, viewed_marked=False)
+            view.update(fab_done=False, account_refreshed=False, viewed_marked=False,
+                        support_prompted=False)
             continue_btn.set_visibility(False)
             design_btn.disable()
             status.text = "Continuing: " + " -> ".join(rem) + " ..."
@@ -4672,6 +4829,7 @@ def index(prompt: str = "", project: str = ""):
                          spend=p.cost_usd, zip=(p.zip_path if zip_ok else None),
                          ws=str(ws), stem=p.project_stem,
                          user_id=user.id, project_id=p.id, brief=p.brief or "",
+                         board_code=p.board_code,
                          status=("awaiting_input" if p.status == "awaiting_input" else None),
                          awaiting_input=(p.status == "awaiting_input"),
                          questions=[q for q in (sj.get("open_questions") or [])
@@ -4761,9 +4919,11 @@ def index(prompt: str = "", project: str = ""):
                           "Upgrade for more.", color="warning")
                 return
             pid = _store().create_project(u.id, brief.value)
+            proj = _store().get_project(pid)
             state = _fresh_run_state()
             state.update(running=True, user_id=u.id, project_id=pid,
-                         brief=brief.value)
+                         brief=brief.value,
+                         board_code=(proj.board_code if proj else None))
             _reset_view()
             continue_btn.set_visibility(False)
             new_btn.set_visibility(True)
@@ -4803,6 +4963,13 @@ def index(prompt: str = "", project: str = ""):
                 tabs.flush()
             if state["spend"] is not None:
                 spend.text = f"Spent this design: ${state['spend']:.4f}"
+
+            # Board ID chip: tracks the open design (state rebinding included).
+            code = state.get("board_code")
+            want = f"Board ID: {code}" if code else ""
+            if board_label.text != want:
+                board_label.text = want
+                board_label.set_visibility(bool(want))
 
             # A background run starting or ending (this page's, another tab's,
             # or one this page detached from) changes what the project list
@@ -4943,7 +5110,14 @@ def index(prompt: str = "", project: str = ""):
                                     .props("color=positive")
                 elif state["ok"] is False:
                     status.text = ("Build failed. The synthesized schematic is shown in "
-                                   "the Synthesize tab (red) for review.")
+                                   "the Synthesize tab (red) for review."
+                                   + (f" Board ID: {code}." if code else ""))
+                    # Surface the support dialog ONCE per failed run on this page
+                    # (the failure itself is already auto-filed by the worker);
+                    # closing it without sending stays closed.
+                    if not view.get("support_prompted"):
+                        view["support_prompted"] = True
+                        open_support_dialog(auto=True)
 
         refresh_account_ui()
         view["live_sig"] = _live_sig()
