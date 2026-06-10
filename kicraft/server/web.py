@@ -36,7 +36,14 @@ from urllib.parse import quote
 from nicegui import app, ui
 from starlette.responses import FileResponse, PlainTextResponse, RedirectResponse
 
-from .accounts import _RESET_TTL_SECONDS, AccountStore, is_admin
+from .accounts import (
+    _RESET_TTL_SECONDS,
+    DEFAULT_TIER,
+    TIERS,
+    AccountStore,
+    grant_expiry,
+    is_admin,
+)
 from .config import LEGAL_VERSION, Settings, default_legal_dir
 from .examples import CHIP_PROMPTS, EXAMPLE_PROMPTS
 from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView, kicanvas_head
@@ -114,10 +121,12 @@ def _project_spend_usd(project_id) -> float | None:
 
 
 def _signup_code() -> str:
-    """The invite code required to register, read live (env loads in main(), so
-    reading it at import time would capture an empty string). Falls back to
-    KICRAFT_ACCESS_PASSWORD so an already-deployed box keeps working until its
-    env is updated to the new KICRAFT_SIGNUP_CODE."""
+    """The LEGACY env-var invite code (KICRAFT_SIGNUP_CODE, older boxes used
+    KICRAFT_ACCESS_PASSWORD), read live (env loads in main(), so reading it at
+    import time would capture an empty string). Still honored at signup as a
+    plain free-tier code so links already handed out keep working, but new
+    codes -- including ones that grant a paid tier for N days -- are minted in
+    the DB from /admin/invites."""
     return (os.environ.get("KICRAFT_SIGNUP_CODE")
             or os.environ.get("KICRAFT_ACCESS_PASSWORD", "")).strip()
 
@@ -1527,7 +1536,11 @@ def signup_page(prompt: str = ""):
                 .style("color:#cbd5e1;border-left:3px solid #60a5fa;padding-left:8px")
         email = ui.input("Email").classes("w-full")
         pw = ui.input("Password", password=True, password_toggle_button=True).classes("w-full")
-        code = ui.input("Invite code", password=True).classes("w-full")
+        # When the operator opens public signup (/admin/invites), the code becomes
+        # optional: blank = free tier, while a code still applies its tier grant.
+        open_signup = _store().signup_open()
+        code = ui.input("Invite code (optional)" if open_signup else "Invite code",
+                        password=True).classes("w-full")
 
         agree = ui.checkbox("I agree to the Terms of Service and Privacy Policy") \
             .classes("text-sm")
@@ -1543,26 +1556,37 @@ def signup_page(prompt: str = ""):
             .classes("text-xs -mt-2").style("color:#64748b")
 
         def submit():
-            want = _signup_code()
-            if not want:
-                ui.notify("Signup is not configured (set KICRAFT_SIGNUP_CODE).",
-                          color="negative")
-                return
-            if not hmac.compare_digest((code.value or "").strip(), want):
-                ui.notify("Invalid invite code.", color="negative")
+            store = _store()
+            code_str = (code.value or "").strip()
+            grant = None  # an invite_codes row when a DB code applies its tier
+            if code_str:
+                grant = store.check_invite_code(code_str)
+                legacy = _signup_code()
+                if grant is None and not (
+                        legacy and hmac.compare_digest(code_str, legacy)):
+                    ui.notify("Invalid or disabled invite code.", color="negative")
+                    return
+            elif not store.signup_open():
+                ui.notify("An invite code is required while KiCraft is in "
+                          "private beta.", color="negative")
                 return
             if not agree.value:
                 ui.notify("Please accept the Terms of Service and Privacy Policy "
                           "to create an account.", color="warning")
                 return
             try:
-                user = _store().create_user(
+                user = store.create_user(
                     email.value or "", pw.value or "",
+                    tier=grant["tier"] if grant else DEFAULT_TIER,
+                    tier_expires_at=grant_expiry(grant["duration_days"]) if grant
+                    else None,
                     accepted_terms_version=LEGAL_VERSION,
                     allow_training=bool(allow_training.value))
             except ValueError as e:
                 ui.notify(str(e), color="negative")
                 return
+            if grant:  # only a real signup consumes one of the code's uses
+                store.record_invite_use(grant["id"])
             app.storage.user["user_id"] = user.id
             app.storage.user["email"] = user.email
             app.storage.user["session_epoch"] = user.session_epoch
@@ -1763,6 +1787,9 @@ def profile_page():
             period = "week" if q["window_days"] <= 7 else "month"
             with ui.row().classes("items-center gap-2"):
                 ui.badge(q["label"], color="primary")
+                if user.tier_expires_at:  # an invite-code grant with an end date
+                    ui.label(f"until {user.tier_expires_at[:10]}") \
+                        .classes("text-xs").style("color:#94a3b8")
                 if q.get("unlimited"):
                     ui.label("Unlimited designs (staff).") \
                         .classes("text-sm").style("color:#94a3b8")
@@ -1890,6 +1917,9 @@ def _admin_header(active: str) -> None:
                 .props("flat dense no-caps color=white").classes("text-xs")
             ui.button("Users", icon="group",
                       on_click=lambda: ui.navigate.to("/admin/users")) \
+                .props("flat dense no-caps color=white").classes("text-xs")
+            ui.button("Invites", icon="vpn_key",
+                      on_click=lambda: ui.navigate.to("/admin/invites")) \
                 .props("flat dense no-caps color=white").classes("text-xs")
             ui.button("Self-Eval", icon="science",
                       on_click=lambda: ui.navigate.to("/admin/self-eval")) \
@@ -2748,6 +2778,171 @@ def admin_users_page():
 
         search.on_value_change(lambda: build_users())
         build_users()
+
+
+@ui.page("/admin/invites")
+def admin_invites_page():
+    """Invite-code management: mint codes that sign a user up at a chosen tier
+    for a set number of days (blank = forever), disable leaked or retired codes,
+    and flip the public-launch switch that lets the Free tier register with no
+    code at all. Every mutating handler re-checks is_admin() (defense in depth,
+    same as /admin/users)."""
+    user, redirect = _require_admin()
+    if redirect is not None:
+        return redirect
+
+    store = _store()
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    _admin_header("invites")
+
+    tier_options = {t: TIERS[t]["label"] for t in TIERS}
+
+    def guard() -> bool:
+        """Defense in depth: never trust the page-load gate for a mutation."""
+        if not is_admin(_current_user()):
+            ui.notify("Admin access required.", color="warning")
+            return False
+        return True
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1100px"):
+        ui.label("Invite codes").classes("text-2xl font-bold text-white")
+
+        # -- public-launch switch -------------------------------------------
+        with ui.card().classes("w-full gap-1") \
+                .style("background:#0f172a;border:1px solid #1e293b"):
+            ui.label("Public signup").classes("text-base font-semibold text-white")
+
+            def on_toggle(e) -> None:
+                if not guard():
+                    open_sw.value = store.signup_open()  # revert the flip
+                    return
+                store.set_signup_open(bool(e.value))
+                ui.notify("Public signup is now "
+                          f"{'OPEN: anyone can register on the Free tier' if e.value else 'closed: an invite code is required'}.",
+                          color="positive")
+
+            open_sw = ui.switch("Allow Free-tier signup without an invite code",
+                                value=store.signup_open())
+            open_sw.on_value_change(on_toggle)
+            ui.label("Off = invite-only beta (every signup needs a code below). "
+                     "On = public launch: the code field becomes optional, and a "
+                     "code still upgrades the signup to its tier.") \
+                .classes("text-xs").style("color:#94a3b8")
+
+        # -- mint a new code --------------------------------------------------
+        with ui.card().classes("w-full gap-1") \
+                .style("background:#0f172a;border:1px solid #1e293b"):
+            ui.label("New invite code").classes("text-base font-semibold text-white")
+            with ui.row().classes("w-full items-end gap-3 flex-wrap"):
+                code_in = ui.input("Code", placeholder="FREEMAX") \
+                    .props("dense").classes("w-44")
+                tier_sel = ui.select(tier_options, value=DEFAULT_TIER, label="Tier") \
+                    .props("dense options-dense").classes("w-28")
+                days_in = ui.number("Days", min=1, precision=0) \
+                    .props("dense clearable").classes("w-28") \
+                    .tooltip("How long the signup keeps the tier; blank = forever")
+                uses_in = ui.number("Max uses", min=1, precision=0) \
+                    .props("dense clearable").classes("w-28") \
+                    .tooltip("How many signups may redeem it; blank = unlimited")
+
+                def do_create() -> None:
+                    if not guard():
+                        return
+                    try:
+                        c = store.create_invite_code(
+                            code_in.value or "", tier_sel.value or DEFAULT_TIER,
+                            duration_days=int(days_in.value) if days_in.value else None,
+                            max_uses=int(uses_in.value) if uses_in.value else None)
+                    except ValueError as e:
+                        ui.notify(str(e), color="negative")
+                        return
+                    ui.notify(f"Created {c['code']}.", color="positive")
+                    code_in.value = ""
+                    build_codes()
+
+                ui.button("Create", icon="add", on_click=do_create).props("dense")
+            ui.label("Example: code FREEMAX, tier Max, days blank gives the Max "
+                     "tier free forever; days 30 gives it for 30 days, then the "
+                     "account drops back to Free.") \
+                .classes("text-xs").style("color:#94a3b8")
+
+        # -- existing codes ----------------------------------------------------
+        container = ui.column().classes("w-full gap-0")
+
+        def do_set_enabled(row: dict, enabled: bool) -> None:
+            if not guard():
+                return
+            try:
+                store.set_invite_code_enabled(row["id"], enabled)
+            except ValueError as e:
+                ui.notify(str(e), color="negative")
+                return
+            ui.notify(f"{row['code']} {'re-enabled' if enabled else 'disabled'}.",
+                      color="positive")
+            build_codes()
+
+        def build_codes() -> None:
+            container.clear()
+            rows = store.list_invite_codes()
+            with container:
+                with ui.row().classes("w-full items-center gap-2 text-xs font-bold") \
+                        .style("color:#64748b;padding:2px 0"):
+                    ui.label("code").style("width:170px")
+                    ui.label("tier").style("width:60px")
+                    ui.label("grants").style("width:110px")
+                    ui.label("uses").style("width:70px")
+                    ui.label("status").style("width:70px")
+                    ui.label("created").style("width:84px")
+                    ui.label("last used").style("width:84px")
+                    ui.label("actions").classes("flex-1")
+                if not rows:
+                    ui.label("No invite codes yet. Mint one above; the legacy "
+                             "env code (if set) also still works.") \
+                        .classes("text-sm").style("color:#94a3b8")
+                for r in rows:
+                    with ui.row().classes("w-full items-center gap-2 text-xs") \
+                            .style("border-top:1px solid #1e293b;padding:4px 0"):
+                        ui.label(r["code"]).style(
+                            "width:170px;color:#e2e8f0;font-family:monospace")
+                        ui.badge(TIERS[r["tier"]]["label"]
+                                 if r["tier"] in TIERS else r["tier"],
+                                 color="primary").style("width:60px")
+                        ui.label("forever" if r["duration_days"] is None
+                                 else f"{r['duration_days']} days") \
+                            .style("width:110px;color:#cbd5e1")
+                        ui.label(f"{r['use_count']} / "
+                                 f"{r['max_uses'] if r['max_uses'] is not None else '∞'}") \
+                            .style("width:70px;color:#cbd5e1")
+                        if not r["enabled"]:
+                            ui.label("disabled").style("width:70px;color:#f87171")
+                        elif r["max_uses"] is not None \
+                                and r["use_count"] >= r["max_uses"]:
+                            ui.label("used up").style("width:70px;color:#f59e0b")
+                        else:
+                            ui.label("active").style("width:70px;color:#34d399")
+                        ui.label((r["created_at"] or "")[:10]) \
+                            .style("width:84px;color:#64748b")
+                        ui.label((r["last_used_at"] or "")[:10] or "never") \
+                            .style("width:84px;color:#64748b")
+                        with ui.row().classes("flex-1 gap-1 items-center"):
+                            if r["enabled"]:
+                                ui.button("Disable", icon="block",
+                                          on_click=lambda row=r:
+                                          do_set_enabled(row, False)) \
+                                    .props("flat dense no-caps").classes("text-xs")
+                            else:
+                                ui.button("Enable", icon="check_circle",
+                                          on_click=lambda row=r:
+                                          do_set_enabled(row, True)) \
+                                    .props("flat dense no-caps").classes("text-xs")
+
+        build_codes()
+
+        if _signup_code():
+            ui.label("Note: the legacy KICRAFT_SIGNUP_CODE env code is also still "
+                     "accepted at signup (it grants the Free tier). Remove it from "
+                     ".env to retire it.").classes("text-xs").style("color:#64748b")
 
 
 # --------------------------------------------------------------------------- #
@@ -4494,9 +4689,11 @@ if os.environ.get("KICRAFT_WEB_DEMO"):
 
 def main() -> None:
     Settings.from_env()  # fail fast if OPENROUTER_API_KEY is missing; also loads .env
-    if not _signup_code():
-        print("WARNING: neither KICRAFT_SIGNUP_CODE nor KICRAFT_ACCESS_PASSWORD is set; "
-              "no one can register. Set KICRAFT_SIGNUP_CODE before exposing kicraft.io.")
+    store = _store()
+    if not (_signup_code() or store.signup_open()
+            or any(c["enabled"] for c in store.list_invite_codes())):
+        print("WARNING: public signup is off and no invite code exists; no one can "
+              "register. Mint a code at /admin/invites or set KICRAFT_SIGNUP_CODE.")
     ui.run(
         host=os.environ.get("KICRAFT_WEB_HOST", "0.0.0.0"),
         port=int(os.environ.get("KICRAFT_WEB_PORT", "8080")),

@@ -74,6 +74,22 @@ def _utcnow_iso() -> str:
     return _utcnow().isoformat()
 
 
+# Invite codes: human-typeable, so the charset is strict (no whitespace or
+# lookalike punctuation to mistype) and matching is case-insensitive (the column
+# is COLLATE NOCASE -- 'freemax' redeems 'FREEMAX').
+_INVITE_CODE_RE = re.compile(r"[A-Za-z0-9_-]{3,64}")
+
+
+def grant_expiry(duration_days: int | None) -> str | None:
+    """ISO-8601 UTC instant a code-granted tier lapses, or None for forever.
+
+    Lives here (not web.py) so the date math sits next to the expiry comparison
+    in _downgrade_if_expired and the two can never drift."""
+    if not duration_days:
+        return None
+    return (_utcnow() + dt.timedelta(days=int(duration_days))).isoformat()
+
+
 def hash_password(password: str) -> str:
     """Return a self-describing scrypt hash: scrypt$N$r$p$salt_hex$hash_hex."""
     salt = secrets.token_bytes(16)
@@ -117,6 +133,10 @@ class User:
     # force-logs-out, so a password reset evicts every other live session (the
     # point of recovering an account someone else got into).
     session_epoch: int = 0
+    # When an invite-code-granted tier lapses (ISO-8601 UTC), or None for no
+    # expiry. Enforced lazily on read (see _downgrade_if_expired); a manual
+    # set_tier clears it.
+    tier_expires_at: str | None = None
 
 
 @dataclass
@@ -211,9 +231,30 @@ class AccountStore:
                 "accepted_terms_version TEXT,"
                 "accepted_terms_at TEXT,"
                 "allow_training INTEGER NOT NULL DEFAULT 1,"
-                "session_epoch INTEGER NOT NULL DEFAULT 0)"
+                "session_epoch INTEGER NOT NULL DEFAULT 0,"
+                "tier_expires_at TEXT)"
             )
             self._ensure_columns(conn)
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS invite_codes ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "code TEXT NOT NULL COLLATE NOCASE UNIQUE,"
+                "tier TEXT NOT NULL DEFAULT 'free',"
+                "duration_days INTEGER,"          # NULL = the tier never expires
+                "max_uses INTEGER,"               # NULL = unlimited signups
+                "use_count INTEGER NOT NULL DEFAULT 0,"
+                "enabled INTEGER NOT NULL DEFAULT 1,"
+                "created_at TEXT NOT NULL,"
+                "disabled_at TEXT,"
+                "last_used_at TEXT)"
+            )
+            # Site-wide operator switches (e.g. open_free_signup). A KV table so a
+            # toggle flipped from the dashboard survives restarts without an env
+            # edit + redeploy.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS app_settings ("
+                "key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS password_resets ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -304,6 +345,9 @@ class AccountStore:
         if "session_epoch" not in cols:
             conn.execute(
                 "ALTER TABLE users ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0")
+        if "tier_expires_at" not in cols:
+            # NULL = no expiry, so every pre-existing tier persists unchanged.
+            conn.execute("ALTER TABLE users ADD COLUMN tier_expires_at TEXT")
         if "role" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
             # One-time backfill: the retired 'admin' billing tier becomes the admin
@@ -380,11 +424,38 @@ class AccountStore:
                     accepted_terms_version=row["accepted_terms_version"],
                     accepted_terms_at=row["accepted_terms_at"],
                     allow_training=bool(row["allow_training"]),
-                    session_epoch=int(row["session_epoch"]))
+                    session_epoch=int(row["session_epoch"]),
+                    tier_expires_at=row["tier_expires_at"])
+
+    def _downgrade_if_expired(self, conn: sqlite3.Connection,
+                              row: sqlite3.Row | None) -> sqlite3.Row | None:
+        """Lazily lapse a code-granted tier: if the row's tier_expires_at has
+        passed, downgrade it to the free tier (persisted) and return the fresh
+        row. Every single-user read path funnels through here, so an expired
+        grant ends the moment the account is next touched; the bulk readers the
+        admin dashboard uses call expire_due_tiers() instead."""
+        if row is None or row["tier_expires_at"] is None:
+            return row
+        if row["tier_expires_at"] > _utcnow_iso():  # ISO UTC compares lexically
+            return row
+        conn.execute("UPDATE users SET tier=?, tier_expires_at=NULL WHERE id=?",
+                     (DEFAULT_TIER, row["id"]))
+        return conn.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone()
+
+    def expire_due_tiers(self) -> int:
+        """Sweep every lapsed code-granted tier back to free; returns how many
+        users were downgraded. Cheap when nothing is due (matches no rows)."""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE users SET tier=?, tier_expires_at=NULL "
+                "WHERE tier_expires_at IS NOT NULL AND tier_expires_at <= ?",
+                (DEFAULT_TIER, _utcnow_iso()))
+            return int(cur.rowcount)
 
     def create_user(self, email: str, password: str, tier: str = DEFAULT_TIER, *,
                     accepted_terms_version: str | None = None,
-                    allow_training: bool = True) -> User:
+                    allow_training: bool = True,
+                    tier_expires_at: str | None = None) -> User:
         em = self._norm_email(email)
         if not em or "@" not in em:
             raise ValueError("a valid email is required")
@@ -398,27 +469,31 @@ class AccountStore:
             with self._conn() as conn:
                 cur = conn.execute(
                     "INSERT INTO users (email, password_hash, tier, created_at, "
-                    "accepted_terms_version, accepted_terms_at, allow_training) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "accepted_terms_version, accepted_terms_at, allow_training, "
+                    "tier_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (em, hash_password(password), tier, now,
-                     accepted_terms_version, accepted_at, 1 if allow_training else 0))
+                     accepted_terms_version, accepted_at, 1 if allow_training else 0,
+                     tier_expires_at))
                 uid = cur.lastrowid
         except sqlite3.IntegrityError as e:
             raise ValueError(f"email {em!r} is already registered") from e
         return User(id=int(uid), email=em, tier=tier, created_at=now,
                     role=DEFAULT_ROLE,
                     accepted_terms_version=accepted_terms_version,
-                    accepted_terms_at=accepted_at, allow_training=allow_training)
+                    accepted_terms_at=accepted_at, allow_training=allow_training,
+                    tier_expires_at=tier_expires_at)
 
     def get_user(self, user_id: int) -> User | None:
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            row = self._downgrade_if_expired(conn, row)
         return self._row_to_user(row) if row else None
 
     def get_user_by_email(self, email: str) -> User | None:
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM users WHERE email=?",
                                (self._norm_email(email),)).fetchone()
+            row = self._downgrade_if_expired(conn, row)
         return self._row_to_user(row) if row else None
 
     def authenticate(self, email: str, password: str) -> User | None:
@@ -427,16 +502,21 @@ class AccountStore:
                                (self._norm_email(email),)).fetchone()
             if not row or not verify_password(password, row["password_hash"]):
                 return None
+            row = self._downgrade_if_expired(conn, row)
             conn.execute("UPDATE users SET last_login_at=? WHERE id=?",
                          (_utcnow_iso(), row["id"]))
         return self._row_to_user(row)
 
     def set_tier(self, email: str, tier: str) -> User:
+        """Manually assign a billing tier. Clears any invite-code expiry: an
+        explicit admin assignment is indefinite, not a timed grant."""
         if tier not in TIERS:
             raise ValueError(f"unknown tier {tier!r}; choose from {', '.join(TIERS)}")
         em = self._norm_email(email)
         with self._conn() as conn:
-            cur = conn.execute("UPDATE users SET tier=? WHERE email=?", (tier, em))
+            cur = conn.execute(
+                "UPDATE users SET tier=?, tier_expires_at=NULL WHERE email=?",
+                (tier, em))
             if cur.rowcount == 0:
                 raise ValueError(f"no user with email {email!r}")
             row = conn.execute("SELECT * FROM users WHERE email=?", (em,)).fetchone()
@@ -473,6 +553,7 @@ class AccountStore:
                 "SELECT COUNT(*) FROM users WHERE role=?", (role,)).fetchone()[0])
 
     def list_users(self) -> list[User]:
+        self.expire_due_tiers()  # so a lapsed grant never shows as still-active
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
         return [self._row_to_user(r) for r in rows]
@@ -959,6 +1040,7 @@ class AccountStore:
 
     def tier_distribution(self) -> list[tuple[str, int]]:
         """(tier, count) over all users, busiest first."""
+        self.expire_due_tiers()
         with self._conn() as conn:
             return [(r["tier"], int(r["n"])) for r in conn.execute(
                 "SELECT tier, COUNT(*) AS n FROM users GROUP BY tier ORDER BY n DESC")]
@@ -996,8 +1078,10 @@ class AccountStore:
         """One row per user with project_count, total spend, and most-recent project
         time, via a single LEFT JOIN (keeps zero-project users; no N+1). Backs the
         /admin/users table and the overview 'top users' panel. Newest users first."""
+        self.expire_due_tiers()
         sql = (
             "SELECT u.id, u.email, u.tier, u.role, u.created_at, u.last_login_at, "
+            "u.tier_expires_at, "
             "COUNT(p.id) AS project_count, "
             "COALESCE(SUM(p.cost_usd), 0) AS spend_usd, "
             "MAX(p.created_at) AS last_project_at "
@@ -1005,3 +1089,104 @@ class AccountStore:
             "GROUP BY u.id ORDER BY u.created_at DESC")
         with self._conn() as conn:
             return [{k: r[k] for k in r.keys()} for r in conn.execute(sql).fetchall()]
+
+    # ---- invite codes -------------------------------------------------------
+
+    @staticmethod
+    def _row_to_code(row: sqlite3.Row) -> dict:
+        d = {k: row[k] for k in row.keys()}
+        d["enabled"] = bool(d["enabled"])
+        return d
+
+    def create_invite_code(self, code: str, tier: str = DEFAULT_TIER, *,
+                           duration_days: int | None = None,
+                           max_uses: int | None = None) -> dict:
+        """Mint an invite code that lets someone sign up at `tier`, keeping it
+        for `duration_days` (None = forever) before lapsing back to free.
+        `max_uses` caps how many signups may redeem it (None = unlimited)."""
+        c = (code or "").strip()
+        if not _INVITE_CODE_RE.fullmatch(c):
+            raise ValueError("a code must be 3-64 letters, digits, '-' or '_'")
+        if tier not in TIERS:
+            raise ValueError(f"unknown tier {tier!r}; choose from {', '.join(TIERS)}")
+        if duration_days is not None and int(duration_days) < 1:
+            raise ValueError("duration_days must be at least 1 (or None for forever)")
+        if max_uses is not None and int(max_uses) < 1:
+            raise ValueError("max_uses must be at least 1 (or None for unlimited)")
+        try:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    "INSERT INTO invite_codes (code, tier, duration_days, max_uses, "
+                    "created_at) VALUES (?, ?, ?, ?, ?)",
+                    (c, tier,
+                     int(duration_days) if duration_days is not None else None,
+                     int(max_uses) if max_uses is not None else None,
+                     _utcnow_iso()))
+                row = conn.execute("SELECT * FROM invite_codes WHERE id=?",
+                                   (cur.lastrowid,)).fetchone()
+        except sqlite3.IntegrityError as e:
+            raise ValueError(f"code {c!r} already exists") from e
+        return self._row_to_code(row)
+
+    def list_invite_codes(self) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM invite_codes ORDER BY id DESC").fetchall()
+        return [self._row_to_code(r) for r in rows]
+
+    def set_invite_code_enabled(self, code_id: int, enabled: bool) -> None:
+        """Disable (or re-enable) a code. Disabling only stops NEW signups; a
+        tier already granted runs until its own tier_expires_at."""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE invite_codes SET enabled=?, disabled_at=? WHERE id=?",
+                (1 if enabled else 0, None if enabled else _utcnow_iso(), code_id))
+            if cur.rowcount == 0:
+                raise ValueError(f"no invite code with id {code_id!r}")
+
+    def check_invite_code(self, code: str) -> dict | None:
+        """The grant a code confers (tier, duration_days, ...), or None when the
+        code is unknown, disabled, or used up. Read-only: the signup flow checks
+        first, creates the user, then calls record_invite_use -- so a failed
+        signup (duplicate email) never burns a use. Two signups racing the last
+        use can both pass; at this scale one extra redemption is fine."""
+        c = (code or "").strip()
+        if not c:
+            return None
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM invite_codes WHERE code=? AND enabled=1 "
+                "AND (max_uses IS NULL OR use_count < max_uses)", (c,)).fetchone()
+        return self._row_to_code(row) if row else None
+
+    def record_invite_use(self, code_id: int) -> None:
+        """Count a successful signup against a code (call after create_user)."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE invite_codes SET use_count=use_count+1, last_used_at=? "
+                "WHERE id=?", (_utcnow_iso(), code_id))
+
+    # ---- site settings ------------------------------------------------------
+
+    _OPEN_SIGNUP_KEY = "open_free_signup"
+
+    def get_setting(self, key: str, default: str | None = None) -> str | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT value FROM app_settings WHERE key=?",
+                               (key,)).fetchone()
+        return row["value"] if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+    def signup_open(self) -> bool:
+        """Whether anyone may register on the free tier WITHOUT an invite code.
+        Defaults closed (invite-only beta); flipped from /admin/invites at
+        public launch."""
+        return self.get_setting(self._OPEN_SIGNUP_KEY, "0") == "1"
+
+    def set_signup_open(self, open_: bool) -> None:
+        self.set_setting(self._OPEN_SIGNUP_KEY, "1" if open_ else "0")
