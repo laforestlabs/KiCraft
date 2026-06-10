@@ -9,6 +9,7 @@ stage CLIs is covered by tests/test_session.py.)
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -240,6 +241,25 @@ def test_evaluate_one_build_gate_caps_concurrent_builds(tmp_path, monkeypatch):
 
     assert all(r["build_rc"] == 0 for r in recs)
     assert state["max"] == 1          # the gate never let two builds overlap
+
+
+def test_run_build_timeout_restarts_at_slot_acquired_marker(tmp_path, monkeypatch):
+    # kicraft.build_slots contract: time queued for a host-wide build slot is not
+    # build time. The child "queues" 0.8s, emits ACQUIRED_MARKER, then "routes"
+    # 1.0s — total wall exceeds the 1.4s timeout, so it survives only if the
+    # watchdog clock restarts at the marker.
+    from kicraft.build_slots import ACQUIRED_MARKER
+    child = ("import time; time.sleep(0.8); "
+             f"print({ACQUIRED_MARKER!r}, flush=True); time.sleep(1.0)")
+    monkeypatch.setattr(se, "_BUILD_CMD", [sys.executable, "-c", child])
+    events = []
+    assert se.run_build(tmp_path, events.append, timeout_s=1.4) == 0
+    assert any(ACQUIRED_MARKER in (e.get("text") or "") for e in events)
+
+    # negative control: with no marker the watchdog still kills a stuck build
+    monkeypatch.setattr(se, "_BUILD_CMD",
+                        [sys.executable, "-c", "import time; time.sleep(30)"])
+    assert se.run_build(tmp_path, events.append, timeout_s=0.4) < 0
 
 
 def test_main_parallel_overlaps_briefs_and_orders_records(tmp_path, monkeypatch):

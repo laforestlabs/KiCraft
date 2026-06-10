@@ -55,6 +55,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from kicraft.build_slots import ACQUIRED_MARKER
 from kicraft.server.examples import EXAMPLE_PROMPTS
 from kicraft.server.session import read_state, record_answers, remaining_stages, run_session
 
@@ -188,7 +189,9 @@ def run_design(client, brief: str, rundir: Path, progress, *,
 def run_build(rundir: Path, progress, *, timeout_s: int = 1200) -> int:
     """Run the deterministic synth+place+route+fab build (mirrors the web worker),
     streaming its log into ``events.jsonl`` via ``progress``. A watchdog kills the
-    build after ``timeout_s`` so one stuck route can't stall the whole batch.
+    build after ``timeout_s`` so one stuck route can't stall the whole batch; per
+    the ``kicraft.build_slots`` contract the clock restarts at ACQUIRED_MARKER, so
+    time spent queued for a host-wide build slot is never billed against the build.
     Returns the build exit code (negative if killed)."""
     progress({"kind": "build_start"})
     proc = subprocess.Popen(_BUILD_CMD, cwd=str(rundir), text=True,
@@ -199,6 +202,10 @@ def run_build(rundir: Path, progress, *, timeout_s: int = 1200) -> int:
     try:
         for line in proc.stdout:  # type: ignore[union-attr]
             progress({"kind": "build_log", "text": line.rstrip("\n")})
+            if ACQUIRED_MARKER in line:
+                timer.cancel()
+                timer = threading.Timer(timeout_s, proc.kill)
+                timer.start()
         proc.wait()
     finally:
         timer.cancel()
