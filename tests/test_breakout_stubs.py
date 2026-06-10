@@ -258,6 +258,88 @@ def test_waypoint_spec_crossing_foreign_pad_is_dropped(tmp_path):
     assert segs == []
 
 
+def test_perimeter_tie_direct_when_only_same_net_pads_between(tmp_path):
+    # The brief-2 DIP-switch shape: three adjacent commons on one power net,
+    # nothing foreign between the farthest pair. A same-net pad is a landing,
+    # not an obstacle, so the tie must be the straight pad-to-pad segment --
+    # not a perimeter walk (which, with the pad row near the board edge, used
+    # to stamp locked copper off the board and hang FreeRouting).
+    path = str(tmp_path / "b.kicad_pcb")
+    _board(
+        path,
+        (10.0, 2.0),
+        {
+            "4": ("VDD", 8.0, 1.4),
+            "5": ("VDD", 10.0, 1.4),
+            "6": ("VDD", 12.0, 1.4),
+        },
+    )
+    board = pcbnew.LoadBoard(path)
+    specs = perimeter_tie_specs(board, "J1", net_names=["VDD"], margin_mm=1.0)
+    assert len(specs) == 1
+    # Direct tie: a single waypoint -- the far pad -- with no detour corners.
+    assert len(specs[0].waypoints) == 1
+    assert specs[0].waypoints[0] == pytest.approx((12.0, 1.4))
+
+
+def test_perimeter_tie_walk_is_clamped_onto_the_board(tmp_path):
+    # Power pads near the top board edge with a foreign pad between them: the
+    # unclamped walk rectangle (pad field + margin) pokes past the outline, so
+    # the old walk stamped locked copper off the board -- which hangs
+    # FreeRouting. The walk must instead be clamped inside the outline while
+    # still clearing every pad.
+    path = str(tmp_path / "b.kicad_pcb")
+    _board(
+        path,
+        (10.0, 3.0),
+        {
+            "4": ("VDD", 8.0, 1.4),
+            "5": ("CC2", 10.0, 1.4),  # foreign pad blocks the direct tie
+            "6": ("VDD", 12.0, 1.4),
+            "1": ("GND", 8.0, 9.0),
+            "2": ("GND", 10.0, 9.0),
+            "3": ("GND", 12.0, 9.0),
+        },
+    )
+    board = pcbnew.LoadBoard(path)
+    specs = perimeter_tie_specs(board, "J1", net_names=["VDD"], margin_mm=1.0)
+    assert len(specs) == 1
+    s = specs[0]
+    # It is a walk (detour corners), not a direct segment...
+    assert len(s.waypoints) > 1
+    # ...every waypoint stays on the 30x30 board...
+    assert all(0.0 <= x <= 30.0 and 0.0 <= y <= 30.0 for x, y in s.waypoints)
+    # ...and the whole path still clears every foreign pad.
+    fp = next(f for f in board.GetFootprints() if f.GetReferenceAsString() == "J1")
+    foreign = [p for p in fp.Pads() if p.GetNetname() != "VDD"]
+    start = fp.FindPadByNumber(s.pad).GetPosition()
+    points = [(pcbnew.ToMM(start.x), pcbnew.ToMM(start.y)), *s.waypoints]
+    assert all(
+        _segment_clears_pads(foreign, a, b, 0.1)
+        for a, b in zip(points, points[1:])
+    )
+
+
+def test_waypoint_spec_leaving_board_is_dropped(tmp_path):
+    # Hard invariant at the stamp choke point: locked copper outside the board
+    # outline hangs FreeRouting, so a spec with an off-board waypoint is
+    # skipped entirely -- whatever generated it.
+    path = str(tmp_path / "b.kicad_pcb")
+    _board(path, (5.0, 10.0), {"B5": ("CC2", 8.0, 10.0)})
+    res = add_breakout_stubs(
+        path, [BreakoutSpec(ref="J1", pad="B5", waypoints=[(8.0, -1.0)])]
+    )
+    assert res["stubs"] == 0
+    assert any("off_board" in s for s in res["skipped"])
+    board = pcbnew.LoadBoard(path)
+    segs = [
+        t
+        for t in board.GetTracks()
+        if isinstance(t, pcbnew.PCB_TRACK) and not isinstance(t, pcbnew.PCB_VIA)
+    ]
+    assert segs == []
+
+
 def test_auto_power_tie_detects_connector_and_skips_gnd(tmp_path):
     path = str(tmp_path / "b.kicad_pcb")
     _board(
