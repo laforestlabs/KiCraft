@@ -73,6 +73,10 @@ class Settings:
     ledger_path: Path = Path.home() / ".kicraft" / "spend_ledger.db"
     users_db_path: Path = Path.home() / ".kicraft" / "accounts.db"
     projects_dir: Path = Path.home() / ".kicraft" / "projects"
+    # Run workspaces (one tempdir per design run). A real directory, not /tmp:
+    # the standalone build worker is a separate systemd unit and PrivateTmp
+    # would hide the web app's workspaces from it.
+    work_dir: Path = Path.home() / ".kicraft" / "work"
     legal_dir: Path = _DEFAULT_LEGAL_DIR
     kill_switch: bool = False
     request_timeout_s: int = 120
@@ -146,6 +150,7 @@ class Settings:
             ledger_path=Path(os.environ.get("KICRAFT_SPEND_LEDGER", str(cls.ledger_path))),
             users_db_path=Path(os.environ.get("KICRAFT_USERS_DB", str(cls.users_db_path))),
             projects_dir=Path(os.environ.get("KICRAFT_PROJECTS_DIR", str(cls.projects_dir))),
+            work_dir=Path(os.environ.get("KICRAFT_WORK_DIR", str(cls.work_dir))),
             legal_dir=Path(os.environ.get("KICRAFT_LEGAL_DIR", str(cls.legal_dir))),
             kill_switch=_env_bool("KICRAFT_KILL_SWITCH"),
             public_url=os.environ.get(

@@ -1,0 +1,35 @@
+# Standalone deterministic-build worker for kicraft.io.
+#
+# Claims queued build_jobs rows (enqueued by kicraft-web) and runs
+# `kicraft build` in each job's workspace, so in-flight builds survive
+# kicraft-web restarts. Optional: without this unit, kicraft-web detects the
+# missing heartbeat and runs builds in-process exactly as before.
+#
+# Install (as root):
+#   cp deploy/kicraft-build-worker.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now kicraft-build-worker
+#
+# Configuration comes from /home/kicraft/KiCraft/.env (loaded by the process
+# itself via WorkingDirectory, same as kicraft-web). Relevant knobs:
+#   KICRAFT_BUILD_SLOTS      host-wide concurrent builds (default cpu//6, min 1)
+#   KICRAFT_WORK_DIR         shared workspace root (default ~/.kicraft/work);
+#                            must NOT be /tmp: PrivateTmp namespaces it per unit.
+
+[Unit]
+Description=KiCraft build worker (queued place+route jobs)
+After=network.target
+
+[Service]
+Type=simple
+User=kicraft
+WorkingDirectory=/home/kicraft/KiCraft
+ExecStart=/home/kicraft/KiCraft/.venv/bin/python -m kicraft.server.build_worker
+Restart=on-failure
+RestartSec=5
+# SIGTERM makes the worker abort + requeue its running builds before exiting.
+TimeoutStopSec=30
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

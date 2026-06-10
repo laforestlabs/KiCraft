@@ -13,6 +13,7 @@ Run locally:   KICRAFT_ACCESS_PASSWORD=secret python -m kicraft.server.web
 from __future__ import annotations
 
 import base64
+import datetime as dt
 import hashlib
 import hmac
 import json
@@ -70,6 +71,9 @@ from .session import (
     run_session,
 )
 from .spend_guard import SpendGuard
+from kicraft.build_slots import ACQUIRED_MARKER, slot_count
+
+from . import notify
 from .stage_driver import DESIGN_STAGES, KICRAFT, SLOT_MODEL
 from .stagetabs import StageTabs, demo_events
 
@@ -104,6 +108,120 @@ def _store() -> AccountStore:
         s = Settings.from_env()
         _STORE = AccountStore(s.users_db_path, s.projects_dir)
     return _STORE
+
+
+def _new_workspace(prefix: str) -> Path:
+    """A run workspace under the shared work dir (KICRAFT_WORK_DIR), NOT /tmp:
+    the standalone build worker is a separate systemd unit, and PrivateTmp would
+    hide a /tmp workspace from it. Also what lets a build survive a web restart."""
+    root = Settings.from_env().work_dir
+    root.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=root))
+
+
+def _gc_workspaces(max_age_days: float = 2.0) -> None:
+    """Drop abandoned run workspaces. Everything durable was copied into
+    projects_dir at finalize time (reopen rehydrates from there, not from the
+    workspace), so a workspace only needs to outlive its own live page session.
+    Two days bounds the disk held by .experiments trees, which dwarf the
+    durable copies."""
+    try:
+        root = Settings.from_env().work_dir
+        if not root.is_dir():
+            return
+        cutoff = time.time() - max_age_days * 86400
+        for d in root.iterdir():
+            try:
+                if d.is_dir() and d.stat().st_mtime < cutoff:
+                    shutil.rmtree(d, ignore_errors=True)
+            except OSError:
+                continue
+    except Exception:  # housekeeping must never block startup
+        pass
+
+
+# Build jobs currently driven by a live thread of THIS process; the orphan
+# reaper leaves these alone. set add/discard are atomic under the GIL.
+_ACTIVE_JOBS: set[int] = set()
+
+
+def _drain_build_log(path: Path, offset: int, remainder: str, progress) -> tuple[int, str]:
+    """Incrementally stream a worker-written build log into the event feed.
+    Returns the new (byte offset, partial-line remainder)."""
+    try:
+        with path.open("rb") as f:
+            f.seek(offset)
+            chunk = f.read()
+    except OSError:  # not created yet (job still queued) or transiently unreadable
+        return offset, remainder
+    if not chunk:
+        return offset, remainder
+    lines = (remainder + chunk.decode("utf-8", "replace")).split("\n")
+    for line in lines[:-1]:
+        progress({"kind": "build_log", "text": line.rstrip()[:500]})
+    return offset + len(chunk), lines[-1]
+
+
+def _iso_age_s(iso: str) -> float:
+    try:
+        return (dt.datetime.now(dt.timezone.utc)
+                - dt.datetime.fromisoformat(iso)).total_seconds()
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _finalize_orphan(job) -> None:
+    """Finalize a project whose driving web thread died (a restart): persist
+    whatever the build produced, close the project row, and email the owner.
+    The LLM-stage transcript is gone with the old process; the artifacts and the
+    outcome are what the user actually needs back."""
+    store = _store()
+    p = store.get_project(job.project_id)
+    if p is None or p.status != "running":
+        return
+    ws = Path(job.workspace)
+    st: dict = {"project_id": job.project_id, "user_id": job.user_id,
+                "brief": p.brief or "", "events": [], "status": None,
+                "ok": (job.status == "done" and job.rc == 0),
+                "spend": _project_spend_usd(job.project_id), "notify_force": True}
+    if st["ok"] and ws.is_dir():
+        st["stem"] = _read_project_stem(ws)
+        st["zip"] = _zip_generated(ws)
+        st["ok"] = bool(st["zip"])
+    _persist_project(ws if ws.is_dir() else None, st)
+
+
+def _orphan_reaper() -> None:
+    """Background janitor for the build queue (started once in main()):
+    - requeue jobs whose claimant process died mid-build;
+    - finalize finished jobs nobody is tailing (their web thread predates the
+      last restart), so users get their board + email instead of a project stuck
+      'running' forever;
+    - fail queued jobs that have neither a driving thread nor a live worker
+      (nothing will ever pick them up);
+    - hourly, garbage-collect aged-out run workspaces (restarts are no longer
+      the only reclaim point precisely because builds now survive them)."""
+    ticks = 0
+    while True:
+        try:
+            ticks += 1
+            if ticks % 120 == 0:  # ~hourly at the 30s cadence
+                _gc_workspaces()
+            store = _store()
+            store.requeue_stale_builds()
+            worker_up = store.build_worker_alive()
+            for job in store.list_unfinalized_builds():
+                if job.id in _ACTIVE_JOBS or job.project_id is None:
+                    continue
+                if job.status in ("done", "failed"):
+                    _finalize_orphan(job)
+                elif (job.status == "queued" and not worker_up
+                        and _iso_age_s(job.created_at) > 120):
+                    store.finish_build(job.id, rc=None, status="failed")
+                    _finalize_orphan(store.get_build_job(job.id))
+        except Exception:  # the janitor must survive any single bad row
+            pass
+        time.sleep(30)
 
 
 def _project_spend_usd(project_id) -> float | None:
@@ -148,6 +266,7 @@ def _current_user():
         for k in ("user_id", "email", "session_epoch"):
             app.storage.user.pop(k, None)
         return None
+    notify.mark_active(user.id)  # liveness for walk-away email suppression
     return user
 
 
@@ -882,8 +1001,6 @@ def _price_for_lcsc(cid: str):
     threading.Thread(target=work, daemon=True).start()
     return None
 
-    threading.Thread(target=work, daemon=True).start()
-
 
 def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | None,
                     build_lines: list[str], *, prices: dict | None = None) -> list[dict]:
@@ -1123,6 +1240,17 @@ def _persist_project(ws: Path | None, state: dict) -> None:
             store.reindex_search(pid)
         except Exception:
             pass
+        # Walk-away notification: the run just reached a state worth an email
+        # (done, failed, or parked on a question). Suppressed inside notify when
+        # the user is actively watching, unless a restart-recovery finalize
+        # forces it (nobody was watching that run's stream by definition).
+        try:
+            notify.notify_run_event(
+                store, Settings.from_env(), user_id=uid, project_id=pid,
+                status=status, brief=state.get("brief", ""),
+                skip_if_active=not state.get("notify_force"))
+        except Exception:
+            pass
 
 
 def _rehydrate_workspace(project) -> Path:
@@ -1130,7 +1258,7 @@ def _rehydrate_workspace(project) -> Path:
     fetched parts) and generated tree, so the session can resume, edit, or rebuild
     against it. Falls back to the top-level state.json for legacy projects that
     predate the saved kicraft/ tree."""
-    ws = Path(tempfile.mkdtemp(prefix="kicraft_resume_"))
+    ws = _new_workspace("kicraft_resume_")
     base = Path(project.dir_path) if project.dir_path else None
     if base and (base / "kicraft").is_dir():
         shutil.copytree(base / "kicraft", ws / ".kicraft")
@@ -1207,7 +1335,7 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
     `stages` (the stage being resumed or edited).
     """
     ws = (Path(state["ws"]) if state.get("ws")
-          else Path(tempfile.mkdtemp(prefix="kicraft_web_")))
+          else _new_workspace("kicraft_web_"))
     state["ws"] = str(ws)
     state["status"] = None  # reset; set to awaiting_input only if we park
     # Stamp every model call of this run with a stable id so the spend ledger can
@@ -1248,22 +1376,80 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
             state["project_dir"] = str(project_dir)
             state["token"] = _register_project_dir(project_dir)
 
-        def _run_build() -> int:
-            progress({"kind": "build_start"})
+        def _run_build_local(job_id: int) -> int:
+            """Execute our own (self-claimed) build job in-process: the pre-queue
+            behavior, kept as the fallback for deploys without the worker unit.
+            The 30m wall clock restarts at the slot-acquired marker so time spent
+            queued for a host build slot is not billed against the build."""
             proc = subprocess.Popen(
                 KICRAFT + ["build", ".kicraft/state.json", "generated", "--no-archive"],
                 cwd=str(ws), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1)
-            started = time.monotonic()
+            deadline = time.monotonic() + 1800
             for line in proc.stdout or []:
-                progress({"kind": "build_log", "text": line.rstrip()[:500]})
-                if time.monotonic() - started > 1800:  # hard wall-clock bound
+                text = line.rstrip()
+                progress({"kind": "build_log", "text": text[:500]})
+                if ACQUIRED_MARKER in text:
+                    deadline = time.monotonic() + 1800
+                if time.monotonic() > deadline:  # hard wall-clock bound
                     proc.kill()
                     progress({"kind": "build_log", "text": "[build exceeded 30m, killed]"})
                     break
             rc = proc.wait()
+            _store().finish_build(job_id, rc=rc)
             progress({"kind": "build_done", "ok": rc == 0})
             return rc
+
+        def _run_build() -> int:
+            """Run the deterministic build through the host build queue.
+
+            Enqueues a build_jobs row, then drives one polling state machine:
+            while 'queued' it emits queue events (position/ETA) and, when no
+            standalone worker is heartbeating, self-claims the row once it
+            reaches the queue head and a slot is free (FIFO across this process'
+            run threads via the row order); while 'running' under the worker it
+            tails the job's log file into the live event stream. A worker death
+            mid-build surfaces here as the row going back to 'queued' (the
+            reaper requeues it), which this loop simply handles again."""
+            progress({"kind": "build_start"})
+            store = _store()
+            log_path = ws / ".kicraft" / "build.log"
+            job_id = store.enqueue_build(
+                workspace=str(ws), project_id=state.get("project_id"),
+                user_id=state.get("user_id"), log_path=str(log_path))
+            _ACTIVE_JOBS.add(job_id)
+            try:
+                last_pos = None
+                offset, tail_buf = 0, ""
+                while True:
+                    job = store.get_build_job(job_id)
+                    if job is None:
+                        progress({"kind": "build_done", "ok": False})
+                        return 1
+                    offset, tail_buf = _drain_build_log(
+                        log_path, offset, tail_buf, progress)
+                    if job.status in ("done", "failed"):
+                        rc = job.rc if job.rc is not None else 1
+                        progress({"kind": "build_done", "ok": rc == 0})
+                        return rc
+                    if job.status == "queued":
+                        ahead, depth, running = store.build_queue_position(job_id)
+                        if (not store.build_worker_alive() and ahead == 0
+                                and running < max(1, slot_count())):
+                            if store.claim_build(job_id, f"pid:{os.getpid()}"):
+                                return _run_build_local(job_id)
+                            continue  # lost the claim race; re-read the row
+                        if ahead != last_pos:
+                            last_pos = ahead
+                            avg = store.avg_build_seconds()
+                            progress({"kind": "queue", "position": ahead,
+                                      "depth": depth,
+                                      "eta_s": (avg * (ahead + 1)) if avg else None})
+                    else:
+                        last_pos = None  # re-announce position if requeued later
+                    time.sleep(1.0)
+            finally:
+                _ACTIVE_JOBS.discard(job_id)
 
         rc = _run_build()
         # Bounded ERC recovery: build fails (exit 5) at the §9.12 ERC gate when the
@@ -3958,7 +4144,7 @@ def _render_landing() -> None:
 
 
 @ui.page("/")
-def index(prompt: str = ""):
+def index(prompt: str = "", project: int = 0):
     user = _current_user()
     if user is None:
         _render_landing()
@@ -4079,6 +4265,14 @@ def index(prompt: str = ""):
                 with ui.row().classes("items-center kc-arrow") as arrow_hint:
                     ui.icon("arrow_back").classes("kc-arrow-icon")
                     ui.label("click to start")
+
+        # Walk-away notifications: persisted per user; the run worker reads the
+        # stored preference at send time, so flipping it mid-run takes effect.
+        ui.checkbox("Email me when a run finishes or needs my input",
+                    value=bool(user.notify_email),
+                    on_change=lambda e: _store().set_notify_email(
+                        user.id, bool(e.value))) \
+            .props("dense size=xs").classes("text-xs").style("color:#94a3b8")
 
         def use_prompt(text: str):
             brief.value = text
@@ -4451,6 +4645,9 @@ def index(prompt: str = ""):
         design_btn.on_click(start)
 
         def render():
+            # This timer only ticks while the page's websocket is connected, so it
+            # is the "still watching" signal that suppresses walk-away emails.
+            notify.mark_active(state.get("user_id"))
             evs = state["events"]
             changed = False
             while state["rendered"] < len(evs):
@@ -4588,6 +4785,12 @@ def index(prompt: str = ""):
                                    "the Synthesize tab (red) for review.")
 
         refresh_account_ui()
+        # Deep link from notification emails: /?project=<id> reopens the user's
+        # own project (continue, answer the parked question, or download).
+        if project:
+            p = _store().get_project(int(project))
+            if p is not None and p.user_id == user.id:
+                open_project(p)
         ui.timer(0.2, render)
 
     with ui.footer().classes("justify-center py-1") \
@@ -4694,6 +4897,9 @@ def main() -> None:
             or any(c["enabled"] for c in store.list_invite_codes())):
         print("WARNING: public signup is off and no invite code exists; no one can "
               "register. Mint a code at /admin/invites or set KICRAFT_SIGNUP_CODE.")
+    _gc_workspaces()
+    # Recover builds that outlived the previous web process (see _orphan_reaper).
+    threading.Thread(target=_orphan_reaper, daemon=True).start()
     ui.run(
         host=os.environ.get("KICRAFT_WEB_HOST", "0.0.0.0"),
         port=int(os.environ.get("KICRAFT_WEB_PORT", "8080")),
