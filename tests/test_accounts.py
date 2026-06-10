@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import sqlite3
 
 import pytest
@@ -16,6 +17,7 @@ from kicraft.server.accounts import (
     grant_expiry,
     hash_password,
     is_admin,
+    new_board_code,
     verify_password,
 )
 
@@ -822,3 +824,78 @@ def test_delete_user_purges_likes_and_keeps_others(store):
     assert store.get_project(pid) is None                 # owner's project gone
     assert store.has_liked(owner.id, other_pid) is False  # owner's like cleaned up
     assert store.get_project(other_pid) is not None       # other's project intact
+
+
+# ---- board ids + support reports -------------------------------------------
+
+_BOARD_CODE_RE = re.compile(r"KC-[2-9A-HJKMNP-Z]{6}\Z")
+
+
+def test_board_code_format():
+    for _ in range(50):
+        assert _BOARD_CODE_RE.fullmatch(new_board_code())
+
+
+def test_new_projects_get_unique_board_codes(store):
+    u = store.create_user("bc@e.st", "pw")
+    p1 = store.get_project(store.create_project(u.id, "one"))
+    p2 = store.get_project(store.create_project(u.id, "two"))
+    assert _BOARD_CODE_RE.fullmatch(p1.board_code)
+    assert _BOARD_CODE_RE.fullmatch(p2.board_code)
+    assert p1.board_code != p2.board_code
+    assert {p.board_code for p in store.list_projects(u.id)} \
+        == {p1.board_code, p2.board_code}
+
+
+def test_board_code_backfilled_on_migration(tmp_path):
+    """A DB from before board ids gains a unique code on every existing project."""
+    db = tmp_path / "accounts.db"
+    with sqlite3.connect(db) as conn:  # pre-board_code projects schema
+        conn.execute(
+            "CREATE TABLE projects (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "user_id INTEGER NOT NULL, brief TEXT NOT NULL, project_stem TEXT,"
+            "status TEXT NOT NULL DEFAULT 'running', created_at TEXT NOT NULL,"
+            "finished_at TEXT, cost_usd REAL, dir_path TEXT, zip_path TEXT)")
+        for brief in ("old one", "old two"):
+            conn.execute(
+                "INSERT INTO projects (user_id, brief, status, created_at) "
+                "VALUES (1, ?, 'failed', '2026-01-01T00:00:00+00:00')", (brief,))
+    store = AccountStore(db, tmp_path / "projects")  # migrates + backfills
+    codes = [p.board_code for p in store.list_projects(1)]
+    assert len(codes) == 2 and len(set(codes)) == 2
+    assert all(_BOARD_CODE_RE.fullmatch(c) for c in codes)
+    reopened = AccountStore(db, tmp_path / "projects")  # idempotent: codes stable
+    assert [p.board_code for p in reopened.list_projects(1)] == codes
+
+
+def test_support_report_roundtrip(store):
+    u = store.create_user("sup@e.st", "pw")
+    pid = store.create_project(u.id, "blinky")
+    p = store.get_project(pid)
+    rid = store.create_support_report(
+        user_id=u.id, project_id=pid, board_code=p.board_code,
+        kind="error_auto", diagnostics={"build_log_tail": ["boom"]})
+    new = store.list_support_reports(status="new")
+    assert [r.id for r in new] == [rid]
+    r = new[0]
+    assert r.kind == "error_auto" and r.status == "new"
+    assert r.board_code == p.board_code and r.project_id == pid
+    assert r.message is None
+    assert r.diagnostics == {"build_log_tail": ["boom"]}
+    store.set_support_report_message(rid, "it broke while routing")
+    assert store.list_support_reports()[0].message == "it broke while routing"
+    store.set_support_report_status(rid, "reviewed")
+    assert store.list_support_reports(status="new") == []
+    assert store.list_support_reports(status="reviewed")[0].id == rid
+
+
+def test_support_reports_exported_and_purged_with_user(store):
+    u = store.create_user("priv@e.st", "pw")
+    other = store.create_user("other@e.st", "pw")
+    rid = store.create_support_report(user_id=u.id, kind="user", message="help")
+    other_rid = store.create_support_report(user_id=other.id, kind="user")
+    data = store.export_user(u.id)
+    assert [r["id"] for r in data["support_reports"]] == [rid]
+    store.delete_user(u.id)
+    remaining = store.list_support_reports()
+    assert [r.id for r in remaining] == [other_rid]  # other users' reports intact
