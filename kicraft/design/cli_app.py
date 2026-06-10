@@ -1870,6 +1870,20 @@ def _cmd_build(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 6
 
+    # 2..5 saturate the host (parallel leaf solvers + FreeRouting JVMs), so they
+    # run under a host-wide build slot; the wait line below is the queue signal
+    # callers (build worker, web log tail) key their timeouts and UI off.
+    from kicraft.build_slots import build_slot
+
+    with build_slot(echo=lambda line: print(line, flush=True)):
+        return _layout_route_fab(args, state, state_path, artifacts, results,
+                                 stem, project_dir, root_sch, pcb)
+
+
+def _layout_route_fab(args, state, state_path, artifacts, results,
+                      stem: str, project_dir: Path, root_sch: Path, pcb: Path) -> int:
+    """The heavy tail of `build` (place+route, verify gate, fab export, archive),
+    split out so _cmd_build can hold a host-wide build slot across exactly this."""
     # 2. Optimize placement + route (leaves then parent) via the layout engine.
     print(f"[build] 2/5 place + route (quality={args.quality}) -- may take minutes ...")
     rc = _run_layout(args.quality, root_sch, pcb)

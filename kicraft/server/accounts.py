@@ -74,6 +74,30 @@ def _utcnow_iso() -> str:
     return _utcnow().isoformat()
 
 
+def _claimant_pid(claimed_by: str | None) -> int | None:
+    """Parse the pid out of a build job's 'pid:<n>' claimant tag."""
+    if claimed_by and claimed_by.startswith("pid:"):
+        try:
+            return int(claimed_by.split(":")[1])
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
+def _pid_alive(pid: int | None) -> bool:
+    """Conservative liveness: an unparseable claimant reads as alive, so a tag
+    format change can never mass-requeue builds that are actually running."""
+    if pid is None:
+        return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # exists, owned by someone else
+        return True
+
+
 # Invite codes: human-typeable, so the charset is strict (no whitespace or
 # lookalike punctuation to mistype) and matching is case-insensitive (the column
 # is COLLATE NOCASE -- 'freemax' redeems 'FREEMAX').
@@ -137,6 +161,32 @@ class User:
     # expiry. Enforced lazily on read (see _downgrade_if_expired); a manual
     # set_tier clears it.
     tier_expires_at: str | None = None
+    # Email the user when a design run finishes or parks on a question, so they
+    # can walk away from a multi-minute (possibly queued) build. Suppressed when
+    # the user is actively watching (see kicraft.server.notify).
+    notify_email: bool = True
+
+
+@dataclass
+class BuildJob:
+    """One queued/running deterministic build (the heavy place+route phase).
+
+    The row is the cross-process protocol between the web app (which enqueues
+    and tails) and the build worker (which claims and executes); see
+    kicraft.server.build_worker. `claimed_by` is "pid:<pid>" of the claimant so
+    a restarted worker can detect and requeue orphans of a dead predecessor."""
+    id: int
+    project_id: int | None
+    user_id: int | None
+    workspace: str
+    status: str  # queued | running | done | failed
+    created_at: str
+    rc: int | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    attempts: int = 0
+    claimed_by: str | None = None
+    log_path: str | None = None
 
 
 @dataclass
@@ -235,7 +285,8 @@ class AccountStore:
                 "accepted_terms_at TEXT,"
                 "allow_training INTEGER NOT NULL DEFAULT 1,"
                 "session_epoch INTEGER NOT NULL DEFAULT 0,"
-                "tier_expires_at TEXT)"
+                "tier_expires_at TEXT,"
+                "notify_email INTEGER NOT NULL DEFAULT 1)"
             )
             self._ensure_columns(conn)
             conn.execute(
@@ -298,6 +349,28 @@ class AccountStore:
                 "CREATE INDEX IF NOT EXISTS idx_projects_user_created "
                 "ON projects(user_id, created_at)"
             )
+            # FIFO queue of deterministic builds (see BuildJob). Shared by the web
+            # app and the standalone build worker, so it lives here with the rest
+            # of the cross-process state rather than in web-process memory.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS build_jobs ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "project_id INTEGER,"
+                "user_id INTEGER,"
+                "workspace TEXT NOT NULL,"
+                "status TEXT NOT NULL DEFAULT 'queued',"
+                "rc INTEGER,"
+                "created_at TEXT NOT NULL,"
+                "started_at TEXT,"
+                "finished_at TEXT,"
+                "attempts INTEGER NOT NULL DEFAULT 0,"
+                "claimed_by TEXT,"
+                "log_path TEXT)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_build_jobs_status "
+                "ON build_jobs(status, id)"
+            )
             # Per-user dedup of likes; the count is denormalized onto
             # projects.like_count and kept in sync inside toggle_like's txn.
             conn.execute(
@@ -352,6 +425,9 @@ class AccountStore:
         if "tier_expires_at" not in cols:
             # NULL = no expiry, so every pre-existing tier persists unchanged.
             conn.execute("ALTER TABLE users ADD COLUMN tier_expires_at TEXT")
+        if "notify_email" not in cols:
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN notify_email INTEGER NOT NULL DEFAULT 1")
         if "role" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
             # One-time backfill: the retired 'admin' billing tier becomes the admin
@@ -436,7 +512,8 @@ class AccountStore:
                     accepted_terms_at=row["accepted_terms_at"],
                     allow_training=bool(row["allow_training"]),
                     session_epoch=int(row["session_epoch"]),
-                    tier_expires_at=row["tier_expires_at"])
+                    tier_expires_at=row["tier_expires_at"],
+                    notify_email=bool(row["notify_email"]))
 
     def _downgrade_if_expired(self, conn: sqlite3.Connection,
                               row: sqlite3.Row | None) -> sqlite3.Row | None:
@@ -1190,6 +1267,161 @@ class AccountStore:
             conn.execute(
                 "UPDATE invite_codes SET use_count=use_count+1, last_used_at=? "
                 "WHERE id=?", (_utcnow_iso(), code_id))
+
+    # ---- build queue ---------------------------------------------------------
+    # Cross-process FIFO of deterministic builds. The web app enqueues one row per
+    # build and tails its log; the standalone worker (kicraft.server.build_worker)
+    # claims and executes rows, or the web thread self-claims its own row when no
+    # worker is alive (single-service deploys keep working unchanged). All claims
+    # go through one guarded UPDATE, so a row can never run twice.
+
+    _WORKER_HEARTBEAT_KEY = "build_worker_heartbeat"
+
+    @staticmethod
+    def _row_to_build_job(row: sqlite3.Row) -> BuildJob:
+        return BuildJob(id=row["id"], project_id=row["project_id"],
+                        user_id=row["user_id"], workspace=row["workspace"],
+                        status=row["status"], rc=row["rc"],
+                        created_at=row["created_at"], started_at=row["started_at"],
+                        finished_at=row["finished_at"], attempts=row["attempts"],
+                        claimed_by=row["claimed_by"], log_path=row["log_path"])
+
+    def enqueue_build(self, *, workspace: str, project_id: int | None = None,
+                      user_id: int | None = None, log_path: str | None = None) -> int:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO build_jobs (project_id, user_id, workspace, status, "
+                "created_at, log_path) VALUES (?, ?, ?, 'queued', ?, ?)",
+                (project_id, user_id, workspace, _utcnow_iso(), log_path))
+            return int(cur.lastrowid)
+
+    def get_build_job(self, job_id: int) -> BuildJob | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM build_jobs WHERE id=?",
+                               (job_id,)).fetchone()
+        return self._row_to_build_job(row) if row else None
+
+    def claim_build(self, job_id: int, claimed_by: str) -> bool:
+        """Atomically move one specific queued job to running. The status guard in
+        the WHERE makes concurrent claimants (worker vs web fallback) safe: exactly
+        one UPDATE matches."""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE build_jobs SET status='running', started_at=?, "
+                "claimed_by=?, attempts=attempts+1 WHERE id=? AND status='queued'",
+                (_utcnow_iso(), claimed_by, job_id))
+            return cur.rowcount == 1
+
+    def claim_next_build(self, claimed_by: str) -> BuildJob | None:
+        """Claim the oldest queued job (FIFO), or None when the queue is empty."""
+        while True:
+            with self._conn() as conn:
+                row = conn.execute("SELECT id FROM build_jobs WHERE status='queued' "
+                                   "ORDER BY id LIMIT 1").fetchone()
+            if row is None:
+                return None
+            if self.claim_build(int(row["id"]), claimed_by):
+                return self.get_build_job(int(row["id"]))
+            # Lost the race for that row; the next loop sees the new queue head.
+
+    def finish_build(self, job_id: int, *, rc: int | None,
+                     status: str = "done") -> None:
+        """`done` = the build process ran to an exit code (rc, any value);
+        `failed` = it could not run at all (missing workspace, attempts
+        exhausted, aborted by a worker shutdown)."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE build_jobs SET status=?, rc=?, finished_at=? WHERE id=?",
+                (status, rc, _utcnow_iso(), job_id))
+
+    def requeue_build(self, job_id: int) -> None:
+        """Put a claimed-but-aborted job back at its queue position (id order)."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE build_jobs SET status='queued', claimed_by=NULL, "
+                "started_at=NULL WHERE id=? AND status='running'", (job_id,))
+
+    def build_queue_position(self, job_id: int) -> tuple[int, int, int]:
+        """(jobs queued ahead of `job_id`, total queued, running) for the UI."""
+        with self._conn() as conn:
+            ahead = conn.execute(
+                "SELECT COUNT(*) FROM build_jobs WHERE status='queued' AND id<?",
+                (job_id,)).fetchone()[0]
+            depth = conn.execute(
+                "SELECT COUNT(*) FROM build_jobs WHERE status='queued'").fetchone()[0]
+            running = conn.execute(
+                "SELECT COUNT(*) FROM build_jobs WHERE status='running'").fetchone()[0]
+        return int(ahead), int(depth), int(running)
+
+    def list_unfinalized_builds(self) -> list[BuildJob]:
+        """Jobs whose owning project is still 'running' but which no longer have
+        (or may not have) a live driving thread: finished ones to finalize, and
+        queued ones to fail when nothing will ever execute them. Consumed by the
+        web app's orphan reaper after a restart."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT b.* FROM build_jobs b JOIN projects p ON p.id=b.project_id "
+                "WHERE p.status='running' AND b.status IN ('done','failed','queued') "
+                "ORDER BY b.id").fetchall()
+        return [self._row_to_build_job(r) for r in rows]
+
+    def count_running_builds(self) -> int:
+        with self._conn() as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM build_jobs "
+                                    "WHERE status='running'").fetchone()[0])
+
+    def avg_build_seconds(self, last_n: int = 5) -> float | None:
+        """Rolling mean wall-clock of the last completed builds, for queue ETAs.
+        None until one build has completed (callers show no estimate)."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT AVG((julianday(finished_at) - julianday(started_at)) * 86400.0) "
+                "FROM (SELECT started_at, finished_at FROM build_jobs "
+                "      WHERE status='done' AND started_at IS NOT NULL "
+                "      ORDER BY id DESC LIMIT ?)", (last_n,)).fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+
+    def requeue_stale_builds(self, *, max_attempts: int = 2) -> int:
+        """Recover 'running' rows whose claimant process is dead (crashed web or
+        worker): requeue them, or fail them once they have burned `max_attempts`
+        claims. Same-host pid checks only, which matches the single-box deploy.
+        Returns how many rows changed."""
+        changed = 0
+        with self._conn() as conn:
+            rows = conn.execute("SELECT id, attempts, claimed_by FROM build_jobs "
+                                "WHERE status='running'").fetchall()
+        for r in rows:
+            if _pid_alive(_claimant_pid(r["claimed_by"])):
+                continue
+            if int(r["attempts"]) >= max_attempts:
+                self.finish_build(int(r["id"]), rc=None, status="failed")
+            else:
+                self.requeue_build(int(r["id"]))
+            changed += 1
+        return changed
+
+    def beat_build_worker(self) -> None:
+        self.set_setting(self._WORKER_HEARTBEAT_KEY, _utcnow_iso())
+
+    def build_worker_alive(self, max_age_s: float = 15.0) -> bool:
+        """Whether a standalone build worker heartbeated recently. Stale or absent
+        -> the web falls back to running builds in-process, so a deploy without
+        the worker unit behaves exactly as before this feature."""
+        raw = self.get_setting(self._WORKER_HEARTBEAT_KEY)
+        if not raw:
+            return False
+        try:
+            beat = dt.datetime.fromisoformat(raw)
+        except ValueError:
+            return False
+        return (_utcnow() - beat).total_seconds() <= max_age_s
+
+    # ---- notification preference --------------------------------------------
+
+    def set_notify_email(self, user_id: int, enabled: bool) -> None:
+        with self._conn() as conn:
+            conn.execute("UPDATE users SET notify_email=? WHERE id=?",
+                         (1 if enabled else 0, user_id))
 
     # ---- site settings ------------------------------------------------------
 

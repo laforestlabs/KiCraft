@@ -22,7 +22,7 @@ supplied separately via ``set_inspector(stage, spec)`` (the page reads
 Event kinds handled (shapes unchanged from the agent loop):
   stage_start{stage} reasoning_delta{text} answer_delta{text} tool{name,args}
   tool_result{output} retry{stage,errors} stage_done{stage,ok,cost}
-  build_start build_log{text} build_done{ok}
+  build_start queue{position,depth,eta_s} build_log{text} build_done{ok}
 Both ``reasoning_delta`` (the model's reasoning channel) and ``answer_delta`` (its
 content draft) stream into the Thinking window so it fills live even for models /
 tool-free stages that only emit content; the committed result still lands,
@@ -266,6 +266,19 @@ class StagePanel:
             ui.label(head).classes("text-xs font-mono").style(f"color:{self.accent}")
             self._live = ui.label("streaming…").classes("text-xs font-mono") \
                 .style(f"color:{_DIMMER}")
+
+    def set_queued(self, position: int, depth: int, eta_s=None) -> None:
+        """Queue pill: the run's deterministic build is waiting for a host build
+        slot (other users' builds are ahead). Replaced by the normal running
+        spinner as soon as the first build log line lands."""
+        self._status_slot.clear()
+        with self._status_slot:
+            ui.spinner("hourglass", size="sm").style(f"color:{_DIM}")
+            msg = ("Queued: next up" if position <= 0
+                   else f"Queued: {position} build{'s' if position != 1 else ''} ahead")
+            if isinstance(eta_s, (int, float)) and eta_s > 0:
+                msg += f" · est. ~{max(1, round(eta_s / 60))} min"
+            ui.label(msg).classes("text-xs").style(f"color:{_DIM}")
 
     def set_status(self, ok: bool, cost=None, attempts=None) -> None:
         self._status_slot.clear()
@@ -651,6 +664,12 @@ class StageTabs:
                          e.get("cost"), e.get("attempts"))
         elif k == "build_start":
             self._set_current("synthesize")
+        elif k == "queue":
+            # The whole deterministic build is parked in the host build queue;
+            # surface position/ETA on the tab build_start just activated.
+            self._set_current("synthesize")
+            self.panels["synthesize"].set_queued(
+                int(e.get("position") or 0), int(e.get("depth") or 0), e.get("eta_s"))
         elif k == "build_log":
             sub = _build_substage(e.get("text", ""))
             if sub and sub != self._current:
