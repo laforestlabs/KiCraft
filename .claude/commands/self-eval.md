@@ -1,6 +1,6 @@
 ---
 description: Self-eval regression loop — drive every curated example brief (examples.py EXAMPLE_PROMPTS) end to end, auto-answering any clarifying questions, then grade each with the kicraft.eval rubric and compile a saved report.
-argument-hint: "[--limit N | --only 1,3,5 | --no-judge | --judge-model M | --build-timeout S] (optional; default: all briefs, full A–F judge)"
+argument-hint: "[--limit N | --only 1,3,5 | --no-judge | --judge-model M | --build-timeout S | --parallel N | --build-slots M | --resume DIR] (optional; default: all briefs, full A–F judge)"
 ---
 
 Run the KiCraft **self-eval** loop: for every brief in `EXAMPLE_PROMPTS`
@@ -13,9 +13,13 @@ command runs it and interprets the results. Extra flags: `$ARGUMENTS`.
 
 > **Cost & time.** This drives real LLM pipelines (BOM part-resolution dominates
 > the spend) plus a deterministic place-and-route per board, so the default run
-> (9 briefs, judge on) takes **many minutes** and **spends real money** via the
+> (9 briefs, judge on) takes **~1 hour** and **spends real money** via the
 > capped OpenRouter client. The client's spend guard still caps the day. For a
 > fast smoke test, pass `--limit 1`; to skip the judge spend, `--no-judge`.
+>
+> The harness itself defaults to `--parallel 3 --build-slots 2` (briefs overlap;
+> at most 2 routing JVMs at once) — no flags needed. Pass `--parallel 1` only
+> when a strictly sequential baseline run is explicitly wanted.
 
 ## 1. Launch the batch (background — it outlives a single turn)
 
@@ -40,8 +44,11 @@ Then start the harness **in the background** (set the Bash tool's
 Tell the user it is running, name `<OUT>`, and note you'll report when it
 finishes. While it runs you may peek with `tail -n 30 "<OUT>/run.log"` — each
 brief prints a `grade=… final=… build=…` line as it completes. The harness
-writes `summary.json` + `summary.md` only at the very end, so treat the existence
-of `<OUT>/summary.json` as "done."
+checkpoints `summary.json` after **every** brief (live progress, and what
+`--resume <OUT>` reads to finish an interrupted batch), so its existence does
+NOT mean "done" — the run is finished only when `summary.json` has top-level
+`finished_at`/`wall_s` keys (written at the very end) or the background process
+has exited.
 
 ## 2. Present the compiled report
 
