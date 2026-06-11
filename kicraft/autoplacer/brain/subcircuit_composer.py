@@ -1681,18 +1681,50 @@ def _extract_blockers_from_pcb(
             edge_reference_points[ref] = edge_marker
 
     board_edges = board.GetBoardEdgesBoundingBox()
+    outline_rect = _bbox_to_rect(board_edges)
+
+    # Re-base every PCB-derived rect into the canonical leaf-local frame
+    # (Edge.Cuts top-left at (0,0)). solved_layout.json is serialized
+    # re-based (solve_subcircuits.round_to_layout) while the mini PCB file
+    # stays page-centered; consumers mix these rects with layout-frame
+    # geometry and solver placement origins, so page-frame rects here shift
+    # every derived constraint anchor by the page offset -- the edge-snap
+    # in the final-outline computation then stretches the parent board to
+    # the phantom anchor (~3x-wide boards with one bare-FR4 side).
+    shift_x = outline_rect[0].x
+    shift_y = outline_rect[0].y
+    if board_edges.GetWidth() <= 0 and board_edges.GetHeight() <= 0:
+        shift_x = 0.0
+        shift_y = 0.0
+
+    def _rebase_rect(rect: tuple[Point, Point]) -> tuple[Point, Point]:
+        return (
+            Point(rect[0].x - shift_x, rect[0].y - shift_y),
+            Point(rect[1].x - shift_x, rect[1].y - shift_y),
+        )
+
+    def _rebase_rects(
+        rects: tuple[tuple[Point, Point], ...],
+    ) -> tuple[tuple[Point, Point], ...]:
+        return tuple(_rebase_rect(rect) for rect in rects)
 
     return LeafBlockerSet(
-        front_pads=_coalesce_rects(front_pads),
-        back_pads=_coalesce_rects(back_pads),
-        tht_drills=_coalesce_rects(tht_drills),
-        leaf_outline=_bbox_to_rect(board_edges),
+        front_pads=_rebase_rects(_coalesce_rects(front_pads)),
+        back_pads=_rebase_rects(_coalesce_rects(back_pads)),
+        tht_drills=_rebase_rects(_coalesce_rects(tht_drills)),
+        leaf_outline=_rebase_rect(outline_rect),
+        # Trace rects come from artifact.layout (already leaf-local).
         front_traces=_coalesce_rects(front_traces),
         back_traces=_coalesce_rects(back_traces),
-        front_tht_pads=_coalesce_rects(front_tht_pads),
-        back_tht_pads=_coalesce_rects(back_tht_pads),
-        component_rects=component_rects,
-        edge_reference_points=edge_reference_points,
+        front_tht_pads=_rebase_rects(_coalesce_rects(front_tht_pads)),
+        back_tht_pads=_rebase_rects(_coalesce_rects(back_tht_pads)),
+        component_rects={
+            ref: _rebase_rect(rect) for ref, rect in component_rects.items()
+        },
+        edge_reference_points={
+            ref: Point(point.x - shift_x, point.y - shift_y)
+            for ref, point in edge_reference_points.items()
+        },
     )
 
 

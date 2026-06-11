@@ -259,6 +259,8 @@ def test_opposing_power_stubs_of_two_rails_never_meet() -> None:
         _route_power,
     )
 
+    from kicraft.design.synthesis.router import _pt_on_axis_seg
+
     routed = RoutedSheet()
     gnd = _Endpoint(x=10.0, y=10.0, exit="right", ref="U1", pin="1")
     vbus = _Endpoint(x=10.0 + 2 * GRID_MM, y=10.0, exit="left", ref="J1", pin="1")
@@ -266,9 +268,15 @@ def test_opposing_power_stubs_of_two_rails_never_meet() -> None:
     power_stubs: list = []
     _route_power(routed, "GND", [gnd], frozenset(), all_pins, power_stubs)
     _route_power(routed, "VBUS", [vbus], frozenset(), all_pins, power_stubs)
-    assert len(routed.wires) == 2
-    gnd_end = routed.wires[0].x2_mm
-    vbus_end = routed.wires[1].x2_mm
-    assert gnd_end == pytest.approx(10.0 + GRID_MM)
-    # The VBUS stub stopped short of the GND stub's end.
-    assert vbus_end > gnd_end + 0.5
+    # Horizontal exits now elbow so the symbols stand upright; segment
+    # counts are an implementation detail. The safety property is what
+    # matters: no segment of one rail touches any segment of the other.
+    gnd_segs = [s for (net, *s) in power_stubs if net == "GND"]
+    vbus_segs = [s for (net, *s) in power_stubs if net == "VBUS"]
+    assert gnd_segs and vbus_segs
+    for (ax1, ay1, ax2, ay2) in gnd_segs:
+        for (bx1, by1, bx2, by2) in vbus_segs:
+            for (px, py) in ((ax1, ay1), (ax2, ay2)):
+                assert not _pt_on_axis_seg(px, py, bx1, by1, bx2, by2)
+            for (px, py) in ((bx1, by1), (bx2, by2)):
+                assert not _pt_on_axis_seg(px, py, ax1, ay1, ax2, ay2)
