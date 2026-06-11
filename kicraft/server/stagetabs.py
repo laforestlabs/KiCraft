@@ -60,6 +60,7 @@ _DIMMER = "#64748b"    # slate-500, tertiary / glyphs
 _STATUS_COLOR = {
     "pending": "#64748b",
     "active": "#fbbf24",
+    "parked": "#fbbf24",   # waiting on the user's answer (amber, like active)
     "done": "#34d399",
     "failed": "#f87171",
 }
@@ -297,6 +298,19 @@ class StagePanel:
             self._live.set_text(self._live_text(done=True, ok=ok, cost=cost, attempts=attempts))
             self._live.style(f"color:{_OK if ok else _FAIL}")
 
+    def set_parked(self) -> None:
+        """Pill for a stage parked on a clarifying question: nothing is running,
+        the user owes an answer (a live park or a reopened parked project)."""
+        self._status_slot.clear()
+        with self._status_slot:
+            ui.icon("help").style("color:#fbbf24;font-size:1.1rem")
+            ui.label("waiting for your answer").classes("text-xs").style("color:#fbbf24")
+
+    def set_pending(self) -> None:
+        """Drop any result pill: the stage's outcome was invalidated (an upstream
+        edit cleared its slot) and it has not run again yet."""
+        self._status_slot.clear()
+
     def _live_text(self, done=False, ok=True, cost=None, attempts=None) -> str:
         elapsed = (time.monotonic() - self._t0) if self._t0 else 0.0
         head = ("✓ committed" if ok else "✗ failed") if done else "streaming"
@@ -444,7 +458,8 @@ class StagePanel:
         if not sections:
             if self._draft_buf and not self._committed:
                 return
-            self._insp.clear()
+            self._committed = False  # slot cleared (an upstream edit): a new
+            self._insp.clear()       # run's draft may own the pane again
             with self._insp:
                 ui.label("No data committed for this stage yet.") \
                     .classes("text-xs italic").style(f"color:{_DIMMER}")
@@ -662,6 +677,15 @@ class StageTabs:
         elif k == "stage_done":
             self._finish(e.get("stage") or self._current, bool(e.get("ok")),
                          e.get("cost"), e.get("attempts"))
+        elif k == "question":
+            # The stage parked on a clarifying question: stop the spinner, say
+            # the run is waiting on the user (it is not failed, not running).
+            stg = e.get("stage") or self._current
+            p = self.panels.get(stg)
+            if p is not None:
+                p.end_runs()
+                p.set_parked()
+                self._set_tab_status(stg, "parked")
         elif k == "build_start":
             self._set_current("synthesize")
         elif k == "queue":
@@ -715,6 +739,41 @@ class StageTabs:
     def active(self) -> str | None:
         """The currently selected tab key."""
         return self.tabs.value
+
+    def set_statuses(self, statuses: dict[str, str],
+                     stage_status: dict | None = None) -> None:
+        """Paint each tab's durable status on a reopened (or edited) project:
+        the tab color plus the panel's result pill. `statuses` comes from
+        session.derive_stage_statuses; `stage_status` is state.json's persisted
+        per-stage outcome block, read for the done pill's cost/attempts. Live
+        streaming events layered on top afterwards win (mark_running and
+        _finish each repaint the same status slot)."""
+        meta = stage_status or {}
+        for key, st in statuses.items():
+            p = self.panels.get(key)
+            if p is None or st not in _STATUS_COLOR:
+                continue
+            self._set_tab_status(key, st)
+            e = meta.get(key) if isinstance(meta.get(key), dict) else {}
+            if st == "done":
+                p.set_status(True, cost=e.get("cost_usd"), attempts=e.get("attempts"))
+            elif st == "failed":
+                p.set_status(False)
+            elif st == "parked":
+                p.set_parked()
+            elif st == "pending":
+                p.set_pending()
+
+    def reset_stage(self, key: str) -> None:
+        """Clear ONE phase back to a pending placeholder (its data was
+        invalidated by an upstream edit and it will re-run)."""
+        p = self.panels.get(key)
+        if p is None:
+            return
+        p.clear()
+        self._set_tab_status(key, "pending")
+        if self._current == key:
+            self._current = None
 
     def reset(self) -> None:
         self._current = None

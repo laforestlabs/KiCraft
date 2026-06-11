@@ -18,6 +18,11 @@ from pathlib import Path
 
 from .stage_driver import DESIGN_STAGES, drive_chain
 
+# The deterministic build sub-phases, in pipeline order after DESIGN_STAGES.
+# Their status is always derived from artifacts (sheets / board / fab zip), never
+# persisted: artifacts cannot go stale against themselves.
+BUILD_PHASES = ("synthesize", "place_route", "fab")
+
 
 def _stage_done(stage: str, state: dict) -> bool:
     """Whether `stage`'s contribution to the state is already present. wiring is
@@ -36,6 +41,54 @@ def remaining_stages(state: dict) -> list[str]:
         if not _stage_done(stage, state):
             return stages[i:]
     return []
+
+
+def derive_stage_statuses(state: dict, *, project_status: str | None = None,
+                          sheets_exist: bool = False,
+                          synth_checks_failed: bool = False,
+                          pcb_ready: bool = False,
+                          zip_ok: bool = False) -> dict[str, str]:
+    """Map every pipeline phase to its durable status, for restoring the GUI's
+    stage tabs on a reopened project: 'pending' | 'parked' | 'done' | 'failed'.
+
+    Design stages read the persisted stage_status block (written by the stage
+    driver at commit/fail time), falling back to slot presence for legacy
+    projects that predate it. An unanswered open question marks its stage
+    'parked'. The build phases are derived from artifact signals the caller
+    reads from the workspace, gated on the design being complete so leftover
+    artifacts from a build that predates an edit don't count. 'active' is never
+    produced here: only a live event stream knows a stage is running.
+    """
+    ss = state.get("stage_status") or {}
+    out: dict[str, str] = {}
+    for s in DESIGN_STAGES:
+        e = ss.get(s)
+        if isinstance(e, dict) and e.get("ok") is True:
+            out[s] = "done"
+        elif isinstance(e, dict) and e.get("ok") is False:
+            out[s] = "failed"
+        elif _stage_done(s, state):
+            out[s] = "done"  # legacy project predating stage_status
+        else:
+            out[s] = "pending"
+    for q in state.get("open_questions") or []:
+        s = q.get("stage")
+        if not q.get("answer") and out.get(s) not in (None, "done"):
+            out[s] = "parked"
+
+    design_complete = all(out[s] == "done" for s in DESIGN_STAGES)
+    failed = project_status == "failed"
+    synth_ok = design_complete and sheets_exist and not synth_checks_failed
+    out["synthesize"] = ("done" if synth_ok
+                         else "failed" if design_complete and failed
+                         else "pending")
+    out["place_route"] = ("done" if design_complete and pcb_ready
+                          else "failed" if synth_ok and failed
+                          else "pending")
+    out["fab"] = ("done" if design_complete and zip_ok
+                  else "failed" if design_complete and pcb_ready and failed
+                  else "pending")
+    return out
 
 
 def downstream_stages(stage: str) -> list[str]:
@@ -58,9 +111,12 @@ def read_state(ws) -> dict:
 def commit_slot(ws, stage: str, slot: dict, brief: str = "", project_stem=None):
     """Commit an edited slot to the workspace state.json via the deterministic CLI
     (which re-validates it). Returns (ok, out); out carries `errors` on rejection."""
-    from .stage_driver import _commit  # deterministic stage-commit wrapper
+    from .stage_driver import _commit, _stamp_stage_status
     state_path = Path(ws) / ".kicraft" / "state.json"
-    return _commit(stage, dict(slot), state_path, brief, project_stem, Path(ws))
+    ok, out = _commit(stage, dict(slot), state_path, brief, project_stem, Path(ws))
+    if ok:  # a manual edit is a zero-cost commit; the stage is (re)done
+        _stamp_stage_status(state_path, stage, True)
+    return ok, out
 
 
 def record_answers(ws, stage: str, answers: list[dict]) -> None:
@@ -91,6 +147,9 @@ def null_downstream(ws, stage: str) -> list[str]:
                 bom["no_connect_pins"] = []
         else:
             sj[s] = None
+        ss = sj.get("stage_status")
+        if isinstance(ss, dict):  # the stage's recorded outcome is stale too
+            ss.pop(s, None)
     sj["open_questions"] = [q for q in (sj.get("open_questions") or [])
                             if q.get("stage") not in cleared]
     state_path.write_text(json.dumps(sj, indent=2) + "\n", encoding="utf-8")

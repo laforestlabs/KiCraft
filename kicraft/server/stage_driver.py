@@ -16,6 +16,7 @@ footprints (or fetches them from LCSC) instead of guessing.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import re
@@ -290,6 +291,34 @@ def _commit(stage, slot, state_path, brief, project_stem=None, workspace=None) -
     return (proc.returncode == 0 and bool(out.get("ok"))), out
 
 
+def _stamp_stage_status(state_path, stage: str, ok: bool, *,
+                        cost_usd=None, attempts=None) -> None:
+    """Record a stage's durable outcome in state.json's stage_status block (a real
+    ConversationState field, so the CLI's load/validate/dump round-trip preserves
+    it). This is what lets a reopened project restore its pipeline progress
+    without the ephemeral event stream. Tolerates a missing state.json (a
+    first-stage failure before any commit). Atomic write: the web render timer
+    reads this file concurrently."""
+    p = Path(state_path)
+    try:
+        sj = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        sj = {}
+    entry: dict = {"ok": bool(ok),
+                   "finished_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+    if cost_usd is not None:
+        entry["cost_usd"] = round(float(cost_usd), 6)
+    if attempts is not None:
+        entry["attempts"] = int(attempts)
+    block = sj.get("stage_status") or {}
+    block[stage] = entry
+    sj["stage_status"] = block
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(sj, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, p)
+
+
 # Per-stage self-correction budget. Wiring must satisfy whole-board net coverage
 # (§9.11) in a single slot; on a complex board the model needs more correction
 # passes than the simpler, smaller-slot stages, so they floor higher (BOM must
@@ -383,6 +412,7 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
     prep = _run(KICRAFT + ["stage-prep", stage, str(state_path)], workspace)
     if prep.returncode != 0:
         err = (prep.stderr.strip() or prep.stdout.strip())[:600]
+        _stamp_stage_status(state_path, stage, False)
         if progress:
             progress({"kind": "stage_done", "stage": stage, "ok": False})
         return {"stage": stage, "commit_ok": False, "cost_usd": 0.0,
@@ -390,8 +420,11 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
     prep_json = json.loads(prep.stdout)
     extras = prep_json.get("extras") or {}
 
+    # Bookkeeping the model has no use for stays out of its prompt.
+    prompt_state = dict(prep_json["state"])
+    prompt_state.pop("stage_status", None)
     user = (f"PROJECT BRIEF:\n{brief}\n\n"
-            f"CURRENT DESIGN STATE (JSON):\n{json.dumps(prep_json['state'])}")
+            f"CURRENT DESIGN STATE (JSON):\n{json.dumps(prompt_state)}")
     if extras:
         budget = 40000 if stage == "wiring" else 24000
         user += f"\n\nSTAGE EXTRAS (reference data from stage-prep):\n{json.dumps(extras)[:budget]}"
@@ -469,6 +502,8 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         project_stem = obj.pop("project_stem", None)
         ok, out = _commit(stage, dict(obj), state_path, brief, project_stem, workspace)
         if ok:
+            _stamp_stage_status(state_path, stage, True,
+                                cost_usd=total_cost, attempts=attempt + 1)
             if progress:
                 progress({"kind": "stage_done", "stage": stage, "ok": True,
                           "cost": total_cost, "attempts": attempt + 1})
@@ -481,6 +516,8 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
                       "offenders": out.get("offenders")})
         messages.append({"role": "user", "content": _retry_feedback(out)})
 
+    _stamp_stage_status(state_path, stage, False,
+                        cost_usd=total_cost, attempts=max_retries + 1)
     if progress:
         progress({"kind": "stage_done", "stage": stage, "ok": False, "cost": total_cost})
     return {"stage": stage, "commit_ok": False, "cost_usd": total_cost,
