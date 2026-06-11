@@ -2944,6 +2944,46 @@ def _route_parent_board(
             # web that saturates F.Cu and blocks signal interconnects.
             strip_net_copper(str(stamped_pcb), gnd_net)
             add_gnd_pour_and_thermal_vias(str(stamped_pcb), cfg)
+            # The strip just deleted the leaves' locked shield ties along with
+            # the GND web -- and the plane cannot replace them: a connector's
+            # through-hole shield legs sit where the B.Cu fill loses its
+            # thermal spokes to the slot holes, so without the ties they come
+            # back as the 8/8 'unconnected GND at J1' rc7 signature. Re-stamp
+            # them here, pre-route; the stamper's pad/track guards drop any
+            # tie that would cross the composed leaf copper.
+            if cfg.get("shield_tie_enabled", True):
+                try:
+                    from kicraft.autoplacer.freerouting_runner import (
+                        _run_pcbnew_script,
+                    )
+
+                    _tie_cfg = json.dumps({
+                        k: cfg[k]
+                        for k in (
+                            "shield_tie_enabled",
+                            "shield_tie_exclude_refs",
+                            "shield_tie_max_mm",
+                            "freerouting_min_clearance_mm",
+                            "freerouting_fine_pitch_track_mm",
+                            "gnd_zone_net",
+                        )
+                        if k in cfg
+                    })
+                    _run_pcbnew_script(
+                        "import pcbnew, json\n"
+                        "from kicraft.autoplacer.brain.breakout_stubs import (\n"
+                        "    add_breakout_stubs, shield_tie_specs)\n"
+                        f"cfg = json.loads({_tie_cfg!r})\n"
+                        f"board = pcbnew.LoadBoard({str(stamped_pcb)!r})\n"
+                        "specs = shield_tie_specs(board, cfg)\n"
+                        "del board\n"
+                        f"s = add_breakout_stubs({str(stamped_pcb)!r}, specs, cfg=cfg)\n"
+                        "print('parent shield ties:', s['stubs'], 'stamped,',\n"
+                        "      len(s['skipped']), 'skipped')\n"
+                    )
+                except Exception as exc:
+                    print(f"warning: parent shield re-tie failed: {exc}",
+                          file=sys.stderr)
         freerouting_stats = route_with_freerouting(
             kicad_pcb_path=str(stamped_pcb),
             output_path=str(routed_pcb),

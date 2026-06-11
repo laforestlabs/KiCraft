@@ -117,41 +117,162 @@ def _segment_clears_pads(
     return True
 
 
-def _safe_radial_length(
+def _own_clearance_mm(pad, layer_id, fallback_mm: float) -> float:
+    """Resolved clearance constraint of *pad* in mm (netclass-aware).
+
+    Falls back to *fallback_mm* on boards without project netclasses (tests,
+    bare .kicad_pcb files) or older pcbnew APIs.
+    """
+    try:
+        v = pcbnew.ToMM(pad.GetOwnClearance(layer_id))
+    except Exception:
+        return fallback_mm
+    return v if v > 0 else fallback_mm
+
+
+def _pad_ref(pad) -> str:
+    try:
+        fp = pad.GetParentFootprint()
+        return fp.GetReferenceAsString() if fp else ""
+    except Exception:
+        return ""
+
+
+def _foreign_pad_margins(
     board: "pcbnew.BOARD",
     src_pad,
+    *,
+    floor_mm: float,
+    half_width_mm: float,
+    layer_id,
+) -> tuple[list, list]:
+    """Per-pad guard margins for copper on *src_pad*'s net: ``(path, tip)``.
+
+    KiCad and FreeRouting both resolve a pair clearance as the LARGER of the
+    two items' constraints, so a stub held only to the flat config floor can
+    end inside a Power-netclass pad's keep-out: legal to this module, illegal
+    to the router, which then abandons the net exactly as if the stub were
+    absent (the rc7 CC2 signature).
+
+    *path* margins guard the stamped copper itself: full pair clearance vs
+    pads of OTHER footprints (a violation there is a real, unwaived DRC
+    error), collision-only vs the source footprint's own pads (pair clearance
+    is unsatisfiable by construction inside a 0.5 mm pad field, and the
+    routed-board gate waives footprint-internal violations). *tip* margins
+    are pair clearance + track half-width vs EVERY foreign pad: the stub end
+    is where FreeRouting must legally attach.
+    """
+    src_cl = _own_clearance_mm(src_pad, layer_id, floor_mm)
+    src_ref = _pad_ref(src_pad)
+    collide_mm = half_width_mm + 0.05
+    path: list = []
+    tip: list = []
+    for pad in _foreign_pads(board, src_pad.GetNetCode(), exclude=src_pad):
+        pair = max(floor_mm, src_cl, _own_clearance_mm(pad, layer_id, floor_mm))
+        same_fp = src_ref and _pad_ref(pad) == src_ref
+        path.append((pad, int(pcbnew.FromMM(collide_mm if same_fp else pair))))
+        tip.append((pad, int(pcbnew.FromMM(pair + half_width_mm))))
+    return path, tip
+
+
+def _point_clears_obstacles(obstacles: list, x_mm: float, y_mm: float) -> bool:
+    pt = pcbnew.VECTOR2I(int(pcbnew.FromMM(x_mm)), int(pcbnew.FromMM(y_mm)))
+    return not any(pad.HitTest(pt, margin) for pad, margin in obstacles)
+
+
+def _segment_clears_obstacles(
+    obstacles: list,
+    a_mm: tuple[float, float],
+    b_mm: tuple[float, float],
+    *,
+    step_mm: float = 0.1,
+) -> bool:
+    """Like :func:`_segment_clears_pads` but with a per-pad margin.
+
+    *obstacles* is ``[(pad, margin_int)]`` from :func:`_foreign_pad_margins`.
+    """
+    ax, ay = a_mm
+    bx, by = b_mm
+    steps = max(1, int(((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5 / step_mm))
+    for k in range(steps + 1):
+        t = k / steps
+        if not _point_clears_obstacles(
+            obstacles, ax + (bx - ax) * t, ay + (by - ay) * t
+        ):
+            return False
+    return True
+
+
+def _seg_seg_dist_mm(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    c: tuple[float, float],
+    d: tuple[float, float],
+) -> float:
+    """Minimum distance between segments *a*->*b* and *c*->*d* (0 if crossing)."""
+
+    def pt_seg(px, py, x1, y1, x2, y2):
+        dx, dy = x2 - x1, y2 - y1
+        l2 = dx * dx + dy * dy
+        t = 0.0 if l2 == 0 else max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / l2))
+        qx, qy = x1 + t * dx, y1 + t * dy
+        return ((px - qx) ** 2 + (py - qy) ** 2) ** 0.5
+
+    def orient(px, py, qx, qy, rx, ry):
+        return (qx - px) * (ry - py) - (qy - py) * (rx - px)
+
+    o1 = orient(*a, *b, *c)
+    o2 = orient(*a, *b, *d)
+    o3 = orient(*c, *d, *a)
+    o4 = orient(*c, *d, *b)
+    if ((o1 > 0) != (o2 > 0)) and ((o3 > 0) != (o4 > 0)):
+        return 0.0
+    return min(
+        pt_seg(*c, *a, *b),
+        pt_seg(*d, *a, *b),
+        pt_seg(*a, *c, *d),
+        pt_seg(*b, *c, *d),
+    )
+
+
+def _radial_escape_end(
+    path_obstacles: list,
+    tip_obstacles: list,
     start_mm: tuple[float, float],
     dir_unit: tuple[float, float],
     requested_mm: float,
-    clearance_mm: float,
-) -> float:
-    """Largest escape length along *dir_unit* that stays clear of other pads.
+    *,
+    min_useful_mm: float,
+    max_extra_mm: float = 2.5,
+    step_mm: float = 0.05,
+    inner_box: tuple[float, float, float, float] | None = None,
+) -> tuple[float, float] | None:
+    """End point of a radial escape whose tip FreeRouting can legally attach to.
 
-    A radial escape on a dense connector can run straight across a neighbouring
-    pad (a different net, or an NC pad) -- which the autorouter then reports as a
-    short. March along the ray and stop just before the first point that falls
-    within *clearance_mm* of any foreign pad. Returns 0.0 when even the first
-    step collides (no safe escape in this direction).
+    Marches outward sample by sample. The march stops at the first *path*
+    collision (crossing a foreign pad is a short) or at the board's inner box.
+    Among the sampled points whose *tip* margins all clear, prefer the first
+    one at/past *requested_mm* -- extending up to *max_extra_mm* beyond it when
+    the tip is still boxed in at the requested length -- else the farthest
+    legal tip short of it. ``None`` when the direction never yields a legal
+    tip at least *min_useful_mm* out.
     """
-    others = _foreign_pads(board, src_pad.GetNetCode(), exclude=src_pad)
-    if not others:
-        return requested_mm
-
-    step = 0.1
     sx, sy = start_mm
     ux, uy = dir_unit
-    safe = 0.0
-    d = step
-    margin = int(pcbnew.FromMM(clearance_mm))
-    while d <= requested_mm + 1e-9:
-        pt = pcbnew.VECTOR2I(
-            int(pcbnew.FromMM(sx + ux * d)), int(pcbnew.FromMM(sy + uy * d))
-        )
-        if any(pad.HitTest(pt, margin) for pad in others):
+    best_short = None
+    d = step_mm
+    while d <= requested_mm + max_extra_mm + 1e-9:
+        x, y = sx + ux * d, sy + uy * d
+        if not _points_within_box_mm([(x, y)], inner_box):
             break
-        safe = d
-        d += step
-    return safe
+        if not _point_clears_obstacles(path_obstacles, x, y):
+            break
+        if d >= min_useful_mm and _point_clears_obstacles(tip_obstacles, x, y):
+            if d >= requested_mm - 1e-9:
+                return (x, y)
+            best_short = (x, y)
+        d += step_mm
+    return best_short
 
 
 def _nearest_on_rect(
@@ -342,8 +463,14 @@ def perimeter_tie_specs(
         # same net), tie directly. Shortest copper, and immune to the off-board
         # walk below. Both endpoints are placed pads, so the segment is always
         # on the board.
-        obstacles = _foreign_pads(board, pads[i].GetNetCode())
-        if _segment_clears_pads(obstacles, p1, p2, clearance_mm):
+        path_obs, _tip_obs = _foreign_pad_margins(
+            board,
+            pads[i],
+            floor_mm=clearance_mm,
+            half_width_mm=0.0765,
+            layer_id=_LAYERS.get(layer, pcbnew.F_Cu),
+        )
+        if _segment_clears_obstacles(path_obs, p1, p2):
             specs.append(
                 BreakoutSpec(
                     ref=ref, pad=pads[i].GetNumber(), waypoints=[p2], layer=layer
@@ -427,6 +554,77 @@ def auto_power_tie_specs(
                 clearance_mm=float(cfg.get("freerouting_min_clearance_mm", 0.153)),
             )
         )
+    return specs
+
+
+def shield_tie_specs(
+    board: "pcbnew.BOARD",
+    cfg: dict[str, Any] | None = None,
+) -> list[BreakoutSpec]:
+    """Tie each netted through-hole pad to its nearest same-net pad.
+
+    A connector's through-hole shield/shell legs (USB-C TYPE-C-31 pads 1-4 on
+    GND) sit where neither GND plane can reach them: the F.Cu fill is walled
+    out of the fine-pitch pad row by the Power-netclass clearance, and the
+    B.Cu fill around the slot holes loses its thermal spokes -- so the legs
+    facing the pad row survive as unconnected ratlines on an otherwise-routed
+    board. A short locked same-net track to the nearest pad (preferring an
+    SMD pad, which the pour and router do reach) closes each leg
+    deterministically. The stamp-time guards in :func:`add_breakout_stubs`
+    drop any tie whose straight path would cross foreign copper.
+    """
+    cfg = cfg or {}
+    if not cfg.get("shield_tie_enabled", True):
+        return []
+    exclude = set(cfg.get("shield_tie_exclude_refs", []) or [])
+    max_mm = float(cfg.get("shield_tie_max_mm", 4.0))
+
+    specs: list[BreakoutSpec] = []
+    for fp in board.GetFootprints():
+        ref = fp.GetReferenceAsString()
+        if ref in exclude:
+            continue
+        pads = list(fp.Pads())
+        for pad in pads:
+            if pad.GetAttribute() != pcbnew.PAD_ATTRIB_PTH:
+                continue
+            net_code = pad.GetNetCode()
+            if net_code == 0:
+                continue
+            mates = [q for q in pads if q is not pad and q.GetNetCode() == net_code]
+            if not mates:
+                continue
+            smd = [q for q in mates if q.GetAttribute() == pcbnew.PAD_ATTRIB_SMD]
+            pool = smd or mates
+            p = pad.GetPosition()
+            mate = min(
+                pool,
+                key=lambda m: (m.GetPosition().x - p.x) ** 2
+                + (m.GetPosition().y - p.y) ** 2,
+            )
+            mp = mate.GetPosition()
+            d_mm = (
+                (pcbnew.ToMM(mp.x - p.x)) ** 2 + (pcbnew.ToMM(mp.y - p.y)) ** 2
+            ) ** 0.5
+            # Touching pads are already connected; a far mate means this is not
+            # the shield-leg shape and a straight tie would cross the part.
+            if d_mm < 0.1 or d_mm > max_mm:
+                continue
+            # The tie joins the legs to the SMD pad, but on the PARENT that
+            # whole cluster can still be an island: the F.Cu pour is
+            # clearance-walled out of the connector area and the B.Cu plane
+            # loses its spokes to the slot holes -- the round then burns on
+            # 1-3 GND ratlines until the build clock dies. A via at the SMD
+            # end bonds the island straight down to the B.Cu plane. (Never on
+            # a PTH mate: that would drill into the mate's own hole.)
+            specs.append(
+                BreakoutSpec(
+                    ref=ref,
+                    pad=pad.GetNumber(),
+                    waypoints=[(pcbnew.ToMM(mp.x), pcbnew.ToMM(mp.y))],
+                    via_at_end=bool(smd) and bool(cfg.get("shield_tie_via", True)),
+                )
+            )
     return specs
 
 
@@ -521,6 +719,31 @@ def add_breakout_stubs(
 
     board = pcbnew.LoadBoard(pcb_path)
     inner_box = _board_inner_box_mm(board)
+    floor_mm = float(cfg.get("freerouting_min_clearance_mm", 0.153))
+    # Copper stamped by THIS call, for mutual clearance between specs: a tie
+    # and a later escape stub are stamped blind to each other, and two locked
+    # tracks 0.05 mm apart are a violation no router pass can repair (and the
+    # gate cannot waive: a track-track DRC block names no footprint).
+    # (net_code, a_mm, b_mm, half_width_mm, own_clearance_mm, layer) per segment.
+    stamped: list[tuple[int, tuple, tuple, float, float, Any]] = []
+    # Copper already ON the board before this call: empty for a fresh leaf,
+    # but the parent re-tie pass stamps into a board carrying every leaf's
+    # routed traces -- crossing one of those is a short the foreign-PAD guard
+    # cannot see. A via is a zero-length segment on every copper layer.
+    for t in board.GetTracks():
+        is_via = t.GetClass() == "PCB_VIA"
+        if is_via:
+            p = (pcbnew.ToMM(t.GetPosition().x), pcbnew.ToMM(t.GetPosition().y))
+            a_mm, b_mm, t_layer = p, p, None
+        else:
+            a_mm = (pcbnew.ToMM(t.GetStart().x), pcbnew.ToMM(t.GetStart().y))
+            b_mm = (pcbnew.ToMM(t.GetEnd().x), pcbnew.ToMM(t.GetEnd().y))
+            t_layer = t.GetLayer()
+        try:
+            t_half_w = pcbnew.ToMM(t.GetWidth()) / 2.0
+        except TypeError:
+            t_half_w = 0.3
+        stamped.append((t.GetNetCode(), a_mm, b_mm, t_half_w, floor_mm, t_layer))
 
     def _pt(xy: tuple[float, float]):
         return pcbnew.VECTOR2I(pcbnew.FromMM(xy[0]), pcbnew.FromMM(xy[1]))
@@ -539,6 +762,24 @@ def add_breakout_stubs(
             summary["skipped"].append(f"{spec.ref}.{spec.pad}:bad_layer:{spec.layer}")
             continue
         width = pcbnew.FromMM(spec.width_mm if spec.width_mm else default_w)
+        half_width_mm = pcbnew.ToMM(width) / 2.0
+        src_cl_mm = _own_clearance_mm(pad, layer, floor_mm)
+        path_obs, tip_obs = _foreign_pad_margins(
+            board, pad, floor_mm=floor_mm, half_width_mm=half_width_mm, layer_id=layer
+        )
+
+        def _conflicts_with_copper(points: list[tuple[float, float]]) -> bool:
+            """True when the path runs too close to other-net stamped/board copper."""
+            for a, b in zip(points, points[1:]):
+                for o_net, o_a, o_b, o_hw, o_cl, o_layer in stamped:
+                    if o_net == net_code:
+                        continue
+                    if o_layer is not None and o_layer != layer:
+                        continue
+                    need = max(floor_mm, src_cl_mm, o_cl) + half_width_mm + o_hw
+                    if _seg_seg_dist_mm(a, b, o_a, o_b) < need:
+                        return True
+            return False
 
         pad_pos = pad.GetPosition()
         start_mm = (pcbnew.ToMM(pad_pos.x), pcbnew.ToMM(pad_pos.y))
@@ -549,13 +790,16 @@ def add_breakout_stubs(
             # clear of the source footprint's own pads, but a curated path or a
             # neighbour the geometry could not see may still intrude. A partial
             # tie is useless, so drop the whole spec rather than clip it.
-            clearance = float(cfg.get("freerouting_min_clearance_mm", 0.153))
-            obstacles = _foreign_pads(board, net_code)
             if not all(
-                _segment_clears_pads(obstacles, a, b, clearance)
+                _segment_clears_obstacles(path_obs, a, b)
                 for a, b in zip(points, points[1:])
             ):
                 summary["skipped"].append(f"{spec.ref}.{spec.pad}:waypoint_crosses_pad")
+                continue
+            if _conflicts_with_copper(points):
+                summary["skipped"].append(
+                    f"{spec.ref}.{spec.pad}:conflicts_with_stamped_stub"
+                )
                 continue
         else:
             fc = fp.GetPosition()
@@ -563,24 +807,40 @@ def add_breakout_stubs(
             dx, dy = start_mm[0] - cx, start_mm[1] - cy
             norm = (dx * dx + dy * dy) ** 0.5
             dir_unit = (1.0, 0.0) if norm < 1e-6 else (dx / norm, dy / norm)
-            # Clip the radial escape so it never crosses a neighbouring pad
-            # (which would short). Skip the stub when no safe escape exists in
-            # this direction rather than emit a shorting trace.
-            clearance = float(cfg.get("freerouting_min_clearance_mm", 0.153))
-            safe_len = _safe_radial_length(
-                board, pad, start_mm, dir_unit, spec.length_mm, clearance
-            )
-            min_useful = max(clearance, pcbnew.ToMM(width))
-            if safe_len < min_useful:
+            # March out radially: never cross a neighbouring pad (a short), and
+            # only stamp a stub whose TIP clears every foreign pad by the
+            # netclass pair clearance -- a tip the router cannot legally attach
+            # to leaves the net exactly as unrouted as no stub at all.
+            # The radial direction is right for a part whose pads ring its
+            # centre (QFN) but for a connector ROW it can run diagonally ALONG
+            # the row, colliding forever (the USB-C CC2 signature) -- so fall
+            # back to the four axis directions. A direction whose tip is legal
+            # but whose run lands beside already-stamped copper (e.g. the VBUS
+            # perimeter tie one pad-row out) is rejected HERE so the next
+            # direction still gets its chance.
+            points = None
+            for du in (dir_unit, (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)):
+                end = _radial_escape_end(
+                    path_obs,
+                    tip_obs,
+                    start_mm,
+                    du,
+                    spec.length_mm,
+                    min_useful_mm=max(floor_mm, pcbnew.ToMM(width)),
+                    inner_box=inner_box,
+                )
+                if end is None:
+                    continue
+                cand = [start_mm, end]
+                if _conflicts_with_copper(cand):
+                    continue
+                points = cand
+                break
+            if points is None:
                 summary["skipped"].append(
                     f"{spec.ref}.{spec.pad}:no_safe_radial_escape"
                 )
                 continue
-            end = (
-                start_mm[0] + dir_unit[0] * safe_len,
-                start_mm[1] + dir_unit[1] * safe_len,
-            )
-            points = [start_mm, end]
 
         # Hard invariant: never stamp locked copper outside the board outline.
         # FreeRouting 1.9.0 hangs (no SES, no error) on a locked wire corner
@@ -602,6 +862,7 @@ def add_breakout_stubs(
                 track.SetLocked(True)
             board.Add(track)
             summary["segments"] += 1
+            stamped.append((net_code, a, b, half_width_mm, src_cl_mm, layer))
 
         if spec.via_at_end:
             via = pcbnew.PCB_VIA(board)

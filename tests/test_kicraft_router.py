@@ -197,3 +197,78 @@ def test_no_connect_pins_emit_markers() -> None:
         no_connect=[PinEndpoint(ref="U1", pin="4")],  # NC pin on AP2112K
     )
     assert len(routed.no_connects) == 1
+
+
+def test_power_stub_retreats_off_a_foreign_pin() -> None:
+    # run_05 regression: U1's GND pin stub stepped one full grid right, landing
+    # exactly on R4's pin 2 (a VBUS pin one grid step away) -- in KiCad a pin
+    # touching a wire end connects, so the two GLOBAL rails merged and ERC
+    # reported the two rails' PWR_FLAGs as conflicting power outputs. The stub
+    # must retreat to half a grid step instead of stamping onto the pin.
+    from kicraft.design.synthesis.router import (
+        GRID_MM,
+        RoutedSheet,
+        _Endpoint,
+        _route_power,
+    )
+
+    routed = RoutedSheet()
+    e = _Endpoint(x=153.67, y=95.25, exit="right", ref="U1", pin="3")
+    all_pins = [(153.67, 95.25, "U1", "3"), (153.67 + GRID_MM, 95.25, "R4", "2")]
+    _route_power(routed, "GND", [e], frozenset(), all_pins, [])
+    assert len(routed.power_symbols) == 1
+    sym = routed.power_symbols[0]
+    assert sym.x_mm == pytest.approx(153.67 + GRID_MM / 2)
+    assert routed.wires[0].x2_mm == pytest.approx(153.67 + GRID_MM / 2)
+
+
+def test_power_stub_boxed_in_falls_back_to_global_label() -> None:
+    # A foreign pin at the half-grid point too: no safe stub exists in the exit
+    # direction, so the pin gets a global label at its own position -- the net
+    # stays named, and nothing is stamped onto foreign copper.
+    from kicraft.design.synthesis.router import (
+        GRID_MM,
+        RoutedSheet,
+        _Endpoint,
+        _route_power,
+    )
+
+    routed = RoutedSheet()
+    e = _Endpoint(x=10.0, y=10.0, exit="right", ref="U1", pin="3")
+    all_pins = [
+        (10.0, 10.0, "U1", "3"),
+        (10.0 + GRID_MM / 2, 10.0, "R4", "2"),
+        (10.0 + GRID_MM, 10.0, "R4", "1"),
+    ]
+    _route_power(routed, "GND", [e], frozenset(), all_pins, [])
+    assert routed.wires == []
+    assert routed.power_symbols == []
+    assert len(routed.global_labels) == 1
+    lbl = routed.global_labels[0]
+    assert lbl.text == "GND" and (lbl.x_mm, lbl.y_mm) == (10.0, 10.0)
+
+
+def test_opposing_power_stubs_of_two_rails_never_meet() -> None:
+    # Two pins of DIFFERENT rails facing each other, two grid steps apart:
+    # full-length stubs would meet head-on at the midpoint and short the rails.
+    # The second stub must retreat to half a grid step.
+    from kicraft.design.synthesis.router import (
+        GRID_MM,
+        RoutedSheet,
+        _Endpoint,
+        _route_power,
+    )
+
+    routed = RoutedSheet()
+    gnd = _Endpoint(x=10.0, y=10.0, exit="right", ref="U1", pin="1")
+    vbus = _Endpoint(x=10.0 + 2 * GRID_MM, y=10.0, exit="left", ref="J1", pin="1")
+    all_pins = [(10.0, 10.0, "U1", "1"), (10.0 + 2 * GRID_MM, 10.0, "J1", "1")]
+    power_stubs: list = []
+    _route_power(routed, "GND", [gnd], frozenset(), all_pins, power_stubs)
+    _route_power(routed, "VBUS", [vbus], frozenset(), all_pins, power_stubs)
+    assert len(routed.wires) == 2
+    gnd_end = routed.wires[0].x2_mm
+    vbus_end = routed.wires[1].x2_mm
+    assert gnd_end == pytest.approx(10.0 + GRID_MM)
+    # The VBUS stub stopped short of the GND stub's end.
+    assert vbus_end > gnd_end + 0.5

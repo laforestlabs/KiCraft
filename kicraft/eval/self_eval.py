@@ -186,7 +186,7 @@ def run_design(client, brief: str, rundir: Path, progress, *,
             "rounds": max_park_rounds, "error": "exceeded max park/resume rounds"}
 
 
-def run_build(rundir: Path, progress, *, timeout_s: int = 1200) -> int:
+def run_build(rundir: Path, progress, *, timeout_s: int = 2400) -> int:
     """Run the deterministic synth+place+route+fab build (mirrors the web worker),
     streaming its log into ``events.jsonl`` via ``progress``. A watchdog kills the
     build after ``timeout_s`` so one stuck route can't stall the whole batch; per
@@ -219,7 +219,7 @@ def run_build(rundir: Path, progress, *, timeout_s: int = 1200) -> int:
 
 def evaluate_one(client, idx: int, prompt: str, out_dir: Path, *,
                  judge_model, skip_judge: bool, max_park_rounds: int = 12,
-                 build_timeout_s: int = 1200, build_gate=None) -> dict:
+                 build_timeout_s: int = 2400, build_gate=None) -> dict:
     """Drive + build + score one brief into ``out_dir/<stem>/``. Never raises: any
     failure is captured in the returned record so the batch continues.
 
@@ -433,7 +433,7 @@ def main(argv=None) -> int:
     ap.add_argument("--judge-model", default=None, help="judge model override")
     ap.add_argument("--max-park-rounds", type=int, default=12,
                     help="cap on park/auto-answer resume rounds per brief")
-    ap.add_argument("--build-timeout", type=int, default=1200,
+    ap.add_argument("--build-timeout", type=int, default=2400,
                     help="seconds before a stuck build is killed (per brief)")
     ap.add_argument("--parallel", type=int, default=3,
                     help="run N briefs concurrently (threads; default 3 — the measured "
