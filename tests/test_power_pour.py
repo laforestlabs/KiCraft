@@ -212,3 +212,115 @@ def test_thermal_via_not_stamped_through_foreign_track(tmp_path):
     for v in _gnd_vias(path):
         pos = (pcbnew.ToMM(v.GetPosition().x), pcbnew.ToMM(v.GetPosition().y))
         assert pos != (pytest.approx(blocked_at[0]), pytest.approx(blocked_at[1]))
+
+
+# ---------------------------------------------------------------------------
+# GND strand repair: stranded clusters tied back to the main plane
+# ---------------------------------------------------------------------------
+
+from kicraft.autoplacer.brain.gnd_pour import repair_stranded_gnd  # noqa: E402
+
+
+def _stranded_board(path, *, block_both_layers=False):
+    """Main GND cluster (U2 pad + via on it) at (8,10); a stranded 2-pad
+    connector GND pin J7.2 at (16,10) with nothing nearby -- the run_03 shape.
+    Optionally copper walls on BOTH layers between them."""
+    board = pcbnew.NewBoard(path)
+    for name in ("GND", "5V", "SIG"):
+        board.Add(pcbnew.NETINFO_ITEM(board, name))
+
+    def net(n):
+        return board.GetNetInfo().GetNetItem(n)
+
+    corners = [(0, 0), (24, 0), (24, 20), (0, 20), (0, 0)]
+    for (x1, y1), (x2, y2) in zip(corners, corners[1:]):
+        seg = pcbnew.PCB_SHAPE(board)
+        seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        seg.SetStart(pcbnew.VECTOR2I(_mm(x1), _mm(y1)))
+        seg.SetEnd(pcbnew.VECTOR2I(_mm(x2), _mm(y2)))
+        seg.SetLayer(pcbnew.Edge_Cuts)
+        board.Add(seg)
+
+    def add_fp(ref, pads):
+        fp = pcbnew.FOOTPRINT(board)
+        fp.SetReference(ref)
+        board.Add(fp)
+        for num, (netname, x, y) in pads.items():
+            pad = pcbnew.PAD(fp)
+            pad.SetSize(pcbnew.VECTOR2I(_mm(1.0), _mm(1.0)))
+            pad.SetPosition(pcbnew.VECTOR2I(_mm(x), _mm(y)))
+            pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+            pad.SetLayerSet(pcbnew.PAD.SMDMask())
+            pad.SetNumber(num)
+            pad.SetNet(net(netname))
+            fp.Add(pad)
+
+    add_fp("U2", {"1": ("GND", 8.0, 10.0), "2": ("SIG", 8.0, 13.0)})
+    add_fp("J7", {"1": ("5V", 16.0, 7.0), "2": ("GND", 16.0, 10.0)})
+    via = pcbnew.PCB_VIA(board)
+    via.SetPosition(pcbnew.VECTOR2I(_mm(8.0), _mm(10.0)))
+    via.SetDrill(_mm(0.3))
+    try:
+        via.SetWidth(_mm(0.6))
+    except TypeError:
+        via.SetWidth(pcbnew.F_Cu, _mm(0.6))
+    via.SetNet(net("GND"))
+    board.Add(via)
+    if block_both_layers:
+        for layer in (pcbnew.F_Cu, pcbnew.B_Cu):
+            t = pcbnew.PCB_TRACK(board)
+            t.SetStart(pcbnew.VECTOR2I(_mm(12.0), _mm(2.0)))
+            t.SetEnd(pcbnew.VECTOR2I(_mm(12.0), _mm(18.0)))
+            t.SetWidth(_mm(0.3))
+            t.SetLayer(layer)
+            t.SetNet(net("SIG"))
+            board.Add(t)
+    board.Save(path)
+    return path
+
+
+def test_stranded_gnd_pad_is_tied_back_to_main_cluster(tmp_path):
+    # run_03 J7.2 regression: a 2-pad THT/SMD connector GND pin with no plane
+    # reach, no via, no shield-tie mate. The repair pass must tie it straight
+    # back to the main GND cluster and report it.
+    path = str(tmp_path / "b.kicad_pcb")
+    _stranded_board(path)
+    res = repair_stranded_gnd(path, {"gnd_zone_net": "GND"})
+    assert res["stranded"] == 1 and res["tied"] == 1, res
+    board = pcbnew.LoadBoard(path)
+    gnd_tracks = [t for t in board.GetTracks()
+                  if not isinstance(t, pcbnew.PCB_VIA) and t.GetNetname() == "GND"]
+    assert len(gnd_tracks) == 1
+    xs = sorted([pcbnew.ToMM(gnd_tracks[0].GetStart().x),
+                 pcbnew.ToMM(gnd_tracks[0].GetEnd().x)])
+    assert xs == [pytest.approx(8.0), pytest.approx(16.0)]
+
+
+def test_stranded_gnd_skipped_when_both_layers_blocked(tmp_path):
+    # A foreign wall on BOTH layers: the tie must be skipped (board no worse),
+    # never stamped across the foreign copper.
+    path = str(tmp_path / "b.kicad_pcb")
+    _stranded_board(path, block_both_layers=True)
+    res = repair_stranded_gnd(path, {"gnd_zone_net": "GND"})
+    assert res["tied"] == 0, res
+    assert any("no_clear_path" in s for s in res["skipped"]), res
+    board = pcbnew.LoadBoard(path)
+    assert not [t for t in board.GetTracks()
+                if not isinstance(t, pcbnew.PCB_VIA) and t.GetNetname() == "GND"]
+
+
+def test_strand_repair_noop_when_single_cluster(tmp_path):
+    # Everything already connected -> nothing stamped.
+    path = str(tmp_path / "b.kicad_pcb")
+    _stranded_board(path)
+    board = pcbnew.LoadBoard(path)
+    t = pcbnew.PCB_TRACK(board)
+    t.SetStart(pcbnew.VECTOR2I(_mm(8.0), _mm(10.0)))
+    t.SetEnd(pcbnew.VECTOR2I(_mm(16.0), _mm(10.0)))
+    t.SetWidth(_mm(0.3))
+    t.SetLayer(pcbnew.F_Cu)
+    t.SetNet(board.GetNetInfo().GetNetItem("GND"))
+    board.Add(t)
+    board.Save(path)
+    res = repair_stranded_gnd(path, {"gnd_zone_net": "GND"})
+    assert res["stranded"] == 0 and res["tied"] == 0, res

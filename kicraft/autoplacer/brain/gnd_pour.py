@@ -19,6 +19,7 @@ EP array while leaving perimeter GND pins -- which route normally -- alone.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pcbnew
@@ -243,6 +244,200 @@ def pour_power_planes(
     # Fill every zone together so priorities resolve power vs. GND overlap.
     pcbnew.ZONE_FILLER(board).Fill(board.Zones())
     board.Save(pcb_path)
+    return summary
+
+
+def repair_stranded_gnd(
+    pcb_path: str,
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Tie GND clusters stranded from the main plane back with guarded tracks.
+
+    GND is never routed by FreeRouting -- the plane is supposed to reach every
+    GND pad. In a crowded region the B.Cu plane fragments around signal
+    tracks, and a THT connector GND pin (run_03 J7.2: a 2-pin LED-channel
+    header) can end up on a tiny fill island with no path to the main plane:
+    no via to drop through, no same-net mate for a shield tie, no GND track.
+    This post-pour pass finds every GND cluster isolated from the main one
+    (geometric union-find over pads/vias/tracks/fill islands) and stamps a
+    direct same-net track from a stranded pad to the nearest main-cluster
+    pad/via via :func:`add_breakout_stubs` -- inheriting its foreign-pad,
+    existing-copper, netclass and outline guards -- then refills the zones so
+    the pour closes around the new tie. A tie whose straight path is blocked
+    is skipped (the board is no worse than before).
+    """
+    cfg = cfg or {}
+    summary: dict[str, Any] = {"clusters": 0, "stranded": 0, "tied": 0, "skipped": []}
+    if not cfg.get("gnd_strand_repair_enabled", True):
+        return summary
+    gnd_name = cfg.get("gnd_zone_net", "GND")
+    if not gnd_name:
+        return summary
+
+    board = pcbnew.LoadBoard(pcb_path)
+    gnd_net = board.GetNetInfo().GetNetItem(gnd_name)
+    if not gnd_net or gnd_net.GetNetCode() == 0:
+        return summary
+    gnd_code = gnd_net.GetNetCode()
+    max_tie_mm = float(cfg.get("gnd_strand_repair_max_mm", 30.0))
+
+    # --- collect GND nodes -------------------------------------------------
+    # Each node: (kind, payload, layers, probe_points_mm). A PTH pad or via
+    # spans both layers; an SMD pad only its own; a fill island only its zone's.
+    F, B = pcbnew.F_Cu, pcbnew.B_Cu
+
+    def _pts_around(x_mm: float, y_mm: float, r_mm: float) -> list[tuple[float, float]]:
+        if r_mm <= 0:
+            return [(x_mm, y_mm)]
+        out = [(x_mm, y_mm)]
+        for k in range(8):
+            a = k * 0.785398
+            out.append((x_mm + r_mm * math.cos(a), y_mm + r_mm * math.sin(a)))
+        return out
+
+    nodes: list[dict] = []
+    for fp in board.GetFootprints():
+        for p in fp.Pads():
+            if p.GetNetCode() != gnd_code:
+                continue
+            pos = p.GetPosition()
+            x, y = pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y)
+            try:
+                sz = p.GetSize()
+            except TypeError:
+                sz = p.GetSize(F)
+            r = min(pcbnew.ToMM(sz.x), pcbnew.ToMM(sz.y)) / 2.0
+            is_pth = p.GetAttribute() == pcbnew.PAD_ATTRIB_PTH
+            nodes.append({
+                "kind": "pad", "ref": fp.GetReferenceAsString(), "num": p.GetNumber(),
+                "layers": {F, B} if is_pth else {F if p.IsOnLayer(F) else B},
+                "pts": _pts_around(x, y, r), "xy": (x, y),
+            })
+    for t in board.GetTracks():
+        if t.GetNetCode() != gnd_code:
+            continue
+        if t.GetClass() == "PCB_VIA":
+            pos = t.GetPosition()
+            x, y = pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y)
+            nodes.append({"kind": "via", "layers": {F, B},
+                          "pts": _pts_around(x, y, pcbnew.ToMM(t.GetWidth()) / 2.0),
+                          "xy": (x, y)})
+        else:
+            a, b2 = t.GetStart(), t.GetEnd()
+            nodes.append({"kind": "trk", "layers": {t.GetLayer()},
+                          "pts": [(pcbnew.ToMM(a.x), pcbnew.ToMM(a.y)),
+                                  (pcbnew.ToMM(b2.x), pcbnew.ToMM(b2.y))],
+                          "xy": (pcbnew.ToMM((a.x + b2.x) / 2), pcbnew.ToMM((a.y + b2.y) / 2))})
+    islands: list[dict] = []
+    for z in board.Zones():
+        if z.GetNetname() != gnd_name or z.GetIsRuleArea():
+            continue
+        layer = z.GetLayer()
+        fill = z.GetFilledPolysList(layer)
+        for i in range(fill.OutlineCount()):
+            bb = fill.Outline(i).BBox()
+            islands.append({"kind": "island", "layers": {layer}, "fill": fill,
+                            "idx": i,
+                            "xy": (pcbnew.ToMM(bb.Centre().x), pcbnew.ToMM(bb.Centre().y))})
+
+    all_nodes = nodes + islands
+    parent = list(range(len(all_nodes)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        parent[find(i)] = find(j)
+
+    # pads/vias/tracks <-> islands: any probe point inside the island's fill.
+    for ii, isl in enumerate(islands):
+        gi = len(nodes) + ii
+        for ni, n in enumerate(nodes):
+            if not (n["layers"] & isl["layers"]):
+                continue
+            for (px, py) in n["pts"]:
+                if isl["fill"].Contains(
+                    pcbnew.VECTOR2I(pcbnew.FromMM(px), pcbnew.FromMM(py)), isl["idx"]
+                ):
+                    union(ni, gi)
+                    break
+    # pads/vias/tracks <-> each other: shared layer + a probe point within
+    # 0.05 mm of another's probe point (track ends land on pad/via centres).
+    for i in range(len(nodes)):
+        for j in range(i + 1, len(nodes)):
+            if not (nodes[i]["layers"] & nodes[j]["layers"]):
+                continue
+            done = False
+            for (ax, ay) in nodes[i]["pts"]:
+                for (bx, by) in nodes[j]["pts"]:
+                    if (ax - bx) ** 2 + (ay - by) ** 2 < 0.0025:
+                        union(i, j)
+                        done = True
+                        break
+                if done:
+                    break
+
+    clusters: dict[int, list[int]] = {}
+    for i in range(len(all_nodes)):
+        clusters.setdefault(find(i), []).append(i)
+    summary["clusters"] = len(clusters)
+    if len(clusters) <= 1:
+        return summary
+    main_root = max(clusters, key=lambda r: len(clusters[r]))
+    main_targets = [
+        all_nodes[i] for i in clusters[main_root]
+        if all_nodes[i]["kind"] in ("pad", "via")
+    ]
+    if not main_targets:
+        return summary
+
+    specs = []
+    for root, members in clusters.items():
+        if root == main_root:
+            continue
+        summary["stranded"] += 1
+        src = next((all_nodes[i] for i in members if all_nodes[i]["kind"] == "pad"), None)
+        if src is None:
+            summary["skipped"].append("cluster_without_pad")
+            continue
+        sx, sy = src["xy"]
+        tgt = min(main_targets,
+                  key=lambda t: (t["xy"][0] - sx) ** 2 + (t["xy"][1] - sy) ** 2)
+        d = ((tgt["xy"][0] - sx) ** 2 + (tgt["xy"][1] - sy) ** 2) ** 0.5
+        if d > max_tie_mm:
+            summary["skipped"].append(f"{src['ref']}.{src['num']}:too_far:{d:.1f}mm")
+            continue
+        specs.append((src["ref"], src["num"], tgt["xy"]))
+
+    if not specs:
+        return summary
+    from kicraft.autoplacer.brain.breakout_stubs import (
+        BreakoutSpec,
+        add_breakout_stubs,
+    )
+
+    # Try F.Cu first, retry the leftovers on B.Cu (the strand is usually in a
+    # region where one layer is crowded and the other open).
+    remaining = specs
+    for layer_name in ("F.Cu", "B.Cu"):
+        if not remaining:
+            break
+        batch = [BreakoutSpec(ref=r, pad=n, waypoints=[xy], layer=layer_name)
+                 for r, n, xy in remaining]
+        res = add_breakout_stubs(pcb_path, batch, cfg=cfg)
+        summary["tied"] += res.get("stubs", 0)
+        failed_keys = {s.split(":")[0] for s in res.get("skipped", [])}
+        remaining = [(r, n, xy) for r, n, xy in remaining
+                     if f"{r}.{n}" in failed_keys]
+    summary["skipped"].extend(f"{r}.{n}:no_clear_path" for r, n, _ in remaining)
+
+    if summary["tied"]:
+        board = pcbnew.LoadBoard(pcb_path)
+        pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+        board.Save(pcb_path)
     return summary
 
 
