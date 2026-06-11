@@ -610,11 +610,19 @@ def shield_tie_specs(
             # the shield-leg shape and a straight tie would cross the part.
             if d_mm < 0.1 or d_mm > max_mm:
                 continue
+            # The tie joins the legs to the SMD pad, but on the PARENT that
+            # whole cluster can still be an island: the F.Cu pour is
+            # clearance-walled out of the connector area and the B.Cu plane
+            # loses its spokes to the slot holes -- the round then burns on
+            # 1-3 GND ratlines until the build clock dies. A via at the SMD
+            # end bonds the island straight down to the B.Cu plane. (Never on
+            # a PTH mate: that would drill into the mate's own hole.)
             specs.append(
                 BreakoutSpec(
                     ref=ref,
                     pad=pad.GetNumber(),
                     waypoints=[(pcbnew.ToMM(mp.x), pcbnew.ToMM(mp.y))],
+                    via_at_end=bool(smd) and bool(cfg.get("shield_tie_via", True)),
                 )
             )
     return specs

@@ -711,8 +711,11 @@ def test_shield_tie_prefers_smd_same_net_pad(tmp_path):
         ("4", (11.2, 10.8)),
         ("3", (11.2, 10.8)),
     }
+    # A stitching via at each SMD end bonds the shield island to the B.Cu
+    # GND plane (the parent pour cannot reach the connector area).
+    assert all(s.via_at_end for s in specs)
     res = add_breakout_stubs(path, specs)
-    assert res["stubs"] == 2
+    assert res["stubs"] == 2 and res["vias"] == 2
     routed = pcbnew.LoadBoard(path)
     segs = [
         t
