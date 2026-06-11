@@ -716,8 +716,26 @@ def add_breakout_stubs(
     # and a later escape stub are stamped blind to each other, and two locked
     # tracks 0.05 mm apart are a violation no router pass can repair (and the
     # gate cannot waive: a track-track DRC block names no footprint).
-    # (net_code, a_mm, b_mm, half_width_mm, own_clearance_mm) per segment.
-    stamped: list[tuple[int, tuple, tuple, float, float]] = []
+    # (net_code, a_mm, b_mm, half_width_mm, own_clearance_mm, layer) per segment.
+    stamped: list[tuple[int, tuple, tuple, float, float, Any]] = []
+    # Copper already ON the board before this call: empty for a fresh leaf,
+    # but the parent re-tie pass stamps into a board carrying every leaf's
+    # routed traces -- crossing one of those is a short the foreign-PAD guard
+    # cannot see. A via is a zero-length segment on every copper layer.
+    for t in board.GetTracks():
+        is_via = t.GetClass() == "PCB_VIA"
+        if is_via:
+            p = (pcbnew.ToMM(t.GetPosition().x), pcbnew.ToMM(t.GetPosition().y))
+            a_mm, b_mm, t_layer = p, p, None
+        else:
+            a_mm = (pcbnew.ToMM(t.GetStart().x), pcbnew.ToMM(t.GetStart().y))
+            b_mm = (pcbnew.ToMM(t.GetEnd().x), pcbnew.ToMM(t.GetEnd().y))
+            t_layer = t.GetLayer()
+        try:
+            t_half_w = pcbnew.ToMM(t.GetWidth()) / 2.0
+        except TypeError:
+            t_half_w = 0.3
+        stamped.append((t.GetNetCode(), a_mm, b_mm, t_half_w, floor_mm, t_layer))
 
     def _pt(xy: tuple[float, float]):
         return pcbnew.VECTOR2I(pcbnew.FromMM(xy[0]), pcbnew.FromMM(xy[1]))
@@ -767,15 +785,23 @@ def add_breakout_stubs(
             # only stamp a stub whose TIP clears every foreign pad by the
             # netclass pair clearance -- a tip the router cannot legally attach
             # to leaves the net exactly as unrouted as no stub at all.
-            end = _radial_escape_end(
-                path_obs,
-                tip_obs,
-                start_mm,
-                dir_unit,
-                spec.length_mm,
-                min_useful_mm=max(floor_mm, pcbnew.ToMM(width)),
-                inner_box=inner_box,
-            )
+            # The radial direction is right for a part whose pads ring its
+            # centre (QFN) but for a connector ROW it can run diagonally ALONG
+            # the row, colliding forever (the USB-C CC2 signature) -- so fall
+            # back to the four axis directions until one yields a legal tip.
+            end = None
+            for du in (dir_unit, (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)):
+                end = _radial_escape_end(
+                    path_obs,
+                    tip_obs,
+                    start_mm,
+                    du,
+                    spec.length_mm,
+                    min_useful_mm=max(floor_mm, pcbnew.ToMM(width)),
+                    inner_box=inner_box,
+                )
+                if end is not None:
+                    break
             if end is None:
                 summary["skipped"].append(
                     f"{spec.ref}.{spec.pad}:no_safe_radial_escape"
@@ -785,8 +811,10 @@ def add_breakout_stubs(
 
         conflict = None
         for a, b in zip(points, points[1:]):
-            for o_net, o_a, o_b, o_hw, o_cl in stamped:
+            for o_net, o_a, o_b, o_hw, o_cl, o_layer in stamped:
                 if o_net == net_code:
+                    continue
+                if o_layer is not None and o_layer != layer:
                     continue
                 need = max(floor_mm, src_cl_mm, o_cl) + half_width_mm + o_hw
                 if _seg_seg_dist_mm(a, b, o_a, o_b) < need:
@@ -820,7 +848,7 @@ def add_breakout_stubs(
                 track.SetLocked(True)
             board.Add(track)
             summary["segments"] += 1
-            stamped.append((net_code, a, b, half_width_mm, src_cl_mm))
+            stamped.append((net_code, a, b, half_width_mm, src_cl_mm, layer))
 
         if spec.via_at_end:
             via = pcbnew.PCB_VIA(board)

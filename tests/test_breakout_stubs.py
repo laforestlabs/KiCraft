@@ -139,18 +139,57 @@ def test_radial_escape_is_clipped_before_a_neighbour_pad(tmp_path):
 
 
 def test_radial_escape_skipped_when_no_safe_room(tmp_path):
-    # Blocker hard against the pad -> no safe escape -> stub skipped, not shorted.
+    # Blockers hemming the pad in on every quadrant (the _board test pads are
+    # 0.3 mm circles): every candidate direction collides before a legal tip
+    # exists -> stub skipped, not shorted.
     path = str(tmp_path / "b.kicad_pcb")
     _board(
         path,
         (5.0, 10.0),
-        {"B5": ("CC2", 8.0, 10.0), "BLK": ("GND", 8.35, 10.0)},
+        {
+            "B5": ("CC2", 8.0, 10.0),
+            "B1": ("GND", 8.25, 10.25),
+            "B2": ("GND", 7.75, 10.25),
+            "B3": ("GND", 8.25, 9.75),
+            "B4": ("GND", 7.75, 9.75),
+        },
     )
     res = add_breakout_stubs(
         path, [BreakoutSpec(ref="J1", pad="B5", length_mm=2.0)]
     )
     assert res["stubs"] == 0
     assert any("no_safe_radial_escape" in s for s in res["skipped"])
+
+
+def test_radial_escape_falls_back_to_axis_direction(tmp_path):
+    # Connector-row shape: the radial direction (footprint centre -> pad,
+    # here (0.6, 0.8)) is hemmed in by a neighbour sitting just off the ray
+    # (the USB-C CC2 signature), but the +x axis escape is wide open. The
+    # stub must fall back to an axis direction instead of being skipped.
+    path = str(tmp_path / "b.kicad_pcb")
+    _board(
+        path,
+        (5.0, 6.0),
+        {
+            "B5": ("CC2", 8.0, 10.0),
+            "N0": ("GND", 8.18, 10.30),  # kills the radial ray near the start
+            "N3": ("GND", 8.0, 11.15),   # row neighbours block +/-y tips
+            "N4": ("GND", 8.0, 8.85),
+        },
+    )
+    res = add_breakout_stubs(
+        path, [BreakoutSpec(ref="J1", pad="B5", length_mm=1.5)]
+    )
+    assert res["stubs"] == 1
+    board = pcbnew.LoadBoard(path)
+    seg = next(
+        t
+        for t in board.GetTracks()
+        if isinstance(t, pcbnew.PCB_TRACK) and not isinstance(t, pcbnew.PCB_VIA)
+    )
+    end = (pcbnew.ToMM(seg.GetEnd().x), pcbnew.ToMM(seg.GetEnd().y))
+    # The +x axis escape at the requested length, not the diagonal radial one.
+    assert end == (pytest.approx(9.5), pytest.approx(10.0)), end
 
 
 def test_perimeter_tie_routes_around_bbox(tmp_path):
