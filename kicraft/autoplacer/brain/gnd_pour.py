@@ -19,6 +19,7 @@ EP array while leaving perimeter GND pins -- which route normally -- alone.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pcbnew
@@ -246,6 +247,204 @@ def pour_power_planes(
     return summary
 
 
+def repair_stranded_gnd(
+    pcb_path: str,
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Tie GND clusters stranded from the main plane back with guarded tracks.
+
+    GND is never routed by FreeRouting -- the plane is supposed to reach every
+    GND pad. In a crowded region the B.Cu plane fragments around signal
+    tracks, and a THT connector GND pin (run_03 J7.2: a 2-pin LED-channel
+    header) can end up on a tiny fill island with no path to the main plane:
+    no via to drop through, no same-net mate for a shield tie, no GND track.
+    This post-pour pass finds every GND cluster isolated from the main one
+    (geometric union-find over pads/vias/tracks/fill islands) and stamps a
+    direct same-net track from a stranded pad to the nearest main-cluster
+    pad/via via :func:`add_breakout_stubs` -- inheriting its foreign-pad,
+    existing-copper, netclass and outline guards -- then refills the zones so
+    the pour closes around the new tie. A tie whose straight path is blocked
+    is skipped (the board is no worse than before).
+    """
+    cfg = cfg or {}
+    summary: dict[str, Any] = {"clusters": 0, "stranded": 0, "tied": 0, "skipped": []}
+    if not cfg.get("gnd_strand_repair_enabled", True):
+        return summary
+    gnd_name = cfg.get("gnd_zone_net", "GND")
+    if not gnd_name:
+        return summary
+
+    board = pcbnew.LoadBoard(pcb_path)
+    gnd_net = board.GetNetInfo().GetNetItem(gnd_name)
+    if not gnd_net or gnd_net.GetNetCode() == 0:
+        return summary
+    gnd_code = gnd_net.GetNetCode()
+    max_tie_mm = float(cfg.get("gnd_strand_repair_max_mm", 30.0))
+
+    # --- collect GND nodes -------------------------------------------------
+    # Each node: (kind, payload, layers, probe_points_mm). A PTH pad or via
+    # spans both layers; an SMD pad only its own; a fill island only its zone's.
+    F, B = pcbnew.F_Cu, pcbnew.B_Cu
+
+    def _pts_around(x_mm: float, y_mm: float, r_mm: float) -> list[tuple[float, float]]:
+        if r_mm <= 0:
+            return [(x_mm, y_mm)]
+        out = [(x_mm, y_mm)]
+        for k in range(8):
+            a = k * 0.785398
+            out.append((x_mm + r_mm * math.cos(a), y_mm + r_mm * math.sin(a)))
+        return out
+
+    nodes: list[dict] = []
+    for fp in board.GetFootprints():
+        for p in fp.Pads():
+            if p.GetNetCode() != gnd_code:
+                continue
+            pos = p.GetPosition()
+            x, y = pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y)
+            try:
+                sz = p.GetSize()
+            except TypeError:
+                sz = p.GetSize(F)
+            r = min(pcbnew.ToMM(sz.x), pcbnew.ToMM(sz.y)) / 2.0
+            is_pth = p.GetAttribute() == pcbnew.PAD_ATTRIB_PTH
+            nodes.append({
+                "kind": "pad", "ref": fp.GetReferenceAsString(), "num": p.GetNumber(),
+                "layers": {F, B} if is_pth else {F if p.IsOnLayer(F) else B},
+                "pts": _pts_around(x, y, r), "xy": (x, y),
+            })
+    for t in board.GetTracks():
+        if t.GetNetCode() != gnd_code:
+            continue
+        if t.GetClass() == "PCB_VIA":
+            pos = t.GetPosition()
+            x, y = pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y)
+            nodes.append({"kind": "via", "layers": {F, B},
+                          "pts": _pts_around(x, y, pcbnew.ToMM(t.GetWidth()) / 2.0),
+                          "xy": (x, y)})
+        else:
+            a, b2 = t.GetStart(), t.GetEnd()
+            nodes.append({"kind": "trk", "layers": {t.GetLayer()},
+                          "pts": [(pcbnew.ToMM(a.x), pcbnew.ToMM(a.y)),
+                                  (pcbnew.ToMM(b2.x), pcbnew.ToMM(b2.y))],
+                          "xy": (pcbnew.ToMM((a.x + b2.x) / 2), pcbnew.ToMM((a.y + b2.y) / 2))})
+    islands: list[dict] = []
+    for z in board.Zones():
+        if z.GetNetname() != gnd_name or z.GetIsRuleArea():
+            continue
+        layer = z.GetLayer()
+        fill = z.GetFilledPolysList(layer)
+        for i in range(fill.OutlineCount()):
+            bb = fill.Outline(i).BBox()
+            islands.append({"kind": "island", "layers": {layer}, "fill": fill,
+                            "idx": i,
+                            "xy": (pcbnew.ToMM(bb.Centre().x), pcbnew.ToMM(bb.Centre().y))})
+
+    all_nodes = nodes + islands
+    parent = list(range(len(all_nodes)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        parent[find(i)] = find(j)
+
+    # pads/vias/tracks <-> islands: any probe point inside the island's fill.
+    for ii, isl in enumerate(islands):
+        gi = len(nodes) + ii
+        for ni, n in enumerate(nodes):
+            if not (n["layers"] & isl["layers"]):
+                continue
+            for (px, py) in n["pts"]:
+                if isl["fill"].Contains(
+                    pcbnew.VECTOR2I(pcbnew.FromMM(px), pcbnew.FromMM(py)), isl["idx"]
+                ):
+                    union(ni, gi)
+                    break
+    # pads/vias/tracks <-> each other: shared layer + a probe point within
+    # 0.05 mm of another's probe point (track ends land on pad/via centres).
+    for i in range(len(nodes)):
+        for j in range(i + 1, len(nodes)):
+            if not (nodes[i]["layers"] & nodes[j]["layers"]):
+                continue
+            done = False
+            for (ax, ay) in nodes[i]["pts"]:
+                for (bx, by) in nodes[j]["pts"]:
+                    if (ax - bx) ** 2 + (ay - by) ** 2 < 0.0025:
+                        union(i, j)
+                        done = True
+                        break
+                if done:
+                    break
+
+    clusters: dict[int, list[int]] = {}
+    for i in range(len(all_nodes)):
+        clusters.setdefault(find(i), []).append(i)
+    summary["clusters"] = len(clusters)
+    if len(clusters) <= 1:
+        return summary
+    main_root = max(clusters, key=lambda r: len(clusters[r]))
+    main_targets = [
+        all_nodes[i] for i in clusters[main_root]
+        if all_nodes[i]["kind"] in ("pad", "via")
+    ]
+    if not main_targets:
+        return summary
+
+    from kicraft.autoplacer.brain.breakout_stubs import (
+        BreakoutSpec,
+        add_breakout_stubs,
+    )
+
+    max_targets = int(cfg.get("gnd_strand_repair_max_targets", 5))
+    for root, members in clusters.items():
+        if root == main_root:
+            continue
+        summary["stranded"] += 1
+        src = next((all_nodes[i] for i in members if all_nodes[i]["kind"] == "pad"), None)
+        if src is None:
+            summary["skipped"].append("cluster_without_pad")
+            continue
+        sx, sy = src["xy"]
+        ranked = sorted(
+            main_targets,
+            key=lambda t: (t["xy"][0] - sx) ** 2 + (t["xy"][1] - sy) ** 2,
+        )
+        # The straight line to the NEAREST target often runs through exactly
+        # the copper wall that stranded this cluster in the first place -- so
+        # walk outward through the nearest few targets (different directions)
+        # on both layers until one tie lands.
+        tied = False
+        for tgt in ranked[:max_targets]:
+            d = ((tgt["xy"][0] - sx) ** 2 + (tgt["xy"][1] - sy) ** 2) ** 0.5
+            if d > max_tie_mm:
+                break  # ranked by distance: everything after is farther
+            for layer_name in ("F.Cu", "B.Cu"):
+                res = add_breakout_stubs(
+                    pcb_path,
+                    [BreakoutSpec(ref=src["ref"], pad=src["num"],
+                                  waypoints=[tgt["xy"]], layer=layer_name)],
+                    cfg=cfg,
+                )
+                if res.get("stubs", 0):
+                    summary["tied"] += 1
+                    tied = True
+                    break
+            if tied:
+                break
+        if not tied:
+            summary["skipped"].append(f"{src['ref']}.{src['num']}:no_clear_path")
+
+    if summary["tied"]:
+        board = pcbnew.LoadBoard(pcb_path)
+        pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+        board.Save(pcb_path)
+    return summary
+
+
 def add_gnd_pour_and_thermal_vias(
     pcb_path: str,
     cfg: dict[str, Any] | None = None,
@@ -278,8 +477,39 @@ def add_gnd_pour_and_thermal_vias(
     pitch = pcbnew.FromMM(float(cfg.get("thermal_via_pitch_mm", 1.2)))
     inset = pcbnew.FromMM(float(cfg.get("thermal_via_inset_mm", 0.5)))
     area_threshold = float(cfg.get("thermal_pad_area_mm2", 4.0))
+    via_clearance = pcbnew.FromMM(
+        float(cfg.get("freerouting_min_clearance_mm", 0.153))
+    )
+    summary["thermal_vias_blocked"] = 0
+    summary["escape_stitched"] = 0
 
-    def _add_via(x: int, y: int) -> None:
+    def _via_blocked(x: int, y: int) -> bool:
+        """True when a GND via at (x, y) would land on another net's copper.
+
+        This runs on a ROUTED board (leaf) or a composed parent full of leaf
+        traces; a via stamped blind through a B.Cu track of another net is a
+        hard short the router can never repair (the IP2368-bank incident:
+        seven shorts from exactly this). Same-net copper is a valid landing.
+        """
+        pt = pcbnew.VECTOR2I(int(x), int(y))
+        margin = int(via_size // 2 + via_clearance)
+        for t in board.GetTracks():
+            if t.GetNetCode() == gnd_code:
+                continue
+            if t.HitTest(pt, margin):
+                return True
+        for ofp in board.GetFootprints():
+            for op in ofp.Pads():
+                if op.GetNetCode() == gnd_code:
+                    continue
+                if op.HitTest(pt, margin):
+                    return True
+        return False
+
+    def _add_via(x: int, y: int) -> bool:
+        if _via_blocked(x, y):
+            summary["thermal_vias_blocked"] += 1
+            return False
         via = pcbnew.PCB_VIA(board)
         via.SetPosition(pcbnew.VECTOR2I(int(x), int(y)))
         via.SetDrill(via_drill)
@@ -289,6 +519,11 @@ def add_gnd_pour_and_thermal_vias(
             via.SetWidth(pcbnew.F_Cu, via_size)
         via.SetNetCode(gnd_code)
         board.Add(via)
+        return True
+
+    # GND pads that need stitching but cannot host an in-pad via: escape them
+    # with a short guarded stub + end via instead (see below).
+    escape_pads: list[tuple[str, str]] = []
 
     # --- 1. Thermal-via arrays under GND thermal / exposed pads ---
     for fp in board.GetFootprints():
@@ -299,7 +534,11 @@ def add_gnd_pour_and_thermal_vias(
         ]
         if not smd:
             continue
-        multipad = len(pads) >= 6  # ICs/modules; passives connect via their traces
+        # ICs/modules need their GND dropped to the plane; 2-pad passives reach
+        # GND through whatever they connect to. >= 3 includes the SOT-23-class
+        # regulators whose lone GND pad otherwise floats as an F.Cu pour island
+        # (run_03 U1.5 / run_05 U2.2 -- the post-connector-fix rc7 signature).
+        multipad = len(pads) >= 3
         # Pad numbers that carry GND -- EP sub-pads share a number but often only
         # one is netted, so treat the whole number-group as GND.
         gnd_numbers = {p.GetNumber() for p in pads if p.GetNetCode() == gnd_code}
@@ -312,17 +551,20 @@ def add_gnd_pour_and_thermal_vias(
             min_dim_mm = min(pcbnew.ToMM(size.x), pcbnew.ToMM(size.y))
             large = pcbnew.ToMM(size.x) * pcbnew.ToMM(size.y) >= area_threshold
             fits_via = min_dim_mm >= pcbnew.ToMM(via_size)
-            # Stitch every GND pad on a multi-pin footprint that can host a via:
-            # this ties BOTH the perimeter GND pins (so the F.Cu GND network drops
-            # to the plane) AND the interior EP down to the B.Cu pour, unifying GND
-            # into one net. Also stitch any large thermal pad. Tiny passive GND
-            # pads are left to their traces (they reach GND through the IC vias).
-            if not ((multipad and fits_via) or large):
+            if not multipad and not large:
                 continue
             pos = pad.GetPosition()
             # Net any stray (number-shared) EP sub-pad to GND so it joins the plane.
             if pad.GetNetCode() != gnd_code:
                 pad.SetNetCode(gnd_code)
+            # Stitch every GND pad on a multi-pin footprint: this ties BOTH the
+            # perimeter GND pins (so the F.Cu GND network drops to the plane)
+            # AND the interior EP down to the B.Cu pour, unifying GND into one
+            # net. A pad too small for an in-pad via is escaped with a short
+            # guarded stub + end via instead (stamped after this pass).
+            if not (fits_via or large):
+                escape_pads.append((fp.GetReferenceAsString(), pad.GetNumber()))
+                continue
             if large:
                 vx = _grid_positions(pos.x, size.x // 2 - inset, pitch)
                 vy = _grid_positions(pos.y, size.y // 2 - inset, pitch)
@@ -331,11 +573,42 @@ def add_gnd_pour_and_thermal_vias(
             placed = 0
             for x in vx:
                 for y in vy:
-                    _add_via(x, y)
-                    placed += 1
+                    if _add_via(x, y):
+                        placed += 1
             if placed:
                 summary["gnd_pads_stitched"] += 1
                 summary["thermal_vias_added"] += placed
+
+    # --- 1b. Escape-stitch the GND pads that cannot host an in-pad via: a
+    #         short locked stub out of the pad with a via at its tip bonds the
+    #         pad (and its F.Cu pour cluster) to the B.Cu plane. Reuses the
+    #         breakout-stub machinery, which already guards against foreign
+    #         pads, existing tracks/vias, netclass pair clearance, and the
+    #         board outline -- exactly the guards a routed board demands.
+    if escape_pads:
+        board.Save(pcb_path)
+        try:
+            from kicraft.autoplacer.brain.breakout_stubs import (
+                BreakoutSpec,
+                add_breakout_stubs,
+            )
+
+            specs = [
+                BreakoutSpec(
+                    ref=ref,
+                    pad=num,
+                    length_mm=float(cfg.get("gnd_escape_length_mm", 1.0)),
+                    via_at_end=True,
+                )
+                for ref, num in escape_pads
+            ]
+            res = add_breakout_stubs(pcb_path, specs, cfg=cfg)
+            summary["escape_stitched"] = res.get("vias", 0)
+            summary["escape_skipped"] = res.get("skipped", [])
+        except Exception as exc:  # finishing helper must never fail the board
+            summary["escape_error"] = str(exc)
+        board = pcbnew.LoadBoard(pcb_path)
+        gnd_net = board.GetNetInfo().GetNetItem(gnd_name)
 
     # --- 2. Full B.Cu GND pour (rule-area keepouts, e.g. the antenna, are
     #        respected automatically by the filler) ---

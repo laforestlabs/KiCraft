@@ -3019,6 +3019,37 @@ def _route_parent_board(
             str(routed_pcb), cfg, layers=(cfg.get("power_plane_layer", "F.Cu"),)
         )
 
+    # GND strand repair: a THT connector GND pin can end up on a tiny plane
+    # fragment with no path to the main pour (FreeRouting never routes GND,
+    # a 2-pad connector has no shield-tie mate, and no via drops through).
+    # Find every GND cluster isolated from the main plane and tie it back
+    # with a guarded same-net track, then refill. pcbnew work -> subprocess.
+    if gnd_net and cfg.get("gnd_strand_repair_enabled", True):
+        try:
+            from kicraft.autoplacer.freerouting_runner import _run_pcbnew_script
+
+            _rep_cfg = json.dumps({
+                k: cfg[k]
+                for k in (
+                    "gnd_zone_net",
+                    "gnd_strand_repair_enabled",
+                    "gnd_strand_repair_max_mm",
+                    "freerouting_min_clearance_mm",
+                    "freerouting_fine_pitch_track_mm",
+                )
+                if k in cfg
+            })
+            _run_pcbnew_script(
+                "import json\n"
+                "from kicraft.autoplacer.brain.gnd_pour import repair_stranded_gnd\n"
+                f"cfg = json.loads({_rep_cfg!r})\n"
+                f"s = repair_stranded_gnd({str(routed_pcb)!r}, cfg)\n"
+                "print('gnd strand repair:', s['stranded'], 'stranded,',\n"
+                "      s['tied'], 'tied,', len(s['skipped']), 'skipped')\n"
+            )
+        except Exception as exc:
+            print(f"warning: gnd strand repair failed: {exc}", file=sys.stderr)
+
     # Import all copper from the routed board (child + new parent traces)
     copper = import_routed_copper(str(routed_pcb))
 
