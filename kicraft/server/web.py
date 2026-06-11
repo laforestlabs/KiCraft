@@ -2090,6 +2090,7 @@ def profile_page():
 
     ui.dark_mode().enable()
     ui.query("body").style("background:#0b1120")
+    _mobile_head()
 
     def logout():
         for k in ("user_id", "email"):
@@ -2100,7 +2101,7 @@ def profile_page():
             .style("background:#0f172a;border-bottom:1px solid #1e293b"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
-            ui.label("your profile").classes("text-sm").style("color:#94a3b8")
+            ui.label("your profile").classes("text-sm kc-tagline").style("color:#94a3b8")
         with ui.row().classes("items-center gap-2"):
             if is_admin(user):
                 ui.button("Admin", icon="admin_panel_settings",
@@ -3508,12 +3509,13 @@ def browse_page():
 
     ui.dark_mode().enable()
     ui.query("body").style("background:#0b1120")
+    _mobile_head()
 
     with ui.header().classes("items-center justify-between") \
             .style("background:#0f172a;border-bottom:1px solid #1e293b"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
-            ui.label("community browser").classes("text-sm").style("color:#94a3b8")
+            ui.label("community browser").classes("text-sm kc-tagline").style("color:#94a3b8")
         ui.button("Back to workspace", icon="arrow_back",
                   on_click=lambda: ui.navigate.to("/")) \
             .props("flat dense no-caps color=white").classes("text-xs")
@@ -3608,12 +3610,13 @@ def public_project_page(project_id: str):
     ui.dark_mode().enable()
     ui.query("body").style("background:#0b1120")
     kicanvas_head()
+    _mobile_head()
 
     with ui.header().classes("items-center justify-between") \
             .style("background:#0f172a;border-bottom:1px solid #1e293b"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
-            ui.label("community project").classes("text-sm").style("color:#94a3b8")
+            ui.label("community project").classes("text-sm kc-tagline").style("color:#94a3b8")
         ui.button("Back to browse", icon="arrow_back",
                   on_click=lambda: ui.navigate.to("/browse")) \
             .props("flat dense no-caps color=white").classes("text-xs")
@@ -3774,12 +3777,13 @@ def samples_page():
     ui.dark_mode().enable()
     ui.query("body").style("background:#0b1120")
     kicanvas_head()
+    _mobile_head()
 
     with ui.header().classes("items-center justify-between") \
             .style("background:#0f172a;border-bottom:1px solid #1e293b"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
-            ui.label("example boards").classes("text-sm").style("color:#94a3b8")
+            ui.label("example boards").classes("text-sm kc-tagline").style("color:#94a3b8")
         ui.button("Back to workspace", icon="arrow_back",
                   on_click=lambda: ui.navigate.to("/")) \
             .props("flat dense no-caps color=white").classes("text-xs")
@@ -3838,13 +3842,20 @@ def samples_page():
                 card.on("click", lambda ss=s: open_sample(ss))
 
 
+def _mobile_head() -> None:
+    """Load the mobile/tablet-only stylesheet. Every rule in it sits under a
+    max-width media query, so desktop (>=1024px) rendering is unaffected."""
+    ui.add_head_html('<link rel="stylesheet" href="/static/kc_mobile.css">')
+
+
 def _parts_header(subtitle_btn_label: str, subtitle_btn_target: str) -> None:
     """The shared dark header for the /parts pages: brand + a single back button."""
+    _mobile_head()
     with ui.header().classes("items-center justify-between") \
             .style("background:#0f172a;border-bottom:1px solid #1e293b"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
-            ui.label("part library").classes("text-sm").style("color:#94a3b8")
+            ui.label("part library").classes("text-sm kc-tagline").style("color:#94a3b8")
         ui.button(subtitle_btn_label, icon="arrow_back",
                   on_click=lambda: ui.navigate.to(subtitle_btn_target)) \
             .props("flat dense no-caps color=white").classes("text-xs")
@@ -4306,6 +4317,7 @@ def index(prompt: str = "", project: str = ""):
     q0 = _store().quota_status(user)
 
     kicanvas_head()
+    _mobile_head()
     ui.add_head_html('<link rel="stylesheet" href="/static/kc_onboarding.css">')
     ui.add_head_html(
         f"<script>window.KICRAFT_PROMPTS={json.dumps(EXAMPLE_PROMPTS)};"
@@ -4352,8 +4364,10 @@ def index(prompt: str = "", project: str = ""):
             .style("background:#0f172a;border-bottom:1px solid #1e293b"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
-            ui.label("design a PCB from a sentence").classes("text-sm").style("color:#94a3b8")
-        with ui.row().classes("items-center gap-3"):
+            ui.label("design a PCB from a sentence").classes("text-sm kc-tagline") \
+                .style("color:#94a3b8")
+        # Full nav row on desktop (>=1024px) ...
+        with ui.row().classes("items-center gap-3 gt-sm"):
             ui.button("Examples", icon="dashboard",
                       on_click=lambda: ui.navigate.to("/samples")) \
                 .props("flat dense no-caps color=white").classes("text-xs") \
@@ -4382,6 +4396,21 @@ def index(prompt: str = "", project: str = ""):
                 .tooltip("Profile & account settings")
             tier_badge = ui.badge(q0["label"], color="primary")
             ui.button("Log out", on_click=logout).props("flat dense color=white").classes("text-xs")
+        # ... collapsed to a badge + hamburger menu on phones/tablets (<1024px).
+        with ui.row().classes("items-center gap-2 lt-md"):
+            m_tier_badge = ui.badge(q0["label"], color="primary")
+            with ui.button(icon="menu").props("flat dense color=white"):
+                with ui.menu().props("auto-close") \
+                        .style("background:#0f172a;border:1px solid #1e293b"):
+                    ui.menu_item("Examples", lambda: ui.navigate.to("/samples"))
+                    ui.menu_item("Part library", lambda: ui.navigate.to("/parts"))
+                    ui.menu_item("Browse", lambda: ui.navigate.to("/browse"))
+                    ui.menu_item("Support", lambda: open_support_dialog(auto=False))
+                    if is_admin(user):
+                        ui.menu_item("Admin", lambda: ui.navigate.to("/admin"))
+                    ui.separator()
+                    ui.menu_item(user.email, lambda: ui.navigate.to("/profile"))
+                    ui.menu_item("Log out", logout)
 
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1600px"):
         try:
@@ -4933,6 +4962,7 @@ def index(prompt: str = "", project: str = ""):
                 quota_label.text = (f"{q['label']} tier: {q['remaining']} of {q['limit']} "
                                     f"designs left this {period}.")
             tier_badge.text = q["label"]
+            m_tier_badge.text = q["label"]
             if q["remaining"] <= 0:
                 design_btn.disable()
                 quota_label.style("color:#f59e0b")
@@ -5271,10 +5301,11 @@ if os.environ.get("KICRAFT_WEB_DEMO"):
         Registered only when KICRAFT_WEB_DEMO is set (off in production)."""
         ui.dark_mode().enable()
         ui.query("body").style("background:#0b1120")
+        _mobile_head()
         with ui.header().classes("items-center justify-between") \
                 .style("background:#0f172a;border-bottom:1px solid #1e293b"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
-            ui.label("design preview (demo)").classes("text-sm").style("color:#94a3b8")
+            ui.label("design preview (demo)").classes("text-sm kc-tagline").style("color:#94a3b8")
         with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1600px"):
             ui.label("Replaying a canned design to preview the per-stage tabs.") \
                 .classes("text-sm").style("color:#94a3b8")

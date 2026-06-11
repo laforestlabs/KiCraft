@@ -1,0 +1,34 @@
+/* Mobile/tablet-only layer. Every rule lives under a max-width media query,
+ * so rendering at >=1024px is byte-identical to not loading this file.
+ * The stage panels carry inline styles (width %, no-wrap, vh heights), hence
+ * the !important overrides. */
+
+/* Stage panels: two columns -> stacked full-width bands. Heights stay bounded
+ * (not natural) because kc_follow.js tail-follow needs each pane to scroll
+ * internally. */
+@media (max-width: 1023.98px) {
+  .kc-stage-body {
+    flex-wrap: wrap !important;
+    height: auto !important;
+    min-height: 0 !important;
+  }
+  .kc-stage-left,
+  .kc-stage-right {
+    width: 100% !important;
+    min-width: 0 !important;
+    flex: 1 1 100% !important;
+    height: auto !important;
+  }
+  /* scroll_area is flex:1 inside a now-auto-height column -> would collapse */
+  .kc-stage-insp  { height: 45vh !important; flex: none !important; }
+  .kc-stage-think { height: 38vh !important; }
+  .kc-stage-act   { height: 30vh !important; flex: none !important; }
+}
+
+/* Phones: icon-only stage tabs so all 8 fit; icons inherit the per-tab status
+ * color, so pending/active/ok/fail stays visible. */
+@media (max-width: 599.98px) {
+  .kc-stage-tabs .q-tab { min-width: 0 !important; padding: 0 10px !important; }
+  .kc-stage-tabs .q-tab__label { display: none !important; }
+  .kc-tagline { display: none !important; }
+}
