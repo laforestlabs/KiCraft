@@ -8,11 +8,13 @@ pcbnew = pytest.importorskip("pcbnew")
 
 from kicraft.autoplacer.brain.breakout_stubs import (  # noqa: E402
     BreakoutSpec,
+    _seg_seg_dist_mm,
     _segment_clears_pads,
     add_breakout_stubs,
     auto_power_tie_specs,
     auto_signal_escape_specs,
     perimeter_tie_specs,
+    shield_tie_specs,
 )
 
 _mm = pcbnew.FromMM
@@ -457,3 +459,234 @@ def test_auto_signal_escape_disable_and_exclude(tmp_path):
     board = pcbnew.LoadBoard(path)
     assert auto_signal_escape_specs(board, {"auto_signal_escape": False}) == []
     assert auto_signal_escape_specs(board, {"signal_escape_exclude_refs": ["J1"]}) == []
+
+
+# ---------------------------------------------------------------------------
+# Netclass-aware stamping (the rc7 CC2 signature) + mutual stub clearance
+# ---------------------------------------------------------------------------
+
+
+def _write_pro_with_power_class(pcb_path, power_nets):
+    """Sibling .kicad_pro so LoadBoard resolves the Power netclass (0.3 mm)."""
+    import json
+    from pathlib import Path
+
+    from kicraft.design.synthesis.kicad_pro import DEFAULT_NETCLASS, POWER_NETCLASS
+
+    p = Path(pcb_path).with_suffix(".kicad_pro")
+    p.write_text(
+        json.dumps(
+            {
+                "board": {"design_settings": {"meta": {"version": 2}}},
+                "meta": {"filename": p.name, "version": 1},
+                "net_settings": {
+                    "classes": [dict(DEFAULT_NETCLASS), dict(POWER_NETCLASS)],
+                    "meta": {"version": 3},
+                    "net_colors": None,
+                    "netclass_assignments": None,
+                    "netclass_patterns": [
+                        {"netclass": "Power", "pattern": n} for n in power_nets
+                    ],
+                },
+            }
+        )
+    )
+    return p
+
+
+def _dense_row_board(path):
+    """CC2 escape pad at (8,10) with a same-footprint VBUS pad alongside at
+    (8,10.65) (1.0x0.6, spans x 7.5-8.5 / y 10.35-10.95) -- the USB-C shape:
+    the escape path is collision-clear, but a tip at the requested 0.6 mm sits
+    inside the VBUS pad's Power-netclass keep-out."""
+    board = pcbnew.NewBoard(path)
+    for name in ("CC2", "VBUS"):
+        board.Add(pcbnew.NETINFO_ITEM(board, name))
+    corners = [(0, 0), (30, 0), (30, 30), (0, 30), (0, 0)]
+    for (x1, y1), (x2, y2) in zip(corners, corners[1:]):
+        seg = pcbnew.PCB_SHAPE(board)
+        seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        seg.SetStart(pcbnew.VECTOR2I(_mm(x1), _mm(y1)))
+        seg.SetEnd(pcbnew.VECTOR2I(_mm(x2), _mm(y2)))
+        seg.SetLayer(pcbnew.Edge_Cuts)
+        board.Add(seg)
+    fp = pcbnew.FOOTPRINT(board)
+    fp.SetReference("J1")
+    fp.SetPosition(pcbnew.VECTOR2I(_mm(5.0), _mm(10.0)))
+    board.Add(fp)
+    for num, net, x, y, w, h in (
+        ("B5", "CC2", 8.0, 10.0, 0.3, 1.0),
+        ("B4A9", "VBUS", 8.0, 10.65, 1.0, 0.6),
+    ):
+        pad = pcbnew.PAD(fp)
+        try:
+            pad.SetShape(pcbnew.PAD_SHAPE_RECT)
+        except TypeError:  # KiCad 9 padstack API wants the layer first
+            pad.SetShape(pcbnew.F_Cu, pcbnew.PAD_SHAPE_RECT)
+        pad.SetSize(pcbnew.VECTOR2I(_mm(w), _mm(h)))
+        pad.SetPosition(pcbnew.VECTOR2I(_mm(x), _mm(y)))
+        pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        pad.SetLayerSet(pcbnew.PAD.SMDMask())
+        pad.SetNumber(num)
+        pad.SetNet(board.GetNetInfo().GetNetItem(net))
+        fp.Add(pad)
+    board.Save(path)
+    return path
+
+
+def _single_track_end_x(path):
+    board = pcbnew.LoadBoard(path)
+    segs = [
+        t
+        for t in board.GetTracks()
+        if isinstance(t, pcbnew.PCB_TRACK) and not isinstance(t, pcbnew.PCB_VIA)
+    ]
+    assert len(segs) == 1
+    return pcbnew.ToMM(segs[0].GetEnd().x)
+
+
+def test_radial_tip_extends_past_power_netclass_keepout(tmp_path):
+    # With the Power netclass resolved, a 0.6 mm escape's tip would sit inside
+    # the VBUS pad's 0.3 mm pair-clearance keep-out -- a tip FreeRouting cannot
+    # attach to, which abandons the net (the rc7 CC2 signature). The stub must
+    # extend until its tip is legal (x >= ~8.64), not stamp the illegal tip.
+    #
+    # NewBoard() registers its (netclass-less) project with pcbnew's settings
+    # manager, and a later LoadBoard of the same path reuses that stale project
+    # instead of reading the sibling .kicad_pro -- so build the board at a
+    # scratch path and copy the bytes to a path whose first load sees the pro.
+    import shutil
+
+    scratch = str(tmp_path / "scratch.kicad_pcb")
+    _dense_row_board(scratch)
+    path = str(tmp_path / "b.kicad_pcb")
+    shutil.copyfile(scratch, path)
+    _write_pro_with_power_class(path, ["VBUS"])
+    board = pcbnew.LoadBoard(path)
+    vbus = next(
+        p for f in board.GetFootprints() for p in f.Pads() if p.GetNumber() == "B4A9"
+    )
+    assert pcbnew.ToMM(vbus.GetOwnClearance(pcbnew.F_Cu)) == pytest.approx(0.3)
+    del board
+
+    res = add_breakout_stubs(path, [BreakoutSpec(ref="J1", pad="B5", length_mm=0.6)])
+    assert res["stubs"] == 1
+    assert _single_track_end_x(path) > 8.62
+
+
+def test_radial_tip_stays_at_requested_length_without_netclasses(tmp_path):
+    # Control: same geometry, no project netclasses -> the flat floor applies
+    # and the 0.6 mm tip is already legal, so the stub ends exactly there.
+    path = str(tmp_path / "b.kicad_pcb")
+    _dense_row_board(path)
+    res = add_breakout_stubs(path, [BreakoutSpec(ref="J1", pad="B5", length_mm=0.6)])
+    assert res["stubs"] == 1
+    assert _single_track_end_x(path) == pytest.approx(8.6, abs=0.02)
+
+
+def test_conflicting_spec_against_stamped_stub_is_skipped(tmp_path):
+    # Two specs on different nets whose copper would land on top of each other:
+    # the first stamps, the second must be dropped -- two locked tracks 0.05 mm
+    # apart are a violation no router pass can repair.
+    path = str(tmp_path / "b.kicad_pcb")
+    _board(
+        path,
+        (5.0, 10.0),
+        {"V1": ("VBUS", 8.0, 10.0), "C1": ("CC2", 9.0, 8.0)},
+    )
+    res = add_breakout_stubs(
+        path,
+        [
+            BreakoutSpec(ref="J1", pad="V1", length_mm=1.5),  # (8,10)->(9.5,10)
+            BreakoutSpec(ref="J1", pad="C1", waypoints=[(9.0, 12.0)]),  # crosses it
+        ],
+    )
+    assert res["stubs"] == 1
+    assert any("conflicts_with_stamped_stub" in s for s in res["skipped"])
+
+
+def test_seg_seg_dist_crossing_and_parallel():
+    assert _seg_seg_dist_mm((0, 0), (2, 0), (1, -1), (1, 1)) == 0.0
+    assert _seg_seg_dist_mm((0, 0), (2, 0), (0, 1), (2, 1)) == pytest.approx(1.0)
+    assert _seg_seg_dist_mm((0, 0), (1, 0), (3, 0), (4, 0)) == pytest.approx(2.0)
+
+
+# ---------------------------------------------------------------------------
+# Shield ties: netted PTH legs -> nearest same-net pad
+# ---------------------------------------------------------------------------
+
+
+def _shield_board(path):
+    """J2 with two GND through-hole shield legs ("3","4"), one GND SMD pad,
+    one VBUS SMD pad and a no-net mounting post."""
+    board = pcbnew.NewBoard(path)
+    for name in ("GND", "VBUS"):
+        board.Add(pcbnew.NETINFO_ITEM(board, name))
+    corners = [(0, 0), (30, 0), (30, 30), (0, 30), (0, 0)]
+    for (x1, y1), (x2, y2) in zip(corners, corners[1:]):
+        seg = pcbnew.PCB_SHAPE(board)
+        seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        seg.SetStart(pcbnew.VECTOR2I(_mm(x1), _mm(y1)))
+        seg.SetEnd(pcbnew.VECTOR2I(_mm(x2), _mm(y2)))
+        seg.SetLayer(pcbnew.Edge_Cuts)
+        board.Add(seg)
+    fp = pcbnew.FOOTPRINT(board)
+    fp.SetReference("J2")
+    fp.SetPosition(pcbnew.VECTOR2I(_mm(10.0), _mm(10.0)))
+    board.Add(fp)
+
+    def add_pad(num, net, x, y, *, pth):
+        pad = pcbnew.PAD(fp)
+        pad.SetPosition(pcbnew.VECTOR2I(_mm(x), _mm(y)))
+        pad.SetNumber(num)
+        if pth:
+            pad.SetAttribute(pcbnew.PAD_ATTRIB_PTH)
+            pad.SetLayerSet(pcbnew.PAD.PTHMask())
+            pad.SetSize(pcbnew.VECTOR2I(_mm(1.2), _mm(1.2)))
+            pad.SetDrillSize(pcbnew.VECTOR2I(_mm(0.8), _mm(0.8)))
+        else:
+            pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+            pad.SetLayerSet(pcbnew.PAD.SMDMask())
+            pad.SetSize(pcbnew.VECTOR2I(_mm(0.6), _mm(0.6)))
+        if net:
+            pad.SetNet(board.GetNetInfo().GetNetItem(net))
+        fp.Add(pad)
+
+    add_pad("4", "GND", 10.0, 10.0, pth=True)
+    add_pad("3", "GND", 10.5, 10.0, pth=True)  # nearer to "4" than the SMD pad
+    add_pad("A1", "GND", 11.2, 10.8, pth=False)
+    add_pad("A4", "VBUS", 12.0, 9.0, pth=False)
+    add_pad("M", "", 9.0, 9.0, pth=True)  # no net -> never tied
+    board.Save(path)
+    return path
+
+
+def test_shield_tie_prefers_smd_same_net_pad(tmp_path):
+    path = str(tmp_path / "b.kicad_pcb")
+    _shield_board(path)
+    board = pcbnew.LoadBoard(path)
+    specs = shield_tie_specs(board)
+    # Both GND legs tie to the SMD pad (the pour/router reach it), NOT to the
+    # nearer sibling PTH leg -- two isolated legs tied together stay isolated.
+    assert {(s.pad, s.waypoints[0]) for s in specs} == {
+        ("4", (11.2, 10.8)),
+        ("3", (11.2, 10.8)),
+    }
+    res = add_breakout_stubs(path, specs)
+    assert res["stubs"] == 2
+    routed = pcbnew.LoadBoard(path)
+    segs = [
+        t
+        for t in routed.GetTracks()
+        if isinstance(t, pcbnew.PCB_TRACK) and not isinstance(t, pcbnew.PCB_VIA)
+    ]
+    assert all(t.GetNetname() == "GND" and t.IsLocked() for t in segs)
+
+
+def test_shield_tie_respects_disable_and_max_distance(tmp_path):
+    path = str(tmp_path / "b.kicad_pcb")
+    _shield_board(path)
+    board = pcbnew.LoadBoard(path)
+    assert shield_tie_specs(board, {"shield_tie_enabled": False}) == []
+    assert shield_tie_specs(board, {"shield_tie_max_mm": 1.0}) == []
+    assert shield_tie_specs(board, {"shield_tie_exclude_refs": ["J2"]}) == []

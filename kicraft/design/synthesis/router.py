@@ -208,6 +208,10 @@ def route_sheet(
     inter_by_name: dict[str, InterSheetNet] = {
         n.name: n for n in architecture.inter_sheet_nets
     }
+    # Power stubs placed so far on this sheet, as (net, x1, y1, x2, y2): two
+    # rails' stubs meeting head-on (or a stub end landing on a foreign pin)
+    # silently merge two GLOBAL nets -- see _route_power.
+    power_stubs: list[tuple[str, float, float, float, float]] = []
 
     for conn in sheet_connections:
         eps: list[_Endpoint] = []
@@ -223,7 +227,7 @@ def route_sheet(
             continue
 
         if is_power_or_ground_name(conn.net_name):
-            _route_power(routed, conn.net_name, eps, flag_nets)
+            _route_power(routed, conn.net_name, eps, flag_nets, all_pins, power_stubs)
             continue
 
         is_inter = conn.net_name in inter_by_name
@@ -271,20 +275,84 @@ def route_sheet(
     return routed
 
 
+def _pt_on_axis_seg(
+    px: float, py: float, x1: float, y1: float, x2: float, y2: float
+) -> bool:
+    """True when point (px,py) lies on the axis-aligned segment (x1,y1)-(x2,y2)."""
+    if abs(y1 - y2) < EPS and abs(py - y1) < EPS:  # horizontal
+        return min(x1, x2) - EPS <= px <= max(x1, x2) + EPS
+    if abs(x1 - x2) < EPS and abs(px - x1) < EPS:  # vertical
+        return min(y1, y2) - EPS <= py <= max(y1, y2) + EPS
+    return False
+
+
+def _power_stub_clear(
+    net_name: str,
+    e: _Endpoint,
+    ex: float,
+    ey: float,
+    own_pins: set[tuple[str, str]],
+    all_pins: list[tuple[float, float, str, str]],
+    power_stubs: list[tuple[str, float, float, float, float]],
+) -> bool:
+    """True when the stub (e.x,e.y)->(ex,ey) can carry *net_name* safely.
+
+    In KiCad a pin end or wire end that merely TOUCHES a wire connects to it,
+    so a power stub that runs over a foreign pin -- or whose end meets another
+    rail's stub -- silently merges two GLOBAL nets project-wide. The only ERC
+    symptom is a baffling "Power output and Power output are connected"
+    between the two rails' PWR_FLAGs (the run_05 VBUS+GND short: a GND stub
+    stepped one grid right onto the neighbouring resistor's VBUS pin).
+    """
+    for (px, py, ref, pin) in all_pins:
+        if (ref, pin) in own_pins:
+            continue
+        if _pt_on_axis_seg(px, py, e.x, e.y, ex, ey):
+            return False
+    for net2, x1, y1, x2, y2 in power_stubs:
+        if net2 == net_name:
+            continue
+        if (
+            _pt_on_axis_seg(ex, ey, x1, y1, x2, y2)
+            or _pt_on_axis_seg(x1, y1, e.x, e.y, ex, ey)
+            or _pt_on_axis_seg(x2, y2, e.x, e.y, ex, ey)
+        ):
+            return False
+    return True
+
+
 def _route_power(
     routed: RoutedSheet,
     net_name: str,
     eps: list[_Endpoint],
     flag_nets: frozenset[str],
+    all_pins: list[tuple[float, float, str, str]],
+    power_stubs: list[tuple[str, float, float, float, float]],
 ) -> None:
     """A short stub + power symbol (or global label) at every pin of a power
-    net, oriented to point away from the wire."""
+    net, oriented to point away from the wire.
+
+    Each stub is collision-checked (see _power_stub_clear); a blocked stub
+    retreats to half a grid step, and when even that collides the pin gets a
+    global label at its own position instead -- the net stays named and
+    connected with no copper stamped onto a foreign pin.
+    """
     power_lib = power_symbol_for(net_name)
     angle_table = _GND_ANGLE if _is_ground(net_name) else _RAIL_ANGLE
+    own_pins = {(e.ref, e.pin) for e in eps}
     flag_xy: tuple[float, float] | None = None
     for e in eps:
         ex, ey = step(e.x, e.y, e.exit, GRID_MM)
+        if not _power_stub_clear(net_name, e, ex, ey, own_pins, all_pins, power_stubs):
+            ex, ey = step(e.x, e.y, e.exit, GRID_MM / 2)
+            if not _power_stub_clear(
+                net_name, e, ex, ey, own_pins, all_pins, power_stubs
+            ):
+                routed.global_labels.append(GlobalLabel(
+                    text=net_name, x_mm=e.x, y_mm=e.y, angle_deg=_LABEL_ANGLE[e.exit]))
+                continue
         routed.wires.append(WireSegment(e.x, e.y, ex, ey))
+        power_stubs.append((net_name, e.x, e.y, ex, ey))
         if flag_xy is None:
             flag_xy = (ex, ey)
         if power_lib is not None:

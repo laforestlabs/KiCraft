@@ -505,6 +505,22 @@ def route_local_subcircuit(
             del _tie_board
         except Exception as exc:  # never fail the leaf on a finishing helper
             print(f"  WARNING: auto power-tie spec gen failed: {exc}")
+    # Shield tie (default on): a connector's through-hole shield legs sit where
+    # neither GND plane can reach them (F.Cu walled out of the pad row by the
+    # Power-netclass clearance, B.Cu thermal spokes lost to the slot holes), so
+    # the legs facing the pad row survive as unconnected ratlines on an
+    # otherwise-routed board. Tie each netted PTH pad to its nearest same-net pad.
+    if cfg.get("shield_tie_enabled", True):
+        try:
+            import pcbnew
+
+            from kicraft.autoplacer.brain.breakout_stubs import shield_tie_specs
+
+            _sh_board = pcbnew.LoadBoard(str(pre_route_board))
+            _breakout_specs = _breakout_specs + shield_tie_specs(_sh_board, cfg)
+            del _sh_board
+        except Exception as exc:  # never fail the leaf on a finishing helper
+            print(f"  WARNING: shield tie spec gen failed: {exc}")
     # Auto signal-escape (default on): radial escapes for the signal pads of a
     # dense connector (USB-C CC pins etc.) the autorouter can't escape from the
     # pad field. Same connector signature as the power-tie above.
