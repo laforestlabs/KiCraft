@@ -90,8 +90,9 @@ BOM_TOOLS = [
                           "'Resistor_SMD:R_0603_1608Metric'"}}, "required": ["footprint"]}}},
     {"type": "function", "function": {
         "name": "lookup_lcsc_id",
-        "description": "Resolve a manufacturer part number or search keyword to an LCSC part "
-                       "number (C#####). Returns {ok, lcsc} or a candidates list.",
+        "description": "Resolve a manufacturer part number, search keyword, or pasted LCSC "
+                       "id / product URL to an LCSC part number (C#####). Returns {ok, lcsc} "
+                       "or a candidates list.",
         "parameters": {"type": "object", "properties": {
             "mpn": {"type": "string", "description": "MPN or keyword, e.g. 'SK-12D07VG4' or "
                     "'SPDT slide switch SMD'"}}, "required": ["mpn"]}}},
@@ -148,6 +149,11 @@ def _stage_extra(stage: str) -> str:
             "pick a stock symbol/footprint. Resolve the real part: lookup_lcsc_id then "
             "add_part_from_lcsc, then list_parts to read the exact '<name>:<sym>' / '<name>:<fp>' "
             "strings. Substituting a generic stock part for a specific IC is wrong.\n"
+            "- SEARCH BUDGET: lookup_lcsc_id is one query + at most one retry per part (retry "
+            "with the bare part family, no descriptive words). If it still misses — or reports "
+            "the backend unreachable — STOP searching for that part: either ask the user for "
+            "the LCSC C-number (one clarifying question can cover several parts) or use the "
+            "closest stock KiCad symbol/footprint and record the substitution in assumptions.\n"
             "- EFFICIENCY: when you need several independent lookups (e.g. several "
             "search_footprints, search_symbols, or lookup_lcsc_id for different parts), "
             "request them TOGETHER in a single turn (emit multiple tool calls at once) "
@@ -225,6 +231,29 @@ def _extract_json(text: str) -> dict:
 def _fallback_stem(brief: str) -> str:
     words = re.findall(r"[A-Za-z0-9]+", brief.upper())[:3]
     return ("_".join(words)[:32]) or "PROJECT"
+
+
+# LCSC ids users paste into briefs/answers — bare (C7386355) or inside an
+# lcsc.com / jlcpcb.com product URL. Mirrors cli_app._LCSC_ID_RE.
+_LCSC_ID_RE = re.compile(r"(?<![A-Za-z0-9])C\d{4,8}(?![A-Za-z0-9])", re.IGNORECASE)
+
+
+def _bom_part_hints(*texts: str) -> str:
+    """Prompt block naming any LCSC ids the user pasted ('' when none).
+
+    A user-supplied C-number is an explicit part choice: surfacing it up front
+    lets the BOM model fetch it directly instead of keyword-searching for the
+    part (the dominant source of wasted tool calls and clarifying questions).
+    """
+    ids = sorted({m.group(0).upper()
+                  for t in texts if t for m in _LCSC_ID_RE.finditer(t)})
+    if not ids:
+        return ""
+    return ("\n\nUSER-SUPPLIED LCSC PART NUMBERS (found in the brief/answers): "
+            + ", ".join(ids)
+            + "\nThese are explicit part choices: call add_part_from_lcsc for each "
+            "FIRST and use the fetched bundle for the matching BOM line instead "
+            "of searching for alternatives.")
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -434,6 +463,9 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
     if instruction:
         user += (f"\n\nThe user requests this change to the {stage}: {instruction}\n"
                  "Re-draft the slot to honor it, keeping everything else consistent.")
+    if stage == "bom":
+        user += _bom_part_hints(brief, instruction or "",
+                                *(str(a.get("answer", "")) for a in (answers or [])))
     user += f"\n\nProduce the {stage} slot JSON now."
 
     messages = [{"role": "system", "content": build_system(stage)},

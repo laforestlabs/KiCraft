@@ -24,6 +24,8 @@ import json
 import re
 import shutil
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import get_args
 
@@ -444,8 +446,75 @@ def _cmd_list_parts(_: argparse.Namespace) -> int:
     return 0
 
 
+# LCSC part numbers as users paste them — bare (C7386355) or inside an
+# lcsc.com / jlcpcb.com product URL (where they follow '_' or '/'). The
+# lookarounds reject MPNs that merely embed a C+digits run (e.g. C8051F320).
+# stage_driver._LCSC_ID_RE mirrors this pattern for brief/answer scanning.
+_LCSC_ID_RE = re.compile(r"(?<![A-Za-z0-9])C\d{4,8}(?![A-Za-z0-9])", re.IGNORECASE)
+
+_EASYEDA_SEARCH_URL = "https://easyeda.com/api/components/search"
+# easyeda.com serves this search to browsers only: bare library User-Agents
+# get a WAF 403, a normal browser string does not. Same host the by-C# symbol/
+# footprint/price fetches already rely on (jlcpcb.com's own search API is
+# hard-blocked from datacenter IPs).
+_BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+
+def _parse_easyeda_search(payload: dict) -> list[dict]:
+    """Flatten an easyeda.com components/search payload into candidate rows
+    ({lcsc, model, brand, package, description}) so selection and printing
+    stay source-agnostic."""
+    lists = ((payload or {}).get("result") or {}).get("lists") or {}
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for source in ("lcsc", "SMT"):
+        for r in lists.get(source) or []:
+            number = ((r.get("lcsc") or {}).get("number")
+                      or (r.get("szlcsc") or {}).get("number"))
+            if not number or number in seen:
+                continue
+            seen.add(number)
+            data_str = r.get("dataStr")
+            c_para = ((data_str.get("head") or {}).get("c_para") or {}
+                      if isinstance(data_str, dict) else {})
+            rows.append({
+                "lcsc": number,
+                "model": r.get("title") or c_para.get("name"),
+                "brand": c_para.get("Manufacturer"),
+                "package": c_para.get("package"),
+                "description": (r.get("description") or "")[:120] or None,
+            })
+    return rows
+
+
+def _search_easyeda_components(keyword: str, page_size: int = 10) -> list[dict] | None:
+    """Keyword-search the LCSC catalog via easyeda.com.
+
+    Returns parsed candidate rows, or None when the backend is unreachable —
+    callers must distinguish that from [] (a genuine no-match) so the BOM
+    agent stops burning retries on keyword variants when the network is down.
+    """
+    data = urllib.parse.urlencode({
+        "wd": keyword, "type": "3", "doctype[]": "2",
+        "page": "1", "pageSize": str(page_size),
+    }).encode()
+    req = urllib.request.Request(
+        _EASYEDA_SEARCH_URL, data=data,
+        headers={"User-Agent": _BROWSER_UA, "Accept": "application/json",
+                 "Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or not payload.get("success"):
+        return None
+    return _parse_easyeda_search(payload)
+
+
 def _pick_lcsc(mpn: str, results: list[dict]) -> dict | None:
-    """Choose the single best JLCPCB search result for `mpn`, or None if
+    """Choose the single best search result for `mpn`, or None if
     ambiguous. Prefer an exact (case-insensitive) match on the part's
     model/MPN, breaking ties by stock (desc) then Basic-over-Extended. With
     no exact match but exactly one result, take it; otherwise return None so
@@ -461,57 +530,69 @@ def _pick_lcsc(mpn: str, results: list[dict]) -> dict | None:
 
 
 def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
-    """Resolve a manufacturer part number to an LCSC part number.
+    """Resolve an MPN / keyword / pasted LCSC id-or-URL to an LCSC part number.
 
-    Checks the parts-library manifests first (offline, authoritative), then
-    falls back to a JLCPCB keyword search. Prints JSON; exits 0 when a single
-    LCSC id is resolved, 4 otherwise (with a candidate list to choose from).
-    Lets the BOM sub-agent own MPN->LCSC resolution without the main thread
-    reaching for WebSearch.
+    Order: explicit C-number in the query (offline), parts-library manifests
+    (offline, authoritative), then an easyeda.com keyword search (network).
+    Prints JSON; exits 0 when a single LCSC id is resolved, 4 otherwise (with
+    a candidate list to choose from). Lets the BOM sub-agent own MPN->LCSC
+    resolution without the main thread reaching for WebSearch.
     """
     mpn = args.mpn
     target = mpn.strip().upper()
 
+    # 0. The query already contains an LCSC id (bare, or inside a pasted
+    #    lcsc.com/jlcpcb.com product URL): nothing to search.
+    m = _LCSC_ID_RE.search(mpn)
+    if m:
+        lcsc = m.group(0).upper()
+        _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=lcsc,
+                   source="explicit-id")
+        print(json.dumps(
+            {"ok": True, "mpn": mpn, "lcsc": lcsc, "source": "explicit-id"},
+            indent=2,
+        ))
+        return 0
+
     # 1. Parts-library manifests — authoritative and offline.
     active, _broken = _load_library_parts(Path.cwd())
     for part in active:
-        m = part.manifest
-        if (m.mpn or "").strip().upper() == target:
-            lcsc = (m.sourcing or {}).get("lcsc")
+        man = part.manifest
+        if (man.mpn or "").strip().upper() == target:
+            lcsc = (man.sourcing or {}).get("lcsc")
             if lcsc:
                 _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=lcsc,
-                           source="parts-library", library_name=m.name)
+                           source="parts-library", library_name=man.name)
                 print(json.dumps(
                     {"ok": True, "mpn": mpn, "lcsc": lcsc,
-                     "source": "parts-library", "name": m.name},
+                     "source": "parts-library", "name": man.name},
                     indent=2,
                 ))
                 return 0
 
-    # 2. JLCPCB keyword search — network, best-effort. search_jlcpcb_components
-    #    already degrades to an empty result list on any network/parse error.
-    try:
-        from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
-    except ImportError as e:
+    # 2. easyeda.com keyword search — network, best-effort.
+    results = _search_easyeda_components(mpn)
+    if results is None:
         _log_query("lookup_lcsc_id", outcome="error", query=mpn,
-                   error="easyeda2kicad-missing")
+                   error="search-backend-unreachable")
         print(json.dumps(
             {"ok": False, "mpn": mpn, "candidates": [],
-             "error": f"easyeda2kicad not installed: {e}"},
+             "error": "part search backend unreachable",
+             "hint": "Do NOT retry other keywords — searches will keep failing "
+                     "this session. Ask the user for an LCSC C-number (C#####) "
+                     "or use the closest stock KiCad part and record the "
+                     "substitution in assumptions."},
             indent=2,
         ))
         return 4
 
-    results = (
-        EasyedaApi().search_jlcpcb_components(keyword=mpn, page_size=10).get("results", [])
-    )
-    fields = ("lcsc", "model", "brand", "package", "stock", "type")
+    fields = ("lcsc", "model", "brand", "package", "description")
     best = _pick_lcsc(mpn, results)
     if best and best.get("lcsc"):
         _log_query("lookup_lcsc_id", outcome="resolved", query=mpn,
-                   lcsc=best["lcsc"], source="jlcpcb")
+                   lcsc=best["lcsc"], source="easyeda")
         print(json.dumps(
-            {"ok": True, "mpn": mpn, "lcsc": best["lcsc"], "source": "jlcpcb",
+            {"ok": True, "mpn": mpn, "lcsc": best["lcsc"], "source": "easyeda",
              "match": {k: best.get(k) for k in fields}},
             indent=2,
         ))
@@ -522,8 +603,12 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
     print(json.dumps(
         {"ok": False, "mpn": mpn,
          "candidates": [{k: r.get(k) for k in fields} for r in results[:10]],
-         "hint": "no unambiguous LCSC id; pick a candidate and pass it to "
-                 "add-part --from-lcsc C<NNNNN>"},
+         "hint": ("pick a candidate and pass it to add-part --from-lcsc C<NNNNN>"
+                  if results else
+                  "no LCSC match; retry at most ONCE with the bare part family "
+                  "(strip suffixes and descriptive words). If that misses too, "
+                  "ask the user for a C-number or use the closest stock KiCad "
+                  "part and record the substitution in assumptions.")},
         indent=2,
     ))
     return 4
