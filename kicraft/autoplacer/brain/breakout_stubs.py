@@ -145,6 +145,7 @@ def _foreign_pad_margins(
     floor_mm: float,
     half_width_mm: float,
     layer_id,
+    strict_same_fp: bool = False,
 ) -> tuple[list, list]:
     """Per-pad guard margins for copper on *src_pad*'s net: ``(path, tip)``.
 
@@ -156,11 +157,16 @@ def _foreign_pad_margins(
 
     *path* margins guard the stamped copper itself: full pair clearance vs
     pads of OTHER footprints (a violation there is a real, unwaived DRC
-    error), collision-only vs the source footprint's own pads (pair clearance
-    is unsatisfiable by construction inside a 0.5 mm pad field, and the
-    routed-board gate waives footprint-internal violations). *tip* margins
-    are pair clearance + track half-width vs EVERY foreign pad: the stub end
-    is where FreeRouting must legally attach.
+    error). For the source footprint's OWN pads the margin depends on
+    *strict_same_fp*: True holds the full pair clearance there too -- the
+    final verify DRC does NOT waive footprint-internal pad-track violations
+    (a stub grazing a same-footprint GND pad at 0.05 mm is a hard error, the
+    KC-UXASHQ U1.5-vs-U1.6 signature) -- while False keeps the historical
+    collision-only margin for pads genuinely hemmed in by their own row
+    (pair clearance is unsatisfiable by construction inside a 0.5 mm pad
+    field). Callers try strict first and relax only when no direction
+    clears. *tip* margins are pair clearance + track half-width vs EVERY
+    foreign pad: the stub end is where FreeRouting must legally attach.
     """
     src_cl = _own_clearance_mm(src_pad, layer_id, floor_mm)
     src_ref = _pad_ref(src_pad)
@@ -170,7 +176,8 @@ def _foreign_pad_margins(
     for pad in _foreign_pads(board, src_pad.GetNetCode(), exclude=src_pad):
         pair = max(floor_mm, src_cl, _own_clearance_mm(pad, layer_id, floor_mm))
         same_fp = src_ref and _pad_ref(pad) == src_ref
-        path.append((pad, int(pcbnew.FromMM(collide_mm if same_fp else pair))))
+        path_mm = collide_mm if (same_fp and not strict_same_fp) else pair
+        path.append((pad, int(pcbnew.FromMM(path_mm))))
         tip.append((pad, int(pcbnew.FromMM(pair + half_width_mm))))
     return path, tip
 
@@ -745,6 +752,29 @@ def add_breakout_stubs(
             t_half_w = 0.3
         stamped.append((t.GetNetCode(), a_mm, b_mm, t_half_w, floor_mm, t_layer))
 
+    # Existing drilled holes (vias + PTH pads): a tip via's hole wall must
+    # keep the board's hole-to-hole minimum from every one of them. Vias
+    # stamped by THIS call join the list as they land. via_pts additionally
+    # tracks via NETS: a second tie ending on a pad that already carries a
+    # same-net via needs its track but not a duplicate via.
+    _h2h = pcbnew.ToMM(board.GetDesignSettings().m_HoleToHoleMin)
+    hole_min_mm = _h2h if _h2h > 0 else float(cfg.get("hole_to_hole_min_mm", 0.25))
+    holes: list[tuple[float, float, float]] = []
+    via_pts: list[tuple[int, float, float]] = []
+    for t in board.GetTracks():
+        if t.GetClass() == "PCB_VIA":
+            p = t.GetPosition()
+            x_mm, y_mm = pcbnew.ToMM(p.x), pcbnew.ToMM(p.y)
+            holes.append((x_mm, y_mm, pcbnew.ToMM(t.GetDrillValue()) / 2.0))
+            via_pts.append((t.GetNetCode(), x_mm, y_mm))
+    for _fp in board.GetFootprints():
+        for _p in _fp.Pads():
+            ds = _p.GetDrillSize()
+            if ds.x > 0 or ds.y > 0:
+                pp = _p.GetPosition()
+                holes.append((pcbnew.ToMM(pp.x), pcbnew.ToMM(pp.y),
+                              max(pcbnew.ToMM(ds.x), pcbnew.ToMM(ds.y)) / 2.0))
+
     def _pt(xy: tuple[float, float]):
         return pcbnew.VECTOR2I(pcbnew.FromMM(xy[0]), pcbnew.FromMM(xy[1]))
 
@@ -781,6 +811,43 @@ def add_breakout_stubs(
                         return True
             return False
 
+        # A tip via is wider than the track (0.6 mm barrel vs ~0.15 mm trace)
+        # and drills a hole: it must clear EVERY foreign pad by pair clearance
+        # + via radius (tip margins only cover the track half-width), stamped/
+        # board copper on all layers, and every existing drilled hole by the
+        # board's hole-to-hole minimum. A spec whose via cannot land is
+        # dropped whole BEFORE its segments stamp -- a stub with no plane via
+        # is dead copper (the pour island it would join is removed).
+        via_r_mm = float(cfg.get("via_size_mm", 0.6)) / 2.0
+        via_drill_r_mm = float(cfg.get("via_drill_mm", 0.3)) / 2.0
+        via_obs = ([(p, m + int(pcbnew.FromMM(via_r_mm - half_width_mm)))
+                    for p, m in tip_obs] if spec.via_at_end else [])
+
+        def _via_redundant(xy: tuple[float, float]) -> bool:
+            """A same-net via already sits under the stub end: the plane bond
+            exists, so stamp the track but not a duplicate via (two shield
+            legs tying to the same SMD pad is the common case)."""
+            return any(
+                n == net_code
+                and ((xy[0] - vx) ** 2 + (xy[1] - vy) ** 2) ** 0.5 <= via_r_mm
+                for n, vx, vy in via_pts
+            )
+
+        def _via_fits(xy: tuple[float, float]) -> bool:
+            if not _point_clears_obstacles(via_obs, xy[0], xy[1]):
+                return False
+            for o_net, o_a, o_b, o_hw, o_cl, _o_layer in stamped:
+                if o_net == net_code:
+                    continue  # a via spans all layers: check every foreign seg
+                need = max(floor_mm, src_cl_mm, o_cl) + via_r_mm + o_hw
+                if _seg_seg_dist_mm(xy, xy, o_a, o_b) < need:
+                    return False
+            return not any(
+                ((xy[0] - hx) ** 2 + (xy[1] - hy) ** 2) ** 0.5
+                < hr + via_drill_r_mm + hole_min_mm
+                for hx, hy, hr in holes
+            )
+
         pad_pos = pad.GetPosition()
         start_mm = (pcbnew.ToMM(pad_pos.x), pcbnew.ToMM(pad_pos.y))
         if spec.waypoints:
@@ -801,6 +868,10 @@ def add_breakout_stubs(
                     f"{spec.ref}.{spec.pad}:conflicts_with_stamped_stub"
                 )
                 continue
+            if (spec.via_at_end and not _via_redundant(points[-1])
+                    and not _via_fits(points[-1])):
+                summary["skipped"].append(f"{spec.ref}.{spec.pad}:via_blocked")
+                continue
         else:
             fc = fp.GetPosition()
             cx, cy = pcbnew.ToMM(fc.x), pcbnew.ToMM(fc.y)
@@ -818,24 +889,39 @@ def add_breakout_stubs(
             # but whose run lands beside already-stamped copper (e.g. the VBUS
             # perimeter tie one pad-row out) is rejected HERE so the next
             # direction still gets its chance.
+            # Two margin rounds: STRICT same-footprint margins first -- the
+            # verify DRC does not waive a stub grazing a sibling pad (the
+            # diagonal-stub-past-the-GND-pad signature) -- then the historical
+            # collision-only margins, so a pad genuinely walled in by its own
+            # row still escapes.
+            strict_path_obs, _ = _foreign_pad_margins(
+                board, pad, floor_mm=floor_mm, half_width_mm=half_width_mm,
+                layer_id=layer, strict_same_fp=True,
+            )
             points = None
-            for du in (dir_unit, (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)):
-                end = _radial_escape_end(
-                    path_obs,
-                    tip_obs,
-                    start_mm,
-                    du,
-                    spec.length_mm,
-                    min_useful_mm=max(floor_mm, pcbnew.ToMM(width)),
-                    inner_box=inner_box,
-                )
-                if end is None:
-                    continue
-                cand = [start_mm, end]
-                if _conflicts_with_copper(cand):
-                    continue
-                points = cand
-                break
+            for path_set in (strict_path_obs, path_obs):
+                for du in (dir_unit, (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)):
+                    end = _radial_escape_end(
+                        path_set,
+                        tip_obs,
+                        start_mm,
+                        du,
+                        spec.length_mm,
+                        min_useful_mm=max(floor_mm, pcbnew.ToMM(width)),
+                        inner_box=inner_box,
+                    )
+                    if end is None:
+                        continue
+                    cand = [start_mm, end]
+                    if _conflicts_with_copper(cand):
+                        continue
+                    if (spec.via_at_end and not _via_redundant(end)
+                            and not _via_fits(end)):
+                        continue
+                    points = cand
+                    break
+                if points is not None:
+                    break
             if points is None:
                 summary["skipped"].append(
                     f"{spec.ref}.{spec.pad}:no_safe_radial_escape"
@@ -864,7 +950,7 @@ def add_breakout_stubs(
             summary["segments"] += 1
             stamped.append((net_code, a, b, half_width_mm, src_cl_mm, layer))
 
-        if spec.via_at_end:
+        if spec.via_at_end and not _via_redundant(points[-1]):
             via = pcbnew.PCB_VIA(board)
             via.SetPosition(_pt(points[-1]))
             via.SetDrill(pcbnew.FromMM(float(cfg.get("via_drill_mm", 0.3))))
@@ -877,6 +963,13 @@ def add_breakout_stubs(
                 via.SetLocked(True)
             board.Add(via)
             summary["vias"] += 1
+            # Later specs must respect this via: its hole (hole-to-hole), its
+            # barrel (a zero-length all-layer segment for copper checks), and
+            # its net (so a tie ending here skips its now-redundant via).
+            holes.append((points[-1][0], points[-1][1], via_drill_r_mm))
+            stamped.append((net_code, points[-1], points[-1], via_r_mm,
+                            src_cl_mm, None))
+            via_pts.append((net_code, points[-1][0], points[-1][1]))
 
         summary["stubs"] += 1
 

@@ -662,6 +662,7 @@ def _cmd_jlcparts_update(args: argparse.Namespace) -> int:
         stats = jlcparts.update(
             dest=Path(args.dest) if args.dest else None,
             base_url=args.base_url,
+            min_stock=args.min_stock,
             progress=lambda msg: print(msg, file=sys.stderr),
         )
     except Exception as e:
@@ -2152,7 +2153,7 @@ def main(argv: list[str] | None = None) -> int:
         "jlcparts-update",
         help=(
             "download/refresh the offline JLC parts catalog (yaqwsx/jlcparts "
-            "nightly dump: ~650 MB download, ~5.5 GB on disk)"
+            "nightly dump: ~650 MB download; in-stock-pruned by default)"
         ),
     )
     p_jlc.add_argument("--base-url", default=jlcparts.DATA_URL,
@@ -2160,6 +2161,9 @@ def main(argv: list[str] | None = None) -> int:
     p_jlc.add_argument("--dest", default=None,
                        help="override the catalog path (default: "
                             "~/.kicraft/jlcparts/cache.sqlite3 or $KICRAFT_JLCPARTS_DB)")
+    p_jlc.add_argument("--min-stock", type=int, default=5,
+                       help="prune rows below this stock to shrink the catalog "
+                            "(default 5; 0 keeps everything, ~5.6 GB)")
     p_jlc.set_defaults(func=_cmd_jlcparts_update)
 
     p_add_part = sub.add_parser(
