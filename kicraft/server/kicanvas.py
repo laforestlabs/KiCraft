@@ -30,6 +30,98 @@ from nicegui import app, ui
 KICANVAS_ASSET: Path = Path(__file__).parent / "static" / "kicanvas.js"
 KICANVAS_SCRIPT_URL = "/static/kicanvas.js"
 
+# KiCanvas (alpha) always opens a document zoomed to the full drawing sheet and
+# exposes no attribute to change that (its `zoom` attribute is registered but
+# never read), so every preview showed the A4 frame + title block with the
+# actual circuit tiny in the middle. This companion script reaches through the
+# bundle's open shadow roots to each viewer element (which exposes its viewer
+# object as a public `.viewer` property), hides the ":DrawingSheet" render
+# layer (frame + title block — its painters target only that layer), and
+# refits the camera to the painted content: the Edge.Cuts outline for boards,
+# the union of painted item layers for schematics (every layer's bbox is
+# populated at paint time). It re-runs on each "kicanvas:load" the viewer
+# object dispatches, which covers switching sheets inside a multi-source
+# embed (each load repaints the layers and re-zooms to the page). Polling is
+# the only discovery mechanism: the apps/viewers are created asynchronously
+# inside shadow DOM after the sources download, and the load event does not
+# bubble out of the embed.
+KICANVAS_CONTENT_FIT_JS = """
+(function () {
+  "use strict";
+  const SHEET = ":DrawingSheet";
+  const SKIP = new Set([SHEET, ":Grid", ":Overlay"]);
+  const hooked = new WeakSet();
+
+  function contentBBox(viewer) {
+    const layers = viewer.layers;
+    // Boards: the Edge.Cuts outline IS the board. zoom_to_board() existing is
+    // what distinguishes a BoardViewer from a SchematicViewer.
+    if (typeof viewer.zoom_to_board === "function") {
+      const edge = layers.by_name("Edge.Cuts");
+      if (edge && edge.bbox && edge.bbox.w > 0 && edge.bbox.h > 0) {
+        return edge.bbox;
+      }
+    }
+    const boxes = [];
+    for (const layer of layers.in_order()) {
+      if (SKIP.has(layer.name)) continue;
+      const b = layer.bbox;
+      if (b && b.valid) boxes.push(b);
+    }
+    if (!boxes.length) return null;
+    const combined = boxes[0].constructor.combine(boxes);
+    return combined.w > 0 && combined.h > 0 ? combined : null;
+  }
+
+  function fit(viewer) {
+    try {
+      if (!viewer.layers || !viewer.viewport) return;
+      const sheet = viewer.layers.by_name(SHEET);
+      if (sheet) sheet.visible = false;
+      const bbox = contentBBox(viewer);
+      if (bbox) {
+        viewer.viewport.camera.bbox = bbox.grow(Math.max(bbox.w, bbox.h) * 0.05);
+        // Widen the pan bounds too: they were set to the page bbox, and if any
+        // content sits outside the frame the pan controller would clamp the
+        // camera right back onto the empty page.
+        const page = viewer.drawing_sheet && viewer.drawing_sheet.page_bbox;
+        if (page) {
+          viewer.viewport.bounds = bbox.constructor.combine([page, bbox]).grow(50);
+        }
+      }
+      viewer.draw();
+    } catch (e) {
+      // A failed fit must never take the viewer down; page zoom is the fallback.
+    }
+  }
+
+  function hook(viewerEl) {
+    const viewer = viewerEl.viewer;
+    if (!viewer || hooked.has(viewerEl)) return;
+    hooked.add(viewerEl);
+    viewer.addEventListener("kicanvas:load", () => fit(viewer));
+    // The first load may already have happened before this poll tick saw the
+    // element; `loaded` is KiCanvas's deferred and stays resolved once open.
+    if (viewer.loaded && viewer.loaded.resolved) fit(viewer);
+  }
+
+  function scan(root) {
+    for (const el of root.querySelectorAll("kc-board-viewer, kc-schematic-viewer")) {
+      hook(el);
+    }
+    for (const el of root.querySelectorAll("*")) {
+      if (el.shadowRoot) scan(el.shadowRoot);
+    }
+  }
+
+  setInterval(() => {
+    for (const embed of document.querySelectorAll("kicanvas-embed")) {
+      if (embed.shadowRoot) scan(embed.shadowRoot);
+    }
+  }, 400);
+})();
+"""
+
 
 @dataclass(frozen=True)
 class KiCanvasSource:
@@ -55,7 +147,8 @@ def _attr(value: str) -> str:
 
 
 def kicanvas_head(script_url: str = KICANVAS_SCRIPT_URL) -> None:
-    """Inject the KiCanvas ES module <script> once per page.
+    """Inject the KiCanvas ES module <script> (plus the content-fit companion
+    script, see KICANVAS_CONTENT_FIT_JS) once per page.
 
     Idempotent within a client connection via app.storage.client, so calling it
     from several components on one page adds a single <script>. Must be called
@@ -70,6 +163,7 @@ def kicanvas_head(script_url: str = KICANVAS_SCRIPT_URL) -> None:
             return
         flag["_kicanvas_head"] = True
     ui.add_head_html(f'<script type="module" src="{_attr(script_url)}"></script>')
+    ui.add_head_html(f"<script>{KICANVAS_CONTENT_FIT_JS}</script>")
 
 
 def _embed_html(sources: list[KiCanvasSource], *, controls: str = "full") -> str:
