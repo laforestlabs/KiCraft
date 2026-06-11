@@ -105,3 +105,25 @@ def test_build_system_offers_clarifying_questions():
     sysmsg = build_system("intent")
     assert '"questions"' in sysmsg   # the model is told it may ask
     assert "blocking" in sysmsg
+
+
+def test_bom_part_hints_extracts_pasted_lcsc_ids():
+    from kicraft.server.stage_driver import _bom_part_hints
+    brief = ("ToF breakout with the sensor at "
+             "https://www.lcsc.com/product-detail/C7386355.html and an LDO C6186")
+    hint = _bom_part_hints(brief, "also use c2924337 please")
+    assert "C7386355" in hint and "C6186" in hint and "C2924337" in hint
+    assert "add_part_from_lcsc" in hint
+
+
+def test_bom_part_hints_ignores_refdes_and_embedded_runs():
+    from kicraft.server.stage_driver import _bom_part_hints
+    # C1/C104 are refdes/values, C8051F320 is an MPN — none are LCSC ids.
+    assert _bom_part_hints("decouple C1 with 100nF, C104 pattern, MCU C8051F320") == ""
+    assert _bom_part_hints("", None) == ""
+
+
+def test_bom_prompt_mentions_search_budget():
+    msg = build_system("bom")
+    assert "SEARCH BUDGET" in msg
+    assert "STOP searching" in msg
