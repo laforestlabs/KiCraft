@@ -98,14 +98,11 @@ def search(query: str, limit: int = 10) -> list[dict]:
     try:
         rows = con.execute(f"{sel} WHERE mfr = ? COLLATE NOCASE {order}",
                            (q, limit)).fetchall()
-        if rows and all(r["stock"] == 0 for r in rows):
-            # An exact hit that is entirely out of stock is often a placeholder
-            # row for a bare family name (e.g. "VL53L1X", where the orderable
-            # part is VL53L1CXV0FY/1 — NOT a superstring of the family name).
-            # Widen with progressively shortened prefixes until in-stock rows
-            # join the candidate set; bounded to keep worst-case scans cheap.
-            rows = list(rows)
-            seen = {r["lcsc"] for r in rows}
+        def _widen(seen: set) -> list:
+            # A bare family name (e.g. "VL53L1X") often isn't a substring of
+            # the orderable MPN (VL53L1CXV0FY/1): widen with progressively
+            # shortened prefixes until in-stock rows appear; bounded to keep
+            # worst-case scans cheap.
             for probe in (q[:n] for n in range(len(q), len(q) - 4, -1)):
                 if len(probe) < 4:
                     break
@@ -114,19 +111,28 @@ def search(query: str, limit: int = 10) -> list[dict]:
                 in_stock = [r for r in extra
                             if r["stock"] > 0 and r["lcsc"] not in seen]
                 if in_stock:
-                    rows += in_stock
-                    rows.sort(key=lambda r: -r["stock"])
-                    break
+                    return in_stock
+            return []
+
+        if rows and all(r["stock"] == 0 for r in rows):
+            # An entirely out-of-stock exact hit is usually a placeholder row
+            # for a family name; surface the orderable parts alongside it.
+            rows = list(rows) + _widen({r["lcsc"] for r in rows})
+            rows.sort(key=lambda r: -r["stock"])
         if not rows:
             rows = con.execute(f"{sel} WHERE mfr LIKE ? {order}",
                                (f"%{q}%", limit)).fetchall()
         if not rows:
             terms = [t for t in re.split(r"\s+", q) if len(t) >= 2]
-            if terms:
+            if len(terms) > 1:
                 hay = "(mfr || ' ' || description || ' ' || manufacturer || ' ' || package)"
                 cond = " AND ".join([f"{hay} LIKE ?"] * len(terms))
                 rows = con.execute(f"{sel} WHERE {cond} {order}",
                                    [f"%{t}%" for t in terms] + [limit]).fetchall()
+        if not rows and " " not in q and len(q) >= 5:
+            # MPN-ish single token with no hit anywhere (a pruned catalog has
+            # no placeholder rows to trigger the zero-stock path above).
+            rows = _widen(set())
     finally:
         con.close()
     return [_candidate(r) for r in rows]
@@ -308,12 +314,35 @@ def _download(url: str, dest: Path) -> bool:
         raise
 
 
-def update(dest: Path | None = None, base_url: str = DATA_URL,
-           progress=lambda msg: None) -> dict:
-    """Download the jlcparts dump, extract, index, and atomically install it.
+def prune(db_file: Path, min_stock: int, progress=lambda msg: None) -> int:
+    """Drop rows below *min_stock* and reclaim the space (VACUUM).
 
-    Returns {"db", "rows", "bytes"}. Raises on any failure, leaving the
-    previous catalog (if any) untouched.
+    The full dump is ~70% out-of-stock rows KiCraft can neither pick (the
+    in-stock-first ranking skips them) nor order; pruning cuts the on-disk
+    catalog to a fraction. Returns the number of rows removed.
+    """
+    con = sqlite3.connect(db_file)
+    try:
+        cur = con.execute("DELETE FROM jlc_components WHERE stock < ?", (min_stock,))
+        removed = cur.rowcount
+        # The dump also ships a 4M-row lcsc_components side table KiCraft
+        # never reads; drop it wholesale before VACUUM reclaims its pages.
+        con.execute("DROP TABLE IF EXISTS lcsc_components")
+        con.commit()
+        progress(f"pruned {removed:,} rows below stock {min_stock}; compacting...")
+        con.execute("VACUUM")
+    finally:
+        con.close()
+    return removed
+
+
+def update(dest: Path | None = None, base_url: str = DATA_URL,
+           min_stock: int = 5, progress=lambda msg: None) -> dict:
+    """Download the jlcparts dump, extract, prune, index, atomically install.
+
+    *min_stock*: rows with less stock are pruned (0 keeps everything).
+    Returns {"db", "rows", "pruned", "bytes"}. Raises on any failure,
+    leaving the previous catalog (if any) untouched.
     """
     dest = dest or db_path()
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -343,9 +372,19 @@ def update(dest: Path | None = None, base_url: str = DATA_URL,
 
         con = sqlite3.connect(db_file)
         try:
+            raw_rows = con.execute("SELECT COUNT(*) FROM jlc_components").fetchone()[0]
+        finally:
+            con.close()
+        # Sanity-check the RAW dump (a heavily pruned but valid catalog must
+        # not trip this) before mutating anything.
+        if raw_rows < 100_000:
+            raise RuntimeError(f"catalog looks wrong: only {raw_rows} components")
+
+        removed = prune(db_file, min_stock, progress) if min_stock > 0 else 0
+
+        con = sqlite3.connect(db_file)
+        try:
             rows = con.execute("SELECT COUNT(*) FROM jlc_components").fetchone()[0]
-            if rows < 100_000:
-                raise RuntimeError(f"catalog looks wrong: only {rows} components")
             progress(f"indexing {rows:,} components...")
             con.execute("CREATE INDEX IF NOT EXISTS idx_jlc_mfr "
                         "ON jlc_components(mfr COLLATE NOCASE)")
@@ -356,6 +395,6 @@ def update(dest: Path | None = None, base_url: str = DATA_URL,
         size = db_file.stat().st_size
         os.replace(db_file, dest)
         progress(f"installed {dest} ({size / 1e9:.2f} GB, {rows:,} parts)")
-        return {"db": str(dest), "rows": rows, "bytes": size}
+        return {"db": str(dest), "rows": rows, "pruned": removed, "bytes": size}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

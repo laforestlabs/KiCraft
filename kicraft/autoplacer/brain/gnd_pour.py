@@ -445,6 +445,57 @@ def repair_stranded_gnd(
     return summary
 
 
+def gnd_escape_specs(
+    board: Any,
+    cfg: dict[str, Any] | None = None,
+) -> list:
+    """Pre-route escape specs for fine-pitch GND pads that can't host a via.
+
+    The post-route escape pass (in :func:`add_gnd_pour_and_thermal_vias`)
+    runs LAST, after the signal breakout stubs and FreeRouting have consumed
+    every exit around a dense pad row -- so exactly the pads that most need a
+    plane bond find no legal path (KC-UXASHQ U1.6: hemmed in by a signal stub
+    and routed tracks, left unconnected). GND is never routed, so its escapes
+    can claim space FIRST: stamp these before the signal stubs and the
+    router, which both route around locked copper. Each spec carries
+    ``via_at_end`` so the stub bonds its pad to the future B.Cu plane; the
+    post-route pass sees the via and skips the pad (no double escape).
+    """
+    cfg = cfg or {}
+    gnd_name = cfg.get("gnd_zone_net", "GND")
+    if not gnd_name or not cfg.get("gnd_pre_escape", True):
+        return []
+    gnd_net = board.GetNetInfo().GetNetItem(gnd_name)
+    if not gnd_net or gnd_net.GetNetCode() == 0:
+        return []
+    gnd_code = gnd_net.GetNetCode()
+
+    from kicraft.autoplacer.brain.breakout_stubs import BreakoutSpec
+
+    via_size_mm = float(cfg.get("via_size_mm", 0.6))
+    area_threshold = float(cfg.get("thermal_pad_area_mm2", 4.0))
+    length = float(cfg.get("gnd_escape_length_mm", 1.0))
+    specs: list = []
+    for fp in board.GetFootprints():
+        pads = list(fp.Pads())
+        if len(pads) < 3:  # escapes stay multipad-only, matching post-route
+            continue
+        for pad in pads:
+            if pad.GetAttribute() not in (pcbnew.PAD_ATTRIB_SMD,
+                                          pcbnew.PAD_ATTRIB_CONN):
+                continue
+            if pad.GetNetCode() != gnd_code:
+                continue
+            size = pad.GetSize()
+            w, h = pcbnew.ToMM(size.x), pcbnew.ToMM(size.y)
+            if min(w, h) >= via_size_mm or w * h >= area_threshold:
+                continue  # the post-route in-pad via handles it
+            specs.append(BreakoutSpec(ref=fp.GetReferenceAsString(),
+                                      pad=pad.GetNumber(),
+                                      length_mm=length, via_at_end=True))
+    return specs
+
+
 def add_gnd_pour_and_thermal_vias(
     pcb_path: str,
     cfg: dict[str, Any] | None = None,
@@ -477,14 +528,67 @@ def add_gnd_pour_and_thermal_vias(
     pitch = pcbnew.FromMM(float(cfg.get("thermal_via_pitch_mm", 1.2)))
     inset = pcbnew.FromMM(float(cfg.get("thermal_via_inset_mm", 0.5)))
     area_threshold = float(cfg.get("thermal_pad_area_mm2", 4.0))
-    via_clearance = pcbnew.FromMM(
-        float(cfg.get("freerouting_min_clearance_mm", 0.153))
-    )
+    floor_mm = float(cfg.get("freerouting_min_clearance_mm", 0.153))
     summary["thermal_vias_blocked"] = 0
     summary["escape_stitched"] = 0
 
+    from kicraft.autoplacer.brain.breakout_stubs import _own_clearance_mm
+
+    # GND-side clearance: KiCad resolves a pair as the LARGER of the two
+    # items' netclass clearances, and GND rides the Power class (0.30 mm) on
+    # generated boards -- a via held only to the 0.153 freerouting floor can
+    # pass this guard yet land 0.26 mm from a Default-class track, a hard
+    # Power-netclass DRC error (the KC-UXASHQ escape-via signature).
+    gnd_cl_mm = floor_mm
+    for _fp in board.GetFootprints():
+        gp = next((p for p in _fp.Pads() if p.GetNetCode() == gnd_code), None)
+        if gp is not None:
+            gnd_cl_mm = max(gnd_cl_mm, _own_clearance_mm(gp, pcbnew.B_Cu, floor_mm))
+            break
+
+    via_r_mm = pcbnew.ToMM(via_size) / 2.0
+    via_drill_r_mm = pcbnew.ToMM(via_drill) / 2.0
+    copper_obstacles: list[tuple[Any, int]] = []  # (item, HitTest margin)
+    for t in board.GetTracks():
+        if t.GetNetCode() == gnd_code:
+            continue
+        t_layer = pcbnew.B_Cu if t.GetClass() == "PCB_VIA" else t.GetLayer()
+        item_cl = _own_clearance_mm(t, t_layer, floor_mm)
+        copper_obstacles.append(
+            (t, int(pcbnew.FromMM(via_r_mm + max(gnd_cl_mm, item_cl))))
+        )
+    for ofp in board.GetFootprints():
+        for op in ofp.Pads():
+            if op.GetNetCode() == gnd_code:
+                continue
+            item_cl = _own_clearance_mm(op, pcbnew.B_Cu, floor_mm)
+            copper_obstacles.append(
+                (op, int(pcbnew.FromMM(via_r_mm + max(gnd_cl_mm, item_cl))))
+            )
+
+    # Drilled holes: a new via's hole wall must keep the board's hole-to-hole
+    # minimum from EVERY existing hole (vias and PTH pads) -- nothing checked
+    # this before (the 0.036 mm hole pair on KC-UXASHQ). Successfully stamped
+    # vias join the list so this pass spaces its own vias too.
+    h2h = pcbnew.ToMM(board.GetDesignSettings().m_HoleToHoleMin)
+    hole_min_mm = h2h if h2h > 0 else float(cfg.get("hole_to_hole_min_mm", 0.25))
+    holes: list[tuple[float, float, float]] = []  # (x_mm, y_mm, hole_radius_mm)
+    for t in board.GetTracks():
+        if t.GetClass() == "PCB_VIA":
+            p = t.GetPosition()
+            holes.append((pcbnew.ToMM(p.x), pcbnew.ToMM(p.y),
+                          pcbnew.ToMM(t.GetDrillValue()) / 2.0))
+    for ofp in board.GetFootprints():
+        for op in ofp.Pads():
+            ds = op.GetDrillSize()
+            if ds.x > 0 or ds.y > 0:
+                p = op.GetPosition()
+                holes.append((pcbnew.ToMM(p.x), pcbnew.ToMM(p.y),
+                              max(pcbnew.ToMM(ds.x), pcbnew.ToMM(ds.y)) / 2.0))
+
     def _via_blocked(x: int, y: int) -> bool:
-        """True when a GND via at (x, y) would land on another net's copper.
+        """True when a GND via at (x, y) would violate another net's copper
+        (netclass pair clearance) or any drilled hole (hole-to-hole minimum).
 
         This runs on a ROUTED board (leaf) or a composed parent full of leaf
         traces; a via stamped blind through a B.Cu track of another net is a
@@ -492,19 +596,14 @@ def add_gnd_pour_and_thermal_vias(
         seven shorts from exactly this). Same-net copper is a valid landing.
         """
         pt = pcbnew.VECTOR2I(int(x), int(y))
-        margin = int(via_size // 2 + via_clearance)
-        for t in board.GetTracks():
-            if t.GetNetCode() == gnd_code:
-                continue
-            if t.HitTest(pt, margin):
-                return True
-        for ofp in board.GetFootprints():
-            for op in ofp.Pads():
-                if op.GetNetCode() == gnd_code:
-                    continue
-                if op.HitTest(pt, margin):
-                    return True
-        return False
+        if any(item.HitTest(pt, margin) for item, margin in copper_obstacles):
+            return True
+        xm, ym = pcbnew.ToMM(int(x)), pcbnew.ToMM(int(y))
+        return any(
+            ((xm - hx) ** 2 + (ym - hy) ** 2) ** 0.5
+            < hr + via_drill_r_mm + hole_min_mm
+            for hx, hy, hr in holes
+        )
 
     def _add_via(x: int, y: int) -> bool:
         if _via_blocked(x, y):
@@ -519,11 +618,29 @@ def add_gnd_pour_and_thermal_vias(
             via.SetWidth(pcbnew.F_Cu, via_size)
         via.SetNetCode(gnd_code)
         board.Add(via)
+        holes.append((pcbnew.ToMM(int(x)), pcbnew.ToMM(int(y)), via_drill_r_mm))
         return True
 
     # GND pads that need stitching but cannot host an in-pad via: escape them
     # with a short guarded stub + end via instead (see below).
     escape_pads: list[tuple[str, str]] = []
+
+    # GND vias already on the board (e.g. a pre-route escape stub's tip via
+    # stamped by gnd_escape_specs): a pad one of those already bonds to the
+    # plane must not be escaped AGAIN post-route.
+    escape_len_mm = float(cfg.get("gnd_escape_length_mm", 1.0))
+    prebonded_reach = escape_len_mm + pcbnew.ToMM(via_size)
+    gnd_via_pts = [
+        (pcbnew.ToMM(t.GetPosition().x), pcbnew.ToMM(t.GetPosition().y))
+        for t in board.GetTracks()
+        if t.GetClass() == "PCB_VIA" and t.GetNetCode() == gnd_code
+    ]
+
+    def _already_bonded(pad) -> bool:
+        p = pad.GetPosition()
+        px, py = pcbnew.ToMM(p.x), pcbnew.ToMM(p.y)
+        return any(((px - vx) ** 2 + (py - vy) ** 2) ** 0.5 <= prebonded_reach
+                   for vx, vy in gnd_via_pts)
 
     # --- 1. Thermal-via arrays under GND thermal / exposed pads ---
     for fp in board.GetFootprints():
@@ -534,10 +651,13 @@ def add_gnd_pour_and_thermal_vias(
         ]
         if not smd:
             continue
-        # ICs/modules need their GND dropped to the plane; 2-pad passives reach
-        # GND through whatever they connect to. >= 3 includes the SOT-23-class
-        # regulators whose lone GND pad otherwise floats as an F.Cu pour island
-        # (run_03 U1.5 / run_05 U2.2 -- the post-connector-fix rc7 signature).
+        # Escape stubs (extra copper near the pad row) stay reserved for
+        # multi-pin parts: >= 3 includes the SOT-23-class regulators whose
+        # lone GND pad otherwise floats as an F.Cu pour island (run_03 U1.5 /
+        # run_05 U2.2). In-pad vias below have no such gate: a 2-pad
+        # decoupling cap's GND pad strands just as hard when no F.Cu GND
+        # copper reaches it and the B.Cu pour is its only path (KC-UXASHQ
+        # C2.2) -- _via_blocked alone decides whether the via is safe.
         multipad = len(pads) >= 3
         # Pad numbers that carry GND -- EP sub-pads share a number but often only
         # one is netted, so treat the whole number-group as GND.
@@ -551,8 +671,6 @@ def add_gnd_pour_and_thermal_vias(
             min_dim_mm = min(pcbnew.ToMM(size.x), pcbnew.ToMM(size.y))
             large = pcbnew.ToMM(size.x) * pcbnew.ToMM(size.y) >= area_threshold
             fits_via = min_dim_mm >= pcbnew.ToMM(via_size)
-            if not multipad and not large:
-                continue
             pos = pad.GetPosition()
             # Net any stray (number-shared) EP sub-pad to GND so it joins the plane.
             if pad.GetNetCode() != gnd_code:
@@ -563,7 +681,8 @@ def add_gnd_pour_and_thermal_vias(
             # net. A pad too small for an in-pad via is escaped with a short
             # guarded stub + end via instead (stamped after this pass).
             if not (fits_via or large):
-                escape_pads.append((fp.GetReferenceAsString(), pad.GetNumber()))
+                if multipad and not _already_bonded(pad):
+                    escape_pads.append((fp.GetReferenceAsString(), pad.GetNumber()))
                 continue
             if large:
                 vx = _grid_positions(pos.x, size.x // 2 - inset, pitch)

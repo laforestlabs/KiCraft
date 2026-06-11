@@ -492,6 +492,21 @@ def route_local_subcircuit(
     # autorouter can't escape its pad field. Added to the pre-route board and
     # preserved through routing so FreeRouting finishes from the breakout points.
     _breakout_specs = _resolve_breakout_specs(cfg)
+    # GND pre-escape (default on): plane-bond stubs for fine-pitch GND pads,
+    # FIRST in the spec order so they claim space before the signal escapes
+    # and the router do -- the post-route escape pass finds those pads walled
+    # in (GND is never routed; signals can route around locked copper).
+    if cfg.get("gnd_pre_escape", True):
+        try:
+            import pcbnew
+
+            from kicraft.autoplacer.brain.gnd_pour import gnd_escape_specs
+
+            _g_board = pcbnew.LoadBoard(str(pre_route_board))
+            _breakout_specs = gnd_escape_specs(_g_board, cfg) + _breakout_specs
+            del _g_board
+        except Exception as exc:  # never fail the leaf on a finishing helper
+            print(f"  WARNING: gnd pre-escape spec gen failed: {exc}")
     # Auto power-tie (default on): route a tie around any connector whose spread
     # power pads (e.g. USB-C VBUS) would otherwise fragment the power pour.
     if cfg.get("auto_power_tie", True):
@@ -738,6 +753,7 @@ def route_local_subcircuit(
     # the plane connects and the boxed-in center pad escapes to ground. Run after
     # the silk re-stamp (the last write to routed_board) and before acceptance
     # validation, so the now-connected center pad is reflected in shorts/unconnected.
+    gnd_pour_summary: dict | None = None
     if cfg.get("gnd_plane_enabled", True):
         gnd_pour_start = time.monotonic()
         try:
@@ -746,9 +762,15 @@ def route_local_subcircuit(
             )
 
             _gnd = add_gnd_pour_and_thermal_vias(str(routed_board), cfg)
+            # Persisted into the leaf result (-> debug.json): stdout-only
+            # summaries made the GND-strand family untriageable from the
+            # experiments tree alone.
+            gnd_pour_summary = _gnd
             print(
                 f"  GND plane: {_gnd.get('thermal_vias_added', 0)} thermal via(s) "
-                f"under {_gnd.get('gnd_pads_stitched', 0)} pad(s); B.Cu pour filled"
+                f"under {_gnd.get('gnd_pads_stitched', 0)} pad(s), "
+                f"{_gnd.get('escape_stitched', 0)} escape(s), "
+                f"{_gnd.get('thermal_vias_blocked', 0)} blocked; B.Cu pour filled"
             )
         except Exception as exc:  # finishing step must never fail the leaf
             print(f"  WARNING: GND plane step failed: {exc}")
@@ -1054,6 +1076,7 @@ def route_local_subcircuit(
             ],
             "freerouting_stats": freerouting_stats,
             "validation": validation,
+            "gnd_pour_summary": copy.deepcopy(gnd_pour_summary),
             "render_diagnostics": copy.deepcopy(leaf_diagnostics),
             "leaf_legality_repair": copy.deepcopy(legality_repair),
             "routed_board_path": str(routed_board),

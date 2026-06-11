@@ -152,14 +152,17 @@ def test_extract_rejects_non_zip(tmp_path):
 
 # ------------------------------------------------------------- updater
 
-def test_update_end_to_end_over_file_urls(tmp_path):
+def test_update_end_to_end_over_file_urls_prunes_low_stock(tmp_path):
     # A plausible catalog: big enough to pass the row-count sanity check.
+    # Even rows are in stock (7), odd rows are low stock (1) -> pruned.
     src_db = tmp_path / "src.sqlite3"
     con = sqlite3.connect(src_db)
     con.execute(_SCHEMA)
     con.executemany(
         "INSERT INTO jlc_components VALUES (?,?,?,?,?,?,?,?)",
-        ((i, f"P{i}", "0805", "m", "base", 1, "1-:0.01", "r") for i in range(100_001)))
+        ((i, f"P{i}", "0805", "m", "base", 7 if i % 2 == 0 else 1, "1-:0.01", "r")
+         for i in range(100_002)))
+    con.execute("CREATE TABLE lcsc_components (lcsc INTEGER PRIMARY KEY)")
     con.commit()
     con.close()
 
@@ -172,15 +175,33 @@ def test_update_end_to_end_over_file_urls(tmp_path):
     msgs = []
     stats = jlcparts.update(dest=dest, base_url=site.as_uri() + "/",
                             progress=msgs.append)
-    assert stats["rows"] == 100_001 and dest.is_file()
+    assert stats["rows"] == 50_001 and stats["pruned"] == 50_001
     con = sqlite3.connect(dest)
-    assert con.execute("SELECT COUNT(*) FROM jlc_components").fetchone()[0] == 100_001
-    idx = [r[0] for r in con.execute(
-        "SELECT name FROM sqlite_master WHERE type='index'")]
+    assert con.execute("SELECT COUNT(*) FROM jlc_components").fetchone()[0] == 50_001
+    assert con.execute("SELECT MIN(stock) FROM jlc_components").fetchone()[0] >= 5
+    names = {r[0] for r in con.execute("SELECT name FROM sqlite_master")}
     con.close()
-    assert "idx_jlc_mfr" in idx                         # exact-MPN lookups stay fast
+    assert "idx_jlc_mfr" in names                       # exact-MPN lookups stay fast
+    assert "lcsc_components" not in names               # unused side table dropped
     assert not (dest.parent / "update.tmp").exists()    # downloads cleaned up
     assert any("installed" in m for m in msgs)
+
+
+def test_search_prefix_fallback_finds_family_in_pruned_catalog(tmp_path, monkeypatch):
+    # A pruned catalog has no zero-stock placeholder row for "VL53L1X" at all;
+    # the bare-family query must still surface the orderable MPN via the
+    # bounded prefix fallback.
+    db = tmp_path / "pruned.sqlite3"
+    con = sqlite3.connect(db)
+    con.execute(_SCHEMA)
+    con.execute("INSERT INTO jlc_components VALUES (?,?,?,?,?,?,?,?)",
+                (190004, "VL53L1CXV0FY/1", "LGA-12", "ST", "expand", 5640,
+                 "1-:4.8", "ToF"))
+    con.commit()
+    con.close()
+    monkeypatch.setenv("KICRAFT_JLCPARTS_DB", str(db))
+    rows = jlcparts.search("VL53L1X")
+    assert [r["lcsc"] for r in rows] == ["C190004"]
 
 
 def test_update_failure_leaves_existing_catalog(tmp_path):
