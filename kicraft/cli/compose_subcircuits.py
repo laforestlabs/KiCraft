@@ -999,8 +999,25 @@ def _compute_final_outline(
     # geometry extends past the corner anchor on that side, we must inflate
     # ``g_val`` by ``spacing_mm`` so pad copper keeps its full edge clearance
     # -- the unconstrained branch already gets margin via constraint_aware_outline.
+    #
+    # Edge-snap sanity clamp: a flush-mount anchor legitimately sits within
+    # a few mm of the placed geometry's edge on its side (pad inset /
+    # housing overhang). An anchor further out than ``spacing_mm + 10`` is
+    # a frame/transform bug upstream, and snapping the outline to it bakes
+    # a phantom bare-FR4 strip into the board (the outline repair pass only
+    # ever grows). Fall back to geometry + spacing and say so.
+    anchor_slack_mm = spacing_mm + 10.0
+
     def _resolve_min(side: str, c_val: float, g_val: float) -> float:
         if edge_constrained_sides[side]:
+            if abs(c_val - g_val) > anchor_slack_mm:
+                print(
+                    f"[outline] {side} edge anchor {c_val:.2f}mm is "
+                    f"{abs(c_val - g_val):.1f}mm from placed geometry edge "
+                    f"{g_val:.2f}mm (> {anchor_slack_mm:.1f}mm slack); "
+                    "ignoring anchor, using geometry + spacing"
+                )
+                return g_val - spacing_mm
             return c_val
         if corner_constrained_sides[side]:
             return min(c_val, g_val - spacing_mm)
@@ -1008,6 +1025,14 @@ def _compute_final_outline(
 
     def _resolve_max(side: str, c_val: float, g_val: float) -> float:
         if edge_constrained_sides[side]:
+            if abs(c_val - g_val) > anchor_slack_mm:
+                print(
+                    f"[outline] {side} edge anchor {c_val:.2f}mm is "
+                    f"{abs(c_val - g_val):.1f}mm from placed geometry edge "
+                    f"{g_val:.2f}mm (> {anchor_slack_mm:.1f}mm slack); "
+                    "ignoring anchor, using geometry + spacing"
+                )
+                return g_val + spacing_mm
             return c_val
         if corner_constrained_sides[side]:
             return max(c_val, g_val + spacing_mm)
@@ -2709,6 +2734,25 @@ def _search_best_layout(
         outline_tl, outline_br = board_state.board_outline
         outline_w_mm = max(0.0, outline_br.x - outline_tl.x)
         outline_h_mm = max(0.0, outline_br.y - outline_tl.y)
+        # Outline-sprawl gate: an outline whose area dwarfs the content it
+        # holds means a phantom edge anchor or runaway auto-grow upstream
+        # baked bare FR4 into the board. Penalize so a compact candidate
+        # always beats a sprawled one even when the other terms tie.
+        sprawl = 0.0
+        all_phys = [c.physical_bbox() for c in board_state.components.values()]
+        if all_phys and outline_w_mm > 0.0 and outline_h_mm > 0.0:
+            content_w = max(b[1].x for b in all_phys) - min(b[0].x for b in all_phys)
+            content_h = max(b[1].y for b in all_phys) - min(b[0].y for b in all_phys)
+            content_area = max(1.0, content_w * content_h)
+            sprawl = (outline_w_mm * outline_h_mm) / content_area
+            if sprawl > 2.0:
+                sprawl_penalty = min(30.0, 10.0 * (sprawl - 2.0))
+                composite -= sprawl_penalty
+                print(
+                    f"[candidate-search] cand={i} outline "
+                    f"{outline_w_mm:.1f}x{outline_h_mm:.1f}mm is {sprawl:.1f}x "
+                    f"its content area; score -{sprawl_penalty:.1f}"
+                )
         # state.geometry_validation is populated inside _stamp_parent_board
         # via _validate_parent_geometry. When pcb_path is None the stamp
         # path is skipped, leaving geometry_validation = {} -- treat that
@@ -2758,6 +2802,7 @@ def _search_best_layout(
                 "overlap": overlap,
                 "net_dist": net_dist,
                 "bbox_packing": bbox_packing,
+                "sprawl": sprawl,
             },
             geometry_accepted=geometry_accepted,
             outside_component_count=outside_component_count,
