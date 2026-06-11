@@ -51,6 +51,14 @@ def test_pick_lcsc_ambiguous_returns_none():
 # ---------- CLI ----------
 
 
+@pytest.fixture(autouse=True)
+def _no_local_jlc_catalog(tmp_path, monkeypatch):
+    """Point the offline JLC catalog at a missing file so these tests
+    exercise the explicit-id / parts-library / easyeda paths regardless of
+    whether the host has the real 5 GB catalog installed."""
+    monkeypatch.setenv("KICRAFT_JLCPARTS_DB", str(tmp_path / "absent.sqlite3"))
+
+
 def test_lookup_library_hit(capsys):
     # EVQP7A01P is vendored with LCSC C79167 — resolved offline, no network.
     rc, payload = _run(capsys, "lookup-lcsc-id", "EVQP7A01P")
@@ -118,6 +126,65 @@ def test_lookup_mpn_embedding_c_digits_is_not_an_id(capsys, monkeypatch):
     assert payload["ok"] is False
 
 
+# ---------- offline JLC catalog path ----------
+
+
+def _mk_catalog(tmp_path, monkeypatch, rows):
+    import sqlite3
+    db = tmp_path / "jlc.sqlite3"
+    con = sqlite3.connect(db)
+    con.execute("""CREATE TABLE jlc_components (
+        lcsc INTEGER PRIMARY KEY, mfr TEXT, package TEXT, manufacturer TEXT,
+        library_type TEXT, stock INTEGER, price TEXT, description TEXT)""")
+    con.executemany("INSERT INTO jlc_components VALUES (?,?,?,?,?,?,?,?)", rows)
+    con.commit()
+    con.close()
+    monkeypatch.setenv("KICRAFT_JLCPARTS_DB", str(db))
+
+
+def test_lookup_jlcparts_exact_hit_no_network(capsys, monkeypatch, tmp_path):
+    _mk_catalog(tmp_path, monkeypatch, [
+        (190004, "VL53L1CXV0FY/1", "LGA-12(2.5x4.9)", "STMicroelectronics",
+         "expand", 5640, "1-9:4.817,1000-:3.1586", "4m I2C ToF sensor ROHS"),
+    ])
+
+    def _boom(kw, **_):
+        raise AssertionError("network search must not run when the catalog hits")
+    monkeypatch.setattr(cli_app, "_search_easyeda_components", _boom)
+
+    rc, payload = _run(capsys, "lookup-lcsc-id", "VL53L1CXV0FY/1")
+    assert rc == 0
+    assert payload["lcsc"] == "C190004" and payload["source"] == "jlcparts"
+    assert payload["match"]["stock"] == 5640
+    assert payload["match"]["type"] == "Extended"
+    assert payload["match"]["price"] == 4.817
+
+
+def test_lookup_jlcparts_ambiguous_lists_candidates_with_stock(capsys, monkeypatch,
+                                                               tmp_path):
+    _mk_catalog(tmp_path, monkeypatch, [
+        (190004, "VL53L1CXV0FY/1", "LGA-12", "ST", "expand", 5640, "1-:4.8", "ToF"),
+        (2970716, "VL53L1CBV0FY/1", "SMD-12P", "ST", "expand", 2963, "1-:5.0", "ToF"),
+    ])
+    rc, payload = _run(capsys, "lookup-lcsc-id", "VL53L1C")
+    assert rc == 4
+    # In-stock-first candidate list; the model is told to pick one.
+    assert [c["lcsc"] for c in payload["candidates"]] == ["C190004", "C2970716"]
+    assert "add_part_from_lcsc" in payload["hint"]
+
+
+def test_lookup_jlcparts_miss_falls_through_to_easyeda(capsys, monkeypatch, tmp_path):
+    _mk_catalog(tmp_path, monkeypatch, [
+        (25744, "RC0805FR-07100KL", "0805", "YAGEO", "base", 1, "1-:0.0041", "res"),
+    ])
+    canned = [{"lcsc": "C83291", "model": "BMP280", "brand": "Bosch",
+               "package": "LGA-8", "description": None}]
+    monkeypatch.setattr(cli_app, "_search_easyeda_components", lambda kw, **_: canned)
+    rc, payload = _run(capsys, "lookup-lcsc-id", "BMP280")
+    assert rc == 0
+    assert payload["lcsc"] == "C83291" and payload["source"] == "easyeda"
+
+
 def test_parse_easyeda_search_flattens_and_dedupes():
     payload = {
         "success": True,
@@ -141,3 +208,16 @@ def test_parse_easyeda_search_flattens_and_dedupes():
     assert rows[0]["package"] == "LGA-12_L4.8-W2.4-P0.8-RB"
     assert rows[0]["description"] == "ToF sensor"
     assert rows[1]["package"] is None  # non-dict dataStr tolerated
+
+
+def test_pick_lcsc_zero_stock_exact_defers_to_in_stock_candidates():
+    # "VL53L1X" exact-matches a zero-stock placeholder row; the orderable
+    # real MPN (in stock) must surface as a candidate instead of losing.
+    results = [
+        {"lcsc": "C2924337", "model": "VL53L1X", "stock": 0, "type": "Extended"},
+        {"lcsc": "C190004", "model": "VL53L1CXV0FY/1", "stock": 5640, "type": "Extended"},
+    ]
+    assert _pick_lcsc("VL53L1X", results) is None
+    # ...but with nothing else in stock, the exact match still wins.
+    results[1]["stock"] = 0
+    assert _pick_lcsc("VL53L1X", results)["lcsc"] == "C2924337"
