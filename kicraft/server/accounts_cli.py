@@ -1,6 +1,7 @@
 """Admin CLI for KiCraft accounts: list users, grant tiers/roles, seed accounts.
 
-Until Stripe (backlog item 3) lands, tier changes are manual. Admin access is a
+Manual tier changes here override a Stripe-granted tier only until the next
+webhook resync (see accounts.set_tier). Admin access is a
 ROLE, orthogonal to the billing tier; grant it here to bootstrap the first admin
 before the /admin dashboard is reachable (the dashboard itself requires an admin):
 
@@ -157,6 +158,25 @@ def _cmd_delete(args: argparse.Namespace) -> int:
         print(f"refusing to delete {u.email} (id {u.id}) without --yes "
               "(this is irreversible)", file=sys.stderr)
         return 1
+    if u.stripe_subscription_id:
+        # Never charge a deleted account again. Best-effort: the CLI runs
+        # without full Settings, so use the env key when present and otherwise
+        # tell the operator to cancel in the Stripe dashboard.
+        key = os.environ.get("KICRAFT_STRIPE_SECRET_KEY", "").strip()
+        canceled = False
+        if key:
+            try:
+                from .billing import StripeGateway
+                StripeGateway(key).cancel_subscription(u.stripe_subscription_id)
+                canceled = True
+                print(f"canceled Stripe subscription {u.stripe_subscription_id}")
+            except Exception as e:
+                print(f"WARNING: cancel of {u.stripe_subscription_id} failed: {e}",
+                      file=sys.stderr)
+        if not canceled:
+            print(f"WARNING: user has Stripe subscription "
+                  f"{u.stripe_subscription_id}; cancel it in the Stripe "
+                  "dashboard or they keep getting charged.", file=sys.stderr)
     purged = store.delete_user(u.id)
     tail = f"; removed {purged}" if purged else ""
     print(f"deleted {u.email} (id {u.id}) and their projects{tail}")

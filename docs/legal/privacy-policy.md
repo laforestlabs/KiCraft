@@ -1,6 +1,6 @@
 # KiCraft Privacy Policy
 
-**Version: 2026-06-09**
+**Version: 2026-06-11**
 
 > **DRAFT, pending attorney review.** This document is a first-draft template. It
 > has not been reviewed by a lawyer. Replace every `[BRACKETED]` placeholder and
@@ -27,6 +27,11 @@ When you use the hosted Service we collect and store:
   for you, and the project archive.
 - **Usage and cost metering**: which design stages ran, token counts, and the
   computed cost of each run.
+- **Billing data (paid plans)**: if you subscribe to a paid plan, our payment
+  processor Stripe collects your card details directly; **we never see or store
+  your card number**. We store only your Stripe customer and subscription
+  identifiers and the subscription's status, so we can match payments to your
+  account.
 
 We store these per account so that you can find your past projects, and we
 associate them with your `user_id`.
@@ -58,6 +63,9 @@ e. **Community sharing (free tier)**: if you are on the free tier, your complete
   retention.
 - **Infrastructure providers.** Hosting and storage for the Service
   (`[HOSTING PROVIDER]`).
+- **Payment processor.** Paid-plan payments are handled by Stripe, Inc., which
+  receives your email and payment details and processes them under
+  [Stripe's privacy policy](https://stripe.com/privacy).
 - We do **not** sell your personal information.
 - We may disclose data if required by law.
 
