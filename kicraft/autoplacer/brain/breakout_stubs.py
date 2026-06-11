@@ -760,6 +760,19 @@ def add_breakout_stubs(
             board, pad, floor_mm=floor_mm, half_width_mm=half_width_mm, layer_id=layer
         )
 
+        def _conflicts_with_copper(points: list[tuple[float, float]]) -> bool:
+            """True when the path runs too close to other-net stamped/board copper."""
+            for a, b in zip(points, points[1:]):
+                for o_net, o_a, o_b, o_hw, o_cl, o_layer in stamped:
+                    if o_net == net_code:
+                        continue
+                    if o_layer is not None and o_layer != layer:
+                        continue
+                    need = max(floor_mm, src_cl_mm, o_cl) + half_width_mm + o_hw
+                    if _seg_seg_dist_mm(a, b, o_a, o_b) < need:
+                        return True
+            return False
+
         pad_pos = pad.GetPosition()
         start_mm = (pcbnew.ToMM(pad_pos.x), pcbnew.ToMM(pad_pos.y))
         if spec.waypoints:
@@ -775,6 +788,11 @@ def add_breakout_stubs(
             ):
                 summary["skipped"].append(f"{spec.ref}.{spec.pad}:waypoint_crosses_pad")
                 continue
+            if _conflicts_with_copper(points):
+                summary["skipped"].append(
+                    f"{spec.ref}.{spec.pad}:conflicts_with_stamped_stub"
+                )
+                continue
         else:
             fc = fp.GetPosition()
             cx, cy = pcbnew.ToMM(fc.x), pcbnew.ToMM(fc.y)
@@ -788,8 +806,11 @@ def add_breakout_stubs(
             # The radial direction is right for a part whose pads ring its
             # centre (QFN) but for a connector ROW it can run diagonally ALONG
             # the row, colliding forever (the USB-C CC2 signature) -- so fall
-            # back to the four axis directions until one yields a legal tip.
-            end = None
+            # back to the four axis directions. A direction whose tip is legal
+            # but whose run lands beside already-stamped copper (e.g. the VBUS
+            # perimeter tie one pad-row out) is rejected HERE so the next
+            # direction still gets its chance.
+            points = None
             for du in (dir_unit, (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)):
                 end = _radial_escape_end(
                     path_obs,
@@ -800,33 +821,18 @@ def add_breakout_stubs(
                     min_useful_mm=max(floor_mm, pcbnew.ToMM(width)),
                     inner_box=inner_box,
                 )
-                if end is not None:
-                    break
-            if end is None:
+                if end is None:
+                    continue
+                cand = [start_mm, end]
+                if _conflicts_with_copper(cand):
+                    continue
+                points = cand
+                break
+            if points is None:
                 summary["skipped"].append(
                     f"{spec.ref}.{spec.pad}:no_safe_radial_escape"
                 )
                 continue
-            points = [start_mm, end]
-
-        conflict = None
-        for a, b in zip(points, points[1:]):
-            for o_net, o_a, o_b, o_hw, o_cl, o_layer in stamped:
-                if o_net == net_code:
-                    continue
-                if o_layer is not None and o_layer != layer:
-                    continue
-                need = max(floor_mm, src_cl_mm, o_cl) + half_width_mm + o_hw
-                if _seg_seg_dist_mm(a, b, o_a, o_b) < need:
-                    conflict = (o_net, o_a, o_b)
-                    break
-            if conflict:
-                break
-        if conflict:
-            summary["skipped"].append(
-                f"{spec.ref}.{spec.pad}:conflicts_with_stamped_stub"
-            )
-            continue
 
         # Hard invariant: never stamp locked copper outside the board outline.
         # FreeRouting 1.9.0 hangs (no SES, no error) on a locked wire corner
