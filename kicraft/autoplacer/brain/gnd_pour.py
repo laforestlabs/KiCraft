@@ -394,7 +394,12 @@ def repair_stranded_gnd(
     if not main_targets:
         return summary
 
-    specs = []
+    from kicraft.autoplacer.brain.breakout_stubs import (
+        BreakoutSpec,
+        add_breakout_stubs,
+    )
+
+    max_targets = int(cfg.get("gnd_strand_repair_max_targets", 5))
     for root, members in clusters.items():
         if root == main_root:
             continue
@@ -404,35 +409,34 @@ def repair_stranded_gnd(
             summary["skipped"].append("cluster_without_pad")
             continue
         sx, sy = src["xy"]
-        tgt = min(main_targets,
-                  key=lambda t: (t["xy"][0] - sx) ** 2 + (t["xy"][1] - sy) ** 2)
-        d = ((tgt["xy"][0] - sx) ** 2 + (tgt["xy"][1] - sy) ** 2) ** 0.5
-        if d > max_tie_mm:
-            summary["skipped"].append(f"{src['ref']}.{src['num']}:too_far:{d:.1f}mm")
-            continue
-        specs.append((src["ref"], src["num"], tgt["xy"]))
-
-    if not specs:
-        return summary
-    from kicraft.autoplacer.brain.breakout_stubs import (
-        BreakoutSpec,
-        add_breakout_stubs,
-    )
-
-    # Try F.Cu first, retry the leftovers on B.Cu (the strand is usually in a
-    # region where one layer is crowded and the other open).
-    remaining = specs
-    for layer_name in ("F.Cu", "B.Cu"):
-        if not remaining:
-            break
-        batch = [BreakoutSpec(ref=r, pad=n, waypoints=[xy], layer=layer_name)
-                 for r, n, xy in remaining]
-        res = add_breakout_stubs(pcb_path, batch, cfg=cfg)
-        summary["tied"] += res.get("stubs", 0)
-        failed_keys = {s.split(":")[0] for s in res.get("skipped", [])}
-        remaining = [(r, n, xy) for r, n, xy in remaining
-                     if f"{r}.{n}" in failed_keys]
-    summary["skipped"].extend(f"{r}.{n}:no_clear_path" for r, n, _ in remaining)
+        ranked = sorted(
+            main_targets,
+            key=lambda t: (t["xy"][0] - sx) ** 2 + (t["xy"][1] - sy) ** 2,
+        )
+        # The straight line to the NEAREST target often runs through exactly
+        # the copper wall that stranded this cluster in the first place -- so
+        # walk outward through the nearest few targets (different directions)
+        # on both layers until one tie lands.
+        tied = False
+        for tgt in ranked[:max_targets]:
+            d = ((tgt["xy"][0] - sx) ** 2 + (tgt["xy"][1] - sy) ** 2) ** 0.5
+            if d > max_tie_mm:
+                break  # ranked by distance: everything after is farther
+            for layer_name in ("F.Cu", "B.Cu"):
+                res = add_breakout_stubs(
+                    pcb_path,
+                    [BreakoutSpec(ref=src["ref"], pad=src["num"],
+                                  waypoints=[tgt["xy"]], layer=layer_name)],
+                    cfg=cfg,
+                )
+                if res.get("stubs", 0):
+                    summary["tied"] += 1
+                    tied = True
+                    break
+            if tied:
+                break
+        if not tied:
+            summary["skipped"].append(f"{src['ref']}.{src['num']}:no_clear_path")
 
     if summary["tied"]:
         board = pcbnew.LoadBoard(pcb_path)
