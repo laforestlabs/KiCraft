@@ -161,3 +161,61 @@ def test_price_cache_ignores_stale_schema_and_roundtrips(tmp_path):
     written = json.loads((kdir / web._PRICE_FILE).read_text())
     assert written["_schema"] == web._PRICE_SCHEMA and k in written["prices"]
     web._PRICE_CACHE.pop(k, None)
+
+
+# ----------------------------------------------- offline JLC catalog pricing
+
+def _mk_catalog(tmp_path, monkeypatch, rows):
+    import sqlite3
+    db = tmp_path / "jlc.sqlite3"
+    con = sqlite3.connect(db)
+    con.execute("""CREATE TABLE jlc_components (
+        lcsc INTEGER PRIMARY KEY, mfr TEXT, package TEXT, manufacturer TEXT,
+        library_type TEXT, stock INTEGER, price TEXT, description TEXT)""")
+    con.executemany("INSERT INTO jlc_components VALUES (?,?,?,?,?,?,?,?)", rows)
+    con.commit()
+    con.close()
+    monkeypatch.setenv("KICRAFT_JLCPARTS_DB", str(db))
+
+
+def test_fetch_price_id_uses_offline_catalog_with_breaks(tmp_path, monkeypatch):
+    _mk_catalog(tmp_path, monkeypatch, [
+        (190004, "VL53L1CXV0FY/1", "LGA-12", "ST", "expand", 5640,
+         "1-9:4.817,10-29:4.2745,30-99:3.9983,100-499:3.3492,1000-:3.1586", "ToF"),
+    ])
+
+    def _no_net(cid):
+        raise AssertionError("easyeda must not be hit when the catalog prices it")
+    monkeypatch.setattr(web, "_easyeda_lcsc_price", _no_net)
+
+    r = web._fetch_price("id:C190004")
+    assert r["unit_price"] == 4.817 and r["stock"] == 5640
+    assert r["price_10"] == 4.2745 and r["price_100"] == 3.3492
+
+
+def test_fetch_price_id_falls_back_to_easyeda_when_catalog_lacks_part(
+        tmp_path, monkeypatch):
+    _mk_catalog(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(
+        web, "_easyeda_lcsc_price",
+        lambda cid: {"unit_price": 1.23, "lcsc": cid, "stock": 7})
+    r = web._fetch_price("id:C42")
+    assert r["unit_price"] == 1.23 and "price_10" not in r
+
+
+def test_fetch_price_keyword_via_offline_catalog(tmp_path, monkeypatch):
+    _mk_catalog(tmp_path, monkeypatch, [
+        (1525, "CL21B104KBCNNNC", "0805", "Samsung", "base", 900000,
+         "1-:0.0046", "50V 100nF X7R +-10% 0805 MLCC ROHS"),
+        (9999, "EXPENSIVE-FALSE-POSITIVE", "0805", "x", "expand", 5,
+         "1-:4.00", "100nF 0805 something"),
+    ])
+    r = web._fetch_price("kw:100nF 0805")
+    assert r["lcsc"] == "C1525" and r["unit_price"] == 0.0046  # cheapest in stock
+
+
+def test_fetch_price_keyword_unavailable_without_catalog(tmp_path, monkeypatch):
+    monkeypatch.setenv("KICRAFT_JLCPARTS_DB", str(tmp_path / "absent.sqlite3"))
+    import pytest
+    with pytest.raises(web._SourceUnavailable):
+        web._fetch_price("kw:100nF 0805")

@@ -50,6 +50,7 @@ from .examples import CHIP_PROMPTS, EXAMPLE_PROMPTS
 from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView, kicanvas_head
 from .mailer import send_reset_email
 from ..parts_library import PART_NAME_RE, Tier
+from ..parts_library import jlcparts
 from .parts_catalog import (
     catalog,
     footprint_svg,
@@ -789,8 +790,10 @@ class _SourceUnavailable(Exception):
 # Bump when the pricing logic changes so persisted prices from the old logic are
 # dropped and re-fetched. v3: price LCSC ids via the easyeda.com product endpoint
 # (the JLCPCB keyword API is WAF-blocked); this also drops the frozen $0.00 caches
-# written while every lookup was returning "no match".
-_PRICE_SCHEMA = 3
+# written while every lookup was returning "no match". v4: the offline jlcparts
+# catalog adds 10/100-pc break prices and keyword pricing; drop the single-price
+# v3 caches so the breaks backfill.
+_PRICE_SCHEMA = 4
 
 # easyeda.com product endpoint: serves the same data KiCraft fetches symbols and
 # footprints from, and -- unlike jlcpcb.com's keyword-search API -- is NOT behind
@@ -835,13 +838,21 @@ def _pick_price(kind: str, query: str, results: list[dict]) -> dict | None:
     return {"unit_price": price_of(r), "lcsc": r.get("lcsc"), "stock": r.get("stock")}
 
 
-def _search_jlcpcb(query: str) -> list[dict]:
-    """JLCPCB/LCSC keyword search via easyeda2kicad. The only source for parts
-    with no LCSC id (un-vendored MPNs, generic passives); its jlcpcb.com endpoint
-    is currently WAF-blocked, so it degrades to an empty list. Network; may raise."""
-    from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
-    res = EasyedaApi().search_jlcpcb_components(keyword=query, page_size=10) or {}
-    return res.get("results") or []
+def _jlcparts_price(cid: str) -> dict | None:
+    """Price + stock + 10/100-pc breaks for an LCSC id from the offline JLC
+    catalog (no network). None when the catalog is absent or carries no
+    usable price for the part — callers fall through to the network source."""
+    part = jlcparts.lookup(cid)
+    if not part:
+        return None
+    ladder = part.get("ladder") or []
+    unit = jlcparts.price_at(ladder, 1)
+    if not unit or unit <= 0:
+        return None
+    return {"unit_price": unit, "lcsc": part["lcsc"],
+            "stock": part.get("stock") or 0,
+            "price_10": jlcparts.price_at(ladder, 10),
+            "price_100": jlcparts.price_at(ladder, 100)}
 
 
 def _easyeda_lcsc_price(cid: str) -> dict | None:
@@ -876,25 +887,22 @@ def _easyeda_lcsc_price(cid: str) -> dict | None:
 
 
 def _fetch_price(key: str) -> dict:
-    """Resolve one price key to ``{"unit_price","lcsc","stock"}``, or raise
-    ``_SourceUnavailable`` when nothing can price it right now.
+    """Resolve one price key to ``{"unit_price","lcsc","stock"}`` (plus
+    ``price_10``/``price_100`` breaks when the offline catalog has them), or
+    raise ``_SourceUnavailable`` when nothing can price it right now.
 
     ``id:`` keys (curated-library + easyeda-vendored parts, which dominate BOM
-    cost) price via the still-working easyeda.com endpoint. ``mpn:``/``kw:`` keys
-    (un-vendored MPNs, generic passives) have no LCSC id, so their only source is
-    the JLCPCB keyword search -- currently WAF-blocked."""
+    cost) price via the offline JLC catalog first (qty ladder + live stock, no
+    network), then the easyeda.com endpoint. ``mpn:``/``kw:`` keys (un-vendored
+    MPNs, generic passives) keyword-search the offline catalog; without it
+    installed they have no source (jlcpcb.com's API is WAF-blocked)."""
     kind, _, query = key.partition(":")
     if kind == "id":
-        pick = _easyeda_lcsc_price(query)
-        if pick is not None:
-            return pick
-        # easyeda carries no inline price for this C#; the only backstop (a JLCPCB
-        # keyword search by the id) is currently blocked.
-        pick = _pick_price("id", query, _search_jlcpcb(query))
+        pick = _jlcparts_price(query) or _easyeda_lcsc_price(query)
         if pick is not None:
             return pick
         raise _SourceUnavailable(f"no price source for {query}")
-    pick = _pick_price(kind, query, _search_jlcpcb(query))
+    pick = _pick_price(kind, query, jlcparts.search(query))
     if pick is None:
         raise _SourceUnavailable(f"keyword pricing unavailable for {query!r}")
     return pick
@@ -4026,7 +4034,8 @@ def part_detail_page(name: str):
                     with row:
                         if isinstance(res, dict):
                             for qty, val in (("1", res["unit_price"]),
-                                             ("10", None), ("100", None)):
+                                             ("10", res.get("price_10")),
+                                             ("100", res.get("price_100"))):
                                 with ui.column().classes("gap-0 items-start"):
                                     ui.label(f"@{qty} pc").classes("text-xs") \
                                         .style("color:#64748b")
@@ -4047,8 +4056,8 @@ def part_detail_page(name: str):
                 if not _fill_price():
                     timer = ui.timer(1.0,
                                      lambda: _fill_price() and timer.deactivate())
-                ui.label("Unit price from LCSC at qty 1. Live 10/100-pc break "
-                         "pricing is currently unavailable.").classes("text-xs") \
+                ui.label("LCSC pricing; 10/100-pc breaks come from the offline "
+                         "JLC catalog when it covers the part.").classes("text-xs") \
                     .style("color:#64748b")
 
         with ui.card().classes("w-full") \

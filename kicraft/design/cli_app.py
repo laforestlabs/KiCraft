@@ -31,6 +31,8 @@ from typing import get_args
 
 from pydantic import ValidationError
 
+from kicraft.parts_library import jlcparts
+
 from .library import (
     ArchitectureLibraryError,
     _format_available_leaves_block,
@@ -523,7 +525,16 @@ def _pick_lcsc(mpn: str, results: list[dict]) -> dict | None:
     exact = [r for r in results if (r.get("model") or "").strip().upper() == target]
     if exact:
         exact.sort(key=lambda r: (-(r.get("stock") or 0), r.get("type") != "Basic"))
-        return exact[0]
+        best = exact[0]
+        # A known-zero-stock exact hit while other candidates ARE in stock is
+        # usually a placeholder catalog row (e.g. a bare family name like
+        # "VL53L1X"); surface the candidate list so the orderable real MPN
+        # wins. stock=None (source doesn't report it) never triggers this.
+        if best.get("stock") == 0 and any(
+            (r.get("stock") or 0) > 0 for r in results if r is not best
+        ):
+            return None
+        return best
     if len(results) == 1:
         return results[0]
     return None
@@ -533,7 +544,8 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
     """Resolve an MPN / keyword / pasted LCSC id-or-URL to an LCSC part number.
 
     Order: explicit C-number in the query (offline), parts-library manifests
-    (offline, authoritative), then an easyeda.com keyword search (network).
+    (offline, authoritative), the offline JLC catalog (jlcparts dump: stock,
+    Basic/Extended, qty-1 price), then an easyeda.com keyword search (network).
     Prints JSON; exits 0 when a single LCSC id is resolved, 4 otherwise (with
     a candidate list to choose from). Lets the BOM sub-agent own MPN->LCSC
     resolution without the main thread reaching for WebSearch.
@@ -570,7 +582,37 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
                 ))
                 return 0
 
-    # 2. easyeda.com keyword search — network, best-effort.
+    # 2. Offline JLC catalog (jlcparts dump) — richer than the network search
+    #    (live stock, Basic/Extended, qty-1 price) and answers without network.
+    #    Falls through only when the catalog is absent or has nothing.
+    if jlcparts.available():
+        results = jlcparts.search(mpn)
+        if results:
+            fields = ("lcsc", "model", "brand", "package", "stock", "type",
+                      "price", "description")
+            best = _pick_lcsc(mpn, results)
+            if best and best.get("lcsc"):
+                _log_query("lookup_lcsc_id", outcome="resolved", query=mpn,
+                           lcsc=best["lcsc"], source="jlcparts")
+                print(json.dumps(
+                    {"ok": True, "mpn": mpn, "lcsc": best["lcsc"],
+                     "source": "jlcparts",
+                     "match": {k: best.get(k) for k in fields}},
+                    indent=2,
+                ))
+                return 0
+            _log_query("lookup_lcsc_id", outcome="miss", query=mpn,
+                       n_candidates=len(results))
+            print(json.dumps(
+                {"ok": False, "mpn": mpn,
+                 "candidates": [{k: r.get(k) for k in fields} for r in results],
+                 "hint": "no single exact match; pick the candidate that fits "
+                         "(prefer in-stock) and pass it to add_part_from_lcsc"},
+                indent=2,
+            ))
+            return 4
+
+    # 3. easyeda.com keyword search — network, best-effort.
     results = _search_easyeda_components(mpn)
     if results is None:
         _log_query("lookup_lcsc_id", outcome="error", query=mpn,
@@ -612,6 +654,21 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
         indent=2,
     ))
     return 4
+
+
+def _cmd_jlcparts_update(args: argparse.Namespace) -> int:
+    """Download/refresh the offline JLC parts catalog."""
+    try:
+        stats = jlcparts.update(
+            dest=Path(args.dest) if args.dest else None,
+            base_url=args.base_url,
+            progress=lambda msg: print(msg, file=sys.stderr),
+        )
+    except Exception as e:
+        print(f"jlcparts-update failed: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps({"ok": True, **stats}, indent=2))
+    return 0
 
 
 def _slugify_libname(s: str) -> str:
@@ -2084,11 +2141,26 @@ def main(argv: list[str] | None = None) -> int:
         "lookup-lcsc-id",
         help=(
             "resolve a manufacturer part number (MPN) to an LCSC part number "
-            "via the parts library, then a JLCPCB keyword search"
+            "via the parts library, the offline JLC catalog, then an "
+            "easyeda.com keyword search"
         ),
     )
     p_lcsc.add_argument("mpn", help="manufacturer part number to resolve")
     p_lcsc.set_defaults(func=_cmd_lookup_lcsc_id)
+
+    p_jlc = sub.add_parser(
+        "jlcparts-update",
+        help=(
+            "download/refresh the offline JLC parts catalog (yaqwsx/jlcparts "
+            "nightly dump: ~650 MB download, ~5.5 GB on disk)"
+        ),
+    )
+    p_jlc.add_argument("--base-url", default=jlcparts.DATA_URL,
+                       help="override the dataset URL (testing)")
+    p_jlc.add_argument("--dest", default=None,
+                       help="override the catalog path (default: "
+                            "~/.kicraft/jlcparts/cache.sqlite3 or $KICRAFT_JLCPARTS_DB)")
+    p_jlc.set_defaults(func=_cmd_jlcparts_update)
 
     p_add_part = sub.add_parser(
         "add-part",
