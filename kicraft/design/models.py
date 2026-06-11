@@ -529,6 +529,18 @@ class ArtifactPaths(BaseModel):
 # ---------- Conversation state ----------
 
 
+class StageStatus(BaseModel):
+    """Durable outcome of one pipeline stage, keyed by stage name in
+    ConversationState.stage_status. Written by the server stage driver at
+    commit/fail time (and by manual slot edits), so a reopened project can
+    restore pipeline progress without replaying the ephemeral event stream."""
+
+    ok: bool
+    cost_usd: float | None = None
+    attempts: int | None = None
+    finished_at: str | None = None  # UTC ISO timestamp
+
+
 class ConversationState(BaseModel):
     """Single mutable object passed to every stage and the orchestrator."""
 
@@ -541,6 +553,7 @@ class ConversationState(BaseModel):
     history: list[ChatMsg] = Field(default_factory=list)
     artifacts: ArtifactPaths | None = None
     expert_mode: bool = False
+    stage_status: dict[str, StageStatus] = Field(default_factory=dict)
 
     def replace_open_questions_for_stage(self, stage: str, new: list[Question]) -> None:
         """Stages overwrite their own slot — questions are slot-scoped too."""

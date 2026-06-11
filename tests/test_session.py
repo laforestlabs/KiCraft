@@ -142,3 +142,5 @@ def test_run_session_parks_on_question_then_resumes(tmp_path):
                        client=_FakeClient([intent_slot]))
     assert res2["status"] == "ok"
     assert read_state(tmp_path)["intent"]["goal"] == "a USB-powered LED"
+    # The driver stamps the durable outcome the GUI restores stage tabs from.
+    assert read_state(tmp_path)["stage_status"]["intent"]["ok"] is True

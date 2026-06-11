@@ -63,6 +63,7 @@ from .parts_catalog import (
 from .samples import SAMPLES_DIR, available_samples, featured_sample
 from .session import (
     commit_slot,
+    derive_stage_statuses,
     downstream_stages,
     null_downstream,
     read_state,
@@ -1183,7 +1184,12 @@ def _collect_support_diagnostics(state: dict) -> dict:
     events = state.get("events") or []
     build_tail = [e.get("text", "") for e in events
                   if e.get("kind") == "build_log"][-60:]
-    stages_done = [e.get("stage") for e in events if e.get("kind") == "stage_done"]
+    # Durable per-stage outcomes first (they cover stages run before a resume);
+    # the in-memory event scan remains as the legacy fallback.
+    ss = (read_state(state["ws"]) if state.get("ws") else {}).get("stage_status") or {}
+    stages_done = ([s for s in DESIGN_STAGES
+                    if isinstance(ss.get(s), dict) and ss[s].get("ok")]
+                   or [e.get("stage") for e in events if e.get("kind") == "stage_done"])
     ws = Path(state["ws"]) if state.get("ws") else None
     if state.get("status"):
         run_status = state["status"]
@@ -1322,6 +1328,27 @@ def _rehydrate_workspace(project) -> Path:
     if base and (base / "generated").is_dir():
         shutil.copytree(base / "generated", ws / "generated")
     return ws
+
+
+def _derived_statuses(ws: Path | None, sj: dict, project_status: str | None,
+                      zip_ok: bool) -> dict[str, str]:
+    """Every tab's durable status for a (re)opened project (the pure mapping is
+    session.derive_stage_statuses; this reads the filesystem signals it needs
+    from the workspace: generated sheets, synth-check failures, the routed
+    board). Feeds StageTabs.set_statuses so a reopened project's stage icons
+    reflect the stages that actually completed."""
+    sheets = pcb = False
+    checks_failed = False
+    if ws is not None:
+        pd = _discover_generated_dir(ws)
+        if pd is not None:
+            sheets = any(pd.glob("*.kicad_sch"))
+            pcb = (pd / f"{pd.name}.kicad_pcb").is_file()
+        checks_failed = bool(_synth_check_failures(ws))
+    return derive_stage_statuses(sj, project_status=project_status,
+                                 sheets_exist=sheets,
+                                 synth_checks_failed=checks_failed,
+                                 pcb_ready=pcb, zip_ok=zip_ok)
 
 
 def _anno_kind(anno) -> tuple[str, list | None]:
@@ -4754,6 +4781,15 @@ def index(prompt: str = "", project: str = ""):
                     ui.notify(f"Edit rejected: {out.get('errors')}", color="negative")
                     return
             null_downstream(ws, stage)
+            # The re-run stages' panels are invalid now: back to placeholders,
+            # and repaint every tab from the durable state (edited stage stays
+            # green, cleared downstream stages drop to pending, build phases
+            # drop to pending because the design is no longer complete).
+            for s in runs:
+                tabs.reset_stage(s)
+            sj = read_state(ws)
+            tabs.set_statuses(_derived_statuses(Path(ws), sj, None, False),
+                              sj.get("stage_status"))
             if state["project_id"]:
                 _store().update_project_status(state["project_id"], "running")
             state.update(running=True, done=False, ok=None, pcb_ready=False,
@@ -4801,6 +4837,16 @@ def index(prompt: str = "", project: str = ""):
                 state = live
                 _reset_view()
                 tabs.reset()
+                # Restore the durable stage statuses first: a live run resumed
+                # after a reopen only streams events for the stages it re-runs,
+                # so the replay below cannot repaint the earlier, already-
+                # committed stages.
+                live_ws = Path(state["ws"]) if state.get("ws") else None
+                live_sj = read_state(state["ws"]) if state.get("ws") else {}
+                tabs.set_statuses(
+                    _derived_statuses(live_ws, live_sj, p.status,
+                                      bool(state.get("zip"))),
+                    live_sj.get("stage_status"))
                 continue_btn.set_visibility(False)
                 new_btn.set_visibility(True)
                 if state.get("running"):
@@ -4844,6 +4890,10 @@ def index(prompt: str = "", project: str = ""):
                 state["project_dir"] = str(project_dir)
                 state["token"] = _register_project_dir(project_dir)
                 state["pcb_ready"] = (project_dir / f"{project_dir.name}.kicad_pcb").is_file()
+            # Stage icons reflect the persisted progress, not just live events:
+            # without this every reopened project showed all-pending tabs.
+            tabs.set_statuses(_derived_statuses(ws, sj, p.status, zip_ok),
+                              sj.get("stage_status"))
             rem = remaining_stages(sj)
             continue_btn.set_visibility(bool(rem) and not state["awaiting_input"])
             if state["awaiting_input"]:
@@ -4996,15 +5046,24 @@ def index(prompt: str = "", project: str = ""):
                 if mt and mt != view["state_mtime"]:
                     view["state_mtime"] = mt
                     sj = _read_state_json(Path(state["ws"]))
-                    for stg in ("intent", "functional_spec", "architecture", "bom", "wiring"):
-                        spec = _inspector_spec(stg, sj, {}, None, view["build_lines"])
-                        if spec:
-                            tabs.set_inspector(stg, spec)
-                    # Live-price any BOM parts in the background (fills in the cost
-                    # column + total once the fetch lands; cached parts are instant).
-                    bom_parts = (sj.get("bom") or {}).get("parts") or []
-                    if bom_parts:
-                        _ensure_bom_prices(bom_parts, state["ws"], state)
+                    if not sj:
+                        # Caught the file mid-write: un-consume the mtime and
+                        # retry next tick instead of wiping the inspectors.
+                        view["state_mtime"] = None
+                    else:
+                        # Unconditional set: an empty spec CLEARS a stage whose
+                        # slot was nulled by an edit (it used to stay stale).
+                        # set_inspector keeps an in-progress live draft on screen.
+                        for stg in ("intent", "functional_spec", "architecture",
+                                    "bom", "wiring"):
+                            tabs.set_inspector(stg, _inspector_spec(
+                                stg, sj, {}, None, view["build_lines"]))
+                        # Live-price any BOM parts in the background (fills in the
+                        # cost column + total once the fetch lands; cached parts
+                        # are instant).
+                        bom_parts = (sj.get("bom") or {}).get("parts") or []
+                        if bom_parts:
+                            _ensure_bom_prices(bom_parts, state["ws"], state)
 
             # Prices arrive on a background thread; re-render the BOM when they do.
             if state["ws"] and state.get("prices_rev") != view.get("prices_rev_seen"):
@@ -5035,7 +5094,9 @@ def index(prompt: str = "", project: str = ""):
                     sj = _read_state_json(Path(state["ws"])) if state["ws"] else {}
                     tabs.set_inspector("synthesize", _inspector_spec(
                         "synthesize", sj, {}, project_dir, view["build_lines"]))
-                    with tabs.view_slot("synthesize"):
+                    slot = tabs.view_slot("synthesize")
+                    slot.clear()  # an edit-rerun renders again; never stack views
+                    with slot:
                         view["sch_view"] = _render_synth_view(srcs, state["stem"])
                     # Painted already if synthesize is the visible tab now; otherwise
                     # mark it for a re-fit when the user first reveals it.
