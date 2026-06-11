@@ -278,8 +278,39 @@ def add_gnd_pour_and_thermal_vias(
     pitch = pcbnew.FromMM(float(cfg.get("thermal_via_pitch_mm", 1.2)))
     inset = pcbnew.FromMM(float(cfg.get("thermal_via_inset_mm", 0.5)))
     area_threshold = float(cfg.get("thermal_pad_area_mm2", 4.0))
+    via_clearance = pcbnew.FromMM(
+        float(cfg.get("freerouting_min_clearance_mm", 0.153))
+    )
+    summary["thermal_vias_blocked"] = 0
+    summary["escape_stitched"] = 0
 
-    def _add_via(x: int, y: int) -> None:
+    def _via_blocked(x: int, y: int) -> bool:
+        """True when a GND via at (x, y) would land on another net's copper.
+
+        This runs on a ROUTED board (leaf) or a composed parent full of leaf
+        traces; a via stamped blind through a B.Cu track of another net is a
+        hard short the router can never repair (the IP2368-bank incident:
+        seven shorts from exactly this). Same-net copper is a valid landing.
+        """
+        pt = pcbnew.VECTOR2I(int(x), int(y))
+        margin = int(via_size // 2 + via_clearance)
+        for t in board.GetTracks():
+            if t.GetNetCode() == gnd_code:
+                continue
+            if t.HitTest(pt, margin):
+                return True
+        for ofp in board.GetFootprints():
+            for op in ofp.Pads():
+                if op.GetNetCode() == gnd_code:
+                    continue
+                if op.HitTest(pt, margin):
+                    return True
+        return False
+
+    def _add_via(x: int, y: int) -> bool:
+        if _via_blocked(x, y):
+            summary["thermal_vias_blocked"] += 1
+            return False
         via = pcbnew.PCB_VIA(board)
         via.SetPosition(pcbnew.VECTOR2I(int(x), int(y)))
         via.SetDrill(via_drill)
@@ -289,6 +320,11 @@ def add_gnd_pour_and_thermal_vias(
             via.SetWidth(pcbnew.F_Cu, via_size)
         via.SetNetCode(gnd_code)
         board.Add(via)
+        return True
+
+    # GND pads that need stitching but cannot host an in-pad via: escape them
+    # with a short guarded stub + end via instead (see below).
+    escape_pads: list[tuple[str, str]] = []
 
     # --- 1. Thermal-via arrays under GND thermal / exposed pads ---
     for fp in board.GetFootprints():
@@ -299,7 +335,11 @@ def add_gnd_pour_and_thermal_vias(
         ]
         if not smd:
             continue
-        multipad = len(pads) >= 6  # ICs/modules; passives connect via their traces
+        # ICs/modules need their GND dropped to the plane; 2-pad passives reach
+        # GND through whatever they connect to. >= 3 includes the SOT-23-class
+        # regulators whose lone GND pad otherwise floats as an F.Cu pour island
+        # (run_03 U1.5 / run_05 U2.2 -- the post-connector-fix rc7 signature).
+        multipad = len(pads) >= 3
         # Pad numbers that carry GND -- EP sub-pads share a number but often only
         # one is netted, so treat the whole number-group as GND.
         gnd_numbers = {p.GetNumber() for p in pads if p.GetNetCode() == gnd_code}
@@ -312,17 +352,20 @@ def add_gnd_pour_and_thermal_vias(
             min_dim_mm = min(pcbnew.ToMM(size.x), pcbnew.ToMM(size.y))
             large = pcbnew.ToMM(size.x) * pcbnew.ToMM(size.y) >= area_threshold
             fits_via = min_dim_mm >= pcbnew.ToMM(via_size)
-            # Stitch every GND pad on a multi-pin footprint that can host a via:
-            # this ties BOTH the perimeter GND pins (so the F.Cu GND network drops
-            # to the plane) AND the interior EP down to the B.Cu pour, unifying GND
-            # into one net. Also stitch any large thermal pad. Tiny passive GND
-            # pads are left to their traces (they reach GND through the IC vias).
-            if not ((multipad and fits_via) or large):
+            if not multipad and not large:
                 continue
             pos = pad.GetPosition()
             # Net any stray (number-shared) EP sub-pad to GND so it joins the plane.
             if pad.GetNetCode() != gnd_code:
                 pad.SetNetCode(gnd_code)
+            # Stitch every GND pad on a multi-pin footprint: this ties BOTH the
+            # perimeter GND pins (so the F.Cu GND network drops to the plane)
+            # AND the interior EP down to the B.Cu pour, unifying GND into one
+            # net. A pad too small for an in-pad via is escaped with a short
+            # guarded stub + end via instead (stamped after this pass).
+            if not (fits_via or large):
+                escape_pads.append((fp.GetReferenceAsString(), pad.GetNumber()))
+                continue
             if large:
                 vx = _grid_positions(pos.x, size.x // 2 - inset, pitch)
                 vy = _grid_positions(pos.y, size.y // 2 - inset, pitch)
@@ -331,11 +374,42 @@ def add_gnd_pour_and_thermal_vias(
             placed = 0
             for x in vx:
                 for y in vy:
-                    _add_via(x, y)
-                    placed += 1
+                    if _add_via(x, y):
+                        placed += 1
             if placed:
                 summary["gnd_pads_stitched"] += 1
                 summary["thermal_vias_added"] += placed
+
+    # --- 1b. Escape-stitch the GND pads that cannot host an in-pad via: a
+    #         short locked stub out of the pad with a via at its tip bonds the
+    #         pad (and its F.Cu pour cluster) to the B.Cu plane. Reuses the
+    #         breakout-stub machinery, which already guards against foreign
+    #         pads, existing tracks/vias, netclass pair clearance, and the
+    #         board outline -- exactly the guards a routed board demands.
+    if escape_pads:
+        board.Save(pcb_path)
+        try:
+            from kicraft.autoplacer.brain.breakout_stubs import (
+                BreakoutSpec,
+                add_breakout_stubs,
+            )
+
+            specs = [
+                BreakoutSpec(
+                    ref=ref,
+                    pad=num,
+                    length_mm=float(cfg.get("gnd_escape_length_mm", 1.0)),
+                    via_at_end=True,
+                )
+                for ref, num in escape_pads
+            ]
+            res = add_breakout_stubs(pcb_path, specs, cfg=cfg)
+            summary["escape_stitched"] = res.get("vias", 0)
+            summary["escape_skipped"] = res.get("skipped", [])
+        except Exception as exc:  # finishing helper must never fail the board
+            summary["escape_error"] = str(exc)
+        board = pcbnew.LoadBoard(pcb_path)
+        gnd_net = board.GetNetInfo().GetNetItem(gnd_name)
 
     # --- 2. Full B.Cu GND pour (rule-area keepouts, e.g. the antenna, are
     #        respected automatically by the filler) ---
