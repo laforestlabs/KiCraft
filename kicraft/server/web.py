@@ -1562,9 +1562,13 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
             behavior, kept as the fallback for deploys without the worker unit.
             The 30m wall clock restarts at the slot-acquired marker so time spent
             queued for a host build slot is not billed against the build."""
+            cmd = KICRAFT + ["build", ".kicraft/state.json", "generated",
+                             "--no-archive"]
+            quality = _store().build_quality_for_user(state.get("user_id"))
+            if quality:  # tier override (free tier -> draft); None = default
+                cmd += ["--quality", quality]
             proc = subprocess.Popen(
-                KICRAFT + ["build", ".kicraft/state.json", "generated", "--no-archive"],
-                cwd=str(ws), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                cmd, cwd=str(ws), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1)
             deadline = time.monotonic() + 1800
             for line in proc.stdout or []:

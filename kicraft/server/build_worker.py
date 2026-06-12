@@ -125,10 +125,15 @@ class BuildWorker:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         env = {**os.environ, "PYTHONUNBUFFERED": "1",
                "KICRAFT_CALLER": os.environ.get("KICRAFT_CALLER", "web")}
+        cmd = list(self.build_cmd)
+        quality = self.store.build_quality_for_user(job.user_id)
+        if quality:
+            cmd += ["--quality", quality]
+            _log(f"job {job.id}: tier quality override --quality {quality}")
         try:
             with log_path.open("a", encoding="utf-8") as logf:
                 proc = subprocess.Popen(
-                    self.build_cmd, cwd=str(ws), stdout=subprocess.PIPE,
+                    cmd, cwd=str(ws), stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, text=True, bufsize=1, env=env,
                     start_new_session=True)
                 with self._lock:

@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import os
 import re
 import shutil
 import sys
@@ -1788,11 +1789,35 @@ def _cmd_synthesize(args: argparse.Namespace) -> int:
 
 _QUALITY_PRESETS = {
     "fast": {"engine": "solve-hierarchy"},
+    # "draft" validated by the 2026-06-12 sweep (logs/draft_sweep/
+    # 20260612T025445Z): ~1.8x faster than "good" at an equal-or-better
+    # fab-ready rate; KICRAFT_QUALITY_PRESETS can override per-process.
+    "draft": {"engine": "autoexperiment", "leaf_rounds": 2, "leaf_attempts": 2,
+              "parent_rounds": 2},
     "good": {"engine": "autoexperiment", "leaf_rounds": 3, "leaf_attempts": 3,
              "parent_rounds": 3},
     "best": {"engine": "autoexperiment", "leaf_rounds": 6, "leaf_attempts": 3,
              "parent_rounds": 6},
 }
+
+
+def _quality_presets() -> dict:
+    """_QUALITY_PRESETS with KICRAFT_QUALITY_PRESETS (a JSON object of
+    per-preset overrides, e.g. '{"draft": {"leaf_rounds": 1}}') merged on top.
+    Lets experiment harnesses sweep preset parameters without code edits."""
+    presets = {name: dict(cfg) for name, cfg in _QUALITY_PRESETS.items()}
+    raw = os.environ.get("KICRAFT_QUALITY_PRESETS", "").strip()
+    if raw:
+        try:
+            overrides = json.loads(raw)
+            for name, cfg in overrides.items():
+                presets.setdefault(name, {}).update(cfg)
+        except (ValueError, AttributeError, TypeError):
+            print(
+                "warning: ignoring malformed KICRAFT_QUALITY_PRESETS",
+                file=sys.stderr,
+            )
+    return presets
 
 
 def _run_layout(quality: str, root_sch: Path, pcb: Path) -> int:
@@ -1813,7 +1838,8 @@ def _run_layout(quality: str, root_sch: Path, pcb: Path) -> int:
     runs -- which is the manual ``solve-leaves -> pin -> compose`` flow that
     reliably placed these boards.
     """
-    preset = _QUALITY_PRESETS.get(quality, _QUALITY_PRESETS["good"])
+    presets = _quality_presets()
+    preset = presets.get(quality, presets["good"])
     if preset["engine"] == "solve-hierarchy":
         from kicraft.cli.solve_hierarchy import main as _solve_hierarchy_main
 
@@ -2377,9 +2403,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_build.add_argument(
         "--quality",
-        choices=["fast", "good", "best"],
+        choices=["fast", "draft", "good", "best"],
         default="good",
-        help="fast=single-pass solve-hierarchy; good/best=autoexperiment optimization",
+        help=(
+            "fast=single-pass solve-hierarchy; draft=reduced autoexperiment "
+            "(quickest optimized result); good/best=autoexperiment optimization"
+        ),
     )
     p_build.add_argument(
         "--archive-root",
