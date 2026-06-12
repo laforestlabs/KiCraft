@@ -781,7 +781,10 @@ def route_local_subcircuit(
     # power pads are reflected in the unconnected count.
     if cfg.get("power_plane_enabled", True):
         try:
-            from kicraft.autoplacer.brain.gnd_pour import pour_power_planes
+            from kicraft.autoplacer.brain.gnd_pour import (
+                pour_power_planes,
+                repair_stranded_power,
+            )
 
             _pwr = pour_power_planes(
                 str(routed_board),
@@ -793,6 +796,16 @@ def route_local_subcircuit(
                     f"  Power plane: poured {_pwr['nets']} on "
                     f"{cfg.get('power_plane_layer', 'F.Cu')}"
                 )
+                # The pour fragments around foreign copper like the GND plane
+                # does and can strand a supply pad on its own island
+                # (fine-pitch parts especially); tie stranded clusters back
+                # so they count as connected in the acceptance below.
+                _rep = repair_stranded_power(str(routed_board), _pwr["nets"], cfg)
+                if _rep.get("stranded"):
+                    print(
+                        f"  Power strand repair: {_rep['stranded']} stranded, "
+                        f"{_rep['tied']} tied, {len(_rep['skipped'])} skipped"
+                    )
         except Exception as exc:  # finishing step must never fail the leaf
             print(f"  WARNING: power plane step failed: {exc}")
         route_timing["gnd_pour_s"] = round(

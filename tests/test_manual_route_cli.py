@@ -2,8 +2,11 @@
 
 The promote tail (`_promote_verify_fab`, shared with `build`) must never
 clobber the last good ``<stem>.kicad_pcb``: a failed verify gate restores
-the backed-up board. Driven with monkeypatched verify/align/export seams
-(no pcbnew, no router)."""
+the backed-up board -- but only when that backup was itself routed (has
+``(segment`` copper). When the previous board is the unrouted synthesis
+placeholder (or absent), the dirty routed candidate is kept so the project
+shows the real place/route result. Driven with monkeypatched
+verify/align/export seams (no pcbnew, no router)."""
 
 from __future__ import annotations
 
@@ -39,7 +42,9 @@ def test_manual_route_registered_and_gates_missing_layout(tmp_path, capsys):
 def project(tmp_path):
     pd = tmp_path / "WIDGET"
     pd.mkdir()
-    (pd / "WIDGET.kicad_pcb").write_text("GOOD BOARD", encoding="utf-8")
+    # The previous board is ROUTED ("(segment" marker) -- the restore-worthy case.
+    (pd / "WIDGET.kicad_pcb").write_text(
+        "GOOD BOARD (segment (start 0 0) (end 1 1))", encoding="utf-8")
     routed_dir = pd / ".experiments" / "subcircuits" / "x"
     routed_dir.mkdir(parents=True)
     (routed_dir / "parent_routed.kicad_pcb").write_text("NEW ROUTE", encoding="utf-8")
@@ -78,13 +83,15 @@ def test_failed_gate_restores_previous_board(project, tmp_path, monkeypatch):
         _state_stub(), state_path, _artifacts_stub(project), "WIDGET",
         project, pcb)
     assert rc == 7
-    assert pcb.read_text(encoding="utf-8") == "GOOD BOARD", (
-        "failed candidate must not clobber the previous good board")
+    assert pcb.read_text(encoding="utf-8").startswith("GOOD BOARD"), (
+        "failed candidate must not clobber the previous good (routed) board")
     assert not pcb.with_name(pcb.name + ".prev").exists()
 
 
-def test_failed_gate_with_no_previous_board_leaves_none(project, tmp_path,
-                                                        monkeypatch):
+def test_failed_gate_with_no_previous_board_keeps_candidate(project, tmp_path,
+                                                            monkeypatch):
+    # First build, no prior board: the dirty routed candidate stays promoted
+    # so the project shows the actual route result (rc still 7, no fab export).
     pcb = project / "WIDGET.kicad_pcb"
     pcb.unlink()  # no prior board (first promote)
     monkeypatch.setattr(cli_app, "_align_project_clearance_to_routing",
@@ -95,7 +102,26 @@ def test_failed_gate_with_no_previous_board_leaves_none(project, tmp_path,
         _state_stub(), tmp_path / "state.json", _artifacts_stub(project),
         "WIDGET", project, pcb)
     assert rc == 7
-    assert not pcb.exists()
+    assert pcb.read_text(encoding="utf-8") == "NEW ROUTE"
+
+
+def test_failed_gate_with_unrouted_previous_board_keeps_candidate(
+        project, tmp_path, monkeypatch):
+    # The previous board is the synthesis placeholder (parts, no copper):
+    # restoring it would render a useless row of floating parts in the UI.
+    # The dirty routed candidate must win; the placeholder backup is dropped.
+    pcb = project / "WIDGET.kicad_pcb"
+    pcb.write_text("PLACED PARTS ONLY no copper here", encoding="utf-8")
+    monkeypatch.setattr(cli_app, "_align_project_clearance_to_routing",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(cli_app, "_verify_routed_board", lambda p: {
+        "ok": False, "shorts": 0, "unconnected": 1, "reasons": [], "tracks": {}})
+    rc = cli_app._promote_verify_fab(
+        _state_stub(), tmp_path / "state.json", _artifacts_stub(project),
+        "WIDGET", project, pcb)
+    assert rc == 7
+    assert pcb.read_text(encoding="utf-8") == "NEW ROUTE"
+    assert not pcb.with_name(pcb.name + ".prev").exists()
 
 
 def test_passing_gate_promotes_and_exports(project, tmp_path, monkeypatch):

@@ -1,6 +1,6 @@
 ---
 description: Investigate why a KiCraft run failed — across BOTH the schematic (ERC) and the PCB placement/routing (DRC). Locates the run, prints the build verdict, localizes the ERC/DRC failures, classifies systematic code/footprint bugs vs per-design model gaps across all runs, and recommends a generalizable fix.
-argument-hint: "[uid/pid | pid | /path/to/run] (optional; default: most recent run)"
+argument-hint: "[KC-XXXXXX board code | uid/pid | pid | /path/to/run] (optional; default: most recent run)"
 ---
 
 Investigate a failed KiCraft run and hand back a fast, accurate picture of **why** it failed and **whether the fix is generalizable** (a synthesis/layout-code or footprint-library bug that hits *every* design) **or per-design** (this design's model output). Target run: `$ARGUMENTS` (may be empty → most recent run).
@@ -15,7 +15,7 @@ A KiCraft `build` is sequential: **synthesize+ERC → place leaves → compose+r
 | 7 | not fab-ready (DRC) | the routed board is dirty (shorts/unconnected/clearance) | §3 PCB |
 | 0 | fab-ready | — | optional §3 to audit placement quality |
 
-A "run" lives under `<projects_dir>/<uid>/<pid>/` (web) **or** any self-eval `run_NN_*` dir (you can pass its full path). Each leaves `events.jsonl` (per-stage + build events), `state.json` (committed design incl. BOM), `kicraft/synthesis_check.json` (the gate verdict), a generated KiCad tree with an ERC report `generated/<stem>/<stem>_erc.rpt`, and — once the build reaches layout — a rich `generated/<stem>/.experiments/` tree (per-leaf solves, per-round parent compose/route, DRC sidecars, the routed board).
+A "run" lives under `<projects_dir>/<uid>/<pid>/` (web) **or** any self-eval `run_NN_*` dir (you can pass its full path). **The dir names are numeric uid/pid — a `KC-XXXXXX` board code is NOT a directory name**; it's `projects.board_code` in `<data_dir>/accounts.db`, which maps to the run via the `dir_path` column (the locator below resolves it automatically). Each leaves `events.jsonl` (per-stage + build events), `state.json` (committed design incl. BOM), `kicraft/synthesis_check.json` (the gate verdict), a generated KiCad tree with an ERC report `generated/<stem>/<stem>_erc.rpt`, and — once the build reaches layout — a rich `generated/<stem>/.experiments/` tree (per-leaf solves, per-round parent compose/route, DRC sidecars, the routed board).
 
 **Two coordinate conventions — do not mix them up:** ERC report `pos` is reported at **1/100 of real mm** (multiply by 100 — see `kicad-erc-report-coords-x100`). PCB/DRC coordinates (`x_mm`/`y_mm`, `inspect_parent` issue coords) are **already real mm — never ×100 them.**
 
@@ -31,11 +31,30 @@ PROJECTS="${KICRAFT_PROJECTS_DIR:-}"
 [ -z "$PROJECTS" ] && [ -f "$REPO/.env" ] && PROJECTS=$(grep -E '^KICRAFT_PROJECTS_DIR=' "$REPO/.env" | tail -1 | cut -d= -f2- | tr -d "\"' ")
 [ -z "$PROJECTS" ] && PROJECTS="$HOME/.kicraft/projects"
 ARG="$ARGUMENTS"
-if   [ -n "$ARG" ] && [ -d "$ARG" ]; then RUN="$ARG"                       # explicit path (web or self-eval run)
-elif [ -n "$ARG" ] && [ -d "$PROJECTS/$ARG" ]; then RUN="$PROJECTS/$ARG"   # uid/pid
-elif [ -n "$ARG" ]; then RUN=$(find "$PROJECTS" -mindepth 2 -maxdepth 2 -type d -path "*/$ARG" 2>/dev/null | head -1)
-else RUN=$(find "$PROJECTS" -mindepth 2 -maxdepth 2 -type d -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-); fi
+DB="$(dirname "$PROJECTS")/accounts.db"; [ -f "$DB" ] || DB="$HOME/.kicraft/accounts.db"
+case "$ARG" in
+  KC-*|kc-*)  # board code (KC-XXXXXX): not a dir name — resolve via projects.board_code -> dir_path in accounts.db
+    RUN=$("$PY" -c "
+import sqlite3, sys
+row = sqlite3.connect(sys.argv[1]).execute(
+    'SELECT dir_path FROM projects WHERE upper(board_code)=upper(?)', (sys.argv[2],)).fetchone()
+print(row[0] if row and row[0] else '')" "$DB" "$ARG")
+    ;;
+  *)
+    if   [ -n "$ARG" ] && [ -d "$ARG" ]; then RUN="$ARG"                       # explicit path (web or self-eval run)
+    elif [ -n "$ARG" ] && [ -d "$PROJECTS/$ARG" ]; then RUN="$PROJECTS/$ARG"   # uid/pid
+    elif [ -n "$ARG" ]; then RUN=$(find "$PROJECTS" -mindepth 2 -maxdepth 2 -type d -path "*/$ARG" 2>/dev/null | head -1)
+    else RUN=$(find "$PROJECTS" -mindepth 2 -maxdepth 2 -type d -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-); fi
+    ;;
+esac
+[ -n "$RUN" ] && [ -d "$RUN" ] || { echo "ERROR: could not resolve run for '$ARG' (PROJECTS=$PROJECTS DB=$DB) — do NOT fall through to scanning the cwd; query accounts.db projects table by hand."; exit 2; }
 echo "RUN=$RUN"; echo "PROJECTS=$PROJECTS"; echo "PY=$PY"
+"$PY" -c "
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+row = con.execute('SELECT id, user_id, board_code, status, quality, created_at, brief FROM projects WHERE dir_path=?', (sys.argv[2],)).fetchone()
+if row: print('DB: pid=%s uid=%s code=%s status=%s quality=%s created=%s brief=%r' % row)
+" "$DB" "$RUN" 2>/dev/null
 "$PY" - "$RUN" <<'PY'
 import json, sys
 from pathlib import Path

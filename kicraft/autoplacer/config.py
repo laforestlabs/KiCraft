@@ -282,6 +282,12 @@ DEFAULT_CONFIG = {
     "power_plane_nets": None,
     "power_plane_max_nets": 1,
     "power_plane_priority": 1,
+    # Power strand repair (default on): the power pour fragments around foreign
+    # copper exactly like the GND plane does and can strand a supply pad on its
+    # own fill island (fine-pitch parts especially -- KC-Z57JEZ +3V3). Tie each
+    # stranded power cluster back with the same guarded-track repair the GND
+    # plane gets. Shares gnd_strand_repair_max_mm for the tie-length cap.
+    "power_strand_repair_enabled": True,
     # Auto power-tie (default on): before routing, route a locked tie around any
     # connector whose spread power pads (e.g. USB-C VBUS on both sides) would
     # otherwise fragment the power pour into disconnected islands. The tie runs
