@@ -213,7 +213,15 @@ def route_sheet(
     # silently merge two GLOBAL nets -- see _route_power.
     power_stubs: list[tuple[str, float, float, float, float]] = []
 
-    for conn in sheet_connections:
+    # Signal nets route FIRST, power nets after: a power stamp (stub, elbow,
+    # merged bus) is the flexible one — it can retreat or fall back to a
+    # label — so it is the side that must dodge. With pins one grid apart, a
+    # power elbow ("one grid out, one grid down") otherwise lands exactly on
+    # the neighboring pin's signal stub: the wires touch, KiCad merges the
+    # nets, and the only symptom is a multiple_net_names WARNING while the
+    # netlist quietly ties the signal to the rail (the VBUS≡USB_DP /
+    # GND≡USB_DN family found on 7/9 self-eval designs).
+    def _resolve_eps(conn) -> list[_Endpoint]:
         eps: list[_Endpoint] = []
         for ep in conn.endpoints:
             pin = _get_pin(ep.ref, ep.pin)
@@ -223,11 +231,18 @@ def route_sheet(
             x, y = pin_abs_position(placed.x_mm, placed.y_mm, placed.rotation_deg, pin)
             eps.append(_Endpoint(
                 x, y, pin_exit_direction(placed.rotation_deg, pin), ep.ref, ep.pin))
-        if not eps:
-            continue
+        return eps
 
-        if is_power_or_ground_name(conn.net_name):
-            _route_power(routed, conn.net_name, eps, flag_nets, all_pins, power_stubs)
+    signal_conns = [
+        c for c in sheet_connections if not is_power_or_ground_name(c.net_name)
+    ]
+    power_conns = [
+        c for c in sheet_connections if is_power_or_ground_name(c.net_name)
+    ]
+
+    for conn in signal_conns:
+        eps = _resolve_eps(conn)
+        if not eps:
             continue
 
         is_inter = conn.net_name in inter_by_name
@@ -242,7 +257,7 @@ def route_sheet(
         # The wire also carries one net label — a bare (unnamed) wire is
         # flagged dangling by kicad-cli ERC, and the name keeps it legible.
         if not is_inter and len(eps) == 2:
-            segs = _safe_link(eps[0], eps[1], all_pins)
+            segs = _safe_link(eps[0], eps[1], all_pins, routed.wires)
             if segs is not None:
                 routed.wires.extend(segs)
                 lx, ly = _label_anchor(segs)
@@ -251,9 +266,19 @@ def route_sheet(
                 continue
 
         # Fallback: a stub + a label per pin (hierarchical for inter-sheet).
+        # A stub whose copper would touch an earlier net's wire retreats to
+        # half a grid, then to a wireless label at the pin itself — touching
+        # wires of different nets merge, and two facing stubs two grids
+        # apart otherwise meet head-on at the midpoint (run_06's
+        # OUT1A≡SENSE1 short).
         for e in eps:
             ex, ey = step(e.x, e.y, e.exit, GRID_MM)
-            routed.wires.append(WireSegment(e.x, e.y, ex, ey))
+            if _seg_touches_any_wire(e.x, e.y, ex, ey, routed.wires):
+                ex, ey = step(e.x, e.y, e.exit, GRID_MM / 2)
+                if _seg_touches_any_wire(e.x, e.y, ex, ey, routed.wires):
+                    ex, ey = e.x, e.y
+            if (ex, ey) != (e.x, e.y):
+                routed.wires.append(WireSegment(e.x, e.y, ex, ey))
             angle = _LABEL_ANGLE[e.exit]
             if is_inter:
                 routed.hier_labels.append(HierLabelPlacement(
@@ -262,6 +287,18 @@ def route_sheet(
             else:
                 routed.labels.append(NetLabel(
                     text=conn.net_name, x_mm=ex, y_mm=ey, angle_deg=angle))
+
+    # Everything stamped so far is signal copper the power pass must avoid;
+    # power-vs-power conflicts stay the job of the power_stubs ledger.
+    signal_wires = list(routed.wires)
+    for conn in power_conns:
+        eps = _resolve_eps(conn)
+        if not eps:
+            continue
+        _route_power(
+            routed, conn.net_name, eps, flag_nets, all_pins, power_stubs,
+            signal_wires,
+        )
 
     # no_connect markers.
     for ep in bom.no_connect_pins:
@@ -469,6 +506,34 @@ def _pt_on_axis_seg(
     return False
 
 
+def _segs_touch(
+    ax1: float, ay1: float, ax2: float, ay2: float,
+    bx1: float, by1: float, bx2: float, by2: float,
+) -> bool:
+    """True when two axis-aligned segments share any point.
+
+    Treats each segment as a degenerate rect, so it covers endpoint
+    touches, T-joins, collinear overlap AND pure perpendicular crossings.
+    A crossing without a junction does not electrically connect in KiCad,
+    so this over-rejects slightly — the conservative direction for copper
+    that must never meet."""
+    return (
+        min(ax1, ax2) <= max(bx1, bx2) + EPS
+        and min(bx1, bx2) <= max(ax1, ax2) + EPS
+        and min(ay1, ay2) <= max(by1, by2) + EPS
+        and min(by1, by2) <= max(ay1, ay2) + EPS
+    )
+
+
+def _seg_touches_any_wire(
+    x1: float, y1: float, x2: float, y2: float, wires: list[WireSegment]
+) -> bool:
+    return any(
+        _segs_touch(x1, y1, x2, y2, w.x1_mm, w.y1_mm, w.x2_mm, w.y2_mm)
+        for w in wires
+    )
+
+
 def _power_stub_clear(
     net_name: str,
     e: _Endpoint,
@@ -477,6 +542,7 @@ def _power_stub_clear(
     own_pins: set[tuple[str, str]],
     all_pins: list[tuple[float, float, str, str]],
     power_stubs: list[tuple[str, float, float, float, float]],
+    signal_wires: list[WireSegment] = (),
 ) -> bool:
     """True when the stub (e.x,e.y)->(ex,ey) can carry *net_name* safely.
 
@@ -486,6 +552,11 @@ def _power_stub_clear(
     symptom is a baffling "Power output and Power output are connected"
     between the two rails' PWR_FLAGs (the run_05 VBUS+GND short: a GND stub
     stepped one grid right onto the neighbouring resistor's VBUS pin).
+
+    ``signal_wires`` is the copper stamped by the signal pass (which routes
+    first); a power segment touching ANY of it ties that signal net to the
+    rail with only a multiple_net_names warning to show for it, so any touch
+    rejects the stub.
     """
     for (px, py, ref, pin) in all_pins:
         if (ref, pin) in own_pins:
@@ -501,6 +572,8 @@ def _power_stub_clear(
             or _pt_on_axis_seg(x2, y2, e.x, e.y, ex, ey)
         ):
             return False
+    if _seg_touches_any_wire(e.x, e.y, ex, ey, signal_wires):
+        return False
     return True
 
 
@@ -511,6 +584,7 @@ def _route_power(
     flag_nets: frozenset[str],
     all_pins: list[tuple[float, float, str, str]],
     power_stubs: list[tuple[str, float, float, float, float]],
+    signal_wires: list[WireSegment] = (),
 ) -> None:
     """A stub + power symbol (or global label) at every pin of a power net.
 
@@ -533,7 +607,8 @@ def _route_power(
     # away from the rail symbol so the diamond doesn't stack on top of it.
     flag_spot: tuple[float, float, int] | None = None
     eps = _merge_stacked_power_pins(
-        routed, net_name, eps, power_lib, own_pins, all_pins, power_stubs
+        routed, net_name, eps, power_lib, own_pins, all_pins, power_stubs,
+        signal_wires,
     )
     for e in eps:
         sym_xy: tuple[float, float] | None = None
@@ -545,9 +620,11 @@ def _route_power(
             vx, vy = step(ex, ey, vdir, GRID_MM)
             corner_ep = _Endpoint(ex, ey, vdir, e.ref, e.pin)
             if _power_stub_clear(
-                net_name, e, ex, ey, own_pins, all_pins, power_stubs
+                net_name, e, ex, ey, own_pins, all_pins, power_stubs,
+                signal_wires,
             ) and _power_stub_clear(
-                net_name, corner_ep, vx, vy, own_pins, all_pins, power_stubs
+                net_name, corner_ep, vx, vy, own_pins, all_pins, power_stubs,
+                signal_wires,
             ):
                 routed.wires.append(WireSegment(e.x, e.y, ex, ey))
                 routed.wires.append(WireSegment(ex, ey, vx, vy))
@@ -559,11 +636,13 @@ def _route_power(
         if sym_xy is None:
             ex, ey = step(e.x, e.y, e.exit, GRID_MM)
             if not _power_stub_clear(
-                net_name, e, ex, ey, own_pins, all_pins, power_stubs
+                net_name, e, ex, ey, own_pins, all_pins, power_stubs,
+                signal_wires,
             ):
                 ex, ey = step(e.x, e.y, e.exit, GRID_MM / 2)
                 if not _power_stub_clear(
-                    net_name, e, ex, ey, own_pins, all_pins, power_stubs
+                    net_name, e, ex, ey, own_pins, all_pins, power_stubs,
+                    signal_wires,
                 ):
                     routed.global_labels.append(GlobalLabel(
                         text=net_name, x_mm=e.x, y_mm=e.y,
@@ -603,6 +682,7 @@ def _merge_stacked_power_pins(
     own_pins: set[tuple[str, str]],
     all_pins: list[tuple[float, float, str, str]],
     power_stubs: list[tuple[str, float, float, float, float]],
+    signal_wires: list[WireSegment] = (),
 ) -> list[_Endpoint]:
     """Collapse a vertical stack of same-net pins (e.g. a connector's four
     shield/EH pins) into one rail/ground drop.
@@ -634,7 +714,8 @@ def _merge_stacked_power_pins(
         for e in col:
             ex, ey = step(e.x, e.y, e.exit, GRID_MM)
             if not _power_stub_clear(
-                net_name, e, ex, ey, own_pins, all_pins, power_stubs
+                net_name, e, ex, ey, own_pins, all_pins, power_stubs,
+                signal_wires,
             ):
                 ok = False
                 break
@@ -645,7 +726,8 @@ def _merge_stacked_power_pins(
         if ok:
             run_ep = _Endpoint(bus_x, top_y, "down", col[0].ref, col[0].pin)
             ok = _power_stub_clear(
-                net_name, run_ep, bus_x, bot_y, own_pins, all_pins, power_stubs
+                net_name, run_ep, bus_x, bot_y, own_pins, all_pins, power_stubs,
+                signal_wires,
             )
         if not ok:
             merged.extend(col)
@@ -675,10 +757,12 @@ def _merge_stacked_power_pins(
 
 
 def _safe_link(
-    a: _Endpoint, b: _Endpoint, all_pins: list[tuple[float, float, str, str]]
+    a: _Endpoint, b: _Endpoint, all_pins: list[tuple[float, float, str, str]],
+    wires: list[WireSegment] = (),
 ) -> list[WireSegment] | None:
     """A straight or single-corner wire between pins ``a`` and ``b`` that
-    passes through no foreign pin (so it can't short two nets), or None."""
+    passes through no foreign pin and touches no already-stamped wire (so
+    it can't short two nets), or None."""
     if abs(a.x - b.x) + abs(a.y - b.y) > MAX_LINK_MM:
         return None
     own = {(a.ref, a.pin), (b.ref, b.pin)}
@@ -693,7 +777,7 @@ def _safe_link(
             elif abs(x1 - x2) < EPS and abs(px - x1) < EPS:  # vertical
                 if min(y1, y2) - EPS <= py <= max(y1, y2) + EPS:
                     return False
-        return True
+        return not _seg_touches_any_wire(x1, y1, x2, y2, wires)
 
     if abs(a.x - b.x) < EPS or abs(a.y - b.y) < EPS:
         if seg_clear(a.x, a.y, b.x, b.y):

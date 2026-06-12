@@ -359,3 +359,52 @@ def test_label_decollision_slides_along_own_wire() -> None:
     assert _pt_on_axis_seg(
         lab.x_mm, lab.y_mm, run.x1_mm, run.y1_mm, run.x2_mm, run.y2_mm
     ), "label slid off its own wire"
+
+
+def test_power_elbow_avoids_signal_stub_below() -> None:
+    # run_04's USB-C family short: a GND pin's elbow ("one grid out, one grid
+    # down") landed exactly on the NEXT pin's signal stub end — pins sit one
+    # grid apart — merging GND with USB_DN in the netlist with only a
+    # multiple_net_names WARNING. With the signal wires passed in, the elbow
+    # (and the straight stub, which would overlap the same copper) must be
+    # rejected; the pin keeps its net via a wireless global label or any stub
+    # that touches nothing.
+    from kicraft.design.synthesis.router import (
+        GRID_MM,
+        RoutedSheet,
+        WireSegment,
+        _Endpoint,
+        _route_power,
+        _seg_touches_any_wire,
+    )
+
+    routed = RoutedSheet()
+    gnd_pin = _Endpoint(x=102.87, y=116.84, exit="left", ref="J1", pin="A1B12")
+    # The neighboring DN1 signal stub, one grid below, already stamped.
+    dn1_stub = WireSegment(102.87, 119.38, 100.33, 119.38)
+    all_pins = [
+        (102.87, 116.84, "J1", "A1B12"),
+        (102.87, 119.38, "J1", "A7"),
+    ]
+    _route_power(
+        routed, "GND", [gnd_pin], frozenset(), all_pins, [], [dn1_stub]
+    )
+    for w in routed.wires:
+        assert not _seg_touches_any_wire(
+            w.x1_mm, w.y1_mm, w.x2_mm, w.y2_mm, [dn1_stub]
+        ), f"power wire ({w.x1_mm},{w.y1_mm})-({w.x2_mm},{w.y2_mm}) touches the signal stub"
+    # The pin still carries its net one way or another.
+    assert routed.wires or routed.global_labels
+
+
+def test_segs_touch_covers_endpoint_t_and_overlap() -> None:
+    from kicraft.design.synthesis.router import _segs_touch
+
+    # endpoint-to-endpoint
+    assert _segs_touch(0, 0, 2.54, 0, 2.54, 0, 2.54, 2.54)
+    # T: endpoint mid-span
+    assert _segs_touch(0, 0, 5.08, 0, 2.54, 0, 2.54, 2.54)
+    # collinear overlap
+    assert _segs_touch(0, 0, 5.08, 0, 2.54, 0, 7.62, 0)
+    # clearly apart
+    assert not _segs_touch(0, 0, 2.54, 0, 0, 2.54, 2.54, 2.54)
