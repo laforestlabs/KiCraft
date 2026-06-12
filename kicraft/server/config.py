@@ -13,7 +13,7 @@ from pathlib import Path
 # Version of the legal documents in docs/legal/. Stamped into each user's consent
 # record at signup; bumping it (here and in the documents) forces existing users
 # to re-accept on their next visit. See docs/legal/README.md.
-LEGAL_VERSION = "2026-06-09"
+LEGAL_VERSION = "2026-06-11"
 
 # Canonical location of the Terms / Privacy markdown, served at /terms and
 # /privacy. Resolves to the repo's docs/legal relative to this package; the box
@@ -102,6 +102,17 @@ class Settings:
     smtp_starttls: bool = True
     smtp_ssl: bool = False
 
+    # --- Stripe billing (credit-card checkout for the paid tiers) ------------
+    # Hosted Stripe Checkout + Customer Portal; card data never touches KiCraft.
+    # The two price ids are Stripe recurring Prices (monthly) mapped onto the
+    # paid tiers in accounts.TIERS. All four values must be set for billing to
+    # be live (see billing_enabled); with any missing, /pricing still renders
+    # but without checkout buttons, and the webhook endpoint refuses events.
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_price_pro: str = ""
+    stripe_price_max: str = ""
+
     # --- OpenRouter provider routing + caching (cost safety) -----------------
     # The model id is served by ~14 backends at a tight price band, but only some
     # cache our long, re-sent system prefix (the dominant cost). The DeepSeek
@@ -167,6 +178,11 @@ class Settings:
                        or os.environ.get("KICRAFT_SMTP_USERNAME", "").strip()),
             smtp_starttls=_env_bool_default("KICRAFT_SMTP_STARTTLS", True),
             smtp_ssl=_env_bool("KICRAFT_SMTP_SSL"),
+            stripe_secret_key=os.environ.get("KICRAFT_STRIPE_SECRET_KEY", "").strip(),
+            stripe_webhook_secret=os.environ.get(
+                "KICRAFT_STRIPE_WEBHOOK_SECRET", "").strip(),
+            stripe_price_pro=os.environ.get("KICRAFT_STRIPE_PRICE_PRO", "").strip(),
+            stripe_price_max=os.environ.get("KICRAFT_STRIPE_PRICE_MAX", "").strip(),
             provider_order=[p.strip() for p in os.environ.get(
                 "KICRAFT_PROVIDER_ORDER",
                 "novita/fp8,siliconflow/fp8,streamlake").split(",") if p.strip()],
@@ -179,6 +195,14 @@ class Settings:
             enable_prompt_cache=_env_bool_default("KICRAFT_ENABLE_PROMPT_CACHE", True),
             eval_judge_model=(os.environ.get("KICRAFT_EVAL_JUDGE_MODEL", "").strip() or None),
         )
+
+    @property
+    def billing_enabled(self) -> bool:
+        """Whether Stripe billing is fully configured (key, webhook secret, and
+        both tier price ids). Anything less and the paid-tier checkout is
+        hidden, so a partially configured box can never half-charge a card."""
+        return bool(self.stripe_secret_key and self.stripe_webhook_secret
+                    and self.stripe_price_pro and self.stripe_price_max)
 
     def redacted(self) -> dict:
         """Settings safe to display/log (without the secret key)."""
@@ -198,6 +222,9 @@ class Settings:
             "smtp_from": self.smtp_from,
             "smtp_starttls": self.smtp_starttls,
             "smtp_ssl": self.smtp_ssl,
+            "billing_enabled": self.billing_enabled,
+            "stripe_price_pro": self.stripe_price_pro,
+            "stripe_price_max": self.stripe_price_max,
             "provider_order": self.provider_order,
             "provider_allow_fallbacks": self.provider_allow_fallbacks,
             "max_price_prompt": self.max_price_prompt,
