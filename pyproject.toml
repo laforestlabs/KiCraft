@@ -33,6 +33,7 @@ design = [
 server = [
     "requests>=2.31",
     "nicegui>=1.4",
+    "stripe>=7",
 ]
 dev = [
     "pytest>=7.0",

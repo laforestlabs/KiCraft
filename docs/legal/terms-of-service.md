@@ -1,6 +1,6 @@
 # KiCraft Terms of Service
 
-**Version: 2026-06-09**
+**Version: 2026-06-11**
 
 > **DRAFT, pending attorney review.** This document is a first-draft template. It
 > has not been reviewed by a lawyer. Replace every `[BRACKETED]` placeholder and
@@ -16,7 +16,7 @@ If you do not agree, do not use the Service.
 ## 1. Eligibility
 
 You must be at least 18 years old and able to form a binding contract. The
-Service is currently offered as an invite-only alpha to a limited set of testers.
+Service is an early-access product; access may be limited or invite-gated.
 
 ## 2. The Service, and the nature of its output
 
@@ -25,7 +25,7 @@ files using large language models and a deterministic synthesis pipeline.
 
 **Outputs are AI-generated and are not guaranteed to be correct, complete,
 manufacturable, or safe.** They are a starting point for a qualified engineer,
-not a finished product. See the safety disclaimer in Section 8.
+not a finished product. See the safety disclaimer in Section 9.
 
 ## 3. Accounts
 
@@ -57,7 +57,7 @@ purposes:
 
 a. **Operating the Service**, including saving your projects so you can find them
    again, and transmitting your prompts to our model providers to generate
-   designs (see Section 7);
+   designs (see Section 8);
 b. **Product analytics**: understanding how the Service is used so we can improve
    it;
 c. **Training and improving machine-learning models**, including using Your
@@ -102,7 +102,36 @@ the publication of already de-identified examples. If you are on a paid tier, yo
 can also choose whether each completed project is public in the community browser
 or kept private, in your account settings (see Section 5).
 
-## 7. Third-party model providers
+## 7. Paid plans, billing, cancellation, and refunds
+
+Some features (higher design quotas, private projects) require a paid
+subscription ("Pro", "Max"). Current prices and quotas are listed on the
+pricing page of the Service.
+
+a. **Billing.** Paid plans are billed as a recurring monthly subscription, in
+   USD, in advance. Payment is processed by Stripe, Inc.; we never see or
+   store your card number. By subscribing you authorize recurring charges to
+   your payment method until you cancel.
+b. **Renewal and cancellation.** Subscriptions renew automatically each month.
+   You can cancel at any time from the billing portal in your profile.
+   Cancellation stops future charges; your plan stays active until the end of
+   the period you already paid for, after which your account moves to the free
+   tier.
+c. **Failed payments.** If a renewal charge fails, Stripe retries it. If
+   payment is not completed within a short grace period, your account moves to
+   the free tier until payment resumes.
+d. **Refunds.** `[REFUND POLICY: e.g. "Fees are non-refundable except where
+   required by law", or a goodwill window; counsel to advise.]`
+e. **Price changes.** We may change prices. Changes take effect from your next
+   billing period, and we will give you at least `[NOTICE PERIOD, e.g. 30
+   days]` notice before a price increase applies to an existing subscription.
+f. **Taxes.** Prices `[include / exclude]` applicable taxes; you are
+   responsible for any taxes we are required to collect.
+g. **Downgrades.** Moving to the free tier does not delete your projects.
+   Projects you made private while on a paid plan stay private, but new
+   free-tier projects are public (Section 5).
+
+## 8. Third-party model providers
 
 To generate designs, the Service sends your prompts and interview answers to
 third-party AI providers (currently OpenRouter and the underlying model provider
@@ -110,7 +139,7 @@ it routes to, such as DeepSeek) for inference. **Your prompt content leaves our
 servers when this happens** and is handled under those providers' terms. Do not
 submit anything you are not comfortable sending to those providers.
 
-## 8. No warranty, and your duty to verify before building
+## 9. No warranty, and your duty to verify before building
 
 THE SERVICE AND ITS OUTPUT ARE PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT
 WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING MERCHANTABILITY, FITNESS
@@ -122,7 +151,7 @@ every design before you fabricate, assemble, power on, sell, or otherwise rely o
 it.** A generated design may contain errors that are unsafe or that damage
 equipment or property. Treat all output as unverified.
 
-## 9. Limitation of liability
+## 10. Limitation of liability
 
 To the maximum extent permitted by law, KiCraft and its operators will not be
 liable for any indirect, incidental, special, consequential, or punitive damages,
@@ -131,30 +160,31 @@ Service or from any design it produces. Our total liability for any claim will n
 exceed the greater of the amount you paid us in the 12 months before the claim or
 `[USD 100]`.
 
-## 10. Indemnification
+## 11. Indemnification
 
 You agree to indemnify and hold KiCraft harmless from claims arising out of Your
 Content, your use of the Service, your violation of these Terms, or any design you
 fabricate or distribute.
 
-## 11. Termination
+## 12. Termination
 
-You may stop using the Service and delete your account at any time. We may
-suspend or terminate access for any violation of these Terms or to protect the
-Service. Sections that by their nature should survive (5, 8, 9, 10, 12) survive
-termination.
+You may stop using the Service and delete your account at any time; deleting
+your account cancels any active subscription. We may suspend or terminate
+access for any violation of these Terms or to protect the Service. Sections
+that by their nature should survive (5, 9, 10, 11, 13), and any payment
+obligations already accrued under Section 7, survive termination.
 
-## 12. Changes to these Terms
+## 13. Changes to these Terms
 
 We may update these Terms. The version date appears at the top of this document.
 For material changes we will require you to accept the updated Terms before you
 continue using the Service.
 
-## 13. Governing law
+## 14. Governing law
 
 These Terms are governed by the laws of `[GOVERNING-LAW JURISDICTION]`, without
 regard to conflict-of-law rules.
 
-## 14. Contact
+## 15. Contact
 
 Questions about these Terms: `[CONTACT EMAIL]`.

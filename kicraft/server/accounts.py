@@ -4,7 +4,8 @@ A small SQLite store mirroring spend_guard.SpendGuard's conventions (connection
 per op, WAL, CREATE TABLE IF NOT EXISTS). It holds the user identities, their
 saved projects, and the metering needed to enforce the per-tier design quotas.
 
-Real payment is out of scope (backlog item 3); tiers are assigned by the admin
+Paid tiers are granted three ways: a Stripe subscription (kicraft.server.billing
+syncs tier + tier_expires_at from webhook state), an invite code, or the admin
 CLI (`kicraft-accounts set-tier`). Passwords are hashed with stdlib scrypt, so
 there is no external dependency. The full design event stream is persisted to
 disk per project by the web worker, not into this DB; this store keeps only
@@ -24,9 +25,10 @@ import sqlite3
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-# Billing tier definitions. `price_usd` is display-only until Stripe lands
-# (backlog item 3); `limit` designs per rolling `window_days` is what
-# count_active_designs enforces. "free" = 1/week, "pro" = 5/month ($5),
+# Billing tier definitions. `price_usd` is the monthly subscription price; the
+# actual charge amount lives on the Stripe Price objects (KICRAFT_STRIPE_PRICE_*),
+# so keep the two in sync when changing pricing. `limit` designs per rolling
+# `window_days` is what count_active_designs enforces. "free" = 1/week, "pro" = 5/month ($5),
 # "max" = 25/month ($10). Admin access is no longer a tier -- it is a separate
 # `role` (see ROLES below), so a user can hold any billing tier and still be
 # staff, and staff bypass the quota outright (see quota_status / can_design).
@@ -180,6 +182,12 @@ class User:
     # can walk away from a multi-minute (possibly queued) build. Suppressed when
     # the user is actively watching (see kicraft.server.notify).
     notify_email: bool = True
+    # Stripe linkage (kicraft.server.billing). Access is still decided by
+    # tier + tier_expires_at above; subscription_id/status are diagnostics shown
+    # on /profile and /admin/users, refreshed on every webhook sync.
+    stripe_customer_id: str | None = None
+    stripe_subscription_id: str | None = None
+    subscription_status: str | None = None
 
 
 @dataclass
@@ -322,9 +330,22 @@ class AccountStore:
                 "allow_training INTEGER NOT NULL DEFAULT 1,"
                 "session_epoch INTEGER NOT NULL DEFAULT 0,"
                 "tier_expires_at TEXT,"
-                "notify_email INTEGER NOT NULL DEFAULT 1)"
+                "notify_email INTEGER NOT NULL DEFAULT 1,"
+                "stripe_customer_id TEXT,"
+                "stripe_subscription_id TEXT,"
+                "subscription_status TEXT)"
             )
             self._ensure_columns(conn)
+            # Processed Stripe webhook event ids (INSERT OR IGNORE dedupe).
+            # Stripe retries delivery until it gets a 2xx, so the same event can
+            # arrive more than once; see record_billing_event.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS billing_events ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "stripe_event_id TEXT NOT NULL UNIQUE,"
+                "type TEXT NOT NULL,"
+                "created_at TEXT NOT NULL)"
+            )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS invite_codes ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -491,6 +512,12 @@ class AccountStore:
         if "notify_email" not in cols:
             conn.execute(
                 "ALTER TABLE users ADD COLUMN notify_email INTEGER NOT NULL DEFAULT 1")
+        if "stripe_customer_id" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN stripe_customer_id TEXT")
+        if "stripe_subscription_id" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN stripe_subscription_id TEXT")
+        if "subscription_status" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN subscription_status TEXT")
         if "role" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
             # One-time backfill: the retired 'admin' billing tier becomes the admin
@@ -590,7 +617,10 @@ class AccountStore:
                     allow_training=bool(row["allow_training"]),
                     session_epoch=int(row["session_epoch"]),
                     tier_expires_at=row["tier_expires_at"],
-                    notify_email=bool(row["notify_email"]))
+                    notify_email=bool(row["notify_email"]),
+                    stripe_customer_id=row["stripe_customer_id"],
+                    stripe_subscription_id=row["stripe_subscription_id"],
+                    subscription_status=row["subscription_status"])
 
     def _downgrade_if_expired(self, conn: sqlite3.Connection,
                               row: sqlite3.Row | None) -> sqlite3.Row | None:
@@ -674,7 +704,9 @@ class AccountStore:
 
     def set_tier(self, email: str, tier: str) -> User:
         """Manually assign a billing tier. Clears any invite-code expiry: an
-        explicit admin assignment is indefinite, not a timed grant."""
+        explicit admin assignment is indefinite, not a timed grant. On a user
+        with a live Stripe subscription the manual tier holds only until the
+        next webhook resync (apply_subscription_state overwrites it)."""
         if tier not in TIERS:
             raise ValueError(f"unknown tier {tier!r}; choose from {', '.join(TIERS)}")
         em = self._norm_email(email)
@@ -716,6 +748,69 @@ class AccountStore:
         with self._conn() as conn:
             return int(conn.execute(
                 "SELECT COUNT(*) FROM users WHERE role=?", (role,)).fetchone()[0])
+
+    # ---- billing (Stripe) ---------------------------------------------------
+
+    def set_stripe_customer(self, user_id: int, customer_id: str) -> None:
+        """Link a user to their Stripe customer (created on first checkout)."""
+        with self._conn() as conn:
+            conn.execute("UPDATE users SET stripe_customer_id=? WHERE id=?",
+                         (customer_id, user_id))
+
+    def get_user_by_stripe_customer(self, customer_id: str) -> User | None:
+        """Resolve a webhook's customer id back to the local account."""
+        if not customer_id:
+            return None
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM users WHERE stripe_customer_id=?",
+                               (customer_id,)).fetchone()
+            row = self._downgrade_if_expired(conn, row)
+        return self._row_to_user(row) if row else None
+
+    def apply_subscription_state(self, user_id: int, *, tier: str,
+                                 tier_expires_at: str | None,
+                                 subscription_id: str | None,
+                                 status: str | None) -> User:
+        """Sync a user's access from authoritative Stripe subscription state.
+
+        The single write path for every billing sync (webhook or success page).
+        tier + tier_expires_at carry the access decision: a paid cycle sets the
+        expiry to the period end plus a grace window, so a renewal extends it
+        and a lapsed subscription falls back to free via _downgrade_if_expired
+        with no extra code. subscription_id/status are diagnostics only."""
+        if tier not in TIERS:
+            raise ValueError(f"unknown tier {tier!r}")
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE users SET tier=?, tier_expires_at=?, "
+                "stripe_subscription_id=?, subscription_status=? WHERE id=?",
+                (tier, tier_expires_at, subscription_id, status, user_id))
+            if cur.rowcount == 0:
+                raise ValueError(f"no user with id {user_id}")
+            row = conn.execute(
+                "SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        return self._row_to_user(row)
+
+    def record_billing_event(self, event_id: str, event_type: str) -> bool:
+        """Record a Stripe webhook event id; False when it was already seen.
+
+        The dedupe that makes webhook handling idempotent: Stripe retries
+        delivery until it receives a 2xx, so the same event can arrive twice."""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO billing_events (stripe_event_id, type, "
+                "created_at) VALUES (?, ?, ?)",
+                (event_id, event_type, _utcnow_iso()))
+            return cur.rowcount > 0
+
+    def forget_billing_event(self, event_id: str) -> None:
+        """Release a claimed event id after its processing FAILED, so Stripe's
+        retry of the same event is processed instead of acked as a duplicate.
+        (record first, process second, forget on failure: the claim is what
+        makes a concurrent duplicate delivery a no-op.)"""
+        with self._conn() as conn:
+            conn.execute("DELETE FROM billing_events WHERE stripe_event_id=?",
+                         (event_id,))
 
     def list_users(self) -> list[User]:
         self.expire_due_tiers()  # so a lapsed grant never shows as still-active
@@ -1338,7 +1433,7 @@ class AccountStore:
         self.expire_due_tiers()
         sql = (
             "SELECT u.id, u.email, u.tier, u.role, u.created_at, u.last_login_at, "
-            "u.tier_expires_at, "
+            "u.tier_expires_at, u.subscription_status, "
             "COUNT(p.id) AS project_count, "
             "COALESCE(SUM(p.cost_usd), 0) AS spend_usd, "
             "MAX(p.created_at) AS last_project_at "

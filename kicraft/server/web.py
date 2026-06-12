@@ -12,6 +12,7 @@ Run locally:   KICRAFT_ACCESS_PASSWORD=secret python -m kicraft.server.web
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import datetime as dt
 import hashlib
@@ -35,6 +36,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from nicegui import app, ui
+from starlette.requests import Request
 from starlette.responses import FileResponse, PlainTextResponse, RedirectResponse
 
 from .accounts import (
@@ -76,7 +78,7 @@ from .spend_guard import SpendGuard
 from kicraft import __version__ as KICRAFT_VERSION
 from kicraft.build_slots import ACQUIRED_MARKER, slot_count
 
-from . import notify
+from . import billing, notify
 from .stage_driver import DESIGN_STAGES, KICRAFT, SLOT_MODEL
 from .stagetabs import StageTabs, demo_events
 
@@ -422,6 +424,44 @@ def serve_part_preview(name: str, asset: str):
         media_type="image/svg+xml",
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.post("/billing/webhook")
+async def stripe_webhook(request: Request):
+    """Stripe webhook: the authoritative sync path for paid tiers.
+
+    Raw Starlette endpoint (signature verification needs the exact body bytes).
+    Flow: verify signature -> claim the event id (duplicate deliveries ack with
+    200 and do nothing) -> sync from re-fetched subscription state. A handler
+    failure releases the claim and 500s so Stripe retries the event later.
+    """
+    settings = Settings.from_env()
+    if not settings.billing_enabled:
+        return PlainTextResponse("billing not configured", status_code=503)
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+    try:
+        event = billing.verify_event(settings, payload, sig)
+    except ValueError:
+        return PlainTextResponse("bad signature", status_code=400)
+
+    store = _store()
+    event_id = str(event.get("id") or "")
+    event_type = str(event.get("type") or "")
+    if not event_id:
+        return PlainTextResponse("no event id", status_code=400)
+    if not store.record_billing_event(event_id, event_type):
+        return PlainTextResponse("duplicate", status_code=200)
+    try:
+        outcome = await asyncio.to_thread(
+            billing.handle_event, store, settings, event,
+            billing.gateway(settings))
+    except Exception as e:
+        store.forget_billing_event(event_id)
+        print(f"[billing] {event_type} {event_id} failed: {e}", flush=True)
+        return PlainTextResponse("handler error", status_code=500)
+    print(f"[billing] {event_type} {event_id}: {outcome}", flush=True)
+    return PlainTextResponse("ok", status_code=200)
 
 
 def _zip_generated(ws: Path) -> str | None:
@@ -2124,7 +2164,12 @@ def profile_page():
             period = "week" if q["window_days"] <= 7 else "month"
             with ui.row().classes("items-center gap-2"):
                 ui.badge(q["label"], color="primary")
-                if user.tier_expires_at:  # an invite-code grant with an end date
+                if user.subscription_status in ("active", "trialing"):
+                    # A subscriber's tier_expires_at is period end + grace, so
+                    # the raw date would read ~3 days late; say what matters.
+                    ui.label("renews monthly") \
+                        .classes("text-xs").style("color:#94a3b8")
+                elif user.tier_expires_at:  # an invite-code grant with an end date
                     ui.label(f"until {user.tier_expires_at[:10]}") \
                         .classes("text-xs").style("color:#94a3b8")
                 if q.get("unlimited"):
@@ -2135,6 +2180,37 @@ def profile_page():
                              f"{period}.").classes("text-sm").style("color:#94a3b8")
             ui.label(f"Member since {user.created_at[:10]}.") \
                 .classes("text-xs").style("color:#64748b")
+
+        with ui.card().classes("w-full gap-2") \
+                .style("background:#0f172a;border:1px solid #1e293b"):
+            ui.label("Plan & billing").classes("text-base font-semibold text-white")
+            billing_on = Settings.from_env().billing_enabled
+            if user.subscription_status:
+                healthy = user.subscription_status in ("active", "trialing")
+                ui.label(f"Subscription: {user.subscription_status}") \
+                    .classes("text-xs") \
+                    .style(f"color:{'#34d399' if healthy else '#f59e0b'}")
+                if user.subscription_status == "past_due":
+                    ui.label("Your last payment failed; Stripe is retrying. "
+                             "Update your card in the billing portal to keep "
+                             "your plan.").classes("text-xs").style("color:#f59e0b")
+            elif user.tier == "free":
+                ui.label("You're on the free plan.") \
+                    .classes("text-xs").style("color:#94a3b8")
+            else:
+                ui.label(f"Your {q['label']} plan was granted by an invite or "
+                         "by staff; no card on file.") \
+                    .classes("text-xs").style("color:#94a3b8")
+            with ui.row().classes("items-center gap-2"):
+                ui.button("See plans", icon="workspace_premium",
+                          on_click=lambda: ui.navigate.to("/pricing")) \
+                    .props("flat dense no-caps color=primary").classes("text-xs")
+                if billing_on and user.stripe_customer_id:
+                    ui.button("Manage billing", icon="credit_card",
+                              on_click=lambda: ui.navigate.to("/billing/portal")) \
+                        .props("flat dense no-caps color=primary").classes("text-xs") \
+                        .tooltip("Stripe portal: update card, switch plan, "
+                                 "cancel, download invoices")
 
         with ui.card().classes("w-full gap-2") \
                 .style("background:#0f172a;border:1px solid #1e293b"):
@@ -2191,6 +2267,238 @@ def profile_page():
         with ui.row().classes("w-full justify-end"):
             ui.button("Log out", icon="logout", on_click=logout) \
                 .props("flat dense no-caps color=white").classes("text-xs")
+
+
+# --------------------------------------------------------------------------- #
+# Pricing + billing (Stripe Checkout / Customer Portal). The /pricing page is
+# public marketing (no model calls, like the landing page); the /billing/*
+# pages are thin authed redirects into Stripe-hosted flows, so no card form
+# ever renders here. Tier sync happens in the /billing/webhook endpoint above.
+# --------------------------------------------------------------------------- #
+
+def _pricing_bullets(tier_key: str, info: dict) -> list[str]:
+    """Feature bullets per tier, with the quota numbers taken from TIERS so the
+    page can never disagree with what quota_status actually enforces."""
+    period = "week" if info["window_days"] <= 7 else "month"
+    designs = f"{info['limit']} full design{'s' if info['limit'] != 1 else ''} a {period}"
+    if tier_key == "free":
+        return [designs,
+                "The whole pipeline: schematic, real parts, placed + routed",
+                "Projects are public and cloneable in the community",
+                "No credit card required"]
+    if tier_key == "pro":
+        return [designs,
+                "Everything in Free, with real headroom",
+                "Keep projects private",
+                "Cancel anytime in the billing portal"]
+    return [designs,
+            "Keep projects private",
+            "Room to iterate on real products",
+            "Cancel anytime in the billing portal"]
+
+
+def _pricing_cta(user, tier_key: str, billing_on: bool) -> tuple[str, str | None]:
+    """(label, href) for a tier card's button; href None renders a disabled
+    chip. Logged-out paid CTAs route to signup first (hard rule: no checkout,
+    nothing chargeable, before an account exists)."""
+    if user is None:
+        return ("Start free", "/signup") if tier_key == "free" \
+            else (f"Get {TIERS[tier_key]['label']}", "/signup")
+    if user.tier == tier_key:
+        return ("Current plan", None)
+    if tier_key == "free":
+        # Paid users downgrade by cancelling in the portal, not by "buying" free.
+        return ("Your plan if you cancel", None)
+    if not billing_on:
+        return ("Coming soon", None)
+    verb = "Switch to" if user.tier in ("pro", "max") else "Upgrade to"
+    return (f"{verb} {TIERS[tier_key]['label']}", f"/billing/checkout?tier={tier_key}")
+
+
+def _render_pricing(user, error: str = "") -> None:
+    """The public pricing page: three tier cards driven from TIERS, plus a small
+    FAQ. Static marketing chrome shared with the landing page (kc_landing.css);
+    deliberately no kc-reveal/JS dependency, so it renders fully without
+    kc_landing.js."""
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    ui.add_head_html('<link rel="stylesheet" href="/static/kc_landing.css">')
+
+    billing_on = Settings.from_env().billing_enabled
+    cards = []
+    for key, info in TIERS.items():
+        label, href = _pricing_cta(user, key, billing_on)
+        featured = key == "pro"
+        price = (f'<span class="kc-price-n">${info["price_usd"]}</span>'
+                 '<span class="kc-price-per">/month</span>') if info["price_usd"] \
+            else '<span class="kc-price-n">$0</span>'
+        bullets = "".join(f"<li>{b}</li>" for b in _pricing_bullets(key, info))
+        cta = (f'<a class="kc-btn {"kc-btn-primary" if featured else "kc-btn-ghost"} '
+               f'kc-price-cta" href="{href}">{label}</a>') if href \
+            else f'<span class="kc-price-chip">{label}</span>'
+        badge = '<span class="kc-badge kc-price-pop">Most popular</span>' if featured else ""
+        cards.append(
+            f'<div class="kc-price-card{" kc-price-featured" if featured else ""}">'
+            f'{badge}<h3>{info["label"]}</h3>'
+            f'<div class="kc-price">{price}</div>'
+            f'<ul class="kc-price-feats">{bullets}</ul>{cta}</div>')
+
+    nav_actions = (
+        '<a class="kc-nav-signin" href="/">Workspace</a>' if user else
+        '<a class="kc-nav-signin" href="/login">Sign in</a>'
+        '<a class="kc-btn kc-btn-primary" href="/signup">Start building</a>')
+    error_banner = ('<p class="kc-price-error">We could not start checkout. '
+                    'Nothing was charged; please try again.</p>') if error else ""
+
+    faq = "".join(
+        f'<div class="kc-faq-item"><h3>{q}</h3><p>{a}</p></div>' for q, a in (
+            ("Can I cancel anytime?",
+             "Yes. Manage billing on your profile opens the Stripe portal; "
+             "cancelling stops renewal and your plan runs to the end of the "
+             "period you already paid for."),
+            ("Do I need a credit card for Free?",
+             "No. The free tier only needs an email address."),
+            ("How does payment work?",
+             "Monthly card subscription handled by Stripe. KiCraft never sees "
+             "or stores your card number."),
+            ("What happens to my projects if I downgrade?",
+             "They stay yours. Designs you made private stay private; new "
+             "projects follow your current plan's rules.")))
+
+    html = f"""
+<div class="kc-landing">
+  <div class="kc-nav"><div class="kc-wrap kc-nav-inner">
+    <div class="kc-brand"><a class="kc-logo kc-grad" href="/"
+      style="text-decoration:none">KiCraft</a>
+      <span class="kc-tag">design a PCB from a sentence</span></div>
+    <div class="kc-nav-actions">{nav_actions}</div>
+  </div></div>
+
+  <section class="kc-section">
+    <div class="kc-wrap">
+      <div class="kc-kicker">Pricing</div>
+      <h2 class="kc-h2">Simple plans, real boards</h2>
+      <p class="kc-lead">Every plan runs the full pipeline: hierarchical
+        schematic, real orderable parts, placement, routing, and fab-ready
+        output. Paid plans add headroom and private projects.</p>
+      {error_banner}
+      <div class="kc-pricing">{"".join(cards)}</div>
+      <p class="kc-price-fine">Prices in USD. Subscriptions renew monthly and
+        can be cancelled anytime; payment is processed by Stripe.</p>
+    </div>
+  </section>
+
+  <section class="kc-section">
+    <div class="kc-wrap">
+      <div class="kc-kicker">Questions</div>
+      <h2 class="kc-h2">Pricing FAQ</h2>
+      <div class="kc-faq">{faq}</div>
+    </div>
+  </section>
+
+  <footer class="kc-foot"><div class="kc-wrap kc-foot-inner">
+    <span>&copy; KiCraft &middot; A <a href="https://laforestlabs.com" target="_blank"
+      rel="noopener">LaForest Labs</a> product</span>
+    <div class="kc-foot-links">
+      <a href="/terms" target="_blank" rel="noopener">Terms of Service</a>
+      <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>
+      <a href="/login">Sign in</a>
+    </div>
+  </div></footer>
+</div>
+"""
+    ui.html(html, sanitize=False)
+
+
+@ui.page("/pricing")
+def pricing_page(error: str = ""):
+    _render_pricing(_current_user(), error=error)
+
+
+@ui.page("/billing/checkout")
+async def billing_checkout_page(tier: str = ""):
+    """Authed redirect into Stripe Checkout for `tier` (or into the Customer
+    Portal when the user already has a live subscription; switching plans there
+    avoids a second subscription). The Stripe call runs off the event loop."""
+    user = _current_user()
+    if user is None:
+        return RedirectResponse("/signup")
+    settings = Settings.from_env()
+    if tier not in ("pro", "max") or not settings.billing_enabled:
+        return RedirectResponse("/pricing")
+    try:
+        url = await asyncio.to_thread(
+            billing.checkout_or_portal_url, _store(), settings, user, tier,
+            billing.gateway(settings))
+    except Exception as e:
+        print(f"[billing] checkout failed for user {user.id}: {e}", flush=True)
+        return RedirectResponse("/pricing?error=checkout")
+    return RedirectResponse(url)
+
+
+@ui.page("/billing/portal")
+async def billing_portal_page():
+    """Authed redirect into the Stripe Customer Portal (update card, switch
+    plan, cancel, download invoices)."""
+    user = _current_user()
+    if user is None:
+        return RedirectResponse("/login")
+    settings = Settings.from_env()
+    if not (settings.billing_enabled and user.stripe_customer_id):
+        return RedirectResponse("/profile")
+    try:
+        url = await asyncio.to_thread(
+            billing.portal_url, _store(), settings, user, billing.gateway(settings))
+    except Exception as e:
+        print(f"[billing] portal failed for user {user.id}: {e}", flush=True)
+        return RedirectResponse("/profile")
+    return RedirectResponse(url)
+
+
+@ui.page("/billing/success")
+async def billing_success_page(session_id: str = ""):
+    """Where Stripe Checkout returns on success. Syncs the subscription
+    immediately (after confirming the session belongs to this user), so the
+    upgrade shows without waiting on the webhook; the webhook remains the
+    authoritative path for everything afterwards."""
+    user = _current_user()
+    if user is None:
+        return RedirectResponse("/login")
+    settings = Settings.from_env()
+    if settings.billing_enabled and session_id:
+        try:
+            outcome = await asyncio.to_thread(
+                billing.sync_from_checkout_session, _store(), settings, user,
+                session_id, billing.gateway(settings))
+            print(f"[billing] success-page sync user {user.id}: {outcome}",
+                  flush=True)
+        except Exception as e:
+            # The webhook will still land the upgrade; never fail the page.
+            print(f"[billing] success-page sync failed for user {user.id}: {e}",
+                  flush=True)
+    fresh = _store().get_user(user.id) or user
+    q = _store().quota_status(fresh)
+
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    with ui.card().classes("absolute-center w-96 items-center gap-2") \
+            .style("background:#0f172a;border:1px solid #1e293b"):
+        ui.icon("check_circle").classes("text-4xl").style("color:#34d399")
+        ui.label(f"You're on {q['label']}").classes("text-xl font-bold text-white")
+        period = "week" if q["window_days"] <= 7 else "month"
+        if q.get("unlimited"):
+            ui.label("Unlimited designs (staff).") \
+                .classes("text-sm").style("color:#94a3b8")
+        else:
+            ui.label(f"{q['remaining']} of {q['limit']} designs available this "
+                     f"{period}.").classes("text-sm").style("color:#94a3b8")
+        ui.label("A receipt is on its way from Stripe. Manage or cancel the "
+                 "subscription anytime from your profile.") \
+            .classes("text-xs text-center").style("color:#64748b")
+        ui.button("Start designing", icon="rocket_launch",
+                  on_click=lambda: ui.navigate.to("/")).classes("w-full")
+        ui.button("Go to profile", on_click=lambda: ui.navigate.to("/profile")) \
+            .props("flat dense no-caps").classes("text-xs")
 
 
 # --------------------------------------------------------------------------- #
@@ -3043,6 +3351,13 @@ def admin_users_page():
                 if not guard():
                     dlg.close()
                     return
+                # A deleted account must never be charged again: cancel any
+                # live Stripe subscription first (best-effort; deletion
+                # proceeds either way and the orphaned sub stays visible in
+                # the Stripe dashboard).
+                target = store.get_user(row["id"])
+                if target is not None:
+                    billing.cancel_subscription_for_user(Settings.from_env(), target)
                 store.delete_user(row["id"])
                 dlg.close()
                 ui.notify(f"Deleted {row['email']}.", color="positive")
@@ -3071,6 +3386,7 @@ def admin_users_page():
                         .style("color:#64748b;padding:2px 0"):
                     ui.label("email").style("width:230px")
                     ui.label("tier").style("width:96px")
+                    ui.label("billing").style("width:76px")
                     ui.label("role").style("width:70px")
                     ui.label("proj").style("width:48px")
                     ui.label("spend").style("width:64px")
@@ -3089,6 +3405,13 @@ def admin_users_page():
                                   value=r["tier"],
                                   on_change=lambda e, em=r["email"]: do_set_tier(em, e.value)) \
                             .props("dense options-dense").style("width:96px")
+                        sub_status = r.get("subscription_status") or "-"
+                        ui.label(sub_status).style(
+                            "width:76px;color:"
+                            + ("#34d399" if sub_status in ("active", "trialing")
+                               else "#64748b")) \
+                            .tooltip("Stripe subscription status (manual tier "
+                                     "changes hold until the next webhook sync)")
                         ui.label(r["role"]).style(
                             f"width:70px;color:{'#a78bfa' if is_admin_row else '#64748b'}")
                         ui.label(str(r["project_count"])).style("width:48px;color:#cbd5e1")
@@ -3702,7 +4025,8 @@ def _clone_button(source, user) -> None:
     def do_clone(make_private):
         pid, err = _clone_project(source, user, make_private)
         if err == "quota":
-            ui.notify("You've used your design quota for this period. Upgrade for more.",
+            ui.notify("You've used your design quota for this period. "
+                      "See /pricing to upgrade.",
                       color="warning")
             return
         if err is not None or pid is None:
@@ -4224,6 +4548,7 @@ def _render_landing() -> None:
     <div class="kc-brand"><span class="kc-logo kc-grad">KiCraft</span>
       <span class="kc-tag">design a PCB from a sentence</span></div>
     <div class="kc-nav-actions">
+      <a class="kc-nav-signin" href="/pricing">Pricing</a>
       <a class="kc-nav-signin" href="/login">Sign in</a>
       <a class="kc-btn kc-btn-primary" href="/signup">Start building</a>
     </div>
@@ -4296,6 +4621,7 @@ def _render_landing() -> None:
     <span>&copy; KiCraft &middot; A <a href="https://laforestlabs.com" target="_blank"
       rel="noopener">LaForest Labs</a> product</span>
     <div class="kc-foot-links">
+      <a href="/pricing">Pricing</a>
       <a href="/terms" target="_blank" rel="noopener">Terms of Service</a>
       <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>
       <a href="/login">Sign in</a>
@@ -4380,6 +4706,10 @@ def index(prompt: str = "", project: str = ""):
                       on_click=lambda: ui.navigate.to("/browse")) \
                 .props("flat dense no-caps color=white").classes("text-xs") \
                 .tooltip("Browse and clone community projects")
+            ui.button("Pricing", icon="workspace_premium",
+                      on_click=lambda: ui.navigate.to("/pricing")) \
+                .props("flat dense no-caps color=white").classes("text-xs") \
+                .tooltip("Plans and upgrades")
             ui.button("Support", icon="support_agent",
                       on_click=lambda: open_support_dialog(auto=False)) \
                 .props("flat dense no-caps color=white").classes("text-xs") \
@@ -4405,6 +4735,7 @@ def index(prompt: str = "", project: str = ""):
                     ui.menu_item("Examples", lambda: ui.navigate.to("/samples"))
                     ui.menu_item("Part library", lambda: ui.navigate.to("/parts"))
                     ui.menu_item("Browse", lambda: ui.navigate.to("/browse"))
+                    ui.menu_item("Pricing", lambda: ui.navigate.to("/pricing"))
                     ui.menu_item("Support", lambda: open_support_dialog(auto=False))
                     if is_admin(user):
                         ui.menu_item("Admin", lambda: ui.navigate.to("/admin"))
@@ -4420,7 +4751,12 @@ def index(prompt: str = "", project: str = ""):
         except Exception:
             ui.label("").classes("hidden")
 
-        quota_label = ui.label().classes("text-xs").style("color:#94a3b8")
+        with ui.row().classes("items-center gap-2"):
+            quota_label = ui.label().classes("text-xs").style("color:#94a3b8")
+            upgrade_link = ui.button("Upgrade", icon="workspace_premium",
+                                     on_click=lambda: ui.navigate.to("/pricing")) \
+                .props("flat dense no-caps color=primary").classes("text-xs")
+            upgrade_link.set_visibility(False)
 
         if first_run:
             with ui.row().classes("w-full items-start justify-between kc-welcome") \
@@ -4963,6 +5299,11 @@ def index(prompt: str = "", project: str = ""):
                                     f"designs left this {period}.")
             tier_badge.text = q["label"]
             m_tier_badge.text = q["label"]
+            # Quietly offer the paid tiers to free users; insist once the
+            # quota is spent (the Design button below goes dark with it).
+            upgrade_link.set_visibility(
+                not q.get("unlimited")
+                and (u.tier == "free" or q["remaining"] <= 0))
             if q["remaining"] <= 0:
                 design_btn.disable()
                 quota_label.style("color:#f59e0b")
@@ -5005,7 +5346,7 @@ def index(prompt: str = "", project: str = ""):
             if q["remaining"] <= 0:
                 period = "week" if q["window_days"] <= 7 else "month"
                 ui.notify(f"You've used your {q['limit']} design(s) this {period}. "
-                          "Upgrade for more.", color="warning")
+                          "See Pricing to upgrade.", color="warning")
                 return
             pid = _store().create_project(u.id, brief.value)
             proj = _store().get_project(pid)
