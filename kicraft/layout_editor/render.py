@@ -1,4 +1,4 @@
-"""Canvas-only PNG render for the Manual Layout tab.
+"""Canvas-only PNG render for the manual layout editor.
 
 Thin wrapper around ``kicraft.render.render_pcb`` (the unified
 PCB-to-PNG pipeline shared with the monitor / pipeline-graph views).

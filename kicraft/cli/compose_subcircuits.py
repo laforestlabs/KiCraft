@@ -57,7 +57,7 @@ from kicraft.autoplacer.brain.parent_adapter import (
     placements_from_solved_state,
     synthetic_block_ref,
 )
-from kicraft.autoplacer.brain.manual_layout import ManualLayout, load_manual_layout
+from kicraft.layout_editor.model import ManualLayout, load_manual_layout
 from kicraft.autoplacer.brain.placement_solver import PlacementSolver
 from kicraft.autoplacer.brain.subcircuit_composer import (
     AttachmentConstraint,
