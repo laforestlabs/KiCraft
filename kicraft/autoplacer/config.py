@@ -14,9 +14,11 @@ from typing import Any
 DEFAULT_CONFIG = {
     # Trace + via floors match OSH Park 2-layer service:
     # https://docs.oshpark.com/services/two-layer/
-    # Signal: 6 mil (0.1524mm) min trace width.
+    # Signal: 0.153mm, just above the 6 mil (0.1524mm) floor -- 0.1524 itself
+    # rounds to 152 µm in the DSN, below the 152.4 µm minimum (the same trap
+    # freerouting_fine_pitch_track_mm documents below).
     # Power: 0.5mm matches the Power netclass in LLUPS.kicad_pro.
-    "signal_width_mm": 0.1524,
+    "signal_width_mm": 0.153,
     "power_width_mm": 0.5,
     # Via: 0.3mm drill + 0.15mm ring = 0.6mm dia (5.91 mil ring, above 5 mil floor)
     "via_drill_mm": 0.3,
