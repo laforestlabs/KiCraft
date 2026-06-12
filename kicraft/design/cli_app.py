@@ -2370,7 +2370,7 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
         backup.unlink(missing_ok=True)
 
     # 5. Export the fab package (Gerbers + drill + CPL + BOM, zipped).
-    print("[build] 5/5 export fab package (Gerbers + drill + CPL + BOM) ...")
+    print("[build] 5/5 export fab package (Gerbers + drill + CPL + BOM + STEP + 3D render) ...")
     from kicraft.design.synthesis.fab_export import export_fab
 
     bom_parts = [p.model_dump() for p in state.bom.parts]
@@ -2378,6 +2378,10 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
 
     artifacts.routed_pcb = pcb
     artifacts.fab_zip = Path(fab["zip"])
+    artifacts.step_file = Path(fab["step"]) if fab.get("step") else None
+    artifacts.board_3d_png = (
+        Path(fab["board_3d_png"]) if fab.get("board_3d_png") else None
+    )
     _persist_artifacts(state, state_path, artifacts)
 
     print()
@@ -2389,6 +2393,10 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     )
     print(f"  fab package: {fab['zip']}")
     print(f"  contents   : {', '.join(fab['files'])}")
+    if fab.get("step"):
+        print(f"  STEP model : {fab['step']}")
+    if fab.get("board_3d_png"):
+        print(f"  3D render  : {fab['board_3d_png']}")
     return 0
 
 
