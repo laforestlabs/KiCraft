@@ -1615,14 +1615,15 @@ def _drive_build_queue(ws: Path, state: dict, progress, *,
 def _rerun_build_worker(state: dict, kind: str) -> None:
     """Re-run one deterministic job (kind='manual_route': route + promote a
     saved manual layout; kind='build': full LLM-free rebuild, e.g. after a
-    placement-rules edit) through the build queue, then refresh the
-    persisted project.
+    placement-rules edit or the Rebuild button) through the build queue,
+    then refresh the persisted project.
 
-    Success refreshes the durable copy (generated tree, zip, project row
-    -> ok) exactly like a build, so a rescued FAILED project becomes a
-    finished one. Failure leaves the durable project untouched (a bad
-    re-run must never flip a good project to failed); the user sees the
-    build log in the tab and gets the walk-away email."""
+    The outcome persists either way -- success exactly like a build, and
+    failure flips the durable project to failed with the failed candidate
+    board on display (no keep-the-last-good-state fallback: the user asked
+    failures to be loudly inspectable in the UI, and the fab tab marks any
+    earlier package stale). The build log streams to the tab and the
+    walk-away email goes out via _persist_project."""
     ws = Path(state["ws"])
     pid = state.get("project_id")
     if pid:
@@ -1633,10 +1634,15 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
 
     try:
         rc = _drive_build_queue(ws, state, progress, kind=kind)
+        # Surface whatever board the build left behind -- on a failed verify
+        # the promote tail keeps the failed candidate, and inspecting it is
+        # the whole point of showing failures.
+        pd = _discover_generated_dir(ws)
+        if pd is not None:
+            state["pcb_ready"] = (pd / f"{pd.name}.kicad_pcb").is_file()
         if rc != 0:
             state["ok"] = False
             return
-        state["pcb_ready"] = True
         state["failed"] = False  # a rescued project is failed no longer
         state["zip"] = _zip_generated(ws)
         state["ok"] = bool(state["zip"])
@@ -1644,17 +1650,13 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
         progress({"kind": "build_log", "text": f"error: {e}"})
         state["ok"] = False
     finally:
-        if state.get("ok"):
-            _persist_project(ws, state)
-        else:
+        if not state.get("ok"):
+            # A failed (re)build has no valid package: drop any stale zip so
+            # the persisted row offers no download that mismatches the board.
+            state["zip"] = None
+            state["failed"] = True
             _file_failure_report(state)
-            try:
-                notify.notify_run_event(
-                    _store(), Settings.from_env(), user_id=state.get("user_id"),
-                    project_id=pid, status="failed",
-                    brief=state.get("brief", ""), skip_if_active=True)
-            except Exception:
-                pass
+        _persist_project(ws, state)
         state["done"] = True
         state["running"] = False
         if (pid and state.get("status") != "awaiting_input"
@@ -1752,11 +1754,15 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
                     state["spend"] = _project_spend_usd(state.get("project_id"))
                 if rr.get("status") == "ok":
                     rc = _run_build()
+        # Surface whatever board the build left behind: on a failed verify the
+        # promote tail keeps the failed candidate so it can be inspected.
+        pd = _discover_generated_dir(ws)
+        if pd is not None:
+            state["pcb_ready"] = (pd / f"{pd.name}.kicad_pcb").is_file()
         if rc != 0:
             state["ok"] = False
             return
 
-        state["pcb_ready"] = True
         state["zip"] = _zip_generated(ws)
         state["ok"] = bool(state["zip"])
     except Exception as e:  # surface, never crash the UI thread
@@ -5680,6 +5686,8 @@ def index(prompt: str = "", project: str = ""):
             # without this every reopened project showed all-pending tabs.
             tabs.set_statuses(_derived_statuses(ws, sj, p.status, zip_ok),
                               sj.get("stage_status"))
+            if state["failed"] and state["pcb_ready"]:
+                _mark_fab_invalid()
             rem = remaining_stages(sj)
             continue_btn.set_visibility(bool(rem) and not state["awaiting_input"])
             if state["awaiting_input"]:
@@ -5914,6 +5922,31 @@ def index(prompt: str = "", project: str = ""):
             _start_replace_build(
                 "Rebuilding (synthesize + place + route + fab, may take "
                 "minutes) -- live progress is in the tabs.")
+
+        def _mark_fab_invalid():
+            """Fail loudly in the FAB tab: red icon + banner. The board on
+            display is a failed verify candidate (kept for inspection), so no
+            valid fab package exists and any earlier download is stale."""
+            if view.get("fab_invalid"):
+                return
+            view["fab_invalid"] = True
+            tabs.set_statuses({"fab": "failed"})
+            stale = bool(state.get("zip"))
+            with tabs.view_slot("fab"):
+                with ui.card().classes("w-full p-3").style(
+                        "border:1px solid #b91c1c;background:#450a0a"):
+                    ui.label("Fab package invalid -- this build FAILED "
+                             "verification.") \
+                        .classes("text-sm font-medium").style("color:#fecaca")
+                    ui.label(
+                        "The board in PLACE/ROUTE is the failed candidate, "
+                        "kept so the problem can be inspected. Do not "
+                        "fabricate it. "
+                        + ("Any package downloaded earlier is from an older "
+                           "successful build and does NOT match this board."
+                           if stale else
+                           "No fab package was exported for this build.")
+                    ).classes("text-xs").style("color:#fca5a5")
 
         def _layout_editor_entry_row(label: str = "Edit layout") -> None:
             """Buttons into the manual layout editor + placement rules (both
@@ -6156,6 +6189,8 @@ def index(prompt: str = "", project: str = ""):
                     status.text = ("Build failed. The synthesized schematic is shown in "
                                    "the Synthesize tab (red) for review."
                                    + (f" Board ID: {code}." if code else ""))
+                    if state.get("pcb_ready"):
+                        _mark_fab_invalid()
                     # Surface the support dialog ONCE per failed run on this page
                     # (the failure itself is already auto-filed by the worker);
                     # closing it without sending stays closed.
