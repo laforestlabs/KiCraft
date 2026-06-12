@@ -370,3 +370,56 @@ def test_resynthesis_removes_stale_orphan_sheets(tmp_path, llups_like_state) -> 
     assert not orphan.exists(), "stale orphan leaf survived re-synthesis"
     assert (tmp_path / "USB_INPUT.kicad_sch").is_file()  # real leaf re-emitted
     assert (tmp_path / "DEMO33.kicad_sch").is_file()  # root re-emitted
+
+
+def _strict_sexpr_parses(text: str) -> bool:
+    """Escape-aware balanced-paren check — the same parse contract eeschema
+    enforces. An unescaped quote inside a string desynchronizes everything
+    after it, which KiCad surfaces as a silently EMPTY hierarchy child."""
+    depth, in_str, i, n = 0, False, 0, len(text)
+    while i < n:
+        c = text[i]
+        if in_str:
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+        i += 1
+    return depth == 0 and not in_str
+
+
+def test_quote_in_part_fields_survives_emission(tmp_path, llups_like_state) -> None:
+    """A part description with an inch mark (`0.96" OLED`) used to terminate the
+    s-expression string early and corrupt the whole leaf file; KiCad then loaded
+    the child sheet as EMPTY (hier_label_mismatch on the parent, part missing
+    from netlist AND board). Every model/part-derived string must be escaped."""
+    j1 = llups_like_state.bom.parts[0]
+    j1.sourcing_note = '4-pin header for SSD1306 0.96" OLED module (VCC, GND, SCL, SDA)'
+    j1.datasheet = 'https://example.com/ssd1306-0.96".pdf'
+    run(llups_like_state, tmp_path)
+    for sch in tmp_path.glob("*.kicad_sch"):
+        text = sch.read_text(encoding="utf-8")
+        assert _strict_sexpr_parses(text), f"{sch.name} does not parse"
+    leaf = (tmp_path / "USB_INPUT.kicad_sch").read_text(encoding="utf-8")
+    assert '0.96\\" OLED' in leaf, "description quote was not escaped"
+
+
+def test_write_guard_rejects_unescaped_quote(tmp_path) -> None:
+    """Belt-and-suspenders: if a future writer bypasses escaping, the emitter
+    must refuse to write the corrupt file instead of letting KiCad silently
+    drop the sheet three stages later."""
+    from kicraft.design.synthesis.emitter import assert_schematic_parses
+
+    corrupt = '(kicad_sch (property "Description" "0.96" OLED (VCC)"))\n'
+    with pytest.raises(ValueError, match="unparseable schematic"):
+        assert_schematic_parses(corrupt, tmp_path / "X.kicad_sch")
+    assert_schematic_parses('(kicad_sch (property "D" "0.96\\" OLED"))\n', tmp_path / "X.kicad_sch")

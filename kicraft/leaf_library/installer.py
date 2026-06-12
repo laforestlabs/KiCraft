@@ -28,6 +28,7 @@ from pathlib import Path
 
 from ..autoplacer.brain.pins import pin_leaf
 from ..autoplacer.brain.subcircuit_artifacts import derive_leaf_key
+from ..design.synthesis.emitter import assert_schematic_parses
 from .loader import LoadedLeaf
 from .manifest import (
     CANONICAL_TRIAD,
@@ -185,6 +186,7 @@ def install_leaf(
     log.debug("sheet %s sch rewrites: %s", sheet_name, sch_counts)
     sch_out = project_dir / sheet_file
     sch_out.parent.mkdir(parents=True, exist_ok=True)
+    assert_schematic_parses(new_sch, sch_out)
     sch_out.write_text(new_sch, encoding="utf-8")
 
     # 4. Write renumbered triad to .experiments/subcircuits/<leaf_key>/
