@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:4d418cc0e53cfa150ece49b355449acdded2194cf8c9391e1e4ab018aa198ea4",
+  "content_hash": "sha256:f866b2414d8a51a7f5a0b2303f90eafddd3726600533342c4f0f94c3c09b5845",
   "datasheet_url": "https://www.lcsc.com/datasheet/C454188.pdf",
   "description": "Monolithic Power Systems MP1584EN \u2014 3 A step-down (buck) converter, 4.5-28 V in \u2192 0.8-25 V out, 1.5 MHz fixed switching. SOIC-8 with exposed thermal pad. The maker default for step-down rails when AMS1117 would dissipate too much heat (e.g., 12 V \u2192 5 V or 9 V \u2192 3.3 V at >300 mA). Used in countless ebay/Amazon mini-buck modules.",
   "footprint_name": "SOIC-8_L4.9-W3.9-P1.27-LS6.0-BL-EP3.3",

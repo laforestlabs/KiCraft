@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:03a902902d32df26481f3cbfb7747364ed89568a0c8f41d68510fbeba3ca8225",
+  "content_hash": "sha256:fd2c9cf6e6478e5fe03c9f0df81357cc909cf033f64c84e5562dfc2af1a20946",
   "datasheet_url": "https://lcsc.com/product-detail/Low-Dropout-Regulators-LDO_DIODES_AP2112K-3-3TRG1_AP2112K-3-3TRG1_C51118.html",
   "description": "Diodes Incorporated AP2112K-3.3 \u2014 3.3 V fixed LDO regulator, 600 mA, SOT-23-5. Low quiescent current (~55 \u00b5A) makes it the battery-powered alternative to AMS1117-3.3. ~250-400 mV dropout at 600 mA; integrated EN pin lets the MCU shut the rail down for sleep.",
   "footprint_name": "SOT-25-5_L2.9-W1.6-P0.95-LS2.8-BL",

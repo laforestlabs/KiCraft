@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:22df68d8d8ff14642540865ae488e7bed299fdae064fa1f0ee915c9b4786fb70",
+  "content_hash": "sha256:de8a8342bb7112694ae71a9694f0e68a756b301c269d7e01b8e17ba1ff405498",
   "datasheet_url": "https://lcsc.com/product-detail/DC-DC-Converters_MT3608_C84817.html",
   "description": "XI'AN Aerosemi MT3608 \u2014 boost (step-up) DC-DC converter, up to 2 A continuous, 1.2 MHz fixed switching, Vout up to 28 V. SOT-23-6. The maker default for 3.7 V \u2192 5 V or 5 V \u2192 12 V boost rails on battery-powered projects.",
   "footprint_name": "SOT-23-6_L2.9-W1.6-P0.95-LS2.8-BL",

@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:45e9e2b263ad03a1ae9a617c85751cb711c4d9e977d89d2473de2883cd79ce85",
+  "content_hash": "sha256:acf75d13f08702bdbe3d39f6bf428fb2d4c4214a18d5c3b2cd87dbd0d1ca4db3",
   "datasheet_url": "https://www.lcsc.com/datasheet/C5149201.pdf",
   "description": "Opsco SK6812MINI-E \u2014 3.5\u00d73.5 mm addressable RGB LED, reverse-mount variant that illuminates through the PCB via a cut-out. WS2812 protocol-compatible. Common keyboard / wearable choice when you want light coming from the bottom side of the board.",
   "footprint_name": "LED-SMD_4P-L3.2-W2.8-LS5.9_SK6812MINI-E",

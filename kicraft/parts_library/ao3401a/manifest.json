@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:af13f342bc9cc3d51f7495687f5568ff4bcd97db2f75946379df3ed4f4d0e9e3",
+  "content_hash": "sha256:1b60989b5cd433afd89d27483632c694c6f2b6f7b26dd49c6f42b1e6e00514e7",
   "datasheet_url": "https://lcsc.com/product-detail/MOSFET_AOS_AO3401A_AO3401A_C15127.html",
   "description": "Alpha & Omega Semi AO3401A \u2014 P-channel MOSFET, 30 V, 4 A continuous in SOT-23. Logic-level Vgs(th) -0.4 to -1.0 V \u2014 drives directly from a 3.3 V GPIO. The universal high-side load switch and reverse-polarity-protection PFET for maker projects. P-channel complement to AO3400A.",
   "footprint_name": "SOT-23_L2.9-W1.3-P1.90-LS2.4-BR",

@@ -685,7 +685,7 @@
 		)
 	)
 	(embedded_fonts no)
-	(model "/WIRELM-SMD_ESP32-S3-WROOM-1.wrl"
+	(model "${KIPRJMOD}/3dmodels/esp32-s3-wroom-1/WIRELM-SMD_ESP32-S3-WROOM-1.wrl"
 		(offset
 			(xyz 0 0 0)
 		)

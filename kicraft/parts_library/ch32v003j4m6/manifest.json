@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:9847dbbc40ea7ea046e6a136dcd6c4cbdb44aeb9527f7416acb571a250b734ca",
+  "content_hash": "sha256:9cf4210dae45f4851f15cdaf86103c6c589b3e2609f08f2d2e47c3e140422797",
   "datasheet_url": "https://www.lcsc.com/datasheet/C5346354.pdf",
   "description": "WCH Jiangsu Qin Heng CH32V003J4M6 \u2014 32-bit RISC-V (RV32EC) MCU, 48 MHz, 16 KB flash, 2 KB SRAM, SOP-8 package. The cheapest microcontroller in the world (~$0.10) with an actual modern ISA. Six GPIOs (one shared with single-wire-debug PD1), one UART, one I\u00b2C, one SPI, one 8-channel 10-bit ADC, several 16-bit timers. The tiny-MCU complement to ESP32-S3 for cost-sensitive / space-constrained / no-wireless designs.",
   "footprint_name": "SOP-8_L4.9-W3.8-P1.27-LS6.0-BL",

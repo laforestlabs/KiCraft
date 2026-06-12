@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:6a7dad54d7119854cd8bca5d42cf2a866f79c30f82a49309026d680539169bd9",
+  "content_hash": "sha256:697d4bd8943feeedf24b45471ccd38fd8b44904fb72c315b5a832c440351cda8",
   "datasheet_url": "https://lcsc.com/product-detail/Low-Dropout-Regulators-LDO_AMS_AMS1117-3-3_AMS1117-3-3_C6186.html",
   "description": "Advanced Monolithic Systems AMS1117-3.3 \u2014 3.3 V fixed LDO regulator, 1 A max, SOT-223 package. Ubiquitous, cheap, and good enough for most digital rails. Use when you want to drop 5 V \u2192 3.3 V without a switcher.",
   "footprint_name": "SOT-223-3_L6.5-W3.4-P2.30-LS7.0-BR",

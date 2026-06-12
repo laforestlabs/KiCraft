@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:40c3fe801004c52b500315b2d6ced7e8cc2a0ad7b1659b9f958dd5d58496501b",
+  "content_hash": "sha256:c557fe91770db93ec253a14aaa403edc8ee0e5fcc9b96685d109cc1854b265b5",
   "datasheet_url": "https://lcsc.com/product-detail/MOSFET_AOS_AO3400A_AO3400A_C20917.html",
   "description": "Alpha & Omega Semi AO3400A \u2014 N-channel MOSFET, 30 V, 5.7 A continuous in SOT-23. True logic-level Vgs(th) 0.7-1.5 V \u2014 drives directly from a 3.3 V GPIO. The universal small-signal NFET for load switches, level shifters, and gate drivers in maker projects.",
   "footprint_name": "SOT-23-3_L2.9-W1.3-P1.90-LS2.4-BR",
