@@ -1986,6 +1986,20 @@ def _align_project_clearance_to_routing(project_dir: Path, stem: str, pcb: Path)
               "to match the fine-pitch routing")
 
 
+def _board_has_routed_copper(pcb_path: Path) -> bool:
+    """True if the board file contains routed tracks (``(segment`` items).
+
+    Distinguishes a previously-routed board worth restoring from the unrouted
+    synthesis placeholder (parts only) that should never displace a routed
+    candidate. Text scan: .kicad_pcb is an s-expression file and only routed
+    copper emits ``(segment`` nodes.
+    """
+    try:
+        return "(segment" in pcb_path.read_text(errors="ignore")
+    except OSError:
+        return False
+
+
 def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
                         project_dir: Path, pcb: Path,
                         *, done_label: str = "BUILD COMPLETE") -> int:
@@ -1995,10 +2009,16 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
 
     Promotion is failure-safe: the previous ``<stem>.kicad_pcb`` (when
     one exists) is backed up before the candidate is copied in, and a
-    failed verify gate restores it, so a bad route can never clobber
-    the last good board. The candidate must sit at the real path during
-    verification because kicad-cli DRC reads netclass clearances from
-    the sibling ``<stem>.kicad_pro``.
+    failed verify gate restores it -- but only when the previous board
+    was itself routed (has tracks), so a bad route can never clobber the
+    last good board. When the previous board is the unrouted synthesis
+    placeholder (parts only, no copper), the dirty-but-routed candidate
+    is kept instead: the project then shows the actual place/route
+    result in the UI rather than a row of floating parts, even though
+    the build still fails the gate (rc 7) and exports no fab package.
+    The candidate must sit at the real path during verification because
+    kicad-cli DRC reads netclass clearances from the sibling
+    ``<stem>.kicad_pro``.
     """
     # 3. Promote the routed parent to the project's main PCB.
     routed = _find_routed_parent(project_dir)
@@ -2029,7 +2049,7 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
         f"traces={gate['tracks'].get('traces', '?')}"
     )
     if not gate["ok"]:
-        if backup is not None:
+        if backup is not None and _board_has_routed_copper(backup):
             os.replace(backup, pcb)
             print(
                 f"[build]     restored previous {pcb.name} (failed candidate "
@@ -2037,7 +2057,15 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
                 file=sys.stderr,
             )
         else:
-            pcb.unlink(missing_ok=True)
+            # Previous board was unrouted (or absent): keep the dirty routed
+            # candidate so the project shows the real place/route result.
+            if backup is not None:
+                backup.unlink(missing_ok=True)
+            print(
+                f"[build]     kept routed-but-dirty {pcb.name} (previous board "
+                "had no routed copper; showing the failed route)",
+                file=sys.stderr,
+            )
         print(
             f"error: routed board is NOT fab-ready -- shorts={gate['shorts']}, "
             f"unconnected={gate['unconnected']}, reasons={gate['reasons']}",

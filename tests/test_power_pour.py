@@ -255,7 +255,8 @@ def _stranded_board(path, *, block_both_layers=False):
             pad.SetNet(net(netname))
             fp.Add(pad)
 
-    add_fp("U2", {"1": ("GND", 8.0, 10.0), "2": ("SIG", 8.0, 13.0)})
+    add_fp("U2", {"1": ("GND", 8.0, 10.0), "2": ("SIG", 8.0, 13.0),
+                  "3": ("5V", 8.0, 7.0)})
     add_fp("J7", {"1": ("5V", 16.0, 7.0), "2": ("GND", 16.0, 10.0)})
     via = pcbnew.PCB_VIA(board)
     via.SetPosition(pcbnew.VECTOR2I(_mm(8.0), _mm(10.0)))
@@ -324,6 +325,53 @@ def test_strand_repair_noop_when_single_cluster(tmp_path):
     board.Save(path)
     res = repair_stranded_gnd(path, {"gnd_zone_net": "GND"})
     assert res["stranded"] == 0 and res["tied"] == 0, res
+
+
+def test_stranded_power_pad_is_tied_back_to_main_cluster(tmp_path):
+    # KC-Z57JEZ regression shape: a power rail (5V) split into two clusters
+    # (U2.3 vs J7.1) with no track between them. The generalized repair must
+    # tie them exactly like the GND pass does.
+    from kicraft.autoplacer.brain.gnd_pour import repair_stranded_power
+
+    path = str(tmp_path / "b.kicad_pcb")
+    _stranded_board(path)
+    res = repair_stranded_power(path, ["5V"], {"gnd_zone_net": "GND"})
+    assert res["nets"] == ["5V"], res
+    assert res["stranded"] == 1 and res["tied"] == 1, res
+    board = pcbnew.LoadBoard(path)
+    pwr_tracks = [t for t in board.GetTracks()
+                  if not isinstance(t, pcbnew.PCB_VIA) and t.GetNetname() == "5V"]
+    assert len(pwr_tracks) == 1
+    xs = sorted([pcbnew.ToMM(pwr_tracks[0].GetStart().x),
+                 pcbnew.ToMM(pwr_tracks[0].GetEnd().x)])
+    assert xs == [pytest.approx(8.0), pytest.approx(16.0)]
+
+
+def test_power_strand_repair_disabled_is_noop(tmp_path):
+    from kicraft.autoplacer.brain.gnd_pour import repair_stranded_power
+
+    path = str(tmp_path / "b.kicad_pcb")
+    _stranded_board(path)
+    res = repair_stranded_power(
+        path, ["5V"],
+        {"gnd_zone_net": "GND", "power_strand_repair_enabled": False})
+    assert res == {"nets": [], "stranded": 0, "tied": 0, "skipped": []}
+    board = pcbnew.LoadBoard(path)
+    assert not [t for t in board.GetTracks()
+                if not isinstance(t, pcbnew.PCB_VIA) and t.GetNetname() == "5V"]
+
+
+def test_power_strand_repair_autodetects_poured_rails(tmp_path):
+    # nets=None must fall back to the same detection pour_power_planes uses
+    # (most-padded power net, GND excluded) so the parent caller that pours
+    # then repairs in separate subprocesses agrees with the pour.
+    from kicraft.autoplacer.brain.gnd_pour import repair_stranded_power
+
+    path = str(tmp_path / "b.kicad_pcb")
+    _stranded_board(path)
+    res = repair_stranded_power(path, None, {"gnd_zone_net": "GND"})
+    assert res["nets"] == ["5V"], res
+    assert res["tied"] == 1, res
 
 
 # ---------------------------------------------------------------------------

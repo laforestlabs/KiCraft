@@ -48,9 +48,15 @@ DEFAULT_NETCLASS = {
     "wire_width": 6,
 }
 
+# Power differs from Default ONLY in conductor sizing (wider tracks/vias for
+# current capacity). Clearance deliberately matches Default: clearance is a
+# voltage/fab parameter and ~6 mil is ample at logic-level voltages, while a
+# wider Power clearance starves routing and zone fill around fine-pitch parts
+# whose pad gap is below it (a 0.8 mm-pitch LGA has 0.28 mm gaps; the old
+# 0.3 mm rule made its supply pads unreachable and un-DRC-able).
 POWER_NETCLASS = {
     "bus_width": 12,
-    "clearance": 0.3,
+    "clearance": 0.15,
     "diff_pair_gap": 0.25,
     "diff_pair_via_gap": 0.25,
     "diff_pair_width": 0.2,
