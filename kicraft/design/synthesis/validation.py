@@ -828,6 +828,189 @@ def check_erc(project_dir: Path, project_stem: str) -> CheckResult:
     return CheckResult(name="9.12 ERC", ok=True, message="ERC clean (0 errors)")
 
 
+# ---------- §9.13 netlist faithfulness (Stage B) ----------
+
+
+def _extract_netlist_groups(netlist_text: str) -> list[set[tuple[str, str]]]:
+    """Parse a kicadsexpr netlist into one (ref, pin) set per net.
+
+    Paren-scans each ``(net ...)`` block (escape-aware) and collects its
+    ``(node (ref "..") (pin "..") ...)`` entries. Power-symbol pseudo-refs
+    (``#PWR..``, ``#FLG..``) are dropped.
+    """
+    groups: list[set[tuple[str, str]]] = []
+    node_re = re.compile(r'\(node\s+\(ref\s+"([^"]+)"\)\s+\(pin\s+"([^"]+)"\)')
+    i = 0
+    n = len(netlist_text)
+    while True:
+        start = netlist_text.find("(net ", i)
+        if start == -1:
+            break
+        depth = 0
+        in_str = False
+        j = start
+        while j < n:
+            c = netlist_text[j]
+            if in_str:
+                if c == "\\":
+                    j += 2
+                    continue
+                if c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        block = netlist_text[start : j + 1]
+        pins = {
+            (ref, pin)
+            for ref, pin in node_re.findall(block)
+            if not ref.startswith("#")
+        }
+        if pins:
+            groups.append(pins)
+        i = j + 1
+    return groups
+
+
+def _compare_netlist_to_bom(
+    extracted: list[set[tuple[str, str]]], bom
+) -> tuple[list[str], list[str]]:
+    """Compare extracted (ref, pin) net groups against ``bom.connections``.
+
+    Returns ``(merges, lost)``: human-readable merge descriptions for
+    extracted nets containing pins of bom nets that share neither a name
+    nor an endpoint, and ``ref.pin`` strings for wired pins absent from
+    every extracted net. Same-named connections are expected to unify
+    (local labels per sheet, power symbols / hier labels across sheets),
+    as are connections sharing an endpoint — anything beyond that landing
+    in one extracted net is a merge the design never asked for.
+    """
+    bom_refs = {p.ref for p in bom.parts}
+    ep_group: dict[tuple[str, str], str] = {}
+    parent: dict[str, str] = {}
+
+    def find(k: str) -> str:
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    by_name: dict[str, str] = {}
+    for c in bom.connections:
+        key = f"{c.sheet}//{c.net_name}"
+        parent.setdefault(key, key)
+        if c.net_name in by_name:
+            union(key, by_name[c.net_name])
+        else:
+            by_name[c.net_name] = key
+        for ep in c.endpoints:
+            e = (ep.ref, str(ep.pin))
+            if e in ep_group:
+                union(key, ep_group[e])
+            ep_group[e] = key
+
+    # Library-backed sheets carry parts the BOM never wired; restrict both
+    # directions of the comparison to endpoints bom.connections knows.
+    wired = set(ep_group)
+    seen: set[tuple[str, str]] = set()
+    merges: list[str] = []
+    for net_pins in extracted:
+        known = {e for e in net_pins if e in wired and e[0] in bom_refs}
+        seen |= known
+        nets_here = {find(ep_group[e]) for e in known}
+        if len(nets_here) > 1:
+            names = sorted({g.split("//", 1)[1] for g in nets_here})
+            sample = sorted(f"{r}.{p}" for r, p in known)[:6]
+            merges.append(f"nets {names} merged at pins {sample}")
+
+    lost = sorted(f"{r}.{p}" for (r, p) in wired - seen if r in bom_refs)
+    return merges, lost
+
+
+def check_netlist_faithfulness(
+    project_dir: Path, project_stem: str, bom
+) -> CheckResult:
+    """§9.13 — the KiCad-extracted netlist matches ``bom.connections``.
+
+    ERC misses two classes of wiring corruption this catches directly:
+
+    - **lost pins** — a wired pin absent from the extracted netlist. Seen
+      when an unescaped quote corrupted a child sheet (KiCad loads it as
+      empty: every part on it vanishes from netlist AND board) and when a
+      de-collision pass abandoned a pin's stub.
+    - **silent net merges** — pins of two BOM nets landing in ONE extracted
+      net with no shared endpoint to justify it. Seen when a slid label
+      landed on a foreign stub (ISP_MISO≡ISP_MOSI): two labels on one wire
+      is legal KiCad, so ERC stays quiet while MISO is shorted to MOSI.
+
+    Cohesion (one BOM net split across several extracted nets) is the
+    router's §9.9/§9.12 territory and not re-checked here.
+    """
+    root_sch = project_dir / f"{project_stem}.kicad_sch"
+    if not root_sch.is_file():
+        return CheckResult(
+            name="9.13 netlist faithfulness", ok=False,
+            message=f"{root_sch.name} missing",
+        )
+    out_path = project_dir / f"{project_stem}_netlist_check.net"
+    try:
+        subprocess.run(
+            ["kicad-cli", "sch", "export", "netlist",
+             "--format", "kicadsexpr",
+             "--output", str(out_path), str(root_sch)],
+            capture_output=True, text=True, timeout=60.0,
+        )
+    except FileNotFoundError:
+        return CheckResult(
+            name="9.13 netlist faithfulness", ok=True,
+            message="kicad-cli not available; netlist check skipped",
+        )
+    except subprocess.TimeoutExpired:
+        return CheckResult(
+            name="9.13 netlist faithfulness", ok=False,
+            message="kicad-cli timed out after 60s",
+        )
+    if not out_path.exists():
+        return CheckResult(
+            name="9.13 netlist faithfulness", ok=False,
+            message="kicad-cli produced no netlist",
+        )
+    try:
+        extracted = _extract_netlist_groups(out_path.read_text())
+    finally:
+        out_path.unlink(missing_ok=True)
+
+    merges, lost = _compare_netlist_to_bom(extracted, bom)
+    offenders = merges + [f"pin missing from netlist: {e}" for e in lost]
+    if offenders:
+        return CheckResult(
+            name="9.13 netlist faithfulness", ok=False,
+            message=(
+                f"{len(merges)} unexpected net merge(s), "
+                f"{len(lost)} wired pin(s) lost"
+            ),
+            offenders=offenders[:20],
+        )
+    n_wired = len({
+        (ep.ref, str(ep.pin)) for c in bom.connections for ep in c.endpoints
+    })
+    return CheckResult(
+        name="9.13 netlist faithfulness", ok=True,
+        message=f"netlist matches bom.connections ({n_wired} wired pins)",
+    )
+
+
 # ---------- aggregator ----------
 
 
@@ -840,9 +1023,9 @@ def collect_validations(
 
     When ``bom`` is provided AND has a non-empty ``connections`` list,
     §9.10 (pin existence), §9.11 (net coverage), §9.9 (connectivity),
-    and §9.12 (ERC) also run. The latter two are Stage-B checks that
-    only make sense once schematic wires + power symbols are being
-    emitted.
+    §9.12 (ERC) and §9.13 (netlist faithfulness) also run. The latter
+    three are Stage-B checks that only make sense once schematic wires +
+    power symbols are being emitted.
     """
     results = [
         check_schematic_version(project_dir),
@@ -859,6 +1042,7 @@ def collect_validations(
         results.append(check_net_coverage(bom))
         results.append(check_connectivity(project_dir, project_stem))
         results.append(check_erc(project_dir, project_stem))
+        results.append(check_netlist_faithfulness(project_dir, project_stem, bom))
     return results
 
 
