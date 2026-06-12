@@ -1,11 +1,11 @@
-"""kicraft manual-route: argument gating + the failure-safe promote tail.
+"""kicraft manual-route: argument gating + the promote tail.
 
-The promote tail (`_promote_verify_fab`, shared with `build`) must never
-clobber the last good ``<stem>.kicad_pcb``: a failed verify gate restores
-the backed-up board -- but only when that backup was itself routed (has
-``(segment`` copper). When the previous board is the unrouted synthesis
-placeholder (or absent), the dirty routed candidate is kept so the project
-shows the real place/route result. Driven with monkeypatched
+The promote tail (`_promote_verify_fab`, shared with `build`) promotes the
+routed candidate unconditionally: a failed verify gate fails loudly (rc 7,
+no fab export) but the candidate STAYS at ``<stem>.kicad_pcb`` so the
+project always shows the board the build actually produced -- there is
+deliberately no restore-the-previous-board fallback (the UI marks any
+earlier fab package stale instead). Driven with monkeypatched
 verify/align/export seams (no pcbnew, no router)."""
 
 from __future__ import annotations
@@ -71,7 +71,11 @@ def _artifacts_stub(pd: Path):
     )
 
 
-def test_failed_gate_restores_previous_board(project, tmp_path, monkeypatch):
+def test_failed_gate_keeps_candidate_over_previous_routed_board(
+        project, tmp_path, monkeypatch):
+    # Even when the previous board was a good routed one, the failed candidate
+    # wins: the project must show the board THIS build produced so the failure
+    # can be inspected (no silent keep-the-last-good fallback).
     pcb = project / "WIDGET.kicad_pcb"
     monkeypatch.setattr(cli_app, "_align_project_clearance_to_routing",
                         lambda *a, **k: None)
@@ -83,8 +87,7 @@ def test_failed_gate_restores_previous_board(project, tmp_path, monkeypatch):
         _state_stub(), state_path, _artifacts_stub(project), "WIDGET",
         project, pcb)
     assert rc == 7
-    assert pcb.read_text(encoding="utf-8").startswith("GOOD BOARD"), (
-        "failed candidate must not clobber the previous good (routed) board")
+    assert pcb.read_text(encoding="utf-8") == "NEW ROUTE"
     assert not pcb.with_name(pcb.name + ".prev").exists()
 
 
