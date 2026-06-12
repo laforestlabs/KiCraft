@@ -125,7 +125,7 @@ _INVITE_CODE_RE = re.compile(r"[A-Za-z0-9_-]{3,64}")
 # /admin/core-components. The design pipeline does not consume it yet; when it
 # does, stages will resolve a block by its function_key slug (see
 # get_core_component), so renaming a seeded key is a breaking change.
-CORE_COMPONENT_CATEGORIES = ("power", "sensors", "drivers", "passives")
+CORE_COMPONENT_CATEGORIES = ("power", "sensors", "drivers", "interface", "passives")
 _FUNCTION_KEY_RE = re.compile(r"[a-z0-9][a-z0-9_-]{1,62}[a-z0-9]")
 CORE_COMPONENTS_SEED_PATH = Path(__file__).resolve().parent / "core_components_seed.json"
 # app_settings key marking the bundled seed as applied. Stays set forever, so
@@ -503,7 +503,7 @@ class AccountStore:
                 "id INTEGER PRIMARY KEY AUTOINCREMENT,"
                 "function_key TEXT NOT NULL COLLATE NOCASE UNIQUE,"  # 'ldo-3v3-1a'
                 "display_name TEXT NOT NULL,"
-                "category TEXT NOT NULL,"          # power|sensors|drivers|passives
+                "category TEXT NOT NULL,"          # one of CORE_COMPONENT_CATEGORIES
                 "qualifier TEXT,"                  # tier text, '<=500mA @ 3.3V'
                 "default_mpn TEXT NOT NULL,"       # MPN, or series name for passives
                 "default_lcsc TEXT,"               # 'C14259'; NULL for series rows

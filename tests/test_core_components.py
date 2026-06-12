@@ -30,7 +30,7 @@ def _reopen(tmp_path) -> AccountStore:
 
 def test_seed_populates_fresh_store(store):
     rows = store.list_core_components()
-    assert len(rows) >= 20
+    assert len(rows) >= 40
     assert {r["category"] for r in rows} == set(CORE_COMPONENT_CATEGORIES)
     keys = [r["function_key"] for r in rows]
     assert len(keys) == len(set(keys))
@@ -175,7 +175,7 @@ def test_list_ordering_and_filters(store):
 
 def test_seed_json_is_valid():
     entries = json.loads(CORE_COMPONENTS_SEED_PATH.read_text(encoding="utf-8"))
-    assert isinstance(entries, list) and len(entries) >= 20
+    assert isinstance(entries, list) and len(entries) >= 40
     keys = [e["function_key"] for e in entries]
     assert len(keys) == len(set(keys))
     for e in entries:
