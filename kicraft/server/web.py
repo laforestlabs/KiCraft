@@ -5891,28 +5891,43 @@ def index(prompt: str = "", project: str = ""):
 
             ui.timer(0.05, _do_open, once=True)
 
-        def _start_replace_build():
-            """LLM-free rebuild (synthesize -> place -> route -> fab) so a
-            committed placement-rules edit takes effect."""
+        def _start_replace_build(
+                message: str = ("Re-placing with your rules (place + route + "
+                                "fab, may take minutes) -- live progress is "
+                                "in the tabs.")):
+            """LLM-free rebuild (synthesize -> place -> route -> fab): after a
+            committed placement-rules edit, or directly from the Rebuild
+            button (e.g. to retry a failed board on a newer pipeline)."""
             if state["running"]:
                 ui.notify("A run is already in progress.", color="warning")
                 return
             if not state.get("ws") or not state.get("project_dir"):
                 return
             state.update(running=True, done=False, ok=None, status=None)
-            status.text = ("Re-placing with your rules (place + route + fab, "
-                           "may take minutes) -- live progress is in the tabs.")
+            status.text = message
             design_btn.disable()
             _close_layout_editor()
             threading.Thread(target=_rerun_build_worker,
                              args=(state, "build"), daemon=True).start()
 
+        def _start_rebuild():
+            _start_replace_build(
+                "Rebuilding (synthesize + place + route + fab, may take "
+                "minutes) -- live progress is in the tabs.")
+
         def _layout_editor_entry_row(label: str = "Edit layout") -> None:
-            """Buttons into the manual layout editor + placement rules,
-            tier-gated visually (the open handlers and the panels' apply
-            paths re-check server-side)."""
+            """Buttons into the manual layout editor + placement rules (both
+            tier-gated visually; the open handlers and the panels' apply
+            paths re-check server-side) + an ungated deterministic Rebuild
+            (same machinery as the original build, no LLM spend)."""
             gated = not user_may_edit_layout(user)
             with ui.row().classes("items-center gap-2 mt-1"):
+                ui.button("Rebuild board", icon="restart_alt",
+                          on_click=_start_rebuild).props("dense outline") \
+                    .tooltip("Re-run the deterministic build on the current "
+                             "design: synthesize, place, route, verify, "
+                             "export. No AI cost. Picks up pipeline fixes "
+                             "deployed since the last build.")
                 btn = ui.button(label, icon="design_services",
                                 on_click=_open_layout_editor).props("dense outline")
                 rules_btn = ui.button("Placement rules", icon="rule",
