@@ -280,3 +280,82 @@ def test_opposing_power_stubs_of_two_rails_never_meet() -> None:
                 assert not _pt_on_axis_seg(px, py, bx1, by1, bx2, by2)
             for (px, py) in ((bx1, by1), (bx2, by2)):
                 assert not _pt_on_axis_seg(px, py, ax1, ay1, ax2, ay2)
+
+
+def test_label_decollision_never_hops_to_foreign_stub() -> None:
+    # run_09's exact failure geometry: two parallel one-grid pin stubs one grid
+    # apart (ATTINY85 pins 5/6), each ending in its own net label. A body rect
+    # makes ISP_MISO's label collide at BOTH reading directions and at every
+    # point of its own stub, while the foreign stub's end is clear. The slide
+    # used to accept any wire -> the label hopped onto ISP_MOSI's stub: its own
+    # stub went dangling (pin_not_connected) and MISO merged with MOSI (two
+    # labels, one wire -- silent). The slide must stay on the label's own
+    # connected component; when nowhere on it is clear, leave the label alone.
+    from kicraft.design.synthesis.router import (
+        NetLabel,
+        RoutedSheet,
+        WireSegment,
+        _pt_on_axis_seg,
+        _resolve_label_collisions,
+    )
+
+    miso_stub = WireSegment(218.44, 156.21, 220.98, 156.21)
+    mosi_stub = WireSegment(218.44, 158.75, 220.98, 158.75)
+    routed = RoutedSheet(
+        wires=[miso_stub, mosi_stub],
+        labels=[
+            NetLabel(text="ISP_MISO", x_mm=220.98, y_mm=156.21, angle_deg=0),
+            NetLabel(text="ISP_MOSI", x_mm=220.98, y_mm=158.75, angle_deg=0),
+        ],
+    )
+    # Collides with any MISO-label rect at y=156.21 (both directions, every
+    # slide position along its own stub, and the outward extension) but clears
+    # rects anchored at y=158.75 (the foreign stub).
+    body_rects = [(205.0, 155.2, 245.0, 157.2)]
+    _resolve_label_collisions(routed, body_rects, all_pins=[])
+
+    miso = next(l for l in routed.labels if l.text == "ISP_MISO")
+    on_own = _pt_on_axis_seg(
+        miso.x_mm, miso.y_mm,
+        miso_stub.x1_mm, miso_stub.y1_mm, miso_stub.x2_mm, miso_stub.y2_mm,
+    )
+    on_foreign = _pt_on_axis_seg(
+        miso.x_mm, miso.y_mm,
+        mosi_stub.x1_mm, mosi_stub.y1_mm, mosi_stub.x2_mm, mosi_stub.y2_mm,
+    )
+    assert on_own and not on_foreign, (
+        f"ISP_MISO label left its net: anchor=({miso.x_mm},{miso.y_mm}) "
+        f"on_own={on_own} on_foreign={on_foreign}"
+    )
+    # And the two labels never share an anchor (the silent-merge signature).
+    anchors = [(l.x_mm, l.y_mm) for l in routed.labels]
+    assert len(set(anchors)) == len(anchors)
+
+
+def test_label_decollision_slides_along_own_wire() -> None:
+    # The legitimate use of the slide is preserved: a label colliding at its
+    # anchor but with clear space farther along ITS OWN wire moves there.
+    from kicraft.design.synthesis.router import (
+        GRID_MM,
+        NetLabel,
+        RoutedSheet,
+        WireSegment,
+        _pt_on_axis_seg,
+        _resolve_label_collisions,
+    )
+
+    run = WireSegment(10.0, 10.0, 10.0 + 4 * GRID_MM, 10.0)
+    routed = RoutedSheet(
+        wires=[run],
+        labels=[NetLabel(text="EN", x_mm=10.0, y_mm=10.0, angle_deg=0)],
+    )
+    # A small body sitting right of the anchor: collides at the anchor in both
+    # reading directions, clear two grids along the wire.
+    body_rects = [(9.0, 9.0, 12.0, 11.0)]
+    _resolve_label_collisions(routed, body_rects, all_pins=[])
+
+    lab = routed.labels[0]
+    assert (lab.x_mm, lab.y_mm) != (10.0, 10.0), "label did not move"
+    assert _pt_on_axis_seg(
+        lab.x_mm, lab.y_mm, run.x1_mm, run.y1_mm, run.x2_mm, run.y2_mm
+    ), "label slid off its own wire"

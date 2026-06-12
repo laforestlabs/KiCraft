@@ -332,6 +332,43 @@ def _rects_overlap(
 _LABEL_OUTWARD = {0: "right", 90: "up", 180: "left", 270: "down"}
 
 
+def _wire_component(
+    anchor_x: float, anchor_y: float, wires: list[WireSegment]
+) -> list[WireSegment]:
+    """The wires electrically reachable from (anchor_x, anchor_y).
+
+    Seeded by every wire passing through the anchor (a label binds anywhere
+    along a wire), grown via SHARED ENDPOINTS only: the router emits
+    connected runs endpoint-to-endpoint, and kicad-cli ERC does not bind a
+    wire end teeing into another wire's mid-span even under a junction (see
+    _merge_stacked_power_pins) -- so endpoint adjacency is the conservative
+    notion of "same net". Under-including only costs a slide candidate;
+    over-including would let a label hop onto a foreign net.
+    """
+    comp = [
+        w for w in wires
+        if _pt_on_axis_seg(anchor_x, anchor_y, w.x1_mm, w.y1_mm, w.x2_mm, w.y2_mm)
+    ]
+    seen = {id(w) for w in comp}
+    frontier = list(comp)
+    while frontier:
+        w = frontier.pop()
+        w_ends = ((w.x1_mm, w.y1_mm), (w.x2_mm, w.y2_mm))
+        for o in wires:
+            if id(o) in seen:
+                continue
+            o_ends = ((o.x1_mm, o.y1_mm), (o.x2_mm, o.y2_mm))
+            if any(
+                abs(ox - wx) < EPS and abs(oy - wy) < EPS
+                for (ox, oy) in o_ends
+                for (wx, wy) in w_ends
+            ):
+                seen.add(id(o))
+                comp.append(o)
+                frontier.append(o)
+    return comp
+
+
 def _resolve_label_collisions(
     routed: RoutedSheet,
     body_rects: list[tuple[float, float, float, float]],
@@ -341,12 +378,15 @@ def _resolve_label_collisions(
 
     Strategy per colliding label: (1) flip the reading direction -- the
     anchor stays on the wire, the text extends the other way; (2) slide the
-    anchor along an existing wire (it must land on one to stay attached),
-    trying both reading directions; (3) push the anchor one grid outward
-    along its stub and extend the wire so the label stays electrically
-    attached -- only when the new segment crosses no pin and its new end
-    lands on no existing wire (either would merge nets); (4) leave it: a
-    readable overlap beats a silent short.
+    anchor along its OWN net's wires -- the connected component of the
+    original anchor, never an arbitrary wire: with pin stubs one grid
+    apart, landing on a neighboring stub both abandons this label's stub
+    (dangling wire + unconnected pin) and names the neighbor's net (a
+    silent net merge -- two labels on one wire is legal KiCad); (3) push
+    the anchor one grid outward along its stub and extend the wire so the
+    label stays electrically attached -- only when the new segment crosses
+    no pin and its new end lands on no existing wire (either would merge
+    nets); (4) leave it: a readable overlap beats a silent short.
     """
     wires = routed.wires
 
@@ -363,6 +403,14 @@ def _resolve_label_collisions(
             _pt_on_axis_seg(x, y, w.x1_mm, w.y1_mm, w.x2_mm, w.y2_mm) for w in wires
         )
 
+    def other_label_anchors(lab) -> set[tuple[float, float]]:
+        return {
+            (round(l2.x_mm, 2), round(l2.y_mm, 2))
+            for s2 in (routed.labels, routed.global_labels)
+            for l2 in s2
+            if l2 is not lab
+        }
+
     slide_offsets = (
         (GRID_MM, 0.0), (-GRID_MM, 0.0), (0.0, GRID_MM), (0.0, -GRID_MM),
         (2 * GRID_MM, 0.0), (-2 * GRID_MM, 0.0), (0.0, 2 * GRID_MM), (0.0, -2 * GRID_MM),
@@ -376,10 +424,19 @@ def _resolve_label_collisions(
             if not collides(_label_rect(lab.text, lab.x_mm, lab.y_mm, flipped)):
                 store[i] = replace(lab, angle_deg=flipped)
                 continue
+            own_wires = _wire_component(lab.x_mm, lab.y_mm, wires)
+            taken = other_label_anchors(lab)
+
+            def on_own_wire(x: float, y: float) -> bool:
+                return any(
+                    _pt_on_axis_seg(x, y, w.x1_mm, w.y1_mm, w.x2_mm, w.y2_mm)
+                    for w in own_wires
+                )
+
             slid = False
             for dx, dy in slide_offsets:
                 sx, sy = lab.x_mm + dx, lab.y_mm + dy
-                if not on_wire(sx, sy):
+                if not on_own_wire(sx, sy) or (round(sx, 2), round(sy, 2)) in taken:
                     continue
                 for angle in (lab.angle_deg, flipped):
                     if not collides(_label_rect(lab.text, sx, sy, angle)):
