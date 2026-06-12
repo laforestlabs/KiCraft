@@ -1964,6 +1964,172 @@ def _align_project_clearance_to_routing(project_dir: Path, stem: str, pcb: Path)
               "to match the fine-pitch routing")
 
 
+def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
+                        project_dir: Path, pcb: Path,
+                        *, done_label: str = "BUILD COMPLETE") -> int:
+    """Steps 3-5 of the build tail: promote the routed parent to the
+    project's main PCB, gate it (no shorts, no unconnected), and export
+    the fab package. Shared by `build` and `manual-route`.
+
+    Promotion is failure-safe: the previous ``<stem>.kicad_pcb`` (when
+    one exists) is backed up before the candidate is copied in, and a
+    failed verify gate restores it, so a bad route can never clobber
+    the last good board. The candidate must sit at the real path during
+    verification because kicad-cli DRC reads netclass clearances from
+    the sibling ``<stem>.kicad_pro``.
+    """
+    # 3. Promote the routed parent to the project's main PCB.
+    routed = _find_routed_parent(project_dir)
+    if routed is None:
+        print(
+            "error: the layout engine produced no routed parent board -- the "
+            "parent compose/route failed (board not routable as placed). "
+            "Inspect .experiments/.../_search for rejected candidates.",
+            file=sys.stderr,
+        )
+        return 6
+    backup: Path | None = None
+    if pcb.is_file():
+        backup = pcb.with_name(pcb.name + ".prev")
+        shutil.copy2(pcb, backup)
+    shutil.copy2(routed, pcb)
+    print(f"[build] 3/5 promoted routed parent -> {pcb.name}")
+
+    # Align the project's netclass clearances with the (possibly fine-pitch
+    # lowered) clearance the board was routed to, so the verify gate validates
+    # against the rule FreeRouting actually used, not a wider declared one.
+    _align_project_clearance_to_routing(project_dir, stem, pcb)
+
+    # 4. Verification gate: no shorts, no unconnected.
+    gate = _verify_routed_board(pcb)
+    print(
+        f"[build] 4/5 verify: shorts={gate['shorts']} unconnected={gate['unconnected']} "
+        f"traces={gate['tracks'].get('traces', '?')}"
+    )
+    if not gate["ok"]:
+        if backup is not None:
+            os.replace(backup, pcb)
+            print(
+                f"[build]     restored previous {pcb.name} (failed candidate "
+                "not promoted)",
+                file=sys.stderr,
+            )
+        else:
+            pcb.unlink(missing_ok=True)
+        print(
+            f"error: routed board is NOT fab-ready -- shorts={gate['shorts']}, "
+            f"unconnected={gate['unconnected']}, reasons={gate['reasons']}",
+            file=sys.stderr,
+        )
+        return 7
+    if backup is not None:
+        backup.unlink(missing_ok=True)
+
+    # 5. Export the fab package (Gerbers + drill + CPL + BOM, zipped).
+    print("[build] 5/5 export fab package (Gerbers + drill + CPL + BOM) ...")
+    from kicraft.design.synthesis.fab_export import export_fab
+
+    bom_parts = [p.model_dump() for p in state.bom.parts]
+    fab = export_fab(str(pcb), str(project_dir), stem, bom_parts=bom_parts)
+
+    artifacts.routed_pcb = pcb
+    artifacts.fab_zip = Path(fab["zip"])
+    _persist_artifacts(state, state_path, artifacts)
+
+    print()
+    print(f"{done_label}: {stem}")
+    print(f"  routed PCB : {pcb}")
+    print(
+        f"  DRC        : 0 shorts, 0 unconnected "
+        f"({gate['tracks'].get('traces', '?')} traces, {gate['tracks'].get('vias', '?')} vias)"
+    )
+    print(f"  fab package: {fab['zip']}")
+    print(f"  contents   : {', '.join(fab['files'])}")
+    return 0
+
+
+def _cmd_manual_route(args: argparse.Namespace) -> int:
+    """Route + promote a saved manual layout, end to end.
+
+    Expects a workspace that already carries a synthesized project
+    (generated/<STEM> with the seed PCB and routed leaf artifacts) and
+    a ``.experiments/manual/manual_layout.json`` written by the layout
+    editor. Runs compose --manual-layout --route under a host-wide
+    build slot, then the same promote/verify/fab tail as `build`.
+    """
+    import subprocess
+
+    from kicraft.build_slots import build_slot
+
+    from .models import ArtifactPaths
+
+    state_path = Path(args.state)
+    out_dir = Path(args.out_dir)
+    try:
+        state = _load_state(state_path)
+    except ValidationError as e:
+        print(f"schema validation failed:\n{e}", file=sys.stderr)
+        return 2
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"could not read {state_path}: {e}", file=sys.stderr)
+        return 2
+
+    if state.bom is None:
+        print("error: manual-route needs a staged state with a BOM.",
+              file=sys.stderr)
+        return 3
+    if state.project_stem and out_dir.name != state.project_stem:
+        out_dir = out_dir / state.project_stem
+    stem = state.project_stem
+    project_dir = out_dir
+    pcb = project_dir / f"{stem}.kicad_pcb"
+    manual_layout = project_dir / ".experiments" / "manual" / "manual_layout.json"
+    if not manual_layout.is_file():
+        print(f"error: no saved manual layout at {manual_layout}; save a "
+              "layout in the editor first.", file=sys.stderr)
+        return 3
+    if not pcb.is_file():
+        print(f"error: no synthesized board at {pcb}; run a build first.",
+              file=sys.stderr)
+        return 3
+
+    # Persisted artifact paths come from the ORIGINAL build's workspace;
+    # in a rehydrated workspace they're stale, so rebuild from disk.
+    artifacts = state.artifacts
+    if artifacts is None or Path(artifacts.project_dir) != project_dir:
+        artifacts = ArtifactPaths(
+            project_dir=project_dir,
+            project_stem=stem,
+            root_sch=project_dir / f"{stem}.kicad_sch",
+            leaf_schs=sorted(
+                p for p in project_dir.glob("*.kicad_sch") if p.stem != stem
+            ),
+            kicad_pro=project_dir / f"{stem}.kicad_pro",
+            autoplacer_json=project_dir / f"{stem}_autoplacer.json",
+        )
+
+    with build_slot(echo=lambda line: print(line, flush=True)):
+        print("[build] 2/5 route the saved manual layout (FreeRouting) -- "
+              "may take minutes ...")
+        cmd = [
+            sys.executable, "-m", "kicraft.cli.compose_subcircuits",
+            "--project", str(project_dir),
+            "--parent", "/",
+            "--pcb", str(pcb),
+            "--manual-layout", str(manual_layout),
+            "--output", str(project_dir / ".experiments" / "manual"
+                            / "manual_routed.json"),
+            "--route",
+        ]
+        rc = subprocess.run(cmd, cwd=str(project_dir)).returncode
+        if rc != 0:
+            print(f"error: manual compose/route exited {rc}", file=sys.stderr)
+            return 6
+        return _promote_verify_fab(state, state_path, artifacts, stem,
+                                   project_dir, pcb,
+                                   done_label="MANUAL ROUTE COMPLETE")
+
+
 def _cmd_build(args: argparse.Namespace) -> int:
     state_path = Path(args.state)
     out_dir = Path(args.out_dir)
@@ -2060,58 +2226,9 @@ def _layout_route_fab(args, state, state_path, artifacts, results,
         print(f"error: layout/route engine exited {rc}", file=sys.stderr)
         return 6
 
-    # 3. Promote the routed parent to the project's main PCB.
-    routed = _find_routed_parent(project_dir)
-    if routed is None:
-        print(
-            "error: the layout engine produced no routed parent board -- the "
-            "parent compose/route failed (board not routable as placed). "
-            "Inspect .experiments/.../_search for rejected candidates.",
-            file=sys.stderr,
-        )
-        return 6
-    shutil.copy2(routed, pcb)
-    print(f"[build] 3/5 promoted routed parent -> {pcb.name}")
-
-    # Align the project's netclass clearances with the (possibly fine-pitch
-    # lowered) clearance the board was routed to, so the verify gate validates
-    # against the rule FreeRouting actually used, not a wider declared one.
-    _align_project_clearance_to_routing(project_dir, stem, pcb)
-
-    # 4. Verification gate: no shorts, no unconnected.
-    gate = _verify_routed_board(pcb)
-    print(
-        f"[build] 4/5 verify: shorts={gate['shorts']} unconnected={gate['unconnected']} "
-        f"traces={gate['tracks'].get('traces', '?')}"
-    )
-    if not gate["ok"]:
-        print(
-            f"error: routed board is NOT fab-ready -- shorts={gate['shorts']}, "
-            f"unconnected={gate['unconnected']}, reasons={gate['reasons']}",
-            file=sys.stderr,
-        )
-        return 7
-
-    # 5. Export the fab package (Gerbers + drill + CPL + BOM, zipped).
-    print("[build] 5/5 export fab package (Gerbers + drill + CPL + BOM) ...")
-    from kicraft.design.synthesis.fab_export import export_fab
-
-    bom_parts = [p.model_dump() for p in state.bom.parts]
-    fab = export_fab(str(pcb), str(project_dir), stem, bom_parts=bom_parts)
-
-    artifacts.routed_pcb = pcb
-    artifacts.fab_zip = Path(fab["zip"])
-    _persist_artifacts(state, state_path, artifacts)
-
-    print()
-    print(f"BUILD COMPLETE: {stem}")
-    print(f"  routed PCB : {pcb}")
-    print(
-        f"  DRC        : 0 shorts, 0 unconnected "
-        f"({gate['tracks'].get('traces', '?')} traces, {gate['tracks'].get('vias', '?')} vias)"
-    )
-    print(f"  fab package: {fab['zip']}")
-    print(f"  contents   : {', '.join(fab['files'])}")
+    rc = _promote_verify_fab(state, state_path, artifacts, stem, project_dir, pcb)
+    if rc != 0:
+        return rc
 
     if not args.no_archive:
         archive_root = (
@@ -2421,6 +2538,20 @@ def main(argv: list[str] | None = None) -> int:
         help="skip the post-build session archive",
     )
     p_build.set_defaults(func=_cmd_build)
+
+    p_mroute = sub.add_parser(
+        "manual-route",
+        help=(
+            "route + promote a saved manual layout "
+            "(.experiments/manual/manual_layout.json) and export the fab "
+            "package; needs a previously synthesized workspace"
+        ),
+    )
+    p_mroute.add_argument("state", help="path to state.json")
+    p_mroute.add_argument(
+        "out_dir", help="output directory (project_stem appended if absent)"
+    )
+    p_mroute.set_defaults(func=_cmd_manual_route)
 
     p_prep = sub.add_parser(
         "stage-prep",
