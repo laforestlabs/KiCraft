@@ -19,6 +19,7 @@ from typing import Any
 from kicraft.autoplacer.brain.types import Point
 from kicraft.layout_editor.leaves import LeafInfo
 from kicraft.layout_editor.model import (
+    DEFAULT_MOUNTING_HOLE_SCREW,
     MOUNTING_HOLE_CORNERS,
     ManualLayout,
     ManualLeafPlacement,
@@ -26,6 +27,9 @@ from kicraft.layout_editor.model import (
     ManualParentLocalPlacement,
     save_manual_layout,
 )
+from kicraft.layout_editor.outline import OutlineSpec
+
+_RECT_SHAPE = {"shape": "rect", "corner_radius_mm": 0.0, "chamfer_mm": 0.0}
 
 
 DEFAULT_OUTLINE_W_MM = 80.0
@@ -46,7 +50,7 @@ def load_initial_layout(
     if saved.is_file():
         try:
             return _layout_to_canvas(json.loads(saved.read_text(encoding="utf-8")), leaves)
-        except (OSError, json.JSONDecodeError, KeyError):
+        except (OSError, json.JSONDecodeError, KeyError, ValueError):
             pass
 
     auto = _find_latest_auto_layout(experiments_dir)
@@ -82,13 +86,16 @@ def save_manual_layout_json(
             )
         )
 
-    outline_raw = payload.get("board_outline") or {}
-    min_pt = Point(
-        float(outline_raw["min"]["x"]), float(outline_raw["min"]["y"])
-    )
-    max_pt = Point(
-        float(outline_raw["max"]["x"]), float(outline_raw["max"]["y"])
-    )
+    outline_raw = payload.get("outline")
+    if outline_raw:
+        outline = OutlineSpec.from_dict(outline_raw)
+    else:
+        # Legacy canvas payload: rectangular board_outline only.
+        legacy = payload.get("board_outline") or {}
+        outline = OutlineSpec.rect(
+            Point(float(legacy["min"]["x"]), float(legacy["min"]["y"])),
+            Point(float(legacy["max"]["x"]), float(legacy["max"]["y"])),
+        )
 
     parent_local = []
     for entry in payload.get("parent_local", []) or []:
@@ -115,6 +122,7 @@ def save_manual_layout_json(
                     pos=Point(
                         float(entry["pos"]["x"]), float(entry["pos"]["y"])
                     ),
+                    screw=str(entry.get("screw", DEFAULT_MOUNTING_HOLE_SCREW)),
                 )
             )
         except (KeyError, TypeError, ValueError):
@@ -122,7 +130,7 @@ def save_manual_layout_json(
 
     layout = ManualLayout(
         placements=placements,
-        board_outline=(min_pt, max_pt),
+        outline=outline,
         parent_local=parent_local,
         mounting_holes=mounting_holes,
     )
@@ -250,6 +258,7 @@ def _seeded_grid(leaves: list[LeafInfo]) -> dict[str, Any]:
                 "min": {"x": 0.0, "y": 0.0},
                 "max": {"x": DEFAULT_OUTLINE_W_MM, "y": DEFAULT_OUTLINE_H_MM},
             },
+            "outline_shape": dict(_RECT_SHAPE),
             "mounting_holes": [],
         }
     cols = max(1, int(math.ceil(math.sqrt(len(leaves)))))
@@ -277,6 +286,7 @@ def _seeded_grid(leaves: list[LeafInfo]) -> dict[str, Any]:
             "min": {"x": 0.0, "y": 0.0},
             "max": {"x": w, "y": h},
         },
+        "outline_shape": dict(_RECT_SHAPE),
         "mounting_holes": [],
     }
 
@@ -346,26 +356,31 @@ def _auto_layout_to_canvas(
     except (KeyError, TypeError, ValueError):
         outline = fallback["board_outline"]
 
-    return {"placements": placements, "board_outline": outline, "mounting_holes": []}
+    return {
+        "placements": placements,
+        "board_outline": outline,
+        "outline_shape": dict(_RECT_SHAPE),
+        "mounting_holes": [],
+    }
 
 
 def _layout_to_canvas(
     payload: dict[str, Any], leaves: list[LeafInfo]
 ) -> dict[str, Any]:
-    """Map a saved manual_layout.json onto canvas state."""
-    placements_in = payload.get("placements") or []
-    by_path: dict[str, dict[str, Any]] = {}
-    for e in placements_in:
-        ip = str(e.get("instance_path", ""))
-        origin = e.get("origin") or {}
-        by_path[ip] = {
-            "instance_path": ip,
-            "origin": {
-                "x": float(origin.get("x", 0.0)),
-                "y": float(origin.get("y", 0.0)),
-            },
-            "rotation": float(e.get("rotation", 0.0)),
+    """Map a saved manual_layout.json (v1 or v2) onto canvas state.
+
+    Raises ``ValueError`` on a malformed payload; the caller falls
+    back to the auto layout / seeded grid.
+    """
+    layout = ManualLayout.from_dict(payload)
+    by_path = {
+        p.instance_path: {
+            "instance_path": p.instance_path,
+            "origin": {"x": p.origin.x, "y": p.origin.y},
+            "rotation": float(p.rotation),
         }
+        for p in layout.placements
+    }
 
     fallback = _seeded_grid(leaves)
     fallback_by_path = {p["instance_path"]: p for p in fallback["placements"]}
@@ -374,44 +389,26 @@ def _layout_to_canvas(
     for lf in leaves:
         placements.append(by_path.get(lf.instance_path, fallback_by_path[lf.instance_path]))
 
-    outline_in = payload.get("board_outline") or {}
-    try:
-        outline = {
-            "min": {
-                "x": float(outline_in["min"]["x"]),
-                "y": float(outline_in["min"]["y"]),
-            },
-            "max": {
-                "x": float(outline_in["max"]["x"]),
-                "y": float(outline_in["max"]["y"]),
-            },
-        }
-    except (KeyError, TypeError, ValueError):
-        outline = fallback["board_outline"]
-
-    holes_in = payload.get("mounting_holes") or []
-    holes_out: list[dict[str, Any]] = []
-    for h in holes_in:
-        try:
-            corner = h.get("corner")
-            if corner is not None and corner not in MOUNTING_HOLE_CORNERS:
-                corner = None
-            holes_out.append(
-                {
-                    "index": int(h.get("index", len(holes_out))),
-                    "corner": corner,
-                    "inset_mm": float(h.get("inset_mm", 5.0)),
-                    "pos": {
-                        "x": float(h.get("pos", {}).get("x", 0.0)),
-                        "y": float(h.get("pos", {}).get("y", 0.0)),
-                    },
-                }
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
-
+    spec = layout.outline
     return {
         "placements": placements,
-        "board_outline": outline,
-        "mounting_holes": holes_out,
+        "board_outline": {
+            "min": {"x": spec.min_pt.x, "y": spec.min_pt.y},
+            "max": {"x": spec.max_pt.x, "y": spec.max_pt.y},
+        },
+        "outline_shape": {
+            "shape": spec.shape,
+            "corner_radius_mm": spec.corner_radius_mm,
+            "chamfer_mm": spec.chamfer_mm,
+        },
+        "mounting_holes": [
+            {
+                "index": h.index,
+                "corner": h.corner,
+                "inset_mm": h.inset_mm,
+                "pos": {"x": h.pos.x, "y": h.pos.y},
+                "screw": h.screw,
+            }
+            for h in layout.mounting_holes
+        ],
     }

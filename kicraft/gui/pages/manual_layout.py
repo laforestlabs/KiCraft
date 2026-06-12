@@ -113,6 +113,10 @@ def manual_layout_page() -> None:
             initial_h = float(initial["board_outline"]["max"]["y"]) - float(
                 initial["board_outline"]["min"]["y"]
             )
+            initial_shape = dict(
+                initial.get("outline_shape")
+                or {"shape": "rect", "corner_radius_mm": 0.0, "chamfer_mm": 0.0}
+            )
             with ui.row().classes("items-center gap-2 mt-1"):
                 ui.label("Outline").classes("text-xs text-gray-400")
                 width_input = ui.number(
@@ -130,6 +134,49 @@ def manual_layout_page() -> None:
                     step=0.5,
                     format="%.2f",
                 ).classes("w-24").props("dense")
+                shape_select = ui.select(
+                    options={
+                        "rect": "Rectangle",
+                        "rounded_rect": "Rounded",
+                        "chamfered_rect": "Chamfered",
+                        "circle": "Circle",
+                    },
+                    value=initial_shape.get("shape", "rect"),
+                    label="Shape",
+                ).classes("w-36").props("dense options-dense")
+                shape_param_input = ui.number(
+                    "Radius/chamfer (mm)",
+                    value=float(
+                        initial_shape.get("corner_radius_mm")
+                        or initial_shape.get("chamfer_mm")
+                        or 3.0
+                    ),
+                    min=0.5,
+                    step=0.5,
+                    format="%.1f",
+                ).classes("w-36").props("dense")
+                if initial_shape.get("shape") not in ("rounded_rect", "chamfered_rect"):
+                    shape_param_input.set_visibility(False)
+
+            def _push_shape_to_canvas() -> None:
+                shape = str(shape_select.value or "rect")
+                param = float(shape_param_input.value or 0.0)
+                spec = {
+                    "shape": shape,
+                    "corner_radius_mm": param if shape == "rounded_rect" else 0.0,
+                    "chamfer_mm": param if shape == "chamfered_rect" else 0.0,
+                }
+                shape_param_input.set_visibility(
+                    shape in ("rounded_rect", "chamfered_rect")
+                )
+                ui.run_javascript(
+                    f"window.manualLayoutCanvases['{canvas_id}'] && "
+                    f"window.manualLayoutCanvases['{canvas_id}']"
+                    f".setOutlineShape({json.dumps(spec)})"
+                )
+
+            shape_select.on_value_change(lambda _e: _push_shape_to_canvas())
+            shape_param_input.on_value_change(lambda _e: _push_shape_to_canvas())
 
             def _push_size_to_canvas() -> None:
                 w = float(width_input.value or 0)
