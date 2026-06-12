@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
 
 from nicegui import ui
 
@@ -24,6 +23,11 @@ from kicraft.layout_editor import (
     load_initial_layout,
     run_manual_compose,
     save_manual_layout_json,
+)
+from kicraft.layout_editor.nicegui_panels import (
+    compose_result_panel,
+    mounting_hole_panel,
+    view_options_panel,
 )
 
 from ..state import get_state
@@ -267,9 +271,9 @@ def manual_layout_page() -> None:
             f"window.manualLayoutCanvases['{canvas_id}'].reset()"
         )).props("flat")
 
-    _mounting_hole_panel(canvas_id, initial.get("mounting_holes") or [])
+    mounting_hole_panel(canvas_id, initial.get("mounting_holes") or [])
 
-    _view_options_panel(canvas_id)
+    view_options_panel(canvas_id)
 
     def _on_open_in_kicad() -> None:
         pcb = find_latest_parent_pcb(state.experiments_dir)
@@ -354,7 +358,7 @@ def manual_layout_page() -> None:
         finally:
             save_btn.props(remove="loading")
 
-        _render_drc_panel(drc_card, result)
+        compose_result_panel(drc_card, result)
         if result.get("rc") == 0:
             status_label.set_text("save + stamp ok; ready to route")
             route_btn.props(remove="disable")
@@ -388,7 +392,7 @@ def manual_layout_page() -> None:
             route_btn.props(remove="loading disable")
             save_btn.props(remove="disable")
 
-        _render_drc_panel(drc_card, result)
+        compose_result_panel(drc_card, result)
         if result.get("rc") == 0:
             status_label.set_text(
                 f"route ok in {result.get('elapsed_s', 0):.1f}s; "
@@ -462,44 +466,6 @@ def _legend(card: ui.card, leaves: list[LeafInfo]) -> None:
                 ).classes("text-xs text-gray-500 ml-auto")
 
 
-def _render_drc_panel(card: ui.card, result: dict[str, Any]) -> None:
-    """Show stamp_drc / routing summary in the panel below the canvas."""
-    card.clear()
-    card.classes(remove="hidden")
-    with card:
-        ui.label("Compose Result").classes("text-sm font-bold mb-1")
-        rc = result.get("rc")
-        rc_color = "text-green-400" if rc == 0 else "text-red-400"
-        ui.label(f"rc={rc}, elapsed={result.get('elapsed_s', 0):.1f}s").classes(
-            f"text-xs {rc_color}"
-        )
-
-        drc = result.get("stamp_drc") or {}
-        if drc:
-            with ui.row().classes("gap-4 mt-2"):
-                _drc_pill("shorts", int(drc.get("shorts", 0)))
-                _drc_pill("clearance", int(drc.get("clearance", 0)))
-                _drc_pill("unconnected", int(drc.get("unconnected", 0)))
-                _drc_pill("copper-edge", int(drc.get("copper_edge_clearance", 0)))
-
-        log_tail = result.get("log_tail") or ""
-        if log_tail:
-            ui.label("Log (tail)").classes("text-xs uppercase text-gray-400 mt-3")
-            ui.html(
-                f'<pre class="text-[11px] text-gray-400 bg-slate-900/50 '
-                f'p-2 rounded overflow-x-auto whitespace-pre-wrap">'
-                f'{_html_escape(log_tail)}</pre>'
-            )
-
-
-def _drc_pill(label: str, count: int) -> None:
-    color = "bg-green-900/40 text-green-300" if count == 0 else "bg-red-900/40 text-red-300"
-    ui.html(
-        f'<span class="px-2 py-1 rounded text-xs {color}">'
-        f'{label}: {count}</span>'
-    )
-
-
 def _max_leaf_mtime(experiments_dir: Path) -> float:
     """Latest mtime of any leaf's solved_layout.json or routed pcb.
 
@@ -524,228 +490,3 @@ def _max_leaf_mtime(experiments_dir: Path) -> float:
                 except OSError:
                     pass
     return latest
-
-
-def _html_escape(s: str) -> str:
-    return (
-        s.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
-
-
-_MOUNTING_HOLE_CORNER_OPTIONS = {
-    "": "None (unpinned)",
-    "top-left": "Top-Left",
-    "top-right": "Top-Right",
-    "bottom-left": "Bottom-Left",
-    "bottom-right": "Bottom-Right",
-}
-_MOUNTING_HOLE_SCREW_OPTIONS = ("M2", "M2.5", "M3", "M4")
-# Default cycling order so a new hole picks up a sensible corner.
-_DEFAULT_CORNER_CYCLE = (
-    "top-left",
-    "bottom-right",
-    "top-right",
-    "bottom-left",
-)
-
-
-def _mounting_hole_panel(canvas_id: str, initial_holes: list[dict]) -> None:
-    """Collapsible expander to declare N mounting holes and their corners.
-
-    State lives in a Python list mirrored to the canvas via
-    ``setMountingHoles``. The canvas re-pegs each pinned hole to the
-    outline's corner + inset on every render, so the user can resize
-    the outline and see the holes follow.
-    """
-    state: list[dict] = []
-    for i, h in enumerate(initial_holes):
-        corner = h.get("corner")
-        if corner not in _MOUNTING_HOLE_CORNER_OPTIONS:
-            corner = None
-        screw = h.get("screw")
-        if screw not in _MOUNTING_HOLE_SCREW_OPTIONS:
-            screw = "M3"
-        state.append(
-            {
-                "index": int(h.get("index", i)),
-                "corner": corner,
-                "inset_mm": float(h.get("inset_mm", 5.0)),
-                "screw": screw,
-            }
-        )
-
-    with ui.expansion(
-        "Mounting Holes",
-        icon="circle",
-        value=bool(state),
-    ).classes("w-full mt-4 bg-slate-800/40 rounded"):
-        with ui.row().classes("items-center gap-3 px-2 pt-2"):
-            count_input = ui.number(
-                "Count",
-                value=len(state),
-                min=0,
-                max=8,
-                step=1,
-                format="%d",
-            ).classes("w-24")
-            ui.label(
-                "Each hole pegs to the named corner with the given inset; "
-                "set corner to 'None' to skip the peg."
-            ).classes("text-xs text-gray-400")
-        rows_container = ui.column().classes("w-full px-2 pb-2 gap-1")
-
-        def _push_to_canvas() -> None:
-            ui.run_javascript(
-                f"window.manualLayoutCanvases['{canvas_id}'] && "
-                f"window.manualLayoutCanvases['{canvas_id}']"
-                f".setMountingHoles({json.dumps(state)})"
-            )
-
-        def _rebuild() -> None:
-            rows_container.clear()
-            with rows_container:
-                for i, h in enumerate(state):
-                    _build_hole_row(i, h, _push_to_canvas)
-            _push_to_canvas()
-
-        def _on_count_change(e: Any) -> None:
-            n = max(0, min(8, int(e.value or 0)))
-            while len(state) < n:
-                idx = len(state)
-                state.append(
-                    {
-                        "index": idx,
-                        "corner": _DEFAULT_CORNER_CYCLE[
-                            idx % len(_DEFAULT_CORNER_CYCLE)
-                        ],
-                        "inset_mm": 5.0,
-                        "screw": "M3",
-                    }
-                )
-            while len(state) > n:
-                state.pop()
-            _rebuild()
-
-        count_input.on_value_change(_on_count_change)
-        _rebuild()
-
-
-def _view_options_panel(canvas_id: str) -> None:
-    """Collapsible View options panel at the bottom of the manual layout tab.
-
-    Toggles plus a spacing input that propagate to the canvas controller
-    via ``setViewOptions(opts)``. Defaults match the historical canvas
-    behavior (grid on, snap on, 0 mm gap) so flipping the expansion open
-    without changing anything is a no-op. The spacing field defaults to
-    1 mm so flipping it on visibly opens up gaps between snapped leaves.
-    """
-    options: dict[str, Any] = {
-        "show_grid": True,
-        "snap_enabled": True,
-        "snap_spacing_mm": 1.0,
-    }
-
-    def _push() -> None:
-        ui.run_javascript(
-            f"window.manualLayoutCanvases['{canvas_id}'] && "
-            f"window.manualLayoutCanvases['{canvas_id}']"
-            f".setViewOptions({json.dumps(options)})"
-        )
-
-    def _on_grid_change(e: Any) -> None:
-        options["show_grid"] = bool(e.value)
-        _push()
-
-    def _on_snap_change(e: Any) -> None:
-        options["snap_enabled"] = bool(e.value)
-        _push()
-
-    def _on_spacing_change(e: Any) -> None:
-        try:
-            options["snap_spacing_mm"] = max(0.0, float(e.value or 0))
-        except (TypeError, ValueError):
-            options["snap_spacing_mm"] = 0.0
-        _push()
-
-    with ui.expansion(
-        "View options",
-        icon="visibility",
-        value=False,
-    ).classes("w-full mt-4 bg-slate-800/40 rounded"):
-        with ui.column().classes("w-full px-2 py-2 gap-2"):
-            ui.switch(
-                "Show grid",
-                value=options["show_grid"],
-                on_change=_on_grid_change,
-            )
-            with ui.row().classes("items-center gap-3"):
-                ui.switch(
-                    "Snap leafs together",
-                    value=options["snap_enabled"],
-                    on_change=_on_snap_change,
-                )
-                ui.number(
-                    "Spacing (mm)",
-                    value=options["snap_spacing_mm"],
-                    min=0,
-                    step=0.1,
-                    format="%.2f",
-                    on_change=_on_spacing_change,
-                ).classes("w-32")
-
-    # Push the initial values once the canvas JS has had a chance to
-    # mount -- the panel renders before the IIFE registers
-    # window.manualLayoutCanvases[canvas_id], so a synchronous push
-    # would silently no-op via the `&& ...` guard. once=True so it
-    # self-destructs after firing; no cleanup needed.
-    ui.timer(0.3, _push, once=True)
-
-
-def _build_hole_row(i: int, hole: dict, on_change) -> None:
-    """One H{N+1} row: corner dropdown + screw size + inset input."""
-    with ui.row().classes("items-center gap-2"):
-        ui.label(f"H{i + 1}").classes("text-xs text-gray-400 w-8")
-        sel = ui.select(
-            options=_MOUNTING_HOLE_CORNER_OPTIONS,
-            value=hole["corner"] or "",
-            label="Corner",
-        ).classes("w-44")
-
-        def _on_corner(e: Any, _hole=hole) -> None:
-            v = str(e.value or "")
-            _hole["corner"] = v if v in _MOUNTING_HOLE_CORNER_OPTIONS and v else None
-            on_change()
-
-        sel.on_value_change(_on_corner)
-
-        screw_sel = ui.select(
-            options=list(_MOUNTING_HOLE_SCREW_OPTIONS),
-            value=hole.get("screw", "M3"),
-            label="Screw",
-        ).classes("w-24")
-
-        def _on_screw(e: Any, _hole=hole) -> None:
-            v = str(e.value or "M3")
-            _hole["screw"] = v if v in _MOUNTING_HOLE_SCREW_OPTIONS else "M3"
-            on_change()
-
-        screw_sel.on_value_change(_on_screw)
-
-        inset = ui.number(
-            "Inset (mm)",
-            value=hole["inset_mm"],
-            min=0,
-            step=0.5,
-            format="%.2f",
-        ).classes("w-32")
-
-        def _on_inset(e: Any, _hole=hole) -> None:
-            try:
-                _hole["inset_mm"] = max(0.0, float(e.value))
-            except (TypeError, ValueError):
-                return
-            on_change()
-
-        inset.on_value_change(_on_inset)

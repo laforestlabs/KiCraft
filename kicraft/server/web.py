@@ -51,6 +51,11 @@ from .accounts import (
 from .config import LEGAL_VERSION, Settings, default_legal_dir
 from .examples import CHIP_PROMPTS, EXAMPLE_PROMPTS
 from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView, kicanvas_head
+from .layout_panel import (
+    LayoutEditorPanel,
+    leaf_artifacts_exist,
+    user_may_edit_layout,
+)
 from .mailer import send_reset_email
 from ..parts_library import PART_NAME_RE, Tier
 from ..parts_library import jlcparts
@@ -85,6 +90,15 @@ from .stagetabs import StageTabs, demo_events
 
 # Self-host the KiCanvas ES module bundle so the browser fetches it same-origin.
 app.add_static_files("/static", str(KICANVAS_ASSET.parent))
+
+# Shared manual-layout canvas controller (kicraft.layout_editor); the editor
+# bootstrap loads it from this mount on first use.
+from kicraft.layout_editor.canvas import (  # noqa: E402
+    DEFAULT_ASSET_MOUNT as _LAYOUT_ASSET_MOUNT,
+    STATIC_DIR as _LAYOUT_STATIC_DIR,
+)
+
+app.add_static_files(_LAYOUT_ASSET_MOUNT, str(_LAYOUT_STATIC_DIR))
 
 # Prebuilt sample projects (preview renders + raw KiCad files) for the public
 # landing showcase and the logged-in explorer. Public on purpose: these are
@@ -1476,6 +1490,10 @@ def _fresh_run_state() -> dict:
         "events": [], "running": False, "done": False, "ok": None,
         "spend": None, "zip": None, "ws": None, "token": None,
         "project_dir": None, "stem": None, "pcb_ready": False,
+        # True only for a REOPENED project whose persisted status is
+        # "failed" (a live failure sets ok=False instead); the rescue
+        # manual-layout CTA keys on either signal.
+        "failed": False,
         "user_id": None, "project_id": None, "brief": "",
         "status": None, "awaiting_input": False, "questions": [],
         "prices_rev": 0,
@@ -4986,7 +5004,11 @@ def index(prompt: str = "", project: str = ""):
                     leaf_progress_sig=None, questions_rendered=None,
                     prices_rev_seen=0, prices_loaded_ws=None,
                     account_refreshed=False, viewed_marked=False,
-                    support_prompted=False, live_sig=live_sig)
+                    support_prompted=False, live_sig=live_sig,
+                    # Manual layout editor: while True the place/route
+                    # view slot belongs to the editor and the timer must
+                    # not repaint the gallery/board over it.
+                    layout_editor=False, rescue_offered=False)
 
     _reset_view()
 
@@ -5555,6 +5577,7 @@ def index(prompt: str = "", project: str = ""):
             completed = p.status == "ok"
             state = _fresh_run_state()
             state.update(done=completed, ok=(True if completed else None),
+                         failed=(p.status == "failed"),
                          spend=p.cost_usd, zip=(p.zip_path if zip_ok else None),
                          ws=str(ws), stem=p.project_stem,
                          user_id=user.id, project_id=p.id, brief=p.brief or "",
@@ -5678,6 +5701,70 @@ def index(prompt: str = "", project: str = ""):
 
         design_btn.on_click(start)
 
+        def _close_layout_editor():
+            """Leave the manual layout editor; the render timer repaints
+            the board view (pcb_view None) or gallery on its next tick.
+            Deferred one tick: the Back button lives inside the slot
+            being cleared, and deleting the clicked element during its
+            own event dispatch is unsafe."""
+
+            def _do_close():
+                view["layout_editor"] = False
+                view["layout_panel"] = None
+                tabs.view_slot("place_route").clear()
+                view["pcb_view"] = None
+                view["pcb_mtime"] = None
+                view["run_mtime"] = None
+                view["leaf_progress_sig"] = None
+                view["rescue_offered"] = False
+
+            ui.timer(0.05, _do_close, once=True)
+
+        def _open_layout_editor():
+            if state["running"]:
+                ui.notify("Wait for the current run to finish first.",
+                          color="warning")
+                return
+            if not state["project_dir"] or not state["token"]:
+                return
+            u = _current_user()
+            if not user_may_edit_layout(u):
+                ui.notify("The layout editor needs a Pro or Max plan. "
+                          "See Pricing.", color="warning")
+                return
+            view["layout_editor"] = True
+
+            def _do_open():
+                panel = LayoutEditorPanel(
+                    project_dir=Path(state["project_dir"]),
+                    stem=state["stem"],
+                    token=state["token"],
+                    user=u,
+                    on_exit=_close_layout_editor,
+                    is_run_active=lambda: bool(state["running"]),
+                )
+                view["layout_panel"] = panel
+                slot = tabs.view_slot("place_route")
+                slot.clear()  # deletes the entry button (deferred, see above)
+                with slot:
+                    panel.render()
+
+            ui.timer(0.05, _do_open, once=True)
+
+        def _layout_editor_entry_row(label: str = "Edit layout") -> None:
+            """Button into the manual layout editor, tier-gated visually
+            (the open handler and the panel's save re-check server-side)."""
+            with ui.row().classes("items-center gap-2 mt-1"):
+                btn = ui.button(label, icon="design_services",
+                                on_click=_open_layout_editor).props("dense outline")
+                if not user_may_edit_layout(user):
+                    btn.disable()
+                    btn.tooltip("Manual layout editing (drag blocks, board "
+                                "size and shape, mounting holes) is a "
+                                "Pro/Max feature.")
+                    ui.link("Upgrade", "/pricing").classes("text-xs") \
+                        .style("color:#38bdf8")
+
         def _live_sig():
             # Includes the running flag so a run parking on a question (it stays
             # registered) still refreshes the list's status label.
@@ -5800,7 +5887,8 @@ def index(prompt: str = "", project: str = ""):
                     rs = _read_run_status(project_dir)
                     tabs.set_inspector("place_route", _inspector_spec(
                         "place_route", {}, rs, project_dir, view["build_lines"]))
-                    if not state["pcb_ready"] and state["token"]:
+                    if (not state["pcb_ready"] and state["token"]
+                            and not view.get("layout_editor")):
                         prog = _leaf_layout_progress(project_dir, state["token"])
                         sig = tuple((d["sheet_name"], d["status"]) for d in prog)
                         if prog and sig != view["leaf_progress_sig"]:
@@ -5809,7 +5897,7 @@ def index(prompt: str = "", project: str = ""):
                             slot.clear()
                             with slot:
                                 _render_leaf_gallery(prog, rs)
-                if state["pcb_ready"]:
+                if state["pcb_ready"] and not view.get("layout_editor"):
                     pcb_name = f"{state['stem']}.kicad_pcb"
                     pcb_path = project_dir / pcb_name
                     pcb_url = f"/project/{state['token']}/{pcb_name}"
@@ -5823,11 +5911,38 @@ def index(prompt: str = "", project: str = ""):
                                 [KiCanvasSource(pcb_url, pcb_name)],
                                 height="", style="height:calc(100vh - 460px);min-height:360px")
                             view["pcb_revealed"] = tabs.active() == "place_route"
+                            # Click during a still-running build is refused
+                            # by the open handler with a notify.
+                            _layout_editor_entry_row()
                     else:
                         mt = _mtime(pcb_path)
                         if mt != view["pcb_mtime"]:
                             view["pcb_mtime"] = mt
                             view["pcb_view"].refresh()
+
+                # Rescue path: the parent place/route failed (live this
+                # session, ok=False, or a reopened failed project,
+                # state["failed"]) but the individual circuit blocks
+                # routed; offer the manual layout editor so the user can
+                # finish the board by hand instead of abandoning the
+                # design.
+                if (not view.get("rescue_offered")
+                        and not view.get("layout_editor")
+                        and not state["running"]
+                        and (state.get("ok") is False or state.get("failed"))
+                        and state["token"]
+                        and leaf_artifacts_exist(project_dir)):
+                    view["rescue_offered"] = True
+                    with tabs.view_slot("place_route"):
+                        with ui.card().classes("w-full p-3").style(
+                                "border:1px solid #b45309;background:#451a03"):
+                            ui.label(
+                                "Automatic board layout failed, but the "
+                                "circuit blocks themselves routed. You can "
+                                "place them on the board yourself."
+                            ).classes("text-sm").style("color:#fcd34d")
+                            _layout_editor_entry_row(
+                                "Rescue: lay out the board manually")
 
             if state["done"]:
                 design_btn.enable()
