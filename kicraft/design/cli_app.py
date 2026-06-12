@@ -75,7 +75,10 @@ from .synthesis.validation import (
 from kicraft.parts_library import Maturity
 from kicraft.parts_library.query_log import record as _log_query
 
-KNOWN_STAGES = ("intent", "functional_spec", "architecture", "bom", "wiring")
+# `placement` is deterministic (user placement rules, no LLM); committing it
+# invalidates nothing upstream and merely requires a rebuild to take effect.
+KNOWN_STAGES = ("intent", "functional_spec", "architecture", "bom", "wiring",
+                "placement")
 
 
 _SAFE_STEM_RE = re.compile(r"[^A-Z0-9_]")
@@ -1367,6 +1370,10 @@ def _apply_slot(
         if "no_connect_pins" in slot_data:
             existing["no_connect_pins"] = slot_data["no_connect_pins"]
         state.bom = BOM.model_validate(existing)
+    elif stage == "placement":
+        from .models import PlacementSection
+
+        state.placement = PlacementSection.model_validate(slot_data)
     else:
         raise ValueError(f"unknown stage {stage!r}; expected one of {KNOWN_STAGES}")
 
@@ -1690,6 +1697,21 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     }
     if archive_warning:
         summary["archive_warning"] = archive_warning
+    # Placement rules referencing refs the BOM no longer carries are
+    # tolerated (parts churn across BOM re-runs); synthesis drops them
+    # with a warning. Surface them at commit time too so the UI can show
+    # which rules are currently inert.
+    if stage == "placement" and state.placement is not None and state.bom is not None:
+        known = {p.ref for p in state.bom.parts}
+        stale = sorted(
+            (set(state.placement.component_zones) | set(state.placement.thermal_refs))
+            - known
+        )
+        if stale:
+            summary["warnings"] = [
+                f"placement rule(s) for ref(s) not in the BOM (ignored at "
+                f"synthesis): {', '.join(stale)}"
+            ]
     print(json.dumps(summary, indent=2))
     return 0
 

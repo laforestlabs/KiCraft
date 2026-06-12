@@ -56,6 +56,7 @@ from .layout_panel import (
     leaf_artifacts_exist,
     user_may_edit_layout,
 )
+from .rules_panel import PlacementRulesPanel
 from .mailer import send_reset_email
 from ..parts_library import PART_NAME_RE, Tier
 from ..parts_library import jlcparts
@@ -1611,15 +1612,17 @@ def _drive_build_queue(ws: Path, state: dict, progress, *,
         _ACTIVE_JOBS.discard(job_id)
 
 
-def _manual_route_worker(state: dict) -> None:
-    """Route a saved manual layout through the build queue, then promote +
-    fab it (kicraft manual-route) and refresh the persisted project.
+def _rerun_build_worker(state: dict, kind: str) -> None:
+    """Re-run one deterministic job (kind='manual_route': route + promote a
+    saved manual layout; kind='build': full LLM-free rebuild, e.g. after a
+    placement-rules edit) through the build queue, then refresh the
+    persisted project.
 
     Success refreshes the durable copy (generated tree, zip, project row
     -> ok) exactly like a build, so a rescued FAILED project becomes a
     finished one. Failure leaves the durable project untouched (a bad
-    manual route must never flip a good project to failed); the user
-    sees the build log in the tab and gets the walk-away email."""
+    re-run must never flip a good project to failed); the user sees the
+    build log in the tab and gets the walk-away email."""
     ws = Path(state["ws"])
     pid = state.get("project_id")
     if pid:
@@ -1629,7 +1632,7 @@ def _manual_route_worker(state: dict) -> None:
         state["events"].append(ev)
 
     try:
-        rc = _drive_build_queue(ws, state, progress, kind="manual_route")
+        rc = _drive_build_queue(ws, state, progress, kind=kind)
         if rc != 0:
             state["ok"] = False
             return
@@ -5842,20 +5845,76 @@ def index(prompt: str = "", project: str = ""):
                            "minutes) -- live progress is in the Place/Route tab.")
             design_btn.disable()
             _close_layout_editor()
-            threading.Thread(target=_manual_route_worker, args=(state,),
-                             daemon=True).start()
+            threading.Thread(target=_rerun_build_worker,
+                             args=(state, "manual_route"), daemon=True).start()
+
+        def _open_rules_panel():
+            if state["running"]:
+                ui.notify("Wait for the current run to finish first.",
+                          color="warning")
+                return
+            if not state["project_dir"] or not state.get("ws"):
+                return
+            u = _current_user()
+            if not user_may_edit_layout(u):
+                ui.notify("Placement rules need a Pro or Max plan. "
+                          "See Pricing.", color="warning")
+                return
+            view["layout_editor"] = True  # the panel owns the view slot
+
+            def _do_open():
+                panel = PlacementRulesPanel(
+                    ws=Path(state["ws"]),
+                    project_dir=Path(state["project_dir"]),
+                    stem=state["stem"],
+                    user=u,
+                    on_exit=_close_layout_editor,
+                    on_rebuild=_start_replace_build,
+                    is_run_active=lambda: bool(state["running"]),
+                )
+                view["layout_panel"] = panel
+                slot = tabs.view_slot("place_route")
+                slot.clear()
+                with slot:
+                    panel.render()
+
+            ui.timer(0.05, _do_open, once=True)
+
+        def _start_replace_build():
+            """LLM-free rebuild (synthesize -> place -> route -> fab) so a
+            committed placement-rules edit takes effect."""
+            if state["running"]:
+                ui.notify("A run is already in progress.", color="warning")
+                return
+            if not state.get("ws") or not state.get("project_dir"):
+                return
+            state.update(running=True, done=False, ok=None, status=None)
+            status.text = ("Re-placing with your rules (place + route + fab, "
+                           "may take minutes) -- live progress is in the tabs.")
+            design_btn.disable()
+            _close_layout_editor()
+            threading.Thread(target=_rerun_build_worker,
+                             args=(state, "build"), daemon=True).start()
 
         def _layout_editor_entry_row(label: str = "Edit layout") -> None:
-            """Button into the manual layout editor, tier-gated visually
-            (the open handler and the panel's save re-check server-side)."""
+            """Buttons into the manual layout editor + placement rules,
+            tier-gated visually (the open handlers and the panels' apply
+            paths re-check server-side)."""
+            gated = not user_may_edit_layout(user)
             with ui.row().classes("items-center gap-2 mt-1"):
                 btn = ui.button(label, icon="design_services",
                                 on_click=_open_layout_editor).props("dense outline")
-                if not user_may_edit_layout(user):
+                rules_btn = ui.button("Placement rules", icon="rule",
+                                      on_click=_open_rules_panel) \
+                    .props("dense outline")
+                if gated:
                     btn.disable()
                     btn.tooltip("Manual layout editing (drag blocks, board "
                                 "size and shape, mounting holes) is a "
                                 "Pro/Max feature.")
+                    rules_btn.disable()
+                    rules_btn.tooltip("Per-component placement rules are a "
+                                      "Pro/Max feature.")
                     ui.link("Upgrade", "/pricing").classes("text-xs") \
                         .style("color:#38bdf8")
 

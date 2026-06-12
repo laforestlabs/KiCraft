@@ -510,6 +510,94 @@ class BOM(BaseModel):
         return self
 
 
+# ---------- Placement (user rules, deterministic; no LLM) ----------
+
+# Anchor vocabulary for per-component placement rules. Single source of
+# truth: the layout editor's rules layer and the web/offline UIs import
+# these (kicraft.layout_editor.rules aliases them).
+PLACEMENT_ANCHOR_VALUES: dict[str, list[str]] = {
+    "edge": ["left", "right", "top", "bottom"],
+    "corner": ["top-left", "top-right", "bottom-left", "bottom-right"],
+    "zone": [
+        "center", "top", "bottom", "left", "right",
+        "center-top", "center-bottom", "center-left", "center-right",
+        "top-left", "top-right", "bottom-left", "bottom-right",
+    ],
+}
+
+
+class PlacementBoard(BaseModel):
+    """Fixed board dimensions for the auto placer. When width/height are
+    set (and ``size_search`` is off) they land in the generated
+    autoplacer.json as board_width_mm/board_height_mm with the size
+    search disabled, so the solver fits the user's chosen board."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    width_mm: float | None = None
+    height_mm: float | None = None
+    size_search: bool = True
+
+    @field_validator("width_mm", "height_mm")
+    @classmethod
+    def _positive(cls, v: float | None) -> float | None:
+        if v is not None and v < 10.0:
+            raise ValueError("board dimensions must be >= 10 mm")
+        return v
+
+
+class PlacementSection(BaseModel):
+    """User placement rules. Deterministic (committing this section never
+    runs an LLM stage and invalidates nothing upstream); merged OVER the
+    BOM's LLM-derived hints into the generated ``<stem>_autoplacer.json``
+    at synthesis time. Refs are deliberately NOT validated against the
+    BOM here: parts churn across BOM re-runs, and a stale rule must
+    degrade to a warning at synthesis, not brick the commit."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    component_zones: dict[str, dict[str, str | float]] = Field(default_factory=dict)
+    thermal_refs: list[str] = Field(default_factory=list)
+    backside_through_hole_leaves: list[str] = Field(default_factory=list)
+    board: PlacementBoard | None = None
+
+    @model_validator(mode="after")
+    def _zone_specs_well_formed(self):
+        allowed_keys = {"edge", "corner", "zone", "rotation"}
+        for ref, spec in self.component_zones.items():
+            extra = set(spec.keys()) - allowed_keys
+            if extra:
+                raise ValueError(
+                    f"component_zones[{ref!r}]: unknown keys {sorted(extra)}; "
+                    f"allowed: {sorted(allowed_keys)}"
+                )
+            anchors = [k for k in ("edge", "corner", "zone") if k in spec]
+            if len(anchors) > 1:
+                raise ValueError(
+                    f"component_zones[{ref!r}]: at most one anchor of "
+                    f"edge/corner/zone, got {anchors}"
+                )
+            for key in anchors:
+                value = spec[key]
+                if value not in PLACEMENT_ANCHOR_VALUES[key]:
+                    raise ValueError(
+                        f"component_zones[{ref!r}].{key}: {value!r} not in "
+                        f"{PLACEMENT_ANCHOR_VALUES[key]}"
+                    )
+            if "rotation" in spec:
+                try:
+                    rot = float(spec["rotation"])
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"component_zones[{ref!r}].rotation must be a number"
+                    ) from exc
+                if not 0.0 <= rot <= 360.0:
+                    raise ValueError(
+                        f"component_zones[{ref!r}].rotation must be in 0..360"
+                    )
+        return self
+
+
 # ---------- Artifacts (set after synthesis) ----------
 
 
@@ -549,6 +637,10 @@ class ConversationState(BaseModel):
     functional_spec: FunctionalSpec | None = None
     architecture: Architecture | None = None
     bom: BOM | None = None
+    # User placement rules (deterministic; not a design stage). Edited
+    # by the web rules panel via `stage-commit placement`; consumed by
+    # write_autoplacer_json with the highest merge precedence.
+    placement: PlacementSection | None = None
     open_questions: list[Question] = Field(default_factory=list)
     history: list[ChatMsg] = Field(default_factory=list)
     artifacts: ArtifactPaths | None = None

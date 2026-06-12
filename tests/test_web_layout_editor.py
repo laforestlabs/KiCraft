@@ -201,3 +201,24 @@ async def test_failed_project_offers_rescue(harness):
     u.find("Rescue: lay out the board manually", kind=ui.button).click()
     await u.should_see("Manual layout")
     await u.should_see("Save & stamp preview")
+
+
+async def test_pro_user_opens_placement_rules_panel(harness):
+    u, web, store, acct = harness
+    store.set_tier(EMAIL, "pro")
+    _persisted_project_with_board(store, acct.id)
+
+    await _login(u)
+    await u.should_see("Placement rules")
+
+    from nicegui import ui
+    u.find("Placement rules", kind=ui.button).click()
+    await u.should_see("Apply & re-place", retries=10)
+    await u.should_see("Auto size")
+    # Grouped component rows come from the schematic; the dummy sheet
+    # parses to no components, so just the chrome is asserted here (the
+    # rules data layer itself is covered by test_gui_per_component_overrides
+    # and test_placement_section).
+
+    u.find("Back to board", kind=ui.button).click()
+    await u.should_see("Placement rules", retries=30)

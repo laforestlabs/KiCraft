@@ -215,6 +215,7 @@ def run(
         state.bom,
         library_fragments=fragments or None,
         library_leaves=library_leaves or None,
+        placement=getattr(state, "placement", None),
     )
     write_empty_pcb(project_dir, state.project_stem, state.bom)
 
