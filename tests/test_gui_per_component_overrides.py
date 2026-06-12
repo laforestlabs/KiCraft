@@ -21,13 +21,13 @@ from pathlib import Path
 
 import pytest
 
-from kicraft.gui.components.per_component import (
+from kicraft.gui.state import AppState
+from kicraft.layout_editor.rules import (
     _build_updated_config,
     _diff_dicts,
     _load_overrides_into_state,
     _set_backside_through_hole,
 )
-from kicraft.gui.state import AppState
 
 
 @pytest.fixture

@@ -15,20 +15,19 @@ from typing import Any
 
 from nicegui import ui
 
-from ..state import get_state
-from .manual_layout_canvas import (
+from kicraft.layout_editor import (
+    LeafInfo,
     build_canvas_html,
     build_canvas_init_script,
-)
-from .manual_layout_runner import (
-    LeafInfo,
     discover_leaves,
     find_latest_parent_pcb,
     load_initial_layout,
-    open_in_pcbnew,
     run_manual_compose,
     save_manual_layout_json,
 )
+
+from ..state import get_state
+from .manual_layout_runner import open_in_pcbnew
 
 
 def manual_layout_page() -> None:

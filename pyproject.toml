@@ -105,6 +105,7 @@ include = ["kicraft*"]
 [tool.setuptools.package-data]
 "kicraft.cli" = ["program.md"]
 "kicraft.eval" = ["rubric.yaml"]
+"kicraft.layout_editor" = ["static/*.js"]
 "kicraft.server" = ["core_components_seed.json"]
 
 [tool.ruff]

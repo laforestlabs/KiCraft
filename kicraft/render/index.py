@@ -7,7 +7,7 @@ PNG fresh for this leaf in this run?":
 - ``pipeline_graph._load_run_phase``       -> ``.experiments/run_phase``
 - ``pipeline_graph._mtime_passes``         -> mtime predicate
 - ``pins.is_pinned`` / ``pins.read_pins``  -> ``pins.json``
-- ``leaf_canvas_render.RENDERER_VERSION``  -> sidecar version
+- ``layout_editor.render.RENDERER_VERSION``  -> sidecar version
 
 and every consumer (the monitor, the manual layout, the inspect tool)
 re-implemented its own fallback ladder over those signals. ``RenderIndex``
