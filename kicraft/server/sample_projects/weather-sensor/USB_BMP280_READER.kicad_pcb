@@ -615,7 +615,7 @@
 			(uuid "0edd2f23-5ebe-4756-b59b-33782e166781")
 		)
 		(embedded_fonts no)
-		(model "/USB-C_SMD-TYPE-C-31-M-12_1.wrl"
+		(model "${KIPRJMOD}/3dmodels/usb-c-16p/USB-C_SMD-TYPE-C-31-M-12_1.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -2611,7 +2611,7 @@
 			(uuid "d470361d-8359-479a-a842-3019c7a63ced")
 		)
 		(embedded_fonts no)
-		(model "/SOP-8_L4.9-W3.8-P1.27-LS6.0-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/ch32v003j4m6/SOP-8_L4.9-W3.8-P1.27-LS6.0-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -3115,7 +3115,7 @@
 			(uuid "387abada-d300-48db-b469-e01e20e4559a")
 		)
 		(embedded_fonts no)
-		(model "/SOT-25-5_L2.9-W1.6-P0.95-LS2.8-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/ap2112k-3v3/SOT-25-5_L2.9-W1.6-P0.95-LS2.8-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
