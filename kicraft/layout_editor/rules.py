@@ -24,16 +24,11 @@ from typing import Any
 from kicraft.autoplacer.brain.hierarchy_parser import parse_hierarchy
 from kicraft.autoplacer.config import discover_project_config
 
-
-ANCHOR_VALUES: dict[str, list[str]] = {
-    "edge": ["left", "right", "top", "bottom"],
-    "corner": ["top-left", "top-right", "bottom-left", "bottom-right"],
-    "zone": [
-        "center", "top", "bottom", "left", "right",
-        "center-top", "center-bottom", "center-left", "center-right",
-        "top-left", "top-right", "bottom-left", "bottom-right",
-    ],
-}
+# Anchor vocabulary lives with the state schema (the placement section
+# validates against it); re-exported here for the UI layers.
+from kicraft.design.models import (  # noqa: F401  (re-export)
+    PLACEMENT_ANCHOR_VALUES as ANCHOR_VALUES,
+)
 
 ANCHOR_CHOICES = ["none", "edge", "corner", "zone"]
 

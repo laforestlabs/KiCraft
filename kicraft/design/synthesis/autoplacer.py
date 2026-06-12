@@ -67,8 +67,14 @@ def write_autoplacer_json(
     *,
     library_fragments: dict[str, Any] | None = None,
     library_leaves: dict[str, dict[str, Any]] | None = None,
+    placement=None,
 ) -> Path:
     """Write `<project_stem>_autoplacer.json` to project_dir. Returns the path.
+
+    Merge precedence, lowest to highest: library fragments < the BOM's
+    LLM-derived hints < the user's ``placement`` section. The generated
+    file is a build artifact: hand edits are overwritten on the next
+    synthesis, so durable user rules belong in ``state.placement``.
 
     Args:
         library_fragments: dict already merged from every library leaf's
@@ -77,6 +83,10 @@ def write_autoplacer_json(
             project's BOM-derived values.
         library_leaves: ``{sheet_name: InstalledLeaf.to_library_leaves_entry()}``
             written as a top-level audit record.
+        placement: the state's ``PlacementSection`` (user rules) or None.
+            Rules naming refs the BOM no longer carries are dropped with
+            a warning (parts churn across BOM re-runs; a stale rule must
+            not fail the §9.6 named-refs check).
     """
     out = project_dir / f"{project_stem}_autoplacer.json"
     body: dict[str, object] = {
@@ -118,6 +128,30 @@ def write_autoplacer_json(
     ).items():
         component_zones[ref] = spec
 
+    # User placement rules: highest precedence. Stale refs are dropped
+    # (with a warning) rather than emitted, because §9.6 fails synthesis
+    # for any autoplacer.json ref absent from the schematic.
+    backside_leaves: list[str] = []
+    if placement is not None:
+        known_refs = {p.ref for p in bom.parts}
+        dropped: list[str] = []
+        for ref, spec in (placement.component_zones or {}).items():
+            if ref in known_refs:
+                component_zones[ref] = dict(spec)
+            else:
+                dropped.append(ref)
+        for ref in placement.thermal_refs or []:
+            if ref not in known_refs:
+                dropped.append(ref)
+            elif ref not in thermal_refs:
+                thermal_refs.append(ref)
+        backside_leaves = sorted(placement.backside_through_hole_leaves or [])
+        if dropped:
+            print(
+                "[autoplacer] warning: dropping placement rule(s) for ref(s) "
+                f"not in the BOM: {', '.join(sorted(set(dropped)))}"
+            )
+
     if ic_groups:
         body["ic_groups"] = ic_groups
     if group_labels:
@@ -149,6 +183,20 @@ def write_autoplacer_json(
     if library_leaves:
         body["library_leaves"] = library_leaves
 
-    body["enable_board_size_search"] = True
+    if backside_leaves:
+        body["parent_placement"] = {
+            "backside_through_hole_leaves": backside_leaves
+        }
+
+    # Fixed board dimensions (user-chosen) pin the solver's board and
+    # disable the size search; otherwise the search stays on and derives
+    # dimensions from leaf areas.
+    board = placement.board if placement is not None else None
+    if board is not None and board.width_mm and board.height_mm:
+        body["board_width_mm"] = float(board.width_mm)
+        body["board_height_mm"] = float(board.height_mm)
+        body["enable_board_size_search"] = bool(board.size_search)
+    else:
+        body["enable_board_size_search"] = True
     out.write_text(json.dumps(body, indent=2) + "\n")
     return out

@@ -43,19 +43,17 @@ _patch_timer_context()
 from .components.pipeline_tracker import pipeline_tracker
 from .pages.design import design_page
 from .pages.leaf_library import leaf_library_page
-from .pages.manual_layout import manual_layout_page
 from .pages.monitor import monitor_page
 from .pages.setup import setup_page
 from .state import get_state
 
 
 def _mount_experiment_assets() -> None:
-    """Expose .experiments/ as /experiments/ for the manual layout canvas.
+    """Expose .experiments/ as /experiments/ for render previews.
 
-    The Manual Layout tab embeds each leaf's routed_front_all.png as
-    an SVG <image> element; the browser fetches it via this static
-    mount. Mounting at /experiments/ keeps the URL space namespaced so
-    nothing else collides with KiCraft artifact paths.
+    The monitor's pipeline graph serves per-leaf/round PNGs through
+    this static mount. Mounting at /experiments/ keeps the URL space
+    namespaced so nothing else collides with KiCraft artifact paths.
     """
     state = get_state()
     experiments_dir = state.experiments_dir
@@ -69,16 +67,7 @@ def _mount_experiment_assets() -> None:
     app.add_static_files("/experiments", str(experiments_dir))
 
 
-def _mount_layout_editor_assets() -> None:
-    """Serve the shared layout-editor static assets (canvas controller
-    JS) at the mount the bootstrap's default asset URL expects."""
-    from kicraft.layout_editor.canvas import DEFAULT_ASSET_MOUNT, STATIC_DIR
-
-    app.add_static_files(DEFAULT_ASSET_MOUNT, str(STATIC_DIR))
-
-
 _mount_experiment_assets()
-_mount_layout_editor_assets()
 
 
 def _load_json(path: Path) -> dict | None:
@@ -146,16 +135,8 @@ def index() -> None:
     ui.add_head_html(
         """
     <style>
-        /* Most tabs read better at a fixed page width; the manual
-           layout tab needs every horizontal pixel for the canvas, so
-           it overrides this with .ml-tab-panel below. */
         .nicegui-content { max-width: 1400px; margin: 0 auto; }
         .q-tab-panel { padding: 16px 0 !important; }
-        body:has(.ml-tab-panel.q-tab-panel--active) .nicegui-content {
-            max-width: none;
-            padding-left: 12px;
-            padding-right: 12px;
-        }
     </style>
     <script>
         /* Workaround for a NiceGUI Socket.IO reconnect bug.
@@ -217,12 +198,13 @@ def index() -> None:
     with ui.row().classes("w-full px-6 pb-1 border-b border-gray-800"):
         pipeline_tracker(state.project_root)
 
+    # The Manual Layout tab moved to the web app's place/route panel
+    # (kicraft.server.layout_panel); both built on kicraft.layout_editor.
     with ui.tabs().classes("w-full") as tabs:
         design_tab = ui.tab("Design", icon="schema")
         leaf_library_tab = ui.tab("Leaf Library", icon="library_books")
         setup_tab = ui.tab("Setup", icon="tune")
         monitor_tab = ui.tab("Monitor", icon="monitor")
-        manual_tab = ui.tab("Manual Layout", icon="open_with")
 
     with ui.tab_panels(tabs, value=setup_tab).classes("w-full px-4"):
         with ui.tab_panel(design_tab):
@@ -233,5 +215,3 @@ def index() -> None:
             setup_page()
         with ui.tab_panel(monitor_tab):
             monitor_page()
-        with ui.tab_panel(manual_tab).classes("ml-tab-panel"):
-            manual_layout_page()

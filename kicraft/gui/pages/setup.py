@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from nicegui import ui
 
-from ..components.per_component import per_component_panel
 from ..state import PLACEMENT_PARAMS, get_state
 from kicraft.autoplacer.config import CONFIG_SEARCH_SPACE, normalize_bounds
 
@@ -20,10 +19,12 @@ def setup_page():
         "useful as a quality signal."
     ).classes("text-sm text-gray-400 mb-6")
 
+    # The Per Component tab moved to the web app's place/route panel
+    # (kicraft.server.rules_panel, backed by the durable state.json
+    # placement section); the offline GUI keeps the engine-tuning tabs.
     with ui.tabs().classes("w-full") as tabs:
         strategy_tab = ui.tab("Run Strategy", icon="play_circle")
         placement_tab = ui.tab("Placement & Routing", icon="tune")
-        per_component_tab = ui.tab("Per Component", icon="view_list")
         hierarchy_tab = ui.tab("Hierarchy Scope", icon="account_tree")
         presets_tab = ui.tab("Presets", icon="bookmark")
 
@@ -33,9 +34,6 @@ def setup_page():
 
         with ui.tab_panel(placement_tab):
             _placement_routing_panel(state)
-
-        with ui.tab_panel(per_component_tab):
-            per_component_panel(state)
 
         with ui.tab_panel(hierarchy_tab):
             _hierarchy_panel(state)
