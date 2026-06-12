@@ -52,6 +52,7 @@ from .examples import CHIP_PROMPTS, EXAMPLE_PROMPTS
 from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView, kicanvas_head
 from .mailer import send_reset_email
 from ..parts_library import PART_NAME_RE, Tier
+from ..parts_library import jlcparts
 from .parts_catalog import (
     catalog,
     footprint_svg,
@@ -829,8 +830,10 @@ class _SourceUnavailable(Exception):
 # Bump when the pricing logic changes so persisted prices from the old logic are
 # dropped and re-fetched. v3: price LCSC ids via the easyeda.com product endpoint
 # (the JLCPCB keyword API is WAF-blocked); this also drops the frozen $0.00 caches
-# written while every lookup was returning "no match".
-_PRICE_SCHEMA = 3
+# written while every lookup was returning "no match". v4: the offline jlcparts
+# catalog adds 10/100-pc break prices and keyword pricing; drop the single-price
+# v3 caches so the breaks backfill.
+_PRICE_SCHEMA = 4
 
 # easyeda.com product endpoint: serves the same data KiCraft fetches symbols and
 # footprints from, and -- unlike jlcpcb.com's keyword-search API -- is NOT behind
@@ -875,13 +878,21 @@ def _pick_price(kind: str, query: str, results: list[dict]) -> dict | None:
     return {"unit_price": price_of(r), "lcsc": r.get("lcsc"), "stock": r.get("stock")}
 
 
-def _search_jlcpcb(query: str) -> list[dict]:
-    """JLCPCB/LCSC keyword search via easyeda2kicad. The only source for parts
-    with no LCSC id (un-vendored MPNs, generic passives); its jlcpcb.com endpoint
-    is currently WAF-blocked, so it degrades to an empty list. Network; may raise."""
-    from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
-    res = EasyedaApi().search_jlcpcb_components(keyword=query, page_size=10) or {}
-    return res.get("results") or []
+def _jlcparts_price(cid: str) -> dict | None:
+    """Price + stock + 10/100-pc breaks for an LCSC id from the offline JLC
+    catalog (no network). None when the catalog is absent or carries no
+    usable price for the part — callers fall through to the network source."""
+    part = jlcparts.lookup(cid)
+    if not part:
+        return None
+    ladder = part.get("ladder") or []
+    unit = jlcparts.price_at(ladder, 1)
+    if not unit or unit <= 0:
+        return None
+    return {"unit_price": unit, "lcsc": part["lcsc"],
+            "stock": part.get("stock") or 0,
+            "price_10": jlcparts.price_at(ladder, 10),
+            "price_100": jlcparts.price_at(ladder, 100)}
 
 
 def _easyeda_lcsc_price(cid: str) -> dict | None:
@@ -916,25 +927,22 @@ def _easyeda_lcsc_price(cid: str) -> dict | None:
 
 
 def _fetch_price(key: str) -> dict:
-    """Resolve one price key to ``{"unit_price","lcsc","stock"}``, or raise
-    ``_SourceUnavailable`` when nothing can price it right now.
+    """Resolve one price key to ``{"unit_price","lcsc","stock"}`` (plus
+    ``price_10``/``price_100`` breaks when the offline catalog has them), or
+    raise ``_SourceUnavailable`` when nothing can price it right now.
 
     ``id:`` keys (curated-library + easyeda-vendored parts, which dominate BOM
-    cost) price via the still-working easyeda.com endpoint. ``mpn:``/``kw:`` keys
-    (un-vendored MPNs, generic passives) have no LCSC id, so their only source is
-    the JLCPCB keyword search -- currently WAF-blocked."""
+    cost) price via the offline JLC catalog first (qty ladder + live stock, no
+    network), then the easyeda.com endpoint. ``mpn:``/``kw:`` keys (un-vendored
+    MPNs, generic passives) keyword-search the offline catalog; without it
+    installed they have no source (jlcpcb.com's API is WAF-blocked)."""
     kind, _, query = key.partition(":")
     if kind == "id":
-        pick = _easyeda_lcsc_price(query)
-        if pick is not None:
-            return pick
-        # easyeda carries no inline price for this C#; the only backstop (a JLCPCB
-        # keyword search by the id) is currently blocked.
-        pick = _pick_price("id", query, _search_jlcpcb(query))
+        pick = _jlcparts_price(query) or _easyeda_lcsc_price(query)
         if pick is not None:
             return pick
         raise _SourceUnavailable(f"no price source for {query}")
-    pick = _pick_price(kind, query, _search_jlcpcb(query))
+    pick = _pick_price(kind, query, jlcparts.search(query))
     if pick is None:
         raise _SourceUnavailable(f"keyword pricing unavailable for {query!r}")
     return pick
@@ -2122,6 +2130,7 @@ def profile_page():
 
     ui.dark_mode().enable()
     ui.query("body").style("background:#0b1120")
+    _mobile_head()
 
     def logout():
         for k in ("user_id", "email"):
@@ -2132,7 +2141,7 @@ def profile_page():
             .style("background:#0f172a;border-bottom:1px solid #1e293b"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
-            ui.label("your profile").classes("text-sm").style("color:#94a3b8")
+            ui.label("your profile").classes("text-sm kc-tagline").style("color:#94a3b8")
         with ui.row().classes("items-center gap-2"):
             if is_admin(user):
                 ui.button("Admin", icon="admin_panel_settings",
@@ -3823,12 +3832,13 @@ def browse_page():
 
     ui.dark_mode().enable()
     ui.query("body").style("background:#0b1120")
+    _mobile_head()
 
     with ui.header().classes("items-center justify-between") \
             .style("background:#0f172a;border-bottom:1px solid #1e293b"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
-            ui.label("community browser").classes("text-sm").style("color:#94a3b8")
+            ui.label("community browser").classes("text-sm kc-tagline").style("color:#94a3b8")
         ui.button("Back to workspace", icon="arrow_back",
                   on_click=lambda: ui.navigate.to("/")) \
             .props("flat dense no-caps color=white").classes("text-xs")
@@ -3923,12 +3933,13 @@ def public_project_page(project_id: str):
     ui.dark_mode().enable()
     ui.query("body").style("background:#0b1120")
     kicanvas_head()
+    _mobile_head()
 
     with ui.header().classes("items-center justify-between") \
             .style("background:#0f172a;border-bottom:1px solid #1e293b"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
-            ui.label("community project").classes("text-sm").style("color:#94a3b8")
+            ui.label("community project").classes("text-sm kc-tagline").style("color:#94a3b8")
         ui.button("Back to browse", icon="arrow_back",
                   on_click=lambda: ui.navigate.to("/browse")) \
             .props("flat dense no-caps color=white").classes("text-xs")
@@ -4090,12 +4101,13 @@ def samples_page():
     ui.dark_mode().enable()
     ui.query("body").style("background:#0b1120")
     kicanvas_head()
+    _mobile_head()
 
     with ui.header().classes("items-center justify-between") \
             .style("background:#0f172a;border-bottom:1px solid #1e293b"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
-            ui.label("example boards").classes("text-sm").style("color:#94a3b8")
+            ui.label("example boards").classes("text-sm kc-tagline").style("color:#94a3b8")
         ui.button("Back to workspace", icon="arrow_back",
                   on_click=lambda: ui.navigate.to("/")) \
             .props("flat dense no-caps color=white").classes("text-xs")
@@ -4154,13 +4166,20 @@ def samples_page():
                 card.on("click", lambda ss=s: open_sample(ss))
 
 
+def _mobile_head() -> None:
+    """Load the mobile/tablet-only stylesheet. Every rule in it sits under a
+    max-width media query, so desktop (>=1024px) rendering is unaffected."""
+    ui.add_head_html('<link rel="stylesheet" href="/static/kc_mobile.css">')
+
+
 def _parts_header(subtitle_btn_label: str, subtitle_btn_target: str) -> None:
     """The shared dark header for the /parts pages: brand + a single back button."""
+    _mobile_head()
     with ui.header().classes("items-center justify-between") \
             .style("background:#0f172a;border-bottom:1px solid #1e293b"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
-            ui.label("part library").classes("text-sm").style("color:#94a3b8")
+            ui.label("part library").classes("text-sm kc-tagline").style("color:#94a3b8")
         ui.button(subtitle_btn_label, icon="arrow_back",
                   on_click=lambda: ui.navigate.to(subtitle_btn_target)) \
             .props("flat dense no-caps color=white").classes("text-xs")
@@ -4350,7 +4369,8 @@ def part_detail_page(name: str):
                     with row:
                         if isinstance(res, dict):
                             for qty, val in (("1", res["unit_price"]),
-                                             ("10", None), ("100", None)):
+                                             ("10", res.get("price_10")),
+                                             ("100", res.get("price_100"))):
                                 with ui.column().classes("gap-0 items-start"):
                                     ui.label(f"@{qty} pc").classes("text-xs") \
                                         .style("color:#64748b")
@@ -4371,8 +4391,8 @@ def part_detail_page(name: str):
                 if not _fill_price():
                     timer = ui.timer(1.0,
                                      lambda: _fill_price() and timer.deactivate())
-                ui.label("Unit price from LCSC at qty 1. Live 10/100-pc break "
-                         "pricing is currently unavailable.").classes("text-xs") \
+                ui.label("LCSC pricing; 10/100-pc breaks come from the offline "
+                         "JLC catalog when it covers the part.").classes("text-xs") \
                     .style("color:#64748b")
 
         with ui.card().classes("w-full") \
@@ -4623,6 +4643,7 @@ def index(prompt: str = "", project: str = ""):
     q0 = _store().quota_status(user)
 
     kicanvas_head()
+    _mobile_head()
     ui.add_head_html('<link rel="stylesheet" href="/static/kc_onboarding.css">')
     ui.add_head_html(
         f"<script>window.KICRAFT_PROMPTS={json.dumps(EXAMPLE_PROMPTS)};"
@@ -4669,8 +4690,10 @@ def index(prompt: str = "", project: str = ""):
             .style("background:#0f172a;border-bottom:1px solid #1e293b"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
-            ui.label("design a PCB from a sentence").classes("text-sm").style("color:#94a3b8")
-        with ui.row().classes("items-center gap-3"):
+            ui.label("design a PCB from a sentence").classes("text-sm kc-tagline") \
+                .style("color:#94a3b8")
+        # Full nav row on desktop (>=1024px) ...
+        with ui.row().classes("items-center gap-3 gt-sm"):
             ui.button("Examples", icon="dashboard",
                       on_click=lambda: ui.navigate.to("/samples")) \
                 .props("flat dense no-caps color=white").classes("text-xs") \
@@ -4703,6 +4726,22 @@ def index(prompt: str = "", project: str = ""):
                 .tooltip("Profile & account settings")
             tier_badge = ui.badge(q0["label"], color="primary")
             ui.button("Log out", on_click=logout).props("flat dense color=white").classes("text-xs")
+        # ... collapsed to a badge + hamburger menu on phones/tablets (<1024px).
+        with ui.row().classes("items-center gap-2 lt-md"):
+            m_tier_badge = ui.badge(q0["label"], color="primary")
+            with ui.button(icon="menu").props("flat dense color=white"):
+                with ui.menu().props("auto-close") \
+                        .style("background:#0f172a;border:1px solid #1e293b"):
+                    ui.menu_item("Examples", lambda: ui.navigate.to("/samples"))
+                    ui.menu_item("Part library", lambda: ui.navigate.to("/parts"))
+                    ui.menu_item("Browse", lambda: ui.navigate.to("/browse"))
+                    ui.menu_item("Pricing", lambda: ui.navigate.to("/pricing"))
+                    ui.menu_item("Support", lambda: open_support_dialog(auto=False))
+                    if is_admin(user):
+                        ui.menu_item("Admin", lambda: ui.navigate.to("/admin"))
+                    ui.separator()
+                    ui.menu_item(user.email, lambda: ui.navigate.to("/profile"))
+                    ui.menu_item("Log out", logout)
 
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1600px"):
         try:
@@ -5259,6 +5298,7 @@ def index(prompt: str = "", project: str = ""):
                 quota_label.text = (f"{q['label']} tier: {q['remaining']} of {q['limit']} "
                                     f"designs left this {period}.")
             tier_badge.text = q["label"]
+            m_tier_badge.text = q["label"]
             # Quietly offer the paid tiers to free users; insist once the
             # quota is spent (the Design button below goes dark with it).
             upgrade_link.set_visibility(
@@ -5602,10 +5642,11 @@ if os.environ.get("KICRAFT_WEB_DEMO"):
         Registered only when KICRAFT_WEB_DEMO is set (off in production)."""
         ui.dark_mode().enable()
         ui.query("body").style("background:#0b1120")
+        _mobile_head()
         with ui.header().classes("items-center justify-between") \
                 .style("background:#0f172a;border-bottom:1px solid #1e293b"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
-            ui.label("design preview (demo)").classes("text-sm").style("color:#94a3b8")
+            ui.label("design preview (demo)").classes("text-sm kc-tagline").style("color:#94a3b8")
         with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1600px"):
             ui.label("Replaying a canned design to preview the per-stage tabs.") \
                 .classes("text-sm").style("color:#94a3b8")

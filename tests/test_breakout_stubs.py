@@ -164,8 +164,10 @@ def test_radial_escape_skipped_when_no_safe_room(tmp_path):
 def test_radial_escape_falls_back_to_axis_direction(tmp_path):
     # Connector-row shape: the radial direction (footprint centre -> pad,
     # here (0.6, 0.8)) is hemmed in by a neighbour sitting just off the ray
-    # (the USB-C CC2 signature), but the +x axis escape is wide open. The
-    # stub must fall back to an axis direction instead of being skipped.
+    # (the USB-C CC2 signature). The stub must fall back to an axis direction
+    # instead of being skipped. The strict (pair-clearance) margin round also
+    # rejects +x -- it would pass only 0.147 mm from N0, inside the 0.153
+    # clearance -- so the first STRICTLY clear axis is -x, at full length.
     path = str(tmp_path / "b.kicad_pcb")
     _board(
         path,
@@ -188,8 +190,8 @@ def test_radial_escape_falls_back_to_axis_direction(tmp_path):
         if isinstance(t, pcbnew.PCB_TRACK) and not isinstance(t, pcbnew.PCB_VIA)
     )
     end = (pcbnew.ToMM(seg.GetEnd().x), pcbnew.ToMM(seg.GetEnd().y))
-    # The +x axis escape at the requested length, not the diagonal radial one.
-    assert end == (pytest.approx(9.5), pytest.approx(10.0)), end
+    # The -x axis escape at the requested length, not the diagonal radial one.
+    assert end == (pytest.approx(6.5), pytest.approx(10.0)), end
 
 
 def test_perimeter_tie_routes_around_bbox(tmp_path):
@@ -711,11 +713,14 @@ def test_shield_tie_prefers_smd_same_net_pad(tmp_path):
         ("4", (11.2, 10.8)),
         ("3", (11.2, 10.8)),
     }
-    # A stitching via at each SMD end bonds the shield island to the B.Cu
-    # GND plane (the parent pour cannot reach the connector area).
+    # A stitching via at the shared SMD end bonds the shield island to the
+    # B.Cu GND plane (the parent pour cannot reach the connector area). Both
+    # ties end on the SAME pad, so only ONE via lands -- the second would be
+    # a coincident drill (a hole-to-hole violation) and is skipped as
+    # redundant, while its track still stamps.
     assert all(s.via_at_end for s in specs)
     res = add_breakout_stubs(path, specs)
-    assert res["stubs"] == 2 and res["vias"] == 2
+    assert res["stubs"] == 2 and res["vias"] == 1
     routed = pcbnew.LoadBoard(path)
     segs = [
         t
@@ -732,3 +737,80 @@ def test_shield_tie_respects_disable_and_max_distance(tmp_path):
     assert shield_tie_specs(board, {"shield_tie_enabled": False}) == []
     assert shield_tie_specs(board, {"shield_tie_max_mm": 1.0}) == []
     assert shield_tie_specs(board, {"shield_tie_exclude_refs": ["J2"]}) == []
+
+
+# ---------------------------------------------------------------------------
+# Strict same-footprint margins + tip-via guards
+# ---------------------------------------------------------------------------
+
+def test_foreign_pad_margins_strict_same_fp(tmp_path):
+    from kicraft.autoplacer.brain.breakout_stubs import (
+        _foreign_pad_margins,
+        _own_clearance_mm,
+    )
+
+    path = str(tmp_path / "b.kicad_pcb")
+    _board(path, (5.0, 10.0), {
+        "B5": ("CC2", 8.0, 10.0),
+        "B6": ("GND", 8.0, 11.5),
+    })
+    board = pcbnew.LoadBoard(path)
+    pads = {p.GetNumber(): p for fp in board.GetFootprints() for p in fp.Pads()}
+    kw = dict(floor_mm=0.153, half_width_mm=0.0765, layer_id=pcbnew.F_Cu)
+    relaxed, _ = _foreign_pad_margins(board, pads["B5"], **kw)
+    strict, _ = _foreign_pad_margins(board, pads["B5"], strict_same_fp=True, **kw)
+    # Relaxed: collision-only (half_width + 0.05) vs the sibling pad.
+    assert relaxed[0][1] == pcbnew.FromMM(0.0765 + 0.05)
+    # Strict: the full pair clearance (the larger of the two pads' resolved
+    # clearances) -- the verify DRC does not waive a stub grazing a
+    # same-footprint pad.
+    pair = max(0.153,
+               _own_clearance_mm(pads["B5"], pcbnew.F_Cu, 0.153),
+               _own_clearance_mm(pads["B6"], pcbnew.F_Cu, 0.153))
+    assert strict[0][1] == pcbnew.FromMM(pair) and pair > 0.153
+
+
+def test_tip_via_near_same_net_via_is_skipped_or_blocked(tmp_path):
+    # via_at_end endgames: ON a same-net via -> redundant (track stamps, no
+    # second drill); NEAR one (0.35 mm) -> hole-to-hole blocked, whole spec
+    # dropped BEFORE any segment stamps (a stub with no plane via is dead
+    # copper).
+    path = str(tmp_path / "b.kicad_pcb")
+    _board(path, (5.0, 10.0), {"B5": ("GND", 8.0, 10.0)})
+    board = pcbnew.LoadBoard(path)
+    via = pcbnew.PCB_VIA(board)
+    via.SetPosition(pcbnew.VECTOR2I(_mm(10.0), _mm(10.0)))
+    via.SetDrill(_mm(0.3))
+    try:
+        via.SetWidth(_mm(0.6))
+    except TypeError:
+        via.SetWidth(pcbnew.F_Cu, _mm(0.6))
+    via.SetNet(board.GetNetInfo().GetNetItem("GND"))
+    board.Add(via)
+    board.Save(path)
+
+    # End exactly on the existing via: redundant -> track yes, via no.
+    res = add_breakout_stubs(path, [BreakoutSpec(
+        ref="J1", pad="B5", waypoints=[(10.0, 10.0)], via_at_end=True)])
+    assert res["stubs"] == 1 and res["segments"] == 1 and res["vias"] == 0
+
+    # End 0.35 mm from the via: not touching, and the two drills would sit
+    # inside the hole-to-hole minimum -> the spec must drop whole.
+    path2 = str(tmp_path / "b2.kicad_pcb")
+    _board(path2, (5.0, 10.0), {"B5": ("GND", 8.0, 10.0)})
+    board = pcbnew.LoadBoard(path2)
+    via = pcbnew.PCB_VIA(board)
+    via.SetPosition(pcbnew.VECTOR2I(_mm(10.35), _mm(10.0)))
+    via.SetDrill(_mm(0.3))
+    try:
+        via.SetWidth(_mm(0.6))
+    except TypeError:
+        via.SetWidth(pcbnew.F_Cu, _mm(0.6))
+    via.SetNet(board.GetNetInfo().GetNetItem("GND"))
+    board.Add(via)
+    board.Save(path2)
+
+    res = add_breakout_stubs(path2, [BreakoutSpec(
+        ref="J1", pad="B5", waypoints=[(10.0, 10.0)], via_at_end=True)])
+    assert res["stubs"] == 0 and res["segments"] == 0
+    assert any("via_blocked" in s for s in res["skipped"])

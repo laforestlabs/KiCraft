@@ -19,12 +19,17 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from kicraft.cli.compose_subcircuits import (
     _compose_artifacts,
     _compute_final_outline,
     _snap_parent_local,
 )
-from kicraft.autoplacer.brain.subcircuit_composer import AttachmentConstraint
+from kicraft.autoplacer.brain.subcircuit_composer import (
+    AttachmentConstraint,
+    extract_leaf_blocker_set,
+)
 from kicraft.autoplacer.brain.subcircuit_instances import (
     LoadedSubcircuitArtifact,
 )
@@ -450,3 +455,124 @@ def test_compute_final_outline_unconstrained_gets_margin():
     assert math.isclose(tl.y, 9.0, abs_tol=1e-3)
     assert math.isclose(br.x, 81.0, abs_tol=1e-3)
     assert math.isclose(br.y, 61.0, abs_tol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Regression: phantom edge anchors + page-centered blocker frames
+# (the 3x-wide parent outline bug, KC-72RQXB).
+
+
+def test_compute_final_outline_phantom_edge_anchor_clamped():
+    # An edge anchor far from the placed geometry (here ~119 mm off --
+    # the A4 page-centering offset applied in the wrong frame) must NOT
+    # stretch the outline. The snap falls back to geometry +/- spacing.
+    placed = [(Point(10.0, 10.0), Point(70.0, 30.0))]
+
+    def _edge(ref: str, side: str) -> AttachmentConstraint:
+        return AttachmentConstraint(
+            ref=ref,
+            target="edge",
+            value=side,
+            inward_keep_in_mm=0.0,
+            outward_overhang_mm=0.0,
+            source="parent_local",
+            child_index=None,
+            strict=True,
+        )
+
+    anchors = {"J1": Point(-109.0, 20.0), "J2": Point(189.0, 20.0)}
+    outline = _compute_final_outline(
+        placed,
+        [_edge("J1", "left"), _edge("J2", "right")],
+        anchors,
+        spacing_mm=2.0,
+    )
+    tl, br = outline
+    assert math.isclose(tl.x, 8.0, abs_tol=1e-3), (
+        f"phantom left anchor must clamp to geometry - spacing (8.0), got {tl.x:.2f}"
+    )
+    assert math.isclose(br.x, 72.0, abs_tol=1e-3), (
+        f"phantom right anchor must clamp to geometry + spacing (72.0), got {br.x:.2f}"
+    )
+
+
+def test_compute_final_outline_nearby_edge_anchor_still_snaps():
+    # A legitimate flush-mount anchor a couple of mm outside the geometry
+    # (connector housing overhang) must still win over geometry+spacing --
+    # the clamp only rejects far-out anchors.
+    placed = [(Point(10.0, 10.0), Point(70.0, 30.0))]
+    constraint = AttachmentConstraint(
+        ref="J1",
+        target="edge",
+        value="left",
+        inward_keep_in_mm=0.0,
+        outward_overhang_mm=0.0,
+        source="parent_local",
+        child_index=None,
+        strict=True,
+    )
+    anchors = {"J1": Point(7.5, 20.0)}
+    outline = _compute_final_outline(placed, [constraint], anchors, spacing_mm=2.0)
+    tl, _ = outline
+    assert math.isclose(tl.x, 7.5, abs_tol=1e-3), (
+        f"nearby edge anchor must snap exactly (7.5), got {tl.x:.2f}"
+    )
+
+
+def test_extract_blockers_from_pcb_rebased_to_leaf_local(tmp_path):
+    # Leaf PCBs are generated centered on their page while
+    # solved_layout.json is serialized re-based (Edge.Cuts top-left at
+    # (0,0)). Blocker extraction from the PCB must come back in the
+    # re-based layout frame, or every constraint anchor derived from a
+    # blocker rect is shifted by the page offset.
+    pcbnew = pytest.importorskip("pcbnew")
+
+    mm = pcbnew.FromMM
+    board = pcbnew.CreateEmptyBoard()
+    # Page-centered outline: (118.38, 94.14) .. (178.62, 115.86)
+    edges = [
+        (118.38, 94.14, 178.62, 94.14),
+        (178.62, 94.14, 178.62, 115.86),
+        (178.62, 115.86, 118.38, 115.86),
+        (118.38, 115.86, 118.38, 94.14),
+    ]
+    for x1, y1, x2, y2 in edges:
+        seg = pcbnew.PCB_SHAPE(board, pcbnew.SHAPE_T_SEGMENT)
+        seg.SetStart(pcbnew.VECTOR2I(mm(x1), mm(y1)))
+        seg.SetEnd(pcbnew.VECTOR2I(mm(x2), mm(y2)))
+        seg.SetLayer(pcbnew.Edge_Cuts)
+        seg.SetWidth(mm(0.1))
+        board.Add(seg)
+    fp = pcbnew.FOOTPRINT(board)
+    fp.SetReference("J1")
+    fp.SetPosition(pcbnew.VECTOR2I(mm(120.0), mm(100.0)))
+    pad = pcbnew.PAD(fp)
+    pad.SetShape(pcbnew.PAD_SHAPE_RECT)
+    pad.SetSize(pcbnew.VECTOR2I(mm(2.0), mm(2.0)))
+    pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+    pad.SetLayerSet(pcbnew.PAD.SMDMask())
+    pad.SetPosition(fp.GetPosition())
+    fp.Add(pad)
+    board.Add(fp)
+    pcb_path = tmp_path / "leaf_routed.kicad_pcb"
+    pcbnew.SaveBoard(str(pcb_path), board)
+
+    artifact = _make_artifact("LEAF", width=60.25, height=21.72)
+    artifact.source_files["mini_pcb"] = str(pcb_path)
+
+    blocker_set = extract_leaf_blocker_set(artifact)
+
+    outline_min, outline_max = blocker_set.leaf_outline
+    assert abs(outline_min.x) < 0.2 and abs(outline_min.y) < 0.2, (
+        f"leaf outline must be re-based to ~(0,0), got {outline_min}"
+    )
+    assert 59.0 < outline_max.x - outline_min.x < 62.0
+
+    j1_min, j1_max = blocker_set.component_rects["J1"]
+    # J1 pad centered at page (120, 100) -> leaf-local ~(1.6, 5.9).
+    assert -1.0 < j1_min.x < 5.0, f"J1 rect still in page frame: min.x={j1_min.x:.2f}"
+    assert j1_max.x < 70.0, f"J1 rect still in page frame: max.x={j1_max.x:.2f}"
+    for rect_min, rect_max in blocker_set.front_pads + blocker_set.tht_drills:
+        assert rect_max.x < 70.0 and rect_max.y < 30.0, (
+            "blocker pad rects must live in the leaf-local frame"
+        )

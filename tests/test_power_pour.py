@@ -324,3 +324,188 @@ def test_strand_repair_noop_when_single_cluster(tmp_path):
     board.Save(path)
     res = repair_stranded_gnd(path, {"gnd_zone_net": "GND"})
     assert res["stranded"] == 0 and res["tied"] == 0, res
+
+
+# ---------------------------------------------------------------------------
+# Netclass pair clearance + hole-to-hole + shape-independent stitching
+# ---------------------------------------------------------------------------
+
+import json  # noqa: E402
+import shutil  # noqa: E402
+
+from kicraft.autoplacer.brain.gnd_pour import gnd_escape_specs  # noqa: E402
+
+# Default(0.15) / Power(0.30) with GND assigned to Power -- the shape every
+# generated board ships in its sibling .kicad_pro.
+_NET_SETTINGS = {
+    "classes": [
+        {"bus_width": 12, "clearance": 0.15, "diff_pair_gap": 0.25,
+         "diff_pair_via_gap": 0.25, "diff_pair_width": 0.2, "line_style": 0,
+         "microvia_diameter": 0.3, "microvia_drill": 0.1, "name": "Default",
+         "pcb_color": "rgba(0, 0, 0, 0.000)", "priority": 2147483647,
+         "schematic_color": "rgba(0, 0, 0, 0.000)", "track_width": 0.2,
+         "via_diameter": 0.6, "via_drill": 0.3, "wire_width": 6},
+        {"bus_width": 12, "clearance": 0.3, "diff_pair_gap": 0.25,
+         "diff_pair_via_gap": 0.25, "diff_pair_width": 0.2, "line_style": 0,
+         "microvia_diameter": 0.3, "microvia_drill": 0.1, "name": "Power",
+         "pcb_color": "rgba(0, 0, 0, 0.000)", "priority": 0,
+         "schematic_color": "rgba(0, 0, 0, 0.000)", "track_width": 0.5,
+         "via_diameter": 0.8, "via_drill": 0.4, "wire_width": 6},
+    ],
+    "meta": {"version": 4},
+    "net_colors": None,
+    "netclass_assignments": None,
+    "netclass_patterns": [{"netclass": "Power", "pattern": "GND"}],
+}
+
+
+def _as_project_board(build_path: str, case_path: str) -> str:
+    """Copy a built board to a FRESH path with a netclass-bearing sibling
+    .kicad_pro. pcbnew caches one project per board path in-process, so the
+    case path must never have been opened before -- loading the copy is the
+    only way a test board resolves netclass clearances like pipeline boards."""
+    shutil.copy(build_path, case_path)
+    pro = case_path[: -len(".kicad_pcb")] + ".kicad_pro"
+    with open(pro, "w", encoding="utf-8") as fh:
+        json.dump({"meta": {"filename": pro.rsplit("/", 1)[-1], "version": 3},
+                   "net_settings": _NET_SETTINGS}, fh)
+    return case_path
+
+
+def test_thermal_via_respects_netclass_pair_clearance(tmp_path):
+    # A SIG (Default, 0.15) B.Cu track 0.6 mm from the GND pad centre: the
+    # old flat 0.153 floor margin (0.528 mm) let the via land 0.225 mm from
+    # the track -- a Power-netclass (0.30) DRC error, the KC-UXASHQ escape-via
+    # signature. With pair clearance the margin is 0.675 mm -> blocked.
+    build = str(tmp_path / "build.kicad_pcb")
+    _sot23_board(build)
+    board = pcbnew.LoadBoard(build)
+    t = pcbnew.PCB_TRACK(board)
+    t.SetStart(pcbnew.VECTOR2I(_mm(12.0), _mm(15.6)))
+    t.SetEnd(pcbnew.VECTOR2I(_mm(18.0), _mm(15.6)))
+    t.SetWidth(_mm(0.15))
+    t.SetLayer(pcbnew.B_Cu)
+    t.SetNet(board.GetNetInfo().GetNetItem("SIG"))
+    board.Add(t)
+    board.Save(build)
+
+    # Control (no project netclasses -> 0.153 floor): the via lands.
+    ctl = str(tmp_path / "control.kicad_pcb")
+    shutil.copy(build, ctl)
+    res = add_gnd_pour_and_thermal_vias(ctl, {"gnd_zone_net": "GND"})
+    assert any(
+        (pcbnew.ToMM(v.GetPosition().x), pcbnew.ToMM(v.GetPosition().y))
+        == (pytest.approx(15.0), pytest.approx(15.0))
+        for v in _gnd_vias(ctl)
+    ), res
+
+    # With Power=0.30 netclasses the same via is blocked.
+    case = _as_project_board(build, str(tmp_path / "case.kicad_pcb"))
+    res = add_gnd_pour_and_thermal_vias(case, {"gnd_zone_net": "GND"})
+    assert res["thermal_vias_blocked"] >= 1, res
+    assert not any(
+        (pcbnew.ToMM(v.GetPosition().x), pcbnew.ToMM(v.GetPosition().y))
+        == (pytest.approx(15.0), pytest.approx(15.0))
+        for v in _gnd_vias(case)
+    )
+
+
+def test_thermal_via_blocked_by_hole_to_hole(tmp_path):
+    # A GND via 0.4 mm from the GND pad centre is same-net copper (the old
+    # guard allowed it) but its drilled hole is 0.4 mm from where the in-pad
+    # via would drill -- inside hole-to-hole minimum. Must be blocked.
+    path = str(tmp_path / "b.kicad_pcb")
+    _sot23_board(path)
+    board = pcbnew.LoadBoard(path)
+    via = pcbnew.PCB_VIA(board)
+    via.SetPosition(pcbnew.VECTOR2I(_mm(15.4), _mm(15.0)))
+    via.SetDrill(_mm(0.3))
+    try:
+        via.SetWidth(_mm(0.6))
+    except TypeError:
+        via.SetWidth(pcbnew.F_Cu, _mm(0.6))
+    via.SetNet(board.GetNetInfo().GetNetItem("GND"))
+    board.Add(via)
+    board.Save(path)
+
+    res = add_gnd_pour_and_thermal_vias(path, {"gnd_zone_net": "GND"})
+    assert res["thermal_vias_blocked"] >= 1, res
+    assert not any(
+        (pcbnew.ToMM(v.GetPosition().x), pcbnew.ToMM(v.GetPosition().y))
+        == (pytest.approx(15.0), pytest.approx(15.0))
+        for v in _gnd_vias(path)
+    )
+
+
+def test_two_pad_passive_via_fitting_gnd_pad_is_stitched(tmp_path):
+    # The KC-UXASHQ C2.2 strand: a decoupling cap's 1.0 mm GND pad could host
+    # an in-pad via with nothing blocking, but the old multipad>=3 gate
+    # skipped 2-pad passives entirely -> B.Cu-only pour never reached it.
+    path = str(tmp_path / "b.kicad_pcb")
+    board = pcbnew.NewBoard(path)
+    for name in ("GND", "+3V3"):
+        board.Add(pcbnew.NETINFO_ITEM(board, name))
+    corners = [(0, 0), (20, 0), (20, 20), (0, 20), (0, 0)]
+    for (x1, y1), (x2, y2) in zip(corners, corners[1:]):
+        seg = pcbnew.PCB_SHAPE(board)
+        seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        seg.SetStart(pcbnew.VECTOR2I(_mm(x1), _mm(y1)))
+        seg.SetEnd(pcbnew.VECTOR2I(_mm(x2), _mm(y2)))
+        seg.SetLayer(pcbnew.Edge_Cuts)
+        board.Add(seg)
+    fp = pcbnew.FOOTPRINT(board)
+    fp.SetReference("C2")
+    board.Add(fp)
+    for num, netname, x in (("1", "+3V3", 8.0), ("2", "GND", 6.0)):
+        pad = pcbnew.PAD(fp)
+        pad.SetSize(pcbnew.VECTOR2I(_mm(1.0), _mm(1.45)))
+        pad.SetPosition(pcbnew.VECTOR2I(_mm(x), _mm(8.0)))
+        pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        pad.SetLayerSet(pcbnew.PAD.SMDMask())
+        pad.SetNumber(num)
+        pad.SetNet(board.GetNetInfo().GetNetItem(netname))
+        fp.Add(pad)
+    board.Save(path)
+
+    res = add_gnd_pour_and_thermal_vias(path, {"gnd_zone_net": "GND"})
+    assert res["gnd_pads_stitched"] >= 1, res
+    assert any(
+        (pcbnew.ToMM(v.GetPosition().x), pcbnew.ToMM(v.GetPosition().y))
+        == (pytest.approx(6.0), pytest.approx(8.0))
+        for v in _gnd_vias(path)
+    )
+
+
+def test_escape_skipped_when_pre_route_via_already_bonds(tmp_path):
+    # A GND via 0.9 mm from U1's small GND pad (a pre-route gnd_escape_specs
+    # stub tip) already bonds it to the plane: the post-route pass must not
+    # stamp a SECOND escape stub for the same pad.
+    path = str(tmp_path / "b.kicad_pcb")
+    _sot23_board(path)
+    board = pcbnew.LoadBoard(path)
+    via = pcbnew.PCB_VIA(board)
+    via.SetPosition(pcbnew.VECTOR2I(_mm(10.9), _mm(10.0)))
+    via.SetDrill(_mm(0.3))
+    try:
+        via.SetWidth(_mm(0.6))
+    except TypeError:
+        via.SetWidth(pcbnew.F_Cu, _mm(0.6))
+    via.SetNet(board.GetNetInfo().GetNetItem("GND"))
+    board.Add(via)
+    board.Save(path)
+
+    res = add_gnd_pour_and_thermal_vias(path, {"gnd_zone_net": "GND"})
+    assert res["escape_stitched"] == 0, res
+
+
+def test_gnd_escape_specs_targets_only_small_gnd_pads(tmp_path):
+    # Pre-route spec gen: U1's 0.5 mm GND pad (no in-pad via possible) gets a
+    # via_at_end escape spec; U2's via-fitting 1.3 mm GND pad does not.
+    path = str(tmp_path / "b.kicad_pcb")
+    _sot23_board(path)
+    board = pcbnew.LoadBoard(path)
+    specs = gnd_escape_specs(board, {"gnd_zone_net": "GND"})
+    assert [(s.ref, s.pad) for s in specs] == [("U1", "2")]
+    assert all(s.via_at_end for s in specs)
+    assert gnd_escape_specs(board, {"gnd_zone_net": "GND",
+                                    "gnd_pre_escape": False}) == []

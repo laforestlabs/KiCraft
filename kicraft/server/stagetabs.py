@@ -140,14 +140,14 @@ class StagePanel:
             # as the larger pane.
             left_w, left_min = ("60%", "360px") if self.key in _BUILD_STAGES \
                 else ("42%", "300px")
-            with ui.row().classes("w-full no-wrap gap-3").style(
+            with ui.row().classes("w-full no-wrap gap-3 kc-stage-body").style(
                     "height:calc(100vh - 340px);min-height:480px"):
                 # LEFT: project-state inspector (+ view slot for KiCanvas/download).
-                with ui.column().classes("gap-1").style(
+                with ui.column().classes("gap-1 kc-stage-left").style(
                         f"width:{left_w};min-width:{left_min};height:100%"):
                     ui.label("Project state").classes(
                         "text-xs font-bold uppercase tracking-wide").style(f"color:{_DIM}")
-                    insp = ui.scroll_area().classes("w-full rounded").style(
+                    insp = ui.scroll_area().classes("w-full rounded kc-stage-insp").style(
                         "flex:1;min-height:0;background:#0f172a;border:1px solid #1e293b")
                     with insp:
                         self.view_slot = ui.column().classes("w-full p-2 gap-2")
@@ -157,17 +157,20 @@ class StagePanel:
                 # Plain overflow containers (not ui.scroll_area) so native scroll
                 # events fire only on real position changes; tail-follow to the
                 # bottom is handled client-side by kc_follow.js (.kc-follow).
-                with ui.column().classes("gap-1").style("flex:1;min-width:0;height:100%"):
+                with ui.column().classes("gap-1 kc-stage-right").style(
+                        "flex:1;min-width:0;height:100%"):
                     ui.label("Thinking").classes(
                         "text-xs font-bold uppercase tracking-wide").style(f"color:{_DIM}")
-                    with ui.element("div").classes("w-full rounded kc-follow").style(
+                    with ui.element("div").classes(
+                            "w-full rounded kc-follow kc-stage-think").style(
                             "height:58%;overflow-y:auto;"
                             "background:#0f172a;border:1px solid #1e293b"):
                         self._think = ui.column().classes("w-full p-2 gap-0")
 
                     ui.label("Activity / log").classes(
                         "text-xs font-bold uppercase tracking-wide mt-1").style(f"color:{_DIM}")
-                    with ui.element("div").classes("w-full rounded kc-follow").style(
+                    with ui.element("div").classes(
+                            "w-full rounded kc-follow kc-stage-act").style(
                             "flex:1;min-height:0;overflow-y:auto;"
                             "background:#0f172a;border:1px solid #1e293b"):
                         self._act = ui.column().classes("w-full p-2 gap-1")
@@ -628,7 +631,8 @@ class StageTabs:
         self._auto_follow = True
         self._on_show: dict[str, object] = {}
 
-        with ui.tabs().classes("w-full").props("dense inline-label") as self.tabs:
+        with ui.tabs().classes("w-full kc-stage-tabs") \
+                .props("dense inline-label mobile-arrows") as self.tabs:
             for key, label, icon, accent in PHASES:
                 t = ui.tab(key, label=label, icon=icon)
                 t.style(f"color:{_STATUS_COLOR['pending']}")

@@ -24,10 +24,14 @@ import json
 import re
 import shutil
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import get_args
 
 from pydantic import ValidationError
+
+from kicraft.parts_library import jlcparts
 
 from .library import (
     ArchitectureLibraryError,
@@ -444,8 +448,75 @@ def _cmd_list_parts(_: argparse.Namespace) -> int:
     return 0
 
 
+# LCSC part numbers as users paste them — bare (C7386355) or inside an
+# lcsc.com / jlcpcb.com product URL (where they follow '_' or '/'). The
+# lookarounds reject MPNs that merely embed a C+digits run (e.g. C8051F320).
+# stage_driver._LCSC_ID_RE mirrors this pattern for brief/answer scanning.
+_LCSC_ID_RE = re.compile(r"(?<![A-Za-z0-9])C\d{4,8}(?![A-Za-z0-9])", re.IGNORECASE)
+
+_EASYEDA_SEARCH_URL = "https://easyeda.com/api/components/search"
+# easyeda.com serves this search to browsers only: bare library User-Agents
+# get a WAF 403, a normal browser string does not. Same host the by-C# symbol/
+# footprint/price fetches already rely on (jlcpcb.com's own search API is
+# hard-blocked from datacenter IPs).
+_BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+
+def _parse_easyeda_search(payload: dict) -> list[dict]:
+    """Flatten an easyeda.com components/search payload into candidate rows
+    ({lcsc, model, brand, package, description}) so selection and printing
+    stay source-agnostic."""
+    lists = ((payload or {}).get("result") or {}).get("lists") or {}
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for source in ("lcsc", "SMT"):
+        for r in lists.get(source) or []:
+            number = ((r.get("lcsc") or {}).get("number")
+                      or (r.get("szlcsc") or {}).get("number"))
+            if not number or number in seen:
+                continue
+            seen.add(number)
+            data_str = r.get("dataStr")
+            c_para = ((data_str.get("head") or {}).get("c_para") or {}
+                      if isinstance(data_str, dict) else {})
+            rows.append({
+                "lcsc": number,
+                "model": r.get("title") or c_para.get("name"),
+                "brand": c_para.get("Manufacturer"),
+                "package": c_para.get("package"),
+                "description": (r.get("description") or "")[:120] or None,
+            })
+    return rows
+
+
+def _search_easyeda_components(keyword: str, page_size: int = 10) -> list[dict] | None:
+    """Keyword-search the LCSC catalog via easyeda.com.
+
+    Returns parsed candidate rows, or None when the backend is unreachable —
+    callers must distinguish that from [] (a genuine no-match) so the BOM
+    agent stops burning retries on keyword variants when the network is down.
+    """
+    data = urllib.parse.urlencode({
+        "wd": keyword, "type": "3", "doctype[]": "2",
+        "page": "1", "pageSize": str(page_size),
+    }).encode()
+    req = urllib.request.Request(
+        _EASYEDA_SEARCH_URL, data=data,
+        headers={"User-Agent": _BROWSER_UA, "Accept": "application/json",
+                 "Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or not payload.get("success"):
+        return None
+    return _parse_easyeda_search(payload)
+
+
 def _pick_lcsc(mpn: str, results: list[dict]) -> dict | None:
-    """Choose the single best JLCPCB search result for `mpn`, or None if
+    """Choose the single best search result for `mpn`, or None if
     ambiguous. Prefer an exact (case-insensitive) match on the part's
     model/MPN, breaking ties by stock (desc) then Basic-over-Extended. With
     no exact match but exactly one result, take it; otherwise return None so
@@ -454,64 +525,116 @@ def _pick_lcsc(mpn: str, results: list[dict]) -> dict | None:
     exact = [r for r in results if (r.get("model") or "").strip().upper() == target]
     if exact:
         exact.sort(key=lambda r: (-(r.get("stock") or 0), r.get("type") != "Basic"))
-        return exact[0]
+        best = exact[0]
+        # A known-zero-stock exact hit while other candidates ARE in stock is
+        # usually a placeholder catalog row (e.g. a bare family name like
+        # "VL53L1X"); surface the candidate list so the orderable real MPN
+        # wins. stock=None (source doesn't report it) never triggers this.
+        if best.get("stock") == 0 and any(
+            (r.get("stock") or 0) > 0 for r in results if r is not best
+        ):
+            return None
+        return best
     if len(results) == 1:
         return results[0]
     return None
 
 
 def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
-    """Resolve a manufacturer part number to an LCSC part number.
+    """Resolve an MPN / keyword / pasted LCSC id-or-URL to an LCSC part number.
 
-    Checks the parts-library manifests first (offline, authoritative), then
-    falls back to a JLCPCB keyword search. Prints JSON; exits 0 when a single
-    LCSC id is resolved, 4 otherwise (with a candidate list to choose from).
-    Lets the BOM sub-agent own MPN->LCSC resolution without the main thread
-    reaching for WebSearch.
+    Order: explicit C-number in the query (offline), parts-library manifests
+    (offline, authoritative), the offline JLC catalog (jlcparts dump: stock,
+    Basic/Extended, qty-1 price), then an easyeda.com keyword search (network).
+    Prints JSON; exits 0 when a single LCSC id is resolved, 4 otherwise (with
+    a candidate list to choose from). Lets the BOM sub-agent own MPN->LCSC
+    resolution without the main thread reaching for WebSearch.
     """
     mpn = args.mpn
     target = mpn.strip().upper()
 
+    # 0. The query already contains an LCSC id (bare, or inside a pasted
+    #    lcsc.com/jlcpcb.com product URL): nothing to search.
+    m = _LCSC_ID_RE.search(mpn)
+    if m:
+        lcsc = m.group(0).upper()
+        _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=lcsc,
+                   source="explicit-id")
+        print(json.dumps(
+            {"ok": True, "mpn": mpn, "lcsc": lcsc, "source": "explicit-id"},
+            indent=2,
+        ))
+        return 0
+
     # 1. Parts-library manifests — authoritative and offline.
     active, _broken = _load_library_parts(Path.cwd())
     for part in active:
-        m = part.manifest
-        if (m.mpn or "").strip().upper() == target:
-            lcsc = (m.sourcing or {}).get("lcsc")
+        man = part.manifest
+        if (man.mpn or "").strip().upper() == target:
+            lcsc = (man.sourcing or {}).get("lcsc")
             if lcsc:
                 _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=lcsc,
-                           source="parts-library", library_name=m.name)
+                           source="parts-library", library_name=man.name)
                 print(json.dumps(
                     {"ok": True, "mpn": mpn, "lcsc": lcsc,
-                     "source": "parts-library", "name": m.name},
+                     "source": "parts-library", "name": man.name},
                     indent=2,
                 ))
                 return 0
 
-    # 2. JLCPCB keyword search — network, best-effort. search_jlcpcb_components
-    #    already degrades to an empty result list on any network/parse error.
-    try:
-        from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
-    except ImportError as e:
+    # 2. Offline JLC catalog (jlcparts dump) — richer than the network search
+    #    (live stock, Basic/Extended, qty-1 price) and answers without network.
+    #    Falls through only when the catalog is absent or has nothing.
+    if jlcparts.available():
+        results = jlcparts.search(mpn)
+        if results:
+            fields = ("lcsc", "model", "brand", "package", "stock", "type",
+                      "price", "description")
+            best = _pick_lcsc(mpn, results)
+            if best and best.get("lcsc"):
+                _log_query("lookup_lcsc_id", outcome="resolved", query=mpn,
+                           lcsc=best["lcsc"], source="jlcparts")
+                print(json.dumps(
+                    {"ok": True, "mpn": mpn, "lcsc": best["lcsc"],
+                     "source": "jlcparts",
+                     "match": {k: best.get(k) for k in fields}},
+                    indent=2,
+                ))
+                return 0
+            _log_query("lookup_lcsc_id", outcome="miss", query=mpn,
+                       n_candidates=len(results))
+            print(json.dumps(
+                {"ok": False, "mpn": mpn,
+                 "candidates": [{k: r.get(k) for k in fields} for r in results],
+                 "hint": "no single exact match; pick the candidate that fits "
+                         "(prefer in-stock) and pass it to add_part_from_lcsc"},
+                indent=2,
+            ))
+            return 4
+
+    # 3. easyeda.com keyword search — network, best-effort.
+    results = _search_easyeda_components(mpn)
+    if results is None:
         _log_query("lookup_lcsc_id", outcome="error", query=mpn,
-                   error="easyeda2kicad-missing")
+                   error="search-backend-unreachable")
         print(json.dumps(
             {"ok": False, "mpn": mpn, "candidates": [],
-             "error": f"easyeda2kicad not installed: {e}"},
+             "error": "part search backend unreachable",
+             "hint": "Do NOT retry other keywords — searches will keep failing "
+                     "this session. Ask the user for an LCSC C-number (C#####) "
+                     "or use the closest stock KiCad part and record the "
+                     "substitution in assumptions."},
             indent=2,
         ))
         return 4
 
-    results = (
-        EasyedaApi().search_jlcpcb_components(keyword=mpn, page_size=10).get("results", [])
-    )
-    fields = ("lcsc", "model", "brand", "package", "stock", "type")
+    fields = ("lcsc", "model", "brand", "package", "description")
     best = _pick_lcsc(mpn, results)
     if best and best.get("lcsc"):
         _log_query("lookup_lcsc_id", outcome="resolved", query=mpn,
-                   lcsc=best["lcsc"], source="jlcpcb")
+                   lcsc=best["lcsc"], source="easyeda")
         print(json.dumps(
-            {"ok": True, "mpn": mpn, "lcsc": best["lcsc"], "source": "jlcpcb",
+            {"ok": True, "mpn": mpn, "lcsc": best["lcsc"], "source": "easyeda",
              "match": {k: best.get(k) for k in fields}},
             indent=2,
         ))
@@ -522,11 +645,31 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
     print(json.dumps(
         {"ok": False, "mpn": mpn,
          "candidates": [{k: r.get(k) for k in fields} for r in results[:10]],
-         "hint": "no unambiguous LCSC id; pick a candidate and pass it to "
-                 "add-part --from-lcsc C<NNNNN>"},
+         "hint": ("pick a candidate and pass it to add-part --from-lcsc C<NNNNN>"
+                  if results else
+                  "no LCSC match; retry at most ONCE with the bare part family "
+                  "(strip suffixes and descriptive words). If that misses too, "
+                  "ask the user for a C-number or use the closest stock KiCad "
+                  "part and record the substitution in assumptions.")},
         indent=2,
     ))
     return 4
+
+
+def _cmd_jlcparts_update(args: argparse.Namespace) -> int:
+    """Download/refresh the offline JLC parts catalog."""
+    try:
+        stats = jlcparts.update(
+            dest=Path(args.dest) if args.dest else None,
+            base_url=args.base_url,
+            min_stock=args.min_stock,
+            progress=lambda msg: print(msg, file=sys.stderr),
+        )
+    except Exception as e:
+        print(f"jlcparts-update failed: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps({"ok": True, **stats}, indent=2))
+    return 0
 
 
 def _slugify_libname(s: str) -> str:
@@ -1999,11 +2142,29 @@ def main(argv: list[str] | None = None) -> int:
         "lookup-lcsc-id",
         help=(
             "resolve a manufacturer part number (MPN) to an LCSC part number "
-            "via the parts library, then a JLCPCB keyword search"
+            "via the parts library, the offline JLC catalog, then an "
+            "easyeda.com keyword search"
         ),
     )
     p_lcsc.add_argument("mpn", help="manufacturer part number to resolve")
     p_lcsc.set_defaults(func=_cmd_lookup_lcsc_id)
+
+    p_jlc = sub.add_parser(
+        "jlcparts-update",
+        help=(
+            "download/refresh the offline JLC parts catalog (yaqwsx/jlcparts "
+            "nightly dump: ~650 MB download; in-stock-pruned by default)"
+        ),
+    )
+    p_jlc.add_argument("--base-url", default=jlcparts.DATA_URL,
+                       help="override the dataset URL (testing)")
+    p_jlc.add_argument("--dest", default=None,
+                       help="override the catalog path (default: "
+                            "~/.kicraft/jlcparts/cache.sqlite3 or $KICRAFT_JLCPARTS_DB)")
+    p_jlc.add_argument("--min-stock", type=int, default=5,
+                       help="prune rows below this stock to shrink the catalog "
+                            "(default 5; 0 keeps everything, ~5.6 GB)")
+    p_jlc.set_defaults(func=_cmd_jlcparts_update)
 
     p_add_part = sub.add_parser(
         "add-part",
