@@ -776,6 +776,84 @@ def _sanitize_footprint_text(fp_text: str, raw_name: str) -> tuple[str, str]:
     return name, fp_text
 
 
+_MODEL_STANZA_RE = re.compile(r'(\(model\s+")([^"]*)(")')
+
+# Stock KiCad 3D models (passives etc.) resolve through the system install;
+# bundle-local models resolve through the project copy synthesis stages.
+_STOCK_3D_PREFIX = "${KICAD9_3DMODEL_DIR}/"
+
+_DEFAULT_MODEL_STANZA = (
+    '\t(model "{path}"\n'
+    "\t\t(offset (xyz 0 0 0))\n"
+    "\t\t(scale (xyz 1 1 1))\n"
+    "\t\t(rotate (xyz 0 0 0))\n"
+    "\t)\n"
+)
+
+
+def _model_stanza_paths(fp_text: str) -> list[str]:
+    """All 3D model paths referenced by ``(model \"...\")`` stanzas, in order."""
+    return [m.group(2) for m in _MODEL_STANZA_RE.finditer(fp_text)]
+
+
+def _rewrite_model_stanza(fp_text: str, new_path: str) -> tuple[str, int]:
+    """Point the footprint's ``(model ...)`` stanza(s) at *new_path*.
+
+    Only the quoted path is replaced; offset/scale/rotate are preserved
+    (they came from the original easyeda2kicad export and stay correct for
+    the same model). When no stanza exists, a zero-transform stanza is
+    appended before the closing paren so a freshly fetched model still gets
+    referenced. Returns ``(new_text, stanza_count)``.
+    """
+    rewritten, n = _MODEL_STANZA_RE.subn(
+        lambda m: m.group(1) + new_path + m.group(3), fp_text
+    )
+    if n:
+        return rewritten, n
+    trimmed = fp_text.rstrip()
+    if not trimmed.endswith(")"):
+        return fp_text, 0
+    stanza = _DEFAULT_MODEL_STANZA.format(path=new_path)
+    return trimmed[:-1] + stanza + ")\n", 1
+
+
+def _check_3d_model_paths(
+    part_dir: Path, part_name: str, fp_text: str
+) -> list[str]:
+    """Problems with the footprint's 3D model references; empty if clean.
+
+    Accepted forms: a stock ``${KICAD9_3DMODEL_DIR}/...`` reference
+    (resolved by the system KiCad install) or
+    ``${KIPRJMOD}/3dmodels/<part_name>/<file>`` backed by a real file in the
+    bundle's ``3d/`` dir (synthesis copies it into the generated project).
+    Anything else (notably the bare ``/NAME.wrl`` paths easyeda2kicad leaves
+    when exported without a model path) cannot resolve anywhere.
+    """
+    problems: list[str] = []
+    expected_prefix = f"${{KIPRJMOD}}/3dmodels/{part_name}/"
+    for path in _model_stanza_paths(fp_text):
+        if path.startswith(_STOCK_3D_PREFIX):
+            continue
+        if path.startswith(expected_prefix):
+            basename = path[len(expected_prefix):]
+            if not basename or "/" in basename:
+                problems.append(
+                    f"3D model path {path!r} must be a flat file directly "
+                    f"under {expected_prefix}"
+                )
+            elif not (part_dir / "3d" / basename).is_file():
+                problems.append(
+                    f"3D model path {path!r} has no backing file "
+                    f"{part_dir / '3d' / basename}"
+                )
+            continue
+        problems.append(
+            f"3D model path {path!r} resolves nowhere: expected "
+            f"{_STOCK_3D_PREFIX}... or {expected_prefix}<file>"
+        )
+    return problems
+
+
 def _parse_sourcing_args(entries: list[str]) -> dict[str, str]:
     """Parse repeated ``--sourcing vendor=part_number`` into a dict.
 
@@ -1289,6 +1367,18 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
         )
         return 2
 
+    if getattr(args, "check_3d", False):
+        problems = _check_3d_model_paths(part_dir, manifest.name, fp_text)
+        if problems:
+            for problem in problems:
+                print(problem, file=sys.stderr)
+            print(
+                "  fix with `fetch-3d <part-dir>` (or hand-edit the stanza "
+                "to a stock ${KICAD9_3DMODEL_DIR} model) and rerun",
+                file=sys.stderr,
+            )
+            return 2
+
     actual = compute_content_hash(part_dir)
     if actual != manifest.content_hash:
         if args.update_hash:
@@ -1305,6 +1395,183 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
 
     print(f"OK {manifest.name}@{manifest.version} ({part_dir})")
     return 0
+
+
+def _cmd_fetch_3d(args: argparse.Namespace) -> int:
+    """Fetch EasyEDA 3D models into part bundles and fix their stanzas.
+
+    For each bundle: download the component's 3D model (WRL with baked
+    colors + raw STEP) into ``<part>/3d/``, rewrite the footprint's
+    ``(model ...)`` path to the project-relative
+    ``${KIPRJMOD}/3dmodels/<name>/<model>.wrl`` scheme that synthesis
+    stages into generated projects, then re-bless the manifest's
+    content_hash. Bundles already on a stock ``${KICAD9_3DMODEL_DIR}``
+    reference are left alone (the system KiCad install resolves those).
+    """
+    from kicraft.parts_library import (
+        compute_content_hash,
+        dump_manifest,
+        footprint_file_path,
+        load_manifest,
+    )
+
+    if args.all_vendored:
+        from kicraft.parts_library.loader import vendored_parts_dir
+
+        base = vendored_parts_dir()
+        part_dirs = sorted(
+            d for d in base.iterdir()
+            if d.is_dir() and (d / "manifest.json").is_file()
+        )
+    else:
+        part_dirs = [Path(p).resolve() for p in args.paths]
+    if not part_dirs:
+        print(
+            "fetch-3d: no part directories (pass paths or --all-vendored)",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not args.report:
+        try:
+            from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
+            from easyeda2kicad.easyeda.easyeda_importer import (
+                Easyeda3dModelImporter,
+            )
+            from easyeda2kicad.kicad.export_kicad_3d_model import (
+                Exporter3dModelKicad,
+            )
+        except ImportError as exc:
+            print(
+                f"easyeda2kicad not installed in this Python environment: {exc}\n"
+                f"install with: pip install easyeda2kicad",
+                file=sys.stderr,
+            )
+            return 2
+
+    _MODEL_EXTS = {".step", ".stp", ".wrl"}
+    buckets: dict[str, list[str]] = {
+        "fetched": [], "already": [], "stock": [], "no-3d": [], "failed": [],
+    }
+
+    for part_dir in part_dirs:
+        label = part_dir.name
+        try:
+            manifest = load_manifest(part_dir)
+        except Exception as exc:  # noqa: BLE001
+            buckets["failed"].append(f"{label}: manifest unreadable ({exc})")
+            continue
+        fp = footprint_file_path(part_dir, manifest.footprint_name)
+        if not fp.is_file():
+            buckets["failed"].append(f"{label}: missing footprint {fp.name}")
+            continue
+        fp_text = fp.read_text()
+        stanza_paths = _model_stanza_paths(fp_text)
+
+        if any(p.startswith(_STOCK_3D_PREFIX) for p in stanza_paths):
+            buckets["stock"].append(label)
+            continue
+
+        prefix = f"${{KIPRJMOD}}/3dmodels/{manifest.name}/"
+        model_dir = part_dir / "3d"
+        has_models = model_dir.is_dir() and any(
+            p.suffix.lower() in _MODEL_EXTS for p in model_dir.iterdir()
+        )
+        if (
+            not args.overwrite
+            and has_models
+            and stanza_paths
+            and all(p.startswith(prefix) for p in stanza_paths)
+        ):
+            buckets["already"].append(label)
+            continue
+
+        if args.report:
+            lcsc = (manifest.sourcing or {}).get("lcsc")
+            why = "needs fetch" if lcsc else "no lcsc id in sourcing"
+            buckets["no-3d" if not lcsc else "fetched"].append(
+                f"{label}: {why}"
+            )
+            continue
+
+        lcsc = (manifest.sourcing or {}).get("lcsc")
+        if not lcsc:
+            buckets["no-3d"].append(f"{label}: no lcsc id in sourcing")
+            continue
+
+        print(f"fetching 3D model for {label} ({lcsc})...", file=sys.stderr)
+        try:
+            cad_data = EasyedaApi(use_cache=False).get_cad_data_of_component(
+                lcsc_id=lcsc
+            )
+            if not cad_data:
+                buckets["failed"].append(f"{label}: EasyEDA returned no data")
+                continue
+            ee_model = Easyeda3dModelImporter(
+                easyeda_cp_cad_data=cad_data, download_raw_3d_model=True
+            ).output
+            exporter = Exporter3dModelKicad(model_3d=ee_model)
+        except Exception as exc:  # noqa: BLE001 - network/parse errors
+            buckets["failed"].append(f"{label}: fetch error ({exc})")
+            continue
+        if ee_model is None or exporter.output is None:
+            buckets["no-3d"].append(f"{label}: no 3D model on EasyEDA")
+            continue
+
+        if args.overwrite and model_dir.is_dir():
+            import shutil as _shutil
+
+            _shutil.rmtree(model_dir)
+        if not exporter.export(output_dir=str(model_dir)):
+            buckets["failed"].append(f"{label}: 3D export wrote nothing")
+            continue
+
+        # EasyEDA model names can carry characters we keep out of paths;
+        # rename on disk so the stanza and the file always agree.
+        raw_name = exporter.output.name
+        safe_name = _sanitize_kicad_name(raw_name)
+        if safe_name != raw_name:
+            for ext in (".wrl", ".step"):
+                src = model_dir / f"{raw_name}{ext}"
+                if src.is_file():
+                    src.replace(model_dir / f"{safe_name}{ext}")
+        wrl = model_dir / f"{safe_name}.wrl"
+        if not wrl.is_file():
+            buckets["failed"].append(f"{label}: export produced no .wrl")
+            continue
+
+        old_basenames = {Path(p).name for p in stanza_paths}
+        fp_new, _count = _rewrite_model_stanza(fp_text, f"{prefix}{wrl.name}")
+        fp.write_text(fp_new)
+        if old_basenames and wrl.name not in old_basenames:
+            print(
+                f"  WARNING {label}: model name changed "
+                f"({', '.join(sorted(old_basenames))} -> {wrl.name}); the kept "
+                f"offset/rotate may not fit the new model, review the render",
+                file=sys.stderr,
+            )
+
+        dump_manifest(
+            manifest.model_copy(
+                update={"content_hash": compute_content_hash(part_dir)}
+            ),
+            part_dir,
+        )
+        buckets["fetched"].append(label)
+
+    headline = {
+        "fetched": "needs fetch" if args.report else "fetched",
+        "already": "already has 3D",
+        "stock": "stock KiCad model (skipped)",
+        "no-3d": "no 3D available",
+        "failed": "FAILED",
+    }
+    for key, names in buckets.items():
+        if names:
+            print(f"{headline[key]} ({len(names)}):")
+            for name in names:
+                print(f"  {name}")
+    return 1 if buckets["failed"] else 0
 
 
 def _cmd_archive(args: argparse.Namespace) -> int:
@@ -2450,6 +2717,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="recompute content_hash and rewrite the manifest instead of failing",
     )
+    p_val_part.add_argument(
+        "--check-3d",
+        action="store_true",
+        help=(
+            "also require every footprint (model ...) path to be a stock "
+            "${KICAD9_3DMODEL_DIR} reference or a ${KIPRJMOD}/3dmodels/<name>/ "
+            "path backed by a file in the bundle's 3d/ dir"
+        ),
+    )
     p_val_part.set_defaults(func=_cmd_validate_part)
 
     p_promote = sub.add_parser(
@@ -2470,6 +2746,38 @@ def main(argv: list[str] | None = None) -> int:
         help="which tier's copy to promote (default: home)",
     )
     p_promote.set_defaults(func=_cmd_promote_part)
+
+    p_fetch3d = sub.add_parser(
+        "fetch-3d",
+        help=(
+            "download EasyEDA 3D models (WRL + STEP) into part bundles and "
+            "point their footprints at ${KIPRJMOD}/3dmodels/<name>/..."
+        ),
+    )
+    p_fetch3d.add_argument(
+        "paths",
+        nargs="*",
+        help="part bundle directories (each containing a manifest.json)",
+    )
+    p_fetch3d.add_argument(
+        "--all-vendored",
+        action="store_true",
+        help="process every bundle in the vendored parts library",
+    )
+    p_fetch3d.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="re-download even when the bundle already has 3d/ models",
+    )
+    p_fetch3d.add_argument(
+        "--report",
+        action="store_true",
+        help=(
+            "classify bundles (already / stock / needs fetch) without "
+            "touching the network or any files"
+        ),
+    )
+    p_fetch3d.set_defaults(func=_cmd_fetch_3d)
 
     p_look = sub.add_parser(
         "lookup-symbol",
