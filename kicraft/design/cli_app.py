@@ -1297,12 +1297,16 @@ def _cmd_promote_part(args: argparse.Namespace) -> int:
 def _cmd_validate_part(args: argparse.Namespace) -> int:
     """Validate a parts-library directory: schema, files, content_hash.
 
-    Three checks, in order: (1) the manifest parses and the directory
+    Four checks, in order: (1) the manifest parses and the directory
     name matches ``name``; (2) the symbol + footprint files declared in
-    the manifest exist and parse; (3) the recomputed content_hash matches
-    the value stored in the manifest. With ``--update-hash``, recompute
-    and rewrite the manifest's ``content_hash`` instead of failing — used
-    when authoring a new part or after deliberate edits.
+    the manifest exist and parse; (3) every footprint ``(model ...)`` path
+    resolves (stock ``${KICAD9_3DMODEL_DIR}`` reference, or a
+    ``${KIPRJMOD}/3dmodels/<name>/`` path backed by a file in the bundle's
+    ``3d/`` dir; footprints with no stanza pass); (4) the recomputed
+    content_hash matches the value stored in the manifest. With
+    ``--update-hash``, recompute and rewrite the manifest's
+    ``content_hash`` instead of failing (used when authoring a new part
+    or after deliberate edits).
     """
     from pydantic import ValidationError as _PydValidationError
 
@@ -1367,17 +1371,16 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
         )
         return 2
 
-    if getattr(args, "check_3d", False):
-        problems = _check_3d_model_paths(part_dir, manifest.name, fp_text)
-        if problems:
-            for problem in problems:
-                print(problem, file=sys.stderr)
-            print(
-                "  fix with `fetch-3d <part-dir>` (or hand-edit the stanza "
-                "to a stock ${KICAD9_3DMODEL_DIR} model) and rerun",
-                file=sys.stderr,
-            )
-            return 2
+    problems = _check_3d_model_paths(part_dir, manifest.name, fp_text)
+    if problems:
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        print(
+            "  fix with `fetch-3d <part-dir>` (or hand-edit the stanza "
+            "to a stock ${KICAD9_3DMODEL_DIR} model) and rerun",
+            file=sys.stderr,
+        )
+        return 2
 
     actual = compute_content_hash(part_dir)
     if actual != manifest.content_hash:
@@ -2716,15 +2719,6 @@ def main(argv: list[str] | None = None) -> int:
         "--update-hash",
         action="store_true",
         help="recompute content_hash and rewrite the manifest instead of failing",
-    )
-    p_val_part.add_argument(
-        "--check-3d",
-        action="store_true",
-        help=(
-            "also require every footprint (model ...) path to be a stock "
-            "${KICAD9_3DMODEL_DIR} reference or a ${KIPRJMOD}/3dmodels/<name>/ "
-            "path backed by a file in the bundle's 3d/ dir"
-        ),
     )
     p_val_part.set_defaults(func=_cmd_validate_part)
 

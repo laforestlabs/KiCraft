@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:3301e61a1fc3fbbd1ba3812146a3ee7fb1f19d37524b78f5a211ba3633c0dc26",
+  "content_hash": "sha256:6450a4c2ba82bae91aa72f28eb47e2a8e58366ff6c137ac9dc9bcf2593f383fd",
   "datasheet_url": "https://lcsc.com/product-detail/PMIC-Battery-Management_TP4056_C16581.html",
   "description": "Top Power TP4056-42-ESOP8 \u2014 single-cell Li-ion/LiPo linear charger IC with constant-current/constant-voltage profile and thermal shutdown. 4.2 V termination, charge current set by PROG resistor (1.2 V / I_charge). The default cheap-and-cheerful maker LiPo charger.",
   "footprint_name": "ESOP-8_L4.9-W3.9-P1.27-LS6.0-BL-EP",

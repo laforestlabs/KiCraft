@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:2c201186d9388b2cc541cbe323a23d8d5855773da4273bad2a0e951a47e830fd",
+  "content_hash": "sha256:06f6d548d5028760df67487bf0f8a4215f499a7d5cb32c57f8a8748bfe1affac",
   "datasheet_url": "https://lcsc.com/product-detail/Light-Emitting-Diodes-LED_5050-RGBIntegrated-Light-4Pin_C114586.html",
   "description": "Worldsemi WS2812B 5050 \u2014 addressable RGB LED with integrated controller. 800 kbps single-wire protocol, cascadable, 24-bit color per pixel. The classic maker addressable LED.",
   "footprint_name": "LED-SMD_4P-L5.0-W5.0-BL_TC5050RGB",

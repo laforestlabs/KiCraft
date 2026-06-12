@@ -131,24 +131,28 @@ def test_check_3d_rejects_bare_and_unbacked_paths(tmp_path: Path):
     assert len(problems) == 1 and "resolves nowhere" in problems[0]
 
 
-# ---------- validate-part --check-3d ----------
+# ---------- validate-part 3D check ----------
 
 
-def test_validate_part_check_3d_pass(tmp_path: Path, capsys):
+def test_validate_part_3d_pass(tmp_path: Path, capsys):
     part_dir = write_valid_part(
         tmp_path,
         footprint=_kiprjmod_footprint("widget", "NEW.wrl"),
         models={"NEW.wrl": "wrl", "NEW.step": "step"},
     )
-    assert main(["validate-part", str(part_dir), "--check-3d"]) == 0
+    assert main(["validate-part", str(part_dir)]) == 0
 
 
-def test_validate_part_check_3d_fails_on_broken_path(tmp_path: Path, capsys):
+def test_validate_part_3d_fails_on_broken_path(tmp_path: Path, capsys):
     part_dir = write_valid_part(tmp_path, footprint=FOOTPRINT_BROKEN_MODEL)
-    assert main(["validate-part", str(part_dir), "--check-3d"]) == 2
+    assert main(["validate-part", str(part_dir)]) == 2
     assert "/OLD-NAME.wrl" in capsys.readouterr().err
-    # Without the flag the same bundle still validates (back-compat until
-    # the vendored library is backfilled).
+
+
+def test_validate_part_3d_passes_without_any_stanza(tmp_path: Path):
+    """No (model ...) stanza means nothing to resolve: still valid (the
+    bundle just renders without a body until a model is fetched)."""
+    part_dir = write_valid_part(tmp_path, footprint=FOOTPRINT_NO_MODEL)
     assert main(["validate-part", str(part_dir)]) == 0
 
 
@@ -241,7 +245,7 @@ def test_fetch_3d_downloads_and_rewires_bundle(
     assert verify_content_hash(part_dir, manifest)
     assert "model name changed" in capsys.readouterr().err
     # The result now passes the strict 3D validation.
-    assert main(["validate-part", str(part_dir), "--check-3d"]) == 0
+    assert main(["validate-part", str(part_dir)]) == 0
 
 
 def test_fetch_3d_skips_already_fetched(tmp_path: Path, fake_easyeda, capsys):
