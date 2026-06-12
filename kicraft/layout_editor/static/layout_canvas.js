@@ -543,6 +543,9 @@ window.kicraftInitLayoutCanvas = function(cfg) {
     // packing leaf silk / pads into a region that won't actually be
     // free of copper.
     const KEEPIN_RADIUS_MM = 3.0;
+    // Ring radius per screw size = courtyard/2 of the stock KiCad
+    // MountingHole footprint the composer synthesizes (drill diameter).
+    const SCREW_RING_R_MM = { 'M2': 2.2, 'M2.5': 2.7, 'M3': 3.2, 'M4': 4.3 };
     recomputeMountingHoles();
     for (const hole of state.mounting_holes) {
       const keepin = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
@@ -556,7 +559,7 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       ring.setAttribute('class', 'ml-mhole');
       ring.setAttribute('cx', hole.pos.x);
       ring.setAttribute('cy', hole.pos.y);
-      ring.setAttribute('r', 3.2);
+      ring.setAttribute('r', SCREW_RING_R_MM[hole.screw] || 3.2);
       svg.appendChild(ring);
       const drill = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       drill.setAttribute('class', 'ml-mhole-drill');

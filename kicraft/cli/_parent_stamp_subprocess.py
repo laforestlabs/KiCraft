@@ -109,6 +109,34 @@ def main(argv: list[str]) -> int:
                 _seg.SetEnd(pcbnew.VECTOR2I(_x2, _y2))
                 board.Add(_seg)
 
+    # --- synthesize stock mounting-hole footprints (manual mode) ---
+    # User-declared holes without a backing H-ref on the source board:
+    # load the stock NPTH footprint and place it directly at its final
+    # (already A4-shifted) position. Loaded BEFORE the move loop, which
+    # iterates the pre-captured _all_footprints, so these are never
+    # double-moved.
+    _synth = _data.get("synthesize_footprints") or []
+    if _synth:
+        _board_refs = {f.GetReferenceAsString() for f in _all_footprints}
+        for _sf in _synth:
+            if _sf["ref"] in _board_refs:
+                raise RuntimeError(
+                    f"synthesized mounting-hole ref {_sf['ref']!r} already "
+                    f"exists on the source board; refusing to overwrite"
+                )
+            _new_fp = pcbnew.FootprintLoad(_sf["lib_dir"], _sf["fp_name"])
+            if _new_fp is None:
+                raise RuntimeError(
+                    f"FootprintLoad({_sf['lib_dir']!r}, {_sf['fp_name']!r}) "
+                    f"returned None; stock MountingHole library missing or "
+                    f"footprint renamed"
+                )
+            _new_fp.SetReference(_sf["ref"])
+            _new_fp.SetPosition(
+                pcbnew.VECTOR2I(pcbnew.FromMM(_sf["x"]), pcbnew.FromMM(_sf["y"]))
+            )
+            board.Add(_new_fp)
+
     # --- move footprints to composed positions (keep all footprints) ---
     _comp_map = {c["ref"]: c for c in _components}
     for _fp in _all_footprints:
