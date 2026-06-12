@@ -1683,12 +1683,23 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
     # attribute cost per run/stage (see kicraft.cli.web_cost_report).
     run_id = f"p{state.get('project_id')}-{int(time.time())}"
 
+    # Core-components registry rows for the architecture/bom prompts, fetched
+    # fresh each run so admin edits apply to reruns. Registry trouble must never
+    # block a design run; it degrades to "no defaults block".
+    core_defaults = None
+    if Settings.from_env().enable_core_defaults:
+        try:
+            core_defaults = _store().list_core_components(include_disabled=False)
+        except Exception:
+            core_defaults = None
+
     def progress(ev):
         state["events"].append(ev)
 
     try:
         res = run_session(ws, state.get("brief", ""), stages, answers=answers,
-                          instruction=instruction, progress=progress, run_id=run_id)
+                          instruction=instruction, progress=progress, run_id=run_id,
+                          core_defaults=core_defaults)
         if res.get("guard"):
             state["spend"] = _project_spend_usd(state.get("project_id"))
 
