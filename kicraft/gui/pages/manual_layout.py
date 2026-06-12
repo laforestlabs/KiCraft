@@ -541,6 +541,7 @@ _MOUNTING_HOLE_CORNER_OPTIONS = {
     "bottom-left": "Bottom-Left",
     "bottom-right": "Bottom-Right",
 }
+_MOUNTING_HOLE_SCREW_OPTIONS = ("M2", "M2.5", "M3", "M4")
 # Default cycling order so a new hole picks up a sensible corner.
 _DEFAULT_CORNER_CYCLE = (
     "top-left",
@@ -563,11 +564,15 @@ def _mounting_hole_panel(canvas_id: str, initial_holes: list[dict]) -> None:
         corner = h.get("corner")
         if corner not in _MOUNTING_HOLE_CORNER_OPTIONS:
             corner = None
+        screw = h.get("screw")
+        if screw not in _MOUNTING_HOLE_SCREW_OPTIONS:
+            screw = "M3"
         state.append(
             {
                 "index": int(h.get("index", i)),
                 "corner": corner,
                 "inset_mm": float(h.get("inset_mm", 5.0)),
+                "screw": screw,
             }
         )
 
@@ -616,6 +621,7 @@ def _mounting_hole_panel(canvas_id: str, initial_holes: list[dict]) -> None:
                             idx % len(_DEFAULT_CORNER_CYCLE)
                         ],
                         "inset_mm": 5.0,
+                        "screw": "M3",
                     }
                 )
             while len(state) > n:
@@ -698,7 +704,7 @@ def _view_options_panel(canvas_id: str) -> None:
 
 
 def _build_hole_row(i: int, hole: dict, on_change) -> None:
-    """One H{N+1} row: corner dropdown + inset input."""
+    """One H{N+1} row: corner dropdown + screw size + inset input."""
     with ui.row().classes("items-center gap-2"):
         ui.label(f"H{i + 1}").classes("text-xs text-gray-400 w-8")
         sel = ui.select(
@@ -713,6 +719,20 @@ def _build_hole_row(i: int, hole: dict, on_change) -> None:
             on_change()
 
         sel.on_value_change(_on_corner)
+
+        screw_sel = ui.select(
+            options=list(_MOUNTING_HOLE_SCREW_OPTIONS),
+            value=hole.get("screw", "M3"),
+            label="Screw",
+        ).classes("w-24")
+
+        def _on_screw(e: Any, _hole=hole) -> None:
+            v = str(e.value or "M3")
+            _hole["screw"] = v if v in _MOUNTING_HOLE_SCREW_OPTIONS else "M3"
+            on_change()
+
+        screw_sel.on_value_change(_on_screw)
+
         inset = ui.number(
             "Inset (mm)",
             value=hole["inset_mm"],

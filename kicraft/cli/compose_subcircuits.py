@@ -185,6 +185,11 @@ class ParentCompositionState:
     # the AABB), and the stamper writes the shape's polyline to
     # Edge.Cuts for non-rect shapes.
     manual_outline: dict[str, Any] | None = None
+    # Stock mounting-hole footprints to load onto the stamped board for
+    # user holes without a backing H-ref (manual mode). Entries:
+    # {ref, x, y, lib_dir, fp_name, screw}; coordinates in the same
+    # frame as components (A4-shifted alongside them at stamp time).
+    synthesized_footprints: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock per phase of a parent compose+route round. Keys (when
     # populated): place_solve_ms, stamp_ms, stamp_drc_ms, freerouting_ms,
     # candidate_search_ms, plus solve_*_ms sub-phases from the solver.
@@ -1304,6 +1309,10 @@ def _compose_artifacts(
         for c in derived.parent_local_constraints
         if c.ref in parent_local
     ]
+    # Stock-footprint load instructions for user mounting holes without
+    # a backing H-ref; populated by the manual branch, executed by the
+    # stamp subprocess. Empty in auto mode.
+    synthesized_footprints: list[dict[str, Any]] = []
     if manual_layout is not None:
         # Manual mode: user-supplied placements + outline. Skip the solver
         # and the auto outline-fit pass entirely. Validation, stamping and
@@ -1339,36 +1348,79 @@ def _compose_artifacts(
             if comp is not None:
                 comp.pos = mpl.pos
 
-        # GUI mounting-hole panel maps to the parent's existing
-        # parent-local mounting-hole footprints in alphabetical ref
-        # order (so H4 < H86 etc.). Override each paired component's
-        # position with the user's chosen corner+inset; mark it
-        # user-positioned so the constraint snap below leaves it
-        # alone.
+        # Editor mounting-hole panel: holes map onto the parent's
+        # existing parent-local mounting-hole footprints in alphabetical
+        # ref order (so H4 < H86 etc.), overriding each paired
+        # component's position with the user's chosen corner+inset.
+        # SURPLUS holes (the common case: schematics rarely carry H
+        # refs) are synthesized: a parent-local Component here for
+        # validation/keep-ins, plus a stock-footprint load instruction
+        # the stamp subprocess executes (see _parent_stamp_subprocess
+        # synthesize_footprints). All are marked user-positioned so the
+        # constraint snap below leaves them alone.
         user_positioned_refs: set[str] = set()
         gui_holes = sorted(
             getattr(manual_layout, "mounting_holes", []) or [],
             key=lambda h: h.index,
         )
         if gui_holes:
+            from kicraft.autoplacer.brain.types import Layer as _Layer
+            from kicraft.layout_editor.holes import (
+                plan_mounting_holes,
+                require_stock_mounting_hole_lib,
+                screw_spec,
+            )
+
             mh_refs = sorted(
                 ref for ref, comp in parent_local_solved.items()
                 if _is_mounting_hole_ref(ref, comp)
             )
-            for hole, ref in zip(gui_holes, mh_refs):
+            taken_refs: set[str] = set(parent_local_solved)
+            for art in loaded_artifacts:
+                taken_refs.update(art.metadata.get("component_refs") or [])
+            mapped_holes, synth_holes = plan_mounting_holes(
+                gui_holes, mh_refs, taken_refs
+            )
+            for hole, ref in mapped_holes:
                 comp = parent_local_solved.get(ref)
                 if comp is None:
                     continue
                 _move_component_to(comp, hole.pos)
                 user_positioned_refs.add(ref)
-            if len(gui_holes) > len(mh_refs):
+            if synth_holes:
+                synth_lib_dir = require_stock_mounting_hole_lib()
+                for hole, ref in synth_holes:
+                    spec = screw_spec(getattr(hole, "screw", None))
+                    parent_local_solved[ref] = Component(
+                        ref=ref,
+                        value=spec.screw,
+                        pos=Point(hole.pos.x, hole.pos.y),
+                        rotation=0.0,
+                        layer=_Layer.FRONT,
+                        width_mm=spec.courtyard_mm,
+                        height_mm=spec.courtyard_mm,
+                        pads=[],
+                        locked=True,
+                        kind="mounting_hole",
+                        body_center=Point(hole.pos.x, hole.pos.y),
+                    )
+                    user_positioned_refs.add(ref)
+                    synthesized_footprints.append(
+                        {
+                            "ref": ref,
+                            "x": hole.pos.x,
+                            "y": hole.pos.y,
+                            "lib_dir": str(synth_lib_dir),
+                            "fp_name": spec.fp_name,
+                            "screw": spec.screw,
+                        }
+                    )
                 print(
-                    f"[manual-layout] note: GUI has {len(gui_holes)} mounting "
-                    f"holes but parent has {len(mh_refs)} matching footprints "
-                    f"({', '.join(mh_refs) or 'none'}); the extra GUI holes "
-                    f"are decorative until composer-side footprint synthesis "
-                    f"lands.",
-                    file=sys.stderr,
+                    f"[manual-layout] synthesized {len(synth_holes)} mounting "
+                    f"hole footprint(s): "
+                    + ", ".join(
+                        f"{e['ref']}={e['fp_name']}" for e in synthesized_footprints
+                    )
                 )
 
         solver_phase_timings = {}
@@ -1670,6 +1722,25 @@ def _compose_artifacts(
         )
         parent_local_keep_in_rects.append(keep_in)
 
+    # Synthesized mounting holes have no attachment constraint, so they
+    # get their keep-in rect here: a square reaching
+    # mounting_holes.keepout.size_mm from the hole center (the config's
+    # documented semantic), stamped as a rule-area so FreeRouting can't
+    # route through the screw head.
+    if synthesized_footprints:
+        _mh_keepout_mm = float(
+            ((cfg.get("mounting_holes") or {}).get("keepout") or {}).get(
+                "size_mm", 4.0
+            )
+        )
+        for _entry in synthesized_footprints:
+            parent_local_keep_in_rects.append(
+                (
+                    Point(_entry["x"] - _mh_keepout_mm, _entry["y"] - _mh_keepout_mm),
+                    Point(_entry["x"] + _mh_keepout_mm, _entry["y"] + _mh_keepout_mm),
+                )
+            )
+
     outline_w = exact_outline[1].x - exact_outline[0].x
     outline_h = exact_outline[1].y - exact_outline[0].y
     packing_metadata: dict[str, Any] = {
@@ -1722,6 +1793,7 @@ def _compose_artifacts(
         manual_outline=(
             manual_layout.outline.to_dict() if manual_layout is not None else None
         ),
+        synthesized_footprints=list(synthesized_footprints),
     )
     state.phase_timings.update(solver_phase_timings)
     return state, transformed_payloads
@@ -2436,6 +2508,8 @@ def _stamp_parent_board(
         for rect in (state.parent_local_keep_in_rects or [])
     ]
 
+    synthesize_json = [dict(e) for e in (state.synthesized_footprints or [])]
+
     # Center the assembly on a standard A4 drawing sheet (297 x 210 mm)
     # so the PCB opens centered in the title block rather than crammed
     # against the top-left corner. The composer's native origin is the
@@ -2473,6 +2547,9 @@ def _stamp_parent_board(
                 _k["tl_y"] += _dy
                 _k["br_x"] += _dx
                 _k["br_y"] += _dy
+            for _sf in synthesize_json:
+                _sf["x"] += _dx
+                _sf["y"] += _dy
             outline_data["tl_x"] += _dx
             outline_data["tl_y"] += _dy
             outline_data["br_x"] += _dx
@@ -2490,6 +2567,7 @@ def _stamp_parent_board(
         "silkscreen": silkscreen_json,
         "outline": outline_data,
         "keepouts": keepout_json,
+        "synthesize_footprints": synthesize_json,
     }
 
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="stamp_parent_")
