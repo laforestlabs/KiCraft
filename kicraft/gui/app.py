@@ -69,7 +69,16 @@ def _mount_experiment_assets() -> None:
     app.add_static_files("/experiments", str(experiments_dir))
 
 
+def _mount_layout_editor_assets() -> None:
+    """Serve the shared layout-editor static assets (canvas controller
+    JS) at the mount the bootstrap's default asset URL expects."""
+    from kicraft.layout_editor.canvas import DEFAULT_ASSET_MOUNT, STATIC_DIR
+
+    app.add_static_files(DEFAULT_ASSET_MOUNT, str(STATIC_DIR))
+
+
 _mount_experiment_assets()
+_mount_layout_editor_assets()
 
 
 def _load_json(path: Path) -> dict | None:

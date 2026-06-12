@@ -19,7 +19,6 @@ Design notes:
 
 from __future__ import annotations
 
-import math
 
 from .subcircuit_extractor import ExtractedSubcircuitBoard
 from .types import (
@@ -115,22 +114,13 @@ def leaf_outline_polyline(
     do not duplicate the first point at the end). ``n_arc`` is the
     number of straight-line samples per 90 deg corner; the silk and
     Edge.Cuts callers must pass the same ``n_arc`` to stay aligned.
+
+    The math lives in ``kicraft.layout_editor.outline`` so shaped
+    parent boards and leaf outlines sample identical geometry.
     """
-    r = min(radius_mm, (x1 - x0) / 2, (y1 - y0) / 2)
-    points: list[Point] = []
-    corners = [
-        (x0 + r, y0 + r, math.pi, math.pi / 2),       # top-left
-        (x1 - r, y0 + r, math.pi / 2, 0),              # top-right
-        (x1 - r, y1 - r, 0, -math.pi / 2),             # bottom-right
-        (x0 + r, y1 - r, -math.pi / 2, -math.pi),      # bottom-left
-    ]
-    for cx, cy, a_start, a_end in corners:
-        for i in range(n_arc):
-            t = a_start + (a_end - a_start) * i / (n_arc - 1)
-            px = cx + r * math.cos(t)
-            py = cy - r * math.sin(t)  # KiCad Y-down
-            points.append(Point(px, py))
-    return points
+    from kicraft.layout_editor.outline import rounded_rect_polyline
+
+    return rounded_rect_polyline(x0, y0, x1, y1, radius_mm, n_arc)
 
 
 def _build_leaf_silkscreen(

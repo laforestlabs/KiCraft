@@ -1,241 +1,138 @@
-"""HTML/SVG/JS for the manual layout canvas.
+// Manual-layout canvas controller (shared static asset).
+// Extracted verbatim from the former Python f-string template in
+// kicraft/gui/pages/manual_layout_canvas.py; the host bootstrap
+// (kicraft/layout_editor/canvas.py) loads this file once and calls
+// window.kicraftInitLayoutCanvas(cfg) per canvas init.
 
-Generates the markup + a self-contained vanilla-JS controller exposing
-``window.manualLayoutCanvases[id]`` with ``getState()`` and ``reset()``.
-"""
+// --- Pure outline-shape geometry -------------------------------------------
+// MUST mirror kicraft/layout_editor/outline.py exactly: same shapes, same
+// polyline sampling, same containment and mounting-hole math. Exported on
+// window.kicraftLayoutGeometry so the cross-language agreement test can
+// drive it from node against the Python implementation.
+window.kicraftLayoutGeometry = (function() {
+  const MAX_SAGITTA_MM = 0.02;
+  const CIRCLE_MIN_SEGMENTS = 32;
+  const CIRCLE_MAX_SEGMENTS = 128;
+  const ROUNDED_RECT_N_ARC = 8;
+  const SQRT2 = Math.sqrt(2.0);
 
-from __future__ import annotations
+  // shapeSpec: { shape, corner_radius_mm, chamfer_mm }; min/max: { x, y }.
+  function clampedParam(spec, min, max) {
+    const half = Math.min(max.x - min.x, max.y - min.y) / 2.0;
+    if (spec.shape === 'rounded_rect') return Math.min(spec.corner_radius_mm || 0, half);
+    if (spec.shape === 'chamfered_rect') return Math.min(spec.chamfer_mm || 0, half);
+    if (spec.shape === 'circle') return half;
+    return 0.0;
+  }
 
-import json
-from typing import Any
+  function circleSegmentCount(r) {
+    if (r <= MAX_SAGITTA_MM) return CIRCLE_MIN_SEGMENTS;
+    const n = Math.ceil(Math.PI / Math.acos(1.0 - MAX_SAGITTA_MM / r));
+    return Math.max(CIRCLE_MIN_SEGMENTS, Math.min(CIRCLE_MAX_SEGMENTS, n));
+  }
 
-
-# Default sizing fallback for the canvas host; the host is actually
-# styled with width: 100% and a viewport-relative height so it grows
-# with the available browser space. These values exist only as the
-# initial render-time fallback before clientWidth / clientHeight are
-# known (and as the lower bound for layouts that miss those metrics).
-CANVAS_WIDTH_PX = 1200
-CANVAS_HEIGHT_PX = 800
-
-
-def _build_canvas_config(
-    leaves: list,
-    initial: dict[str, Any],
-    canvas_id: str,
-) -> dict[str, Any]:
-    leaf_payload = [
-        {
-            "instance_path": lf.instance_path,
-            "sheet_name": lf.sheet_name,
-            "width_mm": lf.width_mm,
-            "height_mm": lf.height_mm,
-            "color": lf.color,
-            "render_url": lf.render_url,
-            # Cosmetic only -- leaf solver's silk-poly bbox.
-            "silk_min_x": lf.silk_min_x,
-            "silk_min_y": lf.silk_min_y,
-            "silk_max_x": lf.silk_max_x,
-            "silk_max_y": lf.silk_max_y,
-            # Where the <image> element draws (SVG viewBox). Includes
-            # footprint silk-text labels that hang past the board edge,
-            # so this is BIGGER than the leaf's physical board. Used
-            # only for <image> x/y/width/height; not for snap/overflow.
-            "image_x_mm": lf.image_x_mm,
-            "image_y_mm": lf.image_y_mm,
-            "image_width_mm": lf.image_width_mm,
-            "image_height_mm": lf.image_height_mm,
-            # Edge.Cuts AABB -- single source of truth for physical
-            # extent. Hit, drag/snap, overflow against the parent
-            # outline, and inter-leaf overlap all run against this.
-            # What gets stamped to the parent occupies THIS rectangle,
-            # not the image rectangle.
-            "edge_min_x": lf.edge_min_x,
-            "edge_min_y": lf.edge_min_y,
-            "edge_max_x": lf.edge_max_x,
-            "edge_max_y": lf.edge_max_y,
-        }
-        for lf in leaves
-    ]
-    return {
-        "leaves": leaf_payload,
-        "initial": initial,
-        "canvas_id": canvas_id,
-        "canvas_w_px": CANVAS_WIDTH_PX,
-        "canvas_h_px": CANVAS_HEIGHT_PX,
+  function outlinePolyline(spec, min, max) {
+    const x0 = min.x, y0 = min.y, x1 = max.x, y1 = max.y;
+    if (!spec || spec.shape === 'rect') {
+      return [{x: x0, y: y0}, {x: x1, y: y0}, {x: x1, y: y1}, {x: x0, y: y1}];
     }
+    if (spec.shape === 'rounded_rect') {
+      const r = clampedParam(spec, min, max);
+      const points = [];
+      const corners = [
+        [x0 + r, y0 + r, Math.PI, Math.PI / 2],
+        [x1 - r, y0 + r, Math.PI / 2, 0],
+        [x1 - r, y1 - r, 0, -Math.PI / 2],
+        [x0 + r, y1 - r, -Math.PI / 2, -Math.PI],
+      ];
+      for (const [cx, cy, aStart, aEnd] of corners) {
+        for (let i = 0; i < ROUNDED_RECT_N_ARC; i++) {
+          const t = aStart + (aEnd - aStart) * i / (ROUNDED_RECT_N_ARC - 1);
+          points.push({x: cx + r * Math.cos(t), y: cy - r * Math.sin(t)});
+        }
+      }
+      return points;
+    }
+    if (spec.shape === 'chamfered_rect') {
+      const c = clampedParam(spec, min, max);
+      return [
+        {x: x0, y: y0 + c}, {x: x0 + c, y: y0},
+        {x: x1 - c, y: y0}, {x: x1, y: y0 + c},
+        {x: x1, y: y1 - c}, {x: x1 - c, y: y1},
+        {x: x0 + c, y: y1}, {x: x0, y: y1 - c},
+      ];
+    }
+    if (spec.shape === 'circle') {
+      const r = clampedParam(spec, min, max);
+      const cx = (x0 + x1) / 2.0, cy = (y0 + y1) / 2.0;
+      const n = circleSegmentCount(r);
+      const pts = [];
+      for (let k = 0; k < n; k++) {
+        const t = Math.PI - 2.0 * Math.PI * k / n;
+        pts.push({x: cx + r * Math.cos(t), y: cy - r * Math.sin(t)});
+      }
+      return pts;
+    }
+    return [{x: x0, y: y0}, {x: x1, y: y0}, {x: x1, y: y1}, {x: x0, y: y1}];
+  }
 
+  function outlineContainsPoint(spec, min, max, x, y, tol) {
+    tol = tol || 0.0;
+    const x0 = min.x, y0 = min.y, x1 = max.x, y1 = max.y;
+    if (x < x0 - tol || x > x1 + tol || y < y0 - tol || y > y1 + tol) return false;
+    if (!spec || spec.shape === 'rect') return true;
+    if (spec.shape === 'circle') {
+      const r = clampedParam(spec, min, max);
+      const cx = (x0 + x1) / 2.0, cy = (y0 + y1) / 2.0;
+      return Math.hypot(x - cx, y - cy) <= r + tol;
+    }
+    if (spec.shape === 'chamfered_rect') {
+      const c = clampedParam(spec, min, max);
+      const t = tol * SQRT2;
+      return (
+        (x - x0) + (y - y0) >= c - t
+        && (x1 - x) + (y - y0) >= c - t
+        && (x1 - x) + (y1 - y) >= c - t
+        && (x - x0) + (y1 - y) >= c - t
+      );
+    }
+    if (spec.shape === 'rounded_rect') {
+      const r = clampedParam(spec, min, max);
+      const ncx = Math.min(Math.max(x, x0 + r), x1 - r);
+      const ncy = Math.min(Math.max(y, y0 + r), y1 - r);
+      return Math.hypot(x - ncx, y - ncy) <= r + tol;
+    }
+    return true;
+  }
 
-def build_canvas_html(
-    leaves: list,  # list[LeafInfo] -- typed in caller; avoid import cycle
-    initial: dict[str, Any],
-    canvas_id: str,
-) -> str:
-    """Return the HTML markup for the canvas (CSS + SVG container).
+  function mountingHolePosition(spec, min, max, corner, insetMm) {
+    const signs = {
+      'top-left': [1.0, 1.0],
+      'top-right': [-1.0, 1.0],
+      'bottom-left': [1.0, -1.0],
+      'bottom-right': [-1.0, -1.0],
+    }[corner];
+    if (!signs) return null;
+    const [sx, sy] = signs;
+    const cx = sx > 0 ? min.x : max.x;
+    const cy = sy > 0 ? min.y : max.y;
+    const p = clampedParam(spec, min, max);
+    let entry = 0.0;
+    const shape = spec ? spec.shape : 'rect';
+    if (shape === 'rounded_rect' || shape === 'circle') entry = p * (SQRT2 - 1.0);
+    else if (shape === 'chamfered_rect') entry = p / SQRT2;
+    const perAxis = entry / SQRT2 + insetMm;
+    return {x: cx + sx * perAxis, y: cy + sy * perAxis};
+  }
 
-    Use ``build_canvas_init_script(...)`` for the matching JS bootstrap;
-    NiceGUI 3.x rejects ``<script>`` tags inside ``ui.html()``.
-    """
-    return f"""
-<style>
-  .ml-canvas-host {{
-    position: relative;
-    width: 100%;
-    /* 180 px reserves room for: header (40), tab strip (50),
-       outline inputs (50), action buttons (50), gap padding (~20).
-       Anything left over goes to the canvas. min-height keeps the
-       canvas usable on tall narrow viewports. */
-    height: calc(100vh - 180px);
-    min-height: 600px;
-    background: #0f172a;
-    border: 1px solid #334155;
-    border-radius: 6px;
-    user-select: none;
-    overflow: hidden;
-  }}
-  .ml-canvas-host svg {{ width: 100%; height: 100%; display: block; }}
-  .ml-leaf {{ cursor: grab; }}
-  .ml-leaf.dragging {{ cursor: grabbing; }}
-  .ml-leaf .ml-leaf-hit {{
-    fill: transparent;
-    stroke: none;
-  }}
-  .ml-leaf-img {{ pointer-events: none; }}
-  /* Sharp-cornered amber outline tracing the leaf solver's silk-poly
-     bbox -- what gets stamped on the parent's F.Silkscreen layer. The
-     rounded silk poly inside the PNG should sit exactly inside these
-     straight edges; if not, the placement (or the solver's poly) is
-     off. This is visual only; drag / snap / overflow run against the
-     full content extent (image_*_mm). */
-  .ml-leaf-silk-bbox {{
-    /* Hidden by default. The yellow rounded silk poly baked into the
-       PNG is already the visible leaf boundary; an additional amber
-       overlay just duplicated it (with different corners) and the user
-       reported the resulting double-line as visual noise. Flip display
-       to "block" for debugging if you want to verify that the silk-poly
-       AABB matches the drawn poly. */
-    display: none;
-    fill: none;
-    stroke: #fbbf24;
-    stroke-width: 0.12;
-    stroke-opacity: 0.55;
-    pointer-events: none;
-  }}
-  .ml-leaf-silk-bbox.snap-active {{
-    /* Kept for code/debug parity; snap feedback now uses per-edge
-       highlights via .ml-snap-edge instead of the whole bbox. */
-    stroke: #22d3ee;
-    stroke-opacity: 1;
-  }}
-  /* Highlight segments drawn over the specific constrained edges of
-     the dragged leaf and the leaf (or outline) it's snapping against.
-     Drawn on top of everything during a snap so the constraint is
-     obvious without the whole leaf lighting up. */
-  .ml-snap-edge {{
-    stroke: #22d3ee;
-    stroke-width: 0.45;
-    stroke-linecap: round;
-    pointer-events: none;
-  }}
-  .ml-rot-handle {{
-    fill: #facc15;
-    fill-opacity: 0;
-    stroke: #facc15;
-    stroke-width: 0.25;
-    stroke-opacity: 0;
-    pointer-events: none;
-    cursor: crosshair;
-    transition: fill-opacity 0.12s ease, stroke-opacity 0.12s ease;
-  }}
-  .ml-leaf.selected .ml-rot-handle {{
-    fill-opacity: 0.95;
-    stroke-opacity: 1;
-    pointer-events: auto;
-  }}
-  .ml-outline {{
-    /* Pcbnew-style black fill inside the parent's Edge.Cuts so the PCB
-       area is visibly distinct from the navy canvas. Leaves render on
-       top with transparent backgrounds, so their PCB content composites
-       over this black fill (and over any overlapping leaf content) the
-       same way it would in pcbnew. */
-    fill: #000000;
-    stroke: #67e8f9;
-    stroke-width: 0.6;
-  }}
-  .ml-edge {{ fill: #67e8f9; opacity: 0.55; cursor: ew-resize; }}
-  .ml-edge.horizontal {{ cursor: ns-resize; }}
-  .ml-edge:hover {{ opacity: 0.95; }}
-  .ml-grid line {{ stroke: #1e293b; stroke-width: 0.15; }}
-  .ml-grid line.major {{ stroke: #334155; stroke-width: 0.25; }}
-  .ml-mhole {{
-    fill: none;
-    stroke: #f87171;
-    stroke-width: 0.25;
-    pointer-events: none;
-  }}
-  .ml-mhole-drill {{
-    fill: #f87171;
-    pointer-events: none;
-  }}
-  .ml-mhole-label {{
-    fill: #fca5a5;
-    font: 600 1.6px sans-serif;
-    pointer-events: none;
-    text-anchor: middle;
-    dominant-baseline: middle;
-  }}
-  .ml-mhole-keepin {{
-    fill: #f87171;
-    fill-opacity: 0.10;
-    stroke: #f87171;
-    stroke-width: 0.15;
-    stroke-dasharray: 0.5 0.3;
-    pointer-events: none;
-  }}
-  /* Overflow indicator: turn the rotation handle red so the user can
-     spot a leaf placed outside the outline without overlaying any
-     extra outline on top of the leaf's baked silkscreen. */
-  .ml-leaf.overflow .ml-rot-handle {{
-    stroke: #ef4444;
-  }}
-  /* Overlap indicator: a red Edge.Cuts AABB outline draws on top of
-     any leaf whose physical board (the rectangle stamped on the
-     parent) intersects another leaf's. Save is still allowed (per
-     workflow choice) but the user sees exactly which leaves are
-     colliding before they hit save. The .ml-leaf-overlap rect is
-     rendered AFTER the silk-bbox and hit rects so it sits on top. */
-  .ml-leaf-overlap {{
-    fill: rgba(239, 68, 68, 0.10);
-    stroke: #ef4444;
-    stroke-width: 0.35;
-    stroke-opacity: 0.95;
-    pointer-events: none;
-  }}
-</style>
-<div id="{canvas_id}-host" class="ml-canvas-host">
-  <svg id="{canvas_id}" xmlns="http://www.w3.org/2000/svg"></svg>
-</div>
-"""
+  return {
+    outlinePolyline: outlinePolyline,
+    outlineContainsPoint: outlineContainsPoint,
+    mountingHolePosition: mountingHolePosition,
+  };
+})();
 
-
-def build_canvas_init_script(
-    leaves: list,
-    initial: dict[str, Any],
-    canvas_id: str,
-) -> str:
-    """Return JS source that bootstraps the canvas controller.
-
-    Run this via ``ui.run_javascript(...)`` after the markup from
-    ``build_canvas_html`` is in the DOM.
-    """
-    config = _build_canvas_config(leaves, initial, canvas_id)
-    config_json = json.dumps(config)
-    return _CANVAS_JS_TEMPLATE.format(config_json=config_json)
-
-
-_CANVAS_JS_TEMPLATE = """
-(function() {{
-  const cfg = {config_json};
+window.kicraftInitLayoutCanvas = function(cfg) {
   const HOST_ID = cfg.canvas_id + '-host';
 
   // Each call to this IIFE bumps the canvas's version. The Python
@@ -245,12 +142,12 @@ _CANVAS_JS_TEMPLATE = """
   // (SVG-level listeners auto-clean when render() replaces the SVG
   // contents). Listeners check this sentinel and bail if a newer
   // IIFE has registered, so only the latest version ever responds.
-  window.__mlc_version = window.__mlc_version || {{}};
+  window.__mlc_version = window.__mlc_version || {};
   window.__mlc_version[cfg.canvas_id] = (window.__mlc_version[cfg.canvas_id] || 0) + 1;
   const myVersion = window.__mlc_version[cfg.canvas_id];
-  function isCurrent() {{
+  function isCurrent() {
     return window.__mlc_version[cfg.canvas_id] === myVersion;
-  }}
+  }
   const SVG_ID = cfg.canvas_id;
   const SELECTED_ID = cfg.canvas_id + '-selected';
   const COORDS_ID = cfg.canvas_id + '-coords';
@@ -273,61 +170,81 @@ _CANVAS_JS_TEMPLATE = """
   // intentional gaps.
   const SNAP_THRESHOLD_MM = 0.5;
 
-  function deepCopy(obj) {{ return JSON.parse(JSON.stringify(obj)); }}
+  function deepCopy(obj) { return JSON.parse(JSON.stringify(obj)); }
 
-  function makeState() {{
-    return {{
+  function makeState() {
+    return {
       placements: deepCopy(cfg.initial.placements),
       board_outline: deepCopy(cfg.initial.board_outline),
+      // Shape tag + parameters; the AABB above stays the single
+      // source of truth for size, so every pre-shape code path
+      // (viewBox, edge handles, snapping) is untouched by shapes.
+      outline_shape: deepCopy(
+        cfg.initial.outline_shape
+        || { shape: 'rect', corner_radius_mm: 0.0, chamfer_mm: 0.0 }
+      ),
       mounting_holes: deepCopy(cfg.initial.mounting_holes || []),
       selected: null,
       snap_active: null,
       // Per-axis edge pair that the latest snap pinned, populated by
       // startDrag's move handler. Each entry (when non-null) has shape
-      // {{ my_edge, other_path, other_edge }}. Read by render() to
+      // { my_edge, other_path, other_edge }. Read by render() to
       // draw highlighted edge segments on the dragged leaf and on the
       // constraining neighbor / outline.
-      snap_constraints: {{ x: null, y: null }},
+      snap_constraints: { x: null, y: null },
       // View options -- mutated by setViewOptions() from the Python
       // panel. Defaults match the historical canvas behavior (grid on,
       // edge-snap on, 0 mm gap between snapped leaves).
-      view_options: {{
+      view_options: {
         show_grid: true,
         snap_enabled: true,
         snap_spacing_mm: 0.0,
-      }},
-    }};
-  }}
+      },
+    };
+  }
 
   // Mounting holes are pinned to outline corners with a per-hole
   // inset; recompute their world positions whenever the outline
   // changes so dragging an edge handle keeps the holes glued to
   // their corners. Holes with corner=null keep whatever pos they
   // had (they're declared but not pinned).
-  function recomputeMountingHoles() {{
+  function recomputeMountingHoles() {
     const out = state.board_outline;
-    for (const h of state.mounting_holes) {{
+    for (const h of state.mounting_holes) {
       if (!h.corner) continue;
       const inset = Number(h.inset_mm) || 0;
-      switch (h.corner) {{
-        case 'top-left':
-          h.pos = {{ x: out.min.x + inset, y: out.min.y + inset }}; break;
-        case 'top-right':
-          h.pos = {{ x: out.max.x - inset, y: out.min.y + inset }}; break;
-        case 'bottom-left':
-          h.pos = {{ x: out.min.x + inset, y: out.max.y - inset }}; break;
-        case 'bottom-right':
-          h.pos = {{ x: out.max.x - inset, y: out.max.y - inset }}; break;
-      }}
-    }}
-  }}
+      // Shape-aware corner peg: on rounded/chamfered/circular boards
+      // the AABB corner is off-board, so the peg point walks inward
+      // along the corner diagonal from where the diagonal enters the
+      // shape (plain rect reduces to corner + (inset, inset)).
+      const pos = window.kicraftLayoutGeometry.mountingHolePosition(
+        state.outline_shape, out.min, out.max, h.corner, inset
+      );
+      if (pos) h.pos = pos;
+    }
+  }
+
+  // Circle boards need a square AABB (the circle is its inscribed
+  // circle). Called after any outline mutation; `draggedSide` picks
+  // which dimension wins so an edge drag feels direct.
+  function enforceShapeConstraints(draggedSide) {
+    if (!state.outline_shape || state.outline_shape.shape !== 'circle') return;
+    const out = state.board_outline;
+    const w = out.max.x - out.min.x;
+    const h = out.max.y - out.min.y;
+    if (draggedSide === 'top' || draggedSide === 'bottom') {
+      out.max.x = out.min.x + h;
+    } else {
+      out.max.y = out.min.y + w;
+    }
+  }
 
   const initial = makeState();
   let state = makeState();
 
   const leafByPath = Object.fromEntries(cfg.leaves.map(l => [l.instance_path, l]));
 
-  function viewBox() {{
+  function viewBox() {
     const out = state.board_outline;
     const w = out.max.x - out.min.x;
     const h = out.max.y - out.min.y;
@@ -335,45 +252,45 @@ _CANVAS_JS_TEMPLATE = """
     const vbH = Math.max(h + 2 * PADDING_Y_MM, 30);
     const vbX = out.min.x - PADDING_X_MM;
     const vbY = out.min.y - PADDING_Y_MM;
-    return {{ vbX, vbY, vbW, vbH }};
-  }}
+    return { vbX, vbY, vbW, vbH };
+  }
 
-  function setSelected(ip) {{
+  function setSelected(ip) {
     state.selected = ip;
     const sel = document.getElementById(SELECTED_ID);
-    if (sel) {{
-      if (ip) {{
+    if (sel) {
+      if (ip) {
         const lf = leafByPath[ip];
         sel.textContent = lf ? lf.sheet_name : ip;
-      }} else {{
+      } else {
         sel.textContent = 'none';
-      }}
-    }}
+      }
+    }
     updateCoordsLabel();
     render();
-  }}
+  }
 
-  function updateCoordsLabel() {{
+  function updateCoordsLabel() {
     const coords = document.getElementById(COORDS_ID);
     const outlineEl = document.getElementById(OUTLINE_ID);
-    if (outlineEl) {{
+    if (outlineEl) {
       const w = (state.board_outline.max.x - state.board_outline.min.x);
       const h = (state.board_outline.max.y - state.board_outline.min.y);
       outlineEl.textContent = w.toFixed(1) + ' × ' + h.toFixed(1) + ' mm';
-    }}
+    }
     if (!coords) return;
-    if (!state.selected) {{ coords.textContent = '--'; return; }}
+    if (!state.selected) { coords.textContent = '--'; return; }
     const p = state.placements.find(p => p.instance_path === state.selected);
-    if (!p) {{ coords.textContent = '--'; return; }}
+    if (!p) { coords.textContent = '--'; return; }
     coords.textContent = 'x=' + p.origin.x.toFixed(2) + ', y=' + p.origin.y.toFixed(2)
       + ', rot=' + (p.rotation || 0).toFixed(0) + '°';
-  }}
+  }
 
-  function snapAngle(deg, shiftHeld) {{
+  function snapAngle(deg, shiftHeld) {
     if (shiftHeld) return deg;
     const m = ((deg % 360) + 360) % 360;
     return Math.round(m / SNAP_DEG) * SNAP_DEG;
-  }}
+  }
 
   // Compose-equivalent transform. KiCad / pcbnew rotates CLOCKWISE
   // (matching SetOrientationDegrees), so transform_loaded_artifact's
@@ -392,27 +309,27 @@ _CANVAS_JS_TEMPLATE = """
   // AABB center). This is what gets stamped on the parent, so rotating
   // around it keeps the user's mental model -- "I'm spinning the board"
   // -- consistent with the stamped result.
-  function leafCenterLocal(leaf) {{
-    return {{
+  function leafCenterLocal(leaf) {
+    return {
       x: (leaf.edge_min_x + leaf.edge_max_x) * 0.5,
       y: (leaf.edge_min_y + leaf.edge_max_y) * 0.5,
-    }};
-  }}
+    };
+  }
 
-  function leafCenter(p, leaf) {{
+  function leafCenter(p, leaf) {
     const r = (p.rotation || 0) * Math.PI / 180;
     const c = Math.cos(r), s = Math.sin(r);
     const sc = leafCenterLocal(leaf);
-    return {{
+    return {
       x: p.origin.x + c * sc.x + s * sc.y,
       y: p.origin.y - s * sc.x + c * sc.y,
-    }};
-  }}
+    };
+  }
 
   // Inverse for the same CW rotation: solve
   //   center = origin + R_CW(theta) * leaf_center
   // for origin so the visual center stays put as the user rotates.
-  function setRotationKeepCenter(p, leaf, newRotDeg) {{
+  function setRotationKeepCenter(p, leaf, newRotDeg) {
     const center = leafCenter(p, leaf);
     const r = newRotDeg * Math.PI / 180;
     const c = Math.cos(r), s = Math.sin(r);
@@ -420,14 +337,14 @@ _CANVAS_JS_TEMPLATE = """
     p.origin.x = center.x - (c * sc.x + s * sc.y);
     p.origin.y = center.y - (-s * sc.x + c * sc.y);
     p.rotation = newRotDeg;
-  }}
+  }
 
   // Axis-aligned bbox of the leaf's PHYSICAL board (Edge.Cuts) in
   // PARENT (canvas-world) coords, accounting for rotation. This is the
   // single source of truth for snap + overflow + inter-leaf overlap:
   // it's the rectangle the parent stamper actually places on the
   // board, so anything aligned here matches what gets stamped.
-  function leafBboxParent(p, leaf) {{
+  function leafBboxParent(p, leaf) {
     const r = (p.rotation || 0) * Math.PI / 180;
     const c = Math.cos(r), s = Math.sin(r);
     const x0 = leaf.edge_min_x, y0 = leaf.edge_min_y;
@@ -436,69 +353,69 @@ _CANVAS_JS_TEMPLATE = """
     const ty = (x, y) => -x * s + y * c + p.origin.y;
     const xs = [tx(x0, y0), tx(x1, y0), tx(x1, y1), tx(x0, y1)];
     const ys = [ty(x0, y0), ty(x1, y0), ty(x1, y1), ty(x0, y1)];
-    return {{
+    return {
       min_x: Math.min.apply(null, xs),
       max_x: Math.max.apply(null, xs),
       min_y: Math.min.apply(null, ys),
       max_y: Math.max.apply(null, ys),
-    }};
-  }}
+    };
+  }
 
   // Compute the set of leaves that collide with at least one other leaf
   // in parent space. Used to red-flag overlapping placements. The
   // collision is on Edge.Cuts AABBs -- if two leaves' physical boards
   // overlap by more than EPS_MM, both go in the set.
   const OVERLAP_EPS_MM = 0.01;
-  function computeOverlaps() {{
-    const bboxes = state.placements.map(p => {{
+  function computeOverlaps() {
+    const bboxes = state.placements.map(p => {
       const leaf = leafByPath[p.instance_path];
       if (!leaf) return null;
-      return {{ ip: p.instance_path, b: leafBboxParent(p, leaf) }};
-    }}).filter(Boolean);
+      return { ip: p.instance_path, b: leafBboxParent(p, leaf) };
+    }).filter(Boolean);
     const overlapping = new Set();
-    for (let i = 0; i < bboxes.length; i++) {{
-      for (let j = i + 1; j < bboxes.length; j++) {{
+    for (let i = 0; i < bboxes.length; i++) {
+      for (let j = i + 1; j < bboxes.length; j++) {
         const a = bboxes[i].b, b = bboxes[j].b;
         const ox = Math.min(a.max_x, b.max_x) - Math.max(a.min_x, b.min_x);
         const oy = Math.min(a.max_y, b.max_y) - Math.max(a.min_y, b.min_y);
-        if (ox > OVERLAP_EPS_MM && oy > OVERLAP_EPS_MM) {{
+        if (ox > OVERLAP_EPS_MM && oy > OVERLAP_EPS_MM) {
           overlapping.add(bboxes[i].ip);
           overlapping.add(bboxes[j].ip);
-        }}
-      }}
-    }}
+        }
+      }
+    }
     return overlapping;
-  }}
+  }
 
   // Walk every other leaf's silk bbox + the board outline edges and
   // collect the smallest x/y offset that pulls the dragged leaf's
   // edges into exact alignment, when that offset is within
   // SNAP_THRESHOLD_MM. Returns null when nothing is close enough.
-  function computeDragSnap(ip, myBbox) {{
+  function computeDragSnap(ip, myBbox) {
     if (!state.view_options.snap_enabled) return null;
     const gap = Math.max(0, Number(state.view_options.snap_spacing_mm) || 0);
     const candidates = [];
-    for (const other of state.placements) {{
+    for (const other of state.placements) {
       if (other.instance_path === ip) continue;
       const otherLeaf = leafByPath[other.instance_path];
       if (!otherLeaf) continue;
       const ob = leafBboxParent(other, otherLeaf);
-      candidates.push({{ b: ob, edge_gap: gap, path: other.instance_path }});
-    }}
+      candidates.push({ b: ob, edge_gap: gap, path: other.instance_path });
+    }
     // Board outline counts too -- snap to the INSIDE of the parent
     // edges, with no gap (the gap setting is for leaf-to-leaf spacing,
     // not leaf-to-outline padding). The sentinel path '__outline__'
     // lets the renderer find the right bbox without aliasing a leaf.
     const o = state.board_outline;
-    candidates.push({{
-      b: {{ min_x: o.min.x, max_x: o.max.x, min_y: o.min.y, max_y: o.max.y }},
+    candidates.push({
+      b: { min_x: o.min.x, max_x: o.max.x, min_y: o.min.y, max_y: o.max.y },
       edge_gap: 0,
       path: '__outline__',
-    }});
+    });
 
     let bestDx = 0, bestDxDist = Infinity, bestXC = null;
     let bestDy = 0, bestDyDist = Infinity, bestYC = null;
-    for (const c of candidates) {{
+    for (const c of candidates) {
       const ob = c.b;
       const g = c.edge_gap;
       // Pair format: [my_edge, other_edge, current_offset, target_offset].
@@ -519,28 +436,28 @@ _CANVAS_JS_TEMPLATE = """
         ['top',    'top',    myBbox.min_y - ob.min_y,  0],  // top-aligned
         ['bottom', 'bottom', myBbox.max_y - ob.max_y,  0],  // bottom-aligned
       ];
-      for (const [myE, otherE, d, target] of xPairs) {{
+      for (const [myE, otherE, d, target] of xPairs) {
         const a = Math.abs(d - target);
-        if (a < SNAP_THRESHOLD_MM && a < bestDxDist) {{
+        if (a < SNAP_THRESHOLD_MM && a < bestDxDist) {
           bestDx = target - d;
           bestDxDist = a;
-          bestXC = {{ my_edge: myE, other_path: c.path, other_edge: otherE }};
-        }}
-      }}
-      for (const [myE, otherE, d, target] of yPairs) {{
+          bestXC = { my_edge: myE, other_path: c.path, other_edge: otherE };
+        }
+      }
+      for (const [myE, otherE, d, target] of yPairs) {
         const a = Math.abs(d - target);
-        if (a < SNAP_THRESHOLD_MM && a < bestDyDist) {{
+        if (a < SNAP_THRESHOLD_MM && a < bestDyDist) {
           bestDy = target - d;
           bestDyDist = a;
-          bestYC = {{ my_edge: myE, other_path: c.path, other_edge: otherE }};
-        }}
-      }}
-    }}
+          bestYC = { my_edge: myE, other_path: c.path, other_edge: otherE };
+        }
+      }
+    }
     if (bestDxDist === Infinity && bestDyDist === Infinity) return null;
-    return {{ dx: bestDx, dy: bestDy, x_constraint: bestXC, y_constraint: bestYC }};
-  }}
+    return { dx: bestDx, dy: bestDy, x_constraint: bestXC, y_constraint: bestYC };
+  }
 
-  function render() {{
+  function render() {
     const svg = document.getElementById(SVG_ID);
     if (!svg) return;
     const vb = viewBox();
@@ -556,7 +473,7 @@ _CANVAS_JS_TEMPLATE = """
     // the outline (which still render correctly via the letterbox)
     // float over a gridless dark background. Skipped entirely when
     // the View options panel toggles show_grid off.
-    if (state.view_options.show_grid) {{
+    if (state.view_options.show_grid) {
       const grid = document.createElementNS('http://www.w3.org/2000/svg', 'g');
       grid.setAttribute('class', 'ml-grid');
       const svgW = svg.clientWidth || cfg.canvas_w_px;
@@ -570,32 +487,47 @@ _CANVAS_JS_TEMPLATE = """
       const x1 = visX + visW;
       const y0 = Math.floor(visY / 5) * 5;
       const y1 = visY + visH;
-      for (let x = x0; x <= x1; x += 5) {{
+      for (let x = x0; x <= x1; x += 5) {
         const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
         ln.setAttribute('x1', x); ln.setAttribute('x2', x);
         ln.setAttribute('y1', visY); ln.setAttribute('y2', y1);
         if (x % 10 === 0) ln.setAttribute('class', 'major');
         grid.appendChild(ln);
-      }}
-      for (let y = y0; y <= y1; y += 5) {{
+      }
+      for (let y = y0; y <= y1; y += 5) {
         const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
         ln.setAttribute('x1', visX); ln.setAttribute('x2', x1);
         ln.setAttribute('y1', y); ln.setAttribute('y2', y);
         if (y % 10 === 0) ln.setAttribute('class', 'major');
         grid.appendChild(ln);
-      }}
+      }
       svg.appendChild(grid);
-    }}
+    }
 
-    // Outline rect
+    // Outline: plain rect element for rect shape; closed <path> traced
+    // from the shared polyline generator otherwise (the exact loop the
+    // parent stamper writes to Edge.Cuts).
     const outline = state.board_outline;
-    const outRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    outRect.setAttribute('class', 'ml-outline');
-    outRect.setAttribute('x', outline.min.x);
-    outRect.setAttribute('y', outline.min.y);
-    outRect.setAttribute('width', outline.max.x - outline.min.x);
-    outRect.setAttribute('height', outline.max.y - outline.min.y);
-    svg.appendChild(outRect);
+    if (!state.outline_shape || state.outline_shape.shape === 'rect') {
+      const outRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      outRect.setAttribute('class', 'ml-outline');
+      outRect.setAttribute('x', outline.min.x);
+      outRect.setAttribute('y', outline.min.y);
+      outRect.setAttribute('width', outline.max.x - outline.min.x);
+      outRect.setAttribute('height', outline.max.y - outline.min.y);
+      svg.appendChild(outRect);
+    } else {
+      const pts = window.kicraftLayoutGeometry.outlinePolyline(
+        state.outline_shape, outline.min, outline.max
+      );
+      const d = pts.map(
+        (p, i) => (i === 0 ? 'M' : 'L') + p.x.toFixed(4) + ' ' + p.y.toFixed(4)
+      ).join(' ') + ' Z';
+      const outPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      outPath.setAttribute('class', 'ml-outline');
+      outPath.setAttribute('d', d);
+      svg.appendChild(outPath);
+    }
 
     // Edge handles
     const w = outline.max.x - outline.min.x;
@@ -611,8 +543,11 @@ _CANVAS_JS_TEMPLATE = """
     // packing leaf silk / pads into a region that won't actually be
     // free of copper.
     const KEEPIN_RADIUS_MM = 3.0;
+    // Ring radius per screw size = courtyard/2 of the stock KiCad
+    // MountingHole footprint the composer synthesizes (drill diameter).
+    const SCREW_RING_R_MM = { 'M2': 2.2, 'M2.5': 2.7, 'M3': 3.2, 'M4': 4.3 };
     recomputeMountingHoles();
-    for (const hole of state.mounting_holes) {{
+    for (const hole of state.mounting_holes) {
       const keepin = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
       keepin.setAttribute('class', 'ml-mhole-keepin');
       keepin.setAttribute('x', hole.pos.x - KEEPIN_RADIUS_MM);
@@ -624,7 +559,7 @@ _CANVAS_JS_TEMPLATE = """
       ring.setAttribute('class', 'ml-mhole');
       ring.setAttribute('cx', hole.pos.x);
       ring.setAttribute('cy', hole.pos.y);
-      ring.setAttribute('r', 3.2);
+      ring.setAttribute('r', SCREW_RING_R_MM[hole.screw] || 3.2);
       svg.appendChild(ring);
       const drill = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       drill.setAttribute('class', 'ml-mhole-drill');
@@ -638,12 +573,12 @@ _CANVAS_JS_TEMPLATE = """
       label.setAttribute('y', hole.pos.y - 4.0);
       label.textContent = 'H' + (hole.index + 1);
       svg.appendChild(label);
-    }}
+    }
 
     // Leaves
     const out = state.board_outline;
     const overlapping = computeOverlaps();
-    for (const p of state.placements) {{
+    for (const p of state.placements) {
       const leaf = leafByPath[p.instance_path];
       if (!leaf) continue;
       // Three leaf-local rects per placement:
@@ -671,12 +606,12 @@ _CANVAS_JS_TEMPLATE = """
       // the physical board crosses the parent outline.
       const r = (p.rotation || 0) * Math.PI / 180;
       const rc = Math.cos(r), rs = Math.sin(r);
-      function corner(lx, ly) {{
-        return {{
+      function corner(lx, ly) {
+        return {
           x: p.origin.x + rc * lx + rs * ly,
           y: p.origin.y - rs * lx + rc * ly,
-        }};
-      }}
+        };
+      }
       const corners = [
         corner(ex0, ey0),
         corner(ex1, ey0),
@@ -684,8 +619,9 @@ _CANVAS_JS_TEMPLATE = """
         corner(ex0, ey1),
       ];
       const overflow = corners.some(c =>
-        c.x < out.min.x - 0.01 || c.x > out.max.x + 0.01 ||
-        c.y < out.min.y - 0.01 || c.y > out.max.y + 0.01
+        !window.kicraftLayoutGeometry.outlineContainsPoint(
+          state.outline_shape, out.min, out.max, c.x, c.y, 0.01
+        )
       );
       const collides = overlapping.has(p.instance_path);
       const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
@@ -709,7 +645,7 @@ _CANVAS_JS_TEMPLATE = """
       // coords -- the silk poly INSIDE the PNG lands on the silk_min/
       // max bbox by construction, and stacked leaves composite cleanly
       // through the PNG's transparent background.
-      if (leaf.render_url) {{
+      if (leaf.render_url) {
         const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
         img.setAttribute('class', 'ml-leaf-img');
         img.setAttribute('href', leaf.render_url);
@@ -719,7 +655,7 @@ _CANVAS_JS_TEMPLATE = """
         img.setAttribute('height', leaf.image_height_mm);
         img.setAttribute('preserveAspectRatio', 'none');
         g.appendChild(img);
-      }}
+      }
 
       // Sharp-cornered amber rectangle traced over the leaf solver's
       // silk-poly bbox. Lets the user see what gets stamped to the
@@ -757,7 +693,7 @@ _CANVAS_JS_TEMPLATE = """
       // Drawn AFTER the hit rect so it sits visibly on top of the leaf
       // image. Mostly transparent fill so the leaf content underneath
       // still reads.
-      if (collides) {{
+      if (collides) {
         const ov = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
         ov.setAttribute('class', 'ml-leaf-overlap');
         ov.setAttribute('x', ex0);
@@ -765,7 +701,7 @@ _CANVAS_JS_TEMPLATE = """
         ov.setAttribute('width', Math.max(0, ex1 - ex0));
         ov.setAttribute('height', Math.max(0, ey1 - ey0));
         g.appendChild(ov);
-      }}
+      }
 
       // Rotation handle sits just outside the Edge.Cuts top-right
       // corner so it tracks the physical board under rotation.
@@ -778,56 +714,56 @@ _CANVAS_JS_TEMPLATE = """
       g.appendChild(rot);
 
       svg.appendChild(g);
-    }}
+    }
 
     // Snap-edge highlights: draw the constrained edges of the dragged
     // leaf AND the leaf (or outline) it's snapping against, drawn on
     // top of every leaf so the constraint is obvious without lighting
     // up the whole bbox. Only fires while a drag-snap is active.
-    if (state.snap_active) {{
+    if (state.snap_active) {
       const me = state.placements.find(x => x.instance_path === state.snap_active);
       const meLeaf = me ? leafByPath[state.snap_active] : null;
-      if (me && meLeaf) {{
+      if (me && meLeaf) {
         const meBbox = leafBboxParent(me, meLeaf);
         const constraints = [state.snap_constraints.x, state.snap_constraints.y];
-        for (const c of constraints) {{
+        for (const c of constraints) {
           if (!c) continue;
           appendSnapEdge(svg, edgeLine(meBbox, c.my_edge));
           let otherBbox = null;
-          if (c.other_path === '__outline__') {{
+          if (c.other_path === '__outline__') {
             const o = state.board_outline;
-            otherBbox = {{ min_x: o.min.x, max_x: o.max.x, min_y: o.min.y, max_y: o.max.y }};
-          }} else {{
+            otherBbox = { min_x: o.min.x, max_x: o.max.x, min_y: o.min.y, max_y: o.max.y };
+          } else {
             const other = state.placements.find(x => x.instance_path === c.other_path);
             const otherLeaf = other ? leafByPath[c.other_path] : null;
             if (other && otherLeaf) otherBbox = leafBboxParent(other, otherLeaf);
-          }}
+          }
           if (otherBbox) appendSnapEdge(svg, edgeLine(otherBbox, c.other_edge));
-        }}
-      }}
-    }}
+        }
+      }
+    }
 
     bindLeafEvents(svg);
     bindEdgeEvents(svg);
     updateCoordsLabel();
-  }}
+  }
 
-  function edgeLine(bbox, side) {{
+  function edgeLine(bbox, side) {
     // Axis-aligned line segment along the named edge of an AABB.
     // The render layer rotates leaves at the group level, but
     // leafBboxParent already returns the rotated AABB in parent
     // coords, so these segments live on the visible parent-space
     // edge regardless of the leaf's rotation.
-    switch (side) {{
-      case 'left':   return {{ x1: bbox.min_x, y1: bbox.min_y, x2: bbox.min_x, y2: bbox.max_y }};
-      case 'right':  return {{ x1: bbox.max_x, y1: bbox.min_y, x2: bbox.max_x, y2: bbox.max_y }};
-      case 'top':    return {{ x1: bbox.min_x, y1: bbox.min_y, x2: bbox.max_x, y2: bbox.min_y }};
-      case 'bottom': return {{ x1: bbox.min_x, y1: bbox.max_y, x2: bbox.max_x, y2: bbox.max_y }};
-      default: return {{ x1: 0, y1: 0, x2: 0, y2: 0 }};
-    }}
-  }}
+    switch (side) {
+      case 'left':   return { x1: bbox.min_x, y1: bbox.min_y, x2: bbox.min_x, y2: bbox.max_y };
+      case 'right':  return { x1: bbox.max_x, y1: bbox.min_y, x2: bbox.max_x, y2: bbox.max_y };
+      case 'top':    return { x1: bbox.min_x, y1: bbox.min_y, x2: bbox.max_x, y2: bbox.min_y };
+      case 'bottom': return { x1: bbox.min_x, y1: bbox.max_y, x2: bbox.max_x, y2: bbox.max_y };
+      default: return { x1: 0, y1: 0, x2: 0, y2: 0 };
+    }
+  }
 
-  function appendSnapEdge(svg, line) {{
+  function appendSnapEdge(svg, line) {
     const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
     ln.setAttribute('class', 'ml-snap-edge');
     ln.setAttribute('x1', line.x1);
@@ -835,46 +771,46 @@ _CANVAS_JS_TEMPLATE = """
     ln.setAttribute('x2', line.x2);
     ln.setAttribute('y2', line.y2);
     svg.appendChild(ln);
-  }}
+  }
 
-  function addEdge(svg, side, x, y, w, h, horizontal=false) {{
+  function addEdge(svg, side, x, y, w, h, horizontal=false) {
     const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
     r.setAttribute('class', 'ml-edge' + (horizontal ? ' horizontal' : ''));
     r.setAttribute('data-edge', side);
     r.setAttribute('x', x); r.setAttribute('y', y);
     r.setAttribute('width', w); r.setAttribute('height', h);
     svg.appendChild(r);
-  }}
+  }
 
-  function svgToWorld(svg, evt) {{
+  function svgToWorld(svg, evt) {
     const pt = svg.createSVGPoint();
     pt.x = evt.clientX; pt.y = evt.clientY;
     const ctm = svg.getScreenCTM();
-    if (!ctm) return {{ x: 0, y: 0 }};
+    if (!ctm) return { x: 0, y: 0 };
     const inv = ctm.inverse();
     const w = pt.matrixTransform(inv);
-    return {{ x: w.x, y: w.y }};
-  }}
+    return { x: w.x, y: w.y };
+  }
 
-  function bindLeafEvents(svg) {{
-    svg.querySelectorAll('.ml-leaf').forEach(g => {{
+  function bindLeafEvents(svg) {
+    svg.querySelectorAll('.ml-leaf').forEach(g => {
       const ip = g.getAttribute('data-instance-path');
-      g.addEventListener('mousedown', (e) => {{
-        if (e.target && e.target.getAttribute('data-role') === 'rotate') {{
+      g.addEventListener('mousedown', (e) => {
+        if (e.target && e.target.getAttribute('data-role') === 'rotate') {
           startRotate(svg, ip, e);
-        }} else {{
+        } else {
           startDrag(svg, ip, e);
-        }}
+        }
         e.preventDefault();
-      }});
-    }});
-    svg.addEventListener('contextmenu', (e) => {{
+      });
+    });
+    svg.addEventListener('contextmenu', (e) => {
       const target = e.target.closest('.ml-leaf');
-      if (target) {{
+      if (target) {
         e.preventDefault();
         const ip = target.getAttribute('data-instance-path');
         const p = state.placements.find(x => x.instance_path === ip);
-        if (p) {{
+        if (p) {
           const leaf = leafByPath[ip];
           // Negate to invert input mapping: a CW step (intuitive) is
           // stored as a negative rotation, which the SVG transform's
@@ -884,31 +820,31 @@ _CANVAS_JS_TEMPLATE = """
           // exists for in the first place.
           setRotationKeepCenter(p, leaf, snapAngle((p.rotation || 0) - SNAP_DEG, false));
           setSelected(ip);
-        }}
-      }}
-    }});
-    document.addEventListener('keydown', (e) => {{
+        }
+      }
+    });
+    document.addEventListener('keydown', (e) => {
       if (!isCurrent()) return;  // stale IIFE from a prior refresh
       if (!state.selected) return;
-      if (e.key === 'r' || e.key === 'R') {{
+      if (e.key === 'r' || e.key === 'R') {
         const p = state.placements.find(x => x.instance_path === state.selected);
-        if (p) {{
+        if (p) {
           const leaf = leafByPath[state.selected];
           setRotationKeepCenter(p, leaf, snapAngle((p.rotation || 0) - SNAP_DEG, false));
           render();
-        }}
-      }}
-    }});
-  }}
+        }
+      }
+    });
+  }
 
-  function startDrag(svg, ip, evt) {{
+  function startDrag(svg, ip, evt) {
     setSelected(ip);
     const p = state.placements.find(x => x.instance_path === ip);
     if (!p) return;
     const leaf = leafByPath[ip];
     const start = svgToWorld(svg, evt);
-    const orig = {{ x: p.origin.x, y: p.origin.y }};
-    const move = (e) => {{
+    const orig = { x: p.origin.x, y: p.origin.y };
+    const move = (e) => {
       const cur = svgToWorld(svg, e);
       p.origin.x = orig.x + (cur.x - start.x);
       p.origin.y = orig.y + (cur.y - start.y);
@@ -920,32 +856,32 @@ _CANVAS_JS_TEMPLATE = """
       // edge when they really want to.
       const myBbox = leafBboxParent(p, leaf);
       const snap = e.shiftKey ? null : computeDragSnap(ip, myBbox);
-      if (snap) {{
+      if (snap) {
         p.origin.x += snap.dx;
         p.origin.y += snap.dy;
         state.snap_active = ip;
         state.snap_constraints.x = snap.x_constraint;
         state.snap_constraints.y = snap.y_constraint;
-      }} else {{
+      } else {
         state.snap_active = null;
         state.snap_constraints.x = null;
         state.snap_constraints.y = null;
-      }}
+      }
       render();
-    }};
-    const up = () => {{
+    };
+    const up = () => {
       state.snap_active = null;
       state.snap_constraints.x = null;
       state.snap_constraints.y = null;
       render();
       document.removeEventListener('mousemove', move);
       document.removeEventListener('mouseup', up);
-    }};
+    };
     document.addEventListener('mousemove', move);
     document.addEventListener('mouseup', up);
-  }}
+  }
 
-  function startRotate(svg, ip, evt) {{
+  function startRotate(svg, ip, evt) {
     setSelected(ip);
     const p = state.placements.find(x => x.instance_path === ip);
     if (!p) return;
@@ -958,7 +894,7 @@ _CANVAS_JS_TEMPLATE = """
     const startW = svgToWorld(svg, evt);
     const startAngle = Math.atan2(startW.y - center.y, startW.x - center.x) * 180 / Math.PI;
     const baseRot = p.rotation || 0;
-    const move = (e) => {{
+    const move = (e) => {
       const cur = svgToWorld(svg, e);
       const ang = Math.atan2(cur.y - center.y, cur.x - center.x) * 180 / Math.PI;
       // Negate the drag delta so a visual-CW mouse motion produces a
@@ -968,21 +904,21 @@ _CANVAS_JS_TEMPLATE = """
       // input mapping here instead of touching the transform.
       setRotationKeepCenter(p, leaf, baseRot - (ang - startAngle));
       render();
-    }};
-    const up = (e) => {{
+    };
+    const up = (e) => {
       setRotationKeepCenter(p, leaf, snapAngle(p.rotation, e.shiftKey));
       render();
       document.removeEventListener('mousemove', move);
       document.removeEventListener('mouseup', up);
-    }};
+    };
     document.addEventListener('mousemove', move);
     document.addEventListener('mouseup', up);
-  }}
+  }
 
-  function bindEdgeEvents(svg) {{
-    svg.querySelectorAll('.ml-edge').forEach(el => {{
+  function bindEdgeEvents(svg) {
+    svg.querySelectorAll('.ml-edge').forEach(el => {
       const side = el.getAttribute('data-edge');
-      el.addEventListener('mousedown', (e) => {{
+      el.addEventListener('mousedown', (e) => {
         // Capture the screen-to-viewBox scale ONCE at mousedown.
         // Edge drags grow/shrink the outline, which changes the
         // viewBox, which shifts the live CTM. If we reused
@@ -999,83 +935,94 @@ _CANVAS_JS_TEMPLATE = """
         const startClientY = e.clientY;
         const orig = deepCopy(state.board_outline);
         const minSize = 10;
-        const move = (ev) => {{
+        const move = (ev) => {
           const dx = (ev.clientX - startClientX) * mmPerPxX;
           const dy = (ev.clientY - startClientY) * mmPerPxY;
           const out = state.board_outline;
-          if (side === 'left') {{
+          if (side === 'left') {
             out.min.x = Math.min(orig.min.x + dx, orig.max.x - minSize);
-          }} else if (side === 'right') {{
+          } else if (side === 'right') {
             out.max.x = Math.max(orig.max.x + dx, orig.min.x + minSize);
-          }} else if (side === 'top') {{
+          } else if (side === 'top') {
             out.min.y = Math.min(orig.min.y + dy, orig.max.y - minSize);
-          }} else if (side === 'bottom') {{
+          } else if (side === 'bottom') {
             out.max.y = Math.max(orig.max.y + dy, orig.min.y + minSize);
-          }}
+          }
+          enforceShapeConstraints(side);
           render();
-        }};
-        const up = () => {{
+        };
+        const up = () => {
           document.removeEventListener('mousemove', move);
           document.removeEventListener('mouseup', up);
-        }};
+        };
         document.addEventListener('mousemove', move);
         document.addEventListener('mouseup', up);
         e.preventDefault();
-      }});
-    }});
-  }}
+      });
+    });
+  }
 
   // --- Public API exposed to Python ---
-  window.manualLayoutCanvases = window.manualLayoutCanvases || {{}};
-  window.manualLayoutCanvases[cfg.canvas_id] = {{
-    getState: function() {{
+  window.manualLayoutCanvases = window.manualLayoutCanvases || {};
+  window.manualLayoutCanvases[cfg.canvas_id] = {
+    getState: function() {
       // Quantize to 0.001 mm and 0.1° to keep JSON tidy
-      const placements = state.placements.map(p => ({{
+      const placements = state.placements.map(p => ({
         instance_path: p.instance_path,
-        origin: {{
+        origin: {
           x: Math.round(p.origin.x * 1000) / 1000,
           y: Math.round(p.origin.y * 1000) / 1000,
-        }},
+        },
         rotation: Math.round(((p.rotation || 0) * 10)) / 10,
-      }}));
+      }));
       const out = state.board_outline;
       recomputeMountingHoles();
-      const mounting_holes = state.mounting_holes.map(h => ({{
+      const mounting_holes = state.mounting_holes.map(h => ({
         index: h.index,
         corner: h.corner,
         inset_mm: Math.round(h.inset_mm * 100) / 100,
-        pos: {{
+        pos: {
           x: Math.round(h.pos.x * 1000) / 1000,
           y: Math.round(h.pos.y * 1000) / 1000,
-        }},
-      }}));
-      return {{
+        },
+        screw: h.screw || 'M3',
+      }));
+      const outline_min = {
+        x: Math.round(out.min.x * 1000) / 1000,
+        y: Math.round(out.min.y * 1000) / 1000,
+      };
+      const outline_max = {
+        x: Math.round(out.max.x * 1000) / 1000,
+        y: Math.round(out.max.y * 1000) / 1000,
+      };
+      const shape = state.outline_shape || { shape: 'rect' };
+      return {
         placements: placements,
-        board_outline: {{
-          min: {{
-            x: Math.round(out.min.x * 1000) / 1000,
-            y: Math.round(out.min.y * 1000) / 1000,
-          }},
-          max: {{
-            x: Math.round(out.max.x * 1000) / 1000,
-            y: Math.round(out.max.y * 1000) / 1000,
-          }},
-        }},
+        // Legacy AABB key kept so an older server can still read a
+        // newer canvas's payload during deploy skew.
+        board_outline: { min: outline_min, max: outline_max },
+        outline: {
+          shape: shape.shape || 'rect',
+          min: outline_min,
+          max: outline_max,
+          corner_radius_mm: Math.round((shape.corner_radius_mm || 0) * 100) / 100,
+          chamfer_mm: Math.round((shape.chamfer_mm || 0) * 100) / 100,
+        },
         mounting_holes: mounting_holes,
-      }};
-    }},
-    reset: function() {{
+      };
+    },
+    reset: function() {
       state = makeState();
       render();
-    }},
-    getOutlineSize: function() {{
+    },
+    getOutlineSize: function() {
       const out = state.board_outline;
-      return {{
+      return {
         width: Math.round((out.max.x - out.min.x) * 1000) / 1000,
         height: Math.round((out.max.y - out.min.y) * 1000) / 1000,
-      }};
-    }},
-    setOutlineSize: function(width, height) {{
+      };
+    },
+    setOutlineSize: function(width, height) {
       const out = state.board_outline;
       const w = Math.max(10, Number(width) || 0);
       const h = Math.max(10, Number(height) || 0);
@@ -1083,52 +1030,73 @@ _CANVAS_JS_TEMPLATE = """
       // shoved when the user only adjusted width or only height.
       out.max.x = out.min.x + w;
       out.max.y = out.min.y + h;
+      enforceShapeConstraints(null);
       render();
-    }},
-    setMountingHoles: function(holes) {{
+    },
+    setOutlineShape: function(spec) {
+      // Merge {shape, corner_radius_mm, chamfer_mm}. Switching to
+      // circle squares the AABB on the current width.
+      if (!spec || typeof spec !== 'object') return;
+      const cur = state.outline_shape;
+      if (typeof spec.shape === 'string') cur.shape = spec.shape;
+      if (typeof spec.corner_radius_mm === 'number') {
+        cur.corner_radius_mm = Math.max(0, spec.corner_radius_mm);
+      }
+      if (typeof spec.chamfer_mm === 'number') {
+        cur.chamfer_mm = Math.max(0, spec.chamfer_mm);
+      }
+      enforceShapeConstraints(null);
+      render();
+    },
+    getOutlineShape: function() {
+      return deepCopy(state.outline_shape);
+    },
+    setMountingHoles: function(holes) {
       // Replace the entire mounting-holes list. Caller (Python side)
       // owns count + per-hole corner/inset choices; the canvas just
       // visualises and re-pegs positions to corners on every render.
-      state.mounting_holes = (holes || []).map((h, i) => ({{
+      state.mounting_holes = (holes || []).map((h, i) => ({
         index: typeof h.index === 'number' ? h.index : i,
         corner: h.corner || null,
         inset_mm: Number(h.inset_mm) || 5.0,
-        pos: h.pos ? {{ x: Number(h.pos.x) || 0, y: Number(h.pos.y) || 0 }}
-                   : {{ x: state.board_outline.min.x, y: state.board_outline.min.y }},
-      }}));
+        screw: typeof h.screw === 'string' && h.screw ? h.screw : 'M3',
+        pos: h.pos ? { x: Number(h.pos.x) || 0, y: Number(h.pos.y) || 0 }
+                   : { x: state.board_outline.min.x, y: state.board_outline.min.y },
+      }));
       render();
-    }},
-    getMountingHoles: function() {{
+    },
+    getMountingHoles: function() {
       recomputeMountingHoles();
-      return state.mounting_holes.map(h => ({{
+      return state.mounting_holes.map(h => ({
         index: h.index,
         corner: h.corner,
         inset_mm: Math.round(h.inset_mm * 100) / 100,
-        pos: {{
+        screw: h.screw || 'M3',
+        pos: {
           x: Math.round(h.pos.x * 1000) / 1000,
           y: Math.round(h.pos.y * 1000) / 1000,
-        }},
-      }}));
-    }},
-    setViewOptions: function(opts) {{
+        },
+      }));
+    },
+    setViewOptions: function(opts) {
       // Merge into state.view_options so callers only need to pass
       // changed fields. Keys: show_grid (bool), snap_enabled (bool),
       // snap_spacing_mm (number). Re-render so toggles take effect
       // immediately; the snap_spacing_mm value is read live during
       // each drag so no render-time work is needed for it alone.
       if (!opts || typeof opts !== 'object') return;
-      if (typeof opts.show_grid === 'boolean') {{
+      if (typeof opts.show_grid === 'boolean') {
         state.view_options.show_grid = opts.show_grid;
-      }}
-      if (typeof opts.snap_enabled === 'boolean') {{
+      }
+      if (typeof opts.snap_enabled === 'boolean') {
         state.view_options.snap_enabled = opts.snap_enabled;
-      }}
-      if (typeof opts.snap_spacing_mm === 'number') {{
+      }
+      if (typeof opts.snap_spacing_mm === 'number') {
         state.view_options.snap_spacing_mm = Math.max(0, opts.snap_spacing_mm);
-      }}
+      }
       render();
-    }},
-  }};
+    },
+  };
 
   // The Manual Layout tab is mounted lazily by Quasar -- on initial
   // page load the SVG element is not yet in the DOM. Wait for it via
@@ -1137,25 +1105,24 @@ _CANVAS_JS_TEMPLATE = """
   // timeout silently dropped renders when the user lingered in
   // Setup / Monitor before opening Manual Layout). RAF lets layout
   // settle before the first paint.
-  function fireRender() {{
+  function fireRender() {
     if (!isCurrent()) return;
     if (!document.getElementById(SVG_ID)) return;
-    requestAnimationFrame(function() {{
+    requestAnimationFrame(function() {
       if (!isCurrent()) return;
       render();
-    }});
-  }}
-  if (document.getElementById(SVG_ID)) {{
+    });
+  }
+  if (document.getElementById(SVG_ID)) {
     fireRender();
-  }} else {{
-    const observer = new MutationObserver(function(_muts, obs) {{
-      if (!isCurrent()) {{ obs.disconnect(); return; }}
-      if (document.getElementById(SVG_ID)) {{
+  } else {
+    const observer = new MutationObserver(function(_muts, obs) {
+      if (!isCurrent()) { obs.disconnect(); return; }
+      if (document.getElementById(SVG_ID)) {
         obs.disconnect();
         fireRender();
-      }}
-    }});
-    observer.observe(document.body, {{ childList: true, subtree: true }});
-  }}
-}})();
-"""
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+};

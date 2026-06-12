@@ -15,20 +15,19 @@ from typing import Any
 
 from nicegui import ui
 
-from ..state import get_state
-from .manual_layout_canvas import (
+from kicraft.layout_editor import (
+    LeafInfo,
     build_canvas_html,
     build_canvas_init_script,
-)
-from .manual_layout_runner import (
-    LeafInfo,
     discover_leaves,
     find_latest_parent_pcb,
     load_initial_layout,
-    open_in_pcbnew,
     run_manual_compose,
     save_manual_layout_json,
 )
+
+from ..state import get_state
+from .manual_layout_runner import open_in_pcbnew
 
 
 def manual_layout_page() -> None:
@@ -114,6 +113,10 @@ def manual_layout_page() -> None:
             initial_h = float(initial["board_outline"]["max"]["y"]) - float(
                 initial["board_outline"]["min"]["y"]
             )
+            initial_shape = dict(
+                initial.get("outline_shape")
+                or {"shape": "rect", "corner_radius_mm": 0.0, "chamfer_mm": 0.0}
+            )
             with ui.row().classes("items-center gap-2 mt-1"):
                 ui.label("Outline").classes("text-xs text-gray-400")
                 width_input = ui.number(
@@ -131,6 +134,49 @@ def manual_layout_page() -> None:
                     step=0.5,
                     format="%.2f",
                 ).classes("w-24").props("dense")
+                shape_select = ui.select(
+                    options={
+                        "rect": "Rectangle",
+                        "rounded_rect": "Rounded",
+                        "chamfered_rect": "Chamfered",
+                        "circle": "Circle",
+                    },
+                    value=initial_shape.get("shape", "rect"),
+                    label="Shape",
+                ).classes("w-36").props("dense options-dense")
+                shape_param_input = ui.number(
+                    "Radius/chamfer (mm)",
+                    value=float(
+                        initial_shape.get("corner_radius_mm")
+                        or initial_shape.get("chamfer_mm")
+                        or 3.0
+                    ),
+                    min=0.5,
+                    step=0.5,
+                    format="%.1f",
+                ).classes("w-36").props("dense")
+                if initial_shape.get("shape") not in ("rounded_rect", "chamfered_rect"):
+                    shape_param_input.set_visibility(False)
+
+            def _push_shape_to_canvas() -> None:
+                shape = str(shape_select.value or "rect")
+                param = float(shape_param_input.value or 0.0)
+                spec = {
+                    "shape": shape,
+                    "corner_radius_mm": param if shape == "rounded_rect" else 0.0,
+                    "chamfer_mm": param if shape == "chamfered_rect" else 0.0,
+                }
+                shape_param_input.set_visibility(
+                    shape in ("rounded_rect", "chamfered_rect")
+                )
+                ui.run_javascript(
+                    f"window.manualLayoutCanvases['{canvas_id}'] && "
+                    f"window.manualLayoutCanvases['{canvas_id}']"
+                    f".setOutlineShape({json.dumps(spec)})"
+                )
+
+            shape_select.on_value_change(lambda _e: _push_shape_to_canvas())
+            shape_param_input.on_value_change(lambda _e: _push_shape_to_canvas())
 
             def _push_size_to_canvas() -> None:
                 w = float(width_input.value or 0)
@@ -495,6 +541,7 @@ _MOUNTING_HOLE_CORNER_OPTIONS = {
     "bottom-left": "Bottom-Left",
     "bottom-right": "Bottom-Right",
 }
+_MOUNTING_HOLE_SCREW_OPTIONS = ("M2", "M2.5", "M3", "M4")
 # Default cycling order so a new hole picks up a sensible corner.
 _DEFAULT_CORNER_CYCLE = (
     "top-left",
@@ -517,11 +564,15 @@ def _mounting_hole_panel(canvas_id: str, initial_holes: list[dict]) -> None:
         corner = h.get("corner")
         if corner not in _MOUNTING_HOLE_CORNER_OPTIONS:
             corner = None
+        screw = h.get("screw")
+        if screw not in _MOUNTING_HOLE_SCREW_OPTIONS:
+            screw = "M3"
         state.append(
             {
                 "index": int(h.get("index", i)),
                 "corner": corner,
                 "inset_mm": float(h.get("inset_mm", 5.0)),
+                "screw": screw,
             }
         )
 
@@ -570,6 +621,7 @@ def _mounting_hole_panel(canvas_id: str, initial_holes: list[dict]) -> None:
                             idx % len(_DEFAULT_CORNER_CYCLE)
                         ],
                         "inset_mm": 5.0,
+                        "screw": "M3",
                     }
                 )
             while len(state) > n:
@@ -652,7 +704,7 @@ def _view_options_panel(canvas_id: str) -> None:
 
 
 def _build_hole_row(i: int, hole: dict, on_change) -> None:
-    """One H{N+1} row: corner dropdown + inset input."""
+    """One H{N+1} row: corner dropdown + screw size + inset input."""
     with ui.row().classes("items-center gap-2"):
         ui.label(f"H{i + 1}").classes("text-xs text-gray-400 w-8")
         sel = ui.select(
@@ -667,6 +719,20 @@ def _build_hole_row(i: int, hole: dict, on_change) -> None:
             on_change()
 
         sel.on_value_change(_on_corner)
+
+        screw_sel = ui.select(
+            options=list(_MOUNTING_HOLE_SCREW_OPTIONS),
+            value=hole.get("screw", "M3"),
+            label="Screw",
+        ).classes("w-24")
+
+        def _on_screw(e: Any, _hole=hole) -> None:
+            v = str(e.value or "M3")
+            _hole["screw"] = v if v in _MOUNTING_HOLE_SCREW_OPTIONS else "M3"
+            on_change()
+
+        screw_sel.on_value_change(_on_screw)
+
         inset = ui.number(
             "Inset (mm)",
             value=hole["inset_mm"],

@@ -120,6 +120,18 @@ def _pid_alive(pid: int | None) -> bool:
 # is COLLATE NOCASE -- 'freemax' redeems 'FREEMAX').
 _INVITE_CODE_RE = re.compile(r"[A-Za-z0-9_-]{3,64}")
 
+# Core-components registry: one curated default part per common functional block
+# (LDO tiers, buck/boost tiers, sensors, passive series, ...), admin-edited from
+# /admin/core-components. The design pipeline does not consume it yet; when it
+# does, stages will resolve a block by its function_key slug (see
+# get_core_component), so renaming a seeded key is a breaking change.
+CORE_COMPONENT_CATEGORIES = ("power", "sensors", "drivers", "passives")
+_FUNCTION_KEY_RE = re.compile(r"[a-z0-9][a-z0-9_-]{1,62}[a-z0-9]")
+CORE_COMPONENTS_SEED_PATH = Path(__file__).resolve().parent / "core_components_seed.json"
+# app_settings key marking the bundled seed as applied. Stays set forever, so
+# rows an admin deletes are never resurrected by a restart.
+_CORE_SEED_KEY = "core_components_seed_version"
+
 
 def grant_expiry(duration_days: int | None) -> str | None:
     """ISO-8601 UTC instant a code-granted tier lapses, or None for forever.
@@ -306,6 +318,7 @@ class AccountStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._fts_enabled = False  # flipped on by _init_db once projects_fts exists
         self._init_db()
+        self._maybe_seed_core_components()
         self._maybe_backfill_search()
 
     def _conn(self) -> sqlite3.Connection:
@@ -469,6 +482,31 @@ class AccountStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_project_likes_project "
                 "ON project_likes(project_id)"
+            )
+            # Curated default part per common functional block; see the
+            # CORE_COMPONENT_CATEGORIES comment for the registry's role.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS core_components ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "function_key TEXT NOT NULL COLLATE NOCASE UNIQUE,"  # 'ldo-3v3-1a'
+                "display_name TEXT NOT NULL,"
+                "category TEXT NOT NULL,"          # power|sensors|drivers|passives
+                "qualifier TEXT,"                  # tier text, '<=500mA @ 3.3V'
+                "default_mpn TEXT NOT NULL,"       # MPN, or series name for passives
+                "default_lcsc TEXT,"               # 'C14259'; NULL for series rows
+                "package TEXT,"
+                "selection_notes TEXT,"            # rationale + runner-ups
+                "price_usd REAL,"                  # qty-1 price snapshot
+                "stock INTEGER,"                   # LCSC stock snapshot
+                "snapshot_date TEXT,"              # ISO date the snapshot was taken
+                "enabled INTEGER NOT NULL DEFAULT 1,"
+                "sort_order INTEGER NOT NULL DEFAULT 0,"
+                "created_at TEXT NOT NULL,"
+                "updated_at TEXT NOT NULL)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_core_components_category "
+                "ON core_components(category, sort_order, id)"
             )
             # Full-text search over the catalog. Guarded: a SQLite build without
             # FTS5 degrades to a LIKE fallback (see _public_where) instead of
@@ -1714,3 +1752,231 @@ class AccountStore:
 
     def set_signup_open(self, open_: bool) -> None:
         self.set_setting(self._OPEN_SIGNUP_KEY, "1" if open_ else "0")
+
+    # ---- core components ----------------------------------------------------
+    # Curated default part per common functional block, edited from
+    # /admin/core-components. Seeded once from the bundled JSON; after that the
+    # DB is the source of truth (deploys never overwrite admin edits).
+
+    _CORE_COMPONENT_FIELDS = frozenset({
+        "function_key", "display_name", "category", "qualifier", "default_mpn",
+        "default_lcsc", "package", "selection_notes", "price_usd", "stock",
+        "snapshot_date", "enabled", "sort_order"})
+
+    @staticmethod
+    def _row_to_core_component(row: sqlite3.Row) -> dict:
+        d = {k: row[k] for k in row.keys()}
+        d["enabled"] = bool(d["enabled"])
+        return d
+
+    def _normalize_core_component(self, fields: dict, *, partial: bool) -> dict:
+        """Validate + normalize core_components column values. The bundled seed
+        and the admin editor both funnel through here, so there is exactly one
+        validator. `partial` skips the required-field check so updates can patch
+        a subset of columns."""
+        unknown = sorted(set(fields) - self._CORE_COMPONENT_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown core component field(s): {', '.join(unknown)}")
+        if not partial:
+            missing = sorted({"function_key", "display_name", "category",
+                              "default_mpn"} - set(fields))
+            if missing:
+                raise ValueError(f"missing required field(s): {', '.join(missing)}")
+        out: dict = {}
+        for key, value in fields.items():
+            if key == "function_key":
+                v = (value or "").strip().lower()
+                if not _FUNCTION_KEY_RE.fullmatch(v):
+                    raise ValueError(
+                        "function_key must be 3-64 chars of a-z, 0-9, '-' or '_',"
+                        " starting and ending alphanumeric")
+                out[key] = v
+            elif key == "category":
+                if value not in CORE_COMPONENT_CATEGORIES:
+                    raise ValueError(
+                        f"unknown category {value!r}; choose from "
+                        f"{', '.join(CORE_COMPONENT_CATEGORIES)}")
+                out[key] = value
+            elif key in ("display_name", "default_mpn"):
+                v = (value or "").strip()
+                if not v:
+                    raise ValueError(f"{key} must not be empty")
+                out[key] = v
+            elif key == "default_lcsc":
+                v = str(value).strip().upper() if value is not None else ""
+                if not v:
+                    out[key] = None
+                    continue
+                if v.isdigit():
+                    v = f"C{v}"
+                if not re.fullmatch(r"C\d{1,12}", v):
+                    raise ValueError("default_lcsc must be an LCSC id like C14259")
+                out[key] = v
+            elif key in ("qualifier", "package", "selection_notes", "snapshot_date"):
+                v = value.strip() if isinstance(value, str) else value
+                out[key] = v or None
+            elif key == "price_usd":
+                if value is None or value == "":
+                    out[key] = None
+                    continue
+                p = float(value)
+                if p < 0:
+                    raise ValueError("price_usd must be >= 0")
+                out[key] = p
+            elif key == "stock":
+                if value is None or value == "":
+                    out[key] = None
+                    continue
+                s = int(value)
+                if s < 0:
+                    raise ValueError("stock must be >= 0")
+                out[key] = s
+            elif key == "sort_order":
+                out[key] = int(value or 0)
+            elif key == "enabled":
+                out[key] = 1 if value else 0
+        return out
+
+    @staticmethod
+    def _insert_core_component(conn: sqlite3.Connection, fields: dict,
+                               now: str) -> sqlite3.Row:
+        cur = conn.execute(
+            "INSERT INTO core_components (function_key, display_name, category,"
+            " qualifier, default_mpn, default_lcsc, package, selection_notes,"
+            " price_usd, stock, snapshot_date, enabled, sort_order, created_at,"
+            " updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (fields["function_key"], fields["display_name"], fields["category"],
+             fields.get("qualifier"), fields["default_mpn"],
+             fields.get("default_lcsc"), fields.get("package"),
+             fields.get("selection_notes"), fields.get("price_usd"),
+             fields.get("stock"), fields.get("snapshot_date"),
+             fields.get("enabled", 1), fields.get("sort_order", 0), now, now))
+        return conn.execute("SELECT * FROM core_components WHERE id=?",
+                            (cur.lastrowid,)).fetchone()
+
+    def create_core_component(self, *, function_key: str, display_name: str,
+                              category: str, default_mpn: str,
+                              qualifier: str | None = None,
+                              default_lcsc: str | None = None,
+                              package: str | None = None,
+                              selection_notes: str | None = None,
+                              price_usd: float | None = None,
+                              stock: int | None = None,
+                              snapshot_date: str | None = None,
+                              sort_order: int = 0, enabled: bool = True) -> dict:
+        fields = self._normalize_core_component(
+            {"function_key": function_key, "display_name": display_name,
+             "category": category, "qualifier": qualifier,
+             "default_mpn": default_mpn, "default_lcsc": default_lcsc,
+             "package": package, "selection_notes": selection_notes,
+             "price_usd": price_usd, "stock": stock,
+             "snapshot_date": snapshot_date, "sort_order": sort_order,
+             "enabled": enabled}, partial=False)
+        try:
+            with self._conn() as conn:
+                row = self._insert_core_component(conn, fields, _utcnow_iso())
+        except sqlite3.IntegrityError as e:
+            raise ValueError(
+                f"function_key {fields['function_key']!r} already exists") from e
+        return self._row_to_core_component(row)
+
+    def list_core_components(self, *, category: str | None = None,
+                             include_disabled: bool = True) -> list[dict]:
+        where, args = [], []
+        if category is not None:
+            where.append("category=?")
+            args.append(category)
+        if not include_disabled:
+            where.append("enabled=1")
+        sql = "SELECT * FROM core_components"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY category, sort_order, id"
+        with self._conn() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return [self._row_to_core_component(r) for r in rows]
+
+    def get_core_component(self, function_key: str) -> dict | None:
+        """The default part for one functional block, by its function_key slug
+        (case-insensitive). This is the lookup a future BOM-stage hook will use
+        to bias part selection, so treat seeded keys as a stable contract."""
+        key = (function_key or "").strip()
+        if not key:
+            return None
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM core_components WHERE function_key=?",
+                (key,)).fetchone()
+        return self._row_to_core_component(row) if row else None
+
+    def update_core_component(self, component_id: int, **fields) -> dict:
+        if not fields:
+            raise ValueError("no fields to update")
+        norm = self._normalize_core_component(fields, partial=True)
+        # Column names come from the validated whitelist, never from callers.
+        sets = ", ".join(f"{k}=?" for k in norm)
+        try:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    f"UPDATE core_components SET {sets}, updated_at=? WHERE id=?",
+                    (*norm.values(), _utcnow_iso(), component_id))
+                if cur.rowcount == 0:
+                    raise ValueError(f"no core component with id {component_id!r}")
+                row = conn.execute("SELECT * FROM core_components WHERE id=?",
+                                   (component_id,)).fetchone()
+        except sqlite3.IntegrityError as e:
+            raise ValueError(
+                f"function_key {norm.get('function_key')!r} already exists") from e
+        return self._row_to_core_component(row)
+
+    def record_core_component_snapshot(self, component_id: int, *,
+                                       price_usd: float | None,
+                                       stock: int | None) -> dict:
+        """Stamp a fresh jlcparts price/stock observation onto a row. Only this
+        path (the admin Refresh button) sets snapshot_date, so the date always
+        reflects a real catalog read rather than a hand-typed number."""
+        return self.update_core_component(
+            component_id, price_usd=price_usd, stock=stock,
+            snapshot_date=_utcnow().date().isoformat())
+
+    def delete_core_component(self, component_id: int) -> None:
+        """Hard delete. The seed flag stays set, so the row will not come back
+        on restart; re-create it from the admin page if it is missed."""
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM core_components WHERE id=?",
+                               (component_id,))
+            if cur.rowcount == 0:
+                raise ValueError(f"no core component with id {component_id!r}")
+
+    def _maybe_seed_core_components(self) -> int:
+        """One-shot import of the bundled registry seed. Guarded by an
+        app_settings flag written last, in the same transaction as the inserts,
+        so a crash mid-seed cannot strand the flag without rows and a restart
+        never re-seeds (admin deletions stay deleted). A missing seed file
+        leaves the registry empty and the flag unset, so a later restart with
+        the file present still seeds."""
+        if self.get_setting(_CORE_SEED_KEY) is not None:
+            return 0
+        try:
+            raw = CORE_COMPONENTS_SEED_PATH.read_text(encoding="utf-8")
+        except OSError:
+            return 0
+        entries = json.loads(raw)
+        now = _utcnow_iso()
+        inserted = 0
+        with self._conn() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM core_components").fetchone()[0]
+            if count == 0:
+                for entry in entries:
+                    self._insert_core_component(
+                        conn, self._normalize_core_component(entry, partial=False),
+                        now)
+                    inserted += 1
+            # Mark applied even when rows already existed (a pre-flag DB):
+            # whatever is in the table is someone's curation; never touch it.
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (_CORE_SEED_KEY, "1"))
+        return inserted

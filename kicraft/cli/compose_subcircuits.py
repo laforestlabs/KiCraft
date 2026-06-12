@@ -35,7 +35,6 @@ import copy
 import json
 import math
 import shutil
-import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -57,20 +56,16 @@ from kicraft.autoplacer.brain.parent_adapter import (
     placements_from_solved_state,
     synthetic_block_ref,
 )
-from kicraft.autoplacer.brain.manual_layout import ManualLayout, load_manual_layout
+from kicraft.layout_editor.model import ManualLayout, load_manual_layout
 from kicraft.autoplacer.brain.placement_solver import PlacementSolver
 from kicraft.autoplacer.brain.subcircuit_composer import (
     AttachmentConstraint,
     ChildArtifactPlacement,
     DerivedAttachmentConstraints,
-    LeafBlockerSet,
     ParentComposition,
-    PlacementModel,
     build_parent_composition,
     dominant_blocker_side,
     edge_anchor_target_coordinate,
-    estimate_layer_aware_parent_board_size,
-    packed_extents_outline,
     derive_attachment_constraints,
     child_layer_envelopes,
     can_overlap,
@@ -182,6 +177,19 @@ class ParentCompositionState:
     # are expected to extend beyond the board outline (e.g. USB-C shell);
     # the geometry validator must only flag them when pads fall outside.
     edge_constrained_refs: frozenset[str] = field(default_factory=frozenset)
+    # Serialized OutlineSpec dict when this composition came from a
+    # manual layout (kicraft.layout_editor.outline). Non-None marks the
+    # outline as USER-AUTHORITATIVE: the outline-repair grow is skipped
+    # (violations fail loudly via geometry validation instead), the
+    # geometry validator additionally checks the true shape (not just
+    # the AABB), and the stamper writes the shape's polyline to
+    # Edge.Cuts for non-rect shapes.
+    manual_outline: dict[str, Any] | None = None
+    # Stock mounting-hole footprints to load onto the stamped board for
+    # user holes without a backing H-ref (manual mode). Entries:
+    # {ref, x, y, lib_dir, fp_name, screw}; coordinates in the same
+    # frame as components (A4-shifted alongside them at stamp time).
+    synthesized_footprints: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock per phase of a parent compose+route round. Keys (when
     # populated): place_solve_ms, stamp_ms, stamp_drc_ms, freerouting_ms,
     # candidate_search_ms, plus solve_*_ms sub-phases from the solver.
@@ -1301,6 +1309,10 @@ def _compose_artifacts(
         for c in derived.parent_local_constraints
         if c.ref in parent_local
     ]
+    # Stock-footprint load instructions for user mounting holes without
+    # a backing H-ref; populated by the manual branch, executed by the
+    # stamp subprocess. Empty in auto mode.
+    synthesized_footprints: list[dict[str, Any]] = []
     if manual_layout is not None:
         # Manual mode: user-supplied placements + outline. Skip the solver
         # and the auto outline-fit pass entirely. Validation, stamping and
@@ -1336,36 +1348,79 @@ def _compose_artifacts(
             if comp is not None:
                 comp.pos = mpl.pos
 
-        # GUI mounting-hole panel maps to the parent's existing
-        # parent-local mounting-hole footprints in alphabetical ref
-        # order (so H4 < H86 etc.). Override each paired component's
-        # position with the user's chosen corner+inset; mark it
-        # user-positioned so the constraint snap below leaves it
-        # alone.
+        # Editor mounting-hole panel: holes map onto the parent's
+        # existing parent-local mounting-hole footprints in alphabetical
+        # ref order (so H4 < H86 etc.), overriding each paired
+        # component's position with the user's chosen corner+inset.
+        # SURPLUS holes (the common case: schematics rarely carry H
+        # refs) are synthesized: a parent-local Component here for
+        # validation/keep-ins, plus a stock-footprint load instruction
+        # the stamp subprocess executes (see _parent_stamp_subprocess
+        # synthesize_footprints). All are marked user-positioned so the
+        # constraint snap below leaves them alone.
         user_positioned_refs: set[str] = set()
         gui_holes = sorted(
             getattr(manual_layout, "mounting_holes", []) or [],
             key=lambda h: h.index,
         )
         if gui_holes:
+            from kicraft.autoplacer.brain.types import Layer as _Layer
+            from kicraft.layout_editor.holes import (
+                plan_mounting_holes,
+                require_stock_mounting_hole_lib,
+                screw_spec,
+            )
+
             mh_refs = sorted(
                 ref for ref, comp in parent_local_solved.items()
                 if _is_mounting_hole_ref(ref, comp)
             )
-            for hole, ref in zip(gui_holes, mh_refs):
+            taken_refs: set[str] = set(parent_local_solved)
+            for art in loaded_artifacts:
+                taken_refs.update(art.metadata.get("component_refs") or [])
+            mapped_holes, synth_holes = plan_mounting_holes(
+                gui_holes, mh_refs, taken_refs
+            )
+            for hole, ref in mapped_holes:
                 comp = parent_local_solved.get(ref)
                 if comp is None:
                     continue
                 _move_component_to(comp, hole.pos)
                 user_positioned_refs.add(ref)
-            if len(gui_holes) > len(mh_refs):
+            if synth_holes:
+                synth_lib_dir = require_stock_mounting_hole_lib()
+                for hole, ref in synth_holes:
+                    spec = screw_spec(getattr(hole, "screw", None))
+                    parent_local_solved[ref] = Component(
+                        ref=ref,
+                        value=spec.screw,
+                        pos=Point(hole.pos.x, hole.pos.y),
+                        rotation=0.0,
+                        layer=_Layer.FRONT,
+                        width_mm=spec.courtyard_mm,
+                        height_mm=spec.courtyard_mm,
+                        pads=[],
+                        locked=True,
+                        kind="mounting_hole",
+                        body_center=Point(hole.pos.x, hole.pos.y),
+                    )
+                    user_positioned_refs.add(ref)
+                    synthesized_footprints.append(
+                        {
+                            "ref": ref,
+                            "x": hole.pos.x,
+                            "y": hole.pos.y,
+                            "lib_dir": str(synth_lib_dir),
+                            "fp_name": spec.fp_name,
+                            "screw": spec.screw,
+                        }
+                    )
                 print(
-                    f"[manual-layout] note: GUI has {len(gui_holes)} mounting "
-                    f"holes but parent has {len(mh_refs)} matching footprints "
-                    f"({', '.join(mh_refs) or 'none'}); the extra GUI holes "
-                    f"are decorative until composer-side footprint synthesis "
-                    f"lands.",
-                    file=sys.stderr,
+                    f"[manual-layout] synthesized {len(synth_holes)} mounting "
+                    f"hole footprint(s): "
+                    + ", ".join(
+                        f"{e['ref']}={e['fp_name']}" for e in synthesized_footprints
+                    )
                 )
 
         solver_phase_timings = {}
@@ -1667,6 +1722,25 @@ def _compose_artifacts(
         )
         parent_local_keep_in_rects.append(keep_in)
 
+    # Synthesized mounting holes have no attachment constraint, so they
+    # get their keep-in rect here: a square reaching
+    # mounting_holes.keepout.size_mm from the hole center (the config's
+    # documented semantic), stamped as a rule-area so FreeRouting can't
+    # route through the screw head.
+    if synthesized_footprints:
+        _mh_keepout_mm = float(
+            ((cfg.get("mounting_holes") or {}).get("keepout") or {}).get(
+                "size_mm", 4.0
+            )
+        )
+        for _entry in synthesized_footprints:
+            parent_local_keep_in_rects.append(
+                (
+                    Point(_entry["x"] - _mh_keepout_mm, _entry["y"] - _mh_keepout_mm),
+                    Point(_entry["x"] + _mh_keepout_mm, _entry["y"] + _mh_keepout_mm),
+                )
+            )
+
     outline_w = exact_outline[1].x - exact_outline[0].x
     outline_h = exact_outline[1].y - exact_outline[0].y
     packing_metadata: dict[str, Any] = {
@@ -1716,6 +1790,10 @@ def _compose_artifacts(
         edge_constrained_refs=frozenset(
             c.ref for c in all_constraints if c.target in ("edge", "corner")
         ),
+        manual_outline=(
+            manual_layout.outline.to_dict() if manual_layout is not None else None
+        ),
+        synthesized_footprints=list(synthesized_footprints),
     )
     state.phase_timings.update(solver_phase_timings)
     return state, transformed_payloads
@@ -1988,6 +2066,12 @@ def _repair_parent_outline(
     composition = state.composition
     if composition is None:
         return {"repaired": False, "reason": "no composition"}
+    if state.manual_outline is not None:
+        # Manual mode: the user's outline is authoritative. Growing it
+        # silently would deliver a different board than the one drawn
+        # in the editor; geometry validation right after this fails
+        # loudly instead, and the editor surfaces the violations.
+        return {"repaired": False, "reason": "manual outline is authoritative"}
     outline = composition.board_state.board_outline
     if not outline or len(outline) < 2:
         return {"repaired": False, "reason": "no outline"}
@@ -2095,6 +2179,33 @@ def _validate_parent_geometry(
     max_x = br.x + margin
     max_y = br.y + margin
 
+    # Manual non-rect outlines additionally constrain geometry to the
+    # true shape (analytic containment), not just the AABB: a leaf
+    # tucked into the corner of a circular board is inside the AABB
+    # but off the physical board.
+    shape_spec = None
+    if (
+        state.manual_outline is not None
+        and state.manual_outline.get("shape", "rect") != "rect"
+    ):
+        from kicraft.layout_editor.outline import OutlineSpec
+
+        shape_spec = OutlineSpec.from_dict(state.manual_outline)
+
+    def _bbox_outside(bx0: float, by0: float, bx1: float, by1: float) -> bool:
+        if bx0 < min_x or by0 < min_y or bx1 > max_x or by1 > max_y:
+            return True
+        return shape_spec is not None and not shape_spec.contains_rect(
+            bx0, by0, bx1, by1, tol=margin
+        )
+
+    def _point_outside(px: float, py: float) -> bool:
+        if px < min_x or px > max_x or py < min_y or py > max_y:
+            return True
+        return shape_spec is not None and not shape_spec.contains_point(
+            px, py, tol=margin
+        )
+
     outside_components: list[dict[str, Any]] = []
     outside_pads = 0
     outside_traces = 0
@@ -2119,11 +2230,8 @@ def _validate_parent_geometry(
         if ref in edge_constrained:
             component_outside = False
         else:
-            component_outside = (
-                body_tl.x < min_x
-                or body_tl.y < min_y
-                or body_br.x > max_x
-                or body_br.y > max_y
+            component_outside = _bbox_outside(
+                body_tl.x, body_tl.y, body_br.x, body_br.y
             )
 
         # Pad check: pad COPPER (not just the center) must be inside the
@@ -2132,12 +2240,7 @@ def _validate_parent_geometry(
         pad_outside_count = 0
         for pad in comp.pads:
             pad_tl, pad_br = pad.bbox()
-            if (
-                pad_tl.x < min_x
-                or pad_br.x > max_x
-                or pad_tl.y < min_y
-                or pad_br.y > max_y
-            ):
+            if _bbox_outside(pad_tl.x, pad_tl.y, pad_br.x, pad_br.y):
                 pad_outside_count += 1
                 outside_pads += 1
 
@@ -2163,15 +2266,8 @@ def _validate_parent_geometry(
         geometry_union_min_y = min(geometry_union_min_y, trace.start.y, trace.end.y)
         geometry_union_max_x = max(geometry_union_max_x, trace.start.x, trace.end.x)
         geometry_union_max_y = max(geometry_union_max_y, trace.start.y, trace.end.y)
-        if (
-            trace.start.x < min_x
-            or trace.start.x > max_x
-            or trace.start.y < min_y
-            or trace.start.y > max_y
-            or trace.end.x < min_x
-            or trace.end.x > max_x
-            or trace.end.y < min_y
-            or trace.end.y > max_y
+        if _point_outside(trace.start.x, trace.start.y) or _point_outside(
+            trace.end.x, trace.end.y
         ):
             outside_traces += 1
 
@@ -2180,12 +2276,7 @@ def _validate_parent_geometry(
         geometry_union_min_y = min(geometry_union_min_y, via.pos.y)
         geometry_union_max_x = max(geometry_union_max_x, via.pos.x)
         geometry_union_max_y = max(geometry_union_max_y, via.pos.y)
-        if (
-            via.pos.x < min_x
-            or via.pos.x > max_x
-            or via.pos.y < min_y
-            or via.pos.y > max_y
-        ):
+        if _point_outside(via.pos.x, via.pos.y):
             outside_vias += 1
 
     validation = {
@@ -2208,6 +2299,11 @@ def _validate_parent_geometry(
             "width_mm": max(0.0, br.x - tl.x),
             "height_mm": max(0.0, br.y - tl.y),
         },
+        "outline_shape": (
+            state.manual_outline.get("shape", "rect")
+            if state.manual_outline is not None
+            else "rect"
+        ),
         "outside_component_count": len(outside_components),
         "outside_components": outside_components[:50],
         "outside_pad_count": outside_pads,
@@ -2365,6 +2461,24 @@ def _stamp_parent_board(
             "br_x": outline[1].x,
             "br_y": outline[1].y,
         }
+        # Non-rect manual shapes stamp Edge.Cuts as the shape's closed
+        # polyline instead of a 4-segment rectangle. Generated from the
+        # board_state outline AABB (not the spec's own min/max) so the
+        # stamped shape always brackets exactly the validated outline.
+        if (
+            state.manual_outline is not None
+            and state.manual_outline.get("shape", "rect") != "rect"
+        ):
+            from kicraft.layout_editor.outline import OutlineSpec as _OutlineSpec
+
+            _spec = _OutlineSpec.from_dict(
+                {
+                    **state.manual_outline,
+                    "min": {"x": outline[0].x, "y": outline[0].y},
+                    "max": {"x": outline[1].x, "y": outline[1].y},
+                }
+            )
+            outline_data["polyline"] = [[p.x, p.y] for p in _spec.polyline()]
 
     geometry_validation = _validate_parent_geometry(state)
     if not geometry_validation.get("accepted", False):
@@ -2393,6 +2507,8 @@ def _stamp_parent_board(
         }
         for rect in (state.parent_local_keep_in_rects or [])
     ]
+
+    synthesize_json = [dict(e) for e in (state.synthesized_footprints or [])]
 
     # Center the assembly on a standard A4 drawing sheet (297 x 210 mm)
     # so the PCB opens centered in the title block rather than crammed
@@ -2431,10 +2547,16 @@ def _stamp_parent_board(
                 _k["tl_y"] += _dy
                 _k["br_x"] += _dx
                 _k["br_y"] += _dy
+            for _sf in synthesize_json:
+                _sf["x"] += _dx
+                _sf["y"] += _dy
             outline_data["tl_x"] += _dx
             outline_data["tl_y"] += _dy
             outline_data["br_x"] += _dx
             outline_data["br_y"] += _dy
+            for _pt in outline_data.get("polyline") or []:
+                _pt[0] += _dx
+                _pt[1] += _dy
 
     payload = {
         "pcb_path": str(output_pcb),
@@ -2445,6 +2567,7 @@ def _stamp_parent_board(
         "silkscreen": silkscreen_json,
         "outline": outline_data,
         "keepouts": keepout_json,
+        "synthesize_footprints": synthesize_json,
     }
 
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="stamp_parent_")

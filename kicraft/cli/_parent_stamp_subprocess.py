@@ -61,31 +61,81 @@ def main(argv: list[str]) -> int:
         board.Remove(_d)
 
     # --- rewrite board outline if provided ---
+    # With a "polyline" key (manual non-rect shapes: rounded-rect,
+    # circle, chamfered-rect), Edge.Cuts is stamped as that closed
+    # point loop, mirroring the leaf stamper's polyline branch below.
+    # Otherwise the legacy 4-segment sharp rectangle from tl/br.
     _outline = _data.get("outline")
     if _outline:
-        _width_mm = max(1.0, _outline["br_x"] - _outline["tl_x"])
-        _height_mm = max(1.0, _outline["br_y"] - _outline["tl_y"])
-        _left = pcbnew.FromMM(_outline["tl_x"])
-        _top = pcbnew.FromMM(_outline["tl_y"])
-        _right = pcbnew.FromMM(_outline["tl_x"] + _width_mm)
-        _bottom = pcbnew.FromMM(_outline["tl_y"] + _height_mm)
+        _poly_mm = _outline.get("polyline")
+        if _poly_mm and len(_poly_mm) >= 3:
+            _n = len(_poly_mm)
+            for _i in range(_n):
+                _px1, _py1 = _poly_mm[_i]
+                _px2, _py2 = _poly_mm[(_i + 1) % _n]
+                _seg = pcbnew.PCB_SHAPE(board)
+                _seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
+                _seg.SetLayer(pcbnew.Edge_Cuts)
+                _seg.SetWidth(pcbnew.FromMM(0.05))
+                _seg.SetStart(
+                    pcbnew.VECTOR2I(pcbnew.FromMM(_px1), pcbnew.FromMM(_py1))
+                )
+                _seg.SetEnd(
+                    pcbnew.VECTOR2I(pcbnew.FromMM(_px2), pcbnew.FromMM(_py2))
+                )
+                board.Add(_seg)
+        else:
+            _width_mm = max(1.0, _outline["br_x"] - _outline["tl_x"])
+            _height_mm = max(1.0, _outline["br_y"] - _outline["tl_y"])
+            _left = pcbnew.FromMM(_outline["tl_x"])
+            _top = pcbnew.FromMM(_outline["tl_y"])
+            _right = pcbnew.FromMM(_outline["tl_x"] + _width_mm)
+            _bottom = pcbnew.FromMM(_outline["tl_y"] + _height_mm)
 
-        _corners = [
-            (_left, _top),
-            (_right, _top),
-            (_right, _bottom),
-            (_left, _bottom),
-        ]
-        for _i in range(4):
-            _seg = pcbnew.PCB_SHAPE(board)
-            _seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
-            _seg.SetLayer(pcbnew.Edge_Cuts)
-            _seg.SetWidth(pcbnew.FromMM(0.05))
-            _x1, _y1 = _corners[_i]
-            _x2, _y2 = _corners[(_i + 1) % 4]
-            _seg.SetStart(pcbnew.VECTOR2I(_x1, _y1))
-            _seg.SetEnd(pcbnew.VECTOR2I(_x2, _y2))
-            board.Add(_seg)
+            _corners = [
+                (_left, _top),
+                (_right, _top),
+                (_right, _bottom),
+                (_left, _bottom),
+            ]
+            for _i in range(4):
+                _seg = pcbnew.PCB_SHAPE(board)
+                _seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
+                _seg.SetLayer(pcbnew.Edge_Cuts)
+                _seg.SetWidth(pcbnew.FromMM(0.05))
+                _x1, _y1 = _corners[_i]
+                _x2, _y2 = _corners[(_i + 1) % 4]
+                _seg.SetStart(pcbnew.VECTOR2I(_x1, _y1))
+                _seg.SetEnd(pcbnew.VECTOR2I(_x2, _y2))
+                board.Add(_seg)
+
+    # --- synthesize stock mounting-hole footprints (manual mode) ---
+    # User-declared holes without a backing H-ref on the source board:
+    # load the stock NPTH footprint and place it directly at its final
+    # (already A4-shifted) position. Loaded BEFORE the move loop, which
+    # iterates the pre-captured _all_footprints, so these are never
+    # double-moved.
+    _synth = _data.get("synthesize_footprints") or []
+    if _synth:
+        _board_refs = {f.GetReferenceAsString() for f in _all_footprints}
+        for _sf in _synth:
+            if _sf["ref"] in _board_refs:
+                raise RuntimeError(
+                    f"synthesized mounting-hole ref {_sf['ref']!r} already "
+                    f"exists on the source board; refusing to overwrite"
+                )
+            _new_fp = pcbnew.FootprintLoad(_sf["lib_dir"], _sf["fp_name"])
+            if _new_fp is None:
+                raise RuntimeError(
+                    f"FootprintLoad({_sf['lib_dir']!r}, {_sf['fp_name']!r}) "
+                    f"returned None; stock MountingHole library missing or "
+                    f"footprint renamed"
+                )
+            _new_fp.SetReference(_sf["ref"])
+            _new_fp.SetPosition(
+                pcbnew.VECTOR2I(pcbnew.FromMM(_sf["x"]), pcbnew.FromMM(_sf["y"]))
+            )
+            board.Add(_new_fp)
 
     # --- move footprints to composed positions (keep all footprints) ---
     _comp_map = {c["ref"]: c for c in _components}
