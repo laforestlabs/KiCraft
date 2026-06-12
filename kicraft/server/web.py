@@ -41,6 +41,7 @@ from starlette.responses import FileResponse, PlainTextResponse, RedirectRespons
 
 from .accounts import (
     _RESET_TTL_SECONDS,
+    CORE_COMPONENT_CATEGORIES,
     DEFAULT_TIER,
     TIERS,
     AccountStore,
@@ -2566,6 +2567,9 @@ def _admin_header(active: str) -> None:
             ui.button("Invites", icon="vpn_key",
                       on_click=lambda: ui.navigate.to("/admin/invites")) \
                 .props("flat dense no-caps color=white").classes("text-xs")
+            ui.button("Components", icon="memory",
+                      on_click=lambda: ui.navigate.to("/admin/core-components")) \
+                .props("flat dense no-caps color=white").classes("text-xs")
             ui.button("Self-Eval", icon="science",
                       on_click=lambda: ui.navigate.to("/admin/self-eval")) \
                 .props("flat dense no-caps color=white").classes("text-xs")
@@ -3603,6 +3607,311 @@ def admin_invites_page():
             ui.label("Note: the legacy KICRAFT_SIGNUP_CODE env code is also still "
                      "accepted at signup (it grants the Free tier). Remove it from "
                      ".env to retire it.").classes("text-xs").style("color:#64748b")
+
+
+@ui.page("/admin/core-components")
+def admin_core_components_page():
+    """Core-components registry: one curated default part per common functional
+    block (LDO tiers, buck/boost tiers, sensors, passive series), chosen by
+    price + LCSC stock. Seeded from the bundled JSON on first run; after that
+    this page is the source of truth. The design pipeline does not consume the
+    registry yet (a future BOM-stage hook will resolve blocks by function_key).
+    Every mutating handler re-checks is_admin(), same as /admin/invites."""
+    user, redirect = _require_admin()
+    if redirect is not None:
+        return redirect
+
+    store = _store()
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    _admin_header("core components")
+
+    def guard() -> bool:
+        """Defense in depth: never trust the page-load gate for a mutation."""
+        if not is_admin(_current_user()):
+            ui.notify("Admin access required.", color="warning")
+            return False
+        return True
+
+    def open_editor(row: dict | None) -> None:
+        """Create (row=None) or edit a component in a dialog; all field
+        validation lives in the store so the seed and this form can't drift."""
+        with ui.dialog() as dlg, ui.card().classes("gap-2") \
+                .style("background:#0f172a;border:1px solid #1e293b;"
+                       "width:660px;max-width:95vw"):
+            ui.label("New component" if row is None
+                     else f"Edit {row['function_key']}") \
+                .classes("text-base font-semibold text-white")
+            with ui.row().classes("w-full gap-3"):
+                key_in = ui.input("Function key", placeholder="ldo-3v3-1a",
+                                  value=(row or {}).get("function_key", "")) \
+                    .props("dense").classes("w-44") \
+                    .tooltip("Stable slug; a future BOM-stage hook resolves "
+                             "blocks by this key")
+                name_in = ui.input("Display name",
+                                   value=(row or {}).get("display_name", "")) \
+                    .props("dense").classes("w-56")
+                cat_sel = ui.select(list(CORE_COMPONENT_CATEGORIES),
+                                    value=(row or {}).get("category", "power"),
+                                    label="Category") \
+                    .props("dense options-dense").classes("w-32")
+            with ui.row().classes("w-full gap-3"):
+                qual_in = ui.input("Qualifier", placeholder="<=1A @ 3.3V out",
+                                   value=(row or {}).get("qualifier") or "") \
+                    .props("dense").classes("w-56")
+                mpn_in = ui.input("Default MPN",
+                                  value=(row or {}).get("default_mpn", "")) \
+                    .props("dense").classes("w-56")
+            with ui.row().classes("w-full gap-3"):
+                lcsc_in = ui.input("LCSC id", placeholder="C14259",
+                                   value=(row or {}).get("default_lcsc") or "") \
+                    .props("dense").classes("w-32") \
+                    .tooltip("Blank for series rows (passives)")
+                pkg_in = ui.input("Package",
+                                  value=(row or {}).get("package") or "") \
+                    .props("dense").classes("w-40")
+                sort_in = ui.number("Sort order", precision=0,
+                                    value=(row or {}).get("sort_order", 0)) \
+                    .props("dense").classes("w-28")
+            notes_in = ui.textarea(
+                "Selection notes (rationale, runner-ups)",
+                value=(row or {}).get("selection_notes") or "") \
+                .props("dense autogrow").classes("w-full")
+            with ui.row().classes("w-full items-end gap-3"):
+                price_in = ui.number("Price USD (qty 1)", min=0, step=0.0001,
+                                     value=(row or {}).get("price_usd")) \
+                    .props("dense clearable").classes("w-36")
+                stock_in = ui.number("Stock", min=0, precision=0,
+                                     value=(row or {}).get("stock")) \
+                    .props("dense clearable").classes("w-32")
+                en_sw = ui.switch("Enabled",
+                                  value=(row or {}).get("enabled", True))
+            if row is not None and row.get("snapshot_date"):
+                ui.label(f"Price/stock snapshot from {row['snapshot_date']} "
+                         "(only the Refresh button updates the date).") \
+                    .classes("text-xs").style("color:#64748b")
+
+            def do_save() -> None:
+                if not guard():
+                    return
+                kwargs = dict(
+                    function_key=key_in.value or "",
+                    display_name=name_in.value or "",
+                    category=cat_sel.value,
+                    qualifier=qual_in.value or None,
+                    default_mpn=mpn_in.value or "",
+                    default_lcsc=lcsc_in.value or None,
+                    package=pkg_in.value or None,
+                    selection_notes=notes_in.value or None,
+                    price_usd=price_in.value,
+                    stock=int(stock_in.value) if stock_in.value is not None else None,
+                    sort_order=int(sort_in.value or 0),
+                    enabled=bool(en_sw.value))
+                try:
+                    if row is None:
+                        c = store.create_core_component(**kwargs)
+                    else:
+                        c = store.update_core_component(row["id"], **kwargs)
+                except ValueError as e:
+                    ui.notify(str(e), color="negative")
+                    return
+                ui.notify(f"Saved {c['function_key']}.", color="positive")
+                dlg.close()
+                build_table()
+
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Cancel", on_click=dlg.close) \
+                    .props("flat dense no-caps")
+                ui.button("Save", icon="save", on_click=do_save).props("dense")
+        dlg.open()
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1400px"):
+        ui.label("Core components").classes("text-2xl font-bold text-white")
+
+        with ui.card().classes("w-full gap-1") \
+                .style("background:#0f172a;border:1px solid #1e293b"):
+            with ui.row().classes("w-full items-center gap-3"):
+                ui.label("Default part per functional block") \
+                    .classes("text-base font-semibold text-white")
+                ui.button("New component", icon="add",
+                          on_click=lambda: open_editor(None)).props("dense")
+            ui.label("Defaults are chosen by price + LCSC stock (JLC Basic "
+                     "preferred as tiebreak). The design pipeline does not "
+                     "consume this registry yet; edits here only curate the "
+                     "table.").classes("text-xs").style("color:#94a3b8")
+            if not jlcparts.available():
+                ui.label("The jlcparts offline catalog is not installed on this "
+                         "host, so the per-row price/stock refresh is hidden "
+                         "(it works on the production box).") \
+                    .classes("text-xs").style("color:#64748b")
+
+        container = ui.column().classes("w-full gap-0")
+
+        def do_set_enabled(row: dict, enabled: bool) -> None:
+            if not guard():
+                return
+            try:
+                store.update_core_component(row["id"], enabled=enabled)
+            except ValueError as e:
+                ui.notify(str(e), color="negative")
+                return
+            ui.notify(f"{row['function_key']} "
+                      f"{'re-enabled' if enabled else 'disabled'}.",
+                      color="positive")
+            build_table()
+
+        def do_refresh(row: dict) -> None:
+            """Re-read price/stock for the row's LCSC id from the offline
+            jlcparts catalog and stamp today's snapshot date."""
+            if not guard():
+                return
+            info = jlcparts.lookup(row["default_lcsc"])
+            if not info:
+                ui.notify(f"{row['default_lcsc']} not found in the offline "
+                          "catalog.", color="negative")
+                return
+            upd = store.record_core_component_snapshot(
+                row["id"], price_usd=info.get("price"), stock=info.get("stock"))
+            price_s = (f"${upd['price_usd']:.4f}"
+                       if upd["price_usd"] is not None else "price unknown")
+            ui.notify(f"{row['function_key']}: stock {upd['stock']}, {price_s} "
+                      "(qty 1).", color="positive")
+            build_table()
+
+        def do_delete(row: dict) -> None:
+            with ui.dialog() as dlg, ui.card() \
+                    .style("background:#0f172a;border:1px solid #1e293b"):
+                ui.label(f"Delete {row['function_key']}?") \
+                    .classes("text-base font-semibold text-white")
+                ui.label("The seed will not restore it; re-create it from this "
+                         "page if it is missed.") \
+                    .classes("text-sm").style("color:#94a3b8")
+
+                def really() -> None:
+                    if not guard():
+                        return
+                    try:
+                        store.delete_core_component(row["id"])
+                    except ValueError as e:
+                        ui.notify(str(e), color="negative")
+                        return
+                    ui.notify(f"Deleted {row['function_key']}.", color="positive")
+                    dlg.close()
+                    build_table()
+
+                with ui.row().classes("w-full justify-end gap-2"):
+                    ui.button("Cancel", on_click=dlg.close) \
+                        .props("flat dense no-caps")
+                    ui.button("Delete", icon="delete", color="negative",
+                              on_click=really).props("dense no-caps")
+            dlg.open()
+
+        def build_table() -> None:
+            container.clear()
+            rows = store.list_core_components()
+            by_cat: dict[str, list[dict]] = {}
+            for r in rows:
+                by_cat.setdefault(r["category"], []).append(r)
+            with container:
+                if not rows:
+                    ui.label("The registry is empty. Add a component above.") \
+                        .classes("text-sm").style("color:#94a3b8")
+                for cat in CORE_COMPONENT_CATEGORIES:
+                    cat_rows = by_cat.get(cat, [])
+                    if not cat_rows:
+                        continue
+                    ui.label(cat.capitalize()) \
+                        .classes("text-sm font-bold mt-3").style("color:#e2e8f0")
+                    with ui.row().classes(
+                            "w-full items-center gap-2 text-xs font-bold") \
+                            .style("color:#64748b;padding:2px 0"):
+                        ui.label("function key").style("width:140px")
+                        ui.label("block / tier").style("width:220px")
+                        ui.label("default part").style("width:170px")
+                        ui.label("lcsc").style("width:80px")
+                        ui.label("package").style("width:130px")
+                        ui.label("price").style("width:70px")
+                        ui.label("stock").style("width:80px")
+                        ui.label("snapshot").style("width:84px")
+                        ui.label("status").style("width:64px")
+                        ui.label("actions").classes("flex-1")
+                    for r in cat_rows:
+                        dim = "" if r["enabled"] else "opacity:0.45;"
+                        with ui.row().classes(
+                                "w-full items-center gap-2 text-xs") \
+                                .style("border-top:1px solid #1e293b;"
+                                       f"padding:4px 0;{dim}"):
+                            ui.label(r["function_key"]).style(
+                                "width:140px;color:#e2e8f0;font-family:monospace")
+                            with ui.column().classes("gap-0").style("width:220px"):
+                                name = ui.label(r["display_name"]) \
+                                    .style("color:#e2e8f0")
+                                if r["selection_notes"]:
+                                    name.tooltip(r["selection_notes"])
+                                if r["qualifier"]:
+                                    ui.label(r["qualifier"]) \
+                                        .style("color:#64748b")
+                            ui.label(r["default_mpn"]).style(
+                                "width:170px;color:#cbd5e1;font-family:monospace")
+                            if r["default_lcsc"]:
+                                ui.link(r["default_lcsc"],
+                                        "https://www.lcsc.com/product-detail/"
+                                        f"{r['default_lcsc']}.html",
+                                        new_tab=True) \
+                                    .style("width:80px;color:#60a5fa;"
+                                           "font-family:monospace")
+                            else:
+                                ui.label("series").style(
+                                    "width:80px;color:#64748b")
+                            ui.label(r["package"] or "").style(
+                                "width:130px;color:#94a3b8")
+                            ui.label(f"${r['price_usd']:.4f}"
+                                     if r["price_usd"] is not None else "") \
+                                .style("width:70px;color:#cbd5e1")
+                            ui.label(f"{r['stock']:,}"
+                                     if r["stock"] is not None else "") \
+                                .style("width:80px;color:#cbd5e1")
+                            ui.label(r["snapshot_date"] or "").style(
+                                "width:84px;color:#64748b")
+                            if r["enabled"]:
+                                ui.label("active").style(
+                                    "width:64px;color:#34d399")
+                            else:
+                                ui.label("disabled").style(
+                                    "width:64px;color:#f87171")
+                            with ui.row().classes("flex-1 gap-1 items-center"):
+                                ui.button("Edit", icon="edit",
+                                          on_click=lambda row=r:
+                                          open_editor(row)) \
+                                    .props("flat dense no-caps") \
+                                    .classes("text-xs")
+                                if r["enabled"]:
+                                    ui.button("Disable", icon="block",
+                                              on_click=lambda row=r:
+                                              do_set_enabled(row, False)) \
+                                        .props("flat dense no-caps") \
+                                        .classes("text-xs")
+                                else:
+                                    ui.button("Enable", icon="check_circle",
+                                              on_click=lambda row=r:
+                                              do_set_enabled(row, True)) \
+                                        .props("flat dense no-caps") \
+                                        .classes("text-xs")
+                                if jlcparts.available() and r["default_lcsc"]:
+                                    ui.button("Refresh", icon="sync",
+                                              on_click=lambda row=r:
+                                              do_refresh(row)) \
+                                        .props("flat dense no-caps") \
+                                        .classes("text-xs") \
+                                        .tooltip("Re-read price/stock from the "
+                                                 "offline jlcparts catalog")
+                                ui.button("Delete", icon="delete",
+                                          on_click=lambda row=r:
+                                          do_delete(row)) \
+                                    .props("flat dense no-caps") \
+                                    .classes("text-xs")
+
+        build_table()
 
 
 # --------------------------------------------------------------------------- #
