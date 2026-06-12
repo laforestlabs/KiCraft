@@ -3,6 +3,15 @@
 Captures the output of the manual layout editor (offline GUI or web)
 so ``compose_subcircuits`` can bypass the solver and stamp/route the
 user's placements directly.
+
+Schema history:
+
+- ``manual_layout.v1``: rectangular ``board_outline`` (min/max only),
+  mounting holes without a screw size. Still loadable; migrated to v2
+  on read (shape ``rect``, screw ``M3``).
+- ``manual_layout.v2``: first-class ``outline`` (``OutlineSpec``:
+  rect / rounded_rect / circle / chamfered_rect + parameters);
+  mounting holes carry ``screw``. Always written on save.
 """
 
 from __future__ import annotations
@@ -13,9 +22,13 @@ from pathlib import Path
 from typing import Any
 
 from kicraft.autoplacer.brain.types import Point
+from kicraft.layout_editor.outline import OutlineSpec
 
 
-SCHEMA_VERSION = "manual_layout.v1"
+SCHEMA_VERSION = "manual_layout.v2"
+SCHEMA_VERSION_V1 = "manual_layout.v1"
+
+DEFAULT_MOUNTING_HOLE_SCREW = "M3"
 
 
 @dataclass(slots=True)
@@ -50,20 +63,24 @@ class ManualMountingHole:
     ``pos``: the resolved (x, y) the GUI computes from outline +
     corner + inset, persisted so the composer doesn't have to
     re-derive it.
+    ``screw``: fastener size key ("M2" / "M2.5" / "M3" / "M4"); drives
+    the drill/pad geometry when the composer synthesizes a footprint
+    for the hole.
     """
 
     index: int
     corner: str | None
     inset_mm: float
     pos: Point
+    screw: str = DEFAULT_MOUNTING_HOLE_SCREW
 
 
 @dataclass(slots=True)
 class ManualLayout:
     """User-specified parent layout: placements + outline.
 
-    ``board_outline`` is (min_pt, max_pt) in mm and is treated as
-    authoritative -- the auto outline-fit pass is skipped when a manual
+    ``outline`` is authoritative -- the auto outline-fit pass is
+    skipped and the outline-repair grow is disabled when a manual
     layout is provided. ``parent_local`` is optional; entries override
     constraint-snapped positions for mounting holes / edge connectors
     that the user dragged in the GUI. ``mounting_holes`` carries the
@@ -71,10 +88,15 @@ class ManualLayout:
     """
 
     placements: list[ManualLeafPlacement]
-    board_outline: tuple[Point, Point]
+    outline: OutlineSpec
     parent_local: list[ManualParentLocalPlacement] = field(default_factory=list)
     mounting_holes: list[ManualMountingHole] = field(default_factory=list)
     schema_version: str = SCHEMA_VERSION
+
+    @property
+    def board_outline(self) -> tuple[Point, Point]:
+        """AABB view, for consumers that predate outline shapes."""
+        return self.outline.aabb()
 
     def placement_by_path(self) -> dict[str, ManualLeafPlacement]:
         return {p.instance_path: p for p in self.placements}
@@ -83,13 +105,9 @@ class ManualLayout:
         return {p.ref: p for p in self.parent_local}
 
     def to_dict(self) -> dict[str, Any]:
-        min_pt, max_pt = self.board_outline
         return {
-            "schema_version": self.schema_version,
-            "board_outline": {
-                "min": {"x": min_pt.x, "y": min_pt.y},
-                "max": {"x": max_pt.x, "y": max_pt.y},
-            },
+            "schema_version": SCHEMA_VERSION,
+            "outline": self.outline.to_dict(),
             "placements": [
                 {
                     "instance_path": p.instance_path,
@@ -108,6 +126,7 @@ class ManualLayout:
                     "corner": h.corner,
                     "inset_mm": h.inset_mm,
                     "pos": {"x": h.pos.x, "y": h.pos.y},
+                    "screw": h.screw,
                 }
                 for h in self.mounting_holes
             ],
@@ -118,24 +137,29 @@ class ManualLayout:
         if not isinstance(data, dict):
             raise ValueError("manual layout must be a JSON object")
         version = data.get("schema_version")
-        if version != SCHEMA_VERSION:
+        if version == SCHEMA_VERSION:
+            outline = OutlineSpec.from_dict(data.get("outline") or {})
+        elif version == SCHEMA_VERSION_V1:
+            # v1: rectangular board_outline only.
+            outline_raw = data.get("board_outline") or {}
+            try:
+                min_pt = Point(
+                    float(outline_raw["min"]["x"]), float(outline_raw["min"]["y"])
+                )
+                max_pt = Point(
+                    float(outline_raw["max"]["x"]), float(outline_raw["max"]["y"])
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"invalid board_outline: {exc}") from exc
+            if max_pt.x <= min_pt.x or max_pt.y <= min_pt.y:
+                raise ValueError(
+                    f"board_outline must satisfy max>min, got min={min_pt}, max={max_pt}"
+                )
+            outline = OutlineSpec.rect(min_pt, max_pt)
+        else:
             raise ValueError(
                 f"unsupported manual layout schema_version: {version!r} "
-                f"(expected {SCHEMA_VERSION!r})"
-            )
-        outline_raw = data.get("board_outline") or {}
-        try:
-            min_pt = Point(
-                float(outline_raw["min"]["x"]), float(outline_raw["min"]["y"])
-            )
-            max_pt = Point(
-                float(outline_raw["max"]["x"]), float(outline_raw["max"]["y"])
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(f"invalid board_outline: {exc}") from exc
-        if max_pt.x <= min_pt.x or max_pt.y <= min_pt.y:
-            raise ValueError(
-                f"board_outline must satisfy max>min, got min={min_pt}, max={max_pt}"
+                f"(expected {SCHEMA_VERSION!r} or {SCHEMA_VERSION_V1!r})"
             )
 
         placements: list[ManualLeafPlacement] = []
@@ -170,18 +194,21 @@ class ManualLayout:
                     raise ValueError(f"invalid corner: {corner!r}")
                 inset = float(entry.get("inset_mm", 5.0))
                 pos = Point(float(entry["pos"]["x"]), float(entry["pos"]["y"]))
+                screw = str(entry.get("screw", DEFAULT_MOUNTING_HOLE_SCREW))
             except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError(f"invalid mounting_holes entry: {exc}") from exc
             mounting_holes.append(
-                ManualMountingHole(index=idx, corner=corner, inset_mm=inset, pos=pos)
+                ManualMountingHole(
+                    index=idx, corner=corner, inset_mm=inset, pos=pos, screw=screw
+                )
             )
 
         return cls(
             placements=placements,
-            board_outline=(min_pt, max_pt),
+            outline=outline,
             parent_local=parent_local,
             mounting_holes=mounting_holes,
-            schema_version=version,
+            schema_version=SCHEMA_VERSION,
         )
 
 

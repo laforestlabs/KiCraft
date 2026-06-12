@@ -35,7 +35,6 @@ import copy
 import json
 import math
 import shutil
-import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -63,14 +62,10 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
     AttachmentConstraint,
     ChildArtifactPlacement,
     DerivedAttachmentConstraints,
-    LeafBlockerSet,
     ParentComposition,
-    PlacementModel,
     build_parent_composition,
     dominant_blocker_side,
     edge_anchor_target_coordinate,
-    estimate_layer_aware_parent_board_size,
-    packed_extents_outline,
     derive_attachment_constraints,
     child_layer_envelopes,
     can_overlap,
@@ -182,6 +177,14 @@ class ParentCompositionState:
     # are expected to extend beyond the board outline (e.g. USB-C shell);
     # the geometry validator must only flag them when pads fall outside.
     edge_constrained_refs: frozenset[str] = field(default_factory=frozenset)
+    # Serialized OutlineSpec dict when this composition came from a
+    # manual layout (kicraft.layout_editor.outline). Non-None marks the
+    # outline as USER-AUTHORITATIVE: the outline-repair grow is skipped
+    # (violations fail loudly via geometry validation instead), the
+    # geometry validator additionally checks the true shape (not just
+    # the AABB), and the stamper writes the shape's polyline to
+    # Edge.Cuts for non-rect shapes.
+    manual_outline: dict[str, Any] | None = None
     # Wall-clock per phase of a parent compose+route round. Keys (when
     # populated): place_solve_ms, stamp_ms, stamp_drc_ms, freerouting_ms,
     # candidate_search_ms, plus solve_*_ms sub-phases from the solver.
@@ -1716,6 +1719,9 @@ def _compose_artifacts(
         edge_constrained_refs=frozenset(
             c.ref for c in all_constraints if c.target in ("edge", "corner")
         ),
+        manual_outline=(
+            manual_layout.outline.to_dict() if manual_layout is not None else None
+        ),
     )
     state.phase_timings.update(solver_phase_timings)
     return state, transformed_payloads
@@ -1988,6 +1994,12 @@ def _repair_parent_outline(
     composition = state.composition
     if composition is None:
         return {"repaired": False, "reason": "no composition"}
+    if state.manual_outline is not None:
+        # Manual mode: the user's outline is authoritative. Growing it
+        # silently would deliver a different board than the one drawn
+        # in the editor; geometry validation right after this fails
+        # loudly instead, and the editor surfaces the violations.
+        return {"repaired": False, "reason": "manual outline is authoritative"}
     outline = composition.board_state.board_outline
     if not outline or len(outline) < 2:
         return {"repaired": False, "reason": "no outline"}
@@ -2095,6 +2107,33 @@ def _validate_parent_geometry(
     max_x = br.x + margin
     max_y = br.y + margin
 
+    # Manual non-rect outlines additionally constrain geometry to the
+    # true shape (analytic containment), not just the AABB: a leaf
+    # tucked into the corner of a circular board is inside the AABB
+    # but off the physical board.
+    shape_spec = None
+    if (
+        state.manual_outline is not None
+        and state.manual_outline.get("shape", "rect") != "rect"
+    ):
+        from kicraft.layout_editor.outline import OutlineSpec
+
+        shape_spec = OutlineSpec.from_dict(state.manual_outline)
+
+    def _bbox_outside(bx0: float, by0: float, bx1: float, by1: float) -> bool:
+        if bx0 < min_x or by0 < min_y or bx1 > max_x or by1 > max_y:
+            return True
+        return shape_spec is not None and not shape_spec.contains_rect(
+            bx0, by0, bx1, by1, tol=margin
+        )
+
+    def _point_outside(px: float, py: float) -> bool:
+        if px < min_x or px > max_x or py < min_y or py > max_y:
+            return True
+        return shape_spec is not None and not shape_spec.contains_point(
+            px, py, tol=margin
+        )
+
     outside_components: list[dict[str, Any]] = []
     outside_pads = 0
     outside_traces = 0
@@ -2119,11 +2158,8 @@ def _validate_parent_geometry(
         if ref in edge_constrained:
             component_outside = False
         else:
-            component_outside = (
-                body_tl.x < min_x
-                or body_tl.y < min_y
-                or body_br.x > max_x
-                or body_br.y > max_y
+            component_outside = _bbox_outside(
+                body_tl.x, body_tl.y, body_br.x, body_br.y
             )
 
         # Pad check: pad COPPER (not just the center) must be inside the
@@ -2132,12 +2168,7 @@ def _validate_parent_geometry(
         pad_outside_count = 0
         for pad in comp.pads:
             pad_tl, pad_br = pad.bbox()
-            if (
-                pad_tl.x < min_x
-                or pad_br.x > max_x
-                or pad_tl.y < min_y
-                or pad_br.y > max_y
-            ):
+            if _bbox_outside(pad_tl.x, pad_tl.y, pad_br.x, pad_br.y):
                 pad_outside_count += 1
                 outside_pads += 1
 
@@ -2163,15 +2194,8 @@ def _validate_parent_geometry(
         geometry_union_min_y = min(geometry_union_min_y, trace.start.y, trace.end.y)
         geometry_union_max_x = max(geometry_union_max_x, trace.start.x, trace.end.x)
         geometry_union_max_y = max(geometry_union_max_y, trace.start.y, trace.end.y)
-        if (
-            trace.start.x < min_x
-            or trace.start.x > max_x
-            or trace.start.y < min_y
-            or trace.start.y > max_y
-            or trace.end.x < min_x
-            or trace.end.x > max_x
-            or trace.end.y < min_y
-            or trace.end.y > max_y
+        if _point_outside(trace.start.x, trace.start.y) or _point_outside(
+            trace.end.x, trace.end.y
         ):
             outside_traces += 1
 
@@ -2180,12 +2204,7 @@ def _validate_parent_geometry(
         geometry_union_min_y = min(geometry_union_min_y, via.pos.y)
         geometry_union_max_x = max(geometry_union_max_x, via.pos.x)
         geometry_union_max_y = max(geometry_union_max_y, via.pos.y)
-        if (
-            via.pos.x < min_x
-            or via.pos.x > max_x
-            or via.pos.y < min_y
-            or via.pos.y > max_y
-        ):
+        if _point_outside(via.pos.x, via.pos.y):
             outside_vias += 1
 
     validation = {
@@ -2208,6 +2227,11 @@ def _validate_parent_geometry(
             "width_mm": max(0.0, br.x - tl.x),
             "height_mm": max(0.0, br.y - tl.y),
         },
+        "outline_shape": (
+            state.manual_outline.get("shape", "rect")
+            if state.manual_outline is not None
+            else "rect"
+        ),
         "outside_component_count": len(outside_components),
         "outside_components": outside_components[:50],
         "outside_pad_count": outside_pads,
@@ -2365,6 +2389,24 @@ def _stamp_parent_board(
             "br_x": outline[1].x,
             "br_y": outline[1].y,
         }
+        # Non-rect manual shapes stamp Edge.Cuts as the shape's closed
+        # polyline instead of a 4-segment rectangle. Generated from the
+        # board_state outline AABB (not the spec's own min/max) so the
+        # stamped shape always brackets exactly the validated outline.
+        if (
+            state.manual_outline is not None
+            and state.manual_outline.get("shape", "rect") != "rect"
+        ):
+            from kicraft.layout_editor.outline import OutlineSpec as _OutlineSpec
+
+            _spec = _OutlineSpec.from_dict(
+                {
+                    **state.manual_outline,
+                    "min": {"x": outline[0].x, "y": outline[0].y},
+                    "max": {"x": outline[1].x, "y": outline[1].y},
+                }
+            )
+            outline_data["polyline"] = [[p.x, p.y] for p in _spec.polyline()]
 
     geometry_validation = _validate_parent_geometry(state)
     if not geometry_validation.get("accepted", False):
@@ -2435,6 +2477,9 @@ def _stamp_parent_board(
             outline_data["tl_y"] += _dy
             outline_data["br_x"] += _dx
             outline_data["br_y"] += _dy
+            for _pt in outline_data.get("polyline") or []:
+                _pt[0] += _dx
+                _pt[1] += _dy
 
     payload = {
         "pcb_path": str(output_pcb),

@@ -4,6 +4,134 @@
 // (kicraft/layout_editor/canvas.py) loads this file once and calls
 // window.kicraftInitLayoutCanvas(cfg) per canvas init.
 
+// --- Pure outline-shape geometry -------------------------------------------
+// MUST mirror kicraft/layout_editor/outline.py exactly: same shapes, same
+// polyline sampling, same containment and mounting-hole math. Exported on
+// window.kicraftLayoutGeometry so the cross-language agreement test can
+// drive it from node against the Python implementation.
+window.kicraftLayoutGeometry = (function() {
+  const MAX_SAGITTA_MM = 0.02;
+  const CIRCLE_MIN_SEGMENTS = 32;
+  const CIRCLE_MAX_SEGMENTS = 128;
+  const ROUNDED_RECT_N_ARC = 8;
+  const SQRT2 = Math.sqrt(2.0);
+
+  // shapeSpec: { shape, corner_radius_mm, chamfer_mm }; min/max: { x, y }.
+  function clampedParam(spec, min, max) {
+    const half = Math.min(max.x - min.x, max.y - min.y) / 2.0;
+    if (spec.shape === 'rounded_rect') return Math.min(spec.corner_radius_mm || 0, half);
+    if (spec.shape === 'chamfered_rect') return Math.min(spec.chamfer_mm || 0, half);
+    if (spec.shape === 'circle') return half;
+    return 0.0;
+  }
+
+  function circleSegmentCount(r) {
+    if (r <= MAX_SAGITTA_MM) return CIRCLE_MIN_SEGMENTS;
+    const n = Math.ceil(Math.PI / Math.acos(1.0 - MAX_SAGITTA_MM / r));
+    return Math.max(CIRCLE_MIN_SEGMENTS, Math.min(CIRCLE_MAX_SEGMENTS, n));
+  }
+
+  function outlinePolyline(spec, min, max) {
+    const x0 = min.x, y0 = min.y, x1 = max.x, y1 = max.y;
+    if (!spec || spec.shape === 'rect') {
+      return [{x: x0, y: y0}, {x: x1, y: y0}, {x: x1, y: y1}, {x: x0, y: y1}];
+    }
+    if (spec.shape === 'rounded_rect') {
+      const r = clampedParam(spec, min, max);
+      const points = [];
+      const corners = [
+        [x0 + r, y0 + r, Math.PI, Math.PI / 2],
+        [x1 - r, y0 + r, Math.PI / 2, 0],
+        [x1 - r, y1 - r, 0, -Math.PI / 2],
+        [x0 + r, y1 - r, -Math.PI / 2, -Math.PI],
+      ];
+      for (const [cx, cy, aStart, aEnd] of corners) {
+        for (let i = 0; i < ROUNDED_RECT_N_ARC; i++) {
+          const t = aStart + (aEnd - aStart) * i / (ROUNDED_RECT_N_ARC - 1);
+          points.push({x: cx + r * Math.cos(t), y: cy - r * Math.sin(t)});
+        }
+      }
+      return points;
+    }
+    if (spec.shape === 'chamfered_rect') {
+      const c = clampedParam(spec, min, max);
+      return [
+        {x: x0, y: y0 + c}, {x: x0 + c, y: y0},
+        {x: x1 - c, y: y0}, {x: x1, y: y0 + c},
+        {x: x1, y: y1 - c}, {x: x1 - c, y: y1},
+        {x: x0 + c, y: y1}, {x: x0, y: y1 - c},
+      ];
+    }
+    if (spec.shape === 'circle') {
+      const r = clampedParam(spec, min, max);
+      const cx = (x0 + x1) / 2.0, cy = (y0 + y1) / 2.0;
+      const n = circleSegmentCount(r);
+      const pts = [];
+      for (let k = 0; k < n; k++) {
+        const t = Math.PI - 2.0 * Math.PI * k / n;
+        pts.push({x: cx + r * Math.cos(t), y: cy - r * Math.sin(t)});
+      }
+      return pts;
+    }
+    return [{x: x0, y: y0}, {x: x1, y: y0}, {x: x1, y: y1}, {x: x0, y: y1}];
+  }
+
+  function outlineContainsPoint(spec, min, max, x, y, tol) {
+    tol = tol || 0.0;
+    const x0 = min.x, y0 = min.y, x1 = max.x, y1 = max.y;
+    if (x < x0 - tol || x > x1 + tol || y < y0 - tol || y > y1 + tol) return false;
+    if (!spec || spec.shape === 'rect') return true;
+    if (spec.shape === 'circle') {
+      const r = clampedParam(spec, min, max);
+      const cx = (x0 + x1) / 2.0, cy = (y0 + y1) / 2.0;
+      return Math.hypot(x - cx, y - cy) <= r + tol;
+    }
+    if (spec.shape === 'chamfered_rect') {
+      const c = clampedParam(spec, min, max);
+      const t = tol * SQRT2;
+      return (
+        (x - x0) + (y - y0) >= c - t
+        && (x1 - x) + (y - y0) >= c - t
+        && (x1 - x) + (y1 - y) >= c - t
+        && (x - x0) + (y1 - y) >= c - t
+      );
+    }
+    if (spec.shape === 'rounded_rect') {
+      const r = clampedParam(spec, min, max);
+      const ncx = Math.min(Math.max(x, x0 + r), x1 - r);
+      const ncy = Math.min(Math.max(y, y0 + r), y1 - r);
+      return Math.hypot(x - ncx, y - ncy) <= r + tol;
+    }
+    return true;
+  }
+
+  function mountingHolePosition(spec, min, max, corner, insetMm) {
+    const signs = {
+      'top-left': [1.0, 1.0],
+      'top-right': [-1.0, 1.0],
+      'bottom-left': [1.0, -1.0],
+      'bottom-right': [-1.0, -1.0],
+    }[corner];
+    if (!signs) return null;
+    const [sx, sy] = signs;
+    const cx = sx > 0 ? min.x : max.x;
+    const cy = sy > 0 ? min.y : max.y;
+    const p = clampedParam(spec, min, max);
+    let entry = 0.0;
+    const shape = spec ? spec.shape : 'rect';
+    if (shape === 'rounded_rect' || shape === 'circle') entry = p * (SQRT2 - 1.0);
+    else if (shape === 'chamfered_rect') entry = p / SQRT2;
+    const perAxis = entry / SQRT2 + insetMm;
+    return {x: cx + sx * perAxis, y: cy + sy * perAxis};
+  }
+
+  return {
+    outlinePolyline: outlinePolyline,
+    outlineContainsPoint: outlineContainsPoint,
+    mountingHolePosition: mountingHolePosition,
+  };
+})();
+
 window.kicraftInitLayoutCanvas = function(cfg) {
   const HOST_ID = cfg.canvas_id + '-host';
 
@@ -48,6 +176,13 @@ window.kicraftInitLayoutCanvas = function(cfg) {
     return {
       placements: deepCopy(cfg.initial.placements),
       board_outline: deepCopy(cfg.initial.board_outline),
+      // Shape tag + parameters; the AABB above stays the single
+      // source of truth for size, so every pre-shape code path
+      // (viewBox, edge handles, snapping) is untouched by shapes.
+      outline_shape: deepCopy(
+        cfg.initial.outline_shape
+        || { shape: 'rect', corner_radius_mm: 0.0, chamfer_mm: 0.0 }
+      ),
       mounting_holes: deepCopy(cfg.initial.mounting_holes || []),
       selected: null,
       snap_active: null,
@@ -78,16 +213,29 @@ window.kicraftInitLayoutCanvas = function(cfg) {
     for (const h of state.mounting_holes) {
       if (!h.corner) continue;
       const inset = Number(h.inset_mm) || 0;
-      switch (h.corner) {
-        case 'top-left':
-          h.pos = { x: out.min.x + inset, y: out.min.y + inset }; break;
-        case 'top-right':
-          h.pos = { x: out.max.x - inset, y: out.min.y + inset }; break;
-        case 'bottom-left':
-          h.pos = { x: out.min.x + inset, y: out.max.y - inset }; break;
-        case 'bottom-right':
-          h.pos = { x: out.max.x - inset, y: out.max.y - inset }; break;
-      }
+      // Shape-aware corner peg: on rounded/chamfered/circular boards
+      // the AABB corner is off-board, so the peg point walks inward
+      // along the corner diagonal from where the diagonal enters the
+      // shape (plain rect reduces to corner + (inset, inset)).
+      const pos = window.kicraftLayoutGeometry.mountingHolePosition(
+        state.outline_shape, out.min, out.max, h.corner, inset
+      );
+      if (pos) h.pos = pos;
+    }
+  }
+
+  // Circle boards need a square AABB (the circle is its inscribed
+  // circle). Called after any outline mutation; `draggedSide` picks
+  // which dimension wins so an edge drag feels direct.
+  function enforceShapeConstraints(draggedSide) {
+    if (!state.outline_shape || state.outline_shape.shape !== 'circle') return;
+    const out = state.board_outline;
+    const w = out.max.x - out.min.x;
+    const h = out.max.y - out.min.y;
+    if (draggedSide === 'top' || draggedSide === 'bottom') {
+      out.max.x = out.min.x + h;
+    } else {
+      out.max.y = out.min.y + w;
     }
   }
 
@@ -356,15 +504,30 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       svg.appendChild(grid);
     }
 
-    // Outline rect
+    // Outline: plain rect element for rect shape; closed <path> traced
+    // from the shared polyline generator otherwise (the exact loop the
+    // parent stamper writes to Edge.Cuts).
     const outline = state.board_outline;
-    const outRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-    outRect.setAttribute('class', 'ml-outline');
-    outRect.setAttribute('x', outline.min.x);
-    outRect.setAttribute('y', outline.min.y);
-    outRect.setAttribute('width', outline.max.x - outline.min.x);
-    outRect.setAttribute('height', outline.max.y - outline.min.y);
-    svg.appendChild(outRect);
+    if (!state.outline_shape || state.outline_shape.shape === 'rect') {
+      const outRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      outRect.setAttribute('class', 'ml-outline');
+      outRect.setAttribute('x', outline.min.x);
+      outRect.setAttribute('y', outline.min.y);
+      outRect.setAttribute('width', outline.max.x - outline.min.x);
+      outRect.setAttribute('height', outline.max.y - outline.min.y);
+      svg.appendChild(outRect);
+    } else {
+      const pts = window.kicraftLayoutGeometry.outlinePolyline(
+        state.outline_shape, outline.min, outline.max
+      );
+      const d = pts.map(
+        (p, i) => (i === 0 ? 'M' : 'L') + p.x.toFixed(4) + ' ' + p.y.toFixed(4)
+      ).join(' ') + ' Z';
+      const outPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      outPath.setAttribute('class', 'ml-outline');
+      outPath.setAttribute('d', d);
+      svg.appendChild(outPath);
+    }
 
     // Edge handles
     const w = outline.max.x - outline.min.x;
@@ -453,8 +616,9 @@ window.kicraftInitLayoutCanvas = function(cfg) {
         corner(ex0, ey1),
       ];
       const overflow = corners.some(c =>
-        c.x < out.min.x - 0.01 || c.x > out.max.x + 0.01 ||
-        c.y < out.min.y - 0.01 || c.y > out.max.y + 0.01
+        !window.kicraftLayoutGeometry.outlineContainsPoint(
+          state.outline_shape, out.min, out.max, c.x, c.y, 0.01
+        )
       );
       const collides = overlapping.has(p.instance_path);
       const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
@@ -781,6 +945,7 @@ window.kicraftInitLayoutCanvas = function(cfg) {
           } else if (side === 'bottom') {
             out.max.y = Math.max(orig.max.y + dy, orig.min.y + minSize);
           }
+          enforceShapeConstraints(side);
           render();
         };
         const up = () => {
@@ -817,18 +982,28 @@ window.kicraftInitLayoutCanvas = function(cfg) {
           x: Math.round(h.pos.x * 1000) / 1000,
           y: Math.round(h.pos.y * 1000) / 1000,
         },
+        screw: h.screw || 'M3',
       }));
+      const outline_min = {
+        x: Math.round(out.min.x * 1000) / 1000,
+        y: Math.round(out.min.y * 1000) / 1000,
+      };
+      const outline_max = {
+        x: Math.round(out.max.x * 1000) / 1000,
+        y: Math.round(out.max.y * 1000) / 1000,
+      };
+      const shape = state.outline_shape || { shape: 'rect' };
       return {
         placements: placements,
-        board_outline: {
-          min: {
-            x: Math.round(out.min.x * 1000) / 1000,
-            y: Math.round(out.min.y * 1000) / 1000,
-          },
-          max: {
-            x: Math.round(out.max.x * 1000) / 1000,
-            y: Math.round(out.max.y * 1000) / 1000,
-          },
+        // Legacy AABB key kept so an older server can still read a
+        // newer canvas's payload during deploy skew.
+        board_outline: { min: outline_min, max: outline_max },
+        outline: {
+          shape: shape.shape || 'rect',
+          min: outline_min,
+          max: outline_max,
+          corner_radius_mm: Math.round((shape.corner_radius_mm || 0) * 100) / 100,
+          chamfer_mm: Math.round((shape.chamfer_mm || 0) * 100) / 100,
         },
         mounting_holes: mounting_holes,
       };
@@ -852,7 +1027,26 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       // shoved when the user only adjusted width or only height.
       out.max.x = out.min.x + w;
       out.max.y = out.min.y + h;
+      enforceShapeConstraints(null);
       render();
+    },
+    setOutlineShape: function(spec) {
+      // Merge {shape, corner_radius_mm, chamfer_mm}. Switching to
+      // circle squares the AABB on the current width.
+      if (!spec || typeof spec !== 'object') return;
+      const cur = state.outline_shape;
+      if (typeof spec.shape === 'string') cur.shape = spec.shape;
+      if (typeof spec.corner_radius_mm === 'number') {
+        cur.corner_radius_mm = Math.max(0, spec.corner_radius_mm);
+      }
+      if (typeof spec.chamfer_mm === 'number') {
+        cur.chamfer_mm = Math.max(0, spec.chamfer_mm);
+      }
+      enforceShapeConstraints(null);
+      render();
+    },
+    getOutlineShape: function() {
+      return deepCopy(state.outline_shape);
     },
     setMountingHoles: function(holes) {
       // Replace the entire mounting-holes list. Caller (Python side)
@@ -862,6 +1056,7 @@ window.kicraftInitLayoutCanvas = function(cfg) {
         index: typeof h.index === 'number' ? h.index : i,
         corner: h.corner || null,
         inset_mm: Number(h.inset_mm) || 5.0,
+        screw: typeof h.screw === 'string' && h.screw ? h.screw : 'M3',
         pos: h.pos ? { x: Number(h.pos.x) || 0, y: Number(h.pos.y) || 0 }
                    : { x: state.board_outline.min.x, y: state.board_outline.min.y },
       }));
@@ -873,6 +1068,7 @@ window.kicraftInitLayoutCanvas = function(cfg) {
         index: h.index,
         corner: h.corner,
         inset_mm: Math.round(h.inset_mm * 100) / 100,
+        screw: h.screw || 'M3',
         pos: {
           x: Math.round(h.pos.x * 1000) / 1000,
           y: Math.round(h.pos.y * 1000) / 1000,

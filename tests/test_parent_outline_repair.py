@@ -48,12 +48,13 @@ def _pad(ref, x, y, w=1.0, h=1.0):
     )
 
 
-def _state(board_state, edge_refs=()):
+def _state(board_state, edge_refs=(), manual_outline=None):
     composition = SimpleNamespace(board_state=board_state)
     return SimpleNamespace(
         composition=composition,
         edge_constrained_refs=frozenset(edge_refs),
         geometry_validation=None,
+        manual_outline=manual_outline,
     )
 
 
@@ -124,3 +125,51 @@ def test_repair_encloses_stamped_traces_and_vias():
     assert result["repaired"] is True
     assert bs.board_outline[1].x >= 40.0 + 2.0 - 1e-6
     assert _validate_parent_geometry(state)["accepted"] is True
+
+
+def test_manual_outline_is_authoritative_no_grow_and_loud_validation():
+    """Manual mode: the user's outline must never be silently grown.
+
+    A component outside the user-drawn outline leaves the outline
+    untouched and fails geometry validation instead (the editor
+    surfaces the violation; routing stays gated)."""
+    bs = BoardState(
+        components={"U1": _comp("U1", cx=20.0, cy=5.0, w=4.0, h=4.0)},
+        board_outline=(Point(0.0, 0.0), Point(10.0, 10.0)),
+    )
+    manual = {
+        "shape": "rect",
+        "min": {"x": 0.0, "y": 0.0},
+        "max": {"x": 10.0, "y": 10.0},
+    }
+    state = _state(bs, manual_outline=manual)
+    result = _repair_parent_outline(state, margin_mm=2.0)
+    assert result["repaired"] is False
+    assert "authoritative" in result["reason"]
+    assert bs.board_outline == (Point(0.0, 0.0), Point(10.0, 10.0))
+    assert _validate_parent_geometry(state)["accepted"] is False
+
+
+def test_manual_circle_outline_flags_geometry_in_aabb_corner():
+    """A part inside the AABB but outside the circle must be rejected."""
+    bs = BoardState(
+        components={"U1": _comp("U1", cx=4.0, cy=4.0, w=4.0, h=4.0)},
+        board_outline=(Point(0.0, 0.0), Point(50.0, 50.0)),
+    )
+    manual = {
+        "shape": "circle",
+        "min": {"x": 0.0, "y": 0.0},
+        "max": {"x": 50.0, "y": 50.0},
+    }
+    state = _state(bs, manual_outline=manual)
+    validation = _validate_parent_geometry(state)
+    assert validation["outline_shape"] == "circle"
+    assert validation["accepted"] is False
+
+    # The same part at the circle's center passes.
+    bs_ok = BoardState(
+        components={"U1": _comp("U1", cx=25.0, cy=25.0, w=4.0, h=4.0)},
+        board_outline=(Point(0.0, 0.0), Point(50.0, 50.0)),
+    )
+    state_ok = _state(bs_ok, manual_outline=manual)
+    assert _validate_parent_geometry(state_ok)["accepted"] is True
