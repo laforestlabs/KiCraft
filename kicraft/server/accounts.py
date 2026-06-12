@@ -1355,6 +1355,23 @@ class AccountStore:
     def can_design(self, user: User) -> bool:
         return is_admin(user) or self.quota_status(user)["remaining"] > 0
 
+    def build_quality_for_user(self, user_id: int | None) -> str | None:
+        """The `kicraft build --quality` override for this user's tier, or None
+        to use the build default.
+
+        Free tier builds at 'draft' (2x2 autoexperiment): the 2026-06-12 sweep
+        (logs/draft_sweep/20260612T025445Z) measured it ~1.8x faster to gerber
+        than the default 'good' 3x3 at an equal-or-better fab-ready rate on the
+        sweep boards. Paid tiers and staff keep the default; unknown/absent
+        users too, so non-web callers see no behavior change.
+        """
+        if user_id is None:
+            return None
+        user = self.get_user(user_id)
+        if user is None or is_admin(user):
+            return None
+        return "draft" if user.tier == "free" else None
+
     # ---- admin stats ------------------------------------------------------
 
     def overview_stats(self, *, window_days: int = 30) -> dict:
