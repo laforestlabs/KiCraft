@@ -5,7 +5,7 @@ Given the `architecture` (available in the `state` field of stage-prep's output)
 **Programming interface.** Reflect the architecture's programming decision:
 
 - **Native-USB MCU** (an ESP32-S3 / C3 / S2 / C6, the default): no bridge part. The MCU's native USB pins connect to the board's USB connector (wiring handles it); nothing extra to add here beyond the MCU itself.
-- **Classic ESP32 with a CH340N bridge**: include the `ch340n` bridge (vendored, in the parts block), two small-signal NPN transistors + base resistors for the DTR/RTS auto-reset to EN/IO0, and the bridge's decoupling. Cluster them with the bridge in `ic_groups`.
+- **Classic ESP32 with a USB-UART bridge**: include the bridge chosen by the architecture stage (the core-defaults `usb-uart-bridge` row, CH340C / C84681, by default; or the vendored `ch340n` bundle when it is already in the parts block), two small-signal NPN transistors + base resistors for the DTR/RTS auto-reset to EN/IO0, and the bridge's decoupling. Cluster them with the bridge in `ic_groups`.
 
 Either way the wiring stage connects the path, so no programming question reaches it.
 
@@ -43,6 +43,8 @@ Constraints (enforced by Pydantic):
 - `ref` / `symbol` / `footprint` shapes match the regexes above.
 
 ## Part selection
+
+**Core defaults: adopt before researching.** `extras.core_defaults_block` from `stage-prep bom` (when present) is the curated registry of default parts, one per common functional block, each with a verified LCSC C-number. Precedence: a matching curated bundle in `extras.parts_block` first, then the core default, then research. When a required function matches a core-defaults row and no stated constraint disqualifies it (voltage/current beyond the row's qualifier, package or assembly limits, an explicit user-named part), adopt the default directly: fetch its bundle with the given C-number in ONE call (the `add_part_from_lcsc` tool, or `kicraft add-part --from-lcsc <C#> --into project`), and do NOT call `lookup_lcsc_id` or `search_symbols` for that part. For the passive-series rows (no C-number), use the named package with the stock `Device:R` / `Device:C` symbols per the footprint defaults below. Record each adoption in `assumptions` (e.g. `"LDO 3.3V: ME6211C33M5G-N per core defaults (defaulted)"`). Check the block's "Package caveats" section before adopting a flagged row.
 
 **Prefer the smaller stocked variant.** When a part comes in several package or module sizes that are all stocked on LCSC and electrically suitable, pick the physically smaller one (e.g. `esp32-s3-mini-1` over `esp32-s3-wroom-1`) to save board area, UNLESS a stated constraint overrides it: a cost driver, the smaller part dropping pins / IO / power rating the design needs, or (for passives) the assembly method favoring a larger hand-solderable size.
 

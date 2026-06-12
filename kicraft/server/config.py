@@ -131,6 +131,12 @@ class Settings:
     max_price_completion: float = 0.35
     enable_prompt_cache: bool = True
 
+    # Surface the core-components registry (admin-curated default part per
+    # functional block, /admin/core-components) in the architecture/bom prompts
+    # so the model adopts defaults instead of researching them. KICRAFT_CORE_DEFAULTS=0
+    # disables for A/B cost comparisons.
+    enable_core_defaults: bool = True
+
     # --- Class-J self-evaluation judge (admin-only web feature) ---------------
     # The design loop runs a deliberately cheap/weak model; grading a finished run
     # wants a stronger one. None means "reuse the design model" (`model`), which
@@ -193,6 +199,7 @@ class Settings:
             max_price_completion=float(
                 os.environ.get("KICRAFT_MAX_PRICE_COMPLETION", cls.max_price_completion)),
             enable_prompt_cache=_env_bool_default("KICRAFT_ENABLE_PROMPT_CACHE", True),
+            enable_core_defaults=_env_bool_default("KICRAFT_CORE_DEFAULTS", True),
             eval_judge_model=(os.environ.get("KICRAFT_EVAL_JUDGE_MODEL", "").strip() or None),
         )
 
@@ -230,5 +237,6 @@ class Settings:
             "max_price_prompt": self.max_price_prompt,
             "max_price_completion": self.max_price_completion,
             "enable_prompt_cache": self.enable_prompt_cache,
+            "enable_core_defaults": self.enable_core_defaults,
             "eval_judge_model": self.eval_judge_model,
         }

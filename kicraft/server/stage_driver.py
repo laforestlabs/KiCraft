@@ -149,6 +149,13 @@ def _stage_extra(stage: str) -> str:
             "pick a stock symbol/footprint. Resolve the real part: lookup_lcsc_id then "
             "add_part_from_lcsc, then list_parts to read the exact '<name>:<sym>' / '<name>:<fp>' "
             "strings. Substituting a generic stock part for a specific IC is wrong.\n"
+            "- CORE DEFAULTS: extras.core_defaults_block (when present) lists one curated "
+            "default part per common functional block, each with a verified LCSC C-number. "
+            "When a needed function matches a row and no stated constraint disqualifies it, "
+            "SKIP lookup_lcsc_id / search_symbols for that part: call add_part_from_lcsc "
+            "with the given C-number directly (batch several in one turn), then read the "
+            "exact '<name>:<sym>' / '<name>:<fp>' strings from list_parts. A matching "
+            "curated bundle in extras.parts_block still wins over a core default.\n"
             "- SEARCH BUDGET: lookup_lcsc_id is one query + at most one retry per part (retry "
             "with the bare part family, no descriptive words). If it still misses — or reports "
             "the backend unreachable — STOP searching for that part: either ask the user for "
@@ -170,6 +177,43 @@ def _stage_extra(stage: str) -> str:
             "- net_name should match an architecture power_net or inter_sheet_net verbatim "
             "where applicable; connection.sheet must equal a bom part's sheet.")
     return ""
+
+
+def _format_core_defaults_block(rows) -> str | None:
+    """Compact prompt rendering of the core-components registry: the admin-curated
+    default part per common functional block (/admin/core-components). The notes
+    and price/stock snapshots are deliberately dropped; this table rides the user
+    prompt through every BOM tool round, so it must stay small (~4.5KB for 43
+    rows). Rows the admin disabled are skipped; None when nothing remains."""
+    live = [r for r in (rows or []) if r.get("enabled", True)]
+    if not live:
+        return None
+    lines = [
+        "## Core component defaults",
+        "Curated default part per common functional block. Precedence: a matching "
+        "curated bundle in the available-parts table > the core default below > "
+        "research tools. When a needed function matches a row and no stated "
+        "constraint disqualifies it, adopt the default directly: call "
+        "add_part_from_lcsc with the given LCSC C-number (one call, no searching). "
+        "Passive series rows (no C-number) name the package to use with stock "
+        "Device:R / Device:C symbols.",
+        "",
+        "| function_key | block | qualifier | default part | LCSC | package |",
+        "|---|---|---|---|---|---|",
+    ]
+    caveats = []
+    for r in live:
+        cells = (r.get("function_key"), r.get("display_name"), r.get("qualifier"),
+                 r.get("default_mpn"), r.get("default_lcsc"), r.get("package"))
+        lines.append("| " + " | ".join(str(c) if c else "-" for c in cells) + " |")
+        if re.search(r"\b(WLP|CSP|BGA)\b", r.get("package") or ""):
+            caveats.append(
+                f"- {r.get('function_key')} ({r.get('default_mpn')}): "
+                f"{r.get('package')} is machine-assembly-only; if hand assembly "
+                "is required, research an alternative instead of adopting it.")
+    if caveats:
+        lines += ["", "### Package caveats", *caveats]
+    return "\n".join(lines)
 
 
 def _schema_for(stage: str) -> str:
@@ -435,7 +479,8 @@ def _client_model(client) -> str | None:
 
 
 def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, max_retries=2,
-                progress=None, answers=None, instruction=None, meta_ctx=None) -> dict:
+                progress=None, answers=None, instruction=None, meta_ctx=None,
+                core_defaults=None) -> dict:
     if progress:
         progress({"kind": "stage_start", "stage": stage, "model": _client_model(client)})
     prep = _run(KICRAFT + ["stage-prep", stage, str(state_path)], workspace)
@@ -448,6 +493,14 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
                 "error": f"stage-prep failed: {err}"}
     prep_json = json.loads(prep.stdout)
     extras = prep_json.get("extras") or {}
+
+    # Core-components registry (admin-curated default parts): rendered fresh from
+    # the rows the caller fetched on this run, never persisted into state.json,
+    # so admin edits land on every resume/re-drive.
+    if stage in ("architecture", "bom") and core_defaults:
+        block = _format_core_defaults_block(core_defaults)
+        if block:
+            extras["core_defaults_block"] = block
 
     # Bookkeeping the model has no use for stays out of its prompt.
     prompt_state = dict(prep_json["state"])
@@ -557,7 +610,8 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
 
 
 def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_stage=None,
-                progress=None, client=None, answers=None, instruction=None, run_id=None):
+                progress=None, client=None, answers=None, instruction=None, run_id=None,
+                core_defaults=None):
     ws = Path(workspace)
     (ws / ".kicraft").mkdir(parents=True, exist_ok=True)
     state_path = ws / ".kicraft" / "state.json"
@@ -573,7 +627,7 @@ def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_sta
                         _stage_max_retries(stage, max_retries), progress=progress,
                         answers=(answers if i == 0 else None),
                         instruction=(instruction if i == 0 else None),
-                        meta_ctx=base_ctx)
+                        meta_ctx=base_ctx, core_defaults=core_defaults)
         results.append(r)
         if on_stage:
             on_stage(r)
