@@ -4,7 +4,7 @@
   "description": "XI'AN Aerosemi MT3608 \u2014 boost (step-up) DC-DC converter, up to 2 A continuous, 1.2 MHz fixed switching, Vout up to 28 V. SOT-23-6. The maker default for 3.7 V \u2192 5 V or 5 V \u2192 12 V boost rails on battery-powered projects.",
   "footprint_name": "SOT-23-6_L2.9-W1.6-P0.95-LS2.8-BL",
   "kicad_version_min": "9.0.0",
-  "maturity": "reviewed",
+  "maturity": "production",
   "mpn": "MT3608",
   "name": "mt3608",
   "provenance": {

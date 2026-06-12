@@ -4,7 +4,7 @@
   "description": "Generic SS14 \u2014 40 V / 1 A Schottky diode in SMA (DO-214AC). SMD equivalent of 1N5819. The maker-default freewheel diode for boost converters (MT3608, etc), reverse-polarity protection on logic-level rails, and freewheel for low-current relay/motor coils.",
   "footprint_name": "SMA_L4.3-W2.6-LS5.0-RD",
   "kicad_version_min": "9.0.0",
-  "maturity": "reviewed",
+  "maturity": "production",
   "mpn": "SS14",
   "name": "ss14",
   "provenance": {

@@ -4,7 +4,7 @@
   "description": "Advanced Monolithic Systems AMS1117-3.3 \u2014 3.3 V fixed LDO regulator, 1 A max, SOT-223 package. Ubiquitous, cheap, and good enough for most digital rails. Use when you want to drop 5 V \u2192 3.3 V without a switcher.",
   "footprint_name": "SOT-223-3_L6.5-W3.4-P2.30-LS7.0-BR",
   "kicad_version_min": "9.0.0",
-  "maturity": "reviewed",
+  "maturity": "production",
   "mpn": "AMS1117-3.3",
   "name": "ams1117-3v3",
   "provenance": {

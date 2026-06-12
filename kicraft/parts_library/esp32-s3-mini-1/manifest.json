@@ -4,7 +4,7 @@
   "description": "ESPRESSIF(\u4e50\u946b) ESP32-S3-MINI-1-N8",
   "footprint_name": "BULETM-SMD_ESP32-S3-MINI-1-N8",
   "kicad_version_min": "9.0.0",
-  "maturity": "reviewed",
+  "maturity": "production",
   "mpn": "ESP32-S3-MINI-1-N8",
   "name": "esp32-s3-mini-1",
   "provenance": {

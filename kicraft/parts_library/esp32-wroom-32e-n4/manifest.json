@@ -4,7 +4,7 @@
   "description": "ESPRESSIF(\u4e50\u946b) ESP32-WROOM-32E-N4",
   "footprint_name": "WIFI-SMD_ESP32-WROOM-32E",
   "kicad_version_min": "9.0.0",
-  "maturity": "reviewed",
+  "maturity": "production",
   "mpn": "ESP32-WROOM-32E-N4",
   "name": "esp32-wroom-32e-n4",
   "provenance": {

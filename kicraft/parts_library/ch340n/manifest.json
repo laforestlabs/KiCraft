@@ -4,7 +4,7 @@
   "description": "WCH CH340N \u2014 USB 2.0 full-speed to UART bridge, SOP-8 package, internal clock (no external crystal needed). 5 V or 3.3 V operation. The simplest possible USB-serial bridge for MCUs without native USB \u2014 drop-in cheaper and smaller than CH340G.",
   "footprint_name": "SOP-8_L4.9-W3.9-P1.27-LS6.0-BL",
   "kicad_version_min": "9.0.0",
-  "maturity": "reviewed",
+  "maturity": "production",
   "mpn": "CH340N",
   "name": "ch340n",
   "provenance": {

@@ -4,7 +4,7 @@
   "description": "Diodes Incorporated AP2112K-3.3 \u2014 3.3 V fixed LDO regulator, 600 mA, SOT-23-5. Low quiescent current (~55 \u00b5A) makes it the battery-powered alternative to AMS1117-3.3. ~250-400 mV dropout at 600 mA; integrated EN pin lets the MCU shut the rail down for sleep.",
   "footprint_name": "SOT-25-5_L2.9-W1.6-P0.95-LS2.8-BL",
   "kicad_version_min": "9.0.0",
-  "maturity": "reviewed",
+  "maturity": "production",
   "mpn": "AP2112K-3.3TRG1",
   "name": "ap2112k-3v3",
   "provenance": {
