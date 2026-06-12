@@ -110,6 +110,7 @@ class LayoutEditorPanel:
         user,
         on_exit,
         is_run_active,
+        on_route=None,
     ) -> None:
         self.project_dir = project_dir
         self.experiments_dir = project_dir / ".experiments"
@@ -121,12 +122,26 @@ class LayoutEditorPanel:
         # workspace; saving is refused then (mutual exclusion with the
         # build queue).
         self.is_run_active = is_run_active
+        # Host callback that enqueues the manual_route job for this
+        # project (the queue/state plumbing lives with the page).
+        self.on_route = on_route
         self.canvas_id = "web-layout-canvas"
         self._preview_view: KiCanvasView | None = None
         self._preview_slot = None
         self._status = None
         self._drc_card = None
         self._save_btn = None
+        self._route_btn = None
+
+    def saved_layout_path(self) -> Path:
+        return self.experiments_dir / "manual" / "manual_layout.json"
+
+    def _on_route_clicked(self) -> None:
+        if not self.saved_layout_path().is_file():
+            ui.notify("Save the layout first.", color="warning")
+            return
+        if self.on_route is not None:
+            self.on_route()
 
     # -- UI -----------------------------------------------------------------
 
@@ -169,12 +184,24 @@ class LayoutEditorPanel:
                 "Save & stamp preview", icon="save", color="primary",
                 on_click=self._on_save,
             )
+            if self.on_route is not None:
+                self._route_btn = ui.button(
+                    "Route this layout", icon="bolt", color="secondary",
+                    on_click=self._on_route_clicked,
+                )
+                if not self.saved_layout_path().is_file():
+                    self._route_btn.disable()
+                self._route_btn.tooltip(
+                    "Routes the saved layout with FreeRouting through the "
+                    "build queue (minutes), then verifies it and rebuilds "
+                    "the fab package."
+                )
             ui.button("Reset", icon="refresh", on_click=lambda: ui.run_javascript(
                 f"window.manualLayoutCanvases['{self.canvas_id}'].reset()"
             )).props("flat")
             ui.label(
                 "Stamping places your layout on the real board and runs "
-                "DRC (~20 s). Routing the saved layout comes next."
+                "DRC (~20 s); routing commits it through the build queue."
             ).classes("text-xs").style("color:#64748b")
 
         self._drc_card = ui.card().classes("w-full mt-3 hidden")
@@ -214,6 +241,8 @@ class LayoutEditorPanel:
             ml_path = save_manual_layout_json(
                 self.experiments_dir, payload, leaves
             )
+            if self._route_btn is not None:
+                self._route_btn.enable()
             self._set_status("saved; stamping + running DRC…")
         except Exception as exc:  # noqa: BLE001
             self._set_status(f"save failed: {exc}")

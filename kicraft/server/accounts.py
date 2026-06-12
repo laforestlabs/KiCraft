@@ -222,6 +222,12 @@ class BuildJob:
     attempts: int = 0
     claimed_by: str | None = None
     log_path: str | None = None
+    # What command the claimant must run: 'build' (full deterministic
+    # pipeline) or 'manual_route' (route + promote a saved manual
+    # layout). Executors must FAIL unknown kinds rather than fall back
+    # to 'build' (deploy-skew safety: an old worker must not run the
+    # wrong command on a new job).
+    kind: str = "build"
 
 
 @dataclass
@@ -462,12 +468,19 @@ class AccountStore:
                 "finished_at TEXT,"
                 "attempts INTEGER NOT NULL DEFAULT 0,"
                 "claimed_by TEXT,"
-                "log_path TEXT)"
+                "log_path TEXT,"
+                "kind TEXT NOT NULL DEFAULT 'build')"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_build_jobs_status "
                 "ON build_jobs(status, id)"
             )
+            # Additive migration for deployed DBs that predate job kinds.
+            bj_cols = {row["name"]
+                       for row in conn.execute("PRAGMA table_info(build_jobs)")}
+            if "kind" not in bj_cols:
+                conn.execute("ALTER TABLE build_jobs ADD COLUMN kind TEXT "
+                             "NOT NULL DEFAULT 'build'")
             # Per-user dedup of likes; the count is denormalized onto
             # projects.like_count and kept in sync inside toggle_like's txn.
             conn.execute(
@@ -1589,15 +1602,17 @@ class AccountStore:
                         status=row["status"], rc=row["rc"],
                         created_at=row["created_at"], started_at=row["started_at"],
                         finished_at=row["finished_at"], attempts=row["attempts"],
-                        claimed_by=row["claimed_by"], log_path=row["log_path"])
+                        claimed_by=row["claimed_by"], log_path=row["log_path"],
+                        kind=(row["kind"] if "kind" in row.keys() else "build"))
 
     def enqueue_build(self, *, workspace: str, project_id: int | None = None,
-                      user_id: int | None = None, log_path: str | None = None) -> int:
+                      user_id: int | None = None, log_path: str | None = None,
+                      kind: str = "build") -> int:
         with self._conn() as conn:
             cur = conn.execute(
                 "INSERT INTO build_jobs (project_id, user_id, workspace, status, "
-                "created_at, log_path) VALUES (?, ?, ?, 'queued', ?, ?)",
-                (project_id, user_id, workspace, _utcnow_iso(), log_path))
+                "created_at, log_path, kind) VALUES (?, ?, ?, 'queued', ?, ?, ?)",
+                (project_id, user_id, workspace, _utcnow_iso(), log_path, kind))
             return int(cur.lastrowid)
 
     def get_build_job(self, job_id: int) -> BuildJob | None:

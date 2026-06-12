@@ -368,3 +368,73 @@ def test_drain_build_log_partial_lines(tmp_path):
         f.write("ial\n")
     offset, rem = _drain_build_log(log, offset, rem, progress)
     assert [e["text"] for e in events] == ["one", "two", "partial"] and rem == ""
+
+
+# --------------------------------------------------------------------------- #
+# job kinds (manual_route)
+# --------------------------------------------------------------------------- #
+def test_enqueue_kind_round_trips_and_defaults(store, tmp_path):
+    ws = _ws(tmp_path)
+    j_default = store.enqueue_build(workspace=str(ws))
+    j_manual = store.enqueue_build(workspace=str(ws), kind="manual_route")
+    assert store.get_build_job(j_default).kind == "build"
+    assert store.get_build_job(j_manual).kind == "manual_route"
+
+
+def test_worker_dispatches_command_by_kind(store, tmp_path, monkeypatch):
+    monkeypatch.setenv("KICRAFT_BUILD_SLOTS", "0")
+    ws = _ws(tmp_path)
+    j = store.enqueue_build(workspace=str(ws), kind="manual_route")
+    w = BuildWorker(
+        store, poll_s=0.05, max_jobs=1,
+        commands={
+            "build": [sys.executable, "-c", "print('wrong command')"],
+            "manual_route": [sys.executable, "-c", "print('manual route ran')"],
+        })
+    assert w.run_once() is True
+    _drain(w)
+    job = store.get_build_job(j)
+    assert job.status == "done" and job.rc == 0
+    log = (ws / ".kicraft" / "build.log").read_text()
+    assert "manual route ran" in log
+    assert "wrong command" not in log
+
+
+def test_worker_fails_unknown_kind_instead_of_running_build(
+        store, tmp_path, monkeypatch):
+    """Deploy-skew safety: an old worker that does not know a job kind
+    must fail the job, never fall back to the 'build' command."""
+    monkeypatch.setenv("KICRAFT_BUILD_SLOTS", "0")
+    ws = _ws(tmp_path)
+    j = store.enqueue_build(workspace=str(ws), kind="frobnicate")
+    w = BuildWorker(store, poll_s=0.05, max_jobs=1,
+                    commands={"build": [sys.executable, "-c", "print('nope')"]})
+    assert w.run_once() is True
+    _drain(w)
+    job = store.get_build_job(j)
+    assert job.status == "failed"
+    assert "nope" not in (
+        (ws / ".kicraft" / "build.log").read_text()
+        if (ws / ".kicraft" / "build.log").is_file() else "")
+
+
+def test_kind_column_migrates_legacy_db(tmp_path):
+    """A deployed build_jobs table without the kind column upgrades in
+    place; pre-existing rows read back as kind='build'."""
+    db = tmp_path / "accounts.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TABLE build_jobs ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER,"
+            "user_id INTEGER, workspace TEXT NOT NULL,"
+            "status TEXT NOT NULL DEFAULT 'queued', rc INTEGER,"
+            "created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,"
+            "attempts INTEGER NOT NULL DEFAULT 0, claimed_by TEXT,"
+            "log_path TEXT)")
+        conn.execute(
+            "INSERT INTO build_jobs (workspace, status, created_at)"
+            " VALUES ('/tmp/ws', 'queued', '2026-01-01T00:00:00')")
+
+    store = AccountStore(db, tmp_path / "projects")  # runs the migration
+    job = store.get_build_job(1)
+    assert job is not None and job.kind == "build"

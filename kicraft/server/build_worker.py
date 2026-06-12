@@ -43,6 +43,11 @@ from .accounts import AccountStore, BuildJob
 _BUILD_CMD = [sys.executable, "-m", "kicraft.design.cli_app",
               "build", ".kicraft/state.json", "generated", "--no-archive"]
 
+# Route + promote a saved manual layout (kicraft manual-route); enqueued by the
+# web layout editor's "Route this layout".
+_MANUAL_ROUTE_CMD = [sys.executable, "-m", "kicraft.design.cli_app",
+                     "manual-route", ".kicraft/state.json", "generated"]
+
 _MAX_ATTEMPTS = 2  # claims a job may burn before it is failed instead of requeued
 
 
@@ -56,9 +61,17 @@ class BuildWorker:
 
     def __init__(self, store: AccountStore, *, build_cmd: list[str] | None = None,
                  timeout_s: float = 1800.0, poll_s: float = 2.0,
-                 max_jobs: int | None = None):
+                 max_jobs: int | None = None,
+                 commands: dict[str, list[str]] | None = None):
         self.store = store
         self.build_cmd = list(build_cmd or _BUILD_CMD)
+        # Command per job kind. A kind absent here FAILS the job rather
+        # than falling back to 'build' (deploy-skew safety: an old worker
+        # must never run the wrong command on a job from a newer web).
+        self.commands = (
+            {k: list(v) for k, v in commands.items()} if commands is not None
+            else {"build": self.build_cmd, "manual_route": list(_MANUAL_ROUTE_CMD)}
+        )
         self.timeout_s = timeout_s
         self.poll_s = poll_s
         self.max_jobs = max_jobs if max_jobs is not None else max(1, slot_count())
@@ -121,15 +134,22 @@ class BuildWorker:
             _log(f"job {job.id}: workspace gone ({ws}) -> failed")
             self.store.finish_build(job.id, rc=None, status="failed")
             return
-        _log(f"job {job.id}: building in {ws}")
+        kind = getattr(job, "kind", "build") or "build"
+        cmd_base = self.commands.get(kind)
+        if cmd_base is None:
+            _log(f"job {job.id}: unknown job kind {kind!r} -> failed")
+            self.store.finish_build(job.id, rc=None, status="failed")
+            return
+        _log(f"job {job.id}: {kind} in {ws}")
         log_path.parent.mkdir(parents=True, exist_ok=True)
         env = {**os.environ, "PYTHONUNBUFFERED": "1",
                "KICRAFT_CALLER": os.environ.get("KICRAFT_CALLER", "web")}
-        cmd = list(self.build_cmd)
-        quality = self.store.build_quality_for_user(job.user_id)
-        if quality:
-            cmd += ["--quality", quality]
-            _log(f"job {job.id}: tier quality override --quality {quality}")
+        cmd = list(cmd_base)
+        if kind == "build":
+            quality = self.store.build_quality_for_user(job.user_id)
+            if quality:
+                cmd += ["--quality", quality]
+                _log(f"job {job.id}: tier quality override --quality {quality}")
         try:
             with log_path.open("a", encoding="utf-8") as logf:
                 proc = subprocess.Popen(

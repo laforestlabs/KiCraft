@@ -1521,6 +1521,144 @@ def _pick_default_project(user_id: int):
     return None
 
 
+_JOB_KIND_ARGS = {
+    "build": ["build", ".kicraft/state.json", "generated", "--no-archive"],
+    "manual_route": ["manual-route", ".kicraft/state.json", "generated"],
+}
+
+
+def _execute_claimed_job_local(ws: Path, state: dict, job_id: int, progress,
+                               *, kind: str = "build") -> int:
+    """Execute our own (self-claimed) job in-process: the pre-queue behavior,
+    kept as the fallback for deploys without the worker unit. The 30m wall
+    clock restarts at the slot-acquired marker so time spent queued for a host
+    build slot is not billed against the job."""
+    cmd = KICRAFT + list(_JOB_KIND_ARGS[kind])
+    if kind == "build":
+        quality = _store().build_quality_for_user(state.get("user_id"))
+        if quality:  # tier override (free tier -> draft); None = default
+            cmd += ["--quality", quality]
+    proc = subprocess.Popen(
+        cmd, cwd=str(ws), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1)
+    deadline = time.monotonic() + 1800
+    for line in proc.stdout or []:
+        text = line.rstrip()
+        progress({"kind": "build_log", "text": text[:500]})
+        if ACQUIRED_MARKER in text:
+            deadline = time.monotonic() + 1800
+        if time.monotonic() > deadline:  # hard wall-clock bound
+            proc.kill()
+            progress({"kind": "build_log", "text": "[build exceeded 30m, killed]"})
+            break
+    rc = proc.wait()
+    _store().finish_build(job_id, rc=rc)
+    progress({"kind": "build_done", "ok": rc == 0})
+    return rc
+
+
+def _drive_build_queue(ws: Path, state: dict, progress, *,
+                       kind: str = "build") -> int:
+    """Run one deterministic job through the host build queue.
+
+    Enqueues a build_jobs row, then drives one polling state machine:
+    while 'queued' it emits queue events (position/ETA) and, when no
+    standalone worker is heartbeating, self-claims the row once it
+    reaches the queue head and a slot is free (FIFO across this process'
+    run threads via the row order); while 'running' under the worker it
+    tails the job's log file into the live event stream. A worker death
+    mid-build surfaces here as the row going back to 'queued' (the
+    reaper requeues it), which this loop simply handles again."""
+    progress({"kind": "build_start"})
+    store = _store()
+    log_path = ws / ".kicraft" / "build.log"
+    job_id = store.enqueue_build(
+        workspace=str(ws), project_id=state.get("project_id"),
+        user_id=state.get("user_id"), log_path=str(log_path), kind=kind)
+    _ACTIVE_JOBS.add(job_id)
+    try:
+        last_pos = None
+        offset, tail_buf = 0, ""
+        while True:
+            job = store.get_build_job(job_id)
+            if job is None:
+                progress({"kind": "build_done", "ok": False})
+                return 1
+            offset, tail_buf = _drain_build_log(
+                log_path, offset, tail_buf, progress)
+            if job.status in ("done", "failed"):
+                rc = job.rc if job.rc is not None else 1
+                progress({"kind": "build_done", "ok": rc == 0})
+                return rc
+            if job.status == "queued":
+                ahead, depth, running = store.build_queue_position(job_id)
+                if (not store.build_worker_alive() and ahead == 0
+                        and running < max(1, slot_count())):
+                    if store.claim_build(job_id, f"pid:{os.getpid()}"):
+                        return _execute_claimed_job_local(
+                            ws, state, job_id, progress, kind=kind)
+                    continue  # lost the claim race; re-read the row
+                if ahead != last_pos:
+                    last_pos = ahead
+                    avg = store.avg_build_seconds()
+                    progress({"kind": "queue", "position": ahead,
+                              "depth": depth,
+                              "eta_s": (avg * (ahead + 1)) if avg else None})
+            else:
+                last_pos = None  # re-announce position if requeued later
+            time.sleep(1.0)
+    finally:
+        _ACTIVE_JOBS.discard(job_id)
+
+
+def _manual_route_worker(state: dict) -> None:
+    """Route a saved manual layout through the build queue, then promote +
+    fab it (kicraft manual-route) and refresh the persisted project.
+
+    Success refreshes the durable copy (generated tree, zip, project row
+    -> ok) exactly like a build, so a rescued FAILED project becomes a
+    finished one. Failure leaves the durable project untouched (a bad
+    manual route must never flip a good project to failed); the user
+    sees the build log in the tab and gets the walk-away email."""
+    ws = Path(state["ws"])
+    pid = state.get("project_id")
+    if pid:
+        _LIVE_RUNS[pid] = state
+
+    def progress(ev):
+        state["events"].append(ev)
+
+    try:
+        rc = _drive_build_queue(ws, state, progress, kind="manual_route")
+        if rc != 0:
+            state["ok"] = False
+            return
+        state["pcb_ready"] = True
+        state["failed"] = False  # a rescued project is failed no longer
+        state["zip"] = _zip_generated(ws)
+        state["ok"] = bool(state["zip"])
+    except Exception as e:  # surface, never crash the UI thread
+        progress({"kind": "build_log", "text": f"error: {e}"})
+        state["ok"] = False
+    finally:
+        if state.get("ok"):
+            _persist_project(ws, state)
+        else:
+            _file_failure_report(state)
+            try:
+                notify.notify_run_event(
+                    _store(), Settings.from_env(), user_id=state.get("user_id"),
+                    project_id=pid, status="failed",
+                    brief=state.get("brief", ""), skip_if_active=True)
+            except Exception:
+                pass
+        state["done"] = True
+        state["running"] = False
+        if (pid and state.get("status") != "awaiting_input"
+                and _LIVE_RUNS.get(pid) is state):
+            _LIVE_RUNS.pop(pid, None)
+
+
 def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
     """Drive `stages` for this page's session, streaming progress into `state`,
     then (on success) run the deterministic build. Shared by the initial design,
@@ -1576,84 +1714,8 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
             state["project_dir"] = str(project_dir)
             state["token"] = _register_project_dir(project_dir)
 
-        def _run_build_local(job_id: int) -> int:
-            """Execute our own (self-claimed) build job in-process: the pre-queue
-            behavior, kept as the fallback for deploys without the worker unit.
-            The 30m wall clock restarts at the slot-acquired marker so time spent
-            queued for a host build slot is not billed against the build."""
-            cmd = KICRAFT + ["build", ".kicraft/state.json", "generated",
-                             "--no-archive"]
-            quality = _store().build_quality_for_user(state.get("user_id"))
-            if quality:  # tier override (free tier -> draft); None = default
-                cmd += ["--quality", quality]
-            proc = subprocess.Popen(
-                cmd, cwd=str(ws), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1)
-            deadline = time.monotonic() + 1800
-            for line in proc.stdout or []:
-                text = line.rstrip()
-                progress({"kind": "build_log", "text": text[:500]})
-                if ACQUIRED_MARKER in text:
-                    deadline = time.monotonic() + 1800
-                if time.monotonic() > deadline:  # hard wall-clock bound
-                    proc.kill()
-                    progress({"kind": "build_log", "text": "[build exceeded 30m, killed]"})
-                    break
-            rc = proc.wait()
-            _store().finish_build(job_id, rc=rc)
-            progress({"kind": "build_done", "ok": rc == 0})
-            return rc
-
         def _run_build() -> int:
-            """Run the deterministic build through the host build queue.
-
-            Enqueues a build_jobs row, then drives one polling state machine:
-            while 'queued' it emits queue events (position/ETA) and, when no
-            standalone worker is heartbeating, self-claims the row once it
-            reaches the queue head and a slot is free (FIFO across this process'
-            run threads via the row order); while 'running' under the worker it
-            tails the job's log file into the live event stream. A worker death
-            mid-build surfaces here as the row going back to 'queued' (the
-            reaper requeues it), which this loop simply handles again."""
-            progress({"kind": "build_start"})
-            store = _store()
-            log_path = ws / ".kicraft" / "build.log"
-            job_id = store.enqueue_build(
-                workspace=str(ws), project_id=state.get("project_id"),
-                user_id=state.get("user_id"), log_path=str(log_path))
-            _ACTIVE_JOBS.add(job_id)
-            try:
-                last_pos = None
-                offset, tail_buf = 0, ""
-                while True:
-                    job = store.get_build_job(job_id)
-                    if job is None:
-                        progress({"kind": "build_done", "ok": False})
-                        return 1
-                    offset, tail_buf = _drain_build_log(
-                        log_path, offset, tail_buf, progress)
-                    if job.status in ("done", "failed"):
-                        rc = job.rc if job.rc is not None else 1
-                        progress({"kind": "build_done", "ok": rc == 0})
-                        return rc
-                    if job.status == "queued":
-                        ahead, depth, running = store.build_queue_position(job_id)
-                        if (not store.build_worker_alive() and ahead == 0
-                                and running < max(1, slot_count())):
-                            if store.claim_build(job_id, f"pid:{os.getpid()}"):
-                                return _run_build_local(job_id)
-                            continue  # lost the claim race; re-read the row
-                        if ahead != last_pos:
-                            last_pos = ahead
-                            avg = store.avg_build_seconds()
-                            progress({"kind": "queue", "position": ahead,
-                                      "depth": depth,
-                                      "eta_s": (avg * (ahead + 1)) if avg else None})
-                    else:
-                        last_pos = None  # re-announce position if requeued later
-                    time.sleep(1.0)
-            finally:
-                _ACTIVE_JOBS.discard(job_id)
+            return _drive_build_queue(ws, state, progress)
 
         rc = _run_build()
         # Bounded ERC recovery: build fails (exit 5) at the §9.12 ERC gate when the
@@ -5746,6 +5808,7 @@ def index(prompt: str = "", project: str = ""):
                     user=u,
                     on_exit=_close_layout_editor,
                     is_run_active=lambda: bool(state["running"]),
+                    on_route=_start_manual_route,
                 )
                 view["layout_panel"] = panel
                 slot = tabs.view_slot("place_route")
@@ -5754,6 +5817,33 @@ def index(prompt: str = "", project: str = ""):
                     panel.render()
 
             ui.timer(0.05, _do_open, once=True)
+
+        def _start_manual_route():
+            """Enqueue a manual_route job for this project's workspace and
+            return the tab to the live build view; logs + queue position
+            stream through the same plumbing as a normal build."""
+            if state["running"]:
+                ui.notify("A run is already in progress.", color="warning")
+                return
+            u = _current_user()
+            if not user_may_edit_layout(u):
+                ui.notify("Routing a manual layout needs a Pro or Max plan.",
+                          color="warning")
+                return
+            if not state.get("ws") or not state.get("project_dir"):
+                return
+            ml = (Path(state["project_dir"]) / ".experiments" / "manual"
+                  / "manual_layout.json")
+            if not ml.is_file():
+                ui.notify("Save the layout first.", color="warning")
+                return
+            state.update(running=True, done=False, ok=None, status=None)
+            status.text = ("Routing your manual layout (FreeRouting, may take "
+                           "minutes) -- live progress is in the Place/Route tab.")
+            design_btn.disable()
+            _close_layout_editor()
+            threading.Thread(target=_manual_route_worker, args=(state,),
+                             daemon=True).start()
 
         def _layout_editor_entry_row(label: str = "Edit layout") -> None:
             """Button into the manual layout editor, tier-gated visually
