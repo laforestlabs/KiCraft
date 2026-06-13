@@ -22,6 +22,7 @@ AFTER writing files (so the user can inspect what was produced).
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 
 from .models import ArtifactPaths, ConversationState
@@ -33,6 +34,7 @@ from .synthesis.emitter import (
 )
 from .synthesis.kicad_pcb_stub import write_empty_pcb
 from .synthesis.kicad_pro import write_kicad_pro
+from .synthesis.models3d import stage_3d_models
 from .synthesis.validation import (
     CheckResult,
     SynthesisValidationError,
@@ -176,6 +178,9 @@ def run(
         for stale in project_dir.glob(pat):
             if stale.is_file():
                 stale.unlink()
+    # Staged 3D models follow the BOM, so a re-synthesis with a changed BOM
+    # must not leave orphan models behind; stage_3d_models repopulates below.
+    shutil.rmtree(project_dir / "3dmodels", ignore_errors=True)
 
     # Guard the root/leaf filename collision (a leaf stem equal to the project
     # stem would clobber the root, or be clobbered by it) BEFORE building sheet
@@ -218,6 +223,7 @@ def run(
         placement=getattr(state, "placement", None),
     )
     write_empty_pcb(project_dir, state.project_stem, state.bom)
+    stage_3d_models(project_dir, state.bom)
 
     # Build the artifact record now — the files exist on disk regardless of
     # whether the §9 checks pass — so a validation failure can still report
