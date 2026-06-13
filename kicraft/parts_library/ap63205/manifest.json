@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:d8e91dfd3d713eac1af01f7dae221c46a06273c3d14e65390726589571e8f719",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C2071056.pdf",
+  "description": "DIODES(\u7f8e\u53f0) AP63205WU-7",
+  "footprint_name": "TSOT-23-6_L2.9-W1.6-P0.95-LS2.8-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "AP63205WU-7",
+  "name": "ap63205",
+  "provenance": {
+    "added_at": "2026-06-13T01:11:09Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2071056"
+  },
+  "symbol_name": "AP63205WU-7",
+  "tags": [
+    "regulator",
+    "buck",
+    "5v",
+    "2a",
+    "tsot-26"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "3.8-32V in, fixed 5V out. Needs 0.1uF bootstrap (BST-SW) + 22uF out; keep the SW node small for EMI."
+}

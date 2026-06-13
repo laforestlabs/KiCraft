@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:832b8e394251c5da62f14f8a225d3ec9e1ffcd447c41dcd7160c56761cf23f61",
+  "datasheet_url": "https://lcsc.com/product-detail/Low-Dropout-Regulators-LDO_ME6211C33M5G-N_C82942.html",
+  "description": "ME6211C33M5G-N",
+  "footprint_name": "SOT-23-5_L3.0-W1.7-P0.95-LS2.8-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "ME6211C33M5G-N",
+  "name": "me6211c33",
+  "provenance": {
+    "added_at": "2026-06-13T01:09:15Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C82942"
+  },
+  "symbol_name": "ME6211C33M5G-N",
+  "tags": [
+    "regulator",
+    "ldo",
+    "3v3",
+    "sot-23-5"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "6V max input. Ceramic-stable: 1uF in/out. 500mA class; thermals limit sustained current in SOT-23-5."
+}

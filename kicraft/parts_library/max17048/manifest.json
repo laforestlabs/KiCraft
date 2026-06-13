@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:1694925261df45337a8d4269ebac2cf83b820ab1e8be05654450a2b597c990ae",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C2682616.pdf",
+  "description": "ADI(\u4e9a\u5fb7\u8bfa)/MAXIM(\u7f8e\u4fe1) MAX17048G+T10",
+  "footprint_name": "TDFN-8_L2.0-W2.0-P0.50-BL-EP1.2",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "MAX17048G+T10",
+  "name": "max17048",
+  "provenance": {
+    "added_at": "2026-06-13T01:11:54Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2682616"
+  },
+  "symbol_name": "MAX17048G+T10",
+  "tags": [
+    "battery",
+    "fuel-gauge",
+    "lipo",
+    "i2c"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "I2C addr 0x36. ModelGauge needs a quick-start or relaxed battery after insertion for accuracy; ALRT is open-drain (pull-up)."
+}
