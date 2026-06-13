@@ -185,6 +185,11 @@ class ParentCompositionState:
     # are expected to extend beyond the board outline (e.g. USB-C shell);
     # the geometry validator must only flag them when pads fall outside.
     edge_constrained_refs: frozenset[str] = field(default_factory=frozenset)
+    # Outline sides (left/right/top/bottom) whose position is defined by an
+    # edge-mount connector's mouth. _repair_parent_outline keeps these flush
+    # with the connector instead of adding breathing-room margin, so the port
+    # is not buried by a neighbor part sitting just inboard of the mouth.
+    connector_outline_sides: frozenset[str] = field(default_factory=frozenset)
     # Serialized OutlineSpec dict when this composition came from a
     # manual layout (kicraft.layout_editor.outline). Non-None marks the
     # outline as USER-AUTHORITATIVE: the outline-repair grow is skipped
@@ -1829,6 +1834,16 @@ def _compose_artifacts(
         edge_constrained_refs=frozenset(
             c.ref for c in all_constraints if c.target in ("edge", "corner")
         ),
+        connector_outline_sides=frozenset(
+            side
+            for c in all_constraints
+            if c.ref.startswith("J") and c.target in ("edge", "corner")
+            for side in (
+                [c.value]
+                if c.target == "edge" and c.value in ("left", "right", "top", "bottom")
+                else [s for s in c.value.split("-") if s in ("left", "right", "top", "bottom")]
+            )
+        ),
         manual_outline=(
             manual_layout.outline.to_dict() if manual_layout is not None else None
         ),
@@ -2117,18 +2132,32 @@ def _repair_parent_outline(
 
     tl, br = outline
     edge_constrained = set(state.edge_constrained_refs or ())
+    # Sides of the outline that an edge-mount CONNECTOR's mouth defines. On
+    # these the constraint-aware outline (tl/br) already sits at mouth+overhang;
+    # the repair must NOT add breathing-room margin there or it buries the port
+    # behind a neighbor part sitting just inboard of the mouth.
+    conn_sides = set(state.connector_outline_sides or ())
 
-    req_min_x = float("inf")
-    req_min_y = float("inf")
-    req_max_x = float("-inf")
-    req_max_y = float("-inf")
+    # Two requirement boxes over the SAME geometry (non-edge-constrained bodies
+    # + all pads + traces + vias): `req` gets margin_mm of copper-to-edge
+    # breathing room; `flr` is the zero-margin floor used on connector sides so
+    # geometry still stays inside the board without pushing the port-edge out.
+    req_min_x = req_min_y = float("inf")
+    req_max_x = req_max_y = float("-inf")
+    flr_min_x = flr_min_y = float("inf")
+    flr_max_x = flr_max_y = float("-inf")
 
     def _grow(p_tl: Point, p_br: Point) -> None:
         nonlocal req_min_x, req_min_y, req_max_x, req_max_y
+        nonlocal flr_min_x, flr_min_y, flr_max_x, flr_max_y
         req_min_x = min(req_min_x, p_tl.x)
         req_min_y = min(req_min_y, p_tl.y)
         req_max_x = max(req_max_x, p_br.x)
         req_max_y = max(req_max_y, p_br.y)
+        flr_min_x = min(flr_min_x, p_tl.x)
+        flr_min_y = min(flr_min_y, p_tl.y)
+        flr_max_x = max(flr_max_x, p_br.x)
+        flr_max_y = max(flr_max_y, p_br.y)
 
     for ref, comp in (composition.board_state.components or {}).items():
         if ref not in edge_constrained:
@@ -2156,6 +2185,20 @@ def _repair_parent_outline(
 
     new_tl = Point(min(tl.x, req_min_x), min(tl.y, req_min_y))
     new_br = Point(max(br.x, req_max_x), max(br.y, req_max_y))
+
+    # On connector-defined sides, keep the edge at the constraint-aware outline
+    # (mouth + overhang) and grow ONLY to the zero-margin floor -- so a neighbor
+    # part inboard of the mouth, or the breathing-room margin, can never push
+    # the board out past the port. Geometry genuinely beyond the mouth (a stray
+    # passive) still gets enclosed, so the board stays fabricable.
+    if "left" in conn_sides:
+        new_tl = Point(min(tl.x, flr_min_x), new_tl.y)
+    if "top" in conn_sides:
+        new_tl = Point(new_tl.x, min(tl.y, flr_min_y))
+    if "right" in conn_sides:
+        new_br = Point(max(br.x, flr_max_x), new_br.y)
+    if "bottom" in conn_sides:
+        new_br = Point(new_br.x, max(br.y, flr_max_y))
 
     changed = (
         abs(new_tl.x - tl.x) > 1e-6

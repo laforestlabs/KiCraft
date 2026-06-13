@@ -48,11 +48,12 @@ def _pad(ref, x, y, w=1.0, h=1.0):
     )
 
 
-def _state(board_state, edge_refs=(), manual_outline=None):
+def _state(board_state, edge_refs=(), manual_outline=None, connector_sides=()):
     composition = SimpleNamespace(board_state=board_state)
     return SimpleNamespace(
         composition=composition,
         edge_constrained_refs=frozenset(edge_refs),
+        connector_outline_sides=frozenset(connector_sides),
         geometry_validation=None,
         manual_outline=manual_outline,
     )
@@ -110,6 +111,55 @@ def test_edge_connector_body_overhang_does_not_grow_outline():
     # Body overhang to x=-4 is exempt; pad at x=3 is already inside -> no grow.
     assert result["repaired"] is False
     assert bs.board_outline[0].x == 0.0
+
+
+def test_connector_edge_not_buried_by_inboard_neighbor():
+    # USB-C J1 mouth defines the LEFT edge at x=0 (outline already snapped
+    # there). A neighbor cap C1 sits 0.5mm inboard of the mouth. Without the
+    # connector-side rule, the repair would grow left to C1.body - 2mm margin
+    # = -1.5, burying the port 1.5mm under FR4. With it, the left edge stays
+    # at the mouth (x=0) because C1 is inboard and its copper is inside.
+    j1 = _comp(
+        "J1", cx=2.0, cy=10.0, w=4.0, h=6.0,   # body x in [0,4]; mouth at x=0
+        pads=[_pad("J1", 3.0, 10.0)],          # pad well inboard
+        kind="connector",
+    )
+    c1 = _comp(
+        "C1", cx=1.5, cy=14.0, w=2.0, h=1.5,   # body x in [0.5, 2.5], inboard
+        pads=[_pad("C1", 1.5, 14.0, w=1.0, h=1.0)],
+    )
+    bs = BoardState(
+        components={"J1": j1, "C1": c1},
+        board_outline=(Point(0.0, 0.0), Point(20.0, 20.0)),
+    )
+    state = _state(bs, edge_refs={"J1"}, connector_sides={"left"})
+    result = _repair_parent_outline(state, margin_mm=2.0)
+    # Left edge must NOT move out past the mouth (x=0); the port stays flush.
+    assert bs.board_outline[0].x >= -1e-6, (
+        f"left edge buried to {bs.board_outline[0].x}, port unmateable"
+    )
+    # And nothing is left outside the board.
+    assert _validate_parent_geometry(state)["accepted"] is True
+
+
+def test_connector_side_still_encloses_geometry_beyond_mouth():
+    # A stray passive C1 placed slightly BEYOND the mouth (x=-1) must still be
+    # enclosed (fabricable) -- the connector-side rule uses a zero-margin floor,
+    # not a hard clamp, so it extends just far enough to keep C1 inside.
+    j1 = _comp("J1", cx=2.0, cy=10.0, w=4.0, h=6.0,
+               pads=[_pad("J1", 3.0, 10.0)], kind="connector")
+    c1 = _comp("C1", cx=-0.5, cy=14.0, w=1.0, h=1.0,  # body x in [-1.0, 0.0]
+               pads=[_pad("C1", -0.5, 14.0, w=0.6, h=0.6)])
+    bs = BoardState(
+        components={"J1": j1, "C1": c1},
+        board_outline=(Point(0.0, 0.0), Point(20.0, 20.0)),
+    )
+    state = _state(bs, edge_refs={"J1"}, connector_sides={"left"})
+    _repair_parent_outline(state, margin_mm=2.0)
+    # Grows to enclose C1 (x=-1.0) with no breathing-room margin, not -1.0-2.0.
+    assert bs.board_outline[0].x <= -1.0 + 1e-6
+    assert bs.board_outline[0].x >= -1.0 - 1e-6
+    assert _validate_parent_geometry(state)["accepted"] is True
 
 
 def test_repair_encloses_stamped_traces_and_vias():
