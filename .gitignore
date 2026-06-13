@@ -78,3 +78,4 @@ provider_bench_*.png
 /.claude/agents
 /.claude/settings.json
 /.claude/settings.local.json
+.render-check/

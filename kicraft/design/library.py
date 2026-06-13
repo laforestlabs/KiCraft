@@ -197,9 +197,15 @@ def _format_available_parts_block(loaded_parts: list) -> str | None:
             f"`{m.name}:{m.footprint_name}` | {part.tier.value} | {m.maturity} |"
         )
     # Watch-out notes for parts that have them — easy to miss in the table.
+    # Capped per part: full notes across a 50+ bundle library are tens of KB
+    # and this block rides the BOM prompt through every tool round; the part
+    # detail page / manifest keeps the full text.
     flagged = [p for p in loaded_parts if p.manifest.watch_out_for]
     if flagged:
         lines.append("\n### Watch out for")
         for part in flagged:
-            lines.append(f"- **{part.manifest.name}**: {part.manifest.watch_out_for}")
+            note = part.manifest.watch_out_for
+            if len(note) > 140:
+                note = note[:137].rstrip() + "..."
+            lines.append(f"- **{part.manifest.name}**: {note}")
     return "\n".join(lines)

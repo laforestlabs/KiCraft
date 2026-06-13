@@ -1,10 +1,11 @@
 """Simulated-browser smoke test of /admin/core-components.
 
 Uses NiceGUI's User simulation (same harness shape as test_web_index_autoopen):
-no real browser, no LLM. Covers the page rendering the seeded registry for an
-admin and the _require_admin bounce for a normal user. Row mutations are not
-driven here; they are thin wrappers over the store methods covered by
-test_core_components.py.
+no real browser, no LLM. Covers the page rendering the catalog-synced registry
+for an admin (read-only except enable/disable + refresh: the repo catalog owns
+part/block edits) and the _require_admin bounce for a normal user. Row
+mutations are not driven here; they are thin wrappers over the store methods
+covered by test_core_components.py.
 """
 from __future__ import annotations
 
@@ -57,15 +58,23 @@ async def _login(u, email: str) -> None:
     await u.should_see("design a PCB from a sentence")  # the workspace header
 
 
-async def test_admin_page_renders_seeded_registry(harness):
+async def test_admin_page_renders_synced_registry(harness):
     u, web, store = harness
     await _login(u, ADMIN_EMAIL)
     await u.open("/admin/core-components")
     await u.should_see("Core components")
-    await u.should_see("ldo-3v3-1a")      # a seeded power row
-    await u.should_see("AMS1117-3.3")     # its default part
+    await u.should_see("ldo-3v3-1a")      # a catalog power row
+    await u.should_see("AMS1117-3.3")     # its default part (from the manifest)
+    await u.should_see("ams1117-3v3")     # the new bundle column
     await u.should_see("Passives")        # category sections render
     await u.should_see("series")          # series rows show 'series', no LCSC id
+    # The repo catalog owns part/block edits: the CRUD surface is gone, only
+    # enable/disable (+ jlcparts refresh where available) remains.
+    await u.should_see("Disable")
+    await u.should_not_see("New component")
+    await u.should_not_see("Edit")
+    await u.should_not_see("Delete")
+    await u.should_see("edits happen via git")
 
 
 async def test_non_admin_is_bounced(harness):
