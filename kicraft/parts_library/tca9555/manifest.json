@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:b23c920f2bd1abbbbca3b9b1f49a6fdb31848c19a47a39ac09002d1b527413a3",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C42420608.pdf",
+  "description": "UMW(\u53cb\u53f0\u534a\u5bfc\u4f53) TCA9555PWR(UMW)",
+  "footprint_name": "TSSOP-24_L7.8-W4.4-P0.65-LS6.4-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "TCA9555PWR(UMW)",
+  "name": "tca9555",
+  "provenance": {
+    "added_at": "2026-06-13T01:51:36Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C42420608"
+  },
+  "symbol_name": "TCA9555PWR",
+  "tags": [
+    "io-expander",
+    "gpio",
+    "i2c",
+    "interface"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "16ch I2C IO expander: addr via A0-A2 (0x20-0x27); INT is open-drain (pull-up); inputs default high-impedance with weak pull-ups."
+}

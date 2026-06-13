@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:dc0c641201badcb5db79d899e863737616dbc2d43ed0933d5d33a0a743d9e9f0",
+  "datasheet_url": "https://lcsc.com/product-detail/Audio-OpAmps_DIODES_PAM8302AADCR_PAM8302AADCR_C112137.html",
+  "description": "DIODES(\u7f8e\u53f0) PAM8302AADCR",
+  "footprint_name": "SOP-8_L4.9-W3.9-P1.27-LS6.0-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "PAM8302AADCR",
+  "name": "pam8302a",
+  "provenance": {
+    "added_at": "2026-06-13T01:50:24Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C112137"
+  },
+  "symbol_name": "PAM8302AADCR",
+  "tags": [
+    "audio-amp",
+    "analog",
+    "class-d",
+    "audio"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Analog mono class-D: BTL output (never ground the speaker return); SD pin needs pull-up to enable; differential input preferred."
+}

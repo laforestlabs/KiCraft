@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:66ec2918b4b37ede67362f9869bbf245cc0dc66ed9114ec8b58a925b684c7ecb",
+  "datasheet_url": "https://lcsc.com/product-detail/Motor-Drivers_TI_DRV8833PWP_DRV8833PWP_C50506.html",
+  "description": "TI(\u5fb7\u5dde\u4eea\u5668) DRV8833PWPR",
+  "footprint_name": "TSSOP-16_L5.0-W4.4-P0.65-LS6.4-BL-EP",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "DRV8833PWPR",
+  "name": "drv8833",
+  "provenance": {
+    "added_at": "2026-06-13T01:49:14Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C50506"
+  },
+  "symbol_name": "DRV8833PWP",
+  "tags": [
+    "dc-motor",
+    "motor-driver",
+    "h-bridge"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Dual H-bridge: nSLEEP needs a pull-up to enable; AISEN/BISEN to GND (or sense R); 2.7-10.8V motor supply."
+}

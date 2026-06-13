@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:a8d4ec405fb937cb011eefe166fec4507d615bd6c981b20490d062ccc50a8c8b",
+  "datasheet_url": "https://lcsc.com/product-detail/MOS-Drivers_ALLEGRO_A4988SETTR-T_A4988SETTR-T_C38437.html",
+  "description": "ALLEGRO(\u7f8e\u56fd\u57c3\u6208\u7f57) A4988SETTR-T",
+  "footprint_name": "WQFN-28_L5.0-W5.0-P0.50-BL-EP3.2",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "A4988SETTR-T",
+  "name": "a4988",
+  "provenance": {
+    "added_at": "2026-06-13T01:48:51Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C38437"
+  },
+  "symbol_name": "A4988SETTR-T",
+  "tags": [
+    "stepper",
+    "motor-driver",
+    "qfn"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Needs current-limit set via REF (VREF divider/pot) and ROSC; microstep pins strapped; thermal pad vias required at >1A."
+}

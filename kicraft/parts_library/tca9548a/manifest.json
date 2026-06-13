@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:e1651ee5ee8351d3d4c33b0819a84f4140e9e5e3c9dd1d3e0a195c594a510140",
+  "datasheet_url": "https://lcsc.com/product-detail/Logic-ICs_TI_TCA9548APWR_TCA9548APWR_C130026.html",
+  "description": "TI(\u5fb7\u5dde\u4eea\u5668) TCA9548APWR",
+  "footprint_name": "TSSOP-24_L7.8-W4.4-P0.65-LS6.4-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "TCA9548APWR",
+  "name": "tca9548a",
+  "provenance": {
+    "added_at": "2026-06-13T01:51:59Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C130026"
+  },
+  "symbol_name": "TCA9548APWR",
+  "tags": [
+    "i2c-mux",
+    "i2c",
+    "interface"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "8ch I2C mux: addr via A0-A2; RESET active-low needs a pull-up; downstream buses each need their own pull-ups."
+}

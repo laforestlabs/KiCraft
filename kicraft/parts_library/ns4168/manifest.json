@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:8f0c5bca2e7eed84c26d88e02ce416e11675695e4c845e3fe920e1142ef32d93",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C910588.pdf",
+  "description": "Nsiway(\u7eb3\u82af\u5a01) NS4168",
+  "footprint_name": "ESOP-8_L4.9-W3.9-P1.27-LS6.0-BL-EP",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "NS4168",
+  "name": "ns4168",
+  "provenance": {
+    "added_at": "2026-06-13T01:50:02Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C910588"
+  },
+  "symbol_name": "NS4168_C910588",
+  "tags": [
+    "audio-amp",
+    "i2s",
+    "class-d",
+    "audio"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "I2S mono class-D: 3-5.25V; output is a BTL pair (no ground-referenced load, no headphones); keep speaker traces short and paired."
+}
