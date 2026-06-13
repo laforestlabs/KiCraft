@@ -383,6 +383,20 @@ def _same_number_pads_board(path, *, stranded_layer=pcbnew.F_Cu):
         seg.SetLayer(pcbnew.Edge_Cuts)
         board.Add(seg)
 
+    def _smd_mask(layer):
+        # Build the single-side SMD layer set explicitly. Passing
+        # pcbnew.PAD.SMDMask().FlipStandardLayers() straight into SetLayerSet
+        # segfaults in the KiCad 9 binding (FlipStandardLayers hands back a
+        # temporary LSET proxy that SetLayerSet then reads after it is freed);
+        # AddLayer onto a held LSET is stable.
+        ls = pcbnew.LSET()
+        cu, paste, mask = ((pcbnew.F_Cu, pcbnew.F_Paste, pcbnew.F_Mask)
+                           if layer == pcbnew.F_Cu
+                           else (pcbnew.B_Cu, pcbnew.B_Paste, pcbnew.B_Mask))
+        for L in (cu, paste, mask):
+            ls.AddLayer(L)
+        return ls
+
     fp = pcbnew.FOOTPRINT(board)
     fp.SetReference("U2")
     board.Add(fp)
@@ -391,8 +405,7 @@ def _same_number_pads_board(path, *, stranded_layer=pcbnew.F_Cu):
         pad.SetSize(pcbnew.VECTOR2I(_mm(1.0), _mm(1.0)))
         pad.SetPosition(pcbnew.VECTOR2I(_mm(x), _mm(y)))
         pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
-        pad.SetLayerSet(pcbnew.PAD.SMDMask() if layer == pcbnew.F_Cu
-                        else pcbnew.PAD.SMDMask().FlipStandardLayers())
+        pad.SetLayerSet(_smd_mask(layer))
         pad.SetNumber("GND")
         pad.SetNet(net("GND"))
         fp.Add(pad)
