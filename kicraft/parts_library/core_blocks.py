@@ -7,7 +7,7 @@ truth for the core-components registry. The accounts DB only mirrors it:
 and part edits happen here (via git) while the DB owns nothing but runtime
 state (the ``enabled`` flag and jlcparts price/stock snapshots).
 
-Every block is exactly one of three kinds:
+Every block is exactly one of two kinds:
 
 - ``bundle``: the default part is a vendored parts-library bundle
   (``kicraft/parts_library/<bundle>/``). Its MPN and LCSC id are DERIVED
@@ -15,10 +15,11 @@ Every block is exactly one of three kinds:
   bundle and the registry cannot disagree.
 - ``stock``: a stock-KiCad-backed passive series (``Device:R``/``Device:C``
   symbols); there is no bundle and no single LCSC id.
-- transitional ``default_mpn``/``default_lcsc``: a curated default that is
-  not vendored yet. Allowed only while the vendoring batches are in flight;
-  the catalog guard test counts these down to zero, after which the fields
-  are removed from the schema.
+
+A new default part is vendored first (``add-part --into vendored``) and
+then added here as a ``bundle`` row, so there is no LCSC-only transitional
+state: a catalog row that names an unvendored part by LCSC is rejected
+(``extra="forbid"`` plus the one-of check below).
 
 ``package`` stays authored prose ("SOT-23-5", "0402"): manifests only carry
 the raw footprint name, and the short package label is curation, not
@@ -38,7 +39,6 @@ from .manifest import PART_NAME_RE, load_manifest
 
 CORE_COMPONENT_CATEGORIES = ("power", "sensors", "drivers", "interface", "passives")
 FUNCTION_KEY_RE = re.compile(r"[a-z0-9][a-z0-9_-]{1,62}[a-z0-9]")
-_LCSC_RE = re.compile(r"C\d{1,12}")
 
 CORE_BLOCKS_PATH = Path(__file__).resolve().parent / "core_blocks.json"
 
@@ -67,10 +67,6 @@ class CoreBlock(BaseModel):
     sort_order: int = 0
     bundle: str | None = None
     stock: StockSeries | None = None
-    # Transitional kind: a default not vendored yet. Forbidden once the
-    # vendoring batches complete (the catalog guard counts these to zero).
-    default_mpn: str | None = None
-    default_lcsc: str | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> "CoreBlock":
@@ -81,21 +77,12 @@ class CoreBlock(BaseModel):
             )
         if not self.display_name.strip():
             raise ValueError(f"{self.function_key}: display_name must not be empty")
-        kinds = sum(
-            x is not None for x in (self.bundle, self.stock, self.default_lcsc)
-        )
+        kinds = sum(x is not None for x in (self.bundle, self.stock))
         if kinds != 1:
             raise ValueError(
-                f"{self.function_key}: exactly one of bundle / stock / "
-                f"default_lcsc must be set (got {kinds})"
-            )
-        if (self.default_lcsc is None) != (self.default_mpn is None):
-            raise ValueError(
-                f"{self.function_key}: default_mpn and default_lcsc go together"
-            )
-        if self.default_lcsc is not None and not _LCSC_RE.fullmatch(self.default_lcsc):
-            raise ValueError(
-                f"{self.function_key}: default_lcsc must be an LCSC id like C14259"
+                f"{self.function_key}: exactly one of bundle / stock must be "
+                f"set (got {kinds}). Vendor the part first, then add a bundle "
+                f"row; LCSC-only rows are not allowed."
             )
         if self.bundle is not None and not PART_NAME_RE.match(self.bundle):
             raise ValueError(
@@ -159,12 +146,9 @@ def resolve_block(block: CoreBlock, *, parts_dir: Path | None = None) -> dict:
         manifest = load_manifest(base / block.bundle)
         out["default_mpn"] = manifest.mpn
         out["default_lcsc"] = (manifest.sourcing or {}).get("lcsc")
-    elif block.stock is not None:
+    else:  # stock series (the only other kind)
         out["default_mpn"] = block.stock.series
         out["default_lcsc"] = None
-    else:
-        out["default_mpn"] = block.default_mpn
-        out["default_lcsc"] = block.default_lcsc
     return out
 
 

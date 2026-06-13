@@ -211,28 +211,27 @@ def test_list_ordering_and_filters(store):
 
 # ---- catalog guard (packaging/CI tripwire) --------------------------------------
 
-# Transitional rows (default_lcsc, not yet vendored) count down to zero as the
-# vendoring batches land; bump this as each batch flips its rows to `bundle:`.
-EXPECTED_TRANSITIONAL_ROWS = 0
-
-
-def test_catalog_is_valid_and_bundles_resolve():
+def test_catalog_is_valid_and_every_block_is_bundle_or_stock():
+    """Every catalog block resolves: a bundle row points at a loadable
+    vendored manifest, a stock row is a passive series. The schema forbids
+    LCSC-only rows outright (extra='forbid' + the one-of validator), so a
+    part must be vendored before it can be a default."""
     catalog = load_core_catalog()  # pydantic-valid incl. unique keys
     assert CORE_BLOCKS_PATH.is_file()
     assert len(catalog.blocks) >= 40
     base = vendored_parts_dir()
-    transitional = 0
     for block in catalog.blocks:
         assert FUNCTION_KEY_RE.fullmatch(block.function_key)
         if block.bundle is not None:
             manifest = load_manifest(base / block.bundle)  # raises if broken
             row = resolve_block(block)
             assert row["default_mpn"] == manifest.mpn
-        elif block.stock is not None:
-            assert block.category == "passives"
         else:
-            transitional += 1
-    assert transitional == EXPECTED_TRANSITIONAL_ROWS, (
-        f"{transitional} transitional (LCSC-only) rows; expected "
-        f"{EXPECTED_TRANSITIONAL_ROWS}. After vendoring a batch, flip its "
-        f"catalog rows to bundle: and update EXPECTED_TRANSITIONAL_ROWS.")
+            assert block.stock is not None and block.category == "passives"
+
+
+def test_lcsc_only_catalog_row_is_rejected():
+    with pytest.raises(Exception):
+        _catalog_of({"function_key": "lcsc-only", "display_name": "X",
+                     "category": "power", "default_lcsc": "C123",
+                     "default_mpn": "MPN1"})
