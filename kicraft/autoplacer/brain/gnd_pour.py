@@ -247,35 +247,36 @@ def pour_power_planes(
     return summary
 
 
-def repair_stranded_gnd(
+def repair_stranded_net(
     pcb_path: str,
+    net_name: str,
     cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Tie GND clusters stranded from the main plane back with guarded tracks.
+    """Tie a poured net's stranded clusters back to its main one with guarded tracks.
 
-    GND is never routed by FreeRouting -- the plane is supposed to reach every
-    GND pad. In a crowded region the B.Cu plane fragments around signal
-    tracks, and a THT connector GND pin (run_03 J7.2: a 2-pin LED-channel
-    header) can end up on a tiny fill island with no path to the main plane:
-    no via to drop through, no same-net mate for a shield tie, no GND track.
-    This post-pour pass finds every GND cluster isolated from the main one
-    (geometric union-find over pads/vias/tracks/fill islands) and stamps a
-    direct same-net track from a stranded pad to the nearest main-cluster
-    pad/via via :func:`add_breakout_stubs` -- inheriting its foreign-pad,
+    A poured net (the GND plane, or a power rail plane) is supposed to reach
+    every one of its pads through copper. In a crowded region the fill
+    fragments around foreign tracks/pads, and a pad can end up on a tiny fill
+    island with no path to the main cluster: no via to drop through, no
+    same-net mate for a shield tie, no routed track (GND is never given to
+    FreeRouting; a fine-pitch part's supply pad may be unreachable for it --
+    KC-Z57JEZ U1 +3V3). This post-pour pass finds every cluster of
+    ``net_name`` isolated from the main one (geometric union-find over
+    pads/vias/tracks/fill islands) and stamps a direct same-net track from a
+    stranded pad to the nearest main-cluster pad/via via
+    :func:`add_breakout_stubs` -- inheriting its foreign-pad,
     existing-copper, netclass and outline guards -- then refills the zones so
     the pour closes around the new tie. A tie whose straight path is blocked
     is skipped (the board is no worse than before).
     """
     cfg = cfg or {}
-    summary: dict[str, Any] = {"clusters": 0, "stranded": 0, "tied": 0, "skipped": []}
-    if not cfg.get("gnd_strand_repair_enabled", True):
-        return summary
-    gnd_name = cfg.get("gnd_zone_net", "GND")
-    if not gnd_name:
+    summary: dict[str, Any] = {"net": net_name, "clusters": 0, "stranded": 0,
+                               "tied": 0, "skipped": []}
+    if not net_name:
         return summary
 
     board = pcbnew.LoadBoard(pcb_path)
-    gnd_net = board.GetNetInfo().GetNetItem(gnd_name)
+    gnd_net = board.GetNetInfo().GetNetItem(net_name)
     if not gnd_net or gnd_net.GetNetCode() == 0:
         return summary
     gnd_code = gnd_net.GetNetCode()
@@ -330,7 +331,7 @@ def repair_stranded_gnd(
                           "xy": (pcbnew.ToMM((a.x + b2.x) / 2), pcbnew.ToMM((a.y + b2.y) / 2))})
     islands: list[dict] = []
     for z in board.Zones():
-        if z.GetNetname() != gnd_name or z.GetIsRuleArea():
+        if z.GetNetname() != net_name or z.GetIsRuleArea():
             continue
         layer = z.GetLayer()
         fill = z.GetFilledPolysList(layer)
@@ -443,6 +444,52 @@ def repair_stranded_gnd(
         pcbnew.ZONE_FILLER(board).Fill(board.Zones())
         board.Save(pcb_path)
     return summary
+
+
+def repair_stranded_gnd(
+    pcb_path: str,
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """GND strand repair: :func:`repair_stranded_net` on the GND pour net."""
+    cfg = cfg or {}
+    gnd_name = cfg.get("gnd_zone_net", "GND")
+    if not cfg.get("gnd_strand_repair_enabled", True):
+        return {"net": gnd_name, "clusters": 0, "stranded": 0, "tied": 0,
+                "skipped": []}
+    return repair_stranded_net(pcb_path, gnd_name, cfg)
+
+
+def repair_stranded_power(
+    pcb_path: str,
+    nets: list[str] | None = None,
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Strand repair for the poured power rail(s) -- the GND repair's twin.
+
+    The power plane fragments exactly like the GND plane does (KC-Z57JEZ: the
+    +3V3 F.Cu pour split into two islands around a fine-pitch LGA, stranding
+    the part's supply pads), but the repair pass historically ran for GND
+    only. Runs :func:`repair_stranded_net` for each poured rail. ``nets``
+    defaults to the same detection :func:`pour_power_planes` uses, so callers
+    that ignored its return value still repair the right rails.
+    """
+    cfg = cfg or {}
+    out: dict[str, Any] = {"nets": [], "stranded": 0, "tied": 0, "skipped": []}
+    if not cfg.get("power_strand_repair_enabled", True):
+        return out
+    if nets is None:
+        if not cfg.get("power_plane_enabled", True):
+            return out
+        board = pcbnew.LoadBoard(pcb_path)
+        nets = _detect_power_nets(board, cfg)
+        del board
+    for net_name in nets or []:
+        s = repair_stranded_net(pcb_path, net_name, cfg)
+        out["nets"].append(net_name)
+        out["stranded"] += s["stranded"]
+        out["tied"] += s["tied"]
+        out["skipped"].extend(f"{net_name}:{item}" for item in s["skipped"])
+    return out
 
 
 def gnd_escape_specs(

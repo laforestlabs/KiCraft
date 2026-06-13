@@ -2315,12 +2315,14 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     project's main PCB, gate it (no shorts, no unconnected), and export
     the fab package. Shared by `build` and `manual-route`.
 
-    Promotion is failure-safe: the previous ``<stem>.kicad_pcb`` (when
-    one exists) is backed up before the candidate is copied in, and a
-    failed verify gate restores it, so a bad route can never clobber
-    the last good board. The candidate must sit at the real path during
-    verification because kicad-cli DRC reads netclass clearances from
-    the sibling ``<stem>.kicad_pro``.
+    Promotion is unconditional: the candidate stays at ``<stem>.kicad_pcb``
+    whether or not it passes the verify gate, so the project always shows
+    the board this build actually produced and a failure can be inspected
+    directly (no restore-the-last-good-board fallback -- a failed gate
+    fails loudly with rc 7 and exports no fab package; the UI marks any
+    previously exported package invalid). The candidate must sit at the
+    real path during verification because kicad-cli DRC reads netclass
+    clearances from the sibling ``<stem>.kicad_pro``.
     """
     # 3. Promote the routed parent to the project's main PCB.
     routed = _find_routed_parent(project_dir)
@@ -2332,10 +2334,6 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
             file=sys.stderr,
         )
         return 6
-    backup: Path | None = None
-    if pcb.is_file():
-        backup = pcb.with_name(pcb.name + ".prev")
-        shutil.copy2(pcb, backup)
     shutil.copy2(routed, pcb)
     print(f"[build] 3/5 promoted routed parent -> {pcb.name}")
 
@@ -2351,23 +2349,17 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
         f"traces={gate['tracks'].get('traces', '?')}"
     )
     if not gate["ok"]:
-        if backup is not None:
-            os.replace(backup, pcb)
-            print(
-                f"[build]     restored previous {pcb.name} (failed candidate "
-                "not promoted)",
-                file=sys.stderr,
-            )
-        else:
-            pcb.unlink(missing_ok=True)
+        print(
+            f"[build]     kept failed board {pcb.name} for inspection "
+            "(no fab package exported; any earlier package is now stale)",
+            file=sys.stderr,
+        )
         print(
             f"error: routed board is NOT fab-ready -- shorts={gate['shorts']}, "
             f"unconnected={gate['unconnected']}, reasons={gate['reasons']}",
             file=sys.stderr,
         )
         return 7
-    if backup is not None:
-        backup.unlink(missing_ok=True)
 
     # 5. Export the fab package (Gerbers + drill + CPL + BOM, zipped).
     print("[build] 5/5 export fab package (Gerbers + drill + CPL + BOM + STEP + 3D render) ...")

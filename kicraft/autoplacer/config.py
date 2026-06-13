@@ -14,9 +14,11 @@ from typing import Any
 DEFAULT_CONFIG = {
     # Trace + via floors match OSH Park 2-layer service:
     # https://docs.oshpark.com/services/two-layer/
-    # Signal: 6 mil (0.1524mm) min trace width.
+    # Signal: 0.153mm, just above the 6 mil (0.1524mm) floor -- 0.1524 itself
+    # rounds to 152 µm in the DSN, below the 152.4 µm minimum (the same trap
+    # freerouting_fine_pitch_track_mm documents below).
     # Power: 0.5mm matches the Power netclass in LLUPS.kicad_pro.
-    "signal_width_mm": 0.1524,
+    "signal_width_mm": 0.153,
     "power_width_mm": 0.5,
     # Via: 0.3mm drill + 0.15mm ring = 0.6mm dia (5.91 mil ring, above 5 mil floor)
     "via_drill_mm": 0.3,
@@ -282,6 +284,12 @@ DEFAULT_CONFIG = {
     "power_plane_nets": None,
     "power_plane_max_nets": 1,
     "power_plane_priority": 1,
+    # Power strand repair (default on): the power pour fragments around foreign
+    # copper exactly like the GND plane does and can strand a supply pad on its
+    # own fill island (fine-pitch parts especially -- KC-Z57JEZ +3V3). Tie each
+    # stranded power cluster back with the same guarded-track repair the GND
+    # plane gets. Shares gnd_strand_repair_max_mm for the tie-length cap.
+    "power_strand_repair_enabled": True,
     # Auto power-tie (default on): before routing, route a locked tie around any
     # connector whose spread power pads (e.g. USB-C VBUS on both sides) would
     # otherwise fragment the power pour into disconnected islands. The tie runs

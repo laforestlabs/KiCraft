@@ -100,6 +100,14 @@ def test_failure_localizes_to_fab():
     assert out["fab"] == "failed"
 
 
+def test_failed_build_outranks_stale_zip():
+    # A failed (re)build keeps the failed candidate board; a zip surviving
+    # from an earlier successful build is stale and must NOT turn fab green.
+    out = derive_stage_statuses(_complete_design(), project_status="failed",
+                                sheets_exist=True, pcb_ready=True, zip_ok=True)
+    assert out["fab"] == "failed"
+
+
 def test_stale_artifacts_ignored_when_design_incomplete():
     # An edit nulled downstream slots; the generated tree from the earlier
     # build still exists but must not paint the build phases done.

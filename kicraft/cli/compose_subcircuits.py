@@ -3218,6 +3218,40 @@ def _route_parent_board(
         except Exception as exc:
             print(f"warning: gnd strand repair failed: {exc}", file=sys.stderr)
 
+    # Power strand repair: the power-rail pour fragments exactly like the GND
+    # plane (KC-Z57JEZ: +3V3 split into two F.Cu islands around a fine-pitch
+    # LGA, stranding the part's supply pads) -- tie each stranded power
+    # cluster back the same way. pcbnew work -> subprocess.
+    if cfg.get("power_plane_enabled", True) and cfg.get(
+            "power_strand_repair_enabled", True):
+        try:
+            from kicraft.autoplacer.freerouting_runner import _run_pcbnew_script
+
+            _pwr_cfg = json.dumps({
+                k: cfg[k]
+                for k in (
+                    "power_strand_repair_enabled",
+                    "power_plane_enabled",
+                    "power_plane_nets",
+                    "power_plane_max_nets",
+                    "gnd_zone_net",
+                    "gnd_strand_repair_max_mm",
+                    "freerouting_min_clearance_mm",
+                    "freerouting_fine_pitch_track_mm",
+                )
+                if k in cfg
+            })
+            _run_pcbnew_script(
+                "import json\n"
+                "from kicraft.autoplacer.brain.gnd_pour import repair_stranded_power\n"
+                f"cfg = json.loads({_pwr_cfg!r})\n"
+                f"s = repair_stranded_power({str(routed_pcb)!r}, None, cfg)\n"
+                "print('power strand repair:', s['nets'], '--', s['stranded'],\n"
+                "      'stranded,', s['tied'], 'tied,', len(s['skipped']), 'skipped')\n"
+            )
+        except Exception as exc:
+            print(f"warning: power strand repair failed: {exc}", file=sys.stderr)
+
     # Import all copper from the routed board (child + new parent traces)
     copper = import_routed_copper(str(routed_pcb))
 

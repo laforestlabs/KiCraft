@@ -508,12 +508,19 @@ def test_auto_signal_escape_disable_and_exclude(tmp_path):
 
 
 def _write_pro_with_power_class(pcb_path, power_nets):
-    """Sibling .kicad_pro so LoadBoard resolves the Power netclass (0.3 mm)."""
+    """Sibling .kicad_pro so LoadBoard resolves a WIDE Power netclass (0.3 mm).
+
+    The clearance is pinned at 0.3 mm rather than inheriting the shipped
+    POWER_NETCLASS (now 0.15, same as Default): these tests exercise the
+    stub stamper's handling of a netclass keepout wider than the default,
+    which any project with a custom wide class can still present.
+    """
     import json
     from pathlib import Path
 
     from kicraft.design.synthesis.kicad_pro import DEFAULT_NETCLASS, POWER_NETCLASS
 
+    wide_power = dict(POWER_NETCLASS, clearance=0.3)
     p = Path(pcb_path).with_suffix(".kicad_pro")
     p.write_text(
         json.dumps(
@@ -521,7 +528,7 @@ def _write_pro_with_power_class(pcb_path, power_nets):
                 "board": {"design_settings": {"meta": {"version": 2}}},
                 "meta": {"filename": p.name, "version": 1},
                 "net_settings": {
-                    "classes": [dict(DEFAULT_NETCLASS), dict(POWER_NETCLASS)],
+                    "classes": [dict(DEFAULT_NETCLASS), wide_power],
                     "meta": {"version": 3},
                     "net_colors": None,
                     "netclass_assignments": None,

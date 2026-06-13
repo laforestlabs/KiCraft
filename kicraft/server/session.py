@@ -85,8 +85,11 @@ def derive_stage_statuses(state: dict, *, project_status: str | None = None,
     out["place_route"] = ("done" if design_complete and pcb_ready
                           else "failed" if synth_ok and failed
                           else "pending")
-    out["fab"] = ("done" if design_complete and zip_ok
-                  else "failed" if design_complete and pcb_ready and failed
+    # failed-with-a-board outranks zip_ok: after a failed (re)build the board
+    # on disk is the failed candidate, so any surviving zip from an earlier
+    # successful build is stale -- the tab must read failed, not done.
+    out["fab"] = ("failed" if design_complete and pcb_ready and failed
+                  else "done" if design_complete and zip_ok
                   else "pending")
     return out
 
