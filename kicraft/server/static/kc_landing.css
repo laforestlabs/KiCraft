@@ -199,6 +199,28 @@
   50%      { transform: translateY(-12px) rotate(-0.4deg); }
 }
 
+/* Interactive 3D board models (<model-viewer>). The board floats on a
+   transparent canvas and the rendered PNG is its poster, so the swap from
+   poster to the live, orbitable model is seamless. */
+.kc-model, .kc-model-hero { background: transparent; --poster-color: transparent; }
+.kc-model::part(default-progress-bar) { opacity: 0; }
+.kc-hero-art .kc-model-hero {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 560px;
+  aspect-ratio: 4 / 3;
+  filter: drop-shadow(0 26px 40px rgba(0, 0, 0, 0.55));
+  cursor: grab;
+}
+.kc-hero-art .kc-model-hero:active { cursor: grabbing; }
+.kc-sample-art .kc-model {
+  width: 100%;
+  height: 184px;
+  pointer-events: none; /* the whole card is one link; the model is decorative */
+  filter: drop-shadow(0 14px 22px rgba(0, 0, 0, 0.5));
+}
+
 /* Ambient page glow blobs (behind sections). */
 .kc-glow {
   position: absolute;
