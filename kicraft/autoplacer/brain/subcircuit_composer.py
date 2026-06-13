@@ -51,6 +51,7 @@ from .types import (
     Component,
     HierarchyLevelState,
     InterfaceAnchor,
+    Layer,
     Net,
     Point,
     SilkscreenElement,
@@ -59,6 +60,9 @@ from .types import (
     SubCircuitLayout,
     TraceSegment,
     Via,
+    angles_close,
+    edge_outward_angle,
+    opening_board_angle,
 )
 
 
@@ -300,16 +304,25 @@ def derive_attachment_constraints(
             inward = float(keepout.get("size_mm", 4.0))
             outward = 0.0
         elif is_conn:
-            # connector_edge_inset_mm: positive = inset INTO the board,
-            # negative = body overhangs OUTBOARD by |inset|. The previous
-            # parent_overhang_mm per-ref dict was a project-level escape
-            # hatch for connectors whose footprints lacked a "PCB Edge"
-            # marker -- with proper pad bbox tracking and the PCB Edge
-            # marker fallback in _compute_local_anchor_offset, that escape
-            # hatch is no longer load-bearing.
-            inset = cfg.get("connector_edge_inset_mm", 1.0)
-            inward = max(0.0, inset)
-            outward = max(0.0, -inset)
+            # The constrained side's anchor is the connector's edge-facing
+            # body line. For a connector with a detectable mating MOUTH (USB-C,
+            # barrel jack -- opening_direction is set, and the leaf is rotated
+            # so the opening faces this edge, see
+            # _filter_rotations_for_connector_opening) the board edge must sit
+            # flush with, or just behind, the mouth so a plug clears the FR4;
+            # connector_edge_overhang_mm makes the mouth sit that many mm proud
+            # of the edge. A mouthless connector (pin header, JST) mounts flush
+            # -- no housing overhang.
+            #
+            # Either way inward is 0: the legacy connector_edge_inset_mm pushed
+            # the edge PAST the body, burying USB ports and making those boards
+            # physically unusable.
+            has_mouth = getattr(comp, "opening_direction", None) is not None
+            inward = 0.0
+            if has_mouth:
+                outward = max(0.0, float(cfg.get("connector_edge_overhang_mm", 0.5)))
+            else:
+                outward = 0.0
         else:
             inward = 0.0
             outward = 0.0
@@ -346,6 +359,7 @@ def derive_attachment_constraints(
             models=_build_models_for_artifact(artifact, grouped_constraints, all_rotation_candidates),
         )
         expand_rotation_candidates(spec)
+        _filter_rotations_for_connector_opening(spec, logger)
         child_specs[child_index] = spec
 
     return DerivedAttachmentConstraints(
@@ -414,6 +428,65 @@ def expand_rotation_candidates(spec: PlacementSpec) -> None:
 def _is_mounting_hole_constraint(constraint: AttachmentConstraint) -> bool:
     """A constraint targets a round mounting hole (rotationally symmetric)."""
     return constraint.ref.startswith("H")
+
+
+def _filter_rotations_for_connector_opening(
+    spec: PlacementSpec,
+    logger: logging.Logger,
+) -> None:
+    """Narrow ``spec.rotation_candidates`` to leaf rotations that point every
+    edge-constrained connector's opening OUTWARD at its assigned board edge.
+
+    A leaf-embedded USB / edge connector carries a footprint-local
+    ``opening_direction`` (``detect_opening_direction``). Without this filter
+    the parent composer picks the leaf's rotation purely by packing score and
+    can leave a connector at the right edge but with its mouth facing *into*
+    the board -- an unmateable port. For each candidate leaf rotation we read
+    the connector's transformed (parent-space) rotation/layer off the
+    pre-built model and keep the rotation only if the mouth faces away from
+    the board on its assigned side.
+
+    Connectors with no detectable opening are ignored (they place as before).
+    If no rotation satisfies every detectable connector -- e.g. two connectors
+    pinned to opposite edges within one leaf, which cannot both face out under
+    a single rigid rotation -- the candidate set is left untouched and a
+    warning is logged so the post-compose gate can flag the survivor.
+    """
+    edge_constraints = [c for c in spec.constraints if c.target == "edge"]
+    if not edge_constraints:
+        return
+
+    has_detectable = False
+    kept: list[float] = []
+    for rot in spec.rotation_candidates:
+        model = spec.models.get(rot)
+        if model is None:
+            continue
+        ok = True
+        for c in edge_constraints:
+            comp = model.transformed.transformed_components.get(c.ref)
+            if comp is None or comp.opening_direction is None:
+                continue  # not an orientable connector -- leave it be
+            has_detectable = True
+            board_opening = opening_board_angle(comp.opening_direction, comp.rotation)
+            want = edge_outward_angle(comp.layer, c.value)
+            if not angles_close(board_opening, want):
+                ok = False
+                break
+        if ok:
+            kept.append(rot)
+
+    if not has_detectable:
+        return
+    if kept:
+        spec.rotation_candidates = kept
+    else:
+        logger.warning(
+            "Leaf %s: no rotation orients every edge connector outward; "
+            "keeping all %d candidates (a port may face inward)",
+            spec.instance_path,
+            len(spec.rotation_candidates),
+        )
 
 
 def _constraint_sides(constraint: AttachmentConstraint) -> list[str]:

@@ -20,6 +20,41 @@ class Layer(IntEnum):
     BACK = 1  # B.Cu
 
 
+# --- Edge-connector orientation helpers -----------------------------------
+# Single source of truth for "which way should a connector face at a board
+# edge". Shared by the single-board solver (_best_rotation_for_edge), the
+# multi-leaf composer's leaf-rotation filter, and the post-compose
+# orientation gate so the three can never drift apart.
+
+# Board-space angle (deg, Y-down: 0=+X, 90=+Y, 180=-X, 270=-Y) that points
+# OUTWARD from each named board edge. On B.Cu the local X-axis is mirrored
+# by Flip(), so left/right swap.
+_OUTWARD_FRONT = {"left": 180.0, "right": 0.0, "top": 270.0, "bottom": 90.0}
+_OUTWARD_BACK = {"left": 0.0, "right": 180.0, "top": 270.0, "bottom": 90.0}
+
+
+def edge_outward_angle(layer: "Layer", edge: str) -> float:
+    """Board-space angle that points away from the named board edge."""
+    table = _OUTWARD_BACK if layer == Layer.BACK else _OUTWARD_FRONT
+    return table[edge]
+
+
+def opening_board_angle(opening_direction: float, rotation: float) -> float:
+    """Footprint-local ``opening_direction`` expressed in board space.
+
+    Inverse of ``detect_opening_direction``'s ``local = (board + rotation)``:
+    ``board = (local - rotation) % 360``. ``rotation`` is the footprint's
+    board-space orientation (``GetOrientationDegrees``), which after a leaf
+    transform is the connector's parent-space rotation.
+    """
+    return (opening_direction - rotation) % 360.0
+
+
+def angles_close(a: float, b: float, tol: float = 1.0) -> bool:
+    """True when two angles are equal modulo 360 within ``tol`` degrees."""
+    return abs(((a - b + 180.0) % 360.0) - 180.0) <= tol
+
+
 @dataclass(slots=True, frozen=True)
 class BlockRotationGeometry:
     """Per-rotation bbox dimensions for a synthetic leaf block.

@@ -23,6 +23,8 @@ from kicraft.autoplacer.brain.types import (
     Point,
     SubCircuitId,
     SubCircuitLayout,
+    edge_outward_angle,
+    opening_board_angle,
 )
 from kicraft.cli.compose_subcircuits import _compose_artifacts
 
@@ -79,7 +81,12 @@ def test_edge_connector_pinned_to_parent_bottom_outline():
             )
         },
     )
-    # Connector block: J1 with pads at the leaf-local bottom edge (max y).
+    # Connector block: a self-consistent USB-C. Pins/tail sit at the leaf-local
+    # BACK (small y); the shell/mouth extends toward +y. opening_direction=90
+    # encodes "mouth faces +y" in the footprint-local frame (see
+    # detect_opening_direction). For a mateable port the MOUTH must reach the
+    # board edge while the PADS stay inboard.
+    overhang = 0.5
     mcu = _artifact(
         "MCU",
         12.0,
@@ -92,18 +99,18 @@ def test_edge_connector_pinned_to_parent_bottom_outline():
                 rotation=0.0,
                 layer=Layer.FRONT,
                 width_mm=9.0,
-                height_mm=3.0,
+                height_mm=3.0,  # body y in [3.5, 6.5]; mouth at +y (6.5)
                 kind="connector",
                 body_center=Point(6.0, 5.0),
-                opening_direction=180.0,  # opening faces +y (bottom) in local frame
-                pads=[_pad("J1", "A1", 2.0, 5.5), _pad("J1", "A2", 10.0, 5.5)],
+                opening_direction=90.0,  # mouth faces +y (bottom) in local frame
+                pads=[_pad("J1", "A1", 2.0, 3.5), _pad("J1", "A2", 10.0, 3.5)],
             )
         },
     )
 
     cfg = {
         "component_zones": {"J1": {"edge": "bottom"}},
-        "connector_edge_inset_mm": 0.0,  # flush
+        "connector_edge_overhang_mm": overhang,
     }
     state, _ = _compose_artifacts(
         [core, mcu],
@@ -126,11 +133,26 @@ def test_edge_connector_pinned_to_parent_bottom_outline():
         transform_loaded_artifact(core, core_entry.origin, core_entry.rotation)
     )["U2"]
 
-    j1_pad_max_y = max(p.pos.y for p in j1.pads)
-    # J1's outboard pads must sit at the parent's bottom outline (within a small
-    # tolerance for inset/rounding), and below the core IC.
-    assert abs(j1_pad_max_y - parent_bottom) <= 1.5, (
-        f"J1 pads (max y={j1_pad_max_y:.2f}) not pinned to parent bottom "
-        f"outline (y={parent_bottom:.2f}); edge constraint not applied"
+    # 1. The mouth must face OUTWARD (down) from the bottom edge -- this is the
+    #    Layer B guarantee that keeps the port mateable, end to end.
+    board_opening = opening_board_angle(j1.opening_direction, j1.rotation)
+    assert board_opening == edge_outward_angle(Layer.FRONT, "bottom"), (
+        f"J1 mouth faces {board_opening} deg, expected "
+        f"{edge_outward_angle(Layer.FRONT, 'bottom')} (outward/down)"
     )
-    assert j1_pad_max_y > u2.pos.y, "edge connector must be below the core block"
+
+    # 2. The body mouth (max y of the body bbox) sits at the board edge, proud
+    #    by ~overhang so a plug clears the FR4 -- never buried inboard.
+    j1_body_bottom = j1.pos.y + j1.height_mm / 2.0
+    assert parent_bottom - 0.1 <= j1_body_bottom <= parent_bottom + overhang + 0.6, (
+        f"J1 mouth (y={j1_body_bottom:.2f}) not flush/overhanging the parent "
+        f"bottom outline (y={parent_bottom:.2f}); edge constraint not applied"
+    )
+
+    # 3. The PADS must stay inboard of the edge (on the board, routable).
+    j1_pad_max_y = max(p.pos.y for p in j1.pads)
+    assert j1_pad_max_y < parent_bottom, (
+        f"J1 pads (max y={j1_pad_max_y:.2f}) must be inboard of the bottom "
+        f"edge (y={parent_bottom:.2f}), not at/over it"
+    )
+    assert j1.pos.y > u2.pos.y, "edge connector must be below the core block"
