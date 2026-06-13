@@ -312,42 +312,60 @@ def detect_opening_direction(fp) -> float | None:
     if not body_xs:
         return None
 
-    # --- How far body extends beyond pads on each side ---
-    extensions = {
-        0: max(body_xs) - max(pad_xs),  # +X (right)
-        180: min(pad_xs) - min(body_xs),  # -X (left)
-        90: max(body_ys) - max(pad_ys),  # +Y (down)
-        270: min(pad_ys) - min(body_ys),  # -Y (up)
-    }
-
-    ranked = sorted(extensions.items(), key=lambda kv: kv[1], reverse=True)
-    best_dir, best_ext = ranked[0]
-    _, second_ext = ranked[1]
+    pad_cx = (min(pad_xs) + max(pad_xs)) / 2
+    pad_cy = (min(pad_ys) + max(pad_ys)) / 2
 
     opening_board = None
-    if best_ext >= 1.0 and (best_ext - second_ext) >= 0.5:
-        opening_board = best_dir
-    else:
-        # Fallback: "PCB Edge" / "Board Edge" text on Dwgs.User
-        pad_cx = (min(pad_xs) + max(pad_xs)) / 2
-        pad_cy = (min(pad_ys) + max(pad_ys)) / 2
-        for item in fp.GraphicalItems():
-            if item.GetLayer() != pcbnew.Dwgs_User:
-                continue
-            try:
-                text = item.GetText()
-            except Exception:
-                continue
-            if not text or "edge" not in text.lower():
-                continue
-            tp = item.GetPosition()
-            off_x = pcbnew.ToMM(tp.x) - pad_cx
-            off_y = pcbnew.ToMM(tp.y) - pad_cy
-            if abs(off_x) > abs(off_y):
-                opening_board = 0 if off_x > 0 else 180
+
+    # (1) Explicit "PCB Edge" / "Board Edge" marker on Dwgs.User -- the
+    # footprint author telling us exactly where the board edge belongs.
+    # Authoritative when present (most vendor USB footprints carry it).
+    for item in fp.GraphicalItems():
+        if item.GetLayer() != pcbnew.Dwgs_User:
+            continue
+        try:
+            text = item.GetText()
+        except Exception:
+            continue
+        if not text or "edge" not in text.lower():
+            continue
+        tp = item.GetPosition()
+        off_x = pcbnew.ToMM(tp.x) - pad_cx
+        off_y = pcbnew.ToMM(tp.y) - pad_cy
+        if abs(off_x) > abs(off_y):
+            opening_board = 0 if off_x > 0 else 180
+        else:
+            opening_board = 90 if off_y > 0 else 270
+        break
+
+    # (2) Body (courtyard + fab) extends asymmetrically past the pad cluster:
+    # a USB/edge connector's shell overhangs its pins toward the mating mouth.
+    if opening_board is None:
+        extensions = {
+            0: max(body_xs) - max(pad_xs),  # +X (right)
+            180: min(pad_xs) - min(body_xs),  # -X (left)
+            90: max(body_ys) - max(pad_ys),  # +Y (down)
+            270: min(pad_ys) - min(body_ys),  # -Y (up)
+        }
+        ranked = sorted(extensions.items(), key=lambda kv: kv[1], reverse=True)
+        best_dir, best_ext = ranked[0]
+        _, second_ext = ranked[1]
+        if best_ext >= 1.0 and (best_ext - second_ext) >= 0.5:
+            opening_board = best_dir
+
+    # (3) Pad cluster sits off-center inside the body: the pins/tail crowd one
+    # end and the mouth is the far side. Catches connectors whose courtyard is
+    # near-symmetric but whose pads are clearly biased toward the back.
+    if opening_board is None:
+        body_cx = (min(body_xs) + max(body_xs)) / 2
+        body_cy = (min(body_ys) + max(body_ys)) / 2
+        dx = body_cx - pad_cx
+        dy = body_cy - pad_cy
+        if max(abs(dx), abs(dy)) >= 0.5:
+            if abs(dx) > abs(dy):
+                opening_board = 0 if dx > 0 else 180
             else:
-                opening_board = 90 if off_y > 0 else 270
-            break
+                opening_board = 90 if dy > 0 else 270
 
     if opening_board is None:
         return None

@@ -94,6 +94,7 @@ from .types import (
     Net,
     PlacedGroup,
     Point,
+    edge_outward_angle,
 )
 
 
@@ -1138,19 +1139,12 @@ class PlacementSolver:
         2. Otherwise fall back to aspect-ratio heuristics (long axis
            parallel to the edge).
         """
-        # Expected outward direction per edge (board-space angle).
-        # On B.Cu, Flip() mirrors the local X-axis, so left/right swap.
-        if comp.layer == Layer.BACK:
-            outward = {"left": 0, "right": 180, "top": 270, "bottom": 90}
-        else:
-            outward = {"left": 180, "right": 0, "top": 270, "bottom": 90}
-
         if comp.opening_direction is not None:
             # Direct computation: we need the opening (local-frame angle)
-            # to end up pointing at outward[edge] in board-space.
+            # to end up pointing at edge_outward_angle in board-space.
             # KiCad forward: board_angle = local_angle - rotation.
-            # So: rotation = opening_direction - outward[edge]
-            rot = (comp.opening_direction - outward[edge]) % 360
+            # So: rotation = opening_direction - outward.
+            rot = (comp.opening_direction - edge_outward_angle(comp.layer, edge)) % 360
             return rot
 
         # -- Fallback: no detectable opening direction --

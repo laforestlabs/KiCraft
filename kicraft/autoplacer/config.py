@@ -96,8 +96,16 @@ DEFAULT_CONFIG = {
     "connector_gap_mm": 3.58,
     # Connector edge inset — distance (mm) from board edge to the nearest
     # edge of the connector body.  0 = flush, positive = inset, negative =
-    # overhang.  Only applies to edge-pinned connectors.
+    # overhang.  Used only by the single-board leaf solver (_pin_edge_components)
+    # for intra-leaf positioning; the parent composer uses the signed
+    # connector_edge_overhang_mm below for the final board edge.
     "connector_edge_inset_mm": 2.5,
+    # Connector edge overhang — how far (mm) an edge-mount connector's mouth
+    # sits PROUD of the composed board edge (board stops this far short of the
+    # mouth) so a plug clears the FR4.  USB-C / barrel jacks are unusable when
+    # the board overhangs the port, so this is a positive flush-or-overhang
+    # margin, never an inset.
+    "connector_edge_overhang_mm": 0.5,
     # Mounting hole geometry. ``count`` is the target number of holes;
     # actual count is whatever the source PCB project ships. ``screw``
     # is a free-form reference (e.g. "M2.5", "M3", "#4-40") used to

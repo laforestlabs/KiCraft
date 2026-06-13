@@ -83,7 +83,15 @@ from kicraft.autoplacer.brain.subcircuit_instances import (
     transformed_debug_dict,
     transformed_summary,
 )
-from kicraft.autoplacer.brain.types import Component, Point, SubCircuitDefinition, SubCircuitId
+from kicraft.autoplacer.brain.types import (
+    Component,
+    Point,
+    SubCircuitDefinition,
+    SubCircuitId,
+    angles_close,
+    edge_outward_angle,
+    opening_board_angle,
+)
 
 
 @dataclass(slots=True)
@@ -1493,6 +1501,7 @@ def _compose_artifacts(
     entries: list[CompositionEntry] = []
     transformed_payloads: list[dict[str, Any]] = []
     child_artifact_placements: list[ChildArtifactPlacement] = []
+    final_transformed_by_index: dict[int, Any] = {}
     for child_index, artifact in enumerate(loaded_artifacts):
         placement = placements_dict.get(artifact.instance_path)
         if placement is None:
@@ -1504,6 +1513,7 @@ def _compose_artifacts(
             transformed = transform_loaded_artifact(
                 artifact, origin=placement.origin, rotation=placement.rotation
             )
+        final_transformed_by_index[child_index] = transformed
         entry = CompositionEntry(
             artifact_dir=artifact.artifact_dir,
             sheet_name=artifact.sheet_name,
@@ -1612,6 +1622,35 @@ def _compose_artifacts(
         )
         if is_hole:
             mounting_hole_keep_in_satisfied[c.ref] = ok
+
+    # --- Edge connector orientation gate -------------------------------
+    # Verify every edge-pinned connector with a detectable mouth ended up
+    # facing OUTWARD on its assigned edge. _filter_rotations_for_connector_opening
+    # should have guaranteed this, so a violation here means an unsatisfiable
+    # multi-connector leaf or an undetected regression -- surface it loudly
+    # rather than silently shipping a board whose USB port faces inward.
+    misoriented_connectors: list[str] = []
+    for c in all_constraints:
+        if c.target != "edge" or c.source != "child_artifact" or c.child_index is None:
+            continue
+        transformed = final_transformed_by_index.get(int(c.child_index))
+        if transformed is None:
+            continue
+        comp = transformed.transformed_components.get(c.ref)
+        if comp is None or comp.opening_direction is None:
+            continue
+        board_opening = opening_board_angle(comp.opening_direction, comp.rotation)
+        want = edge_outward_angle(comp.layer, c.value)
+        if not angles_close(board_opening, want):
+            misoriented_connectors.append(c.ref)
+    if misoriented_connectors:
+        logger.warning(
+            "Edge connector(s) %s face INWARD after composition (mouth not at "
+            "the board edge) -- the port may be unmateable. Check that the "
+            "leaf rotation candidates were not over-constrained and that the "
+            "connector's opening_direction was detected correctly.",
+            ", ".join(sorted(misoriented_connectors)),
+        )
 
     same_side_overlap_conflicts: list[tuple[str, str]] = []
     tht_keepout_violations: list[tuple[str, str]] = []
