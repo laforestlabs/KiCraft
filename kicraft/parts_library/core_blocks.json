@@ -190,8 +190,7 @@
       "package": "WQFN-28-EP 5x5",
       "selection_notes": "Best price/stock by 2x (55K stock at $0.97). TMC2209-LA-T (C2150710, $2.70) for silent StealthChop and UART config; DRV8825PWPR (C81582, $2.17) for supplies up to 45V.",
       "sort_order": 210,
-      "default_mpn": "A4988SETTR-T",
-      "default_lcsc": "C38437"
+      "bundle": "a4988"
     },
     {
       "function_key": "res-0402",
@@ -363,8 +362,7 @@
       "package": "TSSOP-16-EP",
       "selection_notes": "Dual H-bridge: the breakout default for differential-drive robots. TB6612FNG (C88224, $1.13) is the Adafruit-classic equivalent; DRV8837 (C39159, $0.21, 55K stock) when one motor suffices; L9110S ($0.13-0.17) the bargain single.",
       "sort_order": 220,
-      "default_mpn": "DRV8833PWPR",
-      "default_lcsc": "C50506"
+      "bundle": "drv8833"
     },
     {
       "function_key": "servo-pwm-driver",
@@ -374,8 +372,7 @@
       "package": "TSSOP-28",
       "selection_notes": "The Adafruit 16-channel servo-driver classic with no real substitute at LCSC; only needed beyond the MCU's own PWM channels.",
       "sort_order": 230,
-      "default_mpn": "PCA9685PW",
-      "default_lcsc": "C2678753"
+      "bundle": "pca9685"
     },
     {
       "function_key": "audio-amp-i2s",
@@ -385,8 +382,7 @@
       "package": "ESOP-8",
       "selection_notes": "I2S mono class-D used across Chinese ESP32 speaker designs; easiest package of the stocked options. MAX98357A is the Adafruit classic (TQFN C910544 $1.28; BGA-9 C2682619 $0.51 but a 1.3mm BGA).",
       "sort_order": 240,
-      "default_mpn": "NS4168",
-      "default_lcsc": "C910588"
+      "bundle": "ns4168"
     },
     {
       "function_key": "audio-amp-analog",
@@ -396,8 +392,7 @@
       "package": "SOP-8",
       "selection_notes": "The Adafruit speaker-amp staple, picked over the stereo PAM8403 ($0.17 but thin 2.7K no-brand stock) for stock depth and a known source. Use two for stereo.",
       "sort_order": 250,
-      "default_mpn": "PAM8302AADCR",
-      "default_lcsc": "C112137"
+      "bundle": "pam8302a"
     },
     {
       "function_key": "addressable-led",
@@ -418,8 +413,7 @@
       "package": "SOP-8",
       "selection_notes": "PCF8563-compatible used across M5Stack hardware; deepest stock at the lowest price tier. Genuine NXP PCF8563T (C7440, $0.59); DS3231MZ (C107410, $2.94) when TCXO precision matters (the Adafruit precision-RTC classic); DS1307 is 5V-only legacy.",
       "sort_order": 410,
-      "default_mpn": "BM8563ESA",
-      "default_lcsc": "C269877"
+      "bundle": "bm8563"
     },
     {
       "function_key": "usb-uart-bridge",
@@ -429,8 +423,7 @@
       "package": "SOP-16",
       "selection_notes": "83K stock, no crystal needed. NOTE: the design skill's flashing prose references CH340N, which had 31 units in stock at snapshot; CH340C is the same family in a stocked package. CH343P (C2846043, $1.25) for 6Mbps; CP2102N ($1.64+) the SiLabs option.",
       "sort_order": 420,
-      "default_mpn": "CH340C",
-      "default_lcsc": "C84681"
+      "bundle": "ch340c"
     },
     {
       "function_key": "io-expander",
@@ -440,8 +433,7 @@
       "package": "TSSOP-24",
       "selection_notes": "16-bit expander at the lowest verified price. PCF8574 (UMW C22396383, $0.56) is the 8-bit classic; MCP23017 (C558584, $1.68) the Adafruit breakout staple if its register model is preferred.",
       "sort_order": 430,
-      "default_mpn": "TCA9555PWR (UMW)",
-      "default_lcsc": "C42420608"
+      "bundle": "tca9555"
     },
     {
       "function_key": "i2c-mux",
@@ -451,8 +443,7 @@
       "package": "TSSOP-24",
       "selection_notes": "The Adafruit address-conflict fixer, cheap enough to default. PCA9548APW (C21198, $0.99) is the same function from NXP.",
       "sort_order": 440,
-      "default_mpn": "TCA9548APWR",
-      "default_lcsc": "C130026"
+      "bundle": "tca9548a"
     }
   ]
 }

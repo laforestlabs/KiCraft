@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:4bd2cf217c2958aef0939782c5f53b3e4bc7a3fba5975f10d94b8f06a4784772",
+  "datasheet_url": "https://lcsc.com/product-detail/Real-time-Clocks_GATEMODE-BM8563ESA_C269877.html",
+  "description": "GATEMODE(\u6377\u8302\u5fae) BM8563ESA",
+  "footprint_name": "SOP-8_L5.0-W4.0-P1.27-LS6.0-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "BM8563ESA",
+  "name": "bm8563",
+  "provenance": {
+    "added_at": "2026-06-13T01:50:47Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C269877"
+  },
+  "symbol_name": "BM8563ESA_C269877",
+  "tags": [
+    "rtc",
+    "clock",
+    "i2c",
+    "interface"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "RTC: needs 32.768kHz crystal close to the chip with specified load caps; INT is open-drain; backup via battery/supercap on VDD."
+}

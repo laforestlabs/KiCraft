@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:9570ce82bb40459e748acf134fee8262a2c4d792dfb3569e8d7c12c70fcbd403",
+  "datasheet_url": "https://lcsc.com/product-detail/USB_CH340C_C84681.html",
+  "description": "WCH(\u5357\u4eac\u6c81\u6052) CH340C",
+  "footprint_name": "SOP-16_L10.0-W3.9-P1.27-LS6.0-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "CH340C",
+  "name": "ch340c",
+  "provenance": {
+    "added_at": "2026-06-13T01:51:11Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C84681"
+  },
+  "symbol_name": "CH340C",
+  "tags": [
+    "usb-uart",
+    "bridge",
+    "interface",
+    "usb"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Internal oscillator (no crystal needed, unlike CH340G). V3 pin: tie to VCC at 3.3V, or leave decoupled at 5V; DTR/RTS for ESP auto-reset."
+}
