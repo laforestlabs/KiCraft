@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:bd2c799e5503045ece8db42ffe8048d7d671ec6bb98254897f0f6cffc21fb257",
+  "datasheet_url": "https://lcsc.com/product-detail/DC-DC-Converters_TI_TPS54331DDAR_TPS54331DDAR_C90761.html",
+  "description": "TI(\u5fb7\u5dde\u4eea\u5668) TPS54331DDAR",
+  "footprint_name": "SOIC-8_L4.9-W3.9-P1.27-LS6.0-BL-EP",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "TPS54331DDAR",
+  "name": "tps54331",
+  "provenance": {
+    "added_at": "2026-06-13T01:11:32Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C90761"
+  },
+  "symbol_name": "TPS54331DDAR",
+  "tags": [
+    "regulator",
+    "buck",
+    "adjustable",
+    "3a",
+    "soic-8"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Adjustable: 0.8V FB ref needs divider + RC compensation + bootstrap cap. PowerPAD must get thermal vias to a pour."
+}

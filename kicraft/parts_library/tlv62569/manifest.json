@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:b527c2cfb9d7051abe44091fd668c2847c603a5e042a4e8c19addd3115eadd49",
+  "datasheet_url": "https://lcsc.com/product-detail/DC-DC-Converters_Texas-Instruments_TLV62569DBVR_Texas-Instruments-TI-TLV62569DBVR_C141836.html",
+  "description": "TI(\u5fb7\u5dde\u4eea\u5668) TLV62569DBVR",
+  "footprint_name": "SOT-23-5_L3.0-W1.7-P0.95-LS2.8-BR",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "TLV62569DBVR",
+  "name": "tlv62569",
+  "provenance": {
+    "added_at": "2026-06-13T01:10:24Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C141836"
+  },
+  "symbol_name": "TLV62569DBVR",
+  "tags": [
+    "regulator",
+    "buck",
+    "3v3",
+    "1a",
+    "sot-23-5"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Vin to 5.5V only. 2.2uH + 22uF out; 100% duty mode near dropout (Vin close to 3.3V) raises ripple."
+}

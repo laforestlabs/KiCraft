@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:80fa509895efef03f7a598215d923214d3bc6e452698d81a577ec98f13d0c89d",
+  "datasheet_url": "https://lcsc.com/product-detail/PMIC-Current-Regulation_TI_INA226AIDGSR_INA226AIDGSR_C49851.html",
+  "description": "TI(\u5fb7\u5dde\u4eea\u5668) INA226AIDGSR",
+  "footprint_name": "MSOP-10_L3.0-W3.0-P0.50-LS5.0-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "INA226AIDGSR",
+  "name": "ina226",
+  "provenance": {
+    "added_at": "2026-06-13T01:12:18Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C49851"
+  },
+  "symbol_name": "INA226AIDGSR",
+  "tags": [
+    "current-sense",
+    "power-monitor",
+    "i2c",
+    "msop-10"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Kelvin-connect the shunt sense pins. Bus pin max 36V. I2C address set by A0/A1 strapping."
+}

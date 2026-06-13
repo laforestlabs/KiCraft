@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:1d4f6683783e9c13aedab9eb8e032a37fc3e4bd232126094ad3449ea1f24eaa9",
+  "datasheet_url": "https://lcsc.com/product-detail/DC-DC-Converters_TI_TPS61088RHLR_TPS61088RHLR_C87357.html",
+  "description": "TI(\u5fb7\u5dde\u4eea\u5668) TPS61088RHLR",
+  "footprint_name": "VQFN-20_L4.6-W3.6-P0.50-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "TPS61088RHLR",
+  "name": "tps61088",
+  "provenance": {
+    "added_at": "2026-06-13T01:10:02Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C87357"
+  },
+  "symbol_name": "TPS61088RHLR",
+  "tags": [
+    "regulator",
+    "boost",
+    "5v",
+    "2a",
+    "vqfn"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "VQFN-20 center pad: reflow only, thermal vias. Hot-loop layout critical: keep SW/input loop tight; 1uH-2.2uH high-current inductor."
+}
