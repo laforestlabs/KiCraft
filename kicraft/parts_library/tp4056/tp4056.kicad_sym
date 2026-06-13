@@ -2,123 +2,129 @@
   (version 20211014)
   (generator https://github.com/uPesy/easyeda2kicad.py)
 
-  (symbol "TP4056"
+  (symbol "TP4056_C725790"
     (in_bom yes)
     (on_board yes)
     (property
       "Reference"
       "U"
       (id 0)
-      (at 0 20.32 0)
+      (at 0 10.16 0)
       (effects (font (size 1.27 1.27) ) )
     )
     (property
       "Value"
-      "TP4056"
+      "TP4056_C725790"
       (id 1)
-      (at 0 -25.40 0)
+      (at 0 -10.16 0)
       (effects (font (size 1.27 1.27) ) )
     )
     (property
       "Footprint"
       "tp4056:ESOP-8_L4.9-W3.9-P1.27-LS6.0-BL-EP"
       (id 2)
-      (at 0 -27.94 0)
+      (at 0 -12.70 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
       "Datasheet"
-      "https://lcsc.com/product-detail/PMIC-Battery-Management_TP4056_C16581.html"
+      "https://lcsc.com/product-detail/PMIC-Battery-Management_UMW-Youtai-Semiconductor-Co-Ltd-TP4056_C725790.html"
       (id 3)
-      (at 0 -30.48 0)
+      (at 0 -15.24 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
       "Manufacturer"
-      "TOPPOWER(南京拓微)"
+      "UMW(友台半导体)"
       (id 4)
-      (at 0 -33.02 0)
+      (at 0 -17.78 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
       "MPN"
-      "TP4056-42-ESOP8"
+      "TP4056"
       (id 5)
-      (at 0 -35.56 0)
+      (at 0 -20.32 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
       "LCSC Part"
-      "C16581"
+      "C725790"
       (id 6)
-      (at 0 -38.10 0)
+      (at 0 -22.86 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
       "ki_keywords"
       "Battery Management ICs"
       (id 8)
-      (at 0 -40.64 0)
+      (at 0 -25.40 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
-    (symbol "TP4056_0_1"
+    (symbol "TP4056_C725790_0_1"
       (rectangle
-        (start -10.16 20.32)
-        (end 10.16 -15.24)
+        (start -10.16 7.62)
+        (end 10.16 -7.62)
         (stroke (width 0) (type default))
         (fill (type background))
       )
-      (pin unspecified line
-        (at 15.24 15.24 180)
-        (length 5.08)
-        (name "BAT" (effects (font (size 1.27 1.27))))
-        (number "5" (effects (font (size 1.27 1.27))))
+      (circle
+        (center -8.89 6.35)
+        (radius 0.38)
+        (stroke (width 0) (type default))
+        (fill (type none))
       )
       (pin unspecified line
-        (at 15.24 -0.00 180)
-        (length 5.08)
+        (at -12.70 2.54 0)
+        (length 2.54)
         (name "TEMP" (effects (font (size 1.27 1.27))))
         (number "1" (effects (font (size 1.27 1.27))))
       )
       (pin unspecified line
-        (at 15.24 -7.62 180)
-        (length 5.08)
+        (at -12.70 -0.00 0)
+        (length 2.54)
         (name "PROG" (effects (font (size 1.27 1.27))))
         (number "2" (effects (font (size 1.27 1.27))))
       )
       (pin unspecified line
-        (at 0.00 -20.32 90)
-        (length 5.08)
+        (at -12.70 -2.54 0)
+        (length 2.54)
         (name "GND" (effects (font (size 1.27 1.27))))
         (number "3" (effects (font (size 1.27 1.27))))
       )
       (pin unspecified line
-        (at -15.24 15.24 0)
-        (length 5.08)
+        (at -12.70 -5.08 0)
+        (length 2.54)
         (name "VCC" (effects (font (size 1.27 1.27))))
         (number "4" (effects (font (size 1.27 1.27))))
       )
       (pin unspecified line
-        (at -15.24 7.62 0)
-        (length 5.08)
-        (name "CE" (effects (font (size 1.27 1.27))))
-        (number "8" (effects (font (size 1.27 1.27))))
+        (at 12.70 -5.08 180)
+        (length 2.54)
+        (name "BAT" (effects (font (size 1.27 1.27))))
+        (number "5" (effects (font (size 1.27 1.27))))
       )
       (pin unspecified line
-        (at -15.24 -0.00 0)
-        (length 5.08)
-        (name "~{CHRG}" (effects (font (size 1.27 1.27))))
-        (number "7" (effects (font (size 1.27 1.27))))
-      )
-      (pin unspecified line
-        (at -15.24 -7.62 0)
-        (length 5.08)
+        (at 12.70 -2.54 180)
+        (length 2.54)
         (name "~{STDBY}" (effects (font (size 1.27 1.27))))
         (number "6" (effects (font (size 1.27 1.27))))
       )
       (pin unspecified line
-        (at 15.24 6.35 180)
-        (length 5.08)
+        (at 12.70 -0.00 180)
+        (length 2.54)
+        (name "~{CHRG}" (effects (font (size 1.27 1.27))))
+        (number "7" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 12.70 2.54 180)
+        (length 2.54)
+        (name "CE" (effects (font (size 1.27 1.27))))
+        (number "8" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 12.70 5.08 180)
+        (length 2.54)
         (name "EP" (effects (font (size 1.27 1.27))))
         (number "9" (effects (font (size 1.27 1.27))))
       )

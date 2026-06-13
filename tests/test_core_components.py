@@ -213,7 +213,7 @@ def test_list_ordering_and_filters(store):
 
 # Transitional rows (default_lcsc, not yet vendored) count down to zero as the
 # vendoring batches land; bump this as each batch flips its rows to `bundle:`.
-EXPECTED_TRANSITIONAL_ROWS = 2
+EXPECTED_TRANSITIONAL_ROWS = 0
 
 
 def test_catalog_is_valid_and_bundles_resolve():

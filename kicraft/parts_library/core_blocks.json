@@ -99,8 +99,7 @@
       "package": "ESOP-8",
       "selection_notes": "469K stock at $0.07. Original TopPower TP4056-42-ESOP8 is C16581 ($0.19). TP4057 (C725791, $0.039, SOT-23-6, 500mA) for tiny boards; MCP73831 (C424093, $0.81) when a name brand is required.",
       "sort_order": 100,
-      "default_mpn": "TP4056",
-      "default_lcsc": "C725790"
+      "bundle": "tp4056"
     },
     {
       "function_key": "photodiode",
@@ -402,8 +401,7 @@
       "package": "SMD5050-4P",
       "selection_notes": "NeoPixel, 336K stock. SK6812MINI-E (C5149201, $0.087) for the 3.5mm mini, WS2812B-2020/4020 for tighter boards; chain any count off one data GPIO.",
       "sort_order": 260,
-      "default_mpn": "WS2812B-B/T",
-      "default_lcsc": "C2761795"
+      "bundle": "ws2812b"
     },
     {
       "function_key": "rtc",

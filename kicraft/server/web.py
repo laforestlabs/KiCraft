@@ -6138,8 +6138,8 @@ if os.environ.get("KICRAFT_WEB_DEMO"):
                          "topologies": {"LED_DRIVER": "boost constant-current"},
                          "mcu_present": False, "comms_protocols": [], "inter_sheet_nets": []},
         "bom": {"parts": [
-            {"ref": "U1", "value": "TP4056", "symbol": "tp4056:TP4056",
-             "footprint": "tp4056:SOP-8", "sheet": "MAIN"},
+            {"ref": "U1", "value": "TP4056", "symbol": "tp4056:TP4056_C725790",
+             "footprint": "tp4056:ESOP-8", "sheet": "MAIN"},
             {"ref": "J1", "value": "USB-C", "symbol": "usb-c-16p:TYPE-C-31-M-12",
              "footprint": "usb-c-16p:TYPE-C", "sheet": "MAIN"},
             {"ref": "D1", "value": "white LED", "symbol": "Device:LED",
@@ -6157,7 +6157,7 @@ if os.environ.get("KICRAFT_WEB_DEMO"):
     # total render with no network. TP4056/USB-C come from curated bundles, so
     # they resolve to their manifest LCSC id (id:C…); the LED is a generic passive.
     _DEMO_PRICES = {
-        "id:C16581": {"unit_price": 0.18, "lcsc": "C16581", "stock": 9999},
+        "id:C725790": {"unit_price": 0.18, "lcsc": "C725790", "stock": 9999},
         "id:C165948": {"unit_price": 0.0667, "lcsc": "C165948", "stock": 9999},
         "kw:white LED 0603": {"unit_price": 0.014, "lcsc": "C72043", "stock": 9999},
     }
