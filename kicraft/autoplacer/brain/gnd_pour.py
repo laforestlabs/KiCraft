@@ -247,44 +247,19 @@ def pour_power_planes(
     return summary
 
 
-def repair_stranded_net(
-    pcb_path: str,
-    net_name: str,
-    cfg: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Tie a poured net's stranded clusters back to its main one with guarded tracks.
+def _collect_net_clusters(
+    board: "pcbnew.BOARD", net_name: str
+) -> tuple[dict[int, list[int]], list[dict]]:
+    """Geometric union-find over one net's pads/vias/tracks/fill islands.
 
-    A poured net (the GND plane, or a power rail plane) is supposed to reach
-    every one of its pads through copper. In a crowded region the fill
-    fragments around foreign tracks/pads, and a pad can end up on a tiny fill
-    island with no path to the main cluster: no via to drop through, no
-    same-net mate for a shield tie, no routed track (GND is never given to
-    FreeRouting; a fine-pitch part's supply pad may be unreachable for it --
-    KC-Z57JEZ U1 +3V3). This post-pour pass finds every cluster of
-    ``net_name`` isolated from the main one (geometric union-find over
-    pads/vias/tracks/fill islands) and stamps a direct same-net track from a
-    stranded pad to the nearest main-cluster pad/via via
-    :func:`add_breakout_stubs` -- inheriting its foreign-pad,
-    existing-copper, netclass and outline guards -- then refills the zones so
-    the pour closes around the new tie. A tie whose straight path is blocked
-    is skipped (the board is no worse than before).
+    Returns ``(clusters, all_nodes)``: *clusters* maps a root index to the
+    member indices of one electrically-contiguous group, *all_nodes* holds the
+    node dicts those indices point into. Empty when the net has no items.
     """
-    cfg = cfg or {}
-    summary: dict[str, Any] = {"net": net_name, "clusters": 0, "stranded": 0,
-                               "tied": 0, "skipped": []}
-    if not net_name:
-        return summary
-
-    board = pcbnew.LoadBoard(pcb_path)
-    gnd_net = board.GetNetInfo().GetNetItem(net_name)
-    if not gnd_net or gnd_net.GetNetCode() == 0:
-        return summary
-    gnd_code = gnd_net.GetNetCode()
-    max_tie_mm = float(cfg.get("gnd_strand_repair_max_mm", 30.0))
-
-    # --- collect GND nodes -------------------------------------------------
-    # Each node: (kind, payload, layers, probe_points_mm). A PTH pad or via
-    # spans both layers; an SMD pad only its own; a fill island only its zone's.
+    net = board.GetNetInfo().GetNetItem(net_name)
+    if not net or net.GetNetCode() == 0:
+        return {}, []
+    net_code = net.GetNetCode()
     F, B = pcbnew.F_Cu, pcbnew.B_Cu
 
     def _pts_around(x_mm: float, y_mm: float, r_mm: float) -> list[tuple[float, float]]:
@@ -299,7 +274,7 @@ def repair_stranded_net(
     nodes: list[dict] = []
     for fp in board.GetFootprints():
         for p in fp.Pads():
-            if p.GetNetCode() != gnd_code:
+            if p.GetNetCode() != net_code:
                 continue
             pos = p.GetPosition()
             x, y = pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y)
@@ -312,17 +287,17 @@ def repair_stranded_net(
             nodes.append({
                 "kind": "pad", "ref": fp.GetReferenceAsString(), "num": p.GetNumber(),
                 "layers": {F, B} if is_pth else {F if p.IsOnLayer(F) else B},
-                "pts": _pts_around(x, y, r), "xy": (x, y),
+                "pts": _pts_around(x, y, r), "xy": (x, y), "r": r,
             })
     for t in board.GetTracks():
-        if t.GetNetCode() != gnd_code:
+        if t.GetNetCode() != net_code:
             continue
         if t.GetClass() == "PCB_VIA":
             pos = t.GetPosition()
             x, y = pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y)
+            r = pcbnew.ToMM(t.GetWidth()) / 2.0
             nodes.append({"kind": "via", "layers": {F, B},
-                          "pts": _pts_around(x, y, pcbnew.ToMM(t.GetWidth()) / 2.0),
-                          "xy": (x, y)})
+                          "pts": _pts_around(x, y, r), "xy": (x, y), "r": r})
         else:
             a, b2 = t.GetStart(), t.GetEnd()
             nodes.append({"kind": "trk", "layers": {t.GetLayer()},
@@ -384,6 +359,41 @@ def repair_stranded_net(
     clusters: dict[int, list[int]] = {}
     for i in range(len(all_nodes)):
         clusters.setdefault(find(i), []).append(i)
+    return clusters, all_nodes
+
+
+def repair_stranded_net(
+    pcb_path: str,
+    net_name: str,
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Tie a poured net's stranded clusters back to its main one with guarded tracks.
+
+    A poured net (the GND plane, or a power rail plane) is supposed to reach
+    every one of its pads through copper. In a crowded region the fill
+    fragments around foreign tracks/pads, and a pad can end up on a tiny fill
+    island with no path to the main cluster: no via to drop through, no
+    same-net mate for a shield tie, no routed track (GND is never given to
+    FreeRouting; a fine-pitch part's supply pad may be unreachable for it --
+    KC-Z57JEZ U1 +3V3). This post-pour pass finds every cluster of
+    ``net_name`` isolated from the main one (geometric union-find over
+    pads/vias/tracks/fill islands) and stamps a direct same-net track from a
+    stranded pad to the nearest main-cluster pad/via via
+    :func:`add_breakout_stubs` -- inheriting its foreign-pad,
+    existing-copper, netclass and outline guards -- then refills the zones so
+    the pour closes around the new tie. A tie whose straight path is blocked
+    is skipped (the board is no worse than before).
+    """
+    cfg = cfg or {}
+    summary: dict[str, Any] = {"net": net_name, "clusters": 0, "stranded": 0,
+                               "tied": 0, "skipped": [], "unresolved": 0}
+    if not net_name:
+        return summary
+
+    board = pcbnew.LoadBoard(pcb_path)
+    max_tie_mm = float(cfg.get("gnd_strand_repair_max_mm", 30.0))
+
+    clusters, all_nodes = _collect_net_clusters(board, net_name)
     summary["clusters"] = len(clusters)
     if len(clusters) <= 1:
         return summary
@@ -400,6 +410,8 @@ def repair_stranded_net(
         add_breakout_stubs,
     )
 
+    F, B = pcbnew.F_Cu, pcbnew.B_Cu
+    via_nodes = [n for n in all_nodes if n["kind"] == "via"]
     max_targets = int(cfg.get("gnd_strand_repair_max_targets", 5))
     for root, members in clusters.items():
         if root == main_root:
@@ -410,6 +422,21 @@ def repair_stranded_net(
             summary["skipped"].append("cluster_without_pad")
             continue
         sx, sy = src["xy"]
+        # Layers the tie can START on: the pad's own copper -- or, when a
+        # same-net via barrel overlaps the pad centre (the escape-stitch
+        # stub+via shape), the far layer through that via. A tie drawn on a
+        # layer the source pad does not reach is dead copper that REPORTS
+        # success (the run_01 ESP32 signature, together with the wrong-pad
+        # lookup near_xy now prevents).
+        via_bridge = any(
+            ((n["xy"][0] - sx) ** 2 + (n["xy"][1] - sy) ** 2) ** 0.5 <= n["r"]
+            for n in via_nodes
+        )
+        start_layers = [
+            (lname, lid) for lname, lid in (("F.Cu", F), ("B.Cu", B))
+            if lid in src["layers"] or via_bridge
+        ]
+        start_layers.sort(key=lambda t: t[1] not in src["layers"])
         ranked = sorted(
             main_targets,
             key=lambda t: (t["xy"][0] - sx) ** 2 + (t["xy"][1] - sy) ** 2,
@@ -417,17 +444,22 @@ def repair_stranded_net(
         # The straight line to the NEAREST target often runs through exactly
         # the copper wall that stranded this cluster in the first place -- so
         # walk outward through the nearest few targets (different directions)
-        # on both layers until one tie lands.
+        # on every feasible layer until one tie lands.
         tied = False
         for tgt in ranked[:max_targets]:
             d = ((tgt["xy"][0] - sx) ** 2 + (tgt["xy"][1] - sy) ** 2) ** 0.5
             if d > max_tie_mm:
                 break  # ranked by distance: everything after is farther
-            for layer_name in ("F.Cu", "B.Cu"):
+            for layer_name, layer_id in start_layers:
+                # The tie END must land on copper too: an SMD target pad
+                # bonds only on its own layer (vias and PTH pads span both).
+                if layer_id not in tgt["layers"]:
+                    continue
                 res = add_breakout_stubs(
                     pcb_path,
                     [BreakoutSpec(ref=src["ref"], pad=src["num"],
-                                  waypoints=[tgt["xy"]], layer=layer_name)],
+                                  waypoints=[tgt["xy"]], layer=layer_name,
+                                  near_xy=src["xy"])],
                     cfg=cfg,
                 )
                 if res.get("stubs", 0):
@@ -443,6 +475,16 @@ def repair_stranded_net(
         board = pcbnew.LoadBoard(pcb_path)
         pcbnew.ZONE_FILLER(board).Fill(board.Zones())
         board.Save(pcb_path)
+        # Verify on the refilled board: a tie that stamped but did not merge
+        # its cluster (wrong pad, wrong layer, refill split) must be LOUD --
+        # the silent version shipped boards whose ratsnest still showed the
+        # strand while the build log said "tied".
+        clusters, _ = _collect_net_clusters(board, net_name)
+    summary["unresolved"] = max(0, len(clusters) - 1)
+    if summary["unresolved"]:
+        print(f"  WARNING: {net_name} strand repair left {summary['unresolved']} "
+              f"cluster(s) disconnected (tied={summary['tied']}, "
+              f"skipped={summary['skipped']})")
     return summary
 
 
@@ -474,7 +516,8 @@ def repair_stranded_power(
     that ignored its return value still repair the right rails.
     """
     cfg = cfg or {}
-    out: dict[str, Any] = {"nets": [], "stranded": 0, "tied": 0, "skipped": []}
+    out: dict[str, Any] = {"nets": [], "stranded": 0, "tied": 0, "skipped": [],
+                           "unresolved": 0}
     if not cfg.get("power_strand_repair_enabled", True):
         return out
     if nets is None:
@@ -488,6 +531,7 @@ def repair_stranded_power(
         out["nets"].append(net_name)
         out["stranded"] += s["stranded"]
         out["tied"] += s["tied"]
+        out["unresolved"] += s.get("unresolved", 0)
         out["skipped"].extend(f"{net_name}:{item}" for item in s["skipped"])
     return out
 

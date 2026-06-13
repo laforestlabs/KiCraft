@@ -49,6 +49,12 @@ class BreakoutSpec:
     via_at_end:
         Drop a layer-changing via at the final point (to escape onto the other
         layer when this one is congested).
+    near_xy:
+        Disambiguates the pad when the footprint carries SEVERAL pads with the
+        same number (ESP32-class modules number every ground pad "GND"): the
+        matching pad nearest this board point (mm) is used. Without it the
+        first match wins -- which for a strand repair tied the wrong, already-
+        connected pad and silently left the stranded one (run_01/run_03).
     """
 
     ref: str
@@ -58,14 +64,23 @@ class BreakoutSpec:
     width_mm: float | None = None
     layer: str = "F.Cu"
     via_at_end: bool = False
+    near_xy: tuple[float, float] | None = None
 
 
-def _find_pad(board: "pcbnew.BOARD", ref: str, pad_number: str):
+def _find_pad(board: "pcbnew.BOARD", ref: str, pad_number: str,
+              near_xy: tuple[float, float] | None = None):
+    """The footprint's pad with *pad_number*; nearest to *near_xy* when several
+    pads share that number (module footprints number every ground pad "GND")."""
     for fp in board.GetFootprints():
         if fp.GetReferenceAsString() == ref:
-            for pad in fp.Pads():
-                if pad.GetNumber() == pad_number:
-                    return fp, pad
+            matches = [p for p in fp.Pads() if p.GetNumber() == pad_number]
+            if not matches:
+                return None, None
+            if near_xy is not None and len(matches) > 1:
+                matches.sort(key=lambda p: (
+                    (pcbnew.ToMM(p.GetPosition().x) - near_xy[0]) ** 2
+                    + (pcbnew.ToMM(p.GetPosition().y) - near_xy[1]) ** 2))
+            return fp, matches[0]
     return None, None
 
 
@@ -779,7 +794,7 @@ def add_breakout_stubs(
         return pcbnew.VECTOR2I(pcbnew.FromMM(xy[0]), pcbnew.FromMM(xy[1]))
 
     for spec in specs:
-        fp, pad = _find_pad(board, spec.ref, spec.pad)
+        fp, pad = _find_pad(board, spec.ref, spec.pad, spec.near_xy)
         if pad is None:
             summary["skipped"].append(f"{spec.ref}.{spec.pad}:pad_not_found")
             continue
