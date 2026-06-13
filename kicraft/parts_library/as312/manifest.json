@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:2083f122c71dd6d3639bd75dc399cdfe501f8c5de8010f08b0382bcb51e6f466",
+  "datasheet_url": "https://lcsc.com/product-detail/Infrared-Sensors_AS312_C90465.html",
+  "description": "AS312",
+  "footprint_name": "SENSORM-TH_3P_AS312",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "AS312",
+  "name": "as312",
+  "provenance": {
+    "added_at": "2026-06-13T01:19:07Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C90465"
+  },
+  "symbol_name": "AS312",
+  "tags": [
+    "pir",
+    "motion",
+    "sensor"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "PIR element needs a fresnel lens and a quiet supply (RC-filter VCC); digital output is slow (seconds-scale)."
+}

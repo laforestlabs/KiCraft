@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:5f4a34c36960e4a39692c19d19f92d90d54332c59ecf0fed824d114ebec533c9",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C504893.pdf",
+  "description": "VISHAY(\u5a01\u4e16) VEML7700-TR",
+  "footprint_name": "LED-SMD_4P-L6.8-W2.4_VEML7700-TR",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "VEML7700-TR",
+  "name": "veml7700",
+  "provenance": {
+    "added_at": "2026-06-13T01:30:18Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C504893"
+  },
+  "symbol_name": "VEML7700-TR",
+  "tags": [
+    "ambient-light",
+    "sensor",
+    "i2c"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Fixed I2C addr 0x10. Optical surface must stay clear: no soldermask, silk, or parts shadowing it."
+}

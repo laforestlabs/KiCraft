@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:527ffaa61a08626394560ece7acb83583f7b89b1818fbc8ee52f61b686493849",
+  "datasheet_url": "https://lcsc.com/product-detail/Others_Youtai-Semiconductor-Co-Ltd-DS18B20_C376006.html",
+  "description": "UMW(\u53cb\u53f0\u534a\u5bfc\u4f53) DS18B20(UMW)",
+  "footprint_name": "TO-92-3_L4.9-W3.7-P1.27-L",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "DS18B20(UMW)",
+  "name": "ds18b20",
+  "provenance": {
+    "added_at": "2026-06-13T01:31:05Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C376006"
+  },
+  "symbol_name": "DS18B20",
+  "tags": [
+    "temperature",
+    "sensor",
+    "1-wire",
+    "tht",
+    "to-92"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "1-Wire: DQ needs a 4.7k pull-up. TO-92 through-hole; lead spacing per footprint, watch orientation."
+}

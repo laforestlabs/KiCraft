@@ -110,8 +110,7 @@
       "package": "SMD 3.3x2.8mm",
       "selection_notes": "Everlight, responds across visible and IR. PD15-22B/TR8 (C161211, $0.10) is the IR-only twin. VBPW34S (C145262, $0.59) for large-area needs. PT17-21C ($0.06, 0805) is a phototransistor when gain beats linearity.",
       "sort_order": 110,
-      "default_mpn": "PD15-22C/TR8",
-      "default_lcsc": "C146236"
+      "bundle": "pd15-22c"
     },
     {
       "function_key": "adc-external",
@@ -121,8 +120,7 @@
       "package": "VSSOP-10",
       "selection_notes": "Cheaper than the 12-bit ADS1015IDGSR ($1.62) in the same snapshot, so the 16-bit part wins on both price and resolution.",
       "sort_order": 120,
-      "default_mpn": "ADS1115IDGSR",
-      "default_lcsc": "C37593"
+      "bundle": "ads1115"
     },
     {
       "function_key": "hall-effect",
@@ -132,8 +130,7 @@
       "package": "SOT-23",
       "selection_notes": "Diodes Inc linear hall, well documented and stocked. OH49E (C49021369, $0.28) is a cheaper clone; SS49E (C85697) is the TO-92S through-hole classic. For a digital switch instead, use an omnipolar SOT-23 part like SLSS49E-3 (C2904393, $0.15).",
       "sort_order": 130,
-      "default_mpn": "AH49ENTR-G1",
-      "default_lcsc": "C314698"
+      "bundle": "ah49e"
     },
     {
       "function_key": "tof-distance",
@@ -143,8 +140,7 @@
       "package": "SMD-12 4.4x2.4mm",
       "selection_notes": "VL53L0X module-on-chip; the hobby standard. VL53L1CXV0FY/1 (C190004, $4.82) doubles the range to 4m.",
       "sort_order": 140,
-      "default_mpn": "VL53L0CXV0DH/1",
-      "default_lcsc": "C91199"
+      "bundle": "vl53l0x"
     },
     {
       "function_key": "accelerometer",
@@ -154,8 +150,7 @@
       "package": "LGA-12 2x2mm",
       "selection_notes": "Cheapest current-production 3-axis part. Stock was moderate (1.3K) at snapshot; LIS3DHTR (C15134, $1.09, 6.2K stock) is the better-stocked fallback. ADXL345 runs $3.45+.",
       "sort_order": 150,
-      "default_mpn": "LIS2DH12TR",
-      "default_lcsc": "C110926"
+      "bundle": "lis2dh12"
     },
     {
       "function_key": "gyroscope",
@@ -165,8 +160,7 @@
       "package": "LGA-14 2.5x3mm",
       "selection_notes": "Standalone gyros are effectively EOL at LCSC (L3GD20 unstocked, A3G4250D stock 18 at snapshot), so this row deliberately points at the 6-axis IMU default.",
       "sort_order": 160,
-      "default_mpn": "LSM6DS3TR-C",
-      "default_lcsc": "C967633"
+      "bundle": "lsm6ds3tr-c"
     },
     {
       "function_key": "imu-6axis",
@@ -176,8 +170,7 @@
       "package": "LGA-14 2.5x3mm",
       "selection_notes": "82K stock at $1.54. QMI8658A (C3021082, $1.62, 54K stock) is a close second. MPU-6050 is EOL and now $14.92 at LCSC; avoid in new designs.",
       "sort_order": 170,
-      "default_mpn": "LSM6DS3TR-C",
-      "default_lcsc": "C967633"
+      "bundle": "lsm6ds3tr-c"
     },
     {
       "function_key": "pir",
@@ -187,8 +180,7 @@
       "package": "THT, TO-5 style",
       "selection_notes": "Integrated digital pyro sensor (through-hole). AM312 had no stock at snapshot. BISS0001 (C404323, $0.11) is the analog-controller route when paired with a bare pyro element.",
       "sort_order": 180,
-      "default_mpn": "AS312",
-      "default_lcsc": "C90465"
+      "bundle": "as312"
     },
     {
       "function_key": "stepper-driver",
@@ -301,8 +293,7 @@
       "package": "SMD-6P 3x3mm",
       "selection_notes": "The Adafruit breakout favorite because it is a fraction of Sensirion pricing. SHT40-CD1B-R3 (C7461852, $1.89) or SHT30 (~$2.8-3.0) when accuracy specs matter; DHT20 is the same die in SIP-4.",
       "sort_order": 190,
-      "default_mpn": "AHT20",
-      "default_lcsc": "C2757850"
+      "bundle": "aht20"
     },
     {
       "function_key": "pressure-sensor",
@@ -312,8 +303,7 @@
       "package": "LGA-10 2x2mm",
       "selection_notes": "Genuine BMP280 has drifted to $6.87 with 4.5K stock, so the newer BMP388 wins on every axis (29K stock). BME280 ($6.36) adds humidity, but AHT20 + BMP388 together is cheaper. BMP390/BMP581 unstocked at snapshot.",
       "sort_order": 200,
-      "default_mpn": "BMP388",
-      "default_lcsc": "C779278"
+      "bundle": "bmp388"
     },
     {
       "function_key": "ambient-light",
@@ -323,8 +313,7 @@
       "package": "SMD-4P",
       "selection_notes": "Adafruit's current lux pick and the price winner. BH1750FVI-TR (C78960, $0.93, 36K stock) is the GY-302 classic with deeper stock; OPT3001 (C90462, $1.23) the TI option.",
       "sort_order": 210,
-      "default_mpn": "VEML7700-TR",
-      "default_lcsc": "C504893"
+      "bundle": "veml7700"
     },
     {
       "function_key": "magnetometer",
@@ -334,8 +323,7 @@
       "package": "WLP-4 0.8x0.8mm",
       "selection_notes": "Adafruit's current magnetometer chip and by far the cheapest stocked compass. Mind the tiny 0.8mm WLP (machine assembly only); QMC5883P (C2847467, $1.53, LGA-16 3x3) when a friendlier package is worth 5x the price. With imu-6axis this covers 9-DOF, which is why pricey fusion parts (BNO055 $10) are not defaulted.",
       "sort_order": 220,
-      "default_mpn": "MMC5603NJ",
-      "default_lcsc": "C404328"
+      "bundle": "mmc5603nj"
     },
     {
       "function_key": "temp-sensor-1wire",
@@ -345,8 +333,7 @@
       "package": "TO-92",
       "selection_notes": "The probe-able hobby classic (waterproof probe assemblies everywhere). UMW second source at half the genuine price (DS18B20+ C9753, $1.20). For on-board I2C temperature, TMP102 (C99269, $0.32) or the temp-humidity row.",
       "sort_order": 230,
-      "default_mpn": "DS18B20 (UMW)",
-      "default_lcsc": "C376006"
+      "bundle": "ds18b20"
     },
     {
       "function_key": "cap-touch",
@@ -356,8 +343,7 @@
       "package": "SOT-23-6",
       "selection_notes": "The jellybean inside every cheap touch module. AT42QT1010 (C74512, $1.31) is the SparkFun/Adafruit name brand; MPR121QR2 (C91322, $2.67) for 12 pads.",
       "sort_order": 240,
-      "default_mpn": "TTP223-TD",
-      "default_lcsc": "C42422128"
+      "bundle": "ttp223"
     },
     {
       "function_key": "i2s-microphone",
@@ -367,8 +353,7 @@
       "package": "LGA-5 2.7x3.5mm",
       "selection_notes": "For ESP32 voice projects. The breakout classics are gone at LCSC (INMP441 and SPH0645 unstocked); name-brand ICS-43434 is $6.77. MEMSensing MSM261 series is the stocked current standard.",
       "sort_order": 250,
-      "default_mpn": "MSM261DDB020",
-      "default_lcsc": "C27636198"
+      "bundle": "msm261d"
     },
     {
       "function_key": "dc-motor-driver",

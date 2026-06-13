@@ -1,0 +1,31 @@
+{
+  "content_hash": "sha256:9a1188feeb25ce5167e5b2cda48b14fb9d01c977ed2feee756f141d153d866c6",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C967633.pdf",
+  "description": "ST(\u610f\u6cd5\u534a\u5bfc\u4f53) LSM6DS3TR-C",
+  "footprint_name": "LGA-14_L3.0-W2.5-P0.50-TL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "LSM6DS3TR-C",
+  "name": "lsm6ds3tr-c",
+  "provenance": {
+    "added_at": "2026-06-13T01:18:44Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C967633"
+  },
+  "symbol_name": "LSM6DS3TR-C",
+  "tags": [
+    "imu",
+    "gyroscope",
+    "accelerometer",
+    "6-axis",
+    "i2c",
+    "lga"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "LGA-14: reflow only. SDO/SA0 sets the I2C address; mount away from board flex and vibration sources for clean data."
+}

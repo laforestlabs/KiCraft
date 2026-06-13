@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:5dc61c5fa2b3dbfb676d7db83e3d7098080876be7b434c189d5d70f54c2a9c6d",
+  "datasheet_url": "https://lcsc.com/product-detail/Magnetic-Sensors_MEMSIC-MMC5603NJ_C404328.html",
+  "description": "MEMSIC(\u7f8e\u65b0) MMC5603NJ",
+  "footprint_name": "FLIPCHIP-4_L0.8-W0.8-R2-C2-P0.40-TL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "MMC5603NJ",
+  "name": "mmc5603nj",
+  "provenance": {
+    "added_at": "2026-06-13T01:30:42Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C404328"
+  },
+  "symbol_name": "MMC5603NJ",
+  "tags": [
+    "magnetometer",
+    "compass",
+    "sensor",
+    "i2c",
+    "wlp"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "WLP package: machine assembly only. Keep away from ferromagnetic parts and high-current traces (field distortion)."
+}

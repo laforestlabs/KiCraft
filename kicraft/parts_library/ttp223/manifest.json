@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:e1776a8aed3f9a657981bdd7527bbb26aac57895e3a18beed76a654f1bf8ac6f",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C42422128.pdf",
+  "description": "TDSEMIC(\u62d3\u7535\u534a\u5bfc\u4f53) TTP223-TD",
+  "footprint_name": "SOT-23-6_L2.9-W1.6-P0.95-LS2.9-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "TTP223-TD",
+  "name": "ttp223",
+  "provenance": {
+    "added_at": "2026-06-13T01:31:28Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C42422128"
+  },
+  "symbol_name": "TTP223-TD",
+  "tags": [
+    "cap-touch",
+    "touch",
+    "sensor",
+    "sot-23-6"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Touch input ties to a copper pad via ~1k series R; sensitivity set by pad size and the optional cap on the pin; keep the pad clear of ground pour."
+}
