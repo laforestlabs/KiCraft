@@ -204,9 +204,6 @@ def _format_core_defaults_block(rows) -> str | None:
         "add_part_from_lcsc or lookup_lcsc_id for these.",
         "- Passive series rows (no C-number) name the package to use with stock "
         "Device:R / Device:C symbols.",
-        # Transitional: deleted once every non-passive row is bundle-backed.
-        "- Remaining rows (LCSC id, no bundle): call add_part_from_lcsc with the "
-        "given C-number (one call, no searching).",
         "",
         "| function_key | block | qualifier | default part | LCSC | package | bundle |",
         "|---|---|---|---|---|---|---|",
