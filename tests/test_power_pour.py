@@ -355,10 +355,116 @@ def test_power_strand_repair_disabled_is_noop(tmp_path):
     res = repair_stranded_power(
         path, ["5V"],
         {"gnd_zone_net": "GND", "power_strand_repair_enabled": False})
-    assert res == {"nets": [], "stranded": 0, "tied": 0, "skipped": []}
+    assert res == {"nets": [], "stranded": 0, "tied": 0, "skipped": [],
+                   "unresolved": 0}
     board = pcbnew.LoadBoard(path)
     assert not [t for t in board.GetTracks()
                 if not isinstance(t, pcbnew.PCB_VIA) and t.GetNetname() == "5V"]
+
+
+def _same_number_pads_board(path, *, stranded_layer=pcbnew.F_Cu):
+    """run_01/run_03 ESP32-module shape: U2 carries TWO pads both numbered
+    "GND". The first-in-iteration one sits ON the main cluster (with a via);
+    the far one is stranded. ``_find_pad``'s first-match used to tie the
+    already-connected pad and report success while the strand stayed."""
+    board = pcbnew.NewBoard(path)
+    for name in ("GND", "SIG"):
+        board.Add(pcbnew.NETINFO_ITEM(board, name))
+
+    def net(n):
+        return board.GetNetInfo().GetNetItem(n)
+
+    corners = [(0, 0), (30, 0), (30, 20), (0, 20), (0, 0)]
+    for (x1, y1), (x2, y2) in zip(corners, corners[1:]):
+        seg = pcbnew.PCB_SHAPE(board)
+        seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        seg.SetStart(pcbnew.VECTOR2I(_mm(x1), _mm(y1)))
+        seg.SetEnd(pcbnew.VECTOR2I(_mm(x2), _mm(y2)))
+        seg.SetLayer(pcbnew.Edge_Cuts)
+        board.Add(seg)
+
+    fp = pcbnew.FOOTPRINT(board)
+    fp.SetReference("U2")
+    board.Add(fp)
+    for x, y, layer in ((8.0, 10.0, pcbnew.F_Cu), (22.0, 10.0, stranded_layer)):
+        pad = pcbnew.PAD(fp)
+        pad.SetSize(pcbnew.VECTOR2I(_mm(1.0), _mm(1.0)))
+        pad.SetPosition(pcbnew.VECTOR2I(_mm(x), _mm(y)))
+        pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        pad.SetLayerSet(pcbnew.PAD.SMDMask() if layer == pcbnew.F_Cu
+                        else pcbnew.PAD.SMDMask().FlipStandardLayers())
+        pad.SetNumber("GND")
+        pad.SetNet(net("GND"))
+        fp.Add(pad)
+    via = pcbnew.PCB_VIA(board)
+    via.SetPosition(pcbnew.VECTOR2I(_mm(8.0), _mm(10.0)))
+    via.SetDrill(_mm(0.3))
+    try:
+        via.SetWidth(_mm(0.6))
+    except TypeError:
+        via.SetWidth(pcbnew.F_Cu, _mm(0.6))
+    via.SetNet(net("GND"))
+    board.Add(via)
+    board.Save(path)
+    return path
+
+
+def test_strand_repair_ties_the_stranded_same_number_pad(tmp_path):
+    # run_01 ESP32-S3 regression: 13 module pads all numbered "GND"; the
+    # repair must tie the STRANDED one, not the first number-match (which is
+    # already on the main plane -- a zero-length no-op that reported "tied").
+    path = str(tmp_path / "b.kicad_pcb")
+    _same_number_pads_board(path)
+    res = repair_stranded_gnd(path, {"gnd_zone_net": "GND"})
+    assert res["stranded"] == 1 and res["tied"] == 1, res
+    assert res["unresolved"] == 0, res
+    board = pcbnew.LoadBoard(path)
+    gnd_tracks = [t for t in board.GetTracks()
+                  if not isinstance(t, pcbnew.PCB_VIA) and t.GetNetname() == "GND"]
+    assert len(gnd_tracks) == 1
+    xs = sorted([pcbnew.ToMM(gnd_tracks[0].GetStart().x),
+                 pcbnew.ToMM(gnd_tracks[0].GetEnd().x)])
+    assert xs == [pytest.approx(8.0), pytest.approx(22.0)]
+
+
+def test_strand_repair_skips_layer_unreachable_tie(tmp_path):
+    # A B.Cu-only stranded pad with no via bridge cannot legally tie to an
+    # F.Cu-only target: the old code stamped the F.Cu track anyway (dead
+    # copper starting under a B.Cu pad) and claimed success. Now it must
+    # skip, stamp nothing, and report the strand as unresolved.
+    path = str(tmp_path / "b.kicad_pcb")
+    _same_number_pads_board(path, stranded_layer=pcbnew.B_Cu)
+    board = pcbnew.LoadBoard(path)
+    for t in list(board.GetTracks()):  # drop the via: F.Cu pad+nothing main
+        board.Remove(t)
+    board.Save(path)
+    res = repair_stranded_gnd(path, {"gnd_zone_net": "GND"})
+    assert res["tied"] == 0, res
+    assert res["unresolved"] == 1, res
+    assert any("no_clear_path" in s for s in res["skipped"]), res
+    board = pcbnew.LoadBoard(path)
+    assert not [t for t in board.GetTracks()
+                if not isinstance(t, pcbnew.PCB_VIA) and t.GetNetname() == "GND"]
+
+
+def test_strand_repair_via_bridge_allows_far_layer_tie(tmp_path):
+    # The escape-stitch shape: an F.Cu stranded pad WITH a via at its centre
+    # may tie on B.Cu through that via when the target only has B.Cu copper.
+    path = str(tmp_path / "b.kicad_pcb")
+    _same_number_pads_board(path, stranded_layer=pcbnew.B_Cu)
+    board = pcbnew.LoadBoard(path)
+    via = pcbnew.PCB_VIA(board)
+    via.SetPosition(pcbnew.VECTOR2I(_mm(22.0), _mm(10.0)))
+    via.SetDrill(_mm(0.3))
+    try:
+        via.SetWidth(_mm(0.6))
+    except TypeError:
+        via.SetWidth(pcbnew.F_Cu, _mm(0.6))
+    via.SetNet(board.GetNetInfo().GetNetItem("GND"))
+    board.Add(via)
+    board.Save(path)
+    res = repair_stranded_gnd(path, {"gnd_zone_net": "GND"})
+    assert res["tied"] == 1 and res["unresolved"] == 0, res
 
 
 def test_power_strand_repair_autodetects_poured_rails(tmp_path):

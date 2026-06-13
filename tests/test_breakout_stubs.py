@@ -821,3 +821,30 @@ def test_tip_via_near_same_net_via_is_skipped_or_blocked(tmp_path):
         ref="J1", pad="B5", waypoints=[(10.0, 10.0)], via_at_end=True)])
     assert res["stubs"] == 0 and res["segments"] == 0
     assert any("via_blocked" in s for s in res["skipped"])
+
+
+def test_near_xy_disambiguates_same_number_pads(tmp_path):
+    # ESP32-class modules number every ground pad "GND": a spec must reach the
+    # pad NEAREST near_xy, not the first number-match (the strand-repair
+    # wrong-pad signature). Without near_xy the first match still wins.
+    path = str(tmp_path / "b.kicad_pcb")
+    _board(path, (5.0, 10.0), {"B5": ("GND", 8.0, 10.0)})
+    board = pcbnew.LoadBoard(path)
+    fp = board.GetFootprints()[0]
+    dup = pcbnew.PAD(fp)
+    dup.SetSize(pcbnew.VECTOR2I(_mm(0.3), _mm(1.0)))
+    dup.SetPosition(pcbnew.VECTOR2I(_mm(8.0), _mm(20.0)))
+    dup.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+    dup.SetLayerSet(pcbnew.PAD.SMDMask())
+    dup.SetNumber("B5")
+    dup.SetNet(board.GetNetInfo().GetNetItem("GND"))
+    fp.Add(dup)
+    board.Save(path)
+
+    res = add_breakout_stubs(path, [BreakoutSpec(
+        ref="J1", pad="B5", waypoints=[(12.0, 20.0)], near_xy=(8.0, 20.0))])
+    assert res["stubs"] == 1, res
+    board = pcbnew.LoadBoard(path)
+    trk = [t for t in board.GetTracks() if not isinstance(t, pcbnew.PCB_VIA)][0]
+    ys = sorted([pcbnew.ToMM(trk.GetStart().y), pcbnew.ToMM(trk.GetEnd().y)])
+    assert ys == [pytest.approx(20.0), pytest.approx(20.0)]
