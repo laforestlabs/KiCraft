@@ -19,8 +19,8 @@ def test_resolve_part_embedded_id_manifest_mpn_kw_and_none():
     # 2. a curated-bundle part ("<lib>:<name>") resolves to its manifest LCSC id --
     #    the exact part -- ahead of an MPN keyword search (which is also blocked).
     assert web._resolve_part(
-        {"symbol": "tp4056:TP4056", "footprint": "tp4056:ESOP-8",
-         "mpn": "TP4056-42-ESOP8"}) == ("id", "C16581")
+        {"symbol": "tp4056:TP4056_C725790", "footprint": "tp4056:ESOP-8",
+         "mpn": "TP4056"}) == ("id", "C725790")
     # 3. a non-bundle part with an MPN falls back to an MPN search
     assert web._resolve_part(
         {"symbol": "x:CHIP", "footprint": "x:QFN", "mpn": "SOMEMPN-123"}) == ("mpn", "SOMEMPN-123")

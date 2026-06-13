@@ -1,23 +1,23 @@
 {
-  "content_hash": "sha256:6450a4c2ba82bae91aa72f28eb47e2a8e58366ff6c137ac9dc9bcf2593f383fd",
-  "datasheet_url": "https://lcsc.com/product-detail/PMIC-Battery-Management_TP4056_C16581.html",
-  "description": "Top Power TP4056-42-ESOP8 \u2014 single-cell Li-ion/LiPo linear charger IC with constant-current/constant-voltage profile and thermal shutdown. 4.2 V termination, charge current set by PROG resistor (1.2 V / I_charge). The default cheap-and-cheerful maker LiPo charger.",
+  "content_hash": "sha256:266c22021e986e9eb4df0561d62f3a5ab9c274e1a1e7024ca0bfd2994db8daca",
+  "datasheet_url": "https://lcsc.com/product-detail/PMIC-Battery-Management_UMW-Youtai-Semiconductor-Co-Ltd-TP4056_C725790.html",
+  "description": "UMW(\u53cb\u53f0\u534a\u5bfc\u4f53) TP4056",
   "footprint_name": "ESOP-8_L4.9-W3.9-P1.27-LS6.0-BL-EP",
   "kicad_version_min": "9.0.0",
   "maturity": "production",
-  "mpn": "TP4056-42-ESOP8",
+  "mpn": "TP4056",
   "name": "tp4056",
   "provenance": {
-    "added_at": "2026-05-22T18:26:40Z",
+    "added_at": "2026-06-13T01:55:40Z",
     "kicad_version": "9.0.0",
-    "source": "vendored",
+    "source": "easyeda2kicad",
     "source_project_stem": null
   },
   "schema_version": "1",
   "sourcing": {
-    "lcsc": "C16581"
+    "lcsc": "C725790"
   },
-  "symbol_name": "TP4056",
+  "symbol_name": "TP4056_C725790",
   "tags": [
     "charger",
     "lipo",
@@ -26,5 +26,5 @@
     "single-cell"
   ],
   "version": "0.1.0",
-  "watch_out_for": "ESOP-8 thermal pad MUST be soldered to a copper pour for the rated charge current \u2014 uncovered, it derates hard at >300 mA. Rprog = 1200 / I_charge_mA (k\u03a9); e.g. 1.2 k\u03a9 \u2192 1 A. No battery-protection circuitry inside \u2014 pair with a separate DW01-class IC + FET for OV/UV/OC protection on the cell."
+  "watch_out_for": "ESOP-8 thermal pad MUST be soldered to a copper pour for rated current (derates hard uncovered). Rprog = 1200 / I_charge_mA (kOhm). No cell protection inside: pair with a DW01-class IC + FET."
 }

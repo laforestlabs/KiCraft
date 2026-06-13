@@ -852,23 +852,16 @@ def demo_events() -> list[dict]:
     ev.append({"kind": "tool", "name": "list_parts", "args": {}})
     ev.append({"kind": "tool_result", "name": "list_parts",
                "output": "usb-c-16p   TYPE-C-31-M-12   USB-C receptacle, 16-pin\n"
+                         "tp4056      TP4056_C725790   1A Li-ion charger, ESOP-8\n"
                          "Device:R    Resistor_SMD:R_0603_1608Metric\n"
                          "Device:C    Capacitor_SMD:C_0603_1608Metric\n"
-                         "Device:LED  LED_SMD:LED_0603_1608Metric\n... 14 bundles"})
-    ev += think("USB-C receptacle is covered by usb-c-16p. The TP4056 charger is not ",
-                "in the library, so resolve it from LCSC and fetch the bundle.")
-    ev.append({"kind": "tool", "name": "lookup_lcsc_id", "args": {"mpn": "TP4056"}})
-    ev.append({"kind": "tool_result", "name": "lookup_lcsc_id",
-               "output": '{"ok": true, "lcsc": "C16581", "desc": "TP4056 1A Li-ion charger, SOP-8"}'})
-    ev.append({"kind": "tool", "name": "add_part_from_lcsc",
-               "args": {"lcsc_id": "C16581", "name": "tp4056"}})
-    ev.append({"kind": "tool_result", "name": "add_part_from_lcsc",
-               "output": "add-part exit=0\nfetched tp4056 (symbol + footprint SOP-8)\n\n"
-                         "CURRENT PARTS LIBRARY:\n  tp4056:TP4056   tp4056:SOP-8_3.9x4.9\n"
-                         "  usb-c-16p:TYPE-C-31-M-12 ...   (15 bundles total)"})
-    ev += think("Good, all symbols and footprints resolve. Emit the BOM slot JSON.")
+                         "Device:LED  LED_SMD:LED_0603_1608Metric\n... 55 bundles"})
+    ev += think("Both the USB-C receptacle and the charger are vendored bundles ",
+                "(tp4056 is the lipo-charger-1s core default), so nothing needs ",
+                "fetching: take the exact ids from list_parts verbatim.")
+    ev += think("All symbols and footprints resolve. Emit the BOM slot JSON.")
     ev += answer('{"parts": [{"ref": "U1", "value": "TP4056", ',
-                 '"symbol": "tp4056:TP4056", "footprint": "tp4056:SOP-8", "sheet": "MAIN"}, ',
+                 '"symbol": "tp4056:TP4056_C725790", "footprint": "tp4056:ESOP-8", "sheet": "MAIN"}, ',
                  '{"ref": "J1", "value": "USB-C", "symbol": "usb-c-16p:TYPE-C-31-M-12", ',
                  '"footprint": "usb-c-16p:TYPE-C", "sheet": "MAIN"}]}')
     ev.append({"kind": "stage_done", "stage": "bom", "ok": True, "cost": 0.0431, "attempts": 1})
