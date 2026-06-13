@@ -141,7 +141,7 @@ def test_passing_gate_promotes_and_exports(project, tmp_path, monkeypatch):
         zip_path = Path(project_dir) / "fab.zip"
         zip_path.write_text("zip", encoding="utf-8")
         return {"zip": str(zip_path), "files": ["a.gbr"], "fab_dir": project_dir,
-                "bom_csv": None}
+                "bom_csv": None, "step": None, "board_3d_png": None}
 
     import kicraft.design.synthesis.fab_export as fab_export
     monkeypatch.setattr(fab_export, "export_fab", fake_export)
@@ -210,7 +210,7 @@ def test_cmd_manual_route_end_to_end_with_stubbed_router(tmp_path, monkeypatch):
         zp = Path(project_dir) / "fab.zip"
         zp.write_text("zip", encoding="utf-8")
         return {"zip": str(zp), "files": ["a.gbr"], "fab_dir": project_dir,
-                "bom_csv": None}
+                "bom_csv": None, "step": None, "board_3d_png": None}
 
     monkeypatch.setattr(fab_export, "export_fab", fake_export)
 

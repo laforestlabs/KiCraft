@@ -611,6 +611,8 @@ class ArtifactPaths(BaseModel):
     custom_footprint_dir: Path | None = None
     routed_pcb: Path | None = None  # set by `build`: promoted fully-routed board
     fab_zip: Path | None = None  # set by `build`: zipped Gerber/drill/CPL/BOM package
+    step_file: Path | None = None  # set by `build`: STEP export of the assembled board
+    board_3d_png: Path | None = None  # set by `build`: rendered 3D view of the board
     status: str = "ok"  # "ok" if all §9 checks passed, else "failed"
 
 

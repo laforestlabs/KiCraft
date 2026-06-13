@@ -5,8 +5,10 @@ into a JLCPCB/OSHPark-ready package:
 
 * Gerber X2 for the standard fab layer stack (copper, mask, silk, paste, edge),
 * Excellon drill files (+ a drill map, PTH/NPTH separated),
-* a CSV placement / CPL file, and
-* a BOM CSV derived from the BOM slot,
+* a CSV placement / CPL file,
+* a BOM CSV derived from the BOM slot, and
+* best-effort 3D outputs: a STEP model and a rendered PNG of the assembled
+  board (``kicad-cli pcb export step`` / ``pcb render``; never fail the build),
 
 all collected under ``<out_dir>/fab/`` and zipped to
 ``<out_dir>/<stem>_fab_<UTCdate>.zip``.
@@ -15,7 +17,9 @@ from __future__ import annotations
 
 import csv
 import re
+import shutil
 import subprocess
+import sys
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,8 +33,8 @@ _FAB_LAYERS = (
 _LCSC_RE = re.compile(r"\bC\d{4,}\b")
 
 
-def _run(cmd: list[str]) -> None:
-    r = subprocess.run(cmd, capture_output=True, text=True)
+def _run(cmd: list[str], timeout: float | None = None) -> None:
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
         raise RuntimeError(
             f"{' '.join(cmd[:5])} ... failed (rc={r.returncode}): "
@@ -62,11 +66,18 @@ def export_fab(
     *,
     bom_parts: list[dict[str, Any]] | None = None,
     fab_layers: str = _FAB_LAYERS,
+    include_3d: bool = True,
 ) -> dict[str, Any]:
     """Export Gerbers/drill/CPL/BOM from a routed PCB and zip them.
 
-    Returns {fab_dir, zip, files, bom_csv}. Raises RuntimeError if any
-    kicad-cli step fails.
+    With ``include_3d`` (the default) also exports a STEP model
+    (``<stem>.step``, models substituted from the footprints' WRL refs) and
+    a rendered PNG of the assembled board (``board_3d.png``); both land in
+    the zip. The 3D outputs are best-effort: the gerbers are the
+    deliverable, so a STEP/render failure warns and continues.
+
+    Returns {fab_dir, zip, files, bom_csv, step, board_3d_png}. Raises
+    RuntimeError if any non-3D kicad-cli step fails.
     """
     pcb_path = str(pcb_path)
     out = Path(out_dir)
@@ -96,6 +107,43 @@ def export_fab(
         bom_csv = fab / "bom.csv"
         _write_bom_csv(bom_csv, bom_parts)
 
+    step_path: Path | None = None
+    render_path: Path | None = None
+    if include_3d:
+        step_candidate = fab / f"{stem}.step"
+        try:
+            _run([
+                _KICAD_CLI, "pcb", "export", "step",
+                "--subst-models", "--force",
+                "-o", str(step_candidate), pcb_path,
+            ], timeout=300)
+            step_path = step_candidate
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            print(f"fab: STEP export failed, continuing without: {exc}",
+                  file=sys.stderr)
+
+        render_candidate = fab / "board_3d.png"
+        # Never let a failed re-render resurrect a stale image into the zip.
+        render_candidate.unlink(missing_ok=True)
+        render_cmd = [
+            _KICAD_CLI, "pcb", "render", "-o", str(render_candidate),
+            "--quality", "high", "--background", "opaque",
+            "--rotate", "-30,0,30", "--zoom", "0.9",
+            "-w", "1600", "-h", "1200", pcb_path,
+        ]
+        try:
+            try:
+                _run(render_cmd, timeout=300)
+            except (RuntimeError, subprocess.TimeoutExpired):
+                # Headless boxes have no GL context; xvfb-run provides one.
+                if not shutil.which("xvfb-run"):
+                    raise
+                _run(["xvfb-run", "-a", *render_cmd], timeout=300)
+            render_path = render_candidate
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            print(f"fab: 3D render failed, continuing without: {exc}",
+                  file=sys.stderr)
+
     ts = datetime.now(timezone.utc).strftime("%Y%m%d")
     zip_path = out / f"{stem}_fab_{ts}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -109,4 +157,6 @@ def export_fab(
         "zip": str(zip_path),
         "files": files,
         "bom_csv": str(bom_csv) if bom_csv else None,
+        "step": str(step_path) if step_path else None,
+        "board_3d_png": str(render_path) if render_path else None,
     }
