@@ -922,9 +922,9 @@
 			)
 		)
 		(embedded_fonts no)
-		(model "/WIFI-SMD_L25.5-W18.0-H3.1-ESP32-WROOM-32E.wrl"
+		(model "${KIPRJMOD}/3dmodels/esp32-wroom-32e-n4/WIFI-SMD_L25.5-W18.0-H3.1-ESP32-WROOM-32E.wrl"
 			(offset
-				(xyz 0 0 0)
+				(xyz -7.56 0 0)
 			)
 			(scale
 				(xyz 1 1 1)
@@ -2776,7 +2776,7 @@
 			(uuid "14cf5e7f-3c51-4b25-a728-4f86c91174bb")
 		)
 		(embedded_fonts no)
-		(model "/SOT-223-4P_L6.5-W3.5-H1.6-LS7.0-P2.30.wrl"
+		(model "${KIPRJMOD}/3dmodels/ams1117-3v3/SOT-223-4P_L6.5-W3.5-H1.6-LS7.0-P2.30.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -4898,7 +4898,7 @@
 			(uuid "d7309aba-e346-442e-8649-99bf099cf806")
 		)
 		(embedded_fonts no)
-		(model "/USB-C_SMD-TYPE-C-31-M-12_1.wrl"
+		(model "${KIPRJMOD}/3dmodels/usb-c-16p/USB-C_SMD-TYPE-C-31-M-12_1.wrl"
 			(offset
 				(xyz 0 0 0)
 			)

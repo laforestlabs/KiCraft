@@ -1230,7 +1230,9 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
         if arts:
             secs.append({"type": "kv", "title": "Artifacts", "rows": [
                 ("status", arts.get("status", "")),
-                ("fab package", "ready" if arts.get("fab_zip") else "pending")]})
+                ("fab package", "ready" if arts.get("fab_zip") else "pending"),
+                ("STEP model", "ready" if arts.get("step_file") else "pending"),
+                ("3D render", "ready" if arts.get("board_3d_png") else "pending")]})
         log = _build_lines_for("fab", build_lines)
         if log:
             secs.append({"type": "list", "title": "Fab export", "items": log})
@@ -6182,6 +6184,16 @@ def index(prompt: str = "", project: str = ""):
                                 stg, sj, rs, project_dir, view["build_lines"]))
                         if state["zip"]:
                             with tabs.view_slot("fab"):
+                                # Assembled-board 3D render from the fab stage
+                                # (best-effort artifact: absent when kicad-cli
+                                # render failed; the package is still complete).
+                                png = (project_dir / "fab" / "board_3d.png"
+                                       if project_dir else None)
+                                if png is not None and png.is_file() and state["token"]:
+                                    ui.image(
+                                        f"/project/{state['token']}/render/fab/"
+                                        f"board_3d.png?v={int(png.stat().st_mtime)}"
+                                    ).classes("w-full max-w-3xl rounded-borders q-mb-sm")
                                 ui.button("Download KiCad project (.zip)", icon="download",
                                           on_click=lambda: ui.download(state["zip"])) \
                                     .props("color=positive")

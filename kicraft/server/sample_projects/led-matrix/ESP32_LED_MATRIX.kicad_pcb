@@ -527,7 +527,7 @@
 			(uuid "9e349286-c3e1-492e-9a7f-5fbedee6665e")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -776,7 +776,7 @@
 			(uuid "423a6005-bb32-458b-814d-91ca4f04e63d")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -1025,7 +1025,7 @@
 			(uuid "31ee8d1f-0857-4fea-925e-f056b8adce97")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -1274,7 +1274,7 @@
 			(uuid "4dbea292-ee3c-4d3a-bbed-7f3d0eaa2735")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -1523,7 +1523,7 @@
 			(uuid "a6a30b86-f992-4656-a5b7-2a0306e8a921")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -1772,7 +1772,7 @@
 			(uuid "7037619a-d766-4451-98d9-b27bf02eaa9e")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -2021,7 +2021,7 @@
 			(uuid "2fc45923-8121-41ff-b1c8-c80403d7dc04")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -2270,7 +2270,7 @@
 			(uuid "22dc7658-68c9-42a9-96cd-19ad22d879be")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -2519,7 +2519,7 @@
 			(uuid "c13c713a-2f5a-4650-b4aa-2fcf1c3da9a2")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -2768,7 +2768,7 @@
 			(uuid "2c44233d-bab2-4ab9-8a07-5fdf8951c31a")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -3017,7 +3017,7 @@
 			(uuid "812a4795-0d54-4a08-a5cc-afeb86e96e1f")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -3401,7 +3401,7 @@
 			(uuid "3878838c-29de-4e84-9978-d9c841fe25e6")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -3650,7 +3650,7 @@
 			(uuid "697734ae-5ccb-4671-bd3b-6400818a52a5")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -4228,7 +4228,7 @@
 			(uuid "a2e1ee33-f222-4ca3-b363-4a8e80a979ba")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -4477,7 +4477,7 @@
 			(uuid "892cc6c4-9468-45d2-a467-e54c7b87645d")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -4726,7 +4726,7 @@
 			(uuid "ec4b9b4a-cd52-4808-bcdd-0b6fd8366099")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -4975,7 +4975,7 @@
 			(uuid "9fed3819-273f-4b2e-85e0-cdf12403e210")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -5224,7 +5224,7 @@
 			(uuid "499957cd-7dbb-4747-ace3-76a6a2bbb833")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -5473,7 +5473,7 @@
 			(uuid "c2b8e3dc-e329-4d65-9128-35a8e7154921")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -5722,7 +5722,7 @@
 			(uuid "68ba6376-7d43-47c6-94c8-debddd3183c8")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -6106,7 +6106,7 @@
 			(uuid "ae842c62-c2c2-4b6d-aa16-d0468db23ed7")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -6355,7 +6355,7 @@
 			(uuid "377e7306-aed2-4989-9302-a0aaeb51fa83")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -6604,7 +6604,7 @@
 			(uuid "318341d2-3db1-4a38-93e6-58f29e2e59d8")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -6853,7 +6853,7 @@
 			(uuid "a1c6b939-1ba5-46db-b9ff-476bbad74d83")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -7102,7 +7102,7 @@
 			(uuid "b5635e9a-5292-4ff6-9b7a-3c8d458c8c83")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -7351,7 +7351,7 @@
 			(uuid "1c1485ba-928f-4b3e-b0b2-11ba9c5bf0fd")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -7600,7 +7600,7 @@
 			(uuid "add8a8f7-7099-4efb-8e96-9ef0e4d5439d")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -8087,7 +8087,7 @@
 			(uuid "c35f0b91-4b77-43c0-a8a3-98f93a475bbe")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -8335,7 +8335,7 @@
 			(uuid "bb492f29-07b0-4064-9017-9895cc6a4869")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -8584,7 +8584,7 @@
 			(uuid "f21e580f-70de-4954-ba84-0e47167e79f6")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -8833,7 +8833,7 @@
 			(uuid "e78261de-a25c-442e-815c-1218268b0bab")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -9217,7 +9217,7 @@
 			(uuid "928bb842-67cb-49a6-8f84-ff143c005b63")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -9466,7 +9466,7 @@
 			(uuid "d437c6a6-2a70-46d2-b612-9c661f66eb9f")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -9850,7 +9850,7 @@
 			(uuid "514c909f-439d-4259-9475-8335330863da")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -10099,7 +10099,7 @@
 			(uuid "479d9696-3831-47e9-a634-b1af5e16711c")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -10483,7 +10483,7 @@
 			(uuid "bb2a3319-d273-4cd7-aa49-8c8d77057478")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -10867,7 +10867,7 @@
 			(uuid "bd2b6b11-0511-4afa-ba9a-a246be98c63d")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -11116,7 +11116,7 @@
 			(uuid "cbff9db1-c6e9-4d7d-82cc-63d18b7f9134")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -11500,7 +11500,7 @@
 			(uuid "56624e7b-6dc4-4faa-a013-53540aef6c68")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -11749,7 +11749,7 @@
 			(uuid "ecbb488b-f5d4-400d-ac9c-15b63d577fd4")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -11998,7 +11998,7 @@
 			(uuid "35aa20a8-240b-4ba1-81f2-96078cbe0b75")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -12382,7 +12382,7 @@
 			(uuid "7f0a50f3-0b62-46ff-8a99-b0a249ee5436")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -12631,7 +12631,7 @@
 			(uuid "b41e8761-13b6-46cd-8b79-52d35b0a2aca")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -12880,7 +12880,7 @@
 			(uuid "b7acc6d0-a95a-4bb7-a236-831e1884938b")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -13129,7 +13129,7 @@
 			(uuid "95862b02-8fbb-4b7a-9399-25e5de99ee4a")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -13513,7 +13513,7 @@
 			(uuid "d1816b27-2074-4f2f-90fc-e880d72d53de")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -13897,7 +13897,7 @@
 			(uuid "b2a9212c-6153-4c92-95e7-05211eec16db")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -14146,7 +14146,7 @@
 			(uuid "0683b353-fdea-428a-949b-41394a90a07d")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -14395,7 +14395,7 @@
 			(uuid "f232a295-56fb-4830-bf61-98cdac8faacd")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -14644,7 +14644,7 @@
 			(uuid "cfc6be1c-6318-4c87-9d9c-2d25881403ce")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -15028,7 +15028,7 @@
 			(uuid "c051346e-c9d8-4b6e-982b-c76c75ea7881")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -15277,7 +15277,7 @@
 			(uuid "50b152dc-cf85-475b-8583-1e9a3d727c19")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -15526,7 +15526,7 @@
 			(uuid "65d41410-8e28-48d5-8ce9-4cb56ab0497b")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -15775,7 +15775,7 @@
 			(uuid "f2e9b947-5c8d-4fc0-9d31-0c1912ddace5")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -16024,7 +16024,7 @@
 			(uuid "76d34063-7b73-4b67-9817-9c97fb22da94")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -16273,7 +16273,7 @@
 			(uuid "3c8ab3f5-7a4f-4511-a454-b867126e1ddb")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -16522,7 +16522,7 @@
 			(uuid "7d02bbc3-f58f-414b-b392-6579911f1dce")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -16771,7 +16771,7 @@
 			(uuid "f117fbb3-bda6-4497-a9f1-b2ea2ebea430")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -17020,7 +17020,7 @@
 			(uuid "ae808365-be8e-45e4-9230-09c973ddc3bf")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -17269,7 +17269,7 @@
 			(uuid "7fe34b30-cceb-4d59-ace5-087d488a59e4")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -17518,7 +17518,7 @@
 			(uuid "4a818338-1b89-469b-aab6-741ac4dd2c32")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -17767,7 +17767,7 @@
 			(uuid "0a518b32-ceaf-4a12-a825-3cdef72a4ff1")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -18016,7 +18016,7 @@
 			(uuid "8a29458f-1642-4a4a-bc66-468e7faa2bfa")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -18265,7 +18265,7 @@
 			(uuid "5617406f-62b3-49d0-a320-9b8c3be3c7a7")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -18514,7 +18514,7 @@
 			(uuid "900fe2a9-cdb6-459e-947a-8046a7b42b85")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -18763,7 +18763,7 @@
 			(uuid "73f36e90-52d4-4377-9432-c89dc5d3686d")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -19012,7 +19012,7 @@
 			(uuid "6f29ce16-4dd0-4d1e-9a6a-b0f2e0a80639")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -19261,7 +19261,7 @@
 			(uuid "0e5891a4-f3b0-4503-bd4f-a8fc89e18919")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -19510,7 +19510,7 @@
 			(uuid "6e1594b8-5411-4afc-a23c-8188dc10b68a")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -19727,7 +19727,7 @@
 			(uuid "a31f2b46-f28a-4739-bf1a-1b6ec9b8c15c")
 		)
 		(embedded_fonts no)
-		(model "/SOT-223-4P_L6.5-W3.5-H1.6-LS7.0-P2.30.wrl"
+		(model "${KIPRJMOD}/3dmodels/ams1117-3v3/SOT-223-4P_L6.5-W3.5-H1.6-LS7.0-P2.30.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -19976,7 +19976,7 @@
 			(uuid "953036d6-d282-451c-9f8a-7919a5d77cf7")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -20225,7 +20225,7 @@
 			(uuid "dd1867c3-f8d6-49a4-ae90-2716d08663c7")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -20474,7 +20474,7 @@
 			(uuid "417be910-ab76-429a-a51f-e3c7ef6a30da")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -20723,7 +20723,7 @@
 			(uuid "cc68888a-1a1e-43ed-8bef-3ff9a500259d")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -21210,7 +21210,7 @@
 			(uuid "6b74e04c-a05c-4ead-a2f0-224c4e5a1603")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -21459,7 +21459,7 @@
 			(uuid "ae8e6473-cf36-472d-b9c6-9abe719e4a18")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -21708,7 +21708,7 @@
 			(uuid "ee473642-5819-43f7-86a9-9fc2297ea8df")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -21957,7 +21957,7 @@
 			(uuid "fc46f3bf-65b3-4165-befe-ec3648f66d48")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -22206,7 +22206,7 @@
 			(uuid "87e5d3e2-a73a-47b6-bb62-f8dd40a9a271")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -22455,7 +22455,7 @@
 			(uuid "4719e33d-f8e3-4107-953b-d6b547835f0e")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -22704,7 +22704,7 @@
 			(uuid "669602e1-a62f-4bda-993e-c4102d6abccc")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -22953,7 +22953,7 @@
 			(uuid "621a78ad-d05e-4e0f-aca2-7e8d6c17177b")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -23361,7 +23361,7 @@
 			(uuid "7f0325b6-d7d3-4c88-9c36-be18ddc466e6")
 		)
 		(embedded_fonts no)
-		(model "/USB-C_SMD-TYPE-C-31-M-12_1.wrl"
+		(model "${KIPRJMOD}/3dmodels/usb-c-16p/USB-C_SMD-TYPE-C-31-M-12_1.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -23610,7 +23610,7 @@
 			(uuid "ed1777ce-073a-437b-a76c-89bdcff7ed45")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -23859,7 +23859,7 @@
 			(uuid "d2f35493-e63f-416e-9891-8df9b08567e5")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -24108,7 +24108,7 @@
 			(uuid "fc613fed-0597-4bc0-b264-dc53c9e216e0")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -24357,7 +24357,7 @@
 			(uuid "a348ef29-a73f-4978-9c66-689629489d3b")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -24606,7 +24606,7 @@
 			(uuid "30479522-5941-43a8-96e9-2ee91ba0166e")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -24855,7 +24855,7 @@
 			(uuid "1919003c-fe52-4210-9083-6a46987f7555")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -25104,7 +25104,7 @@
 			(uuid "bb40d3d9-6b4d-44bf-b6b8-540155b40bc6")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -25353,7 +25353,7 @@
 			(uuid "caa617ef-937d-47d9-80cb-d874fbb348bb")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -26035,7 +26035,7 @@
 			(uuid "949aed42-99e5-4e76-82c3-18f9c9b80655")
 		)
 		(embedded_fonts no)
-		(model "/WIRELM-SMD_ESP32-S3-WROOM-1.wrl"
+		(model "${KIPRJMOD}/3dmodels/esp32-s3-wroom-1/WIRELM-SMD_ESP32-S3-WROOM-1.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -26284,7 +26284,7 @@
 			(uuid "343c1465-04fb-4b8f-8a58-24efecaa8e54")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -26533,7 +26533,7 @@
 			(uuid "85788b31-f2fe-4457-a194-fcfcdc8f9144")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -26782,7 +26782,7 @@
 			(uuid "a0271a1b-43cb-4385-a2f9-a02549ebf1dd")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -27031,7 +27031,7 @@
 			(uuid "f1ea8f3f-4c76-4988-a876-5d0a6d0b334d")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -27280,7 +27280,7 @@
 			(uuid "5409e7dd-0b13-4680-85de-3c8aeb13c1f6")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -27529,7 +27529,7 @@
 			(uuid "c86579ed-5227-40ab-a695-03629792d59d")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -27778,7 +27778,7 @@
 			(uuid "5dd3de9f-9f48-47d7-984f-fb7ea754de9e")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -28027,7 +28027,7 @@
 			(uuid "0cc42169-192d-4659-aea2-1d485462febd")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -28276,7 +28276,7 @@
 			(uuid "e02afc79-5487-49bf-9759-cb6563737695")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -28525,7 +28525,7 @@
 			(uuid "5348632a-a459-4442-98d5-74dd62ef7724")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -28774,7 +28774,7 @@
 			(uuid "f213d74d-e9de-482b-8e0f-4589806f958f")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -29023,7 +29023,7 @@
 			(uuid "ab7879c6-14f9-4155-a840-7e806b8c1d12")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -29272,7 +29272,7 @@
 			(uuid "8be48758-2e82-42c3-85db-d452b20f9787")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -29521,7 +29521,7 @@
 			(uuid "07e761fb-d3b1-4b24-9d1d-9bc30e1becf3")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -29770,7 +29770,7 @@
 			(uuid "6cf57f2d-800d-41b6-aace-e68dfb189fd8")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -30019,7 +30019,7 @@
 			(uuid "eceeeb3e-93a4-4b2f-a955-9749f333bc0c")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -30268,7 +30268,7 @@
 			(uuid "da7418b7-26b8-479a-b36e-ef1e20cba181")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -30517,7 +30517,7 @@
 			(uuid "220861ab-1a87-471d-9ab4-52590dfd27d3")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -30766,7 +30766,7 @@
 			(uuid "065e2c57-e716-4495-9b8d-934357232615")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -31015,7 +31015,7 @@
 			(uuid "5f0e62bc-965e-4771-acb6-9c015e6cee54")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -31399,7 +31399,7 @@
 			(uuid "b1f2c04b-7b90-469c-9d8e-11b233dc058d")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -31648,7 +31648,7 @@
 			(uuid "666fac6d-bb05-49a5-bd54-7ee15c973056")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -31897,7 +31897,7 @@
 			(uuid "f478a2c6-5f8e-402c-bcfa-f59129880406")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -32146,7 +32146,7 @@
 			(uuid "4ffb1be5-7380-4a22-b923-f963109cace2")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -32395,7 +32395,7 @@
 			(uuid "4c9e3a50-95db-4c02-bbc8-ff9839215624")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -32644,7 +32644,7 @@
 			(uuid "592e9318-235e-43ca-8c1a-59c60e1eb37c")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -33028,7 +33028,7 @@
 			(uuid "e3ad41bb-22c8-45e8-b992-554eb1d4d403")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -33277,7 +33277,7 @@
 			(uuid "4e63da63-cc79-4108-bb30-8f6b52da4dff")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -33526,7 +33526,7 @@
 			(uuid "0cd9e2a4-f9bb-4cdc-90af-4f4151c09f0b")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -33775,7 +33775,7 @@
 			(uuid "2a95a34b-f8cb-4db0-be57-5665b0c1e5eb")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -34024,7 +34024,7 @@
 			(uuid "51cb8239-2970-4cfd-bd7b-9781d3c8775a")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -34273,7 +34273,7 @@
 			(uuid "11a8b7b7-ac1c-4af1-b37d-627ffae1b27d")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -34522,7 +34522,7 @@
 			(uuid "63e6e1f5-63a0-4a33-a983-bb9633e9f24a")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -34771,7 +34771,7 @@
 			(uuid "d4fc693b-0e4d-4217-ae89-ca86ceb57eb2")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -35155,7 +35155,7 @@
 			(uuid "aeb7f29e-aa6b-426d-aced-0306741cfa82")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -35404,7 +35404,7 @@
 			(uuid "6744cddf-ea9a-4088-ae36-680de30b7d6c")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -35653,7 +35653,7 @@
 			(uuid "a7754f60-83f9-4c48-8f11-34cbbc50a215")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -35902,7 +35902,7 @@
 			(uuid "88c16211-cd81-4417-8d58-235ed5e95cf9")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -36151,7 +36151,7 @@
 			(uuid "081d5750-0c25-4824-a86a-31365aeeed82")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -36400,7 +36400,7 @@
 			(uuid "593cc7e7-9b5c-4ad6-8861-b6f7ce41dd75")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -36649,7 +36649,7 @@
 			(uuid "0e85fe81-e8b3-4139-8743-315624192c6c")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -36898,7 +36898,7 @@
 			(uuid "8c391a0b-fe55-4d2b-ad89-061ebb3a69cf")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -37147,7 +37147,7 @@
 			(uuid "ccda999d-69be-472f-a582-a4acbc97d9cd")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -37396,7 +37396,7 @@
 			(uuid "2fde48bb-59b5-4d79-8622-8d3c099d61ab")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -37645,7 +37645,7 @@
 			(uuid "783aaab0-c662-4554-a9cf-52d6129610cc")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -37894,7 +37894,7 @@
 			(uuid "2471ff21-18b4-4dd4-a3c6-15c022307cf9")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -38143,7 +38143,7 @@
 			(uuid "b32f9864-7a42-4853-ba8d-e97c3604064a")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -38527,7 +38527,7 @@
 			(uuid "05ef3377-db23-485a-906b-5a91a3ff7295")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -38776,7 +38776,7 @@
 			(uuid "20458d44-2b72-4a4b-bf68-206354e5e81d")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -39025,7 +39025,7 @@
 			(uuid "519f538b-950a-4ed3-901a-53fc7f6ecd18")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -39274,7 +39274,7 @@
 			(uuid "cc8e6f14-bce9-43e0-85b2-a148285b9f14")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -39658,7 +39658,7 @@
 			(uuid "101c713d-df15-44d0-996d-69a9d9402a55")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -39907,7 +39907,7 @@
 			(uuid "f7ea863f-604e-4c03-bc69-fc4f30467a8c")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -40156,7 +40156,7 @@
 			(uuid "894645ce-a432-4216-8baf-a45d7f6d71d7")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -40405,7 +40405,7 @@
 			(uuid "4c36fa9e-3d41-4de7-8bf4-dec0f65dd0bc")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -40654,7 +40654,7 @@
 			(uuid "2b358ae0-5d6d-4d5a-9e55-b4d1e0d6405d")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -41038,7 +41038,7 @@
 			(uuid "729e37df-015d-4cb3-9863-4945f4f94fb7")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -41287,7 +41287,7 @@
 			(uuid "1ff12923-9663-4262-bd9c-81d621f9c5cf")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -41536,7 +41536,7 @@
 			(uuid "958e4d0b-3ca9-445d-b186-681e6f834086")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -41785,7 +41785,7 @@
 			(uuid "bf0be3ad-45e8-457c-9406-4382c4040714")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -42034,7 +42034,7 @@
 			(uuid "d52169d9-ccee-49d5-8a36-6b8600477246")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -42283,7 +42283,7 @@
 			(uuid "7afd22a6-da62-4d53-986e-93159d5f5f61")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -42532,7 +42532,7 @@
 			(uuid "b59773d1-298f-49c0-82a1-0b65154c2cad")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -42781,7 +42781,7 @@
 			(uuid "73d01d49-0844-463f-ac03-c16f086c390a")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -43030,7 +43030,7 @@
 			(uuid "90f9706f-c71a-4e24-8fcc-ab1357593588")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -43279,7 +43279,7 @@
 			(uuid "0e7521e6-5fdd-4ca9-9f39-f06bddbeb25c")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -43663,7 +43663,7 @@
 			(uuid "6e256ad9-f87a-4514-8839-c0f38cc4faf4")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -44047,7 +44047,7 @@
 			(uuid "e6dbf9da-4f15-443a-8452-7d54a798fde4")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -44296,7 +44296,7 @@
 			(uuid "a56b0acf-4886-42e0-8834-5ed9bc302b3a")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -44545,7 +44545,7 @@
 			(uuid "225aa1f8-e8bb-43fa-9d56-b7f1ba77cb20")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -44770,7 +44770,7 @@
 			(uuid "e262b48f-231a-4efb-af8f-3c6d97692375")
 		)
 		(embedded_fonts no)
-		(model "/SOT-23-5_L2.9-W1.6-H1.1-LS2.8-P0.95.wrl"
+		(model "${KIPRJMOD}/3dmodels/me6211c33m5g-n/SOT-23-5_L2.9-W1.6-H1.1-LS2.8-P0.95.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -45019,7 +45019,7 @@
 			(uuid "9f1c74ad-42b5-4642-b5e5-45e9289ad92d")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -45268,7 +45268,7 @@
 			(uuid "4ed392f2-bbcb-4acf-afc1-0c71d0133347")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -45517,7 +45517,7 @@
 			(uuid "9b6ef385-cfab-441e-9d30-bb5b3e39c0bd")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -45766,7 +45766,7 @@
 			(uuid "95433bd6-6d11-479d-9ef8-3c9b8d325d3c")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -46015,7 +46015,7 @@
 			(uuid "927f62e5-13cc-48e4-9b34-009e90aef317")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -46264,7 +46264,7 @@
 			(uuid "bd5f8b51-44db-4726-84b2-9939bb6a811d")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -46513,7 +46513,7 @@
 			(uuid "7a889d61-99a0-4e82-9cad-0b642e49ea6a")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -46897,7 +46897,7 @@
 			(uuid "3997c3e3-5848-4827-b356-128c0c400dd4")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -47146,7 +47146,7 @@
 			(uuid "f318917f-f5a0-4fd5-8ba1-942cc4716d81")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -47395,7 +47395,7 @@
 			(uuid "53488eb6-3e27-475d-ba9b-b2dcc1cbaad0")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -47644,7 +47644,7 @@
 			(uuid "d1d0c77a-be27-491a-8625-00204eea5552")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -47893,7 +47893,7 @@
 			(uuid "00ba56a1-a49c-4c29-91cc-3a42a7b2a90a")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -48142,7 +48142,7 @@
 			(uuid "d50ba666-ee21-4b69-816f-6540dc85cf14")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -48391,7 +48391,7 @@
 			(uuid "551148c4-81d9-4c6a-bb97-aebbe5054326")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -48640,7 +48640,7 @@
 			(uuid "335e19ad-3816-402f-b0f0-337a6783acdc")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -48889,7 +48889,7 @@
 			(uuid "646511d3-cf53-4898-abe9-772ea251ca4c")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -49138,7 +49138,7 @@
 			(uuid "6f2ad989-142b-4ca7-9881-afe5b3beadaf")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -49387,7 +49387,7 @@
 			(uuid "9caac549-560f-4428-b0fe-d231c83c1bb7")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -49636,7 +49636,7 @@
 			(uuid "cc0f3932-5935-4ce4-919a-15bbea8cd3c8")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -50020,7 +50020,7 @@
 			(uuid "3932ec02-7ec8-43da-9877-aa3abc96df70")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -50269,7 +50269,7 @@
 			(uuid "fcb90aee-0dc1-4cb0-9a44-51b6dbfce796")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -50518,7 +50518,7 @@
 			(uuid "c22cb29c-5400-4850-982e-06b5b0cfc9ca")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -50767,7 +50767,7 @@
 			(uuid "670a8248-9ea4-4013-af5f-1e399f455fbe")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -51016,7 +51016,7 @@
 			(uuid "c9a01933-efaf-435c-9dfa-78f577fdf5b5")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -51265,7 +51265,7 @@
 			(uuid "e0affe96-43b6-47e7-a88d-76ba0097d179")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -51514,7 +51514,7 @@
 			(uuid "fe23e1d8-903a-44d3-8af4-7d92140135d4")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -51763,7 +51763,7 @@
 			(uuid "c7a79774-91d6-4135-a40c-3022b95ad420")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -52012,7 +52012,7 @@
 			(uuid "378b0bc4-9d31-4a91-be7e-62e1d628bf2f")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -52261,7 +52261,7 @@
 			(uuid "0e19bb5a-1f01-4730-abdf-037ff47b5de9")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -52510,7 +52510,7 @@
 			(uuid "7db14810-e62e-42ad-88d6-7abf75d0c96c")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -52759,7 +52759,7 @@
 			(uuid "a33135a3-1d29-4895-97f5-6f87d2789d38")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -53008,7 +53008,7 @@
 			(uuid "9d9eda67-3dc0-4a27-9c18-aabd2ebf5064")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -53257,7 +53257,7 @@
 			(uuid "f46d1928-eadf-4711-96dd-341ef1c2b0d4")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -53506,7 +53506,7 @@
 			(uuid "81b995f4-05e9-4efe-85fd-b519026d2a20")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -53755,7 +53755,7 @@
 			(uuid "4b8e5657-a3c1-4fff-b82b-03b5960a87fe")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -54004,7 +54004,7 @@
 			(uuid "0d789995-fa70-4d49-bd86-cd4d9149e107")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -54253,7 +54253,7 @@
 			(uuid "6777c366-52d1-4d20-9c47-a2d6a26ed2f1")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -54502,7 +54502,7 @@
 			(uuid "20be5f42-b93b-4903-a9bf-bdaa0b51d9bb")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -54751,7 +54751,7 @@
 			(uuid "a8301966-b776-4570-8a2c-557277aa4e34")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -55135,7 +55135,7 @@
 			(uuid "3597fdbc-1202-41a5-8c9f-c75084cf0a91")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -55519,7 +55519,7 @@
 			(uuid "80566ffe-5230-4bbc-aad0-bd5efb69428d")
 		)
 		(embedded_fonts no)
-		(model "/LED-SMD_4P-L1.5-W1.5-BL.wrl"
+		(model "${KIPRJMOD}/3dmodels/sk6805-ec15/LED-SMD_4P-L1.5-W1.5-BL.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
