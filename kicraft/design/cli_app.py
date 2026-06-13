@@ -1161,11 +1161,16 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
     # EasyEDA symbol names can carry characters illegal in a KiCad 'Library:Name'
     # (e.g. the '#' in 'DS3231SN#_C722469'), which fails BomPart's SYMBOL_RE. Sanitize
     # the reference and rewrite the on-disk (symbol "...") header to match.
-    raw_symbol_name = ee_symbol.info.name
+    # Trust the FILE for the starting name, not ee_symbol.info.name: the
+    # exporter itself mangles some characters when writing (a '/' in the MPN
+    # lands as '_', e.g. 'PD15-22C/TR8' -> 'PD15-22C_TR8'), and a manifest
+    # symbol_name derived from info.name would then never match the file.
+    sym_text = sym_path.read_text()
+    raw_symbol_name = _scan_symbol_name(sym_text) or ee_symbol.info.name
     symbol_name = _sanitize_kicad_name(raw_symbol_name)
     if symbol_name != raw_symbol_name:
         sym_path.write_text(
-            _normalize_symbol_text(sym_path.read_text(), raw_symbol_name, symbol_name)
+            _normalize_symbol_text(sym_text, raw_symbol_name, symbol_name)
         )
 
     # 3D model: fetched by default so the bundle renders with a body in the

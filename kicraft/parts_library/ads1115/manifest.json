@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:3ab51e20e684b7c4044b93d3d64cb1b0f5362bc29d127f100302a081f2b1c933",
+  "datasheet_url": "https://lcsc.com/product-detail/Analog-To-Digital-Converters-ADCs_TI_ADS1115IDGSR_ADS1115IDGSR_C37593.html",
+  "description": "16-Bit ADC with Integrated Multiplexer, PGA, Comparator, Oscillator, and Reference, -40 to 125 degC, 10-pin SOP (DGS10), Green (RoHS  no SbBr)",
+  "footprint_name": "MSOP-10_L3.0-W3.0-P0.50-LS5.0-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "ADS1115IDGSR",
+  "name": "ads1115",
+  "provenance": {
+    "added_at": "2026-06-13T01:17:12Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C37593"
+  },
+  "symbol_name": "ADS1115IDGSR",
+  "tags": [
+    "adc",
+    "16-bit",
+    "i2c",
+    "sensor",
+    "msop-10"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "I2C addr set by ADDR strap (0x48-0x4B). Inputs must stay within GND-0.3V..VDD+0.3V; the PGA does not extend the input range."
+}

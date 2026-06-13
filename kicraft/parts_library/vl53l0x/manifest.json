@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:3c9b6fd7ff2a6153a6bb4e617854a6001d2d3d807cd5bcab2caa6a33754edf2b",
+  "datasheet_url": "https://lcsc.com/product-detail/Sensors_STMicroelectronics_VL53L0CXV0DH-1_VL53L0CXV0DH-1_C91199.html",
+  "description": "ST(\u610f\u6cd5\u534a\u5bfc\u4f53) VL53L0CXV0DH/1",
+  "footprint_name": "OPTO-SMD_12P_VL53L0CXV0DH-1",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "VL53L0CXV0DH/1",
+  "name": "vl53l0x",
+  "provenance": {
+    "added_at": "2026-06-13T01:34:03Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C91199"
+  },
+  "symbol_name": "VL53L0CXV0DH_1",
+  "tags": [
+    "tof",
+    "distance",
+    "sensor",
+    "i2c"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "2.6-3.5V supply. XSHUT must be pulled high to run; keep the optical window unobstructed (no mask/silk/parts in front)."
+}

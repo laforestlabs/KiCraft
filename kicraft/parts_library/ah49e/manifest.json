@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:0324bfe757719581f2e3c05872d8c16232393446ce7977b1bd94c298f5bdf5b1",
+  "datasheet_url": "https://lcsc.com/product-detail/Others_Diodes-Incorporated_AH49ENTR-G1_Diodes-Incorporated-AH49ENTR-G1_C314698.html",
+  "description": "DIODES(\u7f8e\u53f0) AH49ENTR-G1",
+  "footprint_name": "SOT-23-3_L2.9-W1.3-P1.90-LS2.4-BR",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "AH49ENTR-G1",
+  "name": "ah49e",
+  "provenance": {
+    "added_at": "2026-06-13T01:17:34Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C314698"
+  },
+  "symbol_name": "AH49ENTR-G1",
+  "tags": [
+    "hall-effect",
+    "sensor",
+    "analog",
+    "sot-23"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Linear (analog) hall sensor: ratiometric output near VCC/2 at zero field; it is not a digital switch."
+}

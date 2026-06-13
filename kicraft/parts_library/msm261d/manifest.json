@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:167bbdb4e9671a3b12abe6be747d0c73b046ed57c87eb0e7de6a80fda326c5a8",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C27636198.pdf",
+  "description": "MEMS(\u654f\u82af\u5fae) MSM261DDB020",
+  "footprint_name": "MIC-SMD_5P_L3.5-W2.7-P0.82_SPH0641LU4H-1",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "MSM261DDB020",
+  "name": "msm261d",
+  "provenance": {
+    "added_at": "2026-06-13T01:31:52Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C27636198"
+  },
+  "symbol_name": "MSM261DDB020",
+  "tags": [
+    "microphone",
+    "i2s",
+    "mems",
+    "audio",
+    "sensor"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Bottom-port MEMS mic: needs an acoustic NPTH hole under the port, paste keepout around it, and a gentle reflow profile."
+}

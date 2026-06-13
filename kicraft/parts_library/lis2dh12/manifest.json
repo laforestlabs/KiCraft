@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:c835764413e622fe83024c02b5a9b50c6e9f7ef7761be4eddbd62c859d4e1dff",
+  "datasheet_url": "https://lcsc.com/product-detail/Motion-Sensors-Accelerometers_STMicroelectronics_LIS2DH12TR_STMicroelectronics-LIS2DH12TR_C110926.html",
+  "description": "ST(\u610f\u6cd5\u534a\u5bfc\u4f53) LIS2DH12TR",
+  "footprint_name": "LGA-12_L2.0-W2.0-P0.50-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "LIS2DH12TR",
+  "name": "lis2dh12",
+  "provenance": {
+    "added_at": "2026-06-13T01:18:21Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C110926"
+  },
+  "symbol_name": "LIS2DH12TR",
+  "tags": [
+    "accelerometer",
+    "motion",
+    "sensor",
+    "i2c",
+    "lga"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "LGA-12: reflow only. Decouple VDD and VDD_IO separately; I2C address bit via SA0 strap."
+}

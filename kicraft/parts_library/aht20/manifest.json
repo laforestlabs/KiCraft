@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:a69f002a66b9482b11a4c1f1eeaabdbbac3edec29ce594e67912fcab91632bee",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C2757850.pdf",
+  "description": "\u5e7f\u5dde\u5965\u677e AHT20",
+  "footprint_name": "SENSOR-SMD_L3.0-W3.0-P1.00-BR",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "AHT20",
+  "name": "aht20",
+  "provenance": {
+    "added_at": "2026-06-13T01:29:32Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2757850"
+  },
+  "symbol_name": "AHT20_C2757850",
+  "tags": [
+    "temperature",
+    "humidity",
+    "sensor",
+    "i2c"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Fixed I2C addr 0x38. Humidity element is moisture/reflow sensitive: follow the soldering profile; keep away from board heat sources."
+}

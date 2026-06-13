@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:0a1cc51a5fb3415608fca7a4bd101e829b7f9f642d7aaea0915dafe24133b151",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C779278.pdf",
+  "description": "Bosch(\u535a\u4e16) BMP388",
+  "footprint_name": "SENSORM-SMD_BMP388",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "BMP388",
+  "name": "bmp388",
+  "provenance": {
+    "added_at": "2026-06-13T01:29:55Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C779278"
+  },
+  "symbol_name": "BMP388",
+  "tags": [
+    "pressure",
+    "barometer",
+    "sensor",
+    "i2c",
+    "lga"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "LGA-10: reflow only. 1.8-3.6V; CSB/SDO select SPI vs I2C and address; the vent hole must stay uncovered."
+}
