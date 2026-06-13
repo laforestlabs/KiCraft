@@ -21,9 +21,17 @@ import os
 import re
 import secrets
 import shutil
+import logging
 import sqlite3
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+from kicraft.parts_library.core_blocks import (
+    CORE_COMPONENT_CATEGORIES,
+    FUNCTION_KEY_RE as _FUNCTION_KEY_RE,
+)
+
+log = logging.getLogger(__name__)
 
 # Billing tier definitions. `price_usd` is the monthly subscription price; the
 # actual charge amount lives on the Stripe Price objects (KICRAFT_STRIPE_PRICE_*),
@@ -120,17 +128,16 @@ def _pid_alive(pid: int | None) -> bool:
 # is COLLATE NOCASE -- 'freemax' redeems 'FREEMAX').
 _INVITE_CODE_RE = re.compile(r"[A-Za-z0-9_-]{3,64}")
 
-# Core-components registry: one curated default part per common functional block
-# (LDO tiers, buck/boost tiers, sensors, passive series, ...), admin-edited from
-# /admin/core-components. The design pipeline does not consume it yet; when it
-# does, stages will resolve a block by its function_key slug (see
-# get_core_component), so renaming a seeded key is a breaking change.
-CORE_COMPONENT_CATEGORIES = ("power", "sensors", "drivers", "interface", "passives")
-_FUNCTION_KEY_RE = re.compile(r"[a-z0-9][a-z0-9_-]{1,62}[a-z0-9]")
-CORE_COMPONENTS_SEED_PATH = Path(__file__).resolve().parent / "core_components_seed.json"
-# app_settings key marking the bundled seed as applied. Stays set forever, so
-# rows an admin deletes are never resurrected by a restart.
-_CORE_SEED_KEY = "core_components_seed_version"
+# Core-components registry: one curated default part per common functional
+# block (LDO tiers, buck/boost tiers, sensors, passive series, ...). The repo
+# catalog kicraft/parts_library/core_blocks.json is the source of truth; the
+# core_components table is a cache re-synced from it on every store init
+# (_sync_core_components_from_catalog), so block/part edits happen via git
+# while the DB owns only runtime state (enabled flag + price/stock
+# snapshots). Consumed per run by the architecture/BOM prompts (see
+# stage_driver._format_core_defaults_block); renaming a function_key is a
+# breaking change. CORE_COMPONENT_CATEGORIES and the function-key regex live
+# in kicraft.parts_library.core_blocks and are imported above.
 
 
 def grant_expiry(duration_days: int | None) -> str | None:
@@ -324,7 +331,7 @@ class AccountStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._fts_enabled = False  # flipped on by _init_db once projects_fts exists
         self._init_db()
-        self._maybe_seed_core_components()
+        self._sync_core_components_from_catalog()
         self._maybe_backfill_search()
 
     def _conn(self) -> sqlite3.Connection:
@@ -507,6 +514,7 @@ class AccountStore:
                 "qualifier TEXT,"                  # tier text, '<=500mA @ 3.3V'
                 "default_mpn TEXT NOT NULL,"       # MPN, or series name for passives
                 "default_lcsc TEXT,"               # 'C14259'; NULL for series rows
+                "bundle TEXT,"                     # vendored parts-library bundle name
                 "package TEXT,"
                 "selection_notes TEXT,"            # rationale + runner-ups
                 "price_usd REAL,"                  # qty-1 price snapshot
@@ -521,6 +529,12 @@ class AccountStore:
                 "CREATE INDEX IF NOT EXISTS idx_core_components_category "
                 "ON core_components(category, sort_order, id)"
             )
+            # Additive migration for deployed DBs that predate bundle-backed
+            # catalog rows.
+            cc_cols = {row["name"]
+                       for row in conn.execute("PRAGMA table_info(core_components)")}
+            if "bundle" not in cc_cols:
+                conn.execute("ALTER TABLE core_components ADD COLUMN bundle TEXT")
             # Full-text search over the catalog. Guarded: a SQLite build without
             # FTS5 degrades to a LIKE fallback (see _public_where) instead of
             # crashing init. porter stemming makes "watering" match "water".
@@ -1769,14 +1783,15 @@ class AccountStore:
         self.set_setting(self._OPEN_SIGNUP_KEY, "1" if open_ else "0")
 
     # ---- core components ----------------------------------------------------
-    # Curated default part per common functional block, edited from
-    # /admin/core-components. Seeded once from the bundled JSON; after that the
-    # DB is the source of truth (deploys never overwrite admin edits).
+    # Curated default part per common functional block. The repo catalog
+    # (kicraft/parts_library/core_blocks.json) is the source of truth; this
+    # table is a cache re-synced from it on every store init. Admin owns only
+    # the enabled flag and price/stock snapshots (/admin/core-components).
 
     _CORE_COMPONENT_FIELDS = frozenset({
         "function_key", "display_name", "category", "qualifier", "default_mpn",
-        "default_lcsc", "package", "selection_notes", "price_usd", "stock",
-        "snapshot_date", "enabled", "sort_order"})
+        "default_lcsc", "bundle", "package", "selection_notes", "price_usd",
+        "stock", "snapshot_date", "enabled", "sort_order"})
 
     @staticmethod
     def _row_to_core_component(row: sqlite3.Row) -> dict:
@@ -1785,10 +1800,10 @@ class AccountStore:
         return d
 
     def _normalize_core_component(self, fields: dict, *, partial: bool) -> dict:
-        """Validate + normalize core_components column values. The bundled seed
-        and the admin editor both funnel through here, so there is exactly one
-        validator. `partial` skips the required-field check so updates can patch
-        a subset of columns."""
+        """Validate + normalize core_components column values. The catalog
+        sync and the admin editor both funnel through here, so there is
+        exactly one validator. `partial` skips the required-field check so
+        updates can patch a subset of columns."""
         unknown = sorted(set(fields) - self._CORE_COMPONENT_FIELDS)
         if unknown:
             raise ValueError(f"unknown core component field(s): {', '.join(unknown)}")
@@ -1827,6 +1842,15 @@ class AccountStore:
                 if not re.fullmatch(r"C\d{1,12}", v):
                     raise ValueError("default_lcsc must be an LCSC id like C14259")
                 out[key] = v
+            elif key == "bundle":
+                v = (value or "").strip() if isinstance(value, str) else value
+                if not v:
+                    out[key] = None
+                    continue
+                if not re.fullmatch(r"[a-z][a-z0-9-]*[a-z0-9]", v):
+                    raise ValueError(
+                        f"bundle {v!r} is not a valid parts-library name")
+                out[key] = v
             elif key in ("qualifier", "package", "selection_notes", "snapshot_date"):
                 v = value.strip() if isinstance(value, str) else value
                 out[key] = v or None
@@ -1857,43 +1881,19 @@ class AccountStore:
                                now: str) -> sqlite3.Row:
         cur = conn.execute(
             "INSERT INTO core_components (function_key, display_name, category,"
-            " qualifier, default_mpn, default_lcsc, package, selection_notes,"
-            " price_usd, stock, snapshot_date, enabled, sort_order, created_at,"
-            " updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " qualifier, default_mpn, default_lcsc, bundle, package,"
+            " selection_notes, price_usd, stock, snapshot_date, enabled,"
+            " sort_order, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (fields["function_key"], fields["display_name"], fields["category"],
              fields.get("qualifier"), fields["default_mpn"],
-             fields.get("default_lcsc"), fields.get("package"),
-             fields.get("selection_notes"), fields.get("price_usd"),
-             fields.get("stock"), fields.get("snapshot_date"),
-             fields.get("enabled", 1), fields.get("sort_order", 0), now, now))
+             fields.get("default_lcsc"), fields.get("bundle"),
+             fields.get("package"), fields.get("selection_notes"),
+             fields.get("price_usd"), fields.get("stock"),
+             fields.get("snapshot_date"), fields.get("enabled", 1),
+             fields.get("sort_order", 0), now, now))
         return conn.execute("SELECT * FROM core_components WHERE id=?",
                             (cur.lastrowid,)).fetchone()
-
-    def create_core_component(self, *, function_key: str, display_name: str,
-                              category: str, default_mpn: str,
-                              qualifier: str | None = None,
-                              default_lcsc: str | None = None,
-                              package: str | None = None,
-                              selection_notes: str | None = None,
-                              price_usd: float | None = None,
-                              stock: int | None = None,
-                              snapshot_date: str | None = None,
-                              sort_order: int = 0, enabled: bool = True) -> dict:
-        fields = self._normalize_core_component(
-            {"function_key": function_key, "display_name": display_name,
-             "category": category, "qualifier": qualifier,
-             "default_mpn": default_mpn, "default_lcsc": default_lcsc,
-             "package": package, "selection_notes": selection_notes,
-             "price_usd": price_usd, "stock": stock,
-             "snapshot_date": snapshot_date, "sort_order": sort_order,
-             "enabled": enabled}, partial=False)
-        try:
-            with self._conn() as conn:
-                row = self._insert_core_component(conn, fields, _utcnow_iso())
-        except sqlite3.IntegrityError as e:
-            raise ValueError(
-                f"function_key {fields['function_key']!r} already exists") from e
-        return self._row_to_core_component(row)
 
     def list_core_components(self, *, category: str | None = None,
                              include_disabled: bool = True) -> list[dict]:
@@ -1913,8 +1913,8 @@ class AccountStore:
 
     def get_core_component(self, function_key: str) -> dict | None:
         """The default part for one functional block, by its function_key slug
-        (case-insensitive). This is the lookup a future BOM-stage hook will use
-        to bias part selection, so treat seeded keys as a stable contract."""
+        (case-insensitive). function_keys are a stable contract consumed by
+        the architecture/BOM prompts; rename only via the repo catalog."""
         key = (function_key or "").strip()
         if not key:
             return None
@@ -1954,44 +1954,74 @@ class AccountStore:
             component_id, price_usd=price_usd, stock=stock,
             snapshot_date=_utcnow().date().isoformat())
 
-    def delete_core_component(self, component_id: int) -> None:
-        """Hard delete. The seed flag stays set, so the row will not come back
-        on restart; re-create it from the admin page if it is missed."""
-        with self._conn() as conn:
-            cur = conn.execute("DELETE FROM core_components WHERE id=?",
-                               (component_id,))
-            if cur.rowcount == 0:
-                raise ValueError(f"no core component with id {component_id!r}")
+    # Canonical fields the catalog sync owns; everything else on a row
+    # (enabled, price_usd, stock, snapshot_date, created_at) is DB-owned
+    # runtime state that survives syncs.
+    _CORE_SYNC_FIELDS = ("display_name", "category", "qualifier",
+                         "default_mpn", "default_lcsc", "bundle", "package",
+                         "selection_notes", "sort_order")
 
-    def _maybe_seed_core_components(self) -> int:
-        """One-shot import of the bundled registry seed. Guarded by an
-        app_settings flag written last, in the same transaction as the inserts,
-        so a crash mid-seed cannot strand the flag without rows and a restart
-        never re-seeds (admin deletions stay deleted). A missing seed file
-        leaves the registry empty and the flag unset, so a later restart with
-        the file present still seeds."""
-        if self.get_setting(_CORE_SEED_KEY) is not None:
-            return 0
+    def _sync_core_components_from_catalog(self) -> None:
+        """Mirror the repo catalog into the core_components table.
+
+        Runs on every store open: the catalog
+        (kicraft/parts_library/core_blocks.json) defines what the blocks ARE
+        (upsert by function_key, canonical fields overwritten; rows whose key
+        left the catalog deleted), while DB-owned runtime state (enabled,
+        price/stock snapshots, created_at) is preserved. A block whose
+        bundle manifest is unreadable keeps its existing DB row (warn only),
+        and catalog trouble never blocks startup: the parts-library CI
+        guards are where breakage is loud, not server init.
+        """
+        from kicraft.parts_library.core_blocks import (
+            load_core_catalog,
+            resolve_block,
+        )
+
         try:
-            raw = CORE_COMPONENTS_SEED_PATH.read_text(encoding="utf-8")
-        except OSError:
-            return 0
-        entries = json.loads(raw)
+            catalog = load_core_catalog()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("core-components sync skipped (catalog unreadable): %s",
+                        exc)
+            return
+        catalog_keys = {b.function_key for b in catalog.blocks}
+        resolved: list[dict] = []
+        for block in catalog.blocks:
+            try:
+                resolved.append(self._normalize_core_component(
+                    resolve_block(block), partial=False))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("core-components sync: keeping existing row for "
+                            "%s (resolve failed: %s)", block.function_key, exc)
+
         now = _utcnow_iso()
-        inserted = 0
+        inserted = updated = deleted = 0
         with self._conn() as conn:
-            count = conn.execute(
-                "SELECT COUNT(*) FROM core_components").fetchone()[0]
-            if count == 0:
-                for entry in entries:
-                    self._insert_core_component(
-                        conn, self._normalize_core_component(entry, partial=False),
-                        now)
+            existing = {row["function_key"]: row for row in conn.execute(
+                "SELECT * FROM core_components")}
+            for fields in resolved:
+                row = existing.get(fields["function_key"])
+                if row is None:
+                    self._insert_core_component(conn, fields, now)
                     inserted += 1
-            # Mark applied even when rows already existed (a pre-flag DB):
-            # whatever is in the table is someone's curation; never touch it.
-            conn.execute(
-                "INSERT INTO app_settings (key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (_CORE_SEED_KEY, "1"))
-        return inserted
+                    continue
+                changes = {k: fields.get(k) for k in self._CORE_SYNC_FIELDS
+                           if row[k] != fields.get(k)}
+                if changes:
+                    sets = ", ".join(f"{k}=?" for k in changes)
+                    conn.execute(
+                        f"UPDATE core_components SET {sets}, updated_at=? "
+                        f"WHERE id=?",
+                        (*changes.values(), now, row["id"]))
+                    updated += 1
+            for key, row in existing.items():
+                if key not in catalog_keys:
+                    conn.execute("DELETE FROM core_components WHERE id=?",
+                                 (row["id"],))
+                    deleted += 1
+            # Retire the legacy one-shot-seed marker; the sync supersedes it.
+            conn.execute("DELETE FROM app_settings WHERE key=?",
+                         ("core_components_seed_version",))
+        if inserted or updated or deleted:
+            log.info("core-components sync: %d inserted, %d updated, "
+                     "%d deleted", inserted, updated, deleted)

@@ -694,6 +694,12 @@ def _slugify_libname(s: str) -> str:
 def _resolve_dest_dir(into: str) -> Path:
     if into == "home":
         return Path.home() / ".kicraft" / "parts"
+    if into == "vendored":
+        # The repo-shipped library itself: used when vendoring core-default
+        # bundles (the slug/sanitize/3D logic is identical to the other tiers).
+        from kicraft.parts_library.loader import vendored_parts_dir
+
+        return vendored_parts_dir()
     return Path.cwd() / ".kicraft" / "parts"
 
 
@@ -2730,9 +2736,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_add_part.add_argument(
         "--into",
-        choices=["project", "home"],
+        choices=["project", "home", "vendored"],
         default="project",
-        help="destination tier (default: project, i.e. <cwd>/.kicraft/parts/)",
+        help=(
+            "destination tier (default: project, i.e. <cwd>/.kicraft/parts/); "
+            "'vendored' writes into the repo parts library itself (for "
+            "vendoring core-default bundles)"
+        ),
     )
     p_add_part.add_argument(
         "--name",

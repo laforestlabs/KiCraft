@@ -1,0 +1,482 @@
+{
+  "schema_version": "1",
+  "blocks": [
+    {
+      "function_key": "ldo-3v3-500ma",
+      "display_name": "LDO 3.3V (<=500mA)",
+      "category": "power",
+      "qualifier": "<=500mA @ 3.3V out",
+      "package": "SOT-23-5",
+      "selection_notes": "Lowest-cost true 500mA-class 3.3V LDO with deep stock. Runner-ups: AP2112K-3.3TRG1 (C51118, $0.16, 600mA), XC6206P332MR ($0.017 but only 200-250mA, misses the tier).",
+      "sort_order": 10,
+      "default_mpn": "ME6211C33M5G-N",
+      "default_lcsc": "C82942"
+    },
+    {
+      "function_key": "ldo-3v3-1a",
+      "display_name": "LDO 3.3V (<=1A)",
+      "category": "power",
+      "qualifier": "<=1A @ 3.3V out, Vin to 15V",
+      "package": "SOT-223",
+      "selection_notes": "JLC Basic jellybean with 2.1M stock; Basic avoids the extended-part setup fee at assembly. Cheaper Extended clone: AMS1117-3.3 C347222 ($0.043). Allow >=1.3V dropout headroom.",
+      "sort_order": 20,
+      "bundle": "ams1117-3v3"
+    },
+    {
+      "function_key": "ldo-3v3-3a",
+      "display_name": "LDO 3.3V (<=3A)",
+      "category": "power",
+      "qualifier": "<=3A @ 3.3V out (5A-rated part)",
+      "package": "TO-252-3",
+      "selection_notes": "Diodes Inc 5A-rated LDO, best price with healthy stock in the 3A+ class. Runner-up LM1084S-3.3/TR (C259972, $0.37). Genuine LM1085ISX-3.3 is $2.01. Linear at 3A dissipates hard: budget copper area.",
+      "sort_order": 30,
+      "default_mpn": "AZ1084CD-3.3TRG1",
+      "default_lcsc": "C151391"
+    },
+    {
+      "function_key": "boost-5v-1a",
+      "display_name": "Boost converter 5V (~1A)",
+      "category": "power",
+      "qualifier": "5V out, ~1A from 1S Li-ion, 2A switch",
+      "package": "SOT-23-6",
+      "selection_notes": "Canonical cheap booster. MT3608L (C2932326, $0.044) is cheaper but a 16V-max-input variant. TPS61023 (C919459, $0.27) when synchronous rectification or low-battery behavior matters.",
+      "sort_order": 40,
+      "bundle": "mt3608"
+    },
+    {
+      "function_key": "boost-5v-2a",
+      "display_name": "Boost converter 5V (2A+)",
+      "category": "power",
+      "qualifier": "5V out, >=2A from 1S Li-ion, 10A switch",
+      "package": "VQFN-20-EP(3.6x4.6)",
+      "selection_notes": "Only big-switch parts genuinely deliver 2A+ at 5V from 3.0-4.2V in. FP6293 (C83576, $0.53, 3.5A switch) covers ~1.5A budget builds. TPS61021A has 71K stock but tops out at 4.4V output, so it is ineligible.",
+      "sort_order": 50,
+      "default_mpn": "TPS61088RHLR",
+      "default_lcsc": "C87357"
+    },
+    {
+      "function_key": "buck-3v3-1a",
+      "display_name": "Buck converter 3.3V (~1A)",
+      "category": "power",
+      "qualifier": "~1A @ 3.3V from a 5V rail, 2A-rated",
+      "package": "SOT-23-5",
+      "selection_notes": "TI 2A synchronous buck at $0.07 with 189K stock. SY8089A1AAC (C479074, $0.09, 282K stock) is equivalent. ME3116 (C97643, $0.14) when Vin can reach 40V.",
+      "sort_order": 60,
+      "default_mpn": "TLV62569DBVR",
+      "default_lcsc": "C141836"
+    },
+    {
+      "function_key": "buck-3v3-2a",
+      "display_name": "Buck converter 3.3V (~2A)",
+      "category": "power",
+      "qualifier": "2A fixed 3.3V, Vin 3.8-32V",
+      "package": "TSOT-23-6",
+      "selection_notes": "Fixed-output wide-Vin buck with minimal externals; the standard pick for 12V/24V inputs down to 3.3V.",
+      "sort_order": 70,
+      "default_mpn": "AP63203WU-7",
+      "default_lcsc": "C780769"
+    },
+    {
+      "function_key": "buck-5v-2a",
+      "display_name": "Buck converter 5V (~2A)",
+      "category": "power",
+      "qualifier": "2A fixed 5V, Vin 3.8-32V",
+      "package": "TSOT-23-6",
+      "selection_notes": "Same family as AP63203 (one footprint serves both rails).",
+      "sort_order": 80,
+      "default_mpn": "AP63205WU-7",
+      "default_lcsc": "C2071056"
+    },
+    {
+      "function_key": "buck-adj-3a",
+      "display_name": "Buck converter adjustable (~3A)",
+      "category": "power",
+      "qualifier": "3A adjustable, Vin 3.5-28V",
+      "package": "SOIC-8-EP",
+      "selection_notes": "Best price/stock 3A buck by a wide margin (152K stock). MP1584EN is $2.91 at LCSC despite its cheap-module reputation. XL4015E1 (C51661, $0.67) when 5A or a dirt-simple 180kHz design is acceptable.",
+      "sort_order": 90,
+      "default_mpn": "TPS54331DDAR",
+      "default_lcsc": "C90761"
+    },
+    {
+      "function_key": "lipo-charger-1s",
+      "display_name": "LiPo charger (1-cell)",
+      "category": "power",
+      "qualifier": "1S 4.2V linear, up to 1A programmable",
+      "package": "ESOP-8",
+      "selection_notes": "469K stock at $0.07. Original TopPower TP4056-42-ESOP8 is C16581 ($0.19). TP4057 (C725791, $0.039, SOT-23-6, 500mA) for tiny boards; MCP73831 (C424093, $0.81) when a name brand is required.",
+      "sort_order": 100,
+      "default_mpn": "TP4056",
+      "default_lcsc": "C725790"
+    },
+    {
+      "function_key": "photodiode",
+      "display_name": "Photodiode",
+      "category": "sensors",
+      "qualifier": "visible+IR, 400-1100nm, SMD",
+      "package": "SMD 3.3x2.8mm",
+      "selection_notes": "Everlight, responds across visible and IR. PD15-22B/TR8 (C161211, $0.10) is the IR-only twin. VBPW34S (C145262, $0.59) for large-area needs. PT17-21C ($0.06, 0805) is a phototransistor when gain beats linearity.",
+      "sort_order": 110,
+      "default_mpn": "PD15-22C/TR8",
+      "default_lcsc": "C146236"
+    },
+    {
+      "function_key": "adc-external",
+      "display_name": "External ADC",
+      "category": "sensors",
+      "qualifier": "16-bit, 4-channel, I2C",
+      "package": "VSSOP-10",
+      "selection_notes": "Cheaper than the 12-bit ADS1015IDGSR ($1.62) in the same snapshot, so the 16-bit part wins on both price and resolution.",
+      "sort_order": 120,
+      "default_mpn": "ADS1115IDGSR",
+      "default_lcsc": "C37593"
+    },
+    {
+      "function_key": "hall-effect",
+      "display_name": "Hall effect sensor",
+      "category": "sensors",
+      "qualifier": "linear analog output",
+      "package": "SOT-23",
+      "selection_notes": "Diodes Inc linear hall, well documented and stocked. OH49E (C49021369, $0.28) is a cheaper clone; SS49E (C85697) is the TO-92S through-hole classic. For a digital switch instead, use an omnipolar SOT-23 part like SLSS49E-3 (C2904393, $0.15).",
+      "sort_order": 130,
+      "default_mpn": "AH49ENTR-G1",
+      "default_lcsc": "C314698"
+    },
+    {
+      "function_key": "tof-distance",
+      "display_name": "ToF distance sensor",
+      "category": "sensors",
+      "qualifier": "I2C, ranges to 2m",
+      "package": "SMD-12 4.4x2.4mm",
+      "selection_notes": "VL53L0X module-on-chip; the hobby standard. VL53L1CXV0FY/1 (C190004, $4.82) doubles the range to 4m.",
+      "sort_order": 140,
+      "default_mpn": "VL53L0CXV0DH/1",
+      "default_lcsc": "C91199"
+    },
+    {
+      "function_key": "accelerometer",
+      "display_name": "Accelerometer (3-axis)",
+      "category": "sensors",
+      "qualifier": "I2C/SPI, low power",
+      "package": "LGA-12 2x2mm",
+      "selection_notes": "Cheapest current-production 3-axis part. Stock was moderate (1.3K) at snapshot; LIS3DHTR (C15134, $1.09, 6.2K stock) is the better-stocked fallback. ADXL345 runs $3.45+.",
+      "sort_order": 150,
+      "default_mpn": "LIS2DH12TR",
+      "default_lcsc": "C110926"
+    },
+    {
+      "function_key": "gyroscope",
+      "display_name": "Gyroscope",
+      "category": "sensors",
+      "qualifier": "use the 6-axis IMU",
+      "package": "LGA-14 2.5x3mm",
+      "selection_notes": "Standalone gyros are effectively EOL at LCSC (L3GD20 unstocked, A3G4250D stock 18 at snapshot), so this row deliberately points at the 6-axis IMU default.",
+      "sort_order": 160,
+      "default_mpn": "LSM6DS3TR-C",
+      "default_lcsc": "C967633"
+    },
+    {
+      "function_key": "imu-6axis",
+      "display_name": "6-axis IMU",
+      "category": "sensors",
+      "qualifier": "accel + gyro, I2C/SPI",
+      "package": "LGA-14 2.5x3mm",
+      "selection_notes": "82K stock at $1.54. QMI8658A (C3021082, $1.62, 54K stock) is a close second. MPU-6050 is EOL and now $14.92 at LCSC; avoid in new designs.",
+      "sort_order": 170,
+      "default_mpn": "LSM6DS3TR-C",
+      "default_lcsc": "C967633"
+    },
+    {
+      "function_key": "pir",
+      "display_name": "PIR motion sensor",
+      "category": "sensors",
+      "qualifier": "digital out, integrated element",
+      "package": "THT, TO-5 style",
+      "selection_notes": "Integrated digital pyro sensor (through-hole). AM312 had no stock at snapshot. BISS0001 (C404323, $0.11) is the analog-controller route when paired with a bare pyro element.",
+      "sort_order": 180,
+      "default_mpn": "AS312",
+      "default_lcsc": "C90465"
+    },
+    {
+      "function_key": "stepper-driver",
+      "display_name": "Stepper motor driver",
+      "category": "drivers",
+      "qualifier": "bipolar, ~2A, STEP/DIR",
+      "package": "WQFN-28-EP 5x5",
+      "selection_notes": "Best price/stock by 2x (55K stock at $0.97). TMC2209-LA-T (C2150710, $2.70) for silent StealthChop and UART config; DRV8825PWPR (C81582, $2.17) for supplies up to 45V.",
+      "sort_order": 210,
+      "default_mpn": "A4988SETTR-T",
+      "default_lcsc": "C38437"
+    },
+    {
+      "function_key": "res-0402",
+      "display_name": "Resistor series 0402",
+      "category": "passives",
+      "qualifier": "1% thick film, E24 values",
+      "package": "0402",
+      "selection_notes": "JLC Basic across common values. Representative 10k 0402WGF1002TCE = C25744 ($0.0013, 7.2M stock at snapshot). Specific values resolve within the series.",
+      "sort_order": 310,
+      "stock": {
+        "series": "UNI-ROYAL 0402WGF series"
+      }
+    },
+    {
+      "function_key": "res-0603",
+      "display_name": "Resistor series 0603",
+      "category": "passives",
+      "qualifier": "1% thick film, E24 values",
+      "package": "0603",
+      "selection_notes": "JLC Basic across common values. Representative 10k 0603WAF1002T5E = C25804 ($0.0033, 7.6M stock at snapshot).",
+      "sort_order": 320,
+      "stock": {
+        "series": "UNI-ROYAL 0603WAF series"
+      }
+    },
+    {
+      "function_key": "res-0805",
+      "display_name": "Resistor series 0805",
+      "category": "passives",
+      "qualifier": "1% thick film, E24 values",
+      "package": "0805",
+      "selection_notes": "JLC Basic across common values. Representative 10k 0805W8F1002T5E = C17414 ($0.0030, 14.1M stock at snapshot).",
+      "sort_order": 330,
+      "stock": {
+        "series": "UNI-ROYAL 0805W8F series"
+      }
+    },
+    {
+      "function_key": "cap-mlcc-0402",
+      "display_name": "MLCC series 0402",
+      "category": "passives",
+      "qualifier": "X5R/X7R ceramics",
+      "package": "0402",
+      "selection_notes": "Representative 100nF/25V CL05A104KA5NNNC = C100072 ($0.0024 at snapshot). Mind voltage/capacitance derating at 0402.",
+      "sort_order": 340,
+      "stock": {
+        "series": "Samsung CL05 series"
+      }
+    },
+    {
+      "function_key": "cap-mlcc-0603",
+      "display_name": "MLCC series 0603",
+      "category": "passives",
+      "qualifier": "X5R/X7R ceramics",
+      "package": "0603",
+      "selection_notes": "JLC Basic for common values. Representative 1uF/50V CL10A105KB8NNNC = C15849 ($0.011, 6.1M stock at snapshot).",
+      "sort_order": 350,
+      "stock": {
+        "series": "Samsung CL10 series"
+      }
+    },
+    {
+      "function_key": "cap-mlcc-0805",
+      "display_name": "MLCC series 0805",
+      "category": "passives",
+      "qualifier": "X5R/X7R ceramics",
+      "package": "0805",
+      "selection_notes": "Representative 10uF/16V CL21A106KOQNNNE = C1713 ($0.019; that exact value was thin at snapshot, but the series is the LCSC standard for 0805 bulk capacitance).",
+      "sort_order": 360,
+      "stock": {
+        "series": "Samsung CL21 series"
+      }
+    },
+    {
+      "function_key": "fuel-gauge-1s",
+      "display_name": "Fuel gauge (1-cell Li-ion)",
+      "category": "power",
+      "qualifier": "1S, I2C state-of-charge",
+      "package": "DFN-8-EP(2x2)",
+      "selection_notes": "The Adafruit/SparkFun standard for battery percentage; no cheaper stocked option exists (MAX17043 $7.51 at 256 stock, LC709203 unstocked). Pairs with lipo-charger-1s.",
+      "sort_order": 110,
+      "default_mpn": "MAX17048G+T10",
+      "default_lcsc": "C2682616"
+    },
+    {
+      "function_key": "current-sensor",
+      "display_name": "Current/power monitor",
+      "category": "power",
+      "qualifier": "high-side I2C, shunt-based",
+      "package": "VSOP-10",
+      "selection_notes": "Cheaper, deeper-stocked AND better-specced (36V, 16-bit, alert pin) than the Adafruit-classic INA219 (C87469, $0.84, 20K). INA3221 (C181255, $1.56) for three channels.",
+      "sort_order": 120,
+      "default_mpn": "INA226AIDGSR",
+      "default_lcsc": "C49851"
+    },
+    {
+      "function_key": "temp-humidity",
+      "display_name": "Temperature/humidity sensor",
+      "category": "sensors",
+      "qualifier": "I2C, +/-0.3C / +/-2%RH",
+      "package": "SMD-6P 3x3mm",
+      "selection_notes": "The Adafruit breakout favorite because it is a fraction of Sensirion pricing. SHT40-CD1B-R3 (C7461852, $1.89) or SHT30 (~$2.8-3.0) when accuracy specs matter; DHT20 is the same die in SIP-4.",
+      "sort_order": 190,
+      "default_mpn": "AHT20",
+      "default_lcsc": "C2757850"
+    },
+    {
+      "function_key": "pressure-sensor",
+      "display_name": "Barometric pressure sensor",
+      "category": "sensors",
+      "qualifier": "I2C/SPI, 300-1250 hPa",
+      "package": "LGA-10 2x2mm",
+      "selection_notes": "Genuine BMP280 has drifted to $6.87 with 4.5K stock, so the newer BMP388 wins on every axis (29K stock). BME280 ($6.36) adds humidity, but AHT20 + BMP388 together is cheaper. BMP390/BMP581 unstocked at snapshot.",
+      "sort_order": 200,
+      "default_mpn": "BMP388",
+      "default_lcsc": "C779278"
+    },
+    {
+      "function_key": "ambient-light",
+      "display_name": "Ambient light sensor",
+      "category": "sensors",
+      "qualifier": "I2C lux, 0-120 klx",
+      "package": "SMD-4P",
+      "selection_notes": "Adafruit's current lux pick and the price winner. BH1750FVI-TR (C78960, $0.93, 36K stock) is the GY-302 classic with deeper stock; OPT3001 (C90462, $1.23) the TI option.",
+      "sort_order": 210,
+      "default_mpn": "VEML7700-TR",
+      "default_lcsc": "C504893"
+    },
+    {
+      "function_key": "magnetometer",
+      "display_name": "Magnetometer (3-axis)",
+      "category": "sensors",
+      "qualifier": "I2C compass, +/-30 G",
+      "package": "WLP-4 0.8x0.8mm",
+      "selection_notes": "Adafruit's current magnetometer chip and by far the cheapest stocked compass. Mind the tiny 0.8mm WLP (machine assembly only); QMC5883P (C2847467, $1.53, LGA-16 3x3) when a friendlier package is worth 5x the price. With imu-6axis this covers 9-DOF, which is why pricey fusion parts (BNO055 $10) are not defaulted.",
+      "sort_order": 220,
+      "default_mpn": "MMC5603NJ",
+      "default_lcsc": "C404328"
+    },
+    {
+      "function_key": "temp-sensor-1wire",
+      "display_name": "Temperature sensor (1-Wire probe)",
+      "category": "sensors",
+      "qualifier": "-55 to +125C, probe-able",
+      "package": "TO-92",
+      "selection_notes": "The probe-able hobby classic (waterproof probe assemblies everywhere). UMW second source at half the genuine price (DS18B20+ C9753, $1.20). For on-board I2C temperature, TMP102 (C99269, $0.32) or the temp-humidity row.",
+      "sort_order": 230,
+      "default_mpn": "DS18B20 (UMW)",
+      "default_lcsc": "C376006"
+    },
+    {
+      "function_key": "cap-touch",
+      "display_name": "Capacitive touch sensor",
+      "category": "sensors",
+      "qualifier": "single pad, digital out",
+      "package": "SOT-23-6",
+      "selection_notes": "The jellybean inside every cheap touch module. AT42QT1010 (C74512, $1.31) is the SparkFun/Adafruit name brand; MPR121QR2 (C91322, $2.67) for 12 pads.",
+      "sort_order": 240,
+      "default_mpn": "TTP223-TD",
+      "default_lcsc": "C42422128"
+    },
+    {
+      "function_key": "i2s-microphone",
+      "display_name": "MEMS microphone (I2S)",
+      "category": "sensors",
+      "qualifier": "digital, omnidirectional",
+      "package": "LGA-5 2.7x3.5mm",
+      "selection_notes": "For ESP32 voice projects. The breakout classics are gone at LCSC (INMP441 and SPH0645 unstocked); name-brand ICS-43434 is $6.77. MEMSensing MSM261 series is the stocked current standard.",
+      "sort_order": 250,
+      "default_mpn": "MSM261DDB020",
+      "default_lcsc": "C27636198"
+    },
+    {
+      "function_key": "dc-motor-driver",
+      "display_name": "DC motor driver (dual H-bridge)",
+      "category": "drivers",
+      "qualifier": "2ch, 1.5A, 2.7-10.8V",
+      "package": "TSSOP-16-EP",
+      "selection_notes": "Dual H-bridge: the breakout default for differential-drive robots. TB6612FNG (C88224, $1.13) is the Adafruit-classic equivalent; DRV8837 (C39159, $0.21, 55K stock) when one motor suffices; L9110S ($0.13-0.17) the bargain single.",
+      "sort_order": 220,
+      "default_mpn": "DRV8833PWPR",
+      "default_lcsc": "C50506"
+    },
+    {
+      "function_key": "servo-pwm-driver",
+      "display_name": "PWM/servo driver",
+      "category": "drivers",
+      "qualifier": "16ch 12-bit I2C",
+      "package": "TSSOP-28",
+      "selection_notes": "The Adafruit 16-channel servo-driver classic with no real substitute at LCSC; only needed beyond the MCU's own PWM channels.",
+      "sort_order": 230,
+      "default_mpn": "PCA9685PW",
+      "default_lcsc": "C2678753"
+    },
+    {
+      "function_key": "audio-amp-i2s",
+      "display_name": "Audio amplifier (I2S)",
+      "category": "drivers",
+      "qualifier": "mono class-D, ~3W",
+      "package": "ESOP-8",
+      "selection_notes": "I2S mono class-D used across Chinese ESP32 speaker designs; easiest package of the stocked options. MAX98357A is the Adafruit classic (TQFN C910544 $1.28; BGA-9 C2682619 $0.51 but a 1.3mm BGA).",
+      "sort_order": 240,
+      "default_mpn": "NS4168",
+      "default_lcsc": "C910588"
+    },
+    {
+      "function_key": "audio-amp-analog",
+      "display_name": "Audio amplifier (analog in)",
+      "category": "drivers",
+      "qualifier": "mono class-D, 2.5W",
+      "package": "SOP-8",
+      "selection_notes": "The Adafruit speaker-amp staple, picked over the stereo PAM8403 ($0.17 but thin 2.7K no-brand stock) for stock depth and a known source. Use two for stereo.",
+      "sort_order": 250,
+      "default_mpn": "PAM8302AADCR",
+      "default_lcsc": "C112137"
+    },
+    {
+      "function_key": "addressable-led",
+      "display_name": "Addressable RGB LED",
+      "category": "drivers",
+      "qualifier": "integrated driver, 5050",
+      "package": "SMD5050-4P",
+      "selection_notes": "NeoPixel, 336K stock. SK6812MINI-E (C5149201, $0.087) for the 3.5mm mini, WS2812B-2020/4020 for tighter boards; chain any count off one data GPIO.",
+      "sort_order": 260,
+      "default_mpn": "WS2812B-B/T",
+      "default_lcsc": "C2761795"
+    },
+    {
+      "function_key": "rtc",
+      "display_name": "Real-time clock",
+      "category": "interface",
+      "qualifier": "I2C, battery-backed",
+      "package": "SOP-8",
+      "selection_notes": "PCF8563-compatible used across M5Stack hardware; deepest stock at the lowest price tier. Genuine NXP PCF8563T (C7440, $0.59); DS3231MZ (C107410, $2.94) when TCXO precision matters (the Adafruit precision-RTC classic); DS1307 is 5V-only legacy.",
+      "sort_order": 410,
+      "default_mpn": "BM8563ESA",
+      "default_lcsc": "C269877"
+    },
+    {
+      "function_key": "usb-uart-bridge",
+      "display_name": "USB-UART bridge",
+      "category": "interface",
+      "qualifier": "USB 2.0 FS, internal osc",
+      "package": "SOP-16",
+      "selection_notes": "83K stock, no crystal needed. NOTE: the design skill's flashing prose references CH340N, which had 31 units in stock at snapshot; CH340C is the same family in a stocked package. CH343P (C2846043, $1.25) for 6Mbps; CP2102N ($1.64+) the SiLabs option.",
+      "sort_order": 420,
+      "default_mpn": "CH340C",
+      "default_lcsc": "C84681"
+    },
+    {
+      "function_key": "io-expander",
+      "display_name": "I/O expander (I2C)",
+      "category": "interface",
+      "qualifier": "16-bit, interrupt out",
+      "package": "TSSOP-24",
+      "selection_notes": "16-bit expander at the lowest verified price. PCF8574 (UMW C22396383, $0.56) is the 8-bit classic; MCP23017 (C558584, $1.68) the Adafruit breakout staple if its register model is preferred.",
+      "sort_order": 430,
+      "default_mpn": "TCA9555PWR (UMW)",
+      "default_lcsc": "C42420608"
+    },
+    {
+      "function_key": "i2c-mux",
+      "display_name": "I2C multiplexer",
+      "category": "interface",
+      "qualifier": "8-channel, address fix",
+      "package": "TSSOP-24",
+      "selection_notes": "The Adafruit address-conflict fixer, cheap enough to default. PCA9548APW (C21198, $0.99) is the same function from NXP.",
+      "sort_order": 440,
+      "default_mpn": "TCA9548APWR",
+      "default_lcsc": "C130026"
+    }
+  ]
+}

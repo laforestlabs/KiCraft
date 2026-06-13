@@ -100,7 +100,8 @@ BOM_TOOLS = [
         "name": "add_part_from_lcsc",
         "description": "Fetch a real symbol+footprint bundle from LCSC into the project parts "
                        "library. Afterwards call list_parts to get the exact '<name>:<symbol>' "
-                       "and '<name>:<footprint>' strings.",
+                       "and '<name>:<footprint>' strings. Not needed for core-default rows "
+                       "that name a bundle: those are already in the library.",
         "parameters": {"type": "object", "properties": {
             "lcsc_id": {"type": "string", "description": "LCSC part number like C2837270"},
             "name": {"type": "string", "description": "optional library slug"}},
@@ -150,12 +151,14 @@ def _stage_extra(stage: str) -> str:
             "add_part_from_lcsc, then list_parts to read the exact '<name>:<sym>' / '<name>:<fp>' "
             "strings. Substituting a generic stock part for a specific IC is wrong.\n"
             "- CORE DEFAULTS: extras.core_defaults_block (when present) lists one curated "
-            "default part per common functional block, each with a verified LCSC C-number. "
-            "When a needed function matches a row and no stated constraint disqualifies it, "
-            "SKIP lookup_lcsc_id / search_symbols for that part: call add_part_from_lcsc "
-            "with the given C-number directly (batch several in one turn), then read the "
-            "exact '<name>:<sym>' / '<name>:<fp>' strings from list_parts. A matching "
-            "curated bundle in extras.parts_block still wins over a core default.\n"
+            "default part per common functional block. When a needed function matches a "
+            "row and no stated constraint disqualifies it, SKIP lookup_lcsc_id / "
+            "search_symbols for that part. Rows with a `bundle` are ALREADY in the parts "
+            "library: read the exact '<name>:<sym>' / '<name>:<fp>' strings from "
+            "extras.parts_block or list_parts (no fetch). Rows with only a C-number: call "
+            "add_part_from_lcsc with that C-number directly (batch several in one turn). "
+            "A matching curated bundle in extras.parts_block still wins over a core "
+            "default.\n"
             "- SEARCH BUDGET: lookup_lcsc_id is one query + at most one retry per part (retry "
             "with the bare part family, no descriptive words). If it still misses — or reports "
             "the backend unreachable — STOP searching for that part: either ask the user for "
@@ -180,11 +183,12 @@ def _stage_extra(stage: str) -> str:
 
 
 def _format_core_defaults_block(rows) -> str | None:
-    """Compact prompt rendering of the core-components registry: the admin-curated
-    default part per common functional block (/admin/core-components). The notes
-    and price/stock snapshots are deliberately dropped; this table rides the user
-    prompt through every BOM tool round, so it must stay small (~4.5KB for 43
-    rows). Rows the admin disabled are skipped; None when nothing remains."""
+    """Compact prompt rendering of the core-components registry: the curated
+    default part per common functional block (repo catalog core_blocks.json,
+    synced into /admin/core-components). The notes and price/stock snapshots
+    are deliberately dropped; this table rides the user prompt through every
+    BOM tool round, so it must stay small (~6KB for 43 rows). Rows the admin
+    disabled are skipped; None when nothing remains."""
     live = [r for r in (rows or []) if r.get("enabled", True)]
     if not live:
         return None
@@ -193,18 +197,25 @@ def _format_core_defaults_block(rows) -> str | None:
         "Curated default part per common functional block. Precedence: a matching "
         "curated bundle in the available-parts table > the core default below > "
         "research tools. When a needed function matches a row and no stated "
-        "constraint disqualifies it, adopt the default directly: call "
-        "add_part_from_lcsc with the given LCSC C-number (one call, no searching). "
-        "Passive series rows (no C-number) name the package to use with stock "
+        "constraint disqualifies it, adopt the default directly:",
+        "- Rows with a `bundle` are ALREADY in the parts library: take the exact "
+        "'<bundle>:<symbol>' / '<bundle>:<footprint>' strings from the "
+        "available-parts table (extras.parts_block) or list_parts. Do NOT call "
+        "add_part_from_lcsc or lookup_lcsc_id for these.",
+        "- Passive series rows (no C-number) name the package to use with stock "
         "Device:R / Device:C symbols.",
+        # Transitional: deleted once every non-passive row is bundle-backed.
+        "- Remaining rows (LCSC id, no bundle): call add_part_from_lcsc with the "
+        "given C-number (one call, no searching).",
         "",
-        "| function_key | block | qualifier | default part | LCSC | package |",
-        "|---|---|---|---|---|---|",
+        "| function_key | block | qualifier | default part | LCSC | package | bundle |",
+        "|---|---|---|---|---|---|---|",
     ]
     caveats = []
     for r in live:
         cells = (r.get("function_key"), r.get("display_name"), r.get("qualifier"),
-                 r.get("default_mpn"), r.get("default_lcsc"), r.get("package"))
+                 r.get("default_mpn"), r.get("default_lcsc"), r.get("package"),
+                 r.get("bundle"))
         lines.append("| " + " | ".join(str(c) if c else "-" for c in cells) + " |")
         if re.search(r"\b(WLP|CSP|BGA)\b", r.get("package") or ""):
             caveats.append(
@@ -313,8 +324,11 @@ def _bom_executor(workspace: Path):
     """Return an executor(name, args) -> str backed by the kicraft CLI (cwd=workspace)."""
     def execute(name: str, args: dict) -> str:
         if name == "list_parts":
+            # Generous cap: the vendored library alone renders ~600 chars per
+            # bundle, and the core-defaults adoption rule sends the model HERE
+            # for exact ids, so truncating this table breaks bundle adoption.
             r = _run(KICRAFT + ["list-parts"], workspace)
-            return (r.stdout or r.stderr)[:8000]
+            return (r.stdout or r.stderr)[:40000]
         if name == "lookup_symbol":
             r = _run(KICRAFT + ["lookup-symbol", str(args.get("symbol", ""))], workspace)
             return (r.stdout or r.stderr)[:3000]
@@ -341,7 +355,7 @@ def _bom_executor(workspace: Path):
             r = _run(KICRAFT + cmd, workspace)
             lp = _run(KICRAFT + ["list-parts"], workspace)
             return (f"add-part exit={r.returncode}\n{(r.stdout + chr(10) + r.stderr).strip()[:1500]}"
-                    f"\n\nCURRENT PARTS LIBRARY:\n{lp.stdout[:5000]}")
+                    f"\n\nCURRENT PARTS LIBRARY:\n{lp.stdout[:40000]}")
         return f"unknown tool: {name}"
     return execute
 
@@ -508,7 +522,9 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
     user = (f"PROJECT BRIEF:\n{brief}\n\n"
             f"CURRENT DESIGN STATE (JSON):\n{json.dumps(prompt_state)}")
     if extras:
-        budget = 40000 if stage == "wiring" else 24000
+        # bom carries the full parts table + core defaults (the adoption rule
+        # depends on both being complete), wiring carries symbol_pinouts.
+        budget = {"wiring": 40000, "bom": 48000}.get(stage, 24000)
         user += f"\n\nSTAGE EXTRAS (reference data from stage-prep):\n{json.dumps(extras)[:budget]}"
     if answers:
         qa = "\n".join(f"Q: {a.get('text', '')}\nA: {a.get('answer', '')}" for a in answers)

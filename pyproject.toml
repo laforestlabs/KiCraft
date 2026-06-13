@@ -106,7 +106,7 @@ include = ["kicraft*"]
 "kicraft.cli" = ["program.md"]
 "kicraft.eval" = ["rubric.yaml"]
 "kicraft.layout_editor" = ["static/*.js"]
-"kicraft.server" = ["core_components_seed.json"]
+"kicraft.parts_library" = ["core_blocks.json"]
 
 [tool.ruff]
 line-length = 100

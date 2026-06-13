@@ -4,7 +4,7 @@ Given the captured `intent` and `functional_spec` (both available in the `state`
 
 **Library reuse.** The `extras.leaves_block` field from stage-prep is the curated catalog of pre-tested sheet implementations the user has built up (or `null` if the library is empty). Reusing one is faster and lower-risk than designing from scratch — but only when the leaf's interface actually fits. Do NOT run `kicraft list-leaves` yourself; the prep output already contains everything.
 
-**Core component defaults.** The `extras.core_defaults_block` field from stage-prep (when present) lists the curated default part per common functional block (regulator tiers, sensors, drivers, interface chips). Use it when committing to topologies, and NAME the default family in `assumptions` for each block it covers (e.g. `"LDO 3.3V <=500mA: ME6211C33 per core defaults (defaulted)"`): the BOM stage then adopts those exact parts without researching alternatives.
+**Core component defaults.** The `extras.core_defaults_block` field from stage-prep (when present) lists the curated default part per common functional block (regulator tiers, sensors, drivers, interface chips); rows with a `bundle` are already vendored in the parts library, ready to use with zero fetching. Use it when committing to topologies, and NAME the default family in `assumptions` for each block it covers (e.g. `"LDO 3.3V <=500mA: ME6211C33 per core defaults (defaulted)"`): the BOM stage then adopts those exact parts without researching alternatives.
 
 Slot shape (`Architecture`):
 
