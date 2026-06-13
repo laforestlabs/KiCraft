@@ -3,8 +3,8 @@
 The library is searched in four tiers (highest precedence first):
 
 1. project-local: ``<project_root>/.kicraft/parts/<name>/``
-2. user-wide:     ``~/.kicraft/parts/<name>/``
-3. vendored:      ``<kicraft_install>/parts_library/<name>/``
+2. vendored:      ``<kicraft_install>/parts_library/<name>/``
+3. user-wide:     ``~/.kicraft/parts/<name>/`` (the BOM stage's fetch cache)
 4. extras:        directories in ``$KICRAFT_EXTRA_PARTS_DIRS`` (colon-separated)
 
 A part bundle contains a manifest, a ``<name>.kicad_sym`` file whose
