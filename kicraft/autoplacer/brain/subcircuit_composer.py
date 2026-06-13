@@ -479,7 +479,13 @@ def _filter_rotations_for_connector_opening(
     if not has_detectable:
         return
     if kept:
+        # Narrow BOTH: rotation_candidates seeds the solver's initial rotation
+        # (parent_adapter uses [0]) and all_rotation_candidates is the set the
+        # solver is ALLOWED to move through (parent_adapter -> allowed_rots).
+        # Constraining only the seed lets the solver rotate the connector back
+        # inward for a better packing score, so the allowed set must shrink too.
         spec.rotation_candidates = kept
+        spec.all_rotation_candidates = kept
     else:
         logger.warning(
             "Leaf %s: no rotation orients every edge connector outward; "

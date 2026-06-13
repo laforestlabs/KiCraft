@@ -152,6 +152,7 @@ def _spec_with_connector(opening, edge, layer=Layer.FRONT, leaf_local_rot=0.0):
     return SimpleNamespace(
         constraints=[constraint],
         rotation_candidates=list(candidates),
+        all_rotation_candidates=list(candidates),
         models=models,
         instance_path="/leaf",
     )
@@ -165,6 +166,10 @@ def test_filter_keeps_only_outward_rotation(edge, kept):
     spec = _spec_with_connector(opening=90.0, edge=edge)
     _filter_rotations_for_connector_opening(spec, _LOGGER)
     assert spec.rotation_candidates == [kept]
+    # all_rotation_candidates is the set the solver is ALLOWED to move through
+    # (parent_adapter -> allowed_rots); it MUST be narrowed too, or the solver
+    # rotates the connector back inward for packing. Regression guard.
+    assert spec.all_rotation_candidates == [kept]
 
 
 def test_filter_noop_without_detectable_opening():
@@ -172,6 +177,7 @@ def test_filter_noop_without_detectable_opening():
     _filter_rotations_for_connector_opening(spec, _LOGGER)
     # Undetectable mouth: leave every candidate (placed as before).
     assert spec.rotation_candidates == [0.0, 90.0, 180.0, 270.0]
+    assert spec.all_rotation_candidates == [0.0, 90.0, 180.0, 270.0]
 
 
 def test_filter_keeps_all_when_unsatisfiable(caplog):
@@ -200,12 +206,14 @@ def test_filter_keeps_all_when_unsatisfiable(caplog):
     spec = SimpleNamespace(
         constraints=[c_bottom, c_top],
         rotation_candidates=list(candidates),
+        all_rotation_candidates=list(candidates),
         models=models,
         instance_path="/leaf",
     )
     with caplog.at_level(logging.WARNING):
         _filter_rotations_for_connector_opening(spec, _LOGGER)
     assert spec.rotation_candidates == candidates
+    assert spec.all_rotation_candidates == candidates
     assert any("no rotation orients" in r.message for r in caplog.records)
 
 
