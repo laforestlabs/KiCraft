@@ -5,11 +5,12 @@ libraries. The parts library handles tiers 1-4 (project / home /
 vendored / extras); stock KiCad at ``/usr/share/kicad/{symbols,
 footprints}`` is the tier-5 last resort.
 
-Search order, highest priority first:
+Search order, highest priority first (delegated to
+``kicraft.parts_library.loader.resolve_tier_dirs``):
 
 1. ``<project_root>/.kicraft/parts/<library>/<library>.kicad_sym``
-2. ``~/.kicraft/parts/<library>/<library>.kicad_sym``
-3. ``<kicraft_install>/parts_library/<library>/<library>.kicad_sym``
+2. ``<kicraft_install>/parts_library/<library>/<library>.kicad_sym``
+3. ``~/.kicraft/parts/<library>/<library>.kicad_sym``
 4. ``$KICRAFT_EXTRA_PARTS_DIRS``-joined dirs, same shape
 5. ``/usr/share/kicad/symbols/<library>.kicad_sym``
 

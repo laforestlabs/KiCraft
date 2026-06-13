@@ -20,11 +20,12 @@ def test_resolve_tier_dirs_order(isolated_home, clean_extras_env, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     tiers = resolve_tier_dirs(project)
-    # Project first, then home, then vendored
+    # Project first, then vendored (curated repo content beats the home
+    # fetch cache), then home.
     names = [t.value for t, _ in tiers]
     assert names[0] == "project"
-    assert names[1] == "home"
-    assert names[2] == "vendored"
+    assert names[1] == "vendored"
+    assert names[2] == "home"
 
 
 def test_resolve_tier_dirs_includes_extras(isolated_home, monkeypatch, tmp_path):
@@ -46,7 +47,7 @@ def test_resolve_tier_dirs_includes_extras(isolated_home, monkeypatch, tmp_path)
 def test_resolve_tier_dirs_without_project_root(isolated_home, clean_extras_env):
     tiers = resolve_tier_dirs(None)
     names = [t.value for t, _ in tiers]
-    assert names[0] == "home"  # no project tier
+    assert names[0] == "vendored"  # no project tier
     assert "project" not in names
 
 
@@ -68,6 +69,34 @@ def test_find_part_falls_through_to_home(isolated_home, clean_extras_env, tmp_pa
     found = find_part("widget", project)
     assert found is not None
     assert found.tier == Tier.HOME
+
+
+def test_vendored_shadows_home(isolated_home, clean_extras_env,
+                               mask_vendored_tier):
+    """A home-tier copy never shadows a same-named vendored bundle: the home
+    tier is the BOM stage's auto-fetch cache, and after a re-vendor (possibly
+    at a different LCSC variant) the cached copy is stale, not an override."""
+    write_valid_part(mask_vendored_tier, name="widget")
+    write_valid_part(isolated_home / ".kicraft" / "parts", name="widget")
+    found = find_part("widget", None)
+    assert found is not None
+    assert found.tier == Tier.VENDORED
+    active, shadowed, _broken = load_all_with_overrides(None)
+    assert [p.tier for p in active if p.manifest.name == "widget"] \
+        == [Tier.VENDORED]
+    assert [p.tier for p in shadowed if p.manifest.name == "widget"] \
+        == [Tier.HOME]
+
+
+def test_project_shadows_vendored(isolated_home, clean_extras_env,
+                                  mask_vendored_tier, tmp_path):
+    """The project tier stays the deliberate-override location."""
+    project = tmp_path / "project"
+    write_valid_part(mask_vendored_tier, name="widget")
+    write_valid_part(project / ".kicraft" / "parts", name="widget")
+    found = find_part("widget", project)
+    assert found is not None
+    assert found.tier == Tier.PROJECT
 
 
 def test_find_part_returns_none_when_absent(isolated_home, clean_extras_env, tmp_path):

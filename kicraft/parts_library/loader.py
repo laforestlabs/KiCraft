@@ -3,14 +3,19 @@
 Search order, highest precedence first:
 
 1. ``<project_root>/.kicraft/parts/<name>/``  — project-local override
-2. ``~/.kicraft/parts/<name>/``               — user-wide accumulator
-3. ``<kicraft_install>/parts_library/<name>/`` — curated, vendored
+2. ``<kicraft_install>/parts_library/<name>/`` — curated, vendored
+3. ``~/.kicraft/parts/<name>/``               — user-wide fetch cache
 4. ``$KICRAFT_EXTRA_PARTS_DIRS``              — escape hatch (colon-separated)
 
-A part loaded from a higher tier wins; the loader returns the first
-match by ``name`` and reports which tier supplied it. Callers that need
-the full picture (e.g. ``list-parts``) ask for ``load_all_with_overrides``
-to see both the active entry and shadowed-but-discoverable ones.
+One rule: curated repo content beats auto-fetched caches. The home tier is
+where the BOM stage persists on-demand LCSC fetches, so a same-named bundle
+there is a stale cache once the part gets vendored (e.g. a re-vendor at a
+different LCSC variant), never a deliberate override; a deliberate override
+lives in the project tier. A part loaded from a higher tier wins; the
+loader returns the first match by ``name`` and reports which tier supplied
+it. Callers that need the full picture (e.g. ``list-parts``) ask for
+``load_all_with_overrides`` to see both the active entry and
+shadowed-but-discoverable ones.
 
 KiCad's stock libraries at ``/usr/share/kicad/{symbols,footprints}`` are
 *not* parts in this sense — they're resolved separately by the
@@ -102,8 +107,11 @@ def resolve_tier_dirs(project_root: Path | None) -> list[tuple[Tier, Path]]:
     out: list[tuple[Tier, Path]] = []
     if project_root is not None:
         out.append((Tier.PROJECT, project_parts_dir(project_root)))
-    out.append((Tier.HOME, home_parts_dir()))
+    # Vendored beats home: the home tier is the BOM stage's auto-fetch cache,
+    # and curated repo content must win over a stale cached copy (see the
+    # module docstring). Deliberate overrides belong in the project tier.
     out.append((Tier.VENDORED, vendored_parts_dir()))
+    out.append((Tier.HOME, home_parts_dir()))
     for d in extra_parts_dirs():
         out.append((Tier.EXTRA, d))
     return out
