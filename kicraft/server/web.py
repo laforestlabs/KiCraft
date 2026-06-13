@@ -4763,14 +4763,37 @@ def _svg_icon(path: str) -> str:
             f'{path}</svg>')
 
 
+def _sample_media(s, *, hero: bool = False) -> str:
+    """The board's interactive 3D model when a GLB is bundled, else the static
+    render. The PNG doubles as the model's poster (instant paint) and the no-JS
+    fallback, so a sample without a GLB degrades to exactly the old behaviour."""
+    alt = f"{s.title} board, designed by KiCraft"
+    if not s.has_3d():
+        cls = "kc-board" if hero else ""
+        lazy = "" if hero else ' loading="lazy"'
+        return f'<img class="{cls}" src="{s.board_png_url}" alt="{alt}"{lazy}>'
+    common = (f'src="{s.board_glb_url}" poster="{s.board_png_url}" alt="{alt}" '
+              f'camera-orbit="22deg 66deg 102%" interaction-prompt="none" '
+              f'reveal="auto"')
+    if hero:
+        # Above the fold and not a link: load eagerly, let visitors orbit it.
+        return (f'<model-viewer class="kc-model kc-model-hero" {common} '
+                f'camera-controls auto-rotate auto-rotate-delay="900" '
+                f'rotation-per-second="16deg" disable-pan shadow-intensity="0" '
+                f'exposure="1.0" touch-action="pan-y" loading="eager"></model-viewer>')
+    # Inside the card link: pointer-events:none (CSS) keeps the card clickable,
+    # so just spin gently and lazy-load the GLB when scrolled near.
+    return (f'<model-viewer class="kc-model" {common} auto-rotate '
+            f'auto-rotate-delay="0" rotation-per-second="13deg" disable-zoom '
+            f'disable-pan disable-tap loading="lazy"></model-viewer>')
+
+
 def _landing_sample_card(s) -> str:
     badge = '<span class="kc-badge">Featured</span>' if s.featured else ""
     href = f"/signup?prompt={quote(s.prompt)}"
     return (
         f'<a class="kc-sample kc-reveal" href="{href}">'
-        f'<div class="kc-sample-art">{badge}'
-        f'<img src="{s.board_png_url}" alt="{s.title} board, designed by KiCraft" '
-        f'loading="lazy"></div>'
+        f'<div class="kc-sample-art">{badge}{_sample_media(s)}</div>'
         f'<div class="kc-sample-body">'
         f'<h3>{s.title}</h3>'
         f'<div class="kc-sample-stats">{s.sheets} sheets &middot; {s.parts} parts '
@@ -4797,6 +4820,13 @@ def _render_landing() -> None:
 
     samples = available_samples()
     hero = featured_sample()
+    if any(s.has_3d() for s in samples):
+        # <model-viewer> (Google, @google/model-viewer 4.0.0, BSD-3) — self-hosted
+        # like kicanvas.js so there's no CDN runtime dependency. The element
+        # registers on load; the lazy Draco/KTX2 decoders it *can* fetch never
+        # fire for KiCad's plain (uncompressed) GLBs.
+        ui.add_head_html(
+            '<script type="module" src="/static/model-viewer.min.js"></script>')
 
     pipeline = "".join(
         f'<div class="kc-step{" kc-step-build" if b else ""}">'
@@ -4821,8 +4851,7 @@ def _render_landing() -> None:
     seed_html = seed.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     gallery = "".join(_landing_sample_card(s) for s in samples)
-    hero_art = (f'<div class="kc-hero-art"><img class="kc-board" '
-                f'src="{hero.board_png_url}" alt="A PCB designed by KiCraft"></div>'
+    hero_art = (f'<div class="kc-hero-art">{_sample_media(hero, hero=True)}</div>'
                 if hero else "")
     gallery_block = (
         f'<section class="kc-section" id="samples" style="scroll-margin-top:80px">'

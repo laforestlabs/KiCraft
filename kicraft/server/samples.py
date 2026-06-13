@@ -1,9 +1,11 @@
 """Curated, prebuilt KiCraft sample projects for the web showcase.
 
 Single source of truth, reused two ways (mirrors how ``examples.py`` feeds the
-prompt box): the public landing page (``web._render_landing``) shows each sample's
-3D board render and the brief that produced it, and the logged-in explorer
-(``web.samples_page``) opens the real KiCad files in KiCanvas.
+prompt box): the public landing page (``web._render_landing``) shows an
+interactive 3D model of each board (a ``<model-viewer>`` of ``board.glb``, with the
+rendered ``board.png`` as poster / no-JS fallback) and the brief that produced it,
+and the logged-in explorer (``web.samples_page``) opens the real KiCad files in
+KiCanvas.
 
 Every sample is a *finished* KiCraft output: a hierarchical schematic, real parts,
 and a placed-and-routed board, curated from a real build into
@@ -12,11 +14,14 @@ them costs zero tokens: the public page can showcase real work without ever call
 a model. (No model usage before a valid email signup is a hard product rule, so the
 showcase is deliberately prebuilt rather than generated on demand.)
 
-To add a sample: drop its curated KiCad files under ``sample_projects/<new-id>/``
-(root + leaf ``*.kicad_sch``, ``*.kicad_pcb``, ``*.kicad_pro``; no ``.experiments``),
-render ``previews/board.png`` with ``kicad-cli pcb render``, and append a ``Sample``
-below. The landing and explorer render whatever ``available_samples()`` returns, so
-a partially-synced deploy degrades to fewer cards rather than broken images.
+To add a sample, run ``scripts/promote_to_sample.py`` on a finished self-eval run:
+it copies the curated KiCad files under ``sample_projects/<new-id>/`` (root + leaf
+``*.kicad_sch``, ``*.kicad_pcb``, ``*.kicad_pro``; no ``.experiments``), stages the
+bundle 3D models under ``3dmodels/``, renders ``previews/board.png`` and exports the
+interactive ``previews/board.glb`` with ``kicad-cli``, and prints the ``Sample`` to
+append below. The landing and explorer render whatever ``available_samples()``
+returns, so a partially-synced deploy degrades to fewer cards rather than broken
+images; ``board.glb`` is optional — a sample without it falls back to the PNG.
 """
 from __future__ import annotations
 
@@ -68,6 +73,18 @@ class Sample:
     def board_png_url(self) -> str:
         return f"{SAMPLES_URL}/{self.id}/previews/board.png"
 
+    @property
+    def board_glb(self) -> Path:
+        return self.dir / "previews" / "board.glb"
+
+    @property
+    def board_glb_url(self) -> str:
+        return f"{SAMPLES_URL}/{self.id}/previews/board.glb"
+
+    def has_3d(self) -> bool:
+        """True when an interactive GLB model is bundled (else use the PNG)."""
+        return self.board_glb.is_file()
+
     def schematic_files(self) -> list[Path]:
         """The root schematic first, then leaf sheets (sorted), so KiCanvas links
         the hierarchy by filename the way the app's synth view expects."""
@@ -95,33 +112,33 @@ class Sample:
 # brief yields a design like the one shown.
 SAMPLES: list[Sample] = [
     Sample(
-        id="motion-sensor",
-        title="ESP32-S3 motion sensor",
-        blurb="A PIR motion controller: ESP32-S3, USB-C power, a 3.3 V regulator, "
-              "and a programming header.",
-        prompt="An ESP32-S3 PIR motion sensor board: USB-C power, a 3.3 V "
-               "regulator, and a programming header.",
-        stem="ESP32_MOTION_SENSOR",
-        sheets=6, parts=22, featured=True,
-    ),
-    Sample(
         id="weather-sensor",
         title="BMP280 weather sensor",
-        blurb="A barometric temperature and pressure sensor on a Qwiic/STEMMA bus, "
+        blurb="A barometric pressure and temperature sensor on a Qwiic/STEMMA bus, "
               "USB-C powered.",
         prompt="A BMP280 barometric weather sensor on a Qwiic/STEMMA bus, USB-C.",
-        stem="USB_BMP280_READER",
-        sheets=6, parts=17,
+        stem="A_BMP280_BAROMETRIC",
+        sheets=3, parts=13, featured=True,
     ),
     Sample(
-        id="led-matrix",
-        title="ESP32 LED-matrix driver",
-        blurb="An ambitious one: an ESP32-driven addressable LED matrix, 200+ "
-              "placed parts, fully routed, USB-C powered.",
-        prompt="An ESP32-driven addressable LED matrix board: USB-C power, a "
-               "3.3 V rail, and a 5 V level shifter.",
-        stem="ESP32_LED_MATRIX",
-        sheets=6, parts=230,
+        id="bench-breakout",
+        title="USB-C bench breakout",
+        blurb="Bench power from USB-C: regulated 3.3 V and 5 V rails with status "
+              "LEDs and ESD protection.",
+        prompt="A bench breakout: USB-C in, regulated 3.3 V and 5 V rails with "
+               "status LEDs.",
+        stem="BENCH_BREAKOUT",
+        sheets=4, parts=16,
+    ),
+    Sample(
+        id="night-light",
+        title="PIR motion night light",
+        blurb="A motion-activated night light: a PIR sensor switching warm-white "
+              "LEDs, USB-C powered.",
+        prompt="A motion-activated USB-C night light with a PIR sensor and "
+               "warm-white LEDs.",
+        stem="A_MOTION_ACTIVATED",
+        sheets=4, parts=17,
     ),
 ]
 
