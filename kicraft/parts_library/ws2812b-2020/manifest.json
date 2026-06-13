@@ -1,10 +1,10 @@
 {
-  "content_hash": "sha256:bcac53ddf3fa50df966d5ede9a3089d282875f9c6e82e21173756dbd89a92195",
+  "content_hash": "sha256:59f3388238194484c80d757ec6e96a293f9ff2b8e9acfe0e1a7c898e222b79e9",
   "datasheet_url": "https://lcsc.com/product-detail/Light-Emitting-Diodes-LED_Worldsemi-WS2812B-2020_C965555.html",
   "description": "Worldsemi WS2812B-2020 \u2014 2\u00d72 mm addressable RGB LED in the smallest standard package. WS2812 protocol-compatible. Use when board area is tight and dense pixel arrays matter (POV displays, jewelry, fine wearable strips).",
   "footprint_name": "LED-SMD_4P-L2.0-W2.0-TL_WS2812B-2020",
   "kicad_version_min": "9.0.0",
-  "maturity": "reviewed",
+  "maturity": "production",
   "mpn": "WS2812B-2020",
   "name": "ws2812b-2020",
   "provenance": {

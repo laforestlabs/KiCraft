@@ -1,10 +1,10 @@
 {
-  "content_hash": "sha256:a8e4073a0c4108fea501dccf8a63f175b77e2b1317aebc9bf0cacd3c3b5928c0",
+  "content_hash": "sha256:531b3582e456483b7351c23df7de604e8ae1e5731298b2e429ffe8293dad3d6f",
   "datasheet_url": "https://lcsc.com/product-detail/Others_PUOLOP-DW01_C351410.html",
   "description": "PUOLOP DW01A \u2014 single-cell Li-ion/LiPo protection controller, SOT-23-6. Overcharge cut at ~4.30 V, overdischarge cut at ~2.40 V, overcurrent/short-circuit detection. Drives an external back-to-back N-channel pair (FS8205A or equivalent) to disconnect the cell on fault. The cheap-and-cheerful single-cell BMS companion to TP4056 chargers.",
   "footprint_name": "SOT-23-6_L2.9-W1.6-P0.95-LS2.8-BL",
   "kicad_version_min": "9.0.0",
-  "maturity": "reviewed",
+  "maturity": "production",
   "mpn": "DW01A",
   "name": "dw01a",
   "provenance": {

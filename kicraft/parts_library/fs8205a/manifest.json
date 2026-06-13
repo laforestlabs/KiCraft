@@ -1,10 +1,10 @@
 {
-  "content_hash": "sha256:8f90b9c7fd26d0ceea30a66159ab52ae48412db424d5c8ef237b207ee9940830",
+  "content_hash": "sha256:0c025c283959c7820760a4a0d5fcae5b3df5301c1c4b6206668bad6b93eb6979",
   "datasheet_url": "https://www.lcsc.com/datasheet/C2830320.pdf",
   "description": "TECH PUBLIC FS8205A \u2014 dual N-channel MOSFET, 20 V / 6 A, SOT-23-6. Source-tied internal back-to-back FET pair. The de-facto switch IC paired with DW01A for single-cell Li-ion/LiPo protection \u2014 together they make the cheap LiPo BMS found in nearly every Chinese power bank.",
   "footprint_name": "SOT-23-6_L2.9-W1.6-P0.95-LS2.8-BR",
   "kicad_version_min": "9.0.0",
-  "maturity": "reviewed",
+  "maturity": "production",
   "mpn": "FS8205A",
   "name": "fs8205a",
   "provenance": {

@@ -551,9 +551,9 @@
 		)
 	)
 	(embedded_fonts no)
-	(model "/WIFI-SMD_L25.5-W18.0-H3.1-ESP32-WROOM-32E.wrl"
+	(model "${KIPRJMOD}/3dmodels/esp32-wroom-32e-n4/WIFI-SMD_L25.5-W18.0-H3.1-ESP32-WROOM-32E.wrl"
 		(offset
-			(xyz 0 0 0)
+			(xyz -7.56 0 0)
 		)
 		(scale
 			(xyz 1 1 1)

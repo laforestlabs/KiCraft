@@ -1079,9 +1079,11 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
     try:
         from easyeda2kicad.easyeda.easyeda_api import EasyedaApi
         from easyeda2kicad.easyeda.easyeda_importer import (
+            Easyeda3dModelImporter,
             EasyedaFootprintImporter,
             EasyedaSymbolImporter,
         )
+        from easyeda2kicad.kicad.export_kicad_3d_model import Exporter3dModelKicad
         from easyeda2kicad.kicad.export_kicad_footprint import ExporterFootprintKicad
         from easyeda2kicad.kicad.export_kicad_symbol import ExporterSymbolKicad
     except ImportError as exc:
@@ -1160,17 +1162,67 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
             _normalize_symbol_text(sym_path.read_text(), raw_symbol_name, symbol_name)
         )
 
-    # Footprint: write into the .pretty dir. 3D model path is left empty
-    # (no .step yet); user can re-fetch with a 3D flag in a follow-up.
+    # 3D model: fetched by default so the bundle renders with a body in the
+    # board's 3D view. A missing or failed download must never fail the part
+    # fetch; the footprint is then written without any (model ...) stanza.
+    model_basename: str | None = None
+    if not args.no_3d:
+        try:
+            ee_model = Easyeda3dModelImporter(
+                easyeda_cp_cad_data=cad_data, download_raw_3d_model=True
+            ).output
+            exporter_3d = Exporter3dModelKicad(model_3d=ee_model)
+            if exporter_3d.output is not None and exporter_3d.export(
+                output_dir=str(part_dir / "3d")
+            ):
+                raw_model = exporter_3d.output.name
+                safe_model = _sanitize_kicad_name(raw_model)
+                if safe_model != raw_model:
+                    for ext in (".wrl", ".step"):
+                        src = part_dir / "3d" / f"{raw_model}{ext}"
+                        if src.is_file():
+                            src.replace(part_dir / "3d" / f"{safe_model}{ext}")
+                if (part_dir / "3d" / f"{safe_model}.wrl").is_file():
+                    model_basename = f"{safe_model}.wrl"
+        except Exception as exc:  # noqa: BLE001 - network/parse errors
+            print(
+                f"3D model fetch failed for {lcsc_id}: {exc}; continuing "
+                f"without (re-run `fetch-3d` on the bundle later)",
+                file=sys.stderr,
+            )
+        if model_basename is None:
+            print(
+                f"no 3D model for {lcsc_id}; the bundle will render without "
+                f"a body (re-run `fetch-3d` or drop files into 3d/ later)",
+                file=sys.stderr,
+            )
+
+    # Footprint: write into the .pretty dir, its model stanza pointing at the
+    # project-relative path synthesis stages into generated projects.
     raw_footprint_name = ee_footprint.info.name
     footprint_name = _sanitize_kicad_name(raw_footprint_name)
     fp_path = pretty_dir / f"{footprint_name}.kicad_mod"
-    ExporterFootprintKicad(footprint=ee_footprint).export(
-        footprint_full_path=str(fp_path), model_3d_path=""
+    fp_exporter = ExporterFootprintKicad(footprint=ee_footprint)
+    if model_basename is None:
+        # Suppress the stanza entirely: exporting with an empty model path
+        # would emit the old broken bare "/NAME.wrl" reference.
+        fp_exporter.output.model_3d = None
+    fp_exporter.export(
+        footprint_full_path=str(fp_path),
+        model_3d_path=f"${{KIPRJMOD}}/3dmodels/{libname}",
     )
     if footprint_name != raw_footprint_name:
         _, fp_fixed = _sanitize_footprint_text(fp_path.read_text(), raw_footprint_name)
         fp_path.write_text(fp_fixed)
+    if model_basename is not None:
+        # The stanza was written with EasyEDA's raw model name; repoint it at
+        # the (possibly sanitized) file we actually have on disk.
+        fp_text = fp_path.read_text()
+        fp_fixed, _count = _rewrite_model_stanza(
+            fp_text, f"${{KIPRJMOD}}/3dmodels/{libname}/{model_basename}"
+        )
+        if fp_fixed != fp_text:
+            fp_path.write_text(fp_fixed)
 
     # Compose the manifest, then compute content_hash and rewrite once.
     sourcing: dict[str, str] = {"lcsc": lcsc_id}
@@ -1297,12 +1349,16 @@ def _cmd_promote_part(args: argparse.Namespace) -> int:
 def _cmd_validate_part(args: argparse.Namespace) -> int:
     """Validate a parts-library directory: schema, files, content_hash.
 
-    Three checks, in order: (1) the manifest parses and the directory
+    Four checks, in order: (1) the manifest parses and the directory
     name matches ``name``; (2) the symbol + footprint files declared in
-    the manifest exist and parse; (3) the recomputed content_hash matches
-    the value stored in the manifest. With ``--update-hash``, recompute
-    and rewrite the manifest's ``content_hash`` instead of failing — used
-    when authoring a new part or after deliberate edits.
+    the manifest exist and parse; (3) every footprint ``(model ...)`` path
+    resolves (stock ``${KICAD9_3DMODEL_DIR}`` reference, or a
+    ``${KIPRJMOD}/3dmodels/<name>/`` path backed by a file in the bundle's
+    ``3d/`` dir; footprints with no stanza pass); (4) the recomputed
+    content_hash matches the value stored in the manifest. With
+    ``--update-hash``, recompute and rewrite the manifest's
+    ``content_hash`` instead of failing (used when authoring a new part
+    or after deliberate edits).
     """
     from pydantic import ValidationError as _PydValidationError
 
@@ -1367,17 +1423,16 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
         )
         return 2
 
-    if getattr(args, "check_3d", False):
-        problems = _check_3d_model_paths(part_dir, manifest.name, fp_text)
-        if problems:
-            for problem in problems:
-                print(problem, file=sys.stderr)
-            print(
-                "  fix with `fetch-3d <part-dir>` (or hand-edit the stanza "
-                "to a stock ${KICAD9_3DMODEL_DIR} model) and rerun",
-                file=sys.stderr,
-            )
-            return 2
+    problems = _check_3d_model_paths(part_dir, manifest.name, fp_text)
+    if problems:
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        print(
+            "  fix with `fetch-3d <part-dir>` (or hand-edit the stanza "
+            "to a stock ${KICAD9_3DMODEL_DIR} model) and rerun",
+            file=sys.stderr,
+        )
+        return 2
 
     actual = compute_content_hash(part_dir)
     if actual != manifest.content_hash:
@@ -2685,6 +2740,14 @@ def main(argv: list[str] | None = None) -> int:
         help="replace an existing part directory with the same slug",
     )
     p_add_part.add_argument(
+        "--no-3d",
+        action="store_true",
+        help=(
+            "skip downloading the EasyEDA 3D model (--from-lcsc only); the "
+            "footprint is then written without a (model ...) stanza"
+        ),
+    )
+    p_add_part.add_argument(
         "--maturity",
         choices=list(get_args(Maturity)),
         default="prototype",
@@ -2708,15 +2771,6 @@ def main(argv: list[str] | None = None) -> int:
         "--update-hash",
         action="store_true",
         help="recompute content_hash and rewrite the manifest instead of failing",
-    )
-    p_val_part.add_argument(
-        "--check-3d",
-        action="store_true",
-        help=(
-            "also require every footprint (model ...) path to be a stock "
-            "${KICAD9_3DMODEL_DIR} reference or a ${KIPRJMOD}/3dmodels/<name>/ "
-            "path backed by a file in the bundle's 3d/ dir"
-        ),
     )
     p_val_part.set_defaults(func=_cmd_validate_part)
 

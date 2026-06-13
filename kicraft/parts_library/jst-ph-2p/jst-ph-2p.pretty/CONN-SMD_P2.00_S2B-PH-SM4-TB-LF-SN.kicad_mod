@@ -34,7 +34,7 @@
 	(fp_line (start -3.00 -1.63) (end -3.00 -3.23) (layer F.CrtYd) (width 0.05))
 	(fp_line (start -3.00 -3.23) (end -3.95 -3.23) (layer F.CrtYd) (width 0.05))
 	(fp_line (start -3.95 -3.23) (end -3.95 4.37) (layer F.CrtYd) (width 0.05))
-	(model "/CONN-SMD_P2.00_S2B-PH-SM4-TB-LF-SN.wrl"
+	(model "${KIPRJMOD}/3dmodels/jst-ph-2p/CONN-SMD_P2.00_S2B-PH-SM4-TB-LF-SN.wrl"
 		(offset (xyz 0.000 0.000 0.000))
 		(scale (xyz 1 1 1))
 		(rotate (xyz 0 0 0))

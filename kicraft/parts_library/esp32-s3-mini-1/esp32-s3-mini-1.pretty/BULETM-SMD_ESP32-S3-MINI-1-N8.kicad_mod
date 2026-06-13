@@ -109,7 +109,7 @@
 	(fp_line (start -7.70 -12.78) (end 7.70 -12.78) (layer F.CrtYd) (width 0.05))
 	(fp_line (start 7.70 -12.78) (end 7.70 7.72) (layer F.CrtYd) (width 0.05))
 	(fp_line (start 7.70 7.72) (end -7.70 7.72) (layer F.CrtYd) (width 0.05))
-	(model "/BULETM-SMD_ESP32-S3-MINI-1-N8.wrl"
+	(model "${KIPRJMOD}/3dmodels/esp32-s3-mini-1/BULETM-SMD_ESP32-S3-MINI-1-N8.wrl"
 		(offset (xyz 0.000 0.000 0.000))
 		(scale (xyz 1 1 1))
 		(rotate (xyz 0 0 0))

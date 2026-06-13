@@ -24,7 +24,7 @@
 	(fp_line (start 2.15 1.30) (end -2.15 1.30) (layer F.CrtYd) (width 0.05))
 	(fp_poly (pts (xy -2.157730 -1.439875) (xy -2.157730 -0.962381) (xy -2.614930 -0.962381) (xy -2.614930 -1.439875) (xy -2.157730 -1.439875)) (stroke (width 0) (type solid)) (fill solid) (layer "F.SilkS"))
 	(fp_poly (pts (xy -2.145030 1.439926) (xy -2.145030 0.962431) (xy -2.602230 0.962431) (xy -2.602230 1.439926) (xy -2.145030 1.439926)) (stroke (width 0) (type solid)) (fill solid) (layer "F.SilkS"))
-	(model "/SMA_L4.3-W2.6-LS5.0-RD.wrl"
+	(model "${KIPRJMOD}/3dmodels/ss14/SMA_L4.3-W2.6-LS5.0-RD.wrl"
 		(offset (xyz 0.000 0.000 0.000))
 		(scale (xyz 1 1 1))
 		(rotate (xyz 0 0 0))

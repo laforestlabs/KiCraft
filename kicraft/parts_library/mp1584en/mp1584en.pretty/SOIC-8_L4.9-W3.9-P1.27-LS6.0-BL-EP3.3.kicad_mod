@@ -40,7 +40,7 @@
 	(fp_line (start 2.45 -1.95) (end 2.45 1.95) (layer F.CrtYd) (width 0.05))
 	(fp_line (start 2.45 1.95) (end -2.45 1.95) (layer F.CrtYd) (width 0.05))
 	(fp_line (start -2.45 1.95) (end -2.45 -1.95) (layer F.CrtYd) (width 0.05))
-	(model "/SOIC-8_L4.9-W3.9-P1.27-LS6.0-BL-EP3.3.wrl"
+	(model "${KIPRJMOD}/3dmodels/mp1584en/SOIC-8_L4.9-W3.9-P1.27-LS6.0-BL-EP3.3.wrl"
 		(offset (xyz 0.000 0.000 0.000))
 		(scale (xyz 1 1 1))
 		(rotate (xyz 0 0 0))
