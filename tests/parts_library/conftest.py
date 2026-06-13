@@ -69,11 +69,13 @@ def write_valid_part(
     symbol: str = VALID_SYMBOL,
     footprint: str = VALID_FOOTPRINT,
     footprint_name: str = "WidgetFP",
+    models: dict[str, str] | None = None,
 ) -> Path:
     """Write a complete, validated part bundle into ``base/<name>/``.
 
     Returns the part directory. The manifest's ``content_hash`` is filled
-    in after the bundle files are written so it matches.
+    in after the bundle files are written so it matches. ``models`` maps
+    filenames to contents written into the bundle's ``3d/`` dir.
     """
     part_dir = base / name
     part_dir.mkdir(parents=True, exist_ok=True)
@@ -81,6 +83,11 @@ def write_valid_part(
     fp_dir = part_dir / f"{name}.pretty"
     fp_dir.mkdir(exist_ok=True)
     (fp_dir / f"{footprint_name}.kicad_mod").write_text(footprint)
+    if models:
+        model_dir = part_dir / "3d"
+        model_dir.mkdir(exist_ok=True)
+        for fname, contents in models.items():
+            (model_dir / fname).write_text(contents)
     manifest = make_valid_manifest(name=name, footprint_name=footprint_name)
     dump_manifest(manifest, part_dir)
     actual = compute_content_hash(part_dir)
