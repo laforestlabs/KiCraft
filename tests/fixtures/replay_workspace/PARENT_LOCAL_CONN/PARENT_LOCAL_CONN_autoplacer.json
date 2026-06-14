@@ -1,0 +1,40 @@
+{
+  "project_name": "PARENT_LOCAL_CONN",
+  "pcb_file": "PARENT_LOCAL_CONN.kicad_pcb",
+  "power_nets": [
+    "+3V3",
+    "GND",
+    "VBUS_IN",
+    "VBUS_OUT"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C1",
+      "C2"
+    ]
+  },
+  "group_labels": {
+    "U1": "PD TRIGGER"
+  },
+  "signal_flow_order": [
+    "J1",
+    "U1",
+    "J2"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J2": {
+      "edge": "right"
+    },
+    "SW1": {
+      "edge": "top"
+    },
+    "J3": {
+      "edge": "bottom"
+    }
+  },
+  "enable_board_size_search": true,
+  "parent_compose_spacing_mm": 3.5
+}

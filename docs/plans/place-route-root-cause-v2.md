@@ -1,9 +1,10 @@
 # Plan v2: connector stranding + stamp-short family — root-cause, not gating
 
 **Status:** Phases 1+2 **MERGED to main** (commit 2358fd4, fast-forward,
-2026-06-14) & fleet-validated; Phases 3-4 deferred (fixture-blocked).
-NOT pushed/deployed yet (local main is ahead of origin/main; pipeline changes
-need `deploy/restart-web.sh` + `restart-build-worker.sh` after a push).
+2026-06-14) & fleet-validated. Phase 3 **UNBLOCKED 2026-06-14**: the
+parent-local-connector fixture is built + frozen (`PARENT_LOCAL_CONN`) and shows
+the connector strands today (strict `xfail`); paused for review before the
+connector-branch deletion. Phase 4 follows Phase 3.
 
 ## Progress (2026-06-14)
 - **Phase 1 (RC3+RC2) DONE.** `+rot` convention flipped at all three recovery
@@ -31,14 +32,28 @@ need `deploy/restart-web.sh` + `restart-build-worker.sh` after a push).
   - run_09 IMPROVED: candidate shorts 8/8/1/5 (mine) vs 16/24/… (main),
     consistent with RC2 holding same-layer leaves apart. **No regression; a net
     improvement on the one stressed board.**
-- **Phase 3 (Lever 2.1) blocked on a fixture.** None of the 9 workspaces has a
-  parent-local CONNECTOR in a hierarchical board (the case
-  `_snap_parent_local`'s connector branch handles): run_08 is flat (no compose),
-  run_09's parent-locals are LEDs (generic snap branch). The connector-branch
-  deletion still has no validating fixture; deferred as a scoped follow-up
-  (construct a parent-local-connector workspace → freeze into corpus → auto-wrap
-  + delete behind it + the connector_edge_gap gate). Landing it blind would risk
-  the USB-C work.
+- **Phase 3 (Lever 2.1) — fixture BUILT 2026-06-14; checkpoint before deletion.**
+  The corpus had no parent-local CONNECTOR in a hierarchical board (the case
+  `_snap_parent_local`'s connector branch handles), so the deletion had no gate.
+  Built one by hand from `USB_PD_TRIGGER` (no LLM synthesis): new fixture
+  `tests/fixtures/replay_workspace/PARENT_LOCAL_CONN/` =
+  `USB_PD_TRIGGER` + a root-level connector `J3` (`edge:bottom`, in no leaf →
+  parent-local). Tooling: `scripts/build_parent_local_conn_fixture.py`;
+  parent golden frozen; `connector_edge_gap` tests added.
+  **Finding that revises the premise:** a parent-local connector does NOT land
+  flush today — J3 **strands ~4 mm inboard** while the leaf connectors J1/J2/SW1
+  stay flush (positive control). `_snap_parent_local` snaps J3 to the pre-repair
+  outline, but a *leaf* defines the board extremity on that edge and J3 (having
+  no synthetic block) is never pinned as an extremity — RC1's mechanism, applied
+  to a parent-local. So Phase 2's edge-flush fix reaches *leaf* connectors only.
+  This makes Lever 2.1 a **fix**, not just a simplification: auto-wrapping J3 as
+  a single-component leaf routes it through the path that pins it flush. Encoded
+  as a strict `xfail` (`test_parent_local_connector_not_stranded`) that flips to
+  pass when 2.1 lands. Two incidental gate fixes: `replay_corpus.py` now reads a
+  per-fixture `parent_compose_spacing_mm` (this board shorts at the 2.0 default —
+  a 4th edge connector packs it tight; frozen at 3.5) and SKIPs a mode with no
+  golden (PARENT_LOCAL_CONN is parent-only). **Paused here for review before the
+  connector-branch deletion** — landing it blind would risk the USB-C work.
 - **Phase 4 (Lever 2.5, file splits):** mechanical, corpus-zero-drift; sequenced
   after 2.1 (move less code), so it follows the 2.1 fixture work.
 

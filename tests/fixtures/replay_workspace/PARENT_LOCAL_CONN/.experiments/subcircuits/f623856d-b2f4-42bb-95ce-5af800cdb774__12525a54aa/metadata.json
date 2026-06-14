@@ -1,0 +1,128 @@
+{
+  "access_policy": "interface_only",
+  "artifact_paths": {
+    "artifact_dir": "/tmp/replay_cmd_P/USB_PD_TRIGGER/.experiments/subcircuits/f623856d-b2f4-42bb-95ce-5af800cdb774__12525a54aa",
+    "base_dir": "/tmp/replay_cmd_P/USB_PD_TRIGGER/.experiments/subcircuits",
+    "debug_json": "/tmp/replay_cmd_P/USB_PD_TRIGGER/.experiments/subcircuits/f623856d-b2f4-42bb-95ce-5af800cdb774__12525a54aa/debug.json",
+    "metadata_json": "/tmp/replay_cmd_P/USB_PD_TRIGGER/.experiments/subcircuits/f623856d-b2f4-42bb-95ce-5af800cdb774__12525a54aa/metadata.json",
+    "mini_pcb": "/tmp/replay_cmd_P/USB_PD_TRIGGER/.experiments/subcircuits/f623856d-b2f4-42bb-95ce-5af800cdb774__12525a54aa/leaf_routed.kicad_pcb",
+    "solved_layout_json": "/tmp/replay_cmd_P/USB_PD_TRIGGER/.experiments/subcircuits/f623856d-b2f4-42bb-95ce-5af800cdb774__12525a54aa/solved_layout.json"
+  },
+  "component_refs": [
+    "J1",
+    "R1",
+    "R2"
+  ],
+  "config_hash": "55d7b7148f44b7061ab0a0b1d72ec048e9d77f34cea8d22badb3e6ca0c724f95",
+  "external_nets": [
+    "CC1",
+    "CC2",
+    "GND",
+    "VBUS_IN"
+  ],
+  "instance_path": "/f623856d-b2f4-42bb-95ce-5af800cdb774",
+  "interface_ports": [
+    {
+      "access_policy": "interface_only",
+      "bus_index": null,
+      "cardinality": 1,
+      "description": "normalized from schematic sheet pin",
+      "direction": "output",
+      "name": "VBUS_IN",
+      "net_name": "VBUS_IN",
+      "preferred_side": "right",
+      "required": true,
+      "role": "signal_out"
+    },
+    {
+      "access_policy": "interface_only",
+      "bus_index": null,
+      "cardinality": 1,
+      "description": "normalized from schematic sheet pin",
+      "direction": "bidirectional",
+      "name": "CC1",
+      "net_name": "CC1",
+      "preferred_side": "right",
+      "required": true,
+      "role": "bidir"
+    },
+    {
+      "access_policy": "interface_only",
+      "bus_index": null,
+      "cardinality": 1,
+      "description": "normalized from schematic sheet pin",
+      "direction": "bidirectional",
+      "name": "CC2",
+      "net_name": "CC2",
+      "preferred_side": "right",
+      "required": true,
+      "role": "bidir"
+    }
+  ],
+  "internal_nets": [],
+  "internal_trace_count": 0,
+  "internal_via_count": 0,
+  "local_board_outline": {
+    "bottom_right_x": 156.0225,
+    "bottom_right_y": 110.84395,
+    "height_mm": 11.687900000000013,
+    "top_left_x": 140.9775,
+    "top_left_y": 99.15605,
+    "width_mm": 15.045000000000016
+  },
+  "local_translation": {
+    "x": -122.57574,
+    "y": -88.6475
+  },
+  "notes": [
+    "solved by solve_subcircuits.py",
+    "best_round=0",
+    "best_seed=1654615998",
+    "best_score=83.701",
+    "rounds=1",
+    "solved_component_count=3",
+    "canonical_layout_schema=subcircuits.layout.v1",
+    "router=freerouting",
+    "accepted=True",
+    "failed_round_count=0",
+    "failure_reasons=none",
+    "historically_trivial_candidate=True",
+    "leaf_total_s=8.636",
+    "route_total_s=8.596",
+    "freerouting_s=5.755",
+    "size_reduction_attempted=True",
+    "size_reduction_passes=1",
+    "original_outline_width_mm=28.242",
+    "original_outline_height_mm=29.510",
+    "reduced_outline_width_mm=15.045",
+    "reduced_outline_height_mm=11.688",
+    "leaf=USB C INPUT",
+    "instance_path=/f623856d-b2f4-42bb-95ce-5af800cdb774",
+    "component_count=3",
+    "internal_nets=0",
+    "external_nets=4",
+    "ignored_nets=0",
+    "margin_mm=10.820",
+    "reduced_outline_width_mm=26.242",
+    "reduced_outline_height_mm=29.510",
+    "size_reduction_attempted=True",
+    "size_reduction_passes=1",
+    "outline_reduction_width_mm=2.000",
+    "outline_reduction_height_mm=0.000",
+    "outline_reduction_area_mm2=59.019"
+  ],
+  "parent_instance_path": "/",
+  "project_dir": "/tmp/replay_cmd_P/USB_PD_TRIGGER",
+  "schema_version": "subcircuits.v1",
+  "schematic_path": "/tmp/replay_cmd_P/USB_PD_TRIGGER/USB_C_INPUT.kicad_sch",
+  "sheet_file": "USB_C_INPUT.kicad_sch",
+  "sheet_name": "USB C INPUT",
+  "solver_version": "subcircuits-m4-freerouting",
+  "source_hash": "434633b138ada95b96b2d70dd74ea631c9f43dc423fc5a9629996b1ff6fcd4e6",
+  "subcircuit_id": {
+    "instance_path": "/f623856d-b2f4-42bb-95ce-5af800cdb774",
+    "parent_instance_path": "/",
+    "sheet_file": "USB_C_INPUT.kicad_sch",
+    "sheet_name": "USB C INPUT"
+  }
+}

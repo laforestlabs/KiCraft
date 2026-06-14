@@ -30,6 +30,11 @@ from kicraft.autoplacer.brain.connector_edge_gap import (
 FIXTURE = (
     Path(__file__).parent / "fixtures" / "replay_workspace" / "USB_PD_TRIGGER"
 )
+# Same board + a parent-local connector J3 (in no leaf, edge:bottom) -- the only
+# fixture that exercises _snap_parent_local's connector branch (Lever 2.1).
+PARENT_LOCAL_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "replay_workspace" / "PARENT_LOCAL_CONN"
+)
 # board (x0,y0,x1,y1) = left,top,right,bottom in KiCad Y-down
 BOARD = (0.0, 0.0, 20.0, 10.0)
 
@@ -71,9 +76,16 @@ def test_stranded_filters_failures():
 # ---- gated integration: live measurement on the committed fixture -----------
 
 
-def _compose_and_measure(tmp_path: Path) -> dict[str, EdgeGap]:
-    dest = tmp_path / "USB_PD_TRIGGER"
-    shutil.copytree(FIXTURE, dest)
+def _compose_and_measure(tmp_path: Path, fixture: Path = FIXTURE) -> dict[str, EdgeGap]:
+    stem = fixture.name  # dir name == project stem for both fixtures
+    cfg = json.loads(
+        (fixture / f"{stem}_autoplacer.json").read_text(encoding="utf-8")
+    )
+    # Some fixtures (an extra edge connector packs tighter) record their own
+    # parent-compose clearance so the gate composes them as they were frozen.
+    spacing = str(cfg.get("parent_compose_spacing_mm", 2.0))
+    dest = tmp_path / stem
+    shutil.copytree(fixture, dest)
     real = str(dest.resolve())
     for jf in (dest / ".experiments").rglob("*.json"):
         t = jf.read_text(encoding="utf-8")
@@ -86,18 +98,15 @@ def _compose_and_measure(tmp_path: Path) -> dict[str, EdgeGap]:
            "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
     rc = subprocess.run(
         [sys.executable, "-m", "kicraft.cli.compose_subcircuits",
-         "--project", str(dest), "--parent", "USB_PD_TRIGGER",
-         "--pcb", str(dest / "USB_PD_TRIGGER.kicad_pcb"),
-         "--spacing-mm", "2.0", "--stamp", "--seed", "0"],
+         "--project", str(dest), "--parent", stem,
+         "--pcb", str(dest / f"{stem}.kicad_pcb"),
+         "--spacing-mm", spacing, "--stamp", "--seed", "0"],
         cwd=str(Path(__file__).resolve().parent.parent), env=env,
     ).returncode
     assert rc == 0, f"compose exited {rc}"
     board = sorted(glob.glob(str(dest / ".experiments" / "subcircuits"
                                  / "subcircuit__*" / "parent_pre_freerouting.kicad_pcb")))[-1]
-    zones = json.loads(
-        (FIXTURE / "USB_PD_TRIGGER_autoplacer.json").read_text(encoding="utf-8")
-    )["component_zones"]
-    return {g.ref: g for g in connector_edge_gaps(board, zones)}
+    return {g.ref: g for g in connector_edge_gaps(board, cfg["component_zones"])}
 
 
 @pytest.mark.skipif(
@@ -132,3 +141,54 @@ def test_top_zoned_switch_not_stranded(tmp_path):
     pytest.importorskip("pcbnew")
     gaps = _compose_and_measure(tmp_path)
     assert gaps["SW1"].ok, gaps["SW1"]
+
+
+# ---- parent-local connector (Lever 2.1): the only fixture exercising the -----
+# ---- _snap_parent_local connector branch the simplification will delete. -----
+
+
+@pytest.mark.skipif(
+    not os.environ.get("KICRAFT_REPLAY_E2E"),
+    reason="set KICRAFT_REPLAY_E2E=1 to run (slow; spawns compose)",
+)
+@pytest.mark.skipif(
+    not (PARENT_LOCAL_FIXTURE / ".experiments").is_dir(),
+    reason="parent-local-connector fixture missing",
+)
+def test_parent_local_fixture_leaf_connectors_flush(tmp_path):
+    """Positive control: on the parent-local-connector fixture the LEAF
+    connectors (J1/J2/SW1, each inside a subcircuit) still land flush. Proves
+    the fixture is sane and isolates the parent-local J3 as the only stranded
+    connector (the next test)."""
+    pytest.importorskip("pcbnew")
+    gaps = _compose_and_measure(tmp_path, PARENT_LOCAL_FIXTURE)
+    assert gaps["J1"].ok, gaps["J1"]
+    assert gaps["J2"].ok, gaps["J2"]
+    assert gaps["SW1"].ok, gaps["SW1"]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="parent-local connector strands (~4mm inboard): _snap_parent_local "
+    "snaps J3 to the pre-repair outline, but a leaf defines the board "
+    "extremity on that edge and J3 is never pinned as an extremity (it has no "
+    "synthetic block). Lever 2.1 (Phase 3) auto-wraps a loose parent-level "
+    "connector as a single-component leaf, routing it through the leaf path "
+    "that pins it flush -- then this flips to pass and the marker is removed. "
+    "See docs/plans/place-route-root-cause-v2.md.",
+)
+@pytest.mark.skipif(
+    not os.environ.get("KICRAFT_REPLAY_E2E"),
+    reason="set KICRAFT_REPLAY_E2E=1 to run (slow; spawns compose)",
+)
+@pytest.mark.skipif(
+    not (PARENT_LOCAL_FIXTURE / ".experiments").is_dir(),
+    reason="parent-local-connector fixture missing",
+)
+def test_parent_local_connector_not_stranded(tmp_path):
+    """A parent-local edge connector (J3, in no leaf, edge:bottom) must land
+    flush on its board edge like a leaf connector. XFAIL today; the Lever 2.1
+    auto-wrap is the fix."""
+    pytest.importorskip("pcbnew")
+    gaps = _compose_and_measure(tmp_path, PARENT_LOCAL_FIXTURE)
+    assert gaps["J3"].ok, gaps["J3"]

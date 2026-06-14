@@ -130,6 +130,21 @@ def _detokenize(project_dir: Path) -> None:
             jf.write_text(text.replace(PATH_TOKEN, real), encoding="utf-8")
 
 
+def _parent_spacing(workspace: Path, stem: str) -> str:
+    """Per-fixture parent-compose clearance (mm). Most boards compose at the
+    2.0 default; a fixture that packs tighter (e.g. an extra edge connector)
+    records its own ``parent_compose_spacing_mm`` in its autoplacer config so
+    the gate composes it the same way it was frozen."""
+    cfg = workspace / f"{stem}_autoplacer.json"
+    if cfg.is_file():
+        try:
+            return str(json.loads(cfg.read_text(encoding="utf-8"))
+                       .get("parent_compose_spacing_mm", 2.0))
+        except Exception:  # noqa: BLE001 -- malformed config -> default
+            pass
+    return "2.0"
+
+
 def _run_parent(workspace: Path, stem: str, scratch: Path) -> dict:
     dest = scratch / workspace.name
     shutil.copytree(workspace, dest)
@@ -144,7 +159,7 @@ def _run_parent(workspace: Path, stem: str, scratch: Path) -> dict:
         [sys.executable, "-m", "kicraft.cli.compose_subcircuits",
          "--project", str(dest), "--parent", stem,
          "--pcb", str(dest / f"{stem}.kicad_pcb"),
-         "--spacing-mm", "2.0", "--stamp", "--seed", "0"],
+         "--spacing-mm", _parent_spacing(workspace, stem), "--stamp", "--seed", "0"],
         cwd=str(REPO_ROOT), env=env,
     ).returncode
     if rc != 0:
@@ -177,13 +192,21 @@ def _diff(golden: dict, actual: dict) -> list[str]:
 
 def _check_mode(mode: str, ws: Path, stem: str, scratch: Path,
                 root: Path, update: bool) -> bool:
-    """Run one mode for one workspace. Returns True on drift/error."""
+    """Run one mode for one workspace. Returns True on drift/error.
+
+    A fixture opts into a mode by the presence of its golden: in check mode a
+    missing golden is a SKIP (the fixture isn't registered for this mode), not
+    a failure -- so a parent-only fixture (no leaf golden) doesn't break a
+    ``--mode both`` run. Use ``--mode <m> --update`` to mint a new golden."""
+    golden_path = root / f"{ws.name}.{mode}.golden.json"
+    if not update and not golden_path.exists():
+        print(f"  [{mode}] SKIP (no {golden_path.name})")
+        return False
     try:
         actual = _run_leaf(ws, scratch) if mode == "leaf" else _run_parent(ws, stem, scratch)
     except Exception as exc:  # noqa: BLE001 -- report + keep going
         print(f"  [{mode}] ERROR: {exc}", file=sys.stderr)
         return True
-    golden_path = root / f"{ws.name}.{mode}.golden.json"
     if update:
         golden_path.write_text(json.dumps(actual, indent=2, sort_keys=True),
                                encoding="utf-8")
