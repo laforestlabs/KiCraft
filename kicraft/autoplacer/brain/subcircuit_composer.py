@@ -429,33 +429,69 @@ def _is_mounting_hole_constraint(constraint: AttachmentConstraint) -> bool:
     return constraint.ref.startswith("H")
 
 
+def _edge_zoned_is_leaf_extremity(
+    transformed: TransformedSubcircuit,
+    ref: str,
+    side: str,
+    *,
+    tol_mm: float = 0.5,
+) -> bool:
+    """True if component ``ref`` is the leaf's physical extremity on ``side``
+    (no other component protrudes more than ``tol_mm`` past it there).
+
+    An edge-zoned component can only land flush on the board edge if it is the
+    extremity of its leaf on that side -- otherwise a sibling in the same leaf
+    defines the board edge and buries the zoned part inboard (the SW1 stranding:
+    a top-zoned switch flipped 180 deg so a resistor sat above it). Compared in
+    the rotated leaf frame via ``physical_bbox`` (courtyard union pads)."""
+    target = transformed.transformed_components.get(ref)
+    if target is None:
+        return True  # can't evaluate -> don't constrain on this axis
+    tmin, tmax = target.physical_bbox()
+    for oref, ocomp in transformed.transformed_components.items():
+        if oref == ref:
+            continue
+        omin, omax = ocomp.physical_bbox()
+        if side == "left" and omin.x < tmin.x - tol_mm:
+            return False
+        if side == "right" and omax.x > tmax.x + tol_mm:
+            return False
+        if side == "top" and omin.y < tmin.y - tol_mm:
+            return False
+        if side == "bottom" and omax.y > tmax.y + tol_mm:
+            return False
+    return True
+
+
 def _filter_rotations_for_connector_opening(
     spec: PlacementSpec,
     logger: logging.Logger,
 ) -> None:
-    """Narrow ``spec.rotation_candidates`` to leaf rotations that point every
-    edge-constrained connector's opening OUTWARD at its assigned board edge.
+    """Narrow ``spec.rotation_candidates`` to leaf rotations that place every
+    edge-constrained part correctly at its assigned board edge.
 
-    A leaf-embedded USB / edge connector carries a footprint-local
-    ``opening_direction`` (``detect_opening_direction``). Without this filter
-    the parent composer picks the leaf's rotation purely by packing score and
-    can leave a connector at the right edge but with its mouth facing *into*
-    the board -- an unmateable port. For each candidate leaf rotation we read
-    the connector's transformed (parent-space) rotation/layer off the
-    pre-built model and keep the rotation only if the mouth faces away from
-    the board on its assigned side.
+    Two criteria, both required per edge constraint:
 
-    Connectors with no detectable opening are ignored (they place as before).
-    If no rotation satisfies every detectable connector -- e.g. two connectors
-    pinned to opposite edges within one leaf, which cannot both face out under
-    a single rigid rotation -- the candidate set is left untouched and a
-    warning is logged so the post-compose gate can flag the survivor.
+    1. **Mouth outward** (connectors only): a leaf-embedded USB / edge connector
+       carries a footprint-local ``opening_direction``
+       (``detect_opening_direction``); keep the rotation only if that mouth
+       faces away from the board on its assigned side, so the port is mateable.
+    2. **Leaf extremity** (all edge-zoned parts, incl. mouthless switches /
+       headers): keep the rotation only if the zoned part is its leaf's
+       extremity on the assigned side (``_edge_zoned_is_leaf_extremity``).
+       Without this a switch with no detectable mouth places by packing score
+       and a sibling ends up nearer the edge, stranding the zoned part inboard.
+
+    If no rotation satisfies every edge constraint -- e.g. two parts pinned to
+    opposite edges of one rigid leaf, or a part that is never its leaf's
+    extremity -- the candidate set is left untouched and a warning is logged so
+    the post-compose gate (connector_edge_gap) flags the survivor.
     """
     edge_constraints = [c for c in spec.constraints if c.target == "edge"]
     if not edge_constraints:
         return
 
-    has_detectable = False
+    has_constraint = False
     kept: list[float] = []
     for rot in spec.rotation_candidates:
         model = spec.models.get(rot)
@@ -464,18 +500,26 @@ def _filter_rotations_for_connector_opening(
         ok = True
         for c in edge_constraints:
             comp = model.transformed.transformed_components.get(c.ref)
-            if comp is None or comp.opening_direction is None:
-                continue  # not an orientable connector -- leave it be
-            has_detectable = True
-            board_opening = opening_board_angle(comp.opening_direction, comp.rotation)
-            want = edge_outward_angle(comp.layer, c.value)
-            if not angles_close(board_opening, want):
+            if comp is None:
+                continue  # constrained ref not in this leaf -- leave it be
+            has_constraint = True
+            if comp.opening_direction is not None:
+                board_opening = opening_board_angle(
+                    comp.opening_direction, comp.rotation
+                )
+                want = edge_outward_angle(comp.layer, c.value)
+                if not angles_close(board_opening, want):
+                    ok = False
+                    break
+            if not _edge_zoned_is_leaf_extremity(
+                model.transformed, c.ref, c.value
+            ):
                 ok = False
                 break
         if ok:
             kept.append(rot)
 
-    if not has_detectable:
+    if not has_constraint:
         return
     if kept:
         # Narrow BOTH: rotation_candidates seeds the solver's initial rotation
@@ -487,8 +531,9 @@ def _filter_rotations_for_connector_opening(
         spec.all_rotation_candidates = kept
     else:
         logger.warning(
-            "Leaf %s: no rotation orients every edge connector outward; "
-            "keeping all %d candidates (a port may face inward)",
+            "Leaf %s: no rotation places every edge-zoned part outward AND at "
+            "its leaf extremity; keeping all %d candidates (a part may face "
+            "inward or strand inboard)",
             spec.instance_path,
             len(spec.rotation_candidates),
         )
@@ -1889,12 +1934,43 @@ def can_overlap_sparse(
     force_back_only_a: bool = False,
     force_back_only_b: bool = False,
 ) -> bool:
-    # Combined SMT + THT pad lists per layer. Per-rect overlap checks
-    # must catch any same-layer F.Cu / B.Cu copper conflict regardless
-    # of whether the rect came from an SMT pad or a THT annular ring;
-    # the dataclass split moved THT rings into ``front_tht_pads`` /
-    # ``back_tht_pads`` only so the OUTLINE GATE below can ignore them
-    # as non-intent shadow. Per-pad coverage stays whole via the union.
+    # RC2 -- the principled rule, checked FIRST. A leaf "commits" a copper
+    # layer when it has MEANINGFUL same-side copper: real SMT pads or routed
+    # traces (NOT bare THT annular-ring shadow, which sits on both layers and
+    # doesn't claim a side; ``force_back_only`` overrides). Two leaves that both
+    # commit the SAME side can never share footprint -- the solver must hold
+    # them at design clearance. This replaces the old "sparse per-rect
+    # compatibility + outline gate" allowance, which let same-layer leaves pack
+    # bbox-adjacent whenever their sampled pads happened not to overlap; their
+    # stamped planes/traces then shorted at the seam (placement_solver.py:3182).
+    front_a = (
+        sum(_rect_area(r) for r in blocker_a.front_pads)
+        + sum(_rect_area(r) for r in blocker_a.front_traces)
+    ) > 0.0 and not force_back_only_a
+    front_b = (
+        sum(_rect_area(r) for r in blocker_b.front_pads)
+        + sum(_rect_area(r) for r in blocker_b.front_traces)
+    ) > 0.0 and not force_back_only_b
+    back_a = (
+        sum(_rect_area(r) for r in blocker_a.back_pads)
+        + sum(_rect_area(r) for r in blocker_a.back_traces)
+    ) > 0.0 or force_back_only_a
+    back_b = (
+        sum(_rect_area(r) for r in blocker_b.back_pads)
+        + sum(_rect_area(r) for r in blocker_b.back_traces)
+    ) > 0.0 or force_back_only_b
+    if (front_a and front_b) or (back_a and back_b):
+        return False
+
+    # OPPOSITE-LAYER (stacking) pair only past this point -- e.g. an SMT-front
+    # leaf over a back-side THT battery holder. The remaining conflicts are
+    # through-hole: a TH drill pierces both layers, and a THT annular ring is
+    # copper on BOTH layers, so they can still collide with the other leaf's
+    # committed side. The per-rect checks below catch exactly those.
+    #
+    # Combined SMT + THT pad lists per layer (THT rings live in
+    # ``front_tht_pads`` / ``back_tht_pads`` so the side-commit test above can
+    # ignore them; per-rect coverage stays whole via the union).
     front_pads_a = blocker_a.front_pads + blocker_a.front_tht_pads
     back_pads_a = blocker_a.back_pads + blocker_a.back_tht_pads
     front_pads_b = blocker_b.front_pads + blocker_b.front_tht_pads
@@ -1999,56 +2075,8 @@ def can_overlap_sparse(
     ):
         return False
 
-    outline_a = _transform_rect(blocker_a.leaf_outline, origin_a, rotation_a)
-    outline_b = _transform_rect(blocker_b.leaf_outline, origin_b, rotation_b)
-    # Same-layer outline overlap is forbidden when both leaves have
-    # MEANINGFUL same-layer copper. The sparse rect checks above only
-    # inspect specific pads/traces; they miss the continuous F.Cu
-    # plane between them, so a leaf with sparse F.Cu pads at (10,5)
-    # and (15,5) reports compatible with another leaf whose pad sits
-    # at (12,5) -- but the leaves' actual stamped copper, components,
-    # silkscreen, and mask occupy the full leaf rectangle.
-    #
-    # "Meaningful" excludes ``front_tht_pads`` / ``back_tht_pads``
-    # (annular ring shadow around through-hole drills): a pure-THT
-    # leaf doesn't actually carry a continuous F.Cu plane that would
-    # short with an SMT-on-front leaf stacked above. Sparse drill /
-    # ring overlaps are caught by the per-pad checks above. This is
-    # what re-enables LLUPS-style stacking (SMT regulators on top of
-    # the back-side THT battery holder) without the manual
-    # ``force_back_only`` override having to be set per-project.
-    #
-    # The original 6c15e92 fix targeted the (dual, front) and (dual,
-    # back) cases where dual = REAL SMT/trace copper on both layers
-    # (e.g. CHARGER's front SMT pads + back PTH drill); those still
-    # have non-zero ``front_pads`` area after the dataclass split, so
-    # the gate still fires for them.
-    #
-    # ``force_back_only_*`` remains as a project-level override for
-    # leaves the auto-detection cannot infer (a pure-THT screw
-    # terminal whose intended placement layer is project-specific).
-    # Passed through from
-    # cfg["parent_placement"]["backside_through_hole_leaves"] via the
-    # synthetic block component's block_force_back_only flag.
-    front_a = (
-        sum(_rect_area(r) for r in blocker_a.front_pads)
-        + sum(_rect_area(r) for r in blocker_a.front_traces)
-    ) > 0.0 and not force_back_only_a
-    front_b = (
-        sum(_rect_area(r) for r in blocker_b.front_pads)
-        + sum(_rect_area(r) for r in blocker_b.front_traces)
-    ) > 0.0 and not force_back_only_b
-    back_a = (
-        sum(_rect_area(r) for r in blocker_a.back_pads)
-        + sum(_rect_area(r) for r in blocker_a.back_traces)
-    ) > 0.0 or force_back_only_a
-    back_b = (
-        sum(_rect_area(r) for r in blocker_b.back_pads)
-        + sum(_rect_area(r) for r in blocker_b.back_traces)
-    ) > 0.0 or force_back_only_b
-    if (front_a and front_b) or (back_a and back_b):
-        if _rects_intersect(outline_a, outline_b):
-            return False
+    # No same-side copper commit (checked first) and no through-hole conflict:
+    # the leaves are on opposite layers and may stack.
     return True
 
 

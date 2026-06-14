@@ -53,7 +53,7 @@ def _state(board_state, edge_refs=(), manual_outline=None, connector_sides=()):
     return SimpleNamespace(
         composition=composition,
         edge_constrained_refs=frozenset(edge_refs),
-        connector_outline_sides=frozenset(connector_sides),
+        edge_zoned_outline_sides=frozenset(connector_sides),
         geometry_validation=None,
         manual_outline=manual_outline,
     )

@@ -1,8 +1,8 @@
 """Connector edge-attachment acceptance metric (plan Part 3).
 
-For each edge-zoned component, the signed OUTWARD gap between its courtyard
-"mouth" (the courtyard edge on the assigned side) and the board edge it is
-assigned to:
+For each edge-zoned component, the signed OUTWARD gap between its "mouth" (the
+OUTERMOST of its courtyard and pad copper on the assigned side -- see
+``_mouth_bbox``) and the board edge it is assigned to:
 
     gap > 0  -> mouth is PAST the board edge (overhang; e.g. a USB-C body)
     gap ~ 0  -> flush
@@ -54,17 +54,31 @@ def edge_gap_mm(
     raise ValueError(f"unsupported edge: {edge}")
 
 
-def _courtyard_bbox(fp, pcbnew):
-    """Footprint courtyard bbox (board coords), falling back to the overall
-    bounding box when no courtyard layer is drawn."""
+def _mouth_bbox(fp, pcbnew):
+    """The part's OUTERMOST physical extent toward a board edge, in board
+    coords: the union of its courtyard and its pad copper.
+
+    A part's "mouth" -- the feature that must reach the board edge -- is its
+    most-outward feature on the zoned side. For a USB-C the courtyard (shell)
+    overhangs the pads; for a switch/header the pads can sit PROUD of an inset
+    courtyard. Using courtyard alone then falsely reads such a part as inboard
+    even when its pads are flush at the edge. The union is the right "mouth":
+    pads are copper that must be inside the board, courtyard is the keep-out,
+    and the edge should meet whichever reaches furthest out."""
+    bb = None
     for layer in (pcbnew.F_CrtYd, pcbnew.B_CrtYd):
         try:
             poly = fp.GetCourtyard(layer)
         except Exception:  # noqa: BLE001 -- API shape varies across KiCad
             poly = None
         if poly is not None and poly.OutlineCount() > 0:
-            return poly.BBox()
-    return fp.GetBoundingBox(False, False)  # no text, no invisible
+            bb = poly.BBox()
+            break
+    if bb is None:
+        bb = fp.GetBoundingBox(False, False)  # no courtyard drawn: no text/invisible
+    for pad in fp.Pads():
+        bb.Merge(pad.GetBoundingBox())
+    return bb
 
 
 def connector_edge_gaps(
@@ -94,7 +108,7 @@ def connector_edge_gaps(
         fp = fps.get(ref)
         if fp is None:
             continue
-        bb = _courtyard_bbox(fp, pcbnew)
+        bb = _mouth_bbox(fp, pcbnew)
         court = (
             pcbnew.ToMM(bb.GetLeft()), pcbnew.ToMM(bb.GetTop()),
             pcbnew.ToMM(bb.GetRight()), pcbnew.ToMM(bb.GetBottom()),

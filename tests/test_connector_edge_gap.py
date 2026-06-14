@@ -122,13 +122,13 @@ def test_edge_connectors_flush_on_fixture(tmp_path):
 @pytest.mark.skipif(
     not (FIXTURE / ".experiments").is_dir(), reason="frozen-leaf fixture missing"
 )
-@pytest.mark.xfail(
-    reason="known stranding: SW1 (top-zoned) sits several mm inboard -- the "
-    "90/270 convention bug + leaf-extremity; fix gated on parent-stamp "
-    "robustness (see parent_adapter._rotated / the plan doc)",
-    strict=True,
-)
 def test_top_zoned_switch_not_stranded(tmp_path):
+    """SW1 (top-zoned switch) lands flush. Was -9.2mm buried -- fixed by the
+    RC1/RC2/RC3 chain: +rot convention, same-layer clearance, the rotation
+    extremity constraint (a mouthless switch must still be its leaf's top
+    extremity), and registering non-connector edge-zoned parts in
+    edge_zoned_outline_sides so _repair_parent_outline doesn't bury them under
+    breathing-room margin. (plan v2: docs/plans/place-route-root-cause-v2.md)"""
     pytest.importorskip("pcbnew")
     gaps = _compose_and_measure(tmp_path)
     assert gaps["SW1"].ok, gaps["SW1"]

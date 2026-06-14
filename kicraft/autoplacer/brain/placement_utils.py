@@ -49,11 +49,11 @@ def _world_artifact_origin(comp: Component) -> Point:
     """
     if comp.block_artifact_origin_offset is None:
         return Point(comp.pos.x, comp.pos.y)
-    # origin = body_pos - rotate_vector(offset, -rotation). The -rotation here is
-    # the KNOWN 90/270 stranding bug (should be +rotation) -- kept consistent
+    # origin = body_pos - rotate_vector(offset, +rotation): the true inverse of
+    # the KiCad-CW forward body-center transform (R_cw(+rot)). Kept consistent
     # with the other two recovery sites; see parent_adapter._rotated.
     rotated = geometry.rotate_vector(
-        comp.block_artifact_origin_offset, -comp.rotation
+        comp.block_artifact_origin_offset, comp.rotation
     )
     return Point(comp.pos.x - rotated.x, comp.pos.y - rotated.y)
 

@@ -60,29 +60,18 @@ def synthetic_block_ref(child_index: int, sheet_name: str) -> str:
 
 def _rotated(point: Point, rotation_deg: float) -> Point:
     """Recover-origin rotation: ``origin = body_pos - _rotated(
-    body_center_offset, rotation)``. Currently the NEGATED angle (math-CCW ==
-    ``rotate_vector(·, -rotation)``).
+    body_center_offset, rotation)``.
 
-    KNOWN BUG (Part 3, proven; fix gated -- see below). The correct inverse of
-    the forward body-center transform (``R_cw(+rot)``, via
-    transform_loaded_artifact -> _transform_point) subtracts ``R_cw(+rot)``,
-    i.e. ``rotate_vector(offset, +rotation)``. ``-rotation`` agrees only at
-    rotation in {0,180}; at 90/270 it recovers a block with an off-origin body
-    center to an origin shifted by ``(2·offset.y, -2·offset.x)``. This is a real
-    cause of the Part-3 "edge connector several mm inboard" stranding -- the
-    connector_edge_gap metric measured a top-zoned switch at -9.2mm inboard, and
-    flipping to +rotation moved it to -3.85mm (and flush for the leaves that ARE
-    rotated 90/270).
+    The forward body-center transform is KiCad-CW ``R_cw(+rot)`` (via
+    transform_loaded_artifact -> _transform_point), so the true inverse subtracts
+    ``R_cw(+rot)`` == ``rotate_vector(offset, +rotation)``. (The earlier
+    ``-rotation`` was a math-CCW inverse that agrees only at rotation in {0,180};
+    at 90/270 it mis-recovered a block with an off-origin body center by
+    ``(2·offset.y, -2·offset.x)``.)
 
-    NOT FIXED YET because flipping the sign ALSO tightens every parent layout
-    (the bug had been masking sprawl), and the stamp step then can't produce a
-    shorts==0 candidate on the tighter board -- compose aborts. So the fix needs
-    (a) the parent stamp made robust to tight layouts and (b) the residual
-    stranding cause (the switch is not its leaf's top extremity) addressed.
-    Tracked in docs/plans/place-route-replay-and-codebase-simplification.md.
-    All three origin-recovery sites (_world_artifact_origin, _block_artifact_origin)
-    use this same convention so they stay consistent -- flip them together."""
-    return geometry.rotate_vector(point, -rotation_deg)
+    All three origin-recovery sites (this, _world_artifact_origin,
+    _block_artifact_origin) share this convention -- keep them in lockstep."""
+    return geometry.rotate_vector(point, rotation_deg)
 
 
 def _content_bbox(artifact: LoadedSubcircuitArtifact) -> tuple[Point, Point]:

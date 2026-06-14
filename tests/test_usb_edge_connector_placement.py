@@ -139,10 +139,17 @@ def _spec_with_connector(opening, edge, layer=Layer.FRONT, leaf_local_rot=0.0):
         rot: SimpleNamespace(
             transformed=SimpleNamespace(
                 transformed_components={
-                    "J1": SimpleNamespace(
-                        opening_direction=opening,
+                    "J1": Component(
+                        ref="J1",
+                        value="USB-C",
+                        pos=Point(0.0, 0.0),
                         rotation=(leaf_local_rot + rot) % 360.0,
                         layer=layer,
+                        width_mm=9.0,
+                        height_mm=3.0,
+                        kind="connector",
+                        pads=[],
+                        opening_direction=opening,
                     )
                 }
             )
@@ -192,13 +199,18 @@ def test_filter_keeps_all_when_unsatisfiable(caplog):
         outward_overhang_mm=0.5, source="child_artifact", child_index=0,
     )
     candidates = [0.0, 90.0, 180.0, 270.0]
+
+    def _conn(ref, rot):
+        return Component(
+            ref=ref, value="USB-C", pos=Point(0.0, 0.0), rotation=rot,
+            layer=Layer.FRONT, width_mm=9.0, height_mm=3.0, kind="connector",
+            pads=[], opening_direction=90.0,
+        )
+
     models = {
         rot: SimpleNamespace(
             transformed=SimpleNamespace(
-                transformed_components={
-                    "J1": SimpleNamespace(opening_direction=90.0, rotation=rot, layer=Layer.FRONT),
-                    "J2": SimpleNamespace(opening_direction=90.0, rotation=rot, layer=Layer.FRONT),
-                }
+                transformed_components={"J1": _conn("J1", rot), "J2": _conn("J2", rot)}
             )
         )
         for rot in candidates
@@ -214,7 +226,52 @@ def test_filter_keeps_all_when_unsatisfiable(caplog):
         _filter_rotations_for_connector_opening(spec, _LOGGER)
     assert spec.rotation_candidates == candidates
     assert spec.all_rotation_candidates == candidates
-    assert any("no rotation orients" in r.message for r in caplog.records)
+    assert any("no rotation places every edge-zoned part" in r.message
+               for r in caplog.records)
+
+
+def test_filter_keeps_only_rotations_with_zoned_part_at_extremity():
+    """A mouthless edge-zoned part (e.g. a switch) must still be its leaf's
+    extremity on the zoned side. Here SW1 is top-zoned and a sibling R1 sits
+    above it at leaf-rotation 0/270 but below it at 180; only the rotations
+    where SW1 is the topmost part survive (RC1 extremity criterion)."""
+    constraint = AttachmentConstraint(
+        ref="SW1", target="edge", value="top", inward_keep_in_mm=0.0,
+        outward_overhang_mm=0.0, source="child_artifact", child_index=0,
+    )
+
+    def _part(ref, y):
+        return Component(
+            ref=ref, value=ref, pos=Point(0.0, y), rotation=0.0,
+            layer=Layer.FRONT, width_mm=2.0, height_mm=2.0, kind="other", pads=[],
+        )
+
+    # Per rotation, place SW1 and a sibling R1; SW1 is topmost (smaller y) only
+    # at rotations 90 and 180 in this stand-in.
+    sw_y = {0.0: 5.0, 90.0: 0.0, 180.0: 0.0, 270.0: 5.0}
+    r1_y = {0.0: 0.0, 90.0: 5.0, 180.0: 5.0, 270.0: 0.0}
+    candidates = [0.0, 90.0, 180.0, 270.0]
+    models = {
+        rot: SimpleNamespace(
+            transformed=SimpleNamespace(
+                transformed_components={
+                    "SW1": _part("SW1", sw_y[rot]),
+                    "R1": _part("R1", r1_y[rot]),
+                }
+            )
+        )
+        for rot in candidates
+    }
+    spec = SimpleNamespace(
+        constraints=[constraint],
+        rotation_candidates=list(candidates),
+        all_rotation_candidates=list(candidates),
+        models=models,
+        instance_path="/leaf",
+    )
+    _filter_rotations_for_connector_opening(spec, _LOGGER)
+    assert spec.rotation_candidates == [90.0, 180.0]
+    assert spec.all_rotation_candidates == [90.0, 180.0]
 
 
 # --- Layer C: overhang math ----------------------------------------------

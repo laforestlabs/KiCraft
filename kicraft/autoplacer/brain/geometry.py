@@ -15,10 +15,14 @@ documented root of intra-leaf shorts and mis-oriented edge connectors. Every
 place that rotates placement geometry routes through these helpers so the
 convention is chosen, documented, and tested exactly once.
 
-Note on inverses: ``math-CCW(θ) ≡ rotate_vector(·, -θ)``. Code that "undoes" a
-placement rotation therefore calls ``rotate_vector(v, -deg)`` -- the negative
-angle makes the inverse explicit at the call site (and, where the inverse is
-load-bearing, easy to audit).
+Note on inverses: the inverse of ``rotate_vector(·, +θ)`` is
+``rotate_vector(·, -θ)`` (and ``math-CCW(θ) ≡ rotate_vector(·, -θ)``). The
+origin-recovery sites (parent_adapter._rotated, placement_utils._world_artifact_origin,
+compose._block_artifact_origin) recover ``origin = pos - rotate_vector(offset,
++rot)`` -- a *subtraction* of the SAME-sign forward transform, not a negated
+rotation; that is the true inverse of placing a block at ``pos`` via the
+forward ``R_cw(+rot)`` body-center transform. (Negating the angle there was a
+historical 90/270 stranding bug, now fixed.)
 """
 from __future__ import annotations
 

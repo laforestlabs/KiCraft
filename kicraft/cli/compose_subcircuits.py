@@ -187,10 +187,11 @@ class ParentCompositionState:
     # the geometry validator must only flag them when pads fall outside.
     edge_constrained_refs: frozenset[str] = field(default_factory=frozenset)
     # Outline sides (left/right/top/bottom) whose position is defined by an
-    # edge-mount connector's mouth. _repair_parent_outline keeps these flush
-    # with the connector instead of adding breathing-room margin, so the port
-    # is not buried by a neighbor part sitting just inboard of the mouth.
-    connector_outline_sides: frozenset[str] = field(default_factory=frozenset)
+    # edge-ZONED part (a connector mouth, OR a switch/header zoned to that
+    # edge). _repair_parent_outline keeps these flush with the part instead of
+    # adding breathing-room margin, so the zoned part is not buried inboard by
+    # the margin or by a neighbor sitting just behind it.
+    edge_zoned_outline_sides: frozenset[str] = field(default_factory=frozenset)
     # Serialized OutlineSpec dict when this composition came from a
     # manual layout (kicraft.layout_editor.outline). Non-None marks the
     # outline as USER-AUTHORITATIVE: the outline-repair grow is skipped
@@ -704,15 +705,14 @@ def _resolve_constraint_anchor_positions(
 def _block_artifact_origin(comp: Component) -> Point:
     """Inverse of synthetic-block-pos -> artifact-origin mapping. For a
     synthetic block, ``world_origin = pos - rotate_vector(body_center_offset,
-    -rot)``; matches ``_recover_artifact_placements`` / ``_world_artifact_origin``
-    (all three share the SAME convention -- the ``-rot`` is the known 90/270
-    stranding bug documented on parent_adapter._rotated; flip the three together
-    once the stamp/extremity blockers are resolved). For non-block components
-    (parent-local mounting holes) the origin is simply ``comp.pos``.
+    +rot)`` -- the true inverse of the KiCad-CW forward body-center transform;
+    matches ``_recover_artifact_placements`` / ``_world_artifact_origin`` (all
+    three share the SAME convention; see parent_adapter._rotated). For non-block
+    components (parent-local mounting holes) the origin is simply ``comp.pos``.
     """
     if comp.kind != "subcircuit" or comp.block_artifact_origin_offset is None:
         return comp.pos
-    rotated = geometry.rotate_vector(comp.block_artifact_origin_offset, -comp.rotation)
+    rotated = geometry.rotate_vector(comp.block_artifact_origin_offset, comp.rotation)
     return Point(comp.pos.x - rotated.x, comp.pos.y - rotated.y)
 
 
@@ -1898,10 +1898,10 @@ def _compose_artifacts(
         edge_constrained_refs=frozenset(
             c.ref for c in all_constraints if c.target in ("edge", "corner")
         ),
-        connector_outline_sides=frozenset(
+        edge_zoned_outline_sides=frozenset(
             side
             for c in all_constraints
-            if c.ref.startswith("J") and c.target in ("edge", "corner")
+            if c.target in ("edge", "corner") and not _is_mounting_hole_ref(c.ref)
             for side in (
                 [c.value]
                 if c.target == "edge" and c.value in ("left", "right", "top", "bottom")
@@ -2200,7 +2200,7 @@ def _repair_parent_outline(
     # these the constraint-aware outline (tl/br) already sits at mouth+overhang;
     # the repair must NOT add breathing-room margin there or it buries the port
     # behind a neighbor part sitting just inboard of the mouth.
-    conn_sides = set(state.connector_outline_sides or ())
+    conn_sides = set(state.edge_zoned_outline_sides or ())
 
     # Two requirement boxes over the SAME geometry (non-edge-constrained bodies
     # + all pads + traces + vias): `req` gets margin_mm of copper-to-edge

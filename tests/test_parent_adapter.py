@@ -222,11 +222,14 @@ def test_placements_round_trip_each_rotation(rotation):
     placement = placements["/leaf"]
     assert placement.rotation == rotation
 
-    # Verify forward direction: body_center = origin + rotated(content_center, rot)
+    # Verify forward direction with the KiCad-CW convention (the single one in
+    # geometry.rotate_vector): body_center = origin + R_cw(content_center, rot),
+    # R_cw = (x·cos + y·sin, -x·sin + y·cos). The recovery (+rot) is its true
+    # inverse, so the forward transform reproduces block_pos exactly.
     rad = math.radians(rotation)
     cos_r, sin_r = math.cos(rad), math.sin(rad)
-    expected_body_x = placement.origin.x + (5.0 * cos_r - 4.0 * sin_r)
-    expected_body_y = placement.origin.y + (5.0 * sin_r + 4.0 * cos_r)
+    expected_body_x = placement.origin.x + (5.0 * cos_r + 4.0 * sin_r)
+    expected_body_y = placement.origin.y + (-5.0 * sin_r + 4.0 * cos_r)
     assert math.isclose(expected_body_x, block_pos.x, abs_tol=1e-9)
     assert math.isclose(expected_body_y, block_pos.y, abs_tol=1e-9)
 

@@ -106,9 +106,9 @@ def test_world_origin_90_rotation():
     blockers = _make_blocker_set(front_pads=[(Point(0.0, 0.0), Point(2.0, 2.0))])
     comp = _make_block("A", pos=Point(50.0, 50.0), rotation=90.0, blocker_set=blockers)
     origin = _world_artifact_origin(comp)
-    # (5, 5) rotated by +90 -> (-5, 5); world_origin = pos - rotated = (55, 45)
-    assert math.isclose(origin.x, 55.0, abs_tol=1e-9)
-    assert math.isclose(origin.y, 45.0, abs_tol=1e-9)
+    # (5, 5) rotated +90 KiCad-CW -> (5, -5); world_origin = pos - rotated = (45, 55)
+    assert math.isclose(origin.x, 45.0, abs_tol=1e-9)
+    assert math.isclose(origin.y, 55.0, abs_tol=1e-9)
 
 
 def test_world_origin_180_rotation():
@@ -124,9 +124,9 @@ def test_world_origin_270_rotation():
     blockers = _make_blocker_set(front_pads=[(Point(0.0, 0.0), Point(2.0, 2.0))])
     comp = _make_block("A", pos=Point(50.0, 50.0), rotation=270.0, blocker_set=blockers)
     origin = _world_artifact_origin(comp)
-    # (5, 5) rotated by 270 -> (5, -5); world_origin = pos - rotated = (45, 55)
-    assert math.isclose(origin.x, 45.0, abs_tol=1e-9)
-    assert math.isclose(origin.y, 55.0, abs_tol=1e-9)
+    # (5, 5) rotated +270 KiCad-CW -> (-5, 5); world_origin = pos - rotated = (55, 45)
+    assert math.isclose(origin.x, 55.0, abs_tol=1e-9)
+    assert math.isclose(origin.y, 45.0, abs_tol=1e-9)
 
 
 # ---------------------------------------------------------------------------
