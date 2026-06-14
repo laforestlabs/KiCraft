@@ -1,39 +1,41 @@
 #!/usr/bin/env python3
 """Replay a fixed corpus of synthesized workspaces and diff placement vs golden.
 
-The deterministic-placement harness that the placement/compose simplification
+The deterministic-placement harness the placement/compose simplification
 (Part 2 of docs/plans/place-route-replay-and-codebase-simplification.md) is
-validated against: before a refactor, snapshot the corpus's placement geometry
+validated against: before a refactor, snapshot the corpus geometry
 (``--update``); after, re-run and assert NOTHING moved. A "no-op refactor" that
 changes any board is then a visible, located diff -- not a silent regression.
 
-What it does, per workspace under the corpus root:
-  1. copy it to a scratch dir (the workspace is never mutated in place),
-  2. ``kicraft replay --project ... --quality fast --no-route --no-fab --seed 0``
-     -- placement only, the part `replay` guarantees reproducible (the composed
-     parent is NOT compared: it consumes routed leaves and so inherits
-     FreeRouting's best-effort nondeterminism),
-  3. read each leaf ``leaf_pre_freerouting.kicad_pcb`` into a geometry map
-     (ref -> x_mm, y_mm, rotation_deg),
-  4. compare to ``<root>/<name>.golden.json`` (or write it with ``--update``).
+Two modes (run both by default):
 
-A workspace is any subdirectory holding exactly one ``<stem>.kicad_pcb`` with a
-sibling ``<stem>.kicad_sch`` + ``<stem>.kicad_pro`` (the same shape `replay
---project` discovers). Drop more workspaces in to grow the corpus -- a
-stranded-connector case, a flat board, etc. (the plan's intended ~6).
+* ``leaf``   -- ``replay --no-route`` on each workspace; diff the per-leaf
+  placement (``leaf_pre_freerouting.kicad_pcb``), which `replay` guarantees
+  reproducible (pinned seed + hash seed). Snapshot: ``<name>.leaf.golden.json``.
+
+* ``parent`` -- compose-only on the workspace's COMMITTED, FROZEN leaf artifacts
+  (``.experiments/subcircuits/<leaf>/`` with paths tokenized as
+  ``__KICRAFT_PROJECT_DIR__``), run with hash+thread pinning. This is the
+  validation gate for parent-frame refactors (Levers 2.1/2.3, the convention
+  bug). Parent placement is deterministic GIVEN frozen leaf inputs + pinned
+  threads (empirically verified); a full replay's parent is NOT reproducible
+  because leaf stamping (vias/pour -> size_reduction -> block size) is
+  nondeterministic, so the parent gate freezes the leaves instead of
+  regenerating them. Snapshot: ``<name>.parent.golden.json``.
 
 Usage:
-    python scripts/replay_corpus.py                 # check vs goldens
-    python scripts/replay_corpus.py --update        # (re)write goldens
-    python scripts/replay_corpus.py --root DIR      # alternate corpus root
+    python scripts/replay_corpus.py                  # check both modes
+    python scripts/replay_corpus.py --mode parent    # one mode
+    python scripts/replay_corpus.py --update         # (re)write goldens
 
-Exit code: 0 = all match (or updated), 1 = drift detected, 2 = infra error.
+Exit: 0 = all match (or updated), 1 = drift, 2 = infra error.
 """
 from __future__ import annotations
 
 import argparse
 import glob
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -42,7 +44,19 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ROOT = REPO_ROOT / "tests" / "fixtures" / "replay_workspace"
+PATH_TOKEN = "__KICRAFT_PROJECT_DIR__"
 ROUND = 4  # mm precision for position; degrees rounded to 3
+
+# Env that makes placement reproducible: hash seed pins set/dict + force-state
+# dedup order; single-thread numpy removes FP-reduction jitter that otherwise
+# flips discrete solver branches in the parent placement.
+PINNED_ENV = {
+    "PYTHONHASHSEED": "0",
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+}
 
 
 def _discover_workspaces(root: Path) -> list[Path]:
@@ -60,10 +74,24 @@ def _discover_workspaces(root: Path) -> list[Path]:
     return out
 
 
-def _leaf_geometry(project_dir: Path) -> dict[str, dict[str, list]]:
-    """Per-leaf footprint geometry from each leaf_pre_freerouting.kicad_pcb."""
-    import pcbnew  # imported lazily so --help works without KiCad
+def _footprints(pcb_path: str) -> dict[str, list]:
+    import pcbnew  # lazy so --help works without KiCad
 
+    board = pcbnew.LoadBoard(pcb_path)
+    return {
+        fp.GetReference(): [
+            round(pcbnew.ToMM(fp.GetPosition().x), ROUND),
+            round(pcbnew.ToMM(fp.GetPosition().y), ROUND),
+            round(fp.GetOrientationDegrees(), 3),
+        ]
+        for fp in board.GetFootprints()
+    }
+
+
+# ---- leaf mode ---------------------------------------------------------------
+
+
+def _leaf_geometry(project_dir: Path) -> dict[str, dict[str, list]]:
     geo: dict[str, dict[str, list]] = {}
     for p in sorted(
         glob.glob(
@@ -71,59 +99,120 @@ def _leaf_geometry(project_dir: Path) -> dict[str, dict[str, list]]:
                 / "*" / "leaf_pre_freerouting.kicad_pcb")
         )
     ):
-        board = pcbnew.LoadBoard(p)
-        geo[Path(p).parent.name] = {
-            fp.GetReference(): [
-                round(pcbnew.ToMM(fp.GetPosition().x), ROUND),
-                round(pcbnew.ToMM(fp.GetPosition().y), ROUND),
-                round(fp.GetOrientationDegrees(), 3),
-            ]
-            for fp in board.GetFootprints()
-        }
+        geo[Path(p).parent.name] = _footprints(p)
     return geo
 
 
-def _replay(workspace: Path, scratch: Path) -> Path:
-    """Copy the workspace into scratch, replay placement, return the copy dir."""
+def _run_leaf(workspace: Path, scratch: Path) -> dict:
     dest = scratch / workspace.name
     shutil.copytree(workspace, dest)
-    # Start from a clean slate so placement regenerates deterministically.
-    shutil.rmtree(dest / ".experiments", ignore_errors=True)
+    shutil.rmtree(dest / ".experiments", ignore_errors=True)  # regenerate leaves
     rc = subprocess.run(
-        [
-            sys.executable, "-m", "kicraft.design.cli_app", "replay",
-            "--project", str(dest), "--quality", "fast",
-            "--no-route", "--no-fab", "--seed", "0",
-        ],
+        [sys.executable, "-m", "kicraft.design.cli_app", "replay",
+         "--project", str(dest), "--quality", "fast", "--no-route",
+         "--no-fab", "--seed", "0"],
         cwd=str(REPO_ROOT),
     ).returncode
     if rc != 0:
-        raise RuntimeError(f"replay exited {rc} for {workspace.name}")
-    return dest
+        raise RuntimeError(f"replay exited {rc}")
+    return _leaf_geometry(dest)
+
+
+# ---- parent mode -------------------------------------------------------------
+
+
+def _detokenize(project_dir: Path) -> None:
+    """Point the committed frozen-leaf artifacts at this project copy."""
+    real = str(project_dir)
+    for jf in (project_dir / ".experiments").rglob("*.json"):
+        text = jf.read_text(encoding="utf-8")
+        if PATH_TOKEN in text:
+            jf.write_text(text.replace(PATH_TOKEN, real), encoding="utf-8")
+
+
+def _run_parent(workspace: Path, stem: str, scratch: Path) -> dict:
+    dest = scratch / workspace.name
+    shutil.copytree(workspace, dest)
+    _detokenize(dest)
+    # Drop any stale parent artifact so compose regenerates it from the frozen
+    # leaves; keep the leaf artifacts (the whole point of the parent gate).
+    for p in glob.glob(str(dest / ".experiments" / "subcircuits"
+                            / "subcircuit__*" / "parent_pre_freerouting.kicad_pcb")):
+        os.remove(p)
+    env = {**os.environ, **PINNED_ENV}
+    rc = subprocess.run(
+        [sys.executable, "-m", "kicraft.cli.compose_subcircuits",
+         "--project", str(dest), "--parent", stem,
+         "--pcb", str(dest / f"{stem}.kicad_pcb"),
+         "--spacing-mm", "2.0", "--stamp", "--seed", "0"],
+        cwd=str(REPO_ROOT), env=env,
+    ).returncode
+    if rc != 0:
+        raise RuntimeError(f"compose exited {rc}")
+    hits = sorted(glob.glob(str(dest / ".experiments" / "subcircuits"
+                                / "subcircuit__*" / "parent_pre_freerouting.kicad_pcb")))
+    if not hits:
+        raise RuntimeError("compose produced no parent_pre_freerouting board")
+    return {"__parent__": _footprints(hits[-1])}
+
+
+# ---- shared driver -----------------------------------------------------------
 
 
 def _diff(golden: dict, actual: dict) -> list[str]:
-    """Human-readable lines describing every divergence (empty == match)."""
     lines: list[str] = []
-    for leaf in sorted(set(golden) | set(actual)):
-        if leaf not in golden:
-            lines.append(f"  + new leaf {leaf}")
+    for grp in sorted(set(golden) | set(actual)):
+        if grp not in golden:
+            lines.append(f"  + new group {grp}")
             continue
-        if leaf not in actual:
-            lines.append(f"  - missing leaf {leaf}")
+        if grp not in actual:
+            lines.append(f"  - missing group {grp}")
             continue
-        g, a = golden[leaf], actual[leaf]
+        g, a = golden[grp], actual[grp]
         for ref in sorted(set(g) | set(a)):
             if g.get(ref) != a.get(ref):
-                lines.append(f"  ~ {leaf}/{ref}: golden={g.get(ref)} now={a.get(ref)}")
+                lines.append(f"  ~ {grp}/{ref}: golden={g.get(ref)} now={a.get(ref)}")
     return lines
 
 
+def _check_mode(mode: str, ws: Path, stem: str, scratch: Path,
+                root: Path, update: bool) -> bool:
+    """Run one mode for one workspace. Returns True on drift/error."""
+    try:
+        actual = _run_leaf(ws, scratch) if mode == "leaf" else _run_parent(ws, stem, scratch)
+    except Exception as exc:  # noqa: BLE001 -- report + keep going
+        print(f"  [{mode}] ERROR: {exc}", file=sys.stderr)
+        return True
+    golden_path = root / f"{ws.name}.{mode}.golden.json"
+    if update:
+        golden_path.write_text(json.dumps(actual, indent=2, sort_keys=True),
+                               encoding="utf-8")
+        n = sum(len(v) for v in actual.values())
+        print(f"  [{mode}] wrote golden ({len(actual)} group(s), {n} footprints)")
+        return False
+    if not golden_path.exists():
+        print(f"  [{mode}] NO GOLDEN ({golden_path.name}); run --update first",
+              file=sys.stderr)
+        return True
+    lines = _diff(json.loads(golden_path.read_text(encoding="utf-8")), actual)
+    if lines:
+        print(f"  [{mode}] DRIFT ({len(lines)} change(s)):")
+        print("\n".join(lines))
+        return True
+    n = sum(len(v) for v in actual.values())
+    print(f"  [{mode}] OK -- {n} footprints match golden")
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     ap.add_argument("--root", default=str(DEFAULT_ROOT),
                     help=f"corpus root (default {DEFAULT_ROOT})")
+    ap.add_argument("--mode", choices=["leaf", "parent", "both"], default="both",
+                    help="which validation to run (default both)")
     ap.add_argument("--update", action="store_true",
                     help="write/refresh the golden snapshots instead of checking")
     args = ap.parse_args(argv)
@@ -133,41 +222,20 @@ def main(argv: list[str] | None = None) -> int:
     if not workspaces:
         print(f"error: no synthesized workspaces under {root}", file=sys.stderr)
         return 2
+    modes = ["leaf", "parent"] if args.mode == "both" else [args.mode]
 
-    print(f"replay corpus: {len(workspaces)} workspace(s) under {root}")
+    print(f"replay corpus: {len(workspaces)} workspace(s), modes={modes}")
     drift = False
     with tempfile.TemporaryDirectory(prefix="replay_corpus_") as tmp:
-        scratch = Path(tmp)
         for ws in workspaces:
             print(f"\n=== {ws.name} ===")
-            try:
-                placed = _replay(ws, scratch)
-                actual = _leaf_geometry(placed)
-            except Exception as exc:  # noqa: BLE001 -- report + continue the corpus
-                print(f"  ERROR: {exc}", file=sys.stderr)
-                drift = True
-                continue
-            golden_path = root / f"{ws.name}.golden.json"
-            if args.update:
-                golden_path.write_text(json.dumps(actual, indent=2, sort_keys=True),
-                                       encoding="utf-8")
-                n = sum(len(v) for v in actual.values())
-                print(f"  wrote golden ({len(actual)} leaves, {n} footprints)")
-                continue
-            if not golden_path.exists():
-                print(f"  NO GOLDEN ({golden_path.name}); run with --update first",
-                      file=sys.stderr)
-                drift = True
-                continue
-            golden = json.loads(golden_path.read_text(encoding="utf-8"))
-            lines = _diff(golden, actual)
-            if lines:
-                drift = True
-                print(f"  DRIFT ({len(lines)} change(s)):")
-                print("\n".join(lines))
-            else:
-                n = sum(len(v) for v in actual.values())
-                print(f"  OK -- {len(actual)} leaves, {n} footprints match golden")
+            stem = next(p.stem for p in ws.glob("*.kicad_pro"))
+            for mode in modes:
+                # Fresh scratch subdir per (workspace, mode) so copies don't clash.
+                scratch = Path(tmp) / f"{ws.name}_{mode}"
+                scratch.mkdir(parents=True, exist_ok=True)
+                if _check_mode(mode, ws, stem, scratch, root, args.update):
+                    drift = True
 
     if args.update:
         print("\ngoldens updated.")

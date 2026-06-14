@@ -340,6 +340,27 @@ def _replay_once(dest: Path) -> None:
 
 @pytest.mark.skipif(
     not os.environ.get("KICRAFT_REPLAY_E2E"),
+    reason="set KICRAFT_REPLAY_E2E=1 to run (slow; spawns compose)",
+)
+@pytest.mark.skipif(
+    not (FIXTURE / ".experiments").is_dir(),
+    reason="frozen-leaf parent-corpus fixture missing",
+)
+def test_parent_corpus_matches_golden():
+    """The parent-placement gate (Levers 2.1/2.3): compose-only on the committed
+    frozen leaf artifacts must reproduce the golden parent placement."""
+    pytest.importorskip("pcbnew")
+    repo_root = Path(__file__).resolve().parent.parent
+    rc = subprocess.run(
+        [sys.executable, str(repo_root / "scripts" / "replay_corpus.py"),
+         "--mode", "parent"],
+        cwd=str(repo_root),
+    ).returncode
+    assert rc == 0, "parent corpus drifted from golden (or errored)"
+
+
+@pytest.mark.skipif(
+    not os.environ.get("KICRAFT_REPLAY_E2E"),
     reason="set KICRAFT_REPLAY_E2E=1 to run (slow; spawns the layout engine)",
 )
 @pytest.mark.skipif(not FIXTURE.is_dir(), reason="replay fixture missing")

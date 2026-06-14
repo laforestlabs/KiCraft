@@ -17,5 +17,19 @@ drives the `replay --project DIR` discovery path (no state needed).
 The deterministic-placement test compares the per-leaf
 `leaf_pre_freerouting.kicad_pcb` boards across two runs — that is the placement
 output, which `replay` guarantees is reproducible (pinned seed + hash seed).
-The composed parent board is NOT asserted byte-stable: it consumes the *routed*
-leaf boards and so inherits FreeRouting's best-effort nondeterminism.
+
+## `.experiments/subcircuits/` — frozen leaf artifacts (parent corpus)
+
+`scripts/replay_corpus.py --mode parent` validates parent-frame placement
+(Part 2 Levers 2.1/2.3). A full replay's *parent* is NOT reproducible — leaf
+stamping (pour/vias → `size_reduction` → block bbox) is nondeterministic — so
+the parent gate freezes the leaf inputs instead: the committed
+`.experiments/subcircuits/<leaf>/{metadata,debug,solved_layout}.json` +
+`leaf_routed.kicad_pcb` are a deterministic compose snapshot. Given frozen
+leaves + thread pinning, compose's parent placement is byte-identical run to run
+(verified).
+
+Absolute paths inside these JSON files are tokenized as
+`__KICRAFT_PROJECT_DIR__`; the corpus substitutes the real copy dir at run time,
+so the fixture relocates cleanly. Regenerate (e.g. after a deliberate
+parent-placement change) with `scripts/replay_corpus.py --mode parent --update`.

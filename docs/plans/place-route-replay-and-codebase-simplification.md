@@ -102,15 +102,42 @@ Small (~1 day). Almost entirely reuse; the real work is auditing/pinning the see
   best-effort.** The determinism test + corpus therefore assert on the per-leaf
   placement boards, not the parent.
 
-**Follow-up this surfaced (worth a fix, deferred — belongs with Part 3 / compose
-cleanup):** `replay --no-route` skips *parent* routing but the leaf solve still
-runs FreeRouting on each leaf (confirmed: `solve_subcircuits` routes leaves even
-with `args.route=False` — the route flag plumbs correctly but routing still
-happens; root cause not yet pinned). Two payoffs once fixed: (a) `--no-route`
-becomes genuinely fast (leaf routing is most of the wall-clock), and (b) if
-compose then reads the deterministic `leaf_pre_freerouting` boards, the **parent
-becomes deterministic too**, upgrading the determinism guarantee from leaf-level
-to board-level — directly enabling Part 3's "same stranding on replay" repro.
+**Parent-determinism — root-caused and unlocked (2026-06-14, see "Unlock" below).**
+An earlier note here claimed `--no-route` still routes leaves; that was **wrong**
+(`route=False` is honored — no FreeRouting runs; the misleading "routed: True"
+log just reads copper the seed PCB already carried). The real reason a full
+replay's *parent* isn't reproducible is a multi-source chain, now mapped:
+1. **Leaf stamping is nondeterministic** — pour/via stamping (and thus
+   `size_reduction` → the leaf block's bbox) varies run-to-run, so each
+   leaf *block* enters parent placement at a slightly different size even though
+   leaf *component positions* are identical.
+2. **numpy thread FP-jitter** flips discrete branches in the parent placement
+   solver unless threads are pinned (`OMP/OPENBLAS/MKL/NUMEXPR_NUM_THREADS=1`).
+3. **`_run_kicad_cli_drc` shorts noise** (same board → different shorts) can flip
+   which candidate the K-way parent search accepts/wins.
+
+**Proven recipe:** with leaf artifacts FROZEN + threads pinned, parent placement
+is byte-identical across runs (verified). That is what the parent corpus uses
+(below) — it freezes the leaves rather than trying to make leaf stamping
+deterministic (a deeper, separate fix).
+
+### Unlock: parent-placement corpus (DONE 2026-06-14) — gate for Levers 2.1/2.3
+`scripts/replay_corpus.py` now has two modes:
+- **`leaf`** — `replay --no-route`, diff per-leaf `leaf_pre_freerouting`
+  placement vs `<name>.leaf.golden.json` (the existing reproducible signal).
+- **`parent`** — compose-only on the workspace's **committed, frozen** leaf
+  artifacts (`tests/fixtures/replay_workspace/<stem>/.experiments/subcircuits/`,
+  with absolute paths tokenized as `__KICRAFT_PROJECT_DIR__` so the fixture
+  relocates), run with hash+thread pinning; diff parent footprint placement vs
+  `<name>.parent.golden.json`. Verified deterministic across repeated runs.
+
+This is the parent-level validation gate Levers **2.1** (parent-only-leaves) and
+**2.3** (edge/anchor centralization) require — both touch parent-frame/compose
+code the leaf-only gate can't see. Workflow: `--update` before a refactor, plain
+run after; any parent placement change shows as a located diff. (Caveat: a
+genuine bug-FIX like the 90/270 convention bug WILL move the parent — there the
+diff is expected and must be checked as an improvement, which needs Part 3's
+stranding metric.)
 
 ---
 
