@@ -1,7 +1,9 @@
 # Plan v2: connector stranding + stamp-short family — root-cause, not gating
 
-**Status:** Phases 1+2 IMPLEMENTED & fleet-validated (branch
-`place-route-root-cause-v2`); Phases 3-4 deferred (fixture-blocked). 2026-06-14.
+**Status:** Phases 1+2 **MERGED to main** (commit 2358fd4, fast-forward,
+2026-06-14) & fleet-validated; Phases 3-4 deferred (fixture-blocked).
+NOT pushed/deployed yet (local main is ahead of origin/main; pipeline changes
+need `deploy/restart-web.sh` + `restart-build-worker.sh` after a push).
 
 ## Progress (2026-06-14)
 - **Phase 1 (RC3+RC2) DONE.** `+rot` convention flipped at all three recovery
