@@ -2175,8 +2175,22 @@ def _quality_presets() -> dict:
     return presets
 
 
-def _run_layout(quality: str, root_sch: Path, pcb: Path) -> int:
+def _run_layout(quality: str, root_sch: Path, pcb: Path,
+                *, seed: int | None = None, route: bool = True) -> int:
     """Run the placement+routing engine in-process (inherits this env's pcbnew).
+
+    ``seed`` pins the placement RNG so two runs of the same workspace produce the
+    same placement (the determinism guarantee `replay` relies on). When ``None``
+    (the `build` default) NO seed is forwarded, preserving each engine's existing
+    behavior -- autoexperiment then draws a *random* master seed per run, so its
+    optimization search keeps exploring. An explicit seed is threaded to BOTH
+    engines: solve-hierarchy to the leaf solver, autoexperiment as its master
+    seed. `replay` always passes one, which is why it is reproducible.
+
+    ``route`` toggles FreeRouting. ``route=False`` (placement only) is honored by
+    the solve-hierarchy (``fast``) engine -- the fast, deterministic path used to
+    validate placement stability. The autoexperiment engines always route (their
+    search scores rounds by routed DRC), so they ignore ``route=False``.
 
     autoexperiment qualities run in TWO phases instead of one combined loop:
 
@@ -2195,13 +2209,21 @@ def _run_layout(quality: str, root_sch: Path, pcb: Path) -> int:
     """
     presets = _quality_presets()
     preset = presets.get(quality, presets["good"])
+    seed_args = ["--seed", str(seed)] if seed is not None else []
     if preset["engine"] == "solve-hierarchy":
         from kicraft.cli.solve_hierarchy import main as _solve_hierarchy_main
 
-        return _solve_hierarchy_main([str(root_sch), "--pcb", str(pcb), "--route"])
+        argv = [str(root_sch), "--pcb", str(pcb), *seed_args]
+        if route:
+            argv.append("--route")
+        return _solve_hierarchy_main(argv)
     from kicraft.cli.autoexperiment import main as _autoexperiment_main
 
-    common = [str(pcb), "--schematic", str(root_sch)]
+    if not route:
+        print("[build]   note: --no-route is honored only by the fast "
+              "(solve-hierarchy) engine; this quality always routes.",
+              file=sys.stderr)
+    common = [str(pcb), "--schematic", str(root_sch), *seed_args]
     print(f"[build]   leaf phase: {preset['leaf_rounds']}x{preset['leaf_attempts']} "
           f"designs/leaf + auto-pin best ...")
     leaf_rc = _autoexperiment_main(common + [
@@ -2227,6 +2249,28 @@ def _find_routed_parent(project_dir: Path) -> Path | None:
     except Exception:
         pass
     hits = sorted(project_dir.glob("**/parent_routed.kicad_pcb"))
+    return hits[-1] if hits else None
+
+
+def _find_placed_parent(project_dir: Path) -> Path | None:
+    """Best *placed* parent board: the routed one if present, else the
+    pre-freerouting compose (what ``--no-route`` produces). Used by `replay
+    --no-route`, the fast placement-only iteration mode whose footprint
+    positions are the determinism guarantee we assert."""
+    routed = _find_routed_parent(project_dir)
+    if routed is not None:
+        return routed
+    try:
+        from kicraft.cli.solve_hierarchy import _find_parent_artifact
+
+        art = _find_parent_artifact(project_dir)
+        if art is not None:
+            pre = Path(art) / "parent_pre_freerouting.kicad_pcb"
+            if pre.exists():
+                return pre
+    except Exception:
+        pass
+    hits = sorted(project_dir.glob("**/parent_pre_freerouting.kicad_pcb"))
     return hits[-1] if hits else None
 
 
@@ -2321,7 +2365,8 @@ def _align_project_clearance_to_routing(project_dir: Path, stem: str, pcb: Path)
 
 def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
                         project_dir: Path, pcb: Path,
-                        *, done_label: str = "BUILD COMPLETE") -> int:
+                        *, done_label: str = "BUILD COMPLETE",
+                        do_fab: bool = True) -> int:
     """Steps 3-5 of the build tail: promote the routed parent to the
     project's main PCB, gate it (no shorts, no unconnected), and export
     the fab package. Shared by `build` and `manual-route`.
@@ -2371,6 +2416,18 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
             file=sys.stderr,
         )
         return 7
+
+    if not do_fab:
+        print(f"[build] 5/5 skipped fab export (--no-fab); verified board at {pcb.name}")
+        print()
+        print(f"{done_label}: {stem}")
+        print(f"  routed PCB : {pcb}")
+        print(
+            f"  DRC        : 0 shorts, 0 unconnected "
+            f"({gate['tracks'].get('traces', '?')} traces, "
+            f"{gate['tracks'].get('vias', '?')} vias)"
+        )
+        return 0
 
     # 5. Export the fab package (Gerbers + drill + CPL + BOM, zipped).
     print("[build] 5/5 export fab package (Gerbers + drill + CPL + BOM + STEP + 3D render) ...")
@@ -2573,22 +2630,52 @@ def _cmd_build(args: argparse.Namespace) -> int:
 def _layout_route_fab(args, state, state_path, artifacts, results,
                       stem: str, project_dir: Path, root_sch: Path, pcb: Path) -> int:
     """The heavy tail of `build` (place+route, verify gate, fab export, archive),
-    split out so _cmd_build can hold a host-wide build slot across exactly this."""
-    # 2. Optimize placement + route (leaves then parent) via the layout engine.
-    print(f"[build] 2/5 place + route (quality={args.quality}) -- may take minutes ...")
-    rc = _run_layout(args.quality, root_sch, pcb)
+    split out so _cmd_build can hold a host-wide build slot across exactly this.
+
+    Also the seam `replay` reuses to re-run place+route on a fixed workspace.
+    The replay-only knobs are read off ``args`` with build-preserving defaults:
+    ``seed`` (placement RNG, default None = engine's own/random), ``route``
+    (default True), and ``no_fab`` (default False) -- `_cmd_build`'s namespace
+    carries none of them, so build is byte-for-byte unchanged."""
+    seed = getattr(args, "seed", None)
+    route = getattr(args, "route", True)
+    do_fab = not getattr(args, "no_fab", False)
+    done_label = getattr(args, "done_label", "BUILD COMPLETE")
+
+    # 2. Optimize placement (+ route) via the layout engine.
+    action = "place + route" if route else "place (no route)"
+    seed_label = seed if seed is not None else "auto"
+    print(f"[build] 2/5 {action} (quality={args.quality}, seed={seed_label}) "
+          "-- may take minutes ...")
+    rc = _run_layout(args.quality, root_sch, pcb, seed=seed, route=route)
     if rc != 0:
         print(f"error: layout/route engine exited {rc}", file=sys.stderr)
         return 6
 
-    rc = _promote_verify_fab(state, state_path, artifacts, stem, project_dir, pcb)
-    if rc != 0:
-        return rc
+    if not route:
+        # Placement-only: promote the placed (pre-freerouting) parent so the
+        # positions are inspectable, but skip the routed-board verify/fab tail.
+        placed = _find_placed_parent(project_dir)
+        if placed is None:
+            print("error: the layout engine produced no placed parent board "
+                  "(parent compose failed).", file=sys.stderr)
+            return 6
+        shutil.copy2(placed, pcb)
+        print(f"[build] 3/5 promoted placed parent -> {pcb.name} "
+              "(placement only; no verify/fab)")
+        print()
+        print(f"{done_label}: {stem}")
+        print(f"  placed PCB : {pcb}")
+    else:
+        rc = _promote_verify_fab(state, state_path, artifacts, stem, project_dir,
+                                 pcb, done_label=done_label, do_fab=do_fab)
+        if rc != 0:
+            return rc
 
-    if not args.no_archive:
+    if not getattr(args, "no_archive", True):
         archive_root = (
             Path(args.archive_root).expanduser().resolve()
-            if args.archive_root
+            if getattr(args, "archive_root", None)
             else _default_archive_root().resolve()
         )
         try:
@@ -2603,6 +2690,210 @@ def _layout_route_fab(args, state, state_path, artifacts, results,
         except OSError as e:
             print(f"warning: archive failed: {e}", file=sys.stderr)
     return 0
+
+
+def _pin_deterministic_placement_env() -> None:
+    """Pin the process env so the placement subprocesses `replay` spawns are
+    reproducible. ``PYTHONHASHSEED`` is the dominant lever: the placement solver
+    iterates ``set``/``dict`` of string refs and dedups force-states by ``hash``,
+    all salted per-process by the hash seed -- left unpinned, two runs of the same
+    seeded workspace diverge at mm scale (empirically verified). The thread caps
+    remove residual floating-point reduction jitter from multi-threaded numpy in
+    the force solver. ``setdefault`` so an explicitly-set value (e.g. to probe
+    salt-robustness) is honored. The placement runs in child processes that read
+    these at startup, so setting them on the parent here is sufficient; routing
+    (FreeRouting) remains best-effort-stable regardless."""
+    os.environ.setdefault("PYTHONHASHSEED", "0")
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
+
+
+class _ReplayInputError(Exception):
+    """A workspace cannot be replayed (missing/ambiguous synthesized artifacts)."""
+
+
+def _discover_stem(project_dir: Path) -> str | None:
+    """The project stem of a synthesized workspace = the single basename that
+    owns the full root artifact set (``<stem>.kicad_pro`` + ``.kicad_pcb`` +
+    ``.kicad_sch``). Returns None when zero or more than one candidate matches."""
+    candidates = [
+        p.stem
+        for p in sorted(project_dir.glob("*.kicad_pro"))
+        if (project_dir / f"{p.stem}.kicad_pcb").exists()
+        and (project_dir / f"{p.stem}.kicad_sch").exists()
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _find_state_json(project_dir: Path, stem: str) -> Path | None:
+    """Locate the workspace's ``state.json`` by walking up from the project dir
+    (a synthesized workspace lives at ``<work>/generated/<STEM>/`` with the state
+    at ``<work>/.kicraft/state.json``). Only returns a state whose
+    ``project_stem`` matches ``stem`` so an unrelated ancestor state is ignored."""
+    base = project_dir
+    for _ in range(6):
+        cand = base / ".kicraft" / "state.json"
+        if cand.is_file():
+            try:
+                if _load_state(cand).project_stem == stem:
+                    return cand
+            except (OSError, json.JSONDecodeError, ValidationError):
+                pass
+        if base.parent == base:
+            break
+        base = base.parent
+    return None
+
+
+def _resolve_synthesized_workspace(args: argparse.Namespace):
+    """Resolve an already-synthesized workspace for `replay` and validate that the
+    artifacts place+route consume exist. Supports both input modes and returns
+    ``(state, state_path, artifacts, stem, project_dir, root_sch, pcb)``.
+
+    Raises ``_ReplayInputError`` (caller maps to rc 3) on a missing/ambiguous
+    workspace -- never calls synthesis."""
+    from .models import ArtifactPaths
+
+    project = getattr(args, "project", None)
+    if project:
+        project_dir = Path(project).expanduser().resolve()
+        if not project_dir.is_dir():
+            raise _ReplayInputError(f"--project {project_dir} is not a directory")
+        stem = _discover_stem(project_dir)
+        if stem is None:
+            raise _ReplayInputError(
+                f"could not identify a single synthesized project in {project_dir} "
+                "(need exactly one <stem>.kicad_pro with sibling .kicad_pcb + "
+                ".kicad_sch). Use the `replay STATE.json OUT_DIR` form instead.")
+        state_path = _find_state_json(project_dir, stem)
+        state = _load_state(state_path) if state_path is not None else None
+    else:
+        if not getattr(args, "state", None) or not getattr(args, "out_dir", None):
+            raise _ReplayInputError(
+                "provide either `--project DIR` or positional `STATE.json OUT_DIR`")
+        state_path = Path(args.state)
+        try:
+            state = _load_state(state_path)
+        except ValidationError as e:
+            raise _ReplayInputError(f"schema validation failed:\n{e}") from e
+        except (OSError, json.JSONDecodeError) as e:
+            raise _ReplayInputError(f"could not read {state_path}: {e}") from e
+        out_dir = Path(args.out_dir)
+        if state.project_stem and out_dir.name != state.project_stem:
+            out_dir = out_dir / state.project_stem
+        project_dir = out_dir.resolve()
+        stem = state.project_stem
+        if not stem:
+            raise _ReplayInputError(
+                "state has no project_stem; cannot locate artifacts")
+
+    root_sch = project_dir / f"{stem}.kicad_sch"
+    pcb = project_dir / f"{stem}.kicad_pcb"
+    kicad_pro = project_dir / f"{stem}.kicad_pro"
+    autoplacer_json = project_dir / f"{stem}_autoplacer.json"
+
+    # Validate the artifacts the placement engine actually consumes. The
+    # autoplacer.json is part of a complete synthesized set but is read only by
+    # the UI panels, not the placer -- a missing one is a warning, not a failure.
+    missing = [p for p in (root_sch, pcb, kicad_pro) if not p.is_file()]
+    if missing:
+        raise _ReplayInputError(
+            "missing required synthesized artifact(s):\n  "
+            + "\n  ".join(str(p) for p in missing)
+            + "\n(run synthesis / `kicraft build` first to produce them)")
+    if not autoplacer_json.is_file():
+        print(f"warning: {autoplacer_json.name} absent (UI seed file; not needed "
+              "for placement) -- continuing", file=sys.stderr)
+
+    if state is None:
+        state = ConversationState(project_stem=stem)
+
+    # Persisted ArtifactPaths from the original build are stale in a rehydrated or
+    # copied workspace, so rebuild them from disk when they don't match.
+    artifacts = state.artifacts
+    if artifacts is None or Path(artifacts.project_dir).resolve() != project_dir:
+        artifacts = ArtifactPaths(
+            project_dir=project_dir,
+            project_stem=stem,
+            root_sch=root_sch,
+            leaf_schs=sorted(
+                p for p in project_dir.glob("*.kicad_sch") if p.stem != stem
+            ),
+            kicad_pro=kicad_pro,
+            autoplacer_json=autoplacer_json,
+        )
+    return state, state_path, artifacts, stem, project_dir, root_sch, pcb
+
+
+def _cmd_replay(args: argparse.Namespace) -> int:
+    """Re-run ONLY place + route on an already-synthesized workspace -- `build`
+    minus its synthesize step. No LLM / synthesis stage runs, so a placement code
+    change can be tested against a FIXED input and produce a reproducible board.
+
+    Two input modes:
+      replay STATE.json OUT_DIR  -- resolve artifacts via state.artifacts
+      replay --project DIR       -- discover artifacts on disk (no state.json
+                                    needed; preferred for iteration/testing)
+    """
+    from kicraft.build_slots import build_slot
+
+    # Pin the placement RNG/threading env BEFORE spawning any layout subprocess,
+    # so the determinism guarantee holds (see helper).
+    _pin_deterministic_placement_env()
+
+    try:
+        (state, state_path, artifacts, stem,
+         project_dir, root_sch, pcb) = _resolve_synthesized_workspace(args)
+    except _ReplayInputError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 3
+
+    # Fail fast on a degenerate (0-leaf) hierarchy, as `build` does.
+    degenerate = _degenerate_hierarchy_error(root_sch)
+    if degenerate:
+        print(f"error: {degenerate}", file=sys.stderr)
+        return 6
+
+    # A state.json-less project-mode replay can't build a BOM-backed fab package
+    # or a session archive; downgrade loudly instead of crashing deep in the tail.
+    if state_path is None:
+        if not getattr(args, "no_fab", False):
+            print("note: no state.json near --project; skipping fab export (needs "
+                  "the BOM). Use `replay STATE.json OUT_DIR` to export a package.",
+                  file=sys.stderr)
+            args.no_fab = True
+        args.no_archive = True
+
+    # Determinism guard: synthesis must NOT run, so the root schematic the placer
+    # reads must be byte-identical before and after the replay.
+    sch_before = root_sch.read_bytes()
+
+    if args.route:
+        from kicraft.autoplacer.freerouting_runner import (
+            FreeroutingUnavailableError,
+            preflight_routing_toolchain,
+        )
+
+        try:
+            preflight_routing_toolchain()
+        except FreeroutingUnavailableError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 6
+
+    args.done_label = "REPLAY COMPLETE"
+    print(f"[replay] re-running place{'+route' if args.route else ''} on "
+          f"{project_dir} (quality={args.quality}, seed={args.seed}) "
+          "-- no synthesis")
+    with build_slot(echo=lambda line: print(line, flush=True)):
+        rc = _layout_route_fab(args, state, state_path, artifacts, [],
+                               stem, project_dir, root_sch, pcb)
+
+    if root_sch.read_bytes() != sch_before:
+        print("error: replay mutated the root schematic -- synthesis must not run "
+              "during replay (determinism violated).", file=sys.stderr)
+        return 8
+    return rc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2937,6 +3228,66 @@ def main(argv: list[str] | None = None) -> int:
         help="skip the post-build session archive",
     )
     p_build.set_defaults(func=_cmd_build)
+
+    p_replay = sub.add_parser(
+        "replay",
+        help=(
+            "re-run ONLY place + route on an already-synthesized workspace "
+            "(deterministic; no LLM/synthesis) -- the repro harness for "
+            "placement/compose code changes"
+        ),
+        description=(
+            "Re-runs placement + routing (+ promote/verify/fab) on a fixed, "
+            "already-synthesized workspace WITHOUT re-running synthesis, so a "
+            "code change produces a reproducible board against a frozen input. "
+            "Determinism is guaranteed for placement (pinned --seed); routing "
+            "(FreeRouting) is best-effort-stable. Use --no-route for a fast, "
+            "fully deterministic placement-only check."
+        ),
+    )
+    p_replay.add_argument(
+        "state", nargs="?",
+        help="path to state.json (omit when using --project)",
+    )
+    p_replay.add_argument(
+        "out_dir", nargs="?",
+        help="output directory (project_stem appended if absent)",
+    )
+    p_replay.add_argument(
+        "--project", default=None,
+        help="discover artifacts on disk under this synthesized project dir "
+             "(no state.json needed; preferred for testing)",
+    )
+    p_replay.add_argument(
+        "--quality",
+        choices=["fast", "draft", "good", "best"],
+        default="fast",
+        help="fast=deterministic single-pass solve-hierarchy (default; honors "
+             "--no-route); draft/good/best=autoexperiment search (always routes)",
+    )
+    p_replay.add_argument(
+        "--seed", type=int, default=0,
+        help="placement RNG seed (default 0). Same seed + same workspace => "
+             "same placement",
+    )
+    p_replay.add_argument(
+        "--route", dest="route", action="store_true", default=True,
+        help="route after placement (default)",
+    )
+    p_replay.add_argument(
+        "--no-route", dest="route", action="store_false",
+        help="placement only -- promote the placed board and skip "
+             "routing/verify/fab (fast determinism check; fast engine only)",
+    )
+    p_replay.add_argument(
+        "--no-fab", action="store_true",
+        help="skip the fab-package export (stop after the verify gate)",
+    )
+    p_replay.add_argument(
+        "--archive", dest="no_archive", action="store_false", default=True,
+        help="archive a session snapshot (replay skips this by default)",
+    )
+    p_replay.set_defaults(func=_cmd_replay)
 
     p_mroute = sub.add_parser(
         "manual-route",

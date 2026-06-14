@@ -99,6 +99,7 @@ def _solve_leaves(
     rounds: int,
     route: bool,
     only: list[str] | None = None,
+    seed: int = 0,
 ) -> str:
     """Solve all leaf subcircuits by delegating to solve_subcircuits.py."""
     cmd = [
@@ -109,6 +110,8 @@ def _solve_leaves(
         pcb,
         "--rounds",
         str(rounds),
+        "--seed",
+        str(seed),
     ]
     if route:
         cmd.append("--route")
@@ -251,6 +254,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--jar",
         help="FreeRouting JAR path override",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Base RNG seed for the leaf placement search (default: 0). "
+             "Pinning it makes placement reproducible.",
+    )
     return parser.parse_args(argv)
 
 
@@ -307,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
                         args.rounds,
                         args.route,
                         args.only,
+                        seed=args.seed,
                     )
                 except Exception as exc:
                     print(

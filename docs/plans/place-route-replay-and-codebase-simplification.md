@@ -9,6 +9,11 @@
 
 ## Part 1 — `replay` command: re-run ONLY place + route, deterministically
 
+> **STATUS: IMPLEMENTED 2026-06-14.** `kicraft replay` ships (both input modes),
+> seed + env pinned, placement determinism verified, fixture + tests + corpus
+> harness committed. See **“Implemented”** at the end of Part 1 for what landed,
+> the determinism scope that held, and the one follow-up it surfaced.
+
 ### Goal
 A CLI command that takes an **already-synthesized** project workspace and re-runs placement + routing (+ promote/verify/fab) **without touching the LLM synthesis stages**, so a code change can be tested against a *fixed* input and produce a *reproducible* board. This is the deterministic test harness the connector work lacked.
 
@@ -55,6 +60,57 @@ Registration mirrors `p_build` (`cli_app.py:2912`); `set_defaults(func=_cmd_repl
 
 ### Effort
 Small (~1 day). Almost entirely reuse; the real work is auditing/pinning the seed and writing the reproducibility test.
+
+### Implemented (2026-06-14)
+**What landed:**
+- `kicraft replay` (`cli_app.py`): both input modes (`replay STATE.json OUT_DIR`
+  and `replay --project DIR`), `--quality {fast,draft,good,best}` (default
+  `fast`), `--seed` (default 0), `--route/--no-route`, `--no-fab`, `--archive`
+  (replay skips the session archive by default). Helpers: `_cmd_replay`,
+  `_resolve_synthesized_workspace` (validates the artifacts the placer consumes,
+  rc 3 on missing; `_autoplacer.json` is a warning — it's UI-only, the placer
+  never reads it), `_discover_stem`, `_find_state_json`, `_find_placed_parent`.
+  Reuses the `_layout_route_fab` → `_run_layout`/`_promote_verify_fab` seam under
+  `build_slot`. A post-run guard re-reads the root `.kicad_sch` and fails rc 8 if
+  anything mutated it — the no-synthesis invariant, asserted, not assumed.
+- **Seed plumbed** through `_run_layout(seed, route)` → solve-hierarchy (new
+  `--seed`, threaded to `solve_subcircuits` via `_solve_leaves`) and
+  autoexperiment (`--seed` already existed; was unset = *random*). `seed=None` is
+  preserved as the `build` default (no `--seed` forwarded → build's search stays
+  random), so **build behavior is unchanged**; only `replay` pins a seed.
+- **Env pinned** by `_pin_deterministic_placement_env()` (replay only):
+  `PYTHONHASHSEED=0` + single-thread numpy (`OMP/OPENBLAS/MKL/NUMEXPR_NUM_THREADS=1`),
+  `setdefault` so a caller can override.
+- Fixture `tests/fixtures/replay_workspace/USB_PD_TRIGGER/` (a real USB-C, 4-leaf
+  workspace; ~256 KB), `tests/test_replay_command.py` (15 unit + 1 opt-in e2e
+  gated by `KICRAFT_REPLAY_E2E=1`), and `scripts/replay_corpus.py` (golden-diff
+  harness — the “make replay-corpus” the sequencing calls for; `--update` writes
+  goldens, no-arg checks; `*.golden.json` committed).
+
+**Determinism — what actually held (the audit the plan asked for):**
+- **`PYTHONHASHSEED` is the dominant nondeterminism source.** The placement
+  solver iterates `set`/`dict` of string refs and dedups force-states via
+  `hash(...)` (`placement_solver.py:~2223`), all salted per-process by the hash
+  seed. Unpinned, two seeded runs of the same workspace diverge at **mm scale**
+  (verified). Pinned, leaf placement is **byte-identical**.
+- **Placement IS reproducible; the composed parent is NOT.** Each leaf's
+  `leaf_pre_freerouting.kicad_pcb` (the placement output) is 0-diff across two
+  independent replays with the env pinned. The promoted *parent*
+  (`<stem>.kicad_pcb`) still differs run-to-run because compose consumes the
+  **routed** leaf boards, and FreeRouting is not bit-deterministic. This is
+  exactly the plan's scoped guarantee: **placement deterministic, routing
+  best-effort.** The determinism test + corpus therefore assert on the per-leaf
+  placement boards, not the parent.
+
+**Follow-up this surfaced (worth a fix, deferred — belongs with Part 3 / compose
+cleanup):** `replay --no-route` skips *parent* routing but the leaf solve still
+runs FreeRouting on each leaf (confirmed: `solve_subcircuits` routes leaves even
+with `args.route=False` — the route flag plumbs correctly but routing still
+happens; root cause not yet pinned). Two payoffs once fixed: (a) `--no-route`
+becomes genuinely fast (leaf routing is most of the wall-clock), and (b) if
+compose then reads the deterministic `leaf_pre_freerouting` boards, the **parent
+becomes deterministic too**, upgrading the determinism guarantee from leaf-level
+to board-level — directly enabling Part 3's "same stranding on replay" repro.
 
 ---
 
