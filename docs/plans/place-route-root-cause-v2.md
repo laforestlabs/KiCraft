@@ -1,7 +1,7 @@
 # Plan v2: connector stranding + stamp-short family — root-cause, not gating
 
-**Status:** Phases 1+2 IMPLEMENTED & validated (commit on branch
-`place-route-root-cause-v2`); Phase 3 in progress; proposed 2026-06-14.
+**Status:** Phases 1+2 IMPLEMENTED & fleet-validated (branch
+`place-route-root-cause-v2`); Phases 3-4 deferred (fixture-blocked). 2026-06-14.
 
 ## Progress (2026-06-14)
 - **Phase 1 (RC3+RC2) DONE.** `+rot` convention flipped at all three recovery
@@ -16,13 +16,29 @@
   J1/J2/SW1 all flush (SW1 was −9.2mm); the SW1 xfail is now a passing test.**
   Parent corpus golden updated (expected move); leaf placement unchanged.
 - **Validation:** full placement/compose unit suite green (only 4 PRE-EXISTING
-  unrelated failures remain); parent corpus deterministic across runs; a
-  fleet `self-eval` is running to confirm no regression before merge.
-- **Phase 3 (Lever 2.1) prerequisite:** the committed corpus fixture has no
-  parent-local connectors, so the auto-wrap can't be validated against it.
-  Plan: harvest a parent-local-connector workspace from the self-eval run as a
-  new corpus fixture, then do the auto-wrap + delete the `_snap_parent_local`
-  connector branch behind it.
+  unrelated failures remain); parent corpus deterministic across runs.
+- **Fleet validation (deterministic A/B, not the noisy synthesis self-eval).**
+  Full-synthesis self-eval is dominated by synthesis noise — fab-ready swings
+  0/9–6/9 across runs on identical code — so it can't detect a place/route
+  regression. Instead I replayed PARENT COMPOSE on the 9 freshly-synthesized
+  workspaces' FROZEN routed leaves (where RC1/RC2/RC3 live), my branch vs
+  `main` (`scripts/ab_compose.py`):
+  - 7/9 compose rc=0 on my branch; the two non-successes — run_08 (rc=2, a FLAT
+    board: no leaf subcircuits, compose N/A) and run_09 (rc=1, abort) — fail
+    **identically on `main`**. No new failure.
+  - run_09 IMPROVED: candidate shorts 8/8/1/5 (mine) vs 16/24/… (main),
+    consistent with RC2 holding same-layer leaves apart. **No regression; a net
+    improvement on the one stressed board.**
+- **Phase 3 (Lever 2.1) blocked on a fixture.** None of the 9 workspaces has a
+  parent-local CONNECTOR in a hierarchical board (the case
+  `_snap_parent_local`'s connector branch handles): run_08 is flat (no compose),
+  run_09's parent-locals are LEDs (generic snap branch). The connector-branch
+  deletion still has no validating fixture; deferred as a scoped follow-up
+  (construct a parent-local-connector workspace → freeze into corpus → auto-wrap
+  + delete behind it + the connector_edge_gap gate). Landing it blind would risk
+  the USB-C work.
+- **Phase 4 (Lever 2.5, file splits):** mechanical, corpus-zero-drift; sequenced
+  after 2.1 (move less code), so it follows the 2.1 fixture work.
 
 ---
 
