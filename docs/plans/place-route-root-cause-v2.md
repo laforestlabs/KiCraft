@@ -1,6 +1,32 @@
 # Plan v2: connector stranding + stamp-short family — root-cause, not gating
 
-**Status:** proposed 2026-06-14. Supersedes the *gated* framing in
+**Status:** Phases 1+2 IMPLEMENTED & validated (commit on branch
+`place-route-root-cause-v2`); Phase 3 in progress; proposed 2026-06-14.
+
+## Progress (2026-06-14)
+- **Phase 1 (RC3+RC2) DONE.** `+rot` convention flipped at all three recovery
+  sites; `can_overlap_sparse` rewritten to the same-layer-clearance rule
+  (fragile per-rect same-layer branch + outline gate deleted). Compose stays
+  rc=0 with no seam shorts. Convention unit tests updated to KiCad-CW.
+- **Phase 2 (RC1) DONE.** Rotation filter now also requires every edge-zoned
+  part to be its leaf's extremity on the zoned side (fixes mouthless switches);
+  `edge_zoned_outline_sides` (was `connector_outline_sides`, J-only) registers
+  all edge-zoned non-hole refs so `_repair_parent_outline` can't bury them;
+  `connector_edge_gap` measures mouth = courtyard ∪ pads. **Fixture result:
+  J1/J2/SW1 all flush (SW1 was −9.2mm); the SW1 xfail is now a passing test.**
+  Parent corpus golden updated (expected move); leaf placement unchanged.
+- **Validation:** full placement/compose unit suite green (only 4 PRE-EXISTING
+  unrelated failures remain); parent corpus deterministic across runs; a
+  fleet `self-eval` is running to confirm no regression before merge.
+- **Phase 3 (Lever 2.1) prerequisite:** the committed corpus fixture has no
+  parent-local connectors, so the auto-wrap can't be validated against it.
+  Plan: harvest a parent-local-connector workspace from the self-eval run as a
+  new corpus fixture, then do the auto-wrap + delete the `_snap_parent_local`
+  connector branch behind it.
+
+---
+
+**Original status:** proposed 2026-06-14. Supersedes the *gated* framing in
 `place-route-replay-and-codebase-simplification.md` Part 3 / Lever 2.1. That doc
 did excellent foundational work (replay harness, geometry centralization,
 fallback inventory, the `connector_edge_gap` metric) — keep all of it. What this
