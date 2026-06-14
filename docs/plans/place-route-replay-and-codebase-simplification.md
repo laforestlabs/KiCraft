@@ -324,18 +324,33 @@ exactly `(2·offset.y, -2·offset.x)`; flipping to `+rot` moved SW1 from −9.2m
 1. **Residual cause** — SW1 still −3.85mm after the convention fix: it is not its
    leaf's top extremity (hypothesis 1 above). Needs the leaf-internal
    extremity/edge re-pin, OR Lever 2.1 wrapping it as its own leaf.
-2. **Stamp fragility** — flipping the sign tightens every parent layout (the bug
-   had masked sprawl; bh 50→34mm on the fixture), and the parent stamp then
-   produces shorts on EVERY candidate (verified k=4 and k=12), so compose
-   aborts. The stamp (pours/breakout-stubs) must be made robust to tight layouts
-   first. All three recovery sites are centralized on `geometry.rotate_vector`
-   and carry a "flip the three together" note so the fix is a one-line change
-   once those blockers clear.
+2. **OVERLAPPING leaves — the real blocker (diagnosed 2026-06-14).** Flipping
+   the sign does NOT just "tighten" the layout — it makes leaf bboxes **OVERLAP**
+   (measured: PD CONTROLLER ∩ USB-C INPUT = **4.83mm**, two more pairs ~0.7mm).
+   The shorts are then those leaves' own routed **traces** crossing (`Track
+   [GND]` vs VBUS_OUT/CC2 at ~7µm gaps), NOT pours/stubs. So **"make the stamp
+   robust" is the wrong lever** — the stamp faithfully replays each leaf's
+   copper; you cannot replay *overlapping* leaves cleanly.
 
-**So the single-mechanism stranding fix is real but gated on parent-stamp
-robustness + the leaf-extremity re-pin (or Lever 2.1).** The harness + strict
-xfail (`test_top_zoned_switch_not_stranded`) capture the bug so it can't regress
-silently and the fix flips the xfail when it lands.
+**Why the leaves overlap (the deeper coupling).** The solver's block placement
+and the origin recovery **share the buggy `-rot` convention**: the solver
+enforces `placement_clearance_mm` between block bboxes, but the leaves are
+rendered by the recovery, and the `-rot` bug's positional shift
+(`(2·offset.y, -2·offset.x)`) was *inadvertently providing the inter-leaf
+spacing*. Flip only the recovery and that spacing collapses → leaves overlap.
+The geometry gate misses it too (`geometry_accepted: true` despite 4.83mm
+overlap — it checks board *containment*, not inter-leaf overlap). So the fix is
+NOT a one-line sign flip: the solver's block-placement/spacing must be made
+consistent with the correct `+rot` recovery (a coupled, solver-level change), or
+the stranding fixed by a different localized mechanism.
+
+**So the single-mechanism stranding fix is real but gated on untangling the
+solver/recovery convention coupling (so the correct `+rot` placement is
+non-overlapping) + the leaf-extremity re-pin.** The harness + strict xfail
+(`test_top_zoned_switch_not_stranded`) capture the bug so it can't regress
+silently and the fix flips the xfail when it lands. **Decision 2026-06-14: stop
+here and document — the SW1 fix is a dedicated solver-convention effort, not a
+stamp tweak.**
 
 ---
 
