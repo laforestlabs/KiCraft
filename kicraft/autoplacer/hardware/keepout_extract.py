@@ -20,11 +20,11 @@ that has both an internal strip and a family-spec match is protected by both.
 """
 from __future__ import annotations
 
-import math
 from fnmatch import fnmatch
 
 import pcbnew
 
+from ..brain import geometry
 from ..brain.types import KeepoutRect, Point
 
 
@@ -55,27 +55,24 @@ def _transform_local_rect(
 ) -> tuple[Point, Point]:
     """Transform a local-frame rect to a board-coord AABB.
 
-    Uses KiCad's footprint orientation convention (verified against placed-zone
-    coordinates): a local point ``(lx, ly)`` lands at
-    ``(ox + lx*cos - (-ly)*sin, ...)`` -- concretely
-    ``bx = ox + lx*cosθ + ly*sinθ``, ``by = oy - lx*sinθ + ly*cosθ``. This is
-    the inverse-sign of the composer's leaf->parent ``_apply_rotation`` helper,
-    which is why that helper is not reused here. For 90/180/270 the AABB is
-    exact; for arbitrary angles it is the conservative bounding box of the
-    rotated rect (over-approximating the keep-out, which is safe).
+    Uses KiCad's footprint orientation convention via
+    :func:`geometry.transform_point` (each local corner -> board coords). For
+    90/180/270 the AABB is exact; for arbitrary angles it is the conservative
+    bounding box of the rotated rect (over-approximating the keep-out, safe).
     """
-    theta = math.radians(rotation_deg)
-    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    origin = Point(origin_x, origin_y)
     corners = [
         (spec["x_min"], spec["y_min"]),
         (spec["x_max"], spec["y_min"]),
         (spec["x_max"], spec["y_max"]),
         (spec["x_min"], spec["y_max"]),
     ]
-    xs, ys = [], []
-    for lx, ly in corners:
-        xs.append(origin_x + lx * cos_t + ly * sin_t)
-        ys.append(origin_y - lx * sin_t + ly * cos_t)
+    pts = [
+        geometry.transform_point(Point(lx, ly), origin, rotation_deg)
+        for lx, ly in corners
+    ]
+    xs = [p.x for p in pts]
+    ys = [p.y for p in pts]
     return Point(min(xs), min(ys)), Point(max(xs), max(ys))
 
 

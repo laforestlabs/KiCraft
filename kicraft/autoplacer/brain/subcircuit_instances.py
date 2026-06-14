@@ -26,11 +26,11 @@ from __future__ import annotations
 
 import copy
 import json
-import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import geometry
 from .types import (
     Component,
     InterfaceAnchor,
@@ -759,23 +759,9 @@ def _transform_pad(
 
 def _rotate_size(size: Point, rotation_deg: float) -> Point:
     """Return the AABB extent of a (size.x by size.y) rectangle rotated by
-    ``rotation_deg``. Orthogonal rotations are exact; non-orthogonal ones
-    return the bounding-box extent of the rotated rectangle.
-    """
-    import math
-
-    rot = rotation_deg % 360.0
-    if abs(rot) < 1e-3 or abs(rot - 180.0) < 1e-3:
-        return Point(size.x, size.y)
-    if abs(rot - 90.0) < 1e-3 or abs(rot - 270.0) < 1e-3:
-        return Point(size.y, size.x)
-    theta = math.radians(rot)
-    cos_t = abs(math.cos(theta))
-    sin_t = abs(math.sin(theta))
-    return Point(
-        size.x * cos_t + size.y * sin_t,
-        size.x * sin_t + size.y * cos_t,
-    )
+    ``rotation_deg`` (see :func:`geometry.bbox_after_rotation`)."""
+    w, h = geometry.bbox_after_rotation(size.x, size.y, rotation_deg)
+    return Point(w, h)
 
 
 def _transform_trace(
@@ -851,13 +837,10 @@ def _transform_point(
     a 90° rotation to coincide some traces with same-leaf pads of
     different nets after nm rounding, producing intra-leaf shorting_items
     on stamped boards even when leaf_routed.kicad_pcb was clean.
+
+    Canonical implementation now lives in :func:`geometry.transform_point`.
     """
-    theta = math.radians(rotation_deg)
-    cos_t = math.cos(theta)
-    sin_t = math.sin(theta)
-    x = point.x * cos_t + point.y * sin_t
-    y = -point.x * sin_t + point.y * cos_t
-    return Point(x + origin.x, y + origin.y)
+    return geometry.transform_point(point, origin, rotation_deg)
 
 
 def _rotated_bbox_size(
@@ -865,14 +848,9 @@ def _rotated_bbox_size(
     height: float,
     rotation_deg: float,
 ) -> tuple[float, float]:
-    """Compute axis-aligned bbox size after rotation."""
-    theta = math.radians(rotation_deg % 360.0)
-    cos_t = abs(math.cos(theta))
-    sin_t = abs(math.sin(theta))
-    return (
-        width * cos_t + height * sin_t,
-        width * sin_t + height * cos_t,
-    )
+    """Compute axis-aligned bbox size after rotation
+    (see :func:`geometry.bbox_after_rotation`)."""
+    return geometry.bbox_after_rotation(width, height, rotation_deg)
 
 
 def _compute_layout_bbox(

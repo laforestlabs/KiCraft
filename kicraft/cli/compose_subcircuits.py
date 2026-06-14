@@ -73,6 +73,7 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
     constraint_aware_outline,
     extract_leaf_blocker_set,
 )
+from kicraft.autoplacer.brain import geometry
 from kicraft.autoplacer.brain.types import BoardState
 from kicraft.autoplacer.brain.subcircuit_extractor import extract_parent_local_components
 from kicraft.autoplacer.brain.subcircuit_instances import (
@@ -1095,34 +1096,6 @@ def _move_component_to(comp: Component, new_pos: Point) -> None:
         pad.pos = Point(pad.pos.x + dx, pad.pos.y + dy)
 
 
-def _rotate_component_in_place(comp: Component, delta_deg: float) -> None:
-    """Rotate a Component about its own ``pos`` by ``delta_deg`` (pads,
-    body_center, rotation, and -- for 90/270 -- the AABB width/height).
-
-    Uses KiCad's rotation convention (x' = x cos + y sin; y' = -x sin + y cos),
-    matching _transform_point / pcbnew.SetOrientationDegrees, so the resulting
-    geometry agrees with opening_board_angle / _best_rotation_for_edge. Math
-    CCW here would orient the mouth toward the opposite edge."""
-    delta = delta_deg % 360.0
-    if abs(delta) < 1e-6:
-        return
-    rad = math.radians(delta)
-    cos_r, sin_r = math.cos(rad), math.sin(rad)
-    cx, cy = comp.pos.x, comp.pos.y
-
-    def _rot(p: Point) -> Point:
-        dx, dy = p.x - cx, p.y - cy
-        return Point(cx + dx * cos_r + dy * sin_r, cy - dx * sin_r + dy * cos_r)
-
-    if comp.body_center is not None:
-        comp.body_center = _rot(comp.body_center)
-    for pad in comp.pads:
-        pad.pos = _rot(pad.pos)
-    comp.rotation = (comp.rotation + delta) % 360.0
-    if round(delta) % 180 == 90:
-        comp.width_mm, comp.height_mm = comp.height_mm, comp.width_mm
-
-
 def _snap_parent_local(
     comps: dict[str, Component],
     constraints: list[AttachmentConstraint],
@@ -1154,7 +1127,7 @@ def _snap_parent_local(
             and c.value in ("left", "right", "top", "bottom")
         ):
             target_rot = PlacementSolver._best_rotation_for_edge(comp, c.value)
-            _rotate_component_in_place(comp, target_rot - comp.rotation)
+            geometry.rotate_component_in_place(comp, target_rot - comp.rotation)
             bc = comp.body_center if comp.body_center is not None else comp.pos
             half_w, half_h = comp.width_mm / 2.0, comp.height_mm / 2.0
             # Mouth = body-AABB edge on the outward-facing side.

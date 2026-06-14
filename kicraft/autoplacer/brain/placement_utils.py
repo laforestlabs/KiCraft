@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 from typing import NamedTuple
 
+from . import geometry
 from .types import Component, Point
 
 
@@ -48,14 +49,13 @@ def _world_artifact_origin(comp: Component) -> Point:
     """
     if comp.block_artifact_origin_offset is None:
         return Point(comp.pos.x, comp.pos.y)
-    rad = math.radians(comp.rotation)
-    cos_r = math.cos(rad)
-    sin_r = math.sin(rad)
-    ox = comp.block_artifact_origin_offset.x
-    oy = comp.block_artifact_origin_offset.y
-    rotated_x = ox * cos_r - oy * sin_r
-    rotated_y = ox * sin_r + oy * cos_r
-    return Point(comp.pos.x - rotated_x, comp.pos.y - rotated_y)
+    # rotate_vector(offset, -rotation) == the old math-CCW rotation. Same
+    # inverse-recovery pattern (and same 90/270 caveat) flagged on
+    # parent_adapter._rotated -- preserved exactly here.
+    rotated = geometry.rotate_vector(
+        comp.block_artifact_origin_offset, -comp.rotation
+    )
+    return Point(comp.pos.x - rotated.x, comp.pos.y - rotated.y)
 
 
 def _blocker_pair_compatible(a: Component, b: Component) -> bool:

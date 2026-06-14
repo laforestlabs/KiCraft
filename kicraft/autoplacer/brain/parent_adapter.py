@@ -22,12 +22,11 @@ wired up. PR5 replaces ``_compose_artifacts`` to use it.
 
 from __future__ import annotations
 
-import math
 import re
 from typing import Any
 
+from . import geometry
 from .subcircuit_composer import (
-    AttachmentConstraint,
     ChildArtifactPlacement,
     DerivedAttachmentConstraints,
     PlacementModel,
@@ -60,13 +59,22 @@ def synthetic_block_ref(child_index: int, sheet_name: str) -> str:
 
 
 def _rotated(point: Point, rotation_deg: float) -> Point:
-    rad = math.radians(rotation_deg)
-    cos_r = math.cos(rad)
-    sin_r = math.sin(rad)
-    return Point(
-        point.x * cos_r - point.y * sin_r,
-        point.x * sin_r + point.y * cos_r,
-    )
+    """math-CCW rotation == ``rotate_vector(point, -rotation_deg)`` (KiCad CW
+    with a negated angle).
+
+    FLAG (Lever 2.4 inventory / candidate Part-3 cause): the sole caller uses
+    this to *invert* a forward placement -- ``origin = body_pos - _rotated(
+    body_center_offset, rotation)`` -- to recover an artifact's instance origin.
+    But the forward transform of ``body_center`` is KiCad CW (`R_cw(+rot)`, via
+    transform_loaded_artifact -> _transform_point), so the correct inverse
+    subtracts ``R_cw(+rot)·offset``, i.e. ``rotate_vector(offset, +rotation)``,
+    NOT ``-rotation``. They agree only for rotation in {0, 180}; at 90/270 a
+    block with an off-origin body center is recovered to a shifted origin --
+    a strong suspect for the "edge connector landed several mm inboard /
+    unrotated" stranding. Left UNCHANGED here (no-op centralization); fixing it
+    is a behavior change to validate against a parent-level corpus separately.
+    """
+    return geometry.rotate_vector(point, -rotation_deg)
 
 
 def _content_bbox(artifact: LoadedSubcircuitArtifact) -> tuple[Point, Point]:

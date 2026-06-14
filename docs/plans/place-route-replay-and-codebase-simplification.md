@@ -160,6 +160,22 @@ These are duplicate logic for the same goal. The recent parent-local connector f
 **Risks:** manual layout editor references `ManualLayout.parent_local` (`layout_editor/model.py`); provide a migration/deprecation. Existing projects with parent-local connector zones must be auto-wrapped (backward compat). Mounting-hole synthesis must be preserved.
 
 ### Lever 2.2 — Centralize coordinate-frame + rotation math (kills convention bugs)
+
+> **STATUS: IMPLEMENTED 2026-06-14 (no-op, corpus-verified).** New module
+> `kicraft/autoplacer/brain/geometry.py` owns the single KiCad-CW convention:
+> `rotate_vector`, `transform_point`, `bbox_after_rotation`,
+> `rotate_component_in_place`. Migrated every ad-hoc site to it —
+> `subcircuit_instances._transform_point`/`_rotate_size`/`_rotated_bbox_size`,
+> `compose._rotate_component_in_place` (deleted; call site uses `geometry.`),
+> `keepout_extract._transform_local_rect`, and the two math-CCW *inverse*
+> sites (`parent_adapter._rotated`, `placement_utils._world_artifact_origin`)
+> as `rotate_vector(v, -deg)` (provably identical; `math-CCW(θ) ≡
+> rotate_vector(·,-θ)`). `tests/test_geometry.py` (18 tests) pins the
+> convention incl. **agreement with `pcbnew.SetOrientationDegrees`**; the
+> replay corpus confirms leaf placement is byte-identical (true no-op). The
+> two inverse sites were found to be a **latent convention bug at 90/270** —
+> preserved exactly here and flagged in `lever-2.4-fallback-inventory.md` for a
+> separate, parent-corpus-validated fix (likely the Part 3 root cause).
 Rotation/transform logic is scattered and uses **inconsistent conventions** — this directly caused a bug in the recent fix (math-CCW vs KiCad CW). Functions found: `subcircuit_instances._transform_point` (KiCad convention, `:830`), `_rotate_size` (`:760`), `_rotated_bbox_size` (`:863`), `parent_adapter._rotated` (`:62`), `compose_subcircuits._rotate_component_in_place` (`:1098`), `placement_solver` rotations, `keepout_extract._transform_local_rect`.
 
 **Proposal:** one module `kicraft/autoplacer/geometry.py` (or extend `types.py`) owning: `rotate_point`, `rotate_size`, `transform_point(origin, rot)`, `rotate_component_in_place`, `bbox_after_rotation` — **all using the single KiCad convention** documented once (`board_angle = local_angle - rotation`; `x' = x·cosθ + y·sinθ; y' = -x·sinθ + y·cosθ`). Replace every ad-hoc rotation with calls to it. Add a property test: `transform_point` agrees with `pcbnew.SetOrientationDegrees` for a pad at (1,0) across 0/90/180/270 (the empirically-verified case already documented in `_transform_point`).
@@ -170,6 +186,14 @@ Anchor + edge-target logic is spread across: `edge_anchor_target_coordinate` (`s
 **Proposal:** a single `edge_attachment` module exposing one tested API: given (component, edge, overhang) → the connector's mouth anchor and the outward rotation; given (constraints, outline) → the final outline and per-ref anchor coordinates. Leaf and (remaining) parent-local snapping both call it. This removes the "snap uses pad centroid but outline uses courtyard mouth" mismatch class of bugs.
 
 ### Lever 2.4 — Inventory and remove fallbacks / sloppy patches
+
+> **STATUS: inventory DELIVERED 2026-06-14** — see
+> `docs/plans/lever-2.4-fallback-inventory.md` (~98 markers classified P/F/D/K;
+> the ~35 in `placement_solver` collapse to "board-containment clamps" that
+> should *count + surface* activations rather than silently rescue; plus the
+> plan-named items and the new 90/270 convention-bug finding). Removal/promotion
+> of individual items is follow-up work.
+
 `placement_solver.py` alone has ~57 fallback/clamp/legacy markers. **Task:** produce a one-page inventory (grep `fallback|best.effort|escape hatch|workaround|legacy|for now|clamp|HACK|XXX`) and for each decide: (a) promote to a real, documented mechanism, (b) replace with a loud failure + diagnostic, or (c) delete if dead. Specific known ones to revisit:
 - The opening-direction 3-layer fallback (marker → body-extension → centroid) in `adapter.detect_opening_direction` — keep, but make the chosen layer observable in diagnostics.
 - The `>10mm` anchor clamp in `_compute_final_outline` (history: double-rebase) — once frames are centralized (2.2), this clamp may be deletable; verify.
