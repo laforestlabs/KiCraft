@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:4c5d4bdc5fddf6647680e54cc80e0a337cfd0b0ba25b12c35b9448a0bfd9138b",
+  "datasheet_url": "https://lcsc.com/product-detail/Surface-Mount-Fuses_BOURNS_MF-MSMF050-2_0-5A-15V-Self-healing-fuse_C17313.html",
+  "description": "BOURNS MF-MSMF050-2",
+  "footprint_name": "F1812",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "MF-MSMF050-2",
+  "name": "mf-msmf050-2",
+  "provenance": {
+    "added_at": "2026-06-14T23:24:31Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C17313"
+  },
+  "symbol_name": "MF-MSMF050-2",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

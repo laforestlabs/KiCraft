@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:e188dc4104c411391afe0f5b6293cfb9c2bce499b4f3861ffe907ab8fdfd2235",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C970725.pdf",
+  "description": "WCH(\u5357\u4eac\u6c81\u6052) CH224K",
+  "footprint_name": "ESSOP-10_L4.9-W3.9-P1.0-LS6.0-TL-EP",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "CH224K",
+  "name": "ch224k",
+  "provenance": {
+    "added_at": "2026-06-14T23:24:28Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C970725"
+  },
+  "symbol_name": "CH224K",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:9d6a0e7bbfe7b7625b67ca69e23ffefa6c16e7319d79d89ff0d7581aaf0a76bf",
+  "datasheet_url": "https://lcsc.com/product-detail/Terminal-Blocks_WJ126V-5-0-2P_C8404.html",
+  "description": "WJ126V-5.0-2P",
+  "footprint_name": "CONN-TH_WJ126V-5.0-2P",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "WJ126V-5.0-2P",
+  "name": "screw-terminal-5mm-2p",
+  "provenance": {
+    "added_at": "2026-06-14T23:24:30Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C8404"
+  },
+  "symbol_name": "WJ126V-5.0-2P",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

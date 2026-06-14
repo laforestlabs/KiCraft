@@ -514,7 +514,7 @@
 			(uuid "742ade52-5fe3-49e8-ba77-dfdc3c03314c")
 		)
 		(embedded_fonts no)
-		(model "/CONN-TH_DB5.00-LI-2P-126.wrl"
+		(model "${KIPRJMOD}/3dmodels/screw-terminal-5mm-2p/CONN-TH_DB5.00-LI-2P-126.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -851,7 +851,7 @@
 			(uuid "639a6832-f951-4df5-8ab3-165afd32d00a")
 		)
 		(embedded_fonts no)
-		(model "/ESSOP-10_L4.9-W3.9-P1.0-LS6.0-TL-EP.wrl"
+		(model "${KIPRJMOD}/3dmodels/ch224k/ESSOP-10_L4.9-W3.9-P1.0-LS6.0-TL-EP.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
