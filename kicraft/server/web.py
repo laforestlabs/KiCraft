@@ -4394,6 +4394,11 @@ def samples_page():
     ui.query("body").style("background:#0b1120")
     kicanvas_head()
     _mobile_head()
+    if any(s.has_3d() for s in available_samples()):
+        # <model-viewer> (Google @google/model-viewer 4.0.0, BSD-3) — self-hosted
+        # like kicanvas.js. The explorer is where the interactive 3D board lives.
+        ui.add_head_html(
+            '<script type="module" src="/static/model-viewer.min.js"></script>')
 
     with ui.header().classes("items-center justify-between") \
             .style("background:#0f172a;border-bottom:1px solid #1e293b"):
@@ -4429,6 +4434,16 @@ def samples_page():
                                   f"/?prompt={quote(ss.prompt)}")) \
                         .props("color=primary unelevated")
                 ui.label(s.blurb).classes("text-sm").style("color:#94a3b8")
+                # Interactive 3D board first (the show-off view), then the real
+                # schematic and routed board in KiCanvas.
+                if s.has_3d():
+                    with ui.card().classes("w-full") \
+                            .style("background:#0f172a;border:1px solid #1e293b"):
+                        ui.label("3D model").classes("text-xs font-medium") \
+                            .style("color:#94a3b8")
+                        # sanitize=False: NiceGUI would strip the custom element.
+                        ui.html(_sample_model_viewer(s), sanitize=False) \
+                            .classes("w-full")
                 # Schematic and board are both rendered visible (not in tabs/dialogs):
                 # a KiCanvas WebGL canvas built inside a hidden container can size to
                 # zero and never repaint, so keeping both on-screen avoids that.
@@ -4764,28 +4779,32 @@ def _svg_icon(path: str) -> str:
 
 
 def _sample_media(s, *, hero: bool = False) -> str:
-    """The board's interactive 3D model when a GLB is bundled, else the static
-    render. The PNG doubles as the model's poster (instant paint) and the no-JS
-    fallback, so a sample without a GLB degrades to exactly the old behaviour."""
+    """A static, high-quality isometric render of the board. The landing page is
+    all stills now — the hero and every gallery card — so it paints instantly and
+    shows the board the way the renderer drew it. The interactive 3D model lives
+    on the logged-in explorer instead (see ``_sample_model_viewer``)."""
     alt = f"{s.title} board, designed by KiCraft"
-    if not s.has_3d():
-        cls = "kc-board" if hero else ""
-        lazy = "" if hero else ' loading="lazy"'
-        return f'<img class="{cls}" src="{s.board_png_url}" alt="{alt}"{lazy}>'
-    common = (f'src="{s.board_glb_url}" poster="{s.board_png_url}" alt="{alt}" '
-              f'camera-orbit="22deg 66deg 102%" interaction-prompt="none" '
-              f'reveal="auto"')
     if hero:
-        # Above the fold and not a link: load eagerly, let visitors orbit it.
-        return (f'<model-viewer class="kc-model kc-model-hero" {common} '
-                f'camera-controls auto-rotate auto-rotate-delay="900" '
-                f'rotation-per-second="16deg" disable-pan shadow-intensity="0" '
-                f'exposure="1.0" touch-action="pan-y" loading="eager"></model-viewer>')
-    # Inside the card link: pointer-events:none (CSS) keeps the card clickable,
-    # so just spin gently and lazy-load the GLB when scrolled near.
-    return (f'<model-viewer class="kc-model" {common} auto-rotate '
-            f'auto-rotate-delay="0" rotation-per-second="13deg" disable-zoom '
-            f'disable-pan disable-tap loading="lazy"></model-viewer>')
+        # The featured board's dedicated hero render (hero.png, else board.png).
+        return (f'<img class="kc-board" src="{s.board_hero_url}" alt="{alt}" '
+                f'fetchpriority="high">')
+    return f'<img src="{s.board_png_url}" alt="{alt}" loading="lazy">'
+
+
+def _sample_model_viewer(s) -> str:
+    """Interactive 3D ``<model-viewer>`` of the board's GLB, for the explorer.
+    Orbit/zoom enabled and gently auto-rotating, grounded with a soft shadow; the
+    static render is the poster so it paints instantly before the GLB streams in.
+    Starts at a flat, mostly-top-down angle to match the landing stills."""
+    alt = f"{s.title} board, designed by KiCraft"
+    return (
+        f'<model-viewer src="{s.board_glb_url}" poster="{s.board_png_url}" '
+        f'alt="{alt}" camera-controls auto-rotate auto-rotate-delay="1500" '
+        f'rotation-per-second="14deg" camera-orbit="16deg 58deg 105%" '
+        f'interaction-prompt="none" shadow-intensity="1" shadow-softness="0.85" '
+        f'exposure="1.05" touch-action="pan-y" reveal="auto" loading="lazy" '
+        f'style="width:100%;height:520px;background:transparent;'
+        f'--poster-color:transparent;"></model-viewer>')
 
 
 def _landing_sample_card(s) -> str:
@@ -4820,13 +4839,9 @@ def _render_landing() -> None:
 
     samples = available_samples()
     hero = featured_sample()
-    if any(s.has_3d() for s in samples):
-        # <model-viewer> (Google, @google/model-viewer 4.0.0, BSD-3) — self-hosted
-        # like kicanvas.js so there's no CDN runtime dependency. The element
-        # registers on load; the lazy Draco/KTX2 decoders it *can* fetch never
-        # fire for KiCad's plain (uncompressed) GLBs.
-        ui.add_head_html(
-            '<script type="module" src="/static/model-viewer.min.js"></script>')
+    # The landing page is all static renders now — no <model-viewer> and no
+    # model-viewer bundle loaded here. The interactive 3D board lives on the
+    # logged-in explorer (samples_page), which pulls the bundle in itself.
 
     pipeline = "".join(
         f'<div class="kc-step{" kc-step-build" if b else ""}">'

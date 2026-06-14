@@ -59,7 +59,10 @@ def test_board_source_and_preview_urls_under_static_mount():
         burl, bname = s.board_source()
         assert bname == f"{s.stem}.kicad_pcb"
         assert burl == f"/samples/{s.id}/{bname}"
-        assert s.board_png_url == f"/samples/{s.id}/previews/board.png"
+        # The preview URL is under the static mount; a ``?v=`` cache-bust may be
+        # appended so a regenerated render/GLB defeats the browser cache.
+        assert s.board_png_url.split("?")[0] == f"/samples/{s.id}/previews/board.png"
+        assert re.fullmatch(r"(\?v=\d+)?", s.board_png_url.split("/previews/board.png")[1])
 
 
 def test_metadata_is_sane():
