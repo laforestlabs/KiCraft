@@ -1,9 +1,10 @@
 # Plan v2: connector stranding + stamp-short family — root-cause, not gating
 
-**Status:** Phases 1+2 **MERGED to main** (commit 2358fd4) & fleet-validated.
-Phase 3 (Lever 2.1) **DONE 2026-06-14** & fleet-validated (fixture
-`PARENT_LOCAL_CONN`, deterministic A/B). Phase 4 (Lever 2.5, file splits) is the
-remaining work.
+**Status:** Phases 1+2 **MERGED** (2358fd4) & fleet-validated. Phase 3 (Lever
+2.1) **DONE 2026-06-14** & fleet-validated (fixture `PARENT_LOCAL_CONN`,
+deterministic A/B), MERGED + deployed. Phase 4 (Lever 2.5) **DONE 2026-06-14**:
+`compose_subcircuits.py` split 4331→2942 LOC (−32%) into 6 cohesive modules,
+corpus-zero-drift. All plan phases complete.
 
 ## Progress (2026-06-14)
 - **Phase 1 (RC3+RC2) DONE.** `+rot` convention flipped at all three recovery
@@ -54,8 +55,20 @@ remaining work.
   regressions, one net win. Incidental: `replay_corpus.py` reads a per-fixture
   `parent_compose_spacing_mm` (this board shorts at the 2.0 default) and SKIPs a
   mode with no golden (PARENT_LOCAL_CONN is parent-only).
-- **Phase 4 (Lever 2.5, file splits):** mechanical, corpus-zero-drift; sequenced
-  after 2.1 (move less code), so it follows the 2.1 fixture work.
+- **Phase 4 (Lever 2.5, file splits) DONE 2026-06-14.** `compose_subcircuits.py`
+  (4331 LOC) split bottom-up into 6 cohesive sibling modules, re-exported to
+  preserve the public API + internal references: `_compose_geometry` (bbox/rect
+  leaf helpers), `_compose_state` (`CompositionEntry`/`ParentCompositionState`),
+  `_compose_validate` (outline repair + geometry validation + render),
+  `_compose_stamp` (board stamping + pre-route DRC), `_compose_route`
+  (FreeRouting + post-route validation), `_compose_persist` (artifact write).
+  Core module → 2942 LOC (orchestrator `_compose_artifacts`, `_search_best_layout`
+  — kept since it calls `_compose_artifacts` — parent-local, output formatters,
+  CLI). Mechanical/no-op: corpus zero-drift on both fixtures + full unit suite
+  unchanged (25 pre-existing fails only). Dep order was enforced with `symtable`
+  (each module imports only what it uses). NOTE: `placement_solver.py` is a
+  single ~3800-LOC `PlacementSolver` class — not a mechanical file-split target
+  (would need a class/mixin decomposition); left intact.
 
 ---
 
