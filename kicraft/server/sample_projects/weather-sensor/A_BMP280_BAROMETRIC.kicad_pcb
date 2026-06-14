@@ -891,7 +891,7 @@
 			(uuid "7306ada4-c100-427b-8ba6-e7053abdbbc4")
 		)
 		(embedded_fonts no)
-		(model "/LGA-8_L2.5-W2.0-P0.65_AMP6127.wrl"
+		(model "${KIPRJMOD}/3dmodels/bmp280-bosch-sensor/LGA-8_L2.5-W2.0-P0.65_AMP6127.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -2081,7 +2081,7 @@
 			(uuid "dddab00f-e62b-42a2-98e1-c4a1372af3c2")
 		)
 		(embedded_fonts no)
-		(model "/CONN-SMD_SR1.00-WS-4P.wrl"
+		(model "${KIPRJMOD}/3dmodels/jst-sh-4p-qwiic/CONN-SMD_SR1.00-WS-4P.wrl"
 			(offset
 				(xyz 0 0 0)
 			)
@@ -2301,7 +2301,7 @@
 			(uuid "3ab0738f-bba1-4f15-8cb2-4d8284be62af")
 		)
 		(embedded_fonts no)
-		(model "/SOT-23-3P_L2.9-W1.3-H1.0-LS2.4-P0.95.wrl"
+		(model "${KIPRJMOD}/3dmodels/ah49e/SOT-23-3P_L2.9-W1.3-H1.0-LS2.4-P0.95.wrl"
 			(offset
 				(xyz 0 0 0)
 			)

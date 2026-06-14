@@ -2048,7 +2048,7 @@
 			(uuid "25657b24-5019-403e-a9c0-65a28235e68a")
 		)
 		(embedded_fonts no)
-		(model "/SOT-23-6_L2.9-W1.6-H1.5-LS2.8-P0.95.wrl"
+		(model "${KIPRJMOD}/3dmodels/dw01a/SOT-23-6_L2.9-W1.6-H1.5-LS2.8-P0.95.wrl"
 			(offset
 				(xyz 0 0 0)
 			)

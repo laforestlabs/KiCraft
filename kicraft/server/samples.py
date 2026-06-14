@@ -69,9 +69,35 @@ class Sample:
     def board_png(self) -> Path:
         return self.dir / "previews" / "board.png"
 
+    @staticmethod
+    def _cache_bust(path: Path) -> str:
+        """``?v=<mtime>`` so a regenerated preview busts the browser cache. The
+        /samples static mount serves these with ``Cache-Control: max-age=3600``
+        at a stable URL, so without this a refreshed board.glb / render keeps
+        showing the old cached bytes for up to an hour."""
+        try:
+            return f"?v={int(path.stat().st_mtime)}"
+        except OSError:
+            return ""
+
     @property
     def board_png_url(self) -> str:
-        return f"{SAMPLES_URL}/{self.id}/previews/board.png"
+        return f"{SAMPLES_URL}/{self.id}/previews/board.png{self._cache_bust(self.board_png)}"
+
+    @property
+    def board_hero(self) -> Path:
+        """A dedicated, polished hero render (perspective + floor shadow, larger)
+        for the featured board's hero. Optional — falls back to board.png."""
+        return self.dir / "previews" / "hero.png"
+
+    @property
+    def board_hero_url(self) -> str:
+        """URL for the hero image: the dedicated hero render if bundled, else the
+        standard board render."""
+        if self.board_hero.is_file():
+            return (f"{SAMPLES_URL}/{self.id}/previews/hero.png"
+                    f"{self._cache_bust(self.board_hero)}")
+        return self.board_png_url
 
     @property
     def board_glb(self) -> Path:
@@ -79,7 +105,7 @@ class Sample:
 
     @property
     def board_glb_url(self) -> str:
-        return f"{SAMPLES_URL}/{self.id}/previews/board.glb"
+        return f"{SAMPLES_URL}/{self.id}/previews/board.glb{self._cache_bust(self.board_glb)}"
 
     def has_3d(self) -> bool:
         """True when an interactive GLB model is bundled (else use the PNG)."""
