@@ -40,6 +40,8 @@ from kicraft.autoplacer.brain.types import (
     Point,
     SubCircuitId,
     SubCircuitLayout,
+    edge_outward_angle,
+    opening_board_angle,
 )
 
 
@@ -309,6 +311,53 @@ def test_snap_parent_local_top_left_corner():
     # body_center and pos translate by the same delta.
     assert math.isclose(hole.body_center.x, 5.0, abs_tol=1e-3)
     assert math.isclose(hole.body_center.y, 5.0, abs_tol=1e-3)
+
+
+def test_snap_parent_local_connector_rotates_and_pins_mouth_to_edge():
+    """A parent-local USB-C (no synthetic block => never pinned by the solver)
+    must be rotated so its mouth faces outward AND have its mouth (body edge)
+    land at the board edge with pads inboard. This is the flat-board / loose
+    parent-local connector path that was stranding ports at rot=0."""
+    # rot=0, opening_direction=90 (mouth faces +y in the footprint-local frame);
+    # body 9(x) x 7(y) centered at (50,40); tail pads at the -y back.
+    j1 = Component(
+        ref="J1",
+        value="USB-C",
+        pos=Point(50.0, 40.0),
+        rotation=0.0,
+        layer=Layer.FRONT,
+        width_mm=9.0,
+        height_mm=7.0,
+        kind="connector",
+        body_center=Point(50.0, 40.0),
+        opening_direction=90.0,
+        pads=[
+            Pad(ref="J1", pad_id="A1", pos=Point(47.0, 37.0), net="", layer=Layer.FRONT),
+            Pad(ref="J1", pad_id="A2", pos=Point(53.0, 37.0), net="", layer=Layer.FRONT),
+        ],
+    )
+    overhang = 0.5
+    constraint = AttachmentConstraint(
+        ref="J1", target="edge", value="left",
+        inward_keep_in_mm=0.0, outward_overhang_mm=overhang,
+        source="parent_local", child_index=None, strict=True,
+    )
+    outline = (Point(0.0, 0.0), Point(100.0, 80.0))
+    _snap_parent_local({"J1": j1}, [constraint], outline)
+
+    # 1. Rotated so the mouth faces OUTWARD (left) -- the whole point.
+    assert opening_board_angle(j1.opening_direction, j1.rotation) == edge_outward_angle(
+        Layer.FRONT, "left"
+    ), f"mouth faces {opening_board_angle(j1.opening_direction, j1.rotation)} not left"
+
+    # 2. Mouth (body-AABB left edge) sits at board edge, proud by `overhang`.
+    body_left = j1.body_center.x - j1.width_mm / 2.0
+    assert math.isclose(body_left, outline[0].x - overhang, abs_tol=1e-3), (
+        f"mouth at {body_left}, expected {outline[0].x - overhang}"
+    )
+
+    # 3. Pads stay INBOARD of the board edge (on the board, routable).
+    assert min(p.pos.x for p in j1.pads) > outline[0].x, "pads pushed off-board"
 
 
 def test_snap_parent_local_bottom_right_corner():

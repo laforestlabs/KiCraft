@@ -1095,6 +1095,34 @@ def _move_component_to(comp: Component, new_pos: Point) -> None:
         pad.pos = Point(pad.pos.x + dx, pad.pos.y + dy)
 
 
+def _rotate_component_in_place(comp: Component, delta_deg: float) -> None:
+    """Rotate a Component about its own ``pos`` by ``delta_deg`` (pads,
+    body_center, rotation, and -- for 90/270 -- the AABB width/height).
+
+    Uses KiCad's rotation convention (x' = x cos + y sin; y' = -x sin + y cos),
+    matching _transform_point / pcbnew.SetOrientationDegrees, so the resulting
+    geometry agrees with opening_board_angle / _best_rotation_for_edge. Math
+    CCW here would orient the mouth toward the opposite edge."""
+    delta = delta_deg % 360.0
+    if abs(delta) < 1e-6:
+        return
+    rad = math.radians(delta)
+    cos_r, sin_r = math.cos(rad), math.sin(rad)
+    cx, cy = comp.pos.x, comp.pos.y
+
+    def _rot(p: Point) -> Point:
+        dx, dy = p.x - cx, p.y - cy
+        return Point(cx + dx * cos_r + dy * sin_r, cy - dx * sin_r + dy * cos_r)
+
+    if comp.body_center is not None:
+        comp.body_center = _rot(comp.body_center)
+    for pad in comp.pads:
+        pad.pos = _rot(pad.pos)
+    comp.rotation = (comp.rotation + delta) % 360.0
+    if round(delta) % 180 == 90:
+        comp.width_mm, comp.height_mm = comp.height_mm, comp.width_mm
+
+
 def _snap_parent_local(
     comps: dict[str, Component],
     constraints: list[AttachmentConstraint],
@@ -1104,12 +1132,53 @@ def _snap_parent_local(
     constraint so its anchor lands at the exact constraint coordinate
     via edge_anchor_target_coordinate. Restores sub-mm precision the
     geometry validator enforces (the solver's edge-pinning math may
-    leave it within the connector_inset_mm jitter window)."""
+    leave it within the connector_inset_mm jitter window).
+
+    Parent-local edge CONNECTORS (J*) are additionally rotated so their
+    mouth faces outward and anchored by the body (mouth) edge rather than
+    the pad centroid -- the solver never pins them (they have no synthetic
+    block), so without this a flat-board USB-C strands inboard at rot=0
+    facing the wrong way. Leaf connectors take the equivalent path via the
+    composer's attachment constraints; this is the parent-local mirror."""
     min_pt, max_pt = outline
     for c in constraints:
         comp = comps.get(c.ref)
         if comp is None:
             continue
+
+        # --- Parent-local edge connector: orient mouth out + anchor the body
+        # edge (mouth) to the board edge so pads stay inboard. ---
+        if (
+            c.ref.startswith("J")
+            and c.target == "edge"
+            and c.value in ("left", "right", "top", "bottom")
+        ):
+            target_rot = PlacementSolver._best_rotation_for_edge(comp, c.value)
+            _rotate_component_in_place(comp, target_rot - comp.rotation)
+            bc = comp.body_center if comp.body_center is not None else comp.pos
+            half_w, half_h = comp.width_mm / 2.0, comp.height_mm / 2.0
+            # Mouth = body-AABB edge on the outward-facing side.
+            if c.value == "left":
+                anchor_x, anchor_y = bc.x - half_w, None
+            elif c.value == "right":
+                anchor_x, anchor_y = bc.x + half_w, None
+            elif c.value == "top":
+                anchor_x, anchor_y = None, bc.y - half_h
+            else:  # bottom
+                anchor_x, anchor_y = None, bc.y + half_h
+            dx = dy = 0.0
+            if anchor_x is not None:
+                dx = edge_anchor_target_coordinate(c.value, c, min_pt, max_pt) - anchor_x
+            if anchor_y is not None:
+                dy = edge_anchor_target_coordinate(c.value, c, min_pt, max_pt) - anchor_y
+            if abs(dx) > 1e-6 or abs(dy) > 1e-6:
+                comp.pos = Point(comp.pos.x + dx, comp.pos.y + dy)
+                if comp.body_center is not None:
+                    comp.body_center = Point(comp.body_center.x + dx, comp.body_center.y + dy)
+                for pad in comp.pads:
+                    pad.pos = Point(pad.pos.x + dx, pad.pos.y + dy)
+            continue
+
         target_x = comp.pos.x
         target_y = comp.pos.y
         if c.target == "edge":
