@@ -306,6 +306,37 @@ In self-eval `20260613T223846Z`, connectors with a correct `edge:` zone ended up
 - A regression test (built on the corpus): for every edge-zoned connector, `mouth_to_edge_gap ∈ [−0.1mm (flush), +overhang]` (no burial > ~0.5mm) across the corpus.
 - The fix is a **single** mechanism (post Part 2), not another per-path patch.
 
+### Implemented / found (2026-06-14)
+**Acceptance harness DONE.** `kicraft/autoplacer/brain/connector_edge_gap.py`:
+`connector_edge_gaps(board, component_zones)` returns the signed outward
+mouth-to-edge gap per edge-zoned ref (uses the `<stem>_autoplacer.json`
+`component_zones` map); `edge_gap_mm` is the pure, unit-tested arithmetic.
+`tests/test_connector_edge_gap.py` (10 unit + 2 gated). Run on the committed
+fixture parent: **J1/J2 land flush (~+0.475mm); SW1 (top-zoned) is −9.2mm
+INBOARD** — the bug, reproduced.
+
+**Root cause (one of them), PROVEN.** The 90/270 origin-recovery convention bug
+(`parent_adapter._rotated` / `_world_artifact_origin` / `_block_artifact_origin`
+all subtract `R_cw(-rot)` instead of `R_cw(+rot)`). Round-trip test
+(`test_geometry`-style) shows `-rot` mis-recovers a 90/270 block's origin by
+exactly `(2·offset.y, -2·offset.x)`; flipping to `+rot` moved SW1 from −9.2mm to
+−3.85mm. **Fix NOT merged** for two reasons, both real:
+1. **Residual cause** — SW1 still −3.85mm after the convention fix: it is not its
+   leaf's top extremity (hypothesis 1 above). Needs the leaf-internal
+   extremity/edge re-pin, OR Lever 2.1 wrapping it as its own leaf.
+2. **Stamp fragility** — flipping the sign tightens every parent layout (the bug
+   had masked sprawl; bh 50→34mm on the fixture), and the parent stamp then
+   produces shorts on EVERY candidate (verified k=4 and k=12), so compose
+   aborts. The stamp (pours/breakout-stubs) must be made robust to tight layouts
+   first. All three recovery sites are centralized on `geometry.rotate_vector`
+   and carry a "flip the three together" note so the fix is a one-line change
+   once those blockers clear.
+
+**So the single-mechanism stranding fix is real but gated on parent-stamp
+robustness + the leaf-extremity re-pin (or Lever 2.1).** The harness + strict
+xfail (`test_top_zoned_switch_not_stranded`) capture the bug so it can't regress
+silently and the fix flips the xfail when it lands.
+
 ---
 
 ## Non-goals / risks

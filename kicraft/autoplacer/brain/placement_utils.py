@@ -49,9 +49,9 @@ def _world_artifact_origin(comp: Component) -> Point:
     """
     if comp.block_artifact_origin_offset is None:
         return Point(comp.pos.x, comp.pos.y)
-    # rotate_vector(offset, -rotation) == the old math-CCW rotation. Same
-    # inverse-recovery pattern (and same 90/270 caveat) flagged on
-    # parent_adapter._rotated -- preserved exactly here.
+    # origin = body_pos - rotate_vector(offset, -rotation). The -rotation here is
+    # the KNOWN 90/270 stranding bug (should be +rotation) -- kept consistent
+    # with the other two recovery sites; see parent_adapter._rotated.
     rotated = geometry.rotate_vector(
         comp.block_artifact_origin_offset, -comp.rotation
     )

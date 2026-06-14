@@ -703,20 +703,17 @@ def _resolve_constraint_anchor_positions(
 
 def _block_artifact_origin(comp: Component) -> Point:
     """Inverse of synthetic-block-pos -> artifact-origin mapping. For a
-    synthetic block, ``world_origin = pos - rotated(body_center_offset, rot)``;
-    matches ``placements_from_solved_state``. For non-block components
+    synthetic block, ``world_origin = pos - rotate_vector(body_center_offset,
+    -rot)``; matches ``_recover_artifact_placements`` / ``_world_artifact_origin``
+    (all three share the SAME convention -- the ``-rot`` is the known 90/270
+    stranding bug documented on parent_adapter._rotated; flip the three together
+    once the stamp/extremity blockers are resolved). For non-block components
     (parent-local mounting holes) the origin is simply ``comp.pos``.
     """
     if comp.kind != "subcircuit" or comp.block_artifact_origin_offset is None:
         return comp.pos
-    body_offset = comp.block_artifact_origin_offset
-    rad = math.radians(comp.rotation)
-    cos_r = math.cos(rad)
-    sin_r = math.sin(rad)
-    return Point(
-        comp.pos.x - (body_offset.x * cos_r - body_offset.y * sin_r),
-        comp.pos.y - (body_offset.x * sin_r + body_offset.y * cos_r),
-    )
+    rotated = geometry.rotate_vector(comp.block_artifact_origin_offset, -comp.rotation)
+    return Point(comp.pos.x - rotated.x, comp.pos.y - rotated.y)
 
 
 def _apply_slide(comp: Component, free_axis_y: bool, delta: float) -> None:

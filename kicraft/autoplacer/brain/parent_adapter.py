@@ -59,21 +59,29 @@ def synthetic_block_ref(child_index: int, sheet_name: str) -> str:
 
 
 def _rotated(point: Point, rotation_deg: float) -> Point:
-    """math-CCW rotation == ``rotate_vector(point, -rotation_deg)`` (KiCad CW
-    with a negated angle).
+    """Recover-origin rotation: ``origin = body_pos - _rotated(
+    body_center_offset, rotation)``. Currently the NEGATED angle (math-CCW ==
+    ``rotate_vector(·, -rotation)``).
 
-    FLAG (Lever 2.4 inventory / candidate Part-3 cause): the sole caller uses
-    this to *invert* a forward placement -- ``origin = body_pos - _rotated(
-    body_center_offset, rotation)`` -- to recover an artifact's instance origin.
-    But the forward transform of ``body_center`` is KiCad CW (`R_cw(+rot)`, via
-    transform_loaded_artifact -> _transform_point), so the correct inverse
-    subtracts ``R_cw(+rot)·offset``, i.e. ``rotate_vector(offset, +rotation)``,
-    NOT ``-rotation``. They agree only for rotation in {0, 180}; at 90/270 a
-    block with an off-origin body center is recovered to a shifted origin --
-    a strong suspect for the "edge connector landed several mm inboard /
-    unrotated" stranding. Left UNCHANGED here (no-op centralization); fixing it
-    is a behavior change to validate against a parent-level corpus separately.
-    """
+    KNOWN BUG (Part 3, proven; fix gated -- see below). The correct inverse of
+    the forward body-center transform (``R_cw(+rot)``, via
+    transform_loaded_artifact -> _transform_point) subtracts ``R_cw(+rot)``,
+    i.e. ``rotate_vector(offset, +rotation)``. ``-rotation`` agrees only at
+    rotation in {0,180}; at 90/270 it recovers a block with an off-origin body
+    center to an origin shifted by ``(2·offset.y, -2·offset.x)``. This is a real
+    cause of the Part-3 "edge connector several mm inboard" stranding -- the
+    connector_edge_gap metric measured a top-zoned switch at -9.2mm inboard, and
+    flipping to +rotation moved it to -3.85mm (and flush for the leaves that ARE
+    rotated 90/270).
+
+    NOT FIXED YET because flipping the sign ALSO tightens every parent layout
+    (the bug had been masking sprawl), and the stamp step then can't produce a
+    shorts==0 candidate on the tighter board -- compose aborts. So the fix needs
+    (a) the parent stamp made robust to tight layouts and (b) the residual
+    stranding cause (the switch is not its leaf's top extremity) addressed.
+    Tracked in docs/plans/place-route-replay-and-codebase-simplification.md.
+    All three origin-recovery sites (_world_artifact_origin, _block_artifact_origin)
+    use this same convention so they stay consistent -- flip them together."""
     return geometry.rotate_vector(point, -rotation_deg)
 
 
