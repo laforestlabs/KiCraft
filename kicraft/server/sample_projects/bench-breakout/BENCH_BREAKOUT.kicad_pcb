@@ -1103,7 +1103,7 @@
 			(uuid "57ee5d9c-aeaa-4532-983c-67d815e70e87")
 		)
 		(embedded_fonts no)
-		(model "/F1812_L4.5-W3.2-H1.0.wrl"
+		(model "${KIPRJMOD}/3dmodels/mf-msmf050-2/F1812_L4.5-W3.2-H1.0.wrl"
 			(offset
 				(xyz 0 0 0)
 			)

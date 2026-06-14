@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:5df6a8c230cbe2d8e1428671b066362898e22cf4cc3578b8664994903ab6027a",
+  "datasheet_url": "https://lcsc.com/product-detail/Others_JST-Sales-America__JST-Sales-America-SM04B-SRSS-TB-LF-SN_C160404.html",
+  "description": "JST SM04B-SRSS-TB(LF)(SN)",
+  "footprint_name": "CONN-SMD_4P-P1.00_SM04B-SRSS-TB-LF-SN",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "SM04B-SRSS-TB(LF)(SN)",
+  "name": "jst-sh-4p-qwiic",
+  "provenance": {
+    "added_at": "2026-06-14T23:24:31Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C160404"
+  },
+  "symbol_name": "SM04B-SRSS-TB",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:6d98e45e8562d488e00306bc767af5040c8d92c8c3ba890e04d1ef1437d832f1",
+  "datasheet_url": "https://lcsc.com/product-detail/Sensors_Bosch_BMP280_BMP280_C83291.html",
+  "description": "Bosch(\u535a\u4e16) BMP280",
+  "footprint_name": "LGA-8_L2.5-W2.0-P0.65_AMP6127",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "BMP280",
+  "name": "bmp280-bosch-sensor",
+  "provenance": {
+    "added_at": "2026-06-14T23:24:32Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C83291"
+  },
+  "symbol_name": "BMP280",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}
