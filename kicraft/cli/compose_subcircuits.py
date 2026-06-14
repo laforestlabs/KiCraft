@@ -77,6 +77,7 @@ from kicraft.autoplacer.brain import geometry
 from kicraft.autoplacer.brain.types import BoardState
 from kicraft.autoplacer.brain.subcircuit_extractor import extract_parent_local_components
 from kicraft.autoplacer.brain.subcircuit_instances import (
+    LoadedSubcircuitArtifact,
     artifact_debug_dict,
     artifact_summary,
     load_solved_artifacts,
@@ -89,6 +90,7 @@ from kicraft.autoplacer.brain.types import (
     Point,
     SubCircuitDefinition,
     SubCircuitId,
+    SubCircuitLayout,
     angles_close,
     edge_outward_angle,
     opening_board_angle,
@@ -1101,6 +1103,73 @@ def _warn_non_board_level_parent_local(parent_local: dict[str, Component]) -> li
     return offenders
 
 
+def _wrap_loose_parent_components_as_leaves(
+    parent_local: dict[str, Component],
+    loaded_artifacts: list,
+) -> tuple[list, dict[str, Component]]:
+    """Lever 2.1: wrap each loose parent-level non-board component (an edge
+    connector etc. that sits on the parent sheet, in no leaf) as a
+    single-component leaf so it flows through the ONE leaf placement path --
+    the solver edge-pins its synthetic block as the board extremity and the
+    composer flush-aligns it, exactly like a leaf connector.
+
+    This replaces the parent-local snap, which only pinned a connector to the
+    pre-repair outline and stranded it inboard whenever a taller leaf defined
+    the board extremity on that edge (the PARENT_LOCAL_CONN fixture). Wrapping
+    routes it through the path that actually makes it the extremity.
+
+    Board-level structure (mounting holes / fiducials) is NOT wrapped: it has
+    no mating direction and wants the generic corner/zone parent-local snap.
+    Returns the augmented artifact list and the trimmed parent_local dict."""
+    offenders = _warn_non_board_level_parent_local(parent_local)
+    if not offenders:
+        return loaded_artifacts, parent_local
+
+    import logging
+
+    wrapped = list(loaded_artifacts)
+    remaining = dict(parent_local)
+    for ref in offenders:
+        comp = copy.deepcopy(remaining.pop(ref))
+        # Re-base the component into a (0,0)-anchored leaf-local frame sized to
+        # its own extent. A real leaf's components sit INSIDE its board outline;
+        # the parent-local component still carries its absolute seed-PCB
+        # position, so without this the body-center origin recovery and the
+        # anchor frame math don't cancel and the connector's edge anchor lands
+        # ~(seed offset) mm out of frame (slack fallback -> stranded).
+        half_w, half_h = comp.width_mm / 2.0, comp.height_mm / 2.0
+        bc = comp.body_center if comp.body_center is not None else comp.pos
+        min_x = min([bc.x - half_w] + [p.pos.x for p in comp.pads])
+        min_y = min([bc.y - half_h] + [p.pos.y for p in comp.pads])
+        max_x = max([bc.x + half_w] + [p.pos.x for p in comp.pads])
+        max_y = max([bc.y + half_h] + [p.pos.y for p in comp.pads])
+        dx, dy = -min_x, -min_y
+        comp.pos = Point(comp.pos.x + dx, comp.pos.y + dy)
+        comp.body_center = Point(bc.x + dx, bc.y + dy)
+        for pad in comp.pads:
+            pad.pos = Point(pad.pos.x + dx, pad.pos.y + dy)
+        layout = SubCircuitLayout(
+            subcircuit_id=SubCircuitId(
+                sheet_name=f"__auto_{ref}",
+                sheet_file=f"__auto_{ref}.kicad_sch",
+                instance_path=f"/__auto_{ref}",
+            ),
+            components={ref: comp},
+            bounding_box=(max(0.1, max_x - min_x), max(0.1, max_y - min_y)),
+        )
+        wrapped.append(
+            LoadedSubcircuitArtifact(
+                artifact_dir=f"<auto:{ref}>", metadata={}, debug={}, layout=layout
+            )
+        )
+    logging.getLogger(__name__).info(
+        "Lever 2.1: auto-wrapped %d loose parent-level component(s) as "
+        "single-component leaves: %s",
+        len(offenders), ", ".join(offenders),
+    )
+    return wrapped, remaining
+
+
 def _move_component_to(comp: Component, new_pos: Point) -> None:
     """Translate a Component (and its pads / body_center) so its anchor
     lands at ``new_pos``. Preserves rotation; mirrors the same delta
@@ -1128,49 +1197,15 @@ def _snap_parent_local(
     geometry validator enforces (the solver's edge-pinning math may
     leave it within the connector_inset_mm jitter window).
 
-    Parent-local edge CONNECTORS (J*) are additionally rotated so their
-    mouth faces outward and anchored by the body (mouth) edge rather than
-    the pad centroid -- the solver never pins them (they have no synthetic
-    block), so without this a flat-board USB-C strands inboard at rot=0
-    facing the wrong way. Leaf connectors take the equivalent path via the
-    composer's attachment constraints; this is the parent-local mirror."""
+    Lever 2.1: loose parent-level CONNECTORS no longer reach here -- compose
+    auto-wraps them as single-component leaves (_wrap_loose_parent_components_as_leaves)
+    so they take the SAME edge-pin/flush-align path as leaf connectors. What
+    remains parent-local is board-level structure (mounting holes / fiducials),
+    which wants this generic corner/zone snap (no mating direction)."""
     min_pt, max_pt = outline
     for c in constraints:
         comp = comps.get(c.ref)
         if comp is None:
-            continue
-
-        # --- Parent-local edge connector: orient mouth out + anchor the body
-        # edge (mouth) to the board edge so pads stay inboard. ---
-        if (
-            c.ref.startswith("J")
-            and c.target == "edge"
-            and c.value in ("left", "right", "top", "bottom")
-        ):
-            target_rot = PlacementSolver._best_rotation_for_edge(comp, c.value)
-            geometry.rotate_component_in_place(comp, target_rot - comp.rotation)
-            bc = comp.body_center if comp.body_center is not None else comp.pos
-            half_w, half_h = comp.width_mm / 2.0, comp.height_mm / 2.0
-            # Mouth = body-AABB edge on the outward-facing side.
-            if c.value == "left":
-                anchor_x, anchor_y = bc.x - half_w, None
-            elif c.value == "right":
-                anchor_x, anchor_y = bc.x + half_w, None
-            elif c.value == "top":
-                anchor_x, anchor_y = None, bc.y - half_h
-            else:  # bottom
-                anchor_x, anchor_y = None, bc.y + half_h
-            dx = dy = 0.0
-            if anchor_x is not None:
-                dx = edge_anchor_target_coordinate(c.value, c, min_pt, max_pt) - anchor_x
-            if anchor_y is not None:
-                dy = edge_anchor_target_coordinate(c.value, c, min_pt, max_pt) - anchor_y
-            if abs(dx) > 1e-6 or abs(dy) > 1e-6:
-                comp.pos = Point(comp.pos.x + dx, comp.pos.y + dy)
-                if comp.body_center is not None:
-                    comp.body_center = Point(comp.body_center.x + dx, comp.body_center.y + dy)
-                for pad in comp.pads:
-                    pad.pos = Point(pad.pos.x + dx, pad.pos.y + dy)
             continue
 
         target_x = comp.pos.x
@@ -1295,7 +1330,11 @@ def _compose_artifacts(
                 component_zones, loaded_artifacts
             ),
         )
-        _warn_non_board_level_parent_local(parent_local)
+        # Lever 2.1: loose parent-level connectors flow through the leaf path
+        # (edge-pinned as the board extremity), not the parent-local snap.
+        loaded_artifacts, parent_local = _wrap_loose_parent_components_as_leaves(
+            parent_local, loaded_artifacts
+        )
 
     derived = derive_attachment_constraints(
         loaded_artifacts,

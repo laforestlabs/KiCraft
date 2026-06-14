@@ -167,16 +167,6 @@ def test_parent_local_fixture_leaf_connectors_flush(tmp_path):
     assert gaps["SW1"].ok, gaps["SW1"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="parent-local connector strands (~4mm inboard): _snap_parent_local "
-    "snaps J3 to the pre-repair outline, but a leaf defines the board "
-    "extremity on that edge and J3 is never pinned as an extremity (it has no "
-    "synthetic block). Lever 2.1 (Phase 3) auto-wraps a loose parent-level "
-    "connector as a single-component leaf, routing it through the leaf path "
-    "that pins it flush -- then this flips to pass and the marker is removed. "
-    "See docs/plans/place-route-root-cause-v2.md.",
-)
 @pytest.mark.skipif(
     not os.environ.get("KICRAFT_REPLAY_E2E"),
     reason="set KICRAFT_REPLAY_E2E=1 to run (slow; spawns compose)",
@@ -186,9 +176,12 @@ def test_parent_local_fixture_leaf_connectors_flush(tmp_path):
     reason="parent-local-connector fixture missing",
 )
 def test_parent_local_connector_not_stranded(tmp_path):
-    """A parent-local edge connector (J3, in no leaf, edge:bottom) must land
-    flush on its board edge like a leaf connector. XFAIL today; the Lever 2.1
-    auto-wrap is the fix."""
+    """A parent-local edge connector (J3, in no leaf, edge:bottom) lands flush
+    on its board edge like a leaf connector. Was ~4mm stranded (the parent-local
+    snap pinned it to the pre-repair outline behind a taller leaf); fixed by
+    Lever 2.1 -- compose auto-wraps a loose parent-level connector as a
+    single-component leaf so the solver edge-pins it as the board extremity.
+    See docs/plans/place-route-root-cause-v2.md."""
     pytest.importorskip("pcbnew")
     gaps = _compose_and_measure(tmp_path, PARENT_LOCAL_FIXTURE)
     assert gaps["J3"].ok, gaps["J3"]

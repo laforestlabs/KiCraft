@@ -46,12 +46,12 @@ loose parent-level connectors through the leaf path; this fixture is its gate.
 
 Built by `scripts/build_parent_local_conn_fixture.py` (hand-derived, no LLM
 synthesis). Notes:
-- **Baseline behaviour:** the leaf connectors J1/J2/SW1 land flush, but the
-  parent-local J3 **strands ~4 mm inboard** — `_snap_parent_local` snaps it to
-  the pre-repair outline while a leaf defines the board extremity, and J3 is
-  never pinned as an extremity. `tests/test_connector_edge_gap.py` encodes this
-  as a strict `xfail` (`test_parent_local_connector_not_stranded`) that flips to
-  pass once Lever 2.1 lands.
+- **What it gates:** before Lever 2.1 the parent-local J3 stranded ~4 mm inboard
+  (the leaf connectors J1/J2/SW1 stayed flush). Lever 2.1 auto-wraps J3 as a
+  single-component leaf so it lands flush like the others;
+  `test_parent_local_connector_not_stranded` asserts J3 flush and
+  `test_parent_local_fixture_leaf_connectors_flush` is the J1/J2/SW1 positive
+  control. All four connectors now land flush.
 - **Parent-mode only:** it has a `.parent.golden.json` but no `.leaf.golden.json`
   (the seed PCB carries J3, which leaf-regeneration via `replay` doesn't model).
   `replay_corpus.py` SKIPs a mode with no golden, so `--mode both` is clean.

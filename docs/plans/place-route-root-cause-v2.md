@@ -1,10 +1,9 @@
 # Plan v2: connector stranding + stamp-short family — root-cause, not gating
 
-**Status:** Phases 1+2 **MERGED to main** (commit 2358fd4, fast-forward,
-2026-06-14) & fleet-validated. Phase 3 **UNBLOCKED 2026-06-14**: the
-parent-local-connector fixture is built + frozen (`PARENT_LOCAL_CONN`) and shows
-the connector strands today (strict `xfail`); paused for review before the
-connector-branch deletion. Phase 4 follows Phase 3.
+**Status:** Phases 1+2 **MERGED to main** (commit 2358fd4) & fleet-validated.
+Phase 3 (Lever 2.1) **DONE 2026-06-14** & fleet-validated (fixture
+`PARENT_LOCAL_CONN`, deterministic A/B). Phase 4 (Lever 2.5, file splits) is the
+remaining work.
 
 ## Progress (2026-06-14)
 - **Phase 1 (RC3+RC2) DONE.** `+rot` convention flipped at all three recovery
@@ -32,28 +31,29 @@ connector-branch deletion. Phase 4 follows Phase 3.
   - run_09 IMPROVED: candidate shorts 8/8/1/5 (mine) vs 16/24/… (main),
     consistent with RC2 holding same-layer leaves apart. **No regression; a net
     improvement on the one stressed board.**
-- **Phase 3 (Lever 2.1) — fixture BUILT 2026-06-14; checkpoint before deletion.**
-  The corpus had no parent-local CONNECTOR in a hierarchical board (the case
-  `_snap_parent_local`'s connector branch handles), so the deletion had no gate.
-  Built one by hand from `USB_PD_TRIGGER` (no LLM synthesis): new fixture
-  `tests/fixtures/replay_workspace/PARENT_LOCAL_CONN/` =
-  `USB_PD_TRIGGER` + a root-level connector `J3` (`edge:bottom`, in no leaf →
-  parent-local). Tooling: `scripts/build_parent_local_conn_fixture.py`;
-  parent golden frozen; `connector_edge_gap` tests added.
-  **Finding that revises the premise:** a parent-local connector does NOT land
-  flush today — J3 **strands ~4 mm inboard** while the leaf connectors J1/J2/SW1
-  stay flush (positive control). `_snap_parent_local` snaps J3 to the pre-repair
-  outline, but a *leaf* defines the board extremity on that edge and J3 (having
-  no synthetic block) is never pinned as an extremity — RC1's mechanism, applied
-  to a parent-local. So Phase 2's edge-flush fix reaches *leaf* connectors only.
-  This makes Lever 2.1 a **fix**, not just a simplification: auto-wrapping J3 as
-  a single-component leaf routes it through the path that pins it flush. Encoded
-  as a strict `xfail` (`test_parent_local_connector_not_stranded`) that flips to
-  pass when 2.1 lands. Two incidental gate fixes: `replay_corpus.py` now reads a
-  per-fixture `parent_compose_spacing_mm` (this board shorts at the 2.0 default —
-  a 4th edge connector packs it tight; frozen at 3.5) and SKIPs a mode with no
-  golden (PARENT_LOCAL_CONN is parent-only). **Paused here for review before the
-  connector-branch deletion** — landing it blind would risk the USB-C work.
+- **Phase 3 (Lever 2.1) DONE 2026-06-14.** Fixture `PARENT_LOCAL_CONN` (=
+  `USB_PD_TRIGGER` + a root-level connector `J3` `edge:bottom`, in no leaf →
+  parent-local; `scripts/build_parent_local_conn_fixture.py`) was the gate. It
+  first proved the premise wrong — a parent-local connector does NOT land flush;
+  J3 **stranded ~4 mm** while leaf connectors stayed flush — so Lever 2.1 is a
+  **fix**, not just simplification.
+  **The fix:** `_wrap_loose_parent_components_as_leaves` wraps each loose
+  parent-level non-board component as a single-component leaf so it flows through
+  the leaf edge-pin/flush path; the `_snap_parent_local` connector branch is
+  deleted (board-level holes keep the generic snap). **Critical sub-bug:** the
+  wrapped component must be RE-BASED into its own `(0,0)`-anchored leaf box — it
+  still carried absolute seed-PCB coords, so the leaf-frame anchor math didn't
+  cancel and the edge anchor landed ~150 mm out of frame (slack fallback →
+  stranded by `spacing`). The garbage anchor also polluted the whole outline,
+  stranding a neighbour (SW1). After the re-base **all four connectors land
+  flush** and the xfail flips to a passing test.
+  **Validation:** `USB_PD_TRIGGER` parent golden byte-unchanged (wrap is a no-op
+  without a parent-local component); fixture all-flush + deterministic; full unit
+  suite no new failures; deterministic fleet A/B (`scripts/ab_compose.py`) 8/9
+  IDENTICAL to main and **run_09 IMPROVED (rc=1 abort → rc=0)** — zero
+  regressions, one net win. Incidental: `replay_corpus.py` reads a per-fixture
+  `parent_compose_spacing_mm` (this board shorts at the 2.0 default) and SKIPs a
+  mode with no golden (PARENT_LOCAL_CONN is parent-only).
 - **Phase 4 (Lever 2.5, file splits):** mechanical, corpus-zero-drift; sequenced
   after 2.1 (move less code), so it follows the 2.1 fixture work.
 

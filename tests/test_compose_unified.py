@@ -25,6 +25,7 @@ from kicraft.cli.compose_subcircuits import (
     _compose_artifacts,
     _compute_final_outline,
     _snap_parent_local,
+    _wrap_loose_parent_components_as_leaves,
 )
 from kicraft.autoplacer.brain.subcircuit_composer import (
     AttachmentConstraint,
@@ -40,8 +41,6 @@ from kicraft.autoplacer.brain.types import (
     Point,
     SubCircuitId,
     SubCircuitLayout,
-    edge_outward_angle,
-    opening_board_angle,
 )
 
 
@@ -313,51 +312,47 @@ def test_snap_parent_local_top_left_corner():
     assert math.isclose(hole.body_center.y, 5.0, abs_tol=1e-3)
 
 
-def test_snap_parent_local_connector_rotates_and_pins_mouth_to_edge():
-    """A parent-local USB-C (no synthetic block => never pinned by the solver)
-    must be rotated so its mouth faces outward AND have its mouth (body edge)
-    land at the board edge with pads inboard. This is the flat-board / loose
-    parent-local connector path that was stranding ports at rot=0."""
-    # rot=0, opening_direction=90 (mouth faces +y in the footprint-local frame);
-    # body 9(x) x 7(y) centered at (50,40); tail pads at the -y back.
+def test_wrap_loose_parent_connector_as_leaf():
+    """Lever 2.1: a loose parent-level connector (J*, in no leaf) is wrapped as
+    a single-component leaf -- pulled out of parent_local and appended to the
+    artifact list, RE-BASED into its own (0,0)-anchored leaf box so the leaf
+    edge-pin/flush path's frame math cancels (the old parent-local snap branch
+    that rotated+pinned it here is deleted). A mounting hole stays parent-local."""
     j1 = Component(
-        ref="J1",
-        value="USB-C",
-        pos=Point(50.0, 40.0),
-        rotation=0.0,
-        layer=Layer.FRONT,
-        width_mm=9.0,
-        height_mm=7.0,
-        kind="connector",
-        body_center=Point(50.0, 40.0),
-        opening_direction=90.0,
+        ref="J1", value="USB-C", pos=Point(150.0, 122.0), rotation=0.0,
+        layer=Layer.FRONT, width_mm=9.0, height_mm=7.0, kind="connector",
+        body_center=Point(150.0, 122.0),
         pads=[
-            Pad(ref="J1", pad_id="A1", pos=Point(47.0, 37.0), net="", layer=Layer.FRONT),
-            Pad(ref="J1", pad_id="A2", pos=Point(53.0, 37.0), net="", layer=Layer.FRONT),
+            Pad(ref="J1", pad_id="A1", pos=Point(147.0, 119.0), net="", layer=Layer.FRONT),
+            Pad(ref="J1", pad_id="A2", pos=Point(153.0, 119.0), net="", layer=Layer.FRONT),
         ],
     )
-    overhang = 0.5
-    constraint = AttachmentConstraint(
-        ref="J1", target="edge", value="left",
-        inward_keep_in_mm=0.0, outward_overhang_mm=overhang,
-        source="parent_local", child_index=None, strict=True,
+    hole = Component(
+        ref="H1", value="MountingHole", pos=Point(10.0, 10.0), rotation=0.0,
+        layer=Layer.FRONT, width_mm=3.2, height_mm=3.2, kind="mounting_hole",
+        body_center=Point(10.0, 10.0),
+        pads=[Pad(ref="H1", pad_id="1", pos=Point(10.0, 10.0), net="", layer=Layer.FRONT)],
     )
-    outline = (Point(0.0, 0.0), Point(100.0, 80.0))
-    _snap_parent_local({"J1": j1}, [constraint], outline)
+    parent_local = {"J1": j1, "H1": hole}
+    artifacts, remaining = _wrap_loose_parent_components_as_leaves(parent_local, [])
 
-    # 1. Rotated so the mouth faces OUTWARD (left) -- the whole point.
-    assert opening_board_angle(j1.opening_direction, j1.rotation) == edge_outward_angle(
-        Layer.FRONT, "left"
-    ), f"mouth faces {opening_board_angle(j1.opening_direction, j1.rotation)} not left"
-
-    # 2. Mouth (body-AABB left edge) sits at board edge, proud by `overhang`.
-    body_left = j1.body_center.x - j1.width_mm / 2.0
-    assert math.isclose(body_left, outline[0].x - overhang, abs_tol=1e-3), (
-        f"mouth at {body_left}, expected {outline[0].x - overhang}"
-    )
-
-    # 3. Pads stay INBOARD of the board edge (on the board, routable).
-    assert min(p.pos.x for p in j1.pads) > outline[0].x, "pads pushed off-board"
+    # The mounting hole stays parent-local; the connector is removed from it.
+    assert set(remaining) == {"H1"}
+    # The connector became one single-component leaf.
+    assert len(artifacts) == 1
+    leaf = artifacts[0]
+    assert set(leaf.layout.components) == {"J1"}
+    # Re-based: everything sits inside a (0,0)-anchored box (no absolute seed
+    # coords leak into the leaf-local frame).
+    wrapped = leaf.layout.components["J1"]
+    bb_w, bb_h = leaf.layout.bounding_box
+    assert bb_w > 0 and bb_h > 0
+    xs = [p.pos.x for p in wrapped.pads] + [wrapped.body_center.x]
+    ys = [p.pos.y for p in wrapped.pads] + [wrapped.body_center.y]
+    assert min(xs) >= -1e-6 and min(ys) >= -1e-6
+    assert max(xs) <= bb_w + 1e-6 and max(ys) <= bb_h + 1e-6
+    # The caller's parent_local dict is not mutated in place.
+    assert set(parent_local) == {"J1", "H1"}
 
 
 def test_snap_parent_local_bottom_right_corner():
