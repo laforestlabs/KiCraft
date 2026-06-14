@@ -2,7 +2,7 @@
 	(version 20250114)
 	(generator "eeschema")
 	(generator_version "9.0")
-	(uuid "c658c779-50f0-4ebf-b52f-5f98dd451f64")
+	(uuid "2bfee3ee-b5d7-4c0b-a5c5-6698998ed923")
 	(paper "A4")
 
 	(lib_symbols
@@ -719,36 +719,36 @@
 
 	(symbol
 		(lib_id "bmp280-bosch-sensor:BMP280")
-		(at 115.57 105.41 0)
+		(at 115.57 115.57 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(uuid "3fe15a64-587c-5128-9053-f0f052c42985")
+		(uuid "3eb2372f-3489-57d3-9aaa-ab68255698ad")
 		(property "Reference" "U2"
-			(at 115.57 95.25 0)
+			(at 115.57 105.41 0)
 			(effects (font (size 1.27 1.27)))
 		)
 		(property "Value" "BMP280"
-			(at 115.57 92.71 0)
+			(at 115.57 102.87 0)
 			(effects (font (size 1.27 1.27)))
 		)
 		(property "Footprint" "bmp280-bosch-sensor:LGA-8_L2.5-W2.0-P0.65_AMP6127"
-			(at 115.57 112.41 0)
+			(at 115.57 122.57 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
-		(property "Datasheet" ""
-			(at 115.57 105.41 0)
+		(property "Datasheet" "https://www.lcsc.com/product-detail/Pressure-Sensors_Bosch-Sensortec-BMP280_C83291.html"
+			(at 115.57 115.57 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
-		(property "Description" "LCSC C83291; I2C barometric pressure sensor"
-			(at 115.57 105.41 0)
+		(property "Description" "LCSC C83291 (defaulted)"
+			(at 115.57 115.57 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
 					(reference "U2")
 					(unit 1)
 				)
@@ -757,75 +757,37 @@
 	)
 	(symbol
 		(lib_id "Device:C")
-		(at 100.33 78.74 0)
+		(at 100.33 88.9 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(uuid "a5425485-b800-5c08-9dbb-91e65146f6ad")
-		(property "Reference" "C3"
-			(at 104.648 77.47 0)
+		(uuid "6c06598b-3eab-5683-814a-808d6b7c6c9f")
+		(property "Reference" "C5"
+			(at 104.648 87.63 0)
 			(effects (font (size 1.27 1.27)) (justify left))
 		)
 		(property "Value" "100nF"
-			(at 104.648 80.01 0)
+			(at 104.648 90.17 0)
 			(effects (font (size 1.27 1.27)) (justify left))
 		)
 		(property "Footprint" "Capacitor_SMD:C_0805_2012Metric"
-			(at 100.33 85.74 0)
+			(at 100.33 95.9 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(property "Datasheet" ""
-			(at 100.33 78.74 0)
+			(at 100.33 88.9 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
-		(property "Description" "BMP280 VDD decoupling"
-			(at 100.33 78.74 0)
-			(effects (font (size 1.27 1.27)) (hide yes))
-		)
-		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
-					(reference "C3")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:R")
-		(at 144.78 107.95 270)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "3b650575-2a55-5a80-8cf2-c1febe7ad7f4")
-		(property "Reference" "R3"
-			(at 152.908 106.68 90)
-			(effects (font (size 1.27 1.27)) (justify left))
-		)
-		(property "Value" "4.7k"
-			(at 152.908 109.22 90)
-			(effects (font (size 1.27 1.27)) (justify left))
-		)
-		(property "Footprint" "Resistor_SMD:R_0805_2012Metric"
-			(at 144.78 114.95 0)
-			(effects (font (size 1.27 1.27)) (hide yes))
-		)
-		(property "Datasheet" ""
-			(at 144.78 107.95 0)
-			(effects (font (size 1.27 1.27)) (hide yes))
-		)
-		(property "Description" "I2C SDA pull-up to +3V3"
-			(at 144.78 107.95 0)
+		(property "Description" "BMP280 decoupling, 0805 X7R 10V (defaulted)"
+			(at 100.33 88.9 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
-					(reference "R3")
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
+					(reference "C5")
 					(unit 1)
 				)
 			)
@@ -839,8 +801,8 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(uuid "2ff63184-3d15-5576-9703-60b4ad50226c")
-		(property "Reference" "R4"
+		(uuid "64c4dff7-486b-57b9-b1b4-d01017d322bb")
+		(property "Reference" "R3"
 			(at 139.192 127 90)
 			(effects (font (size 1.27 1.27)) (justify right))
 		)
@@ -856,14 +818,14 @@
 			(at 144.78 128.27 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
-		(property "Description" "I2C SCL pull-up to +3V3"
+		(property "Description" "I2C SCL pull-up to 3.3V, 0805 (defaulted)"
 			(at 144.78 128.27 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
-					(reference "R4")
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
+					(reference "R3")
 					(unit 1)
 				)
 			)
@@ -871,19 +833,19 @@
 	)
 	(symbol
 		(lib_id "Device:R")
-		(at 144.78 118.11 90)
+		(at 144.78 118.11 270)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(uuid "b86a180f-b5f2-52a1-92c5-7a6622961732")
-		(property "Reference" "R5"
-			(at 152.908 116.84 270)
+		(uuid "1cbbcd0e-b286-516c-9ee5-fdc3b2b8d80d")
+		(property "Reference" "R4"
+			(at 152.908 116.84 90)
 			(effects (font (size 1.27 1.27)) (justify left))
 		)
-		(property "Value" "10"
-			(at 152.908 119.38 270)
+		(property "Value" "4.7k"
+			(at 152.908 119.38 90)
 			(effects (font (size 1.27 1.27)) (justify left))
 		)
 		(property "Footprint" "Resistor_SMD:R_0805_2012Metric"
@@ -894,52 +856,14 @@
 			(at 144.78 118.11 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
-		(property "Description" "SDA series resistor for Qwiic/STEMMA protection"
+		(property "Description" "I2C SDA pull-up to 3.3V, 0805 (defaulted)"
 			(at 144.78 118.11 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
-					(reference "R5")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:R")
-		(at 144.78 138.43 90)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "2f5c6e78-39bd-5653-b2cb-f58c49ae48e9")
-		(property "Reference" "R6"
-			(at 150.368 137.16 270)
-			(effects (font (size 1.27 1.27)) (justify left))
-		)
-		(property "Value" "10"
-			(at 150.368 139.7 270)
-			(effects (font (size 1.27 1.27)) (justify left))
-		)
-		(property "Footprint" "Resistor_SMD:R_0805_2012Metric"
-			(at 144.78 145.43 0)
-			(effects (font (size 1.27 1.27)) (hide yes))
-		)
-		(property "Datasheet" ""
-			(at 144.78 138.43 0)
-			(effects (font (size 1.27 1.27)) (hide yes))
-		)
-		(property "Description" "SCL series resistor for Qwiic/STEMMA protection"
-			(at 144.78 138.43 0)
-			(effects (font (size 1.27 1.27)) (hide yes))
-		)
-		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
-					(reference "R6")
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
+					(reference "R4")
 					(unit 1)
 				)
 			)
@@ -947,36 +871,36 @@
 	)
 	(symbol
 		(lib_id "jst-sh-4p-qwiic:SM04B-SRSS-TB")
-		(at 190.5 105.41 0)
+		(at 190.5 115.57 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(uuid "b7812a97-86de-5ed0-9058-e7cdf6db80d7")
+		(uuid "6fdfc9e9-821c-5e2c-910a-2d9b57e913ac")
 		(property "Reference" "J2"
-			(at 201.168 104.14 0)
+			(at 201.168 114.3 0)
 			(effects (font (size 1.27 1.27)) (justify left))
 		)
 		(property "Value" "SM04B-SRSS-TB"
-			(at 201.168 106.68 0)
+			(at 201.168 116.84 0)
 			(effects (font (size 1.27 1.27)) (justify left))
 		)
 		(property "Footprint" "jst-sh-4p-qwiic:CONN-SMD_4P-P1.00_SM04B-SRSS-TB-LF-SN"
-			(at 190.5 112.41 0)
+			(at 190.5 122.57 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
-		(property "Datasheet" ""
-			(at 190.5 105.41 0)
+		(property "Datasheet" "https://www.lcsc.com/product-detail/Wire-To-Board-Connectors_JST-SM04B-SRSS-TB-LF-SN_C160404.html"
+			(at 190.5 115.57 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
-		(property "Description" "JST SH 4-pin, Qwiic/STEMMA compatible, LCSC C160404"
-			(at 190.5 105.41 0)
+		(property "Description" "LCSC C160404, JST SH 4-pin right-angle (defaulted)"
+			(at 190.5 115.57 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
 					(reference "J2")
 					(unit 1)
 				)
@@ -985,24 +909,24 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 100.33 85.09 0)
+		(at 100.33 95.25 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom no)
 		(on_board no)
 		(dnp no)
-		(uuid "87668037-1993-512a-8442-e026ef1f8c8c")
+		(uuid "fc0cfdc2-2adb-5254-8eec-773c1de98672")
 		(property "Reference" "#PWR62829"
-			(at 100.33 82.09 0)
+			(at 100.33 92.25 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(property "Value" "GND"
-			(at 100.33 88.09 0)
+			(at 100.33 98.25 0)
 			(effects (font (size 1.27 1.27)))
 		)
 		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
 					(reference "#PWR62829")
 					(unit 1)
 				)
@@ -1011,24 +935,24 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 186.69 99.06 180)
+		(at 186.69 109.22 180)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom no)
 		(on_board no)
 		(dnp no)
-		(uuid "2ef1b5ab-097b-5e48-b0b3-414d164da11a")
+		(uuid "d7545995-c71a-5cac-beda-873fc10ad64b")
 		(property "Reference" "#PWR60729"
-			(at 186.69 96.06 0)
+			(at 186.69 106.22 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(property "Value" "GND"
-			(at 186.69 102.06 0)
+			(at 186.69 112.22 0)
 			(effects (font (size 1.27 1.27)))
 		)
 		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
 					(reference "#PWR60729")
 					(unit 1)
 				)
@@ -1037,51 +961,25 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 133.35 100.33 0)
+		(at 133.35 110.49 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom no)
 		(on_board no)
 		(dnp no)
-		(uuid "550b0b94-a539-50fe-9adc-b8eb629638aa")
+		(uuid "f6902b8c-00ff-5206-8921-57c9ee61edcb")
 		(property "Reference" "#PWR91005"
-			(at 133.35 97.33 0)
+			(at 133.35 107.49 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(property "Value" "GND"
-			(at 133.35 103.33 0)
+			(at 133.35 113.49 0)
 			(effects (font (size 1.27 1.27)))
 		)
 		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
 					(reference "#PWR91005")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:GND")
-		(at 97.79 105.41 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom no)
-		(on_board no)
-		(dnp no)
-		(uuid "5d392e8d-bbb2-5e6e-bdbf-ad464f02589c")
-		(property "Reference" "#PWR17234"
-			(at 97.79 102.41 0)
-			(effects (font (size 1.27 1.27)) (hide yes))
-		)
-		(property "Value" "GND"
-			(at 97.79 108.41 0)
-			(effects (font (size 1.27 1.27)))
-		)
-		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
-					(reference "#PWR17234")
 					(unit 1)
 				)
 			)
@@ -1095,8 +993,8 @@
 		(in_bom no)
 		(on_board no)
 		(dnp no)
-		(uuid "d0d35555-9311-501a-93ef-fe23907563d6")
-		(property "Reference" "#PWR54237"
+		(uuid "183eabdb-7ee8-5f54-8a7b-20f1200688ce")
+		(property "Reference" "#PWR17234"
 			(at 97.79 112.57 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
@@ -1105,8 +1003,34 @@
 			(effects (font (size 1.27 1.27)))
 		)
 		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
+					(reference "#PWR17234")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 97.79 125.73 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "d5d35096-94a4-56e4-978b-1b981c6ca175")
+		(property "Reference" "#PWR54237"
+			(at 97.79 122.73 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 97.79 128.73 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
 					(reference "#PWR54237")
 					(unit 1)
 				)
@@ -1115,24 +1039,24 @@
 	)
 	(symbol
 		(lib_id "power:+3V3")
-		(at 100.33 72.39 0)
+		(at 100.33 82.55 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom no)
 		(on_board no)
 		(dnp no)
-		(uuid "958ce14c-7549-5094-959d-79b58bb94c8e")
+		(uuid "3078926b-e6e3-5439-9d7b-8b8dd32f486c")
 		(property "Reference" "#PWR40786"
-			(at 100.33 69.39 0)
+			(at 100.33 79.55 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(property "Value" "+3V3"
-			(at 100.33 75.39 0)
+			(at 100.33 85.55 0)
 			(effects (font (size 1.27 1.27)))
 		)
 		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
 					(reference "#PWR40786")
 					(unit 1)
 				)
@@ -1141,24 +1065,24 @@
 	)
 	(symbol
 		(lib_id "power:+3V3")
-		(at 189.23 99.06 0)
+		(at 189.23 109.22 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom no)
 		(on_board no)
 		(dnp no)
-		(uuid "8d0ba1e8-187e-5828-b7ee-5f16cc67c5af")
+		(uuid "08aa1601-1d14-5249-a3d4-1bce033a24c9")
 		(property "Reference" "#PWR30401"
-			(at 189.23 96.06 0)
+			(at 189.23 106.22 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(property "Value" "+3V3"
-			(at 189.23 102.06 0)
+			(at 189.23 112.22 0)
 			(effects (font (size 1.27 1.27)))
 		)
 		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
 					(reference "#PWR30401")
 					(unit 1)
 				)
@@ -1167,24 +1091,24 @@
 	)
 	(symbol
 		(lib_id "power:+3V3")
-		(at 97.79 95.25 0)
+		(at 133.35 113.03 270)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom no)
 		(on_board no)
 		(dnp no)
-		(uuid "ce5b5a21-da24-5286-b4a7-4572b9a7711a")
+		(uuid "b9eca834-8ace-52b2-b3c3-cac05867a144")
 		(property "Reference" "#PWR19214"
-			(at 97.79 92.25 0)
+			(at 133.35 110.03 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(property "Value" "+3V3"
-			(at 97.79 98.25 0)
+			(at 133.35 116.03 0)
 			(effects (font (size 1.27 1.27)))
 		)
 		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
 					(reference "#PWR19214")
 					(unit 1)
 				)
@@ -1193,24 +1117,24 @@
 	)
 	(symbol
 		(lib_id "power:+3V3")
-		(at 97.79 107.95 90)
+		(at 97.79 105.41 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom no)
 		(on_board no)
 		(dnp no)
-		(uuid "77e5e187-5560-50d9-bfe8-b854b06d8cbe")
+		(uuid "04b7bcaa-a476-55d8-a954-e8b012c11665")
 		(property "Reference" "#PWR58345"
-			(at 97.79 104.95 0)
+			(at 97.79 102.41 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(property "Value" "+3V3"
-			(at 97.79 110.95 0)
+			(at 97.79 108.41 0)
 			(effects (font (size 1.27 1.27)))
 		)
 		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
 					(reference "#PWR58345")
 					(unit 1)
 				)
@@ -1219,24 +1143,24 @@
 	)
 	(symbol
 		(lib_id "power:+3V3")
-		(at 133.35 102.87 270)
+		(at 97.79 118.11 90)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom no)
 		(on_board no)
 		(dnp no)
-		(uuid "b9a52b7c-75fd-57db-aff9-b0428a12c9a2")
+		(uuid "f1b45e8c-8e14-5d3c-9549-0f106cc26643")
 		(property "Reference" "#PWR67962"
-			(at 133.35 99.87 0)
+			(at 97.79 115.11 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(property "Value" "+3V3"
-			(at 133.35 105.87 0)
+			(at 97.79 121.11 0)
 			(effects (font (size 1.27 1.27)))
 		)
 		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
 					(reference "#PWR67962")
 					(unit 1)
 				)
@@ -1245,24 +1169,24 @@
 	)
 	(symbol
 		(lib_id "power:+3V3")
-		(at 151.13 105.41 0)
+		(at 151.13 115.57 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom no)
 		(on_board no)
 		(dnp no)
-		(uuid "eb9ec013-83ef-545c-a13f-f00de61ed289")
+		(uuid "4f9940e7-c4b2-5aa9-813e-f5be3b4b5016")
 		(property "Reference" "#PWR92783"
-			(at 151.13 102.41 0)
+			(at 151.13 112.57 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(property "Value" "+3V3"
-			(at 151.13 108.41 0)
+			(at 151.13 118.57 0)
 			(effects (font (size 1.27 1.27)))
 		)
 		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
 					(reference "#PWR92783")
 					(unit 1)
 				)
@@ -1277,7 +1201,7 @@
 		(in_bom no)
 		(on_board no)
 		(dnp no)
-		(uuid "fe983b8e-ad31-502a-90b6-d018350b671a")
+		(uuid "68b42cec-31c4-5b6c-a989-f17631c94f1e")
 		(property "Reference" "#PWR17636"
 			(at 151.13 122.73 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
@@ -1287,8 +1211,8 @@
 			(effects (font (size 1.27 1.27)))
 		)
 		(instances
-			(project "A_BMP280_BAROMETRIC"
-				(path "/c658c779-50f0-4ebf-b52f-5f98dd451f64"
+			(project "BMP280_QWIIC_USB_C"
+				(path "/2bfee3ee-b5d7-4c0b-a5c5-6698998ed923"
 					(reference "#PWR17636")
 					(unit 1)
 				)
@@ -1296,201 +1220,166 @@
 		)
 	)
 	(wire
-		(pts (xy 130.81 107.95) (xy 133.35 107.95))
+		(pts (xy 130.81 118.11) (xy 133.35 118.11))
 		(stroke (width 0) (type default))
-		(uuid "8f6bc54f-596a-5e7e-9b66-dac30e843814")
-	)
-	(wire
-		(pts (xy 140.97 107.95) (xy 138.43 107.95))
-		(stroke (width 0) (type default))
-		(uuid "9bf577c8-0a32-5b1b-9d27-8ef3f4c24637")
+		(uuid "d0d2bd1e-202d-5b6f-aec1-8f2b9395985f")
 	)
 	(wire
 		(pts (xy 140.97 118.11) (xy 138.43 118.11))
 		(stroke (width 0) (type default))
-		(uuid "ba765d2f-2013-5b11-bb26-46c7755e751d")
+		(uuid "764e0231-1e83-5aab-b2bb-bccb51437cd5")
 	)
 	(wire
-		(pts (xy 148.59 118.11) (xy 191.77 118.11))
+		(pts (xy 191.77 111.76) (xy 191.77 109.22))
 		(stroke (width 0) (type default))
-		(uuid "d28359ba-4da1-5b1c-a0cf-02a1d6c54d6d")
+		(uuid "e08b9fd7-b864-53bc-aff5-5b7388e9f74a")
 	)
 	(wire
-		(pts (xy 191.77 118.11) (xy 191.77 101.6))
+		(pts (xy 130.81 123.19) (xy 133.35 123.19))
 		(stroke (width 0) (type default))
-		(uuid "4c65d3d8-bccd-50ac-a947-79e47ff3cd4a")
-	)
-	(wire
-		(pts (xy 130.81 113.03) (xy 133.35 113.03))
-		(stroke (width 0) (type default))
-		(uuid "c8bd92e0-abe9-54c1-b370-1597263a1902")
+		(uuid "d65e9491-3f03-5bc6-9405-e8ff250e27d2")
 	)
 	(wire
 		(pts (xy 140.97 128.27) (xy 138.43 128.27))
 		(stroke (width 0) (type default))
-		(uuid "31e34776-bba8-50dd-b63a-5787ff61d446")
+		(uuid "f64187e0-7381-547b-bbd9-6a7886a4622f")
 	)
 	(wire
-		(pts (xy 140.97 138.43) (xy 138.43 138.43))
+		(pts (xy 194.31 111.76) (xy 194.31 109.22))
 		(stroke (width 0) (type default))
-		(uuid "0d3557b9-97da-5785-afa9-5bebcf99875b")
+		(uuid "c154ca2c-3d22-5bcf-9b25-6ee0354fb4bf")
 	)
 	(wire
-		(pts (xy 148.59 138.43) (xy 151.13 138.43))
+		(pts (xy 100.33 92.71) (xy 100.33 95.25))
 		(stroke (width 0) (type default))
-		(uuid "3cf828f4-2b4d-50f1-ae57-adbd1a0a1e66")
+		(uuid "e60886c8-1534-57ec-8537-ef494ec1b8c8")
 	)
 	(wire
-		(pts (xy 194.31 101.6) (xy 194.31 99.06))
+		(pts (xy 186.69 111.76) (xy 186.69 109.22))
 		(stroke (width 0) (type default))
-		(uuid "38ecc9ae-8600-596f-b5d0-fea8e0805914")
+		(uuid "fb859623-11ce-57d0-ba3a-9890cb5e936a")
 	)
 	(wire
-		(pts (xy 100.33 82.55) (xy 100.33 85.09))
+		(pts (xy 130.81 107.95) (xy 133.35 107.95))
 		(stroke (width 0) (type default))
-		(uuid "4ef6d29f-8798-5a1c-96f6-041241ba2519")
+		(uuid "86d81ce8-c523-5cca-8077-7f1eda64b7d5")
 	)
 	(wire
-		(pts (xy 186.69 101.6) (xy 186.69 99.06))
+		(pts (xy 133.35 107.95) (xy 133.35 110.49))
 		(stroke (width 0) (type default))
-		(uuid "188ee205-f19a-5666-9d1f-099e7268a957")
-	)
-	(wire
-		(pts (xy 130.81 97.79) (xy 133.35 97.79))
-		(stroke (width 0) (type default))
-		(uuid "9aa99b7f-2b76-5d50-b4e6-13bace668468")
-	)
-	(wire
-		(pts (xy 133.35 97.79) (xy 133.35 100.33))
-		(stroke (width 0) (type default))
-		(uuid "7ef9924b-fc3e-51b7-b3c4-6092365deae9")
-	)
-	(wire
-		(pts (xy 100.33 102.87) (xy 97.79 102.87))
-		(stroke (width 0) (type default))
-		(uuid "52c103fe-7d95-51a1-8366-1be6cab649af")
-	)
-	(wire
-		(pts (xy 97.79 102.87) (xy 97.79 105.41))
-		(stroke (width 0) (type default))
-		(uuid "bd537b3f-5b96-5613-9f30-910ed2f1a756")
+		(uuid "e6cf9aa6-3975-5d70-822f-0d5418f6e2d3")
 	)
 	(wire
 		(pts (xy 100.33 113.03) (xy 97.79 113.03))
 		(stroke (width 0) (type default))
-		(uuid "e39b1717-a1e3-5620-a6c2-ad8599649fd8")
+		(uuid "03bbc599-af94-5cff-9e23-30a50a48d2cf")
 	)
 	(wire
 		(pts (xy 97.79 113.03) (xy 97.79 115.57))
 		(stroke (width 0) (type default))
-		(uuid "df533e34-3c95-5b6f-b4b5-fe5d3bfb210f")
+		(uuid "33edc679-1638-594b-9e9d-9873c4defc0d")
 	)
 	(wire
-		(pts (xy 100.33 74.93) (xy 100.33 72.39))
+		(pts (xy 100.33 123.19) (xy 97.79 123.19))
 		(stroke (width 0) (type default))
-		(uuid "e63096b6-0384-5bcb-96e0-5c9413cbf1b0")
+		(uuid "d82a0b6c-40f2-5f6f-bdf4-257403a9af75")
 	)
 	(wire
-		(pts (xy 189.23 101.6) (xy 189.23 99.06))
+		(pts (xy 97.79 123.19) (xy 97.79 125.73))
 		(stroke (width 0) (type default))
-		(uuid "84c718bd-54fa-5f41-bc6b-49fdcc680b57")
+		(uuid "c45bdb9a-873d-5e62-a6d1-78c21bdb0807")
 	)
 	(wire
-		(pts (xy 100.33 97.79) (xy 97.79 97.79))
+		(pts (xy 100.33 85.09) (xy 100.33 82.55))
 		(stroke (width 0) (type default))
-		(uuid "df1117fb-7213-5304-86e2-5d633e5a4b3a")
+		(uuid "ca0b02df-bf03-5cf9-8103-e5d7fe0f6ecb")
 	)
 	(wire
-		(pts (xy 97.79 97.79) (xy 97.79 95.25))
+		(pts (xy 189.23 111.76) (xy 189.23 109.22))
 		(stroke (width 0) (type default))
-		(uuid "831365ad-4a42-518d-b017-7c0455c55df9")
+		(uuid "a35b53e1-a688-55f0-977c-8fed04ce5004")
+	)
+	(wire
+		(pts (xy 130.81 113.03) (xy 133.35 113.03))
+		(stroke (width 0) (type default))
+		(uuid "1bcb3103-8535-544a-984c-c91d52d42356")
 	)
 	(wire
 		(pts (xy 100.33 107.95) (xy 97.79 107.95))
 		(stroke (width 0) (type default))
-		(uuid "b057af7b-2c32-5b11-a4da-23b7f7e29e35")
+		(uuid "ab492fbf-1ffd-5f56-aa8f-87b5ffc23424")
 	)
 	(wire
-		(pts (xy 130.81 102.87) (xy 133.35 102.87))
+		(pts (xy 97.79 107.95) (xy 97.79 105.41))
 		(stroke (width 0) (type default))
-		(uuid "cfde3e72-2285-5282-bfce-758a05973fad")
+		(uuid "9a6818e3-512b-51ea-bd1e-2080a83d455f")
 	)
 	(wire
-		(pts (xy 148.59 107.95) (xy 151.13 107.95))
+		(pts (xy 100.33 118.11) (xy 97.79 118.11))
 		(stroke (width 0) (type default))
-		(uuid "bc727735-91bc-52ac-9317-2a69278298cc")
+		(uuid "db599520-39fe-59e7-b174-69d58b34e654")
 	)
 	(wire
-		(pts (xy 151.13 107.95) (xy 151.13 105.41))
+		(pts (xy 148.59 118.11) (xy 151.13 118.11))
 		(stroke (width 0) (type default))
-		(uuid "36077c0b-b2e9-5f65-ae83-db0e74769a37")
+		(uuid "6d5c9671-8249-5281-a212-73e350329185")
+	)
+	(wire
+		(pts (xy 151.13 118.11) (xy 151.13 115.57))
+		(stroke (width 0) (type default))
+		(uuid "b3019850-23f0-5d2d-b09b-86e524bbcdb7")
 	)
 	(wire
 		(pts (xy 148.59 128.27) (xy 151.13 128.27))
 		(stroke (width 0) (type default))
-		(uuid "caeeaf44-097f-5413-9ad6-8b015f3c66d2")
+		(uuid "3ed1dfdd-12e6-5134-bccc-a8987eeef034")
 	)
 	(wire
 		(pts (xy 151.13 128.27) (xy 151.13 125.73))
 		(stroke (width 0) (type default))
-		(uuid "a7656473-9da8-5858-96d2-e6ec2f17909c")
+		(uuid "4f2053d2-19ab-5934-8f47-062cded75c49")
 	)
-	(label "SDA"
-		(at 133.35 107.95 0)
+	(label "I2C_SDA"
+		(at 130.81 118.11 0)
 		(effects (font (size 1.27 1.27)) (justify left))
-		(uuid "caee47ec-d8d6-5ba3-8039-55ca4035e650")
+		(uuid "d4400852-44f5-547a-95f2-c8ee69b59c26")
 	)
-	(label "SDA"
-		(at 138.43 107.95 180)
-		(effects (font (size 1.27 1.27)) (justify right))
-		(uuid "3c90ee6c-76e0-575e-8987-85ff891441da")
-	)
-	(label "SDA"
+	(label "I2C_SDA"
 		(at 138.43 118.11 180)
 		(effects (font (size 1.27 1.27)) (justify right))
-		(uuid "b6f65fa7-8747-5460-bf4f-7471d31da2b4")
+		(uuid "487fcd52-a7a8-52bb-b81c-70efb592c8c7")
 	)
-	(label "SDA_QWIIC"
-		(at 191.77 118.11 0)
+	(label "I2C_SDA"
+		(at 191.77 109.22 90)
 		(effects (font (size 1.27 1.27)) (justify left))
-		(uuid "2b970736-fb4e-5cdb-a4ec-97f547bb00da")
+		(uuid "e4f581a2-3081-5946-b268-67c57f1bfad8")
 	)
-	(label "SCL"
-		(at 133.35 113.03 0)
+	(label "I2C_SCL"
+		(at 133.35 123.19 0)
 		(effects (font (size 1.27 1.27)) (justify left))
-		(uuid "d70926af-87fa-539d-9d53-30337484c585")
+		(uuid "d84f3c0a-5a18-5002-9bc7-d9af1fc5d150")
 	)
-	(label "SCL"
+	(label "I2C_SCL"
 		(at 138.43 128.27 180)
 		(effects (font (size 1.27 1.27)) (justify right))
-		(uuid "42a40d1e-aaf8-502c-9af0-a64dc53e8258")
+		(uuid "6cd3a814-a342-5280-b1d6-db06024e5c53")
 	)
-	(label "SCL"
-		(at 138.43 138.43 180)
-		(effects (font (size 1.27 1.27)) (justify right))
-		(uuid "60aa60a8-7ea6-5a12-8a13-c1bab04d133a")
-	)
-	(label "SCL_QWIIC"
-		(at 151.13 138.43 0)
+	(label "I2C_SCL"
+		(at 194.31 109.22 90)
 		(effects (font (size 1.27 1.27)) (justify left))
-		(uuid "bf03fb7e-4ed5-58c2-8552-a79c58b9619e")
-	)
-	(label "SCL_QWIIC"
-		(at 194.31 99.06 90)
-		(effects (font (size 1.27 1.27)) (justify left))
-		(uuid "d1e520ca-722f-5cdc-8e64-128364b9c517")
+		(uuid "7dfbe8be-7c45-5921-ae4a-ca30c103a588")
 	)
 	(no_connect
-		(at 199.39 101.6)
-		(uuid "bd04c4ff-6856-5b36-9acf-8d01e8c46623")
+		(at 199.39 111.76)
+		(uuid "bad13dca-e7f3-596b-bc8c-19faca034866")
 	)
 	(no_connect
-		(at 181.61 101.6)
-		(uuid "7b0848cb-c74b-559f-a707-456b37db99f3")
+		(at 181.61 111.76)
+		(uuid "535147a7-35b9-5b59-80ed-cacb831ee66d")
 	)
 
 	(sheet_instances
-		(path "/23cf2c5c-15ee-439a-b094-cd99ef005417"
+		(path "/1d062938-f936-471f-a2e6-40337d41b26b"
 			(page "SENSOR")
 		)
 	)

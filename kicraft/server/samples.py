@@ -138,33 +138,33 @@ class Sample:
 # brief yields a design like the one shown.
 SAMPLES: list[Sample] = [
     Sample(
+        id="usb-pd-trigger",
+        title="USB-C PD trigger",
+        blurb="A USB-C Power Delivery trigger that outputs a switch-selectable "
+              "9 V, 12 V, or 20 V.",
+        prompt="A USB-C PD trigger board that outputs a switch-selectable 9 V, "
+               "12 V, or 20 V.",
+        stem="USB_PD_TRIGGER",
+        sheets=2, parts=12, featured=True,
+    ),
+    Sample(
         id="weather-sensor",
         title="BMP280 weather sensor",
         blurb="A barometric pressure and temperature sensor on a Qwiic/STEMMA bus, "
               "USB-C powered.",
         prompt="A BMP280 barometric weather sensor on a Qwiic/STEMMA bus, USB-C.",
-        stem="A_BMP280_BAROMETRIC",
-        sheets=3, parts=13, featured=True,
+        stem="BMP280_QWIIC_USB_C",
+        sheets=3, parts=13,
     ),
     Sample(
         id="bench-breakout",
         title="USB-C bench breakout",
         blurb="Bench power from USB-C: regulated 3.3 V and 5 V rails with status "
-              "LEDs and ESD protection.",
+              "LEDs.",
         prompt="A bench breakout: USB-C in, regulated 3.3 V and 5 V rails with "
                "status LEDs.",
         stem="BENCH_BREAKOUT",
-        sheets=4, parts=16,
-    ),
-    Sample(
-        id="night-light",
-        title="PIR motion night light",
-        blurb="A motion-activated night light: a PIR sensor switching warm-white "
-              "LEDs, USB-C powered.",
-        prompt="A motion-activated USB-C night light with a PIR sensor and "
-               "warm-white LEDs.",
-        stem="A_MOTION_ACTIVATED",
-        sheets=4, parts=17,
+        sheets=5, parts=19,
     ),
 ]
 
