@@ -690,17 +690,14 @@ def _resolve_constraint_anchor_positions(
                 placement.origin.y + local_offset.y,
             )
 
+    from kicraft.autoplacer.brain.subcircuit_composer import pad_centroid_anchor
+
     for constraint in derived.parent_local_constraints:
         comp = parent_local.get(constraint.ref)
         if comp is None:
             continue
-        if comp.pads:
-            cx = sum(p.pos.x for p in comp.pads) / len(comp.pads)
-            cy = sum(p.pos.y for p in comp.pads) / len(comp.pads)
-        else:
-            anchor = comp.body_center if comp.body_center is not None else comp.pos
-            cx, cy = anchor.x, anchor.y
-        anchors[constraint.ref] = Point(cx, cy)
+        # Same body-pinned anchor the leaf path uses for holes -- one formula.
+        anchors[constraint.ref] = pad_centroid_anchor(comp)
     return anchors
 
 
@@ -1080,6 +1077,33 @@ def _is_mounting_hole_ref(ref: str, comp: Component | None = None) -> bool:
     return upper.startswith("H") and (len(upper) == 1 or upper[1].isdigit() or upper[1] == "_")
 
 
+def _warn_non_board_level_parent_local(parent_local: dict[str, Component]) -> list[str]:
+    """Surface the parent-only-leaves invariant (Part 2, Lever 2.1) at its source.
+
+    A top-level/parent sheet should carry only child leaves plus board-level
+    structure (mounting holes / fiducials). Any OTHER loose component on the
+    parent sheet is a "parent-local" ref that flows through compose's SECOND
+    placement path (``_snap_parent_local`` + its connector branch) instead of
+    the single leaf path -- the exact duplication this plan collapses. Warn
+    (don't fail) so the violation is visible; the eventual collapse auto-wraps
+    each offender as a single-component leaf so it flows through the one path.
+    Returns the offending refs (board-level refs excluded)."""
+    import logging
+
+    offenders = [
+        ref for ref, comp in parent_local.items()
+        if not _is_mounting_hole_ref(ref, comp)
+    ]
+    if offenders:
+        logging.getLogger(__name__).warning(
+            "parent-only-leaves invariant: %d non-board-level parent-local "
+            "component(s) take the parent-local placement path rather than a "
+            "leaf: %s (Lever 2.1 will auto-wrap these as single-component leaves)",
+            len(offenders), ", ".join(sorted(offenders)),
+        )
+    return offenders
+
+
 def _move_component_to(comp: Component, new_pos: Point) -> None:
     """Translate a Component (and its pads / body_center) so its anchor
     lands at ``new_pos``. Preserves rotation; mirrors the same delta
@@ -1274,6 +1298,7 @@ def _compose_artifacts(
                 component_zones, loaded_artifacts
             ),
         )
+        _warn_non_board_level_parent_local(parent_local)
 
     derived = derive_attachment_constraints(
         loaded_artifacts,

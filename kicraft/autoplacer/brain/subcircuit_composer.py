@@ -51,7 +51,6 @@ from .types import (
     Component,
     HierarchyLevelState,
     InterfaceAnchor,
-    Layer,
     Net,
     Point,
     SilkscreenElement,
@@ -505,12 +504,20 @@ def _constraint_sides(constraint: AttachmentConstraint) -> list[str]:
     return []
 
 
-def _compute_mounting_hole_anchor(component: Component) -> Point:
+def pad_centroid_anchor(component: Component) -> Point:
+    """The anchor coordinate for a component pinned by its body, not an edge:
+    the centroid of its pads, falling back to body_center then pos. Shared by
+    mounting holes (leaf path) and parent-local body-pinned refs (compose) so
+    the two never compute it differently."""
     if component.pads:
         pad_x = sum(pad.pos.x for pad in component.pads) / len(component.pads)
         pad_y = sum(pad.pos.y for pad in component.pads) / len(component.pads)
         return Point(pad_x, pad_y)
     return component.body_center if component.body_center is not None else component.pos
+
+
+# Back-compat alias for the old hole-specific name.
+_compute_mounting_hole_anchor = pad_centroid_anchor
 
 
 def _constrained_components_bbox(
@@ -555,7 +562,7 @@ def _compute_local_anchor_offset(
     )
 
     if constraint.ref.startswith("H") or "hole" in getattr(component, "kind", "").lower():
-        return _compute_mounting_hole_anchor(component)
+        return pad_centroid_anchor(component)
 
     grouped_bbox = _constrained_components_bbox(
         transformed,

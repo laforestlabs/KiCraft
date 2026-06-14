@@ -164,6 +164,27 @@ The connector bug was hard to *find* because the same logical operation ("pin an
 ### Lever 2.1 — "Top-level parent sheets contain only leaves" (eliminate the parent-local component path)
 This is the highest-value simplification and the user's lead suggestion.
 
+> **STATUS: foundation DONE 2026-06-14; core GATED.** Migration step 6 (the
+> synthesis/compose-time guard) shipped: `_warn_non_board_level_parent_local`
+> (compose_subcircuits) fires right after `extract_parent_local_components` and
+> logs every non-board-level (non-mounting-hole) parent-local ref — the exact
+> set the auto-wrap must convert to leaves — so the invariant is visible at its
+> source instead of silently patched downstream. Step 2.2's deletions already
+> removed the duplicated rotation helper.
+>
+> **Core deliberately NOT done** (auto-wrap + delete the `_snap_parent_local`
+> connector branch + collapse `DerivedAttachmentConstraints.parent_local_*`).
+> Reason — it is the plan's highest-blast-radius change AND it changes parent
+> placement (not a corpus no-op), so it must be validated as a *correct* change,
+> which needs two things that don't exist yet: (a) a corpus fixture that
+> actually carries a parent-local connector (the committed `USB_PD_TRIGGER` has
+> all connectors in leaves, so it can't exercise the path), and (b) Part 3's
+> connector-stranding metric (`mouth_to_edge_gap ∈ [−0.1mm, +overhang]`) to
+> assert the wrapped connector lands correctly. Rushing it would risk regressing
+> the very USB-C edge-connector fixes that motivated this plan. **Recommended
+> next step: build those two (a parent-local-connector workspace + the stranding
+> check) as Part 3's acceptance harness, then do the auto-wrap behind them.**
+
 **Finding (feasible):** A sheet is a leaf iff it has zero child sheets (`hierarchy_parser.py:~510`). "Parent-local" components are whatever ends up constrained but not inside any child artifact (`extract_parent_local_components`, `subcircuit_extractor.py:301`). For connectors this creates a **second** placement path:
 - **Leaf path:** `subcircuit_composer._filter_rotations_for_connector_opening` + `_compute_local_anchor_offset` + attachment constraints → solver rotates/pins the leaf.
 - **Parent-local path:** `compose_subcircuits._snap_parent_local` + `_rotate_component_in_place` (added in the recent fix) → post-solve rotate+snap.
@@ -208,6 +229,24 @@ Rotation/transform logic is scattered and uses **inconsistent conventions** — 
 **Proposal:** one module `kicraft/autoplacer/geometry.py` (or extend `types.py`) owning: `rotate_point`, `rotate_size`, `transform_point(origin, rot)`, `rotate_component_in_place`, `bbox_after_rotation` — **all using the single KiCad convention** documented once (`board_angle = local_angle - rotation`; `x' = x·cosθ + y·sinθ; y' = -x·sinθ + y·cosθ`). Replace every ad-hoc rotation with calls to it. Add a property test: `transform_point` agrees with `pcbnew.SetOrientationDegrees` for a pad at (1,0) across 0/90/180/270 (the empirically-verified case already documented in `_transform_point`).
 
 ### Lever 2.3 — Centralize edge/anchor/outline math
+
+> **STATUS: substantially DONE (2026-06-14).** The edge/anchor API was already
+> centralized by prior work: `edge_anchor_target_coordinate` is the single
+> target-coordinate formula (every compose call site uses it), and
+> `_compute_local_anchor_offset` is the shared anchor-position computation used
+> by BOTH the leaf path and compose's `_resolve_constraint_anchor_positions`.
+> This pass collapsed the one remaining duplicate: the body-pinned anchor
+> (pad centroid -> body_center -> pos) is now `pad_centroid_anchor` in
+> subcircuit_composer, called by the leaf hole path AND compose's parent-local
+> branch (was inline). Corpus-verified no-op (leaf + parent).
+>
+> **Remaining (gated):** the connector *mouth*-anchor still differs between the
+> leaf path (edge-marker / courtyard mouth via `_compute_local_anchor_offset`)
+> and the parent-local connector branch in `_snap_parent_local` (body-AABB
+> half-extent) — the "pad centroid vs courtyard mouth" mismatch. Collapsing it
+> is NOT a no-op (it moves parent-local connectors) and is best done as part of
+> Lever 2.1, which deletes the parent-local connector branch outright. It needs
+> a parent-local-connector fixture + Part 3's stranding metric to validate.
 Anchor + edge-target logic is spread across: `edge_anchor_target_coordinate` (`subcircuit_composer.py:604`), `_compute_local_anchor_offset` (`:542`), `_compute_mounting_hole_anchor` (`:508`), `_constraint_local_rect` (`:1450`), `_resolve_constraint_anchor_positions` (`compose_subcircuits.py:649`), `_snap_parent_local` (`:1126`), `_compute_final_outline` (`:961`), `_repair_parent_outline` (`:2155`), plus `edge_outward_angle`/`opening_board_angle` (`types.py`, added recently).
 
 **Proposal:** a single `edge_attachment` module exposing one tested API: given (component, edge, overhang) → the connector's mouth anchor and the outward rotation; given (constraints, outline) → the final outline and per-ref anchor coordinates. Leaf and (remaining) parent-local snapping both call it. This removes the "snap uses pad centroid but outline uses courtyard mouth" mismatch class of bugs.
@@ -228,6 +267,13 @@ Anchor + edge-target logic is spread across: `edge_anchor_target_coordinate` (`s
 - Best-effort persistence / promote-dirty-board paths — audit whether they still earn their keep.
 
 ### Lever 2.5 — Split the god-files
+
+> **STATUS: deferred (correctly) — gated behind 2.1.** The plan says do this
+> "after the logic collapses (2.1–2.3) so we move less code," and the file split
+> is most valuable once 2.1 deletes the parent-local branch from
+> `_snap_parent_local`. Doing it before 2.1 means moving code that 2.1 then
+> deletes. So 2.5 follows the 2.1 core.
+
 `compose_subcircuits.py` (~4300) should split along its already-clear seams: `compose/cli.py` (argparse/main), `compose/outline.py` (`_compute_final_outline`, `_repair_parent_outline`), `compose/snap.py` (anchor snapping), `compose/validate.py` (`_validate_parent_geometry`), `compose/stamp.py`. Same for `placement_solver.py` (pinning vs SA vs scoring vs grid). Pure mechanical extraction — do it **after** the logic collapses (2.1–2.3) so we move less code.
 
 ### Sequencing
