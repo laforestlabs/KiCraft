@@ -2,7 +2,7 @@
 	(version 20250114)
 	(generator "eeschema")
 	(generator_version "9.0")
-	(uuid "3b0eb370-fd3e-44ea-a148-a59507e3cfbd")
+	(uuid "aeb7bb6e-f527-4c40-b22b-a32c069036da")
 	(paper "A4")
 
 	(lib_symbols
@@ -674,12 +674,12 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(uuid "24a5529a-cbde-5346-aaf4-a1e6f529a0e7")
-		(property "Reference" "D1"
+		(uuid "8f8b824c-c76a-5af8-894c-2fb2bcdee156")
+		(property "Reference" "D2"
 			(at 118.618 105.41 0)
 			(effects (font (size 1.27 1.27)) (justify left))
 		)
-		(property "Value" "Red LED"
+		(property "Value" "Red"
 			(at 118.618 107.95 0)
 			(effects (font (size 1.27 1.27)) (justify left))
 		)
@@ -691,14 +691,14 @@
 			(at 113.03 106.68 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
-		(property "Description" "5V rail indicator"
+		(property "Description" ""
 			(at 113.03 106.68 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
 			(project "BENCH_BREAKOUT"
-				(path "/3b0eb370-fd3e-44ea-a148-a59507e3cfbd"
-					(reference "D1")
+				(path "/aeb7bb6e-f527-4c40-b22b-a32c069036da"
+					(reference "D2")
 					(unit 1)
 				)
 			)
@@ -712,12 +712,12 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(uuid "8f8b824c-c76a-5af8-894c-2fb2bcdee156")
-		(property "Reference" "D2"
+		(uuid "067bc8ba-363f-5cde-a6e1-8a976f149333")
+		(property "Reference" "D3"
 			(at 144.018 105.41 0)
 			(effects (font (size 1.27 1.27)) (justify left))
 		)
-		(property "Value" "Red LED"
+		(property "Value" "Green"
 			(at 144.018 107.95 0)
 			(effects (font (size 1.27 1.27)) (justify left))
 		)
@@ -729,14 +729,14 @@
 			(at 138.43 106.68 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
-		(property "Description" "3.3V rail indicator"
+		(property "Description" ""
 			(at 138.43 106.68 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
 			(project "BENCH_BREAKOUT"
-				(path "/3b0eb370-fd3e-44ea-a148-a59507e3cfbd"
-					(reference "D2")
+				(path "/aeb7bb6e-f527-4c40-b22b-a32c069036da"
+					(reference "D3")
 					(unit 1)
 				)
 			)
@@ -750,14 +750,14 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(uuid "7f5122af-e232-5b74-8727-cc2aa3c7e338")
-		(property "Reference" "R3"
-			(at 168.148 105.41 0)
-			(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "17dca14d-08db-5335-88c1-718fbbbbfdcd")
+		(property "Reference" "R2"
+			(at 159.512 105.41 0)
+			(effects (font (size 1.27 1.27)) (justify right))
 		)
-		(property "Value" "1k"
-			(at 168.148 107.95 0)
-			(effects (font (size 1.27 1.27)) (justify left))
+		(property "Value" "470"
+			(at 159.512 107.95 0)
+			(effects (font (size 1.27 1.27)) (justify right))
 		)
 		(property "Footprint" "Resistor_SMD:R_0805_2012Metric"
 			(at 163.83 113.68 0)
@@ -767,14 +767,14 @@
 			(at 163.83 106.68 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
-		(property "Description" "5V LED current limit"
+		(property "Description" ""
 			(at 163.83 106.68 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
 			(project "BENCH_BREAKOUT"
-				(path "/3b0eb370-fd3e-44ea-a148-a59507e3cfbd"
-					(reference "R3")
+				(path "/aeb7bb6e-f527-4c40-b22b-a32c069036da"
+					(reference "R2")
 					(unit 1)
 				)
 			)
@@ -788,12 +788,12 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(uuid "bacdbf23-77ac-5c65-a549-a38cf5d22dcf")
-		(property "Reference" "R4"
+		(uuid "7f5122af-e232-5b74-8727-cc2aa3c7e338")
+		(property "Reference" "R3"
 			(at 193.548 105.41 0)
 			(effects (font (size 1.27 1.27)) (justify left))
 		)
-		(property "Value" "1k"
+		(property "Value" "470"
 			(at 193.548 107.95 0)
 			(effects (font (size 1.27 1.27)) (justify left))
 		)
@@ -805,14 +805,14 @@
 			(at 189.23 106.68 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
-		(property "Description" "3.3V LED current limit"
+		(property "Description" ""
 			(at 189.23 106.68 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
 			(project "BENCH_BREAKOUT"
-				(path "/3b0eb370-fd3e-44ea-a148-a59507e3cfbd"
-					(reference "R4")
+				(path "/aeb7bb6e-f527-4c40-b22b-a32c069036da"
+					(reference "R3")
 					(unit 1)
 				)
 			)
@@ -837,7 +837,7 @@
 		)
 		(instances
 			(project "BENCH_BREAKOUT"
-				(path "/3b0eb370-fd3e-44ea-a148-a59507e3cfbd"
+				(path "/aeb7bb6e-f527-4c40-b22b-a32c069036da"
 					(reference "#PWR24892")
 					(unit 1)
 				)
@@ -863,7 +863,7 @@
 		)
 		(instances
 			(project "BENCH_BREAKOUT"
-				(path "/3b0eb370-fd3e-44ea-a148-a59507e3cfbd"
+				(path "/aeb7bb6e-f527-4c40-b22b-a32c069036da"
 					(reference "#PWR34107")
 					(unit 1)
 				)
@@ -889,7 +889,7 @@
 		)
 		(instances
 			(project "BENCH_BREAKOUT"
-				(path "/3b0eb370-fd3e-44ea-a148-a59507e3cfbd"
+				(path "/aeb7bb6e-f527-4c40-b22b-a32c069036da"
 					(reference "#PWR08225")
 					(unit 1)
 				)
@@ -915,7 +915,7 @@
 		)
 		(instances
 			(project "BENCH_BREAKOUT"
-				(path "/3b0eb370-fd3e-44ea-a148-a59507e3cfbd"
+				(path "/aeb7bb6e-f527-4c40-b22b-a32c069036da"
 					(reference "#PWR33693")
 					(unit 1)
 				)
@@ -972,19 +972,19 @@
 		(stroke (width 0) (type default))
 		(uuid "b5834811-a559-58e6-8840-5474d2cbac17")
 	)
-	(label "LED5V"
+	(label "LED5V_ANODE"
 		(at 116.84 110.49 0)
 		(effects (font (size 1.27 1.27)) (justify left))
 		(uuid "074d2715-fb84-5757-9643-e03a94833019")
 	)
-	(label "LED3V3"
+	(label "LED3V3_ANODE"
 		(at 186.69 106.68 180)
 		(effects (font (size 1.27 1.27)) (justify right))
 		(uuid "8db996d3-1d6a-517a-a9ce-94bf51cca357")
 	)
 
 	(sheet_instances
-		(path "/8cde41cc-faa2-4018-99ca-d98eb26713c2"
+		(path "/d7e12d13-11bb-4d62-b32c-ef5309e6501f"
 			(page "STATUS_LEDS")
 		)
 	)

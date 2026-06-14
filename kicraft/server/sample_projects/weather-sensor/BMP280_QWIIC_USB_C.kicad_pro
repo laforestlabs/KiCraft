@@ -253,7 +253,7 @@
     "pinned_symbol_libs": []
   },
   "meta": {
-    "filename": "A_MOTION_ACTIVATED.kicad_pro",
+    "filename": "BMP280_QWIIC_USB_C.kicad_pro",
     "version": 3
   },
   "net_settings": {
@@ -304,6 +304,10 @@
       {
         "netclass": "Power",
         "pattern": "VBUS"
+      },
+      {
+        "netclass": "Power",
+        "pattern": "+3V3"
       },
       {
         "netclass": "Power",
