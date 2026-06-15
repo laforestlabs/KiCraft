@@ -1,0 +1,46 @@
+{
+  "project_name": "ARDUINO_UNO_SHIELD",
+  "pcb_file": "ARDUINO_UNO_SHIELD.kicad_pcb",
+  "power_nets": [
+    "+3V3_ARDUINO",
+    "+3V3_REG",
+    "+5V",
+    "GND"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C1",
+      "C2"
+    ]
+  },
+  "group_labels": {
+    "U1": "3V3 REG"
+  },
+  "thermal_refs": [
+    "U1"
+  ],
+  "signal_flow_order": [
+    "U1"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J2": {
+      "edge": "right"
+    },
+    "H1": {
+      "corner": "top-left"
+    },
+    "H2": {
+      "corner": "top-right"
+    },
+    "H3": {
+      "corner": "bottom-left"
+    },
+    "H4": {
+      "corner": "bottom-right"
+    }
+  },
+  "enable_board_size_search": true
+}

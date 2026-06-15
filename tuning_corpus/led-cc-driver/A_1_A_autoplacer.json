@@ -1,0 +1,36 @@
+{
+  "project_name": "A_1_A",
+  "pcb_file": "A_1_A.kicad_pcb",
+  "power_nets": [
+    "GND",
+    "VUSB"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C2",
+      "C3",
+      "R3"
+    ]
+  },
+  "group_labels": {
+    "U1": "LED DRIVER"
+  },
+  "thermal_refs": [
+    "U1",
+    "D1"
+  ],
+  "signal_flow_order": [
+    "J1",
+    "U1",
+    "D1"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "right"
+    },
+    "D1": {
+      "zone": "bottom"
+    }
+  },
+  "enable_board_size_search": true
+}

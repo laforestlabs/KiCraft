@@ -1,0 +1,877 @@
+(kicad_sch
+	(version 20250114)
+	(generator "eeschema")
+	(generator_version "9.0")
+	(uuid "4ab117b5-303d-43ee-89d9-dc74bd757dd4")
+	(paper "A4")
+
+	(lib_symbols
+		(symbol "screw-terminal-5mm-2p:WJ126V-5.0-2P"
+    (in_bom yes)
+    (on_board yes)
+    (property
+      "Reference"
+      "P"
+      (id 0)
+      (at 0 7.62 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Value"
+      "WJ126V-5.0-2P"
+      (id 1)
+      (at 0 -7.62 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Footprint"
+      "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P"
+      (id 2)
+      (at 0 -10.16 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Datasheet"
+      "https://lcsc.com/product-detail/Terminal-Blocks_WJ126V-5-0-2P_C8404.html"
+      (id 3)
+      (at 0 -12.70 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Manufacturer"
+      "KANGNEX(康奈克斯电气)"
+      (id 4)
+      (at 0 -15.24 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "MPN"
+      "WJ126V-5.0-2P"
+      (id 5)
+      (at 0 -17.78 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "LCSC Part"
+      "C8404"
+      (id 6)
+      (at 0 -20.32 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "ki_keywords"
+      "Screw terminal"
+      (id 8)
+      (at 0 -22.86 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "ki_description"
+      "WJ126V-5.0-2P"
+      (id 9)
+      (at 0 -25.40 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (symbol "WJ126V-5.0-2P_0_1"
+      (rectangle
+        (start -6.35 5.08)
+        (end 1.27 -5.08)
+        (stroke (width 0) (type default))
+        (fill (type background))
+      )
+      (pin passive line
+        (at 6.35 2.54 180)
+        (length 5.08)
+        (name "1" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))
+      )
+      (pin passive line
+        (at 6.35 -2.54 180)
+        (length 5.08)
+        (name "2" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )
+		(symbol "power:GND"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -6.35 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "GND_0_1"
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 -1.27) (xy 1.27 -1.27) (xy 0 -2.54) (xy -1.27 -1.27) (xy 0 -1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "GND_1_1"
+			(pin power_in line
+				(at 0 0 270)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+	)
+
+	(symbol
+		(lib_id "screw-terminal-5mm-2p:WJ126V-5.0-2P")
+		(at 52.07 104.14 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "14db8c9f-88fc-5ae1-b6be-cd24f4775de5")
+		(property "Reference" "J2"
+			(at 56.642 102.87 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "WJ126V-5.0-2P"
+			(at 56.642 105.41 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Footprint" "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P"
+			(at 52.07 111.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 52.07 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C8404"
+			(at 52.07 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "AN_EIGHT_CHANNEL"
+				(path "/4ab117b5-303d-43ee-89d9-dc74bd757dd4"
+					(reference "J2")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "screw-terminal-5mm-2p:WJ126V-5.0-2P")
+		(at 77.47 104.14 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "015dec0e-9a7c-5c80-a8ac-d2cb10fe98a9")
+		(property "Reference" "J3"
+			(at 82.042 102.87 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "WJ126V-5.0-2P"
+			(at 82.042 105.41 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Footprint" "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P"
+			(at 77.47 111.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 77.47 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C8404"
+			(at 77.47 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "AN_EIGHT_CHANNEL"
+				(path "/4ab117b5-303d-43ee-89d9-dc74bd757dd4"
+					(reference "J3")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "screw-terminal-5mm-2p:WJ126V-5.0-2P")
+		(at 102.87 104.14 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "590ac56c-26d9-5a86-b782-489d9ebc5427")
+		(property "Reference" "J4"
+			(at 107.442 102.87 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "WJ126V-5.0-2P"
+			(at 107.442 105.41 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Footprint" "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P"
+			(at 102.87 111.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 102.87 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C8404"
+			(at 102.87 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "AN_EIGHT_CHANNEL"
+				(path "/4ab117b5-303d-43ee-89d9-dc74bd757dd4"
+					(reference "J4")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "screw-terminal-5mm-2p:WJ126V-5.0-2P")
+		(at 128.27 104.14 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "a3d28a3d-48ac-5d20-b2eb-21a6986a99e6")
+		(property "Reference" "J5"
+			(at 132.842 102.87 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "WJ126V-5.0-2P"
+			(at 132.842 105.41 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Footprint" "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P"
+			(at 128.27 111.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 128.27 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C8404"
+			(at 128.27 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "AN_EIGHT_CHANNEL"
+				(path "/4ab117b5-303d-43ee-89d9-dc74bd757dd4"
+					(reference "J5")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "screw-terminal-5mm-2p:WJ126V-5.0-2P")
+		(at 153.67 104.14 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "b25876dc-10f7-5fcb-81a2-c4b1782cb7c4")
+		(property "Reference" "J6"
+			(at 158.242 102.87 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "WJ126V-5.0-2P"
+			(at 158.242 105.41 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Footprint" "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P"
+			(at 153.67 111.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 153.67 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C8404"
+			(at 153.67 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "AN_EIGHT_CHANNEL"
+				(path "/4ab117b5-303d-43ee-89d9-dc74bd757dd4"
+					(reference "J6")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "screw-terminal-5mm-2p:WJ126V-5.0-2P")
+		(at 179.07 104.14 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "8e98a2ff-0cbb-57fb-9693-0b40b408caf3")
+		(property "Reference" "J7"
+			(at 183.642 102.87 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "WJ126V-5.0-2P"
+			(at 183.642 105.41 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Footprint" "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P"
+			(at 179.07 111.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 179.07 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C8404"
+			(at 179.07 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "AN_EIGHT_CHANNEL"
+				(path "/4ab117b5-303d-43ee-89d9-dc74bd757dd4"
+					(reference "J7")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "screw-terminal-5mm-2p:WJ126V-5.0-2P")
+		(at 204.47 104.14 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "774af499-c9a6-50f6-824d-3d36991ef804")
+		(property "Reference" "J8"
+			(at 209.042 102.87 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "WJ126V-5.0-2P"
+			(at 209.042 105.41 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Footprint" "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P"
+			(at 204.47 111.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 204.47 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C8404"
+			(at 204.47 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "AN_EIGHT_CHANNEL"
+				(path "/4ab117b5-303d-43ee-89d9-dc74bd757dd4"
+					(reference "J8")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "screw-terminal-5mm-2p:WJ126V-5.0-2P")
+		(at 229.87 104.14 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "aaffd0a5-4b42-5523-aaec-51efdb0d6113")
+		(property "Reference" "J9"
+			(at 234.442 102.87 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "WJ126V-5.0-2P"
+			(at 234.442 105.41 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Footprint" "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P"
+			(at 229.87 111.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 229.87 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C8404"
+			(at 229.87 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "AN_EIGHT_CHANNEL"
+				(path "/4ab117b5-303d-43ee-89d9-dc74bd757dd4"
+					(reference "J9")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 60.96 109.22 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "ebb8cdb4-6e29-5a2d-b908-5b9dda44d6a9")
+		(property "Reference" "#PWR27229"
+			(at 60.96 106.22 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 60.96 112.22 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "AN_EIGHT_CHANNEL"
+				(path "/4ab117b5-303d-43ee-89d9-dc74bd757dd4"
+					(reference "#PWR27229")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 86.36 109.22 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "97ae474d-32b1-5597-a1f6-bec57b0b06e1")
+		(property "Reference" "#PWR17028"
+			(at 86.36 106.22 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 86.36 112.22 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "AN_EIGHT_CHANNEL"
+				(path "/4ab117b5-303d-43ee-89d9-dc74bd757dd4"
+					(reference "#PWR17028")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 111.76 109.22 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "d7516f36-8335-5cfb-a9ef-b92b82f2556f")
+		(property "Reference" "#PWR67527"
+			(at 111.76 106.22 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 111.76 112.22 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "AN_EIGHT_CHANNEL"
+				(path "/4ab117b5-303d-43ee-89d9-dc74bd757dd4"
+					(reference "#PWR67527")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 137.16 109.22 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "96d2e243-dbb2-5426-8391-cb227d2ea820")
+		(property "Reference" "#PWR06521"
+			(at 137.16 106.22 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 137.16 112.22 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "AN_EIGHT_CHANNEL"
+				(path "/4ab117b5-303d-43ee-89d9-dc74bd757dd4"
+					(reference "#PWR06521")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 162.56 109.22 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "5ab7d680-2244-54ae-aeb2-24e8f5fcba46")
+		(property "Reference" "#PWR55463"
+			(at 162.56 106.22 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 162.56 112.22 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "AN_EIGHT_CHANNEL"
+				(path "/4ab117b5-303d-43ee-89d9-dc74bd757dd4"
+					(reference "#PWR55463")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 187.96 109.22 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "b34627f8-a4d5-575d-9840-678043ed0967")
+		(property "Reference" "#PWR49297"
+			(at 187.96 106.22 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 187.96 112.22 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "AN_EIGHT_CHANNEL"
+				(path "/4ab117b5-303d-43ee-89d9-dc74bd757dd4"
+					(reference "#PWR49297")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 213.36 109.22 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "494fa962-1626-54e9-9ff9-27100aa193fb")
+		(property "Reference" "#PWR37254"
+			(at 213.36 106.22 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 213.36 112.22 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "AN_EIGHT_CHANNEL"
+				(path "/4ab117b5-303d-43ee-89d9-dc74bd757dd4"
+					(reference "#PWR37254")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 238.76 109.22 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "f6f3deb0-48ed-5ede-a5e3-ebc07b6246c6")
+		(property "Reference" "#PWR33115"
+			(at 238.76 106.22 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 238.76 112.22 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "AN_EIGHT_CHANNEL"
+				(path "/4ab117b5-303d-43ee-89d9-dc74bd757dd4"
+					(reference "#PWR33115")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(wire
+		(pts (xy 58.42 101.6) (xy 60.96 101.6))
+		(stroke (width 0) (type default))
+		(uuid "5eb6bd16-a768-54ea-9442-31b66ea899eb")
+	)
+	(wire
+		(pts (xy 83.82 101.6) (xy 86.36 101.6))
+		(stroke (width 0) (type default))
+		(uuid "f6cbdb95-4207-5b1c-b22c-1e7e924c4358")
+	)
+	(wire
+		(pts (xy 109.22 101.6) (xy 111.76 101.6))
+		(stroke (width 0) (type default))
+		(uuid "3ac0317a-8289-583e-bb11-9b82ac1c580c")
+	)
+	(wire
+		(pts (xy 134.62 101.6) (xy 137.16 101.6))
+		(stroke (width 0) (type default))
+		(uuid "1c438051-7178-5ff6-9388-c1dabde3814d")
+	)
+	(wire
+		(pts (xy 160.02 101.6) (xy 162.56 101.6))
+		(stroke (width 0) (type default))
+		(uuid "d074947c-fb50-59b1-8143-5cb178562945")
+	)
+	(wire
+		(pts (xy 185.42 101.6) (xy 187.96 101.6))
+		(stroke (width 0) (type default))
+		(uuid "97362c5d-49c8-5a1a-a505-ed49098a5b7b")
+	)
+	(wire
+		(pts (xy 210.82 101.6) (xy 213.36 101.6))
+		(stroke (width 0) (type default))
+		(uuid "ef8f2afe-3b3d-5cf7-9223-7ada07f27339")
+	)
+	(wire
+		(pts (xy 236.22 101.6) (xy 238.76 101.6))
+		(stroke (width 0) (type default))
+		(uuid "a0f9fa6a-5441-5f61-ab90-db1ea69ea360")
+	)
+	(wire
+		(pts (xy 58.42 106.68) (xy 60.96 106.68))
+		(stroke (width 0) (type default))
+		(uuid "a30d5b7a-ed48-5797-b47c-c4a0e0decaf4")
+	)
+	(wire
+		(pts (xy 60.96 106.68) (xy 60.96 109.22))
+		(stroke (width 0) (type default))
+		(uuid "3b892363-51af-5d44-a4bd-3c27f585b8bd")
+	)
+	(wire
+		(pts (xy 83.82 106.68) (xy 86.36 106.68))
+		(stroke (width 0) (type default))
+		(uuid "efb9bd30-83a6-5a24-a0ac-90a967400c5f")
+	)
+	(wire
+		(pts (xy 86.36 106.68) (xy 86.36 109.22))
+		(stroke (width 0) (type default))
+		(uuid "d00238b4-d94a-5d3f-a7ef-cfb42fc0b538")
+	)
+	(wire
+		(pts (xy 109.22 106.68) (xy 111.76 106.68))
+		(stroke (width 0) (type default))
+		(uuid "2787018e-44c6-5195-8293-119d8351234d")
+	)
+	(wire
+		(pts (xy 111.76 106.68) (xy 111.76 109.22))
+		(stroke (width 0) (type default))
+		(uuid "5141092b-995f-513f-8f58-744bd9d23114")
+	)
+	(wire
+		(pts (xy 134.62 106.68) (xy 137.16 106.68))
+		(stroke (width 0) (type default))
+		(uuid "b1dc5ae2-0625-5d3d-a5dd-e12cb57d9159")
+	)
+	(wire
+		(pts (xy 137.16 106.68) (xy 137.16 109.22))
+		(stroke (width 0) (type default))
+		(uuid "484bf1b1-ffe7-5ff4-af40-1e8b02f33f1e")
+	)
+	(wire
+		(pts (xy 160.02 106.68) (xy 162.56 106.68))
+		(stroke (width 0) (type default))
+		(uuid "07377266-aab0-5a55-a75e-1eb77e7116ee")
+	)
+	(wire
+		(pts (xy 162.56 106.68) (xy 162.56 109.22))
+		(stroke (width 0) (type default))
+		(uuid "05445ed8-1b74-5079-8cbc-4000ccd0fc25")
+	)
+	(wire
+		(pts (xy 185.42 106.68) (xy 187.96 106.68))
+		(stroke (width 0) (type default))
+		(uuid "ff398f09-bef6-5613-aabe-7f9aaa9fae3f")
+	)
+	(wire
+		(pts (xy 187.96 106.68) (xy 187.96 109.22))
+		(stroke (width 0) (type default))
+		(uuid "a1e5b129-8079-5a75-9f16-6af89b221ad8")
+	)
+	(wire
+		(pts (xy 210.82 106.68) (xy 213.36 106.68))
+		(stroke (width 0) (type default))
+		(uuid "7db073d2-7743-5bd2-8dd6-0bb884eab683")
+	)
+	(wire
+		(pts (xy 213.36 106.68) (xy 213.36 109.22))
+		(stroke (width 0) (type default))
+		(uuid "78b16112-9318-58b5-acf6-5424a9bd4740")
+	)
+	(wire
+		(pts (xy 236.22 106.68) (xy 238.76 106.68))
+		(stroke (width 0) (type default))
+		(uuid "6877a1ef-202e-527a-a685-bd6d8ed97e69")
+	)
+	(wire
+		(pts (xy 238.76 106.68) (xy 238.76 109.22))
+		(stroke (width 0) (type default))
+		(uuid "1972ace7-e83a-5efb-b7ac-a949b79b4886")
+	)
+	(hierarchical_label "AIN1" (shape output)
+		(at 60.96 101.6 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "fdd8b250-8858-55e9-bf79-a0c28580bf07")
+	)
+	(hierarchical_label "AIN2" (shape output)
+		(at 86.36 101.6 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "2c3db79c-1bfd-5524-8ea7-f06fc6951288")
+	)
+	(hierarchical_label "AIN3" (shape output)
+		(at 111.76 101.6 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "b3fd7eea-bedc-5751-abd0-118ba71f0bcc")
+	)
+	(hierarchical_label "AIN4" (shape output)
+		(at 137.16 101.6 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "b92fc831-d151-545b-9563-5f4d834a82db")
+	)
+	(hierarchical_label "AIN5" (shape output)
+		(at 162.56 101.6 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "60652288-88c0-5a66-9f86-5baa83a1281e")
+	)
+	(hierarchical_label "AIN6" (shape output)
+		(at 187.96 101.6 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "621ac307-02ba-5406-881a-53030a8cb0ad")
+	)
+	(hierarchical_label "AIN7" (shape output)
+		(at 213.36 101.6 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "9d5c9079-74e5-5050-b59b-1963a14fe737")
+	)
+	(hierarchical_label "AIN8" (shape output)
+		(at 238.76 101.6 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "ba733053-754f-5c1a-acf6-88c74e22458c")
+	)
+
+	(sheet_instances
+		(path "/48518ef0-c872-4569-bebd-a456d236de19"
+			(page "SCREW_TERMINALS")
+		)
+	)
+)

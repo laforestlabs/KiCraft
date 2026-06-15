@@ -1,0 +1,77 @@
+{
+  "project_name": "AN_ESP32_S3",
+  "pcb_file": "AN_ESP32_S3.kicad_pcb",
+  "power_nets": [
+    "+3V3",
+    "GND",
+    "VBAT"
+  ],
+  "ic_groups": {
+    "Q1": [
+      "R1",
+      "R2"
+    ],
+    "U1": [
+      "C1",
+      "C2",
+      "C3",
+      "C4",
+      "L1"
+    ],
+    "U2": [
+      "C5",
+      "C6",
+      "C7"
+    ],
+    "U3": [
+      "C8",
+      "C9",
+      "C10",
+      "R7",
+      "R8"
+    ],
+    "U4": [
+      "C11",
+      "C12",
+      "C13",
+      "R9",
+      "R10"
+    ]
+  },
+  "group_labels": {
+    "U1": "BUCK_3V3",
+    "U2": "ESP32-S3",
+    "U3": "MOTOR_1",
+    "U4": "MOTOR_2"
+  },
+  "thermal_refs": [
+    "U1"
+  ],
+  "signal_flow_order": [
+    "J2",
+    "U2",
+    "U3",
+    "U4"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J2": {
+      "edge": "right"
+    },
+    "J3": {
+      "edge": "top"
+    },
+    "J4": {
+      "edge": "top"
+    },
+    "J5": {
+      "edge": "top"
+    },
+    "J6": {
+      "edge": "top"
+    }
+  },
+  "enable_board_size_search": true
+}

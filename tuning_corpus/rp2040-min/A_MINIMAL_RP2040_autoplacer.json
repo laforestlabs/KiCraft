@@ -1,0 +1,62 @@
+{
+  "project_name": "A_MINIMAL_RP2040",
+  "pcb_file": "A_MINIMAL_RP2040.kicad_pcb",
+  "power_nets": [
+    "+3V3",
+    "GND",
+    "VBUS"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C1",
+      "C2"
+    ],
+    "U2": [
+      "C5",
+      "C6",
+      "C7",
+      "C8",
+      "C9",
+      "C10",
+      "C11",
+      "C12",
+      "C13",
+      "R3"
+    ],
+    "Y1": [
+      "C3",
+      "C4"
+    ],
+    "U3": [
+      "C14"
+    ]
+  },
+  "group_labels": {
+    "U1": "3V3 REGULATOR",
+    "U2": "RP2040",
+    "U3": "QSPI FLASH"
+  },
+  "thermal_refs": [
+    "U1"
+  ],
+  "signal_flow_order": [
+    "J1",
+    "U1",
+    "U2",
+    "U3",
+    "J2",
+    "J3"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J2": {
+      "edge": "bottom"
+    },
+    "J3": {
+      "edge": "bottom"
+    }
+  },
+  "enable_board_size_search": true
+}

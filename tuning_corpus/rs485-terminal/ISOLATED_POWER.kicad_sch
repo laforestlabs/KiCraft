@@ -1,0 +1,763 @@
+(kicad_sch
+	(version 20250114)
+	(generator "eeschema")
+	(generator_version "9.0")
+	(uuid "1d06c29d-e589-4eb5-acd5-d10268235216")
+	(paper "A4")
+
+	(lib_symbols
+		(symbol "b0505s-1wr3:B0505S-1WR3_C7465178"
+    (in_bom yes)
+    (on_board yes)
+    (property
+      "Reference"
+      "U"
+      (id 0)
+      (at 0 8.89 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Value"
+      "B0505S-1WR3_C7465178"
+      (id 1)
+      (at 0 -8.89 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Footprint"
+      "b0505s-1wr3:PWRM-TH_B0505S-1WR3"
+      (id 2)
+      (at 0 -11.43 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Datasheet"
+      "https://www.lcsc.com/datasheet/C7465178.pdf"
+      (id 3)
+      (at 0 -13.97 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Manufacturer"
+      "EVISUN(易成)"
+      (id 4)
+      (at 0 -16.51 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "MPN"
+      "B0505S-1WR3"
+      (id 5)
+      (at 0 -19.05 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "LCSC Part"
+      "C7465178"
+      (id 6)
+      (at 0 -21.59 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "ki_keywords"
+      "Power Modules"
+      (id 8)
+      (at 0 -24.13 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (symbol "B0505S-1WR3_C7465178_0_1"
+      (rectangle
+        (start -5.08 6.35)
+        (end 7.62 -6.35)
+        (stroke (width 0) (type default))
+        (fill (type background))
+      )
+      (circle
+        (center -3.81 5.08)
+        (radius 0.38)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (pin unspecified line
+        (at -7.62 3.81 0)
+        (length 2.54)
+        (name "-Vin" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -7.62 1.27 0)
+        (length 2.54)
+        (name "+Vin" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -7.62 -1.27 0)
+        (length 2.54)
+        (name "-Vout" (effects (font (size 1.27 1.27))))
+        (number "3" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -7.62 -3.81 0)
+        (length 2.54)
+        (name "+Vout" (effects (font (size 1.27 1.27))))
+        (number "4" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )
+		(symbol "Device:C"
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0.254)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "C"
+			(at 0.635 2.54 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "C"
+			(at 0.635 -2.54 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" ""
+			(at 0.9652 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Unpolarized capacitor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "cap capacitor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_fp_filters" "C_*"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "C_0_1"
+			(polyline
+				(pts
+					(xy -2.032 0.762) (xy 2.032 0.762)
+				)
+				(stroke
+					(width 0.508)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy -2.032 -0.762) (xy 2.032 -0.762)
+				)
+				(stroke
+					(width 0.508)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "C_1_1"
+			(pin passive line
+				(at 0 3.81 270)
+				(length 2.794)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 0 -3.81 90)
+				(length 2.794)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+		(symbol "power:GND"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -6.35 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "GND_0_1"
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 -1.27) (xy 1.27 -1.27) (xy 0 -2.54) (xy -1.27 -1.27) (xy 0 -1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "GND_1_1"
+			(pin power_in line
+				(at 0 0 270)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+		(symbol "power:VCC"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "VCC"
+			(at 0 3.556 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"VCC\""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "VCC_0_1"
+			(polyline
+				(pts
+					(xy -0.762 1.27) (xy 0 2.54)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0 2.54) (xy 0.762 1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 2.54)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "VCC_1_1"
+			(pin power_in line
+				(at 0 0 90)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+	)
+
+	(symbol
+		(lib_id "b0505s-1wr3:B0505S-1WR3_C7465178")
+		(at 151.13 118.11 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "5cdefe4f-9913-5aa5-b936-ad0db43cecf6")
+		(property "Reference" "U1"
+			(at 151.13 127 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "B0505S-1WR3"
+			(at 151.13 124.46 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "b0505s-1wr3:PWRM-TH_B0505S-1WR3"
+			(at 151.13 125.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "https://www.lcsc.com/datasheet/C7465178.html"
+			(at 151.13 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "EVISUN B0505S-1WR3 isolated DC-DC, 5V/1W, LCSC C7465178"
+			(at 151.13 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "MAX485_ISOLATED_BOARD"
+				(path "/1d06c29d-e589-4eb5-acd5-d10268235216"
+					(reference "U1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 143.51 95.25 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "8118b823-82e8-5395-8700-07c6604752bc")
+		(property "Reference" "C3"
+			(at 147.828 93.98 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "10uF"
+			(at 147.828 96.52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Capacitor_SMD:C_0805_2012Metric"
+			(at 143.51 102.25 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 143.51 95.25 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "10uF 16V X5R 0805 input cap for DC-DC, LCSC C17024 (defaulted)"
+			(at 143.51 95.25 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "MAX485_ISOLATED_BOARD"
+				(path "/1d06c29d-e589-4eb5-acd5-d10268235216"
+					(reference "C3")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 156.21 95.25 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "efb4006d-5563-5f23-aee8-cc11f157982b")
+		(property "Reference" "C4"
+			(at 157.988 93.98 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "10uF"
+			(at 157.988 96.52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Capacitor_SMD:C_0805_2012Metric"
+			(at 156.21 102.25 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 156.21 95.25 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "10uF 16V X5R 0805 output cap for DC-DC, LCSC C17024 (defaulted)"
+			(at 156.21 95.25 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "MAX485_ISOLATED_BOARD"
+				(path "/1d06c29d-e589-4eb5-acd5-d10268235216"
+					(reference "C4")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:VCC")
+		(at 143.51 88.9 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "c6d89a4f-03bf-5803-a2f1-70e3d9766f97")
+		(property "Reference" "#PWR07659"
+			(at 143.51 85.9 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "VCC"
+			(at 143.51 91.9 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "MAX485_ISOLATED_BOARD"
+				(path "/1d06c29d-e589-4eb5-acd5-d10268235216"
+					(reference "#PWR07659")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:VCC")
+		(at 140.97 114.3 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "9855a17f-9762-5fa8-aff6-2256113fc799")
+		(property "Reference" "#PWR43797"
+			(at 140.97 111.3 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "VCC"
+			(at 140.97 117.3 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "MAX485_ISOLATED_BOARD"
+				(path "/1d06c29d-e589-4eb5-acd5-d10268235216"
+					(reference "#PWR43797")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 143.51 101.6 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "c3bfbd46-5021-55be-991b-f547c6843de5")
+		(property "Reference" "#PWR13893"
+			(at 143.51 98.6 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 143.51 104.6 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "MAX485_ISOLATED_BOARD"
+				(path "/1d06c29d-e589-4eb5-acd5-d10268235216"
+					(reference "#PWR13893")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 142.24 114.3 90)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "ffc9520b-84fb-59ca-8e62-4df3cc039793")
+		(property "Reference" "#PWR80177"
+			(at 142.24 111.3 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 142.24 117.3 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "MAX485_ISOLATED_BOARD"
+				(path "/1d06c29d-e589-4eb5-acd5-d10268235216"
+					(reference "#PWR80177")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(wire
+		(pts (xy 143.51 121.92) (xy 140.97 121.92))
+		(stroke (width 0) (type default))
+		(uuid "18a0d65b-3c93-5611-82fc-26e0d3db10aa")
+	)
+	(wire
+		(pts (xy 156.21 91.44) (xy 156.21 88.9))
+		(stroke (width 0) (type default))
+		(uuid "239b5cd7-9f37-5d97-8fc1-014710a26a9f")
+	)
+	(wire
+		(pts (xy 143.51 119.38) (xy 140.97 119.38))
+		(stroke (width 0) (type default))
+		(uuid "381fcd60-21a5-5b2f-b670-a89c95bc540f")
+	)
+	(wire
+		(pts (xy 156.21 99.06) (xy 156.21 101.6))
+		(stroke (width 0) (type default))
+		(uuid "f64dbaf5-2837-530f-bb71-2e358c46f668")
+	)
+	(wire
+		(pts (xy 143.51 91.44) (xy 143.51 88.9))
+		(stroke (width 0) (type default))
+		(uuid "56a3c89e-bce1-552a-a307-7e6dfadaedd7")
+	)
+	(wire
+		(pts (xy 143.51 116.84) (xy 140.97 116.84))
+		(stroke (width 0) (type default))
+		(uuid "7e2e7db9-e668-508b-8c58-0862e2ceb299")
+	)
+	(wire
+		(pts (xy 140.97 116.84) (xy 140.97 114.3))
+		(stroke (width 0) (type default))
+		(uuid "d9dea81e-86ed-52ac-a49f-6aafa89e5ade")
+	)
+	(wire
+		(pts (xy 143.51 99.06) (xy 143.51 101.6))
+		(stroke (width 0) (type default))
+		(uuid "4281ee69-5d65-5729-b419-8b057b71ff82")
+	)
+	(wire
+		(pts (xy 143.51 114.3) (xy 142.24 114.3))
+		(stroke (width 0) (type default))
+		(uuid "d73a8f2c-6232-55d4-abc6-65044de4f2b5")
+	)
+	(hierarchical_label "VISO" (shape bidirectional)
+		(at 140.97 121.92 180)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "a97606f7-a4b4-5282-a563-3800c45fb701")
+	)
+	(hierarchical_label "VISO" (shape bidirectional)
+		(at 156.21 88.9 90)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "a97606f7-a4b4-5282-a563-3800c45fb701")
+	)
+	(hierarchical_label "GND_ISO" (shape bidirectional)
+		(at 140.97 119.38 180)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "7b16dd62-66db-5071-a1a5-0ba8ad68dbe3")
+	)
+	(hierarchical_label "GND_ISO" (shape bidirectional)
+		(at 156.21 101.6 270)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "7b16dd62-66db-5071-a1a5-0ba8ad68dbe3")
+	)
+
+	(sheet_instances
+		(path "/3422619b-1151-48c0-971f-dc2a32a7a87a"
+			(page "ISOLATED_POWER")
+		)
+	)
+)

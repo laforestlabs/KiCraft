@@ -1,0 +1,18 @@
+{
+  "project_name": "A_24_PIN",
+  "pcb_file": "A_24_PIN.kicad_pcb",
+  "power_nets": [],
+  "signal_flow_order": [
+    "J1",
+    "J2"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "top"
+    },
+    "J2": {
+      "edge": "bottom"
+    }
+  },
+  "enable_board_size_search": true
+}

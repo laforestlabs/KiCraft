@@ -1,0 +1,44 @@
+{
+  "project_name": "STM32F103_DEV_BOARD",
+  "pcb_file": "STM32F103_DEV_BOARD.kicad_pcb",
+  "power_nets": [
+    "+3V3",
+    "GND",
+    "VBUS"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C1",
+      "C2"
+    ],
+    "U2": [
+      "C3",
+      "C4",
+      "C5",
+      "C6",
+      "C7",
+      "C8",
+      "C9"
+    ]
+  },
+  "group_labels": {
+    "U1": "3.3V REGULATOR",
+    "U2": "STM32F103"
+  },
+  "thermal_refs": [
+    "U1"
+  ],
+  "signal_flow_order": [
+    "U1",
+    "U2"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "bottom"
+    },
+    "J2": {
+      "edge": "top"
+    }
+  },
+  "enable_board_size_search": true
+}

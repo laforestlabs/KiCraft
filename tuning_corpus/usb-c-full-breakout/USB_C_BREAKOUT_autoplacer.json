@@ -1,0 +1,20 @@
+{
+  "project_name": "USB_C_BREAKOUT",
+  "pcb_file": "USB_C_BREAKOUT.kicad_pcb",
+  "power_nets": [
+    "GND",
+    "VBUS"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "right"
+    },
+    "J2": {
+      "edge": "left"
+    },
+    "J3": {
+      "edge": "left"
+    }
+  },
+  "enable_board_size_search": true
+}

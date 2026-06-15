@@ -1,0 +1,27 @@
+{
+  "project_name": "PASSIVE_SPEAKER_CROSSOVER",
+  "pcb_file": "PASSIVE_SPEAKER_CROSSOVER.kicad_pcb",
+  "power_nets": [
+    "GND"
+  ],
+  "signal_flow_order": [
+    "J1",
+    "L1",
+    "C1",
+    "C2",
+    "J2",
+    "J3"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J2": {
+      "edge": "right"
+    },
+    "J3": {
+      "edge": "right"
+    }
+  },
+  "enable_board_size_search": true
+}

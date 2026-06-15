@@ -1,0 +1,45 @@
+{
+  "project_name": "AN_AUDIO_BREAKOUT",
+  "pcb_file": "AN_AUDIO_BREAKOUT.kicad_pcb",
+  "power_nets": [
+    "+5V",
+    "GND"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C2"
+    ]
+  },
+  "group_labels": {
+    "U1": "QUAD BUFFER"
+  },
+  "signal_flow_order": [
+    "J1",
+    "J2",
+    "J3",
+    "J4",
+    "U1",
+    "J6"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "bottom"
+    },
+    "J2": {
+      "edge": "bottom"
+    },
+    "J3": {
+      "edge": "bottom"
+    },
+    "J4": {
+      "edge": "bottom"
+    },
+    "J5": {
+      "edge": "left"
+    },
+    "J6": {
+      "edge": "right"
+    }
+  },
+  "enable_board_size_search": true
+}

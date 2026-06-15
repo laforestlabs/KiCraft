@@ -1,0 +1,58 @@
+{
+  "project_name": "A_FOUR_CHANNEL",
+  "pcb_file": "A_FOUR_CHANNEL.kicad_pcb",
+  "power_nets": [
+    "+5V",
+    "GND",
+    "GND_ISO"
+  ],
+  "ic_groups": {
+    "U1": [
+      "R1"
+    ],
+    "U2": [
+      "R2"
+    ],
+    "U3": [
+      "R3"
+    ],
+    "U4": [
+      "R4"
+    ],
+    "U5": [
+      "C2"
+    ]
+  },
+  "group_labels": {
+    "U5": "RELAY_DRVR"
+  },
+  "thermal_refs": [
+    "U5",
+    "D1"
+  ],
+  "signal_flow_order": [
+    "J2",
+    "U1",
+    "U2",
+    "U3",
+    "U4",
+    "U5",
+    "K1",
+    "K2",
+    "K3",
+    "K4",
+    "J3"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J2": {
+      "edge": "left"
+    },
+    "J3": {
+      "edge": "right"
+    }
+  },
+  "enable_board_size_search": true
+}

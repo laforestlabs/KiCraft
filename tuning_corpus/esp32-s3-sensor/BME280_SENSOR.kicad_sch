@@ -1,0 +1,1128 @@
+(kicad_sch
+	(version 20250114)
+	(generator "eeschema")
+	(generator_version "9.0")
+	(uuid "4e49148d-faee-453d-a1e3-e0d34dfd6357")
+	(paper "A4")
+
+	(lib_symbols
+		(symbol "bme280-bosch-sensor:BME280"
+    (in_bom yes)
+    (on_board yes)
+    (property
+      "Reference"
+      "U"
+      (id 0)
+      (at 0 8.89 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Value"
+      "BME280"
+      (id 1)
+      (at 0 -8.89 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Footprint"
+      "bme280-bosch-sensor:LGA-8_BME280_BL"
+      (id 2)
+      (at 0 -11.43 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Datasheet"
+      "https://lcsc.com/product-detail/Sensors_Bosch_BME280_BME280_C92489.html"
+      (id 3)
+      (at 0 -13.97 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Manufacturer"
+      "Bosch(博世)"
+      (id 4)
+      (at 0 -16.51 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "MPN"
+      "BME280"
+      (id 5)
+      (at 0 -19.05 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "LCSC Part"
+      "C92489"
+      (id 6)
+      (at 0 -21.59 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "ki_keywords"
+      "Humidity Sensors/Temperature and Humidity Sensors"
+      (id 8)
+      (at 0 -24.13 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (symbol "BME280_0_1"
+      (rectangle
+        (start -10.16 6.86)
+        (end 10.16 -6.86)
+        (stroke (width 0) (type default))
+        (fill (type background))
+      )
+      (pin unspecified line
+        (at 12.70 3.81 180)
+        (length 2.54)
+        (name "GND" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 12.70 1.27 180)
+        (length 2.54)
+        (name "CSB" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 12.70 -1.27 180)
+        (length 2.54)
+        (name "SDI" (effects (font (size 1.27 1.27))))
+        (number "3" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 12.70 -3.81 180)
+        (length 2.54)
+        (name "SCK" (effects (font (size 1.27 1.27))))
+        (number "4" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -12.70 -3.81 0)
+        (length 2.54)
+        (name "SDO" (effects (font (size 1.27 1.27))))
+        (number "5" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -12.70 -1.27 0)
+        (length 2.54)
+        (name "VDDIO" (effects (font (size 1.27 1.27))))
+        (number "6" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -12.70 1.27 0)
+        (length 2.54)
+        (name "GND" (effects (font (size 1.27 1.27))))
+        (number "7" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -12.70 3.81 0)
+        (length 2.54)
+        (name "VDD" (effects (font (size 1.27 1.27))))
+        (number "8" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )
+		(symbol "Device:R"
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "R"
+			(at 2.032 0 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "R"
+			(at 0 0 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at -1.778 0 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "R res resistor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_fp_filters" "R_*"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "R_0_1"
+			(rectangle
+				(start -1.016 -2.54)
+				(end 1.016 2.54)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "R_1_1"
+			(pin passive line
+				(at 0 3.81 270)
+				(length 1.27)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 0 -3.81 90)
+				(length 1.27)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+		(symbol "Device:C"
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0.254)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "C"
+			(at 0.635 2.54 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "C"
+			(at 0.635 -2.54 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" ""
+			(at 0.9652 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Unpolarized capacitor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "cap capacitor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_fp_filters" "C_*"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "C_0_1"
+			(polyline
+				(pts
+					(xy -2.032 0.762) (xy 2.032 0.762)
+				)
+				(stroke
+					(width 0.508)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy -2.032 -0.762) (xy 2.032 -0.762)
+				)
+				(stroke
+					(width 0.508)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "C_1_1"
+			(pin passive line
+				(at 0 3.81 270)
+				(length 2.794)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 0 -3.81 90)
+				(length 2.794)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+		(symbol "power:+3V3"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "+3V3"
+			(at 0 3.556 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"+3V3\""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "+3V3_0_1"
+			(polyline
+				(pts
+					(xy -0.762 1.27) (xy 0 2.54)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0 2.54) (xy 0.762 1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 2.54)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "+3V3_1_1"
+			(pin power_in line
+				(at 0 0 90)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+		(symbol "power:GND"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -6.35 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "GND_0_1"
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 -1.27) (xy 1.27 -1.27) (xy 0 -2.54) (xy -1.27 -1.27) (xy 0 -1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "GND_1_1"
+			(pin power_in line
+				(at 0 0 270)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+	)
+
+	(symbol
+		(lib_id "bme280-bosch-sensor:BME280")
+		(at 139.7 114.3 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "622e50d3-904d-5955-a171-736412e410a0")
+		(property "Reference" "U4"
+			(at 139.7 107.95 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "BME280"
+			(at 139.7 105.41 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "bme280-bosch-sensor:LGA-8_BME280_BL"
+			(at 139.7 121.3 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 139.7 114.3 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C92489 - Bosch BME280 temp/humidity/pressure sensor, LGA-8"
+			(at 139.7 114.3 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "ESP32S3_ENV_NODE"
+				(path "/4e49148d-faee-453d-a1e3-e0d34dfd6357"
+					(reference "U4")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 166.37 115.57 270)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "30dd06a5-8cfd-5f13-bf9b-3d2a0a5cac22")
+		(property "Reference" "R3"
+			(at 174.498 114.3 90)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "4.7k"
+			(at 174.498 116.84 90)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Resistor_SMD:R_0805_2012Metric"
+			(at 166.37 122.57 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 166.37 115.57 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "I2C SDA pull-up for BME280 bus"
+			(at 166.37 115.57 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "ESP32S3_ENV_NODE"
+				(path "/4e49148d-faee-453d-a1e3-e0d34dfd6357"
+					(reference "R3")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 166.37 125.73 270)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "014c9096-0129-575a-bb23-524cbf905bb4")
+		(property "Reference" "R4"
+			(at 160.782 124.46 90)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "4.7k"
+			(at 160.782 127 90)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Footprint" "Resistor_SMD:R_0805_2012Metric"
+			(at 166.37 132.73 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 166.37 125.73 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "I2C SCL pull-up for BME280 bus"
+			(at 166.37 125.73 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "ESP32S3_ENV_NODE"
+				(path "/4e49148d-faee-453d-a1e3-e0d34dfd6357"
+					(reference "R4")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 152.4 91.44 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "86f8f472-c12a-5cb4-a4e1-cf7aa8d6d286")
+		(property "Reference" "C6"
+			(at 156.718 90.17 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "0.1uF"
+			(at 156.718 92.71 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Capacitor_SMD:C_0805_2012Metric"
+			(at 152.4 98.44 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 152.4 91.44 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "Decoupling capacitor for BME280 sensor"
+			(at 152.4 91.44 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "ESP32S3_ENV_NODE"
+				(path "/4e49148d-faee-453d-a1e3-e0d34dfd6357"
+					(reference "C6")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 152.4 97.79 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "60936f95-4e06-5497-be3e-bf24c85762e3")
+		(property "Reference" "#PWR64033"
+			(at 152.4 94.79 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 152.4 100.79 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "ESP32S3_ENV_NODE"
+				(path "/4e49148d-faee-453d-a1e3-e0d34dfd6357"
+					(reference "#PWR64033")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 154.94 113.03 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "d4f6b977-ae95-5faf-9d48-285d23b738e2")
+		(property "Reference" "#PWR38607"
+			(at 154.94 110.03 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 154.94 116.03 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "ESP32S3_ENV_NODE"
+				(path "/4e49148d-faee-453d-a1e3-e0d34dfd6357"
+					(reference "#PWR38607")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 124.46 120.65 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "8c130591-9879-5e72-88cb-777ca323140b")
+		(property "Reference" "#PWR06270"
+			(at 124.46 117.65 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 124.46 123.65 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "ESP32S3_ENV_NODE"
+				(path "/4e49148d-faee-453d-a1e3-e0d34dfd6357"
+					(reference "#PWR06270")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+3V3")
+		(at 152.4 85.09 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "31546221-dc6d-5fd1-bd7f-8e90521a01ad")
+		(property "Reference" "#PWR13758"
+			(at 152.4 82.09 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "+3V3"
+			(at 152.4 88.09 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "ESP32S3_ENV_NODE"
+				(path "/4e49148d-faee-453d-a1e3-e0d34dfd6357"
+					(reference "#PWR13758")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+3V3")
+		(at 153.67 113.03 270)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "f57ba10b-2fbf-51b7-8926-e1aebffa517d")
+		(property "Reference" "#PWR88414"
+			(at 153.67 110.03 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "+3V3"
+			(at 153.67 116.03 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "ESP32S3_ENV_NODE"
+				(path "/4e49148d-faee-453d-a1e3-e0d34dfd6357"
+					(reference "#PWR88414")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+3V3")
+		(at 124.46 107.95 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "11bd88cb-cf4a-5043-b38a-ad436a82f7c5")
+		(property "Reference" "#PWR78583"
+			(at 124.46 104.95 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "+3V3"
+			(at 124.46 110.95 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "ESP32S3_ENV_NODE"
+				(path "/4e49148d-faee-453d-a1e3-e0d34dfd6357"
+					(reference "#PWR78583")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+3V3")
+		(at 125.73 115.57 90)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "1f2f0d73-7976-5519-8808-e0b1c49f0ff1")
+		(property "Reference" "#PWR35794"
+			(at 125.73 112.57 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "+3V3"
+			(at 125.73 118.57 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "ESP32S3_ENV_NODE"
+				(path "/4e49148d-faee-453d-a1e3-e0d34dfd6357"
+					(reference "#PWR35794")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+3V3")
+		(at 172.72 113.03 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "975e0b48-6483-5247-ba01-98de15b32c8c")
+		(property "Reference" "#PWR14390"
+			(at 172.72 110.03 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "+3V3"
+			(at 172.72 116.03 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "ESP32S3_ENV_NODE"
+				(path "/4e49148d-faee-453d-a1e3-e0d34dfd6357"
+					(reference "#PWR14390")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+3V3")
+		(at 172.72 123.19 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "31e59a3f-fd6d-5301-9972-62db5d1070d9")
+		(property "Reference" "#PWR02340"
+			(at 172.72 120.19 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "+3V3"
+			(at 172.72 126.19 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "ESP32S3_ENV_NODE"
+				(path "/4e49148d-faee-453d-a1e3-e0d34dfd6357"
+					(reference "#PWR02340")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(wire
+		(pts (xy 152.4 115.57) (xy 154.94 115.57))
+		(stroke (width 0) (type default))
+		(uuid "8f98ac58-e6cb-5357-b3ea-5aff47994dc1")
+	)
+	(wire
+		(pts (xy 162.56 115.57) (xy 160.02 115.57))
+		(stroke (width 0) (type default))
+		(uuid "b54715e5-d877-5096-bae7-aae7b5ba7118")
+	)
+	(wire
+		(pts (xy 152.4 118.11) (xy 154.94 118.11))
+		(stroke (width 0) (type default))
+		(uuid "0e742ca7-25ec-5c30-ac94-2bcbf076899a")
+	)
+	(wire
+		(pts (xy 162.56 125.73) (xy 160.02 125.73))
+		(stroke (width 0) (type default))
+		(uuid "a904ea04-999b-57ef-8a1b-c0708bb39fa4")
+	)
+	(wire
+		(pts (xy 127 113.03) (xy 124.46 113.03))
+		(stroke (width 0) (type default))
+		(uuid "d52fd91a-e58e-5cd1-9251-4f81b7764413")
+	)
+	(wire
+		(pts (xy 127 118.11) (xy 124.46 118.11))
+		(stroke (width 0) (type default))
+		(uuid "ec298465-8046-55cf-bf20-abf7a2cab49e")
+	)
+	(wire
+		(pts (xy 124.46 113.03) (xy 124.46 118.11))
+		(stroke (width 0) (type default))
+		(uuid "7e15d2b0-32bd-50a7-91d1-3d40dfdd7be9")
+	)
+	(wire
+		(pts (xy 152.4 95.25) (xy 152.4 97.79))
+		(stroke (width 0) (type default))
+		(uuid "0d34f9a4-f6ab-5608-8c53-6dfa842e22ee")
+	)
+	(wire
+		(pts (xy 152.4 110.49) (xy 154.94 110.49))
+		(stroke (width 0) (type default))
+		(uuid "61d0caf1-ab34-53ce-8fd6-47947727b306")
+	)
+	(wire
+		(pts (xy 154.94 110.49) (xy 154.94 113.03))
+		(stroke (width 0) (type default))
+		(uuid "51768076-26cc-5159-bb68-1a33ea4c3a28")
+	)
+	(wire
+		(pts (xy 124.46 118.11) (xy 124.46 120.65))
+		(stroke (width 0) (type default))
+		(uuid "1e883b27-59a1-5d9d-87cf-095d856a72af")
+	)
+	(wire
+		(pts (xy 152.4 87.63) (xy 152.4 85.09))
+		(stroke (width 0) (type default))
+		(uuid "fa4dbbe6-f390-543b-afa7-7c3173b209f5")
+	)
+	(wire
+		(pts (xy 152.4 113.03) (xy 153.67 113.03))
+		(stroke (width 0) (type default))
+		(uuid "b6f6ffc4-682a-5ba0-9eca-b2f073f691e2")
+	)
+	(wire
+		(pts (xy 127 110.49) (xy 124.46 110.49))
+		(stroke (width 0) (type default))
+		(uuid "afdcf9fd-1e4f-5d22-ba90-fb5f9ad8abbb")
+	)
+	(wire
+		(pts (xy 124.46 110.49) (xy 124.46 107.95))
+		(stroke (width 0) (type default))
+		(uuid "57be20f9-489e-5b5f-9251-9eab124bd5bc")
+	)
+	(wire
+		(pts (xy 127 115.57) (xy 125.73 115.57))
+		(stroke (width 0) (type default))
+		(uuid "9b5f1308-fbef-54e3-bb9c-3f7fee2b1142")
+	)
+	(wire
+		(pts (xy 170.18 115.57) (xy 172.72 115.57))
+		(stroke (width 0) (type default))
+		(uuid "209a6fa6-c10f-57b0-b1e4-ea0d19cd5a4a")
+	)
+	(wire
+		(pts (xy 172.72 115.57) (xy 172.72 113.03))
+		(stroke (width 0) (type default))
+		(uuid "f06b2b14-2f18-5e5d-bfc7-c2a846998fe4")
+	)
+	(wire
+		(pts (xy 170.18 125.73) (xy 172.72 125.73))
+		(stroke (width 0) (type default))
+		(uuid "ef5c5523-a80a-52d1-b8ce-06eebfc4b7ef")
+	)
+	(wire
+		(pts (xy 172.72 125.73) (xy 172.72 123.19))
+		(stroke (width 0) (type default))
+		(uuid "96b8794e-97c5-5d06-8417-cc225c4ba7ce")
+	)
+	(hierarchical_label "I2C_SDA" (shape bidirectional)
+		(at 154.94 115.57 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "ccd0de49-9f5f-562c-8dff-cf80bfbdfac2")
+	)
+	(hierarchical_label "I2C_SDA" (shape bidirectional)
+		(at 160.02 115.57 180)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "ccd0de49-9f5f-562c-8dff-cf80bfbdfac2")
+	)
+	(hierarchical_label "I2C_SCL" (shape bidirectional)
+		(at 154.94 118.11 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "8fdd143e-70dd-5f33-aa6d-2138ab6b7157")
+	)
+	(hierarchical_label "I2C_SCL" (shape bidirectional)
+		(at 160.02 125.73 180)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "8fdd143e-70dd-5f33-aa6d-2138ab6b7157")
+	)
+
+	(sheet_instances
+		(path "/364c9350-4b28-48af-a854-27695611af01"
+			(page "BME280_SENSOR")
+		)
+	)
+)

@@ -1,0 +1,59 @@
+{
+  "project_name": "AN_NRF52840_BLE",
+  "pcb_file": "AN_NRF52840_BLE.kicad_pcb",
+  "power_nets": [
+    "GND",
+    "VBAT",
+    "VDD"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C1",
+      "C2",
+      "C3",
+      "C4",
+      "C5",
+      "C6",
+      "C7",
+      "C8",
+      "C9",
+      "L1",
+      "Y1",
+      "Y2",
+      "C10",
+      "C11",
+      "C12",
+      "C13"
+    ],
+    "ANT1": [
+      "C14",
+      "C15",
+      "L2"
+    ]
+  },
+  "group_labels": {
+    "U1": "NRF52840",
+    "ANT1": "CHIP_ANTENNA",
+    "BT1": "COIN_CELL"
+  },
+  "signal_flow_order": [
+    "BT1",
+    "U1",
+    "ANT1"
+  ],
+  "component_zones": {
+    "BT1": {
+      "zone": "bottom"
+    },
+    "ANT1": {
+      "edge": "top"
+    },
+    "J1": {
+      "edge": "right"
+    },
+    "SW1": {
+      "edge": "left"
+    }
+  },
+  "enable_board_size_search": true
+}

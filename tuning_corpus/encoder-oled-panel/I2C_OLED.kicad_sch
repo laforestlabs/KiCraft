@@ -1,0 +1,460 @@
+(kicad_sch
+	(version 20250114)
+	(generator "eeschema")
+	(generator_version "9.0")
+	(uuid "279317aa-7aca-4a41-9a9f-96b133f03083")
+	(paper "A4")
+
+	(lib_symbols
+		(symbol "hs91l02w2c01-oled:HS91L02W2C01"
+    (in_bom yes)
+    (on_board yes)
+    (property
+      "Reference"
+      "OLED"
+      (id 0)
+      (at 0 8.89 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Value"
+      "HS91L02W2C01"
+      (id 1)
+      (at 0 -8.89 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Footprint"
+      "hs91l02w2c01-oled:OLED-TH_L38.0-W12.0_HS91L02W2C01"
+      (id 2)
+      (at 0 -11.43 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Datasheet"
+      "https://www.lcsc.com/datasheet/C5248081.pdf"
+      (id 3)
+      (at 0 -13.97 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Manufacturer"
+      "HS(汉昇)"
+      (id 4)
+      (at 0 -16.51 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "MPN"
+      "HS91L02W2C01"
+      (id 5)
+      (at 0 -19.05 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "LCSC Part"
+      "C5248081"
+      (id 6)
+      (at 0 -21.59 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "ki_keywords"
+      "OLED Displays Modules"
+      (id 8)
+      (at 0 -24.13 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (symbol "HS91L02W2C01_0_1"
+      (rectangle
+        (start -5.08 6.35)
+        (end 2.54 -6.35)
+        (stroke (width 0) (type default))
+        (fill (type background))
+      )
+      (pin unspecified line
+        (at 5.08 -3.81 180)
+        (length 2.54)
+        (name "GND" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 5.08 -1.27 180)
+        (length 2.54)
+        (name "VCC" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 5.08 1.27 180)
+        (length 2.54)
+        (name "SCL" (effects (font (size 1.27 1.27))))
+        (number "3" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 5.08 3.81 180)
+        (length 2.54)
+        (name "SDA" (effects (font (size 1.27 1.27))))
+        (number "4" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )
+		(symbol "power:+3V3"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "+3V3"
+			(at 0 3.556 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"+3V3\""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "+3V3_0_1"
+			(polyline
+				(pts
+					(xy -0.762 1.27) (xy 0 2.54)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0 2.54) (xy 0.762 1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 2.54)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "+3V3_1_1"
+			(pin power_in line
+				(at 0 0 90)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+		(symbol "power:GND"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -6.35 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "GND_0_1"
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 -1.27) (xy 1.27 -1.27) (xy 0 -2.54) (xy -1.27 -1.27) (xy 0 -1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "GND_1_1"
+			(pin power_in line
+				(at 0 0 270)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+	)
+
+	(symbol
+		(lib_id "hs91l02w2c01-oled:HS91L02W2C01")
+		(at 142.24 104.14 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "d43966a9-46fe-5503-b58d-58051d86bb8c")
+		(property "Reference" "U2"
+			(at 142.24 97.79 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "HS91L02W2C01"
+			(at 142.24 95.25 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "hs91l02w2c01-oled:OLED-TH_L38.0-W12.0_HS91L02W2C01"
+			(at 142.24 111.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 142.24 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "0.91 inch 128x32 I2C OLED module, SSD1306 controller, white, LCSC C5248081; footprint shows through-hole pins not SMT (defaulted)"
+			(at 142.24 104.14 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "FRONT_PANEL_BOARD"
+				(path "/279317aa-7aca-4a41-9a9f-96b133f03083"
+					(reference "U2")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 149.86 110.49 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "c7417b0f-4f6e-5290-bea8-2a84686aef14")
+		(property "Reference" "#PWR14513"
+			(at 149.86 107.49 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 149.86 113.49 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "FRONT_PANEL_BOARD"
+				(path "/279317aa-7aca-4a41-9a9f-96b133f03083"
+					(reference "#PWR14513")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+3V3")
+		(at 149.86 105.41 270)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "669053ff-451a-5694-9d4c-6fd0874e6050")
+		(property "Reference" "#PWR36090"
+			(at 149.86 102.41 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "+3V3"
+			(at 149.86 108.41 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "FRONT_PANEL_BOARD"
+				(path "/279317aa-7aca-4a41-9a9f-96b133f03083"
+					(reference "#PWR36090")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(wire
+		(pts (xy 147.32 102.87) (xy 149.86 102.87))
+		(stroke (width 0) (type default))
+		(uuid "fa525aa0-2052-5cb8-a8dd-a055a79677fd")
+	)
+	(wire
+		(pts (xy 147.32 100.33) (xy 149.86 100.33))
+		(stroke (width 0) (type default))
+		(uuid "f6689f71-e94d-5624-ad34-acc31a0b1389")
+	)
+	(wire
+		(pts (xy 147.32 107.95) (xy 149.86 107.95))
+		(stroke (width 0) (type default))
+		(uuid "7ea4a6c3-5d72-55ee-9306-a89495a03086")
+	)
+	(wire
+		(pts (xy 149.86 107.95) (xy 149.86 110.49))
+		(stroke (width 0) (type default))
+		(uuid "588b2887-86f3-51a5-b517-dfcc7dd264d7")
+	)
+	(wire
+		(pts (xy 147.32 105.41) (xy 149.86 105.41))
+		(stroke (width 0) (type default))
+		(uuid "3749cc0e-4ef6-5f35-be53-48d4c1317eee")
+	)
+	(hierarchical_label "SCL" (shape bidirectional)
+		(at 149.86 102.87 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "9bebea06-dc05-5ab8-a814-f7e54545c68b")
+	)
+	(hierarchical_label "SDA" (shape bidirectional)
+		(at 149.86 100.33 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "9dbaeba9-9904-5cee-a013-c412aca4dd57")
+	)
+
+	(sheet_instances
+		(path "/7a198409-8e36-40da-a9a5-2b08a5347421"
+			(page "I2C_OLED")
+		)
+	)
+)

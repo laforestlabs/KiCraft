@@ -1,0 +1,408 @@
+(kicad_sch
+	(version 20250114)
+	(generator "eeschema")
+	(generator_version "9.0")
+	(uuid "a75c9c20-d0f4-47d3-a5f4-da4afe3ed339")
+	(paper "A4")
+
+	(lib_symbols
+		(symbol "ec11e15244g1:EC11E15244G1"
+    (in_bom yes)
+    (on_board yes)
+    (property
+      "Reference"
+      "SW"
+      (id 0)
+      (at 0 12.70 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Value"
+      "EC11E15244G1"
+      (id 1)
+      (at 0 -12.70 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Footprint"
+      "ec11e15244g1:SW-TH_EC11E15244G1"
+      (id 2)
+      (at 0 -15.24 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Datasheet"
+      "https://lcsc.com/product-detail/Others_ALPS-Electric-EC11E15244G1_C370970.html"
+      (id 3)
+      (at 0 -17.78 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Manufacturer"
+      "ALPSALPINE(阿尔卑斯阿尔派)"
+      (id 4)
+      (at 0 -20.32 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "MPN"
+      "EC11E15244G1"
+      (id 5)
+      (at 0 -22.86 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "LCSC Part"
+      "C370970"
+      (id 6)
+      (at 0 -25.40 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "ki_keywords"
+      "Rotary Encoders"
+      (id 8)
+      (at 0 -27.94 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (symbol "EC11E15244G1_0_1"
+      (circle
+        (center 0.00 0.25)
+        (radius 2.92)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy -4.32 -4.32) (xy -3.56 -4.32) (xy -3.30 -4.32) (xy -3.30 -3.30) (xy 3.30 -3.30) (xy 3.30 -4.32) (xy 4.32 -4.32) (xy 4.32 4.83) (xy 3.30 4.83) (xy 3.30 3.81) (xy -3.30 3.81) (xy -3.30 4.83) (xy -4.32 4.83) (xy -4.32 -4.32)
+        )
+        (stroke (width 0) (type default))
+        (fill (type background))
+      )
+      (polyline
+        (pts
+          (xy -2.54 -3.30) (xy -2.54 -5.08) (xy -2.54 -5.08)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 0.00 -3.30) (xy 0.00 -5.08)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 2.54 -3.30) (xy 2.54 -5.08)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy -2.54 3.81) (xy -2.54 5.08)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 2.54 3.81) (xy 2.54 5.08)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (pin unspecified line
+        (at -2.54 -7.62 90)
+        (length 2.54)
+        (name "A" (effects (font (size 1.27 1.27))))
+        (number "A" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 2.54 -7.62 90)
+        (length 2.54)
+        (name "B" (effects (font (size 1.27 1.27))))
+        (number "B" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 0.00 -7.62 90)
+        (length 2.54)
+        (name "C" (effects (font (size 1.27 1.27))))
+        (number "C" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -2.54 7.62 270)
+        (length 2.54)
+        (name "D" (effects (font (size 1.27 1.27))))
+        (number "D" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 2.54 7.62 270)
+        (length 2.54)
+        (name "E" (effects (font (size 1.27 1.27))))
+        (number "E" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 7.62 -0.00 180)
+        (length 3.81)
+        (name "6" (effects (font (size 1.27 1.27))))
+        (number "6" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -7.62 -0.00 0)
+        (length 3.81)
+        (name "7" (effects (font (size 1.27 1.27))))
+        (number "7" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )
+		(symbol "power:GND"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -6.35 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "GND_0_1"
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 -1.27) (xy 1.27 -1.27) (xy 0 -2.54) (xy -1.27 -1.27) (xy 0 -1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "GND_1_1"
+			(pin power_in line
+				(at 0 0 270)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+	)
+
+	(symbol
+		(lib_id "ec11e15244g1:EC11E15244G1")
+		(at 148.59 105.41 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "45faa4af-b3b6-56b8-817d-c48f76dd6573")
+		(property "Reference" "U1"
+			(at 157.988 104.14 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "EC11E15244G1"
+			(at 157.988 106.68 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "ec11e15244g1:SW-TH_EC11E15244G1"
+			(at 148.59 112.41 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 148.59 105.41 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "ALPS rotary encoder with push button, LCSC C370970, through-hole (defaulted)"
+			(at 148.59 105.41 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "FRONT_PANEL_BOARD"
+				(path "/a75c9c20-d0f4-47d3-a5f4-da4afe3ed339"
+					(reference "U1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 148.59 115.57 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "09f91852-7cb1-5ae6-b839-9e93cda66a57")
+		(property "Reference" "#PWR14273"
+			(at 148.59 112.57 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 148.59 118.57 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "FRONT_PANEL_BOARD"
+				(path "/a75c9c20-d0f4-47d3-a5f4-da4afe3ed339"
+					(reference "#PWR14273")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 146.05 95.25 180)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "00a31eac-1609-599d-840f-6a796cc34204")
+		(property "Reference" "#PWR34415"
+			(at 146.05 92.25 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 146.05 98.25 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "FRONT_PANEL_BOARD"
+				(path "/a75c9c20-d0f4-47d3-a5f4-da4afe3ed339"
+					(reference "#PWR34415")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(wire
+		(pts (xy 146.05 113.03) (xy 146.05 115.57))
+		(stroke (width 0) (type default))
+		(uuid "ad88beda-e97d-5fe5-a3c9-72390043ea9b")
+	)
+	(wire
+		(pts (xy 151.13 113.03) (xy 151.13 115.57))
+		(stroke (width 0) (type default))
+		(uuid "ed608e83-7a0a-5a18-878e-839e5296a619")
+	)
+	(wire
+		(pts (xy 151.13 97.79) (xy 151.13 95.25))
+		(stroke (width 0) (type default))
+		(uuid "22b15040-b38b-5a1f-a1cc-fcc4e51b3545")
+	)
+	(wire
+		(pts (xy 148.59 113.03) (xy 148.59 115.57))
+		(stroke (width 0) (type default))
+		(uuid "2ab65384-c7eb-52b1-b8ec-bf70ba3aed7f")
+	)
+	(wire
+		(pts (xy 146.05 97.79) (xy 146.05 95.25))
+		(stroke (width 0) (type default))
+		(uuid "239034ab-284e-5e7c-be58-71debece4bbd")
+	)
+	(no_connect
+		(at 156.21 105.41)
+		(uuid "4d95cb6e-65e4-5406-977f-4c55e326dffd")
+	)
+	(no_connect
+		(at 140.97 105.41)
+		(uuid "9c6d107f-68c1-5d05-859d-89dd4c398259")
+	)
+	(hierarchical_label "ENC_A" (shape output)
+		(at 146.05 115.57 270)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "728e2595-b8fc-52d2-82c3-e91b7829626c")
+	)
+	(hierarchical_label "ENC_B" (shape output)
+		(at 151.13 115.57 270)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "43fde0f9-92b2-53b0-a62a-f9d8fcafbd20")
+	)
+	(hierarchical_label "ENC_SW" (shape output)
+		(at 151.13 95.25 90)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "bb38df73-34fd-52aa-b233-8c3c4653bb51")
+	)
+
+	(sheet_instances
+		(path "/d409bd90-3aa3-4dc6-aa2d-1f7657cc8a25"
+			(page "ROTARY_ENCODER")
+		)
+	)
+)

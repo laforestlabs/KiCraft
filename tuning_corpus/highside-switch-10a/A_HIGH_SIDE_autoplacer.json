@@ -1,0 +1,48 @@
+{
+  "project_name": "A_HIGH_SIDE",
+  "pcb_file": "A_HIGH_SIDE.kicad_pcb",
+  "power_nets": [
+    "GND",
+    "VIN",
+    "VOUT"
+  ],
+  "ic_groups": {
+    "U1": [
+      "R1",
+      "R2"
+    ],
+    "Q1": [
+      "R3",
+      "R4"
+    ]
+  },
+  "group_labels": {
+    "U1": "P-MOSFET",
+    "Q1": "GATE_DRV",
+    "J1": "VIN",
+    "J2": "LOAD",
+    "J3": "CTRL"
+  },
+  "thermal_refs": [
+    "U1",
+    "D1"
+  ],
+  "signal_flow_order": [
+    "J3",
+    "Q1",
+    "U1",
+    "J2"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J2": {
+      "edge": "right"
+    },
+    "J3": {
+      "edge": "left"
+    }
+  },
+  "enable_board_size_search": true
+}

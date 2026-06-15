@@ -1,0 +1,144 @@
+{
+  "workspaces": {
+    "audio-jack-buffer": {
+      "brief": "An audio breakout: four 3.5 mm jacks along the edge into an op-amp unity-gain buffer, no microcontroller.",
+      "split": "holdout",
+      "stem": "AN_AUDIO_BREAKOUT"
+    },
+    "buck-3a": {
+      "brief": "A 5 V to 3.3 V 3 A buck converter board (TPS5430) with input/output screw terminals and a thermal-via copper pour.",
+      "split": "holdout",
+      "stem": "TPS5430_BUCK"
+    },
+    "can-node": {
+      "brief": "A CAN bus node: an STM32 MCU, an SN65HVD230 transceiver, a DB9 connector, and a switchable bus terminator.",
+      "split": "train",
+      "stem": "CAN_BUS_NODE"
+    },
+    "daq-8ch": {
+      "brief": "An eight-channel data-acquisition board: an MCU reading two ADS1115 ADCs over I2C, inputs on screw terminals, USB-C.",
+      "split": "holdout",
+      "stem": "AN_EIGHT_CHANNEL"
+    },
+    "dual-rail-supply": {
+      "brief": "A plus/minus 12 V dual-rail supply from a 24 V input using a DC-DC converter, output on screw terminals.",
+      "split": "holdout",
+      "stem": "12V_DUAL_RAIL_SUPPLY"
+    },
+    "encoder-oled-panel": {
+      "brief": "A front-panel board: a through-hole rotary encoder with push button, an SMT I2C OLED, three buttons, and four mounting holes.",
+      "split": "train",
+      "stem": "FRONT_PANEL_BOARD"
+    },
+    "esp32-dual-motor": {
+      "brief": "An ESP32-S3 robot controller with two DRV8833 motor drivers, a buck regulator from a 2S battery, and motor screw terminals.",
+      "split": "holdout",
+      "stem": "AN_ESP32_S3"
+    },
+    "esp32-s3-sensor": {
+      "brief": "An ESP32-S3 environmental sensor node: BME280 temp/humidity/pressure, USB-C, and a status LED.",
+      "split": "train",
+      "stem": "ESP32S3_ENV_NODE"
+    },
+    "fpc-breakout": {
+      "brief": "A 24-pin 0.5 mm-pitch FPC/FFC connector breakout to a 0.1-inch header row.",
+      "split": "train",
+      "stem": "A_24_PIN"
+    },
+    "gpio-expander": {
+      "brief": "An I2C GPIO expander board: an MCP23017 with all sixteen lines on screw terminals and a chainable I2C header.",
+      "split": "holdout",
+      "stem": "AN_I2C_GPIO"
+    },
+    "highside-switch-10a": {
+      "brief": "A high-side load switch: a logic-controlled P-channel MOSFET driving a 10 A load on screw terminals, with a thermal pad.",
+      "split": "train",
+      "stem": "A_HIGH_SIDE"
+    },
+    "led-cc-driver": {
+      "brief": "A 1 A constant-current driver for a single power LED, USB-C input, with a heatsink copper area, no microcontroller.",
+      "split": "holdout",
+      "stem": "A_1_A"
+    },
+    "lora-node": {
+      "brief": "A LoRa node: an SX1276 module with an SMA antenna connector, an STM32L0 MCU, and a screw-terminal sensor input.",
+      "split": "holdout",
+      "stem": "SX1276_LORA_NODE"
+    },
+    "nrf52-beacon": {
+      "brief": "An nRF52840 BLE beacon with an onboard chip antenna, a coin-cell holder, and a single user button.",
+      "split": "train",
+      "stem": "AN_NRF52840_BLE"
+    },
+    "proto-shield": {
+      "brief": "An Arduino-Uno-format prototyping shield with stacking through-hole headers and an onboard SMT 3.3 V regulator.",
+      "split": "train",
+      "stem": "ARDUINO_UNO_SHIELD"
+    },
+    "r2r-dac": {
+      "brief": "An R-2R resistor-ladder DAC breakout: eight logic inputs on a header into an op-amp buffered analog output, no microcontroller.",
+      "split": "holdout",
+      "stem": "AN_R_2R"
+    },
+    "rc-lowpass-bnc": {
+      "brief": "A passive RC low-pass filter breakout with two BNC connectors and a cutoff-setting trim pot, no microcontroller.",
+      "split": "train",
+      "stem": "PASSIVE_RC_LPF_BREAKOUT"
+    },
+    "relay-quad": {
+      "brief": "A four-channel relay board: through-hole relays driven by an SMT ULN2003, opto-isolated inputs, and screw-terminal outputs.",
+      "split": "train",
+      "stem": "A_FOUR_CHANNEL"
+    },
+    "rp2040-min": {
+      "brief": "A minimal RP2040 board (QFN-56) with QSPI flash, USB-C, a 12 MHz crystal, and castellated GPIO.",
+      "split": "holdout",
+      "stem": "A_MINIMAL_RP2040"
+    },
+    "rs485-terminal": {
+      "brief": "An isolated RS-485 transceiver board (MAX485) with screw-terminal A/B/GND lines and a DE/RE jumper.",
+      "split": "train",
+      "stem": "MAX485_ISOLATED_BOARD"
+    },
+    "servo-driver-16": {
+      "brief": "A 16-channel servo driver: a PCA9685 with sixteen 3-pin servo headers along the board edge and a power screw terminal.",
+      "split": "holdout",
+      "stem": "PCA9685_SERVO_DRIVER"
+    },
+    "speaker-crossover": {
+      "brief": "A passive two-way speaker crossover: an air-core inductor, film capacitors, and binding-post terminals, no active parts.",
+      "split": "train",
+      "stem": "PASSIVE_SPEAKER_CROSSOVER"
+    },
+    "stepper-a4988": {
+      "brief": "A stepper motor controller using an A4988 driver, microstep-select DIP switches, a motor connector, and a 12 V screw terminal.",
+      "split": "train",
+      "stem": "STEPPER_MOTOR_CONTROLLER"
+    },
+    "stm32-min": {
+      "brief": "A minimal STM32F103 development board (LQFP-48) with USB-C, an 8 MHz crystal, an SWD header, and boot/reset buttons.",
+      "split": "train",
+      "stem": "STM32F103_DEV_BOARD"
+    },
+    "thermocouple-amp": {
+      "brief": "A K-type thermocouple amplifier board (MAX31855) with a screw-terminal input and an SPI header output.",
+      "split": "train",
+      "stem": "A_K_TYPE"
+    },
+    "usb-a-power-splitter": {
+      "brief": "A USB-C input to dual USB-A host-power splitter with per-port current limiting and status LEDs.",
+      "split": "train",
+      "stem": "USB_C_HOST_SPLITTER"
+    },
+    "usb-c-full-breakout": {
+      "brief": "A USB-C receptacle breakout exposing VBUS, GND, the CC and SBU pins, and the high-speed pairs to 0.1-inch headers.",
+      "split": "train",
+      "stem": "USB_C_BREAKOUT"
+    },
+    "usb-pd-trigger": {
+      "brief": "A USB-C PD trigger board that outputs a switch-selectable 9 V, 12 V, or 20 V.",
+      "split": "holdout",
+      "stem": "A_USB_C"
+    }
+  }
+}

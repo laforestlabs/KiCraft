@@ -1,0 +1,57 @@
+{
+  "project_name": "SX1276_LORA_NODE",
+  "pcb_file": "SX1276_LORA_NODE.kicad_pcb",
+  "power_nets": [
+    "+3V3",
+    "GND",
+    "VBAT"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C1",
+      "C2"
+    ],
+    "U2": [
+      "C3",
+      "C4",
+      "C5",
+      "C6",
+      "C7",
+      "Y1",
+      "C8",
+      "C9",
+      "Y2",
+      "C10",
+      "C11"
+    ],
+    "U3": [
+      "C13",
+      "C14"
+    ]
+  },
+  "group_labels": {
+    "U1": "LDO_3V3",
+    "U2": "STM32L0_MCU",
+    "U3": "LORA_MODULE"
+  },
+  "thermal_refs": [
+    "U1"
+  ],
+  "signal_flow_order": [
+    "U1",
+    "U2",
+    "U3"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "top"
+    },
+    "J2": {
+      "edge": "bottom"
+    },
+    "J3": {
+      "edge": "right"
+    }
+  },
+  "enable_board_size_search": true
+}

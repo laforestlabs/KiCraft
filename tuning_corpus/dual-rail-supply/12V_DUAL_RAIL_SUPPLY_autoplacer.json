@@ -1,0 +1,41 @@
+{
+  "project_name": "12V_DUAL_RAIL_SUPPLY",
+  "pcb_file": "12V_DUAL_RAIL_SUPPLY.kicad_pcb",
+  "power_nets": [
+    "+12V",
+    "+24V",
+    "-12V",
+    "GND"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C1",
+      "C2",
+      "C3",
+      "C4",
+      "C5",
+      "C6",
+      "FB1",
+      "FB2"
+    ]
+  },
+  "group_labels": {
+    "U1": "DC-DC +/-12V"
+  },
+  "thermal_refs": [
+    "U1",
+    "D1"
+  ],
+  "signal_flow_order": [
+    "U1"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J2": {
+      "edge": "right"
+    }
+  },
+  "enable_board_size_search": true
+}

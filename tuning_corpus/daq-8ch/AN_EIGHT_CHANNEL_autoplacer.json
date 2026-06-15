@@ -1,0 +1,70 @@
+{
+  "project_name": "AN_EIGHT_CHANNEL",
+  "pcb_file": "AN_EIGHT_CHANNEL.kicad_pcb",
+  "power_nets": [
+    "+3V3",
+    "GND",
+    "VBUS"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C1",
+      "C2"
+    ],
+    "U2": [
+      "C4",
+      "C5",
+      "C6"
+    ],
+    "U3": [
+      "C7"
+    ],
+    "U4": [
+      "C8"
+    ]
+  },
+  "group_labels": {
+    "U1": "3V3 LDO",
+    "U2": "MCU",
+    "U3": "ADC1",
+    "U4": "ADC2"
+  },
+  "thermal_refs": [
+    "U1"
+  ],
+  "signal_flow_order": [
+    "U2",
+    "U3",
+    "U4"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J2": {
+      "edge": "right"
+    },
+    "J3": {
+      "edge": "right"
+    },
+    "J4": {
+      "edge": "right"
+    },
+    "J5": {
+      "edge": "right"
+    },
+    "J6": {
+      "edge": "right"
+    },
+    "J7": {
+      "edge": "right"
+    },
+    "J8": {
+      "edge": "right"
+    },
+    "J9": {
+      "edge": "right"
+    }
+  },
+  "enable_board_size_search": true
+}

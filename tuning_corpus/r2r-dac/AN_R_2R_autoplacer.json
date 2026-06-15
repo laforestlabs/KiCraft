@@ -1,0 +1,32 @@
+{
+  "project_name": "AN_R_2R",
+  "pcb_file": "AN_R_2R.kicad_pcb",
+  "power_nets": [
+    "+5V",
+    "GND"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C1",
+      "C2"
+    ]
+  },
+  "group_labels": {
+    "U1": "OPAMP"
+  },
+  "signal_flow_order": [
+    "U1"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J2": {
+      "edge": "right"
+    },
+    "J3": {
+      "edge": "bottom"
+    }
+  },
+  "enable_board_size_search": true
+}

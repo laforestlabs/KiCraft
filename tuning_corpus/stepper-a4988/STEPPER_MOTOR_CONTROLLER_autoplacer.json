@@ -1,0 +1,61 @@
+{
+  "project_name": "STEPPER_MOTOR_CONTROLLER",
+  "pcb_file": "STEPPER_MOTOR_CONTROLLER.kicad_pcb",
+  "power_nets": [
+    "+12V",
+    "+5V",
+    "GND"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C3",
+      "C4"
+    ],
+    "U2": [
+      "C5",
+      "C6",
+      "C7",
+      "C8",
+      "C9",
+      "C10",
+      "R1",
+      "R2",
+      "R3",
+      "R4",
+      "R5",
+      "R6",
+      "R7",
+      "R8"
+    ]
+  },
+  "group_labels": {
+    "U1": "5V_REG",
+    "U2": "A4988"
+  },
+  "thermal_refs": [
+    "U1",
+    "U2"
+  ],
+  "signal_flow_order": [
+    "U1",
+    "J2",
+    "S1",
+    "U2",
+    "J3"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J2": {
+      "edge": "bottom"
+    },
+    "J3": {
+      "edge": "right"
+    },
+    "S1": {
+      "edge": "top"
+    }
+  },
+  "enable_board_size_search": true
+}

@@ -1,0 +1,40 @@
+{
+  "project_name": "USB_C_HOST_SPLITTER",
+  "pcb_file": "USB_C_HOST_SPLITTER.kicad_pcb",
+  "power_nets": [
+    "+5V",
+    "GND"
+  ],
+  "ic_groups": {
+    "U1": [
+      "R3",
+      "C1",
+      "C2"
+    ],
+    "U2": [
+      "R5",
+      "C3",
+      "C4"
+    ]
+  },
+  "group_labels": {
+    "U1": "PORT1",
+    "U2": "PORT2"
+  },
+  "signal_flow_order": [
+    "U1",
+    "U2"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J2": {
+      "edge": "right"
+    },
+    "J3": {
+      "edge": "right"
+    }
+  },
+  "enable_board_size_search": true
+}

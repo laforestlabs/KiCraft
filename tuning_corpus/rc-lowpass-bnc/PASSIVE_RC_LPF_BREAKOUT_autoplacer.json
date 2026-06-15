@@ -1,0 +1,21 @@
+{
+  "project_name": "PASSIVE_RC_LPF_BREAKOUT",
+  "pcb_file": "PASSIVE_RC_LPF_BREAKOUT.kicad_pcb",
+  "power_nets": [
+    "GND"
+  ],
+  "signal_flow_order": [
+    "J1",
+    "RV1",
+    "J2"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J2": {
+      "edge": "right"
+    }
+  },
+  "enable_board_size_search": true
+}

@@ -1,0 +1,75 @@
+{
+  "project_name": "PCA9685_SERVO_DRIVER",
+  "pcb_file": "PCA9685_SERVO_DRIVER.kicad_pcb",
+  "power_nets": [
+    "GND",
+    "VCC",
+    "VSERVO"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C1",
+      "C2",
+      "R1",
+      "R2"
+    ]
+  },
+  "group_labels": {
+    "U1": "PCA9685"
+  },
+  "signal_flow_order": [
+    "J1",
+    "U1",
+    "J3",
+    "J4",
+    "J5",
+    "J6",
+    "J7",
+    "J8",
+    "J9",
+    "J10",
+    "J11",
+    "J12",
+    "J13",
+    "J14",
+    "J15",
+    "J16",
+    "J17",
+    "J18"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J2": {
+      "edge": "right"
+    }
+  },
+  "arrays": [
+    {
+      "refs": [
+        "J3",
+        "J4",
+        "J5",
+        "J6",
+        "J7",
+        "J8",
+        "J9",
+        "J10",
+        "J11",
+        "J12",
+        "J13",
+        "J14",
+        "J15",
+        "J16",
+        "J17",
+        "J18"
+      ],
+      "rows": 2,
+      "cols": 8,
+      "pitch_mm": null,
+      "serpentine": true
+    }
+  ],
+  "enable_board_size_search": true
+}

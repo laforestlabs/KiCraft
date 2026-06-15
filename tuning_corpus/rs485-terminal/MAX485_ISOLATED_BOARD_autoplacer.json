@@ -1,0 +1,56 @@
+{
+  "project_name": "MAX485_ISOLATED_BOARD",
+  "pcb_file": "MAX485_ISOLATED_BOARD.kicad_pcb",
+  "power_nets": [
+    "GND",
+    "GND_ISO",
+    "VCC",
+    "VISO"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C3",
+      "C4"
+    ],
+    "U2": [
+      "C5",
+      "C6"
+    ],
+    "U3": [
+      "C7",
+      "C8"
+    ],
+    "U4": [
+      "C9",
+      "R1"
+    ]
+  },
+  "group_labels": {
+    "U1": "ISOLATED_PWR",
+    "U2": "ISO_TX_RX",
+    "U3": "ISO_DE_RE",
+    "U4": "RS485"
+  },
+  "thermal_refs": [
+    "U1"
+  ],
+  "signal_flow_order": [
+    "J1",
+    "U2",
+    "U3",
+    "U4",
+    "J3"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J3": {
+      "edge": "right"
+    },
+    "J2": {
+      "edge": "right"
+    }
+  },
+  "enable_board_size_search": true
+}

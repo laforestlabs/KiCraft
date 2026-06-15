@@ -1,0 +1,31 @@
+{
+  "project_name": "A_K_TYPE",
+  "pcb_file": "A_K_TYPE.kicad_pcb",
+  "power_nets": [
+    "+3V3",
+    "GND"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C1",
+      "C2"
+    ]
+  },
+  "group_labels": {
+    "U1": "THERMOCOUPLE DIGITIZER"
+  },
+  "signal_flow_order": [
+    "J1",
+    "U1",
+    "J2"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J2": {
+      "edge": "right"
+    }
+  },
+  "enable_board_size_search": true
+}

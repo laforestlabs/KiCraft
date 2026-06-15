@@ -1,0 +1,71 @@
+{
+  "project_name": "AN_I2C_GPIO",
+  "pcb_file": "AN_I2C_GPIO.kicad_pcb",
+  "power_nets": [
+    "+3V3",
+    "GND"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C1",
+      "C2",
+      "C3"
+    ]
+  },
+  "group_labels": {
+    "U1": "GPIO_EXPANDER"
+  },
+  "signal_flow_order": [
+    "J1",
+    "U1",
+    "TB1"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "TB1": {
+      "edge": "right"
+    },
+    "TB2": {
+      "edge": "right"
+    },
+    "TB3": {
+      "edge": "right"
+    },
+    "TB4": {
+      "edge": "right"
+    },
+    "TB5": {
+      "edge": "right"
+    },
+    "TB6": {
+      "edge": "right"
+    },
+    "TB7": {
+      "edge": "right"
+    },
+    "TB8": {
+      "edge": "right"
+    }
+  },
+  "arrays": [
+    {
+      "refs": [
+        "TB1",
+        "TB2",
+        "TB3",
+        "TB4",
+        "TB5",
+        "TB6",
+        "TB7",
+        "TB8"
+      ],
+      "rows": 1,
+      "cols": 8,
+      "pitch_mm": null,
+      "serpentine": true
+    }
+  ],
+  "enable_board_size_search": true
+}

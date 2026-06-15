@@ -23,6 +23,17 @@ from kicraft.tuning.workspace import PATH_TOKEN, discover_stem
 
 MANIFEST_NAME = "manifest.json"
 
+# A replay-only board needs just its KiCad source (schematics + seed PCB +
+# project + lib tables); a full build also emits 3D models, a fab package, and
+# gerbers — tens of MB of binary that replay never reads. A lean freeze drops
+# all of it so the committed corpus stays KB-scale per board.
+_LEAN_IGNORE = (
+    ".experiments", "3dmodels", "fab", "fp-info-cache",
+    "*.step", "*.stp", "*.wrl", "*.zip", "*.pdf", "*.png", "*.svg",
+    "*.gbr", "*.gbrjob", "*.gm1", "*.drl", "*.rpt", "*.net",
+    "*_best.kicad_pcb",  # autoexperiment artifact; replay uses <stem>.kicad_pcb
+)
+
 
 @dataclass
 class Workspace:
@@ -175,7 +186,7 @@ def freeze_workspace(
         shutil.rmtree(dest)
     if lean:
         shutil.copytree(src, dest,
-                        ignore=shutil.ignore_patterns(".experiments"))
+                        ignore=shutil.ignore_patterns(*_LEAN_IGNORE))
     else:
         shutil.copytree(src, dest)
         src_abs = str(src.resolve())

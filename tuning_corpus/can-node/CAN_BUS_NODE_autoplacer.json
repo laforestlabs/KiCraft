@@ -1,0 +1,64 @@
+{
+  "project_name": "CAN_BUS_NODE",
+  "pcb_file": "CAN_BUS_NODE.kicad_pcb",
+  "power_nets": [
+    "+3V3",
+    "GND",
+    "VBUS"
+  ],
+  "ic_groups": {
+    "U1": [
+      "C1",
+      "C2",
+      "C3"
+    ],
+    "U2": [
+      "C4",
+      "C5",
+      "C6",
+      "C7",
+      "C8",
+      "C9",
+      "C10",
+      "C11",
+      "C12",
+      "C13",
+      "Y1",
+      "Y2",
+      "R2",
+      "R3",
+      "SW1"
+    ],
+    "U3": [
+      "C14",
+      "C15",
+      "Q1",
+      "R4",
+      "R5"
+    ]
+  },
+  "group_labels": {
+    "U1": "LDO 3V3",
+    "U2": "STM32F103 MCU",
+    "U3": "CAN TXRX"
+  },
+  "thermal_refs": [
+    "U1"
+  ],
+  "signal_flow_order": [
+    "U2",
+    "U3"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "left"
+    },
+    "J2": {
+      "edge": "right"
+    },
+    "SW1": {
+      "edge": "bottom"
+    }
+  },
+  "enable_board_size_search": true
+}

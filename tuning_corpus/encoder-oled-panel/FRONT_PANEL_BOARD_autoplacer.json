@@ -1,0 +1,38 @@
+{
+  "project_name": "FRONT_PANEL_BOARD",
+  "pcb_file": "FRONT_PANEL_BOARD.kicad_pcb",
+  "power_nets": [
+    "+3V3",
+    "GND"
+  ],
+  "group_labels": {
+    "U1": "ROTARY ENCODER",
+    "U2": "OLED DISPLAY"
+  },
+  "signal_flow_order": [
+    "U1",
+    "SW1",
+    "SW2",
+    "SW3",
+    "U2",
+    "J1"
+  ],
+  "component_zones": {
+    "J1": {
+      "edge": "bottom"
+    },
+    "H1": {
+      "corner": "top-left"
+    },
+    "H2": {
+      "corner": "top-right"
+    },
+    "H3": {
+      "corner": "bottom-left"
+    },
+    "H4": {
+      "corner": "bottom-right"
+    }
+  },
+  "enable_board_size_search": true
+}
