@@ -505,6 +505,21 @@ def _solve_one_round(
     if ordering_legality.get("resolved", False):
         solved_components = repaired_components
 
+    # Keep ordinary parts behind their edge connector's pads (KC-S8PC37 R8).
+    # Compose stamps this leaf rigidly, so a companion fixed behind the pads
+    # here stays behind them on the parent. After passive-ordering + legality
+    # repair (which re-place companions), before routing/size-reduction.
+    companion_clear = float(cfg.get("connector_edge_companion_clearance_mm", 0.5))
+    if companion_clear > 0.0 and getattr(solver, "_edge_pinned_groups", None):
+        for _ in range(3):
+            if solver._clamp_companions_inboard_of_connectors(
+                solved_components, companion_clear
+            ) == 0:
+                break
+            solver._resolve_overlaps(solved_components)
+            solver._restore_pinned_positions(solved_components)
+        solver._clamp_companions_inboard_of_connectors(solved_components, companion_clear)
+
     placement_score_start = time.monotonic()
     placement = _score_local_components(local_state, solved_components, cfg)
     round_timing["placement_scoring_s"] = round(

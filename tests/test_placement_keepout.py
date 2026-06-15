@@ -7,6 +7,7 @@ from kicraft.autoplacer.brain.types import (
     Component,
     KeepoutRect,
     Layer,
+    Pad,
     Point,
 )
 
@@ -22,6 +23,48 @@ def _comp(ref, x, y, *, w=3.0, h=3.0, locked=False):
         height_mm=h,
         locked=locked,
     )
+
+
+def _comp_with_pad(ref, x, y, *, w=2.0, h=2.0, kind="passive", locked=False):
+    """A 1-pad component whose pad copper bbox is ``pos ± (w, h)/2``."""
+    pad = Pad(ref=ref, pad_id="1", pos=Point(x, y), net="N", layer=Layer.FRONT,
+              size_mm=Point(w, h))
+    return Component(
+        ref=ref, value="", pos=Point(x, y), rotation=0.0, layer=Layer.FRONT,
+        width_mm=w, height_mm=h, pads=[pad], kind=kind, locked=locked,
+    )
+
+
+def test_companion_pushed_behind_connector_pads_left():
+    # J1 (connector, locked) pad copper x[5,7]; R8 (passive) pad x[3,5] OUTBOARD
+    # of J1. R8 must be pushed so its left pad face >= J1 left pad face + clearance;
+    # J1 unmoved; a far passive untouched.
+    conn = _comp_with_pad("J1", 6.0, 20.0, w=2.0, h=8.0, kind="connector", locked=True)
+    victim = _comp_with_pad("R8", 4.0, 20.0, w=2.0, h=1.0)   # pad x[3,5]
+    far = _comp_with_pad("R9", 30.0, 20.0, w=1.0, h=1.0)
+    state = BoardState(
+        components={"J1": conn, "R8": victim, "R9": far},
+        board_outline=(Point(0, 0), Point(40, 40)), keepout_rects=[],
+    )
+    solver = _solver(state)
+    solver._edge_pinned_groups = {"left": ["J1"]}
+    assert solver._clamp_companions_inboard_of_connectors(state.components, 0.5) == 1
+    assert min(p.bbox()[0].x for p in victim.pads) >= 5.5 - 1e-6
+    assert (conn.pos.x, conn.pos.y) == (6.0, 20.0)
+    assert (far.pos.x, far.pos.y) == (30.0, 20.0)
+
+
+def test_companion_clamp_noop_when_already_inboard():
+    conn = _comp_with_pad("J1", 6.0, 20.0, w=2.0, h=8.0, kind="connector", locked=True)
+    inboard = _comp_with_pad("C1", 20.0, 20.0, w=1.0, h=1.0)  # well inboard
+    state = BoardState(
+        components={"J1": conn, "C1": inboard},
+        board_outline=(Point(0, 0), Point(40, 40)), keepout_rects=[],
+    )
+    solver = _solver(state)
+    solver._edge_pinned_groups = {"left": ["J1"]}
+    assert solver._clamp_companions_inboard_of_connectors(state.components, 0.5) == 0
+    assert (inboard.pos.x, inboard.pos.y) == (20.0, 20.0)
 
 
 def _overlaps(comp, kr) -> bool:

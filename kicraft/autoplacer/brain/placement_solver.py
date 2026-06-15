@@ -1452,6 +1452,20 @@ class PlacementSolver:
                 nearest = min(distances, key=distances.get)
                 edge_groups.setdefault(nearest, []).append(ref)
 
+        # Edge-pinned discrete parts per side (connectors + explicitly edge-zoned
+        # switches), excluding mounting holes and subcircuit blocks. Used by
+        # _clamp_companions_inboard_of_connectors to keep ordinary parts behind
+        # the connector's pads on its zoned side (KC-S8PC37 R8).
+        self._edge_pinned_groups: dict[str, list[str]] = {}
+        for edge, refs in edge_groups.items():
+            keep = [
+                r
+                for r in refs
+                if r in comps and comps[r].kind not in ("mounting_hole", "subcircuit")
+            ]
+            if keep:
+                self._edge_pinned_groups[edge] = keep
+
         # Reserve corner space along edge before placing edge groups so
         # edge connectors don't land where a corner-pinned mounting hole
         # will go. Without this, on LLUPS J1 (USB-C, edge=left) could
@@ -2347,6 +2361,73 @@ class PlacementSolver:
         for kr in rects:
             corrections += self._push_out_of_rect(comps, kr.tl, kr.br, kr.owner_ref)
         return corrections
+
+    def _clamp_companions_inboard_of_connectors(
+        self, comps: dict[str, Component], clearance: float
+    ) -> int:
+        """Push unlocked, non-connector parts inboard so their copper stays
+        ``clearance`` mm behind the edge connector's outboard-most PAD face on
+        each zoned side (self._edge_pinned_groups). The composed parent edge is
+        drawn outboard of the connector's pads, so keeping companions behind the
+        pads keeps them clear of the final edge (KC-S8PC37 R8). Uses pad copper
+        faces (Pad.bbox), not component bboxes (a connector's shell/courtyard
+        bbox overhangs the board; its pads sit inboard). Returns parts moved."""
+        groups = getattr(self, "_edge_pinned_groups", None)
+        if not groups:
+            return 0
+        moved = 0
+        for side, conn_refs in groups.items():
+            conn_set = set(conn_refs)
+            pad_boxes = [
+                p.bbox()
+                for r in conn_refs
+                if (c := comps.get(r)) is not None
+                for p in c.pads
+            ]
+            if not pad_boxes:
+                continue
+            if side == "left":
+                limit = min(b[0].x for b in pad_boxes) + clearance
+            elif side == "right":
+                limit = max(b[1].x for b in pad_boxes) - clearance
+            elif side == "top":
+                limit = min(b[0].y for b in pad_boxes) + clearance
+            elif side == "bottom":
+                limit = max(b[1].y for b in pad_boxes) - clearance
+            else:
+                continue
+            for ref, comp in comps.items():
+                if (
+                    comp.locked
+                    or ref in conn_set
+                    or comp.kind in ("mounting_hole", "subcircuit", "connector")
+                    or not comp.pads
+                ):
+                    continue
+                boxes = [p.bbox() for p in comp.pads]
+                if side == "left":
+                    face = min(b[0].x for b in boxes)
+                    dx, dy = (limit - face, 0.0) if face < limit else (0.0, 0.0)
+                elif side == "right":
+                    face = max(b[1].x for b in boxes)
+                    dx, dy = (limit - face, 0.0) if face > limit else (0.0, 0.0)
+                elif side == "top":
+                    face = min(b[0].y for b in boxes)
+                    dx, dy = (0.0, limit - face) if face < limit else (0.0, 0.0)
+                else:  # bottom
+                    face = max(b[1].y for b in boxes)
+                    dx, dy = (0.0, limit - face) if face > limit else (0.0, 0.0)
+                if dx == 0.0 and dy == 0.0:
+                    continue
+                comp.pos = Point(comp.pos.x + dx, comp.pos.y + dy)
+                if comp.body_center is not None:
+                    comp.body_center = Point(
+                        comp.body_center.x + dx, comp.body_center.y + dy
+                    )
+                for pad in comp.pads:
+                    pad.pos = Point(pad.pos.x + dx, pad.pos.y + dy)
+                moved += 1
+        return moved
 
     def _sa_refine(
         self,
