@@ -274,6 +274,13 @@ DEFAULT_CONFIG = {
     "zone_min_thickness_mm": 0.25,
     "zone_thermal_gap_mm": 0.5,
     "zone_thermal_spoke_mm": 0.5,
+    # GND pour pad connection: "full" (solid, default) or "thermal". Solid is the
+    # plane-correct choice (matches power_plane_pad_connection): a dense pin field
+    # -- an ESP32 module's GND ring, a fine-pitch connector -- can't fit the gap a
+    # thermal-relief spoke needs, so <2 spokes resolve and KiCad raises
+    # starved_thermal. Solid has no spokes to starve; it only adds same-net copper
+    # so it can't short or pinch another net. Use "thermal" for hand-assembly.
+    "gnd_plane_pad_connection": "full",
     # Full bottom-layer GND plane (default on): after routing, pour a B.Cu GND
     # zone over the whole board (the ZONE_FILLER keeps it clear of rule-area
     # keepouts like the WROOM antenna) and stitch large GND/thermal pads into it

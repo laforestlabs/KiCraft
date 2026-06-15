@@ -36,6 +36,54 @@ def _grid_positions(center_nm: int, half_nm: int, pitch_nm: int) -> list[int]:
     return [center_nm - half_nm + i * step for i in range(intervals + 1)]
 
 
+def _apply_gnd_pad_connection(zone: Any, cfg: dict[str, Any]) -> None:
+    """Set the GND pour's pad-connection mode.
+
+    Solid (full) by default -- the same call :func:`pour_power_planes` makes for
+    power planes, for the same reason: on a dense pin field (an ESP32 module's
+    GND ring, a fine-pitch connector) thermal-relief spokes need a gap wider than
+    the pad pitch, so fewer than the DRC-required two spokes resolve and KiCad
+    flags ``starved_thermal``. A solid tie has no spokes to starve and is the
+    low-impedance connection a ground plane wants anyway; it only adds same-net
+    copper, so it can never create a short or narrow another net's clearance. Set
+    ``gnd_plane_pad_connection: "thermal"`` to restore relief (e.g. a
+    hand-assembled board whose small passives would heat-sink into the plane).
+    """
+    if str(cfg.get("gnd_plane_pad_connection", "full")).lower() == "thermal":
+        zone.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL)
+        zone.SetThermalReliefGap(
+            pcbnew.FromMM(float(cfg.get("zone_thermal_gap_mm", 0.5)))
+        )
+        zone.SetThermalReliefSpokeWidth(
+            pcbnew.FromMM(float(cfg.get("zone_thermal_spoke_mm", 0.5)))
+        )
+    else:
+        zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)
+
+
+def _collect_keepout_zones(board: Any) -> list[Any]:
+    """Rule-area keep-out zones that forbid tracks or vias -- both board-level
+    and the ones embedded inside footprints (the ESP32-S3-MINI/WROOM antenna
+    near-field ``antenna_keepout`` ships inside the module's .kicad_mod).
+
+    FreeRouting's DSN export already steers *signal* traces clear of these, but
+    the post-route GND finisher (in-pad/array thermal vias + small-pad escape
+    stubs) had no such guard, so it stamped GND vias and 1 mm stubs straight into
+    U1's antenna keep-out (the KC-S8PC37 signature: 30 items_not_allowed).
+    """
+    zones: list[Any] = []
+    for z in board.Zones():
+        if z.GetIsRuleArea() and (z.GetDoNotAllowVias() or z.GetDoNotAllowTracks()):
+            zones.append(z)
+    for fp in board.GetFootprints():
+        for z in fp.Zones():
+            if z.GetIsRuleArea() and (
+                z.GetDoNotAllowVias() or z.GetDoNotAllowTracks()
+            ):
+                zones.append(z)
+    return zones
+
+
 def pour_gnd_planes(
     pcb_path: str,
     cfg: dict[str, Any] | None = None,
@@ -90,13 +138,7 @@ def pour_gnd_planes(
             zone.SetMinThickness(
                 pcbnew.FromMM(float(cfg.get("zone_min_thickness_mm", 0.25)))
             )
-            zone.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL)
-            zone.SetThermalReliefGap(
-                pcbnew.FromMM(float(cfg.get("zone_thermal_gap_mm", 0.5)))
-            )
-            zone.SetThermalReliefSpokeWidth(
-                pcbnew.FromMM(float(cfg.get("zone_thermal_spoke_mm", 0.5)))
-            )
+            _apply_gnd_pad_connection(zone, cfg)
             zone.SetAssignedPriority(0)
             board.Add(zone)
             try:
@@ -614,6 +656,22 @@ def add_gnd_pour_and_thermal_vias(
         return summary
     gnd_code = gnd_net.GetNetCode()
 
+    # Track/via keep-outs (the footprint-embedded antenna near-field, board-level
+    # rule areas) the finisher must keep its vias and escape stubs out of.
+    keepout_zones = _collect_keepout_zones(board)
+
+    def _in_keepout(pt: Any, clearance_iu: int = 0) -> bool:
+        """True when ``pt`` lies in (or within ``clearance_iu`` of) a track/via
+        keep-out, so a via of that radius -- or an escape stub reaching that far
+        -- would intrude on the protected area."""
+        for z in keepout_zones:
+            bb = z.GetBoundingBox()
+            if clearance_iu:
+                bb.Inflate(int(clearance_iu))
+            if bb.Contains(pt):
+                return True
+        return False
+
     via_drill = pcbnew.FromMM(float(cfg.get("via_drill_mm", 0.3)))
     via_size = pcbnew.FromMM(float(cfg.get("via_size_mm", 0.6)))
     pitch = pcbnew.FromMM(float(cfg.get("thermal_via_pitch_mm", 1.2)))
@@ -687,6 +745,10 @@ def add_gnd_pour_and_thermal_vias(
         seven shorts from exactly this). Same-net copper is a valid landing.
         """
         pt = pcbnew.VECTOR2I(int(x), int(y))
+        # A via whose barrel overlaps a track/via keep-out (the antenna
+        # near-field) is an items_not_allowed DRC error the router can't repair.
+        if _in_keepout(pt, int(pcbnew.FromMM(via_r_mm))):
+            return True
         if any(item.HitTest(pt, margin) for item, margin in copper_obstacles):
             return True
         xm, ym = pcbnew.ToMM(int(x)), pcbnew.ToMM(int(y))
@@ -772,7 +834,18 @@ def add_gnd_pour_and_thermal_vias(
             # net. A pad too small for an in-pad via is escaped with a short
             # guarded stub + end via instead (stamped after this pass).
             if not (fits_via or large):
-                if multipad and not _already_bonded(pad):
+                # An escape stub reaches gnd_escape_length + an end via out of
+                # the pad: if that lands in a keep-out, skip it (the pad still
+                # bonds through its footprint's other GND pins / the pour).
+                escape_reach = pcbnew.FromMM(
+                    float(cfg.get("gnd_escape_length_mm", 1.0))
+                    + pcbnew.ToMM(via_size)
+                )
+                if (
+                    multipad
+                    and not _already_bonded(pad)
+                    and not _in_keepout(pos, int(escape_reach))
+                ):
                     escape_pads.append((fp.GetReferenceAsString(), pad.GetNumber()))
                 continue
             if large:
@@ -848,13 +921,7 @@ def add_gnd_pour_and_thermal_vias(
         zone.SetMinThickness(
             pcbnew.FromMM(float(cfg.get("zone_min_thickness_mm", 0.25)))
         )
-        zone.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL)
-        zone.SetThermalReliefGap(
-            pcbnew.FromMM(float(cfg.get("zone_thermal_gap_mm", 0.5)))
-        )
-        zone.SetThermalReliefSpokeWidth(
-            pcbnew.FromMM(float(cfg.get("zone_thermal_spoke_mm", 0.5)))
-        )
+        _apply_gnd_pad_connection(zone, cfg)
         zone.SetAssignedPriority(0)
         board.Add(zone)
     # Drop pour islands that aren't tied to GND (avoids isolated-copper DRC).
