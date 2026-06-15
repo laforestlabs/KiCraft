@@ -153,7 +153,8 @@ def write_manifest(root: str | Path, workspaces: Sequence[Workspace]) -> Path:
 # --- freeze (Phase 0): snapshot synthesized runs into a relocatable corpus ---
 
 def freeze_workspace(
-    src: str | Path, dest: str | Path, *, brief: str = "", split: str = ""
+    src: str | Path, dest: str | Path, *, brief: str = "", split: str = "",
+    lean: bool = False,
 ) -> Workspace:
     """Copy a synthesized workspace to ``dest`` and tokenize its frozen-leaf
     artifacts so the corpus is relocatable.
@@ -162,21 +163,32 @@ def freeze_workspace(
     path; we replace it with ``PATH_TOKEN`` (the same convention the committed
     fixtures use), which ``workspace.prepare_scratch`` rewrites to the scratch
     dir at eval time. The result is a board the tuner can re-place/re-route from
-    any location at $0 LLM."""
+    any location at $0 LLM.
+
+    ``lean=True`` drops the bulky ``.experiments`` tree (routed leaves, DSN
+    files): in replay mode the tuner regenerates leaves from the schematic, so a
+    lean freeze (schematics + seed PCB + project) is all it needs and is small
+    enough to commit. Lean freezes need no tokenization (nothing references the
+    source path)."""
     src, dest = Path(src), Path(dest)
     if dest.exists():
         shutil.rmtree(dest)
-    shutil.copytree(src, dest)
-    src_abs = str(src.resolve())
-    exp = dest / ".experiments"
-    if exp.is_dir():
-        for jf in exp.rglob("*.json"):
-            try:
-                text = jf.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            if src_abs in text:
-                jf.write_text(text.replace(src_abs, PATH_TOKEN), encoding="utf-8")
+    if lean:
+        shutil.copytree(src, dest,
+                        ignore=shutil.ignore_patterns(".experiments"))
+    else:
+        shutil.copytree(src, dest)
+        src_abs = str(src.resolve())
+        exp = dest / ".experiments"
+        if exp.is_dir():
+            for jf in exp.rglob("*.json"):
+                try:
+                    text = jf.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                if src_abs in text:
+                    jf.write_text(text.replace(src_abs, PATH_TOKEN),
+                                  encoding="utf-8")
     return Workspace(path=dest, name=dest.name, stem=discover_stem(dest),
                      brief=brief, split=split)
 
