@@ -1293,6 +1293,30 @@ class AccountStore:
         with self._conn() as conn:
             conn.execute("DELETE FROM projects_fts WHERE project_id=?", (project_id,))
 
+    def delete_project(self, project_id: int) -> str | None:
+        """Delete one project: its row, its catalog likes + FTS entry, and its
+        on-disk tree (projects_dir/<user_id>/<project_id>/, which holds the zip).
+
+        Mirrors the per-project cleanup delete_user does, scoped to a single
+        project so a user can remove one design without dropping the account.
+        Ownership is enforced by the caller. Returns the filesystem path purged
+        (for logging), or None if the project or its tree did not exist."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT user_id FROM projects WHERE id=?", (project_id,)).fetchone()
+            if row is None:
+                return None
+            uid = row["user_id"]
+            conn.execute("DELETE FROM project_likes WHERE project_id=?", (project_id,))
+            if self._fts_enabled:
+                conn.execute("DELETE FROM projects_fts WHERE project_id=?", (project_id,))
+            conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+        tree = self.projects_dir / str(uid) / str(project_id)
+        if tree.exists():
+            shutil.rmtree(tree, ignore_errors=True)
+            return str(tree)
+        return None
+
     def backfill_search(self) -> int:
         """Index every public, completed project. Returns the count indexed. Safe
         to re-run; reindex_search is idempotent per project."""
