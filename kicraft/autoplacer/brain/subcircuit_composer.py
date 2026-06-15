@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from . import geometry
 from .placement_utils import packing_metrics
 from .subcircuit_instances import (
     LoadedSubcircuitArtifact,
@@ -1423,22 +1424,18 @@ def _rect_area(rect: tuple[Point, Point]) -> float:
 
 
 def _transform_local_point(point: Point, origin: Point, rotation_deg: float) -> Point:
-    rotation = rotation_deg % 360.0
-    if abs(rotation - 0.0) < 1e-9:
-        return Point(point.x + origin.x, point.y + origin.y)
-    if abs(rotation - 90.0) < 1e-9:
-        return Point(-point.y + origin.x, point.x + origin.y)
-    if abs(rotation - 180.0) < 1e-9:
-        return Point(-point.x + origin.x, -point.y + origin.y)
-    if abs(rotation - 270.0) < 1e-9:
-        return Point(point.y + origin.x, -point.x + origin.y)
-    theta = math.radians(rotation)
-    cos_theta = math.cos(theta)
-    sin_theta = math.sin(theta)
-    return Point(
-        point.x * cos_theta - point.y * sin_theta + origin.x,
-        point.x * sin_theta + point.y * cos_theta + origin.y,
-    )
+    """Rigid local->world transform for compose geometry (anchors + overlap).
+
+    Delegates to :func:`geometry.transform_point` -- the single, tested
+    KiCad-CW convention (90deg: (x,y)->(y,-x)) that the leaf is ACTUALLY placed
+    with (subcircuit_instances._transform_point). This helper formerly hand-rolled
+    the OPPOSITE handedness (math-CCW, 90deg: (x,y)->(-y,x)); for a 90/270 leaf
+    that reflected the connector edge anchor across the part's body and stranded
+    the connector ~part-height inboard of the board edge. The two conventions
+    agree at 0/180deg, so only rotated leaves were affected. See
+    ``geometry`` module docstring + ``docs/plans/usb-c-edge-connector-stranding-three-bugs.md``.
+    """
+    return geometry.transform_point(point, origin, rotation_deg)
 
 
 def _points_bbox(points: list[Point]) -> tuple[Point, Point]:

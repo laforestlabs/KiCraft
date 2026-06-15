@@ -488,6 +488,37 @@ def test_compute_final_outline_edge_pinned_no_margin():
     )
 
 
+def test_compute_final_outline_rejects_far_outboard_edge_anchor():
+    # Regression for the USB-C stranding bug: a buggy anchor convention put
+    # the left edge anchor ~part-height OUTBOARD of the placed geometry, and
+    # the loose ``spacing_mm + 10`` clamp waved it through -- baking a bare-FR4
+    # strip between the connector mouth and the board edge. The tightened
+    # clamp (``spacing_mm + 2``) must IGNORE such an anchor and fall back to
+    # geometry - spacing so the strip can never form.
+    placed = [(Point(10.0, 10.0), Point(80.0, 60.0))]  # geom left edge = 10.0
+    constraint = AttachmentConstraint(
+        ref="J1", target="edge", value="left",
+        inward_keep_in_mm=0.0, outward_overhang_mm=0.0,
+        source="parent_local", child_index=None, strict=True,
+    )
+    # Anchor 8.3 mm outboard of the geometry left edge (the stranding signature).
+    outline = _compute_final_outline(
+        placed, [constraint], {"J1": Point(1.7, 30.0)}, spacing_mm=2.0
+    )
+    tl, _ = outline
+    assert math.isclose(tl.x, 8.0, abs_tol=1e-3), (
+        "far-outboard edge anchor must be ignored (fall back to geom-spacing "
+        f"= 8.0), got {tl.x:.4f}"
+    )
+    # A flush anchor (within the clamp) is still honored exactly.
+    flush = _compute_final_outline(
+        placed, [constraint], {"J1": Point(10.0, 30.0)}, spacing_mm=2.0
+    )
+    assert math.isclose(flush[0].x, 10.0, abs_tol=1e-3), (
+        f"flush edge anchor must still be honored, got {flush[0].x:.4f}"
+    )
+
+
 def test_compute_final_outline_unconstrained_gets_margin():
     # No constraints at all -> all four sides are unconstrained and
     # should land at geom +/- spacing_mm. This branch is also untouched

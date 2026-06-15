@@ -784,12 +784,17 @@ def _compute_final_outline(
     # -- the unconstrained branch already gets margin via constraint_aware_outline.
     #
     # Edge-snap sanity clamp: a flush-mount anchor legitimately sits within
-    # a few mm of the placed geometry's edge on its side (pad inset /
-    # housing overhang). An anchor further out than ``spacing_mm + 10`` is
-    # a frame/transform bug upstream, and snapping the outline to it bakes
-    # a phantom bare-FR4 strip into the board (the outline repair pass only
-    # ever grows). Fall back to geometry + spacing and say so.
-    anchor_slack_mm = spacing_mm + 10.0
+    # a couple mm of the placed geometry's edge on its side (pad inset /
+    # housing overhang). An anchor further out is a frame/transform bug
+    # upstream, and snapping the outline to it bakes a phantom bare-FR4 strip
+    # into the board (the outline repair pass only ever grows). The old
+    # ``spacing_mm + 10`` (~11mm) was loose enough to wave through an 8.8mm
+    # stranded USB-C anchor; ``spacing_mm + 2`` keeps the real flush case
+    # (delta ~= overhang, well under the clamp) while rejecting the
+    # part-height-scale reflection the convention bug produced. The fallback
+    # (geometry + spacing) is benign -- it just tracks geometry instead of a
+    # bogus anchor. Fall back and say so.
+    anchor_slack_mm = spacing_mm + 2.0
 
     def _resolve_min(side: str, c_val: float, g_val: float) -> float:
         if edge_constrained_sides[side]:
@@ -2836,6 +2841,77 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 1
+
+            # Early bail: connector edge-mount gate. An edge-zoned connector
+            # (USB-C, etc.) whose mouth is pulled inboard of the board edge it
+            # is zoned to is an UNMATEABLE port -- a real defect DRC cannot see
+            # (the board is electrically fine, so it would ship "fab-ready").
+            # Stranding is a PLACEMENT property fixed by stamp time, so measure
+            # on the stamped board and reject before spending ~200s routing a
+            # layout that's already wrong, mirroring the stamp_shorts guard.
+            # The round is rejected so the autoexperiment search retries another
+            # placement; with the anchor-convention fix (Fix A) a correctly
+            # zoned connector lands flush and never trips this. Config-gated
+            # (default on) and a generous inboard tolerance so only genuine
+            # stranding -- not pad-inset / rounding noise -- triggers a reject.
+            if args.route and cfg.get("enforce_connector_edge_gap", True):
+                component_zones = cfg.get("component_zones", {}) or {}
+                try:
+                    from kicraft.autoplacer.brain.connector_edge_gap import (
+                        connector_edge_gaps,
+                    )
+
+                    inboard_tol = float(
+                        cfg.get("connector_edge_inboard_tol_mm", 1.0)
+                    )
+                    edge_gaps = connector_edge_gaps(
+                        str(stamped_pcb),
+                        component_zones,
+                        inboard_tol_mm=inboard_tol,
+                    )
+                    # Reject only genuine INBOARD stranding -- not the rarer
+                    # excessive-overhang failure, which is far less clearly a
+                    # defect and (with no best-effort promotion downstream) not
+                    # worth risking a whole-build failure over.
+                    strand = [g for g in edge_gaps if g.gap_mm < -inboard_tol]
+                except Exception as gate_exc:  # noqa: BLE001
+                    # The gate must never invent a new failure mode: a pcbnew
+                    # load hiccup here should not fail an otherwise-good round.
+                    print(
+                        f"warning: connector edge-gap gate skipped: {gate_exc}",
+                        file=sys.stderr,
+                    )
+                    strand = []
+                    edge_gaps = []
+                if strand:
+                    reasons = [
+                        f"connector_stranded:{g.ref}@{g.gap_mm:.2f}mm({g.edge})"
+                        for g in strand
+                    ]
+                    state.routed_validation = {
+                        "accepted": False,
+                        "rejection_reasons": reasons,
+                        "connector_edge_gaps": [
+                            {"ref": g.ref, "edge": g.edge, "gap_mm": g.gap_mm, "ok": g.ok}
+                            for g in edge_gaps
+                        ],
+                        "drc": {"skipped_routing": True},
+                    }
+                    if args.output:
+                        _save_composition_snapshot(
+                            Path(args.output).resolve(),
+                            state,
+                            transformed_payloads,
+                        )
+                    print(
+                        f"parent_status      : rejected ({', '.join(reasons)})"
+                    )
+                    print(
+                        "error: connector(s) stranded inboard of their zoned "
+                        f"board edge: {', '.join(reasons)}; skipped routing",
+                        file=sys.stderr,
+                    )
+                    return 1
 
             if args.route:
                 _t_route = time.perf_counter()

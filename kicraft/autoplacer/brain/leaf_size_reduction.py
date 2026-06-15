@@ -24,15 +24,20 @@ def local_solver_config(
 
     # Start the local zone map from the parent's zones so axis hints
     # carry through unchanged for non-connector parts (batteries, ICs,
-    # passives). Connectors get re-derived below from leaf-local
-    # geometry, OVERWRITING whatever the parent said -- the parent's
-    # "edge:right" may not be the closest leaf-board edge. Without this
-    # fallback, alignment-group detection inside the leaf solver loses
-    # the parent's axis hint for non-connector groups (e.g. parallel
-    # batteries) and the alignment repair pass becomes a no-op.
+    # passives). A connector with NO explicit parent edge gets re-derived
+    # below from leaf-local geometry (the nearest-edge fallback); a
+    # connector that DOES carry an explicit parent edge is left untouched
+    # -- that edge states which FINAL-board edge the off-board connector
+    # mates at, and clobbering it with the nearest leaf-board edge solves
+    # the connector at the wrong leaf edge, forcing a 90/270 compose
+    # rotation that strands it inboard. Without the copied map, alignment-
+    # group detection inside the leaf solver loses the parent's axis hint
+    # for non-connector groups (e.g. parallel batteries) and the alignment
+    # repair pass becomes a no-op.
+    parent_zones = base_cfg.get("component_zones", {}) or {}
     local_component_zones: dict[str, Any] = {
         ref: dict(spec)
-        for ref, spec in (base_cfg.get("component_zones", {}) or {}).items()
+        for ref, spec in parent_zones.items()
         if isinstance(spec, dict)
     }
     source_outline = (
@@ -46,6 +51,15 @@ def local_solver_config(
 
     for ref, comp in extraction.local_state.components.items():
         if comp.kind == "connector":
+            # An explicit parent edge zone is authoritative for an off-board
+            # connector: it names the FINAL-board edge it mates at. Keep the
+            # copied parent spec so the leaf solver places the connector at
+            # that leaf edge (its board extremity) and compose mounts it flush
+            # without a stranding rotation. Only parent-UNZONED connectors fall
+            # through to the leaf-local nearest-edge derivation below.
+            parent_edge = (parent_zones.get(ref) or {}).get("edge")
+            if parent_edge in ("left", "right", "top", "bottom"):
+                continue
             if source_board_tl is not None and source_board_br is not None:
                 if comp.body_center is not None:
                     source_center_x = comp.body_center.x - translation.x
