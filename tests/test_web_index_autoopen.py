@@ -72,24 +72,6 @@ def _persisted_project(store, user_id: int, brief: str, stem: str) -> int:
     return pid
 
 
-class _ContextCheckedNotify:
-    """Production parity for ui.notify in the simulation: the real notify
-    resolves the client through the CURRENT slot, which raises RuntimeError if
-    the handler's own button row was deleted (e.g. by a projects-list rebuild).
-    The harness's UserNotify skips that walk, so wrap it to restore the check."""
-
-    def __init__(self, inner):
-        self.inner = inner
-
-    def __call__(self, *args, **kwargs):
-        from nicegui import context
-        _ = context.client  # raises if the enclosing slot was deleted
-        return self.inner(*args, **kwargs)
-
-    def __getattr__(self, name):  # contains() etc. used by should_see
-        return getattr(self.inner, name)
-
-
 async def _login(u):
     await u.open("/login")
     u.find("Email").type(EMAIL)
@@ -113,9 +95,11 @@ async def test_returning_to_index_attaches_to_live_run(harness):
 
 
 async def test_blank_composer_when_nothing_needs_attention(harness):
+    # The project list moved to /projects, so a fresh user lands on the blank
+    # composer (first-run welcome), not an inline "No projects yet" list.
     u, web, store, acct = harness
     await _login(u)
-    await u.should_see("No projects yet")
+    await u.should_see("Welcome to KiCraft")
 
 
 async def test_cloned_project_opens_with_bom(harness):
@@ -124,7 +108,6 @@ async def test_cloned_project_opens_with_bom(harness):
     (auto-open of the fresh unseen result) with its BOM inspector populated
     from the cloned state.json -- not on a blank composer."""
     u, web, store, acct = harness
-    from nicegui import ui
 
     owner = store.create_user("owner@example.com", "ownerpw12345")
     src_id = _persisted_project(store, owner.id, "bmp280 reader", "BMP280_READER")
@@ -138,14 +121,6 @@ async def test_cloned_project_opens_with_bom(harness):
     # The BOM tab's inspector renders the cloned parts (render-timer driven).
     await u.should_see("Summary")
     await u.should_see("Parts")
-
-    # Re-opening from the projects list must toast: it used to crash at the
-    # final ui.notify because refresh_account_ui had just deleted the clicked
-    # button's slot ("parent element ... has been deleted", seen in the live
-    # log). The context-checked wrapper restores the production slot walk.
-    u.notify = _ContextCheckedNotify(u.notify)
-    u.find("Open", kind=ui.button).click()
-    await u.should_see("Opened BMP280_READER")
 
 
 async def test_clone_deep_link_outranks_parked_default(harness):

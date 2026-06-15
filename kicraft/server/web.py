@@ -2340,40 +2340,155 @@ def profile_page():
             ui.label("Community visibility").classes("text-base font-semibold text-white")
             if _can_make_private(user):
                 ui.label("Choose which of your completed projects appear in the "
-                         "community browser.").classes("text-xs").style("color:#94a3b8")
-                ok_projs = [p for p in _store().list_projects(user.id) if p.status == "ok"]
-                if not ok_projs:
-                    ui.label("You have no completed projects yet.") \
-                        .classes("text-xs").style("color:#64748b")
-                for p in ok_projs:
-                    with ui.row().classes("w-full items-center gap-2"):
-                        ui.label(p.project_stem or f"project {p.id}") \
-                            .classes("text-sm flex-grow").style("color:#e2e8f0")
-                        sw = ui.switch("Public", value=p.is_public)
-
-                        def _flip(e, pid=p.id):
-                            # Re-check tier server-side: a downgraded/forged session
-                            # must not be able to hide a project from the catalog.
-                            if not _can_make_private(_current_user()):
-                                ui.notify("Only paid plans can change visibility.",
-                                          color="warning")
-                                return
-                            _store().set_visibility(pid, bool(e.value))
-                            _store().reindex_search(pid)
-                            ui.notify("Visibility updated.", color="positive")
-
-                        sw.on_value_change(_flip)
-            else:
-                ui.label("Your projects are public and appear in the community "
-                         "browser. Upgrade to Pro to keep projects private.") \
+                         "community browser from your projects page.") \
                     .classes("text-xs").style("color:#94a3b8")
-            ui.button("Open community browser", icon="travel_explore",
-                      on_click=lambda: ui.navigate.to("/browse")) \
-                .props("flat dense no-caps color=primary").classes("text-xs mt-1")
+            else:
+                ui.label("Your completed projects are public and appear in the "
+                         "community browser. Upgrade to Pro to keep projects "
+                         "private.").classes("text-xs").style("color:#94a3b8")
+            with ui.row().classes("items-center gap-2 mt-1"):
+                ui.button("Manage your projects", icon="folder",
+                          on_click=lambda: ui.navigate.to("/projects")) \
+                    .props("flat dense no-caps color=primary").classes("text-xs")
+                ui.button("Open community browser", icon="travel_explore",
+                          on_click=lambda: ui.navigate.to("/browse")) \
+                    .props("flat dense no-caps color=primary").classes("text-xs")
 
         with ui.row().classes("w-full justify-end"):
             ui.button("Log out", icon="logout", on_click=logout) \
                 .props("flat dense no-caps color=white").classes("text-xs")
+
+
+@ui.page("/projects")
+def projects_page():
+    """The user's own designs on their own page: every project they've started,
+    newest first, with Open / Download actions and -- for paid (pro/max) plans --
+    a per-project Public toggle that lists a completed board in the community
+    browser. This is the home the 'Your projects' workspace expander used to be;
+    living on its own page keeps the composer uncluttered and gives visibility its
+    own room. Login + consent gated like the rest of the app."""
+    user = _current_user()
+    if user is None:
+        return RedirectResponse("/login")
+    if user.accepted_terms_version != LEGAL_VERSION:
+        return RedirectResponse("/consent")
+
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    _mobile_head()
+
+    # Whether this plan may keep a project private. Re-checked server-side on every
+    # toggle below, never trusting this initial UI gate.
+    can_private = _can_make_private(user)
+
+    with ui.header().classes("items-center justify-between") \
+            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+        with ui.row().classes("items-center gap-2"):
+            ui.label("KiCraft").classes("text-xl font-bold text-white")
+            ui.label("your projects").classes("text-sm kc-tagline").style("color:#94a3b8")
+        with ui.row().classes("items-center gap-2"):
+            ui.button("Browse community", icon="travel_explore",
+                      on_click=lambda: ui.navigate.to("/browse")) \
+                .props("flat dense no-caps color=white").classes("text-xs") \
+                .tooltip("Browse and clone community projects")
+            ui.button("Back to workspace", icon="arrow_back",
+                      on_click=lambda: ui.navigate.to("/")) \
+                .props("flat dense no-caps color=white").classes("text-xs")
+
+    with ui.column().classes("w-full max-w-4xl mx-auto p-6 gap-3"):
+        ui.label("Your projects").classes("text-2xl font-bold text-white")
+        if can_private:
+            ui.label("Every board you've designed. Flip a completed project to "
+                     "Public to list it in the community browser; flip it back "
+                     "to keep it private.").classes("text-sm").style("color:#94a3b8")
+        else:
+            ui.label("Every board you've designed. On the free plan, completed "
+                     "projects are public and appear in the community browser -- "
+                     "upgrade to Pro to keep projects private.") \
+                .classes("text-sm").style("color:#94a3b8")
+
+        rows_box = ui.column().classes("w-full gap-2")
+
+        def render_rows():
+            rows_box.clear()
+            with rows_box:
+                projs = _store().list_projects(user.id)
+                if not projs:
+                    ui.label("No projects yet. Describe a board in the workspace "
+                             "to begin.").classes("text-sm").style("color:#64748b")
+                    return
+                for p in projs:
+                    _render_row(p)
+
+        def _render_row(p):
+            live = _LIVE_RUNS.get(p.id)
+            with ui.card().classes("w-full gap-2") \
+                    .style("background:#0f172a;border:1px solid #1e293b"):
+                with ui.row().classes("w-full items-center gap-3"):
+                    ui.label(p.project_stem or "(building…)") \
+                        .classes("text-sm font-semibold").style("color:#e2e8f0")
+                    if p.board_code:
+                        ui.label(p.board_code).classes("text-xs font-mono") \
+                            .style("color:#64748b") \
+                            .tooltip("Board ID. Quote it when reporting an issue.")
+                    # A 'running' row with no live worker is a run the server lost
+                    # (restart/crash mid-run): say so instead of a phantom run.
+                    shown = p.status
+                    if p.status == "running" and live is None:
+                        shown = "interrupted"
+                    ui.label(shown).classes("text-xs").style(
+                        "color:#4ade80" if live is not None else "color:#94a3b8")
+                    ui.label(p.created_at[:19].replace("T", " ")) \
+                        .classes("text-xs").style("color:#64748b")
+                    ui.space()
+                    # Open deep-links into the workspace, which attaches to the
+                    # live run when there is one (see index()'s ?project= branch).
+                    if p.dir_path or live is not None:
+                        ui.button("Open", icon="folder_open",
+                                  on_click=lambda pp=p: ui.navigate.to(
+                                      f"/?project={pp.id}")) \
+                            .props("flat dense no-caps")
+                    if p.zip_path and Path(p.zip_path).is_file():
+                        ui.button("Download", icon="download",
+                                  on_click=lambda zp=p.zip_path: ui.download(zp)) \
+                            .props("flat dense no-caps")
+                    if p.dir_path and is_admin(user):
+                        ui.button("Evaluate", icon="fact_check",
+                                  on_click=lambda pp=p: open_eval_dialog(
+                                      pp.dir_path,
+                                      pp.project_stem or f"project {pp.id}")) \
+                            .props("flat dense no-caps").style("color:#a78bfa")
+                # Visibility is only meaningful for a completed board -- the
+                # community browser lists status=='ok' only. Paid plans get a real
+                # toggle; free plans see the always-public note.
+                if p.status == "ok":
+                    with ui.row().classes("w-full items-center gap-2"):
+                        if can_private:
+                            sw = ui.switch("Public in the community",
+                                           value=p.is_public)
+
+                            def _flip(e, pid=p.id):
+                                # Re-check tier server-side: a downgraded/forged
+                                # session must not move a project in the catalog.
+                                if not _can_make_private(_current_user()):
+                                    ui.notify("Only paid plans can change "
+                                              "visibility.", color="warning")
+                                    return
+                                _store().set_visibility(pid, bool(e.value))
+                                _store().reindex_search(pid)
+                                ui.notify(
+                                    "Now public in the community."
+                                    if e.value else "Now private.",
+                                    color="positive")
+
+                            sw.on_value_change(_flip)
+                        else:
+                            ui.icon("public").classes("text-sm") \
+                                .style("color:#34d399")
+                            ui.label("Public in the community browser") \
+                                .classes("text-xs").style("color:#94a3b8")
+
+        render_rows()
 
 
 # --------------------------------------------------------------------------- #
@@ -5330,6 +5445,10 @@ def index(prompt: str = "", project: str = ""):
                 .style("color:#94a3b8")
         # Full nav row on desktop (>=1024px) ...
         with ui.row().classes("items-center gap-3 gt-sm"):
+            ui.button("My projects", icon="folder",
+                      on_click=lambda: ui.navigate.to("/projects")) \
+                .props("flat dense no-caps color=white").classes("text-xs") \
+                .tooltip("Your designs -- open them and publish to the community")
             ui.button("Examples", icon="dashboard",
                       on_click=lambda: ui.navigate.to("/samples")) \
                 .props("flat dense no-caps color=white").classes("text-xs") \
@@ -5368,6 +5487,7 @@ def index(prompt: str = "", project: str = ""):
             with ui.button(icon="menu").props("flat dense color=white"):
                 with ui.menu().props("auto-close") \
                         .style("background:#0f172a;border:1px solid #1e293b"):
+                    ui.menu_item("My projects", lambda: ui.navigate.to("/projects"))
                     ui.menu_item("Examples", lambda: ui.navigate.to("/samples"))
                     ui.menu_item("Part library", lambda: ui.navigate.to("/parts"))
                     ui.menu_item("Browse", lambda: ui.navigate.to("/browse"))
@@ -5435,11 +5555,11 @@ def index(prompt: str = "", project: str = ""):
             continue_btn.set_visibility(False)
             # Escape hatch from the auto-opened design: detach to a blank
             # composer so a second design can run in parallel (the open one
-            # keeps running in the background, reachable from Your projects).
+            # keeps running in the background, reachable from My projects).
             new_btn = ui.button("New design", icon="add") \
                 .props("outline color=white") \
                 .tooltip("Start a fresh design. The open one keeps running in "
-                         "the background and stays under Your projects.")
+                         "the background and stays under My projects.")
             new_btn.set_visibility(False)
             if first_run:
                 design_btn.classes(add="kc-pulse")
@@ -5585,57 +5705,10 @@ def index(prompt: str = "", project: str = ""):
         tabs.on_show("synthesize", lambda: _reveal_view("sch_view", "sch_revealed"))
         tabs.on_show("place_route", lambda: _reveal_view("pcb_view", "pcb_revealed"))
 
-        with ui.expansion("Your projects").classes("w-full mt-2") \
-                .style("background:#0f172a;border:1px solid #1e293b"):
-            proj_container = ui.column().classes("w-full gap-1 p-2")
-
-        with ui.expansion("Edit a stage & re-run").classes("w-full") \
+        with ui.expansion("Edit a stage & re-run").classes("w-full mt-2") \
                 .style("background:#0f172a;border:1px solid #1e293b"):
             edit_box = ui.column().classes("w-full gap-2 p-2")
         edit_ctx: dict = {"getter": None, "raw": None, "instr": None}
-
-        def build_projects():
-            proj_container.clear()
-            with proj_container:
-                projs = _store().list_projects(user.id)
-                if not projs:
-                    ui.label("No projects yet. Describe a board above to begin.") \
-                        .classes("text-xs").style("color:#64748b")
-                for p in projs:
-                    live = _LIVE_RUNS.get(p.id)
-                    with ui.row().classes("items-center gap-3 w-full"):
-                        ui.label(p.project_stem or "(building...)") \
-                            .classes("text-sm").style("color:#e2e8f0")
-                        if p.board_code:
-                            ui.label(p.board_code).classes("text-xs font-mono") \
-                                .style("color:#64748b") \
-                                .tooltip("Board ID. Quote it when reporting an issue.")
-                        # A 'running' row with no live worker is a run the
-                        # server lost (restart/crash mid-run): say so instead
-                        # of showing a phantom run forever.
-                        shown = p.status
-                        if p.status == "running" and live is None:
-                            shown = "interrupted"
-                        ui.label(shown).classes("text-xs").style(
-                            "color:#4ade80" if live is not None else "color:#94a3b8")
-                        ui.label(p.created_at[:19].replace("T", " ")) \
-                            .classes("text-xs").style("color:#64748b")
-                        # Open attaches to the live run when there is one, so
-                        # the button exists from the first second of a run --
-                        # not only once artifacts are persisted (dir_path).
-                        if p.dir_path or live is not None:
-                            ui.button("Open", icon="folder_open",
-                                      on_click=lambda pp=p: open_project(pp)).props("flat dense")
-                        if p.zip_path and Path(p.zip_path).is_file():
-                            ui.button("Download", icon="download",
-                                      on_click=lambda zp=p.zip_path: ui.download(zp)) \
-                                .props("flat dense")
-                        if p.dir_path and is_admin(user):
-                            ui.button("Evaluate", icon="fact_check",
-                                      on_click=lambda pp=p: open_eval_dialog(
-                                          pp.dir_path,
-                                          pp.project_stem or f"project {pp.id}")) \
-                                .props("flat dense").style("color:#a78bfa")
 
         def build_question_panel():
             """(Re)build the clarifying-question panel for a parked run. Always
@@ -5950,7 +6023,6 @@ def index(prompt: str = "", project: str = ""):
                 if not state["running"]:
                     design_btn.enable()
                 quota_label.style("color:#94a3b8")
-            build_projects()
             build_edit_panel()
 
         def start_fresh():
