@@ -30,6 +30,9 @@ design = [
     "kicad-skip>=0.2",
     "easyeda2kicad>=1.0",
 ]
+tuning = [
+    "cma>=4.0",
+]
 server = [
     "requests>=2.31",
     "nicegui>=1.4",
