@@ -79,12 +79,15 @@ excluded with `--exclude scratch`.)
 
 ## Promote the winner
 When you've run enough generations, validate the best config on the held-out
-boards and print the overlay to apply to `DEFAULT_CONFIG`:
+boards and print the overlay to apply to `DEFAULT_CONFIG` (the entrypoint sets up
+the repo/venv, then runs whatever command you pass):
 ```sh
+# review the Pareto front
 docker run --rm -v /mnt/user/appdata/kicraft-tune:/data kicraft-tune \
-  bash -lc 'cd $KICRAFT_DATA/KiCraft && python -m kicraft.tuning.cli \
-            report  --out /data/runs/i7 && python -m kicraft.tuning.cli \
-            promote --corpus tuning_corpus --out /data/runs/i7'
+  python -m kicraft.tuning.cli report --out /data/runs/i7
+# validate the winner on the holdout boards
+docker run --rm -v /mnt/user/appdata/kicraft-tune:/data kicraft-tune \
+  python -m kicraft.tuning.cli promote --corpus tuning_corpus --out /data/runs/i7
 ```
 `promote` re-evaluates the candidate vs the current default on the holdout
 boards (sign-test + Pareto-dominance) and, if it wins, writes the overlay to
@@ -98,7 +101,7 @@ docker stop kicraft-tune && docker rm kicraft-tune   # stop
 # re-run the same `docker run ...` to resume — cached evals are reused, and
 # updating is automatic (the entrypoint pulls the latest main on each start).
 docker run --rm -v /mnt/user/appdata/kicraft-tune:/data kicraft-tune \
-  bash -lc 'cd $KICRAFT_DATA/KiCraft && python -m kicraft.tuning.cli resume --out /data/runs/i7'
+  python -m kicraft.tuning.cli resume --out /data/runs/i7
 ```
 
 ## Troubleshooting
