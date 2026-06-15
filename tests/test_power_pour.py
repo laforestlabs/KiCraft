@@ -676,3 +676,136 @@ def test_gnd_escape_specs_targets_only_small_gnd_pads(tmp_path):
     assert all(s.via_at_end for s in specs)
     assert gnd_escape_specs(board, {"gnd_zone_net": "GND",
                                     "gnd_pre_escape": False}) == []
+
+
+# ---------------------------------------------------------------------------
+# Footprint rule-area keep-out guard + solid GND pad connection (KC-S8PC37):
+# the ESP32-S3-MINI ships an antenna_keepout rule area inside its .kicad_mod;
+# the GND finisher stamped 16 escape stubs + 14 vias straight into it (30
+# items_not_allowed), and the thermal GND zone starved spokes on the module's
+# dense pin ring.
+# ---------------------------------------------------------------------------
+
+from kicraft.autoplacer.brain.gnd_pour import pour_gnd_planes  # noqa: E402
+
+
+def _module_keepout_board(path):
+    """A module-shaped U1: a dense row of 0.5 mm GND pads (0.85 mm pitch -- too
+    small for an in-pad via, too tight for thermal spokes) with an embedded
+    antenna_keepout rule area just below the row, plus one large GND pad on U2
+    far from the keep-out that must still get its in-pad stitch via."""
+    board = pcbnew.NewBoard(path)
+    for name in ("GND", "SIG"):
+        board.Add(pcbnew.NETINFO_ITEM(board, name))
+
+    def net(n):
+        return board.GetNetInfo().GetNetItem(n)
+
+    corners = [(0, 0), (30, 0), (30, 30), (0, 30), (0, 0)]
+    for (x1, y1), (x2, y2) in zip(corners, corners[1:]):
+        seg = pcbnew.PCB_SHAPE(board)
+        seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        seg.SetStart(pcbnew.VECTOR2I(_mm(x1), _mm(y1)))
+        seg.SetEnd(pcbnew.VECTOR2I(_mm(x2), _mm(y2)))
+        seg.SetLayer(pcbnew.Edge_Cuts)
+        board.Add(seg)
+
+    u1 = pcbnew.FOOTPRINT(board)
+    u1.SetReference("U1")
+    board.Add(u1)
+    x = 10.0
+    for i in range(12):
+        pad = pcbnew.PAD(u1)
+        pad.SetSize(pcbnew.VECTOR2I(_mm(0.5), _mm(0.5)))
+        pad.SetPosition(pcbnew.VECTOR2I(_mm(x), _mm(10.0)))
+        pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        pad.SetLayerSet(pcbnew.PAD.SMDMask())
+        pad.SetNumber(str(i + 1))
+        pad.SetNet(net("GND"))
+        u1.Add(pad)
+        x += 0.85
+    # Antenna keep-out embedded in the footprint, just below the GND pad row.
+    ko = pcbnew.ZONE(u1)
+    ko.SetIsRuleArea(True)
+    ko.SetZoneName("antenna_keepout")
+    ko.SetDoNotAllowTracks(True)
+    ko.SetDoNotAllowVias(True)
+    ko.SetDoNotAllowCopperPour(True)
+    ko.SetDoNotAllowPads(True)
+    ls = pcbnew.LSET()
+    ls.AddLayer(pcbnew.F_Cu)
+    ls.AddLayer(pcbnew.B_Cu)
+    ko.SetLayerSet(ls)
+    outline = ko.Outline()
+    outline.NewOutline()
+    for px, py in ((9.5, 10.6), (20.0, 10.6), (20.0, 14.0), (9.5, 14.0)):
+        outline.Append(_mm(px), _mm(py))
+    u1.Add(ko)
+
+    # A large GND pad far from any keep-out: the finisher must still stitch it.
+    u2 = pcbnew.FOOTPRINT(board)
+    u2.SetReference("U2")
+    board.Add(u2)
+    pad = pcbnew.PAD(u2)
+    pad.SetSize(pcbnew.VECTOR2I(_mm(2.5), _mm(2.5)))
+    pad.SetPosition(pcbnew.VECTOR2I(_mm(25.0), _mm(25.0)))
+    pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+    pad.SetLayerSet(pcbnew.PAD.SMDMask())
+    pad.SetNumber("1")
+    pad.SetNet(net("GND"))
+    u2.Add(pad)
+
+    board.Save(path)
+    return path
+
+
+def test_gnd_finisher_keeps_copper_out_of_footprint_keepout(tmp_path):
+    # KC-S8PC37: every escape stub + thermal via the finisher would stamp into
+    # U1's antenna_keepout must be skipped, while the far U2 GND pad still
+    # stitches (the guard is targeted, not a blanket disable).
+    path = str(tmp_path / "b.kicad_pcb")
+    _module_keepout_board(path)
+    res = add_gnd_pour_and_thermal_vias(path, {"gnd_zone_net": "GND"})
+
+    board = pcbnew.LoadBoard(path)
+    ko = next(z for fp in board.GetFootprints() for z in fp.Zones()
+              if z.GetIsRuleArea())
+    poly = ko.Outline()
+
+    def _inside(item):
+        p = item.GetPosition()
+        return poly.Contains(pcbnew.VECTOR2I(int(p.x), int(p.y)))
+
+    gnd_in_keepout = [t for t in board.GetTracks()
+                      if t.GetNetname() == "GND" and _inside(t)]
+    assert gnd_in_keepout == [], gnd_in_keepout
+    # The far U2 pad is unaffected by the keep-out and still gets stitched
+    # (a large pad takes a via array, so just require a GND via in its area).
+    assert any(
+        isinstance(t, pcbnew.PCB_VIA) and t.GetNetname() == "GND"
+        and abs(pcbnew.ToMM(t.GetPosition().x) - 25.0) <= 1.25
+        and abs(pcbnew.ToMM(t.GetPosition().y) - 25.0) <= 1.25
+        for t in board.GetTracks()
+    ), res
+
+
+def test_gnd_pour_pad_connection_solid_by_default_thermal_when_configured(tmp_path):
+    # The starved_thermal fix: GND pours connect pads solidly by default (no
+    # spokes to starve on a dense pin ring), and "thermal" restores relief.
+    path = str(tmp_path / "b.kicad_pcb")
+    _board(path, {"1": "GND", "2": "GND"})
+    pour_gnd_planes(path, {"gnd_zone_net": "GND"}, layers=("F.Cu",))
+    board = pcbnew.LoadBoard(path)
+    z = next(z for z in board.Zones()
+             if z.GetNetname() == "GND" and not z.GetIsRuleArea())
+    assert z.GetPadConnection() == pcbnew.ZONE_CONNECTION_FULL
+
+    path2 = str(tmp_path / "b2.kicad_pcb")
+    _board(path2, {"1": "GND", "2": "GND"})
+    pour_gnd_planes(path2, {"gnd_zone_net": "GND",
+                            "gnd_plane_pad_connection": "thermal"},
+                    layers=("F.Cu",))
+    board2 = pcbnew.LoadBoard(path2)
+    z2 = next(z for z in board2.Zones()
+              if z.GetNetname() == "GND" and not z.GetIsRuleArea())
+    assert z2.GetPadConnection() == pcbnew.ZONE_CONNECTION_THERMAL
