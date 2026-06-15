@@ -103,8 +103,24 @@ def _cmd_screen(a) -> int:
 
 
 def _cmd_run(a) -> int:
-    from kicraft.tuning.orchestrator import run_tuning
+    from kicraft.tuning.orchestrator import SCREEN_NAME, run_tuning
 
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    if a.active:
+        from kicraft.tuning.space import all_param_names
+        valid = set(all_param_names())
+        active = [p.strip() for p in a.active.split(",") if p.strip()]
+        bad = [p for p in active if p not in valid]
+        if bad:
+            print(f"unknown tunable param(s): {bad}\nvalid: {sorted(valid)}",
+                  file=sys.stderr)
+            return 2
+        # Pre-seed screen.json so the orchestrator skips the screening pass.
+        (out / SCREEN_NAME).write_text(json.dumps({
+            "active": active, "frozen": [], "correlations": {},
+            "n_samples": 0, "scalarization": a.scalarization, "samples": []}))
+        print(f"[run] using {len(active)} given active params (screening skipped)")
     run_id = a.run_id or time.strftime("tune-%Y%m%dT%H%M%SZ", time.gmtime())
     run_tuning(_settings_from_args(a), run_id=run_id,
                log=lambda m: print(m, flush=True), resume=False)
@@ -310,6 +326,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--gens", type=int, default=30)
     p.add_argument("--popsize", type=int, default=None)
     p.add_argument("--cma-seed", type=int, default=0)
+    p.add_argument("--active", default=None,
+                   help="comma-separated param names to tune; pre-seeds "
+                        "screen.json and SKIPS the screening pass")
     p.add_argument("--run-id", default=None)
     p.set_defaults(func=_cmd_run)
 

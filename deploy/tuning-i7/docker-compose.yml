@@ -1,0 +1,23 @@
+# KiCraft auto-tuning worker (homelab i7 / unraid). Build once; it clones the
+# repo + corpus into the mounted volume, tunes, and writes runs to /data/runs.
+# Watch with:  docker logs -f kicraft-tune
+services:
+  kicraft-tune:
+    build: .
+    image: kicraft-tune:latest
+    container_name: kicraft-tune
+    # IMPORTANT: put /data on a fast pool (SSD/NVMe cache), NOT the spinning
+    # array — each eval copies a workspace to scratch, so it is I/O heavy.
+    volumes:
+      - /mnt/user/appdata/kicraft-tune:/data
+    environment:
+      GENS: "40"
+      SEEDS: "0,1"        # K seeds/board; placement is deterministic, this averages routing noise
+      POPSIZE: "8"
+      SCAL: "balanced"    # correctness | balanced | speed
+      TIMEOUT: "600"      # per-eval cap (s)
+      RUN_ID: "i7"
+      # KICRAFT_BUILD_SLOTS: "6"   # concurrent evals; default = cores / 4
+      # KICRAFT_BRANCH: "main"
+      # ACTIVE: "edge_margin_mm,placement_clearance_mm,..."  # override tuned params
+    restart: "no"
