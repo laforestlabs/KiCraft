@@ -17,6 +17,7 @@ flagged) and the baseline (current DEFAULT_CONFIG) for reference.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -24,7 +25,12 @@ from kicraft.tuning import space
 from kicraft.tuning.reward import CorpusObjectives, pareto_front
 from kicraft.tuning.store import config_hash
 
-RUN_MARKERS = ("tuning.db", "checkpoint.json", "report.json")
+# A self-contained, chart-ready payload the tuner writes each generation. It is
+# the ONLY file that needs to travel to a remote viewer (e.g. the cloud admin
+# page): tiny JSON, no live sqlite to sync. The local DB is the source of truth;
+# progress.json is its published snapshot.
+PROGRESS_NAME = "progress.json"
+RUN_MARKERS = (PROGRESS_NAME, "tuning.db", "checkpoint.json", "report.json")
 
 
 def discover_runs(roots: list[str | Path]) -> list[Path]:
@@ -83,6 +89,22 @@ def _active_params(run_dir: Path, report: dict | None, checkpoint: dict | None) 
 def run_overview(run_dir: Path) -> dict:
     """Cheap headline stats for the runs LIST (no full chart build)."""
     run_dir = Path(run_dir)
+    # Prefer a published payload (covers a synced remote run with no local DB).
+    pub = _read_json(run_dir / PROGRESS_NAME)
+    if pub:
+        pts = pub.get("points", [])
+        finished = bool(pub.get("finished"))
+        n_gens = int(pub.get("n_gens", 0))
+        return {
+            "path": str(run_dir), "name": run_dir.name,
+            "mtime": run_dir.stat().st_mtime, "gen": n_gens,
+            "n_configs": int(pub.get("n_configs", 0)),
+            "scalarization": pub.get("scalarization"),
+            "baseline_fab": (pub.get("baseline") or {}).get("fab"),
+            "best_fab": (max((p.get("fab", 0.0) for p in pts), default=None)
+                         if pts else None),
+            "finished": finished, "running": n_gens > 0 and not finished,
+        }
     checkpoint = _read_json(run_dir / "checkpoint.json")
     report = _read_json(run_dir / "report.json")
     gen = int(checkpoint.get("gen", 0)) if checkpoint else 0
@@ -104,7 +126,28 @@ def run_overview(run_dir: Path) -> dict:
 
 
 def load_run(run_dir: str | Path) -> dict:
-    """Full chart-ready payload for one tuning run."""
+    """Chart-ready payload for one run: the published snapshot if present
+    (a synced remote run), otherwise computed live from the local DB."""
+    run_dir = Path(run_dir)
+    pub = _read_json(run_dir / PROGRESS_NAME)
+    if pub:
+        return pub
+    return build_payload(run_dir)
+
+
+def publish(run_dir: str | Path) -> Path:
+    """Write the chart payload to ``progress.json`` (atomic). Called by the tuner
+    each generation; the result is the single small file a remote viewer needs."""
+    run_dir = Path(run_dir)
+    payload = build_payload(run_dir)
+    tmp = run_dir / (PROGRESS_NAME + ".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, run_dir / PROGRESS_NAME)
+    return run_dir / PROGRESS_NAME
+
+
+def build_payload(run_dir: str | Path) -> dict:
+    """Compute the full chart-ready payload from the local DB + checkpoint."""
     run_dir = Path(run_dir)
     checkpoint = _read_json(run_dir / "checkpoint.json")
     report = _read_json(run_dir / "report.json")

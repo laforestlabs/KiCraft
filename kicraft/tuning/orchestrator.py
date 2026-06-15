@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
+from kicraft.tuning import report_data
 from kicraft.tuning import reward as R
 from kicraft.tuning import space
 from kicraft.tuning.corpus import (
@@ -218,6 +219,10 @@ def run_tuning(
             "optimizer": opt.state_dict(), "archive": archive,
             "settings": asdict(settings),
         })
+        try:  # publish the chart payload (the one file a remote viewer needs)
+            report_data.publish(out)
+        except Exception:  # noqa: BLE001 — best-effort, never fail the run
+            pass
         dt = time.monotonic() - t0
         log(f"[tune] gen {gen}: pop={len(X)} bestJ={best_j:.3f} "
             f"({dt:.0f}s){ho_line}")
@@ -231,6 +236,10 @@ def run_tuning(
         "baseline": next((a for a in archive if a.get("baseline")), None),
     }
     _atomic_write_json(out / REPORT_NAME, report)
+    try:
+        report_data.publish(out)
+    except Exception:  # noqa: BLE001
+        pass
     store.close()
     log(f"[tune] done: {report['n_configs_evaluated']} configs, "
         f"{len(front)} on the Pareto front -> {out / REPORT_NAME}")

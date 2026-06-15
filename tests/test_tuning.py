@@ -226,6 +226,16 @@ def test_report_data_load_run(tmp_path):
     # discovery finds the run
     assert run in report_data.discover_runs([tmp_path])
 
+    # publish -> a self-contained progress.json the cloud page reads directly
+    report_data.publish(run)
+    assert (run / "progress.json").is_file()
+    # load_run now prefers the published payload (same content), and run_overview
+    # works off it alone (as it would on a synced remote run with no DB)
+    pub = report_data.load_run(run)
+    assert pub["n_gens"] == 2 and {p["hash"] for p in pub["points"] if p["front"]} == {ha, hb}
+    ov = report_data.run_overview(run)
+    assert ov["gen"] == 2 and ov["baseline_fab"] == 0.6
+
 
 def test_freeze_corpus_roundtrip(tmp_path):
     import shutil

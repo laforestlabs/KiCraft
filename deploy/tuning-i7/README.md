@@ -67,15 +67,30 @@ docker compose logs -f
 On a 16-core/24-thread i7, expect **minutes per generation** (vs hours on the
 cloud box) — so K=2 seeds and the full 16-board corpus are comfortable.
 
-## Watch the charts on kicraft.io (optional)
-The admin page (`/admin/tuning`) scans `~/.kicraft/tuning` on the **cloud** box.
-To see the i7 run there, rsync the run dir over periodically:
-```sh
-rsync -a /mnt/user/appdata/kicraft-tune/runs/i7/ \
-  CLOUD_HOST:~/.kicraft/tuning/i7/
-```
-(Only `tuning.db` + `checkpoint.json` matter for the charts; `scratch/` can be
-excluded with `--exclude scratch`.)
+## Watch the charts on kicraft.io
+The tuner writes a tiny, self-contained `progress.json` (the full chart payload)
+into the run dir every generation. Push just that one file to the cloud box and
+it appears on the admin page (`/admin/tuning`) automatically — no live database
+to sync.
+
+`sync-to-admin.sh` does it. Set it up once on the unraid host:
+
+1. **Passwordless SSH, unraid → cloud** (as the user that runs the web app, e.g.
+   `kicraft`):
+   ```sh
+   ssh-keygen -t ed25519 -f /boot/config/ssh/kicraft_tune_id -N ''
+   ssh-copy-id -i /boot/config/ssh/kicraft_tune_id.pub kicraft@YOUR_CLOUD_HOST
+   ```
+2. **Edit `sync-to-admin.sh`** — set `CLOUD=kicraft@YOUR_CLOUD_HOST` (and
+   `RUN_DIR`/`RUN_ID` if you changed them).
+3. **Schedule it** with the *User Scripts* plugin (Settings → User Scripts → Add
+   Script), paste the script, and set a **custom cron** `*/5 * * * *` (every 5
+   min). Or just `*/5 * * * * /path/to/sync-to-admin.sh` in a crontab.
+
+The run shows up in the admin runs list as `i7`; open it for the live
+generation/convergence/Pareto charts (the page auto-refreshes every 15 s, so it
+tracks each sync). `progress.json` is a few KB, so syncing is instant and safe
+to run as often as you like.
 
 ## Promote the winner
 When you've run enough generations, validate the best config on the held-out
