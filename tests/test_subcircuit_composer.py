@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from kicraft.autoplacer.brain import geometry
 from kicraft.autoplacer.brain.subcircuit_composer import (
     AttachmentConstraint,
     ChildPlacement,
@@ -14,6 +15,7 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
     PlacementConstraintEntry,
     PlacementModel,
     _compute_local_anchor_offset,
+    _transform_local_point,
     build_parent_composition,
     child_layer_envelopes,
     composition_summary,
@@ -614,3 +616,33 @@ class TestPackingSpacingAffectsBoardSize:
             )
 
 
+
+
+# ---------------------------------------------------------------------------
+# Rotation-convention guard for the compose anchor/overlap transform.
+#
+# Regression for the USB-C edge connector stranded ~8.8mm inboard
+# (docs/plans/usb-c-edge-connector-stranding-three-bugs.md). The leaf is
+# PLACED with the KiCad-CW convention (geometry.transform_point); the edge
+# anchor was computed with the OPPOSITE handedness (math-CCW), so for a
+# 90/270-rotated connector leaf the anchor reflected across the part body and
+# landed ~part-height outboard of the real mouth -> empty-FR4 strip. The fix
+# routes _transform_local_point through the single tested convention.
+
+
+def test_transform_local_point_uses_kicad_cw_placement_convention():
+    point = Point(10.5, 4.245)
+    origin = Point(-7.19, 41.48)
+    for rotation in (0.0, 90.0, 180.0, 270.0, 45.0, 30.0):
+        got = _transform_local_point(point, origin, rotation)
+        want = geometry.transform_point(point, origin, rotation)
+        assert got.x == pytest.approx(want.x), (rotation, got, want)
+        assert got.y == pytest.approx(want.y), (rotation, got, want)
+
+
+def test_transform_local_point_90deg_is_not_math_ccw():
+    # Pin the actual handedness so a future refactor can't silently regress to
+    # math-CCW. KiCad-CW 90deg maps local (1,0) -> (0,-1); math-CCW -> (0,+1).
+    got = _transform_local_point(Point(1.0, 0.0), Point(0.0, 0.0), 90.0)
+    assert got.x == pytest.approx(0.0)
+    assert got.y == pytest.approx(-1.0), f"expected KiCad-CW (0,-1), got {got}"
