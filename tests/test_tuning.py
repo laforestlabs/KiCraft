@@ -170,6 +170,63 @@ def test_benchmark_set_well_formed():
     assert len(B.BENCHMARK_PROMPTS) >= 24
 
 
+def test_report_data_load_run(tmp_path):
+    """report_data turns a run dir (sqlite + checkpoint) into chart series."""
+    import json
+
+    from kicraft.tuning import report_data
+    from kicraft.tuning.store import Store, config_hash
+
+    run = tmp_path / "run"
+    run.mkdir()
+    s = Store(run / "tuning.db")
+    active = ["edge_margin_mm", "placement_clearance_mm"]
+    ovA = {"edge_margin_mm": 4.0, "placement_clearance_mm": 2.0}
+    ovB = {"edge_margin_mm": 8.0, "placement_clearance_mm": 3.0}
+    hb, ha, hb2 = config_hash({}), config_hash(ovA), config_hash(ovB)
+    s.upsert_config(ha, ovA); s.upsert_config(hb2, ovB)
+    # gen 0: A (best, j=0.7) and B (j=0.3); holdout monitors A
+    s.record_generation("t", 0, ha, scalarization="balanced", j=0.7, is_train=True,
+                        fab_ready_rate=0.8, mean_drc=1.0, mean_wall_s=110.0)
+    s.record_generation("t", 0, hb2, scalarization="balanced", j=0.3, is_train=True,
+                        fab_ready_rate=0.5, mean_drc=3.0, mean_wall_s=120.0)
+    s.record_generation("t", 0, ha, scalarization="balanced", j=0.65, is_train=False,
+                        fab_ready_rate=0.75, mean_drc=1.0, mean_wall_s=110.0)
+    # gen 1: A improves
+    s.record_generation("t", 1, ha, scalarization="balanced", j=0.75, is_train=True,
+                        fab_ready_rate=0.85, mean_drc=0.5, mean_wall_s=108.0)
+    s.close()
+    (run / "checkpoint.json").write_text(json.dumps({
+        "run_id": "t", "gen": 2, "active": active, "scalarization": "balanced",
+        "archive": [
+            {"hash": hb, "overlay": {}, "fab": 0.6, "drc": 2.0, "wall": 100.0,
+             "worst": 0.6, "baseline": True},
+            {"hash": ha, "overlay": ovA, "fab": 0.85, "drc": 0.5, "wall": 108.0,
+             "worst": 0.85},
+            {"hash": hb2, "overlay": ovB, "fab": 0.5, "drc": 3.0, "wall": 120.0,
+             "worst": 0.5},
+        ],
+    }))
+
+    d = report_data.load_run(run)
+    assert d["active_params"] == active
+    assert d["n_gens"] == 2
+    # time series: gen-best train + holdout
+    g0 = next(g for g in d["gens"] if g["gen"] == 0)
+    assert g0["train"]["hash"] == ha and g0["train"]["fab"] == 0.8  # best of gen 0
+    assert g0["holdout"]["fab"] == 0.75
+    # parameter convergence trace follows the gen-best overlay
+    em = d["param_traces"]["edge_margin_mm"]
+    assert [p["gen"] for p in em] == [0, 1]
+    assert em[0]["value"] == 4.0 and 0.0 <= em[0]["norm"] <= 1.0
+    # baseline + Pareto: B is dominated by the baseline, A and baseline are not
+    assert d["baseline"]["fab"] == 0.6
+    front = {p["hash"] for p in d["points"] if p["front"]}
+    assert ha in front and hb in front and hb2 not in front
+    # discovery finds the run
+    assert run in report_data.discover_runs([tmp_path])
+
+
 def test_freeze_corpus_roundtrip(tmp_path):
     import shutil
     from pathlib import Path

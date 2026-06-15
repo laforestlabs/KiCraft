@@ -2656,6 +2656,68 @@ def _echart_pie(pairs, *, title: str) -> dict:
     }
 
 
+def _echart_multi_line(labels, series, *, title: str, y_name: str = "",
+                       baseline=None, y_range=None) -> dict:
+    """Multi-series line chart over a category x-axis (pure; see _echart_bar).
+
+    ``series`` = [(name, values, color), ...]; ``baseline`` draws a dashed
+    horizontal reference line (the current DEFAULT_CONFIG); ``y_range`` pins the
+    y-axis to (min, max)."""
+    s = []
+    for i, (name, values, color) in enumerate(series):
+        d = {"type": "line", "name": name, "data": list(values), "smooth": True,
+             "showSymbol": False, "connectNulls": True,
+             "itemStyle": {"color": color}, "lineStyle": {"color": color}}
+        if i == 0 and baseline is not None:
+            d["markLine"] = {
+                "symbol": "none", "silent": True,
+                "label": {"color": "#f59e0b", "formatter": "default", "fontSize": 9},
+                "lineStyle": {"color": "#f59e0b", "type": "dashed"},
+                "data": [{"yAxis": baseline}]}
+        s.append(d)
+    yaxis = {"type": "value", "name": y_name, "nameTextStyle": {"color": _CHART_AXIS},
+             "axisLabel": {"color": _CHART_AXIS},
+             "splitLine": {"lineStyle": {"color": _CHART_GRID}}}
+    if y_range is not None:
+        yaxis["min"], yaxis["max"] = y_range
+    return {
+        "backgroundColor": "transparent",
+        "title": {"text": title, "textStyle": {"color": "#e2e8f0", "fontSize": 13}},
+        "tooltip": {"trigger": "axis"},
+        "legend": {"top": 22, "textStyle": {"color": _CHART_AXIS, "fontSize": 10}},
+        "grid": {"left": 54, "right": 18, "top": 58, "bottom": 34},
+        "xAxis": {"type": "category", "data": list(labels), "name": "generation",
+                  "nameLocation": "middle", "nameGap": 24,
+                  "nameTextStyle": {"color": _CHART_AXIS},
+                  "axisLabel": {"color": _CHART_AXIS, "fontSize": 10}},
+        "yAxis": yaxis,
+        "series": s,
+    }
+
+
+def _echart_scatter(series, *, title: str, x_name: str = "", y_name: str = "") -> dict:
+    """Scatter chart (pure; see _echart_bar). ``series`` = [(name, points, color,
+    size), ...] where points = [[x, y], ...]."""
+    s = [{"type": "scatter", "name": name, "data": list(points),
+          "symbolSize": size, "itemStyle": {"color": color}}
+         for name, points, color, size in series]
+    return {
+        "backgroundColor": "transparent",
+        "title": {"text": title, "textStyle": {"color": "#e2e8f0", "fontSize": 13}},
+        "tooltip": {"trigger": "item"},
+        "legend": {"top": 22, "textStyle": {"color": _CHART_AXIS, "fontSize": 10}},
+        "grid": {"left": 54, "right": 18, "top": 58, "bottom": 44},
+        "xAxis": {"type": "value", "name": x_name, "nameLocation": "middle",
+                  "nameGap": 26, "nameTextStyle": {"color": _CHART_AXIS},
+                  "axisLabel": {"color": _CHART_AXIS},
+                  "splitLine": {"lineStyle": {"color": _CHART_GRID}}},
+        "yAxis": {"type": "value", "name": y_name, "nameTextStyle": {"color": _CHART_AXIS},
+                  "axisLabel": {"color": _CHART_AXIS},
+                  "splitLine": {"lineStyle": {"color": _CHART_GRID}}},
+        "series": s,
+    }
+
+
 def _admin_header(active: str) -> None:
     """Shared header for the admin pages; `active` names the current sub-page."""
     with ui.header().classes("items-center justify-between") \
@@ -2679,6 +2741,9 @@ def _admin_header(active: str) -> None:
             ui.button("Self-Eval", icon="science",
                       on_click=lambda: ui.navigate.to("/admin/self-eval")) \
                 .props("flat dense no-caps color=white").classes("text-xs")
+            ui.button("Tuning", icon="tune",
+                      on_click=lambda: ui.navigate.to("/admin/tuning")) \
+                .props("flat dense no-caps color=white").classes("text-xs")
             ui.button("Back to workspace", icon="arrow_back",
                       on_click=lambda: ui.navigate.to("/")) \
                 .props("flat dense no-caps color=white").classes("text-xs")
@@ -2686,6 +2751,237 @@ def _admin_header(active: str) -> None:
 
 def _admin_card_style() -> str:
     return "background:#0f172a;border:1px solid #1e293b;min-width:380px"
+
+
+# --------------------------------------------------------------------------- #
+# Admin: auto-tuning results (kicraft.tuning runs). Read-only visualization of
+# how the routed Pareto objective improves and how the searched parameters
+# converge over CMA-ES generations. Reads each run dir (tuning.db + checkpoint)
+# via kicraft.tuning.report_data; auto-refreshes so a live run updates in place.
+# --------------------------------------------------------------------------- #
+_TUNE_PALETTE = ["#60a5fa", "#34d399", "#fbbf24", "#f87171", "#a78bfa",
+                 "#22d3ee", "#fb923c", "#4ade80", "#e879f9", "#f472b6"]
+
+
+def _tuning_out_roots() -> list[Path]:
+    """Every root a tuning run can live under (GUI default + repo logs)."""
+    base = Path(getattr(Settings.from_env(), "projects_dir",
+                        Path.home() / ".kicraft" / "projects"))
+    roots = [base.parent / "tuning",
+             Path(__file__).resolve().parents[2] / "logs" / "tuning"]
+    out: list[Path] = []
+    seen: set = set()
+    for r in roots:
+        try:
+            rp = r.resolve()
+        except OSError:
+            continue
+        if rp not in seen and r.is_dir():
+            seen.add(rp)
+            out.append(r)
+    return out
+
+
+def _tuning_detail_ui(d: dict) -> None:
+    """Render one tuning run's stat cards + charts into the current container."""
+    gens = d["gens"]
+    active = d["active_params"]
+    base = d["baseline"] or {}
+
+    def _stat(label: str, value: str) -> None:
+        with ui.card().style(_admin_card_style() + ";min-width:150px;padding:8px 12px"):
+            ui.label(label).classes("text-xs").style("color:#64748b")
+            ui.label(value).classes("text-lg font-bold").style("color:#e2e8f0")
+
+    with ui.row().classes("w-full gap-3 flex-wrap"):
+        _stat("generation", str(d["n_gens"]))
+        _stat("configs tried", str(d["n_configs"]))
+        _stat("train / holdout", f"{d['n_train'] or '?'} / {d['n_holdout'] or '?'}")
+        _stat("scalarization", d["scalarization"] or "—")
+        if base.get("fab") is not None:
+            _stat("default fab-ready", f"{base['fab']:.2f}")
+
+    if not gens:
+        ui.label("Baseline still evaluating — charts populate once generation 0 "
+                 "completes.").classes("text-sm").style("color:#94a3b8")
+
+    labels = [g["gen"] for g in gens]
+
+    def _col(metric: str, where: str):
+        return [None if not g.get(where) else g[where].get(metric) for g in gens]
+
+    if gens:
+        with ui.row().classes("w-full gap-3 flex-wrap"):
+            with ui.card().classes("flex-1").style(_admin_card_style()):
+                ui.echart(_echart_multi_line(labels, [
+                    ("train best", _col("fab", "train"), "#34d399"),
+                    ("holdout", _col("fab", "holdout"), "#60a5fa")],
+                    title="Fab-ready rate / generation", y_name="rate",
+                    baseline=base.get("fab"), y_range=(0, 1))) \
+                    .classes("w-full").style("height:260px")
+            with ui.card().classes("flex-1").style(_admin_card_style()):
+                ui.echart(_echart_multi_line(labels, [
+                    ("train best", _col("j", "train"), "#a78bfa"),
+                    ("holdout", _col("j", "holdout"), "#60a5fa")],
+                    title="Objective J / generation", y_name="J")) \
+                    .classes("w-full").style("height:260px")
+        with ui.row().classes("w-full gap-3 flex-wrap"):
+            with ui.card().classes("flex-1").style(_admin_card_style()):
+                ui.echart(_echart_multi_line(labels, [
+                    ("train best", _col("drc", "train"), "#f87171")],
+                    title="Mean DRC (shorts+unconnected) / generation",
+                    y_name="violations", baseline=base.get("drc"))) \
+                    .classes("w-full").style("height:260px")
+            with ui.card().classes("flex-1").style(_admin_card_style()):
+                ui.echart(_echart_multi_line(labels, [
+                    ("train best", _col("wall", "train"), "#22d3ee")],
+                    title="Mean build time / generation", y_name="seconds",
+                    baseline=base.get("wall"))) \
+                    .classes("w-full").style("height:260px")
+
+        with ui.card().classes("w-full").style(_admin_card_style()):
+            series = []
+            for i, p in enumerate(active):
+                tr = {pt["gen"]: pt["norm"] for pt in d["param_traces"].get(p, [])}
+                series.append((p, [tr.get(g) for g in labels],
+                               _TUNE_PALETTE[i % len(_TUNE_PALETTE)]))
+            ui.echart(_echart_multi_line(
+                labels, series, title="Parameter convergence (normalized 0–1)",
+                y_name="norm", y_range=(0, 1))).classes("w-full").style("height:320px")
+
+    pts = d["points"]
+    if pts:
+        dom = [[p["wall"], p["fab"]] for p in pts if not p["front"] and not p["baseline"]]
+        front = [[p["wall"], p["fab"]] for p in pts if p["front"] and not p["baseline"]]
+        baseln = [[p["wall"], p["fab"]] for p in pts if p["baseline"]]
+        with ui.card().classes("w-full").style(_admin_card_style()):
+            ui.echart(_echart_scatter([
+                ("evaluated", dom, "#475569", 7),
+                ("Pareto front", front, "#34d399", 12),
+                ("default", baseln, "#f59e0b", 15)],
+                title="Pareto archive — fab-ready vs build time",
+                x_name="mean build time (s)", y_name="fab-ready rate")) \
+                .classes("w-full").style("height:340px")
+
+    if active and gens:
+        with ui.card().classes("w-full").style(_admin_card_style()):
+            ui.label("Active params: current best vs default").classes(
+                "text-sm font-bold").style("color:#94a3b8")
+            with ui.row().classes("w-full gap-3 text-xs").style("color:#64748b"):
+                ui.label("param").style("width:260px")
+                ui.label("default").style("width:110px")
+                ui.label("current best").style("width:120px")
+            for p in active:
+                tr = d["param_traces"].get(p, [])
+                cur = tr[-1]["value"] if tr else None
+                with ui.row().classes("w-full gap-3 text-xs").style(
+                        "border-top:1px solid #1e293b;padding:3px 0"):
+                    ui.label(p).classes("font-mono").style("width:260px;color:#cbd5e1")
+                    ui.label(f"{d['defaults'].get(p, 0):.4g}").style(
+                        "width:110px;color:#94a3b8")
+                    ui.label("—" if cur is None else f"{cur:.4g}").style(
+                        "width:120px;color:#e2e8f0")
+
+
+@ui.page("/admin/tuning")
+def admin_tuning_page():
+    """Admin: list of auto-tuning runs (kicraft.tuning), newest first."""
+    user, redirect = _require_admin()
+    if redirect is not None:
+        return redirect
+    ui.dark_mode().enable()
+    _admin_header("tuning")
+    from kicraft.tuning import report_data
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
+        ui.label("Auto-tuning runs").classes("text-2xl font-bold text-white")
+        ui.label("CMA-ES tuning of the default placement/routing config against the "
+                 "routed Pareto objective (fab-ready · DRC · build time).") \
+            .classes("text-sm").style("color:#94a3b8")
+        ui.separator().style("background:#1e293b;margin-top:4px")
+        runs_box = ui.column().classes("w-full gap-0")
+
+        def render_list():
+            runs = [report_data.run_overview(d)
+                    for d in report_data.discover_runs(_tuning_out_roots())]
+            runs_box.clear()
+            with runs_box:
+                if not runs:
+                    ui.label("No tuning runs under ~/.kicraft/tuning or logs/tuning yet.") \
+                        .classes("text-xs").style("color:#64748b")
+                    return
+                with ui.row().classes("w-full items-center gap-3 text-xs").style(
+                        "padding:4px 6px;color:#64748b"):
+                    ui.label("run").style("width:210px")
+                    ui.label("state").style("width:90px")
+                    ui.label("gen").style("width:54px")
+                    ui.label("configs").style("width:70px")
+                    ui.label("default fab").style("width:96px")
+                    ui.label("best fab").style("width:80px")
+                for r in runs:
+                    state = ("done" if r["finished"]
+                             else "running" if r["running"] else "new")
+                    col = {"done": "#4ade80", "running": "#fbbf24",
+                           "new": "#64748b"}[state]
+                    row = ui.row().classes(
+                        "w-full items-center gap-3 text-xs cursor-pointer").style(
+                        "border-top:1px solid #1e293b;padding:5px 6px")
+                    tok = _register_project_dir(Path(r["path"]))
+                    row.on("click", lambda _e=None, t=tok:
+                           ui.navigate.to(f"/admin/tuning/run?run={quote(t)}"))
+                    with row:
+                        ui.label(r["name"]).classes("font-mono").style(
+                            "width:210px;color:#e2e8f0")
+                        ui.label(state).style(f"width:90px;color:{col}")
+                        ui.label(str(r["gen"])).style("width:54px;color:#cbd5e1")
+                        ui.label(str(r["n_configs"])).style("width:70px;color:#cbd5e1")
+                        ui.label("—" if r["baseline_fab"] is None
+                                 else f"{r['baseline_fab']:.2f}").style(
+                            "width:96px;color:#cbd5e1")
+                        ui.label("—" if r["best_fab"] is None
+                                 else f"{r['best_fab']:.2f}").style(
+                            "width:80px;color:#cbd5e1")
+
+        ui.timer(10.0, render_list)
+        render_list()
+
+
+@ui.page("/admin/tuning/run")
+def admin_tuning_run_page(run: str = ""):
+    """Admin: charts for one tuning run; auto-refreshes for a live run."""
+    user, redirect = _require_admin()
+    if redirect is not None:
+        return redirect
+    ui.dark_mode().enable()
+    _admin_header("tuning")
+    from kicraft.tuning import report_data
+
+    run_dir = _resolve_project_token(run) if run else None
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
+        ui.button("← All runs", icon="arrow_back",
+                  on_click=lambda: ui.navigate.to("/admin/tuning")) \
+            .props("flat dense no-caps color=white").classes("text-xs")
+        if run_dir is None or not run_dir.is_dir():
+            ui.label("Run not found (the link may be stale).").classes(
+                "text-sm").style("color:#f87171")
+            return
+        ui.label(run_dir.name).classes("text-xl font-bold").style("color:#e2e8f0")
+        body = ui.column().classes("w-full gap-3")
+
+        def render():
+            body.clear()
+            try:
+                d = report_data.load_run(run_dir)
+            except Exception as exc:  # noqa: BLE001 — surface, don't crash the page
+                with body:
+                    ui.label(f"(could not load run: {exc})").classes(
+                        "text-xs").style("color:#f87171")
+                return
+            with body:
+                _tuning_detail_ui(d)
+
+        ui.timer(15.0, render)
+        render()
 
 
 # --------------------------------------------------------------------------- #
