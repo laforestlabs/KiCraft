@@ -106,6 +106,18 @@ DEFAULT_CONFIG = {
     # the board overhangs the port, so this is a positive flush-or-overhang
     # margin, never an inset.
     "connector_edge_overhang_mm": 0.5,
+    # Keep ordinary parts behind an edge-pinned connector's pads (leaf solve).
+    # The composed parent board edge is drawn OUTBOARD of the connector's pads,
+    # so a companion left outboard strands in the copper-to-edge clearance band
+    # (KC-S8PC37 R8). 0 disables. Pairs with connector_edge_owns_side_mm below,
+    # which keeps OTHER leaves' blocks from crowding past the connector at the
+    # parent level (so the connector stays the flush edge extremity).
+    "connector_edge_companion_clearance_mm": 0.5,
+    # At parent compose, shift each edge-zoned block outboard so it is the board
+    # extremity on its side -> its connector defines the board edge and stays
+    # flush, instead of another block edging past it and stranding the connector
+    # inboard (KC-S8PC37 J1). Outboard-only, so it can't create overlaps.
+    "connector_edge_block_extremity": True,
     # Mounting hole geometry. ``count`` is the target number of holes;
     # actual count is whatever the source PCB project ships. ``screw``
     # is a free-form reference (e.g. "M2.5", "M3", "#4-40") used to

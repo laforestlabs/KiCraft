@@ -1044,6 +1044,60 @@ def _synthetic_parent_definition(loaded_artifacts) -> SubCircuitDefinition:
     )
 
 
+def _ensure_edge_blocks_extremal(
+    solved: dict[str, Component],
+    block_zones: dict[str, Any],
+    margin_mm: float = 0.1,
+) -> list[str]:
+    """Shift each edge-zoned block OUTBOARD so it is the extremity on its zoned
+    side, so the connector it contains defines the board edge and stays flush.
+
+    Without this, the parent solver may place another leaf's block a hair more
+    outboard than the edge-zoned connector's block; the board edge (= bbox union
+    of all blocks) is then drawn at that other block and the connector reads as
+    stranded inboard -- the KC-S8PC37 J1 signature once R8 is no longer masking
+    the edge. The shift is OUTBOARD-only (toward the empty board edge), so it
+    never creates an overlap; it just grows the board by the small amount the
+    other block had crowded past the connector. Returns the refs shifted.
+    """
+    shifted: list[str] = []
+    for bref, zone in (block_zones or {}).items():
+        side = (zone or {}).get("edge")
+        if side not in ("left", "right", "top", "bottom") or bref not in solved:
+            continue
+        e_tl, e_br = solved[bref].bbox(0.0)
+        others = [solved[r].bbox(0.0) for r in solved if r != bref]
+        if not others:
+            continue
+        dx = dy = 0.0
+        if side == "left":
+            m = min(b[0].x for b in others)
+            if m < e_tl.x:
+                dx = m - e_tl.x - margin_mm
+        elif side == "right":
+            m = max(b[1].x for b in others)
+            if m > e_br.x:
+                dx = m - e_br.x + margin_mm
+        elif side == "top":
+            m = min(b[0].y for b in others)
+            if m < e_tl.y:
+                dy = m - e_tl.y - margin_mm
+        else:  # bottom
+            m = max(b[1].y for b in others)
+            if m > e_br.y:
+                dy = m - e_br.y + margin_mm
+        if dx == 0.0 and dy == 0.0:
+            continue
+        c = solved[bref]
+        c.pos = Point(c.pos.x + dx, c.pos.y + dy)
+        if c.body_center is not None:
+            c.body_center = Point(c.body_center.x + dx, c.body_center.y + dy)
+        for pad in c.pads:
+            pad.pos = Point(pad.pos.x + dx, pad.pos.y + dy)
+        shifted.append(bref)
+    return shifted
+
+
 def _compose_artifacts(
     loaded_artifacts,
     *,
@@ -1346,6 +1400,14 @@ def _compose_artifacts(
         # to include it. Bringing it back inside the cluster span lets
         # _compute_final_outline shrink the board.
         _slide_constrained_to_cluster(solved, derived, synthetic_refs)
+
+        # Make each edge-zoned block the extremity on its side so its connector
+        # defines the board edge and stays flush (KC-S8PC37 J1) instead of being
+        # stranded inboard by another block edging past it.
+        if cfg.get("connector_edge_block_extremity", True):
+            _shifted = _ensure_edge_blocks_extremal(solved, block_zones)
+            if _shifted:
+                logger.info("composition: shifted edge blocks to extremity: %s", _shifted)
 
         # --- Recover artifact placements from solver output ---
         placements_dict = placements_from_solved_state(solved, list(loaded_artifacts), synthetic_refs)

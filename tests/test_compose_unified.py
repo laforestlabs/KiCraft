@@ -24,6 +24,7 @@ import pytest
 from kicraft.cli.compose_subcircuits import (
     _compose_artifacts,
     _compute_final_outline,
+    _ensure_edge_blocks_extremal,
     _snap_parent_local,
     _wrap_loose_parent_components_as_leaves,
 )
@@ -651,3 +652,29 @@ def test_extract_blockers_from_pcb_rebased_to_leaf_local(tmp_path):
         assert rect_max.x < 70.0 and rect_max.y < 30.0, (
             "blocker pad rects must live in the leaf-local frame"
         )
+
+
+def _block(ref, x, y, w, h):
+    return Component(ref=ref, value="", pos=Point(x, y), rotation=0.0,
+                     layer=Layer.FRONT, width_mm=w, height_mm=h, kind="subcircuit")
+
+
+def test_ensure_edge_blocks_extremal_shifts_connector_block_out():
+    # Edge-zoned block B0 (left) at x[10,20]; another block B1 at x[8,18] sits
+    # 2mm outboard of B0 -> B0's connector would strand. The pass shifts B0
+    # outboard so it is the left extremity (KC-S8PC37 J1).
+    solved = {"B0": _block("B0", 15, 15, 10, 10), "B1": _block("B1", 13, 35, 10, 10)}
+    shifted = _ensure_edge_blocks_extremal(solved, {"B0": {"edge": "left"}}, margin_mm=0.1)
+    assert shifted == ["B0"]
+    b0_left = solved["B0"].bbox(0.0)[0].x
+    b1_left = solved["B1"].bbox(0.0)[0].x
+    assert b0_left <= b1_left + 1e-9, "edge block must become the left extremity"
+    assert (solved["B1"].pos.x, solved["B1"].pos.y) == (13, 35), "other block unmoved"
+
+
+def test_ensure_edge_blocks_extremal_noop_when_already_extremity():
+    # B0 (left-zoned) already leftmost -> no shift, other block untouched.
+    solved = {"B0": _block("B0", 10, 15, 10, 10), "B1": _block("B1", 30, 15, 10, 10)}
+    before = solved["B0"].pos.x
+    assert _ensure_edge_blocks_extremal(solved, {"B0": {"edge": "left"}}) == []
+    assert solved["B0"].pos.x == before
