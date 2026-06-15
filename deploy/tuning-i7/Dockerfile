@@ -8,8 +8,13 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC PIP_ROOT_USER_ACTION=ignore
 
 # Toolchain: KiCad 9.0 (kicad-cli + pcbnew python), a JRE + xvfb for FreeRouting,
-# git/python for the repo + venv.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# git/python for the repo + venv. The Check-Date/Valid-Until bypass keeps `apt`
+# working when the host clock is skewed (common on homelab boxes with a dead RTC
+# battery) — Ubuntu re-publishes its InRelease files constantly, so even a few
+# hours behind makes them look "not valid yet". Fix the host clock too.
+RUN printf 'Acquire::Check-Valid-Until "false";\nAcquire::Check-Date "false";\n' \
+        > /etc/apt/apt.conf.d/99no-check-date \
+ && apt-get update && apt-get install -y --no-install-recommends \
         software-properties-common ca-certificates gnupg curl git \
         python3 python3-venv python3-pip \
         default-jre-headless xvfb xauth fonts-dejavu-core \
