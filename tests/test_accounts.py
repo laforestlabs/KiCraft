@@ -183,6 +183,29 @@ def test_delete_user_purges_rows_and_files(store):
     assert store.list_projects(u.id) == []  # projects gone
 
 
+def test_delete_project_purges_one_row_and_tree_keeps_others(store):
+    u = store.create_user("p@e.st", "pw")
+    keep = store.create_project(u.id, "keep")
+    store.finish_project(keep, "ok", stem="KEEP")
+    drop = store.create_project(u.id, "drop")
+    store.finish_project(drop, "ok", stem="DROP")
+    drop_tree = store.projects_dir / str(u.id) / str(drop)
+    drop_tree.mkdir(parents=True, exist_ok=True)
+    (drop_tree / "kicraft_project.zip").write_text("zip", encoding="utf-8")
+
+    purged = store.delete_project(drop)
+    assert purged == str(drop_tree)
+    assert not drop_tree.exists()                       # only that tree is gone
+    assert store.get_project(drop) is None              # only that row is gone
+    assert store.get_project(keep) is not None          # sibling untouched
+    assert [p.id for p in store.list_projects(u.id)] == [keep]
+    assert store.get_user(u.id) is not None             # account intact
+
+
+def test_delete_project_missing_is_a_noop(store):
+    assert store.delete_project(999999) is None
+
+
 # ---- quota metering -------------------------------------------------------
 
 def test_quota_status_reflects_tier(store):

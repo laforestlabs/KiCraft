@@ -116,3 +116,45 @@ async def test_paid_plan_can_publish_a_project(harness):
     u.find(kind=ui.switch).click()  # the only switch on the page: flip to Public
     await u.should_see("Now public in the community")
     assert store.get_project(pid).is_public is True
+
+
+async def test_delete_requires_confirmation_then_removes_project(harness):
+    """Delete pops a confirm dialog (project survives until confirmed), and the
+    confirm purges the row from the store and the page."""
+    from nicegui import ui
+
+    u, web, store, acct = harness
+    pid = _ok_project(store, acct.id, "throwaway blinky", "BLINKY")
+    base = store.projects_dir / str(acct.id) / str(pid)
+    assert base.exists()
+
+    await _login(u)
+    await u.open("/projects")
+    await u.should_see("BLINKY")
+
+    # The row Delete opens the confirm dialog (the per-project name proves it
+    # actually opened); nothing is removed yet.
+    u.find(marker="row-delete").click()
+    await u.should_see('"BLINKY" will be deleted')
+    assert store.get_project(pid) is not None  # still there pre-confirm
+
+    # Confirm: row gone from the store, its on-disk tree purged, page refreshed.
+    u.find(marker="confirm-delete").click()
+    await u.should_see('Deleted "BLINKY"')
+    assert store.get_project(pid) is None
+    assert not base.exists()
+    await u.should_see("No projects yet")
+
+
+async def test_delete_can_be_cancelled(harness):
+    """Cancel on the confirm dialog leaves the project untouched."""
+    u, web, store, acct = harness
+    pid = _ok_project(store, acct.id, "keep me", "KEEPER")
+
+    await _login(u)
+    await u.open("/projects")
+    await u.should_see("KEEPER")
+    u.find(marker="row-delete").click()
+    await u.should_see('"KEEPER" will be deleted')
+    u.find("Cancel").click()
+    assert store.get_project(pid) is not None  # untouched

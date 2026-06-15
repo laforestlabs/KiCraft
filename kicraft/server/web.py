@@ -2409,6 +2409,54 @@ def projects_page():
 
         rows_box = ui.column().classes("w-full gap-2")
 
+        # One reusable confirm dialog, built once OUTSIDE the rebuildable rows so a
+        # render_rows() refresh never deletes it mid-handler. A row's Delete button
+        # parks its target here, then opens it.
+        del_target = {"pid": None, "stem": None}
+        with ui.dialog() as del_dialog, ui.card().classes("gap-2") \
+                .style("background:#0f172a;border:1px solid #1e293b"):
+            ui.label("Delete project?").classes("text-base font-semibold text-white")
+            del_msg = ui.label().classes("text-sm").style("color:#e2e8f0")
+            ui.label("This permanently removes the design, its files, and any "
+                     "community listing. It can't be undone.") \
+                .classes("text-xs").style("color:#f59e0b")
+            with ui.row().classes("w-full justify-end gap-2 mt-1"):
+                ui.button("Cancel", on_click=del_dialog.close) \
+                    .props("flat no-caps color=white")
+                ui.button("Delete permanently", icon="delete", color="negative",
+                          on_click=lambda: _do_delete()).props("no-caps") \
+                    .mark("confirm-delete")
+
+        def _ask_delete(p):
+            del_target.update(pid=p.id, stem=p.project_stem or f"project {p.id}")
+            del_msg.text = f'"{del_target["stem"]}" will be deleted.'
+            del_dialog.open()
+
+        def _do_delete():
+            pid = del_target["pid"]
+            if pid is None:
+                return
+            # Re-check ownership + liveness server-side; never trust the UI gate.
+            p = _store().get_project(pid)
+            u = _current_user()
+            if p is None or u is None or p.user_id != u.id:
+                ui.notify("That project is not available.", color="warning")
+                del_dialog.close()
+                return
+            if _LIVE_RUNS.get(pid) is not None:
+                ui.notify("This design is still running -- open it and finish (or "
+                          "start a new one) before deleting.", color="warning")
+                del_dialog.close()
+                return
+            _store().delete_project(pid)
+            # Notify + refresh BEFORE closing the dialog: closing first drops the
+            # slot ui.notify resolves through, so the toast is lost (and the list
+            # never repaints). The clicked button lives in the dialog, not in
+            # rows_box, so render_rows() does not delete it.
+            ui.notify(f'Deleted "{del_target["stem"]}".', color="positive")
+            render_rows()
+            del_dialog.close()
+
         def render_rows():
             rows_box.clear()
             with rows_box:
@@ -2458,6 +2506,14 @@ def projects_page():
                                       pp.dir_path,
                                       pp.project_stem or f"project {pp.id}")) \
                             .props("flat dense no-caps").style("color:#a78bfa")
+                    # Delete is offered only for a project with no live worker, so
+                    # an in-flight run can't be purged from under itself; the
+                    # handler re-checks liveness + ownership before deleting.
+                    if live is None:
+                        ui.button("Delete", icon="delete",
+                                  on_click=lambda pp=p: _ask_delete(pp)) \
+                            .props("flat dense no-caps").style("color:#f87171") \
+                            .mark("row-delete")
                 # Visibility is only meaningful for a completed board -- the
                 # community browser lists status=='ok' only. Paid plans get a real
                 # toggle; free plans see the always-public note.
