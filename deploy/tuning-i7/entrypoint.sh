@@ -34,6 +34,11 @@ import pcbnew, cma
 print(f"[entrypoint] toolchain OK: pcbnew {pcbnew.GetBuildVersion()} | cma {cma.__version__}")
 PY
 test -s /root/.local/lib/freerouting-1.9.0.jar || { echo "[entrypoint] FreeRouting jar missing"; exit 1; }
+# FreeRouting is a Swing/AWT app run under xvfb; the headless JRE can't launch it
+# (no libawt_xawt) and boards come back unrouted. Fail loudly rather than silently.
+find /usr/lib/jvm -name 'libawt_xawt.so' 2>/dev/null | grep -q . \
+    || { echo "[entrypoint] ERROR: GUI-capable JRE missing (libawt_xawt.so) — FreeRouting can't run; rebuild the image (needs full default-jre)"; exit 1; }
+echo "[entrypoint] FreeRouting JRE OK"
 
 cores="$(nproc)"
 # One build slot per ~4 hardware threads: each eval is itself multi-threaded

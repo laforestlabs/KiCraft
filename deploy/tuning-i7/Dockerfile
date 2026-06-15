@@ -28,6 +28,13 @@ RUN mkdir -p /root/.local/lib \
       https://github.com/freerouting/freerouting/releases/download/v1.9.0/freerouting-1.9.0.jar \
  && test -s /root/.local/lib/freerouting-1.9.0.jar
 
+# FreeRouting 1.9.0 is a Swing/AWT GUI app (run under xvfb), so it needs the FULL
+# JRE + X11/font libs — the headless JRE above cannot launch it (no libawt_xawt),
+# which leaves boards unrouted. Separate layer so the cached KiCad layer is reused.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        default-jre libxrender1 libxtst6 libxi6 libxext6 fontconfig \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
