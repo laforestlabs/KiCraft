@@ -10,7 +10,11 @@ from __future__ import annotations
 import pytest
 
 from kicraft.tuning import corpus, reward, space, store
-from kicraft.tuning.evaluate import EvalResult
+from kicraft.tuning.evaluate import (
+    MISSING_BOARD_PENALTY,
+    EvalResult,
+    _effective_drc,
+)
 from kicraft.tuning.optimizer import load_optimizer, make_optimizer
 from kicraft.tuning.screen import _pearson
 
@@ -102,6 +106,44 @@ def test_scalarize_prefers_clean_board():
     bad = reward.aggregate_results([_res("b1", s, False, 5, 100) for s in range(2)])
     w = reward.SCALARIZATIONS["balanced"]
     assert reward.scalarize(good, w) > reward.scalarize(bad, w)
+
+
+def test_effective_drc_penalizes_empty_board():
+    # routed board => the real measured count
+    assert _effective_drc(fab_ready=False, traces=12, shorts=2, unconnected=3) == 5
+    assert _effective_drc(fab_ready=True, traces=12, shorts=0, unconnected=0) == 0
+    # EMPTY board (no copper) that is not fab-ready: DRC-perfect-looking but
+    # degenerate -> must score as a missing board, never drc 0
+    assert _effective_drc(fab_ready=False, traces=0, shorts=0, unconnected=0) == \
+        MISSING_BOARD_PENALTY
+    # a fab-ready board with no nets to route is legitimately done, keep it
+    assert _effective_drc(fab_ready=True, traces=0, shorts=0, unconnected=0) == 0
+
+
+def test_reward_fab_dominates_residual_drc():
+    """A config that routes one more board fab-ready must out-score a config with
+    fewer fab-ready boards but slightly cleaner residual DRC."""
+    w = reward.SCALARIZATIONS["balanced"]
+    # A: 3/4 fab-ready, the failing board has moderate residual DRC
+    more_fab = reward.aggregate_results(
+        [_res("b1", 0, True, 0, 90), _res("b2", 0, True, 0, 90),
+         _res("b3", 0, True, 0, 90), _res("b4", 0, False, 12, 90)])
+    # B: 2/4 fab-ready but the failing boards are a touch cleaner
+    cleaner = reward.aggregate_results(
+        [_res("b1", 0, True, 0, 90), _res("b2", 0, True, 0, 90),
+         _res("b3", 0, False, 6, 90), _res("b4", 0, False, 6, 90)])
+    assert more_fab.fab_ready_rate > cleaner.fab_ready_rate
+    assert reward.scalarize(more_fab, w) > reward.scalarize(cleaner, w)
+
+
+def test_reward_empty_board_loses_to_real_board():
+    """An empty/missing board (DRC sentinel) must never out-score a board that
+    actually routes, even a not-fab-ready one — this is the reward-hack guard."""
+    routes = reward.aggregate_results([_res("b1", s, False, 10, 95) for s in range(2)])
+    empty = reward.aggregate_results(
+        [_res("b1", s, False, MISSING_BOARD_PENALTY, 3) for s in range(2)])
+    for name, w in reward.SCALARIZATIONS.items():
+        assert reward.scalarize(routes, w) > reward.scalarize(empty, w), name
 
 
 # --- store ----------------------------------------------------------------

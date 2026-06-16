@@ -30,9 +30,25 @@ from pathlib import Path
 from kicraft.tuning import workspace as ws
 
 # Penalty applied on the DRC axis when a board fails to produce a routed result
-# at all (route crash / timeout / missing board). Large enough to dominate any
-# real shorts+unconnected count so these never look competitive.
+# at all (route crash / timeout / missing board) OR produces a verifiable but
+# EMPTY board (no copper routed). Large enough to dominate any real
+# shorts+unconnected count so these never look competitive.
 MISSING_BOARD_PENALTY = 999
+
+
+def _effective_drc(*, fab_ready: bool, traces: int, shorts: int, unconnected: int) -> int:
+    """DRC-axis value for a verified board, guarding the degenerate optimum.
+
+    A board that routed NO copper (``traces == 0``) and is not fab-ready scores
+    ``shorts + unconnected == 0`` and so looks DRC-perfect — but it is an empty
+    board, not a clean one. The tuner's reward maximizes ``fab − k·drc − …``, so
+    without this guard the optimizer is driven straight into producing empty
+    boards (cheap wall-time, zero DRC) instead of routing real ones. Treat such
+    a board as a missing board so it can never out-score a board that routes.
+    """
+    if not fab_ready and traces == 0:
+        return MISSING_BOARD_PENALTY
+    return shorts + unconnected
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -215,12 +231,14 @@ def evaluate_config(
     shorts = int(v.get("shorts", 0) or 0)
     unconnected = int(v.get("unconnected", 0) or 0)
     tracks = v.get("tracks", {}) or {}
+    traces = int(tracks.get("traces", 0) or 0)
     fab_ready = bool(v.get("ok", False)) and rc == 0
     result = EvalResult(
         config_hash=config_hash, board=board, seed=seed, mode=mode, rc=rc,
         fab_ready=fab_ready, shorts=shorts, unconnected=unconnected,
-        drc_total=shorts + unconnected,
-        traces=int(tracks.get("traces", 0) or 0),
+        drc_total=_effective_drc(
+            fab_ready=fab_ready, traces=traces, shorts=shorts, unconnected=unconnected),
+        traces=traces,
         vias=int(tracks.get("vias", 0) or 0),
         total_length_mm=round(float(tracks.get("total_length_mm", 0.0) or 0.0), 2),
         wall_s=round(wall, 1), error=err,
