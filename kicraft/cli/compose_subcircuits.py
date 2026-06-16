@@ -207,6 +207,23 @@ def _filter_loaded_artifacts(loaded_artifacts, only: list[str]) -> list[Any]:
     return filtered
 
 
+def _missing_child_artifacts(parent_definition, loaded_artifacts) -> list:
+    """Expected child subcircuit ids that have no loaded solved artifact.
+
+    A child whose solve FAILED produces no ``solved_layout.json`` artifact, so it
+    is absent from ``loaded_artifacts``. Composing the parent without it would
+    strand its components as loose parent-level parts (force/SA'd at the parent)
+    -- a fallback that cannot place a failed leaf. The caller aborts loudly when
+    this is non-empty. Empty ``parent_definition`` -> nothing to require."""
+    if parent_definition is None:
+        return []
+    loaded_paths = {a.layout.subcircuit_id.instance_path for a in loaded_artifacts}
+    return [
+        cid for cid in parent_definition.child_ids
+        if cid.instance_path not in loaded_paths
+    ]
+
+
 def _select_parent_definition(
     project_dir: Path | None,
     parent_selector: str | None,
@@ -2597,6 +2614,32 @@ def main(argv: list[str] | None = None) -> int:
             loaded_artifacts,
             parent_definition,
         )
+
+        # NO FALLBACKS: every expected child subcircuit must have produced a
+        # solved artifact. A child whose solve FAILED yields none, and absorbing
+        # its components as loose parent-level parts (extract_parent_local +
+        # _wrap_loose_parent_components_as_leaves -> force/SA at the parent) has
+        # no reason to place them -- it only masks the failure and burns CPU.
+        # Abort loudly so the failing leaf is fixed, instead of degrading to that
+        # fallback. (--only is an explicit partial-compose debug path: skip it.)
+        if parent_definition is not None and not args.only:
+            missing = _missing_child_artifacts(parent_definition, loaded_artifacts)
+            if missing:
+                names = ", ".join(
+                    f"{getattr(c, 'sheet_name', '') or c.instance_path}"
+                    for c in missing
+                )
+                print(
+                    "error: compose aborted -- child subcircuit(s) produced no "
+                    f"solved artifact (their solve failed): {names}. Refusing to "
+                    "strand their components as loose parent-level parts and "
+                    "force/SA them at the parent -- that fallback cannot place a "
+                    "failed leaf and only hides the failure. Fix the failing "
+                    "leaf(s) and rebuild.",
+                    file=sys.stderr,
+                )
+                return 1
+
         if not loaded_artifacts:
             if args.parent:
                 print(
