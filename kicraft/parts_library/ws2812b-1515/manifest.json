@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:252619d3d6ac2f557b283872fde22a1aee03dc6a6429e1fae41604b2e9113c2d",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C52941388.pdf",
+  "description": "worldsemi WS2812B-1313-V6",
+  "footprint_name": "LED-SMD_4P-L1.3-W1.3-P0.80_WS2812E-1313",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "WS2812B-1313-V6",
+  "name": "ws2812b-1515",
+  "provenance": {
+    "added_at": "2026-06-16T14:55:31Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C52941388"
+  },
+  "symbol_name": "WS2812B-1313-V6",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

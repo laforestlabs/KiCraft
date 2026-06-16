@@ -311,6 +311,21 @@ def repair_leaf_placement_legality(
     counts, moved refs, remaining overlaps, and resolution status.
     """
     repaired = copy.deepcopy(solved_components)
+    # ``array_member`` (and the grid lock) are runtime flags that do NOT survive
+    # a board serialize + reload, so re-establish them from the array hint before
+    # legalizing. Otherwise a grid whose pitch is tighter than the placement
+    # clearance (an explicit, legal request -- the parts' real copper clearance
+    # is the netclass clearance, not the placement clearance) reads as a wall of
+    # overlaps, and the legalizer shoves the intentional grid into a scattered,
+    # still-illegal mess instead of leaving it fixed. The solver already exempts
+    # array-member-vs-array-member pairs from both the escape loop and the
+    # legality gate -- it just needs the flag back.
+    for spec in cfg.get("arrays") or []:
+        for ref in spec.get("refs", []):
+            comp = repaired.get(ref)
+            if comp is not None:
+                comp.array_member = True
+                comp.locked = True
     local_state = copy.deepcopy(extraction.local_state)
     local_state.components = repaired
 
