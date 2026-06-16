@@ -99,6 +99,58 @@ def test_chain_orientation_points_dout_at_next() -> None:
     assert (comps["D3"].pos.x - d1.pos.x) == 6.0
 
 
+def _grid(n: int) -> dict[str, Component]:
+    """A daisy-chain of ``n`` WS2812-style LEDs (Dk_DOUT -> D(k+1)_DIN)."""
+    comps: dict[str, Component] = {}
+    prev = "DATA_IN"
+    for i in range(1, n + 1):
+        dout = f"D{i}_DOUT"
+        comps[f"D{i}"] = _led(f"D{i}", dout, prev)
+        prev = dout
+    return comps
+
+
+def test_serpentine_grid_uses_two_alternating_rotations() -> None:
+    # A repeating matrix, not the old per-member 4-way scatter: every row is a
+    # single rotation, and serpentine alternates it by 180 so the data flow
+    # reverses cleanly row to row.
+    comps = _grid(25)
+    refs = [f"D{i}" for i in range(1, 26)]
+    place_array_leaves(
+        comps, [{"refs": refs, "rows": 5, "cols": 5,
+                 "pitch_mm": 3.0, "serpentine": True}], {})
+    assert len({comps[r].rotation for r in refs}) == 2
+    for r in range(5):
+        row = {comps[refs[r * 5 + c]].rotation for c in range(5)}
+        assert len(row) == 1, f"row {r} not uniform: {row}"
+    # adjacent rows differ by 180
+    r0 = comps[refs[0]].rotation
+    r1 = comps[refs[5]].rotation
+    assert (r0 - r1) % 360 == 180
+
+
+def test_pure_array_leaf_is_fully_handled() -> None:
+    # A leaf that is ONLY the grid (no other parts) must report fully_handled so
+    # solve() skips force/SA -- otherwise SA refine rotates + the legalizer
+    # scatters the locked grid at a tight pitch.
+    comps = _grid(25)
+    refs = [f"D{i}" for i in range(1, 26)]
+    placed, fully = place_array_leaves(
+        comps, [{"refs": refs, "rows": 5, "cols": 5,
+                 "pitch_mm": 3.0, "serpentine": True}], {})
+    assert placed == set(refs)
+    assert fully is True
+
+
+def test_non_serpentine_grid_is_single_uniform_rotation() -> None:
+    comps = _grid(25)
+    refs = [f"D{i}" for i in range(1, 26)]
+    place_array_leaves(
+        comps, [{"refs": refs, "rows": 5, "cols": 5,
+                 "pitch_mm": 3.0, "serpentine": False}], {})
+    assert len({comps[r].rotation for r in refs}) == 1
+
+
 def test_chain_orientation_can_be_disabled() -> None:
     comps = {"D1": _led("D1", "D1_DOUT", "DATA_IN"),
              "D2": _led("D2", "D2_DOUT", "D1_DOUT")}

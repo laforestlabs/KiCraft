@@ -22,55 +22,85 @@ from .placement_utils import _update_pad_positions
 from .types import Component, Point
 
 
-def _orient_chain(comps: dict[str, Component], refs: list[str], cfg: dict) -> None:
-    """Rotate each array member so its data-output pad faces the next member in
-    the chain (DOUT -> next member's DIN; the last member's DIN faces the prev).
+def _orient_array_grid(
+    comps: dict[str, Component],
+    refs: list[str],
+    rows: int,
+    cols: int,
+    serpentine: bool,
+    cfg: dict,
+) -> None:
+    """Give every array member a UNIFORM per-row rotation so the grid is a clean
+    repeating pattern (easy to place + assemble) and the data chain routes
+    deterministically.
 
-    On the serpentine grid every daisy-chain hop is then a short link straight
-    across the narrow inter-component channel, which the deterministic array
-    router (:mod:`array_router`) ties with a clean, repeating trace -- instead
-    of a long diagonal across the LED bodies that the gridless autorouter
-    abandons (a 1515 WS2812's DOUT and DIN sit on opposite corners, so an
-    unrotated left-to-right row forces every hop across two parts). Orthogonal
-    rotation only, so the member stays on its grid cell. Off via
-    ``array_orient_chain=False``.
+    A WS2812-class part has DOUT and DIN on opposite diagonal corners, so the
+    single rotation that points DOUT along a row's data-flow direction also
+    points DIN back toward the previous member. We pick ONE such rotation per
+    row, never per member -- so the array is at most two distinct rotations, not
+    the four-way scatter a per-member "face the next neighbour" orientation
+    produces (which is a placement and assembly nightmare and makes the routing
+    non-repeating):
+
+    - serpentine grid: even rows flow +x, odd rows flow -x, so odd rows are the
+      even-row rotation + 180 (the standard alternate-row-flipped matrix). Every
+      hop -- in-row and at the row turn -- is then short and repeats.
+    - non-serpentine grid: every row flows +x, so ALL members share ONE rotation
+      (the simplest pick-and-place); the longer end-of-row -> start-of-next-row
+      return hop is left to :mod:`array_router` / the autorouter.
+
+    Orthogonal rotation only, so each member stays on its grid cell. Off via
+    ``array_orient_chain=False`` (members keep their incoming rotation).
     """
-    if not cfg.get("array_orient_chain", True):
+    if not cfg.get("array_orient_chain", True) or cols <= 0:
         return
     from kicraft.design.models import is_power_or_ground_name
 
-    def _data_pad(comp: Component, nbr: Component):
-        # The pad whose (non-power) net is shared with the neighbour -- the data
-        # link between the two parts (DOUT toward next, DIN toward prev).
-        nbr_nets = {
-            p.net for p in nbr.pads if p.net and not is_power_or_ground_name(p.net)
-        }
-        for p in comp.pads:
-            if p.net and p.net in nbr_nets:
+    def _shared_data_pad(a: Component, b: Component):
+        # The pad of ``a`` whose non-power net is shared with ``b`` -- the data
+        # link (DOUT toward the next member, DIN toward the previous one).
+        b_nets = {p.net for p in b.pads if p.net and not is_power_or_ground_name(p.net)}
+        for p in a.pads:
+            if p.net and p.net in b_nets:
                 return p
         return None
 
     n = len(refs)
+    # Representative DOUT pad (shared with the next chain member) and the part's
+    # rotation when we read it -- so we can recover the INTRINSIC pad offset (at
+    # absolute rotation 0) and then choose absolute per-row target rotations. We
+    # rotate every member TO a target (never by a per-member delta), so each row
+    # is exactly ONE rotation regardless of how members arrive, and the
+    # serpentine flip is an exact 180.
+    rep = rep_pad = None
+    for i in range(n - 1):
+        p = _shared_data_pad(comps[refs[i]], comps[refs[i + 1]])
+        if p is not None:
+            rep, rep_pad = comps[refs[i]], p
+            break
+    if rep_pad is None:
+        return
+    cur = Point(rep_pad.pos.x - rep.pos.x, rep_pad.pos.y - rep.pos.y)
+    intrinsic = rotate_vector(cur, -rep.rotation)  # DOUT offset at abs rotation 0
+
+    # Even-row target: the absolute rotation pointing DOUT along +x (the row's
+    # data-flow direction); the diagonal DOUT/DIN corners leave a 2-fold tie that
+    # we break to the smallest rotation so the choice is deterministic.
+    r_even, best_key = 0.0, None
+    for R in (0.0, 90.0, 180.0, 270.0):
+        r = rotate_vector(intrinsic, R)
+        rn = math.hypot(r.x, r.y) or 1.0
+        key = (-(r.x) / rn, R)
+        if best_key is None or key < best_key:
+            best_key, r_even = key, R
+    r_odd = (r_even + 180.0) % 360.0
+
     for i, ref in enumerate(refs):
         comp = comps[ref]
-        nbr = comps[refs[i + 1]] if i + 1 < n else (comps[refs[i - 1]] if i else None)
-        if nbr is None:
-            continue
-        pad = _data_pad(comp, nbr)
-        if pad is None:
-            continue
-        ox, oy = pad.pos.x - comp.pos.x, pad.pos.y - comp.pos.y
-        tx, ty = nbr.pos.x - comp.pos.x, nbr.pos.y - comp.pos.y
-        tnorm = math.hypot(tx, ty) or 1.0
-        best_delta, best_dot = 0.0, -2.0
-        for delta in (0.0, 90.0, 180.0, 270.0):
-            r = rotate_vector(Point(ox, oy), delta)
-            rnorm = math.hypot(r.x, r.y) or 1.0
-            dot = (r.x * tx + r.y * ty) / (rnorm * tnorm)
-            if dot > best_dot:
-                best_dot, best_delta = dot, delta
-        if best_delta:
-            rotate_component_in_place(comp, best_delta)
+        target = r_odd if (serpentine and (i // cols) % 2 == 1) else r_even
+        delta = (target - comp.rotation) % 360.0
+        if delta:
+            rotate_component_in_place(comp, delta)
 
 
 def _move(comp: Component, x: float, y: float) -> None:
@@ -164,12 +194,10 @@ def place_array_leaves(
             comp.array_member = True  # legalizer skips overlap-resolving the grid
             placed.add(ref)
 
-        # Orient each member so its DOUT faces the next chain member: turns every
-        # daisy-chain hop into a short cross-channel link the array router can
-        # tie cleanly (DOUT/DIN sit on opposite corners of the part, so the
-        # unrotated grid routes badly). Done after all members of this spec land
-        # so neighbour positions are known.
-        _orient_chain(comps, refs, cfg)
+        # Give the grid a uniform per-row rotation (≤2 distinct angles) so it is
+        # a clean repeating pattern the array router ties cleanly. Done after all
+        # members land so the data-flow direction per row is known.
+        _orient_array_grid(comps, refs, rows, cols, serpentine, cfg)
 
         b = (x0 - px, y0 - py, x0 + (cols - 1) * px + px, y0 + (rows - 1) * py + py)
         grid_bbox = b if grid_bbox is None else (
@@ -216,11 +244,19 @@ def place_array_leaves(
                          max(grid_bbox[2], bx1), by1)
 
     remaining = [r for r in comps if r not in placed]
+    # Pure array leaf: nothing but the grid. It is fully placed -- report handled
+    # so the caller SKIPS force/SA entirely. (Falling through to force/SA here is
+    # a latent bug: the members are locked, but SA refine still rotates them and,
+    # when the pitch is tighter than the legalizer clearance, the overlap
+    # resolver scatters the grid -- which only stayed put at looser pitches by
+    # luck. A grid needs no optimizing.)
+    if not remaining:
+        return placed, True
     # Array-dominated leaf: only simple two-terminal passives remain. Place them
     # in a strip below the grid and report the leaf fully handled so the caller
     # skips force/SA. (Two-terminal passives here are decoupling/bulk caps whose
     # nets are power/global, so exact position is not routing-critical.)
-    if remaining and all(len(comps[r].pads) <= 2 for r in remaining):
+    if all(len(comps[r].pads) <= 2 for r in remaining):
         _place_strip(comps, remaining, grid_bbox, gap)
         return placed, True
     return placed, False

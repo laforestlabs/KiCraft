@@ -367,7 +367,15 @@ class ArraySpec(BaseModel):
     refs: list[str]
     rows: int = Field(gt=0)
     cols: int = Field(gt=0)
-    pitch_mm: float | None = None  # None -> derive from footprint courtyard + gap
+    pitch_mm: float | None = Field(
+        default=None,
+        description=(
+            "Centre-to-centre grid spacing in millimetres. SET THIS whenever the "
+            "design specifies an array pitch (e.g. a brief asking for 'LEDs at 3mm "
+            "pitch' -> 3.0). Leave null ONLY when no pitch is given, to derive one "
+            "from the footprint courtyard plus a default gap."
+        ),
+    )
     serpentine: bool = True
 
     @model_validator(mode="after")
