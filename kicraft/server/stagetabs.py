@@ -111,10 +111,14 @@ class StagePanel:
     the data never clobbers the view.
     """
 
-    def __init__(self, key: str, label: str, icon: str, accent: str) -> None:
+    def __init__(self, key: str, label: str, icon: str, accent: str,
+                 show_cost: bool = False) -> None:
         self.key = key
         self.label = label
         self.accent = accent
+        # Per-stage LLM cost is admin-only telemetry; regular users never see a
+        # dollar figure for a design round (the spend is still tracked server-side).
+        self._show_cost = show_cost
         self._active_run: _Run | None = None
         self._open_run: _Run | None = None
         self._build_log: _Run | None = None
@@ -289,7 +293,7 @@ class StagePanel:
         with self._status_slot:
             if ok:
                 ui.icon("check_circle").style(f"color:{_OK};font-size:1.1rem")
-                if isinstance(cost, (int, float)):
+                if self._show_cost and isinstance(cost, (int, float)):
                     ui.label(f"${cost:.4f}").classes("text-xs font-mono") \
                         .style(f"color:{_DIM}")
             else:
@@ -318,7 +322,7 @@ class StagePanel:
         elapsed = (time.monotonic() - self._t0) if self._t0 else 0.0
         head = ("✓ committed" if ok else "✗ failed") if done else "streaming"
         parts = [head, f"{elapsed:.1f}s"]
-        if done and isinstance(cost, (int, float)):
+        if done and self._show_cost and isinstance(cost, (int, float)):
             parts.append(f"${cost:.4f}")
         parts.append(f"{self._chars:,} chars")
         if self._tools:
@@ -623,8 +627,9 @@ class StageTabs:
     tab (then it stays put until they click back to the live one).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, show_cost: bool = False) -> None:
         _follow_head()
+        self.show_cost = show_cost
         self.panels: dict[str, StagePanel] = {}
         self._tab_el: dict[str, ui.tab] = {}
         self._current: str | None = None
@@ -643,7 +648,8 @@ class StageTabs:
                 .style("background:transparent"):
             for key, label, icon, accent in PHASES:
                 with ui.tab_panel(key).classes("p-0"):
-                    self.panels[key] = StagePanel(key, label, icon, accent)
+                    self.panels[key] = StagePanel(key, label, icon, accent,
+                                                  show_cost)
 
     # ---- tab status / follow ------------------------------------------------
     def _set_tab_status(self, key: str, status: str) -> None:
