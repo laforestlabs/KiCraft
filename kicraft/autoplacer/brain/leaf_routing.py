@@ -550,6 +550,26 @@ def route_local_subcircuit(
             del _esc_board
         except Exception as exc:  # never fail the leaf on a finishing helper
             print(f"  WARNING: auto signal-escape spec gen failed: {exc}")
+    # Array daisy-chain (default on): for an addressable-LED matrix or similar
+    # regular array, deterministically stamp the short data hops (DOUT->DIN) as
+    # locked ties + pad escapes, so FreeRouting -- which abandons a few of these
+    # in the dense inter-component channels every run -- only has to finish from
+    # open copper. Power is delivered by the +5V/GND pours, so the channels
+    # carry only data. Keyed on the array spec, NOT leaf_is_fully_array (a 3-pin
+    # header or other non-passive on the leaf must not disable it).
+    if cfg.get("array_route_enabled", True) and cfg.get("arrays"):
+        try:
+            import pcbnew
+
+            from kicraft.autoplacer.brain.array_router import array_daisy_chain_specs
+
+            _arr_board = pcbnew.LoadBoard(str(pre_route_board))
+            _arr_specs = array_daisy_chain_specs(_arr_board, cfg)
+            del _arr_board
+            if _arr_specs:
+                _breakout_specs = _breakout_specs + _arr_specs
+        except Exception as exc:  # never fail the leaf on a finishing helper
+            print(f"  WARNING: array daisy-chain spec gen failed: {exc}")
     if _breakout_specs:
         try:
             from kicraft.autoplacer.brain.breakout_stubs import add_breakout_stubs

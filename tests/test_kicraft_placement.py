@@ -216,3 +216,35 @@ def test_cluster_parts_do_not_overlap() -> None:
             overlap = (ax0 < bx1 - 0.5 and bx0 < ax1 - 0.5
                        and ay0 < by1 - 0.5 and by0 < ay1 - 0.5)
             assert not overlap, f"{ra} overlaps {rb}"
+
+
+def test_array_members_laid_out_as_grid() -> None:
+    # A 5x2 LED matrix (data-chain order, serpentine) must render as a 2D grid
+    # that mirrors the array shape -- not strung along the anchor row -- so the
+    # schematic reads as a matrix. The connector drops below the grid.
+    from kicraft.design.models import ArraySpec
+
+    sheet = Sheet(name="LED MATRIX", stem="LED_MATRIX", function="matrix")
+    leds = [
+        BomPart(ref=f"D{i}", value="WS2812", symbol="Device:LED",
+                footprint="LED_SMD:LED_0603_1608Metric", sheet="LED MATRIX")
+        for i in range(1, 11)
+    ]
+    j1 = BomPart(ref="J1", value="hdr", symbol="Connector_Generic:Conn_01x03",
+                 footprint="Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
+                 sheet="LED MATRIX")
+    arrays = [ArraySpec(refs=[f"D{i}" for i in range(1, 11)], rows=2, cols=5,
+                        serpentine=True)]
+    bom = BOM(parts=[*leds, j1], connections=[], arrays=arrays)
+
+    placed = {p.ref: p for p in place_sheet(sheet, [*leds, j1], bom)}
+    grid = [placed[f"D{i}"] for i in range(1, 11)]
+    xs = sorted({round(p.x_mm, 2) for p in grid})
+    ys = sorted({round(p.y_mm, 2) for p in grid})
+    assert len(xs) == 5 and len(ys) == 2, "expected a 5x2 grid"
+    assert all(p.role == "array_member" for p in grid)
+    # row 0 is one Y, row 1 another; serpentine reverses row 1.
+    assert placed["D1"].y_mm == placed["D5"].y_mm
+    assert placed["D6"].x_mm > placed["D10"].x_mm
+    # the connector sits below the whole grid, not in the LED row.
+    assert placed["J1"].y_mm > max(ys)

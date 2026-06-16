@@ -2274,6 +2274,22 @@ def _find_placed_parent(project_dir: Path) -> Path | None:
     return hits[-1] if hits else None
 
 
+def _find_best_leaf_board(project_dir: Path) -> Path | None:
+    """Richest single-leaf board, as a last resort when the parent compose
+    produced no parent board at all: the most recently written routed leaf,
+    else the most recent placed (pre-freerouting) leaf. A single leaf is only
+    part of a multi-leaf board, but it is a real placed/routed mini-PCB -- far
+    better to show than the raw, uncomposed scatter board."""
+    sub = project_dir / ".experiments" / "subcircuits"
+    if not sub.is_dir():
+        return None
+    for name in ("leaf_routed.kicad_pcb", "leaf_pre_freerouting.kicad_pcb"):
+        hits = [p for p in sub.glob(f"*/{name}") if p.is_file()]
+        if hits:
+            return max(hits, key=lambda p: p.stat().st_mtime)
+    return None
+
+
 def _count_leaf_subcircuits(root_sch: Path) -> int:
     """Number of non-root leaf subcircuits the hierarchical layout engine would
     place. 0 means a degenerate hierarchy -- the root schematic references no child
@@ -2380,9 +2396,29 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     real path during verification because kicad-cli DRC reads netclass
     clearances from the sibling ``<stem>.kicad_pro``.
     """
-    # 3. Promote the routed parent to the project's main PCB.
+    # 3. Promote the best board the layout engine produced to the project's
+    #    main PCB. A routed parent is ideal; if the parent never routed (rc6),
+    #    promote the richest artifact we DID reach -- the composed, placed
+    #    parent (which carries the leaf-level routing stamped in), else a single
+    #    placed/routed leaf -- so the project ALWAYS shows the real board this
+    #    build produced. Never leave the raw, uncomposed scatter board as the
+    #    preview: it misrepresents a build that actually placed (and usually
+    #    routed) the design as one that never started.
     routed = _find_routed_parent(project_dir)
     if routed is None:
+        partial = _find_placed_parent(project_dir) or _find_best_leaf_board(project_dir)
+        if partial is not None:
+            shutil.copy2(partial, pcb)
+            print(
+                f"[build] 3/5 no routed parent; promoted best partial board "
+                f"for inspection -> {pcb.name} ({partial.name})"
+            )
+        else:
+            print(
+                f"[build] 3/5 no parent or leaf board produced; "
+                f"leaving {pcb.name} as-is",
+                file=sys.stderr,
+            )
         print(
             "error: the layout engine produced no routed parent board -- the "
             "parent compose/route failed (board not routable as placed). "

@@ -1021,6 +1021,16 @@ class PlacementSolver:
                     break
                 self._resolve_overlaps(best_comps)
 
+            # Step 9.3: Push unlocked non-array parts clear of the locked array
+            # grid. A part wider than the grid pitch can't escape the dense grid
+            # via Step 9's per-pair nudges (each lands it on the next cell), so
+            # one push out of the whole grid bbox runs here, then overlaps are
+            # re-resolved against the moved part.
+            for _ in range(3):
+                if self._resolve_array_grid(best_comps) == 0:
+                    break
+                self._resolve_overlaps(best_comps)
+
         with _timed_phase(phase_t, "solve_legalize_ms", capture_comps=lambda: best_comps):
             # Step 9.5: Comprehensive legalization repair for subcircuit mode
             if prefer_legal:
@@ -2272,8 +2282,14 @@ class PlacementSolver:
         r_tl: Point,
         r_br: Point,
         owner_ref: str | None,
+        min_extent_mm: float = 0.0,
     ) -> int:
         """Push every unlocked, non-owner component out of rect [r_tl, r_br].
+
+        ``min_extent_mm`` (default 0) skips parts whose smaller bbox dimension is
+        ``<=`` it — used by the array-grid pass to evict only bulky strays (a
+        series resistor) and leave small companions (per-LED decaps) in place, so
+        the push never scatters a whole companion set into a sprawl.
 
         Shared by the keep-in (mounting-hole) and keep-out (antenna near-field)
         passes. Each overlapping component is moved along whichever of the four
@@ -2292,6 +2308,8 @@ class PlacementSolver:
         for ref, comp in comps.items():
             if comp.locked or ref == owner_ref:
                 continue
+            if min_extent_mm > 0.0 and min(comp.width_mm, comp.height_mm) <= min_extent_mm:
+                continue  # small companion (decap) — don't evict it into a sprawl
             c_tl, c_br = comp.bbox(0.0)
             ox = min(c_br.x, r_br.x) - max(c_tl.x, r_tl.x)
             oy = min(c_br.y, r_br.y) - max(c_tl.y, r_tl.y)
@@ -2361,6 +2379,35 @@ class PlacementSolver:
         for kr in rects:
             corrections += self._push_out_of_rect(comps, kr.tl, kr.br, kr.owner_ref)
         return corrections
+
+    def _resolve_array_grid(self, comps: dict[str, Component]) -> int:
+        """Push unlocked NON-array parts out of the locked array grid's bbox.
+
+        A part wider than the grid pitch (e.g. a series resistor on a 3 mm-pitch
+        LED matrix) that the force/SA pass drops onto the grid cannot escape via
+        normal overlap resolution: every cardinal nudge just lands it on the next
+        locked cell, so it stays overlapping and the leaf fails legality
+        (``leaf_pre_stamp_legality_repair``). Pushing it clear of the WHOLE grid
+        in one move fixes it. Array members are locked, so they are exempt (and
+        member-vs-member clearance overlaps are by design). Returns parts moved.
+        """
+        if not self.cfg.get("array_grid_keepout", True):
+            return 0
+        members = [c for c in comps.values() if getattr(c, "array_member", False)]
+        if not members:
+            return 0
+        margin = self.clearance / 2.0
+        boxes = [c.bbox(margin) for c in members]
+        tl = Point(min(b[0].x for b in boxes), min(b[0].y for b in boxes))
+        br = Point(max(b[1].x for b in boxes), max(b[1].y for b in boxes))
+        # Only evict parts too bulky to coexist beside the grid (a series
+        # resistor), NOT small per-LED companions (decaps) -- evicting a whole
+        # companion set would scatter it into a board-bloating sprawl. "Bulky" =
+        # smaller dimension exceeds a grid member's footprint.
+        member_extent = max(max(c.width_mm, c.height_mm) for c in members)
+        return self._push_out_of_rect(
+            comps, tl, br, owner_ref=None, min_extent_mm=member_extent
+        )
 
     def _clamp_companions_inboard_of_connectors(
         self, comps: dict[str, Component], clearance: float
