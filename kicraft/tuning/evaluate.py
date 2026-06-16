@@ -31,9 +31,14 @@ from kicraft.tuning import workspace as ws
 
 # Penalty applied on the DRC axis when a board fails to produce a routed result
 # at all (route crash / timeout / missing board) OR produces a verifiable but
-# EMPTY board (no copper routed). Large enough to dominate any real
-# shorts+unconnected count so these never look competitive.
-MISSING_BOARD_PENALTY = 999
+# EMPTY board (no copper routed). Sized to be strictly worse than any real
+# board's shorts+unconnected count (real boards run ~0-10 here) so an empty
+# board never looks competitive -- but NOT so large that a few unroutable
+# boards dominate the whole objective. Lesson from the i8 run: at 999 (~140x a
+# real board's DRC), with ~26% of evals empty, empty<->routed flips on a handful
+# of unstable boards swamped the fab signal ~6:1 and the optimizer thrashed.
+# 100 keeps a ~10x margin over the worst real board while letting fab lead.
+MISSING_BOARD_PENALTY = 100
 
 
 def _effective_drc(*, fab_ready: bool, traces: int, shorts: int, unconnected: int) -> int:
