@@ -131,6 +131,67 @@ def test_validate_routed_board_ignores_edge_connector_copper_edge_clearance(
     assert validation["drc"]["copper_edge_footprint_refs"] == ["J1"]
 
 
+def _clean_drc(_path, timeout_s=30):
+    return {"report_text": "", "violations": [], "clearance": 0,
+            "copper_edge_clearance": 0, "shorts": 0, "unconnected": 0,
+            "timed_out": False, "missing_cli": False}
+
+
+def test_validate_routed_board_rejects_empty_board(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    # A board with zero footprints has no shorts and no ratsnest, so a clean
+    # DRC would otherwise accept it. The empty_board guard must reject it.
+    monkeypatch.setattr(
+        freerouting_runner, "count_board_tracks",
+        lambda _p: {"traces": 0, "vias": 0, "total_length_mm": 0.0,
+                    "footprints": 0, "pads": 0, "footprint_refs": []},
+    )
+    monkeypatch.setattr(freerouting_runner, "_run_kicad_cli_drc", _clean_drc)
+    board_path = tmp_path / "empty.kicad_pcb"
+    board_path.write_text("stub", encoding="utf-8")
+
+    v = freerouting_runner.validate_routed_board(str(board_path))
+    assert v["accepted"] is False
+    assert "empty_board" in v["rejection_reasons"]
+
+
+def test_validate_routed_board_accepts_populated_clean_board(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    # The empty_board guard must be a no-op for a real, populated board.
+    monkeypatch.setattr(
+        freerouting_runner, "count_board_tracks",
+        lambda _p: {"traces": 12, "vias": 2, "total_length_mm": 80.0,
+                    "footprints": 3, "pads": 9, "footprint_refs": ["R1", "C1", "U1"]},
+    )
+    monkeypatch.setattr(freerouting_runner, "_run_kicad_cli_drc", _clean_drc)
+    board_path = tmp_path / "ok.kicad_pcb"
+    board_path.write_text("stub", encoding="utf-8")
+
+    v = freerouting_runner.validate_routed_board(str(board_path))
+    assert v["accepted"] is True
+    assert "empty_board" not in v["rejection_reasons"]
+
+
+def test_validate_routed_board_unknown_footprint_count_not_empty(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    # A count-subprocess failure reports footprints=-1 (unknown); that must NOT
+    # be misread as an empty board.
+    monkeypatch.setattr(
+        freerouting_runner, "count_board_tracks",
+        lambda _p: {"traces": 0, "vias": 0, "total_length_mm": 0.0,
+                    "footprints": -1, "pads": -1, "footprint_refs": []},
+    )
+    monkeypatch.setattr(freerouting_runner, "_run_kicad_cli_drc", _clean_drc)
+    board_path = tmp_path / "unknown.kicad_pcb"
+    board_path.write_text("stub", encoding="utf-8")
+
+    v = freerouting_runner.validate_routed_board(str(board_path))
+    assert "empty_board" not in v["rejection_reasons"]
+
+
 def test_run_pcbnew_script_retries_transient_failed_to_load_board(
     monkeypatch: pytest.MonkeyPatch,
 ):

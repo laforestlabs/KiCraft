@@ -2335,6 +2335,25 @@ def _verify_routed_board(pcb: Path) -> dict:
     }
 
 
+def _missing_component_refs(expected_refs, board_refs) -> list[str]:
+    """Expected component refs absent from the routed board (silent drops).
+
+    A board can verify "clean" (no shorts, no unconnected) while having silently
+    dropped whole components -- if the dropped parts took their nets with them
+    there is no ratsnest left to flag. Comparing the expected reference set
+    (from the BOM) against the footprints actually on the board catches that.
+    Verified empirically: a healthy routed board carries exactly one footprint
+    per non-power schematic ref, so a missing ref is a genuine drop.
+
+    Returns [] when ``board_refs`` is empty/unknown (a count failure, or a truly
+    empty board) so this never double-fires with the ``empty_board`` gate.
+    """
+    board = set(board_refs or [])
+    if not board:
+        return []
+    return sorted(r for r in expected_refs if r not in board)
+
+
 def _lower_project_netclass_clearance(pro_path: Path, clearance_mm: float) -> bool:
     """Cap every netclass clearance in a ``.kicad_pro`` at ``clearance_mm``.
 
@@ -2434,23 +2453,35 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     # against the rule FreeRouting actually used, not a wider declared one.
     _align_project_clearance_to_routing(project_dir, stem, pcb)
 
-    # 4. Verification gate: no shorts, no unconnected.
+    # 4. Verification gate: no shorts, no unconnected, and no silently-dropped
+    #    components (a board that dropped parts can still verify "clean").
     gate = _verify_routed_board(pcb)
+    expected_refs = {p.ref for p in (state.bom.parts if state and state.bom else [])}
+    missing_refs = _missing_component_refs(expected_refs, gate["tracks"].get("footprint_refs"))
     print(
         f"[build] 4/5 verify: shorts={gate['shorts']} unconnected={gate['unconnected']} "
-        f"traces={gate['tracks'].get('traces', '?')}"
+        f"traces={gate['tracks'].get('traces', '?')} "
+        f"components={gate['tracks'].get('footprints', '?')}/{len(expected_refs) or '?'}"
     )
-    if not gate["ok"]:
+    if not gate["ok"] or missing_refs:
         print(
             f"[build]     kept failed board {pcb.name} for inspection "
             "(no fab package exported; any earlier package is now stale)",
             file=sys.stderr,
         )
-        print(
-            f"error: routed board is NOT fab-ready -- shorts={gate['shorts']}, "
-            f"unconnected={gate['unconnected']}, reasons={gate['reasons']}",
-            file=sys.stderr,
-        )
+        if missing_refs:
+            print(
+                f"error: routed board is INCOMPLETE -- "
+                f"{len(missing_refs)} expected component(s) missing from the board: "
+                f"{', '.join(missing_refs)}",
+                file=sys.stderr,
+            )
+        if not gate["ok"]:
+            print(
+                f"error: routed board is NOT fab-ready -- shorts={gate['shorts']}, "
+                f"unconnected={gate['unconnected']}, reasons={gate['reasons']}",
+                file=sys.stderr,
+            )
         return 7
 
     if not do_fab:

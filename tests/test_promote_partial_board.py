@@ -57,3 +57,25 @@ def test_no_artifacts_yields_none(tmp_path):
     assert cli_app._find_routed_parent(tmp_path) is None
     assert cli_app._find_placed_parent(tmp_path) is None
     assert cli_app._find_best_leaf_board(tmp_path) is None
+
+
+# --- completeness gate: expected BOM refs vs footprints on the routed board ---
+
+def test_missing_component_refs_flags_dropped_parts():
+    expected = {"U1", "R1", "R2", "C1", "J1"}
+    on_board = ["U1", "R1", "C1", "J1"]  # R2 silently dropped
+    assert cli_app._missing_component_refs(expected, on_board) == ["R2"]
+
+
+def test_missing_component_refs_clean_board():
+    expected = {"U1", "R1", "C1"}
+    # extra footprints on the board (fiducials, logos) are fine
+    on_board = ["U1", "R1", "C1", "FID1"]
+    assert cli_app._missing_component_refs(expected, on_board) == []
+
+
+def test_missing_component_refs_unknown_board_refs_never_fires():
+    # Empty/unknown board refs (count failure) must not flag every part as
+    # missing -- the empty_board gate handles the truly-empty case instead.
+    assert cli_app._missing_component_refs({"U1", "R1"}, []) == []
+    assert cli_app._missing_component_refs({"U1", "R1"}, None) == []

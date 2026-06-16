@@ -377,11 +377,16 @@ def prepare_board_for_placement(kicad_pcb_path: str) -> None:
     clear_zones(kicad_pcb_path)
 
 
-def count_board_tracks(kicad_pcb_path: str) -> dict[str, float | int]:
-    """Count traces, vias, and total trace length from a routed board.
+def count_board_tracks(kicad_pcb_path: str) -> dict[str, Any]:
+    """Count traces, vias, length, and the placed footprints from a board.
 
-    Runs in subprocess to avoid pcbnew SWIG issues.
-    Returns {traces: int, vias: int, total_length_mm: float}.
+    Runs in subprocess to avoid pcbnew SWIG issues. Returns
+    ``{traces, vias, total_length_mm, footprints, pads, footprint_refs}``.
+    ``footprints`` is the placed-component count and ``footprint_refs`` their
+    reference designators -- used to detect an EMPTY board (nothing placed)
+    and, at the build gate, a board that silently dropped expected parts. On a
+    subprocess failure ``footprints``/``pads`` are ``-1`` (unknown, not empty)
+    so callers never misread a count failure as an empty board.
     """
     result = subprocess.run(
         [
@@ -397,15 +402,20 @@ def count_board_tracks(kicad_pcb_path: str) -> dict[str, float | int]:
             "    else:\n"
             "        traces += 1\n"
             "        length_nm += t.GetLength()\n"
+            "fps = list(board.GetFootprints())\n"
+            "refs = [f.GetReference() for f in fps]\n"
+            "pads = sum(len(f.Pads()) for f in fps)\n"
             "print(json.dumps({'traces': traces, 'vias': vias,"
-            "  'total_length_mm': round(pcbnew.ToMM(length_nm), 2)}))\n",
+            "  'total_length_mm': round(pcbnew.ToMM(length_nm), 2),"
+            "  'footprints': len(fps), 'pads': pads, 'footprint_refs': refs}))\n",
         ],
         capture_output=True,
         text=True,
         env=_kicad_subprocess_env(),
     )
     if result.returncode != 0:
-        return {"traces": 0, "vias": 0, "total_length_mm": 0.0}
+        return {"traces": 0, "vias": 0, "total_length_mm": 0.0,
+                "footprints": -1, "pads": -1, "footprint_refs": []}
     return json.loads(result.stdout.strip())
 
 
@@ -1373,6 +1383,17 @@ def validate_routed_board(
     except Exception as exc:
         validation["python_exception"] = True
         validation["rejection_reasons"].append(f"track_count_failed:{exc}")
+
+    # An accepted board MUST contain placed components. A board with zero
+    # footprints is empty (everything dropped) -- it has no shorts and no
+    # ratsnest, so it would otherwise sail through the gate looking "clean".
+    # ``footprints == -1`` means the count subprocess failed (unknown), which
+    # is handled by ``track_count_failed`` above, not treated as empty.
+    _fp = validation["track_summary"].get("footprints", -1)
+    if _fp is None:
+        _fp = -1
+    if int(_fp) == 0:
+        validation["rejection_reasons"].append("empty_board")
 
     drc = _run_kicad_cli_drc(str(board_path), timeout_s=timeout_s)
     validation["drc"] = drc
