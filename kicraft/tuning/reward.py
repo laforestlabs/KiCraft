@@ -23,9 +23,19 @@ from typing import Iterable, Sequence
 from kicraft.tuning.evaluate import EvalResult
 
 # Reference scales for normalizing the minimize-axes into ~[0, 1] in scalarize.
-# drc: a board with ~5 net violations is "quite bad"; time: ~120 s is a typical
-# place+route. These only set the trade-off scale, not the Pareto comparison.
-REF_DRC = 5.0
+# time: ~120 s is a typical place+route. These only set the trade-off scale, not
+# the Pareto comparison.
+#
+# drc: fab-ready ALREADY requires zero shorts+unconnected, so fab_ready_rate is
+# the real correctness signal; the drc axis only separates the partially-failed
+# boards and must stay a tie-breaker, not a co-equal of fab. Real boards carry
+# ~5-15 residual DRC even when good, so the original ref of 5 made an ordinary
+# board's penalty (0.25·12/5 = 0.6) dwarf a 50-point fab swing — the optimizer
+# was rewarded for NOT routing (empty board => drc 0). Calibrate the scale to
+# the empty-board sentinel (evaluate.MISSING_BOARD_PENALTY = 999): real-board
+# DRC now costs <~0.1 (gentle tie-breaker) while a missing/empty board still
+# costs ~6+ per board (crushing). Keep fab as the dominant axis.
+REF_DRC = 40.0
 REF_WALL_S = 120.0
 
 
