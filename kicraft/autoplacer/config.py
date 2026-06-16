@@ -636,9 +636,21 @@ def discover_project_config(project_dir: str | Path) -> Path | None:
     Search order:
     1. ``autoplacer.json``
     2. <dir_stem>_autoplacer.json  (e.g. LLUPS_autoplacer.json)
-    3. [autoplacer] section in a .kicad_pro file (not yet implemented)
+    3. the sole ``*_autoplacer.json`` in the dir (handles a renamed/copied
+       project dir whose config no longer matches the directory name)
+    4. [autoplacer] section in a .kicad_pro file (not yet implemented)
 
     Returns the :class:`Path` to the first match, or ``None``.
+
+    The placement config (which carries the ``arrays`` grid hints) is named
+    after the SYNTHESIS stem, which is not always the directory name -- a
+    project copied into a differently-named work dir, or a leaf solved from a
+    relocated schematic, breaks the dir-name match. Step 3 keeps the hint alive
+    in that common single-config case. When several configs collide and none
+    matches the dir name we refuse to guess and warn loudly, because silently
+    returning ``None`` makes the array leaf solve with ``arrays=[]`` -> force/SA
+    scatters the grid -> the scattered board is best-effort promoted as
+    "fab-ready" (a no-fallback violation; see kicraft-no-fallbacks-fail-loudly).
     """
     project_dir = Path(project_dir)
 
@@ -652,5 +664,20 @@ def discover_project_config(project_dir: str | Path) -> Path | None:
     if stem_cfg.is_file():
         return stem_cfg
 
-    # 3. .kicad_pro [autoplacer] section -- not yet implemented
+    # 3. Exactly one *_autoplacer.json (dir was renamed/copied; stem != dir).
+    matches = sorted(project_dir.glob("*_autoplacer.json"))
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        import sys
+
+        print(
+            f"warning: {project_dir} has {len(matches)} *_autoplacer.json files, "
+            f"none named '{project_dir.name}_autoplacer.json'; placement config "
+            "NOT auto-discovered -- pass --config explicitly or array/placement "
+            f"hints will be lost (candidates: {', '.join(p.name for p in matches)})",
+            file=sys.stderr,
+        )
+
+    # 4. .kicad_pro [autoplacer] section -- not yet implemented
     return None
