@@ -27,6 +27,15 @@ class PlacementScorer:
 
     def score(self) -> PlacementScore:
         s = PlacementScore()
+        # Degenerate guard: an EMPTY placement (no components) must score worst,
+        # not best. Almost every sub-score below returns a perfect 100 when there
+        # is nothing to measure, so without this an empty board would post a near
+        # -perfect total and the optimizer would be rewarded for placing nothing.
+        # A single-component placement is legitimate (e.g. a wrapped connector
+        # leaf), so only the truly-empty case is forced to zero.
+        if not self.state.components:
+            s.total = 0.0
+            return s
         s.net_distance = self._score_net_distance()
         s.crossover_count = count_crossings(self.state)
         s.crossover_score = self._crossover_to_score(s.crossover_count)

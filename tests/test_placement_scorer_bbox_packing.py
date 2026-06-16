@@ -95,3 +95,26 @@ def test_zero_area_returns_100():
     c2 = _comp("R2", 2.0, 1.0, w=0.0, h=2.0)
     score = PlacementScorer(_state([c1, c2]))._score_bbox_packing()
     assert score == pytest.approx(100.0)
+
+
+def test_score_empty_placement_totals_zero():
+    """Degenerate guard: an EMPTY placement scores worst, not best.
+
+    Most sub-metrics return a perfect 100 with nothing to measure, so without
+    the guard an empty board posts a near-perfect total and the optimizer is
+    rewarded for placing nothing (the same failure class as the tuner's
+    empty-board reward hack)."""
+    assert PlacementScorer(_state([])).score().total == 0.0
+
+
+def test_score_nonempty_placement_unaffected():
+    # The guard must be a no-op for any real placement (>=1 component).
+    comps = [_comp("R1", 1.0, 1.0), _comp("R2", 3.0, 1.0)]
+    total = PlacementScorer(_state(comps)).score().total
+    assert total > 0.0
+
+
+def test_score_single_component_is_legitimate():
+    # A single-component placement (e.g. a wrapped connector leaf) is valid and
+    # must NOT be forced to zero -- only the truly-empty case is.
+    assert PlacementScorer(_state([_comp("J1", 5.0, 5.0)])).score().total > 0.0
