@@ -36,14 +36,14 @@ log = logging.getLogger(__name__)
 # Billing tier definitions. `price_usd` is the monthly subscription price; the
 # actual charge amount lives on the Stripe Price objects (KICRAFT_STRIPE_PRICE_*),
 # so keep the two in sync when changing pricing. `limit` designs per rolling
-# `window_days` is what count_active_designs enforces. "free" = 1/week, "pro" = 5/month ($5),
-# "max" = 25/month ($10). Admin access is no longer a tier -- it is a separate
+# `window_days` is what count_active_designs enforces. "free" = 1/week, "pro" = 5/week ($5),
+# "max" = 20/week ($10). Admin access is no longer a tier -- it is a separate
 # `role` (see ROLES below), so a user can hold any billing tier and still be
 # staff, and staff bypass the quota outright (see quota_status / can_design).
 TIERS: dict[str, dict] = {
     "free": {"label": "Free", "price_usd": 0, "limit": 1, "window_days": 7},
-    "pro": {"label": "Pro", "price_usd": 5, "limit": 5, "window_days": 30},
-    "max": {"label": "Max", "price_usd": 10, "limit": 25, "window_days": 30},
+    "pro": {"label": "Pro", "price_usd": 5, "limit": 5, "window_days": 7},
+    "max": {"label": "Max", "price_usd": 10, "limit": 20, "window_days": 7},
 }
 DEFAULT_TIER = "free"
 

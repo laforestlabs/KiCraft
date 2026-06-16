@@ -64,9 +64,39 @@ SIDE_PITCH_MM = 10.16      # 8 * 1.27 — row pitch for stacked side members
 PIN_LINK_GAP_MM = 10.16    # 8 * 1.27
 FREE_PITCH_MM = 25.4       # spacing in the un-clustered fallback row
 
+# An array (e.g. an LED matrix) is laid out as a 2D grid that mirrors its
+# physical shape, so the schematic reads as a matrix instead of a 50-long row.
+# Member symbols are small; these pitches leave room for the inter-member wires
+# and the per-member power/ground stubs while keeping the grid on one sheet.
+ARRAY_TOP_Y_MM = 38.1      # 30 * 1.27 — grid top; clusters drop below it
+ARRAY_COL_PITCH_MM = 15.24  # 12 * 1.27
+ARRAY_ROW_PITCH_MM = 15.24  # 12 * 1.27
+
 
 def _snap(value: float, grid: float = HALF_GRID_MM) -> float:
     return round(value / grid) * grid
+
+
+def _place_array_grid(
+    spec, left_x: float, top_y: float, placed: dict[str, PlacedPart]
+) -> tuple[float, float]:
+    """Lay an array's members on a serpentine ``rows`` x ``cols`` grid (the same
+    data-chain order the PCB grid uses, so the schematic shape matches the
+    board). Returns ``(width, bottom)`` of the grid block."""
+    cols = max(1, int(spec.cols))
+    serpentine = bool(getattr(spec, "serpentine", True))
+    for i, ref in enumerate(spec.refs):
+        row, col = divmod(i, cols)
+        if serpentine and row % 2 == 1:
+            col = cols - 1 - col  # boustrophedon: consecutive members adjacent
+        placed[ref] = PlacedPart(
+            ref=ref,
+            x_mm=_snap(left_x + col * ARRAY_COL_PITCH_MM),
+            y_mm=_snap(top_y + row * ARRAY_ROW_PITCH_MM),
+            rotation_deg=0, mirror=None, role="array_member",
+        )
+    rows = max(1, int(spec.rows))
+    return cols * ARRAY_COL_PITCH_MM, _snap(top_y + rows * ARRAY_ROW_PITCH_MM)
 
 
 @dataclass(frozen=True)
@@ -172,10 +202,21 @@ def place_sheet(
                 if m in parts_by_ref:
                     member_to_group_anchor[m] = ic
 
-    # Anchors: 3+ pins, or named as an ic_groups leader.
+    # Arrays (e.g. an LED matrix) on this sheet: their members are laid out as a
+    # 2D grid that mirrors the array shape, NOT strung in the anchor row. Only
+    # arrays whose every ref is on this sheet are honoured.
+    array_specs = [
+        s for s in getattr(bom, "arrays", [])
+        if s.refs and all(r in parts_by_ref for r in s.refs)
+    ]
+    array_member_refs = {r for s in array_specs for r in s.refs}
+
+    # Anchors: 3+ pins, or named as an ic_groups leader. Array members are laid
+    # out by the grid, never as anchors.
     anchor_refs = {
         p.ref for p in sheet_parts
-        if pins_by_ref[p.ref].count >= 3 or p.ref in bom.ic_groups
+        if (pins_by_ref[p.ref].count >= 3 or p.ref in bom.ic_groups)
+        and p.ref not in array_member_refs
     }
     anchors: dict[str, _Anchor] = {
         ref: _Anchor(ref=ref, part=parts_by_ref[ref], pins=pins_by_ref[ref])
@@ -185,9 +226,20 @@ def place_sheet(
     placed: dict[str, PlacedPart] = {}
     free_refs: list[str] = []
 
+    # --- array grids first, in the upper region; clusters drop below them ---
+    grid_bottom = ARRAY_TOP_Y_MM
+    grid_x = USABLE_LEFT_MM
+    for spec in array_specs:
+        width, bottom = _place_array_grid(spec, grid_x, ARRAY_TOP_Y_MM, placed)
+        grid_x += width + ANCHOR_GAP_MM
+        grid_bottom = max(grid_bottom, bottom)
+    anchor_base_y = (
+        _snap(grid_bottom + ROW_GAP_MM) if array_specs else CENTER_Y_MM
+    )
+
     # --- assign each 2-pin passive to an anchor + role ---
     for part in sheet_parts:
-        if part.ref in anchor_refs:
+        if part.ref in anchor_refs or part.ref in array_member_refs:
             continue
         pins = pins_by_ref[part.ref]
         if pins.count != 2:
@@ -210,10 +262,12 @@ def place_sheet(
         key=lambda a: (flow_index.get(a.ref, len(flow_index)), a.ref),
     )
 
-    cluster_bottom = CENTER_Y_MM
+    cluster_bottom = anchor_base_y
     cursor_x = USABLE_LEFT_MM
     for anchor in ordered:
-        width, bottom = _place_cluster(anchor, cursor_x, placed, pin_net)
+        width, bottom = _place_cluster(
+            anchor, cursor_x, placed, pin_net, base_y=anchor_base_y
+        )
         cursor_x += width + ANCHOR_GAP_MM
         cluster_bottom = max(cluster_bottom, bottom)
 
@@ -362,6 +416,7 @@ def _place_cluster(
     left_x: float,
     placed: dict[str, PlacedPart],
     pin_net: dict[tuple[str, str], str],
+    base_y: float = CENTER_Y_MM,
 ) -> tuple[float, float]:
     """Place an anchor and its members. Returns (cluster_width, cluster_bottom).
 
@@ -370,6 +425,9 @@ def _place_cluster(
     parts are placed pin-aligned at a stub off the exact pin they serve, so the
     wire leaves that pin in its own exit direction and routes cleanly. The
     whole cluster is then shifted so its leftmost element lands at ``left_x``.
+
+    ``base_y`` is the anchor center line; it drops below an array grid when the
+    sheet carries one so the grid and the clusters don't overlap.
     """
     # Anchor body top (rotation 0, sheet +y down) — the rail row hangs above it.
     pins = list(anchor.pins.by_number.values())
@@ -377,7 +435,7 @@ def _place_cluster(
 
     # Provisional origin; the cluster is shifted into place afterwards.
     anchor.x = _snap(left_x + LEFT_RESERVE_MM)
-    anchor.y = CENTER_Y_MM
+    anchor.y = base_y
     placed[anchor.ref] = PlacedPart(
         ref=anchor.ref, x_mm=anchor.x, y_mm=anchor.y,
         rotation_deg=0, mirror=None, role="anchor",
