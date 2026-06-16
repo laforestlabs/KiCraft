@@ -50,6 +50,7 @@ from .accounts import (
 )
 from .config import LEGAL_VERSION, Settings, default_legal_dir
 from .examples import CHIP_PROMPTS, EXAMPLE_PROMPTS
+from kicraft.tuning.benchmark import BENCHMARK_PROMPTS
 from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView, kicanvas_head
 from .layout_panel import (
     LayoutEditorPanel,
@@ -3286,15 +3287,23 @@ def _self_eval_batch_overview(out: Path) -> dict:
 
 
 def _self_eval_selected(out, args: dict) -> list:
+    """The (index, entry) brief set a batch covers, where entry is a benchmark
+    ``{"slug", "archetype", "brief"}`` dict from ``BENCHMARK_PROMPTS``."""
     from kicraft.eval.self_eval import _select
     if "no_judge" in args:  # args from a launch / _args.json are authoritative
-        return _select(list(EXAMPLE_PROMPTS), args.get("limit"), args.get("only"))
-    # Legacy run (pre _args.json): derive the brief set from the run dirs on disk.
-    idxs = sorted({int(p.name.split("_")[1]) for p in Path(out).glob("run_[0-9][0-9]_*")
-                   if p.name.split("_")[1].isdigit()})
-    return ([(i, EXAMPLE_PROMPTS[i - 1]) for i in idxs
-             if 1 <= i <= len(EXAMPLE_PROMPTS)]
-            or _select(list(EXAMPLE_PROMPTS), None, None))
+        return _select(list(BENCHMARK_PROMPTS), args.get("limit"), args.get("only"))
+    # Legacy run (pre _args.json): reconstruct the brief set from the run dirs on disk
+    # (``run_<NN>_<slug>``), matching each dir's slug back to its benchmark entry.
+    by_slug = {e["slug"]: e for e in BENCHMARK_PROMPTS}
+    found = []
+    for p in sorted(Path(out).glob("run_[0-9][0-9]_*")):
+        parts = p.name.split("_", 2)
+        if len(parts) < 3 or not parts[1].isdigit():
+            continue
+        entry = by_slug.get(parts[2])
+        if entry:
+            found.append((int(parts[1]), entry))
+    return found or _select(list(BENCHMARK_PROMPTS), None, None)
 
 
 def _self_eval_running() -> bool:
@@ -3346,11 +3355,13 @@ def _self_eval_adopt_latest() -> None:
     _SELF_EVAL.update(proc=None, out=latest, args=_self_eval_args_for(latest))
 
 
-def _self_eval_brief_status(out: Path, idx: int, prompt: str) -> dict:
-    """Parse one brief's live status from its run dir under `out`."""
+def _self_eval_brief_status(out: Path, idx: int, entry: dict) -> dict:
+    """Parse one brief's live status from its run dir under `out`. ``entry`` is a
+    benchmark ``{"slug", "archetype", "brief"}`` dict."""
     hits = sorted(out.glob(f"run_{idx:02d}_*"))
     rd = hits[0] if hits else None
-    base = {"index": idx, "prompt": prompt, "rundir": (str(rd) if rd else None)}
+    base = {"index": idx, "slug": entry["slug"], "archetype": entry["archetype"],
+            "prompt": entry["brief"], "rundir": (str(rd) if rd else None)}
     if rd is None:
         return {**base, "status": "pending"}
     stage = build_label = None
@@ -3419,7 +3430,7 @@ def admin_self_eval_page():
     ui.dark_mode().enable()
     _admin_header("self-eval")
 
-    n_avail = len(EXAMPLE_PROMPTS)
+    n_avail = len(BENCHMARK_PROMPTS)
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
         ui.label("Self-evaluation").classes("text-2xl font-bold text-white")
         ui.label("Drive every curated example brief end to end (auto-answering "
@@ -3430,8 +3441,8 @@ def admin_self_eval_page():
         with ui.row().classes("items-end gap-3 flex-wrap"):
             limit_in = ui.number("Limit (first N)", value=1, min=0, max=n_avail,
                                  format="%d").props("dense outlined dark").classes("w-40")
-            only_in = ui.input("Only (e.g. 1,3,5)").props("dense outlined dark") \
-                .classes("w-44")
+            only_in = ui.input("Only (slugs, e.g. usb-pd-trigger,buck-3a)") \
+                .props("dense outlined dark").classes("w-44")
             judge_sw = ui.switch("LLM judge (A–F)", value=True)
             run_btn = ui.button("Run self-eval", icon="play_arrow").props("color=primary")
             ui.label(f"{n_avail} briefs available").classes("text-xs") \
@@ -3511,16 +3522,19 @@ def admin_self_eval_page():
                 ui.label("status").style("width:108px")
                 ui.label("grade").style("width:60px")
                 ui.label("build").style("width:118px")
+                ui.label("archetype").style("width:140px")
                 ui.label("brief").classes("flex-1")
                 ui.label("").style("width:56px")
-            for idx, prompt in selected:
+            for idx, entry in selected:
                 with ui.row().classes("w-full items-center gap-2 text-xs") \
                         .style("border-top:1px solid #1e293b;padding:3px 0"):
                     ui.label(str(idx)).style("width:24px;color:#cbd5e1")
                     st_l = ui.label("pending").style("width:108px;color:#64748b")
                     gr_l = ui.label("").style("width:60px;color:#e2e8f0")
                     bd_l = ui.label("").style("width:118px;color:#94a3b8")
-                    ui.label(prompt[:84]).classes("flex-1").style("color:#cbd5e1")
+                    ui.label(entry["archetype"]).style("width:140px;color:#64748b")
+                    ui.label(f"{entry['slug']} — {entry['brief']}"[:96]) \
+                        .classes("flex-1").style("color:#cbd5e1")
                     btn = ui.button("view", on_click=lambda _e=None, i=idx: open_run(i)) \
                         .props("flat dense no-caps color=primary").classes("text-xs") \
                         .style("width:56px")
@@ -3578,7 +3592,7 @@ def admin_self_eval_page():
         if sel_key != sig["sel"]:
             build_rows(selected)
             sig["sel"] = sel_key
-        statuses = [_self_eval_brief_status(out, idx, p) for idx, p in selected]
+        statuses = [_self_eval_brief_status(out, idx, entry) for idx, entry in selected]
         done = [s for s in statuses if s["status"] == "done"]
         graded = [s for s in done if isinstance(s.get("final"), (int, float))]
         fab = sum(1 for s in done if s.get("build") == "fab-ready")

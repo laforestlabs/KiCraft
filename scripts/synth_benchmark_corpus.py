@@ -124,7 +124,7 @@ def main() -> int:
 
         _log(f"[{i + 1}/{total}] {slug}: synthesizing ...")
         t0 = time.time()
-        rec = evaluate_one(client, i, brief, WORK, judge_model=None,
+        rec = evaluate_one(client, i, e, WORK, judge_model=None,
                            skip_judge=True, build_timeout_s=2400)
         cost = float(rec.get("design_cost_usd") or 0.0)
         spent += cost

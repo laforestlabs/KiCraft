@@ -1,10 +1,12 @@
-"""Batch self-evaluation: drive every curated example brief end to end and grade it.
+"""Batch self-evaluation: drive every benchmark brief end to end and grade it.
 
 This is the regression harness behind the ``/self-eval`` command (and the
 ``kicraft-eval-batch`` console script). For each brief in
-``kicraft.server.examples.EXAMPLE_PROMPTS`` it reproduces, headlessly, exactly what
-the web app does for a real user and then scores the result with the existing
-``kicraft.eval`` rubric:
+``kicraft.tuning.benchmark.BENCHMARK_PROMPTS`` (the diverse 28-brief corpus that
+spans the placement/routing stress archetypes — connector density, fine-pitch
+escape, RF keepouts, power/thermal, THT/SMT mix, hierarchy depth) it reproduces,
+headlessly, exactly what the web app does for a real user and then scores the
+result with the existing ``kicraft.eval`` rubric:
 
   1. drive the five LLM design stages (intent -> functional_spec -> architecture ->
      bom -> wiring) over a fresh workspace, auto-answering any clarifying question
@@ -45,7 +47,6 @@ import contextlib
 import datetime as dt
 import json
 import os
-import re
 import shutil
 import statistics
 import subprocess
@@ -56,8 +57,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from kicraft.build_slots import ACQUIRED_MARKER
-from kicraft.server.examples import EXAMPLE_PROMPTS
 from kicraft.server.session import read_state, record_answers, remaining_stages, run_session
+from kicraft.tuning.benchmark import BENCHMARK_PROMPTS as BRIEFS
 
 from .run_web import evaluate_project
 
@@ -100,12 +101,14 @@ def _stamp() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _stem_for(idx: int, prompt: str) -> str:
+def _stem_for(idx: int, entry: dict) -> str:
     """A stable, filesystem-safe run-dir name; ``p<stem>-`` is also the ledger
-    run_id prefix collect_web_metrics groups token usage by."""
-    words = re.findall(r"[A-Za-z0-9]+", prompt.upper())[:3]
-    slug = "_".join(words)[:28] or "BRIEF"
-    return f"run_{idx:02d}_{slug}"
+    run_id prefix collect_web_metrics groups token usage by. The benchmark slug is
+    a unique kebab id, so the dir is human-readable and stable across runs; the
+    ``run_NN_`` prefix preserves ordering and keeps the admin's ``run_NN_*`` globs
+    working. (Hyphens in the slug are safe in the run_id: the prefix match appends a
+    trailing ``-`` and every slug is unique.)"""
+    return f"run_{idx:02d}_{entry['slug']}"
 
 
 def _build_env() -> dict:
@@ -217,11 +220,12 @@ def run_build(rundir: Path, progress, *, timeout_s: int = 2400) -> int:
     return rc if rc is not None else -1
 
 
-def evaluate_one(client, idx: int, prompt: str, out_dir: Path, *,
+def evaluate_one(client, idx: int, entry: dict, out_dir: Path, *,
                  judge_model, skip_judge: bool, max_park_rounds: int = 12,
                  build_timeout_s: int = 2400, build_gate=None) -> dict:
-    """Drive + build + score one brief into ``out_dir/<stem>/``. Never raises: any
-    failure is captured in the returned record so the batch continues.
+    """Drive + build + score one benchmark brief into ``out_dir/<stem>/``. ``entry``
+    is a ``{"slug", "archetype", "brief"}`` dict from ``BENCHMARK_PROMPTS``. Never
+    raises: any failure is captured in the returned record so the batch continues.
 
     ``build_gate`` (a semaphore) caps how many build subprocesses run at once when
     briefs execute concurrently: each route is a single-threaded JVM, so ungated
@@ -230,14 +234,18 @@ def evaluate_one(client, idx: int, prompt: str, out_dir: Path, *,
     they are network-wait and overlap with other briefs' builds for free."""
     t0 = time.time()
     started_at = _now_iso()
-    stem = _stem_for(idx, prompt)
+    prompt = entry["brief"]
+    stem = _stem_for(idx, entry)
     rundir = out_dir / stem
     (rundir / ".kicraft").mkdir(parents=True, exist_ok=True)
     (rundir / "brief.txt").write_text(prompt + "\n", encoding="utf-8")
     progress = _event_writer(rundir / "events.jsonl")
     run_id = f"p{stem}-{int(t0)}"
 
-    rec: dict = {"index": idx, "prompt": prompt, "stem": stem, "rundir": str(rundir)}
+    # ``prompt`` is kept as the record field name (the web admin + report read it) and
+    # mirrors entry["brief"]; ``slug``/``archetype`` are the new corpus identity.
+    rec: dict = {"index": idx, "slug": entry["slug"], "archetype": entry["archetype"],
+                 "prompt": prompt, "stem": stem, "rundir": str(rundir)}
     try:
         d = run_design(client, prompt, rundir, progress,
                        max_park_rounds=max_park_rounds, run_id=run_id)
@@ -282,6 +290,29 @@ def _run_cost(r: dict) -> float:
     return round((r.get("design_cost_usd") or 0.0) + (r.get("judge_cost_usd") or 0.0), 6)
 
 
+def _archetype_stats(records: list[dict]) -> dict[str, dict]:
+    """Per-archetype rollup, so a regression localized to one stress dimension (e.g.
+    fine-pitch escape) is visible even when the overall mean looks fine. Keyed by the
+    benchmark archetype; preserves first-seen order."""
+    out: dict[str, dict] = {}
+    for r in records:
+        a = r.get("archetype") or "—"
+        st = out.setdefault(a, {"n": 0, "graded_n": 0, "fab_ready": 0,
+                                "_finals": [], "grade_counts": {}})
+        st["n"] += 1
+        if isinstance(r.get("final"), (int, float)):
+            st["graded_n"] += 1
+            st["_finals"].append(r["final"])
+        if r.get("build_rc") == 0:
+            st["fab_ready"] += 1
+        g = r.get("grade") or ("ERROR" if r.get("error") else "—")
+        st["grade_counts"][g] = st["grade_counts"].get(g, 0) + 1
+    for st in out.values():
+        fin = st.pop("_finals")
+        st["mean_final"] = round(statistics.fmean(fin), 1) if fin else None
+    return out
+
+
 def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
     """Write ``summary.json`` + ``summary.md`` and return the summary dict."""
     finals = [r["final"] for r in records if isinstance(r.get("final"), (int, float))]
@@ -304,6 +335,7 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
         "median_final": round(statistics.median(finals), 1) if finals else None,
         "grade_counts": grade_counts,
         "gate_counts": gate_counts,
+        "archetype_stats": _archetype_stats(records),
         "total_cost_usd": round(sum(_run_cost(r) for r in records), 4),
         "runs": records,
     }
@@ -325,8 +357,29 @@ def _render_md(s: dict) -> str:
              f"  ·  design model: {s.get('design_model')}")
     L.append(f"- total spend: **${s['total_cost_usd']}**  ·  report dir: `{s.get('out_dir')}`")
     L.append("")
-    L.append("| # | grade | final | verdict | build | Q | $ | brief |")
-    L.append("|---|-------|-------|---------|-------|---|---|-------|")
+
+    arche = s.get("archetype_stats") or {}
+    if arche:
+        L.append("## By archetype")
+        L.append("")
+        L.append("| archetype | n | graded | mean | fab-ready | grades |")
+        L.append("|-----------|---|--------|------|-----------|--------|")
+        for a, st in arche.items():
+            grds = " ".join(f"{g}:{n}" for g, n in sorted(st["grade_counts"].items()))
+            L.append("| " + " | ".join([
+                a,
+                str(st["n"]),
+                str(st["graded_n"]),
+                (str(st["mean_final"]) if st["mean_final"] is not None else "—"),
+                f"{st['fab_ready']}/{st['n']}",
+                grds,
+            ]) + " |")
+        L.append("")
+
+    L.append("## Per brief")
+    L.append("")
+    L.append("| # | slug | archetype | grade | final | verdict | build | Q | $ |")
+    L.append("|---|------|-----------|-------|-------|---------|-------|---|---|")
     for r in s["runs"]:
         if r.get("build_rc") is None:
             build = "—" if not r.get("error") else "—"
@@ -334,17 +387,16 @@ def _render_md(s: dict) -> str:
             build = r.get("build_label") or str(r.get("build_rc"))
         verdict = r.get("verdict") or ("ERROR" if r.get("error") else r.get("design_status") or "—")
         final = r.get("final")
-        brief = r["prompt"].replace("|", "\\|")
-        brief = brief[:58] + "…" if len(brief) > 59 else brief
         L.append("| " + " | ".join([
             str(r["index"]),
+            str(r.get("slug") or "—"),
+            str(r.get("archetype") or "—"),
             r.get("grade") or "—",
             (str(final) if final is not None else "—"),
             str(verdict),
             str(build),
             str(r.get("questions", "—")),
             f"${_run_cost(r)}",
-            brief,
         ]) + " |")
 
     flagged = [r for r in s["runs"] if r.get("error") or r.get("gates")
@@ -385,25 +437,31 @@ def _default_out_dir() -> Path:
     return base / _stamp()
 
 
-def _select(prompts: list[str], limit, only) -> list[tuple[int, str]]:
-    rows = list(enumerate(prompts, start=1))
+def _select(entries: list[dict], limit, only) -> list[tuple[int, dict]]:
+    """Pick benchmark entries to run, paired with their 1-based position. ``only`` is
+    a comma list of slugs (e.g. ``usb-pd-trigger,buck-3a``); bare integers are still
+    accepted as 1-based indices for back-compat."""
+    rows = list(enumerate(entries, start=1))
     if only:
-        want = {int(x) for x in str(only).split(",") if x.strip()}
-        return [(i, p) for i, p in rows if i in want]
+        tokens = {t.strip() for t in str(only).split(",") if t.strip()}
+        nums = {int(t) for t in tokens if t.isdigit()}
+        slugs = {t for t in tokens if not t.isdigit()}
+        return [(i, e) for i, e in rows if i in nums or e["slug"] in slugs]
     if limit is not None:
         return rows[:limit]
     return rows
 
 
-def _load_prior_records(out_dir: Path) -> dict[int, dict]:
+def _load_prior_records(out_dir: Path) -> dict[str, dict]:
     """Per-brief records from an existing batch's ``summary.json``, keyed by brief
-    index. Empty when the batch never wrote a checkpoint (or it is unreadable)."""
+    slug (robust to corpus reordering between a batch and its --resume). Empty when
+    the batch never wrote a checkpoint (or it is unreadable)."""
     path = out_dir / "summary.json"
     if not path.exists():
         return {}
     try:
         runs = json.loads(path.read_text(encoding="utf-8")).get("runs") or []
-        return {r["index"]: r for r in runs if isinstance(r.get("index"), int)}
+        return {r["slug"]: r for r in runs if r.get("slug")}
     except Exception:  # noqa: BLE001 - unreadable summary == nothing to reuse
         return {}
 
@@ -420,12 +478,13 @@ def _reusable(rec: dict | None) -> bool:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
-        description="Drive every curated example brief end to end and grade it "
-                    "(the /self-eval regression loop).")
+        description="Drive every benchmark brief end to end and grade it "
+                    "(the /self-eval regression loop over the 28-brief corpus).")
     ap.add_argument("--limit", type=int, default=None,
-                    help="run only the first N example briefs")
+                    help="run only the first N benchmark briefs")
     ap.add_argument("--only", default=None,
-                    help="comma-separated 1-based indices to run, e.g. '1,3,5'")
+                    help="comma-separated slugs to run, e.g. 'usb-pd-trigger,buck-3a' "
+                         "(bare integers are still accepted as 1-based indices)")
     ap.add_argument("--out", default=None,
                     help="report root (default: <projects_dir>/../self_eval/<ts> or ./logs/self_eval/<ts>)")
     ap.add_argument("--no-judge", action="store_true",
@@ -450,7 +509,7 @@ def main(argv=None) -> int:
                          "with --only/--limit to restrict the considered set.")
     args = ap.parse_args(argv)
 
-    selected = _select(list(EXAMPLE_PROMPTS), args.limit, args.only)
+    selected = _select(list(BRIEFS), args.limit, args.only)
     if not selected:
         print("no briefs selected (check --limit / --only)", file=sys.stderr)
         return 2
@@ -472,9 +531,10 @@ def main(argv=None) -> int:
     prior = _load_prior_records(out_dir) if resume_dir else {}
     if resume_dir and prior and not args.only and args.limit is None:
         # default a resume to the batch's own brief set, not the whole catalog
-        selected = [(i, p) for i, p in selected if i in prior]
-    reused = {i: prior[i] for i, _ in selected if _reusable(prior.get(i))}
-    todo = [(i, p) for i, p in selected if i not in reused]
+        selected = [(i, e) for i, e in selected if e["slug"] in prior]
+    reused = {e["slug"]: prior[e["slug"]] for _, e in selected
+              if _reusable(prior.get(e["slug"]))}
+    todo = [(i, e) for i, e in selected if e["slug"] not in reused]
     parallel = max(1, min(args.parallel, len(todo) or 1))
 
     meta = {
@@ -508,26 +568,26 @@ def main(argv=None) -> int:
     # A re-run brief must start from a clean slate: stale .kicraft state would make
     # run_design resume mid-chain and stale events.jsonl would skew the Class-C scorers.
     if resume_dir:
-        for idx, prompt in todo:
-            stale = out_dir / _stem_for(idx, prompt)
+        for idx, entry in todo:
+            stale = out_dir / _stem_for(idx, entry)
             if stale.exists():
                 shutil.rmtree(stale)
 
     t_mono = time.monotonic()
-    by_idx: dict[int, dict] = dict(reused)
+    by_slug: dict[str, dict] = dict(reused)
     ckpt_lock = threading.Lock()
 
     def _checkpoint() -> None:
         # Live partial summary after every brief: what --resume reads back when a
         # batch is interrupted, and a progress view for the admin GUI. Call with
         # ckpt_lock held.
-        recs = [by_idx[i] for i, _ in selected if i in by_idx]
+        recs = [by_slug[e["slug"]] for _, e in selected if e["slug"] in by_slug]
         compile_report(recs, out_dir, meta)
 
     if parallel <= 1:
-        for n, (idx, prompt) in enumerate(todo, start=1):
-            print(f"\n[{n}/{len(todo)}] #{idx}: {prompt}", flush=True)
-            rec = evaluate_one(client, idx, prompt, out_dir, judge_model=judge_model,
+        for n, (idx, entry) in enumerate(todo, start=1):
+            print(f"\n[{n}/{len(todo)}] #{idx} {entry['slug']}: {entry['brief']}", flush=True)
+            rec = evaluate_one(client, idx, entry, out_dir, judge_model=judge_model,
                                skip_judge=args.no_judge, max_park_rounds=args.max_park_rounds,
                                build_timeout_s=args.build_timeout)
             if rec.get("error"):
@@ -538,20 +598,20 @@ def main(argv=None) -> int:
                       f"build={rec.get('build_label')} cost=${_run_cost(rec)} "
                       f"({rec.get('duration_s')}s)", flush=True)
             with ckpt_lock:
-                by_idx[idx] = rec
+                by_slug[rec["slug"]] = rec
                 _checkpoint()
     else:
         gate = threading.BoundedSemaphore(max(1, args.build_slots))
         print_lock = threading.Lock()
 
-        def _worker(idx: int, prompt: str) -> dict:
+        def _worker(idx: int, entry: dict) -> dict:
             # One client per brief: CappedOpenRouterClient instances are not safe to
             # share across threads (construction is ~ms; the spend ledger is WAL sqlite).
             wclient = CappedOpenRouterClient(s)
-            stem = _stem_for(idx, prompt)
+            stem = _stem_for(idx, entry)
             with print_lock:
-                print(f"[{stem}] start: {prompt}", flush=True)
-            rec = evaluate_one(wclient, idx, prompt, out_dir, judge_model=judge_model,
+                print(f"[{stem}] start: {entry['brief']}", flush=True)
+            rec = evaluate_one(wclient, idx, entry, out_dir, judge_model=judge_model,
                                skip_judge=args.no_judge, max_park_rounds=args.max_park_rounds,
                                build_timeout_s=args.build_timeout, build_gate=gate)
             with print_lock:
@@ -565,16 +625,16 @@ def main(argv=None) -> int:
             return rec
 
         with ThreadPoolExecutor(max_workers=parallel) as ex:
-            futures = [ex.submit(_worker, idx, prompt) for idx, prompt in todo]
+            futures = [ex.submit(_worker, idx, entry) for idx, entry in todo]
             for fut in as_completed(futures):
                 rec = fut.result()  # evaluate_one never raises
                 with ckpt_lock:
-                    by_idx[rec["index"]] = rec
+                    by_slug[rec["slug"]] = rec
                     _checkpoint()
 
     meta["finished_at"] = _now_iso()
     meta["wall_s"] = round(time.monotonic() - t_mono, 1)
-    records = [by_idx[i] for i, _ in selected if i in by_idx]
+    records = [by_slug[e["slug"]] for _, e in selected if e["slug"] in by_slug]
     summary = compile_report(records, out_dir, meta)
 
     print(f"\n=== self-eval complete: {summary['graded_n']}/{summary['n']} graded · "
