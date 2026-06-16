@@ -124,6 +124,45 @@ def _pitch(members: list[Component], spec: dict, gap: float) -> tuple[float, flo
     return px, py
 
 
+def array_companion_refs(
+    comps: dict[str, Component], arrays: list[dict]
+) -> list[str]:
+    """Refs of the per-array decoupling companions in this leaf.
+
+    A companion is a 2-pad part whose BOTH nets are power/ground (a decap, not a
+    signal part like a series data resistor) that rides alongside a *fully
+    present* array grid. Returns ``[]`` when no array is present, so a plain
+    decap leaf (no grid) is left entirely to the normal pipeline -- we only claim
+    companions when there is an array to colocate them with.
+
+    Shared by :func:`place_array_leaves` (which places + tags them) and
+    ``leaf_geometry.repair_leaf_placement_legality`` (which must re-tag them
+    after a board reload, since the ``array_member`` exemption flag does not
+    survive serialize). Deterministic, sorted in ref order.
+    """
+    present_array_refs: set[str] = set()
+    for spec in arrays or []:
+        refs = list(spec.get("refs", []))
+        rows = int(spec.get("rows", 0))
+        cols = int(spec.get("cols", 0))
+        if (refs and rows > 0 and cols > 0 and rows * cols == len(refs)
+                and all(r in comps for r in refs)):
+            present_array_refs.update(refs)
+    if not present_array_refs:
+        return []
+    from kicraft.design.models import is_power_or_ground_name
+
+    out: list[str] = []
+    for ref, c in comps.items():
+        if ref in present_array_refs or len(c.pads) != 2:
+            continue
+        nets = {p.net for p in c.pads if p.net}
+        if nets and all(is_power_or_ground_name(n) for n in nets):
+            out.append(ref)
+    out.sort(key=_ref_sort_key)
+    return out
+
+
 def leaf_is_fully_array(comps: dict[str, Component], arrays: list[dict]) -> bool:
     """True if this leaf is one or more full array grids plus only simple
     two-terminal passives — i.e. ``place_array_leaves`` would fully handle it.
@@ -170,6 +209,7 @@ def place_array_leaves(
     gap = max(float(cfg.get("array_gap_mm", 0.6)), clearance)
     placed: set[str] = set()
     grid_bbox: tuple[float, float, float, float] | None = None
+    grids: list[dict] = []  # per-array geometry for adaptive decap colocation
 
     for spec in arrays or []:
         refs = list(spec.get("refs", []))
@@ -206,42 +246,42 @@ def place_array_leaves(
             max(grid_bbox[2], b[2]),
             max(grid_bbox[3], b[3]),
         )
+        grids.append({
+            "refs": refs, "px": px, "py": py, "rows": rows, "cols": cols,
+            "led_w": max(c.width_mm for c in members),
+            "led_h": max(c.height_mm for c in members),
+            # member centre per chain index, read AFTER placement (serpentine
+            # fill + per-row rotation already applied).
+            "centers": [Point(comps[r].pos.x, comps[r].pos.y) for r in refs],
+        })
 
     if not placed:
         return placed, False
 
     # Per-LED decoupling companions: 2-pad passives whose BOTH nets are
     # power/ground (a decap -- not a signal part like a series data resistor).
-    # Pack them in a compact LOCKED block directly below the grid so they stay
-    # adjacent to the array (the GND/power pour ties them) instead of being
-    # scattered by force/SA + the grid-escape pass (Step 9.3) into a wide sprawl
-    # that bloats the board and strands GND. On a per-LED-decap matrix this is
-    # ~one cap per member, so the eviction would otherwise move all of them.
+    # Place each ADJACENT to the LED it serves (the GND/power pour + the short
+    # neighbour route then tie it) instead of scattering them via force/SA + the
+    # grid-escape pass into a wide sprawl, OR packing them in a tall block far
+    # below the grid that runs off the leaf outline (the KC-BUCJZ4 rc6 / KC-NESCCB
+    # overlap bugs). See _place_companion_decaps for the adaptive beside/edge rule.
     if grid_bbox is not None and cfg.get("array_colocate_decaps", True):
-        from kicraft.design.models import is_power_or_ground_name
-
-        def _is_decap(c: Component) -> bool:
-            if len(c.pads) != 2:
-                return False
-            nets = {p.net for p in c.pads if p.net}
-            return bool(nets) and all(is_power_or_ground_name(n) for n in nets)
-
         decaps = [
-            r for r, c in comps.items()
-            if r not in placed and not getattr(c, "locked", False) and _is_decap(c)
+            r for r in array_companion_refs(comps, arrays)
+            if r not in placed and not getattr(comps[r], "locked", False)
         ]
         if decaps:
-            decaps.sort(key=_ref_sort_key)
-            bx0, bx1, by1 = _place_companion_block(
-                comps, decaps, grid_bbox, gap, clearance
+            grid_bbox = _place_companion_decaps(
+                comps, decaps, grids, grid_bbox, cfg
             )
             placed.update(decaps)
             for r in decaps:
                 comps[r].locked = True
-            # Extend the grid bbox so any later strip (R1 etc.) drops BELOW the
-            # cap block, not on top of it.
-            grid_bbox = (grid_bbox[0], grid_bbox[1],
-                         max(grid_bbox[2], bx1), by1)
+                # Beside-grid companions share the array's clearance exemption so
+                # the legalizer leaves them at the tight pitch (their real
+                # spacing is the netclass copper clearance, not the 2.5 mm
+                # assembly clearance the grid itself is exempt from).
+                comps[r].array_member = True
 
     remaining = [r for r in comps if r not in placed]
     # Pure array leaf: nothing but the grid. It is fully placed -- report handled
@@ -269,41 +309,75 @@ def _ref_sort_key(ref: str) -> tuple[str, int]:
     return (prefix, int(digits) if digits else 0)
 
 
-def _place_companion_block(
+def _place_companion_decaps(
     comps: dict[str, Component],
     refs: list[str],
+    grids: list[dict],
     grid_bbox: tuple[float, float, float, float],
-    gap: float,
-    clearance: float,
-) -> tuple[float, float, float]:
-    """Pack companion passives (per-LED decaps) in a compact grid block directly
-    below the array, as wide as the array. Returns the block's ``(min_x, max_x,
-    max_y)``. Members are NOT marked ``array_member`` (they are companions, not
-    chain members); the caller locks them.
+    cfg: dict,
+) -> tuple[float, float, float, float]:
+    """Adaptively place per-LED decoupling companions and return the (possibly
+    extended) grid bbox.
 
-    Cell pitch is the part extent plus the placement ``clearance`` plus a margin,
-    so the locked block is legal by construction -- packing exactly at the
-    clearance limit leaves the cells touching, and the leaf legality gate (whose
-    effective bbox inflates each part by clearance/2) then rejects the whole
-    leaf, which would strand its components as loose parent-level parts."""
-    min_x, _min_y, max_x, max_y = grid_bbox
+    DEFAULT -- beside each LED: for a single 2-D grid with at most one decap per
+    member, drop decap *k* into the inter-row channel directly beside the array
+    member at chain index *k* (the channel the *in-row* data hops do NOT use), so
+    the cap sits right next to the LED power pads it decouples and stays inside
+    the grid bbox (no outline overflow). Companions are tagged ``array_member`` by
+    the caller, so they share the grid's clearance exemption and pack at the real
+    copper clearance rather than the 2.5 mm placement clearance.
+
+    FALLBACK -- edge rows: when the part does not fit beside (gap too tight), the
+    grid is 1-D, there are several arrays, or there are more decaps than members,
+    lay the decaps in compact tight-pitch rows hugging the grid's bottom edge.
+    Still adjacent (pour-tied), still legal, never the old far-below tall block.
+    """
+    comp_gap = float(cfg.get("array_companion_gap_mm", 0.3))
+    min_x, min_y, max_x, max_y = grid_bbox
+
+    # Beside-each-LED is only well-defined for a single 2-D grid (cols > 1, so the
+    # in-row hops run horizontally and the vertical channel is free for caps) with
+    # no more decaps than members.
+    grid = grids[0] if len(grids) == 1 else None
+    if grid is not None and grid["cols"] > 1 and len(refs) <= len(grid["refs"]):
+        py, led_h = grid["py"], grid["led_h"]
+        cap_h = max(comps[r].height_mm for r in refs)
+        cap_w = max(comps[r].width_mm for r in refs)
+        # Vertical channel below each LED must hold the cap with copper clearance
+        # to the LEDs above and below, and the cap must not be wider than the
+        # column pitch (else neighbouring caps collide horizontally).
+        fits_y = (py - led_h) >= cap_h + 2.0 * comp_gap
+        fits_x = grid["px"] >= cap_w + comp_gap
+        if fits_y and fits_x:
+            centers = grid["centers"]
+            for k, r in enumerate(refs):
+                c = centers[k]
+                _move(comps[r], c.x, c.y + py / 2.0)  # mid inter-row channel
+            print(
+                f"  Array decaps: {len(refs)} placed beside-LED in the inter-row "
+                f"channel (py={py:.2f} led_h={led_h:.2f} cap_h={cap_h:.2f})"
+            )
+            # Caps land within the existing grid bbox (last row's caps sit in the
+            # bottom margin already covered by grid_bbox); bbox unchanged.
+            return grid_bbox
+
+    # FALLBACK: tight-pitch edge rows hugging the grid's bottom edge.
     grid_w = max_x - min_x
-    pitch = clearance + max(gap, 0.5)  # > clearance: cells clear the legality gate
-    cw = max(comps[r].width_mm for r in refs) + pitch
-    ch = max(comps[r].height_mm for r in refs) + pitch
-    cols = max(1, int(grid_w // cw) or 1)  # match the array width
-    x0 = min_x + cw / 2.0
-    y0 = max_y + ch  # first row just below the grid
-    bx1 = min_x
+    pitch_x = max(comps[r].width_mm for r in refs) + comp_gap
+    pitch_y = max(comps[r].height_mm for r in refs) + comp_gap
+    cols = max(1, int(grid_w // pitch_x) or 1)
+    x0 = min_x + pitch_x / 2.0
+    y0 = max_y + pitch_y / 2.0  # first edge row just below the grid
     by1 = y0
     for i, r in enumerate(refs):
         col, row = i % cols, i // cols
-        x = x0 + col * cw
-        y = y0 + row * ch
-        _move(comps[r], x, y)
-        bx1 = max(bx1, x + cw / 2.0)
-        by1 = max(by1, y + ch / 2.0)
-    return (min_x, bx1, by1)
+        _move(comps[r], x0 + col * pitch_x, y0 + row * pitch_y)
+        by1 = max(by1, y0 + row * pitch_y + pitch_y / 2.0)
+    print(
+        f"  Array decaps: {len(refs)} placed in {cols}-wide tight edge rows "
+        f"below the grid (beside-LED not feasible)"
+    )
+    return (min_x, min_y, max(max_x, x0 + (cols - 1) * pitch_x + pitch_x / 2.0), by1)
 
 
 def _place_strip(

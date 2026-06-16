@@ -313,20 +313,26 @@ def test_non_array_part_pushed_off_grid() -> None:
         assert not (ox > 0.0 and oy > 0.0), f"R1 still overlaps {c.ref}"
 
 
-def test_per_led_decaps_colocated_not_scattered() -> None:
-    # Per-LED decoupling caps (2-pad, both nets power/ground) must be packed in a
-    # compact LOCKED block below the grid -- adjacent to the array so the pour
-    # ties GND -- NOT scattered by force/SA + grid-escape into a wide sprawl
-    # (the KC-FFFADA regression: 50 caps -> 192mm-wide band, GND stranded).
+def _decap(ref: str, w: float = 1.0, h: float = 0.5) -> Component:
+    """A 2-pad 100nF decoupling cap (both pads power/ground)."""
+    return Component(
+        ref=ref, value="100nF", pos=Point(0.0, 0.0), rotation=0.0,
+        layer=Layer.FRONT, width_mm=w, height_mm=h,
+        pads=[Pad(ref=ref, pad_id="1", pos=Point(-0.5, 0.0), net="+5V",
+                  layer=Layer.FRONT),
+              Pad(ref=ref, pad_id="2", pos=Point(0.5, 0.0), net="GND",
+                  layer=Layer.FRONT)])
+
+
+def test_per_led_decaps_beside_led_not_scattered() -> None:
+    # Per-LED decoupling caps (2-pad, both nets power/ground) sit BESIDE the LED
+    # they serve, in the inter-row channel -- adjacent (pour + short hop ties
+    # them), within the grid bbox (no outline overflow), NOT scattered by
+    # force/SA + grid-escape into a wide sprawl (the KC-FFFADA regression: 50
+    # caps -> 192mm band) nor packed in a tall far-below block (KC-BUCJZ4 rc6).
     comps = {f"D{i}": _led(f"D{i}", f"D{i}_DOUT", "DATA_IN") for i in range(1, 5)}
     for i in range(1, 5):
-        comps[f"C{i}"] = Component(
-            ref=f"C{i}", value="100nF", pos=Point(0.0, 0.0), rotation=0.0,
-            layer=Layer.FRONT, width_mm=1.0, height_mm=0.5,
-            pads=[Pad(ref=f"C{i}", pad_id="1", pos=Point(-0.5, 0.0), net="+5V",
-                      layer=Layer.FRONT),
-                  Pad(ref=f"C{i}", pad_id="2", pos=Point(0.5, 0.0), net="GND",
-                      layer=Layer.FRONT)])
+        comps[f"C{i}"] = _decap(f"C{i}")
     # a series DATA resistor (NOT a decap: signal nets) must NOT be co-located
     comps["R1"] = Component(
         ref="R1", value="330", pos=Point(0.0, 0.0), rotation=0.0, layer=Layer.FRONT,
@@ -340,12 +346,69 @@ def test_per_led_decaps_colocated_not_scattered() -> None:
                "pitch_mm": 3.0}]
     placed, _ = place_array_leaves(comps, arrays, {})
 
-    assert all(f"C{i}" in placed and comps[f"C{i}"].locked for i in range(1, 5))
+    # placed, locked, and tagged array_member (so the legalizer's clearance gate
+    # exempts them from the 2.5mm placement clearance the tight grid is exempt from)
+    assert all(f"C{i}" in placed and comps[f"C{i}"].locked
+               and comps[f"C{i}"].array_member for i in range(1, 5))
     assert "R1" not in placed, "signal resistor must not be co-located as a decap"
-    leds_y = [comps[f"D{i}"].pos.y for i in range(1, 5)]
+
+    led_pos = {i: comps[f"D{i}"].pos for i in range(1, 5)}
+    grid_min_x = min(p.x for p in led_pos.values())
+    grid_max_x = max(p.x for p in led_pos.values())
+    grid_max_y = max(p.y for p in led_pos.values())
+    for i in range(1, 5):
+        cap = comps[f"C{i}"].pos
+        # beside SOME LED: within one pitch of a member centre (not flung away)
+        nearest = min(((cap.x - p.x) ** 2 + (cap.y - p.y) ** 2) ** 0.5
+                      for p in led_pos.values())
+        assert nearest <= 3.0, f"C{i} not beside any LED (nearest {nearest:.2f}mm)"
+        # in the vertical channel: aligned to its LED's column, offset in y
+        assert any(abs(cap.x - p.x) < 0.01 for p in led_pos.values())
+        # compact: stays within the grid's x-span and just below its bottom row
+        assert grid_min_x - 0.01 <= cap.x <= grid_max_x + 0.01
+        assert cap.y <= grid_max_y + 3.0  # inside the grid bbox bottom margin
+
+
+def test_decaps_fall_back_to_edge_rows_when_too_tight() -> None:
+    # When the cap cannot fit beside the LED (pitch barely clears the LED itself),
+    # fall back to compact tight-pitch edge rows below the grid -- still adjacent,
+    # still legal, never the old far-below 2.5mm-pitch block that overflowed.
+    comps = {f"D{i}": _led(f"D{i}", f"D{i}_DOUT", "DATA_IN") for i in range(1, 5)}
+    for i in range(1, 5):
+        comps[f"C{i}"] = _decap(f"C{i}")
+    # pitch 1.6 vs 1.3 LED -> only 0.3mm gap, no room for a 0.5mm-tall cap beside
+    arrays = [{"refs": [f"D{i}" for i in range(1, 5)], "rows": 2, "cols": 2,
+               "pitch_mm": 1.6}]
+    placed, _ = place_array_leaves(comps, arrays, {})
+
+    assert all(f"C{i}" in placed and comps[f"C{i}"].locked for i in range(1, 5))
     caps_y = [comps[f"C{i}"].pos.y for i in range(1, 5)]
-    assert min(caps_y) > max(leds_y), "decaps sit below the grid"
+    leds_y = [comps[f"D{i}"].pos.y for i in range(1, 5)]
+    assert min(caps_y) > max(leds_y), "edge-row caps sit below the grid"
     caps_x = [comps[f"C{i}"].pos.x for i in range(1, 5)]
     leds_x = [comps[f"D{i}"].pos.x for i in range(1, 5)]
-    # compact: cap block no wider than the grid + one cell (not a sprawl)
-    assert (max(caps_x) - min(caps_x)) <= (max(leds_x) - min(leds_x)) + 3.0
+    # tight: cap rows no wider than the grid + a cell (not a 2.5mm-pitch sprawl)
+    assert (max(caps_x) - min(caps_x)) <= (max(leds_x) - min(leds_x)) + 2.0
+
+
+def test_companion_refs_reload_retag_helper() -> None:
+    # array_companion_refs is the single source of truth for both placement and
+    # the post-reload legality re-tag: it must find the decaps (power/ground
+    # 2-pad) and exclude signal parts, but ONLY when the array is present.
+    from kicraft.autoplacer.brain.array_placement import array_companion_refs
+
+    comps = {f"D{i}": _led(f"D{i}", f"D{i}_DOUT", "DATA_IN") for i in range(1, 5)}
+    comps["C1"] = _decap("C1")
+    comps["C2"] = _decap("C2")
+    comps["R1"] = Component(
+        ref="R1", value="330", pos=Point(0.0, 0.0), rotation=0.0, layer=Layer.FRONT,
+        width_mm=1.0, height_mm=0.5,
+        pads=[Pad(ref="R1", pad_id="1", pos=Point(-0.5, 0.0), net="DATA",
+                  layer=Layer.FRONT),
+              Pad(ref="R1", pad_id="2", pos=Point(0.5, 0.0), net="DATA_IN",
+                  layer=Layer.FRONT)])
+    arrays = [{"refs": [f"D{i}" for i in range(1, 5)], "rows": 2, "cols": 2}]
+    assert array_companion_refs(comps, arrays) == ["C1", "C2"]
+    # no array present in this leaf -> claim nothing (plain decap leaf untouched)
+    assert array_companion_refs({"C1": comps["C1"]}, []) == []
+    assert array_companion_refs({"C1": comps["C1"]}, arrays) == []

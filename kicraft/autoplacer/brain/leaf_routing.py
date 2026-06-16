@@ -557,6 +557,7 @@ def route_local_subcircuit(
     # open copper. Power is delivered by the +5V/GND pours, so the channels
     # carry only data. Keyed on the array spec, NOT leaf_is_fully_array (a 3-pin
     # header or other non-passive on the leaf must not disable it).
+    _arr_specs: list = []
     if cfg.get("array_route_enabled", True) and cfg.get("arrays"):
         try:
             import pcbnew
@@ -583,6 +584,20 @@ def route_local_subcircuit(
                     f"  Breakout stubs: {_bo['stubs']} pad(s), "
                     f"{_bo['segments']} segment(s), {_bo['vias']} via(s)"
                 )
+            # No-silent handoff: a data tie the stamp guards dropped goes to
+            # FreeRouting -- surface it so an incompletely-stamped chain is
+            # visible, not hidden behind a clean-looking "stubs" count.
+            if _arr_specs:
+                _arr_keys = {f"{s.ref}.{s.pad}" for s in _arr_specs}
+                _arr_skipped = [
+                    s for s in _bo.get("skipped", [])
+                    if s.split(":", 1)[0] in _arr_keys
+                ]
+                if _arr_skipped:
+                    print(
+                        f"  array-router: {len(_arr_skipped)}/{len(_arr_specs)} "
+                        f"data tie(s) left to FreeRouting: {', '.join(_arr_skipped)}"
+                    )
         except Exception as exc:  # finishing step must never fail the leaf
             print(f"  WARNING: breakout stub step failed: {exc}")
     # Route cache: a deterministic leaf (e.g. an array grid) has the same

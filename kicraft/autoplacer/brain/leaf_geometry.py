@@ -326,6 +326,17 @@ def repair_leaf_placement_legality(
             if comp is not None:
                 comp.array_member = True
                 comp.locked = True
+    # Per-LED decoupling companions are placed BESIDE the grid at the same tight
+    # pitch and share the grid's clearance exemption; they too lose the
+    # ``array_member`` flag on reload, so re-tag them or the legalizer scatters
+    # the caps it should leave beside their LEDs.
+    from kicraft.autoplacer.brain.array_placement import array_companion_refs
+
+    for ref in array_companion_refs(repaired, cfg.get("arrays") or []):
+        comp = repaired.get(ref)
+        if comp is not None:
+            comp.array_member = True
+            comp.locked = True
     local_state = copy.deepcopy(extraction.local_state)
     local_state.components = repaired
 

@@ -187,3 +187,40 @@ class TestDiscoverProjectConfig:
         stem.write_text(json.dumps({"source": "stem"}))
         result = discover_project_config(proj_dir)
         assert result == generic
+
+    def test_finds_sole_config_when_dir_renamed(self, tmp_path: Path):
+        """A project copied into a differently-named dir still resolves its lone
+        ``<synth_stem>_autoplacer.json`` -- otherwise the array grid hint is
+        silently lost and the scattered board best-effort "passes"."""
+        # dir named "tmpwork" but the only config is "1515_RGB_MATRIX_autoplacer.json"
+        proj_dir = tmp_path / "tmpwork"
+        proj_dir.mkdir()
+        cfg_file = proj_dir / "1515_RGB_MATRIX_autoplacer.json"
+        cfg_file.write_text(json.dumps({"arrays": [{"refs": ["D1"], "rows": 1,
+                                                     "cols": 1}]}))
+        result = discover_project_config(proj_dir)
+        assert result == cfg_file
+
+    def test_ambiguous_multi_config_returns_none_and_warns(
+        self, tmp_path: Path, capsys
+    ):
+        """Several configs, none matching the dir name -> refuse to guess and
+        warn loudly (do NOT silently drop the placement hint)."""
+        proj_dir = tmp_path / "tmpwork"
+        proj_dir.mkdir()
+        (proj_dir / "A_autoplacer.json").write_text(json.dumps({"source": "A"}))
+        (proj_dir / "B_autoplacer.json").write_text(json.dumps({"source": "B"}))
+        result = discover_project_config(proj_dir)
+        assert result is None
+        warning = capsys.readouterr().err
+        assert "NOT auto-discovered" in warning
+        assert "A_autoplacer.json" in warning and "B_autoplacer.json" in warning
+
+    def test_dir_name_match_wins_over_sole_glob(self, tmp_path: Path):
+        """The exact <dirname> match is preferred even when it's the only file
+        (regression guard: glob fallback must not change the happy path)."""
+        proj_dir = tmp_path / "Proj"
+        proj_dir.mkdir()
+        cfg_file = proj_dir / "Proj_autoplacer.json"
+        cfg_file.write_text(json.dumps({"source": "stem"}))
+        assert discover_project_config(proj_dir) == cfg_file

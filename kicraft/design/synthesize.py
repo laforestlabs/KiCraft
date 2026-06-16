@@ -188,6 +188,13 @@ def run(
     # pins, and the leaf file all agree on the renamed stem.
     ensure_leaf_stems_distinct(state.project_stem, state.architecture.sheets)
 
+    # Deterministic BOM rule: thin per-LED decoupling to a couple of bulk caps for
+    # a LOW-current LED array (loud + recorded in bom.assumptions). Must run BEFORE
+    # the schematic / netlist / autoplacer artifacts are emitted from the BOM.
+    from kicraft.design.synthesis.array_decaps import normalize_array_decaps
+
+    normalize_array_decaps(state.bom)
+
     sheet_instances = build_sheet_instances(state.architecture, state.bom)
 
     fragments, library_leaves = _install_library_sheets(
