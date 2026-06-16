@@ -5501,6 +5501,14 @@ def index(prompt: str = "", project: str = ""):
                 .style("color:#94a3b8")
         # Full nav row on desktop (>=1024px) ...
         with ui.row().classes("items-center gap-3 gt-sm"):
+            # Start a fresh design. Lives here (not in the composer) because the
+            # composer's prompt chrome collapses once a design is open. start_fresh
+            # is defined further down; the lambda resolves it at click time.
+            ui.button("New design", icon="add",
+                      on_click=lambda: start_fresh()) \
+                .props("flat dense no-caps color=primary").classes("text-xs") \
+                .tooltip("Start a fresh design. The open one keeps running in the "
+                         "background and stays under My projects.")
             ui.button("My projects", icon="folder",
                       on_click=lambda: ui.navigate.to("/projects")) \
                 .props("flat dense no-caps color=white").classes("text-xs") \
@@ -5543,6 +5551,7 @@ def index(prompt: str = "", project: str = ""):
             with ui.button(icon="menu").props("flat dense color=white"):
                 with ui.menu().props("auto-close") \
                         .style("background:#0f172a;border:1px solid #1e293b"):
+                    ui.menu_item("New design", lambda: start_fresh())
                     ui.menu_item("My projects", lambda: ui.navigate.to("/projects"))
                     ui.menu_item("Examples", lambda: ui.navigate.to("/samples"))
                     ui.menu_item("Part library", lambda: ui.navigate.to("/parts"))
@@ -5556,12 +5565,14 @@ def index(prompt: str = "", project: str = ""):
                     ui.menu_item("Log out", logout)
 
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1600px"):
-        try:
-            budget = SpendGuard(Settings.from_env()).status()
-            ui.label(f"Daily budget remaining: ${budget['daily_remaining_usd']:.2f} "
-                     f"of ${budget['daily_ceiling_usd']:.0f}").classes("text-xs").style("color:#64748b")
-        except Exception:
-            ui.label("").classes("hidden")
+        # Site-wide LLM budget is admin-only telemetry; users never see a cost figure.
+        if is_admin(user):
+            try:
+                budget = SpendGuard(Settings.from_env()).status()
+                ui.label(f"Daily budget remaining: ${budget['daily_remaining_usd']:.2f} "
+                         f"of ${budget['daily_ceiling_usd']:.0f}").classes("text-xs").style("color:#64748b")
+            except Exception:
+                ui.label("").classes("hidden")
 
         with ui.row().classes("items-center gap-2"):
             quota_label = ui.label().classes("text-xs").style("color:#94a3b8")
@@ -5591,6 +5602,19 @@ def index(prompt: str = "", project: str = ""):
 
                 ui.button(icon="close", on_click=dismiss_welcome) \
                     .props("flat dense round color=white")
+
+        # Once a design is open (started, attached, or reopened) the compose chrome
+        # below collapses and only this read-only prompt header stays at the top.
+        # _enter_run_view / _enter_compose_view (defined below) toggle the two.
+        prompt_display = ui.column().classes("w-full gap-1 kc-prompt-shown") \
+            .style("background:#0f172a;border:1px solid #1e293b;"
+                   "border-radius:8px;padding:12px 14px")
+        with prompt_display:
+            ui.label("Your prompt").classes("text-xs uppercase tracking-wide") \
+                .style("color:#64748b")
+            prompt_label = ui.label("").classes("text-sm") \
+                .style("color:#e2e8f0;white-space:pre-wrap")
+        prompt_display.set_visibility(False)
 
         brief = ui.textarea(
             "Describe your board",
@@ -5625,7 +5649,7 @@ def index(prompt: str = "", project: str = ""):
 
         # Walk-away notifications: persisted per user; the run worker reads the
         # stored preference at send time, so flipping it mid-run takes effect.
-        ui.checkbox("Email me when a run finishes or needs my input",
+        notify_chk = ui.checkbox("Email me when a run finishes or needs my input",
                     value=bool(user.notify_email),
                     on_change=lambda e: _store().set_notify_email(
                         user.id, bool(e.value))) \
@@ -5644,6 +5668,26 @@ def index(prompt: str = "", project: str = ""):
             ui.button("Surprise me", icon="casino",
                       on_click=lambda: use_prompt(random.choice(EXAMPLE_PROMPTS))) \
                 .props("flat rounded dense no-caps").classes("kc-chip")
+
+        def _enter_run_view(prompt_text: str) -> None:
+            """A design is open (started / attached / reopened): collapse the
+            compose chrome to the read-only prompt header so only the user's
+            prompt stays at the top. Starting a fresh one happens from the
+            header's "New design" button now."""
+            prompt_label.text = (prompt_text or "").strip()
+            prompt_display.set_visibility(True)
+            for el in (welcome_card, brief, chips_row, notify_chk,
+                       design_btn, new_btn, arrow_hint):
+                if el is not None:
+                    el.set_visibility(False)
+
+        def _enter_compose_view() -> None:
+            """Back to a blank composer: restore the prompt box and its chrome."""
+            prompt_display.set_visibility(False)
+            prompt_label.text = ""
+            for el in (brief, chips_row, notify_chk, design_btn):
+                if el is not None:
+                    el.set_visibility(True)
 
         # Prefill from a sample the visitor chose before signing up (carried via the
         # ?prompt= query or stashed across the signup hop). No run starts: the user
@@ -5670,7 +5714,10 @@ def index(prompt: str = "", project: str = ""):
                         f"navigator.clipboard.writeText({json.dumps(code)})")
                     ui.notify(f"Copied {code}.", color="positive")
             board_label.on("click", _copy_board_code)
+        # Per-design LLM spend: admin-only. Users never see what a design costs;
+        # the spend is still tracked server-side (state["spend"] -> ledger / admin).
         spend = ui.label("").classes("text-sm").style("color:#64748b")
+        spend.set_visibility(is_admin(user))
         question_box = ui.column().classes("w-full")
 
         support_dialog = ui.dialog()
@@ -5748,7 +5795,7 @@ def index(prompt: str = "", project: str = ""):
         # Per-stage tabs: each phase gets its own tab with a project-state inspector
         # (left) over the LLM thinking + activity/log windows (right). The native
         # KiCad schematic/board (KiCanvas) and the download land in the build tabs.
-        tabs = StageTabs()
+        tabs = StageTabs(show_cost=is_admin(user))
 
         # A KiCanvas view built while its tab is hidden sizes its WebGL canvas to zero
         # and never repaints; re-fit it the first time the user reveals that tab. The
@@ -5841,7 +5888,7 @@ def index(prompt: str = "", project: str = ""):
                     ui.label("No committed stages to edit yet.") \
                         .classes("text-xs").style("color:#64748b")
                     return
-                ui.label("Editing a stage re-runs the stages after it (spends tokens).") \
+                ui.label("Editing a stage re-runs the stages after it.") \
                     .classes("text-xs").style("color:#94a3b8")
                 stage_sel = ui.select(editable, value=editable[0], label="Stage").classes("w-64")
                 form_holder = ui.column().classes("w-full gap-2")
@@ -5895,7 +5942,7 @@ def index(prompt: str = "", project: str = ""):
             with ui.dialog() as dlg, ui.card() \
                     .style("background:#0f172a;border:1px solid #1e293b"):
                 ui.label("Re-run stages?").classes("text-lg font-bold text-white")
-                ui.label(verb + tail + ". LLM stages spend tokens.") \
+                ui.label(verb + tail + ".") \
                     .classes("text-sm").style("color:#94a3b8")
                 with ui.row().classes("gap-2 justify-end w-full"):
                     ui.button("Cancel", on_click=dlg.close).props("flat color=white")
@@ -5971,6 +6018,8 @@ def index(prompt: str = "", project: str = ""):
             had (its dict stays in _LIVE_RUNS, reopenable from the list), and
             the same project_id is reused (no new quota slot)."""
             nonlocal state
+            # A design is open: collapse the compose chrome to the prompt header.
+            _enter_run_view(p.brief or "")
             live = _LIVE_RUNS.get(p.id)
             if live is not None:
                 state = live
@@ -5987,7 +6036,7 @@ def index(prompt: str = "", project: str = ""):
                                       bool(state.get("zip"))),
                     live_sj.get("stage_status"))
                 continue_btn.set_visibility(False)
-                new_btn.set_visibility(True)
+                new_btn.set_visibility(False)  # "New design" lives in the header now
                 if state.get("running"):
                     design_btn.disable()
                     what = p.project_stem or (p.brief or "design")[:60]
@@ -6023,7 +6072,7 @@ def index(prompt: str = "", project: str = ""):
             _reset_view()
             view["account_refreshed"] = True
             tabs.reset()
-            new_btn.set_visibility(True)
+            new_btn.set_visibility(False)  # "New design" lives in the header now
             project_dir = _discover_generated_dir(ws)  # restored artifacts -> schematic /
             if project_dir is not None:                # PCB render, even if the run FAILED
                 state["stem"] = project_dir.name
@@ -6092,8 +6141,11 @@ def index(prompt: str = "", project: str = ""):
             brief.value = ""
             status.text = ""
             spend.text = ""
+            board_label.set_visibility(False)
             continue_btn.set_visibility(False)
             new_btn.set_visibility(False)
+            # Restore the prompt box + chrome that collapsed when a design opened.
+            _enter_compose_view()
             refresh_account_ui()  # re-enables Design when quota allows
 
         new_btn.on_click(start_fresh)
@@ -6123,15 +6175,14 @@ def index(prompt: str = "", project: str = ""):
                          board_code=(proj.board_code if proj else None))
             _reset_view()
             continue_btn.set_visibility(False)
-            new_btn.set_visibility(True)
+            new_btn.set_visibility(False)  # "New design" lives in the header now
             tabs.reset()
             status.text = ("Designing... (intent -> functional_spec -> architecture -> bom -> "
                            "wiring -> synthesize -> place/route -> fab)")
             design_btn.disable()
             design_btn.classes(remove="kc-pulse")
-            for _chrome in (welcome_card, chips_row, arrow_hint):
-                if _chrome is not None:
-                    _chrome.set_visibility(False)
+            # Collapse the compose chrome -- only the user's prompt stays at the top.
+            _enter_run_view(brief.value)
             threading.Thread(target=_design_worker, args=(brief.value, state), daemon=True).start()
 
         design_btn.on_click(start)
@@ -6306,7 +6357,7 @@ def index(prompt: str = "", project: str = ""):
                           on_click=_start_rebuild).props("dense outline") \
                     .tooltip("Re-run the deterministic build on the current "
                              "design: synthesize, place, route, verify, "
-                             "export. No AI cost. Picks up pipeline fixes "
+                             "export. No AI step. Picks up pipeline fixes "
                              "deployed since the last build.")
                 btn = ui.button(label, icon="design_services",
                                 on_click=_open_layout_editor).props("dense outline")
@@ -6346,7 +6397,7 @@ def index(prompt: str = "", project: str = ""):
                 changed = True
             if changed:
                 tabs.flush()
-            if state["spend"] is not None:
+            if is_admin(user) and state["spend"] is not None:
                 spend.text = f"Spent this design: ${state['spend']:.4f}"
 
             # Board ID chip: tracks the open design (state rebinding included).
@@ -6576,7 +6627,10 @@ def index(prompt: str = "", project: str = ""):
                 open_project(_auto, notify=False)
         ui.timer(0.2, render)
 
-    with ui.footer().classes("justify-center py-1") \
+    # Non-sticky: the branding sits at the end of the page content and scrolls
+    # away with it (fixed=False) rather than pinning to the viewport bottom --
+    # on mobile the pinned banner used to overlap the composer.
+    with ui.footer(fixed=False).classes("justify-center py-1") \
             .style("background:#0b1120;border-top:1px solid #1e293b"):
         _laforest_footer()
 
