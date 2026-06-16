@@ -204,7 +204,9 @@ def place_array_leaves(
         ]
         if decaps:
             decaps.sort(key=_ref_sort_key)
-            bx0, bx1, by1 = _place_companion_block(comps, decaps, grid_bbox, gap)
+            bx0, bx1, by1 = _place_companion_block(
+                comps, decaps, grid_bbox, gap, clearance
+            )
             placed.update(decaps)
             for r in decaps:
                 comps[r].locked = True
@@ -236,15 +238,23 @@ def _place_companion_block(
     refs: list[str],
     grid_bbox: tuple[float, float, float, float],
     gap: float,
+    clearance: float,
 ) -> tuple[float, float, float]:
     """Pack companion passives (per-LED decaps) in a compact grid block directly
     below the array, as wide as the array. Returns the block's ``(min_x, max_x,
     max_y)``. Members are NOT marked ``array_member`` (they are companions, not
-    chain members); the caller locks them."""
+    chain members); the caller locks them.
+
+    Cell pitch is the part extent plus the placement ``clearance`` plus a margin,
+    so the locked block is legal by construction -- packing exactly at the
+    clearance limit leaves the cells touching, and the leaf legality gate (whose
+    effective bbox inflates each part by clearance/2) then rejects the whole
+    leaf, which would strand its components as loose parent-level parts."""
     min_x, _min_y, max_x, max_y = grid_bbox
     grid_w = max_x - min_x
-    cw = max(comps[r].width_mm for r in refs) + gap
-    ch = max(comps[r].height_mm for r in refs) + gap
+    pitch = clearance + max(gap, 0.5)  # > clearance: cells clear the legality gate
+    cw = max(comps[r].width_mm for r in refs) + pitch
+    ch = max(comps[r].height_mm for r in refs) + pitch
     cols = max(1, int(grid_w // cw) or 1)  # match the array width
     x0 = min_x + cw / 2.0
     y0 = max_y + ch  # first row just below the grid
