@@ -163,6 +163,11 @@ def test_benchmark_set_well_formed():
     slugs = [e["slug"] for e in B.BENCHMARK_PROMPTS]
     assert len(slugs) == len(set(slugs)), "slugs must be unique"
     assert all(e["brief"].strip() for e in B.BENCHMARK_PROMPTS)
+    # the self-eval harness (kicraft.eval.self_eval) keys run dirs by slug, groups
+    # the report by archetype, and drives the pipeline on brief — every entry must
+    # carry all three non-empty.
+    assert all(e.get("slug", "").strip() and e.get("archetype", "").strip()
+               and e.get("brief", "").strip() for e in B.BENCHMARK_PROMPTS)
     assert len(B.briefs()) == len(B.BENCHMARK_PROMPTS)
     # every declared archetype trait is represented by >=1 brief
     assert set(B.coverage()) == set(B.ARCHETYPE_TRAITS)

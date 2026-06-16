@@ -144,7 +144,9 @@ def test_evaluate_one_happy_path_drives_builds_and_scores(tmp_path, monkeypatch)
     monkeypatch.setattr(se, "run_build", fake_run_build)
     monkeypatch.setattr(se, "evaluate_project", fake_eval)
 
-    rec = se.evaluate_one(object(), 1, "An ESP32-S3 plant monitor", tmp_path,
+    entry = {"slug": "esp32-plant", "archetype": "rf_antenna",
+             "brief": "An ESP32-S3 plant monitor"}
+    rec = se.evaluate_one(object(), 1, entry, tmp_path,
                           judge_model="judge-x", skip_judge=False)
 
     assert rec["design_status"] == "ok"
@@ -152,6 +154,8 @@ def test_evaluate_one_happy_path_drives_builds_and_scores(tmp_path, monkeypatch)
     assert rec["grade"] == "A" and rec["final"] == 92.0 and rec["verdict"] == "SHIP"
     assert rec["design_cost_usd"] == 0.05 and rec["judge_cost_usd"] == 0.004
     assert rec["gates"] == [] and "error" not in rec
+    assert rec["slug"] == "esp32-plant" and rec["archetype"] == "rf_antenna"
+    assert rec["stem"] == "run_01_esp32-plant"
     assert (tmp_path / rec["stem"] / "brief.txt").read_text().startswith("An ESP32-S3 plant")
     assert built["dir"].endswith(rec["stem"])
     # the real wall-clock window is passed so latency always scores (grade finalizes)
@@ -173,7 +177,9 @@ def test_evaluate_one_skips_build_when_design_incomplete(tmp_path, monkeypatch):
                         lambda rd, client, **kw:
                         _fake_report(grade="F", final=10.0, verdict="BROKEN", gates=("synthesis_broken",)))
 
-    rec = se.evaluate_one(object(), 2, "a broken brief", tmp_path, judge_model=None, skip_judge=False)
+    rec = se.evaluate_one(object(), 2,
+                          {"slug": "broken", "archetype": "single_passive", "brief": "a broken brief"},
+                          tmp_path, judge_model=None, skip_judge=False)
     assert rec["design_status"] == "failed"
     assert rec["build_rc"] is None and rec["build_label"] is None
     assert rec["grade"] == "F" and rec["gates"] == ["synthesis_broken"]
@@ -184,9 +190,11 @@ def test_evaluate_one_isolates_exceptions(tmp_path, monkeypatch):
         raise RuntimeError("spend ceiling exceeded")
 
     monkeypatch.setattr(se, "run_session", boom)
-    rec = se.evaluate_one(object(), 3, "a brief", tmp_path, judge_model=None, skip_judge=True)
+    rec = se.evaluate_one(object(), 3,
+                          {"slug": "abrief", "archetype": "single_passive", "brief": "a brief"},
+                          tmp_path, judge_model=None, skip_judge=True)
     assert "spend ceiling exceeded" in rec["error"]
-    assert "duration_s" in rec and rec["index"] == 3
+    assert "duration_s" in rec and rec["index"] == 3 and rec["slug"] == "abrief"
 
 
 # --------------------------------------------------------------------------- #
@@ -203,9 +211,11 @@ def _patch_llm_env(monkeypatch):
     monkeypatch.setattr(client_mod, "CappedOpenRouterClient", lambda s: object())
 
 
-def _fake_rec(idx, prompt, out_dir, grade="A", **extra):
-    return {"index": idx, "prompt": prompt, "stem": se._stem_for(idx, prompt),
-            "rundir": str(Path(out_dir) / se._stem_for(idx, prompt)), "grade": grade,
+def _fake_rec(idx, entry, out_dir, grade="A", **extra):
+    stem = se._stem_for(idx, entry)
+    return {"index": idx, "slug": entry["slug"], "archetype": entry["archetype"],
+            "prompt": entry["brief"], "stem": stem,
+            "rundir": str(Path(out_dir) / stem), "grade": grade,
             "final": 90.0, "verdict": "SHIP", "build_rc": 0, "build_label": "fab-ready",
             "questions": 0, "gates": [], "design_cost_usd": 0.01, "judge_cost_usd": 0.0,
             "duration_s": 0.1, **extra}
@@ -234,8 +244,9 @@ def test_evaluate_one_build_gate_caps_concurrent_builds(tmp_path, monkeypatch):
 
     gate = threading.BoundedSemaphore(1)
     with ThreadPoolExecutor(max_workers=3) as ex:
-        futs = [ex.submit(se.evaluate_one, object(), i, f"brief number {i}", tmp_path,
-                          judge_model=None, skip_judge=True, build_gate=gate)
+        futs = [ex.submit(se.evaluate_one, object(), i,
+                          {"slug": f"b{i}", "archetype": "x", "brief": f"brief number {i}"},
+                          tmp_path, judge_model=None, skip_judge=True, build_gate=gate)
                 for i in (1, 2, 3)]
         recs = [f.result() for f in futs]
 
@@ -263,18 +274,21 @@ def test_run_build_timeout_restarts_at_slot_acquired_marker(tmp_path, monkeypatc
 
 
 def test_main_parallel_overlaps_briefs_and_orders_records(tmp_path, monkeypatch):
-    monkeypatch.setattr(se, "EXAMPLE_PROMPTS", ["alpha brief", "beta brief", "gamma brief"])
+    monkeypatch.setattr(se, "BRIEFS", [
+        {"slug": "alpha", "archetype": "x", "brief": "alpha brief"},
+        {"slug": "beta", "archetype": "x", "brief": "beta brief"},
+        {"slug": "gamma", "archetype": "y", "brief": "gamma brief"}])
     _patch_llm_env(monkeypatch)
     state, lock = {"now": 0, "max": 0}, threading.Lock()
 
-    def fake_evaluate_one(client, idx, prompt, out_dir, **kw):
+    def fake_evaluate_one(client, idx, entry, out_dir, **kw):
         with lock:
             state["now"] += 1
             state["max"] = max(state["max"], state["now"])
         time.sleep(0.2 if idx == 1 else 0.05)   # brief 1 finishes LAST
         with lock:
             state["now"] -= 1
-        return _fake_rec(idx, prompt, out_dir)
+        return _fake_rec(idx, entry, out_dir)
 
     monkeypatch.setattr(se, "evaluate_one", fake_evaluate_one)
     assert se.main(["--parallel", "3", "--no-judge", "--out", str(tmp_path)]) == 0
@@ -287,15 +301,17 @@ def test_main_parallel_overlaps_briefs_and_orders_records(tmp_path, monkeypatch)
 
 
 def test_main_sequential_checkpoints_summary_after_each_brief(tmp_path, monkeypatch):
-    monkeypatch.setattr(se, "EXAMPLE_PROMPTS", ["alpha brief", "beta brief"])
+    monkeypatch.setattr(se, "BRIEFS", [
+        {"slug": "alpha", "archetype": "x", "brief": "alpha brief"},
+        {"slug": "beta", "archetype": "x", "brief": "beta brief"}])
     _patch_llm_env(monkeypatch)
     seen_runs_at_call = []
 
-    def fake_evaluate_one(client, idx, prompt, out_dir, **kw):
+    def fake_evaluate_one(client, idx, entry, out_dir, **kw):
         p = Path(out_dir) / "summary.json"
         prior = json.loads(p.read_text())["runs"] if p.exists() else []
         seen_runs_at_call.append(len(prior))
-        return _fake_rec(idx, prompt, out_dir)
+        return _fake_rec(idx, entry, out_dir)
 
     monkeypatch.setattr(se, "evaluate_one", fake_evaluate_one)
     assert se.main(["--parallel", "1", "--no-judge", "--out", str(tmp_path)]) == 0
@@ -305,10 +321,13 @@ def test_main_sequential_checkpoints_summary_after_each_brief(tmp_path, monkeypa
 def test_main_defaults_to_parallel(tmp_path, monkeypatch):
     # every entry point (CLI, /self-eval, admin GUI) relies on the harness itself
     # defaulting to the parallel sweet spot — no flags required
-    monkeypatch.setattr(se, "EXAMPLE_PROMPTS", ["alpha brief", "beta brief", "gamma brief"])
+    monkeypatch.setattr(se, "BRIEFS", [
+        {"slug": "alpha", "archetype": "x", "brief": "alpha brief"},
+        {"slug": "beta", "archetype": "x", "brief": "beta brief"},
+        {"slug": "gamma", "archetype": "y", "brief": "gamma brief"}])
     _patch_llm_env(monkeypatch)
     monkeypatch.setattr(se, "evaluate_one",
-                        lambda client, idx, prompt, out_dir, **kw: _fake_rec(idx, prompt, out_dir))
+                        lambda client, idx, entry, out_dir, **kw: _fake_rec(idx, entry, out_dir))
     assert se.main(["--no-judge", "--out", str(tmp_path)]) == 0
     summ = json.loads((tmp_path / "summary.json").read_text())
     assert summ["parallel"] == 3 and summ["build_slots"] == 2
@@ -318,14 +337,14 @@ def test_main_defaults_to_parallel(tmp_path, monkeypatch):
 def test_main_resolves_relative_out_dir(tmp_path, monkeypatch):
     # design stages run subprocesses with cwd=workspace, so a relative rundir would
     # nest the .kicraft tree inside itself; main() must hand out an absolute out_dir
-    monkeypatch.setattr(se, "EXAMPLE_PROMPTS", ["alpha brief"])
+    monkeypatch.setattr(se, "BRIEFS", [{"slug": "alpha", "archetype": "x", "brief": "alpha brief"}])
     _patch_llm_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
     seen = {}
 
-    def fake_evaluate_one(client, idx, prompt, out_dir, **kw):
+    def fake_evaluate_one(client, idx, entry, out_dir, **kw):
         seen["out_dir"] = Path(out_dir)
-        return _fake_rec(idx, prompt, out_dir)
+        return _fake_rec(idx, entry, out_dir)
 
     monkeypatch.setattr(se, "evaluate_one", fake_evaluate_one)
     assert se.main(["--no-judge", "--out", "rel/batch"]) == 0
@@ -334,21 +353,23 @@ def test_main_resolves_relative_out_dir(tmp_path, monkeypatch):
 
 
 def test_main_resume_reuses_completed_and_reruns_failed(tmp_path, monkeypatch):
-    prompts = ["alpha brief", "beta brief"]
-    monkeypatch.setattr(se, "EXAMPLE_PROMPTS", prompts)
+    entries = [{"slug": "alpha", "archetype": "x", "brief": "alpha brief"},
+               {"slug": "beta", "archetype": "x", "brief": "beta brief"}]
+    monkeypatch.setattr(se, "BRIEFS", entries)
     _patch_llm_env(monkeypatch)
 
     # Prior batch: brief 1 completed (its eval report exists), brief 2 errored and
     # left a stale workspace behind.
-    good = _fake_rec(1, prompts[0], tmp_path)
+    good = _fake_rec(1, entries[0], tmp_path)
     report = Path(good["rundir"]) / "eval" / "report.json"
     report.parent.mkdir(parents=True)
     report.write_text("{}")
     good["report_path"] = str(report)
-    stale = tmp_path / se._stem_for(2, prompts[1]) / ".kicraft"
+    stale = tmp_path / se._stem_for(2, entries[1]) / ".kicraft"
     stale.mkdir(parents=True)
     (stale / "state.json").write_text("{}")
-    bad = {"index": 2, "prompt": prompts[1], "stem": se._stem_for(2, prompts[1]),
+    bad = {"index": 2, "slug": entries[1]["slug"], "archetype": entries[1]["archetype"],
+           "prompt": entries[1]["brief"], "stem": se._stem_for(2, entries[1]),
            "rundir": str(stale.parent), "error": "RuntimeError: boom", "design_cost_usd": 0.0}
     se.compile_report([good, bad], tmp_path,
                       {"started_at": "x", "out_dir": str(tmp_path),
@@ -356,11 +377,11 @@ def test_main_resume_reuses_completed_and_reruns_failed(tmp_path, monkeypatch):
 
     ran = []
 
-    def fake_evaluate_one(client, idx, prompt, out_dir, **kw):
+    def fake_evaluate_one(client, idx, entry, out_dir, **kw):
         ran.append(idx)
         # the failed brief's stale workspace must have been wiped before the re-run
-        assert not (Path(out_dir) / se._stem_for(idx, prompt)).exists()
-        return _fake_rec(idx, prompt, out_dir, grade="B")
+        assert not (Path(out_dir) / se._stem_for(idx, entry)).exists()
+        return _fake_rec(idx, entry, out_dir, grade="B")
 
     monkeypatch.setattr(se, "evaluate_one", fake_evaluate_one)
     assert se.main(["--resume", str(tmp_path), "--no-judge"]) == 0
@@ -377,21 +398,26 @@ def test_main_resume_reuses_completed_and_reruns_failed(tmp_path, monkeypatch):
 # selection + report compilation
 # --------------------------------------------------------------------------- #
 def test_select_limit_and_only():
-    ps = [f"p{i}" for i in range(1, 10)]
-    assert [i for i, _ in se._select(ps, 3, None)] == [1, 2, 3]
-    assert [i for i, _ in se._select(ps, None, "1,5,9")] == [1, 5, 9]
-    assert len(se._select(ps, None, None)) == 9
+    es = [{"slug": f"s{i}", "archetype": "a", "brief": f"p{i}"} for i in range(1, 10)]
+    assert [i for i, _ in se._select(es, 3, None)] == [1, 2, 3]
+    assert [i for i, _ in se._select(es, None, "s1,s5,s9")] == [1, 5, 9]   # by slug
+    assert [i for i, _ in se._select(es, None, "1,5,9")] == [1, 5, 9]      # numeric fallback
+    assert [e["slug"] for _, e in se._select(es, None, "s2")] == ["s2"]
+    assert len(se._select(es, None, None)) == 9
 
 
 def test_compile_report_aggregates_and_writes(tmp_path):
     records = [
-        {"index": 1, "prompt": "a", "stem": "run_01_A", "rundir": "/r/1", "grade": "A",
+        {"index": 1, "slug": "aa", "archetype": "usb_c_connector", "prompt": "a",
+         "stem": "run_01_aa", "rundir": "/r/1", "grade": "A",
          "final": 92.0, "verdict": "SHIP", "build_rc": 0, "build_label": "fab-ready",
          "questions": 0, "gates": [], "design_cost_usd": 0.05, "judge_cost_usd": 0.004},
-        {"index": 2, "prompt": "b", "stem": "run_02_B", "rundir": "/r/2", "grade": "C",
+        {"index": 2, "slug": "bb", "archetype": "fine_pitch", "prompt": "b",
+         "stem": "run_02_bb", "rundir": "/r/2", "grade": "C",
          "final": 55.0, "verdict": "REWORK", "build_rc": 5, "build_label": "ERC errors",
          "questions": 1, "gates": ["erc_errors"], "design_cost_usd": 0.06, "judge_cost_usd": 0.004},
-        {"index": 3, "prompt": "c", "stem": "run_03_C", "rundir": "/r/3",
+        {"index": 3, "slug": "cc", "archetype": "fine_pitch", "prompt": "c",
+         "stem": "run_03_cc", "rundir": "/r/3",
          "error": "RuntimeError: boom", "design_cost_usd": 0.0},
     ]
     meta = {"started_at": "2026-06-08T00:00:00+00:00", "out_dir": str(tmp_path),
@@ -403,6 +429,14 @@ def test_compile_report_aggregates_and_writes(tmp_path):
     assert s["grade_counts"] == {"A": 1, "C": 1, "ERROR": 1}
     assert s["gate_counts"] == {"erc_errors": 1}
     assert round(s["total_cost_usd"], 4) == 0.118
+    # per-archetype rollup localizes regressions to a stress dimension
+    arche = s["archetype_stats"]
+    assert arche["usb_c_connector"] == {
+        "n": 1, "graded_n": 1, "fab_ready": 1, "grade_counts": {"A": 1}, "mean_final": 92.0}
+    assert arche["fine_pitch"]["n"] == 2 and arche["fine_pitch"]["graded_n"] == 1
+    assert arche["fine_pitch"]["mean_final"] == 55.0 and arche["fine_pitch"]["fab_ready"] == 0
+    assert arche["fine_pitch"]["grade_counts"] == {"C": 1, "ERROR": 1}
     assert (tmp_path / "summary.json").is_file()
     md = (tmp_path / "summary.md").read_text()
     assert "Needs attention" in md and "erc_errors" in md and "RuntimeError" in md
+    assert "By archetype" in md and "usb_c_connector" in md
