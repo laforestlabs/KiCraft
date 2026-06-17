@@ -13,8 +13,8 @@ cross-reference, leaving a self-consistent BOM the §9 validation gates accept.
 
 It is LOUD and recorded in ``bom.assumptions`` -- dropping designer/LLM parts is a
 visible engineering decision, never a silent degrade (see
-kicraft-no-fallbacks-fail-loudly). High-current arrays (e.g. a 25-LED WS2812
-string at ~1.5 A) stay fully per-LED-decoupled.
+kicraft-no-fallbacks-fail-loudly). High-current arrays (a 50-LED+ WS2812 string at
+~3 A or more) stay fully per-LED-decoupled.
 """
 from __future__ import annotations
 
@@ -24,9 +24,12 @@ from kicraft.design.models import BOM, is_power_or_ground_name
 # this conservative MAX -- overestimating current makes the rule LESS likely to
 # drop caps, which is the safe direction.
 ARRAY_DECAP_PER_LED_MA = 60.0
-# Total array current below which per-LED decoupling is overkill (a few caps
-# suffice). 500 mA ~= an 8-LED string; a 25-LED string (~1.5 A) keeps per-LED.
-ARRAY_DECAP_BULK_THRESHOLD_MA = 500.0
+# Total array current below which per-LED decoupling is overkill (a couple of bulk
+# caps suffice). 3000 mA ~= a 50-LED string. This is the user's deliberate call:
+# below 3 A, per-LED bypass caps aren't worth their board area + parts cost, so a
+# small/medium array thins to a couple of bulk caps. A 50-LED+ string (>=3 A) keeps
+# full per-LED decoupling.
+ARRAY_DECAP_BULK_THRESHOLD_MA = 3000.0
 # How many caps to keep as distributed bulk decoupling.
 ARRAY_DECAP_BULK_KEEP = 2
 

@@ -47,7 +47,7 @@ def _build_bom(n_leds: int, n_caps: int) -> BOM:
 
 
 def test_low_current_array_thinned_to_bulk() -> None:
-    bom = _build_bom(n_leds=4, n_caps=4)  # 4*60 = 240 mA < 500 -> thin
+    bom = _build_bom(n_leds=4, n_caps=4)  # 4*60 = 240 mA < 3000 -> thin
     dropped = normalize_array_decaps(bom)
     assert dropped == ["C3", "C4"], "keep the first 2 caps, drop the rest"
     remaining_caps = [p.ref for p in bom.parts if p.ref.startswith("C")]
@@ -61,11 +61,22 @@ def test_low_current_array_thinned_to_bulk() -> None:
 
 
 def test_high_current_array_keeps_per_led_decaps() -> None:
-    bom = _build_bom(n_leds=25, n_caps=25)  # 25*60 = 1500 mA >= 500 -> keep all
+    bom = _build_bom(n_leds=51, n_caps=51)  # 51*60 = 3060 mA >= 3000 -> keep all
     dropped = normalize_array_decaps(bom)
     assert dropped == []
-    assert len([p for p in bom.parts if p.ref.startswith("C")]) == 25
+    assert len([p for p in bom.parts if p.ref.startswith("C")]) == 51
     assert bom.assumptions == []
+
+
+def test_threshold_boundary_3a() -> None:
+    # 50 LEDs = 3000 mA is exactly the >= threshold -> keep all per-LED.
+    keep = _build_bom(n_leds=50, n_caps=50)
+    assert normalize_array_decaps(keep) == []
+    assert len([p for p in keep.parts if p.ref.startswith("C")]) == 50
+    # 49 LEDs = 2940 mA < 3000 -> thin to 2 bulk caps.
+    thin = _build_bom(n_leds=49, n_caps=49)
+    assert normalize_array_decaps(thin) == [f"C{i}" for i in range(3, 50)]
+    assert [p.ref for p in thin.parts if p.ref.startswith("C")] == ["C1", "C2"]
 
 
 def test_no_decaps_no_change() -> None:

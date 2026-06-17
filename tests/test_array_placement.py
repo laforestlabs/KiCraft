@@ -374,26 +374,87 @@ def test_per_led_decaps_beside_led_not_scattered() -> None:
         assert cap.y <= grid_max_y + 3.0  # inside the grid bbox bottom margin
 
 
-def test_decaps_fall_back_to_edge_rows_when_too_tight() -> None:
-    # When the cap cannot fit beside the LED (pitch barely clears the LED itself),
-    # fall back to compact tight-pitch edge rows below the grid -- still adjacent,
-    # still legal, never the old far-below 2.5mm-pitch block that overflowed.
+def _ring_layout(pitch_mm: float = 1.6):
+    """Run the too-tight fallback and return (comps, placed)."""
     comps = {f"D{i}": _led(f"D{i}", f"D{i}_DOUT", "DATA_IN") for i in range(1, 5)}
     for i in range(1, 5):
         comps[f"C{i}"] = _decap(f"C{i}")
     # pitch 1.6 vs 1.3 LED -> only 0.3mm gap, no room for a 0.5mm-tall cap beside
     arrays = [{"refs": [f"D{i}" for i in range(1, 5)], "rows": 2, "cols": 2,
-               "pitch_mm": 1.6}]
+               "pitch_mm": pitch_mm}]
     placed, _ = place_array_leaves(comps, arrays, {})
+    return comps, placed
+
+
+def test_decaps_fall_back_to_perimeter_ring_when_too_tight() -> None:
+    # When the cap cannot fit beside the LED (pitch barely clears the LED itself),
+    # fall back to a SINGLE-FILE ring around all four edges of the grid -- a tidy
+    # frame, NOT the old multi-row block hanging off the bottom edge.
+    comps, placed = _ring_layout()
 
     assert all(f"C{i}" in placed and comps[f"C{i}"].locked for i in range(1, 5))
-    caps_y = [comps[f"C{i}"].pos.y for i in range(1, 5)]
-    leds_y = [comps[f"D{i}"].pos.y for i in range(1, 5)]
-    assert min(caps_y) > max(leds_y), "edge-row caps sit below the grid"
-    caps_x = [comps[f"C{i}"].pos.x for i in range(1, 5)]
-    leds_x = [comps[f"D{i}"].pos.x for i in range(1, 5)]
-    # tight: cap rows no wider than the grid + a cell (not a 2.5mm-pitch sprawl)
-    assert (max(caps_x) - min(caps_x)) <= (max(leds_x) - min(leds_x)) + 2.0
+    leds = [comps[f"D{i}"].pos for i in range(1, 5)]
+    lx0, lx1 = min(p.x for p in leds), max(p.x for p in leds)
+    ly0, ly1 = min(p.y for p in leds), max(p.y for p in leds)
+    caps = [comps[f"C{i}"].pos for i in range(1, 5)]
+
+    # Each cap sits just outside the LED block on exactly one side (a ring, not a
+    # block): classify by which side it falls on.
+    sides = {"below": 0, "above": 0, "right": 0, "left": 0}
+    for c in caps:
+        on = [c.y > ly1, c.y < ly0, c.x > lx1, c.x < lx0]
+        assert sum(on) == 1, f"cap {c} not cleanly outside one edge"
+        sides[["below", "above", "right", "left"][on.index(True)]] += 1
+    # 4 caps over a square grid -> one per edge: the ring touches all four sides.
+    assert all(v >= 1 for v in sides.values()), f"not a 4-edge ring: {sides}"
+
+    # No two caps land on top of each other.
+    pts = [(round(c.x, 3), round(c.y, 3)) for c in caps]
+    assert len(set(pts)) == 4, "ring caps must not overlap"
+
+
+def test_perimeter_ring_is_deterministic() -> None:
+    a, _ = _ring_layout()
+    b, _ = _ring_layout()
+    for i in range(1, 5):
+        assert a[f"C{i}"].pos.x == b[f"C{i}"].pos.x
+        assert a[f"C{i}"].pos.y == b[f"C{i}"].pos.y
+
+
+def test_perimeter_ring_stays_in_positive_quadrant() -> None:
+    # KC-93X3X3 rc6: the ring's top and left caps were placed ABOVE / LEFT of the
+    # grid origin at NEGATIVE coordinates. The leaf board-size search grows the
+    # fitted Edge.Cuts from the origin into +x/+y only (array_placement keeps coords
+    # positive), so a negative-coordinate pad fell OUTSIDE the outline and the leaf
+    # legality gate rejected the placement every round -> 0 leaves -> no parent.
+    # The framed cluster (grid + ring) must sit wholly in the positive quadrant.
+    # The old ring test only checked caps were outside the LED *block* on each side
+    # (relative geometry, blind to the outline), so it never caught this.
+    comps, placed = _ring_layout()
+    assert placed, "ring fallback did not place the companions"
+    # The ring puts a cap on the top edge and one on the left edge -- exactly the
+    # ones that used to go negative. Every placed body AND pad must be >= 0.
+    for r in placed:
+        c = comps[r]
+        assert c.pos.x >= 0.0 and c.pos.y >= 0.0, (
+            f"{r} body at ({c.pos.x:.3f}, {c.pos.y:.3f}) is outside the positive "
+            "quadrant -> would fall outside the fitted leaf outline")
+        for p in c.pads:
+            assert p.pos.x >= -1e-6 and p.pos.y >= -1e-6, (
+                f"{r} pad {p.pad_id} at ({p.pos.x:.3f}, {p.pos.y:.3f}) is negative "
+                "-> outside the fitted leaf Edge.Cuts (the KC-93X3X3 legality kill)")
+    # The re-base is rigid: the ring is still a clean 4-edge frame around the grid
+    # (relative geometry preserved), just translated into positive space.
+    leds = [comps[f"D{i}"].pos for i in range(1, 5)]
+    lx0, lx1 = min(p.x for p in leds), max(p.x for p in leds)
+    ly0, ly1 = min(p.y for p in leds), max(p.y for p in leds)
+    sides = {"below": 0, "above": 0, "right": 0, "left": 0}
+    for i in range(1, 5):
+        c = comps[f"C{i}"].pos
+        on = [c.y > ly1, c.y < ly0, c.x > lx1, c.x < lx0]
+        assert sum(on) == 1, f"C{i} not cleanly outside one edge after re-base"
+        sides[["below", "above", "right", "left"][on.index(True)]] += 1
+    assert all(v >= 1 for v in sides.values()), f"frame broke on re-base: {sides}"
 
 
 def test_companion_refs_reload_retag_helper() -> None:
