@@ -142,10 +142,10 @@ class StagePanel:
             # so the inspector column takes most of the width there. The LLM stages
             # have no view and lead with the reasoning stream, so they keep Thinking
             # as the larger pane.
-            left_w, left_min = ("60%", "360px") if self.key in _BUILD_STAGES \
+            left_w, left_min = ("72%", "440px") if self.key in _BUILD_STAGES \
                 else ("42%", "300px")
             with ui.row().classes("w-full no-wrap gap-3 kc-stage-body").style(
-                    "height:calc(100vh - 340px);min-height:480px"):
+                    "height:calc(100vh - 320px);min-height:540px"):
                 # LEFT: project-state inspector (+ view slot for KiCanvas/download).
                 with ui.column().classes("gap-1 kc-stage-left").style(
                         f"width:{left_w};min-width:{left_min};height:100%"):
