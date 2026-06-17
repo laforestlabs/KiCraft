@@ -50,7 +50,14 @@ from kicraft.autoplacer.config import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = SCRIPT_DIR.parents[4]
+# Repo root: this file is <repo>/kicraft/cli/autoexperiment.py, so the repo is
+# SCRIPT_DIR.parents[1]. Used ONLY to auto-detect default project files for the
+# standalone autoexperiment CLI (the tuner imports functions from this module and
+# never relies on these defaults). The old parents[4] assumed a deep install path
+# and raised IndexError at import on a shallow checkout like /data/KiCraft (the
+# tuning container) -- and even on a deep path it resolved to "/", finding nothing.
+# parents[1] exists at any depth and yields the same empty default on real installs.
+PROJECT_DIR = SCRIPT_DIR.parents[1]
 
 def _detect_project_files(project_dir):
     """Auto-detect KiCad project files from directory."""
