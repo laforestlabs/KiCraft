@@ -330,6 +330,27 @@ def place_array_leaves(
                 # assembly clearance the grid itself is exempt from).
                 comps[r].array_member = True
 
+    # Re-base the framed cluster into the positive quadrant. The perimeter ring
+    # frames the grid on ALL four edges, so its top/left caps land ABOVE/LEFT of
+    # the grid origin -- at negative coordinates. The leaf board-size search grows
+    # the fitted Edge.Cuts from the origin into +x/+y only (the grid deliberately
+    # starts at x0,y0=px,py to keep coords positive, see above), so a
+    # negative-coordinate pad falls OUTSIDE that outline and the leaf legality gate
+    # rejects the placement every round -- 0 leaves, no parent, rc6 (KC-93X3X3:
+    # bulk C1 took the bottom edge, pushing decap C2 onto the top edge at y=-0.8
+    # above a y=0 outline). A uniform shift keeps the grid rigid and the data chain
+    # unchanged, and is a no-op for the common cases (no companions, beside-LED, or
+    # a bottom/right-only ring) where the bbox already starts at the origin.
+    if grid_bbox is not None:
+        shift_x = -min(0.0, grid_bbox[0])
+        shift_y = -min(0.0, grid_bbox[1])
+        if shift_x or shift_y:
+            for r in placed:
+                c = comps[r]
+                _move(c, c.pos.x + shift_x, c.pos.y + shift_y)
+            grid_bbox = (grid_bbox[0] + shift_x, grid_bbox[1] + shift_y,
+                         grid_bbox[2] + shift_x, grid_bbox[3] + shift_y)
+
     remaining = [r for r in comps if r not in placed]
     # Pure array leaf: nothing but the grid. It is fully placed -- report handled
     # so the caller SKIPS force/SA entirely. (Falling through to force/SA here is
@@ -374,10 +395,12 @@ def _place_companion_decaps(
     the caller, so they share the grid's clearance exemption and pack at the real
     copper clearance rather than the 2.5 mm placement clearance.
 
-    FALLBACK -- edge rows: when the part does not fit beside (gap too tight), the
-    grid is 1-D, there are several arrays, or there are more decaps than members,
-    lay the decaps in compact tight-pitch rows hugging the grid's bottom edge.
-    Still adjacent (pour-tied), still legal, never the old far-below tall block.
+    FALLBACK -- perimeter ring: when the part does not fit beside (gap too tight),
+    the grid is 1-D, there are several arrays, or there are more decaps than
+    members, lay the decaps as a SINGLE-FILE ring around all four edges of the
+    grid (caps on the vertical edges rotated 90 so the ring stays one component
+    deep). Still adjacent (pour-tied), still legal -- and a tidy frame around the
+    array instead of the old amateurish multi-row block hanging off one edge.
     """
     comp_gap = float(cfg.get("array_companion_gap_mm", 0.3))
     min_x, min_y, max_x, max_y = grid_bbox
@@ -408,23 +431,74 @@ def _place_companion_decaps(
             # bottom margin already covered by grid_bbox); bbox unchanged.
             return grid_bbox
 
-    # FALLBACK: tight-pitch edge rows hugging the grid's bottom edge.
-    grid_w = max_x - min_x
-    pitch_x = max(comps[r].width_mm for r in refs) + comp_gap
-    pitch_y = max(comps[r].height_mm for r in refs) + comp_gap
-    cols = max(1, int(grid_w // pitch_x) or 1)
-    x0 = min_x + pitch_x / 2.0
-    y0 = max_y + pitch_y / 2.0  # first edge row just below the grid
-    by1 = y0
-    for i, r in enumerate(refs):
-        col, row = i % cols, i // cols
-        _move(comps[r], x0 + col * pitch_x, y0 + row * pitch_y)
-        by1 = max(by1, y0 + row * pitch_y + pitch_y / 2.0)
+    # FALLBACK: a single-file ring of caps around all four edges of the grid.
+    grid_w, grid_h = max_x - min_x, max_y - min_y
+    edges = ("bottom", "right", "top", "left")  # clockwise from bottom-left
+    edge_len = {"bottom": grid_w, "right": grid_h, "top": grid_w, "left": grid_h}
+    active = [e for e in edges if edge_len[e] > 1e-6] or ["bottom"]
+
+    # Spread the caps over the active edges proportional to edge length
+    # (largest-remainder, deterministic; refs already ref-sorted). A 1-D grid has
+    # one zero-length axis so its caps fall on the two long edges only.
+    n = len(refs)
+    total_len = sum(edge_len[e] for e in active)
+    counts = {e: 0 for e in edges}
+    if total_len > 1e-6:
+        alloc = {e: n * edge_len[e] / total_len for e in active}
+        for e in active:
+            counts[e] = int(alloc[e])
+        leftover = sorted(active, key=lambda e: alloc[e] - int(alloc[e]), reverse=True)
+        for i in range(n - sum(counts.values())):
+            counts[leftover[i % len(leftover)]] += 1
+    else:
+        counts[active[0]] = n
+
+    bx0, by0, bx1, by1 = min_x, min_y, max_x, max_y  # union bbox accumulator
+    it = iter(refs)
+    overcrowded: list[str] = []
+    for edge in edges:
+        k = counts[edge]
+        if k <= 0:
+            continue
+        horizontal = edge in ("bottom", "top")
+        span = grid_w if horizontal else grid_h
+        base = min_x if horizontal else min_y
+        demand = 0.0
+        for j in range(k):
+            r = next(it)
+            w0, h0 = comps[r].width_mm, comps[r].height_mm  # capture BEFORE rotate
+            demand += w0
+            off = h0 / 2.0 + comp_gap
+            t = base + ((j + 0.5) * span / k if span > 1e-6 else 0.0)
+            if edge == "bottom":
+                cx, cy = t, max_y + off
+            elif edge == "top":
+                cx, cy = t, min_y - off
+            elif edge == "right":
+                rotate_component_in_place(comps[r], 90.0)
+                cx, cy = max_x + off, t
+            else:  # left
+                rotate_component_in_place(comps[r], 90.0)
+                cx, cy = min_x - off, t
+            _move(comps[r], cx, cy)
+            # occupied AABB: verticals were rotated, so their axes swap.
+            ew, eh = (w0, h0) if horizontal else (h0, w0)
+            bx0, by0 = min(bx0, cx - ew / 2.0), min(by0, cy - eh / 2.0)
+            bx1, by1 = max(bx1, cx + ew / 2.0), max(by1, cy + eh / 2.0)
+        if span > 1e-6 and demand > span:
+            overcrowded.append(edge)
+
     print(
-        f"  Array decaps: {len(refs)} placed in {cols}-wide tight edge rows "
-        f"below the grid (beside-LED not feasible)"
+        f"  Array decaps: {n} placed in a single-file perimeter ring "
+        f"(bottom={counts['bottom']} right={counts['right']} "
+        f"top={counts['top']} left={counts['left']}); beside-LED not feasible"
     )
-    return (min_x, min_y, max(max_x, x0 + (cols - 1) * pitch_x + pitch_x / 2.0), by1)
+    if overcrowded:
+        print(
+            f"  WARNING: array decap ring overcrowded on {', '.join(overcrowded)} "
+            "-- caps may abut; the array is space-constrained at this pitch"
+        )
+    return (bx0, by0, bx1, by1)
 
 
 def _place_strip(
