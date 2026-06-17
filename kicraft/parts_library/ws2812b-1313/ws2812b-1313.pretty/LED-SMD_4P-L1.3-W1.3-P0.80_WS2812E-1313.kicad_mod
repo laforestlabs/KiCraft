@@ -26,7 +26,7 @@
 	(fp_line (start 0.65 -0.65) (end 0.65 0.65) (layer F.CrtYd) (width 0.05))
 	(fp_line (start 0.65 0.65) (end -0.65 0.65) (layer F.CrtYd) (width 0.05))
 	(fp_poly (pts (xy -0.130048 -0.070053) (xy 0.250952 -0.070053) (xy 0.123952 0.056947) (xy -0.003048 0.183947) (xy -0.257048 -0.070053) (xy -0.130048 -0.070053)) (stroke (width 0) (type solid)) (fill solid) (layer "F.SilkS"))
-	(model "${KIPRJMOD}/3dmodels/ws2812b-1515/LED-SMD_4P-L1.3-W1.3-P0.80_WS2812E-1313.wrl"
+	(model "${KIPRJMOD}/3dmodels/ws2812b-1313/LED-SMD_4P-L1.3-W1.3-P0.80_WS2812E-1313.wrl"
 		(offset (xyz 0.000 0.000 0.000))
 		(scale (xyz 1 1 1))
 		(rotate (xyz 0 0 0))
