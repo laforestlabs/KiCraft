@@ -2276,15 +2276,34 @@ def _find_placed_parent(project_dir: Path) -> Path | None:
 
 def _find_best_leaf_board(project_dir: Path) -> Path | None:
     """Richest single-leaf board, as a last resort when the parent compose
-    produced no parent board at all: the most recently written routed leaf,
-    else the most recent placed (pre-freerouting) leaf. A single leaf is only
-    part of a multi-leaf board, but it is a real placed/routed mini-PCB -- far
-    better to show than the raw, uncomposed scatter board."""
+    produced no parent board at all: a routed leaf if any, else a placed
+    (pre-freerouting) leaf, else even a placement the legality gate REJECTED
+    (``leaf_illegal_pre_stamp`` -- e.g. an array decap stranded outside the leaf
+    outline, the KC-93X3X3 rc6 shape).
+
+    A single leaf is only part of a multi-leaf board, and a rejected placement is
+    not fab-ready, but each is a REAL placed mini-PCB that shows where the build
+    actually got -- far better to show (so the failure is visible and the user can
+    diagnose it) than the raw, uncomposed scatter board. The caller still returns
+    rc6 and exports no fab package, so this is a PREVIEW only, never a fab-ready
+    promotion.
+
+    The autoexperiment writes per-round snapshots (``round_NNNN_leaf_*``); the
+    single-pass solver writes the bare canonical names; a rejected round leaves
+    ONLY ``leaf_illegal_pre_stamp`` + the ``round_NNNN_`` pre-freerouting snapshot
+    (never the bare names). Match all of them, richest tier first, and within a
+    tier pick the most recently written."""
     sub = project_dir / ".experiments" / "subcircuits"
     if not sub.is_dir():
         return None
-    for name in ("leaf_routed.kicad_pcb", "leaf_pre_freerouting.kicad_pcb"):
-        hits = [p for p in sub.glob(f"*/{name}") if p.is_file()]
+    for pattern in (
+        "*/leaf_routed.kicad_pcb",
+        "*/round_*_leaf_routed.kicad_pcb",
+        "*/leaf_pre_freerouting.kicad_pcb",
+        "*/round_*_leaf_pre_freerouting.kicad_pcb",
+        "*/leaf_illegal_pre_stamp.kicad_pcb",
+    ):
+        hits = [p for p in sub.glob(pattern) if p.is_file()]
         if hits:
             return max(hits, key=lambda p: p.stat().st_mtime)
     return None

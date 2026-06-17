@@ -51,6 +51,44 @@ def test_best_leaf_board_when_no_parent_at_all(tmp_path):
     assert cli_app._find_best_leaf_board(tmp_path) == routed
 
 
+def test_best_leaf_board_surfaces_a_rejected_placement(tmp_path):
+    """KC-93X3X3 rc6: the leaf placement was REJECTED for legality (an array decap
+    stranded outside the outline), so the engine wrote only the per-round
+    pre-freerouting snapshots + leaf_illegal_pre_stamp -- NEVER the bare
+    leaf_pre_freerouting / leaf_routed names the finder used to glob. The finder
+    must still surface one of those real placements (so the failure is visible and
+    diagnosable) instead of None, which would leave the raw scatter board."""
+    leaf = tmp_path / ".experiments" / "subcircuits" / "leafX"
+    _touch(leaf / "round_0000_leaf_pre_freerouting.kicad_pcb")
+    _touch(leaf / "round_0001_leaf_pre_freerouting.kicad_pcb")
+    _touch(leaf / "round_0002_leaf_pre_freerouting.kicad_pcb")
+    _touch(leaf / "leaf_illegal_pre_stamp.kicad_pcb")
+    # the rejected-leaf shape: no bare leaf_pre_freerouting / leaf_routed exist
+    assert cli_app._find_placed_parent(tmp_path) is None
+    got = cli_app._find_best_leaf_board(tmp_path)
+    assert got is not None, "a rejected placement must be shown, not the raw board"
+    # a placed (pre-freerouting) snapshot outranks the bare illegal stamp
+    assert got.name.endswith("leaf_pre_freerouting.kicad_pcb")
+
+
+def test_best_leaf_board_falls_back_to_illegal_stamp(tmp_path):
+    """When the ONLY artifact is the rejected placement stamp, show it -- it is a
+    real placed mini-PCB, still far better than the raw scatter board."""
+    leaf = tmp_path / ".experiments" / "subcircuits" / "leafX"
+    illegal = _touch(leaf / "leaf_illegal_pre_stamp.kicad_pcb")
+    assert cli_app._find_best_leaf_board(tmp_path) == illegal
+
+
+def test_best_leaf_board_tier_order_across_round_and_illegal_names(tmp_path):
+    """Richest-tier-first holds across the round_* and illegal names too: a routed
+    round beats a placed round, which beats the illegal stamp."""
+    leaf = tmp_path / ".experiments" / "subcircuits" / "leafX"
+    _touch(leaf / "leaf_illegal_pre_stamp.kicad_pcb")
+    _touch(leaf / "round_0000_leaf_pre_freerouting.kicad_pcb")
+    routed = _touch(leaf / "round_0000_leaf_routed.kicad_pcb")
+    assert cli_app._find_best_leaf_board(tmp_path) == routed
+
+
 def test_no_artifacts_yields_none(tmp_path):
     """Nothing produced -> finders return None; the promote tail then leaves the
     raw board untouched (it has nothing better to show)."""
