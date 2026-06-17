@@ -27,8 +27,7 @@ from pathlib import Path
 
 from kicraft.design import models
 
-from .client import CappedOpenRouterClient
-from .config import Settings
+from .client import make_client
 
 # The repo venv has no `kicraft` console script; cli_app.py has a __main__ guard.
 KICRAFT = [sys.executable, "-m", "kicraft.design.cli_app"]
@@ -634,7 +633,9 @@ def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_sta
     (ws / ".kicraft").mkdir(parents=True, exist_ok=True)
     state_path = ws / ".kicraft" / "state.json"
     if client is None:
-        client = CappedOpenRouterClient(Settings.from_env())
+        # make_client() builds Settings.from_env() itself for the live client, and
+        # skips it entirely for the mock (which needs no OPENROUTER_API_KEY).
+        client = make_client()
     base_ctx = {"run_id": run_id} if run_id else {}
     results = []
     for i, stage in enumerate(stages):

@@ -3002,6 +3002,12 @@ def _admin_header(active: str) -> None:
             ui.button("Tuning", icon="tune",
                       on_click=lambda: ui.navigate.to("/admin/tuning")) \
                 .props("flat dense no-caps color=white").classes("text-xs")
+            ui.button("Load", icon="speed",
+                      on_click=lambda: ui.navigate.to("/admin/loadtest")) \
+                .props("flat dense no-caps color=white").classes("text-xs")
+            ui.button("Security", icon="security",
+                      on_click=lambda: ui.navigate.to("/admin/security")) \
+                .props("flat dense no-caps color=white").classes("text-xs")
             ui.button("Back to workspace", icon="arrow_back",
                       on_click=lambda: ui.navigate.to("/")) \
                 .props("flat dense no-caps color=white").classes("text-xs")
@@ -3825,6 +3831,287 @@ def admin_self_eval_run_page(run: str = ""):
             .style("color:#64748b")
         ui.label(f"deep DRC inspection: kicraft-gui {gen}") \
             .classes("text-xs font-mono").style("color:#64748b")
+
+
+# --------------------------------------------------------------------------- #
+# Admin: load / stress testing (kicraft.loadtest). Launch a build-storm or
+# full-pipeline scenario as a detached subprocess (so it survives a web restart),
+# then chart the live LoadResultStore. Scenarios are $0 (replay / mock LLM); the
+# ABORT button writes the harness's abort file and terminates the subprocess.
+# --------------------------------------------------------------------------- #
+_LOADTEST: dict = {"proc": None, "scenario": None, "started_at": None,
+                   "abort_file": None, "log": None}
+
+
+def _loadtest_running() -> bool:
+    p = _LOADTEST.get("proc")
+    return bool(p is not None and p.poll() is None)
+
+
+def _loadtest_launch(scenario, *, n, slots, parallel, build_slots, route, do_build) -> str:
+    if _loadtest_running():
+        return ""
+    import datetime as _dt
+
+    from kicraft.loadtest.store import default_store_path
+    ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    base = default_store_path().parent
+    base.mkdir(parents=True, exist_ok=True)
+    log = base / f"run-{ts}.log"
+    abort_file = base / f"abort-{ts}"
+    cmd = [KICRAFT[0], "-m", "kicraft.loadtest"]
+    if scenario == "build-storm":
+        cmd += ["build-storm", "--n", str(int(n)), "--slots", str(int(slots)),
+                "--abort-file", str(abort_file)]
+        if route:
+            cmd += ["--route"]
+    else:
+        cmd += ["pipeline", "--n", str(int(n)), "--parallel", str(int(parallel)),
+                "--build-slots", str(int(build_slots))]
+        if not do_build:
+            cmd += ["--no-build"]
+    logf = log.open("w")
+    proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
+                            env={**os.environ, "KICRAFT_CALLER": "web"},
+                            cwd=str(Path(__file__).resolve().parents[2]))
+    _LOADTEST.update(proc=proc, scenario=scenario, started_at=time.time(),
+                     abort_file=abort_file, log=log)
+    return str(log)
+
+
+def _loadtest_abort() -> None:
+    """Graceful (build-storm honors the abort file) + hard (terminate the proc)."""
+    af = _LOADTEST.get("abort_file")
+    if af:
+        try:
+            Path(af).write_text("abort")
+        except OSError:
+            pass
+    p = _LOADTEST.get("proc")
+    if p is not None and p.poll() is None:
+        p.terminate()
+
+
+@ui.page("/admin/loadtest")
+def admin_loadtest_page():
+    """Admin: launch + watch load/stress scenarios; live host/queue/latency charts."""
+    user, redirect = _require_admin()
+    if redirect is not None:
+        return redirect
+    ui.dark_mode().enable()
+    _admin_header("load")
+    from kicraft.loadtest import charts as lc
+    from kicraft.loadtest.store import LoadResultStore, default_store_path
+
+    cfg = {"scenario": "build-storm", "n": 8, "slots": 2, "parallel": 3,
+           "build_slots": 2, "route": False, "do_build": True}
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
+        ui.label("Load / stress testing").classes("text-2xl font-bold text-white")
+        ui.label("Build-storm (replay, $0) and full-pipeline (mock LLM, $0) scenarios. "
+                 "Find the build-slot saturation knee and what breaks first.") \
+            .classes("text-sm").style("color:#94a3b8")
+        ui.separator().style("background:#1e293b")
+
+        with ui.row().classes("items-end gap-3 w-full"):
+            scen = ui.select(["build-storm", "pipeline"], value=cfg["scenario"],
+                             label="scenario").props("dark dense").style("width:150px")
+            n_in = ui.number("designs (n)", value=cfg["n"], min=1, max=200,
+                             format="%d").props("dark dense").style("width:120px")
+            slots_in = ui.number("build slots", value=cfg["slots"], min=1, max=16,
+                                 format="%d").props("dark dense").style("width:110px")
+            par_in = ui.number("parallel", value=cfg["parallel"], min=1, max=32,
+                               format="%d").props("dark dense").style("width:100px")
+            route_cb = ui.checkbox("route (heavy)", value=cfg["route"]).props("dark")
+            build_cb = ui.checkbox("build", value=cfg["do_build"]).props("dark")
+            launch_btn = ui.button("Launch", icon="play_arrow")
+            ui.button("ABORT", icon="stop", color="red") \
+                .props("outline").on("click", lambda: (_loadtest_abort(), _refresh()))
+        status = ui.label("").classes("text-xs font-mono").style("color:#94a3b8")
+
+        def _launch():
+            log = _loadtest_launch(
+                scen.value, n=n_in.value, slots=slots_in.value, parallel=par_in.value,
+                build_slots=slots_in.value, route=route_cb.value, do_build=build_cb.value)
+            ui.notify("launched" if log else "a load run is already in progress",
+                      type="positive" if log else "warning")
+        launch_btn.on("click", lambda: (_launch(), _refresh()))
+
+        charts_box = ui.column().classes("w-full gap-3")
+        runs_box = ui.column().classes("w-full gap-0")
+
+        def _store_ro() -> LoadResultStore:
+            return LoadResultStore(default_store_path())
+
+        def _refresh():
+            running = _loadtest_running()
+            status.text = (f"running: {_LOADTEST.get('scenario')} "
+                           f"(log {_LOADTEST.get('log')})" if running
+                           else "idle — launch a scenario above")
+            store = _store_ro()
+            runs = store.list_runs(limit=40)
+            # live charts for the newest run
+            charts_box.clear()
+            if runs:
+                rid = runs[0]["run_id"]
+                samples = store.samples_for(rid)
+                summary = runs[0]["summary"] or {}
+                with charts_box:
+                    ui.label(f"latest: {rid}").classes("text-sm font-mono") \
+                        .style("color:#e2e8f0")
+                    with ui.row().classes("w-full gap-3"):
+                        ui.echart(lc.host_chart(samples)).classes("flex-1") \
+                            .style("height:260px;min-width:380px")
+                        ui.echart(lc.queue_chart(samples)).classes("flex-1") \
+                            .style("height:260px;min-width:380px")
+                    with ui.row().classes("w-full gap-3"):
+                        ui.echart(lc.latency_bar(summary)).classes("flex-1") \
+                            .style("height:240px;min-width:300px")
+                        ui.echart(lc.outcome_pie(summary)).classes("flex-1") \
+                            .style("height:240px;min-width:300px")
+                        ui.echart(lc.disk_chart(samples)).classes("flex-1") \
+                            .style("height:240px;min-width:300px")
+            runs_box.clear()
+            with runs_box:
+                ui.label("Recent runs").classes("text-sm font-bold text-white")
+                with ui.row().classes("w-full items-center gap-3 text-xs").style(
+                        "padding:4px 6px;color:#64748b"):
+                    ui.label("run").style("width:280px")
+                    ui.label("scenario").style("width:110px")
+                    ui.label("n").style("width:50px")
+                    ui.label("ok").style("width:50px")
+                    ui.label("max run").style("width:80px")
+                    ui.label("wall s").style("width:80px")
+                for r in runs:
+                    s = r["summary"] or {}
+                    with ui.row().classes("w-full items-center gap-3 text-xs").style(
+                            "border-top:1px solid #1e293b;padding:5px 6px"):
+                        ui.label(r["run_id"]).classes("font-mono").style(
+                            "width:280px;color:#e2e8f0")
+                        ui.label(r["scenario"] or "").style("width:110px;color:#cbd5e1")
+                        ui.label(str(s.get("n", "—"))).style("width:50px;color:#cbd5e1")
+                        ui.label(str(s.get("ok", s.get("design_ok", "—")))).style(
+                            "width:50px;color:#cbd5e1")
+                        ui.label(str(s.get("max_running", "—"))).style(
+                            "width:80px;color:#cbd5e1")
+                        ui.label(str(s.get("wall_total_s", "—"))).style(
+                            "width:80px;color:#cbd5e1")
+
+        ui.timer(2.0, _refresh)
+        _refresh()
+
+
+# --------------------------------------------------------------------------- #
+# Admin: security scans (kicraft.security). Launch bandit/pip-audit/gitleaks into
+# the SecurityResultStore and triage findings (acknowledge persists).
+# --------------------------------------------------------------------------- #
+_SECURITY: dict = {"proc": None, "started_at": None, "log": None}
+
+
+def _security_running() -> bool:
+    p = _SECURITY.get("proc")
+    return bool(p is not None and p.poll() is None)
+
+
+def _security_launch() -> bool:
+    if _security_running():
+        return False
+    from kicraft.security.store import default_store_path
+    base = default_store_path().parent
+    base.mkdir(parents=True, exist_ok=True)
+    log = base / "scan.log"
+    proc = subprocess.Popen(
+        [KICRAFT[0], "-m", "kicraft.security.scans"],
+        stdout=log.open("w"), stderr=subprocess.STDOUT,
+        env={**os.environ, "KICRAFT_CALLER": "web"},
+        cwd=str(Path(__file__).resolve().parents[2]))
+    _SECURITY.update(proc=proc, started_at=time.time(), log=log)
+    return True
+
+
+@ui.page("/admin/security")
+def admin_security_page():
+    """Admin: run static security scans + triage findings (open/acknowledged)."""
+    user, redirect = _require_admin()
+    if redirect is not None:
+        return redirect
+    ui.dark_mode().enable()
+    _admin_header("security")
+    from kicraft.security import charts as sc
+    from kicraft.security.store import SecurityResultStore
+
+    store = SecurityResultStore()
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
+        ui.label("Security scans").classes("text-2xl font-bold text-white")
+        ui.label("Static analysis (bandit), dependency CVEs (pip-audit), and secret "
+                 "scanning (gitleaks). Acknowledge a triaged finding to hide it from "
+                 "the open list (it survives a re-scan).").classes("text-sm") \
+            .style("color:#94a3b8")
+        ui.separator().style("background:#1e293b")
+
+        with ui.row().classes("items-center gap-3"):
+            run_btn = ui.button("Run scans", icon="play_arrow")
+            ftab = ui.toggle(["open", "acknowledged", "all"], value="open").props("dark")
+            status = ui.label("").classes("text-xs font-mono").style("color:#94a3b8")
+
+        run_btn.on("click", lambda: (
+            ui.notify("scanning…" if _security_launch() else "a scan is already running",
+                      type="positive" if not _security_running() else "info"),
+            _refresh()))
+
+        charts_box = ui.row().classes("w-full gap-3")
+        table_box = ui.column().classes("w-full gap-0")
+
+        def _refresh():
+            status.text = ("scanning…" if _security_running()
+                           else f"{sum(store.severity_counts().values())} open finding(s)")
+            charts_box.clear()
+            with charts_box:
+                ui.echart(sc.severity_bar(store.severity_counts())).classes("flex-1") \
+                    .style("height:240px;min-width:380px")
+                ui.echart(sc.status_pie(store.status_counts())).classes("flex-1") \
+                    .style("height:240px;min-width:380px")
+            want = ftab.value
+            status_filter = None if want == "all" else want
+            findings = store.list_findings(status=status_filter)
+            table_box.clear()
+            with table_box:
+                with ui.row().classes("w-full items-center gap-2 text-xs").style(
+                        "padding:4px 6px;color:#64748b"):
+                    ui.label("sev").style("width:70px")
+                    ui.label("tool").style("width:80px")
+                    ui.label("rule").style("width:90px")
+                    ui.label("location").style("width:260px")
+                    ui.label("message").style("flex:1")
+                    ui.label("").style("width:110px")
+                for f in findings[:400]:
+                    col = {"critical": "#ef4444", "high": "#f97316",
+                           "medium": "#f59e0b", "low": "#60a5fa"}.get(
+                        f["severity"], "#94a3b8")
+                    with ui.row().classes("w-full items-center gap-2 text-xs").style(
+                            "border-top:1px solid #1e293b;padding:4px 6px"):
+                        ui.label(f["severity"]).style(f"width:70px;color:{col}")
+                        ui.label(f["tool"]).style("width:80px;color:#cbd5e1")
+                        ui.label(f["rule"]).classes("font-mono").style(
+                            "width:90px;color:#cbd5e1")
+                        ui.label(f["location"]).classes("font-mono").style(
+                            "width:260px;color:#94a3b8")
+                        ui.label(f["message"]).style("flex:1;color:#cbd5e1")
+                        if f["status"] == "open":
+                            ui.button("ack", on_click=lambda _e=None, fid=f["id"]:
+                                      (store.set_status(fid, "acknowledged"), _refresh())) \
+                                .props("flat dense no-caps").classes("text-xs") \
+                                .style("width:110px")
+                        else:
+                            ui.button("reopen", on_click=lambda _e=None, fid=f["id"]:
+                                      (store.set_status(fid, "open"), _refresh())) \
+                                .props("flat dense no-caps").classes("text-xs") \
+                                .style("width:110px")
+
+        ftab.on("update:model-value", lambda _e=None: _refresh())
+        ui.timer(2.0, lambda: status.text.startswith("scanning") and _refresh())
+        _refresh()
 
 
 @ui.page("/admin")

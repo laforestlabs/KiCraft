@@ -8,6 +8,7 @@ caps cannot be bypassed by a new code path.
 from __future__ import annotations
 
 import json
+import os
 
 import requests
 
@@ -31,6 +32,23 @@ _FALLBACK_DEFAULT = (10.0, 30.0)  # unknown model: assume expensive
 # enough total tool calls -- stop offering tools and force the final JSON.
 _MAX_REDUNDANT_TOOL_CALLS = 3
 _MAX_TOTAL_TOOL_CALLS = 16
+
+
+def make_client(settings: Settings | None = None):
+    """Construct the active chat client, honoring ``KICRAFT_LLM_MODE``.
+
+    Default (unset / anything but mock|replay) returns the real
+    ``CappedOpenRouterClient`` -- so this is a prod no-op. ``mock``/``replay``
+    return a ``MockClient`` that replays a recorded per-stage transcript at $0,
+    for load/stress testing the pipeline without spend (and without an API key:
+    the mock never reads ``settings.api_key``). The import is lazy so the
+    loadtest package is never pulled into the hot path in production.
+    """
+    mode = os.environ.get("KICRAFT_LLM_MODE", "live").strip().lower()
+    if mode in ("mock", "replay"):
+        from kicraft.loadtest.mockllm import MockClient
+        return MockClient(settings)
+    return CappedOpenRouterClient(settings or Settings.from_env())
 
 
 def estimate_cost(model: str, input_tokens, output_tokens) -> float:
