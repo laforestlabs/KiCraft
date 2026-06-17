@@ -116,6 +116,13 @@ app.add_static_files("/samples", str(SAMPLES_DIR))
 # KiCanvas painted its aqua fallback (the "teal blob"). See _resolve_project_token.
 _ALLOWED_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_pro")
 
+# Sizing for the in-tab KiCanvas on the build stages (the schematic on Synthesize
+# and the routed board on Place/Route). Both should nearly fill the (widened)
+# inspector column so the artifact is large enough to visually inspect; the offset
+# leaves room for the label + sheet selector above, and the floor keeps it usable
+# on short screens. One constant so the two views never drift apart.
+_BUILD_VIEW_STYLE = "height:calc(100vh - 380px);min-height:460px"
+
 # Shown in the reset email; derived from the token TTL so the two never drift.
 _RESET_TTL_MINUTES = _RESET_TTL_SECONDS // 60
 
@@ -665,12 +672,55 @@ def _leaf_layout_progress(project_dir: Path, token: str) -> list[dict]:
     return out
 
 
-def _render_synth_view(srcs: list[tuple[str, str]], stem: str) -> KiCanvasView:
+def _nonpower_symbol_count(sch_path: Path) -> int:
+    """Number of placed (non-power) symbol instances in a ``.kicad_sch``.
+
+    Each placed instance carries exactly one ``(lib_id "...")``; the lib_symbols
+    definition block at the top of the file does not, so counting ``lib_id``
+    occurrences counts instances. Power symbols (``power:GND`` / ``power:VCC`` /
+    flags) are excluded so a rail sheet thick with power flags doesn't outrank
+    the real circuit. Best-effort: an unreadable sheet counts 0."""
+    try:
+        text = sch_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    return sum(1 for m in re.finditer(r'\(lib_id "([^"]*)"', text)
+               if not m.group(1).startswith("power:"))
+
+
+def _primary_sheet_index(
+    srcs: list[tuple[str, str]], project_dir: Path | None
+) -> int:
+    """Index into `srcs` of the sheet to show first in the Synthesize tab.
+
+    `srcs` is root-first (see `_schematic_sources`). The "primary" sheet is the
+    leaf with the most non-power symbols -- the design's centerpiece (e.g. the
+    LED array, not the power header) -- so the user lands on a readable,
+    content-rich schematic rather than the block-diagram root. Ties keep the
+    earlier (alphabetical) leaf. Falls back to the first leaf (or the root for a
+    single-sheet design) when there's no project_dir or nothing to count."""
+    if len(srcs) <= 1:
+        return 0
+    first_leaf = 1  # srcs[0] is always the root container; leaves follow
+    if project_dir is None:
+        return first_leaf
+    best_idx, best_count = first_leaf, 0
+    for i in range(1, len(srcs)):
+        count = _nonpower_symbol_count(project_dir / srcs[i][1])
+        if count > best_count:
+            best_idx, best_count = i, count
+    return best_idx
+
+
+def _render_synth_view(
+    srcs: list[tuple[str, str]], stem: str, project_dir: Path | None = None
+) -> KiCanvasView:
     """Sheet selector + KiCanvas for the Synthesize tab. `srcs` is (url, filename),
     root-first. One button per sheet (root='Overview', leaves by name) swaps the
     embed to that single sheet via `set_sources`, so KiCanvas renders it directly.
-    Defaults to the first leaf so a readable schematic (not the block-diagram root)
-    is what the user sees first."""
+    Defaults to the design's centerpiece sheet (most non-power symbols; see
+    `_primary_sheet_index`) so a readable schematic -- not the block-diagram root
+    or an incidental connector sheet -- is what the user sees first."""
     root_file = f"{stem}.kicad_sch"
 
     def _label(fname: str) -> str:
@@ -678,16 +728,16 @@ def _render_synth_view(srcs: list[tuple[str, str]], stem: str) -> KiCanvasView:
             return "Overview"
         return fname[:-len(".kicad_sch")] if fname.endswith(".kicad_sch") else fname
 
-    default_idx = 1 if len(srcs) > 1 else 0  # first leaf when present, else root
+    default_idx = _primary_sheet_index(srcs, project_dir)
     ui.label("Schematic").classes("text-xs font-medium").style("color:#94a3b8")
     selector = ui.row().classes("w-full flex-wrap gap-1")
     # Fill (nearly) the whole inspector column so the schematic is large enough to
-    # read; the 460px offset leaves room for the labels + sheet selector above it,
-    # and the floor keeps it usable (and never smaller than the old fixed height)
-    # on short screens. The structured sheet/synthesis data scrolls below.
+    # read; the offset leaves room for the labels + sheet selector above it, and
+    # the floor keeps it usable on short screens. The structured sheet/synthesis
+    # data scrolls below. Shared with the Place/Route board view (_BUILD_VIEW_STYLE).
     view = KiCanvasView(
         [KiCanvasSource(srcs[default_idx][0], srcs[default_idx][1])],
-        height="", style="height:calc(100vh - 460px);min-height:360px")
+        height="", style=_BUILD_VIEW_STYLE)
     with selector:
         for url, fname in srcs:
             ui.button(_label(fname),
@@ -3726,7 +3776,7 @@ def admin_self_eval_run_page(run: str = ""):
                 .style("background:#0f172a;border:1px solid #1e293b"):
             srcs = _schematic_sources(gen, stem, token)
             if srcs:
-                _render_synth_view(srcs, stem)
+                _render_synth_view(srcs, stem, gen)
             else:
                 ui.label("No schematic sheets found.").classes("text-xs") \
                     .style("color:#94a3b8")
@@ -4813,7 +4863,7 @@ def public_project_page(project_id: str):
             if srcs:
                 with ui.card().classes("w-full") \
                         .style("background:#0f172a;border:1px solid #1e293b"):
-                    _render_synth_view(srcs, p.project_stem or "")
+                    _render_synth_view(srcs, p.project_stem or "", gen)
             board = _board_source(gen, p.project_stem or "", token)
             if board:
                 with ui.card().classes("w-full") \
@@ -4966,7 +5016,7 @@ def samples_page():
                 # zero and never repaint, so keeping both on-screen avoids that.
                 with ui.card().classes("w-full") \
                         .style("background:#0f172a;border:1px solid #1e293b"):
-                    _render_synth_view(s.schematic_sources(), s.stem)
+                    _render_synth_view(s.schematic_sources(), s.stem, s.dir)
                 with ui.card().classes("w-full") \
                         .style("background:#0f172a;border:1px solid #1e293b"):
                     ui.label("Board").classes("text-xs font-medium").style("color:#94a3b8")
@@ -6546,7 +6596,8 @@ def index(prompt: str = "", project: str = ""):
                     slot = tabs.view_slot("synthesize")
                     slot.clear()  # an edit-rerun renders again; never stack views
                     with slot:
-                        view["sch_view"] = _render_synth_view(srcs, state["stem"])
+                        view["sch_view"] = _render_synth_view(
+                            srcs, state["stem"], project_dir)
                     # Painted already if synthesize is the visible tab now; otherwise
                     # mark it for a re-fit when the user first reveals it.
                     view["sch_revealed"] = tabs.active() == "synthesize"
@@ -6582,7 +6633,7 @@ def index(prompt: str = "", project: str = ""):
                             ui.label("PCB").classes("text-xs font-medium").style("color:#94a3b8")
                             view["pcb_view"] = KiCanvasView(
                                 [KiCanvasSource(pcb_url, pcb_name)],
-                                height="", style="height:calc(100vh - 460px);min-height:360px")
+                                height="", style=_BUILD_VIEW_STYLE)
                             view["pcb_revealed"] = tabs.active() == "place_route"
                             # Click during a still-running build is refused
                             # by the open handler with a notify.
