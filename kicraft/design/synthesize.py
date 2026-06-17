@@ -191,6 +191,9 @@ def run(
     # Deterministic BOM rule: thin per-LED decoupling to a couple of bulk caps for
     # a LOW-current LED array (loud + recorded in bom.assumptions). Must run BEFORE
     # the schematic / netlist / autoplacer artifacts are emitted from the BOM.
+    from kicraft.design.synthesis.array_decap_footprints import (
+        downsize_array_decap_footprints,
+    )
     from kicraft.design.synthesis.array_decaps import (
         drop_decap_only_arrays,
         normalize_array_decaps,
@@ -201,6 +204,10 @@ def run(
     # -> doomed route. Drop it first so the caps become array companions.
     drop_decap_only_arrays(state.bom)
     normalize_array_decaps(state.bom)
+    # Backstop the prompt's package nudge: size each LED array's surviving decaps
+    # to fit beside the LEDs (0603, or 0402 for sub-2.5mm LEDs). Runs after the
+    # thinning so only surviving caps are touched.
+    downsize_array_decap_footprints(state.bom)
 
     sheet_instances = build_sheet_instances(state.architecture, state.bom)
 
