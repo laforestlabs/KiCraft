@@ -11,12 +11,14 @@ import pytest
 
 from kicraft.tuning import corpus, reward, space, store
 from kicraft.tuning.evaluate import (
+    MISSING_BOARD_AREA_MM2,
     MISSING_BOARD_PENALTY,
     EvalResult,
+    _effective_area,
     _effective_drc,
 )
 from kicraft.tuning.optimizer import load_optimizer, make_optimizer
-from kicraft.tuning.screen import _pearson
+from kicraft.tuning.screen import _pearson, _select_active, _spearman
 
 
 # --- space ----------------------------------------------------------------
@@ -71,6 +73,13 @@ def test_cmaes_converges_and_checkpoints():
 def _res(board, seed, fab, drc, wall):
     return EvalResult("h", board, seed, "replay", 0 if fab else 7, fab,
                       drc, 0, drc, 10, 2, 100.0, wall)
+
+
+def _res_geo(board, seed, fab, drc, wall, area, order):
+    """Like _res but carrying the geometry axes (board area + orderedness)."""
+    return EvalResult("h", board, seed, "replay", 0 if fab else 7, fab,
+                      drc, 0, drc, 10, 2, 100.0, wall,
+                      board_area_mm2=area, orderedness=order)
 
 
 def test_aggregate_seed_and_corpus():
@@ -146,6 +155,63 @@ def test_reward_empty_board_loses_to_real_board():
         assert reward.scalarize(routes, w) > reward.scalarize(empty, w), name
 
 
+# --- geometry axes: board size + orderedness ------------------------------
+
+def test_effective_area_penalizes_empty_and_unmeasurable():
+    # a real routed board keeps its measured area
+    assert _effective_area(fab_ready=True, traces=20, area_mm2=1800.0) == 1800.0
+    assert _effective_area(fab_ready=False, traces=15, area_mm2=2200.0) == 2200.0
+    # EMPTY board (no copper, not fab-ready) is tiny but degenerate -> sentinel,
+    # so it can never win the smaller-is-better size axis
+    assert _effective_area(fab_ready=False, traces=0, area_mm2=300.0) == \
+        MISSING_BOARD_AREA_MM2
+    # measurement failure on a real board (area<=0) -> sentinel, not a tiny "win"
+    assert _effective_area(fab_ready=True, traces=20, area_mm2=0.0) == \
+        MISSING_BOARD_AREA_MM2
+
+
+def test_aggregate_carries_area_and_orderedness():
+    rs = [_res_geo("b1", s, True, 0, 90, 2000.0, 80.0) for s in range(2)]
+    rs += [_res_geo("b2", s, True, 0, 90, 4000.0, 60.0) for s in range(2)]
+    obj = reward.aggregate_results(rs)
+    assert obj.mean_area_mm2 == pytest.approx(3000.0)
+    assert obj.mean_orderedness == pytest.approx(70.0)
+
+
+def test_all_four_rewards_small_ordered_boards():
+    w = reward.SCALARIZATIONS["all_four"]
+    big_messy = reward.aggregate_results(
+        [_res_geo("b1", s, True, 0, 90, 5000.0, 40.0) for s in range(2)])
+    small_ordered = reward.aggregate_results(
+        [_res_geo("b1", s, True, 0, 90, 2000.0, 85.0) for s in range(2)])
+    # identical fab/drc/wall; smaller + more-ordered wins under all_four
+    assert reward.scalarize(small_ordered, w) > reward.scalarize(big_messy, w)
+    # legacy presets omit area/order weights -> the two tie (byte-unchanged)
+    wb = reward.SCALARIZATIONS["balanced"]
+    assert reward.scalarize(small_ordered, wb) == \
+        pytest.approx(reward.scalarize(big_messy, wb))
+
+
+def test_dominance_considers_area_axis():
+    base = reward.aggregate_results(
+        [_res_geo("b1", s, True, 0, 100, 4000.0, 70.0) for s in range(2)])
+    smaller = reward.aggregate_results(
+        [_res_geo("b1", s, True, 0, 100, 2000.0, 70.0) for s in range(2)])
+    # identical on every axis except area -> the smaller board dominates
+    assert reward.dominates(smaller, base)
+    assert not reward.dominates(base, smaller)
+
+
+def test_all_four_empty_board_loses_on_geometry():
+    w = reward.SCALARIZATIONS["all_four"]
+    routed = reward.aggregate_results(
+        [_res_geo("b1", s, False, 8, 95, 5000.0, 50.0) for s in range(2)])
+    empty = reward.aggregate_results(  # carries the area sentinel + zero order
+        [_res_geo("b1", s, False, 8, 3, MISSING_BOARD_AREA_MM2, 0.0)
+         for s in range(2)])
+    assert reward.scalarize(routed, w) > reward.scalarize(empty, w)
+
+
 # --- store ----------------------------------------------------------------
 
 def test_config_hash_stable_under_rounding_and_order():
@@ -164,6 +230,50 @@ def test_store_cache_roundtrip(tmp_path):
     assert got == r
     s.upsert_config(h, {"edge_margin_mm": 6.0}, "test")
     assert s.get_overlay(h) == {"edge_margin_mm": 6.0}
+    s.close()
+
+
+def test_store_roundtrips_area_and_orderedness(tmp_path):
+    s = store.Store(tmp_path / "t.db")
+    h = store.config_hash({"edge_margin_mm": 6.0})
+    r = EvalResult(h, "b1", 0, "replay", 0, True, 0, 0, 0, 10, 2, 100.0, 88.0,
+                   board_area_mm2=2345.6, orderedness=77.5)
+    s.record(r)
+    got = s.lookup(h, "b1", 0, "replay")
+    assert got.board_area_mm2 == pytest.approx(2345.6)
+    assert got.orderedness == pytest.approx(77.5)
+    s.close()
+
+
+def test_store_migrates_legacy_db(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "legacy.db"
+    # A pre-feature DB: evals/generations WITHOUT the new geometry columns.
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        "CREATE TABLE evals (config_hash TEXT, board TEXT, seed INTEGER, mode TEXT,"
+        " rc INTEGER, fab_ready INTEGER, shorts INTEGER, unconnected INTEGER,"
+        " drc_total INTEGER, traces INTEGER, vias INTEGER, total_length_mm REAL,"
+        " wall_s REAL, error TEXT, created_at TEXT,"
+        " PRIMARY KEY (config_hash, board, seed, mode));"
+        "CREATE TABLE generations (run_id TEXT, gen INTEGER, config_hash TEXT,"
+        " scalarization TEXT, j REAL, is_train INTEGER, fab_ready_rate REAL,"
+        " mean_drc REAL, mean_wall_s REAL, created_at TEXT);"
+    )
+    conn.commit()
+    conn.close()
+    # Opening via Store must add the missing columns idempotently, no error.
+    s = store.Store(db)
+    ecols = {row["name"] for row in s._db.execute("PRAGMA table_info(evals)")}
+    assert {"board_area_mm2", "orderedness"} <= ecols
+    gcols = {row["name"] for row in s._db.execute("PRAGMA table_info(generations)")}
+    assert {"mean_area_mm2", "mean_orderedness"} <= gcols
+    # ...and record/readback works on the migrated DB.
+    h = store.config_hash({"edge_margin_mm": 6.0})
+    s.record(EvalResult(h, "b1", 0, "replay", 0, True, 0, 0, 0, 10, 2, 100.0, 88.0,
+                        board_area_mm2=1500.0, orderedness=60.0))
+    assert s.lookup(h, "b1", 0, "replay").board_area_mm2 == pytest.approx(1500.0)
     s.close()
 
 
@@ -195,6 +305,50 @@ def test_pearson():
     assert _pearson([1, 2, 3], [2, 4, 6]) == pytest.approx(1.0)
     assert _pearson([1, 2, 3], [6, 4, 2]) == pytest.approx(-1.0)
     assert _pearson([1, 1, 1], [1, 2, 3]) == 0.0  # constant -> 0
+
+
+def test_spearman_catches_monotone_nonlinear():
+    # A strongly monotone but curved relation: Spearman sees it as perfect,
+    # Pearson underrates it. This is exactly why curved knobs got screened out.
+    xs = [1, 2, 3, 4, 5, 6]
+    ys = [x ** 3 for x in xs]  # monotone increasing, non-linear
+    assert _spearman(xs, ys) == pytest.approx(1.0)
+    assert abs(_spearman(xs, ys)) > abs(_pearson(xs, ys))
+    # ties share the mean rank; a flat series correlates 0
+    assert _spearman([1, 1, 1], [1, 2, 3]) == 0.0
+
+
+def test_select_active_pins_are_always_active():
+    params = ["a", "b", "c", "d"]
+    corr = {"a": 0.9, "b": 0.8, "c": 0.05, "d": 0.01}
+    # 'd' is least-correlated but pinned -> must be active; screening fills the rest
+    active, frozen = _select_active(params, corr, top_k=2, pin=["d"])
+    assert "d" in active
+    assert active == ["d", "a"]            # pin first, then top-|corr|
+    assert set(frozen) == {"b", "c"}
+
+
+def test_select_active_without_pins_is_top_k_by_corr():
+    params = ["a", "b", "c", "d"]
+    corr = {"a": 0.1, "b": 0.9, "c": 0.5, "d": 0.0}
+    active, _ = _select_active(params, corr, top_k=2)
+    assert active == ["b", "c"]
+
+
+def test_select_active_ignores_invalid_and_dup_pins():
+    params = ["a", "b", "c"]
+    corr = {"a": 0.9, "b": 0.5, "c": 0.1}
+    active, _ = _select_active(
+        params, corr, top_k=2, pin=["c", "c", "not_a_param"])
+    assert active == ["c", "a"]            # dup + unknown dropped, then fill
+
+
+def test_select_active_pins_exceeding_topk_all_kept():
+    params = ["a", "b", "c", "d"]
+    corr = {p: 0.0 for p in params}
+    active, frozen = _select_active(params, corr, top_k=1, pin=["c", "d"])
+    assert active == ["c", "d"]            # honor all pins even past top_k
+    assert set(frozen) == {"a", "b"}
 
 
 # --- benchmark brief set + freeze -----------------------------------------

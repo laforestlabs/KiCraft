@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS evals (
     total_length_mm REAL,
     wall_s          REAL,
     error           TEXT,
+    board_area_mm2  REAL,
+    orderedness     REAL,
     created_at      TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (config_hash, board, seed, mode)
 );
@@ -54,6 +56,8 @@ CREATE TABLE IF NOT EXISTS generations (
     fab_ready_rate REAL,
     mean_drc      REAL,
     mean_wall_s   REAL,
+    mean_area_mm2 REAL,
+    mean_orderedness REAL,
     created_at    TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_evals_cfg ON evals(config_hash, mode);
@@ -63,8 +67,16 @@ CREATE INDEX IF NOT EXISTS idx_gen_run ON generations(run_id, gen);
 _EVAL_COLS = (
     "config_hash", "board", "seed", "mode", "rc", "fab_ready", "shorts",
     "unconnected", "drc_total", "traces", "vias", "total_length_mm", "wall_s",
-    "error",
+    "error", "board_area_mm2", "orderedness",
 )
+
+# Columns added after the original schema shipped. CREATE TABLE IF NOT EXISTS
+# leaves a pre-existing DB on the old schema, so add any missing ones at open
+# time -- idempotent and safe for fresh DBs (the column already exists -> skip).
+_MIGRATIONS = {
+    "evals": (("board_area_mm2", "REAL"), ("orderedness", "REAL")),
+    "generations": (("mean_area_mm2", "REAL"), ("mean_orderedness", "REAL")),
+}
 
 
 def canonical_overlay(overlay: dict) -> dict:
@@ -94,7 +106,16 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(_SCHEMA)
+        self._migrate()
         self._db.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after the original schema, idempotently."""
+        for table, cols in _MIGRATIONS.items():
+            have = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
+            for name, decl in cols:
+                if name not in have:
+                    self._db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     # --- evals -------------------------------------------------------------
     def record(self, result: EvalResult) -> None:
@@ -151,14 +172,15 @@ class Store:
     def record_generation(
         self, run_id: str, gen: int, cfg_hash: str, *, scalarization: str,
         j: float, is_train: bool, fab_ready_rate: float, mean_drc: float,
-        mean_wall_s: float,
+        mean_wall_s: float, mean_area_mm2: float = 0.0, mean_orderedness: float = 0.0,
     ) -> None:
         self._db.execute(
             "INSERT INTO generations (run_id, gen, config_hash, scalarization, j, "
-            "is_train, fab_ready_rate, mean_drc, mean_wall_s) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "is_train, fab_ready_rate, mean_drc, mean_wall_s, mean_area_mm2, "
+            "mean_orderedness) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (run_id, gen, cfg_hash, scalarization, j, int(is_train),
-             fab_ready_rate, mean_drc, mean_wall_s),
+             fab_ready_rate, mean_drc, mean_wall_s, mean_area_mm2, mean_orderedness),
         )
         self._db.commit()
 
@@ -173,6 +195,7 @@ class Store:
 
 
 def _row_to_result(row: sqlite3.Row) -> EvalResult:
+    keys = set(row.keys())  # tolerate rows from a pre-migration DB
     return EvalResult(
         config_hash=row["config_hash"], board=row["board"], seed=row["seed"],
         mode=row["mode"], rc=row["rc"], fab_ready=bool(row["fab_ready"]),
@@ -180,4 +203,6 @@ def _row_to_result(row: sqlite3.Row) -> EvalResult:
         drc_total=row["drc_total"], traces=row["traces"], vias=row["vias"],
         total_length_mm=row["total_length_mm"], wall_s=row["wall_s"],
         error=row["error"] or "",
+        board_area_mm2=(row["board_area_mm2"] or 0.0) if "board_area_mm2" in keys else 0.0,
+        orderedness=(row["orderedness"] or 0.0) if "orderedness" in keys else 0.0,
     )

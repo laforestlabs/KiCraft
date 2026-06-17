@@ -12,7 +12,13 @@ from collections import defaultdict
 
 from .graph import count_crossings, total_ratsnest_length
 from .placement_utils import _blocker_pair_compatible, packing_metrics
-from .types import BoardState, Layer, PlacementScore, Point
+from .types import (
+    BoardState,
+    Layer,
+    PlacementScore,
+    Point,
+    placement_weights_from_config,
+)
 
 class PlacementScorer:
     """Scores a placement configuration to guide optimization.
@@ -58,7 +64,7 @@ class PlacementScorer:
             # Score: 100 for 1:1, 80 for 1.5:1, 50 for 2:1, 0 for 3:1+
             s.aspect_ratio = max(0.0, 100.0 * (1.0 - (ratio - 1.0) / 2.0))
 
-        s.compute_total()
+        s.compute_total(weights=placement_weights_from_config(self.cfg))
         return s
 
     def _score_net_distance(self) -> float:

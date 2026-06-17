@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 from kicraft.autoplacer.brain.types import (
+    DEFAULT_PLACEMENT_WEIGHTS,
     BoardState,
     Component,
     Layer,
@@ -17,6 +18,7 @@ from kicraft.autoplacer.brain.types import (
     SubCircuitLayout,
     TraceSegment,
     Via,
+    placement_weights_from_config,
 )
 
 
@@ -310,6 +312,36 @@ class TestPlacementScore:
         ps = PlacementScore(net_distance=80.0, compactness=60.0)
         total = ps.compute_total(weights={"net_distance": 0.5, "compactness": 0.5})
         assert total == pytest.approx(70.0)
+
+    def test_weights_from_config_default_is_byte_identical(self):
+        # No psw_* keys -> the literal defaults, verbatim (placement unchanged).
+        assert placement_weights_from_config(None) == DEFAULT_PLACEMENT_WEIGHTS
+        assert placement_weights_from_config({}) == DEFAULT_PLACEMENT_WEIGHTS
+        assert placement_weights_from_config(
+            {"edge_margin_mm": 6.0}) == DEFAULT_PLACEMENT_WEIGHTS
+
+    def test_default_config_psw_matches_default_weights(self):
+        # The pipeline default must score byte-identically: every psw_* key in
+        # DEFAULT_CONFIG must equal the corresponding DEFAULT_PLACEMENT_WEIGHTS.
+        from kicraft.autoplacer.config import DEFAULT_CONFIG
+
+        derived = placement_weights_from_config(DEFAULT_CONFIG)
+        assert derived == DEFAULT_PLACEMENT_WEIGHTS
+
+    def test_weights_from_config_override_changes_total(self):
+        kw = dict(net_distance=80.0, crossover_score=70.0, bbox_packing=40.0,
+                  group_coherence=75.0, topology_structure=65.0, aspect_ratio=88.0)
+        base = PlacementScore(**kw).compute_total(
+            weights=placement_weights_from_config(None))
+        bumped = PlacementScore(**kw).compute_total(
+            weights=placement_weights_from_config({"psw_bbox_packing": 0.4}))
+        assert bumped != pytest.approx(base)
+
+    def test_weights_from_config_ignores_unknown_psw_keys(self):
+        # A stray psw_<not-a-subscore> must not leak into the weight dict.
+        w = placement_weights_from_config({"psw_not_a_real_subscore": 0.9})
+        assert "not_a_real_subscore" not in w
+        assert w == DEFAULT_PLACEMENT_WEIGHTS
 
 
 # ---- BoardState -----------------------------------------------------------

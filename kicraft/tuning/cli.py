@@ -27,14 +27,15 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--mode", choices=["replay", "compose"], default="replay")
     p.add_argument("--seeds", default="0,1,2",
                    help="comma-separated routing seeds for replication (default 0,1,2)")
-    p.add_argument("--scalarization", choices=["correctness", "balanced", "speed"],
+    p.add_argument("--scalarization",
+                   choices=["correctness", "balanced", "speed", "all_four"],
                    default="balanced")
     p.add_argument("--workers", type=int, default=None,
                    help="max concurrent evals (default: build slots - 1)")
     p.add_argument("--quality", default="fast",
                    choices=["fast", "draft", "good", "best"])
     p.add_argument("--timeout", type=int, default=1200, help="per-eval timeout (s)")
-    p.add_argument("--top-k", type=int, default=10, help="active params after screening")
+    p.add_argument("--top-k", type=int, default=12, help="active params after screening")
     p.add_argument("--screen-samples", type=int, default=40)
     p.add_argument("--holdout-frac", type=float, default=0.3)
     p.add_argument("--split-seed", type=int, default=0)
@@ -54,6 +55,9 @@ def _settings_from_args(a: argparse.Namespace):
         max_workers=a.workers, quality=a.quality, timeout_s=a.timeout,
         holdout_frac=a.holdout_frac, split_seed=a.split_seed, top_k=a.top_k,
         n_screen_samples=a.screen_samples, cma_seed=getattr(a, "cma_seed", 0),
+        pin_active=tuple(
+            p.strip() for p in (getattr(a, "pin", None) or "").split(",") if p.strip()
+        ),
     )
 
 
@@ -116,11 +120,23 @@ def _cmd_run(a) -> int:
             print(f"unknown tunable param(s): {bad}\nvalid: {sorted(valid)}",
                   file=sys.stderr)
             return 2
+        if a.pin:
+            print("[run] --pin ignored because --active skips screening",
+                  file=sys.stderr)
         # Pre-seed screen.json so the orchestrator skips the screening pass.
         (out / SCREEN_NAME).write_text(json.dumps({
             "active": active, "frozen": [], "correlations": {},
             "n_samples": 0, "scalarization": a.scalarization, "samples": []}))
         print(f"[run] using {len(active)} given active params (screening skipped)")
+    elif a.pin:
+        from kicraft.tuning.space import all_param_names
+        valid = set(all_param_names())
+        bad = [p.strip() for p in a.pin.split(",")
+               if p.strip() and p.strip() not in valid]
+        if bad:
+            print(f"unknown tunable param(s): {bad}\nvalid: {sorted(valid)}",
+                  file=sys.stderr)
+            return 2
     run_id = a.run_id or time.strftime("tune-%Y%m%dT%H%M%SZ", time.gmtime())
     run_tuning(_settings_from_args(a), run_id=run_id,
                log=lambda m: print(m, flush=True), resume=False)
@@ -329,6 +345,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--active", default=None,
                    help="comma-separated param names to tune; pre-seeds "
                         "screen.json and SKIPS the screening pass")
+    p.add_argument("--pin", default=None,
+                   help="comma-separated param names ALWAYS kept active; "
+                        "screening fills the remaining top-k slots around them "
+                        "(ignored if --active is given)")
     p.add_argument("--run-id", default=None)
     p.set_defaults(func=_cmd_run)
 

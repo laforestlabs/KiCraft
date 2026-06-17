@@ -361,6 +361,63 @@ class PlacementIterationSnapshot:
         }
 
 
+# Default weighting of the PlacementScore sub-scores -- the single source of
+# truth for what "good placement" means. Tunable per-config via ``psw_<key>``
+# overlays (see ``placement_weights_from_config``); the literal values here are
+# the baseline so a config that overrides nothing scores byte-identically.
+DEFAULT_PLACEMENT_WEIGHTS: dict[str, float] = {
+    "net_distance": 0.20,  # connected parts close together
+    "crossover_score": 0.17,  # fewer crossings = easier routing
+    "compactness": 0.00,  # absorbed by bbox_packing (was 0.01); seed-frame
+    # ratio is constant within a solve so SA cannot move it.
+    "edge_compliance": 0.10,
+    "rotation_score": 0.00,
+    "board_containment": 0.12,
+    "courtyard_overlap": 0.10,
+    "smt_opposite_tht": 0.15,  # SMT on opposite side of THT
+    "group_coherence": 0.08,  # functional groups stay compact
+    "aspect_ratio": 0.02,  # penalize elongated board shapes
+    "topology_structure": 0.05,  # reward topology-aware passive ordering
+    "bbox_packing": 0.15,  # tight packing vs placed bbox (dynamic
+    # under SA, unlike compactness which is fixed for the solve).
+    # Bumped from 0.01 because the post-rotation-fix solver was
+    # producing sprawling placements (board height 170-250 mm) on
+    # most seeds -- with the predicate fix preventing leaf overlap,
+    # nothing else in the score function was pulling leaves
+    # together, so SA had no signal to compact. 0.15 is on par
+    # with smt_opposite_tht so compactness competes with stacking.
+    "block_opposite_side": 0.0,  # parent-side: reward stacking
+    # blocker-compatible (front-only x back-only) block pairs
+    # so SMT leaves migrate onto large back-side THT footprints.
+    # Plumbing is in place but the default weight is 0 -- the
+    # _place_clusters initial placement already puts SMT blocks
+    # in a connectivity-driven cluster, and SA refinement
+    # consistently finds no nearby improvement that would
+    # actually start the stacking. Achieving stacking requires
+    # either a stronger initial placement hint that seeds SMT
+    # blocks inside large back-side block bboxes, or a much
+    # higher weight here paired with a stronger force-phase
+    # attraction. Track as follow-up.
+}
+
+
+def placement_weights_from_config(cfg: Optional[dict] = None) -> dict[str, float]:
+    """Build a PlacementScore weight dict from a project config.
+
+    Returns ``DEFAULT_PLACEMENT_WEIGHTS`` overlaid with any ``psw_<key>`` entries
+    present in ``cfg`` (e.g. ``psw_bbox_packing`` overrides the ``bbox_packing``
+    weight). A config that sets no ``psw_*`` keys yields the defaults verbatim, so
+    placement scoring is unchanged until a tuned config supplies weights.
+    """
+    weights = dict(DEFAULT_PLACEMENT_WEIGHTS)
+    if cfg:
+        for key in DEFAULT_PLACEMENT_WEIGHTS:
+            cv = cfg.get(f"psw_{key}")
+            if cv is not None:
+                weights[key] = float(cv)
+    return weights
+
+
 @dataclass
 class PlacementScore:
     """Scores a placement configuration before routing.
@@ -388,40 +445,7 @@ class PlacementScore:
     bbox_packing: float = 100.0  # tight packing vs placed bbox; 100 when <2 comps
 
     def compute_total(self, weights: Optional[dict[str, float]] = None) -> float:
-        w = weights or {
-            "net_distance": 0.20,  # connected parts close together
-            "crossover_score": 0.17,  # fewer crossings = easier routing
-            "compactness": 0.00,  # absorbed by bbox_packing (was 0.01); seed-frame
-            # ratio is constant within a solve so SA cannot move it.
-            "edge_compliance": 0.10,
-            "rotation_score": 0.00,
-            "board_containment": 0.12,
-            "courtyard_overlap": 0.10,
-            "smt_opposite_tht": 0.15,  # SMT on opposite side of THT
-            "group_coherence": 0.08,  # functional groups stay compact
-            "aspect_ratio": 0.02,  # penalize elongated board shapes
-            "topology_structure": 0.05,  # reward topology-aware passive ordering
-            "bbox_packing": 0.15,  # tight packing vs placed bbox (dynamic
-            # under SA, unlike compactness which is fixed for the solve).
-            # Bumped from 0.01 because the post-rotation-fix solver was
-            # producing sprawling placements (board height 170-250 mm) on
-            # most seeds -- with the predicate fix preventing leaf overlap,
-            # nothing else in the score function was pulling leaves
-            # together, so SA had no signal to compact. 0.15 is on par
-            # with smt_opposite_tht so compactness competes with stacking.
-            "block_opposite_side": 0.0,  # parent-side: reward stacking
-            # blocker-compatible (front-only x back-only) block pairs
-            # so SMT leaves migrate onto large back-side THT footprints.
-            # Plumbing is in place but the default weight is 0 -- the
-            # _place_clusters initial placement already puts SMT blocks
-            # in a connectivity-driven cluster, and SA refinement
-            # consistently finds no nearby improvement that would
-            # actually start the stacking. Achieving stacking requires
-            # either a stronger initial placement hint that seeds SMT
-            # blocks inside large back-side block bboxes, or a much
-            # higher weight here paired with a stronger force-phase
-            # attraction. Track as follow-up.
-        }
+        w = weights or DEFAULT_PLACEMENT_WEIGHTS
         # Normalize by the weight sum so total is a true 0-100 weighted
         # average. The literal weights above sum to ~1.14, so without this
         # a strong placement can score >100 (observed: 103.67), which both

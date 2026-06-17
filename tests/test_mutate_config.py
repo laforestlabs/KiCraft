@@ -152,11 +152,20 @@ class TestMutateConfigClamping:
 class TestSearchSpaceContents:
     """Regression guard: only true heuristics belong in the search space.
 
-    Board dimensions, fab/circuit constraints (signal/power widths, vias,
-    zone fab limits, pad inset, thermal radius) and FreeRouting operational
-    budgets are NOT optimization knobs. They must stay out of
-    CONFIG_SEARCH_SPACE so a parameter sweep can't game the score by
-    enlarging boards or fattening traces.
+    Board dimensions and fab/circuit constraints (signal/power widths, vias,
+    zone fab limits, pad inset, thermal radius) are NOT optimization knobs —
+    they're dictated by the fab and the schematic, and letting a sweep enlarge
+    boards or fatten traces would game the score. ``freerouting_timeout_s``
+    stays forbidden too: it's a hard wall-clock cap, not a quality dial.
+
+    The FreeRouting *pass counts* (``freerouting_max_passes`` /
+    ``leaf_freerouting_max_passes``) ARE searched (Phase 1): more passes trade
+    routing quality against wall-time, and the reward weighs the wall-time axis
+    directly, so they sit on the Pareto frontier. The original gaming worry
+    (crank effort to "win" fab regardless of cost) is contained by (a) bounded
+    ranges in CONFIG_SEARCH_SPACE (parent 8-40, leaf 6-30, well under the old
+    GUI ceiling of 200) and (b) the reward's wall-time AND board-area axes,
+    which now actively penalize the "spend forever / sprawl" degenerate.
     """
 
     FORBIDDEN_KEYS = {
@@ -167,7 +176,6 @@ class TestSearchSpaceContents:
         "via_drill_mm",
         "via_size_mm",
         "freerouting_timeout_s",
-        "freerouting_max_passes",
         "zone_clearance_mm",
         "zone_min_thickness_mm",
         "zone_thermal_gap_mm",
@@ -182,6 +190,13 @@ class TestSearchSpaceContents:
             f"fab/derived constraints leaked into CONFIG_SEARCH_SPACE: "
             f"{sorted(present)}"
         )
+
+    def test_routing_effort_knobs_are_searchable(self):
+        """Phase 1: the routing-effort / routability knobs must stay searchable
+        (the fab-readiness bottleneck lives here, not in the spacing knobs)."""
+        for key in ("freerouting_max_passes", "leaf_freerouting_max_passes",
+                    "signal_escape_length_mm"):
+            assert key in CONFIG_SEARCH_SPACE, f"{key} should be searchable"
 
     def test_board_size_excluded_even_when_enabled(self):
         """enable_board_size=True is now a no-op since board dims are not
