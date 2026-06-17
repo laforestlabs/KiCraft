@@ -213,6 +213,28 @@ def _finalize_orphan(job) -> None:
     _persist_project(ws if ws.is_dir() else None, st)
 
 
+def _reconcile_orphan_projects() -> None:
+    """Close runs lost to a web restart BEFORE they reached the build queue.
+
+    A run is an in-process thread tracked in _LIVE_RUNS; the project row's
+    terminal outcome is written only by that thread. If the process dies during
+    the LLM schematic stages the row is stranded at 'running' forever -- the
+    build-job reaper above never sees it (no build_jobs row was ever enqueued),
+    it renders as a phantom 'interrupted' with no way back, and it keeps burning
+    a quota slot. Mark such rows 'interrupted' (durable, frees the slot),
+    preserving any spend already incurred on the lost stages. The _LIVE_RUNS
+    guard protects a healthy run live in THIS process; the query's NOT IN
+    build_jobs filter leaves every build-stage orphan to _finalize_orphan, which
+    can still recover artifacts. No email: an infra restart is not a design
+    failure, and the row + its Retry button are enough."""
+    store = _store()
+    for p in store.list_orphaned_running_projects():
+        if p.id in _LIVE_RUNS:  # live in this process -> not an orphan
+            continue
+        store.finish_project(p.id, "interrupted",
+                             cost_usd=_project_spend_usd(p.id))
+
+
 def _orphan_reaper() -> None:
     """Background janitor for the build queue (started once in main()):
     - requeue jobs whose claimant process died mid-build;
@@ -221,6 +243,8 @@ def _orphan_reaper() -> None:
       'running' forever;
     - fail queued jobs that have neither a driving thread nor a live worker
       (nothing will ever pick them up);
+    - close runs lost to a restart before any build was enqueued (no build_jobs
+      row to key on), so an LLM-stage death stops masquerading as 'running';
     - hourly, garbage-collect aged-out run workspaces (restarts are no longer
       the only reclaim point precisely because builds now survive them)."""
     ticks = 0
@@ -241,6 +265,9 @@ def _orphan_reaper() -> None:
                         and _iso_age_s(job.created_at) > 120):
                     store.finish_build(job.id, rc=None, status="failed")
                     _finalize_orphan(store.get_build_job(job.id))
+            # Runs lost before they ever enqueued a build (LLM-stage death) have
+            # no build_jobs row above to trigger finalization -- close them here.
+            _reconcile_orphan_projects()
         except Exception:  # the janitor must survive any single bad row
             pass
         time.sleep(30)
@@ -2496,6 +2523,15 @@ def projects_page():
                         ui.button("Open", icon="folder_open",
                                   on_click=lambda pp=p: ui.navigate.to(
                                       f"/?project={pp.id}")) \
+                            .props("flat dense no-caps")
+                    # A lost ('interrupted', incl. the dynamic running+no-live
+                    # window) or failed run can be restarted in one click from its
+                    # saved brief: deep-link it into the composer (no run starts
+                    # until the user clicks Design, so no quota slot is spent here).
+                    if live is None and shown in ("interrupted", "failed") and p.brief:
+                        ui.button("Retry", icon="replay",
+                                  on_click=lambda pp=p: ui.navigate.to(
+                                      f"/?prompt={quote(pp.brief or '')}")) \
                             .props("flat dense no-caps")
                     if p.zip_path and Path(p.zip_path).is_file():
                         ui.button("Download", icon="download",

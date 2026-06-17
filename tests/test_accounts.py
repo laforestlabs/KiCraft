@@ -230,6 +230,31 @@ def test_running_design_reserves_a_slot(store):
     assert store.quota_status(u)["remaining"] == 0  # reserved before it finishes
 
 
+def _backdate_secs(store, project_id, secs_ago):
+    ts = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=secs_ago)).isoformat()
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("UPDATE projects SET created_at=? WHERE id=?", (ts, project_id))
+
+
+def test_list_orphaned_running_projects_selects_only_early_deaths(store):
+    """Returns running rows older than the floor that never enqueued a build;
+    excludes build-stage runs, terminal rows, and just-started runs."""
+    u = store.create_user("orphan@e.st", "pw")
+
+    early = store.create_project(u.id, "lost during LLM stages")
+    build_stage = store.create_project(u.id, "reached the build queue")
+    store.enqueue_build(workspace="/ws", project_id=build_stage, user_id=u.id)
+    finished = store.create_project(u.id, "already done")
+    store.finish_project(finished, "ok", stem="DONE")
+    recent = store.create_project(u.id, "just started")  # inside the age floor
+
+    for pid in (early, build_stage, finished):
+        _backdate_secs(store, pid, 300)
+
+    orphans = store.list_orphaned_running_projects(older_than_s=120)
+    assert {p.id for p in orphans} == {early}
+
+
 def test_awaiting_input_holds_the_slot(store):
     u = store.create_user("park@e.st", "pw")
     pid = store.create_project(u.id, "parked on a question")

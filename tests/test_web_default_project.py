@@ -18,6 +18,7 @@ Pure store + module-function tests (no NiceGUI client, no network, no build).
 """
 from __future__ import annotations
 
+import datetime as dt
 import sqlite3
 import time
 
@@ -140,6 +141,55 @@ def test_orphaned_running_row_is_skipped(store, user_id, live_runs):
     blank shell: with no live state and no artifacts there is nothing to show."""
     store.create_project(user_id, "lost to a restart")
     assert web._pick_default_project(user_id) is None
+
+
+# ---- orphan reconciliation (_reconcile_orphan_projects) ----------------------
+
+
+def _backdate_secs(store, project_id, secs_ago):
+    ts = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=secs_ago)).isoformat()
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("UPDATE projects SET created_at=? WHERE id=?", (ts, project_id))
+
+
+def test_reconcile_closes_early_orphan_and_frees_quota(store, user_id, live_runs):
+    """A run lost during the LLM stages (old, no build_jobs row, not live) is
+    marked 'interrupted', which both ends the phantom and frees its quota slot."""
+    user = store.get_user(user_id)
+    before = store.quota_status(user)["remaining"]
+
+    pid = store.create_project(user_id, "lost to a restart")
+    _backdate_secs(store, pid, 300)
+    assert store.quota_status(user)["remaining"] == before - 1  # slot consumed
+
+    web._reconcile_orphan_projects()
+
+    p = store.get_project(pid)
+    assert p.status == "interrupted"
+    assert p.finished_at is not None
+    assert p.brief == "lost to a restart"  # preserved, so Retry can reuse it
+    assert store.quota_status(user)["remaining"] == before  # slot freed
+
+
+def test_reconcile_leaves_live_recent_and_build_stage_runs(store, user_id, live_runs):
+    """The sweep must not touch a healthy live run, a just-started run inside the
+    registration window, or a run that already reached the build queue (the
+    build-job reaper owns that one and may still recover artifacts)."""
+    live = store.create_project(user_id, "still running here")
+    _backdate_secs(store, live, 300)
+    live_runs[live] = {"running": True, "user_id": user_id}
+
+    recent = store.create_project(user_id, "just started")  # within the age floor
+
+    build_stage = store.create_project(user_id, "reached the build")
+    _backdate_secs(store, build_stage, 300)
+    store.enqueue_build(workspace="/ws", project_id=build_stage, user_id=user_id)
+
+    web._reconcile_orphan_projects()
+
+    assert store.get_project(live).status == "running"
+    assert store.get_project(recent).status == "running"
+    assert store.get_project(build_stage).status == "running"
 
 
 # ---- live-run registry around _run_design ------------------------------------
