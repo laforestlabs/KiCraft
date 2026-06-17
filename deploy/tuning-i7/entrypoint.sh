@@ -53,17 +53,30 @@ echo "[entrypoint] cores=$cores  build_slots=$KICRAFT_BUILD_SLOTS"
 
 cd "$REPO"
 if [ "${1:-tune}" = "tune" ]; then
-    OUT="${OUT:-$DATA/runs/${RUN_ID:-i7}}"
+    OUT="${OUT:-$DATA/runs/${RUN_ID:-i10}}"
     mkdir -p "$OUT"
-    ACTIVE="${ACTIVE:-placement_clearance_mm,courtyard_padding_mm,connector_gap_mm,connector_edge_inset_mm,subcircuit_margin_mm,parent_spacing_mm,sa_refine_move_radius_mm,edge_margin_mm}"
-    echo "[entrypoint] tuning -> $OUT (gens=${GENS:-40} seeds=${SEEDS:-0,1} popsize=${POPSIZE:-8} timeout=${TIMEOUT:-600})"
+    # Param-selection mode (mutually exclusive, ACTIVE wins):
+    #   ACTIVE=<csv>  -> tune EXACTLY these, skip screening (legacy behavior)
+    #   PIN=<csv>     -> always tune these, screening fills the rest up to TOPK
+    # Default: PIN the Phase 1-2 routing/scorer levers so a noisy single-param
+    # screen can't bury them; screening picks the remaining slots over all params.
+    PIN="${PIN:-freerouting_max_passes,leaf_freerouting_max_passes,signal_escape_length_mm,psw_bbox_packing,psw_aspect_ratio,psw_topology_structure}"
+    sel=()
+    if [ -n "${ACTIVE:-}" ]; then
+        sel=(--active "$ACTIVE")
+    elif [ -n "$PIN" ]; then
+        sel=(--pin "$PIN")
+    fi
+    echo "[entrypoint] tuning -> $OUT (gens=${GENS:-40} seeds=${SEEDS:-0,1} popsize=${POPSIZE:-8} timeout=${TIMEOUT:-600} scal=${SCAL:-all_four} top_k=${TOPK:-12})"
+    echo "[entrypoint] param selection: ${sel[*]:-screening only}"
     exec python -m kicraft.tuning.cli run \
         --corpus "$REPO/tuning_corpus" --out "$OUT" \
         --mode replay --seeds "${SEEDS:-0,1}" \
-        --scalarization "${SCAL:-balanced}" \
+        --scalarization "${SCAL:-all_four}" \
         --gens "${GENS:-40}" --popsize "${POPSIZE:-8}" \
-        --timeout "${TIMEOUT:-600}" --active "$ACTIVE" \
-        --run-id "${RUN_ID:-i7}"
+        --timeout "${TIMEOUT:-600}" --top-k "${TOPK:-12}" \
+        "${sel[@]}" \
+        --run-id "${RUN_ID:-i10}"
 fi
 
 # Any other command (e.g. `bash`, or `python -m kicraft.tuning.cli report ...`)
