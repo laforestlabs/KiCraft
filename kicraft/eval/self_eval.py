@@ -514,10 +514,10 @@ def main(argv=None) -> int:
         print("no briefs selected (check --limit / --only)", file=sys.stderr)
         return 2
 
-    from kicraft.server.client import CappedOpenRouterClient
+    from kicraft.server.client import make_client
     from kicraft.server.config import Settings
     s = Settings.from_env()
-    client = CappedOpenRouterClient(s)
+    client = make_client(s)
     judge_model = args.judge_model or getattr(s, "eval_judge_model", None) or getattr(s, "model", None)
 
     # Resolve to an absolute path: design stages run subprocesses with cwd=workspace,
@@ -605,9 +605,10 @@ def main(argv=None) -> int:
         print_lock = threading.Lock()
 
         def _worker(idx: int, entry: dict) -> dict:
-            # One client per brief: CappedOpenRouterClient instances are not safe to
-            # share across threads (construction is ~ms; the spend ledger is WAL sqlite).
-            wclient = CappedOpenRouterClient(s)
+            # One client per brief: client instances are not safe to share across
+            # threads (construction is ~ms; the spend ledger is WAL sqlite). Routed
+            # through make_client so KICRAFT_LLM_MODE=replay drives the corpus at $0.
+            wclient = make_client(s)
             stem = _stem_for(idx, entry)
             with print_lock:
                 print(f"[{stem}] start: {entry['brief']}", flush=True)

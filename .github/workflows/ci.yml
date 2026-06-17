@@ -29,3 +29,32 @@ jobs:
 
       - name: Run tests
         run: pytest -v
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Full extras so the abuse tests (server/design-backed) actually run rather
+      # than skip; bandit + pip-audit come from the dev extra.
+      - name: Install package with dev + runtime extras
+        run: pip install -e ".[dev,design,server,tuning,loadtest]"
+
+      - name: SAST + dependency CVEs (advisory)
+        # Advisory for now (existing findings are being triaged via /admin/security);
+        # flip to gating once the backlog is clean. Never fails the build today.
+        run: python -m kicraft.security.scans || true
+
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+
+      - name: Abuse / vulnerability tests
+        run: pytest tests/security tests/loadtest -v

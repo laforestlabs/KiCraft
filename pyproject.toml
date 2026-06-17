@@ -38,9 +38,16 @@ server = [
     "nicegui>=1.4",
     "stripe>=7",
 ]
+# Load / stress testing harness. psutil is the fast path for host/process metrics
+# (metrics.py falls back to /proc when it is absent, so this extra is optional).
+loadtest = [
+    "psutil>=5.9",
+]
 dev = [
     "pytest>=7.0",
     "ruff>=0.1",
+    "bandit>=1.7",
+    "pip-audit>=2.7",
 ]
 
 [project.scripts]
@@ -73,6 +80,9 @@ provider-bench = "kicraft.cli.provider_bench:main"
 kicraft-smoketest = "kicraft.server.smoketest:main"
 kicraft-web = "kicraft.server.web:main"
 kicraft-accounts = "kicraft.server.accounts_cli:main"
+
+# Load / stress testing harness (build-storm / pipeline / web scenarios -> /admin/loadtest)
+kicraft-loadtest = "kicraft.loadtest.__main__:main"
 
 # Evaluation (admin web self-eval; shares the kicraft.eval core with the offline harness)
 kicraft-eval-web = "kicraft.eval.run_web:main"
