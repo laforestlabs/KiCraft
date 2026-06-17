@@ -6106,6 +6106,19 @@ def index(prompt: str = "", project: str = ""):
             elif rem:
                 status.text = ("Reopened. Remaining: " + " -> ".join(rem)
                                + ". Click Continue design when ready.")
+            elif state["failed"]:
+                # All LLM stages done but the build (place/route) failed or was
+                # killed -- there is no routed/fab board. Do NOT call this
+                # "Design complete": that mislabels a timed-out build and offers
+                # a download of an unrouted board (KC-NZXXEE).
+                status.text = ("Reopened. The PCB place/route did not finish "
+                               "(it failed or timed out), so there is no routed "
+                               "board to download. The schematic stages are "
+                               "complete -- edit a stage and rebuild to retry.")
+            elif not zip_ok:
+                status.text = ("Reopened. Routing finished but no fab package "
+                               "was produced (not fab-ready). Edit a stage to "
+                               "revise, or rebuild.")
             else:
                 status.text = ("Reopened. Design complete: download below, "
                                "or edit a stage to revise.")

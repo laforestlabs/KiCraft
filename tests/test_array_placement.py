@@ -7,7 +7,12 @@ grid-placed deterministically, skipping the optimizer. See
 """
 from __future__ import annotations
 
-from kicraft.autoplacer.brain.array_placement import place_array_leaves
+import pytest
+
+from kicraft.autoplacer.brain.array_placement import (
+    _assert_grids_disjoint,
+    place_array_leaves,
+)
 from kicraft.autoplacer.brain.placement_solver import PlacementSolver
 from kicraft.autoplacer.brain.types import BoardState, Component, Layer, Pad, Point
 
@@ -412,3 +417,42 @@ def test_companion_refs_reload_retag_helper() -> None:
     # no array present in this leaf -> claim nothing (plain decap leaf untouched)
     assert array_companion_refs({"C1": comps["C1"]}, []) == []
     assert array_companion_refs({"C1": comps["C1"]}, arrays) == []
+
+
+# --- Layer 3: grid-overlap guard --------------------------------------------
+
+def _grid_dict(refs, centers, w=1.5, h=1.5):
+    return {"refs": refs, "led_w": w, "led_h": h,
+            "centers": [Point(x, y) for x, y in centers]}
+
+
+def test_assert_grids_disjoint_allows_separated_grids() -> None:
+    a = _grid_dict(["D1", "D2"], [(2, 2), (4, 2)])
+    b = _grid_dict(["E1", "E2"], [(20, 2), (22, 2)])
+    _assert_grids_disjoint([a, b])  # no raise
+
+
+def test_assert_grids_disjoint_raises_on_colocated_grids() -> None:
+    a = _grid_dict(["D1", "D2"], [(2, 2), (4, 2)])
+    b = _grid_dict(["C1", "C2"], [(2, 2), (4, 2)])  # same coords as the LED grid
+    with pytest.raises(ValueError, match="overlap"):
+        _assert_grids_disjoint([a, b])
+
+
+def test_place_array_leaves_rejects_two_arrays_on_same_origin() -> None:
+    # The KC-NZXXEE shape: an LED array and a cap array, both 2x2. Every grid is
+    # laid from the same origin, so without Layer 1 they co-locate -- the guard
+    # must catch that rather than emit a board where caps sit on the LEDs.
+    comps = {f"D{i}": _comp(f"D{i}", "LED", 1.5, 1.5, 4) for i in range(1, 5)}
+    comps.update({f"C{i}": _comp(f"C{i}", "100nF", 1.0, 0.5, 2) for i in range(1, 5)})
+    arrays = [
+        {"refs": [f"D{i}" for i in range(1, 5)], "rows": 2, "cols": 2,
+         "serpentine": True},
+        {"refs": [f"C{i}" for i in range(1, 5)], "rows": 2, "cols": 2,
+         "serpentine": True},
+    ]
+    with pytest.raises(ValueError, match="overlap"):
+        place_array_leaves(
+            comps, arrays,
+            {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0},
+        )

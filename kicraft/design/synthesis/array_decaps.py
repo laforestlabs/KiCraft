@@ -75,6 +75,76 @@ def _scrub_refs(bom: BOM, dropped: set[str]) -> None:
     bom.group_labels = {k: v for k, v in bom.group_labels.items() if k not in dropped}
 
 
+def _decap_membership(bom: BOM) -> dict[str, bool]:
+    """ref -> True when it is a decoupling cap (2-pin, every net power/ground)."""
+    nets_by_ref: dict[str, set[str]] = {}
+    pins_by_ref: dict[str, set[str]] = {}
+    for c in bom.connections:
+        for ep in c.endpoints:
+            nets_by_ref.setdefault(ep.ref, set()).add(c.net_name)
+            pins_by_ref.setdefault(ep.ref, set()).add(ep.pin)
+    out: dict[str, bool] = {}
+    for p in bom.parts:
+        nets = nets_by_ref.get(p.ref, set())
+        out[p.ref] = (
+            len(pins_by_ref.get(p.ref, set())) == 2
+            and bool(nets)
+            and all(is_power_or_ground_name(n) for n in nets)
+        )
+    return out
+
+
+def drop_decap_only_arrays(bom: BOM) -> list[list[str]]:
+    """Remove any ArraySpec whose members are *all* decoupling caps.
+
+    The brief "5x10 array of LEDs" sometimes makes the BOM stage emit a SECOND
+    ArraySpec for the per-LED bypass caps -- an identical grid over C1..Cn. That
+    is not a placement array: the placer then grids those caps from the same
+    origin as the LED grid, landing each cap *on top of* its LED, where its power
+    pads block every inter-LED data tie (the array router skips them all and the
+    leaf falls through to a doomed FreeRouting run -- KC-NZXXEE).
+
+    A decap-only spec is dropped *only* when a real (non-decap) array shares its
+    sheet, so the caps are then picked up as that array's companions and placed
+    in the inter-row channel, clear of the data lane (``array_companion_refs`` /
+    ``_place_companion_decaps``). A decap-only array with no sibling array is
+    left alone (nothing to be a companion of). LOUD + recorded in
+    ``bom.assumptions`` -- see kicraft-no-fallbacks-fail-loudly.
+
+    Returns the member-ref lists of the dropped specs (``[]`` when none).
+    """
+    if len(bom.arrays) < 2:
+        return []
+    is_decap = _decap_membership(bom)
+    sheet_by_ref = {p.ref: p.sheet for p in bom.parts}
+
+    def _all_decap(spec) -> bool:
+        return bool(spec.refs) and all(is_decap.get(r, False) for r in spec.refs)
+
+    real_specs = [s for s in bom.arrays if not _all_decap(s)]
+    real_sheets: set = set()
+    for s in real_specs:
+        real_sheets.update(sheet_by_ref.get(r) for r in s.refs)
+
+    kept, dropped = [], []
+    for spec in bom.arrays:
+        spec_sheets = {sheet_by_ref.get(r) for r in spec.refs}
+        if _all_decap(spec) and real_specs and (spec_sheets & real_sheets):
+            dropped.append(list(spec.refs))
+            note = (
+                f"array spec over {len(spec.refs)} decoupling caps "
+                f"({spec.refs[0]}..{spec.refs[-1]}) dropped -- they decouple a "
+                "sibling array and are placed as its companions, not a grid "
+                "co-located on top of it"
+            )
+            print(f"  [synth] {note}")
+            bom.assumptions.append(note)
+        else:
+            kept.append(spec)
+    bom.arrays = kept
+    return dropped
+
+
 def normalize_array_decaps(
     bom: BOM,
     *,

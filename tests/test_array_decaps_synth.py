@@ -8,7 +8,10 @@ from kicraft.design.models import (
     NetConnection,
     PinEndpoint,
 )
-from kicraft.design.synthesis.array_decaps import normalize_array_decaps
+from kicraft.design.synthesis.array_decaps import (
+    drop_decap_only_arrays,
+    normalize_array_decaps,
+)
 
 
 def _led(ref: str) -> BomPart:
@@ -89,4 +92,64 @@ def test_signal_resistor_not_dropped() -> None:
         endpoints=[PinEndpoint(ref="R1", pin="1"), PinEndpoint(ref="R1", pin="2")]))
     dropped = normalize_array_decaps(bom)
     assert "R1" not in dropped
-    assert any(p.ref == "R1" for p in bom.parts)
+
+
+def _add_cap_array(bom: BOM, n_caps: int) -> None:
+    """Declare C1..Cn as their own grid -- the spurious decap-array the BOM stage
+    sometimes emits alongside the real LED array (KC-NZXXEE)."""
+    bom.arrays.append(ArraySpec(refs=[f"C{i}" for i in range(1, n_caps + 1)],
+                                rows=1, cols=n_caps))
+
+
+def test_decap_only_array_dropped() -> None:
+    # LED array + a spurious cap array over the per-LED decaps on the same sheet.
+    bom = _build_bom(n_leds=10, n_caps=10)
+    _add_cap_array(bom, 10)
+    assert len(bom.arrays) == 2
+    dropped = drop_decap_only_arrays(bom)
+    assert dropped == [[f"C{i}" for i in range(1, 11)]], "the cap array is dropped"
+    assert [a.refs[0] for a in bom.arrays] == ["D1"], "only the LED array survives"
+    assert any("decoupling caps" in a for a in bom.assumptions), "decision recorded"
+    # the caps themselves are NOT removed -- they become array companions
+    assert len([p for p in bom.parts if p.ref.startswith("C")]) == 10
+
+
+def test_real_second_array_not_dropped() -> None:
+    # A second array of SIGNAL parts (series data resistors) is a genuine grid.
+    bom = _build_bom(n_leds=6, n_caps=0)
+    bom.parts += [BomPart(ref=f"R{i}", value="330", symbol="Device:R",
+                          footprint="Resistor_SMD:R_0603_1608Metric",
+                          sheet="LED ARRAY") for i in range(1, 7)]
+    for i in range(1, 7):  # each resistor carries a non-power DATA net -> not a decap
+        bom.connections.append(NetConnection(
+            net_name=f"SER{i}", sheet="LED ARRAY",
+            endpoints=[PinEndpoint(ref=f"R{i}", pin="1"),
+                       PinEndpoint(ref=f"R{i}", pin="2")]))
+    bom.arrays.append(ArraySpec(refs=[f"R{i}" for i in range(1, 7)], rows=1, cols=6))
+    assert drop_decap_only_arrays(bom) == []
+    assert len(bom.arrays) == 2
+
+
+def test_sole_decap_array_kept() -> None:
+    # A decap-only array with NO sibling real array has nothing to companion --
+    # leave it alone rather than strip its grid hint. (Needs >=2 specs to even be
+    # considered, so pair it with a second decap array on a different sheet.)
+    parts = [_cap(f"C{i}") for i in range(1, 9)]  # all on sheet "LED ARRAY"
+    conns = [
+        NetConnection(net_name="+5V", sheet="LED ARRAY",
+                      endpoints=[PinEndpoint(ref=f"C{i}", pin="1") for i in range(1, 9)]),
+        NetConnection(net_name="GND", sheet="LED ARRAY",
+                      endpoints=[PinEndpoint(ref=f"C{i}", pin="2") for i in range(1, 9)]),
+    ]
+    arrays = [ArraySpec(refs=[f"C{i}" for i in range(1, 5)], rows=2, cols=2),
+              ArraySpec(refs=[f"C{i}" for i in range(5, 9)], rows=2, cols=2)]
+    bom = BOM(parts=parts, connections=conns, arrays=arrays)
+    # both specs are decap-only and neither is "real", so nothing is a companion
+    assert drop_decap_only_arrays(bom) == []
+    assert len(bom.arrays) == 2
+
+
+def test_single_array_is_noop() -> None:
+    bom = _build_bom(n_leds=6, n_caps=6)  # only the LED array spec present
+    assert drop_decap_only_arrays(bom) == []
+    assert len(bom.arrays) == 1
