@@ -2051,6 +2051,30 @@ from kicraft.cli._compose_stamp import (  # noqa: E402
 )
 
 
+def _promotable_strand_only(
+    reasons: list[str],
+    connector_strand_reasons: list[str],
+    drc: dict[str, Any] | None,
+) -> bool:
+    """Whether a *rejected* routed parent should still be promoted as a routed
+    but NOT-fab-ready board.
+
+    True only when the board's sole defect is connector stranding -- every
+    rejection reason is a recorded ``connector_stranded:*`` finding -- AND the
+    board is electrically complete (no shorts, no unconnected nets). Such a
+    board is fully routed and usable for inspection; failing it outright as
+    ``rc=6 "no routed parent"`` (with no artifact) misrepresents a placement
+    defect as an infra failure. Boards with any *other* defect (illegal routed
+    geometry, unconnected nets, shorts) stay hard-rejected.
+    """
+    if not connector_strand_reasons:
+        return False
+    if any(reason not in connector_strand_reasons for reason in reasons):
+        return False
+    drc = drc or {}
+    return not drc.get("shorts") and not drc.get("unconnected")
+
+
 @dataclass(slots=True)
 class CandidateRecord:
     """One trial in the layout search loop."""
@@ -2947,18 +2971,22 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 1
 
-            # Early bail: connector edge-mount gate. An edge-zoned connector
-            # (USB-C, etc.) whose mouth is pulled inboard of the board edge it
+            # Connector edge-mount gate. An edge-zoned connector (USB-C, screw
+            # terminal, etc.) whose mouth is pulled inboard of the board edge it
             # is zoned to is an UNMATEABLE port -- a real defect DRC cannot see
-            # (the board is electrically fine, so it would ship "fab-ready").
-            # Stranding is a PLACEMENT property fixed by stamp time, so measure
-            # on the stamped board and reject before spending ~200s routing a
-            # layout that's already wrong, mirroring the stamp_shorts guard.
-            # The round is rejected so the autoexperiment search retries another
-            # placement; with the anchor-convention fix (Fix A) a correctly
-            # zoned connector lands flush and never trips this. Config-gated
-            # (default on) and a generous inboard tolerance so only genuine
-            # stranding -- not pad-inset / rounding noise -- triggers a reject.
+            # (the board is electrically fine, so it would otherwise ship
+            # "fab-ready"). Stranding is a PLACEMENT property fixed by stamp time,
+            # so measure it on the stamped board here. Rather than skip routing
+            # and fail the whole build (which surfaces as a misleading "no routed
+            # parent / route-infra failure" with NO board), we route the board,
+            # then persist + promote it flagged NOT fab-ready below: a routed
+            # board the user can inspect, honestly graded, beats nothing. The
+            # fab-readiness verify gate (_verify_routed_board) independently
+            # re-checks stranding so a stranded board can never reach "fab-ready".
+            # Config-gated (default on); a generous inboard tolerance so only
+            # genuine stranding -- not pad-inset / rounding noise -- is flagged.
+            connector_strand_reasons: list[str] = []
+            connector_edge_gaps_payload: list[dict[str, Any]] = []
             if args.route and cfg.get("enforce_connector_edge_gap", True):
                 component_zones = cfg.get("component_zones", {}) or {}
                 try:
@@ -2974,10 +3002,9 @@ def main(argv: list[str] | None = None) -> int:
                         component_zones,
                         inboard_tol_mm=inboard_tol,
                     )
-                    # Reject only genuine INBOARD stranding -- not the rarer
+                    # Flag only genuine INBOARD stranding -- not the rarer
                     # excessive-overhang failure, which is far less clearly a
-                    # defect and (with no best-effort promotion downstream) not
-                    # worth risking a whole-build failure over.
+                    # defect.
                     strand = [g for g in edge_gaps if g.gap_mm < -inboard_tol]
                 except Exception as gate_exc:  # noqa: BLE001
                     # The gate must never invent a new failure mode: a pcbnew
@@ -2989,34 +3016,20 @@ def main(argv: list[str] | None = None) -> int:
                     strand = []
                     edge_gaps = []
                 if strand:
-                    reasons = [
+                    connector_strand_reasons = [
                         f"connector_stranded:{g.ref}@{g.gap_mm:.2f}mm({g.edge})"
                         for g in strand
                     ]
-                    state.routed_validation = {
-                        "accepted": False,
-                        "rejection_reasons": reasons,
-                        "connector_edge_gaps": [
-                            {"ref": g.ref, "edge": g.edge, "gap_mm": g.gap_mm, "ok": g.ok}
-                            for g in edge_gaps
-                        ],
-                        "drc": {"skipped_routing": True},
-                    }
-                    if args.output:
-                        _save_composition_snapshot(
-                            Path(args.output).resolve(),
-                            state,
-                            transformed_payloads,
-                        )
+                    connector_edge_gaps_payload = [
+                        {"ref": g.ref, "edge": g.edge, "gap_mm": g.gap_mm, "ok": g.ok}
+                        for g in edge_gaps
+                    ]
                     print(
-                        f"parent_status      : rejected ({', '.join(reasons)})"
-                    )
-                    print(
-                        "error: connector(s) stranded inboard of their zoned "
-                        f"board edge: {', '.join(reasons)}; skipped routing",
+                        "warning: connector(s) stranded inboard of their zoned "
+                        f"board edge: {', '.join(connector_strand_reasons)}; "
+                        "routing anyway and flagging the board NOT fab-ready",
                         file=sys.stderr,
                     )
-                    return 1
 
             if args.route:
                 _t_route = time.perf_counter()
@@ -3042,6 +3055,19 @@ def main(argv: list[str] | None = None) -> int:
                         )
 
                     validation = routing_result.get("validation", {})
+                    if connector_strand_reasons:
+                        # A stranded edge connector makes the board not fab-ready
+                        # even when its copper is electrically clean. Fold the
+                        # stamp-time finding into the routed validation so the
+                        # board is promoted (below) but never accepted.
+                        validation = dict(validation)
+                        validation["accepted"] = False
+                        merged_reasons = list(validation.get("rejection_reasons", []))
+                        for _reason in connector_strand_reasons:
+                            if _reason not in merged_reasons:
+                                merged_reasons.append(_reason)
+                        validation["rejection_reasons"] = merged_reasons
+                        validation["connector_edge_gaps"] = connector_edge_gaps_payload
                     state.routed_validation = _compact_routed_validation(validation)
                     if args.output:
                         # Re-save the snapshot so the --output file reflects
@@ -3087,25 +3113,50 @@ def main(argv: list[str] | None = None) -> int:
                     else:
                         reasons = validation.get("rejection_reasons", [])
                         reason_str = ', '.join(reasons) if reasons else 'unknown'
-                        print(
-                            f"parent_status      : rejected ({reason_str})"
-                        )
-                        # Still run the inspector on the rejected board so
-                        # an AI agent can see exactly what failed: which
-                        # DRC violations triggered the rejection, where
-                        # the marker is vs. the board edge, etc.
-                        rejected_pcb = (
-                            Path(routing_result.get("routed_pcb", ""))
-                            if routing_result.get("routed_pcb")
-                            else None
-                        )
-                        if rejected_pcb and rejected_pcb.is_file():
-                            _emit_inspector_bundle(rejected_pcb)
-                        print(
-                            f"error: parent board rejected by acceptance gate: {reason_str}",
-                            file=sys.stderr,
-                        )
-                        return 1
+                        if _promotable_strand_only(
+                            reasons,
+                            connector_strand_reasons,
+                            validation.get("drc", {}),
+                        ):
+                            # The board is fully routed and electrically complete;
+                            # its ONLY defect is an inboard-stranded connector (a
+                            # placement-quality issue, not a route/infra failure).
+                            # Persist + promote it so the build yields a routed
+                            # board honestly marked NOT fab-ready (rc=7) rather
+                            # than discarding it as "no routed parent" (rc=6) with
+                            # nothing to inspect. The verify gate re-checks the
+                            # stranding and keeps it out of "fab-ready".
+                            artifact_dir = _persist_parent_artifact(
+                                state, routing_result, project_dir, cfg
+                            )
+                            print(f"parent_artifact    : {artifact_dir}")
+                            print(
+                                "parent_status      : routed, NOT fab-ready "
+                                f"({reason_str})"
+                            )
+                            _emit_inspector_bundle(
+                                Path(artifact_dir) / "parent_routed.kicad_pcb"
+                            )
+                        else:
+                            print(
+                                f"parent_status      : rejected ({reason_str})"
+                            )
+                            # Still run the inspector on the rejected board so
+                            # an AI agent can see exactly what failed: which
+                            # DRC violations triggered the rejection, where
+                            # the marker is vs. the board edge, etc.
+                            rejected_pcb = (
+                                Path(routing_result.get("routed_pcb", ""))
+                                if routing_result.get("routed_pcb")
+                                else None
+                            )
+                            if rejected_pcb and rejected_pcb.is_file():
+                                _emit_inspector_bundle(rejected_pcb)
+                            print(
+                                f"error: parent board rejected by acceptance gate: {reason_str}",
+                                file=sys.stderr,
+                            )
+                            return 1
                 else:
                     error_msg = routing_result.get("error", "unknown error")
                     print(

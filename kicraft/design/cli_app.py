@@ -2317,8 +2317,45 @@ def _degenerate_hierarchy_error(root_sch: Path) -> str | None:
     return None
 
 
+def _connector_stranded_refs(pcb: Path) -> list[str]:
+    """Edge-zoned connectors stranded inboard of their board edge.
+
+    A fully-routed board can be electrically clean (no shorts/unconnected) yet
+    unusable because an edge-mount connector (USB-C, screw terminal, ...) sits
+    inboard of the board edge it is zoned to -- the plug cannot physically mate.
+    DRC cannot see this, so the fab-readiness gate re-checks it here, independent
+    of compose (which now routes + promotes such boards rather than failing the
+    build). Returns [] when the project carries no edge zones or on any error, so
+    this never invents a failure for boards the gate cannot evaluate.
+    """
+    try:
+        import glob
+        import json
+
+        from kicraft.autoplacer.brain.connector_edge_gap import connector_edge_gaps
+        from kicraft.autoplacer.config import DEFAULT_CONFIG
+
+        zone_files = sorted(glob.glob(str(pcb.parent / "*_autoplacer.json")))
+        zones: dict = {}
+        if zone_files:
+            payload = json.loads(Path(zone_files[0]).read_text(encoding="utf-8"))
+            zones = payload.get("component_zones", payload.get("zones", {})) or {}
+        if not zones:
+            return []
+        tol = float(DEFAULT_CONFIG.get("connector_edge_inboard_tol_mm", 1.0))
+        gaps = connector_edge_gaps(str(pcb), zones, inboard_tol_mm=tol)
+        return [
+            f"connector_stranded:{g.ref}@{g.gap_mm:.2f}mm({g.edge})"
+            for g in gaps
+            if g.gap_mm < -tol
+        ]
+    except Exception:
+        return []
+
+
 def _verify_routed_board(pcb: Path) -> dict:
-    """Acceptance gate: no shorts, no unconnected (connector-shield items waived)."""
+    """Acceptance gate: no shorts, no unconnected (connector-shield items waived),
+    and no edge-zoned connector stranded inboard of its board edge."""
     from kicraft.autoplacer.config import DEFAULT_CONFIG
     from kicraft.autoplacer.freerouting_runner import validate_routed_board
 
@@ -2326,11 +2363,19 @@ def _verify_routed_board(pcb: Path) -> dict:
     drc = v.get("drc", {}) or {}
     shorts = int(drc.get("shorts", 0) or 0)
     unconnected = int(drc.get("unconnected", 0) or 0)
+    accepted = bool(v.get("accepted", False))
+    reasons = list(v.get("rejection_reasons", []))
+    strand = _connector_stranded_refs(pcb)
+    if strand:
+        accepted = False
+        for reason in strand:
+            if reason not in reasons:
+                reasons.append(reason)
     return {
-        "ok": bool(v.get("accepted", False)) and shorts == 0 and unconnected == 0,
+        "ok": accepted and shorts == 0 and unconnected == 0,
         "shorts": shorts,
         "unconnected": unconnected,
-        "reasons": v.get("rejection_reasons", []),
+        "reasons": reasons,
         "tracks": v.get("track_summary", {}) or {},
     }
 
