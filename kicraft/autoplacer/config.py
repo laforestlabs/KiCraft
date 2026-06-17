@@ -188,6 +188,20 @@ DEFAULT_CONFIG = {
     # 0.0 = organic/force-directed layout, 1.0 = full grid alignment.
     # Intermediate values blend proportionally.  Searchable by autoexperiment.
     "orderedness": 0.3,
+    # PlacementScore sub-score weights (psw_*) — the definition of "good
+    # placement" the solver optimizes toward. Defaults MUST equal
+    # types.DEFAULT_PLACEMENT_WEIGHTS so an unmodified config scores
+    # byte-identically; a tuned config overrides individual weights to bias the
+    # placer (e.g. raise psw_bbox_packing / psw_aspect_ratio for smaller boards,
+    # psw_topology_structure / psw_group_coherence for orderliness, psw_net_distance
+    # / psw_crossover_score for routability). Searchable by the tuner; weights are
+    # normalized by their sum in compute_total, so only ratios matter.
+    "psw_net_distance": 0.20,
+    "psw_crossover_score": 0.17,
+    "psw_bbox_packing": 0.15,
+    "psw_group_coherence": 0.08,
+    "psw_topology_structure": 0.05,
+    "psw_aspect_ratio": 0.02,
     # Through-hole backside threshold — THT components with bounding-box area
     # above this value (mm²) are placed on B.Cu so SMT parts can use F.Cu.
     # SMT passives always stay on F.Cu — IC group connectivity forces keep
@@ -484,6 +498,16 @@ CONFIG_SEARCH_SPACE = {
     "freerouting_max_passes": {"min": 8, "max": 40, "sigma": 5, "type": "int"},
     "leaf_freerouting_max_passes": {"min": 6, "max": 30, "sigma": 4, "type": "int"},
     "signal_escape_length_mm": {"min": 0.5, "max": 3.0, "sigma": 0.3, "type": "float"},
+    # --- Phase 2: PlacementScore sub-score weights ---
+    # The objective the placer optimizes for IS these weights, so tuning them is
+    # the highest-leverage lever for orderedness/size/routability. Bounded [0, 0.4]
+    # each; compute_total normalizes by the weight sum so only ratios matter.
+    "psw_net_distance": {"min": 0.0, "max": 0.4, "sigma": 0.05, "type": "float"},
+    "psw_crossover_score": {"min": 0.0, "max": 0.4, "sigma": 0.05, "type": "float"},
+    "psw_bbox_packing": {"min": 0.0, "max": 0.4, "sigma": 0.05, "type": "float"},
+    "psw_group_coherence": {"min": 0.0, "max": 0.4, "sigma": 0.05, "type": "float"},
+    "psw_topology_structure": {"min": 0.0, "max": 0.4, "sigma": 0.05, "type": "float"},
+    "psw_aspect_ratio": {"min": 0.0, "max": 0.4, "sigma": 0.05, "type": "float"},
 }
 
 

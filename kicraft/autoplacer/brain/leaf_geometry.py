@@ -21,6 +21,7 @@ from kicraft.autoplacer.brain.types import (
     Component,
     PlacementScore,
     Point,
+    placement_weights_from_config,
 )
 
 
@@ -290,7 +291,7 @@ def score_local_components(
             0.0,
             min(score.board_containment, 100.0 - 40.0 * pad_outside_count),
         )
-        score.compute_total()
+        score.compute_total(weights=placement_weights_from_config(cfg))
 
     return score
 

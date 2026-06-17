@@ -173,6 +173,13 @@ PLACEMENT_PARAMS: list[dict[str, Any]] = [
     {"key": "parent_seed_area_overhead", "label": "Parent seed overhead", "default": 2.5, "min": 1.5, "max": 3.5, "step": 0.1, "group": "Board Geometry", "description": "Multiplier on child total area to set the parent seed; lower = tighter (forces compaction). Aspect ratios are swept per candidate inside the round."},
     {"key": "placement_clearance_mm", "label": "Placement clearance (mm)", "default": 2.84, "min": 1.10, "max": 5.38, "step": 0.25, "group": "Board Geometry", "description": "Minimum gap between component bounding boxes"},
     {"key": "placement_grid_mm", "label": "Placement grid (mm)", "default": 1.20, "min": 0.34, "max": 2.13, "step": 0.1, "group": "Board Geometry", "description": "Snap grid resolution for component placement"},
+    # -- Placement Scoring (sub-score weights; only ratios matter) --
+    {"key": "psw_net_distance", "label": "Weight: net distance", "default": 0.20, "min": 0.0, "max": 0.4, "step": 0.01, "group": "Placement Scoring", "description": "Weight on keeping connected parts close (routability)"},
+    {"key": "psw_crossover_score", "label": "Weight: crossovers", "default": 0.17, "min": 0.0, "max": 0.4, "step": 0.01, "group": "Placement Scoring", "description": "Weight on minimizing net crossings (routability)"},
+    {"key": "psw_bbox_packing", "label": "Weight: bbox packing", "default": 0.15, "min": 0.0, "max": 0.4, "step": 0.01, "group": "Placement Scoring", "description": "Weight on tight packing (smaller boards)"},
+    {"key": "psw_group_coherence", "label": "Weight: group coherence", "default": 0.08, "min": 0.0, "max": 0.4, "step": 0.01, "group": "Placement Scoring", "description": "Weight on keeping functional groups compact (orderliness)"},
+    {"key": "psw_topology_structure", "label": "Weight: topology structure", "default": 0.05, "min": 0.0, "max": 0.4, "step": 0.01, "group": "Placement Scoring", "description": "Weight on topology-aware passive ordering (orderliness)"},
+    {"key": "psw_aspect_ratio", "label": "Weight: aspect ratio", "default": 0.02, "min": 0.0, "max": 0.4, "step": 0.01, "group": "Placement Scoring", "description": "Weight on square (vs elongated) board shape"},
     # -- Edge & Connectors --
     {"key": "edge_jitter_mm", "label": "Edge jitter (mm)", "default": 5.0, "min": 0.0, "max": 15.0, "step": 0.5, "group": "Edge & Connectors", "description": "Random displacement along edge for edge-pinned parts"},
     {"key": "connector_gap_mm", "label": "Connector gap (mm)", "default": 3.58, "min": 0.46, "max": 7.50, "step": 0.5, "group": "Edge & Connectors", "description": "Spacing between connectors on the same edge"},
