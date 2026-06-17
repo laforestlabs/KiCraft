@@ -1,12 +1,12 @@
 {
-  "content_hash": "sha256:252619d3d6ac2f557b283872fde22a1aee03dc6a6429e1fae41604b2e9113c2d",
+  "content_hash": "sha256:ef07aece6c0673f6ff64ac6fc0a7839d6e513b695eee304478e34a75928159a1",
   "datasheet_url": "https://www.lcsc.com/datasheet/C52941388.pdf",
   "description": "worldsemi WS2812B-1313-V6",
   "footprint_name": "LED-SMD_4P-L1.3-W1.3-P0.80_WS2812E-1313",
   "kicad_version_min": "9.0.0",
   "maturity": "reviewed",
   "mpn": "WS2812B-1313-V6",
-  "name": "ws2812b-1515",
+  "name": "ws2812b-1313",
   "provenance": {
     "added_at": "2026-06-16T14:55:31Z",
     "kicad_version": "9.0.0",
@@ -19,6 +19,6 @@
   },
   "symbol_name": "WS2812B-1313-V6",
   "tags": [],
-  "version": "0.1.0",
-  "watch_out_for": null
+  "version": "0.2.0",
+  "watch_out_for": "Originally vendored under the misnomer 'ws2812b-1515' (no real WS2812B-1515 exists). This IS the 1.3x1.3mm WS2812B-1313-V6 (LCSC C52941388). Symbol pin 4 was mislabeled 'VIN' by easyeda2kicad and corrected to 'DIN' (data-in) in v0.2.0 \u2014 the original swapped VDD/DIN on every LED. For a genuine 1.5mm part use sk6805-1515."
 }
