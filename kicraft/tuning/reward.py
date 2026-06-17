@@ -39,10 +39,14 @@ from kicraft.tuning.evaluate import EvalResult
 # costs ~6+ per board (crushing). Keep fab as the dominant axis.
 REF_DRC = 40.0
 REF_WALL_S = 120.0
-# Area scale (mm^2): a typical mid-size corpus board. Normalizes the size axis to
-# ~[0, 1+] like the others so the area weight trades off on the same footing
-# (a ~3000 mm^2 board costs one full area-weight unit).
-REF_AREA = 3000.0
+# Area scale (mm^2): the corpus baseline mean board area, so the size axis
+# normalizes to ~1.0 at baseline and trades off on the SAME footing as fab
+# (max 1.0) rather than dwarfing it. The first i10 baseline measured mean area
+# ~12621 mm^2 across the 16 train boards; an earlier guess of 3000 made the area
+# cost term ~1.26 -- larger than the entire fab term -- so the optimizer chased
+# small boards over routable ones, inverting the intent that fab is the gate.
+# Recalibrate here if the corpus's typical board size changes materially.
+REF_AREA = 12000.0
 
 
 @dataclass(frozen=True)
