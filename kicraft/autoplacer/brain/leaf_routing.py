@@ -167,6 +167,46 @@ def _deterministic_route_signature(
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
+def _array_inrow_stamp_stats(specs: list, skipped_keys: list) -> tuple[int, int]:
+    """(in_row_ties, in_row_skipped) for an array leaf's daisy-chain.
+
+    In-row hops are single straight ties (one waypoint); serpentine row-turn hops
+    are L/Z routes (multiple waypoints) OR were never emitted at all (no edge
+    channel fit). Either way a turn may legitimately fall back to FreeRouting, so
+    it must NOT count against the stamp gate -- only the in-row hops, which on a
+    healthy oriented array essentially always stamp, are measured. ``skipped_keys``
+    are the ``"ref.pad:reason"`` strings the stamp guard dropped.
+    """
+    in_row = [s for s in specs if len(getattr(s, "waypoints", []) or []) == 1]
+    keys = {f"{s.ref}.{s.pad}" for s in in_row}
+    n_skipped = sum(1 for k in skipped_keys if str(k).split(":", 1)[0] in keys)
+    return len(in_row), n_skipped
+
+
+def array_stamp_gate_tripped(specs: list, skipped_keys: list, cfg: dict[str, Any]) -> bool:
+    """True when an array leaf pre-stamped too few of its IN-ROW data hops.
+
+    A healthy array leaf stamps almost every straight in-row DOUT->DIN hop, so
+    FreeRouting has next to nothing left. A collapsed in-row stamp rate means the
+    channel is obstructed (a foreign pad in the data lane) and FreeRouting will be
+    handed the whole chain -- which it cannot finish on a dense array before the
+    build's wall-clock cap kills it. Row-turn hops are excluded (they may
+    legitimately go to FreeRouting), and the gate is floored at a minimum in-row
+    tie count, so a small array -- e.g. a 2x2 whose only un-stamped hop is its row
+    turn -- never false-fails.
+    """
+    if not cfg.get("array_stamp_gate_enabled", True):
+        return False
+    n_in_row, n_skipped = _array_inrow_stamp_stats(specs, skipped_keys)
+    if not n_in_row:
+        return False
+    min_ties = int(cfg.get("array_min_data_ties_for_gate", 6))
+    min_rate = float(cfg.get("array_min_stamp_rate", 0.5))
+    if n_in_row < min_ties:
+        return False
+    return (n_in_row - n_skipped) / n_in_row < min_rate
+
+
 def route_local_subcircuit(
     extraction: ExtractedSubcircuitBoard,
     solved_components: dict[str, Component],
@@ -558,6 +598,7 @@ def route_local_subcircuit(
     # carry only data. Keyed on the array spec, NOT leaf_is_fully_array (a 3-pin
     # header or other non-passive on the leaf must not disable it).
     _arr_specs: list = []
+    _arr_stamp_skipped: list = []
     if cfg.get("array_route_enabled", True) and cfg.get("arrays"):
         try:
             import pcbnew
@@ -589,17 +630,82 @@ def route_local_subcircuit(
             # visible, not hidden behind a clean-looking "stubs" count.
             if _arr_specs:
                 _arr_keys = {f"{s.ref}.{s.pad}" for s in _arr_specs}
-                _arr_skipped = [
+                _arr_stamp_skipped = [
                     s for s in _bo.get("skipped", [])
                     if s.split(":", 1)[0] in _arr_keys
                 ]
-                if _arr_skipped:
+                if _arr_stamp_skipped:
                     print(
-                        f"  array-router: {len(_arr_skipped)}/{len(_arr_specs)} "
-                        f"data tie(s) left to FreeRouting: {', '.join(_arr_skipped)}"
+                        f"  array-router: {len(_arr_stamp_skipped)}/{len(_arr_specs)} "
+                        f"data tie(s) left to FreeRouting: {', '.join(_arr_stamp_skipped)}"
                     )
         except Exception as exc:  # finishing step must never fail the leaf
             print(f"  WARNING: breakout stub step failed: {exc}")
+
+    # Layer-2 guardrail: a healthy array leaf pre-stamps almost its whole data
+    # chain so FreeRouting has next to nothing left. When the stamp rate collapses
+    # (the inter-member channel is obstructed -- e.g. a foreign pad sitting in the
+    # data lane, the KC-NZXXEE decaps-on-LEDs signature), the entire chain plus
+    # power falls to FreeRouting, which cannot finish a dense array before the
+    # build's wall-clock cap kills it (30 min -> no board -> raw-component
+    # preview). Reject the leaf fast and loud instead, naming the obstruction, so
+    # the real cause surfaces in seconds rather than a silent timeout.
+    if _arr_specs and array_stamp_gate_tripped(_arr_specs, _arr_stamp_skipped, cfg):
+        _n_inrow, _n_inrow_skipped = _array_inrow_stamp_stats(
+            _arr_specs, _arr_stamp_skipped
+        )
+        _stamped = _n_inrow - _n_inrow_skipped
+        _rate = _stamped / _n_inrow
+        _min_rate = float(cfg.get("array_min_stamp_rate", 0.5))
+        print(
+            f"  ARRAY GATE: only {_stamped}/{_n_inrow} in-row data ties stamped "
+            f"({_rate:.0%} < {_min_rate:.0%}) -- the inter-member data channel "
+            "is obstructed (a foreign pad in the data lane?). Rejecting the leaf "
+            "BEFORE FreeRouting rather than handing it a chain it cannot finish "
+            "in time. Skipped: " + ", ".join(_arr_stamp_skipped[:12])
+            + (" ..." if len(_arr_stamp_skipped) > 12 else "")
+        )
+        route_timing["route_local_subcircuit_total_s"] = round(
+            max(0.0, time.monotonic() - route_total_start), 3
+        )
+        _reason = "array_data_channel_obstructed"
+        return (
+            {
+                "enabled": True,
+                "skipped": True,
+                "reason": _reason,
+                "router": "freerouting",
+                "traces": 0,
+                "vias": 0,
+                "total_length_mm": 0.0,
+                "routed_internal_nets": [],
+                "failed_internal_nets": list(sorted(extraction.internal_net_names)),
+                "_trace_segments": [],
+                "_via_objects": [],
+                "validation": {
+                    "accepted": False,
+                    "rejected": True,
+                    "rejection_stage": _reason,
+                    "rejection_reasons": [_reason],
+                    "drc": {
+                        "violations": [],
+                        "report_text": (
+                            "Array leaf rejected before routing: data channel "
+                            "obstructed (in-row hops only; row turns excluded).\n"
+                            f"in_row_ties_total={_n_inrow}\n"
+                            f"in_row_ties_stamped={_stamped}\n"
+                            f"in_row_ties_skipped={_n_inrow_skipped}\n"
+                            f"all_array_ties={len(_arr_specs)}\n"
+                            f"in_row_stamp_rate={_rate:.3f} (min {_min_rate:.3f})\n"
+                            "skipped="
+                            + ", ".join(_arr_stamp_skipped) + "\n"
+                        ),
+                    },
+                },
+                "failed": True,
+            },
+            route_timing,
+        )
     # Route cache: a deterministic leaf (e.g. an array grid) has the same
     # placement every round, so re-running freerouting on it is wasted minutes.
     # Key a cache on the placement + routing-relevant config and reuse the

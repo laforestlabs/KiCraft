@@ -185,6 +185,50 @@ def leaf_is_fully_array(comps: dict[str, Component], arrays: list[dict]) -> bool
     return all(len(comps[r].pads) <= 2 for r in remaining)
 
 
+def _grid_member_bbox(grid: dict) -> tuple[float, float, float, float]:
+    """(min_x, min_y, max_x, max_y) of a placed grid's member pad bodies."""
+    xs = [c.x for c in grid["centers"]]
+    ys = [c.y for c in grid["centers"]]
+    hw, hh = grid["led_w"] / 2.0, grid["led_h"] / 2.0
+    return (min(xs) - hw, min(ys) - hh, max(xs) + hw, max(ys) + hh)
+
+
+def _assert_grids_disjoint(grids: list[dict]) -> None:
+    """Fail loudly if two array grids were placed over the same coordinates.
+
+    Every grid currently starts at the same origin (``x0, y0 = px, py``), so two
+    arrays on one leaf land on top of each other -- each member of grid B sits on
+    a member of grid A, and B's pads then block A's inter-member routing (the
+    KC-NZXXEE decap-array signature). Layer 1 removes the usual offender (a decap
+    array), but any future two-array leaf would silently produce a broken board.
+    A grid pair overlapping by more than half the smaller grid's footprint is a
+    contradiction, not a layout -- raise rather than route garbage.
+    """
+    for a in range(len(grids)):
+        for b in range(a + 1, len(grids)):
+            ax1, ay1, ax2, ay2 = _grid_member_bbox(grids[a])
+            bx1, by1, bx2, by2 = _grid_member_bbox(grids[b])
+            ox = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+            oy = max(0.0, min(ay2, by2) - max(ay1, by1))
+            overlap = ox * oy
+            if overlap <= 0:
+                continue
+            area_a = max(1e-9, (ax2 - ax1) * (ay2 - ay1))
+            area_b = max(1e-9, (bx2 - bx1) * (by2 - by1))
+            if overlap > 0.5 * min(area_a, area_b):
+                ga, gb = grids[a]["refs"], grids[b]["refs"]
+                raise ValueError(
+                    "array grids overlap on this leaf -- two ArraySpecs were "
+                    "placed on the same coordinates "
+                    f"({ga[0]}..{ga[-1]} and {gb[0]}..{gb[-1]}, "
+                    f"overlap {overlap:.1f}mm^2). Each grid is laid from the same "
+                    "origin, so they co-locate and block each other's routing. "
+                    "If one is a decoupling-cap array it should be dropped at "
+                    "synthesis (drop_decap_only_arrays); a genuine multi-array "
+                    "leaf needs distinct grid origins."
+                )
+
+
 def place_array_leaves(
     comps: dict[str, Component], arrays: list[dict], cfg: dict
 ) -> tuple[set[str], bool]:
@@ -257,6 +301,9 @@ def place_array_leaves(
 
     if not placed:
         return placed, False
+
+    # Belt-and-suspenders: no two grids may occupy the same coordinates.
+    _assert_grids_disjoint(grids)
 
     # Per-LED decoupling companions: 2-pad passives whose BOTH nets are
     # power/ground (a decap -- not a signal part like a series data resistor).

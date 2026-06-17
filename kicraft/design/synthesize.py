@@ -191,8 +191,15 @@ def run(
     # Deterministic BOM rule: thin per-LED decoupling to a couple of bulk caps for
     # a LOW-current LED array (loud + recorded in bom.assumptions). Must run BEFORE
     # the schematic / netlist / autoplacer artifacts are emitted from the BOM.
-    from kicraft.design.synthesis.array_decaps import normalize_array_decaps
+    from kicraft.design.synthesis.array_decaps import (
+        drop_decap_only_arrays,
+        normalize_array_decaps,
+    )
 
+    # A decap-only ArraySpec (per-LED bypass caps mistakenly declared as their
+    # own grid) would grid the caps on top of the LED array -> data ties blocked
+    # -> doomed route. Drop it first so the caps become array companions.
+    drop_decap_only_arrays(state.bom)
     normalize_array_decaps(state.bom)
 
     sheet_instances = build_sheet_instances(state.architecture, state.bom)
