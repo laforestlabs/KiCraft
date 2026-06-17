@@ -18,7 +18,7 @@ from kicraft.tuning.evaluate import (
     _effective_drc,
 )
 from kicraft.tuning.optimizer import load_optimizer, make_optimizer
-from kicraft.tuning.screen import _pearson
+from kicraft.tuning.screen import _pearson, _select_active, _spearman
 
 
 # --- space ----------------------------------------------------------------
@@ -305,6 +305,50 @@ def test_pearson():
     assert _pearson([1, 2, 3], [2, 4, 6]) == pytest.approx(1.0)
     assert _pearson([1, 2, 3], [6, 4, 2]) == pytest.approx(-1.0)
     assert _pearson([1, 1, 1], [1, 2, 3]) == 0.0  # constant -> 0
+
+
+def test_spearman_catches_monotone_nonlinear():
+    # A strongly monotone but curved relation: Spearman sees it as perfect,
+    # Pearson underrates it. This is exactly why curved knobs got screened out.
+    xs = [1, 2, 3, 4, 5, 6]
+    ys = [x ** 3 for x in xs]  # monotone increasing, non-linear
+    assert _spearman(xs, ys) == pytest.approx(1.0)
+    assert abs(_spearman(xs, ys)) > abs(_pearson(xs, ys))
+    # ties share the mean rank; a flat series correlates 0
+    assert _spearman([1, 1, 1], [1, 2, 3]) == 0.0
+
+
+def test_select_active_pins_are_always_active():
+    params = ["a", "b", "c", "d"]
+    corr = {"a": 0.9, "b": 0.8, "c": 0.05, "d": 0.01}
+    # 'd' is least-correlated but pinned -> must be active; screening fills the rest
+    active, frozen = _select_active(params, corr, top_k=2, pin=["d"])
+    assert "d" in active
+    assert active == ["d", "a"]            # pin first, then top-|corr|
+    assert set(frozen) == {"b", "c"}
+
+
+def test_select_active_without_pins_is_top_k_by_corr():
+    params = ["a", "b", "c", "d"]
+    corr = {"a": 0.1, "b": 0.9, "c": 0.5, "d": 0.0}
+    active, _ = _select_active(params, corr, top_k=2)
+    assert active == ["b", "c"]
+
+
+def test_select_active_ignores_invalid_and_dup_pins():
+    params = ["a", "b", "c"]
+    corr = {"a": 0.9, "b": 0.5, "c": 0.1}
+    active, _ = _select_active(
+        params, corr, top_k=2, pin=["c", "c", "not_a_param"])
+    assert active == ["c", "a"]            # dup + unknown dropped, then fill
+
+
+def test_select_active_pins_exceeding_topk_all_kept():
+    params = ["a", "b", "c", "d"]
+    corr = {p: 0.0 for p in params}
+    active, frozen = _select_active(params, corr, top_k=1, pin=["c", "d"])
+    assert active == ["c", "d"]            # honor all pins even past top_k
+    assert set(frozen) == {"a", "b"}
 
 
 # --- benchmark brief set + freeze -----------------------------------------

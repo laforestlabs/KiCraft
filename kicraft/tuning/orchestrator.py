@@ -49,10 +49,11 @@ class TuneSettings:
     timeout_s: int = 1200
     holdout_frac: float = 0.3
     split_seed: int = 0
-    top_k: int = 10
+    top_k: int = 12
     n_screen_samples: int = 40
     holdout_every: int = 1
     cma_seed: int = 0
+    pin_active: tuple[str, ...] = ()  # always-active knobs (screening fills the rest)
 
     def resolved(self) -> "TuneSettings":
         out = Path(self.out_dir)
@@ -102,11 +103,14 @@ def _setup_active(
         return sr
     log(f"[tune] screening {len(space.all_param_names())} params "
         f"({settings.n_screen_samples} samples x {len(tr)} train boards) ...")
+    if settings.pin_active:
+        log(f"[tune] pinned active: {list(settings.pin_active)}")
     sr = screen(
         tr, store=store, scratch_root=settings.scratch_root,
         n_samples=settings.n_screen_samples, seeds=settings.seeds,
         mode=settings.mode, scalarization=settings.scalarization,
-        top_k=settings.top_k, max_workers=settings.max_workers,
+        top_k=settings.top_k, pin=settings.pin_active,
+        max_workers=settings.max_workers,
         quality=settings.quality, timeout_s=settings.timeout_s,
         progress=lambda i, n, j: log(f"[tune]   screen {i}/{n}  J={j:.3f}"),
     )
