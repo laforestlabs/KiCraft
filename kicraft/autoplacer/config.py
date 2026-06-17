@@ -399,12 +399,15 @@ DEFAULT_CONFIG = {
 }
 
 
-# Only true layout heuristics belong here. Fab/circuit constraints
+# Only true layout/routing heuristics belong here. Fab/circuit constraints
 # (signal_width_mm, power_width_mm, via_drill_mm, via_size_mm, zone_*_mm,
 # pad_inset_margin_mm, thermal_radius_mm) are dictated by the fab's minimum
 # feature size and the schematic's current/voltage requirements -- they are
-# NOT optimization knobs. Operational params (freerouting_timeout_s,
-# freerouting_max_passes) are runtime budgets, not quality knobs. Board
+# NOT optimization knobs. ``freerouting_timeout_s`` stays a runtime budget (a
+# cap, not a quality dial). ``freerouting_max_passes`` / ``leaf_freerouting_max_passes``
+# ARE searched: more passes trade routing quality (shorter, fewer vias, more
+# complete) against wall-time, and the reward weighs that wall-time axis directly,
+# so they sit on the Pareto frontier rather than being a fixed budget. Board
 # dimensions (board_width_mm, board_height_mm) are derived from leaf areas
 # and enclosure constraints, not searched.
 CONFIG_SEARCH_SPACE = {
@@ -472,6 +475,15 @@ CONFIG_SEARCH_SPACE = {
     # that violate the sum*0.6 / max-child + spacing safety floors;
     # 3.5 ceiling matches the legacy "lots of slack" upper end.
     "parent_seed_area_overhead": {"min": 1.5, "max": 3.5, "sigma": 0.2, "type": "float"},
+    # --- Phase 1: routing-effort / routability knobs ---
+    # These steer the autorouter and dense-connector escapes, NOT fab geometry.
+    # max_passes is the dominant route-quality lever (effort vs wall-time); the
+    # fab-readiness bottleneck (most boards don't route clean) lives here, not in
+    # the spacing knobs the earlier sweeps tuned. Defaults: parent 20 / leaf 12 /
+    # escape 1.5mm. Ranges centered on the defaults with room both ways.
+    "freerouting_max_passes": {"min": 8, "max": 40, "sigma": 5, "type": "int"},
+    "leaf_freerouting_max_passes": {"min": 6, "max": 30, "sigma": 4, "type": "int"},
+    "signal_escape_length_mm": {"min": 0.5, "max": 3.0, "sigma": 0.3, "type": "float"},
 }
 
 
