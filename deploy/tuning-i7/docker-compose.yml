@@ -18,7 +18,7 @@ services:
       TIMEOUT: "600"      # per-eval cap (s)
       RUN_ID: "i10"       # fresh run id (i7/i8/i9 are prior runs; don't reuse)
       # TOPK: "12"                 # active params after screening (default 12)
-      # KICRAFT_BUILD_SLOTS: "6"   # concurrent evals; default = cores / 4
+      # KICRAFT_BUILD_SLOTS: "18"  # concurrent evals; default = cores*3/4 (eval pool = slots-1). Lower if RAM-bound.
       # KICRAFT_BRANCH: "main"
       # PIN: "freerouting_max_passes,psw_bbox_packing,..."   # always-active knobs (entrypoint has a sensible default)
       # ACTIVE: "edge_margin_mm,placement_clearance_mm,..."  # tune EXACTLY these, skip screening (overrides PIN)

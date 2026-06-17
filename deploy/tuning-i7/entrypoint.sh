@@ -41,11 +41,16 @@ find /usr/lib/jvm -name 'libawt_xawt.so' 2>/dev/null | grep -q . \
 echo "[entrypoint] FreeRouting JRE OK"
 
 cores="$(nproc)"
-# One build slot per ~4 hardware threads: each eval is itself multi-threaded
-# (leaf solvers + a FreeRouting JVM), so this runs a few evals concurrently
-# without oversubscribing. Override with KICRAFT_BUILD_SLOTS.
+# Eval concurrency. In practice ONE eval ~= ONE core: placement is single-threaded
+# Python (numpy threads pinned for determinism) and FreeRouting is a ~single-
+# threaded JVM, so the old cores/4 left a 24-thread box ~75% idle. This container
+# is dedicated to tuning, so size for throughput: ~3/4 of threads, leaving headroom
+# for the OS + orchestrator + JVM GC. The eval pool is sized at slots-1
+# (see kicraft/tuning/runner.py:default_workers), so slots=18 -> 17 concurrent.
+# Override with KICRAFT_BUILD_SLOTS (lower it if you see the box swapping --
+# each eval is a pcbnew process + a FreeRouting JVM, roughly ~1 GB).
 if [ -z "${KICRAFT_BUILD_SLOTS:-}" ]; then
-    KICRAFT_BUILD_SLOTS=$(( cores / 4 ))
+    KICRAFT_BUILD_SLOTS=$(( cores * 3 / 4 ))
     [ "$KICRAFT_BUILD_SLOTS" -lt 2 ] && KICRAFT_BUILD_SLOTS=2
 fi
 export KICRAFT_BUILD_SLOTS
