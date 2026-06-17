@@ -1125,6 +1125,27 @@ class AccountStore:
                 (user_id,)).fetchall()
         return [self._row_to_project(r) for r in rows]
 
+    def list_orphaned_running_projects(
+            self, older_than_s: float = 120) -> list[Project]:
+        """Projects stuck at 'running' that never enqueued a build (no build_jobs
+        row) and are older than `older_than_s`.
+
+        These died during the LLM schematic stages (e.g. a web restart wiped the
+        in-process run before synthesis named the board), so unlike build-stage
+        orphans there is no build_jobs row for the reaper to key on and nothing
+        on disk to recover -- only the row needs closing. The age floor dodges
+        the create_project -> _LIVE_RUNS registration window of a genuinely
+        just-started run."""
+        cutoff = (dt.datetime.now(dt.timezone.utc)
+                  - dt.timedelta(seconds=older_than_s)).isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM projects WHERE status='running' AND created_at < ? "
+                "AND id NOT IN (SELECT project_id FROM build_jobs "
+                "WHERE project_id IS NOT NULL) ORDER BY id",
+                (cutoff,)).fetchall()
+        return [self._row_to_project(r) for r in rows]
+
     # ---- support reports ---------------------------------------------------
 
     @staticmethod
