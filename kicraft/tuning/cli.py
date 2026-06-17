@@ -27,7 +27,8 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--mode", choices=["replay", "compose"], default="replay")
     p.add_argument("--seeds", default="0,1,2",
                    help="comma-separated routing seeds for replication (default 0,1,2)")
-    p.add_argument("--scalarization", choices=["correctness", "balanced", "speed"],
+    p.add_argument("--scalarization",
+                   choices=["correctness", "balanced", "speed", "all_four"],
                    default="balanced")
     p.add_argument("--workers", type=int, default=None,
                    help="max concurrent evals (default: build slots - 1)")

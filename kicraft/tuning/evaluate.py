@@ -40,6 +40,14 @@ from kicraft.tuning import workspace as ws
 # 100 keeps a ~10x margin over the worst real board while letting fab lead.
 MISSING_BOARD_PENALTY = 100
 
+# Area-axis sentinel for a missing/empty board (mm^2). Smaller area is better, so
+# a degenerate empty board (which has a tiny or even zero outline) would otherwise
+# WIN the size objective. Pin it to a crushing value: real corpus boards span
+# ~1200-5200 mm^2, so 30000 (~6x the largest) guarantees an empty/failed board
+# can never out-score a board that actually routes on the area axis. Mirrors the
+# role of MISSING_BOARD_PENALTY on the DRC axis.
+MISSING_BOARD_AREA_MM2 = 30000.0
+
 
 def _effective_drc(*, fab_ready: bool, traces: int, shorts: int, unconnected: int) -> int:
     """DRC-axis value for a verified board, guarding the degenerate optimum.
@@ -54,6 +62,55 @@ def _effective_drc(*, fab_ready: bool, traces: int, shorts: int, unconnected: in
     if not fab_ready and traces == 0:
         return MISSING_BOARD_PENALTY
     return shorts + unconnected
+
+
+def _effective_area(*, fab_ready: bool, traces: int, area_mm2: float) -> float:
+    """Area-axis value for a verified board, guarding the degenerate optimum.
+
+    Same spirit as ``_effective_drc``: an empty board (no copper, not fab-ready)
+    must not win the smaller-is-better size objective, and a measurement failure
+    (``area_mm2 <= 0`` on a real board) must not masquerade as a tiny board.
+    Both collapse to the crushing ``MISSING_BOARD_AREA_MM2`` sentinel.
+    """
+    if (not fab_ready and traces == 0) or area_mm2 <= 0.0:
+        return MISSING_BOARD_AREA_MM2
+    return area_mm2
+
+
+def _measure_geometry(board_path: Path) -> tuple[float, float]:
+    """(board_area_mm2, orderedness 0-100) for a routed ``.kicad_pcb``.
+
+    Reconstructs a ``BoardState`` from the finished board (the same extraction the
+    placer's hardware adapter uses) and reads two layout-quality signals back out:
+
+    * **area** — the Edge.Cuts bounding-box area (``board_width * board_height``),
+      the lever for the "minimize board size" objective.
+    * **orderedness** — the mean of the placement scorer's geometry-derived
+      sub-scores: rotation alignment (parts at 0/90/180/270), board aspect ratio,
+      bbox packing tightness, and courtyard non-overlap. These four are computed
+      purely from positions/rotations/outline, so they survive the round-trip
+      through a routed board that has lost the placer's group/net metadata.
+
+    Scored with ``DEFAULT_CONFIG`` (not the candidate overlay) so the metric is a
+    fixed yardstick that fairly compares candidates. Best-effort: any failure
+    returns ``(0.0, 0.0)`` and the ``_effective_area`` guard penalizes the zero.
+    """
+    from kicraft.autoplacer.brain.placement_scorer import PlacementScorer
+    from kicraft.autoplacer.config import DEFAULT_CONFIG
+    from kicraft.autoplacer.hardware.adapter import KiCadAdapter
+
+    cfg = dict(DEFAULT_CONFIG)
+    adapter = KiCadAdapter(str(board_path), config=cfg)
+    state = adapter.load()
+    area = max(0.0, state.board_width) * max(0.0, state.board_height)
+    score = PlacementScorer(state, config=cfg).score()
+    ordered = (
+        score.rotation_score
+        + score.aspect_ratio
+        + score.bbox_packing
+        + score.courtyard_overlap
+    ) / 4.0
+    return (round(area, 1), round(ordered, 2))
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -85,6 +142,8 @@ class EvalResult:
     total_length_mm: float
     wall_s: float
     error: str = ""
+    board_area_mm2: float = 0.0  # Edge.Cuts bbox area (effective; size axis, MINIMIZE)
+    orderedness: float = 0.0     # mean layout-quality sub-score 0-100 (MAXIMIZE)
 
     def as_row(self) -> dict:
         return asdict(self)
@@ -169,6 +228,8 @@ def evaluate_config(
             fab_ready=False, shorts=shorts, unconnected=unconnected, drc_total=drc,
             traces=traces, vias=vias, total_length_mm=length, wall_s=round(wall, 1),
             error=err,
+            # No usable board to measure: crush the size axis, zero the quality axis.
+            board_area_mm2=MISSING_BOARD_AREA_MM2, orderedness=0.0,
         )
 
     try:
@@ -238,6 +299,16 @@ def evaluate_config(
     tracks = v.get("tracks", {}) or {}
     traces = int(tracks.get("traces", 0) or 0)
     fab_ready = bool(v.get("ok", False)) and rc == 0
+
+    # Geometry axes (size + orderedness). Best-effort: a measurement failure
+    # leaves area_raw at 0.0, which _effective_area then crushes to the sentinel
+    # so it can never read as a desirably-tiny board.
+    area_raw, ordered = 0.0, 0.0
+    try:
+        area_raw, ordered = _measure_geometry(board_path)
+    except Exception:  # noqa: BLE001
+        pass
+
     result = EvalResult(
         config_hash=config_hash, board=board, seed=seed, mode=mode, rc=rc,
         fab_ready=fab_ready, shorts=shorts, unconnected=unconnected,
@@ -247,6 +318,9 @@ def evaluate_config(
         vias=int(tracks.get("vias", 0) or 0),
         total_length_mm=round(float(tracks.get("total_length_mm", 0.0) or 0.0), 2),
         wall_s=round(wall, 1), error=err,
+        board_area_mm2=_effective_area(
+            fab_ready=fab_ready, traces=traces, area_mm2=area_raw),
+        orderedness=ordered,
     )
     if cleanup:
         shutil.rmtree(dest, ignore_errors=True)

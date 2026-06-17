@@ -1,9 +1,11 @@
-"""Aggregate raw EvalResults into the 3-axis objective + scalarization.
+"""Aggregate raw EvalResults into the multi-axis objective + scalarization.
 
 Objective axes (the user's "Balanced / Pareto" choice):
-  fab_ready_rate  (MAXIMIZE)  fraction of boards that route DRC-clean
-  mean_drc        (MINIMIZE)  mean shorts+unconnected across boards
-  mean_wall_s     (MINIMIZE)  mean place+route wall-time across boards
+  fab_ready_rate   (MAXIMIZE)  fraction of boards that route DRC-clean
+  mean_drc         (MINIMIZE)  mean shorts+unconnected across boards
+  mean_wall_s      (MINIMIZE)  mean place+route wall-time across boards
+  mean_area_mm2    (MINIMIZE)  mean Edge.Cuts bbox area across boards (board size)
+  mean_orderedness (MAXIMIZE)  mean layout-quality sub-score 0-100 across boards
 
 Routing (FreeRouting) is only best-effort deterministic, so each (config, board)
 is replicated over K seeds and averaged here; placement is byte-deterministic, so
@@ -37,6 +39,10 @@ from kicraft.tuning.evaluate import EvalResult
 # costs ~6+ per board (crushing). Keep fab as the dominant axis.
 REF_DRC = 40.0
 REF_WALL_S = 120.0
+# Area scale (mm^2): a typical mid-size corpus board. Normalizes the size axis to
+# ~[0, 1+] like the others so the area weight trades off on the same footing
+# (a ~3000 mm^2 board costs one full area-weight unit).
+REF_AREA = 3000.0
 
 
 @dataclass(frozen=True)
@@ -46,6 +52,8 @@ class BoardAggregate:
     fab_ready_rate: float  # fraction of seeds that were fab-ready
     mean_drc: float        # mean shorts+unconnected over seeds
     mean_wall_s: float
+    mean_area_mm2: float = 0.0   # mean effective board area over seeds (MINIMIZE)
+    mean_orderedness: float = 0.0  # mean layout-quality 0-100 over seeds (MAXIMIZE)
 
 
 @dataclass(frozen=True)
@@ -55,11 +63,20 @@ class CorpusObjectives:
     mean_wall_s: float      # mean over boards (MINIMIZE)
     worst_board_fab: float  # min board fab_ready_rate (robustness)
     n_boards: int
+    mean_area_mm2: float = 0.0    # mean over boards (MINIMIZE)
+    mean_orderedness: float = 0.0  # mean over boards 0-100 (MAXIMIZE)
 
-    def axes(self) -> tuple[float, float, float]:
-        """The 3 comparison axes, all oriented so SMALLER is better."""
-        # negate fab so the whole tuple is "minimize" for a uniform dominance test
-        return (-self.fab_ready_rate, self.mean_drc, self.mean_wall_s)
+    def axes(self) -> tuple[float, float, float, float, float]:
+        """The comparison axes, all oriented so SMALLER is better."""
+        # negate fab and orderedness so the whole tuple is "minimize" for a
+        # uniform dominance test.
+        return (
+            -self.fab_ready_rate,
+            self.mean_drc,
+            self.mean_wall_s,
+            self.mean_area_mm2,
+            -self.mean_orderedness,
+        )
 
 
 def aggregate_board(results: Sequence[EvalResult]) -> BoardAggregate:
@@ -70,7 +87,9 @@ def aggregate_board(results: Sequence[EvalResult]) -> BoardAggregate:
     fab = sum(1 for r in results if r.fab_ready) / n
     drc = sum(r.drc_total for r in results) / n
     wall = sum(r.wall_s for r in results) / n
-    return BoardAggregate(board, n, fab, drc, wall)
+    area = sum(r.board_area_mm2 for r in results) / n
+    order = sum(r.orderedness for r in results) / n
+    return BoardAggregate(board, n, fab, drc, wall, area, order)
 
 
 def aggregate_corpus(board_aggs: Sequence[BoardAggregate]) -> CorpusObjectives:
@@ -80,8 +99,10 @@ def aggregate_corpus(board_aggs: Sequence[BoardAggregate]) -> CorpusObjectives:
     fab = sum(b.fab_ready_rate for b in board_aggs) / n
     drc = sum(b.mean_drc for b in board_aggs) / n
     wall = sum(b.mean_wall_s for b in board_aggs) / n
+    area = sum(b.mean_area_mm2 for b in board_aggs) / n
+    order = sum(b.mean_orderedness for b in board_aggs) / n
     worst = min(b.fab_ready_rate for b in board_aggs)
-    return CorpusObjectives(fab, drc, wall, worst, n)
+    return CorpusObjectives(fab, drc, wall, worst, n, area, order)
 
 
 def aggregate_results(results: Iterable[EvalResult]) -> CorpusObjectives:
@@ -114,12 +135,17 @@ def pareto_front(objs: Sequence[CorpusObjectives]) -> list[int]:
 
 # --- scalarization (CMA steering) -----------------------------------------
 
-# weights: how much each axis matters. fab is a reward (+), drc/time are costs (-),
-# robustness penalizes the gap between mean and worst board (overfit guard).
+# weights: how much each axis matters. fab/order are rewards (+), drc/time/area are
+# costs (-), robustness penalizes the gap between mean and worst board (overfit
+# guard). The legacy presets omit "area"/"order" keys, so .get() leaves those axes
+# at weight 0 and their behavior is byte-unchanged. "all_four" is the preset that
+# pursues every objective the user asked for: routability, size, speed, orderedness.
 SCALARIZATIONS: dict[str, dict[str, float]] = {
     "correctness": {"fab": 1.0, "drc": 0.30, "time": 0.05, "robust": 0.30},
     "balanced":    {"fab": 1.0, "drc": 0.25, "time": 0.20, "robust": 0.20},
     "speed":       {"fab": 1.0, "drc": 0.20, "time": 0.50, "robust": 0.15},
+    "all_four":    {"fab": 1.0, "drc": 0.25, "time": 0.20, "robust": 0.20,
+                    "area": 0.30, "order": 0.30},
 }
 
 
@@ -129,12 +155,15 @@ def scalarize(
     *,
     ref_drc: float = REF_DRC,
     ref_wall_s: float = REF_WALL_S,
+    ref_area: float = REF_AREA,
 ) -> float:
-    """Collapse the 3 axes (+ robustness) into a scalar CMA MAXIMIZES."""
+    """Collapse the objective axes (+ robustness) into a scalar CMA MAXIMIZES."""
     robust_gap = obj.fab_ready_rate - obj.worst_board_fab
     return (
         weights.get("fab", 1.0) * obj.fab_ready_rate
         - weights.get("drc", 0.0) * (obj.mean_drc / ref_drc)
         - weights.get("time", 0.0) * (obj.mean_wall_s / ref_wall_s)
+        - weights.get("area", 0.0) * (obj.mean_area_mm2 / ref_area)
+        + weights.get("order", 0.0) * (obj.mean_orderedness / 100.0)
         - weights.get("robust", 0.0) * robust_gap
     )

@@ -167,23 +167,27 @@ def build_payload(run_dir: str | Path) -> dict:
         try:
             train_rows: dict[int, dict] = {}
             for r in conn.execute(
-                "SELECT gen, config_hash, j, fab_ready_rate, mean_drc, mean_wall_s "
+                "SELECT gen, config_hash, j, fab_ready_rate, mean_drc, mean_wall_s, "
+                "mean_area_mm2, mean_orderedness "
                 "FROM generations WHERE is_train=1 ORDER BY gen, j"
             ):
                 # last row per gen wins => the max-j (best) candidate of that gen
                 train_rows[r["gen"]] = {
                     "hash": r["config_hash"], "j": r["j"],
                     "fab": r["fab_ready_rate"], "drc": r["mean_drc"],
-                    "wall": r["mean_wall_s"],
+                    "wall": r["mean_wall_s"], "area": r["mean_area_mm2"],
+                    "order": r["mean_orderedness"],
                 }
             hold_rows: dict[int, dict] = {}
             for r in conn.execute(
-                "SELECT gen, j, fab_ready_rate, mean_drc, mean_wall_s "
+                "SELECT gen, j, fab_ready_rate, mean_drc, mean_wall_s, "
+                "mean_area_mm2, mean_orderedness "
                 "FROM generations WHERE is_train=0 ORDER BY gen"
             ):
                 hold_rows[r["gen"]] = {
                     "j": r["j"], "fab": r["fab_ready_rate"],
                     "drc": r["mean_drc"], "wall": r["mean_wall_s"],
+                    "area": r["mean_area_mm2"], "order": r["mean_orderedness"],
                 }
             for g in sorted(set(train_rows) | set(hold_rows)):
                 gens.append({"gen": g, "train": train_rows.get(g),
@@ -220,10 +224,13 @@ def build_payload(run_dir: str | Path) -> dict:
         if not all(k in a for k in ("fab", "drc", "wall")):
             continue
         points.append({"hash": h, "fab": a["fab"], "drc": a["drc"],
-                       "wall": a["wall"],
+                       "wall": a["wall"], "area": a.get("area", 0.0),
+                       "order": a.get("order", 0.0),
                        "baseline": bool(a.get("baseline")) or h == baseline_hash})
     front_idx = set(pareto_front([
-        CorpusObjectives(p["fab"], p["drc"], p["wall"], p["fab"], 1) for p in points
+        CorpusObjectives(p["fab"], p["drc"], p["wall"], p["fab"], 1,
+                         p.get("area", 0.0), p.get("order", 0.0))
+        for p in points
     ])) if points else set()
     for i, p in enumerate(points):
         p["front"] = i in front_idx
@@ -231,7 +238,9 @@ def build_payload(run_dir: str | Path) -> dict:
     baseline = None
     if baseline_entry:
         baseline = {"fab": baseline_entry.get("fab"), "drc": baseline_entry.get("drc"),
-                    "wall": baseline_entry.get("wall")}
+                    "wall": baseline_entry.get("wall"),
+                    "area": baseline_entry.get("area"),
+                    "order": baseline_entry.get("order")}
 
     return {
         "run_dir": str(run_dir), "name": run_dir.name,

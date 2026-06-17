@@ -73,6 +73,7 @@ def _objective_from_record(rec: dict, n_boards: int) -> R.CorpusObjectives:
     return R.CorpusObjectives(
         fab_ready_rate=rec["fab"], mean_drc=rec["drc"], mean_wall_s=rec["wall"],
         worst_board_fab=rec["worst"], n_boards=n_boards,
+        mean_area_mm2=rec.get("area", 0.0), mean_orderedness=rec.get("order", 0.0),
     )
 
 
@@ -161,9 +162,11 @@ def run_tuning(
         )
         archive.append({"hash": bhash, "overlay": {}, "fab": bobj.fab_ready_rate,
                         "drc": bobj.mean_drc, "wall": bobj.mean_wall_s,
+                        "area": bobj.mean_area_mm2, "order": bobj.mean_orderedness,
                         "worst": bobj.worst_board_fab, "baseline": True})
         log(f"[tune] baseline: fab={bobj.fab_ready_rate:.2f} "
-            f"drc={bobj.mean_drc:.2f} wall={bobj.mean_wall_s:.0f}s")
+            f"drc={bobj.mean_drc:.2f} wall={bobj.mean_wall_s:.0f}s "
+            f"area={bobj.mean_area_mm2:.0f}mm2 order={bobj.mean_orderedness:.1f}")
 
     for gen in range(start_gen, settings.max_gens):
         if opt.stop():
@@ -187,10 +190,13 @@ def run_tuning(
                 run_id, gen, h, scalarization=settings.scalarization, j=j,
                 is_train=True, fab_ready_rate=obj.fab_ready_rate,
                 mean_drc=obj.mean_drc, mean_wall_s=obj.mean_wall_s,
+                mean_area_mm2=obj.mean_area_mm2, mean_orderedness=obj.mean_orderedness,
             )
             archive.append({"hash": h, "overlay": overlay,
                             "fab": obj.fab_ready_rate, "drc": obj.mean_drc,
-                            "wall": obj.mean_wall_s, "worst": obj.worst_board_fab})
+                            "wall": obj.mean_wall_s, "area": obj.mean_area_mm2,
+                            "order": obj.mean_orderedness,
+                            "worst": obj.worst_board_fab})
             if j > best_j:
                 best_j, best_overlay = j, overlay
         opt.tell(X, js)
@@ -209,6 +215,7 @@ def run_tuning(
                 j=R.scalarize(hobj, weights), is_train=False,
                 fab_ready_rate=hobj.fab_ready_rate, mean_drc=hobj.mean_drc,
                 mean_wall_s=hobj.mean_wall_s,
+                mean_area_mm2=hobj.mean_area_mm2, mean_orderedness=hobj.mean_orderedness,
             )
             ho_line = (f" | holdout fab={hobj.fab_ready_rate:.2f} "
                        f"drc={hobj.mean_drc:.2f}")
