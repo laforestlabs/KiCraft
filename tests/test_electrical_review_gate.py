@@ -40,17 +40,41 @@ def _enable(monkeypatch, reply):
     monkeypatch.setattr(_client_mod, "make_client", lambda s=None: _Fake(reply))
 
 
-def test_gate_off_by_default(monkeypatch, tmp_path):
-    monkeypatch.delenv("KICRAFT_ELECTRICAL_REVIEW", raising=False)
+def test_gate_disabled_when_env_off(monkeypatch, tmp_path):
+    # Explicit opt-out short-circuits before any client/Settings access.
+    monkeypatch.setenv("KICRAFT_ELECTRICAL_REVIEW", "0")
     r = _maybe_electrical_review(_state(), tmp_path)
     assert r["ran"] is False and r["blocked"] is False
 
 
+def test_gate_on_by_default(monkeypatch, tmp_path):
+    # No env var set -> the gate runs (on by default).
+    monkeypatch.delenv("KICRAFT_ELECTRICAL_REVIEW", raising=False)
+    monkeypatch.setattr(_config_mod.Settings, "from_env",
+                        classmethod(lambda cls, **k: Settings(api_key="x")))
+    monkeypatch.setattr(_client_mod, "make_client",
+                        lambda s=None: _Fake(json.dumps({"findings": []})))
+    r = _maybe_electrical_review(_state(), tmp_path)
+    assert r["ran"] is True and r["blocked"] is False
+
+
 def test_gate_skips_when_no_connections(monkeypatch, tmp_path):
-    monkeypatch.setenv("KICRAFT_ELECTRICAL_REVIEW", "1")
     empty = ConversationState(bom=BOM(parts=[], connections=[]))
     r = _maybe_electrical_review(empty, tmp_path)
     assert r["ran"] is False
+
+
+def test_gate_fail_soft_without_api_key(monkeypatch, tmp_path):
+    # On by default, but no API key -> Settings.from_env raises SystemExit, which
+    # MUST be caught so a keyless build never crashes.
+    monkeypatch.delenv("KICRAFT_ELECTRICAL_REVIEW", raising=False)
+
+    def _no_key(cls, **k):
+        raise SystemExit("OPENROUTER_API_KEY is not set")
+
+    monkeypatch.setattr(_config_mod.Settings, "from_env", classmethod(_no_key))
+    r = _maybe_electrical_review(_state(), tmp_path)
+    assert r["ran"] is False and r["blocked"] is False
 
 
 def test_gate_blocks_on_blocker(monkeypatch, tmp_path):

@@ -2542,21 +2542,22 @@ def _align_project_clearance_to_routing(project_dir: Path, stem: str, pcb: Path)
 def _maybe_electrical_review(state, project_dir: Path) -> dict:
     """Layer 4: optional LLM electrical-review fab gate.
 
-    Gated by ``KICRAFT_ELECTRICAL_REVIEW`` (off by default -- it costs one LLM
-    call per build, and a weak review model can false-block). Reviews the
-    committed design for topology/value/completeness defects the deterministic
-    gates and DRC cannot see, and reports whether a BLOCKER-severity finding
-    means a structurally-sound board should not be declared fab-ready.
+    ON by default; set ``KICRAFT_ELECTRICAL_REVIEW=0`` (or false/no/off) to
+    disable. Reviews the committed design for topology/value/completeness defects
+    the deterministic gates and DRC cannot see, and reports whether a
+    BLOCKER-severity finding means a structurally-sound board should not be
+    declared fab-ready.
 
-    Fail-soft: the enable decision reads the env var directly (so it never needs
-    an API key to stay off), and ANY infra error (no key, network, malformed
-    model output) skips the gate rather than blocking a sound board. Only a
-    definite blocker from a successful review blocks.
+    Fail-soft: the disable decision reads the env var directly (so honoring an
+    opt-out never needs an API key), and ANY error (no API key ->
+    ``Settings.from_env`` SystemExit, network, malformed model output) skips the
+    gate rather than blocking a sound board. Only a definite blocker from a
+    successful review blocks.
     """
     if state is None or state.bom is None or not state.bom.connections:
         return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
-    if os.environ.get("KICRAFT_ELECTRICAL_REVIEW", "").strip().lower() not in (
-        "1", "true", "yes", "on"
+    if os.environ.get("KICRAFT_ELECTRICAL_REVIEW", "").strip().lower() in (
+        "0", "false", "no", "off"
     ):
         return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
     try:
@@ -2582,7 +2583,7 @@ def _maybe_electrical_review(state, project_dir: Path) -> dict:
             return {"ran": False, "findings": [], "blocked": False, "cost_usd": res["cost_usd"]}
         return {"ran": True, "findings": res["findings"],
                 "blocked": has_blocker(res["findings"]), "cost_usd": res["cost_usd"]}
-    except Exception as e:  # never let a review-infra failure block a sound board
+    except (Exception, SystemExit) as e:  # Settings.from_env raises SystemExit w/o a key
         print(f"[build] electrical review skipped ({type(e).__name__}: {e})", file=sys.stderr)
         return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
 
