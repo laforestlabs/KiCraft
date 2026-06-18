@@ -8,6 +8,75 @@ the netlist.
 
 ---
 
+## UPDATE 2026-06-18 — Bucket A re-diagnosed + two fixes landed (branch `fix/connector-stranding-edge-flush`)
+
+The original Bucket-A hypothesis below ("the edge-extremity guarantee isn't
+holding for *parent-level loose connectors*") was **wrong** — verified against the
+actual boards (sheet membership + leaf geometry + pcbnew). **None of the 8
+stranded boards has a parent-local loose connector.** Bucket A is **three**
+distinct mechanisms:
+
+- **A1 — spurious back-side flip** (run_07; contributes run_20/run_25).
+  `placement_solver._assign_layers` auto-flips any THT part ≥50 mm² to B.Cu. A
+  USB-C / terminal-block connector qualifies → its pad X mirrors *and*
+  `edge_outward_angle` swaps left↔right (`types.py`), corrupting the compose
+  rotation filter → stranded. **No guard protected edge-zoned connectors.**
+- **A2 — leaf packing leaves same-edge connectors inboard** (run_08/19/21/25).
+  Several connectors share one edge; the column/row is longer than the leaf, so
+  the overflow wraps into a 2nd row/column inboard (run_19: 4 terminal blocks
+  need ~67 mm in a 55.7 mm leaf → TB2 strands; under the fast engine the whole
+  RELAY_OUTPUT leaf failed to place). run_08/25 are the "two-row, not co-aligned"
+  variant.
+- **A3 — cross-leaf same-edge competition** (run_09/22). Two leaves both claim
+  one edge; only one can be the parent extremity (run_22 MOTOR_1/MOTOR_2 both
+  right). **Not yet fixed** — see remaining work.
+
+**Binding-constraint table (ground truth — count from `rejection_reasons` AND the
+strict `unconnected==0` gate, not the rc):** the final gate
+`_verify_routed_board` returns `ok = accepted and shorts==0 and unconnected==0`,
+and `unconnected` is tracked *separately* from `rejection_reasons`. So Bucket C
+co-binds on 09/13/22/25 but is the *sole* binding constraint only on run_06 —
+fixing A/B clears more boards than chasing C's retry budget.
+
+| Constraint | Runs | |
+|---|---|---|
+| A only | 07, 08, 19, 20 | A clears |
+| A + C | 09, 25 | |
+| B only | 01, 05, 16 | B clears |
+| B + C | 13 | |
+| A + B | 21 | |
+| A + B + C | 22 | |
+| C only | 06 | completeness |
+
+**Fixes landed (validated by deterministic `replay --no-route` + `connector_edge_gaps`, $0):**
+1. **FIX A** — `_assign_layers` exempts edge-zoned connectors / parts with
+   `opening_direction` / `kind=="connector"` from the back-flip. run_07 J2/J3:
+   −5.76/−6.55 (stranded) → +0.38/+0.47 (flush). Test:
+   `test_assign_layers_keeps_edge_connectors_on_front`.
+2. **FIX B** — `_pin_edge_components` grows the leaf board along the edge's
+   parallel axis so all same-edge connectors fit flush in ONE line. run_19: all
+   4 TBs −17.62→−0.03 (and the leaf now *places*, vs failing); run_25: TB1
+   −11.87→−0.03 (all 4 flush). Test: `test_edge_group_grows_board.py`.
+
+Net deterministic placement result: **run_07/19/25 connectors fully flush, run_03
+(the fab-ready board) unchanged, 0 new unit-test failures** (534 passed; the 5
+fails are pre-existing: `test_build_zero_leaf ×3`, `test_kicraft_stage_cli` 1,
+`test_best_round_to_layout` 1).
+
+**Remaining Bucket-A work (precise, with the boards that need it):**
+- **run_08 residual (−2.02 mm).** FIX B co-aligned H1+J2 along the bottom, but a
+  ~2 mm dead leaf margin remains below the (now-extremal) connectors. Needs a
+  *leaf-outline clamp* on the zoned side — but do NOT just shrink the global
+  `connector_edge_inset`/margin: that band IS the copper-edge clearance Bucket B
+  depends on. Clamp only the dead margin where the zoned connector is already the
+  extremity (nothing past it).
+- **A3 cross-leaf (run_09/22).** `_ensure_edge_blocks_extremal` (compose) shifts
+  blocks one-axis and can't co-arrange two same-edge leaves along an edge. Lower
+  value: both boards ALSO have `unconnected>0`, so stranding alone isn't the
+  blocker. See FIX C in the session task list.
+
+---
+
 ## 1. Why this matters now
 
 The schematic side is handled: deterministic wiring gates (§9.16–§9.20) catch
