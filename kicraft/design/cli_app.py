@@ -2539,6 +2539,54 @@ def _align_project_clearance_to_routing(project_dir: Path, stem: str, pcb: Path)
               "to match the fine-pitch routing")
 
 
+def _maybe_electrical_review(state, project_dir: Path) -> dict:
+    """Layer 4: optional LLM electrical-review fab gate.
+
+    Gated by ``KICRAFT_ELECTRICAL_REVIEW`` (off by default -- it costs one LLM
+    call per build, and a weak review model can false-block). Reviews the
+    committed design for topology/value/completeness defects the deterministic
+    gates and DRC cannot see, and reports whether a BLOCKER-severity finding
+    means a structurally-sound board should not be declared fab-ready.
+
+    Fail-soft: the enable decision reads the env var directly (so it never needs
+    an API key to stay off), and ANY infra error (no key, network, malformed
+    model output) skips the gate rather than blocking a sound board. Only a
+    definite blocker from a successful review blocks.
+    """
+    if state is None or state.bom is None or not state.bom.connections:
+        return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
+    if os.environ.get("KICRAFT_ELECTRICAL_REVIEW", "").strip().lower() not in (
+        "1", "true", "yes", "on"
+    ):
+        return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
+    try:
+        from kicraft.server.client import make_client
+        from kicraft.server.config import Settings
+
+        from .synthesis.electrical_review import (
+            build_design_digest,
+            has_blocker,
+            review_design,
+        )
+
+        s = Settings.from_env()
+        client = make_client(s)
+        digest = build_design_digest(state, project_root=project_dir)
+        model = s.review_model or s.model
+        reasoning = ({"max_tokens": s.review_reasoning_tokens}
+                     if s.review_reasoning_tokens else None)
+        res = review_design(client, digest, model=model, reasoning=reasoning)
+        if not res["ok"]:
+            print(f"[build] electrical review skipped (model error: {res['error']})",
+                  file=sys.stderr)
+            return {"ran": False, "findings": [], "blocked": False, "cost_usd": res["cost_usd"]}
+        return {"ran": True, "findings": res["findings"],
+                "blocked": has_blocker(res["findings"]), "cost_usd": res["cost_usd"]}
+    except Exception as e:  # never let a review-infra failure block a sound board
+        print(f"[build] electrical review skipped ({type(e).__name__}: {e})", file=sys.stderr)
+        return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
+
+
 def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
                         project_dir: Path, pcb: Path,
                         *, done_label: str = "BUILD COMPLETE",
@@ -2624,6 +2672,31 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
                 file=sys.stderr,
             )
         return 7
+
+    # 4b. Layer-4 electrical-review gate (cost-gated, off by default): catches
+    #     designs that are structurally fab-ready (DRC-clean, all parts present)
+    #     but electrically wrong -- the class deterministic checks cannot judge.
+    review = _maybe_electrical_review(state, project_dir)
+    if review["ran"]:
+        for f in review["findings"]:
+            sev = f.get("severity", "note").upper()
+            print(f"[build]     review {sev}: [{f.get('area', '')}] {f.get('issue', '')}")
+        if review["blocked"]:
+            print(
+                f"[build]     kept board {pcb.name} for inspection (no fab package; "
+                f"electrical review found a blocker)",
+                file=sys.stderr,
+            )
+            blockers = "; ".join(f["issue"] for f in review["findings"]
+                                 if f.get("severity") == "blocker")
+            print(
+                f"error: routed board is NOT fab-ready -- electrical review blocker(s): {blockers}",
+                file=sys.stderr,
+            )
+            return 7
+        print(f"[build] 4/5 electrical review: "
+              f"{len(review['findings'])} non-blocking finding(s), "
+              f"cost ${review['cost_usd']:.4f}")
 
     if not do_fab:
         print(f"[build] 5/5 skipped fab export (--no-fab); verified board at {pcb.name}")
