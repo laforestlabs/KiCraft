@@ -126,6 +126,34 @@ def test_passive_device_input_pins_retyped_passive(tmp_path: Path) -> None:
     assert block.count("(pin passive") == 2
 
 
+def test_relay_input_pins_retyped_passive(tmp_path: Path) -> None:
+    # easyeda2kicad types a bare relay symbol's Reference "RLY" (instances are
+    # placed K1..Kn) and its coil/contact pins arrive `input`, tripping ERC
+    # pin_not_driven on the coil low-side net (the driver, e.g. a ULN2003
+    # collector, is typed Unspecified, not Output). A relay coil is a passive
+    # load, not a logic input, so the normalizer must retype it `passive`
+    # (matching KiCad's stock Relay:* library).
+    lib = tmp_path / "Rly.kicad_sym"
+    lib.write_text(
+        '(kicad_symbol_lib (version 20211014)\n'
+        '\t(symbol "SRD"\n'
+        '\t\t(property "Reference" "RLY" (at 0 0 0))\n'
+        '\t\t(symbol "SRD_0_1"\n'
+        '\t\t\t(pin input line (at -10 2.54 0) (length 5)'
+        ' (name "coil+") (number "1"))\n'
+        '\t\t\t(pin input line (at -10 0 0) (length 5)'
+        ' (name "coil-") (number "2"))\n'
+        '\t\t\t(pin input line (at 10 0 180) (length 5)'
+        ' (name "COM") (number "3"))\n'
+        '\t\t)\n'
+        '\t)\n'
+        ')\n'
+    )
+    block = extract_symbol_block("Rly", "SRD", stock_dir=tmp_path)
+    assert "(pin input" not in block
+    assert block.count("(pin passive") == 3
+
+
 def test_active_device_input_pins_preserved(tmp_path: Path) -> None:
     # Active devices (Reference "U", "Q", ...) keep their `input` pins: a
     # genuinely floating IC input SHOULD trip ERC, so the normalizer must not
