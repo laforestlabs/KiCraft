@@ -444,6 +444,62 @@ def _cmd_search_footprints(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_electrical_review(args: argparse.Namespace) -> int:
+    """Layer 3: independent LLM electrical review of a committed design.
+
+    Reviews the BOM + function-named netlist for topology/value/completeness
+    defects the deterministic §9 gates cannot judge. Prints a JSON report.
+    Exits 3 when --fail-on-blocker is set and a blocker is found.
+    """
+    from .synthesis.electrical_review import (
+        build_design_digest,
+        has_blocker,
+        review_design,
+    )
+
+    state_path = Path(args.state)
+    try:
+        state = _load_state(state_path)
+    except ValidationError as e:
+        print(f"schema validation failed:\n{e}", file=sys.stderr)
+        return 2
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"could not read {state_path}: {e}", file=sys.stderr)
+        return 2
+
+    if state.bom is None or not state.bom.connections:
+        print(json.dumps({"ok": False, "error": "no wired BOM to review",
+                          "findings": []}, indent=2))
+        return 0
+
+    project_root = state_path.resolve().parent.parent
+    digest = build_design_digest(state, project_root=project_root)
+    if args.digest_only:
+        print(digest)
+        return 0
+
+    from kicraft.server.client import make_client
+    from kicraft.server.config import Settings
+
+    settings = Settings.from_env()
+    client = make_client(settings)
+    # Default to the design model (deepseek-v4-flash -- cheap) but give it a
+    # higher thinking budget; the review is a one-shot reasoning task.
+    model = args.model or settings.review_model or settings.model
+    reasoning = ({"max_tokens": settings.review_reasoning_tokens}
+                 if settings.review_reasoning_tokens else None)
+    result = review_design(client, digest, model=model, reasoning=reasoning)
+    print(json.dumps({
+        "ok": result["ok"],
+        "error": result["error"],
+        "cost_usd": round(result["cost_usd"], 6),
+        "findings": result["findings"],
+    }, indent=2))
+    if args.fail_on_blocker and result["ok"] and has_blocker(result["findings"]):
+        return 3
+    return 0
+
+
 def _cmd_list_leaves(_: argparse.Namespace) -> int:
     leaves = _load_library_leaves()
     block = _format_available_leaves_block(leaves)
@@ -2483,6 +2539,54 @@ def _align_project_clearance_to_routing(project_dir: Path, stem: str, pcb: Path)
               "to match the fine-pitch routing")
 
 
+def _maybe_electrical_review(state, project_dir: Path) -> dict:
+    """Layer 4: optional LLM electrical-review fab gate.
+
+    Gated by ``KICRAFT_ELECTRICAL_REVIEW`` (off by default -- it costs one LLM
+    call per build, and a weak review model can false-block). Reviews the
+    committed design for topology/value/completeness defects the deterministic
+    gates and DRC cannot see, and reports whether a BLOCKER-severity finding
+    means a structurally-sound board should not be declared fab-ready.
+
+    Fail-soft: the enable decision reads the env var directly (so it never needs
+    an API key to stay off), and ANY infra error (no key, network, malformed
+    model output) skips the gate rather than blocking a sound board. Only a
+    definite blocker from a successful review blocks.
+    """
+    if state is None or state.bom is None or not state.bom.connections:
+        return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
+    if os.environ.get("KICRAFT_ELECTRICAL_REVIEW", "").strip().lower() not in (
+        "1", "true", "yes", "on"
+    ):
+        return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
+    try:
+        from kicraft.server.client import make_client
+        from kicraft.server.config import Settings
+
+        from .synthesis.electrical_review import (
+            build_design_digest,
+            has_blocker,
+            review_design,
+        )
+
+        s = Settings.from_env()
+        client = make_client(s)
+        digest = build_design_digest(state, project_root=project_dir)
+        model = s.review_model or s.model
+        reasoning = ({"max_tokens": s.review_reasoning_tokens}
+                     if s.review_reasoning_tokens else None)
+        res = review_design(client, digest, model=model, reasoning=reasoning)
+        if not res["ok"]:
+            print(f"[build] electrical review skipped (model error: {res['error']})",
+                  file=sys.stderr)
+            return {"ran": False, "findings": [], "blocked": False, "cost_usd": res["cost_usd"]}
+        return {"ran": True, "findings": res["findings"],
+                "blocked": has_blocker(res["findings"]), "cost_usd": res["cost_usd"]}
+    except Exception as e:  # never let a review-infra failure block a sound board
+        print(f"[build] electrical review skipped ({type(e).__name__}: {e})", file=sys.stderr)
+        return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
+
+
 def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
                         project_dir: Path, pcb: Path,
                         *, done_label: str = "BUILD COMPLETE",
@@ -2568,6 +2672,31 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
                 file=sys.stderr,
             )
         return 7
+
+    # 4b. Layer-4 electrical-review gate (cost-gated, off by default): catches
+    #     designs that are structurally fab-ready (DRC-clean, all parts present)
+    #     but electrically wrong -- the class deterministic checks cannot judge.
+    review = _maybe_electrical_review(state, project_dir)
+    if review["ran"]:
+        for f in review["findings"]:
+            sev = f.get("severity", "note").upper()
+            print(f"[build]     review {sev}: [{f.get('area', '')}] {f.get('issue', '')}")
+        if review["blocked"]:
+            print(
+                f"[build]     kept board {pcb.name} for inspection (no fab package; "
+                f"electrical review found a blocker)",
+                file=sys.stderr,
+            )
+            blockers = "; ".join(f["issue"] for f in review["findings"]
+                                 if f.get("severity") == "blocker")
+            print(
+                f"error: routed board is NOT fab-ready -- electrical review blocker(s): {blockers}",
+                file=sys.stderr,
+            )
+            return 7
+        print(f"[build] 4/5 electrical review: "
+              f"{len(review['findings'])} non-blocking finding(s), "
+              f"cost ${review['cost_usd']:.4f}")
 
     if not do_fab:
         print(f"[build] 5/5 skipped fab export (--no-fab); verified board at {pcb.name}")
@@ -3063,6 +3192,19 @@ def main(argv: list[str] | None = None) -> int:
     p_val = sub.add_parser("validate", help="validate a state.json file")
     p_val.add_argument("state", help="path to state.json")
     p_val.set_defaults(func=_cmd_validate)
+
+    p_erev = sub.add_parser(
+        "electrical-review",
+        help="LLM electrical review (Layer 3) of a committed design: topology, "
+             "values, decoupling, programming path, protection",
+    )
+    p_erev.add_argument("state", help="path to state.json")
+    p_erev.add_argument("--model", default=None, help="review model override")
+    p_erev.add_argument("--digest-only", action="store_true",
+                        help="print the structured review digest and exit (no LLM call)")
+    p_erev.add_argument("--fail-on-blocker", action="store_true",
+                        help="exit 3 if the review reports a blocker-severity finding")
+    p_erev.set_defaults(func=_cmd_electrical_review)
 
     p_list = sub.add_parser(
         "list-leaves",

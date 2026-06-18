@@ -171,7 +171,7 @@ class MockClient:
 
     # -- client surface -------------------------------------------------------
     def chat(self, messages, model=None, max_tokens=None, temperature=0.2,
-             progress=None, meta_ctx=None) -> dict:
+             progress=None, meta_ctx=None, reasoning=None) -> dict:
         text = self._text_for(meta_ctx)
         self._settle(progress, text)
         return {"text": text, "reasoning": None, "finish_reason": "stop",
