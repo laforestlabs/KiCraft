@@ -17,7 +17,11 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kicraft.design.models import is_power_or_ground_name
+from kicraft.design.models import (
+    GND_NET_PATTERNS,
+    POWER_NET_PATTERNS,
+    is_power_or_ground_name,
+)
 
 
 REQUIRED_SCHEMATIC_VERSION = 20250114
@@ -714,6 +718,229 @@ def check_no_dangling_signal_nets(architecture, bom) -> CheckResult:
     )
 
 
+# ---------- §9.16-§9.18 semantic wiring checks (pin function vs net role) ----------
+#
+# §9.10/§9.11 prove every endpoint pin EXISTS and is accounted for; they do not
+# prove the model bound the right FUNCTION to the right net. Because a
+# PinEndpoint addresses a pin by *number*, a weak wiring stage that ignores the
+# pin-name table (extras.symbol_pinouts) can assign nets by geometric pin order
+# and emit a netlist that is electrically legal -- ERC/DRC pass -- yet
+# functionally wrong: reversed MCU power, a fuse shorted across its own
+# terminals, an antenna feed tied to GND. These checks cross-read each part's
+# symbol pin NAMES against the role of the net every pin lands on and fail the
+# wiring commit with a precise, per-pin retry signal. All three are deliberately
+# conservative -- they fire only on unambiguous contradictions -- so a
+# correctly-wired design never trips them.
+
+# Pin NAMES that denote a positive supply rail. Differential analog inputs
+# (VIN+/VIN-/VINP/VINN) and bare numeric names ("0V", "5V" -- "0V" is the
+# *ground* common on DC-DC modules) are intentionally excluded; only unambiguous
+# supply names match, so the polarity check never trips on a correct connection.
+_POS_SUPPLY_PIN_RE = re.compile(
+    r"VDD|VCC"                        # VDD/VCC + AVDD/DVDD/VDDA/VDDIO/VCCIO (substring)
+    r"|^V(?:BAT|BUS|SYS|AA|IN|IO)$"   # exact supplies (VIN exact, not VIN-/VINP)
+    r"|^V\+$|^VPLUS$",
+    re.IGNORECASE,
+)
+# Pin NAMES that denote ground or the negative-most rail. "0V"/"0.0V" is the
+# 0-volt common used by isolated DC-DC modules and is ground, not a rail.
+_GND_PIN_RE = re.compile(
+    r"GND|VSS"                        # GND/AGND/DGND/PGND + VSS/AVSS/VSSA (substring)
+    r"|^V-$|^VMINUS$|^VEE$|^0V$|^0\.0+V$",
+    re.IGNORECASE,
+)
+
+# Reference-designator prefixes of genuinely two-terminal parts: a 2-pin part of
+# one of these classes with both pins on one net is shorted out / dead.
+_TWO_TERMINAL_REF_PREFIXES = frozenset({
+    "R", "RV", "RT", "RP", "VR",      # resistors / pots / thermistors
+    "C",                              # capacitors
+    "L", "FB", "FL",                  # inductors / ferrite beads
+    "D", "LED", "CR", "DZ", "TVS",    # diodes / LEDs / zeners / TVS
+    "F", "FU",                        # fuses
+    "Y", "XTAL",                      # 2-pin crystals / resonators
+    "ANT", "AE",                      # antennas
+})
+
+_ANTENNA_REF_PREFIXES = frozenset({"ANT", "AE"})
+# Antenna pin names that carry RF (must reach the feed line, never a rail/GND).
+_RF_FEED_PIN_RE = re.compile(r"FEED|RF|^ANT", re.IGNORECASE)
+
+_REF_ALPHA_RE = re.compile(r"^[A-Za-z]+")
+
+
+def _ref_prefix(ref: str) -> str:
+    m = _REF_ALPHA_RE.match(ref)
+    return m.group(0).upper() if m else ""
+
+
+def _net_is_ground(name: str) -> bool:
+    s = name.lstrip("/")
+    return any(p.search(s) for p in GND_NET_PATTERNS)
+
+
+def _net_is_positive_rail(name: str) -> bool:
+    s = name.lstrip("/")
+    return any(p.search(s) for p in POWER_NET_PATTERNS)
+
+
+def _pin_info_by_ref(bom):
+    """``({ref: {pin_number: {"name", "type"}}}, {ref: pin_count})``.
+
+    Tolerant of unresolvable symbols (those are reported by §9.10/§9.11); such
+    refs are simply absent, so the semantic checks skip them rather than
+    double-reporting a missing symbol.
+    """
+    from .symbol_pinout import SymbolNotFoundError, lookup_pins
+
+    info: dict[str, dict[str, dict]] = {}
+    pin_count: dict[str, int] = {}
+    for part in bom.parts:
+        try:
+            data = lookup_pins(part.symbol)
+        except (SymbolNotFoundError, ValueError):
+            continue
+        info[part.ref] = {
+            p["number"]: {
+                "name": p.get("name") or "",
+                "type": p.get("electrical_type") or "",
+            }
+            for p in data["pins"]
+        }
+        pin_count[part.ref] = len(data["pins"])
+    return info, pin_count
+
+
+def _nets_by_ref(bom):
+    """``{ref: {pin_number: net_name}}`` over BOM.connections."""
+    out: dict[str, dict[str, str]] = defaultdict(dict)
+    for c in bom.connections:
+        for ep in c.endpoints:
+            out[ep.ref][ep.pin] = c.net_name
+    return out
+
+
+def check_power_pin_polarity(bom) -> CheckResult:
+    """§9.16 -- a supply pin's NAME must agree with the polarity of its net.
+
+    A pin named VDD/VCC/VBAT/... wired to a ground net, or a GND/VSS/V- pin
+    wired to a positive rail, is the reversed-power mistake a wiring stage makes
+    when it binds pins by position instead of by name (the 8-channel DAQ board
+    tied the MCU's VDD pin to GND and its VSS pin to +3V3). ERC cannot see it --
+    both ends are valid power nets. Fires only when BOTH the pin name and the net
+    polarity are unambiguous AND opposite, so a correctly-wired rail never trips.
+    """
+    info, _ = _pin_info_by_ref(bom)
+    bad: list[str] = []
+    for c in bom.connections:
+        net_gnd = _net_is_ground(c.net_name)
+        net_pos = _net_is_positive_rail(c.net_name)
+        if not (net_gnd or net_pos):
+            continue
+        for ep in c.endpoints:
+            pin = info.get(ep.ref, {}).get(ep.pin)
+            if not pin:
+                continue
+            nm = pin["name"]
+            pos_pin = bool(_POS_SUPPLY_PIN_RE.search(nm))
+            gnd_pin = bool(_GND_PIN_RE.search(nm))
+            if pos_pin == gnd_pin:  # neither, or ambiguously both -> skip
+                continue
+            if pos_pin and net_gnd:
+                bad.append(
+                    f"{ep.ref}.{ep.pin} (pin {nm!r}, a positive supply) is wired to "
+                    f"ground net {c.net_name!r} -- power pins look reversed"
+                )
+            elif gnd_pin and net_pos:
+                bad.append(
+                    f"{ep.ref}.{ep.pin} (pin {nm!r}, a ground/negative pin) is wired to "
+                    f"positive rail {c.net_name!r} -- power pins look reversed"
+                )
+    return CheckResult(
+        name="9.16 power pin polarity",
+        ok=not bad,
+        message=(
+            "supply pins agree with net polarity"
+            if not bad
+            else f"{len(bad)} supply pin(s) on the wrong-polarity net"
+        ),
+        offenders=bad,
+    )
+
+
+def check_two_terminal_self_short(bom) -> CheckResult:
+    """§9.17 -- a two-terminal part with both pins on one net is shorted out.
+
+    A fuse, resistor, inductor, diode, or antenna whose two terminals land on
+    the SAME net does nothing (the +/-12V board wired both ends of its input
+    fuse AND its reverse-polarity diode across VIN, silently disabling all input
+    protection). ERC passes because the net is otherwise valid. Only 2-pin parts
+    of known two-terminal classes are considered, and only when BOTH pins are
+    actually wired (a pin in no_connect_pins is not a short).
+    """
+    _, pin_count = _pin_info_by_ref(bom)
+    nets = _nets_by_ref(bom)
+    bad: list[str] = []
+    for part in bom.parts:
+        if pin_count.get(part.ref) != 2:
+            continue
+        if _ref_prefix(part.ref) not in _TWO_TERMINAL_REF_PREFIXES:
+            continue
+        wired = nets.get(part.ref, {})
+        if len(wired) == 2 and len(set(wired.values())) == 1:
+            bad.append(
+                f"{part.ref} ({part.symbol}) has both terminals on net "
+                f"{next(iter(set(wired.values())))!r} -- the part is shorted out "
+                f"and does nothing"
+            )
+    return CheckResult(
+        name="9.17 two-terminal self-short",
+        ok=not bad,
+        message=(
+            "no two-terminal part shorts itself"
+            if not bad
+            else f"{len(bad)} two-terminal part(s) shorted across a single net"
+        ),
+        offenders=bad,
+    )
+
+
+def check_rf_feed_isolation(bom) -> CheckResult:
+    """§9.18 -- an antenna's RF feed pin must not be tied to a rail or ground.
+
+    A chip/PCB antenna whose feed pin lands on GND (or a power rail) cannot
+    radiate (the nRF52 beacon shorted its antenna feed net to GND, so the
+    radio's output never reached the antenna). ERC sees only a valid GND
+    connection. Checks parts with an antenna refdes whose feed/RF-named pin sits
+    on a ground or positive-rail net.
+    """
+    info, _ = _pin_info_by_ref(bom)
+    nets = _nets_by_ref(bom)
+    bad: list[str] = []
+    for part in bom.parts:
+        if _ref_prefix(part.ref) not in _ANTENNA_REF_PREFIXES:
+            continue
+        for num, pin in info.get(part.ref, {}).items():
+            if not _RF_FEED_PIN_RE.search(pin["name"]):
+                continue
+            net = nets.get(part.ref, {}).get(num)
+            if net and (_net_is_ground(net) or _net_is_positive_rail(net)):
+                bad.append(
+                    f"{part.ref}.{num} (antenna feed pin {pin['name']!r}) is tied to "
+                    f"{net!r} -- the antenna cannot radiate"
+                )
+    return CheckResult(
+        name="9.18 rf feed isolation",
+        ok=not bad,
+        message=(
+            "antenna feed pins reach the RF line"
+            if not bad
+            else f"{len(bad)} antenna feed pin(s) tied to a rail/ground"
+        ),
+        offenders=bad,
+    )
+
+
 # ---------- §9.9 connectivity (Stage B) ----------
 
 
@@ -1040,6 +1267,9 @@ def collect_validations(
     if bom is not None and bom.connections:
         results.append(check_pin_existence(bom))
         results.append(check_net_coverage(bom))
+        results.append(check_power_pin_polarity(bom))
+        results.append(check_two_terminal_self_short(bom))
+        results.append(check_rf_feed_isolation(bom))
         results.append(check_connectivity(project_dir, project_stem))
         results.append(check_erc(project_dir, project_stem))
         results.append(check_netlist_faithfulness(project_dir, project_stem, bom))

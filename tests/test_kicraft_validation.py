@@ -29,9 +29,12 @@ from kicraft.design.synthesis.validation import (
     check_named_refs_exist,
     check_no_dangling_signal_nets,
     check_pin_directions,
+    check_power_pin_polarity,
+    check_rf_feed_isolation,
     check_schematic_version,
     check_sheetfile_refs_resolve,
     check_sheets_have_parts,
+    check_two_terminal_self_short,
     run_validations,
 )
 
@@ -584,3 +587,127 @@ def test_dangling_signal_nets_offender_names_the_pin() -> None:
     offenders = check_no_dangling_signal_nets(arch, bom).offenders
     assert any("J1.A6" in o for o in offenders)
     assert any("U2.23" in o for o in offenders)
+
+
+# ---------- §9.16-§9.18 semantic wiring checks ----------
+#
+# These cross-read each part's symbol pin NAMES against the polarity/role of the
+# net every pin lands on, catching functionally-wrong netlists that are still
+# ERC/DRC-legal (reversed power, a fuse shorted across itself, an antenna feed
+# tied to GND). Pin data is faked via lookup_pins so the tests are hermetic.
+
+import kicraft.design.synthesis.symbol_pinout as _sp
+
+
+def _fake_lookup(pinmap):
+    """lookup_pins stand-in over {symbol: [(num, name, electrical_type), ...]}."""
+    from kicraft.design.synthesis.symbol_pinout import SymbolNotFoundError
+
+    def _lookup(lib_id, *a, **k):
+        if lib_id not in pinmap:
+            raise SymbolNotFoundError(lib_id)
+        return {
+            "symbol": lib_id,
+            "unit_count": 1,
+            "pins": [
+                {"number": n, "name": nm, "electrical_type": t}
+                for (n, nm, t) in pinmap[lib_id]
+            ],
+        }
+
+    return _lookup
+
+
+def _bpart(ref, symbol, sheet="MCU"):
+    return BomPart(ref=ref, value="x", symbol=symbol,
+                   footprint="Package_SO:SOIC-8", sheet=sheet)
+
+
+def test_power_pin_polarity_flags_reversed_supply(monkeypatch) -> None:
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(
+        {"Fake:MCU": [("1", "VDD", "power_in"), ("2", "VSS", "power_in")]}))
+    bom = BOM(parts=[_bpart("U1", "Fake:MCU")], connections=[
+        NetConnection(net_name="GND", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U1", pin="1")]),   # VDD -> GND
+        NetConnection(net_name="+3V3", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U1", pin="2")]),   # VSS -> +3V3
+    ])
+    res = check_power_pin_polarity(bom)
+    assert not res.ok
+    assert len(res.offenders) == 2
+
+
+def test_power_pin_polarity_passes_correct_supply(monkeypatch) -> None:
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(
+        {"Fake:MCU": [("1", "VDD", "power_in"), ("2", "VSS", "power_in")]}))
+    bom = BOM(parts=[_bpart("U1", "Fake:MCU")], connections=[
+        NetConnection(net_name="+3V3", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U1", pin="1")]),
+        NetConnection(net_name="GND", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U1", pin="2")]),
+    ])
+    assert check_power_pin_polarity(bom).ok
+
+
+def test_power_pin_polarity_ignores_differential_input(monkeypatch) -> None:
+    # A differential analog input (VIN-/VINP) must NOT be read as a supply.
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(
+        {"Fake:ADC": [("1", "VIN-", "input"), ("2", "VINP", "input")]}))
+    bom = BOM(parts=[_bpart("U2", "Fake:ADC")], connections=[
+        NetConnection(net_name="GND", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U2", pin="1")]),
+        NetConnection(net_name="+3V3", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U2", pin="2")]),
+    ])
+    assert check_power_pin_polarity(bom).ok
+
+
+def test_two_terminal_self_short_flags_fuse_across_one_net(monkeypatch) -> None:
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(
+        {"Device:Fuse": [("1", "~", "passive"), ("2", "~", "passive")]}))
+    bom = BOM(parts=[_bpart("F1", "Device:Fuse", sheet="POWER")], connections=[
+        NetConnection(net_name="VIN", sheet="POWER",
+                      endpoints=[PinEndpoint(ref="F1", pin="1"),
+                                 PinEndpoint(ref="F1", pin="2")]),
+    ])
+    res = check_two_terminal_self_short(bom)
+    assert not res.ok
+    assert len(res.offenders) == 1
+
+
+def test_two_terminal_self_short_passes_series_part(monkeypatch) -> None:
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(
+        {"Device:Fuse": [("1", "~", "passive"), ("2", "~", "passive")]}))
+    bom = BOM(parts=[_bpart("F1", "Device:Fuse", sheet="POWER")], connections=[
+        NetConnection(net_name="VIN", sheet="POWER",
+                      endpoints=[PinEndpoint(ref="F1", pin="1")]),
+        NetConnection(net_name="VOUT", sheet="POWER",
+                      endpoints=[PinEndpoint(ref="F1", pin="2")]),
+    ])
+    assert check_two_terminal_self_short(bom).ok
+
+
+def test_rf_feed_isolation_flags_antenna_feed_on_gnd(monkeypatch) -> None:
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(
+        {"Fake:ANT": [("1", "FEED", "passive"), ("2", "GND", "passive")]}))
+    bom = BOM(parts=[_bpart("ANT1", "Fake:ANT", sheet="RF")], connections=[
+        NetConnection(net_name="GND", sheet="RF",
+                      endpoints=[PinEndpoint(ref="ANT1", pin="1")]),  # FEED -> GND
+        NetConnection(net_name="GND", sheet="RF",
+                      endpoints=[PinEndpoint(ref="ANT1", pin="2")]),
+    ])
+    res = check_rf_feed_isolation(bom)
+    assert not res.ok
+    assert len(res.offenders) == 1
+
+
+def test_rf_feed_isolation_passes_feed_on_rf_net(monkeypatch) -> None:
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(
+        {"Fake:ANT": [("1", "FEED", "passive"), ("2", "GND", "passive")]}))
+    bom = BOM(parts=[_bpart("ANT1", "Fake:ANT", sheet="RF")], connections=[
+        NetConnection(net_name="ANT_FEED", sheet="RF",
+                      endpoints=[PinEndpoint(ref="ANT1", pin="1")]),
+        NetConnection(net_name="GND", sheet="RF",
+                      endpoints=[PinEndpoint(ref="ANT1", pin="2")]),
+    ])
+    assert check_rf_feed_isolation(bom).ok
