@@ -265,6 +265,10 @@ class BomPart(BaseModel):
     mpn: str | None = None
     datasheet: str | None = None
     sourcing_note: str | None = None
+    # Which copper side the part mounts on. "back" places it on B.Cu (the
+    # footprint is flipped at stamp time); None/"front" is the default F.Cu.
+    # Set "back" for back-mounted parts (e.g. a "header on the back side").
+    side: Literal["front", "back"] | None = None
     # Set on parts that came from a Leaf Library entry. "<name>@<version>".
     # None for LLM-emitted parts. Synthesis applies the renumber map to
     # parts where this is set; LLM parts pass through unchanged.

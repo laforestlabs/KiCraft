@@ -196,6 +196,7 @@ def run(
     )
     from kicraft.design.synthesis.array_decaps import (
         drop_decap_only_arrays,
+        isolate_array_sheets,
         normalize_array_decaps,
     )
 
@@ -208,6 +209,12 @@ def run(
     # to fit beside the LEDs (0603, or 0402 for sub-2.5mm LEDs). Runs after the
     # thinning so only surviving caps are touched.
     downsize_array_decap_footprints(state.bom)
+    # Keep array sheets pure: a non-member, non-companion part (a header, an MCU)
+    # sharing an array's sheet gets stranded ~60mm from the locked grid by the
+    # leaf solver (KC-WXN3SN). Move it to its own sheet -> its own leaf, composed
+    # adjacent to the array. Adds a sheet, so re-guard the root-stem collision.
+    isolate_array_sheets(state.bom, state.architecture)
+    ensure_leaf_stems_distinct(state.project_stem, state.architecture.sheets)
 
     sheet_instances = build_sheet_instances(state.architecture, state.bom)
 

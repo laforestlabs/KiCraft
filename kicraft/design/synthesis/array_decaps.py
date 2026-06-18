@@ -18,7 +18,15 @@ kicraft-no-fallbacks-fail-loudly). High-current arrays (a 50-LED+ WS2812 string 
 """
 from __future__ import annotations
 
-from kicraft.design.models import BOM, is_power_or_ground_name
+from kicraft.design.models import (
+    BOM,
+    Architecture,
+    InterSheetNet,
+    NetConnection,
+    Sheet,
+    SheetPin,
+    is_power_or_ground_name,
+)
 
 # WS2812-class addressable LED: ~3x20 mA = 60 mA per device at full white. We use
 # this conservative MAX -- overestimating current makes the rule LESS likely to
@@ -217,3 +225,168 @@ def normalize_array_decaps(
         print(f"  [synth] {note}")
         bom.assumptions.append(note)
     return sorted(dropped, key=_ref_sort_key)
+
+
+# Connector/header ref prefixes -- a displaced array-sheet part with one of these
+# names the new sheet "HEADER"; anything else gets the generic "SUPPORT".
+_CONNECTOR_PREFIXES = {"J", "CN", "P", "JP", "TB", "CONN"}
+
+
+def _ref_prefix(ref: str) -> str:
+    return "".join(c for c in ref if not c.isdigit())
+
+
+def _isolation_sheet_names(
+    impure_refs: list[str], taken_names: set[str], taken_stems: set[str]
+) -> tuple[str, str]:
+    """A unique, shape-valid (Sheet.name, Sheet.stem) for the displaced parts."""
+    all_conn = bool(impure_refs) and all(
+        _ref_prefix(r) in _CONNECTOR_PREFIXES for r in impure_refs
+    )
+    base = "HEADER" if all_conn else "SUPPORT"
+    name, stem, i = base, base, 1
+    while name in taken_names or stem in taken_stems:
+        i += 1
+        name, stem = f"{base} {i}", f"{base}_{i}"
+    return name, stem
+
+
+def _resplit_connections_by_sheet(bom: BOM) -> None:
+    """Confine every NetConnection to a single sheet after parts were moved.
+
+    A ``NetConnection`` is per-sheet; a net that now spans sheets (because a part
+    moved off the array sheet) must become one connection per sheet, sharing
+    ``net_name``. Endpoints are regrouped by their part's current sheet -- the
+    cross-sheet join is then carried by power symbols (power nets) or inter-sheet
+    nets (signal nets, declared by :func:`_declare_cross_sheet_signal_nets`).
+    """
+    sheet_by_ref = {p.ref: p.sheet for p in bom.parts}
+    out: list[NetConnection] = []
+    for c in bom.connections:
+        groups: dict[str, list] = {}
+        for ep in c.endpoints:
+            groups.setdefault(sheet_by_ref.get(ep.ref, c.sheet), []).append(ep)
+        if len(groups) == 1:
+            c.sheet = next(iter(groups))
+            out.append(c)
+            continue
+        for sh, eps in groups.items():
+            out.append(NetConnection(net_name=c.net_name, endpoints=list(eps), sheet=sh))
+    bom.connections = out
+
+
+def _declare_cross_sheet_signal_nets(bom: BOM, architecture: Architecture) -> None:
+    """Declare each cross-sheet SIGNAL net as a bidirectional inter-sheet net.
+
+    Power/ground nets join across sheets via global power symbols (the emitter
+    skips them for sheet pins -- see ``emitter._emit_sheet_block``), so they are
+    exempt, matching §9.14/§9.15 and the wiring stage's own output. Existing
+    declarations are left untouched. Every declared endpoint sheet has a
+    same-named connection (re-split above), so §9.14 coverage holds.
+    """
+    valid = {s.name for s in architecture.sheets}
+    declared = {n.name for n in architecture.inter_sheet_nets}
+    sheets_by_net: dict[str, set[str]] = {}
+    for c in bom.connections:
+        if c.sheet in valid:
+            sheets_by_net.setdefault(c.net_name, set()).add(c.sheet)
+    for net_name in sorted(sheets_by_net):
+        sheets = sheets_by_net[net_name]
+        if net_name in declared or is_power_or_ground_name(net_name) or len(sheets) < 2:
+            continue
+        architecture.inter_sheet_nets.append(
+            InterSheetNet(
+                name=net_name,
+                endpoints=[
+                    SheetPin(sheet=s, direction="bidirectional") for s in sorted(sheets)
+                ],
+            )
+        )
+        declared.add(net_name)
+
+
+def isolate_array_sheets(bom: BOM, architecture: Architecture) -> list[str]:
+    """Keep every array sheet a pure grid: array members + their companions only.
+
+    The placer grids an array's members on a locked grid and co-locates its 2-pin
+    power/ground companions beside them, but any OTHER part sharing the array's
+    sheet (a power/data header, an MCU, ...) is handed to the force/edge solver,
+    which pins it against the leaf's loose extraction envelope and strands it far
+    from the grid -- the board then bloats to span both (KC-WXN3SN: a 3-pin header
+    landed ~60 mm below a 4x8 LED array, 76% of the board empty).
+
+    So a non-member, non-companion part must not live on an array sheet. This
+    moves every such part onto its own dedicated sheet -> its own leaf, which the
+    parent composer places adjacent to the array via the normal leaf-composition
+    path. Connections are re-split per sheet and the now cross-sheet signal nets
+    are declared inter-sheet so the schematic still wires them. LOUD + recorded in
+    ``bom.assumptions``. Mutates ``bom`` and ``architecture`` in place; returns the
+    moved refs (``[]`` when no array sheet carried a stray part).
+    """
+    if not bom.arrays:
+        return []
+    is_decap = _decap_membership(bom)
+    parts_by_ref = {p.ref: p for p in bom.parts}
+
+    # Per array sheet, the refs allowed to stay: array members + companion decaps.
+    allowed_by_sheet: dict[str, set[str]] = {}
+    for spec in bom.arrays:
+        for r in spec.refs:
+            p = parts_by_ref.get(r)
+            if p is not None:
+                allowed_by_sheet.setdefault(p.sheet, set()).add(r)
+    for sh in list(allowed_by_sheet):
+        allowed_by_sheet[sh].update(
+            p.ref for p in bom.parts if p.sheet == sh and is_decap.get(p.ref, False)
+        )
+
+    taken_names = {s.name for s in architecture.sheets}
+    taken_stems = {s.stem for s in architecture.sheets}
+    moved: list[str] = []
+    notes: list[str] = []
+    for sh in sorted(allowed_by_sheet):
+        impure = sorted(
+            (
+                p.ref
+                for p in bom.parts
+                if p.sheet == sh and p.ref not in allowed_by_sheet[sh]
+            ),
+            key=_ref_sort_key,
+        )
+        if not impure:
+            continue
+        name, stem = _isolation_sheet_names(impure, taken_names, taken_stems)
+        taken_names.add(name)
+        taken_stems.add(stem)
+        architecture.sheets.append(Sheet(name=name, stem=stem, function="interface"))
+        for ref in impure:
+            parts_by_ref[ref].sheet = name
+            # A stray part on an array sheet is an INTERNAL part to co-locate with
+            # the array (a power/data header, not an off-board edge connector --
+            # those get their own sheet at architecture time). Drop any perimeter
+            # (edge/corner) zone so the composer places its leaf next to the array
+            # instead of pinning it flush to a far board edge (where its power
+            # trace then hugs the edge -> copper_edge_clearance). A back-side header
+            # rides behind the array via BomPart.side, not an edge zone.
+            zone = bom.component_zones.get(ref)
+            if zone:
+                cleaned = {k: v for k, v in zone.items() if k not in ("edge", "corner")}
+                if cleaned:
+                    bom.component_zones[ref] = cleaned
+                else:
+                    bom.component_zones.pop(ref, None)
+        moved.extend(impure)
+        notes.append(
+            f"moved {len(impure)} non-array part(s) ({', '.join(impure)}) off array "
+            f"sheet {sh!r} onto a dedicated sheet {name!r} so the array leaf stays a "
+            f"pure grid (a stray part otherwise strands far from the array)"
+        )
+
+    if not moved:
+        return []
+    _resplit_connections_by_sheet(bom)
+    _declare_cross_sheet_signal_nets(bom, architecture)
+    for note in notes:
+        print(f"  [synth] {note}")
+        bom.assumptions.append(note)
+    return sorted(set(moved), key=_ref_sort_key)

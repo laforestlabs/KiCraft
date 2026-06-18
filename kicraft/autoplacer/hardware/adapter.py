@@ -459,12 +459,24 @@ class KiCadAdapter:
                 is_locked = fp.IsLocked()
             else:
                 is_locked = fp.IsLocked() or kind in ("battery",)
+            # Back-side override: synthesis records side-of-board intent in
+            # autoplacer.json (component_layers, from BomPart.side); honor it
+            # here so the part loads as BACK and the existing stamp path flips
+            # the footprint to B.Cu. The seed-PCB footprint is still front, so
+            # the pad coords read below are its front positions -- the later
+            # Flip() at stamp time owns the actual geometry mirror.
+            _layer_override = self.cfg.get("component_layers") or {}
+            comp_layer = (
+                Layer.BACK
+                if _layer_override.get(ref) == "back"
+                else _layer_to_enum(fp.GetLayer())
+            )
             comp = Component(
                 ref=ref,
                 value=val,
                 pos=Point(pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y)),
                 rotation=fp.GetOrientationDegrees(),
-                layer=_layer_to_enum(fp.GetLayer()),
+                layer=comp_layer,
                 width_mm=w_mm,
                 height_mm=h_mm,
                 pads=[],
