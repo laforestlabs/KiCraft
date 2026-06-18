@@ -127,3 +127,21 @@ def test_demorgan_body_style_pins_not_duplicated() -> None:
     same pin numbers; the extractor must dedupe by number, not double them."""
     nums = [p["number"] for p in lookup_pins("74xx:74LS00")["pins"]]
     assert len(nums) == len(set(nums)), f"duplicate pins: {nums}"
+
+
+def test_all_units_returns_every_section() -> None:
+    """`all_units=True` exposes every functional unit of a multi-unit symbol so
+    callers can reason about a quad op-amp's four amplifiers; the default stays
+    unit-1-only (the emitter instantiates one unit per part)."""
+    default = lookup_pins("74xx:74LS00")
+    full = lookup_pins("74xx:74LS00", all_units=True)
+    # A 74LS00 is a quad NAND -> 4 functional units.
+    assert default["unit_count"] == full["unit_count"] >= 2
+    # all_units returns strictly more pins, each tagged with its unit.
+    assert len(full["pins"]) > len(default["pins"])
+    assert {p["unit"] for p in full["pins"]} == set(range(1, full["unit_count"] + 1))
+    # default path is unchanged: every returned pin is unit 1.
+    assert {p["unit"] for p in default["pins"]} == {1}
+    # no duplicate pin numbers across units (global numbering + DeMorgan dedupe).
+    nums = [p["number"] for p in full["pins"]]
+    assert len(nums) == len(set(nums))

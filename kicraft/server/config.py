@@ -156,9 +156,10 @@ class Settings:
     review_reasoning_tokens: int = 8000
     # Layer-4 fab gate: run the electrical review during build verify and block
     # a structurally-sound board from being declared fab-ready if the review
-    # finds a blocker. Off by default -- it costs one LLM call per build, and a
-    # weak review model can false-block. KICRAFT_ELECTRICAL_REVIEW=1 to enable.
-    enable_electrical_review: bool = False
+    # finds a blocker. ON by default -- catching an electrically-wrong board is
+    # worth one cheap LLM call per build. Set KICRAFT_ELECTRICAL_REVIEW=0 to
+    # disable (the gate is also fail-soft: any infra/parse error skips it).
+    enable_electrical_review: bool = True
 
     @classmethod
     def from_env(cls, dotenv: bool = True) -> "Settings":
@@ -219,7 +220,7 @@ class Settings:
             review_model=(os.environ.get("KICRAFT_REVIEW_MODEL", "").strip() or None),
             review_reasoning_tokens=int(
                 os.environ.get("KICRAFT_REVIEW_REASONING_TOKENS", cls.review_reasoning_tokens)),
-            enable_electrical_review=_env_bool_default("KICRAFT_ELECTRICAL_REVIEW", False),
+            enable_electrical_review=_env_bool_default("KICRAFT_ELECTRICAL_REVIEW", True),
         )
 
     @property

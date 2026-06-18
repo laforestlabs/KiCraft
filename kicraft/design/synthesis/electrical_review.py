@@ -54,10 +54,16 @@ _OUTPUT_CONTRACT = (
     '"suggestion": "<the concrete fix>"}\n'
     "  ]\n"
     "}\n"
-    "severity: 'blocker' = the board will not perform its core function or risks "
-    "damage; 'warning' = a real weakness a reviewer would flag; 'note' = a "
-    "nitpick. If the design is sound, return an empty findings list. Cite real "
-    "refdes/net names from the digest in every issue."
+    "severity: 'blocker' = an ELECTRICAL defect that makes the board "
+    "non-functional or risks damage (reversed power, missing current limit, no "
+    "MCU programming path, a shorted oscillator/antenna, grossly wrong "
+    "filter/divider/ladder values, an out-of-spec rail). A part-selection or "
+    "stated-intent mismatch that is still electrically sound -- e.g. screw "
+    "terminals instead of binding posts, a cosmetic package or value-tolerance "
+    "choice -- is at most a 'warning', NEVER a blocker (the board would fabricate "
+    "and work). 'warning' = a real weakness a reviewer would flag; 'note' = a "
+    "nitpick. If the design is electrically sound, return an empty findings list. "
+    "Cite real refdes/net names from the digest in every issue."
 )
 
 

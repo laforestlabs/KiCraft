@@ -65,6 +65,8 @@ Beyond the parts block, the following default-install KiCad 9 stock libraries (a
 
 **Any other stock-KiCad library — `Sensor_*`, `MCU_*`, `RF_*`, `Regulator_*`, `Interface_*`, `Amplifier_*`, vendor-named libraries — is NOT first-tier.** Treat a symbol from one of those exactly like a parts-block/fetch miss: route it through the section below (auto-fetch for beginner/intermediate, or a `material: true` question). Stock symbols for sensors, MCUs, regulators, and interface ICs are frequently out of date or differ from the part the user actually wants, so picking one silently is precisely the substitution this stage exists to prevent.
 
+**Multi-unit (dual/quad) devices — one section per part.** KiCraft instantiates exactly ONE unit of a symbol per BOM part (the emitter places `(unit 1)`; the wiring stage only sees unit 1's pins). So a dual/quad op-amp, comparator, or logic-gate package yields a SINGLE usable section, not two/four. If the design needs N independent sections (e.g. a 4-channel buffer = four op-amps), add N SEPARATE parts (`U1`, `U2`, … each its own `ref`) — do NOT rely on the extra amplifiers inside one dual/quad chip; those units stay unwired and the channels are dead even though ERC passes. Using a quad package for a single section is fine; using one quad and expecting four channels is the trap.
+
 ### When a needed part is in neither the parts block nor stock KiCad
 
 This is the case to handle deliberately — never silently substitute an inferior part. Route based on the captured `state.intent.inferred_expertise`:
