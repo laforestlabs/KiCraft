@@ -163,6 +163,14 @@ def write_autoplacer_json(
     if component_zones:
         body["component_zones"] = component_zones
 
+    # Back-side parts: BomPart.side == "back" -> place on B.Cu. autoplacer.json
+    # is the solver config (merged via config.discover_project_config), so the
+    # adapter reads this map at board load and sets Component.layer = BACK; the
+    # existing stamp path then flips the footprint. Replay-safe (no re-synthesis).
+    component_layers = {p.ref: "back" for p in bom.parts if p.side == "back"}
+    if component_layers:
+        body["component_layers"] = component_layers
+
     # Matrix/array placement hints. The autoplacer grids these members
     # programmatically (serpentine) instead of running force/SA over them.
     # autoplacer.json is the project config, so this key merges straight into
