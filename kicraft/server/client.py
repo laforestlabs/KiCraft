@@ -202,7 +202,7 @@ class CappedOpenRouterClient:
         return on_delta
 
     def chat(self, messages, model=None, max_tokens=None, temperature=0.2, progress=None,
-             meta_ctx=None) -> dict:
+             meta_ctx=None, reasoning=None) -> dict:
         body = {"messages": messages, "temperature": temperature}
         if model:
             body["model"] = model
@@ -210,6 +210,11 @@ class CappedOpenRouterClient:
             body["max_tokens"] = max_tokens
         if meta_ctx:
             body["_meta_ctx"] = meta_ctx
+        # OpenRouter unified reasoning control (the "thinking budget"), e.g.
+        # {"max_tokens": 8000} or {"effort": "high"}. Passed straight through to
+        # the provider; harmless to omit.
+        if reasoning:
+            body["reasoning"] = reasoning
         msg, cost = self._stream(body, on_delta=self._delta_progress(progress))
         return {"text": msg.get("content") or "", "reasoning": msg.get("reasoning"),
                 "finish_reason": msg.get("finish_reason"), "model": None,

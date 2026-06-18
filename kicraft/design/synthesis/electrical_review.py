@@ -223,9 +223,14 @@ def _validate(obj):
 
 
 def review_design(client, digest: str, *, model: str | None = None,
-                  max_tokens: int = 1600, temperature: float = 0.0,
-                  max_attempts: int = 2) -> dict:
+                  max_tokens: int = 3000, temperature: float = 0.0,
+                  max_attempts: int = 2, reasoning: dict | None = None) -> dict:
     """Run the electrical review against a design digest.
+
+    ``reasoning`` is the optional OpenRouter thinking-budget control (e.g.
+    ``{"max_tokens": 8000}``) -- the review is a one-shot reasoning task, so a
+    higher budget on a cheap model buys more than it costs. ``max_tokens`` covers
+    the JSON answer and is set generously so reasoning never crowds it out.
 
     Returns ``{ok, findings, cost_usd, error, raw}``. ``findings`` is a list of
     ``{severity, area, issue, suggestion}`` (empty when the design is sound).
@@ -238,7 +243,7 @@ def review_design(client, digest: str, *, model: str | None = None,
     error = None
     for attempt in range(max_attempts):
         res = client.chat(messages, model=model, max_tokens=max_tokens,
-                          temperature=temperature,
+                          temperature=temperature, reasoning=reasoning,
                           meta_ctx={"phase": "electrical_review", "stage": "review",
                                     "attempt": attempt})
         last_text = res.get("text") or ""

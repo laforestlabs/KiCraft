@@ -29,6 +29,8 @@ class FakeClient:
         text = self.replies[min(self.calls, len(self.replies) - 1)]
         self.calls += 1
         self.last_meta = kw.get("meta_ctx")
+        self.last_reasoning = kw.get("reasoning")
+        self.last_model = kw.get("model")
         return {"text": text, "cost_usd": 0.002}
 
 
@@ -121,3 +123,12 @@ def test_review_meta_ctx_tags_phase():
     client = FakeClient(json.dumps({"findings": []}))
     review_design(client, "digest")
     assert client.last_meta["phase"] == "electrical_review"
+
+
+def test_review_forwards_thinking_budget():
+    client = FakeClient(json.dumps({"findings": []}))
+    review_design(client, "digest", model="deepseek/deepseek-v4-flash",
+                  reasoning={"max_tokens": 8000})
+    assert client.last_model == "deepseek/deepseek-v4-flash"
+    assert client.last_reasoning == {"max_tokens": 8000}
+

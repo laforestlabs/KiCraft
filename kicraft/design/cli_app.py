@@ -479,9 +479,16 @@ def _cmd_electrical_review(args: argparse.Namespace) -> int:
         return 0
 
     from kicraft.server.client import make_client
+    from kicraft.server.config import Settings
 
-    client = make_client()
-    result = review_design(client, digest, model=args.model)
+    settings = Settings.from_env()
+    client = make_client(settings)
+    # Default to the design model (deepseek-v4-flash -- cheap) but give it a
+    # higher thinking budget; the review is a one-shot reasoning task.
+    model = args.model or settings.review_model or settings.model
+    reasoning = ({"max_tokens": settings.review_reasoning_tokens}
+                 if settings.review_reasoning_tokens else None)
+    result = review_design(client, digest, model=model, reasoning=reasoning)
     print(json.dumps({
         "ok": result["ok"],
         "error": result["error"],

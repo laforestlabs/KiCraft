@@ -144,6 +144,16 @@ class Settings:
     # at a more capable id for better judgments; that is an admin action, since a
     # different model may need its own provider routing.
     eval_judge_model: str | None = None
+    # --- Layer-3 electrical-review pass (the in-product design "judge") --------
+    # Reviews a committed design for topology/value/completeness defects the
+    # deterministic §9 gates cannot judge. Runs the DESIGN model by default
+    # (deepseek-v4-flash -- cheap; Claude is prohibitively expensive for a
+    # product) but with a higher THINKING BUDGET, since the review is a one-shot
+    # reasoning task where extra deliberation is worth far more than it costs.
+    # review_model=None reuses `model`. review_reasoning_tokens is the OpenRouter
+    # reasoning max_tokens budget (0 disables the reasoning channel).
+    review_model: str | None = None
+    review_reasoning_tokens: int = 8000
 
     @classmethod
     def from_env(cls, dotenv: bool = True) -> "Settings":
@@ -201,6 +211,9 @@ class Settings:
             enable_prompt_cache=_env_bool_default("KICRAFT_ENABLE_PROMPT_CACHE", True),
             enable_core_defaults=_env_bool_default("KICRAFT_CORE_DEFAULTS", True),
             eval_judge_model=(os.environ.get("KICRAFT_EVAL_JUDGE_MODEL", "").strip() or None),
+            review_model=(os.environ.get("KICRAFT_REVIEW_MODEL", "").strip() or None),
+            review_reasoning_tokens=int(
+                os.environ.get("KICRAFT_REVIEW_REASONING_TOKENS", cls.review_reasoning_tokens)),
         )
 
     @property
