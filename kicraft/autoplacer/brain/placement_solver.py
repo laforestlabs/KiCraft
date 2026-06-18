@@ -1528,11 +1528,30 @@ class PlacementSolver:
             )
 
             corner_a, corner_b = edge_to_corners.get(edge, (None, None))
+            # Reserve length for any corner mount that shares this edge's ends,
+            # so the grow-to-fit step below accounts for the same keep-in the
+            # usable-span clamps apply.
+            _corner_reserve = 0.0
+            if corner_a and _has_corner_mount(corner_a):
+                _corner_reserve += corner_keep * 2
+            if corner_b and _has_corner_mount(corner_b):
+                _corner_reserve += corner_keep * 2
 
             if edge in ("left", "right"):
                 # Column along Y axis — body edge flush with board edge
                 sizes = [group_comps[i].height_mm for i in order]
                 total_h = sum(sizes) + connector_gap * (len(sizes) - 1)
+                # Grow the board height so EVERY same-edge connector fits flush
+                # in ONE column. Without this, a column taller than the leaf
+                # (e.g. 4 screw terminals on a short board, run_19) overflows:
+                # _shift_pads_inside pulls the overrun back inside, the overlap
+                # resolver then shoves it inboard into a 2nd column, and that
+                # connector reads as stranded. Grow-only, and only when the
+                # one-line span genuinely exceeds the board.
+                needed_h = total_h + 2 * margin + _corner_reserve
+                if needed_h > (br.y - tl.y):
+                    br = Point(br.x, tl.y + needed_h)
+                    self.state.board_outline = (tl, br)
                 usable_top = tl.y + margin + sizes[0] / 2
                 usable_bot = br.y - margin - sizes[-1] / 2
                 # Subtract corner-mount footprint from each end so the
@@ -1566,6 +1585,12 @@ class PlacementSolver:
                 # Row along X axis — body edge flush with board edge
                 sizes = [group_comps[i].width_mm for i in order]
                 total_w = sum(sizes) + connector_gap * (len(sizes) - 1)
+                # Grow the board width so the same-edge row fits in ONE line
+                # (see the column branch above for why overflow strands).
+                needed_w = total_w + 2 * margin + _corner_reserve
+                if needed_w > (br.x - tl.x):
+                    br = Point(tl.x + needed_w, br.y)
+                    self.state.board_outline = (tl, br)
                 usable_left = tl.x + margin + sizes[0] / 2
                 usable_right = br.x - margin - sizes[-1] / 2
                 if corner_a and _has_corner_mount(corner_a):
@@ -3718,8 +3743,19 @@ class PlacementSolver:
         SMT passives stay on F.Cu even when their IC group contains a
         back-layer THT component — IC group connectivity forces keep them
         nearby in the same XY region, achieving dual-sided board usage.
+
+        Edge-zoned connectors (and any part carrying an ``opening_direction``)
+        are EXEMPT: they must define a board edge from the front. Flipping one
+        to B.Cu mirrors its pad X *and* swaps left<->right in
+        ``edge_outward_angle`` (see types.py), which inverts the opening the
+        compose rotation filter solves for and strands the connector inboard of
+        the edge it mates at (the run_07 USB-C signature: a >50mm² THT USB-C
+        connector got auto-flipped, then composed inboard). A part the BOM
+        explicitly placed on the back already arrives as ``Layer.BACK`` (set at
+        load from ``component_layers``) and is untouched by the guard below.
         """
         min_area = self.cfg.get("tht_backside_min_area_mm2", 50.0)
+        zones = self.cfg.get("component_zones", {}) or {}
         moved = []
         for ref, comp in comps.items():
             if comp.kind == "subcircuit":
@@ -3727,6 +3763,14 @@ class PlacementSolver:
             if not comp.is_through_hole:
                 continue
             if comp.area < min_area:
+                continue
+            # Keep edge-mating connectors on the front (see docstring).
+            _zone_edge = (zones.get(ref) or {}).get("edge")
+            if (
+                comp.kind == "connector"
+                or comp.opening_direction is not None
+                or _zone_edge in ("left", "right", "top", "bottom")
+            ):
                 continue
             if comp.layer != Layer.BACK:
                 # Mirror pad X offsets to match KiCad Flip() behavior:
