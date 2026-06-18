@@ -941,6 +941,157 @@ def check_rf_feed_isolation(bom) -> CheckResult:
     )
 
 
+# ---------- §9.19 single net per pin (Layer 2) ----------
+
+
+def check_single_net_per_pin(bom) -> CheckResult:
+    """§9.19 -- every part pin belongs to exactly one net.
+
+    A pin (ref, number) listed in two NetConnections with DIFFERENT net_names
+    shorts those nets together -- an ERC/DRC-invisible defect, because the
+    emitter merges the two labels into one valid net. This is the wiring stage's
+    most common functional short: the DRV8833 VM pin on both VBAT and VCP_VM
+    (shorting the motor rail and removing the charge-pump cap); the nRF52
+    matching cap pin on both ANT_FEED and GND (grounding the antenna); the CH224K
+    zener pin on both VBUS and GND. A net_name repeated across sheets (an
+    inter-sheet net wired on each side) is fine -- only DISTINCT names on one pin
+    short, and a pin is only ever on one sheet, so >1 distinct name is always
+    wrong.
+    """
+    nets_for_pin: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for c in bom.connections:
+        for ep in c.endpoints:
+            nets_for_pin[(ep.ref, ep.pin)].add(c.net_name)
+    bad = [
+        f"{ref}.{pin} is wired to {len(names)} different nets "
+        f"({', '.join(sorted(names))}) -- this shorts them together"
+        for (ref, pin), names in sorted(nets_for_pin.items())
+        if len(names) > 1
+    ]
+    return CheckResult(
+        name="9.19 single net per pin",
+        ok=not bad,
+        message=(
+            "every pin belongs to one net"
+            if not bad
+            else f"{len(bad)} pin(s) wired to multiple nets (shorted)"
+        ),
+        offenders=bad,
+    )
+
+
+# ---------- §9.20 part-family wiring contracts (Layer 2) ----------
+#
+# A datasheet-keyed rulebook that asserts pin ROLES by name for the single net a
+# pin lands on -- catching a functional pin bound to the wrong (but single) net,
+# which §9.16 (cross-polarity) and §9.19 (multi-net short) do not see (e.g. a
+# flash VCC scrambled onto a data net, or a CAN transceiver's RS pin strapped to
+# the rail = standby). Each contract matches a part by a regex over
+# "<symbol> <value>" and lists (pin-name regex, role). Conservative: a pin not in
+# connections (no_connect) is skipped, and the net-class tests accept any
+# power-ish / ground-ish *name* (not just canonical rails), so a filtered or
+# locally-named rail never trips it. Append-only -- add a family by adding a row.
+
+_PWR_NET_TOKENS = ("VDD", "VCC", "VBAT", "VBUS", "VSYS", "VIN", "VOUT",
+                   "VREG", "VPP", "3V3", "5V", "1V8", "2V5", "12V")
+
+
+def _net_looks_power(name: str) -> bool:
+    s = name.lstrip("/").upper()
+    return s.startswith("+") or _net_is_positive_rail(name) or any(t in s for t in _PWR_NET_TOKENS)
+
+
+def _net_looks_ground(name: str) -> bool:
+    s = name.lstrip("/").upper()
+    return _net_is_ground(name) or "GND" in s or s in ("VSS", "0V")
+
+
+@dataclass(frozen=True)
+class _FamilyContract:
+    name: str
+    match: re.Pattern
+    rules: tuple  # ((pin-name re.Pattern, role:str), ...)
+
+
+# Roles: "rail" (must be on a supply), "ground" (must be on ground), "signal"
+# (data/clock/CS line -- must NOT be on a rail or ground), "not_rail" (must NOT
+# be on a positive rail; e.g. CAN RS high = standby).
+_FAMILY_CONTRACTS: tuple[_FamilyContract, ...] = (
+    _FamilyContract(
+        name="spi_flash",
+        match=re.compile(r"w25q|gd25|mx25|en25|s25fl|is25|at25q", re.I),
+        rules=(
+            (re.compile(r"^~?\{?VCC\}?~?$|^VDD$", re.I), "rail"),
+            (re.compile(r"^GND$|^VSS$", re.I), "ground"),
+            # IO0/IO1 (DI/DO), CLK and CS are data/clock/select in BOTH SPI and
+            # QSPI modes; WP/HOLD (IO2/IO3) are excluded -- they are legitimately
+            # tied to VCC in plain SPI mode.
+            (re.compile(r"(^|[^0-9])IO[01]([^0-9]|$)|^DI$|^DO$|/IO[01]$|^CLK$|^SCK$|CS", re.I), "signal"),
+        ),
+    ),
+    _FamilyContract(
+        name="can_transceiver",
+        match=re.compile(r"sn65hvd|mcp255\d|tja10|65hvd2", re.I),
+        rules=(
+            (re.compile(r"^VCC$|^VDD$", re.I), "rail"),
+            (re.compile(r"^GND$", re.I), "ground"),
+            (re.compile(r"^RS$|^STB$|^/STB$|^S$", re.I), "not_rail"),
+        ),
+    ),
+)
+
+
+def check_family_wiring_contracts(bom) -> CheckResult:
+    """§9.20 -- datasheet pin-role contracts for known part families.
+
+    See the module comment above _FAMILY_CONTRACTS. Fires only on a wired pin
+    that a family's datasheet says must (not) be on a rail/ground and is bound to
+    a clearly-wrong net; correct and filtered rails pass.
+    """
+    info, _ = _pin_info_by_ref(bom)
+    nets = _nets_by_ref(bom)
+    bad: list[str] = []
+    for part in bom.parts:
+        ident = f"{part.symbol} {part.value}"
+        for contract in _FAMILY_CONTRACTS:
+            if not contract.match.search(ident):
+                continue
+            wired = nets.get(part.ref, {})
+            for num, pdata in info.get(part.ref, {}).items():
+                nm = pdata["name"]
+                net = wired.get(num)
+                if net is None:
+                    continue
+                for rule_re, role in contract.rules:
+                    if not rule_re.search(nm):
+                        continue
+                    problem = None
+                    if role == "rail" and not _net_looks_power(net):
+                        problem = "must be on a supply rail"
+                    elif role == "ground" and not _net_looks_ground(net):
+                        problem = "must be on ground"
+                    elif role == "signal" and (_net_is_ground(net) or _net_is_positive_rail(net)):
+                        problem = "is a data/clock/CS line but sits on power/ground"
+                    elif role == "not_rail" and _net_is_positive_rail(net):
+                        problem = "must not be on a positive rail (that selects standby/wrong mode)"
+                    if problem:
+                        bad.append(
+                            f"[{contract.name}] {part.ref}.{num} (pin {nm!r}) {problem} "
+                            f"-- wired to {net!r}"
+                        )
+                    break  # one rule per pin
+    return CheckResult(
+        name="9.20 part-family wiring contracts",
+        ok=not bad,
+        message=(
+            "family pin roles satisfied"
+            if not bad
+            else f"{len(bad)} pin(s) violate a part-family wiring contract"
+        ),
+        offenders=bad,
+    )
+
+
 # ---------- §9.9 connectivity (Stage B) ----------
 
 
@@ -1270,6 +1421,8 @@ def collect_validations(
         results.append(check_power_pin_polarity(bom))
         results.append(check_two_terminal_self_short(bom))
         results.append(check_rf_feed_isolation(bom))
+        results.append(check_single_net_per_pin(bom))
+        results.append(check_family_wiring_contracts(bom))
         results.append(check_connectivity(project_dir, project_stem))
         results.append(check_erc(project_dir, project_stem))
         results.append(check_netlist_faithfulness(project_dir, project_stem, bom))

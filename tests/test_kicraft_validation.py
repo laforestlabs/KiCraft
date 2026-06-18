@@ -711,3 +711,118 @@ def test_rf_feed_isolation_passes_feed_on_rf_net(monkeypatch) -> None:
                       endpoints=[PinEndpoint(ref="ANT1", pin="2")]),
     ])
     assert check_rf_feed_isolation(bom).ok
+
+
+# ---------- §9.19 single net per pin + §9.20 family contracts (Layer 2) ----------
+
+from kicraft.design.synthesis.validation import (  # noqa: E402
+    check_family_wiring_contracts,
+    check_single_net_per_pin,
+)
+
+
+def test_single_net_per_pin_flags_pin_on_two_nets() -> None:
+    # DRV8833-style: VM pin (12) listed on both VBAT and VCP_VM shorts them
+    # (and removes the charge-pump cap). No symbol lookup needed.
+    bom = BOM(parts=[_bpart("U4", "drv8833:DRV8833", sheet="DRV")], connections=[
+        NetConnection(net_name="VBAT", sheet="DRV",
+                      endpoints=[PinEndpoint(ref="U4", pin="12")]),
+        NetConnection(net_name="VCP_VM", sheet="DRV",
+                      endpoints=[PinEndpoint(ref="U4", pin="11"),
+                                 PinEndpoint(ref="U4", pin="12")]),
+    ])
+    res = check_single_net_per_pin(bom)
+    assert not res.ok
+    assert len(res.offenders) == 1
+    assert "U4.12" in res.offenders[0]
+
+
+def test_single_net_per_pin_passes_clean_wiring() -> None:
+    bom = BOM(parts=[_bpart("U4", "drv8833:DRV8833", sheet="DRV")], connections=[
+        NetConnection(net_name="VBAT", sheet="DRV",
+                      endpoints=[PinEndpoint(ref="U4", pin="12")]),
+        NetConnection(net_name="VCP_VM", sheet="DRV",
+                      endpoints=[PinEndpoint(ref="U4", pin="11")]),
+    ])
+    assert check_single_net_per_pin(bom).ok
+
+
+def test_single_net_per_pin_allows_repeated_name() -> None:
+    # The same net_name appearing in two connections (different pins, one each)
+    # is not a short -- only DISTINCT names on ONE pin are flagged.
+    bom = BOM(parts=[_bpart("U1", "Fake:X", sheet="MCU")], connections=[
+        NetConnection(net_name="SIG", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U1", pin="1")]),
+        NetConnection(net_name="SIG", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U1", pin="2")]),
+    ])
+    assert check_single_net_per_pin(bom).ok
+
+
+def test_family_contract_flags_flash_supply_on_data_net(monkeypatch) -> None:
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"w25q:W25Q16": [
+        ("8", "VCC", "power_in"), ("4", "GND", "power_in"),
+        ("5", "DI/IO0", "bidirectional"), ("6", "CLK", "input"),
+    ]}))
+    bom = BOM(parts=[_bpart("U2", "w25q:W25Q16", sheet="MCU")], connections=[
+        NetConnection(net_name="QSPI_SD0", sheet="MCU",   # VCC scrambled onto a data net
+                      endpoints=[PinEndpoint(ref="U2", pin="8")]),
+        NetConnection(net_name="GND", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U2", pin="4")]),
+        NetConnection(net_name="QSPI_SD1", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U2", pin="5")]),
+        NetConnection(net_name="QSPI_SCLK", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U2", pin="6")]),
+    ])
+    res = check_family_wiring_contracts(bom)
+    assert not res.ok
+    assert any("U2.8" in o for o in res.offenders)
+
+
+def test_family_contract_flags_flash_data_on_rail(monkeypatch) -> None:
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"w25q:W25Q16": [
+        ("8", "VCC", "power_in"), ("4", "GND", "power_in"),
+        ("5", "DI/IO0", "bidirectional"),
+    ]}))
+    bom = BOM(parts=[_bpart("U2", "w25q:W25Q16", sheet="MCU")], connections=[
+        NetConnection(net_name="+3V3", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U2", pin="8")]),
+        NetConnection(net_name="GND", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U2", pin="4")]),
+        NetConnection(net_name="+3V3", sheet="MCU",   # IO0 data line tied to the rail
+                      endpoints=[PinEndpoint(ref="U2", pin="5")]),
+    ])
+    res = check_family_wiring_contracts(bom)
+    assert not res.ok
+    assert any("U2.5" in o for o in res.offenders)
+
+
+def test_family_contract_passes_correct_flash(monkeypatch) -> None:
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"w25q:W25Q16": [
+        ("8", "VCC", "power_in"), ("4", "GND", "power_in"),
+        ("5", "DI/IO0", "bidirectional"), ("6", "CLK", "input"),
+        ("1", "~{CS}", "input"),
+    ]}))
+    bom = BOM(parts=[_bpart("U2", "w25q:W25Q16", sheet="MCU")], connections=[
+        NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="8")]),
+        NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="4")]),
+        NetConnection(net_name="QSPI_SD0", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="5")]),
+        NetConnection(net_name="QSPI_SCLK", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="6")]),
+        NetConnection(net_name="QSPI_CSn", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="1")]),
+    ])
+    assert check_family_wiring_contracts(bom).ok
+
+
+def test_family_contract_flags_can_rs_on_rail(monkeypatch) -> None:
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"sn65hvd230:SN65HVD230": [
+        ("3", "VCC", "power_in"), ("2", "GND", "power_in"), ("8", "RS", "input"),
+    ]}))
+    bom = BOM(parts=[_bpart("U3", "sn65hvd230:SN65HVD230", sheet="CAN")], connections=[
+        NetConnection(net_name="+3V3", sheet="CAN", endpoints=[PinEndpoint(ref="U3", pin="3")]),
+        NetConnection(net_name="GND", sheet="CAN", endpoints=[PinEndpoint(ref="U3", pin="2")]),
+        NetConnection(net_name="+3V3", sheet="CAN",   # RS high = standby (wrong)
+                      endpoints=[PinEndpoint(ref="U3", pin="8")]),
+    ])
+    res = check_family_wiring_contracts(bom)
+    assert not res.ok
+    assert any("U3.8" in o for o in res.offenders)

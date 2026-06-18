@@ -66,6 +66,7 @@ from .synthesis.parts_lookup import (
 from .synthesis.validation import (
     CheckResult,
     SynthesisValidationError,
+    check_family_wiring_contracts,
     check_inter_sheet_nets_realized,
     check_net_coverage,
     check_no_dangling_signal_nets,
@@ -73,6 +74,7 @@ from .synthesis.validation import (
     check_power_pin_polarity,
     check_rf_feed_isolation,
     check_sheets_have_parts,
+    check_single_net_per_pin,
     check_two_terminal_self_short,
 )
 from kicraft.parts_library import Maturity
@@ -331,6 +333,8 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             check_power_pin_polarity(state.bom),
             check_two_terminal_self_short(state.bom),
             check_rf_feed_isolation(state.bom),
+            check_single_net_per_pin(state.bom),
+            check_family_wiring_contracts(state.bom),
         ]
         if state.architecture is not None:
             checks.append(
@@ -1928,6 +1932,8 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             check_power_pin_polarity(state.bom),
             check_two_terminal_self_short(state.bom),
             check_rf_feed_isolation(state.bom),
+            check_single_net_per_pin(state.bom),
+            check_family_wiring_contracts(state.bom),
         ]
         if state.architecture is not None:
             # Architecture declared these inter-sheet nets; the wiring stage
