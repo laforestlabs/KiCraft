@@ -135,19 +135,22 @@ def _qualify_with_prefix(symbol_text: str, symbol_name: str, library: str) -> st
 
 
 # Reference-designator prefixes for device classes whose pins are *passive*
-# contacts in correct KiCad modeling -- switches, connectors, and discrete
-# passives. KiCad's own libraries type every pin of these `passive`
-# (Switch:SW_DIP_x03, Connector:*, Device:R/C/L/D ...). Parts imported from
+# contacts in correct KiCad modeling -- switches, connectors, discrete
+# passives, and bare electromechanical parts (relays, solenoids, motors).
+# KiCad's own libraries type every pin of these `passive` (Switch:SW_DIP_x03,
+# Connector:*, Device:R/C/L/D, Relay:* coil+contacts ...). Parts imported from
 # LCSC via easyeda2kicad, however, inherit EasyEDA's careless pin metadata and
 # routinely arrive typed `input`. KiCad ERC then demands an Output driver for
 # every `input` pin and raises "Input pin not driven by any Output pins"
 # (pin_not_driven) on any net that isn't power-flagged -- even though a switch
-# contact or connector terminal neither drives nor is driven. None of these
-# classes owns a logic input that legitimately needs a driver, so retyping their
-# `input` pins to `passive` only ever corrects an import artifact; it can never
-# mask a real floating-input error. Active devices (ICs: U/Q/...) and
+# contact, connector terminal, or relay coil neither drives nor is driven. None
+# of these classes owns a logic input that legitimately needs a driver (a bare
+# relay coil is a passive load, not a logic input), so retyping their `input`
+# pins to `passive` only ever corrects an import artifact; it can never mask a
+# real floating-input error. Active devices (ICs: U/Q/...) and
 # crystals/oscillators (Y/X, whose enable IS a driven input) are deliberately
-# excluded.
+# excluded. NB: the prefix is the symbol's intrinsic Reference (e.g. easyeda
+# types a relay symbol "RLY" even when instances are placed as K1..Kn).
 _PASSIVE_DEVICE_REF_PREFIXES = frozenset({
     "SW", "BTN", "PB", "KEY",                  # switches / buttons
     "J", "P", "CN", "CON", "JP",               # connectors / headers / jumpers
@@ -156,6 +159,8 @@ _PASSIVE_DEVICE_REF_PREFIXES = frozenset({
     "L", "FB", "FL",                           # inductors / ferrite beads
     "D", "LED", "CR", "DZ", "TVS",             # diodes / LEDs / TVS
     "F", "FU",                                 # fuses
+    "K", "RLY", "RL", "RY",                    # relays (coil + contacts are passive)
+    "SOL", "MTR", "M",                         # solenoids / motors (passive loads)
     "TP",                                      # test points
     "LS", "SP", "BZ", "MK", "MIC",             # transducers (speaker / buzzer / mic)
     "ANT", "AE",                               # antennas
