@@ -266,3 +266,42 @@ def test_rubric_hash_is_stable_and_verifies():
     rub = load_rubric()
     assert rub["meta"]["sha256"] == rub["_computed_sha256"]
     assert len(rub["dimensions"]) == 10
+
+
+# --------------------------------------------------------------------------- #
+# Layer-4 review outcome parsed from build_log events (admin dashboard)
+# --------------------------------------------------------------------------- #
+def _bl(text):
+    return json.dumps({"kind": "build_log", "text": text})
+
+
+def test_build_review_outcome_blocked():
+    from kicraft.server.web import _build_review_outcome
+    lines = [
+        _bl("[build] 4/5 verify: shorts=0 unconnected=0"),
+        _bl("[build]     review BLOCKER: [clock] oscillator pins shorted to GND"),
+        _bl("[build]     kept board X.kicad_pcb for inspection (no fab package; "
+            "electrical review found a blocker)"),
+    ]
+    r = _build_review_outcome(lines)
+    assert r["status"] == "blocked" and r["n"] == 1
+    assert "oscillator" in r["blockers"][0]
+
+
+def test_build_review_outcome_passed():
+    from kicraft.server.web import _build_review_outcome
+    r = _build_review_outcome([_bl("[build] 4/5 electrical review: 2 non-blocking finding(s), cost $0.0010")])
+    assert r["status"] == "passed" and r["n"] == 2 and r["blockers"] == []
+
+
+def test_build_review_outcome_none_when_gate_not_reached():
+    # A board that failed DRC/route never reaches the review gate -> no markers.
+    from kicraft.server.web import _build_review_outcome
+    assert _build_review_outcome([_bl("[build] 4/5 verify: shorts=3 unconnected=5")]) is None
+    assert _build_review_outcome([]) is None
+
+
+def test_build_review_outcome_skipped():
+    from kicraft.server.web import _build_review_outcome
+    r = _build_review_outcome([_bl("[build] electrical review skipped (SystemExit: no key)")])
+    assert r["status"] == "skipped"

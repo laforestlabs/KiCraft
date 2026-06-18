@@ -3447,6 +3447,47 @@ def _self_eval_adopt_latest() -> None:
     _SELF_EVAL.update(proc=None, out=latest, args=_self_eval_args_for(latest))
 
 
+_REVIEW_NONBLOCK_RE = re.compile(r"electrical review: (\d+) non-blocking")
+
+
+def _build_review_outcome(lines) -> dict | None:
+    """The Layer-4 electrical-review verdict parsed from a run's build_log events.
+
+    A review block returns rc 7 -- the SAME build_done rc as a real DRC/route
+    failure -- so the only durable signal that an otherwise structurally-sound
+    board was rejected for an ELECTRICAL defect (vs failing to route) is the
+    build_log markers the gate writes. Returns
+    ``{status: 'blocked'|'passed'|'skipped', n, blockers[]}`` or None if the
+    review never ran (e.g. the build never reached the verify gate).
+    """
+    status = None
+    blockers: list[str] = []
+    n = 0
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        if e.get("kind") != "build_log":
+            continue
+        t = e.get("text", "")
+        if "electrical review found a blocker" in t:
+            status = "blocked"
+        elif "electrical review skipped" in t and status is None:
+            status = "skipped"
+        if "review BLOCKER:" in t:
+            blockers.append(t.split("review BLOCKER:", 1)[1].strip())
+        m = _REVIEW_NONBLOCK_RE.search(t)
+        if m:
+            n = int(m.group(1))
+            if status is None:
+                status = "passed"
+    if status is None:
+        return None
+    return {"status": status, "n": (len(blockers) if status == "blocked" else n),
+            "blockers": blockers}
+
+
 def _self_eval_brief_status(out: Path, idx: int, entry: dict) -> dict:
     """Parse one brief's live status from its run dir under `out`. ``entry`` is a
     benchmark ``{"slug", "archetype", "brief"}`` dict."""
@@ -3457,9 +3498,11 @@ def _self_eval_brief_status(out: Path, idx: int, entry: dict) -> dict:
     if rd is None:
         return {**base, "status": "pending"}
     stage = build_label = None
+    review = None
     ev = rd / "events.jsonl"
     if ev.is_file():
-        for line in ev.read_text(errors="replace").splitlines():
+        lines = ev.read_text(errors="replace").splitlines()
+        for line in lines:
             try:
                 e = json.loads(line)
             except Exception:
@@ -3473,6 +3516,13 @@ def _self_eval_brief_status(out: Path, idx: int, entry: dict) -> dict:
                 build_label = "building…"
             elif k == "build_done":
                 build_label = "fab-ready" if e.get("ok") else f"build rc={e.get('rc')}"
+        review = _build_review_outcome(lines)
+        # A review block returns rc 7 -- the same label as a DRC/route fail.
+        # Relabel it so the dashboard distinguishes an electrically-flagged board
+        # (structurally clean, the gate doing its job) from one that failed to route.
+        if review and review["status"] == "blocked" and build_label \
+                and build_label.startswith("build rc="):
+            build_label = f"review-blocked ({review['n']})"
     rep = rd / "eval" / "report.json"
     if rep.is_file():
         try:
@@ -3484,8 +3534,9 @@ def _self_eval_brief_status(out: Path, idx: int, entry: dict) -> dict:
             gates = [g.get("id") for g in (r.get("gates") or {}).get("triggered", [])]
             return {**base, "status": "done", "grade": sc.get("grade"),
                     "final": sc.get("final"), "verdict": sc.get("verdict"),
-                    "gates": gates, "build": build_label}
-    return {**base, "status": "running", "stage": stage, "build": build_label}
+                    "gates": gates, "build": build_label, "review": review}
+    return {**base, "status": "running", "stage": stage, "build": build_label,
+            "review": review}
 
 
 def _self_eval_leaf_boards(gen_dir: Path) -> list:
@@ -3688,6 +3739,7 @@ def admin_self_eval_page():
         done = [s for s in statuses if s["status"] == "done"]
         graded = [s for s in done if isinstance(s.get("final"), (int, float))]
         fab = sum(1 for s in done if s.get("build") == "fab-ready")
+        rblk = sum(1 for s in statuses if (s.get("review") or {}).get("status") == "blocked")
         summary_done = (out / "summary.json").is_file()
         is_live = bool(live_out and str(live_out) == str(out) and running)
         if is_live:
@@ -3702,6 +3754,12 @@ def admin_self_eval_page():
             if graded:
                 ui.label(f"mean {round(sum(s['final'] for s in graded) / len(graded), 1)}")
             ui.label(f"fab-ready {fab}/{len(selected)}")
+            if rblk:
+                # Structurally-clean boards the Layer-4 electrical review rejected
+                # -- the gate working, NOT routing failures (which are 'build rc=').
+                ui.label(f"⚡ review-blocked {rblk}").style("color:#f59e0b") \
+                    .tooltip("structurally clean but the electrical review found a "
+                             "blocker (counted separately from route/DRC failures)")
             ui.label(f"judge {'off' if args.get('no_judge') else 'on'}")
         for s in statuses:
             idx = s["index"]
@@ -3715,7 +3773,21 @@ def admin_self_eval_page():
             g = s.get("grade")
             r["grade"].set_text(f"{g} {s.get('final')}" if g
                                 else ("—" if st == "done" else ""))
-            r["build"].set_text(s.get("build") or "")
+            bl = s.get("build") or ""
+            r["build"].set_text(bl)
+            if bl == "fab-ready":
+                bcol = "#4ade80"                       # green: shipped
+            elif bl.startswith("review-blocked"):
+                bcol = "#f59e0b"                       # amber: electrically flagged
+            elif bl.startswith("build rc=") or bl == "building…":
+                bcol = "#f87171" if bl.startswith("build rc=") else "#94a3b8"
+            else:
+                bcol = "#94a3b8"
+            r["build"].style("color:" + bcol)
+            rv = s.get("review")
+            if rv and rv.get("blockers"):
+                r["build"].tooltip("electrical review blocker(s): "
+                                   + " | ".join(rv["blockers"])[:400])
             r["btn"].set_visibility(bool(s.get("rundir")))
     ui.timer(1.0, render)
 
@@ -3764,6 +3836,36 @@ def admin_self_eval_run_page(run: str = ""):
                     .style("color:#f87171")
         else:
             ui.label("Not scored yet.").classes("text-sm").style("color:#94a3b8")
+
+        # Layer-4 electrical-review findings, distinct from the DRC/route outcome:
+        # a blocked board is structurally sound but electrically flagged.
+        _ev = run_dir / "events.jsonl"
+        if _ev.is_file():
+            findings = []
+            for ln in _ev.read_text(errors="replace").splitlines():
+                try:
+                    e = json.loads(ln)
+                except Exception:
+                    continue
+                if e.get("kind") != "build_log":
+                    continue
+                t = e.get("text", "")
+                for sev in ("BLOCKER", "WARNING", "NOTE"):
+                    mark = f"review {sev}:"
+                    if mark in t:
+                        findings.append((sev, t.split(mark, 1)[1].strip()))
+            if findings:
+                blocked = any(s == "BLOCKER" for s, _ in findings)
+                sevcol = {"BLOCKER": "#f87171", "WARNING": "#f59e0b", "NOTE": "#94a3b8"}
+                with ui.card().classes("w-full mt-2").style("background:#111827"):
+                    ui.label("⚡ Electrical review — "
+                             + ("BLOCKED (kept for inspection, no fab package)"
+                                if blocked else "passed (non-blocking findings)")) \
+                        .classes("text-sm font-bold") \
+                        .style("color:" + ("#f87171" if blocked else "#4ade80"))
+                    for sev, txt in findings:
+                        ui.label(f"[{sev}] {txt}").classes("text-xs") \
+                            .style("color:" + sevcol[sev])
 
         gen = _discover_generated_dir(run_dir)
         if gen is None:
