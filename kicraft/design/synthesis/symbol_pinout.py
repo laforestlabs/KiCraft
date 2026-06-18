@@ -41,6 +41,7 @@ def lookup_pins(
     lib_id: str,
     project_root: Path | None = None,
     stock_dir: Path = DEFAULT_KICAD_SYMBOL_DIR,
+    all_units: bool = False,
 ) -> dict:
     """Resolve `Library:Name` to its pin inventory.
 
@@ -49,17 +50,25 @@ def lookup_pins(
 
     Returns a dict with keys ``symbol``, ``unit_count``, and ``pins``
     (a list of pin dicts; see the README for the schema).
+
+    By default (``all_units=False``) only unit 1 is returned -- the emitter
+    instantiates a single unit per part. ``all_units=True`` returns EVERY
+    functional unit's pins, each tagged with its ``unit`` (shared unit-0 pins
+    keep ``unit=1``); this is the foundation for reasoning about multi-section
+    devices (e.g. a quad op-amp's four amplifiers) without changing the default
+    single-unit pipeline behaviour.
     """
     library, _, name = lib_id.partition(":")
     if not library or not name:
         raise SymbolNotFoundError(f"bad lib_id {lib_id!r} (expected 'Library:Name')")
     root_str = str(project_root) if project_root is not None else ""
-    return _lookup_cached(library, name, root_str, str(stock_dir))
+    return _lookup_cached(library, name, root_str, str(stock_dir), all_units)
 
 
 @lru_cache(maxsize=256)
 def _lookup_cached(
-    library: str, name: str, project_root_str: str, stock_dir_str: str
+    library: str, name: str, project_root_str: str, stock_dir_str: str,
+    all_units: bool = False,
 ) -> dict:
     project_root = Path(project_root_str) if project_root_str else None
     stock_dir = Path(stock_dir_str)
@@ -101,13 +110,29 @@ def _lookup_cached(
         if outer_pins:
             pins_by_unit[1] = outer_pins
 
-    # v1 instantiates a single unit: return the shared unit-0 pins together with
-    # unit 1's, deduped by pin number (a symbol with a DeMorgan body style
-    # repeats the same pins in its _<unit>_2 sub-symbol). unit_count reflects the
-    # functional (>=1) units only.
+    # unit_count reflects the functional (>=1) units only.
     func_units = [u for u in pins_by_unit if u >= 1]
     unit_count = max(func_units) if func_units else 1
-    seen_numbers: set[str] = set()
+
+    if all_units:
+        # Every functional unit's pins, each tagged with its unit (shared unit-0
+        # power pins keep unit=1). Pin numbers are globally unique across a KiCad
+        # multi-unit symbol; dedupe only the DeMorgan body-style repeats within a
+        # unit. Foundation for multi-section reasoning; not the default path.
+        seen_numbers: set[str] = set()
+        all_pins: list[dict] = []
+        for u in sorted(pins_by_unit):
+            for p in pins_by_unit[u]:
+                if p["number"] in seen_numbers:
+                    continue
+                seen_numbers.add(p["number"])
+                all_pins.append({**p, "unit": (u if u >= 1 else 1)})
+        return {"symbol": f"{library}:{name}", "unit_count": unit_count, "pins": all_pins}
+
+    # Default: instantiate a single unit -- return the shared unit-0 pins together
+    # with unit 1's, deduped by pin number (a DeMorgan body style repeats the same
+    # pins in its _<unit>_2 sub-symbol).
+    seen_numbers = set()
     unit_1_pins: list[dict] = []
     for p in pins_by_unit.get(0, []) + pins_by_unit.get(1, []):
         if p["number"] in seen_numbers:
