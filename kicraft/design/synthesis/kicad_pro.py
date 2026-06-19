@@ -28,7 +28,14 @@ DEFAULT_RULES = {
     "min_via_diameter": 0.508,
     "min_via_annular_width": 0.127,
     "min_hole_to_hole": 0.127,
-    "min_copper_edge_clearance": 0.381,
+    # 0.2 mm = JLCPCB's routed board-edge-to-copper minimum. The old 0.381 mm
+    # (15 mil) was overly conservative and failed boards whose routed tracks sit
+    # 0.2-0.38 mm from the edge -- fab-fine copper. FreeRouting 1.9.0 ignores the
+    # DSN boundary for wires, so this gate threshold (not a router setting) is the
+    # only lever for those track-near-edge cases; genuinely-too-close copper
+    # (< 0.2 mm or past the edge) still fails. Connector pad clearance is kept by
+    # connector_edge_pad_clearance_mm in _repair_parent_outline.
+    "min_copper_edge_clearance": 0.2,
     "min_silk_clearance": 0.0,
     "min_text_height": 0.8,
     "min_text_thickness": 0.08,

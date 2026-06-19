@@ -2810,7 +2810,12 @@ def main(argv: list[str] | None = None) -> int:
             # which leaves copper outside Edge.Cuts and makes FreeRouting
             # return no SES (rc=-1). Repairing here keeps the in-memory state
             # and the stamped Edge.Cuts in sync.
-            outline_repair = _repair_parent_outline(state)
+            outline_repair = _repair_parent_outline(
+                state,
+                pad_edge_clearance_mm=float(
+                    cfg.get("connector_edge_pad_clearance_mm", 0.2)
+                ),
+            )
             if outline_repair.get("repaired"):
                 print(
                     "parent_outline_repaired: "

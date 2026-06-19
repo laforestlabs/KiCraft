@@ -314,9 +314,15 @@ def derive_attachment_constraints(
             # of the edge. A mouthless connector (pin header, JST) mounts flush
             # -- no housing overhang.
             #
+            # ``inward`` is the copper-to-edge clearance the board edge must keep
+            # from the connector's edge-facing SOLDER PADS. The board edge is
             # Either way inward is 0: the legacy connector_edge_inset_mm pushed
             # the edge PAST the body, burying USB ports and making those boards
-            # physically unusable.
+            # physically unusable. The copper-to-edge clearance the board edge
+            # keeps from the connector's edge-facing PADS is applied later, in
+            # _repair_parent_outline (connector_edge_pad_clearance_mm), which is
+            # the single place the connector-side edge is finalized against the
+            # placed pad copper.
             has_mouth = getattr(comp, "opening_direction", None) is not None
             inward = 0.0
             if has_mouth:

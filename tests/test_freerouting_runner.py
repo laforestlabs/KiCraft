@@ -84,10 +84,27 @@ def test_validate_routed_board_marks_single_footprint_clearance_as_internal(
     assert validation["drc"]["clearance_footprint_refs"] == ["J1"]
 
 
-def test_validate_routed_board_ignores_edge_connector_copper_edge_clearance(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-):
+_EDGE_CONN_DRC = {
+    "report_text": """
+[copper_edge_clearance]: Board edge clearance violation
+    @(0.0000 mm, 0.0000 mm): Segment on Edge.Cuts
+    @(1.7700 mm, 0.3000 mm): PTH pad S1 [GND] of J1
+""",
+    "violations": [
+        {
+            "type": "copper_edge_clearance",
+            "description": "[copper_edge_clearance]: Board edge clearance violation",
+        }
+    ],
+    "clearance": 0,
+    "copper_edge_clearance": 1,
+    "shorts": 0,
+    "timed_out": False,
+    "missing_cli": False,
+}
+
+
+def _patch_edge_conn_drc(monkeypatch):
     monkeypatch.setattr(
         freerouting_runner,
         "count_board_tracks",
@@ -96,39 +113,48 @@ def test_validate_routed_board_ignores_edge_connector_copper_edge_clearance(
     monkeypatch.setattr(
         freerouting_runner,
         "_run_kicad_cli_drc",
-        lambda _path, timeout_s=30: {
-            "report_text": """
-[copper_edge_clearance]: Board edge clearance violation
-    @(0.0000 mm, 0.0000 mm): Segment on Edge.Cuts
-    @(1.7700 mm, 0.3000 mm): PTH pad S1 [GND] of J1
-""",
-            "violations": [
-                {
-                    "type": "copper_edge_clearance",
-                    "description": "[copper_edge_clearance]: Board edge clearance violation",
-                }
-            ],
-            "clearance": 0,
-            "copper_edge_clearance": 1,
-            "shorts": 0,
-            "timed_out": False,
-            "missing_cli": False,
-        },
+        lambda _path, timeout_s=30: dict(_EDGE_CONN_DRC),
     )
 
+
+def test_validate_routed_board_flags_edge_connector_copper_edge_clearance(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The blanket edge-connector copper_edge waiver was REMOVED: the composer now
+    # keeps the board edge a clearance outboard of a flush connector's pads
+    # (connector_edge_pad_clearance_mm in _repair_parent_outline), so a genuine
+    # pad-to-edge violation is no longer masked at the gate -- it fails loudly.
+    _patch_edge_conn_drc(monkeypatch)
     board_path = tmp_path / "fake_board.kicad_pcb"
     board_path.write_text("stub", encoding="utf-8")
 
     validation = freerouting_runner.validate_routed_board(
         str(board_path),
-        cfg={
-            "component_zones": {"J1": {"edge": "left"}},
-        },
+        cfg={"component_zones": {"J1": {"edge": "left"}}},
+    )
+
+    assert validation["obviously_illegal_routed_geometry"] is True
+    assert "footprint_internal_copper_edge_count" not in validation
+    assert validation["drc"]["copper_edge_footprint_refs"] == ["J1"]
+
+
+def test_validate_routed_board_waives_ignorable_copper_edge(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The explicit per-board ignorable_footprint_refs escape hatch still waives.
+    _patch_edge_conn_drc(monkeypatch)
+    board_path = tmp_path / "fake_board.kicad_pcb"
+    board_path.write_text("stub", encoding="utf-8")
+
+    validation = freerouting_runner.validate_routed_board(
+        str(board_path),
+        cfg={"ignorable_footprint_refs": ["J1"]},
     )
 
     assert validation["obviously_illegal_routed_geometry"] is False
     assert validation["footprint_internal_copper_edge_count"] == 1
-    assert validation["drc"]["copper_edge_footprint_refs"] == ["J1"]
 
 
 def _clean_drc(_path, timeout_s=30):

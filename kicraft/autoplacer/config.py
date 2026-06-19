@@ -106,6 +106,14 @@ DEFAULT_CONFIG = {
     # the board overhangs the port, so this is a positive flush-or-overhang
     # margin, never an inset.
     "connector_edge_overhang_mm": 0.5,
+    # Copper-to-edge clearance (mm) the composed board edge keeps from an
+    # edge-mount connector's edge-facing SOLDER PADS. The parent composer places
+    # the edge at ``anchor - inward + outward`` with this as ``inward``, so the
+    # connector's pads clear the cut line by this much while its mouth still
+    # overhangs by ``connector_edge_overhang_mm - this``. 0 reproduces the old
+    # pads-flush-with-edge behavior (copper_edge_clearance DRC on BNC GND shields,
+    # flush switches, etc.). Matches the board's min_copper_edge_clearance rule.
+    "connector_edge_pad_clearance_mm": 0.2,
     # Keep ordinary parts behind an edge-pinned connector's pads (leaf solve).
     # The composed parent board edge is drawn OUTBOARD of the connector's pads,
     # so a companion left outboard strands in the copper-to-edge clearance band

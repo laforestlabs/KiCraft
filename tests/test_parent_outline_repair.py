@@ -144,8 +144,11 @@ def test_connector_edge_not_buried_by_inboard_neighbor():
 
 def test_connector_side_still_encloses_geometry_beyond_mouth():
     # A stray passive C1 placed slightly BEYOND the mouth (x=-1) must still be
-    # enclosed (fabricable) -- the connector-side rule uses a zero-margin floor,
-    # not a hard clamp, so it extends just far enough to keep C1 inside.
+    # enclosed (fabricable). The connector-side floor leaves
+    # pad_edge_clearance_mm (0.2) of copper-to-edge clearance from the placed
+    # copper -- so the leftmost copper (C1 body at x=-1.0) lands the edge at
+    # -1.2, not the full breathing-room margin (-3.0) that would bury the port,
+    # and not zero margin (-1.0) that puts C1's copper on the cut line.
     j1 = _comp("J1", cx=2.0, cy=10.0, w=4.0, h=6.0,
                pads=[_pad("J1", 3.0, 10.0)], kind="connector")
     c1 = _comp("C1", cx=-0.5, cy=14.0, w=1.0, h=1.0,  # body x in [-1.0, 0.0]
@@ -155,10 +158,30 @@ def test_connector_side_still_encloses_geometry_beyond_mouth():
         board_outline=(Point(0.0, 0.0), Point(20.0, 20.0)),
     )
     state = _state(bs, edge_refs={"J1"}, connector_sides={"left"})
-    _repair_parent_outline(state, margin_mm=2.0)
-    # Grows to enclose C1 (x=-1.0) with no breathing-room margin, not -1.0-2.0.
-    assert bs.board_outline[0].x <= -1.0 + 1e-6
-    assert bs.board_outline[0].x >= -1.0 - 1e-6
+    _repair_parent_outline(state, margin_mm=2.0, pad_edge_clearance_mm=0.2)
+    # Encloses C1 (x=-1.0) plus 0.2mm copper-to-edge clearance.
+    assert bs.board_outline[0].x <= -1.2 + 1e-6
+    assert bs.board_outline[0].x >= -1.2 - 1e-6
+    assert _validate_parent_geometry(state)["accepted"] is True
+
+
+def test_connector_side_clears_flush_pad_by_clearance():
+    # The core fix: an edge-mount connector whose edge-facing PAD sits at its
+    # body front (a BNC GND shield) -- pad flush with the constraint-aware
+    # outline -- gets the board edge pulled pad_edge_clearance_mm outboard of the
+    # pad, so the pad clears the cut line instead of landing on it.
+    # J1 body left edge at x=0 (flush with the outline), GND pad also reaching x=0.
+    j1 = _comp("J1", cx=2.0, cy=10.0, w=4.0, h=6.0,
+               pads=[_pad("J1", 0.5, 10.0, w=1.0, h=1.0)],  # pad x in [0.0, 1.0]
+               kind="connector")
+    bs = BoardState(
+        components={"J1": j1},
+        board_outline=(Point(0.0, 0.0), Point(20.0, 20.0)),  # left edge at pad
+    )
+    state = _state(bs, edge_refs={"J1"}, connector_sides={"left"})
+    _repair_parent_outline(state, margin_mm=2.0, pad_edge_clearance_mm=0.2)
+    # Edge pulled to pad_left (0.0) - 0.2 = -0.2 so the pad clears by 0.2mm.
+    assert abs(bs.board_outline[0].x - (-0.2)) < 1e-6, bs.board_outline[0].x
     assert _validate_parent_geometry(state)["accepted"] is True
 
 
