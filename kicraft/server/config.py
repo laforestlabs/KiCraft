@@ -180,6 +180,15 @@ class Settings:
     review_provider_order: list[str] = field(default_factory=list)
     review_max_price_prompt: float = 0.0
     review_max_price_completion: float = 0.0
+    # Lazy corroboration of the review gate: a blocker-eligible blocker hard-blocks
+    # only if `review_corroboration` passes agree on it (same category + refdes),
+    # else it demotes to a warning. Pass 2+ runs ONLY when pass 1 proposes such a
+    # blocker, so clean/warning-only builds still cost one pass. 1 = legacy single
+    # pass. review_temperature>0 makes the passes independent enough to corroborate
+    # (0.0 makes them near-identical -> a near no-op). KICRAFT_REVIEW_CORROBORATION
+    # / KICRAFT_REVIEW_TEMPERATURE.
+    review_corroboration: int = 2
+    review_temperature: float = 0.5
     # Layer-4 fab gate: run the electrical review during build verify and block
     # a structurally-sound board from being declared fab-ready if the review
     # finds a blocker. ON by default -- catching an electrically-wrong board is
@@ -256,6 +265,10 @@ class Settings:
                 os.environ.get("KICRAFT_REVIEW_MAX_PRICE_PROMPT", cls.review_max_price_prompt)),
             review_max_price_completion=float(
                 os.environ.get("KICRAFT_REVIEW_MAX_PRICE_COMPLETION", cls.review_max_price_completion)),
+            review_corroboration=int(
+                os.environ.get("KICRAFT_REVIEW_CORROBORATION", cls.review_corroboration)),
+            review_temperature=float(
+                os.environ.get("KICRAFT_REVIEW_TEMPERATURE", cls.review_temperature)),
             enable_electrical_review=_env_bool_default("KICRAFT_ELECTRICAL_REVIEW", True),
         )
 

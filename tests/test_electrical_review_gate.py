@@ -78,12 +78,25 @@ def test_gate_fail_soft_without_api_key(monkeypatch, tmp_path):
 
 
 def test_gate_blocks_on_blocker(monkeypatch, tmp_path):
+    # Blocker-eligible category, corroborated (the _Fake returns the same reply on
+    # both passes -> they agree) -> the gate blocks.
     _enable(monkeypatch, json.dumps({"findings": [
-        {"severity": "blocker", "area": "filter-math",
-         "issue": "wrong values", "suggestion": "fix"}]}))
+        {"severity": "blocker", "area": "current-limit",
+         "issue": "U1 SENSE tied to GND, no current limit", "suggestion": "add Rsense"}]}))
     r = _maybe_electrical_review(_state(), tmp_path)
     assert r["ran"] is True and r["blocked"] is True
     assert r["findings"][0]["severity"] == "blocker"
+
+
+def test_gate_terminals_intent_never_blocks(monkeypatch, tmp_path):
+    # The gate's own never-a-blocker example: screw-vs-binding-post terminals. The
+    # clamp demotes it to a warning BEFORE corroboration -> the board ships.
+    _enable(monkeypatch, json.dumps({"findings": [
+        {"severity": "blocker", "area": "intent-mismatch",
+         "issue": "TB1 uses screw terminals instead of binding posts", "suggestion": "swap"}]}))
+    r = _maybe_electrical_review(_state(), tmp_path)
+    assert r["ran"] is True and r["blocked"] is False
+    assert r["findings"][0]["severity"] == "warning"
 
 
 def test_gate_passes_on_clean_or_warnings(monkeypatch, tmp_path):
