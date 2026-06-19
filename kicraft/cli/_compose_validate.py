@@ -18,6 +18,7 @@ def _repair_parent_outline(
     state: ParentCompositionState,
     *,
     margin_mm: float = 2.0,
+    pad_edge_clearance_mm: float = 0.2,
 ) -> dict[str, Any]:
     """Grow the parent board outline so it encloses all placed geometry.
 
@@ -118,18 +119,25 @@ def _repair_parent_outline(
     new_br = Point(max(br.x, req_max_x), max(br.y, req_max_y))
 
     # On connector-defined sides, keep the edge at the constraint-aware outline
-    # (mouth + overhang) and grow ONLY to the zero-margin floor -- so a neighbor
-    # part inboard of the mouth, or the breathing-room margin, can never push
-    # the board out past the port. Geometry genuinely beyond the mouth (a stray
-    # passive) still gets enclosed, so the board stays fabricable.
+    # (mouth + overhang) and grow ONLY to the floor -- so a neighbor part inboard
+    # of the mouth, or the full breathing-room margin, can never push the board
+    # out past the port. The floor leaves ``pad_edge_clearance_mm`` of copper-to-
+    # edge clearance from the placed copper, so an edge-mount connector whose
+    # edge-facing pads sit at its body front (a BNC GND shield, a flush switch)
+    # gets the cut line pulled that far outboard of its pads -- the fix for
+    # pads-flush-with-edge copper_edge_clearance DRC -- while a connector whose
+    # pads already sit well inboard of the mouth is untouched (the mouth+overhang
+    # edge stays outboard of pad+clearance). The mouth/body (excluded from the
+    # floor) still overhangs, so the port stays accessible.
+    clr = max(0.0, float(pad_edge_clearance_mm))
     if "left" in conn_sides:
-        new_tl = Point(min(tl.x, flr_min_x), new_tl.y)
+        new_tl = Point(min(tl.x, flr_min_x - clr), new_tl.y)
     if "top" in conn_sides:
-        new_tl = Point(new_tl.x, min(tl.y, flr_min_y))
+        new_tl = Point(new_tl.x, min(tl.y, flr_min_y - clr))
     if "right" in conn_sides:
-        new_br = Point(max(br.x, flr_max_x), new_br.y)
+        new_br = Point(max(br.x, flr_max_x + clr), new_br.y)
     if "bottom" in conn_sides:
-        new_br = Point(new_br.x, max(br.y, flr_max_y))
+        new_br = Point(new_br.x, max(br.y, flr_max_y + clr))
 
     changed = (
         abs(new_tl.x - tl.x) > 1e-6

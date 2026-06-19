@@ -1431,20 +1431,21 @@ def validate_routed_board(
         else:
             validation["obviously_illegal_routed_geometry"] = True
     if drc.get("copper_edge_clearance", 0) > 0:
+        # Edge-mount connector PADS no longer get a blanket copper_edge waiver.
+        # The composer now keeps the board edge a copper-to-edge clearance
+        # outboard of an edge-zoned connector's pads (connector_edge_pad_clearance_mm
+        # in _repair_parent_outline), so a correctly flush-mounted connector
+        # produces no pad-to-edge violation to waive -- the geometry is fixed at
+        # the source instead of masked here. Only the explicit per-board
+        # ignorable_footprint_refs escape hatch remains; anything else (a stray
+        # track near the edge, a genuinely too-close pad) fails loudly.
         report_text = str(drc.get("report_text", ""))
-        copper_edge_ref_counts = _extract_violation_footprint_refs(
-            report_text,
-            {"copper_edge_clearance"},
+        copper_edge_refs = set(
+            _extract_violation_footprint_refs(report_text, {"copper_edge_clearance"})
         )
-        copper_edge_refs = set(copper_edge_ref_counts)
         drc["copper_edge_footprint_refs"] = sorted(copper_edge_refs)
         ignorable_refs = set(cfg.get("ignorable_footprint_refs", [])) if cfg else set()
-        edge_component_refs = {
-            ref
-            for ref, zone in (cfg.get("component_zones", {}) if cfg else {}).items()
-            if isinstance(zone, dict) and zone.get("edge")
-        }
-        if copper_edge_refs and copper_edge_refs <= (ignorable_refs | edge_component_refs):
+        if copper_edge_refs and copper_edge_refs <= ignorable_refs:
             validation["footprint_internal_copper_edge_count"] = int(
                 drc.get("copper_edge_clearance", 0)
             )
