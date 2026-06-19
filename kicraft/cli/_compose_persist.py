@@ -5,6 +5,7 @@ Split out of ``compose_subcircuits.py`` (Lever 2.5); re-exported there.
 from __future__ import annotations
 
 import json
+import time
 
 from kicraft.autoplacer.brain.copper_accounting import verify_copper_preservation
 from pathlib import Path
@@ -163,8 +164,15 @@ def _persist_parent_artifact(
     parent_stamped_preview_path = renders_dir / "parent_stamped.png"
     parent_routed_preview_path = renders_dir / "parent_routed.png"
 
+    # Provenance: which run produced this artifact (KICRAFT_RUN_ID is inherited
+    # from the parent process; see kicraft/cli/artifact_paths.py). Lets the
+    # promote freshness gate and `kicraft artifacts` answer "is this current?".
+    from kicraft.cli.artifact_paths import current_run_id
+
     metadata_payload = {
         "schema_version": "parent-compose-v1",
+        "run_id": current_run_id(),
+        "generated_at": time.time(),
         "subcircuit_id": {
             "sheet_name": parent_id.sheet_name,
             "sheet_file": parent_id.sheet_file,

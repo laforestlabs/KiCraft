@@ -22,13 +22,18 @@ def _touch(p: Path) -> Path:
     return p
 
 
-def test_routed_parent_wins_when_present(tmp_path):
+def test_resolvers_are_intent_based_when_both_boards_present(tmp_path):
+    """The resolvers are INTENT-based, not "richest wins": with both a routed and
+    a placed parent on disk, `_find_routed_parent` returns the routed board and
+    `_find_placed_parent` returns the PLACED board -- it never falls back to the
+    routed one. This is the core of the replay --no-route stale-board fix: a
+    placement-only run asks for the placed board and so can never be handed a
+    routed board (stale or otherwise) from a previous run."""
     sub = tmp_path / ".experiments" / "subcircuits" / "subcircuit__abc"
-    _touch(sub / "parent_pre_freerouting.kicad_pcb")
+    placed = _touch(sub / "parent_pre_freerouting.kicad_pcb")
     routed = _touch(sub / "parent_routed.kicad_pcb")
     assert cli_app._find_routed_parent(tmp_path) == routed
-    # placed-parent prefers the routed board too (it is "more placed").
-    assert cli_app._find_placed_parent(tmp_path) == routed
+    assert cli_app._find_placed_parent(tmp_path) == placed
 
 
 def test_placed_parent_is_the_rc6_fallback(tmp_path):

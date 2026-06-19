@@ -185,18 +185,14 @@ def _count_leaf_artifacts(project_dir: Path) -> int:
 
 
 def _find_parent_artifact(project_dir: Path) -> Path | None:
-    """Find the parent artifact directory (the one with parent_routed.kicad_pcb)."""
-    artifacts_dir = project_dir / ".experiments" / "subcircuits"
-    if not artifacts_dir.exists():
-        return None
-    for d in artifacts_dir.iterdir():
-        if d.is_dir() and (d / "parent_routed.kicad_pcb").exists():
-            return d
-    # Fall back to parent_pre_freerouting
-    for d in artifacts_dir.iterdir():
-        if d.is_dir() and (d / "parent_pre_freerouting.kicad_pcb").exists():
-            return d
-    return None
+    """Find the parent artifact directory (the most recently produced one).
+
+    Delegates to the central resolver so selection is deterministic (newest by
+    board/metadata mtime) instead of ``iterdir`` first-match in arbitrary OS
+    order. See ``kicraft/cli/artifact_paths.py``."""
+    from kicraft.cli.artifact_paths import latest_parent_artifact_dir
+
+    return latest_parent_artifact_dir(project_dir)
 
 
 # ---------------------------------------------------------------------------

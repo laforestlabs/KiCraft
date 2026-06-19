@@ -32,6 +32,7 @@ from typing import get_args
 
 from pydantic import ValidationError
 
+from kicraft.cli import artifact_paths
 from kicraft.parts_library import jlcparts
 
 from .library import (
@@ -2360,76 +2361,39 @@ def _run_layout(quality: str, root_sch: Path, pcb: Path,
 
 
 def _find_routed_parent(project_dir: Path) -> Path | None:
-    """Locate the best routed parent board produced by the layout engine."""
-    try:
-        from kicraft.cli.solve_hierarchy import _find_parent_artifact
-
-        art = _find_parent_artifact(project_dir)
-        if art is not None:
-            routed = Path(art) / "parent_routed.kicad_pcb"
-            if routed.exists():
-                return routed
-    except Exception:
-        pass
-    hits = sorted(project_dir.glob("**/parent_routed.kicad_pcb"))
-    return hits[-1] if hits else None
+    """The routed parent board (``parent_routed.kicad_pcb``), or None. Thin
+    wrapper over the central resolver (see ``kicraft/cli/artifact_paths.py``)."""
+    return artifact_paths.resolve_parent_board(project_dir, kind="routed")
 
 
 def _find_placed_parent(project_dir: Path) -> Path | None:
-    """Best *placed* parent board: the routed one if present, else the
-    pre-freerouting compose (what ``--no-route`` produces). Used by `replay
-    --no-route`, the fast placement-only iteration mode whose footprint
-    positions are the determinism guarantee we assert."""
-    routed = _find_routed_parent(project_dir)
-    if routed is not None:
-        return routed
-    try:
-        from kicraft.cli.solve_hierarchy import _find_parent_artifact
-
-        art = _find_parent_artifact(project_dir)
-        if art is not None:
-            pre = Path(art) / "parent_pre_freerouting.kicad_pcb"
-            if pre.exists():
-                return pre
-    except Exception:
-        pass
-    hits = sorted(project_dir.glob("**/parent_pre_freerouting.kicad_pcb"))
-    return hits[-1] if hits else None
+    """The PLACED parent board (``parent_pre_freerouting.kicad_pcb``) -- exactly
+    what ``replay --no-route`` produces. Intent-based: it NEVER returns a routed
+    board, so a placement-only run can't be handed a STALE routed board left over
+    from a previous run (the bug that motivated ``artifact_paths.py``)."""
+    return artifact_paths.resolve_parent_board(project_dir, kind="placed")
 
 
 def _find_best_leaf_board(project_dir: Path) -> Path | None:
-    """Richest single-leaf board, as a last resort when the parent compose
-    produced no parent board at all: a routed leaf if any, else a placed
-    (pre-freerouting) leaf, else even a placement the legality gate REJECTED
-    (``leaf_illegal_pre_stamp`` -- e.g. an array decap stranded outside the leaf
-    outline, the KC-93X3X3 rc6 shape).
+    """Richest single-leaf board, last-resort rc6 PREVIEW when the parent compose
+    produced no parent board at all. Thin wrapper over the central resolver
+    (see ``artifact_paths.resolve_best_leaf_board``)."""
+    return artifact_paths.resolve_best_leaf_board(project_dir)
 
-    A single leaf is only part of a multi-leaf board, and a rejected placement is
-    not fab-ready, but each is a REAL placed mini-PCB that shows where the build
-    actually got -- far better to show (so the failure is visible and the user can
-    diagnose it) than the raw, uncomposed scatter board. The caller still returns
-    rc6 and exports no fab package, so this is a PREVIEW only, never a fab-ready
-    promotion.
 
-    The autoexperiment writes per-round snapshots (``round_NNNN_leaf_*``); the
-    single-pass solver writes the bare canonical names; a rejected round leaves
-    ONLY ``leaf_illegal_pre_stamp`` + the ``round_NNNN_`` pre-freerouting snapshot
-    (never the bare names). Match all of them, richest tier first, and within a
-    tier pick the most recently written."""
-    sub = project_dir / ".experiments" / "subcircuits"
-    if not sub.is_dir():
-        return None
-    for pattern in (
-        "*/leaf_routed.kicad_pcb",
-        "*/round_*_leaf_routed.kicad_pcb",
-        "*/leaf_pre_freerouting.kicad_pcb",
-        "*/round_*_leaf_pre_freerouting.kicad_pcb",
-        "*/leaf_illegal_pre_stamp.kicad_pcb",
-    ):
-        hits = [p for p in sub.glob(pattern) if p.is_file()]
-        if hits:
-            return max(hits, key=lambda p: p.stat().st_mtime)
-    return None
+def _stale_board_msg(kind: str, board: Path, run_id: str | None) -> str:
+    """Loud, actionable message when the freshness gate refuses a stale board --
+    so a 'my change had no effect' run fails visibly instead of silently
+    promoting a previous run's board (the trap documented in docs/ARTIFACTS.md)."""
+    src_rid = artifact_paths.board_run_id(board) or "unknown"
+    return (
+        f"error: refusing to promote a STALE {kind} board -- this run "
+        f"(id={run_id}) produced no fresh {kind} parent board. Found {board} "
+        f"(run_id={src_rid}; its mtime predates this run's start), so it is from "
+        f"a PREVIOUS run. The layout engine likely failed before writing one; "
+        f"inspect .experiments/subcircuits/ for what it produced. "
+        f"See docs/ARTIFACTS.md."
+    )
 
 
 def _count_leaf_subcircuits(root_sch: Path) -> int:
@@ -2660,11 +2624,43 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     #    build produced. Never leave the raw, uncomposed scatter board as the
     #    preview: it misrepresents a build that actually placed (and usually
     #    routed) the design as one that never started.
+    run_id, run_started_at = artifact_paths.ensure_run_context()
     routed = _find_routed_parent(project_dir)
-    if routed is None:
+    # A routed board from a PREVIOUS run is not this run's output: treat it as
+    # "no fresh routed parent" (rc6) and fall through to the inspection preview
+    # rather than silently shipping a stale board as fab-ready (the silent-stale
+    # class this gate exists to kill).
+    routed_fresh = routed is not None and artifact_paths.produced_by_this_run(
+        routed, run_id=run_id, run_started_at=run_started_at
+    )
+    if not routed_fresh:
+        if routed is not None:
+            print(
+                f"[build]     ignoring STALE routed parent {routed.name} "
+                f"(not from run {run_id}); this run produced no fresh routed board",
+                file=sys.stderr,
+            )
         partial = _find_placed_parent(project_dir) or _find_best_leaf_board(project_dir)
         if partial is not None:
-            shutil.copy2(partial, pcb)
+            # rc6 PREVIEW: this run did not route a parent. Surface the richest
+            # board it DID reach so the failure is inspectable. This is already a
+            # failure path -- if the partial isn't even from this run, WARN loudly
+            # but still show it; never hard-error on top of rc6 (the user would
+            # then get nothing to inspect).
+            partial_fresh = artifact_paths.produced_by_this_run(
+                partial, run_id=run_id, run_started_at=run_started_at
+            )
+            shutil.copy(partial, pcb)
+            artifact_paths.write_promote_provenance(
+                pcb, run_id=run_id, run_started_at=run_started_at,
+                source_board=partial, source_kind="partial", fresh=partial_fresh,
+            )
+            if not partial_fresh:
+                print(
+                    f"[build]     WARNING: partial board {partial.name} is NOT "
+                    f"from this run (run_id={run_id}); shown for inspection only.",
+                    file=sys.stderr,
+                )
             print(
                 f"[build] 3/5 no routed parent; promoted best partial board "
                 f"for inspection -> {pcb.name} ({partial.name})"
@@ -2682,7 +2678,11 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
             file=sys.stderr,
         )
         return 6
-    shutil.copy2(routed, pcb)
+    shutil.copy(routed, pcb)  # copy (not copy2) -> honest promote-time mtime
+    artifact_paths.write_promote_provenance(
+        pcb, run_id=run_id, run_started_at=run_started_at,
+        source_board=routed, source_kind="routed", fresh=True,
+    )
     print(f"[build] 3/5 promoted routed parent -> {pcb.name}")
 
     # Align the project's netclass clearances with the (possibly fine-pitch
@@ -2806,6 +2806,11 @@ def _cmd_manual_route(args: argparse.Namespace) -> int:
     from kicraft.build_slots import build_slot
 
     from .models import ArtifactPaths
+
+    # manual-route does not go through _layout_route_fab, so establish this run's
+    # identity here -- before the compose subprocess spawns -- so metadata.json
+    # carries this run's id and the promote freshness gate has a run to compare to.
+    artifact_paths.ensure_run_context()
 
     state_path = Path(args.state)
     out_dir = Path(args.out_dir)
@@ -2974,6 +2979,11 @@ def _layout_route_fab(args, state, state_path, artifacts, results,
     do_fab = not getattr(args, "no_fab", False)
     done_label = getattr(args, "done_label", "BUILD COMPLETE")
 
+    # Establish this run's identity BEFORE the layout subprocess spawns, so the
+    # compose subprocess inherits KICRAFT_RUN_ID (stamped into metadata.json) and
+    # the promote freshness gate below can tell this run's board from a stale one.
+    run_id, run_started_at = artifact_paths.ensure_run_context()
+
     # 2. Optimize placement (+ route) via the layout engine.
     action = "place + route" if route else "place (no route)"
     seed_label = seed if seed is not None else "auto"
@@ -2992,7 +3002,19 @@ def _layout_route_fab(args, state, state_path, artifacts, results,
             print("error: the layout engine produced no placed parent board "
                   "(parent compose failed).", file=sys.stderr)
             return 6
-        shutil.copy2(placed, pcb)
+        # Freshness gate: the placed board is freshly re-stamped on every run, so
+        # if it isn't from THIS run the stamp failed -- error loudly instead of
+        # promoting a previous run's placement (the --no-route stale-board bug).
+        if not artifact_paths.produced_by_this_run(
+            placed, run_id=run_id, run_started_at=run_started_at
+        ):
+            print(_stale_board_msg("placed", placed, run_id), file=sys.stderr)
+            return 6
+        shutil.copy(placed, pcb)  # copy (not copy2) -> honest promote-time mtime
+        artifact_paths.write_promote_provenance(
+            pcb, run_id=run_id, run_started_at=run_started_at,
+            source_board=placed, source_kind="placed", fresh=True,
+        )
         print(f"[build] 3/5 promoted placed parent -> {pcb.name} "
               "(placement only; no verify/fab)")
         print()
@@ -3226,6 +3248,85 @@ def _cmd_replay(args: argparse.Namespace) -> int:
               "during replay (determinism violated).", file=sys.stderr)
         return 8
     return rc
+
+
+def _cmd_artifacts(args: argparse.Namespace) -> int:
+    """Report WHERE the current board artifacts are and WHETHER they are fresh --
+    the one query an agent runs instead of globbing ``.experiments`` by hand and
+    guessing which file is current. Resolves through ``artifact_paths`` (the same
+    resolver the build promote uses) and reads the ``<stem>.provenance.json``
+    written at the last promote. See docs/ARTIFACTS.md."""
+    project_dir = Path(args.project).expanduser().resolve()
+    if not project_dir.is_dir():
+        print(f"error: no such project dir: {project_dir}", file=sys.stderr)
+        return 2
+
+    def _iso(ts) -> str | None:
+        try:
+            return _dt.datetime.fromtimestamp(float(ts)).isoformat(timespec="seconds")
+        except (OSError, TypeError, ValueError):
+            return None
+
+    # The promoted top-level board (<stem>.kicad_pcb) + its promote provenance.
+    promoted = sorted(p for p in project_dir.glob("*.kicad_pcb") if p.is_file())
+    prov = artifact_paths.read_provenance(promoted[0]) if promoted else None
+    promoted_run_id = (prov or {}).get("run_id")
+
+    kinds = ["routed", "placed", "leaf"] if args.kind == "all" else [args.kind]
+    entries: dict[str, dict | None] = {}
+    for kind in kinds:
+        board = (
+            artifact_paths.resolve_best_leaf_board(project_dir)
+            if kind == "leaf"
+            else artifact_paths.resolve_parent_board(project_dir, kind=kind)
+        )
+        if board is None:
+            entries[kind] = None
+            continue
+        rid = artifact_paths.board_run_id(board)
+        entries[kind] = {
+            "path": str(board),
+            "run_id": rid,
+            "mtime": _iso(board.stat().st_mtime) if board.exists() else None,
+            "md5": artifact_paths.file_md5(board),
+            # drift signal: does this artifact's run match what was last promoted?
+            "matches_promoted": (rid == promoted_run_id)
+            if (rid and promoted_run_id) else None,
+        }
+
+    if args.json:
+        print(json.dumps({
+            "project": str(project_dir),
+            "promoted": str(promoted[0]) if promoted else None,
+            "promoted_provenance": prov,
+            "artifacts": entries,
+        }, indent=2, sort_keys=True, default=str))
+        return 0
+
+    print(f"project : {project_dir}")
+    if promoted:
+        print(f"promoted: {promoted[0].name}")
+        if prov:
+            print(f"  provenance: run_id={prov.get('run_id')} "
+                  f"source_kind={prov.get('source_kind')} fresh={prov.get('fresh')} "
+                  f"promoted_at={_iso(prov.get('promoted_at'))}")
+        else:
+            print("  provenance: (none -- promoted by a pre-provenance build, or "
+                  "not yet promoted)")
+    else:
+        print("promoted: (no top-level <stem>.kicad_pcb yet)")
+    print("artifacts (resolved via kicraft/cli/artifact_paths.py):")
+    for kind in kinds:
+        e = entries[kind]
+        if e is None:
+            print(f"  {kind:7}: (none)")
+            continue
+        drift = "  [!] run_id differs from promoted board" \
+            if e["matches_promoted"] is False else ""
+        print(f"  {kind:7}: {e['path']}")
+        print(f"           run_id={e['run_id'] or '(unrecorded)'}  "
+              f"mtime={e['mtime']}  md5={e['md5']}{drift}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3647,6 +3748,35 @@ def main(argv: list[str] | None = None) -> int:
         "out_dir", help="output directory (project_stem appended if absent)"
     )
     p_mroute.set_defaults(func=_cmd_manual_route)
+
+    p_artifacts = sub.add_parser(
+        "artifacts",
+        help=(
+            "show WHERE the current board artifacts are and WHETHER they are "
+            "fresh -- run this instead of globbing .experiments by hand"
+        ),
+        description=(
+            "Resolves the routed / placed / best-leaf board for a synthesized "
+            "project via the same intent-based resolver the build promote uses, "
+            "and reports each board's path, run_id, mtime and md5 plus the "
+            "<stem>.provenance.json from the last promote. The single source of "
+            "truth for 'which board is current and did this run produce it' -- "
+            "see docs/ARTIFACTS.md. NEVER measure <stem>.kicad_pcb for placement "
+            "A/B; resolve the placed board with this command."
+        ),
+    )
+    p_artifacts.add_argument(
+        "--project", required=True,
+        help="synthesized project dir (the one containing .experiments/)",
+    )
+    p_artifacts.add_argument(
+        "--kind", choices=["routed", "placed", "leaf", "all"], default="all",
+        help="which board to resolve (default: all)",
+    )
+    p_artifacts.add_argument(
+        "--json", action="store_true", help="emit machine-readable JSON",
+    )
+    p_artifacts.set_defaults(func=_cmd_artifacts)
 
     p_prep = sub.add_parser(
         "stage-prep",

@@ -164,11 +164,13 @@ def _run_parent(workspace: Path, stem: str, scratch: Path) -> dict:
     ).returncode
     if rc != 0:
         raise RuntimeError(f"compose exited {rc}")
-    hits = sorted(glob.glob(str(dest / ".experiments" / "subcircuits"
-                                / "subcircuit__*" / "parent_pre_freerouting.kicad_pcb")))
-    if not hits:
+    # Resolve the freshly-composed placed board via the central resolver, not a
+    # sorted(glob)[-1] (alphabetical), so the golden measures the current board.
+    from kicraft.cli.artifact_paths import resolve_parent_board
+    board = resolve_parent_board(dest, kind="placed")
+    if board is None:
         raise RuntimeError("compose produced no parent_pre_freerouting board")
-    return {"__parent__": _footprints(hits[-1])}
+    return {"__parent__": _footprints(str(board))}
 
 
 # ---- shared driver -----------------------------------------------------------
