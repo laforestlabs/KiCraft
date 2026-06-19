@@ -482,13 +482,13 @@ def _cmd_electrical_review(args: argparse.Namespace) -> int:
     from kicraft.server.config import Settings
 
     settings = Settings.from_env()
-    client = make_client(settings)
+    client = make_client(settings.for_review())
     # Default to the design model (deepseek-v4-flash -- cheap) but give it a
     # higher thinking budget; the review is a one-shot reasoning task.
     model = args.model or settings.review_model or settings.model
-    reasoning = ({"max_tokens": settings.review_reasoning_tokens}
-                 if settings.review_reasoning_tokens else None)
-    result = review_design(client, digest, model=model, reasoning=reasoning)
+    reasoning = settings.review_reasoning()
+    result = review_design(client, digest, model=model, reasoning=reasoning,
+                           max_tokens=settings.review_max_tokens)
     print(json.dumps({
         "ok": result["ok"],
         "error": result["error"],
@@ -972,6 +972,49 @@ def _finalize_part_bundle(
     dump_manifest(manifest.model_copy(update={"content_hash": actual}), part_dir)
 
 
+def _ensure_vendored_courtyard_clearance(
+    pretty_dir: Path,
+    footprint_name: str,
+    *,
+    min_clearance_mm: float = 0.2,
+) -> None:
+    """Footprint-hygiene check run when vendoring a part: grow the footprint's
+    courtyard so it clears every pad by ``min_clearance_mm``.
+
+    A courtyard that sits at (or inside) its own pad copper makes the part read
+    as physically smaller than its copper, which downstream board-outline /
+    placement geometry treats as the part's extent. Keeping the courtyard a
+    clearance outboard of the pads keeps that geometry honest. Best-effort: only
+    re-saves (round-trips through pcbnew) when a grow is actually needed, and
+    skips silently if pcbnew is unavailable, so it never blocks a part fetch.
+    """
+    try:
+        import pcbnew
+
+        from kicraft.parts_library.footprint_courtyard import (
+            ensure_courtyard_clears_pads,
+        )
+    except ImportError:
+        return
+    try:
+        fp = pcbnew.FootprintLoad(str(pretty_dir), footprint_name)
+        if fp is None:
+            return
+        if ensure_courtyard_clears_pads(fp, min_clearance_mm=min_clearance_mm):
+            pcbnew.PCB_IO_KICAD_SEXPR().FootprintSave(str(pretty_dir), fp)
+            print(
+                f"add-part: grew {footprint_name} courtyard to clear pads by "
+                f">= {min_clearance_mm} mm",
+                file=sys.stderr,
+            )
+    except Exception as exc:  # noqa: BLE001 - hygiene check, never fatal
+        print(
+            f"add-part: courtyard clearance check skipped "
+            f"({type(exc).__name__}: {exc})",
+            file=sys.stderr,
+        )
+
+
 def _add_part_from_files(args: argparse.Namespace) -> int:
     """Bundle a part from user-supplied .kicad_sym + .kicad_mod files.
 
@@ -1064,6 +1107,7 @@ def _add_part_from_files(args: argparse.Namespace) -> int:
     normalized_sym = _normalize_symbol_text(sym_text, raw_symbol_name, symbol_name)
     (part_dir / f"{libname}.kicad_sym").write_text(normalized_sym)
     (pretty_dir / f"{footprint_name}.kicad_mod").write_text(fp_text)
+    _ensure_vendored_courtyard_clearance(pretty_dir, footprint_name)
 
     import datetime as _dt
 
@@ -1303,6 +1347,8 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
         )
         if fp_fixed != fp_text:
             fp_path.write_text(fp_fixed)
+
+    _ensure_vendored_courtyard_clearance(pretty_dir, footprint_name)
 
     # Compose the manifest, then compute content_hash and rewrite once.
     sourcing: dict[str, str] = {"lcsc": lcsc_id}
@@ -2571,12 +2617,12 @@ def _maybe_electrical_review(state, project_dir: Path) -> dict:
         )
 
         s = Settings.from_env()
-        client = make_client(s)
+        client = make_client(s.for_review())
         digest = build_design_digest(state, project_root=project_dir)
         model = s.review_model or s.model
-        reasoning = ({"max_tokens": s.review_reasoning_tokens}
-                     if s.review_reasoning_tokens else None)
-        res = review_design(client, digest, model=model, reasoning=reasoning)
+        reasoning = s.review_reasoning()
+        res = review_design(client, digest, model=model, reasoning=reasoning,
+                            max_tokens=s.review_max_tokens)
         if not res["ok"]:
             print(f"[build] electrical review skipped (model error: {res['error']})",
                   file=sys.stderr)
