@@ -13,9 +13,12 @@ from kicraft.design.models import (
     PinEndpoint,
 )
 from kicraft.design.synthesis.electrical_review import (
+    _categorize,
     build_design_digest,
+    clamp_findings,
     has_blocker,
     review_design,
+    review_design_corroborated,
 )
 
 
@@ -81,16 +84,66 @@ def test_digest_uses_pin_function_names(monkeypatch):
 
 def test_review_parses_valid_findings():
     reply = json.dumps({"findings": [
-        {"severity": "Blocker", "area": "decoupling",
-         "issue": "U1 has no 100nF bypass cap", "suggestion": "add 100nF VCC-GND"},
+        {"severity": "Blocker", "area": "current-limit",
+         "issue": "U1 SENSE tied to GND -- no current limit", "suggestion": "add Rsense"},
         {"severity": "note", "area": "layout", "issue": "minor", "suggestion": ""},
     ]})
     r = review_design(FakeClient(reply), "digest")
     assert r["ok"] and r["error"] is None
     assert len(r["findings"]) == 2
-    assert r["findings"][0]["severity"] == "blocker"   # normalized lowercase
+    assert r["findings"][0]["severity"] == "blocker"   # blocker-eligible, kept
+    assert r["findings"][0]["category"] == "current-limit"
+    assert r["findings"][0]["refs"] == ["U1"]          # refdes recovered from issue
     assert has_blocker(r["findings"])
     assert round(r["cost_usd"], 4) == 0.002
+
+
+def test_clamp_demotes_warning_max_category():
+    # KC-PN2YUC: a decoupling-SIZING critique the model called a blocker -> warning.
+    reply = json.dumps({"findings": [
+        {"severity": "blocker", "area": "decoupling",
+         "issue": "only 2x 100nF for 45 LEDs", "suggestion": "add caps"}]})
+    r = review_design(FakeClient(reply), "digest")
+    f = r["findings"][0]
+    assert f["severity"] == "warning" and f["severity_raw"] == "blocker"
+    assert f["clamped"] is True and f["category"] == "other"
+    assert not has_blocker(r["findings"])
+
+
+def test_categorize_blocker_eligible_phrasings():
+    cases = {
+        ("R2R_ladder", "R-2R inputs drive the ladder nodes directly"): "ladder-topology",
+        ("regulator-feedback", "feedback divider R1/R2 sets 5.08V not 3.3V"): "regulator-feedback",
+        ("current-sense", "SENSE1 tied to GND with no current-sense resistor"): "current-limit",
+        ("programming", "no firmware-flash path; cannot be programmed"): "programming-path",
+        ("isolation", "signal isolation compromised across the optocouplers"): "isolation",
+        ("input-connector", "control inputs have no input connector"): "missing-input",
+    }
+    for (area, issue), cat in cases.items():
+        assert _categorize(area, issue) == cat, (area, issue)
+
+
+def test_categorize_margin_intent_defaults_to_other():
+    # Every known over-block class must fall to 'other' (warning ceiling).
+    for area, issue in [
+        ("decoupling", "only 2x 100nF for 45 LEDs"),
+        ("protection", "no TVS / no input protection on the exposed line"),
+        ("intent-mismatch", "screw terminals instead of binding posts"),
+        ("input-range", "Vin 5V below the 5.5V minimum input"),
+        ("thermal", "regulator runs hot at full load"),
+        ("crystal-load", "32MHz load caps may be low"),
+        ("overvoltage", "VDD at 6V exceeds the 5.5V max"),
+        ("value-tolerance", "1% resistor where 5% suffices"),
+    ]:
+        assert _categorize(area, issue) == "other", (area, issue)
+
+
+def test_clamp_is_additive_and_pure():
+    src = [{"severity": "blocker", "area": "decoupling", "issue": "x", "suggestion": "y"}]
+    out = clamp_findings(src)
+    assert src[0]["severity"] == "blocker"             # input not mutated
+    assert out[0]["severity"] == "warning"
+    assert {"category", "refs", "severity_raw", "clamped"} <= out[0].keys()
 
 
 def test_review_empty_findings_is_sound():
@@ -131,4 +184,66 @@ def test_review_forwards_thinking_budget():
                   reasoning={"max_tokens": 8000})
     assert client.last_model == "deepseek/deepseek-v4-flash"
     assert client.last_reasoning == {"max_tokens": 8000}
+
+
+# --- lazy corroboration ------------------------------------------------------
+_CLEAN = json.dumps({"findings": []})
+
+
+def _blk(area="current-limit", ref="U1"):
+    return json.dumps({"findings": [
+        {"severity": "blocker", "area": area,
+         "issue": f"{ref} SENSE tied to GND -- no current limit", "suggestion": "fix"}]})
+
+
+def test_corroborate_clean_costs_one_pass():
+    c = FakeClient(_CLEAN)
+    r = review_design_corroborated(c, "digest", corroboration=2)
+    assert r["ok"] and r["blocked"] is False
+    assert c.calls == 1                                  # pass 2 never runs
+    assert round(r["cost_usd"], 4) == 0.002
+
+
+def test_corroborate_blocker_agrees_blocks():
+    c = FakeClient(_blk())                               # same blocker both passes
+    r = review_design_corroborated(c, "digest", corroboration=2)
+    assert r["blocked"] is True and c.calls == 2
+    assert r["findings"][0]["corroborated"] is True
+    assert round(r["cost_usd"], 4) == 0.004             # cost only grows on pass 2
+
+
+def test_corroborate_blocker_then_clean_demotes():
+    c = FakeClient(_blk(), _CLEAN)
+    r = review_design_corroborated(c, "digest", corroboration=2)
+    assert r["blocked"] is False and c.calls == 2
+    f = r["findings"][0]
+    assert f["severity"] == "warning" and f["demoted_from"] == "blocker"
+    assert f["corroborated"] is False                    # kept, never dropped
+
+
+def test_corroborate_disagree_on_refdes_demotes():
+    c = FakeClient(_blk(ref="U1"), _blk(ref="U2"))
+    r = review_design_corroborated(c, "digest", corroboration=2)
+    assert r["blocked"] is False and c.calls == 2
+    assert r["findings"][0]["demoted_from"] == "blocker"
+
+
+def test_corroborate_single_pass_knob():
+    c = FakeClient(_blk())
+    r = review_design_corroborated(c, "digest", corroboration=1)
+    assert r["blocked"] is True and c.calls == 1         # legacy single-pass gate
+
+
+def test_corroborate_warning_max_never_reaches_pass2():
+    # A decoupling 'blocker' is clamped to warning in pass 1 -> no candidate.
+    c = FakeClient(json.dumps({"findings": [
+        {"severity": "blocker", "area": "decoupling", "issue": "thin", "suggestion": "x"}]}))
+    r = review_design_corroborated(c, "digest", corroboration=2)
+    assert r["blocked"] is False and c.calls == 1
+
+
+def test_corroborate_fails_closed_when_pass1_unparseable():
+    c = FakeClient("garbage")
+    r = review_design_corroborated(c, "digest", corroboration=2)
+    assert r["ok"] is False and r["blocked"] is False
 

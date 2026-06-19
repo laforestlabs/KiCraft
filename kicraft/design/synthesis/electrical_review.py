@@ -25,8 +25,67 @@ then returns ``ok=False`` with no findings rather than inventing a verdict.
 from __future__ import annotations
 
 import json
+import re
 
 _SEVERITIES = ("blocker", "warning", "note")
+
+# --------------------------------------------------------------------------- #
+# severity taxonomy: a deterministic category -> severity ceiling
+# --------------------------------------------------------------------------- #
+# A single skeptical LLM pass, used as a HARD fab gate, inflates margin/intent/
+# sizing critiques to "blocker" (it over-blocked 7/8 DRC-clean fab-ready boards).
+# The fix: the model's severity is only a SUGGESTION -- a finding may hard-block
+# ONLY if its category is fab-fatal. The category is derived DETERMINISTICALLY from
+# the model's free-text area+issue (we observed 284 distinct `area` strings across
+# the bakeoff, so a model-emitted enum is unusable), and every area we don't match
+# defaults to a WARNING ceiling -- i.e. this is an allowlist of the classes that may
+# block. The blocker-eligible set is exactly every area ever labeled a blocker in a
+# NATURAL bakeoff design plus the deterministic section-9 classes (defense in depth;
+# section 9.16-9.20 also catch the latter pre-LLM). Ground truth:
+# logs/bakeoff/20260618T200126Z/labels.json.
+_SEV_RANK = {"note": 0, "warning": 1, "blocker": 2}
+
+_BLOCKER_ELIGIBLE = frozenset({
+    "current-limit", "regulator-feedback", "ladder-topology", "missing-input",
+    "programming-path", "isolation", "power-polarity", "self-short",
+    "family-contract", "rf-feed",
+})
+
+_DEFAULT_CATEGORY = "other"
+
+# Ordered (category, needles); first hit wins, so SPECIFIC anchors precede generic
+# ones (a regulator "feedback divider" must map to regulator-feedback; a bare
+# resistor "divider" must NOT be promoted). Matched against a lower-cased
+# "<area> <issue>" string. Generosity here is safe: a high ceiling only REFRAINS
+# from demoting; the model's own severity (then corroboration) still gates a block.
+_BE_PATTERNS = (
+    ("ladder-topology", ("r-2r", "r2r", "r 2r", "ladder")),
+    ("current-limit", ("current-limit", "current limit", "current-sens",
+                       "current sens", "sense-resist", "sense resistor", "rsense",
+                       "overcurrent", "over-current", "current-set", "current set")),
+    ("regulator-feedback", ("regulator-feedback", "feedback divider",
+                            "feedback-divider", "feedback resistor", "vfb",
+                            "vsense", "vref", "feedback")),
+    ("programming-path", ("programming", "program path", "first-flash",
+                          "first flash", "firmware-flash", "flash path", "bootloader",
+                          "download mode", "download-mode", "swd", "no firmware",
+                          "cannot be programmed", "no programming")),
+    ("isolation", ("isolation", "isolated", "opto")),
+    ("missing-input", ("missing input", "missing-input", "input connector",
+                       "input-connector", "control input", "control-input",
+                       "input header", "cannot be driven", "cannot command",
+                       "inputs have no", "no input header", "floating input")),
+    ("family-contract", ("family-contract", "transceiver mode", "transceiver-mode",
+                         "can transceiver", "can-transceiver", "rs pin", "de_re",
+                         "de-re", "standby mode", "slope mode")),
+    ("power-polarity", ("power-polarity", "reverse polarity", "reverse-polarity",
+                        "reversed power", "reversed supply", "vdd tied to gnd",
+                        "vcc tied to gnd", "supply polarity")),
+    ("self-short", ("self-short", "self short", "short-circuit", "short circuit",
+                    "shorted out", "both terminals", "both pins on")),
+    ("rf-feed", ("rf-feed", "rf feed", "antenna feed", "rf match", "rf-match",
+                 "antenna matching")),
+)
 
 _SYSTEM = (
     "You are a meticulous, skeptical hardware design reviewer. You review a "
@@ -228,6 +287,66 @@ def _validate(obj):
     return True, out, None
 
 
+# --------------------------------------------------------------------------- #
+# severity clamp (deterministic, post-validate)
+# --------------------------------------------------------------------------- #
+def _categorize(area: str, issue: str = "") -> str:
+    """Map a finding's free-text ``area``+``issue`` to a severity-ceiling category.
+
+    Authoritative and deterministic: severity policy is decided here, never by a
+    model-emitted enum. Returns a member of ``_BLOCKER_ELIGIBLE`` when the text
+    matches a fab-fatal class, else ``_DEFAULT_CATEGORY`` ('other'). First match
+    wins (``_BE_PATTERNS`` is ordered specific-first)."""
+    hay = f"{area} {issue}".lower()
+    for category, needles in _BE_PATTERNS:
+        if any(n in hay for n in needles):
+            return category
+    return _DEFAULT_CATEGORY
+
+
+_REFDES_RE = re.compile(r"\b[A-Z]{1,4}\d+\b")
+
+
+def _extract_refs(text: str) -> list[str]:
+    """Refdes tokens (U1, R12, TB1, ...) cited in a finding, in order, de-duped.
+
+    The prompt already requires citing refdes in ``issue``, so this recovers
+    structured anchors for corroboration matching without a separate model field.
+    Matches uppercase-letter+digit tokens on the original text (so rail names like
+    ``+3V3`` do not yield a spurious ``V3`` -- there is no word boundary before the
+    inner ``V``)."""
+    if not text:
+        return []
+    out: list[str] = []
+    for tok in _REFDES_RE.findall(text):
+        if tok not in out:
+            out.append(tok)
+    return out
+
+
+def clamp_findings(findings: list[dict]) -> list[dict]:
+    """Clamp each finding's severity to its category ceiling (pure; new list).
+
+    A finding can stay ``blocker`` only if its deterministic category is
+    blocker-eligible; every other category caps at ``warning``. Adds ``category``,
+    ``refs``, ``severity_raw`` and ``clamped`` (all additive) and preserves the
+    model's free-text ``area``/``issue`` for display."""
+    out = []
+    for f in findings:
+        category = _categorize(f.get("area", ""), f.get("issue", ""))
+        ceiling = "blocker" if category in _BLOCKER_ELIGIBLE else "warning"
+        raw = f.get("severity", "note")
+        sev = raw if _SEV_RANK.get(raw, 0) <= _SEV_RANK[ceiling] else ceiling
+        g = dict(f)
+        g["category"] = category
+        g["refs"] = _extract_refs(f.get("issue", ""))
+        g["severity_raw"] = raw
+        g["severity"] = sev
+        g["clamped"] = sev != raw
+        out.append(g)
+    return out
+
+
 def review_design(client, digest: str, *, model: str | None = None,
                   max_tokens: int = 24000, temperature: float = 0.0,
                   max_attempts: int = 2, reasoning: dict | None = None) -> dict:
@@ -239,9 +358,11 @@ def review_design(client, digest: str, *, model: str | None = None,
     the JSON answer and is set generously so reasoning never crowds it out.
 
     Returns ``{ok, findings, cost_usd, error, raw}``. ``findings`` is a list of
-    ``{severity, area, issue, suggestion}`` (empty when the design is sound).
-    Fails closed (``ok=False``, empty findings) after ``max_attempts`` rather
-    than inventing a verdict.
+    ``{severity, area, issue, suggestion}`` plus the clamp's additive keys
+    ``{category, refs, severity_raw, clamped}`` (empty when the design is sound);
+    severity is already clamped to its category ceiling. Fails closed
+    (``ok=False``, empty findings) after ``max_attempts`` rather than inventing a
+    verdict.
     """
     messages = _build_messages(digest)
     total_cost = 0.0
@@ -256,8 +377,8 @@ def review_design(client, digest: str, *, model: str | None = None,
         total_cost += float(res.get("cost_usd") or 0.0)
         ok, findings, error = _validate(_extract_json(last_text))
         if ok:
-            return {"ok": True, "findings": findings, "cost_usd": total_cost,
-                    "error": None, "raw": last_text}
+            return {"ok": True, "findings": clamp_findings(findings),
+                    "cost_usd": total_cost, "error": None, "raw": last_text}
         messages.append({"role": "assistant", "content": last_text})
         messages.append({"role": "user", "content":
                          f"That response was not acceptable: {error}. Return ONLY the JSON "
@@ -266,6 +387,93 @@ def review_design(client, digest: str, *, model: str | None = None,
 
     return {"ok": False, "findings": [], "cost_usd": total_cost,
             "error": error or "review produced no valid verdict", "raw": last_text}
+
+
+# --------------------------------------------------------------------------- #
+# lazy N-pass corroboration of blocker-eligible blockers
+# --------------------------------------------------------------------------- #
+def _agreement_key(f: dict):
+    return (f.get("category"), frozenset(f.get("refs") or ()))
+
+
+def _findings_agree(a: dict, b: dict) -> bool:
+    """Do two (already blocker-eligible) blocker findings describe the SAME defect?
+
+    Refdes-anchored: when both passes cite a refdes, they agree iff they share one.
+    The refdes is the stable anchor across noisy passes -- two independent passes
+    routinely label the very same A4988 SENSE->GND defect 'current-limit' vs
+    'regulator-feedback', so requiring category equality is too brittle and silently
+    demotes real blockers. Only when a pass omits a refdes do we fall back to
+    category agreement."""
+    ra, rb = set(a.get("refs") or ()), set(b.get("refs") or ())
+    if ra and rb:
+        return bool(ra & rb)
+    return a.get("category") == b.get("category")
+
+
+def review_design_corroborated(client, digest: str, *, model: str | None = None,
+                               max_tokens: int = 24000, temperature: float = 0.5,
+                               max_attempts: int = 2, reasoning: dict | None = None,
+                               corroboration: int = 2) -> dict:
+    """Electrical review with lazy N-pass corroboration of blocker-eligible blockers.
+
+    Pass 1 always runs (its findings are already severity-clamped by
+    ``review_design``). A second pass runs ONLY if pass 1 proposes a blocker-eligible
+    blocker; that blocker sticks iff ``corroboration`` passes agree on it (same
+    category + overlapping refdes), else it DEMOTES to a warning (kept, never
+    dropped, tagged ``demoted_from="blocker"``/``corroborated=False``). Clean or
+    warning-only designs therefore cost exactly one pass. ``corroboration<=1`` is the
+    legacy single-pass gate.
+
+    Returns ``{ok, findings, blocked, cost_usd, error}``. Fail-soft: an unparseable
+    pass 1 -> ``ok=False`` (gate skips, never blocks); an unparseable later pass ->
+    the candidate cannot corroborate and demotes (fail-open toward shipping)."""
+    def _run(temp):
+        return review_design(client, digest, model=model, max_tokens=max_tokens,
+                             temperature=temp, max_attempts=max_attempts,
+                             reasoning=reasoning)
+
+    p1 = _run(temperature)
+    cost = p1["cost_usd"]
+    if not p1["ok"]:
+        return {"ok": False, "findings": [], "blocked": False,
+                "cost_usd": cost, "error": p1["error"]}
+
+    findings = p1["findings"]
+    candidates = [f for f in findings if f.get("severity") == "blocker"]
+    if not candidates or corroboration <= 1:
+        return {"ok": True, "findings": findings,
+                "blocked": bool(candidates), "cost_usd": cost, "error": None}
+
+    # Lazily run the remaining passes; tally agreeing votes per distinct candidate.
+    votes: dict = {}
+    uniq: list[dict] = []
+    for c in candidates:
+        k = _agreement_key(c)
+        if k not in votes:
+            votes[k] = 1                      # seen once, in pass 1
+            uniq.append(c)
+    for _ in range(corroboration - 1):
+        p = _run(temperature)
+        cost += p["cost_usd"]
+        if not p["ok"]:
+            break                             # can't corroborate -> demote (fail-open)
+        pblk = [f for f in p["findings"] if f.get("severity") == "blocker"]
+        for c in uniq:
+            if any(_findings_agree(c, o) for o in pblk):
+                votes[_agreement_key(c)] += 1
+
+    blocked = False
+    for f in candidates:
+        if votes.get(_agreement_key(f), 1) >= corroboration:
+            f["corroborated"] = True
+            blocked = True
+        else:
+            f["severity"] = "warning"
+            f["demoted_from"] = "blocker"
+            f["corroborated"] = False
+    return {"ok": True, "findings": findings, "blocked": blocked,
+            "cost_usd": cost, "error": None}
 
 
 def has_blocker(findings) -> bool:

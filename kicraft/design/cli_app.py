@@ -2612,8 +2612,7 @@ def _maybe_electrical_review(state, project_dir: Path) -> dict:
 
         from .synthesis.electrical_review import (
             build_design_digest,
-            has_blocker,
-            review_design,
+            review_design_corroborated,
         )
 
         s = Settings.from_env()
@@ -2621,14 +2620,16 @@ def _maybe_electrical_review(state, project_dir: Path) -> dict:
         digest = build_design_digest(state, project_root=project_dir)
         model = s.review_model or s.model
         reasoning = s.review_reasoning()
-        res = review_design(client, digest, model=model, reasoning=reasoning,
-                            max_tokens=s.review_max_tokens)
+        res = review_design_corroborated(
+            client, digest, model=model, reasoning=reasoning,
+            max_tokens=s.review_max_tokens, temperature=s.review_temperature,
+            corroboration=s.review_corroboration)
         if not res["ok"]:
             print(f"[build] electrical review skipped (model error: {res['error']})",
                   file=sys.stderr)
             return {"ran": False, "findings": [], "blocked": False, "cost_usd": res["cost_usd"]}
         return {"ran": True, "findings": res["findings"],
-                "blocked": has_blocker(res["findings"]), "cost_usd": res["cost_usd"]}
+                "blocked": res["blocked"], "cost_usd": res["cost_usd"]}
     except (Exception, SystemExit) as e:  # Settings.from_env raises SystemExit w/o a key
         print(f"[build] electrical review skipped ({type(e).__name__}: {e})", file=sys.stderr)
         return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
@@ -2727,7 +2728,10 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     if review["ran"]:
         for f in review["findings"]:
             sev = f.get("severity", "note").upper()
-            print(f"[build]     review {sev}: [{f.get('area', '')}] {f.get('issue', '')}")
+            issue = f.get("issue", "")
+            if f.get("demoted_from"):  # blocker that a 2nd pass did not corroborate
+                issue = f"{issue} [demoted to warning: not corroborated by a 2nd pass]"
+            print(f"[build]     review {sev}: [{f.get('area', '')}] {issue}")
         if review["blocked"]:
             print(
                 f"[build]     kept board {pcb.name} for inspection (no fab package; "
