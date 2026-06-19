@@ -229,7 +229,7 @@ def _validate(obj):
 
 
 def review_design(client, digest: str, *, model: str | None = None,
-                  max_tokens: int = 3000, temperature: float = 0.0,
+                  max_tokens: int = 24000, temperature: float = 0.0,
                   max_attempts: int = 2, reasoning: dict | None = None) -> dict:
     """Run the electrical review against a design digest.
 

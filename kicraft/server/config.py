@@ -7,7 +7,7 @@ touched (defense in depth behind the prepaid + virtual-card limits).
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 # Version of the legal documents in docs/legal/. Stamped into each user's consent
@@ -152,8 +152,34 @@ class Settings:
     # reasoning task where extra deliberation is worth far more than it costs.
     # review_model=None reuses `model`. review_reasoning_tokens is the OpenRouter
     # reasoning max_tokens budget (0 disables the reasoning channel).
-    review_model: str | None = None
+    # Bakeoff winner (2026-06-19): minimax-m3 gives 100% blocker recall + the
+    # lowest over-block (14% clean / 20% warn) vs flash's 83% / 43-71%, at
+    # ~$0.012 & ~2.5 min per review (flash: ~$0.001 / 35 s). The gate is
+    # once-per-build and fail-soft, so the latency is an acceptable trade. None
+    # reuses the design model. See docs/electrical_review_model_bakeoff.md.
+    review_model: str | None = "minimax/minimax-m3"
     review_reasoning_tokens: int = 8000
+    # Reasoning effort for the review (OpenRouter; portable across the slate --
+    # minimax/glm prefer effort and some models 400 on the token form). When
+    # non-empty it is used INSTEAD of review_reasoning_tokens.
+    # KICRAFT_REVIEW_REASONING_EFFORT='' falls back to the token budget.
+    review_reasoning_effort: str = "medium"
+    # Answer-token budget for the review. Raised from 3000 -> 24000: the 2026
+    # reasoning models emit 10-23k reasoning tokens by default and were
+    # truncating (finish=length) before writing the JSON answer. Cheap models
+    # stop naturally well under this, so it costs only the heavy reasoners.
+    # KICRAFT_REVIEW_MAX_TOKENS.
+    review_max_tokens: int = 24000
+    # Provider routing for the REVIEW call only (the design stages keep the
+    # global cost cap above). Defaults are UNRESTRICTED so a pricier or
+    # closed-weight review_model (Anthropic/Google/Mistral are not on the fp8
+    # caching tier, and reasoning-heavy tiers exceed the $0.18/$0.35 cap) can
+    # actually route. The review is one call per build and the spend guard still
+    # bounds total spend. Empty order = let OpenRouter pick; 0.0 = no price cap.
+    # KICRAFT_REVIEW_PROVIDER_ORDER / _MAX_PRICE_PROMPT / _MAX_PRICE_COMPLETION.
+    review_provider_order: list[str] = field(default_factory=list)
+    review_max_price_prompt: float = 0.0
+    review_max_price_completion: float = 0.0
     # Layer-4 fab gate: run the electrical review during build verify and block
     # a structurally-sound board from being declared fab-ready if the review
     # finds a blocker. ON by default -- catching an electrically-wrong board is
@@ -217,11 +243,41 @@ class Settings:
             enable_prompt_cache=_env_bool_default("KICRAFT_ENABLE_PROMPT_CACHE", True),
             enable_core_defaults=_env_bool_default("KICRAFT_CORE_DEFAULTS", True),
             eval_judge_model=(os.environ.get("KICRAFT_EVAL_JUDGE_MODEL", "").strip() or None),
-            review_model=(os.environ.get("KICRAFT_REVIEW_MODEL", "").strip() or None),
+            review_model=(os.environ.get("KICRAFT_REVIEW_MODEL", "").strip() or cls.review_model),
             review_reasoning_tokens=int(
                 os.environ.get("KICRAFT_REVIEW_REASONING_TOKENS", cls.review_reasoning_tokens)),
+            review_reasoning_effort=os.environ.get(
+                "KICRAFT_REVIEW_REASONING_EFFORT", cls.review_reasoning_effort).strip(),
+            review_max_tokens=int(
+                os.environ.get("KICRAFT_REVIEW_MAX_TOKENS", cls.review_max_tokens)),
+            review_provider_order=[p.strip() for p in os.environ.get(
+                "KICRAFT_REVIEW_PROVIDER_ORDER", "").split(",") if p.strip()],
+            review_max_price_prompt=float(
+                os.environ.get("KICRAFT_REVIEW_MAX_PRICE_PROMPT", cls.review_max_price_prompt)),
+            review_max_price_completion=float(
+                os.environ.get("KICRAFT_REVIEW_MAX_PRICE_COMPLETION", cls.review_max_price_completion)),
             enable_electrical_review=_env_bool_default("KICRAFT_ELECTRICAL_REVIEW", True),
         )
+
+    def for_review(self) -> "Settings":
+        """A copy with provider routing relaxed for the electrical-review call.
+        The design stages keep the global cost cap (`max_price_*`,
+        `provider_order`); the once-per-build review is allowed past it so a
+        pricier or closed-weight `review_model` can route. Spend guard still
+        bounds total spend."""
+        return replace(self, provider_order=self.review_provider_order,
+                       max_price_prompt=self.review_max_price_prompt,
+                       max_price_completion=self.review_max_price_completion)
+
+    def review_reasoning(self) -> dict | None:
+        """OpenRouter reasoning control for the review: effort-based when
+        review_reasoning_effort is set (portable across the slate; minimax/glm
+        prefer effort and some models 400 on the token form), else a token budget."""
+        if self.review_reasoning_effort:
+            return {"effort": self.review_reasoning_effort}
+        if self.review_reasoning_tokens:
+            return {"max_tokens": self.review_reasoning_tokens}
+        return None
 
     @property
     def billing_enabled(self) -> bool:
