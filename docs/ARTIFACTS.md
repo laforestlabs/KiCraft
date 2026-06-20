@@ -113,6 +113,5 @@ what the on-disk `<stem>.kicad_pcb` actually is.
 ## See also
 
 - `kicraft/cli/artifact_paths.py` — the implementation and the precedence rules.
-- `docs/bug-replay-no-route-promotes-stale-routed-board.md`,
-  `docs/kc-vtrvy7-placement-verification-trap.md` — the investigations this
-  resolves (kept for history).
+- `docs/bug-replay-no-route-promotes-stale-routed-board.md` — the investigation
+  this resolves (kept for history).
