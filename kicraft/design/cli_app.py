@@ -2461,7 +2461,16 @@ def _connector_stranded_refs(pcb: Path) -> list[str]:
 
 def _verify_routed_board(pcb: Path) -> dict:
     """Acceptance gate: no shorts, no unconnected (connector-shield items waived),
-    and no edge-zoned connector stranded inboard of its board edge."""
+    no physical-assembly blocker (courtyard overlap / antenna keep-out intrusion),
+    and no edge-zoned connector stranded inboard of its board edge.
+
+    The courtyard / keep-out checks are the verdict-layer BACKSTOP for the
+    placement fix: a board can be electrically clean (no shorts/unconnected) yet
+    physically un-buildable -- two parts whose courtyards overlap can't both be
+    assembled, and copper inside an antenna keep-out ruins RF (KC-8AG6FU: a USB-C
+    pinned inside the ESP32 antenna near-field). This runs only on the promoted
+    board (it does not gate the compose candidate search, so it can't starve it).
+    """
     from kicraft.autoplacer.config import DEFAULT_CONFIG
     from kicraft.autoplacer.freerouting_runner import validate_routed_board
 
@@ -2469,8 +2478,16 @@ def _verify_routed_board(pcb: Path) -> dict:
     drc = v.get("drc", {}) or {}
     shorts = int(drc.get("shorts", 0) or 0)
     unconnected = int(drc.get("unconnected", 0) or 0)
+    courtyard = int(drc.get("courtyard", 0) or 0)
+    keepout = int(drc.get("items_not_allowed", 0) or 0)
     accepted = bool(v.get("accepted", False))
     reasons = list(v.get("rejection_reasons", []))
+    if courtyard > 0 and "courtyards_overlap" not in reasons:
+        accepted = False
+        reasons.append("courtyards_overlap")
+    if keepout > 0 and "keepout_intrusion" not in reasons:
+        accepted = False
+        reasons.append("keepout_intrusion")
     strand = _connector_stranded_refs(pcb)
     if strand:
         accepted = False
@@ -2478,9 +2495,15 @@ def _verify_routed_board(pcb: Path) -> dict:
             if reason not in reasons:
                 reasons.append(reason)
     return {
-        "ok": accepted and shorts == 0 and unconnected == 0,
+        "ok": accepted
+        and shorts == 0
+        and unconnected == 0
+        and courtyard == 0
+        and keepout == 0,
         "shorts": shorts,
         "unconnected": unconnected,
+        "courtyard": courtyard,
+        "keepout": keepout,
         "reasons": reasons,
         "tracks": v.get("track_summary", {}) or {},
     }
@@ -2697,6 +2720,7 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     missing_refs = _missing_component_refs(expected_refs, gate["tracks"].get("footprint_refs"))
     print(
         f"[build] 4/5 verify: shorts={gate['shorts']} unconnected={gate['unconnected']} "
+        f"courtyard={gate.get('courtyard', 0)} keepout={gate.get('keepout', 0)} "
         f"traces={gate['tracks'].get('traces', '?')} "
         f"components={gate['tracks'].get('footprints', '?')}/{len(expected_refs) or '?'}"
     )
@@ -2716,7 +2740,8 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
         if not gate["ok"]:
             print(
                 f"error: routed board is NOT fab-ready -- shorts={gate['shorts']}, "
-                f"unconnected={gate['unconnected']}, reasons={gate['reasons']}",
+                f"unconnected={gate['unconnected']}, courtyard={gate.get('courtyard', 0)}, "
+                f"keepout={gate.get('keepout', 0)}, reasons={gate['reasons']}",
                 file=sys.stderr,
             )
         return 7

@@ -114,6 +114,45 @@ def test_verify_gate_still_fails_on_shorts(monkeypatch, tmp_path):
     assert gate["shorts"] == 1
 
 
+def test_verify_gate_fails_on_courtyard_overlap(monkeypatch, tmp_path):
+    # Electrically clean (no shorts/unconnected) but two courtyards overlap ->
+    # physically un-assemblable -> the verdict backstop must reject it.
+    _patch_validate(
+        monkeypatch, accepted=True,
+        drc={"shorts": 0, "unconnected": 0, "courtyard": 2},
+    )
+    monkeypatch.setattr(cli_app, "_connector_stranded_refs", lambda _pcb: [])
+    gate = cli_app._verify_routed_board(tmp_path / "board.kicad_pcb")
+    assert gate["ok"] is False
+    assert "courtyards_overlap" in gate["reasons"]
+    assert gate["courtyard"] == 2
+
+
+def test_verify_gate_fails_on_keepout_intrusion(monkeypatch, tmp_path):
+    # Copper inside an antenna keep-out (items_not_allowed) is electrically
+    # invisible but ruins RF / collides -> not fab-ready (KC-8AG6FU backstop).
+    _patch_validate(
+        monkeypatch, accepted=True,
+        drc={"shorts": 0, "unconnected": 0, "items_not_allowed": 5},
+    )
+    monkeypatch.setattr(cli_app, "_connector_stranded_refs", lambda _pcb: [])
+    gate = cli_app._verify_routed_board(tmp_path / "board.kicad_pcb")
+    assert gate["ok"] is False
+    assert "keepout_intrusion" in gate["reasons"]
+    assert gate["keepout"] == 5
+
+
+def test_verify_gate_clean_board_reports_zero_courtyard_keepout(monkeypatch, tmp_path):
+    # Regression: a clean board still passes and surfaces the new counts as 0
+    # (so the backstop never false-fires on a healthy board).
+    _patch_validate(monkeypatch, accepted=True)
+    monkeypatch.setattr(cli_app, "_connector_stranded_refs", lambda _pcb: [])
+    gate = cli_app._verify_routed_board(tmp_path / "board.kicad_pcb")
+    assert gate["ok"] is True
+    assert gate["reasons"] == []
+    assert gate["courtyard"] == 0 and gate["keepout"] == 0
+
+
 # --- _connector_stranded_refs: zone discovery, and never invent a failure
 
 
