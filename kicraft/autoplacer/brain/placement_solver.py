@@ -1083,6 +1083,15 @@ class PlacementSolver:
             # Step 14: Re-validate pad containment after restoring pinned positions
             self._clamp_pads_to_board(best_comps)
 
+            # Step 15: Slide edge-pinned connectors out of any non-owner antenna
+            # keep-out, on final geometry. The push-out pass (Step 9.2) skips
+            # locked parts and a connector can't leave its edge, so a USB-C
+            # pinned beside an ESP32's antenna near-field would otherwise survive
+            # to the stamp as a courtyard overlap + items_not_allowed DRC.
+            # Updates _pinned_targets, so no later restore re-introduces it.
+            if self._clear_pinned_from_keepouts(best_comps):
+                self._clamp_pads_to_board(best_comps)
+
         # Final score
         work_state.components = best_comps
         final = PlacementScorer(work_state, self.cfg).score()
@@ -2392,6 +2401,31 @@ class PlacementSolver:
             corrections += self._push_out_of_rect(comps, p_tl, p_br, protected_ref)
         return corrections
 
+    def _keepout_rect_now(
+        self, kr, comps: dict[str, Component]
+    ) -> tuple[Point, Point]:
+        """Owner-tracked board-coord rect for ``kr``.
+
+        The keep-out is rigidly attached to its owner footprint, but the rect
+        was sampled once at extraction (adapter.load). Translate it by the
+        owner's displacement since then so it follows the owner as the solve
+        nudges it -- otherwise parts are pushed out of where the antenna *was*,
+        not where it *is*, and the stamped board carries the overlap the solver
+        thought it had resolved.
+        """
+        origin = getattr(kr, "owner_origin", None)
+        if origin is not None:
+            owner = comps.get(kr.owner_ref)
+            if owner is not None:
+                dx = owner.pos.x - origin.x
+                dy = owner.pos.y - origin.y
+                if dx or dy:
+                    return (
+                        Point(kr.tl.x + dx, kr.tl.y + dy),
+                        Point(kr.br.x + dx, kr.br.y + dy),
+                    )
+        return (kr.tl, kr.br)
+
     def _resolve_keepout_rects(self, comps: dict[str, Component]) -> int:
         """Push unlocked, non-owner components out of antenna keep-out rects.
 
@@ -2402,8 +2436,121 @@ class PlacementSolver:
         rects = getattr(self.state, "keepout_rects", None) or []
         corrections = 0
         for kr in rects:
-            corrections += self._push_out_of_rect(comps, kr.tl, kr.br, kr.owner_ref)
+            r_tl, r_br = self._keepout_rect_now(kr, comps)
+            corrections += self._push_out_of_rect(comps, r_tl, r_br, kr.owner_ref)
         return corrections
+
+    def _slide_pinned_clear(
+        self,
+        comp: Component,
+        edge: str,
+        boxes: list[tuple[Point, Point]],
+        half_gap: float,
+    ) -> Point | None:
+        """Slide ``comp`` along its pinned edge until its bbox clears every box.
+
+        ``edge`` (left/right slide on Y, top/bottom slide on X) keeps the
+        connector flush with the board edge while moving it out of the keep-out.
+        Returns the smallest in-bounds move that clears all boxes, or None if
+        already clear / no clear position exists (caller leaves it for the
+        diagnostic to flag).
+        """
+        tl, br = self.state.board_outline
+        hw = comp.width_mm / 2
+        hh = comp.height_mm / 2
+        x0, y0 = comp.pos.x, comp.pos.y
+
+        def clear_at(x: float, y: float) -> bool:
+            c_tl = Point(x - hw - half_gap, y - hh - half_gap)
+            c_br = Point(x + hw + half_gap, y + hh + half_gap)
+            for o_tl, o_br in boxes:
+                if (
+                    c_tl.x < o_br.x
+                    and c_br.x > o_tl.x
+                    and c_tl.y < o_br.y
+                    and c_br.y > o_tl.y
+                ):
+                    return False
+            return True
+
+        if clear_at(x0, y0):
+            return None
+
+        candidates: list[tuple[float, float, float]] = []
+        if edge in ("left", "right"):
+            lo, hi = tl.y + hh + 1.0, br.y - hh - 1.0
+            for o_tl, o_br in boxes:
+                for ny in (
+                    o_br.y + hh + half_gap + 0.1,
+                    o_tl.y - hh - half_gap - 0.1,
+                ):
+                    ny = max(lo, min(hi, ny))
+                    if clear_at(x0, ny):
+                        candidates.append((abs(ny - y0), x0, ny))
+        else:
+            lo, hi = tl.x + hw + 1.0, br.x - hw - 1.0
+            for o_tl, o_br in boxes:
+                for nx in (
+                    o_br.x + hw + half_gap + 0.1,
+                    o_tl.x - hw - half_gap - 0.1,
+                ):
+                    nx = max(lo, min(hi, nx))
+                    if clear_at(nx, y0):
+                        candidates.append((abs(nx - x0), nx, y0))
+        if not candidates:
+            return None
+        candidates.sort()
+        _, nx, ny = candidates[0]
+        return Point(nx, ny)
+
+    def _clear_pinned_from_keepouts(self, comps: dict[str, Component]) -> int:
+        """Slide edge-pinned connectors clear of any non-owner antenna keep-out.
+
+        _push_out_of_rect skips locked parts, and a connector cannot leave its
+        edge anyway, so an edge connector that lands in a neighbour's antenna
+        near-field (e.g. a USB-C beside an ESP32 module) is never moved -- it
+        survives to the stamp as a courtyard overlap + an items_not_allowed DRC
+        in the antenna keep-out. Sliding along the pinned edge keeps the
+        connector flush while clearing the keep-out. Runs late (final geometry,
+        after the owner's last move) and updates _pinned_targets so the closing
+        restore keeps the cleared position. Returns the number moved.
+        """
+        rects = getattr(self.state, "keepout_rects", None) or []
+        groups = getattr(self, "_edge_pinned_groups", None) or {}
+        if not rects or not groups:
+            return 0
+        if not hasattr(self, "_pinned_targets"):
+            self._pinned_targets = {}
+        half_gap = self.clearance / 2.0
+        moved = 0
+        for edge, refs in groups.items():
+            for ref in refs:
+                comp = comps.get(ref)
+                if comp is None:
+                    continue
+                boxes = [
+                    self._keepout_rect_now(kr, comps)
+                    for kr in rects
+                    if kr.owner_ref != ref
+                ]
+                if not boxes:
+                    continue
+                new_pos = self._slide_pinned_clear(comp, edge, boxes, half_gap)
+                if new_pos is None:
+                    continue
+                dx, dy = new_pos.x - comp.pos.x, new_pos.y - comp.pos.y
+                if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+                    continue
+                comp.pos = Point(comp.pos.x + dx, comp.pos.y + dy)
+                if comp.body_center is not None:
+                    comp.body_center = Point(
+                        comp.body_center.x + dx, comp.body_center.y + dy
+                    )
+                for pad in comp.pads:
+                    pad.pos = Point(pad.pos.x + dx, pad.pos.y + dy)
+                self._pinned_targets[ref] = Point(comp.pos.x, comp.pos.y)
+                moved += 1
+        return moved
 
     def _resolve_array_grid(self, comps: dict[str, Component]) -> int:
         """Push unlocked NON-array parts out of the locked array grid's bbox.
@@ -3513,12 +3660,13 @@ class PlacementSolver:
         # acceptance for boards that previously placed without keep-out modeling.
         keepout_overlaps: list[dict[str, object]] = []
         for kr in getattr(self.state, "keepout_rects", None) or []:
+            r_tl, r_br = self._keepout_rect_now(kr, comps)
             for ref, comp in comps.items():
                 if ref == kr.owner_ref:
                     continue
                 c_tl, c_br = comp.bbox(half_gap)
-                ox = min(c_br.x, kr.br.x) - max(c_tl.x, kr.tl.x)
-                oy = min(c_br.y, kr.br.y) - max(c_tl.y, kr.tl.y)
+                ox = min(c_br.x, r_br.x) - max(c_tl.x, r_tl.x)
+                oy = min(c_br.y, r_br.y) - max(c_tl.y, r_tl.y)
                 if ox > 0.0 and oy > 0.0:
                     keepout_overlaps.append(
                         {

@@ -92,12 +92,14 @@ def extract_keepout_rects(board, cfg: dict) -> list[KeepoutRect]:
             if not (zone.GetDoNotAllowFootprints() or zone.GetDoNotAllowPads()):
                 continue
             bb = zone.Outline().BBox()  # board coords for a placed footprint
+            opos = fp.GetPosition()
             rects.append(
                 KeepoutRect(
                     tl=Point(pcbnew.ToMM(bb.GetLeft()), pcbnew.ToMM(bb.GetTop())),
                     br=Point(pcbnew.ToMM(bb.GetRight()), pcbnew.ToMM(bb.GetBottom())),
                     owner_ref=ref,
                     source="preserve",
+                    owner_origin=Point(pcbnew.ToMM(opos.x), pcbnew.ToMM(opos.y)),
                 )
             )
 
@@ -114,6 +116,14 @@ def extract_keepout_rects(board, cfg: dict) -> list[KeepoutRect]:
             if not _matches_family(candidates, pattern):
                 continue
             tl, br = _transform_local_rect(spec, ox, oy, rot)
-            rects.append(KeepoutRect(tl=tl, br=br, owner_ref=ref, source="inject"))
+            rects.append(
+                KeepoutRect(
+                    tl=tl,
+                    br=br,
+                    owner_ref=ref,
+                    source="inject",
+                    owner_origin=Point(ox, oy),
+                )
+            )
 
     return rects
