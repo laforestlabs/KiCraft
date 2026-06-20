@@ -83,11 +83,13 @@ def _run_one(src: Path, stem: str, scratch: Path) -> dict:
         capture_output=True, text=True,
     )
     out = {"rc": proc.returncode}
-    hits = sorted(glob.glob(str(dest / ".experiments" / "subcircuits"
-                               / "subcircuit__*" / "parent_pre_freerouting.kicad_pcb")))
-    if hits:
-        out["shorts"] = _shorts(hits[-1])
-        out["size"] = _board_size(hits[-1])
+    # Resolve the freshly-composed placed board via the central resolver, not a
+    # sorted(glob)[-1] (alphabetical), so we never measure a stale board.
+    from kicraft.cli.artifact_paths import resolve_parent_board
+    board = resolve_parent_board(dest, kind="placed")
+    if board is not None:
+        out["shorts"] = _shorts(str(board))
+        out["size"] = _board_size(str(board))
     else:
         m = re.search(r"per-candidate:[^\n]*", proc.stdout + proc.stderr)
         out["abort"] = m.group(0)[:120] if m else (proc.stderr.strip().splitlines() or [""])[-1][:120]

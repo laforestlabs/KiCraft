@@ -16,8 +16,11 @@ The unified ``PlacementSolver`` consumes:
 
 This module bridges the two. Its functions are pure: they take parent-side
 data and return solver-side data, with no side effects on disk or shared
-state. PR4 (slate-cobalt-loom) lands this module dormant -- no callers are
-wired up. PR5 replaces ``_compose_artifacts`` to use it.
+state. They are consumed by ``_compose_artifacts`` in
+``kicraft/cli/compose_subcircuits.py`` -- e.g. ``attachment_constraints_to_zones``,
+``infer_interconnect_nets_pre_placement`` (seeds the solver's inter-leaf nets so
+the force-directed attraction pulls connected leaf blocks together), and
+``placements_from_solved_state`` (recovers child placements from the solve).
 """
 
 from __future__ import annotations
