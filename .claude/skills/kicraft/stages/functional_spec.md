@@ -8,6 +8,7 @@ Slot shape (`FunctionalSpec`):
   - `name` — uppercase identifier (e.g. `USB_INPUT`, `CHARGER`, `LDO_3V3`).
   - `category` — one of `sense` / `process` / `drive` / `power` / `interface`.
   - `purpose` — one sentence.
+  - `count` — number of identical instances (default 1). Set `count: N` on ONE block when the design asks for N copies of the SAME function (e.g. "3 axes of stepper outputs" → one `STEPPER_AXIS` block with `count: 3`, NOT three near-duplicate blocks). The architecture stage expands a `count`-N block into N grouped sheets that the layout solves once and replicates. Keep genuinely distinct functions as separate blocks.
 - `connections`: list of `BlockConnection`, each with `from_block`, `to_block`, `signal_type` (`power` / `ground` / `digital` / `analog` / `clock` / `bus` / `rf` / `other`), and a short description.
 - `assumptions`: list of defaults applied, each ending with `(defaulted)`.
 
