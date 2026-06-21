@@ -115,6 +115,35 @@ def test_sheet_ok() -> None:
     assert s.stem == "BOOST_5V"
 
 
+def test_functional_block_count_defaults_one_and_must_be_positive() -> None:
+    assert FunctionalBlock(name="A", category="drive", purpose="x").count == 1
+    b = FunctionalBlock(name="STEPPER", category="drive", purpose="x", count=3)
+    assert b.count == 3
+    with pytest.raises(ValidationError):
+        FunctionalBlock(name="A", category="drive", purpose="x", count=0)
+
+
+def test_sheet_replication_fields_ok_and_paired() -> None:
+    s = Sheet(
+        name="STEPPER AXIS X", stem="STEPPER_AXIS_X", function="x",
+        replication_group="STEPPER_AXIS", replication_instance=1,
+    )
+    assert s.replication_group == "STEPPER_AXIS" and s.replication_instance == 1
+    # unpaired -> rejected
+    with pytest.raises(ValidationError):
+        Sheet(name="X", stem="X", function="x", replication_group="G")
+    with pytest.raises(ValidationError):
+        Sheet(name="X", stem="X", function="x", replication_instance=2)
+    # instance must be >= 1
+    with pytest.raises(ValidationError):
+        Sheet(name="X", stem="X", function="x",
+              replication_group="G", replication_instance=0)
+    # cannot be both library reuse and a replication instance
+    with pytest.raises(ValidationError):
+        Sheet(name="X", stem="X", function="x", from_library="leaf@1",
+              library_instance=1, replication_group="G", replication_instance=1)
+
+
 # ---------- Architecture cross-refs ----------
 
 

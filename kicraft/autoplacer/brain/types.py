@@ -303,12 +303,21 @@ class KeepoutRect:
     (e.g. the ESP32 whose antenna this protects), so its own courtyard may
     overlap. ``source`` is "preserve" (a footprint-internal rule-area) or
     "inject" (a config antenna_keepouts family-spec rect), for diagnostics.
+
+    ``tl``/``br`` are board coords sampled at extraction time. ``owner_origin``
+    is the owner footprint's position at that same instant: because the keep-out
+    is rigidly attached to the owner, the placer translates the rect by the
+    owner's displacement since extraction (``owner.pos - owner_origin``) so the
+    rect tracks the owner as the solve moves it -- without this the rect goes
+    stale the moment the (unlocked) owner is nudged, and parts get pushed out of
+    where the antenna *was*, not where it *is*.
     """
 
     tl: Point
     br: Point
     owner_ref: str
     source: str = ""
+    owner_origin: Point | None = None
 
 
 @dataclass

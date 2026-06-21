@@ -1242,6 +1242,7 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
         "solder_mask_bridge": 0,
         "annular_width": 0,
         "padstack": 0,
+        "items_not_allowed": 0,
         "total": 0,
         "violations": [],
         "report_path": None,
@@ -1321,6 +1322,8 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
                 counts["annular_width"] += 1
             elif vtype == "padstack":
                 counts["padstack"] += 1
+            elif vtype == "items_not_allowed":
+                counts["items_not_allowed"] += 1
     except subprocess.TimeoutExpired:
         counts["timed_out"] = True
     except FileNotFoundError:

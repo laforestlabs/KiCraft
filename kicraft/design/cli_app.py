@@ -67,6 +67,7 @@ from .synthesis.parts_lookup import (
 from .synthesis.validation import (
     CheckResult,
     SynthesisValidationError,
+    bridge_duplicate_pins,
     check_family_wiring_contracts,
     check_inter_sheet_nets_realized,
     check_net_coverage,
@@ -77,6 +78,7 @@ from .synthesis.validation import (
     check_sheets_have_parts,
     check_single_net_per_pin,
     check_two_terminal_self_short,
+    reconcile_inter_sheet_nets,
 )
 from kicraft.parts_library import Maturity
 from kicraft.parts_library.query_log import record as _log_query
@@ -1982,6 +1984,25 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         )
         return 3
 
+    # Wiring netlist normalization (deterministic; a no-op on an already-correct
+    # netlist). Runs before validation + persistence, so the committed state and
+    # the emitter both see the repaired netlist:
+    #   * bridge internally-shorted duplicate pads (KiCad "N'") onto their net,
+    #     so §9.11 stops flagging a pad the package already ties together;
+    #   * reconcile inter_sheet_nets to the crossings wiring actually realized,
+    #     so the stage is never blamed for an inter-sheet contract it cannot edit
+    #     (KC-WFFXZ3 DTR/RTS-into-ESP32; the proto-shield PROTO AREA orphans).
+    wiring_normalizations: list[str] = []
+    if stage == "wiring" and state.bom is not None and state.bom.connections:
+        wiring_normalizations += [
+            f"bridge {b}" for b in bridge_duplicate_pins(state.bom)
+        ]
+        if state.architecture is not None:
+            wiring_normalizations += [
+                f"inter_sheet {c}"
+                for c in reconcile_inter_sheet_nets(state.architecture, state.bom)
+            ]
+
     new_questions: list[Question] = []
     if args.questions_file:
         try:
@@ -2154,6 +2175,8 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     }
     if archive_warning:
         summary["archive_warning"] = archive_warning
+    if wiring_normalizations:
+        summary["wiring_normalizations"] = wiring_normalizations
     # Placement rules referencing refs the BOM no longer carries are
     # tolerated (parts churn across BOM re-runs); synthesis drops them
     # with a warning. Surface them at commit time too so the UI can show
@@ -2461,7 +2484,16 @@ def _connector_stranded_refs(pcb: Path) -> list[str]:
 
 def _verify_routed_board(pcb: Path) -> dict:
     """Acceptance gate: no shorts, no unconnected (connector-shield items waived),
-    and no edge-zoned connector stranded inboard of its board edge."""
+    no physical-assembly blocker (courtyard overlap / antenna keep-out intrusion),
+    and no edge-zoned connector stranded inboard of its board edge.
+
+    The courtyard / keep-out checks are the verdict-layer BACKSTOP for the
+    placement fix: a board can be electrically clean (no shorts/unconnected) yet
+    physically un-buildable -- two parts whose courtyards overlap can't both be
+    assembled, and copper inside an antenna keep-out ruins RF (KC-8AG6FU: a USB-C
+    pinned inside the ESP32 antenna near-field). This runs only on the promoted
+    board (it does not gate the compose candidate search, so it can't starve it).
+    """
     from kicraft.autoplacer.config import DEFAULT_CONFIG
     from kicraft.autoplacer.freerouting_runner import validate_routed_board
 
@@ -2469,8 +2501,16 @@ def _verify_routed_board(pcb: Path) -> dict:
     drc = v.get("drc", {}) or {}
     shorts = int(drc.get("shorts", 0) or 0)
     unconnected = int(drc.get("unconnected", 0) or 0)
+    courtyard = int(drc.get("courtyard", 0) or 0)
+    keepout = int(drc.get("items_not_allowed", 0) or 0)
     accepted = bool(v.get("accepted", False))
     reasons = list(v.get("rejection_reasons", []))
+    if courtyard > 0 and "courtyards_overlap" not in reasons:
+        accepted = False
+        reasons.append("courtyards_overlap")
+    if keepout > 0 and "keepout_intrusion" not in reasons:
+        accepted = False
+        reasons.append("keepout_intrusion")
     strand = _connector_stranded_refs(pcb)
     if strand:
         accepted = False
@@ -2478,9 +2518,15 @@ def _verify_routed_board(pcb: Path) -> dict:
             if reason not in reasons:
                 reasons.append(reason)
     return {
-        "ok": accepted and shorts == 0 and unconnected == 0,
+        "ok": accepted
+        and shorts == 0
+        and unconnected == 0
+        and courtyard == 0
+        and keepout == 0,
         "shorts": shorts,
         "unconnected": unconnected,
+        "courtyard": courtyard,
+        "keepout": keepout,
         "reasons": reasons,
         "tracks": v.get("track_summary", {}) or {},
     }
@@ -2697,6 +2743,7 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     missing_refs = _missing_component_refs(expected_refs, gate["tracks"].get("footprint_refs"))
     print(
         f"[build] 4/5 verify: shorts={gate['shorts']} unconnected={gate['unconnected']} "
+        f"courtyard={gate.get('courtyard', 0)} keepout={gate.get('keepout', 0)} "
         f"traces={gate['tracks'].get('traces', '?')} "
         f"components={gate['tracks'].get('footprints', '?')}/{len(expected_refs) or '?'}"
     )
@@ -2716,7 +2763,8 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
         if not gate["ok"]:
             print(
                 f"error: routed board is NOT fab-ready -- shorts={gate['shorts']}, "
-                f"unconnected={gate['unconnected']}, reasons={gate['reasons']}",
+                f"unconnected={gate['unconnected']}, courtyard={gate.get('courtyard', 0)}, "
+                f"keepout={gate.get('keepout', 0)}, reasons={gate['reasons']}",
                 file=sys.stderr,
             )
         return 7

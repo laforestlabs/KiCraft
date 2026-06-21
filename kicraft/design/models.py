@@ -114,6 +114,18 @@ class FunctionalBlock(BaseModel):
     name: str
     category: BlockCategory
     purpose: str
+    # Number of identical instances of this block the design needs (e.g. 3 for
+    # "3 axes of stepper drivers"). The architecture stage expands a count>1
+    # block into ``count`` sheets sharing a ``replication_group`` so the layout
+    # solves ONE and reuses its placement+routing for the rest.
+    count: int = 1
+
+    @field_validator("count")
+    @classmethod
+    def _count_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"FunctionalBlock.count must be >= 1, got {v}")
+        return v
 
 
 class BlockConnection(BaseModel):
@@ -159,6 +171,14 @@ class Sheet(BaseModel):
     # the second, etc.). Both None for from-scratch sheets.
     from_library: str | None = None
     library_instance: int | None = None
+    # Replication: from-scratch sheets that are structurally identical (e.g.
+    # STEPPER_AXIS_X/Y/Z) share a ``replication_group`` key and carry a 1-based
+    # ``replication_instance``. The layout solves instance 1 (the representative)
+    # and reuses its placement+routing for the rest, remapping refs/nets. Each
+    # sheet still has its own distinct refs and nets (so ERC sees N independent
+    # circuits) -- only the geometry is shared. Both None for unique sheets.
+    replication_group: str | None = None
+    replication_instance: int | None = None
 
     @field_validator("name")
     @classmethod
@@ -193,6 +213,25 @@ class Sheet(BaseModel):
             raise ValueError(
                 f"Sheet.from_library {self.from_library!r} must be "
                 f"'<name>@<version>'"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _replication_fields_paired(self):
+        if (self.replication_group is None) != (self.replication_instance is None):
+            raise ValueError(
+                "Sheet.replication_group and Sheet.replication_instance must "
+                "both be set or both be None"
+            )
+        if self.replication_instance is not None and self.replication_instance < 1:
+            raise ValueError(
+                f"Sheet.replication_instance must be >= 1, got "
+                f"{self.replication_instance}"
+            )
+        if self.replication_group is not None and self.from_library is not None:
+            raise ValueError(
+                "Sheet cannot be both a library reuse (from_library) and a "
+                "replication instance (replication_group)"
             )
         return self
 

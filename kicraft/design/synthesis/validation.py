@@ -20,6 +20,9 @@ from pathlib import Path
 from kicraft.design.models import (
     GND_NET_PATTERNS,
     POWER_NET_PATTERNS,
+    InterSheetNet,
+    PinEndpoint,
+    SheetPin,
     is_power_or_ground_name,
 )
 
@@ -535,6 +538,78 @@ def check_pin_existence(bom) -> CheckResult:
     )
 
 
+# ---------- duplicate-pad (N') auto-bridge ----------
+
+
+def _pin_base(number: str) -> str:
+    """The terminal a (possibly primed) pin number belongs to.
+
+    easyeda2kicad represents a terminal landed on several pads with the KiCad
+    convention ``N``, ``N'``, ``N''`` — each prime is a *duplicate pad of the
+    same internally-shorted terminal* (a 4-pad tactile switch: 1/1' are one
+    leaf-frame contact, 2/2' the other). Stripping the trailing apostrophes
+    yields the shared terminal key.
+    """
+    return number.rstrip("'")
+
+
+def bridge_duplicate_pins(bom) -> list[str]:
+    """Put every duplicate pad of an internally-shorted terminal on its net.
+
+    A part whose symbol exposes ``N`` and ``N'`` has two pads the package shorts
+    together; the net must reach both, but a wiring stage routinely wires only
+    ``N`` and forgets ``N'`` — which §9.11 then (correctly) flags as an uncovered
+    pin, sending the model whack-a-moling. Instead, copy the wired sibling's net
+    onto every un-wired pad of the same terminal. This is always electrically
+    correct (the pads are one node) and a no-op once the netlist covers them.
+
+    A terminal whose pads are wired to *different* nets is left alone — that is a
+    real short for the gates to surface, not a coverage gap to paper over; a pad
+    the model explicitly marked ``no_connect`` is respected; and a terminal with
+    no pad wired is left for §9.11 (we never invent a net).
+
+    Mutates ``bom.connections`` in place; returns the ``ref.pin -> net`` bridges
+    made, for logging.
+    """
+    from .symbol_pinout import SymbolNotFoundError, lookup_pins
+
+    # ref -> {pin -> the connection that wires it}
+    wired: dict[str, dict[str, NetConnection]] = defaultdict(dict)
+    for c in bom.connections:
+        for ep in c.endpoints:
+            wired[ep.ref].setdefault(ep.pin, c)
+    nc: dict[str, set[str]] = defaultdict(set)
+    for ep in bom.no_connect_pins:
+        nc[ep.ref].add(ep.pin)
+
+    bridged: list[str] = []
+    for part in bom.parts:
+        try:
+            info = lookup_pins(part.symbol)
+        except (SymbolNotFoundError, ValueError):
+            continue  # §9.11 reports unresolvable symbols
+        groups: dict[str, list[str]] = defaultdict(list)
+        for pin in info["pins"]:
+            groups[_pin_base(pin["number"])].append(pin["number"])
+        part_wired = wired[part.ref]
+        part_nc = nc[part.ref]
+        for nums in groups.values():
+            if len(nums) < 2:
+                continue  # single pad — nothing to bridge
+            on_net = {n: part_wired[n] for n in nums if n in part_wired}
+            if not on_net:
+                continue  # terminal entirely unwired — not ours to invent a net
+            if len({c.net_name for c in on_net.values()}) > 1:
+                continue  # pads on different nets: a real short, leave it for the gates
+            target = next(iter(on_net.values()))
+            for n in nums:
+                if n not in part_wired and n not in part_nc:
+                    target.endpoints.append(PinEndpoint(ref=part.ref, pin=n))
+                    part_wired[n] = target
+                    bridged.append(f"{part.ref}.{n} -> {target.net_name}")
+    return bridged
+
+
 # ---------- §9.11 net coverage ----------
 
 
@@ -617,6 +692,105 @@ def check_sheets_have_parts(architecture, bom) -> CheckResult:
         ),
         offenders=bad,
     )
+
+
+def _reconciled_endpoints(sheets: set[str], declared) -> list[SheetPin]:
+    """Endpoints for a reconciled inter-sheet net: declared sheets first (so
+    their direction hints survive), then any newly-realized sheet as
+    ``bidirectional`` (we have no per-sheet direction to infer)."""
+    dir_by_sheet = (
+        {e.sheet: e.direction for e in declared.endpoints} if declared else {}
+    )
+    ordered: list[str] = []
+    if declared:
+        ordered += [e.sheet for e in declared.endpoints if e.sheet in sheets]
+    ordered += [s for s in sorted(sheets) if s not in ordered]
+    return [
+        SheetPin(sheet=s, direction=dir_by_sheet.get(s, "bidirectional"))
+        for s in ordered
+    ]
+
+
+def reconcile_inter_sheet_nets(architecture, bom) -> list[str]:
+    """Align ``architecture.inter_sheet_nets`` with the crossings the wiring
+    stage actually realized, so the wiring stage is never handed a cross-sheet
+    contract it has no power to edit.
+
+    The wiring stage emits only ``connections``/``no_connect_pins`` — it cannot
+    add or remove an ``inter_sheet_nets`` entry (those freeze at the architecture
+    stage). Two failure modes follow directly, and each made real boards
+    unbuildable (KC-WFFXZ3's ESP32 auto-reset; the proto-shield PROTO AREA):
+
+      * A net the wiring stage legitimately wires across two sheets but that
+        architecture never declared is flagged dangling by §9.15 on each side
+        (it exempts only *declared* inter-sheet nets), and the emitter draws two
+        disconnected local labels so the net would not even connect. The model
+        cannot escape this — it cannot declare the net. **ADD** every signal net
+        realized on >=2 sheets to ``inter_sheet_nets`` (e.g. EN/IO0 to the MCU).
+
+      * A signal net architecture declared as crossing but that wiring only ever
+        wires on one sheet — its real consumers live there (DTR/RTS at the
+        auto-reset transistors) — leaves the other sheet's pin with no label, so
+        §9.14 can never pass because nothing on that sheet consumes the net.
+        **DROP** it; it is not actually inter-sheet.
+
+    Net effect: a signal net is inter-sheet iff it is wired (under one name) on
+    >=2 sheets. Power/ground inter-sheet nets are preserved verbatim — they join
+    globally through power symbols, not per-pin connections, so realization does
+    not apply (§9.11 owns their per-pin coverage).
+
+    Because it only ever rewrites a contract the wiring stage failed to satisfy,
+    it is a no-op on any design that already passes §9.14/§9.15: such a design
+    has every cross-sheet net declared with all endpoints realized, and no
+    undeclared net wired across sheets. Inconsistent-name dangles (the
+    SOIL_MOISTURE_BLE USB_DP_POWER/USB_DP_ESP32 split) stay caught — each name
+    is single-sheet, so nothing is promoted and §9.15 still fires.
+
+    Mutates ``architecture.inter_sheet_nets`` in place; returns the changes made,
+    for logging.
+    """
+    known = {s.name for s in architecture.sheets}
+    realized: dict[str, set[str]] = defaultdict(set)
+    for c in bom.connections:
+        if c.endpoints and c.sheet in known:
+            realized[c.net_name].add(c.sheet)
+
+    declared = {n.name: n for n in architecture.inter_sheet_nets}
+    power = [
+        n for n in architecture.inter_sheet_nets if is_power_or_ground_name(n.name)
+    ]
+    kept: set[str] = {n.name for n in power}
+
+    signal: list[InterSheetNet] = []
+    changes: list[str] = []
+    for name in sorted(realized):
+        if is_power_or_ground_name(name):
+            continue
+        sheets = realized[name]
+        if len(sheets) < 2:
+            continue
+        signal.append(
+            InterSheetNet(
+                name=name, endpoints=_reconciled_endpoints(sheets, declared.get(name))
+            )
+        )
+        kept.add(name)
+        if name not in declared:
+            changes.append(f"+{name} {sorted(sheets)} (realized, undeclared)")
+        elif {e.sheet for e in declared[name].endpoints} != sheets:
+            was = sorted(e.sheet for e in declared[name].endpoints)
+            changes.append(f"~{name} {was} -> {sorted(sheets)}")
+
+    for n in architecture.inter_sheet_nets:
+        if not is_power_or_ground_name(n.name) and n.name not in kept:
+            changes.append(
+                f"-{n.name} (declared {sorted(e.sheet for e in n.endpoints)}, "
+                f"realized {sorted(realized.get(n.name, set()))})"
+            )
+
+    if changes:
+        architecture.inter_sheet_nets = power + signal
+    return changes
 
 
 def check_inter_sheet_nets_realized(architecture, bom) -> CheckResult:

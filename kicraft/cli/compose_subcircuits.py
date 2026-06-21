@@ -2132,6 +2132,35 @@ class SearchResult:
     total_search_ms: float
 
 
+def _net_dist_score(ratsnest_mm: float, scale_mm: float = 1000.0) -> float:
+    """Compactness score (0..100, higher = tighter) from total ratsnest length.
+
+    Bounded inverse rather than the old linear ``100 - 0.1*ratsnest`` clamp,
+    which floored to 0 for any ratsnest > 1000mm -- killing the signal on the
+    large/sprawled boards that need it. Matches the old slope near 0 (scale
+    1000) but never flatlines, so a 1500mm candidate still ranks below 1200mm.
+    """
+    return 100.0 * scale_mm / (scale_mm + max(0.0, ratsnest_mm))
+
+
+def _sprawl_penalty(
+    outline_area_mm2: float, summed_courtyard_area_mm2: float
+) -> tuple[float, float]:
+    """Return ``(sprawl_ratio, penalty)`` for an outline vs the copper it holds.
+
+    ``sprawl = outline_area / summed_courtyard_area`` (i.e. ``1 / packing``).
+    The denominator is the SUMMED component courtyard area, NOT the area their
+    spread spans: tight leaf clusters flung apart span ~= the whole outline
+    (ratio ~1) and would never trip a span-based gate -- the exact
+    big-board-tiny-parts sprawl we must catch. No penalty above ~33% packing
+    (sprawl 3), ramping linearly to a 25-pt cap by ~12% packing (sprawl 8).
+    """
+    summed = max(1.0, summed_courtyard_area_mm2)
+    sprawl = outline_area_mm2 / summed
+    penalty = min(25.0, 5.0 * (sprawl - 3.0)) if sprawl > 3.0 else 0.0
+    return sprawl, penalty
+
+
 def _search_best_layout(
     loaded_artifacts,
     *,
@@ -2271,7 +2300,7 @@ def _search_best_layout(
         opp_side = float(scorer._score_block_opposite_side())
         overlap = float(scorer._score_courtyard_overlap())
         ratsnest_mm = float(total_ratsnest_length(board_state))
-        net_dist = max(0.0, 100.0 - ratsnest_mm * 0.1)
+        net_dist = _net_dist_score(ratsnest_mm)
         # Compactness penalty: candidates with sprawling placements grow
         # the parent outline (sometimes 200+ mm tall) and break geometry
         # validation. The previous composite saturated to 4.37 across
@@ -2312,24 +2341,30 @@ def _search_best_layout(
         outline_tl, outline_br = board_state.board_outline
         outline_w_mm = max(0.0, outline_br.x - outline_tl.x)
         outline_h_mm = max(0.0, outline_br.y - outline_tl.y)
-        # Outline-sprawl gate: an outline whose area dwarfs the content it
-        # holds means a phantom edge anchor or runaway auto-grow upstream
-        # baked bare FR4 into the board. Penalize so a compact candidate
-        # always beats a sprawled one even when the other terms tie.
+        # Outline-sprawl gate: an outline whose area dwarfs the copper it holds
+        # means a phantom edge anchor or runaway auto-grow baked bare FR4 into
+        # the board. The denominator is the SUMMED component courtyard area, NOT
+        # the area their spread SPANS: when tight leaf clusters are flung apart
+        # across the board the span ~= the whole outline (ratio ~1) and the
+        # penalty never fires -- the exact 215x222mm-for-9%-packing sprawl we
+        # want to catch (KC-8AG6FU). Summed area makes a board of small parts in
+        # a big outline read its true low packing. Penalize so a compact
+        # candidate always beats a sprawled one when the other terms tie.
         sprawl = 0.0
         all_phys = [c.physical_bbox() for c in board_state.components.values()]
         if all_phys and outline_w_mm > 0.0 and outline_h_mm > 0.0:
-            content_w = max(b[1].x for b in all_phys) - min(b[0].x for b in all_phys)
-            content_h = max(b[1].y for b in all_phys) - min(b[0].y for b in all_phys)
-            content_area = max(1.0, content_w * content_h)
-            sprawl = (outline_w_mm * outline_h_mm) / content_area
-            if sprawl > 2.0:
-                sprawl_penalty = min(30.0, 10.0 * (sprawl - 2.0))
+            summed_courtyard_area = sum(
+                (b[1].x - b[0].x) * (b[1].y - b[0].y) for b in all_phys
+            )
+            sprawl, sprawl_penalty = _sprawl_penalty(
+                outline_w_mm * outline_h_mm, summed_courtyard_area
+            )
+            if sprawl_penalty > 0.0:
                 composite -= sprawl_penalty
                 print(
                     f"[candidate-search] cand={i} outline "
                     f"{outline_w_mm:.1f}x{outline_h_mm:.1f}mm is {sprawl:.1f}x "
-                    f"its content area; score -{sprawl_penalty:.1f}"
+                    f"its summed courtyard area; score -{sprawl_penalty:.1f}"
                 )
         # state.geometry_validation is populated inside _stamp_parent_board
         # via _validate_parent_geometry. When pcb_path is None the stamp

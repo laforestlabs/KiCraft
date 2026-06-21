@@ -18,6 +18,8 @@ Slot shape (`Architecture`):
   - `function` — one-sentence description.
   - `from_library` — `"<name>@<version>"` when reusing a leaf, else null.
   - `library_instance` — 1 for the first instance of a reused leaf, 2 for the second, etc. Null when `from_library` is null. BOTH MUST BE SET OR BOTH NULL.
+  - `replication_group` — a shared key (e.g. `"STEPPER_AXIS"`) when this sheet is one of several structurally-identical from-scratch copies; else null.
+  - `replication_instance` — 1-based index within the group (1 for the representative, 2, 3 …). Null when `replication_group` is null. BOTH MUST BE SET OR BOTH NULL. Cannot be combined with `from_library`.
 - `power_nets`: list of every recognized power/ground net (`VBUS`, `+3V3`, `GND`, etc.). Use canonical names — `VBUS` not `BATT_POSITIVE`, `GND` not `EARTH`.
 - `inter_sheet_nets`: every signal that crosses sheet boundaries. Each `InterSheetNet` has `name` and `endpoints` (≥2). Each `SheetPin` endpoint has `sheet` (must match a `Sheet.name`) and `direction` (`input` / `output` / `bidirectional` / `passive`).
   - Power rails: usually `bidirectional` at both ends.
@@ -31,6 +33,7 @@ Constraints (enforced by Pydantic):
 - Every `inter_sheet_nets` endpoint must reference a known `Sheet.name`.
 - Each `InterSheetNet` needs at least 2 endpoints.
 - `Sheet.from_library` and `library_instance` must both be set or both null. `library_instance >= 1`. `from_library` must contain `@`.
+- `Sheet.replication_group` and `replication_instance` must both be set or both null. `replication_instance >= 1`. A replication sheet cannot also be a `from_library` sheet.
 
 Recognized power-net name patterns: `VCC`, `VDD`, `VBAT`, `VBUS`, `VSYS`, `+5V`, `+3V3`, `+3.3V`, `5V`, `3V3`, `3.3V`, `+12V`, `12V`, etc.; `GND`, `PGND`, `AGND`, `DGND`. Non-power signal nets are everything else.
 
@@ -41,7 +44,9 @@ Library reuse — additional rules enforced by `stage-commit`:
 - If no leaf is a good match, design the sheet from scratch (both `from_library` and `library_instance` null).
 - Reevaluate every turn — picking, dropping, or switching a leaf between turns is fine.
 
-Reminder: every block from the Functional Spec gets a Sheet — don't drop any. Every functional-spec `connection` either appears in `inter_sheet_nets` or is entirely local to one sheet if you reorganized.
+**Repeated identical blocks — declare a replication group (solve once, reuse the layout).** When the design needs N structurally-identical copies of the SAME from-scratch sub-circuit — e.g. "3 axes of stepper drivers", a 4-channel relay bank, dual identical motor stages — emit **N separate sheets that share one `replication_group`** with sequential `replication_instance` 1..N (instance 1 is the representative). This is the from-scratch analogue of `library_instance`. Give each sheet its own distinct `name`/`stem` (e.g. `STEPPER_AXIS_X` / `_Y` / `_Z`); the BOM assigns each its own refdes range and wiring its own nets, so ERC still sees N independent circuits with no shorts between them. The signal that drives each instance (STEP/DIR/EN per axis, the per-channel control line) is a normal `inter_sheet_net`. The layout engine then solves ONLY the representative's placement+routing and reuses it for every sibling — far less compute and an identical, predictable layout per copy. A functional-spec block with `count > 1` maps directly to one replication group of that many sheets. Use this only when the copies are truly identical sub-circuits; distinct-but-similar blocks stay separate sheets with no group.
+
+Reminder: every block from the Functional Spec gets a Sheet — don't drop any (a `count`-N block expands to N grouped sheets). Every functional-spec `connection` either appears in `inter_sheet_nets` or is entirely local to one sheet if you reorganized.
 
 **Physical integration — one sheet per IC domain (don't split one chip across sheets; don't merge distinct chips onto one).** The Functional Spec lists *abstract* blocks, but the sheet hierarchy must follow the **physical ICs**: a sheet is one IC plus the support parts that wire directly to it (its connector(s), inductor, CC/DP–DN passives, decoupling, feedback network). Decide this HERE, not at wiring, and get BOTH directions right (the same "decide here, not at wiring" rule as the programming interface below):
 

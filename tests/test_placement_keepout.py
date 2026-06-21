@@ -125,6 +125,135 @@ def test_legality_diagnostics_flags_keepout_overlap():
     assert all(e["ref"] != "U1" for e in diag["keepout_overlaps"])
 
 
+def test_keepout_rect_tracks_moved_owner():
+    # The rect was sampled at extraction with U1 at origin (14,10). U1 has since
+    # moved +10 in x; because the keep-out is rigidly attached to U1, the
+    # effective rect must shift with it. A part clear of the STALE rect (x[5,23])
+    # but inside the TRACKED rect (x[15,33]) must be pushed out.
+    kr = KeepoutRect(
+        tl=Point(5, 5), br=Point(23, 15), owner_ref="U1",
+        owner_origin=Point(14, 10),
+    )
+    owner = _comp("U1", 24, 10, w=18, h=10)  # +10 in x from owner_origin
+    victim = _comp("SW1", 28, 10, w=2, h=2)  # bbox x[27,29]: clear of stale, in tracked
+    state = BoardState(
+        components={"U1": owner, "SW1": victim},
+        board_outline=(Point(0, 0), Point(60, 60)),
+        keepout_rects=[kr],
+    )
+    solver = _solver(state)
+    assert not _overlaps(victim, kr), "victim should be clear of the STALE rect"
+    r_tl, r_br = solver._keepout_rect_now(kr, state.components)
+    assert (r_tl.x, r_br.x) == (15, 33), "rect must track the owner's +10 x move"
+
+    moved = solver._resolve_keepout_rects(state.components)
+    assert moved == 1
+    assert _on_board(victim, state)
+    c_tl, c_br = victim.bbox(0.0)
+    ox = min(c_br.x, r_br.x) - max(c_tl.x, r_tl.x)
+    oy = min(c_br.y, r_br.y) - max(c_tl.y, r_tl.y)
+    assert not (ox > 0 and oy > 0), "victim still inside the tracked keep-out"
+
+
+def test_clear_pinned_connector_slides_along_edge():
+    # J2 (USB-C, right-edge pinned, locked) lands in U3's antenna keep-out.
+    # _push_out_of_rect skips it (locked) and it can't leave its edge, so the
+    # edge-slide pass must move it ALONG the right edge until clear and bake the
+    # cleared spot into _pinned_targets so the closing restore keeps it.
+    kr = KeepoutRect(tl=Point(28, 10), br=Point(40, 20), owner_ref="U3")
+    conn = _comp("J2", 36, 14, w=6, h=8, locked=True)  # bbox x[33,39] y[10,18]
+    state = BoardState(
+        components={"J2": conn},
+        board_outline=(Point(0, 0), Point(40, 60)),
+        keepout_rects=[kr],
+    )
+    assert _overlaps(conn, kr)
+    solver = _solver(state)
+    solver._edge_pinned_groups = {"right": ["J2"]}
+    solver._pinned_targets = {"J2": Point(36, 14)}
+
+    moved = solver._clear_pinned_from_keepouts(state.components)
+
+    assert moved == 1
+    assert not _overlaps(conn, kr), "connector still inside the keep-out"
+    assert _on_board(conn, state)
+    assert abs(conn.pos.x - 36.0) < 1e-6, "must stay flush to its right edge (x fixed)"
+    assert solver._pinned_targets["J2"] == Point(conn.pos.x, conn.pos.y)
+
+
+def test_clear_pinned_connector_noop_when_already_clear():
+    kr = KeepoutRect(tl=Point(5, 5), br=Point(15, 15), owner_ref="U3")
+    conn = _comp("J2", 36, 40, w=6, h=8, locked=True)  # far from kr
+    state = BoardState(
+        components={"J2": conn},
+        board_outline=(Point(0, 0), Point(40, 60)),
+        keepout_rects=[kr],
+    )
+    solver = _solver(state)
+    solver._edge_pinned_groups = {"right": ["J2"]}
+    solver._pinned_targets = {"J2": Point(36, 40)}
+    assert solver._clear_pinned_from_keepouts(state.components) == 0
+    assert (conn.pos.x, conn.pos.y) == (36, 40)
+
+
+def test_clear_pinned_connector_owner_is_exempt():
+    # The connector that OWNS a keep-out is never slid out of its own rect.
+    kr = KeepoutRect(tl=Point(33, 10), br=Point(40, 20), owner_ref="J2")
+    conn = _comp("J2", 36, 14, w=6, h=8, locked=True)
+    state = BoardState(
+        components={"J2": conn},
+        board_outline=(Point(0, 0), Point(40, 60)),
+        keepout_rects=[kr],
+    )
+    solver = _solver(state)
+    solver._edge_pinned_groups = {"right": ["J2"]}
+    solver._pinned_targets = {"J2": Point(36, 14)}
+    assert solver._clear_pinned_from_keepouts(state.components) == 0
+    assert (conn.pos.x, conn.pos.y) == (36, 14)
+
+
+def test_pin_then_clear_keepout_integration():
+    # Full path: the real config-driven _pin_edge_components edge-pins J2 (and
+    # populates _edge_pinned_groups), then _clear_pinned_from_keepouts slides it
+    # out of a neighbour's antenna keep-out while keeping it flush to its edge.
+    j2 = Component(
+        ref="J2", value="USB-C", pos=Point(20, 30), rotation=0.0,
+        layer=Layer.FRONT, width_mm=6, height_mm=8, kind="connector",
+        pads=[Pad(ref="J2", pad_id="1", pos=Point(20, 30), net="N",
+                  layer=Layer.FRONT, size_mm=Point(1, 1))],
+    )
+    u3 = _comp("U3", 10, 30, w=10, h=10)  # the (interior) keep-out owner
+    state = BoardState(
+        components={"J2": j2, "U3": u3},
+        board_outline=(Point(0, 0), Point(40, 60)),
+        keepout_rects=[],
+    )
+    cfg = {
+        "component_zones": {"J2": {"edge": "right"}},
+        "edge_margin_mm": 2.0,
+        "placement_clearance_mm": 0.0,
+    }
+    solver = PlacementSolver(state, cfg, seed=0)
+    solver._pin_edge_components(state.components)
+    assert "J2" in solver._edge_pinned_groups.get("right", []), "J2 not edge-pinned"
+
+    # Plant U3's keep-out over where J2 actually pinned, upper half only so a
+    # downward slide can clear it. owner_origin == U3's pos -> rect is in place.
+    jx, jy = j2.pos.x, j2.pos.y
+    kr = KeepoutRect(
+        tl=Point(jx - 5, jy - 4), br=Point(jx + 5, jy + 1), owner_ref="U3",
+        owner_origin=Point(u3.pos.x, u3.pos.y),
+    )
+    state.keepout_rects = [kr]
+    assert _overlaps(j2, kr), "test setup: J2 should start inside the keep-out"
+
+    moved = solver._clear_pinned_from_keepouts(state.components)
+    assert moved == 1
+    assert not _overlaps(j2, kr), "J2 still inside the keep-out after the clear pass"
+    assert _on_board(j2, state)
+    assert abs(j2.pos.x - jx) < 1e-6, "J2 must stay flush to its pinned right edge"
+
+
 def test_keepout_straddling_board_edge_pushes_inboard():
     # Keep-out crosses the top board edge (antenna faces off-board). The
     # smallest exit (up) would push the part off the board; the solver must
