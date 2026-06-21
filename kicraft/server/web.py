@@ -2538,6 +2538,14 @@ def projects_page():
         def render_rows():
             rows_box.clear()
             with rows_box:
+                # Surface self-eval runs as private admin projects so they open in
+                # the standard viewer. Idempotent + cheap (keyed on dir_path);
+                # best-effort so a scan hiccup never blanks the project list.
+                if is_admin(user):
+                    try:
+                        _store().sync_eval_projects(owner_id=user.id)
+                    except Exception:  # noqa: BLE001
+                        pass
                 projs = _store().list_projects(user.id)
                 if not projs:
                     ui.label("No projects yet. Describe a board in the workspace "
