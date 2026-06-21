@@ -67,6 +67,7 @@ from .synthesis.parts_lookup import (
 from .synthesis.validation import (
     CheckResult,
     SynthesisValidationError,
+    bridge_duplicate_pins,
     check_family_wiring_contracts,
     check_inter_sheet_nets_realized,
     check_net_coverage,
@@ -77,6 +78,7 @@ from .synthesis.validation import (
     check_sheets_have_parts,
     check_single_net_per_pin,
     check_two_terminal_self_short,
+    reconcile_inter_sheet_nets,
 )
 from kicraft.parts_library import Maturity
 from kicraft.parts_library.query_log import record as _log_query
@@ -1982,6 +1984,25 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         )
         return 3
 
+    # Wiring netlist normalization (deterministic; a no-op on an already-correct
+    # netlist). Runs before validation + persistence, so the committed state and
+    # the emitter both see the repaired netlist:
+    #   * bridge internally-shorted duplicate pads (KiCad "N'") onto their net,
+    #     so §9.11 stops flagging a pad the package already ties together;
+    #   * reconcile inter_sheet_nets to the crossings wiring actually realized,
+    #     so the stage is never blamed for an inter-sheet contract it cannot edit
+    #     (KC-WFFXZ3 DTR/RTS-into-ESP32; the proto-shield PROTO AREA orphans).
+    wiring_normalizations: list[str] = []
+    if stage == "wiring" and state.bom is not None and state.bom.connections:
+        wiring_normalizations += [
+            f"bridge {b}" for b in bridge_duplicate_pins(state.bom)
+        ]
+        if state.architecture is not None:
+            wiring_normalizations += [
+                f"inter_sheet {c}"
+                for c in reconcile_inter_sheet_nets(state.architecture, state.bom)
+            ]
+
     new_questions: list[Question] = []
     if args.questions_file:
         try:
@@ -2154,6 +2175,8 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     }
     if archive_warning:
         summary["archive_warning"] = archive_warning
+    if wiring_normalizations:
+        summary["wiring_normalizations"] = wiring_normalizations
     # Placement rules referencing refs the BOM no longer carries are
     # tolerated (parts churn across BOM re-runs); synthesis drops them
     # with a warning. Surface them at commit time too so the UI can show
