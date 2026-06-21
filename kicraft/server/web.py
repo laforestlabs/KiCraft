@@ -2485,6 +2485,16 @@ def projects_page():
                      "upgrade to Pro to keep projects private.") \
                 .classes("text-sm").style("color:#94a3b8")
 
+        # Admin-only toggle to hide/show self-eval runs (EV- board codes) so they
+        # don't crowd real boards. Built once, OUTSIDE rows_box, so a render never
+        # deletes it mid-handler; stays hidden until render_rows finds eval runs.
+        show_eval = {"on": False}
+        with ui.row().classes("w-full items-center gap-2") as eval_toggle_row:
+            eval_switch = ui.switch("Show eval runs", value=False) \
+                .props("dense color=amber").classes("text-xs")
+            eval_count_lbl = ui.label("").classes("text-xs").style("color:#64748b")
+        eval_toggle_row.set_visibility(False)
+
         rows_box = ui.column().classes("w-full gap-2")
 
         # One reusable confirm dialog, built once OUTSIDE the rebuildable rows so a
@@ -2538,12 +2548,34 @@ def projects_page():
         def render_rows():
             rows_box.clear()
             with rows_box:
+                # Surface self-eval runs as private admin projects so they open in
+                # the standard viewer. Idempotent + cheap (keyed on dir_path);
+                # best-effort so a scan hiccup never blanks the project list.
+                if is_admin(user):
+                    try:
+                        _store().sync_eval_projects(owner_id=user.id)
+                    except Exception:  # noqa: BLE001
+                        pass
                 projs = _store().list_projects(user.id)
-                if not projs:
+                # Split eval runs (EV- codes) from real boards; the toggle above
+                # shows/hides them (default hidden so they never crowd the real
+                # list). Non-admins never have eval runs, so the toggle stays off.
+                eval_runs = [p for p in projs
+                             if (p.board_code or "").startswith("EV-")]
+                real = [p for p in projs
+                        if not (p.board_code or "").startswith("EV-")]
+                has_eval = is_admin(user) and bool(eval_runs)
+                eval_toggle_row.set_visibility(has_eval)
+                if has_eval:
+                    n = len(eval_runs)
+                    eval_count_lbl.text = (f"{n} hidden" if not show_eval["on"]
+                                           else f"{n} shown")
+                shown = real + (eval_runs if show_eval["on"] else [])
+                if not shown:
                     ui.label("No projects yet. Describe a board in the workspace "
                              "to begin.").classes("text-sm").style("color:#64748b")
                     return
-                for p in projs:
+                for p in shown:
                     _render_row(p)
 
         def _render_row(p):
@@ -2630,6 +2662,11 @@ def projects_page():
                                 .style("color:#34d399")
                             ui.label("Public in the community browser") \
                                 .classes("text-xs").style("color:#94a3b8")
+
+        def _on_eval_toggle(e):
+            show_eval["on"] = bool(e.value)
+            render_rows()
+        eval_switch.on_value_change(_on_eval_toggle)
 
         render_rows()
 

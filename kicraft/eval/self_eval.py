@@ -115,12 +115,22 @@ def _build_env() -> dict:
     return {**os.environ, "KICRAFT_CALLER": os.environ.get("KICRAFT_CALLER", "web")}
 
 
-def _event_writer(path: Path):
-    """A ``progress(event)`` sink that appends the design/build events to
-    ``events.jsonl`` (the scorable transcript), dropping the client's high-volume
-    streaming kinds so the Class-C scorers see the same shape the web app persists."""
+def _event_writer(path: Path, *, full: bool = False):
+    """A ``progress(event)`` sink that appends design/build events to
+    ``events.jsonl``.
+
+    With ``full`` (the batch default) it persists every event the capped client
+    streams -- reasoning_delta / answer_delta / tool / tool_result -- so an eval
+    run replays in the web viewer exactly like a live web build, whose own
+    events.jsonl carries the same stream. With ``full=False`` it keeps only the
+    structural kinds (``_EVENT_KINDS``), the lean transcript the Class-C scorers
+    were first tuned on. Either is score-safe: the scorers key off specific kinds
+    (stage_done / retry / question), so the extra streaming kinds never skew them
+    -- the web app's own delta-laden transcript is scored the same way."""
     def progress(ev: dict) -> None:
-        if not isinstance(ev, dict) or ev.get("kind") not in _EVENT_KINDS:
+        if not isinstance(ev, dict):
+            return
+        if not full and ev.get("kind") not in _EVENT_KINDS:
             return
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(ev) + "\n")
@@ -222,7 +232,8 @@ def run_build(rundir: Path, progress, *, timeout_s: int = 2400) -> int:
 
 def evaluate_one(client, idx: int, entry: dict, out_dir: Path, *,
                  judge_model, skip_judge: bool, max_park_rounds: int = 12,
-                 build_timeout_s: int = 2400, build_gate=None) -> dict:
+                 build_timeout_s: int = 2400, build_gate=None,
+                 full_events: bool = True) -> dict:
     """Drive + build + score one benchmark brief into ``out_dir/<stem>/``. ``entry``
     is a ``{"slug", "archetype", "brief"}`` dict from ``BENCHMARK_PROMPTS``. Never
     raises: any failure is captured in the returned record so the batch continues.
@@ -239,7 +250,7 @@ def evaluate_one(client, idx: int, entry: dict, out_dir: Path, *,
     rundir = out_dir / stem
     (rundir / ".kicraft").mkdir(parents=True, exist_ok=True)
     (rundir / "brief.txt").write_text(prompt + "\n", encoding="utf-8")
-    progress = _event_writer(rundir / "events.jsonl")
+    progress = _event_writer(rundir / "events.jsonl", full=full_events)
     run_id = f"p{stem}-{int(t0)}"
 
     # ``prompt`` is kept as the record field name (the web admin + report read it) and
@@ -489,6 +500,10 @@ def main(argv=None) -> int:
                     help="report root (default: <projects_dir>/../self_eval/<ts> or ./logs/self_eval/<ts>)")
     ap.add_argument("--no-judge", action="store_true",
                     help="score Class-C only; skip the LLM judge (cheaper, no A-F grade)")
+    ap.add_argument("--lean-events", action="store_true",
+                    help="persist only structural events (stage/retry/build) instead of "
+                         "the full reasoning/answer stream. Default is full fidelity, so a "
+                         "run replays in the web viewer like a live build (~+0.5-2MB/run)")
     ap.add_argument("--judge-model", default=None, help="judge model override")
     ap.add_argument("--max-park-rounds", type=int, default=12,
                     help="cap on park/auto-answer resume rounds per brief")
@@ -546,6 +561,7 @@ def main(argv=None) -> int:
         "rubric_version": None,
         "parallel": parallel,
         "build_slots": max(1, args.build_slots),
+        "full_events": not args.lean_events,
     }
     if resume_dir:
         meta["resumed_reused_n"] = len(reused)
@@ -589,7 +605,8 @@ def main(argv=None) -> int:
             print(f"\n[{n}/{len(todo)}] #{idx} {entry['slug']}: {entry['brief']}", flush=True)
             rec = evaluate_one(client, idx, entry, out_dir, judge_model=judge_model,
                                skip_judge=args.no_judge, max_park_rounds=args.max_park_rounds,
-                               build_timeout_s=args.build_timeout)
+                               build_timeout_s=args.build_timeout,
+                               full_events=not args.lean_events)
             if rec.get("error"):
                 print(f"   ERROR: {rec['error']}", flush=True)
             else:
@@ -614,7 +631,8 @@ def main(argv=None) -> int:
                 print(f"[{stem}] start: {entry['brief']}", flush=True)
             rec = evaluate_one(wclient, idx, entry, out_dir, judge_model=judge_model,
                                skip_judge=args.no_judge, max_park_rounds=args.max_park_rounds,
-                               build_timeout_s=args.build_timeout, build_gate=gate)
+                               build_timeout_s=args.build_timeout, build_gate=gate,
+                               full_events=not args.lean_events)
             with print_lock:
                 if rec.get("error"):
                     print(f"[{stem}] ERROR: {rec['error']}", flush=True)
