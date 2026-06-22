@@ -1,12 +1,14 @@
 # KiCraft refactor roadmap — legibility first
 
-**Status:** in progress. **Done & verified (zero test regressions vs. `main` — identical 27
-pre-existing env/stale failures both sides, 1,877 pass):** Phase 1, Phase 2, the Phase 3
-`storage.py` + `pricing.py` + `render_serving.py` cuts (web.py 7,292→7,000), Phase 4(c), and
-Phase 5 (`build_jobs` leak + README install fix). **Remaining (harder — coupled / behavioral; full
-per-item plan in `docs/plans/refactor-handoff-remaining.md`):**
-`routes_admin`/`project_view`/`build_orchestration` + `cli_app.py` splits, Phase 4(a)/(b), and the
-Phase 5 doc-prose cleanup.
+**Status:** in progress. **Done & verified (zero test regressions — identical 27 pre-existing
+env/stale failures, ~1,877 pass):** Phase 1, Phase 2, the Phase 3 `storage.py` + `pricing.py` +
+`render_serving.py` + **`routes_admin.py` (3a, commit `58701d5`)** cuts (**web.py 7,292 → 5,029**),
+Phase 4(c), and Phase 5 (`build_jobs` leak + README install fix). **Remaining (full per-item plan in
+`docs/plans/refactor-handoff-remaining.md`):** `project_view` split; `build_orchestration`
+**reassessed → sequence with Phase 4(b)** (its `_LIVE_RUNS`/`_persist_project` rebind-seams make a
+clean move depend on the 4b state-consolidation); `cli_app.py` `parts_cli` cut **once its CLI tests
+are green** (they fail on env-data today, so the move can't be verified); Phase 4(a)/(b); Phase 5
+doc-prose cleanup.
 **Date:** 2026-06-22
 **Goal:** make the codebase reason-able — for humans *and* coding agents. The driving
 pain is concrete: multi-hour agent sessions wasted because the code was too sprawling to
@@ -89,9 +91,14 @@ only the NiceGUI page wiring):
   `_discover_generated_dir`, `_persisted_generated_dir` (behavior-preserving move +
   re-export; web.py 7,292→7,207). Deferred: `_persist_project` (store/notify-coupled — moves
   with `build_orchestration`) and the `.kicraft`/`kicraft` accessors (new Phase-4 work).
+- `routes_admin.py` — **✅ DONE (commit `58701d5`):** the `/admin/*` `@ui.page` surface + chart
+  helpers + `_SELF_EVAL`/`_LOADTEST`/`_SECURITY` globals; 1,972 lines out. Self-contained (7 narrow
+  `from .web import` back-refs, no `common.py` needed); web.py reloads it on its own reload so the
+  routes don't 404 in the test harnesses. web.py 7,000→5,029.
 - `build_orchestration.py` — `_run_design`, the `build_jobs` enqueue/drive, `_LIVE_RUNS`.
+  **Reassessed → sequence with Phase 4(b)** (see handoff 3b): its `_LIVE_RUNS`/`_persist_project`
+  rebind-seams + index-page coupling make a clean move depend on the 4b state-consolidation.
 - `project_view.py` — the open/view flow (the open handler + the render loop + panels glue).
-- `routes_admin.py` — admin / self-eval / loadtest dashboards (a large, separable surface).
 - `pricing.py` — **✅ DONE (commit `9d78f28`):** pure BOM-pricing helpers (resolution + selection
   + formatting); the live fetch/cache stayed in web.py (the monkeypatch seam tests rely on).
 - `render_serving.py` — **✅ DONE (commit `7481748`):** token-gated raw-file/render/part-preview
