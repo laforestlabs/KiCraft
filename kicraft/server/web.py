@@ -1511,6 +1511,33 @@ def _fresh_run_state() -> dict:
     }
 
 
+def _load_events(dir_path) -> list[dict]:
+    """Read back the persisted event stream (events.jsonl) for a reopened project.
+    Inverse of the write in _persist_project. The build timeline + LLM-reasoning
+    panel renders from state['events']; events.jsonl is written at finalize but was
+    never read back, so a reopened project showed a blank timeline. Best-effort and
+    per-line tolerant so one corrupt line never blanks the whole history."""
+    if not dir_path:
+        return []
+    f = Path(dir_path) / "events.jsonl"
+    try:
+        lines = f.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out: list[dict] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(ev, dict):
+            out.append(ev)
+    return out
+
+
 def _pick_default_project(user_id: int):
     """The project the workspace should open by default: the newest parked run
     (it is blocked on the user), else the newest live run, else the newest
@@ -6510,6 +6537,10 @@ def index(prompt: str = "", project: str = ""):
                          awaiting_input=(p.status == "awaiting_input"),
                          questions=[q for q in (sj.get("open_questions") or [])
                                     if not q.get("answer")])
+            # Reopen the build timeline + LLM reasoning: events.jsonl is persisted at
+            # finalize but was never read back, so the timeline rendered blank. The
+            # render loop replays these into the tabs (display-only: tabs.push paints).
+            state["events"] = _load_events(p.dir_path)
             _reset_view()
             view["account_refreshed"] = True
             tabs.reset()
