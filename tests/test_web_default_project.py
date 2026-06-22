@@ -257,8 +257,9 @@ def test_ensure_bom_prices_fetches_in_background(monkeypatch):
     start line sat unreachable in _price_for_lcsc), so live BOM pricing silently
     hung at '...' forever. Pin that the fetch runs and bumps prices_rev."""
     key = "kw:test-part-thread-regression"
-    monkeypatch.setattr(web, "_resolve_part",
-                        lambda p: ("kw", "test-part-thread-regression"))
+    # _price_key now lives in kicraft.server.pricing; _ensure_bom_prices calls it
+    # via web's namespace, so patch it there to pin the cache key deterministically.
+    monkeypatch.setattr(web, "_price_key", lambda p: "kw:test-part-thread-regression")
     monkeypatch.setattr(web, "_safe_fetch",
                         lambda k: {"unit_price": 0.5, "lcsc": "C1", "stock": 1})
     with web._PRICE_LOCK:
