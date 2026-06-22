@@ -1,10 +1,12 @@
 # KiCraft refactor roadmap — legibility first
 
 **Status:** in progress. **Done & verified (zero test regressions vs. `main` — identical 27
-pre-existing env/stale failures both sides, 1,876 pass):** Phase 1, Phase 2, the Phase 3
-`storage.py` cut, Phase 4(c), and Phase 5 (`build_jobs` leak + README install fix). **Remaining
-(harder than first scoped — see the Phase 3 reassessment + Phase 4 note):** the rest of the
-Phase 3 splits, Phase 4(a)/(b), and the Phase 5 doc-prose cleanup.
+pre-existing env/stale failures both sides, 1,877 pass):** Phase 1, Phase 2, the Phase 3
+`storage.py` + `pricing.py` + `render_serving.py` cuts (web.py 7,292→7,000), Phase 4(c), and
+Phase 5 (`build_jobs` leak + README install fix). **Remaining (harder — coupled / behavioral; full
+per-item plan in `docs/plans/refactor-handoff-remaining.md`):**
+`routes_admin`/`project_view`/`build_orchestration` + `cli_app.py` splits, Phase 4(a)/(b), and the
+Phase 5 doc-prose cleanup.
 **Date:** 2026-06-22
 **Goal:** make the codebase reason-able — for humans *and* coding agents. The driving
 pain is concrete: multi-hour agent sessions wasted because the code was too sprawling to
@@ -90,19 +92,20 @@ only the NiceGUI page wiring):
 - `build_orchestration.py` — `_run_design`, the `build_jobs` enqueue/drive, `_LIVE_RUNS`.
 - `project_view.py` — the open/view flow (the open handler + the render loop + panels glue).
 - `routes_admin.py` — admin / self-eval / loadtest dashboards (a large, separable surface).
-- `prices.py`, `render_serving.py` — the price cache and the tokened `/project/<token>/…`
-  endpoint.
+- `pricing.py` — **✅ DONE (commit `9d78f28`):** pure BOM-pricing helpers (resolution + selection
+  + formatting); the live fetch/cache stayed in web.py (the monkeypatch seam tests rely on).
+- `render_serving.py` — **✅ DONE (commit `7481748`):** token-gated raw-file/render/part-preview
+  serving; routes register via the import. web.py 7,207→7,000 across both.
 
 Method: one extraction per commit, `pytest --co -q` + targeted tests between each.
 
 **Reassessment after the `storage.py` cut (2026-06-22):** storage.py was the clean exception —
 leaf helpers, called-not-monkeypatched, no back-deps into web.py. The remaining seams are NOT
 clean mechanical moves and should be done deliberately, not in an unattended batch:
-- `prices` / `render_serving` — **doable but churny.** ~6 test files monkeypatch
-  `web._safe_fetch`, so a move+re-export must retarget those patch sites; and
-  `_price_key`→`_resolve_part` drags the LCSC part-resolution cluster along (it's really a
-  ~330-line `parts_pricing.py`, not just "prices"). The suite verifies it, so the *risk* is low
-  but the churn is real.
+- `prices` / `render_serving` — **✅ DONE** (see above). `pricing.py` avoided the test churn by
+  keeping the monkeypatched `_safe_fetch`/cache seam in web.py and moving only the *pure* helpers;
+  `render_serving.py` was a clean move (zero test churn). The full per-item plan for what's left is
+  in `docs/plans/refactor-handoff-remaining.md`.
 - `routes_admin` / `project_view` / `build_orchestration` — **coupled.** These `@ui.page`
   handlers and the `_run_design`/view-loop closures reference many web.py internals, so moving
   them risks circular imports. They need a shared-helpers module (or late imports) *first* — an
