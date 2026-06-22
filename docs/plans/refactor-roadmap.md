@@ -1,6 +1,6 @@
 # KiCraft refactor roadmap — legibility first
 
-**Status:** in progress (Phases 1–2 done; 3–5 planned)
+**Status:** in progress (Phases 1–2 done; Phase 3 started — `storage.py` extracted; 4–5 planned)
 **Date:** 2026-06-22
 **Goal:** make the codebase reason-able — for humans *and* coding agents. The driving
 pain is concrete: multi-hour agent sessions wasted because the code was too sprawling to
@@ -70,7 +70,7 @@ architecture from scratch each session.
 
 ---
 
-## Phase 3 — Split the orchestration monoliths 🔜 PLANNED (next)
+## Phase 3 — Split the orchestration monoliths 🔄 IN PROGRESS
 
 Target the two files where agents drown because the whole file won't fit in context:
 `server/web.py` (7,292) and `design/cli_app.py` (3,913). **Not** `placement_solver.py`
@@ -78,10 +78,11 @@ Target the two files where agents drown because the whole file won't fit in cont
 
 Proposed seams for `server/web.py` (extract into `kicraft/server/` submodules, web.py keeps
 only the NiceGUI page wiring):
-- `storage.py` — workspace + durable lifecycle: `_new_workspace`, `_gc_workspaces`,
-  `_rehydrate_workspace`, `_persist_project`, `_discover_generated_dir`,
-  `_persisted_generated_dir`, the `.kicraft`/`kicraft` accessors. **Do this first** — it's
-  self-contained, high-value, and sets up Phase 4's storage collapse.
+- `storage.py` — workspace + durable lifecycle. **✅ DONE (commit `b298d81`):** moved
+  `_new_workspace`, `_gc_workspaces`, `_rehydrate_workspace`, `_read_project_stem`,
+  `_discover_generated_dir`, `_persisted_generated_dir` (behavior-preserving move +
+  re-export; web.py 7,292→7,207). Deferred: `_persist_project` (store/notify-coupled — moves
+  with `build_orchestration`) and the `.kicraft`/`kicraft` accessors (new Phase-4 work).
 - `build_orchestration.py` — `_run_design`, the `build_jobs` enqueue/drive, `_LIVE_RUNS`.
 - `project_view.py` — the open/view flow (the open handler + the render loop + panels glue).
 - `routes_admin.py` — admin / self-eval / loadtest dashboards (a large, separable surface).
