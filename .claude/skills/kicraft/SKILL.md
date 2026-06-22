@@ -34,16 +34,6 @@ Top-level state fields:
 - `history` (list[ChatMsg]) — automatically appended by `stage-commit`. You do not append directly.
 - `artifacts` (ArtifactPaths | null) — populated by `synthesize`. Leave alone otherwise.
 
-## Live view (Experiment Manager GUI)
-
-Early in a new project, offer to launch the Experiment Manager GUI so the user can watch the whole pipeline live. From the project directory (already the CWD, do not `cd`), start it in the background and give the user the URL (default `http://localhost:8080`):
-
-```
-python -m kicraft.gui
-```
-
-Its top bar tracks every stage (Intent -> Spec -> Architecture -> BOM -> Wiring -> Synthesize -> Place & Route -> Fab) from `.kicraft/state.json` plus the build's `run_status.json`, and the **Design** tab shows the captured slots; the Monitor tab shows the place/route rounds once `build` runs. The GUI is read-only observability, it does not drive the conversation. Offer it once and do not relaunch if it is already running.
-
 ## Per-turn workflow
 
 On each user message, decide ONE of:

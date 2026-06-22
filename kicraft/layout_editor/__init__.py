@@ -3,8 +3,7 @@
 Owns the manual layout data model, leaf discovery + canvas PNG
 rendering, compose/stamp/route orchestration, the per-component
 placement-rules data layer, and the shared canvas JS asset. The
-offline GUI (``kicraft.gui``) and the web app (``kicraft.server``)
-are thin hosts over this package.
+web app (``kicraft.server``) is a thin host over this package.
 """
 
 from kicraft.layout_editor.canvas import (

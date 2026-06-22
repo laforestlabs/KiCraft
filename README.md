@@ -235,15 +235,12 @@ The pinned-PCB triad (`leaf_routed.kicad_pcb` + `metadata.json` +
 drops in as a pre-solved round and the parent composer treats it as
 already-solved on the next `autoexperiment --parents-only`.
 
-### Promote a leaf (GUI)
+### Promote a leaf
 
-```bash
-python -m kicraft.gui
-# -> open the "Leaf Library" tab
-# -> point at a source project that has a pinned round under
-#    .experiments/subcircuits/<leaf_key>/round_NNNN_*
-# -> fill in name/version/description and click Promote
-```
+> **Note:** the Experiment Manager GUI that hosted the "Leaf Library" promote flow was
+> removed 2026-06-22 (recover from git history if needed). Leaf promotion is pending a
+> re-home in the web app — see `docs/plans/refactor-roadmap.md`. The pinned-round import
+> format described above still applies.
 
 The wizard runs the renders, writes a manifest with the
 content-addressed hash, and atomically writes the new directory into
@@ -329,12 +326,6 @@ at the project root for fab handoff.
 
 ```bash
 score-layout project.kicad_pcb
-```
-
-### Launch GUI
-
-```bash
-python -m kicraft.gui
 ```
 
 ### Configuring Placement
@@ -578,7 +569,6 @@ kicraft/
 │   ├── brain/           # Pure algorithms (no pcbnew dependency)
 │   └── hardware/        # KiCad pcbnew API adapter
 ├── scoring/             # Layout quality scoring checks
-├── gui/                 # NiceGUI experiment manager (Leaf Library, Setup, Monitor, Manual Layout, Analysis)
 ├── cli/                 # CLI entry-point scripts
 └── logging_config.py    # Structured logging setup
 ```
