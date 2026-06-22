@@ -1,6 +1,10 @@
 # KiCraft refactor roadmap — legibility first
 
-**Status:** in progress (Phases 1–2 done; Phase 3 started — `storage.py` extracted; 4–5 planned)
+**Status:** in progress. **Done & verified (zero test regressions vs. `main` — identical 27
+pre-existing env/stale failures both sides, 1,876 pass):** Phase 1, Phase 2, the Phase 3
+`storage.py` cut, Phase 4(c), and Phase 5 (`build_jobs` leak + README install fix). **Remaining
+(harder than first scoped — see the Phase 3 reassessment + Phase 4 note):** the rest of the
+Phase 3 splits, Phase 4(a)/(b), and the Phase 5 doc-prose cleanup.
 **Date:** 2026-06-22
 **Goal:** make the codebase reason-able — for humans *and* coding agents. The driving
 pain is concrete: multi-hour agent sessions wasted because the code was too sprawling to
@@ -89,16 +93,28 @@ only the NiceGUI page wiring):
 - `prices.py`, `render_serving.py` — the price cache and the tokened `/project/<token>/…`
   endpoint.
 
-Method: one extraction per commit, `pytest --co -q` + targeted tests between each. Stop and
-report after the `storage.py` extraction for review before proceeding.
+Method: one extraction per commit, `pytest --co -q` + targeted tests between each.
 
-(`design/cli_app.py` gets the same treatment once web.py is tractable: split the `build`
-pipeline driver from the stage-commit/CLI-arg surface.)
+**Reassessment after the `storage.py` cut (2026-06-22):** storage.py was the clean exception —
+leaf helpers, called-not-monkeypatched, no back-deps into web.py. The remaining seams are NOT
+clean mechanical moves and should be done deliberately, not in an unattended batch:
+- `prices` / `render_serving` — **doable but churny.** ~6 test files monkeypatch
+  `web._safe_fetch`, so a move+re-export must retarget those patch sites; and
+  `_price_key`→`_resolve_part` drags the LCSC part-resolution cluster along (it's really a
+  ~330-line `parts_pricing.py`, not just "prices"). The suite verifies it, so the *risk* is low
+  but the churn is real.
+- `routes_admin` / `project_view` / `build_orchestration` — **coupled.** These `@ui.page`
+  handlers and the `_run_design`/view-loop closures reference many web.py internals, so moving
+  them risks circular imports. They need a shared-helpers module (or late imports) *first* — an
+  untangle, not a move. `routes_admin` (~1,500 lines) is the biggest legibility prize but the
+  hardest to extract safely.
+- `design/cli_app.py` (3,913) — large, not yet analyzed; same treatment once web.py is tractable.
 
-## Phase 4 — Reduce essential complexity 🔜 PLANNED
+## Phase 4 — Reduce essential complexity 🔄 PARTIAL (4c done; 4a/4b are behavioral)
 
-These remove *concepts*, not just lines. Bigger and riskier than 1–3; do after the map +
-splits make them safe. Detailed spec for (a): `docs/plans/view-from-durable-refactor-v2.md`.
+These remove *concepts*, not just lines. (a) and (b) **change runtime behavior** of the web app
+(open / view / build / delete paths), so they need real app-level verification and should NOT be
+done blind in an unattended push. Detailed spec for (a): `docs/plans/view-from-durable-refactor-v2.md`.
 
 - **(a) Collapse the workspace↔durable storage duality.** One project directory, same layout
   live and at rest — no `.kicraft`-vs-`kicraft`, no two-way `copytree`, no per-reopen 17–29 MB
@@ -110,17 +126,19 @@ splits make them safe. Detailed spec for (a): `docs/plans/view-from-durable-refa
   across the `projects` table, `state.json`, the in-process `_LIVE_RUNS` dict, and the
   `build_jobs` queue. Pick one owner. This is the root of the "reopen is missing things / is
   it still running?" bug family.
-- **(c) `events.jsonl` timeline fix — cheap, ship anytime.** It's written at persist but never
-  read back on reopen, so the timeline/reasoning panel is blank. Loading it into
-  `state["events"]` on open is ~10 lines and independently valuable; can land before (a)/(b).
+- **(c) `events.jsonl` timeline fix — ✅ DONE (commit `7b24c0a`).** `_load_events` is loaded into
+  `state["events"]` in the reopen path; the render loop replays the cards (display-only:
+  `tabs.push` paints, `_reset_view` zeroes the cursor). +tests (`test_web_reopen_events.py`).
 
-## Phase 5 — Doc & misc cleanup 🔜 PLANNED / optional
+## Phase 5 — Doc & misc cleanup 🔄 PARTIAL
 
-- README still documents GUI-coupled workflows (leaf promotion "GUI-only", the Setup tab,
-  searchable-params tab). Re-home or remove now that the GUI is gone.
-- `docs/` has loose `HANDOFF_*` / one-off plan / spec files — prune or fold.
-- Close the `build_jobs` orphan-row leak (no `DELETE FROM build_jobs` exists anywhere) — see
-  the v2 plan's Phase 6.
+- **✅ DONE (commit `ae6199b`):** closed the `build_jobs` orphan-row leak — `delete_project` now
+  drops a project's `build_jobs` rows and reaps the workspaces of terminal jobs (+test).
+- **✅ DONE (README commit):** fixed the broken install instructions (removed `[gui]` extra,
+  corrected `[kicraft]`→`[design]`).
+- Remaining: README still has GUI-coupled *feature* prose (leaf promotion "GUI-only", the Setup
+  tab, searchable-params tab) — re-home or remove once those features land in the web app; and
+  `docs/` has loose `HANDOFF_*` / one-off files to prune or fold.
 
 ## What we deliberately will NOT touch
 
