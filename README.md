@@ -25,15 +25,12 @@ KiCraft is a multi-layer pipeline. Top-down:
 # with `--system-site-packages` so `pcbnew` is visible (see pipx note below).
 pip install -e .
 
-# With GUI support
-pip install -e ".[gui]"
-
 # With KiCraft helpers (pydantic + kicad-skip + easyeda2kicad; the LLM
 # stages run in the Claude Code skill, not in this package — no API key needed)
-pip install -e ".[kicraft]"
+pip install -e ".[design]"
 
 # With all optional dependencies
-pip install -e ".[gui,scoring,experiment,kicraft,dev]"
+pip install -e ".[scoring,experiment,design,tuning,server,loadtest,dev]"
 ```
 
 ### End-user install (pipx)
