@@ -1408,13 +1408,15 @@ class AccountStore:
             conn.execute("DELETE FROM projects_fts WHERE project_id=?", (project_id,))
 
     def delete_project(self, project_id: int) -> str | None:
-        """Delete one project: its row, its catalog likes + FTS entry, and its
-        on-disk tree (projects_dir/<user_id>/<project_id>/, which holds the zip).
+        """Delete one project: its row, its catalog likes + FTS entry, its
+        build_jobs rows, and its on-disk tree (projects_dir/<user_id>/<project_id>/,
+        which holds the zip).
 
         Mirrors the per-project cleanup delete_user does, scoped to a single
         project so a user can remove one design without dropping the account.
         Ownership is enforced by the caller. Returns the filesystem path purged
         (for logging), or None if the project or its tree did not exist."""
+        stale_ws: list[str] = []
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT user_id FROM projects WHERE id=?", (project_id,)).fetchone()
@@ -1425,6 +1427,21 @@ class AccountStore:
             if self._fts_enabled:
                 conn.execute("DELETE FROM projects_fts WHERE project_id=?", (project_id,))
             conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+            # build_jobs rows are never otherwise deleted, so the rows (and the
+            # scratch workspaces they point at) would leak forever. The project is
+            # going away, so drop all of its rows; reap the workspaces of the
+            # TERMINAL ones only -- a still-running worker (a separate process) owns
+            # its workspace, so leave that to the 2-day workspace GC rather than
+            # yanking it mid-build.
+            jobs = conn.execute(
+                "SELECT workspace, status FROM build_jobs WHERE project_id=?",
+                (project_id,)).fetchall()
+            stale_ws = [j["workspace"] for j in jobs
+                        if j["workspace"] and j["status"] in ("done", "failed")]
+            conn.execute("DELETE FROM build_jobs WHERE project_id=?", (project_id,))
+        for ws in stale_ws:
+            if os.path.isdir(ws):
+                shutil.rmtree(ws, ignore_errors=True)
         tree = self.projects_dir / str(uid) / str(project_id)
         if tree.exists():
             shutil.rmtree(tree, ignore_errors=True)
