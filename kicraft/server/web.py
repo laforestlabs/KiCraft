@@ -93,7 +93,6 @@ from .storage import (
     _persisted_generated_dir,
     _read_project_stem,
     _read_root,
-    _rehydrate_workspace,
     _state_path,
 )
 from .pricing import (  # pure BOM-pricing helpers; fetch/cache stay below
@@ -201,7 +200,7 @@ def _finalize_orphan(job) -> None:
         st["stem"] = _read_project_stem(ws)
         st["zip"] = _zip_generated(ws)
         st["ok"] = bool(st["zip"])
-    _persist_project(ws if ws.is_dir() else None, st)
+    _persist_project(st)
 
 
 def _reconcile_orphan_projects() -> None:
@@ -1101,14 +1100,11 @@ def _project_dir(state: dict) -> Path | None:
     return d
 
 
-def _persist_project(ws: Path | None, state: dict) -> None:
-    """Copy the run's durable artifacts out of the tempdir and finalize the row.
-
-    Best-effort: a persistence failure must never crash the worker. Captures the
-    brief, the full event stream (events.jsonl, 100% of input), the committed
-    state.json, and the generated KiCad tree + zip under
-    projects_dir/<user_id>/<project_id>/, then records the projects-table row.
-    """
+def _persist_project(state: dict) -> None:
+    """Finalize a build-in-place run: write brief.txt + events.jsonl into the project
+    dir (the build already wrote .kicraft/, generated/ and the zip there), point the
+    row at the zip, and record the projects-table row. Best-effort: a persistence
+    failure must never crash the worker."""
     pid = state.get("project_id")
     uid = state.get("user_id")
     if not pid or not uid:
@@ -1128,38 +1124,13 @@ def _persist_project(ws: Path | None, state: dict) -> None:
         with (base / "events.jsonl").open("w", encoding="utf-8") as f:
             for ev in state.get("events", []):
                 f.write(json.dumps(ev, ensure_ascii=False, default=str) + "\n")
-        in_place = ws is not None and Path(ws).resolve() == base.resolve()
-        if in_place:
-            # Build-in-place: the run's .kicraft/, generated/ and kicraft_project.zip
-            # were written directly under `base` -- nothing to copy. Just point the
-            # row at the zip. (Readers resolve the metadata dir via _state_path /
-            # _kicraft_dir, which accept the build's native `.kicraft/`.)
-            z = base / "kicraft_project.zip"
-            if z.is_file():
-                zip_path = str(z)
-                state["zip"] = zip_path
-        elif ws is not None:
-            # Legacy scratch-tempdir build (id-less/admin runs): copy the durable
-            # artifacts out. Save the WHOLE .kicraft/ (state + fetched LCSC bundles +
-            # check files) plus a top-level state.json copy for readers that expect it.
-            kdir = ws / ".kicraft"
-            if kdir.is_dir():
-                kdst = base / "kicraft"
-                shutil.rmtree(kdst, ignore_errors=True)
-                shutil.copytree(kdir, kdst)
-            sj = ws / ".kicraft" / "state.json"
-            if sj.is_file():
-                shutil.copy2(sj, base / "state.json")
-            gen = ws / "generated"
-            if gen.is_dir():
-                dst = base / "generated"
-                shutil.rmtree(dst, ignore_errors=True)
-                shutil.copytree(gen, dst)
-            src_zip = state.get("zip")
-            if src_zip and Path(src_zip).is_file():
-                zip_path = str(base / "kicraft_project.zip")
-                shutil.copy2(src_zip, zip_path)
-                state["zip"] = zip_path  # serve downloads from the durable copy
+        # Build-in-place: this project's .kicraft/, generated/ and kicraft_project.zip
+        # are already under `base` (the build dir IS the durable dir) -- nothing to
+        # copy. Point the row at the zip if the build produced one.
+        z = base / "kicraft_project.zip"
+        if z.is_file():
+            zip_path = str(z)
+            state["zip"] = zip_path
     except Exception as e:  # never crash the worker on persistence
         state.setdefault("events", []).append(
             {"kind": "build_log", "text": f"persist error: {e}"})
@@ -1175,7 +1146,7 @@ def _persist_project(ws: Path | None, state: dict) -> None:
         # a catalog hiccup must never crash the worker.
         try:
             if status == "ok" and dir_path:
-                store.set_quality(pid, _quality_badge_from_ws(ws))
+                store.set_quality(pid, _quality_badge_from_ws(Path(dir_path)))
             store.reindex_search(pid)
         except Exception:
             pass
@@ -1288,10 +1259,6 @@ def _fresh_run_state() -> dict:
     return {
         "events": [], "running": False, "done": False, "ok": None,
         "spend": None, "zip": None, "ws": None, "token": None,
-        # Durable read root for a reopened project (p.dir_path); None for
-        # live/scratch runs. `ws` stays the scratch
-        # workspace and remains the truth for "a real workspace exists".
-        "view_root": None,
         "project_dir": None, "stem": None, "pcb_ready": False,
         # True only for a REOPENED project whose persisted status is
         # "failed" (a live failure sets ok=False instead); the rescue
@@ -1363,11 +1330,7 @@ def _execute_claimed_job_local(ws: Path, state: dict, job_id: int, progress,
     kept as the fallback for deploys without the worker unit. The 30m wall
     clock restarts at the slot-acquired marker so time spent queued for a host
     build slot is not billed against the job."""
-    # Point the relative state-path arg at the resolved metadata dir (build-native +
-    # build-in-place use `.kicraft/`; pre-build-in-place durable projects use `kicraft/`).
-    meta = _kicraft_dir(ws).name
-    cmd = KICRAFT + [a.replace(".kicraft/state.json", f"{meta}/state.json")
-                     for a in _JOB_KIND_ARGS[kind]]
+    cmd = KICRAFT + list(_JOB_KIND_ARGS[kind])
     if kind == "build":
         quality = _store().build_quality_for_user(state.get("user_id"))
         if quality:  # tier override (free tier -> draft); None = default
@@ -1405,7 +1368,7 @@ def _drive_build_queue(ws: Path, state: dict, progress, *,
     reaper requeues it), which this loop simply handles again."""
     progress({"kind": "build_start"})
     store = _store()
-    log_path = _kicraft_dir(ws) / "build.log"
+    log_path = ws / ".kicraft" / "build.log"
     job_id = store.enqueue_build(
         workspace=str(ws), project_id=state.get("project_id"),
         user_id=state.get("user_id"), log_path=str(log_path), kind=kind)
@@ -1489,7 +1452,7 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
             state["zip"] = None
             state["failed"] = True
             _file_failure_report(state)
-        _persist_project(ws, state)
+        _persist_project(state)
         state["done"] = True
         state["running"] = False
         if (pid and state.get("status") != "awaiting_input"
@@ -1511,7 +1474,6 @@ def _ensure_workspace(state: dict, project=None) -> Path | None:
     if pd is None:
         return None
     state["ws"] = str(pd)
-    state["view_root"] = None
     gen = _discover_generated_dir(pd)
     if gen is not None:
         state["stem"] = gen.name
@@ -1625,7 +1587,7 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
         progress({"kind": "build_log", "text": f"error: {e}"})
         state["ok"] = False
     finally:
-        _persist_project(ws, state)
+        _persist_project(state)
         if state.get("ok") is False:  # terminal failure (parked runs have ok=None)
             _file_failure_report(state)
         state["done"] = True
@@ -2813,8 +2775,8 @@ def _clone_project(source, cloner, make_private: bool):
 
     Returns (new_project_id, None) on success or (None, reason) on failure. Consumes
     a quota slot like a normal design (it is an owned, re-runnable copy). The copied
-    tree keeps the kicraft/ + generated/ layout so open_project -> _rehydrate_workspace
-    works unchanged. events.jsonl is NOT copied: the clone starts a fresh history."""
+    tree keeps the `.kicraft/` + `generated/` layout so the clone opens + rebuilds in
+    place. events.jsonl is NOT copied: the clone starts a fresh history."""
     store = _store()
     if not store.can_design(cloner):
         return None, "quota"
@@ -2827,10 +2789,9 @@ def _clone_project(source, cloner, make_private: bool):
     zip_path = None
     try:
         dst.mkdir(parents=True, exist_ok=True)
-        for fname in ("brief.txt", "state.json"):
-            if (src / fname).is_file():
-                shutil.copy2(src / fname, dst / fname)
-        for sub in ("kicraft", "generated"):
+        if (src / "brief.txt").is_file():
+            shutil.copy2(src / "brief.txt", dst / "brief.txt")
+        for sub in (".kicraft", "generated"):
             if (src / sub).is_dir():
                 shutil.copytree(src / sub, dst / sub, dirs_exist_ok=True)
         if (src / "kicraft_project.zip").is_file():
@@ -4365,26 +4326,21 @@ def index(prompt: str = "", project: str = ""):
                               color="positive")
                 refresh_account_ui()
                 return
-            if p.dir_path:
-                # Build-in-place: the durable project dir IS the workspace -- reads
-                # AND any later writes (continue/edit/rebuild) happen here, with no
-                # scratch copy and no copytree on reopen.
-                read_root = Path(p.dir_path)
-                ws_str, view_root = str(p.dir_path), None
-                project_dir = _persisted_generated_dir(p.dir_path, p.project_stem)
-            else:
-                # Legacy project with no durable dir_path: rehydrate a scratch workspace.
-                read_root = _rehydrate_workspace(p)
-                ws_str, view_root = str(read_root), None
-                project_dir = _discover_generated_dir(read_root)
-            sj = read_state(read_root)
+            # Build-in-place: the durable project dir IS the workspace -- reads AND any
+            # later writes (continue/edit/rebuild) happen here, no scratch, no copytree.
+            # (A listed project always has dir_path.)
+            read_root = Path(p.dir_path) if p.dir_path else None
+            ws_str = str(p.dir_path) if p.dir_path else None
+            project_dir = (_persisted_generated_dir(p.dir_path, p.project_stem)
+                           if p.dir_path else None)
+            sj = read_state(read_root) if read_root else {}
             zip_ok = bool(p.zip_path and Path(p.zip_path).is_file())
             completed = p.status == "ok"
             state = _fresh_run_state()
             state.update(done=completed, ok=(True if completed else None),
                          failed=(p.status == "failed"),
                          spend=p.cost_usd, zip=(p.zip_path if zip_ok else None),
-                         ws=ws_str, view_root=view_root, stem=p.project_stem,
+                         ws=ws_str, stem=p.project_stem,
                          user_id=user.id, project_id=p.id, brief=p.brief or "",
                          board_code=p.board_code,
                          status=("awaiting_input" if p.status == "awaiting_input" else None),

@@ -1369,20 +1369,16 @@ class AccountStore:
     # ---- public browser: search index -------------------------------------
 
     def _load_project_state(self, project: Project) -> dict | None:
-        """Read a project's persisted design state for indexing. Resolves the metadata
-        dir across layouts: a build-in-place project keeps the pipeline's native
-        ``.kicraft/``; older ones have a top-level copy or a ``kicraft/`` subtree.
-        Returns None if none is readable."""
+        """Read a project's persisted design state (``<dir>/.kicraft/state.json``) for
+        indexing. Returns None if unreadable."""
         if not project or not project.dir_path:
             return None
-        base = Path(project.dir_path)
-        for cand in (base / "state.json", base / "kicraft" / "state.json",
-                     base / ".kicraft" / "state.json"):
-            if cand.is_file():
-                try:
-                    return json.loads(cand.read_text())
-                except (json.JSONDecodeError, OSError):
-                    return None
+        sj = Path(project.dir_path) / ".kicraft" / "state.json"
+        if sj.is_file():
+            try:
+                return json.loads(sj.read_text())
+            except (json.JSONDecodeError, OSError):
+                return None
         return None
 
     def reindex_search(self, project_id: int) -> None:

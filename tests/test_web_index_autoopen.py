@@ -59,15 +59,14 @@ async def harness(tmp_path):
 
 
 def _persisted_project(store, user_id: int, brief: str, stem: str) -> int:
-    """Lay a finished project on disk the way _persist_project does (brief +
-    state.json + kicraft/state.json) and record its row, so open/clone flows
-    run against the real artifact layout."""
+    """Lay a finished project on disk the way build-in-place does (brief +
+    .kicraft/state.json) and record its row, so open/clone flows run against the
+    real artifact layout."""
     pid = store.create_project(user_id, brief)
     base = store.projects_dir / str(user_id) / str(pid)
-    (base / "kicraft").mkdir(parents=True)
+    (base / ".kicraft").mkdir(parents=True)
     (base / "brief.txt").write_text(brief, encoding="utf-8")
-    shutil.copy2(STATE_FIXTURE, base / "state.json")
-    shutil.copy2(STATE_FIXTURE, base / "kicraft" / "state.json")
+    shutil.copy2(STATE_FIXTURE, base / ".kicraft" / "state.json")
     store.finish_project(pid, "ok", stem=stem, dir_path=str(base))
     return pid
 

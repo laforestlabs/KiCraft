@@ -27,10 +27,9 @@ STATE_FIXTURE = Path(__file__).parent / "fixtures" / "bmp280_reader_state.json"
 
 # --------------------------- _read_root / flag (pure) ---------------------------
 
-def test_read_root_prefers_ws_then_view_root_then_none():
-    assert web._read_root({"ws": "/w", "view_root": "/d"}) == Path("/w")
-    assert web._read_root({"ws": None, "view_root": "/d"}) == Path("/d")
-    assert web._read_root({"ws": None, "view_root": None}) is None
+def test_read_root_is_ws_or_none():
+    assert web._read_root({"ws": "/w"}) == Path("/w")
+    assert web._read_root({"ws": None}) is None
     assert web._read_root({}) is None
 
 
@@ -126,14 +125,13 @@ async def reopen_harness(tmp_path):
 
 
 def _persist_durable(store, user_id, brief, stem):
-    """A finished durable project laid down as _persist_project does, WITH a
-    generated tree so view-from-durable resolves the schematic dir."""
+    """A finished project laid down as build-in-place does (.kicraft/state.json), WITH
+    a generated tree so reopen resolves the schematic dir."""
     pid = store.create_project(user_id, brief)
     base = store.projects_dir / str(user_id) / str(pid)
-    (base / "kicraft").mkdir(parents=True)
+    (base / ".kicraft").mkdir(parents=True)
     (base / "brief.txt").write_text(brief, encoding="utf-8")
-    shutil.copy2(STATE_FIXTURE, base / "state.json")
-    shutil.copy2(STATE_FIXTURE, base / "kicraft" / "state.json")
+    shutil.copy2(STATE_FIXTURE, base / ".kicraft" / "state.json")
     gen = base / "generated" / stem
     gen.mkdir(parents=True)
     (gen / f"{stem}.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")

@@ -3135,16 +3135,13 @@ def _find_state_json(project_dir: Path, stem: str) -> Path | None:
     ``project_stem`` matches ``stem`` so an unrelated ancestor state is ignored."""
     base = project_dir
     for _ in range(6):
-        # `.kicraft/` is the build's native metadata dir; `kicraft/` (no dot) is the
-        # durable layout of projects persisted before build-in-place landed.
-        for meta in (".kicraft", "kicraft"):
-            cand = base / meta / "state.json"
-            if cand.is_file():
-                try:
-                    if _load_state(cand).project_stem == stem:
-                        return cand
-                except (OSError, json.JSONDecodeError, ValidationError):
-                    pass
+        cand = base / ".kicraft" / "state.json"
+        if cand.is_file():
+            try:
+                if _load_state(cand).project_stem == stem:
+                    return cand
+            except (OSError, json.JSONDecodeError, ValidationError):
+                pass
         if base.parent == base:
             break
         base = base.parent

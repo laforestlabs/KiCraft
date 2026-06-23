@@ -51,16 +51,6 @@ _MANUAL_ROUTE_CMD = [sys.executable, "-m", "kicraft.design.cli_app",
 _MAX_ATTEMPTS = 2  # claims a job may burn before it is failed instead of requeued
 
 
-def _meta_dir_name(ws: Path) -> str:
-    """The run-metadata dir relative to the job workspace: ``.kicraft`` (the build's
-    native layout, incl. build-in-place projects) or ``kicraft`` (the durable layout
-    of projects persisted before build-in-place). Defaults to ``.kicraft``."""
-    for name in (".kicraft", "kicraft"):
-        if (ws / name / "state.json").is_file():
-            return name
-    return ".kicraft"
-
-
 def _log(msg: str) -> None:
     print(f"[build-worker] {msg}", flush=True)
 
@@ -139,9 +129,8 @@ class BuildWorker:
     # ---- one job --------------------------------------------------------------
     def _run_job(self, job: BuildJob) -> None:
         ws = Path(job.workspace)
-        meta = _meta_dir_name(ws)
-        log_path = Path(job.log_path or (ws / meta / "build.log"))
-        if not (ws / meta / "state.json").is_file():
+        log_path = Path(job.log_path or (ws / ".kicraft" / "build.log"))
+        if not (ws / ".kicraft" / "state.json").is_file():
             _log(f"job {job.id}: workspace gone ({ws}) -> failed")
             self.store.finish_build(job.id, rc=None, status="failed")
             return
@@ -155,10 +144,7 @@ class BuildWorker:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         env = {**os.environ, "PYTHONUNBUFFERED": "1",
                "KICRAFT_CALLER": os.environ.get("KICRAFT_CALLER", "web")}
-        # Point the relative state-path arg at the resolved metadata dir (old durable
-        # projects use `kicraft/`, build-native + build-in-place use `.kicraft/`).
-        cmd = [a.replace(".kicraft/state.json", f"{meta}/state.json")
-               if isinstance(a, str) else a for a in cmd_base]
+        cmd = list(cmd_base)
         if kind == "build":
             quality = self.store.build_quality_for_user(job.user_id)
             if quality:

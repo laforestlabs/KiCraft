@@ -206,7 +206,7 @@ def _drive(monkeypatch, state, session_result):
         return session_result
 
     monkeypatch.setattr(web, "run_session", fake_run_session)
-    monkeypatch.setattr(web, "_persist_project", lambda ws, st: None)
+    monkeypatch.setattr(web, "_persist_project", lambda st: None)
     web._run_design(state, ["intent"])
     return seen
 
@@ -244,7 +244,7 @@ def test_old_worker_cannot_evict_newer_run(tmp_path, live_runs, monkeypatch):
         return {"status": "error"}
 
     monkeypatch.setattr(web, "run_session", fake_run_session)
-    monkeypatch.setattr(web, "_persist_project", lambda ws, st: None)
+    monkeypatch.setattr(web, "_persist_project", lambda st: None)
     web._run_design(old, ["intent"])
     assert web._LIVE_RUNS.get(9) is newer
 

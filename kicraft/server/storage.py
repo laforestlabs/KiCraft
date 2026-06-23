@@ -23,35 +23,22 @@ from .config import Settings
 
 
 def _read_root(state: dict) -> Path | None:
-    """Where to READ a session's run-metadata + generated artifacts from: the live
-    scratch workspace if one exists, else the durable project root (set on reopen --
-    a reopened project reads its durable tree directly, no scratch copy). None only
-    for a brand-new run before either exists. `bool(state["ws"])` still cleanly means
-    "a real scratch workspace exists" (what delete/GC rely on); this only redirects
-    reads. See docs/plans/view-from-durable-refactor-v2.md."""
-    r = state.get("ws") or state.get("view_root")
+    """The project's directory for this session -- where state + artifacts are read AND
+    written (build-in-place: the durable project dir). None for a brand-new run before
+    it exists."""
+    r = state.get("ws")
     return Path(r) if r else None
 
 
 def _kicraft_dir(root: Path) -> Path:
-    """Run-metadata dir for a *workspace* (``.kicraft``, dotted) OR a *durable*
-    project (``kicraft``, no dot). Prefer whichever already exists; default to the
-    durable name for paths about to be created. This is the one seam that lets a
-    reader take either root unchanged — see docs/plans/view-from-durable-refactor-v2.md
-    ("The core friction") and CLAUDE.md "Storage model"."""
-    for cand in (root / ".kicraft", root / "kicraft"):
-        if cand.is_dir():
-            return cand
-    return root / "kicraft"
+    """The run-metadata dir for a project: always ``<root>/.kicraft/`` (state.json,
+    fetched parts, check files). One name, no fallback -- see CLAUDE.md "Storage model"."""
+    return root / ".kicraft"
 
 
 def _state_path(root: Path) -> Path:
-    """Resolved ``state.json`` for a root: under ``.kicraft``/``kicraft`` if present,
-    else a legacy top-level ``state.json`` (durable projects predating the kicraft/
-    tree). Lets the readers work against a workspace, a durable project, or a legacy
-    project with one call."""
-    p = _kicraft_dir(root) / "state.json"
-    return p if p.is_file() else (root / "state.json")
+    """The committed ``state.json`` for a root: always ``<root>/.kicraft/state.json``."""
+    return root / ".kicraft" / "state.json"
 
 
 def _new_workspace(prefix: str) -> Path:
@@ -64,11 +51,9 @@ def _new_workspace(prefix: str) -> Path:
 
 
 def _gc_workspaces(max_age_days: float = 2.0) -> None:
-    """Drop abandoned run workspaces. Everything durable was copied into
-    projects_dir at finalize time (reopen rehydrates from there, not from the
-    workspace), so a workspace only needs to outlive its own live page session.
-    Two days bounds the disk held by .experiments trees, which dwarf the
-    durable copies."""
+    """Drop abandoned throwaway tempdirs under KICRAFT_WORK_DIR. Real projects build
+    in place under projects_dir (not here), so this only reaps the scratch tempdirs of
+    id-less/admin (self-eval) runs. Two days bounds the disk their .experiments trees hold."""
     try:
         root = Settings.from_env().work_dir
         if not root.is_dir():
@@ -82,23 +67,6 @@ def _gc_workspaces(max_age_days: float = 2.0) -> None:
                 continue
     except Exception:  # housekeeping must never block startup
         pass
-
-
-def _rehydrate_workspace(project) -> Path:
-    """Recreate a working tempdir from a saved project's durable .kicraft/ (state +
-    fetched parts) and generated tree, so the session can resume, edit, or rebuild
-    against it. Falls back to the top-level state.json for legacy projects that
-    predate the saved kicraft/ tree."""
-    ws = _new_workspace("kicraft_resume_")
-    base = Path(project.dir_path) if project.dir_path else None
-    if base and (base / "kicraft").is_dir():
-        shutil.copytree(base / "kicraft", ws / ".kicraft")
-    elif base and (base / "state.json").is_file():
-        (ws / ".kicraft").mkdir(parents=True, exist_ok=True)
-        shutil.copy2(base / "state.json", ws / ".kicraft" / "state.json")
-    if base and (base / "generated").is_dir():
-        shutil.copytree(base / "generated", ws / "generated")
-    return ws
 
 
 def _read_project_stem(ws: Path) -> str | None:
