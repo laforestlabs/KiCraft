@@ -4,12 +4,13 @@
 env/stale failures; pass count rises only by newly-added tests):** Phase 1, Phase 2, the Phase 3
 `storage.py` + `pricing.py` + `render_serving.py` + **`routes_admin.py` (3a, commit `58701d5`)** cuts
 (**web.py 7,292 → 5,031**), Phase 4(c), the **Phase 4(a) step 1 storage accessors (`_kicraft_dir`/
-`_state_path` + reader conversion, commit `5ae1278`)**, the **Phase 4(a) step 2 view-from-durable
-reopen behind `KICRAFT_VIEW_FROM_DURABLE` (default off, commit `b3b7f44`)**, and Phase 5
-(`build_jobs` leak + README install fix). **Remaining (full per-item plan in
-`docs/plans/refactor-handoff-remaining.md`):** flip the view-from-durable default on after a manual
-pass + delete the dead rehydrate-on-view path (Phase 4(a) step 3 / spec phases 6–7);
-`project_view` split; `build_orchestration`
+`_state_path` + reader conversion, commit `5ae1278`)**, the **Phase 4(a) read-side: view-from-durable
+reopen (`b3b7f44`), flag collapsed so it's the only path (`e8d0265`)** — reopen reads durable
+directly, no per-reopen copy, workspace materialized lazily on write; and Phase 5 (`build_jobs`
+leak + README install fix). **Remaining (full per-item plan in
+`docs/plans/refactor-handoff-remaining.md`):** Phase 4(a) WRITE-side collapse (build in the durable
+dir, drop the finalize copytree + the `.kicraft`/`kicraft` split — where the workspace concept and
+real line count go away); `project_view` split; `build_orchestration`
 **reassessed → sequence with Phase 4(b)** (its `_LIVE_RUNS`/`_persist_project` rebind-seams make a
 clean move depend on the 4b state-consolidation); `cli_app.py` `parts_cli` cut **once its CLI tests
 are green** (they fail on env-data today, so the move can't be verified); Phase 4(a)/(b); Phase 5
@@ -142,19 +143,24 @@ done blind in an unattended push. Detailed spec for (a): `docs/plans/view-from-d
     `session.read_state` + `storage._read_project_stem`) routed through them so a durable or
     legacy root reads identically to a workspace root. Parity tests in
     `tests/test_web_storage_accessors.py`. This is the safe prerequisite for the behavioral switch.
-  - **Step 2 ✅ DONE behind `KICRAFT_VIEW_FROM_DURABLE` (commit `b3b7f44`, default OFF).**
-    view-from-durable-refactor-v2.md phases 0/3/4/5: flag + `_read_root(state)`; the reopen
-    (non-live) branch reads the durable tree (no copytree); the view loop / `build_edit_panel` /
-    `_collect_support_diagnostics` redirect through `_read_root`; `_ensure_workspace` rehydrates
+  - **Step 2 ✅ DONE — view-from-durable is the reopen path (`b3b7f44`; flag collapsed `e8d0265`).**
+    A reopened project READS its durable tree directly — no per-reopen 17–29 MB copy.
+    `_read_root(state)` (= ws | view_root); the reopen branch + view loop + `build_edit_panel` +
+    `_collect_support_diagnostics` read via it; `_ensure_workspace` rehydrates a scratch workspace
     lazily at every write gate (the §4 data-loss guard — prior slots survive); price cache writes
-    through to durable. Verified: full suite unchanged (27 baseline, +6 new tests, zero
-    regressions); the whole web suite ALSO passes with the flag forced on; integration test proves
-    reopen renders from durable with **zero** new workspace dirs; mock-LLM instance boots+serves
-    with the flag on. `tests/test_web_view_from_durable.py`.
-  - **Step 3 (remaining, user-gated).** Flip the default on after a manual pass on a real reopened
-    project (do NOT flip prod blind); then phases 6/7: GC docstring + delete the dead
-    view-rehydrate path (this is where web.py's line count finally drops). `build_jobs` leak
-    already closed (`ae6199b`).
+    through to durable. Built and verified behind `KICRAFT_VIEW_FROM_DURABLE`, then the flag was
+    **collapsed** (one reopen semantics, no env var) once proven. Verified: with it as the DEFAULT
+    the whole suite holds at the 27 baseline (zero new); `_read_root`/`_ensure_workspace` units +
+    an integration reopen (renders from durable, **zero** workspace dirs); mock instance boots+serves.
+    `tests/test_web_view_from_durable.py`. NOTE: this is the **read/reopen half** of (a). web.py
+    line count is ~flat — `_rehydrate_workspace` stays for legacy + the lazy write path, so the win
+    is conceptual.
+  - **Step 3 (remaining — the WRITE-side collapse, bigger).** Build IN the durable dir (or an
+    atomically-promoted `.build/`), so a build no longer mints a scratch workspace and finalize no
+    longer `copytree`s workspace→durable; unify the `.kicraft` (workspace) vs `kicraft` (durable)
+    name split — then `_rehydrate_workspace`/`_ensure_workspace`/the whole workspace concept can go.
+    THIS is where the real line + concept reduction lands. Minor: spec phase 6 GC docstring
+    (`build_jobs` leak already closed `ae6199b`).
 - **(b) One source of truth for project state.** Today "what state / is it live?" is smeared
   across the `projects` table, `state.json`, the in-process `_LIVE_RUNS` dict, and the
   `build_jobs` queue. Pick one owner. This is the root of the "reopen is missing things / is

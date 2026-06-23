@@ -5,14 +5,16 @@
 > layout live and at rest), which dissolves most of what this doc carefully *bridges*. This
 > file remains the detailed reference for the storage/state work.
 
-**Status:** IMPLEMENTED behind `KICRAFT_VIEW_FROM_DURABLE` (default off) — commit `b3b7f44`,
-2026-06-23. Done: phase 0 (flag + `_read_root`), phase 1 (events.jsonl, `7b24c0a`), phase 2
-(accessors + reader conversion, `5ae1278`), phase 3 (reopen reads durable + view-loop redirect),
-phase 4 (`_ensure_workspace` at the write gates), phase 5 (price write-through). Verified flag-off
-(byte-identical, full suite) and flag-on (whole web suite green; integration reopen makes zero
-workspace dirs). **Remaining:** phase 6 (GC docstring; the `build_jobs` leak is already closed,
-`ae6199b`) and phase 7 (flip the default after a manual pass, then delete the dead view-rehydrate
-path — where web.py's line count drops). Tests: `tests/test_web_storage_accessors.py`,
+**Status:** IMPLEMENTED — view-from-durable is the only reopen path (`b3b7f44`; the
+`KICRAFT_VIEW_FROM_DURABLE` flag was collapsed in `e8d0265` once proven). 2026-06-23. Done: phase 1
+(events.jsonl, `7b24c0a`), phase 2 (accessors + reader conversion, `5ae1278`), phases 0/3/4/5 (flag,
+reopen-reads-durable + view-loop redirect, `_ensure_workspace` at the write gates, price
+write-through). Verified as the default: whole suite holds at the 27 baseline; integration reopen
+makes zero workspace dirs. **Remaining:** this was the READ/reopen half — the WRITE-side collapse
+(build in the durable dir, drop the finalize workspace→durable copytree, unify the `.kicraft`
+(workspace) vs `kicraft` (durable) name split, then retire the workspace concept entirely) is the
+bigger remaining piece, where the real line/concept reduction lands. Minor: phase 6 GC docstring
+(`build_jobs` leak already closed, `ae6199b`). Tests: `tests/test_web_storage_accessors.py`,
 `tests/test_web_view_from_durable.py`.
 **Date:** 2026-06-22
 **Supersedes:** `view-from-durable-refactor.md` (keeps its core idea; corrects motivation,
