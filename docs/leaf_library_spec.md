@@ -1,5 +1,10 @@
 # Leaf Library — Implementation Spec (v1)
 
+> **SUPERSEDED (2026-06-22):** this spec described the "Leaf Library" tab of the
+> Experiment Manager GUI, which has been removed. Kept for design reference; if the
+> feature is re-homed in the web app it will need a fresh spec. See
+> `docs/plans/refactor-roadmap.md`.
+
 A curated, hand-promoted library of trusted "golden leaves" that the
 KiCraft pipeline reuses verbatim when they match a user's project,
 collapsing leaf-level LLM design surface to a vetted, pinned solution.

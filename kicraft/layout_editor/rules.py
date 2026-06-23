@@ -3,8 +3,8 @@
 Lists every component in the project grouped by leaf (schematic sheet)
 and manages the anchor/rotation/thermal/backside-THT overrides that
 persist to the project's autoplacer.json. The rendering half lives in
-the host app (offline GUI: ``kicraft.gui.components.per_component``);
-this module owns load/stage/diff/write so any host can drive it.
+the host app (``kicraft.server`` rules panel); this module owns
+load/stage/diff/write so any host can drive it.
 
 The ``state`` argument throughout is duck-typed: any object with
 ``project_root`` plus the mutable staging fields

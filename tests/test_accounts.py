@@ -206,6 +206,33 @@ def test_delete_project_missing_is_a_noop(store):
     assert store.delete_project(999999) is None
 
 
+def test_delete_project_reaps_build_jobs_and_terminal_workspaces(store, tmp_path):
+    """delete_project closes the build_jobs row leak (rows were never deleted) and
+    reaps the scratch workspaces of TERMINAL jobs, while leaving a still-running
+    job's workspace for the 2-day GC."""
+    u = store.create_user("b@e.st", "pw")
+    pid = store.create_project(u.id, "drop")
+    store.finish_project(pid, "ok", stem="DROP")
+
+    ws_done = tmp_path / "ws_done"
+    ws_done.mkdir()
+    jid_done = store.enqueue_build(workspace=str(ws_done), project_id=pid, user_id=u.id)
+    store.finish_build(jid_done, rc=0, status="done")
+
+    ws_running = tmp_path / "ws_running"
+    ws_running.mkdir()
+    jid_running = store.enqueue_build(workspace=str(ws_running), project_id=pid, user_id=u.id)
+    claimed = store.claim_next_build("test-worker")
+    assert claimed is not None and claimed.id == jid_running  # -> 'running'
+
+    store.delete_project(pid)
+
+    assert store.get_build_job(jid_done) is None       # leak closed: row deleted
+    assert store.get_build_job(jid_running) is None     # project gone -> row deleted
+    assert not ws_done.exists()                         # terminal workspace reaped
+    assert ws_running.exists()                          # running workspace left for GC
+
+
 # ---- quota metering -------------------------------------------------------
 
 def test_quota_status_reflects_tier(store):

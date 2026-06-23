@@ -12,11 +12,6 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-gui = [
-    "nicegui>=1.4",
-    "sqlalchemy>=2.0",
-    "plotly>=5.0",
-]
 scoring = [
     "Pillow>=10.0",
 ]

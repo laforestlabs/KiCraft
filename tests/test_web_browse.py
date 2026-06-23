@@ -36,9 +36,8 @@ def _persist(store, user_id, brief, *, stem="BOARD", status="ok", is_public=True
     state = {"intent": {"goal": brief, "named_parts": []},
              "bom": {"parts": parts or []},
              "functional_spec": {"blocks": []}, "architecture": {"sheets": []}}
-    (base / "state.json").write_text(json.dumps(state), encoding="utf-8")
-    (base / "kicraft").mkdir(exist_ok=True)
-    (base / "kicraft" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    (base / ".kicraft").mkdir(exist_ok=True)
+    (base / ".kicraft" / "state.json").write_text(json.dumps(state), encoding="utf-8")
     (gen / f"{stem}.kicad_sch").write_text("(kicad_sch)\n", encoding="utf-8")
     if with_pcb:
         (gen / f"{stem}.kicad_pcb").write_text("(kicad_pcb)\n", encoding="utf-8")
@@ -129,7 +128,7 @@ def test_clone_creates_owned_public_copy(store):
     cdir = Path(clone.dir_path)
     assert cdir == store.projects_dir / str(b.id) / str(new_id)   # cloner's namespace
     assert (cdir / "generated" / "SRC" / "SRC.kicad_pcb").is_file()  # tree copied
-    assert (cdir / "kicraft" / "state.json").is_file()
+    assert (cdir / ".kicraft" / "state.json").is_file()
     assert not (cdir / "events.jsonl").exists()                   # fresh history
     assert store.get_project(src_id).clone_count == 1            # source bumped
 

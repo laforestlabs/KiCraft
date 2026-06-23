@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 
 from .stage_driver import DESIGN_STAGES, drive_chain
+from .storage import _state_path
 
 # The deterministic build sub-phases, in pipeline order after DESIGN_STAGES.
 # Their status is always derived from artifacts (sheets / board / fab zip), never
@@ -103,8 +104,11 @@ def downstream_stages(stage: str) -> list[str]:
 
 
 def read_state(ws) -> dict:
-    """Best-effort load of a workspace's committed state.json (or {} if absent)."""
-    p = Path(ws) / ".kicraft" / "state.json"
+    """Best-effort load of a committed state.json (or {} if absent). Resolves the
+    workspace (``.kicraft``), durable (``kicraft``), or legacy (top-level) layout
+    via ``_state_path``; the workspace writers below keep their explicit
+    ``.kicraft`` path, which they always run against."""
+    p = _state_path(Path(ws))
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):

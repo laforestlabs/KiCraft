@@ -122,10 +122,9 @@ def _persisted_project_with_board(
     stem = "USB_BMP280_READER"  # == STATE_FIXTURE's project_stem
     pid = store.create_project(user_id, f"{stem} brief")
     base = store.projects_dir / str(user_id) / str(pid)
-    (base / "kicraft").mkdir(parents=True)
+    (base / ".kicraft").mkdir(parents=True)
     (base / "brief.txt").write_text("brief", encoding="utf-8")
-    shutil.copy2(STATE_FIXTURE, base / "state.json")
-    shutil.copy2(STATE_FIXTURE, base / "kicraft" / "state.json")
+    shutil.copy2(STATE_FIXTURE, base / ".kicraft" / "state.json")
 
     pd = base / "generated" / stem
     leaf = pd / ".experiments" / "subcircuits" / "leaf__abc123"

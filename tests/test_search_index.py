@@ -33,8 +33,8 @@ def _indexed(store, user_id, brief, state, *, status="ok", is_public=True, stem=
     """Create + finish a project, persist its state.json, and index it."""
     pid = store.create_project(user_id, brief, is_public=is_public)
     pdir = store.projects_dir / str(user_id) / str(pid)
-    pdir.mkdir(parents=True, exist_ok=True)
-    (pdir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    (pdir / ".kicraft").mkdir(parents=True, exist_ok=True)
+    (pdir / ".kicraft" / "state.json").write_text(json.dumps(state), encoding="utf-8")
     store.finish_project(pid, status, stem=stem, dir_path=str(pdir))
     store.reindex_search(pid)
     return pid
@@ -113,8 +113,8 @@ def test_backfill_indexes_existing(store):
     u = store.create_user("a@e.st", "pw")
     pid = store.create_project(u.id, "esp board")          # ok+public but not indexed
     pdir = store.projects_dir / str(u.id) / str(pid)
-    pdir.mkdir(parents=True, exist_ok=True)
-    (pdir / "state.json").write_text(
+    (pdir / ".kicraft").mkdir(parents=True, exist_ok=True)
+    (pdir / ".kicraft" / "state.json").write_text(
         json.dumps(_state("esp32", bom_mpns=["ESP32-S3"])), encoding="utf-8")
     store.finish_project(pid, "ok", stem="ESP", dir_path=str(pdir))
     assert store.list_public_projects(query="esp32") == []  # nothing indexed yet

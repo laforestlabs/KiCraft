@@ -276,7 +276,7 @@ def _bl(text):
 
 
 def test_build_review_outcome_blocked():
-    from kicraft.server.web import _build_review_outcome
+    from kicraft.server.routes_admin import _build_review_outcome
     lines = [
         _bl("[build] 4/5 verify: shorts=0 unconnected=0"),
         _bl("[build]     review BLOCKER: [clock] oscillator pins shorted to GND"),
@@ -289,19 +289,19 @@ def test_build_review_outcome_blocked():
 
 
 def test_build_review_outcome_passed():
-    from kicraft.server.web import _build_review_outcome
+    from kicraft.server.routes_admin import _build_review_outcome
     r = _build_review_outcome([_bl("[build] 4/5 electrical review: 2 non-blocking finding(s), cost $0.0010")])
     assert r["status"] == "passed" and r["n"] == 2 and r["blockers"] == []
 
 
 def test_build_review_outcome_none_when_gate_not_reached():
     # A board that failed DRC/route never reaches the review gate -> no markers.
-    from kicraft.server.web import _build_review_outcome
+    from kicraft.server.routes_admin import _build_review_outcome
     assert _build_review_outcome([_bl("[build] 4/5 verify: shorts=3 unconnected=5")]) is None
     assert _build_review_outcome([]) is None
 
 
 def test_build_review_outcome_skipped():
-    from kicraft.server.web import _build_review_outcome
+    from kicraft.server.routes_admin import _build_review_outcome
     r = _build_review_outcome([_bl("[build] electrical review skipped (SystemExit: no key)")])
     assert r["status"] == "skipped"
