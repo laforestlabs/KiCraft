@@ -5,7 +5,15 @@
 > layout live and at rest), which dissolves most of what this doc carefully *bridges*. This
 > file remains the detailed reference for the storage/state work.
 
-**Status:** proposed (not started)
+**Status:** IMPLEMENTED behind `KICRAFT_VIEW_FROM_DURABLE` (default off) — commit `b3b7f44`,
+2026-06-23. Done: phase 0 (flag + `_read_root`), phase 1 (events.jsonl, `7b24c0a`), phase 2
+(accessors + reader conversion, `5ae1278`), phase 3 (reopen reads durable + view-loop redirect),
+phase 4 (`_ensure_workspace` at the write gates), phase 5 (price write-through). Verified flag-off
+(byte-identical, full suite) and flag-on (whole web suite green; integration reopen makes zero
+workspace dirs). **Remaining:** phase 6 (GC docstring; the `build_jobs` leak is already closed,
+`ae6199b`) and phase 7 (flip the default after a manual pass, then delete the dead view-rehydrate
+path — where web.py's line count drops). Tests: `tests/test_web_storage_accessors.py`,
+`tests/test_web_view_from_durable.py`.
 **Date:** 2026-06-22
 **Supersedes:** `view-from-durable-refactor.md` (keeps its core idea; corrects motivation,
 the reader inventory, the lazy-workspace correctness model, and the delete/GC scope).
