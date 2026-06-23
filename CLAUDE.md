@@ -40,10 +40,10 @@ and gotchas live in the auto-memory index; deeper plans in `docs/plans/`.)
   place. **No scratch workspace, no `copytree` either way** — the workspace↔durable duality is gone.
 - `KICRAFT_WORK_DIR` (`~/.kicraft/work/`) now holds only throwaway tempdirs for id-less/admin
   (self-eval) runs, reaped by `_gc_workspaces`.
-- **Legacy projects** persisted before build-in-place use `kicraft/` (no dot) + a top-level
-  `state.json`. Readers and the build resolve either name via `_kicraft_dir`/`_state_path`
-  (`storage.py`), `build_worker._meta_dir_name`, and `cli_app._find_state_json`. See
-  `docs/plans/refactor-roadmap.md` Phase 4 + `view-from-durable-refactor-v2.md`.
+- **One name, no fallback:** the metadata dir is always `.kicraft/` everywhere (workspace,
+  durable, and the pipeline's relative `<cwd>/.kicraft/`). `storage._kicraft_dir`/`_state_path`
+  are the single layout definition. No legacy `kicraft/` (no-dot) compat — pre-build-in-place
+  projects were nuked. See `docs/plans/refactor-roadmap.md` Phase 4.
 
 ## Subsystem map (packages)
 

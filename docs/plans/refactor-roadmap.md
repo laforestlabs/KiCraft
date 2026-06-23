@@ -156,21 +156,18 @@ done blind in an unattended push. Detailed spec for (a): `docs/plans/view-from-d
     `tests/test_web_view_from_durable.py`. NOTE: this is the **read/reopen half** of (a). web.py
     line count is ~flat — `_rehydrate_workspace` stays for legacy + the lazy write path, so the win
     is conceptual.
-  - **Step 3 ✅ DONE — build in place (`9aa0e39`).** A project now lives AND builds in ONE dir
-    (`projects_dir/<uid>/<pid>/`): `_project_dir(state)` is created at design start and IS the build
-    dir; `_design_worker`/`_ensure_workspace`/`open_project` point `state["ws"]` there;
-    `_persist_project` detects in-place (`ws == base`) and **skips the copytree**. No scratch
-    workspace under `KICRAFT_WORK_DIR`, no forward/backward copy. Build-in-place keeps the
-    pipeline's native `.kicraft/`, so durable readers (`_load_persisted_state`,
-    `accounts._load_project_state`) + the build invocation (`build_worker._meta_dir_name`,
-    `_execute_claimed_job_local` via `_kicraft_dir().name`, `cli_app._find_state_json`) resolve the
-    metadata-dir name, so pre-build-in-place `kicraft/` (no-dot) projects still rebuild. Verified: a
-    REAL design+build through the web lifecycle (mock LLM, real place/route) built entirely in the
-    durable dir with **zero** scratch workspaces; full suite at 27 baseline (zero new). `_ensure_workspace`
-    is now just `_project_dir`; `_rehydrate_workspace` survives only for legacy no-`dir_path`
-    projects + id-less/admin runs (which still use a throwaway tempdir). **Remaining tidy-up:**
-    `_gc_workspaces` docstring is now stale (it reaps only id-less tempdirs); the vestigial
-    `view_root`/`_read_root` (always `ws` now) can be inlined; `build_jobs` leak already closed (`ae6199b`).
+  - **Step 3 ✅ DONE — build in place (`9aa0e39`) + one-name simplification (`4571d34`).** A project
+    now lives AND builds in ONE dir (`projects_dir/<uid>/<pid>/`): `_project_dir(state)` is created at
+    design start and IS the build dir; `_design_worker`/`_ensure_workspace`/`open_project` point
+    `state["ws"]` there; `_persist_project` just writes events/brief + points the row at the in-place
+    zip (no `ws` param, no copytree). No scratch workspace under `KICRAFT_WORK_DIR`, no forward/backward
+    copy. **One name, no fallback:** the metadata dir is always `.kicraft/` — old `kicraft/`(no-dot)
+    projects were nuked, so all the dual-name resolution (`_meta_dir_name`, `_find_state_json` probing,
+    multi-candidate readers, the `view_root`/`_read_root` redirect, `_rehydrate_workspace`) was deleted.
+    `storage._kicraft_dir`/`_state_path` collapsed to constants. Net **−155 lines** on the
+    simplification (web.py 5,101→5,076, storage.py ~150→114). Verified: a REAL design+build through the
+    web lifecycle built entirely in the durable dir with **zero** scratch; full suite at 27 baseline.
+    `build_jobs` leak already closed (`ae6199b`). **Phase 4(a) is fully done.**
 - **(b) One source of truth for project state.** Today "what state / is it live?" is smeared
   across the `projects` table, `state.json`, the in-process `_LIVE_RUNS` dict, and the
   `build_jobs` queue. Pick one owner. This is the root of the "reopen is missing things / is
