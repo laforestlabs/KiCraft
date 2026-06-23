@@ -1,10 +1,13 @@
 # KiCraft refactor roadmap — legibility first
 
 **Status:** in progress. **Done & verified (zero test regressions — identical 27 pre-existing
-env/stale failures, ~1,877 pass):** Phase 1, Phase 2, the Phase 3 `storage.py` + `pricing.py` +
-`render_serving.py` + **`routes_admin.py` (3a, commit `58701d5`)** cuts (**web.py 7,292 → 5,029**),
-Phase 4(c), and Phase 5 (`build_jobs` leak + README install fix). **Remaining (full per-item plan in
-`docs/plans/refactor-handoff-remaining.md`):** `project_view` split; `build_orchestration`
+env/stale failures; pass count rises only by newly-added tests):** Phase 1, Phase 2, the Phase 3
+`storage.py` + `pricing.py` + `render_serving.py` + **`routes_admin.py` (3a, commit `58701d5`)** cuts
+(**web.py 7,292 → 5,031**), Phase 4(c), the **Phase 4(a) step 1 storage accessors (`_kicraft_dir`/
+`_state_path` + reader conversion, commit `5ae1278`)**, and Phase 5 (`build_jobs` leak + README
+install fix). **Remaining (full per-item plan in `docs/plans/refactor-handoff-remaining.md`):**
+the Phase 4(a) behavioral switch (view-from-durable behind `KICRAFT_VIEW_FROM_DURABLE`);
+`project_view` split; `build_orchestration`
 **reassessed → sequence with Phase 4(b)** (its `_LIVE_RUNS`/`_persist_project` rebind-seams make a
 clean move depend on the 4b state-consolidation); `cli_app.py` `parts_cli` cut **once its CLI tests
 are green** (they fail on env-data today, so the move can't be verified); Phase 4(a)/(b); Phase 5
@@ -132,6 +135,15 @@ done blind in an unattended push. Detailed spec for (a): `docs/plans/view-from-d
   view-from-durable plan: with the freedom to break, we collapse the split instead of bridging
   it, which is strictly simpler. The blank-timeline (`events.jsonl`) bug disappears by
   construction.
+  - **Step 1 ✅ DONE (commit `5ae1278`, no behavior change).** `_kicraft_dir`/`_state_path`
+    accessors in `storage.py`; every in-scope reader (state/synth-check/price in web.py +
+    `session.read_state` + `storage._read_project_stem`) routed through them so a durable or
+    legacy root reads identically to a workspace root. Parity tests in
+    `tests/test_web_storage_accessors.py`. This is the safe prerequisite for the behavioral switch.
+  - **Step 2 (next, behavioral).** `_open_for_view` + view-loop read-redirect behind
+    `KICRAFT_VIEW_FROM_DURABLE` (view-from-durable-refactor-v2.md phases 3–5). Now verifiable: an
+    isolated mock-LLM instance can be driven locally to confirm "reopen creates zero new workspace
+    dir" before flipping the flag — see the memory note on the driver harness.
 - **(b) One source of truth for project state.** Today "what state / is it live?" is smeared
   across the `projects` table, `state.json`, the in-process `_LIVE_RUNS` dict, and the
   `build_jobs` queue. Pick one owner. This is the root of the "reopen is missing things / is
