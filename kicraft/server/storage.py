@@ -14,7 +14,6 @@ moves here when build orchestration is extracted.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import tempfile
 import time
@@ -23,22 +22,13 @@ from pathlib import Path
 from .config import Settings
 
 
-def _view_from_durable() -> bool:
-    """Whether a reopened project is READ straight from its durable tree instead of
-    being copytree'd into a scratch workspace first (the per-reopen 17-29 MB copy).
-    Env-gated (default off) like KICRAFT_QUALITY_PRESETS until the manual pass, so the
-    hot reopen path can be rolled back without a code revert. See
-    docs/plans/view-from-durable-refactor-v2.md."""
-    return os.environ.get("KICRAFT_VIEW_FROM_DURABLE", "").strip().lower() in (
-        "1", "true", "yes", "on")
-
-
 def _read_root(state: dict) -> Path | None:
     """Where to READ a session's run-metadata + generated artifacts from: the live
-    scratch workspace if one exists, else the durable view root (set on reopen in
-    view-from-durable mode). None only for a brand-new run before either exists.
-    `bool(state["ws"])` still cleanly means "a real scratch workspace exists" (what
-    delete/GC rely on); this only redirects reads."""
+    scratch workspace if one exists, else the durable project root (set on reopen --
+    a reopened project reads its durable tree directly, no scratch copy). None only
+    for a brand-new run before either exists. `bool(state["ws"])` still cleanly means
+    "a real scratch workspace exists" (what delete/GC rely on); this only redirects
+    reads. See docs/plans/view-from-durable-refactor-v2.md."""
     r = state.get("ws") or state.get("view_root")
     return Path(r) if r else None
 

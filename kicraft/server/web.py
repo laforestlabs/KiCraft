@@ -95,7 +95,6 @@ from .storage import (
     _read_root,
     _rehydrate_workspace,
     _state_path,
-    _view_from_durable,
 )
 from .pricing import (  # pure BOM-pricing helpers; fetch/cache stay below
     _LCSC_CODE_RE,
@@ -1036,8 +1035,8 @@ def _collect_support_diagnostics(state: dict) -> dict:
     summary, not the full event stream (which _persist_project already saves
     per project): this payload is what automated review reads first."""
     events = state.get("events") or []
-    # Read root: the scratch workspace, or (view-from-durable reopen) the durable
-    # project root -- so a reopened FAILED project still yields its synth-check / ERC
+    # Read root: the scratch workspace, or (on a reopen) the durable project
+    # root -- so a reopened FAILED project still yields its synth-check / ERC
     # evidence in the support report instead of an empty one.
     read_root = _read_root(state)
     build_tail = [e.get("text", "") for e in events
@@ -1267,8 +1266,8 @@ def _fresh_run_state() -> dict:
     return {
         "events": [], "running": False, "done": False, "ok": None,
         "spend": None, "zip": None, "ws": None, "token": None,
-        # Durable read root for a reopened project in view-from-durable mode
-        # (p.dir_path); None for live/scratch runs. `ws` stays the scratch
+        # Durable read root for a reopened project (p.dir_path); None for
+        # live/scratch runs. `ws` stays the scratch
         # workspace and remains the truth for "a real workspace exists".
         "view_root": None,
         "project_dir": None, "stem": None, "pcb_ready": False,
@@ -1475,14 +1474,14 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
 def _ensure_workspace(state: dict, project=None) -> Path | None:
     """Materialize a scratch workspace on demand for a WRITE action (continue, edit,
     answer, manual layout, rebuild). Idempotent: a no-op when one already exists --
-    which is ALWAYS the case in the flag-off path and for live runs, so calling this
-    at a write gate is safe regardless of KICRAFT_VIEW_FROM_DURABLE.
+    the case for live runs and once a reopened project has been written to.
 
-    In view-from-durable mode a reopened project has ws=None; rehydrate from the
-    durable tree (copytree) so previously-committed slots + fetched parts are present
-    BEFORE _run_design -- whose empty `kicraft_web_` fallback would otherwise silently
-    drop them (the §4 data-loss bug in the plan). MUST run on the UI thread, before
-    _run_design / the build enqueue (the worker is a separate process reading the row).
+    A reopened project reads its durable tree directly, so state["ws"] is None until
+    the first write; rehydrate from the durable tree (copytree) so previously-committed
+    slots + fetched parts are present BEFORE _run_design -- whose empty `kicraft_web_`
+    fallback would otherwise silently drop them (the §4 data-loss bug in the plan).
+    MUST run on the UI thread, before _run_design / the build enqueue (the worker is a
+    separate process reading the row).
     """
     if state.get("ws"):
         return Path(state["ws"])
@@ -4142,7 +4141,7 @@ def index(prompt: str = "", project: str = ""):
         def _answer_and_resume(stage, answers):
             if state["running"]:
                 return
-            _ensure_workspace(state)  # view-from-durable: rehydrate before the write
+            _ensure_workspace(state)  # rehydrate the durable project before the write
             ws = state["ws"]
             if not ws:
                 ui.notify("No open design.", color="warning")
@@ -4246,7 +4245,7 @@ def index(prompt: str = "", project: str = ""):
             if state["running"]:
                 ui.notify("A run is already in progress.", color="warning")
                 return
-            _ensure_workspace(state)  # view-from-durable: rehydrate before the edit/rerun
+            _ensure_workspace(state)  # rehydrate the durable project before the edit/rerun
             ws = state["ws"]
             if not ws:
                 ui.notify("No open design.", color="warning")
@@ -4285,7 +4284,7 @@ def index(prompt: str = "", project: str = ""):
             """Run the stages still missing from the current (reopened) design."""
             if state["running"]:
                 return
-            _ensure_workspace(state)  # view-from-durable: rehydrate before continuing
+            _ensure_workspace(state)  # rehydrate the durable project before continuing
             sj = read_state(state["ws"]) if state["ws"] else {}
             rem = remaining_stages(sj)
             if not rem:
@@ -4347,7 +4346,7 @@ def index(prompt: str = "", project: str = ""):
                               color="positive")
                 refresh_account_ui()
                 return
-            if _view_from_durable() and p.dir_path:
+            if p.dir_path:
                 # Read straight from the durable tree -- no 17-29 MB scratch copy on
                 # every reopen. A workspace is materialized lazily by
                 # _ensure_workspace on the first WRITE action (continue/edit/rebuild).
@@ -4355,6 +4354,7 @@ def index(prompt: str = "", project: str = ""):
                 ws_str, view_root = None, str(p.dir_path)
                 project_dir = _persisted_generated_dir(p.dir_path, p.project_stem)
             else:
+                # Legacy project with no durable dir_path: rehydrate a scratch workspace.
                 read_root = _rehydrate_workspace(p)
                 ws_str, view_root = str(read_root), None
                 project_dir = _discover_generated_dir(read_root)
@@ -4634,7 +4634,7 @@ def index(prompt: str = "", project: str = ""):
             if state["running"]:
                 ui.notify("A run is already in progress.", color="warning")
                 return
-            _ensure_workspace(state)  # view-from-durable: rehydrate before the build enqueue
+            _ensure_workspace(state)  # rehydrate the durable project before the build enqueue
             if not state.get("ws") or not state.get("project_dir"):
                 return
             state.update(running=True, done=False, ok=None, status=None)
@@ -4750,8 +4750,8 @@ def index(prompt: str = "", project: str = ""):
                 build_question_panel()
 
             # Design-stage inspectors: rebuild from state.json whenever it changes.
-            # read_root is the scratch workspace, or (view-from-durable) the durable
-            # project root -- the readers resolve either via the step-1 accessors.
+            # read_root is the scratch workspace, or (on a reopen) the durable
+            # project root -- the readers resolve either via the storage accessors.
             read_root = _read_root(state)
             if read_root:
                 # Seed the price cache from this project's persisted prices once

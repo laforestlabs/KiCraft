@@ -1,11 +1,11 @@
-"""view-from-durable (KICRAFT_VIEW_FROM_DURABLE) — refactor roadmap Phase 4a step 2.
+"""Reopen reads the durable project tree directly — refactor roadmap Phase 4a.
 
-Flag OFF (default): reopen copytree's the durable tree into a scratch workspace
-(legacy behavior; covered by the rest of the web suite). Flag ON: reopen reads the
-durable tree in place -- no per-reopen 17-29 MB copy -- and a workspace is
-materialized LAZILY by `_ensure_workspace` only on the first WRITE action, rehydrated
-(copytree) so previously-committed slots survive (the §4 data-loss guard in
-docs/plans/view-from-durable-refactor-v2.md).
+A reopened project is READ from its durable tree (projects_dir/<uid>/<pid>/) with no
+per-reopen 17-29 MB scratch copy; a workspace is materialized LAZILY by
+`_ensure_workspace` only on the first WRITE action, rehydrated (copytree) so
+previously-committed slots survive (the §4 data-loss guard in
+docs/plans/view-from-durable-refactor-v2.md). Legacy projects without a durable
+dir_path still fall back to an eager rehydrate.
 """
 from __future__ import annotations
 
@@ -33,16 +33,6 @@ def test_read_root_prefers_ws_then_view_root_then_none():
     assert web._read_root({"ws": None, "view_root": "/d"}) == Path("/d")
     assert web._read_root({"ws": None, "view_root": None}) is None
     assert web._read_root({}) is None
-
-
-def test_view_from_durable_env(monkeypatch):
-    monkeypatch.delenv("KICRAFT_VIEW_FROM_DURABLE", raising=False)
-    assert web._view_from_durable() is False
-    for v in ("1", "true", "YES", "on"):
-        monkeypatch.setenv("KICRAFT_VIEW_FROM_DURABLE", v)
-        assert web._view_from_durable() is True
-    monkeypatch.setenv("KICRAFT_VIEW_FROM_DURABLE", "0")
-    assert web._view_from_durable() is False
 
 
 # ------------------------------ _ensure_workspace -------------------------------
@@ -109,14 +99,12 @@ def anyio_backend():
 
 
 @pytest.fixture
-async def flag_on_harness(tmp_path):
-    """user_simulation harness with the flag ON and an isolated KICRAFT_WORK_DIR so
-    the test can assert reopen creates zero workspaces there."""
+async def reopen_harness(tmp_path):
+    """user_simulation harness with an isolated KICRAFT_WORK_DIR so the test can assert
+    that reopening a project creates zero scratch workspaces there."""
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    prev = {k: os.environ.get(k) for k in
-            ("KICRAFT_VIEW_FROM_DURABLE", "KICRAFT_WORK_DIR", "OPENROUTER_API_KEY")}
-    os.environ["KICRAFT_VIEW_FROM_DURABLE"] = "1"
+    prev = {k: os.environ.get(k) for k in ("KICRAFT_WORK_DIR", "OPENROUTER_API_KEY")}
     os.environ["KICRAFT_WORK_DIR"] = str(work_dir)
     os.environ.setdefault("OPENROUTER_API_KEY", "test-not-used")
     async with user_simulation() as u:
@@ -165,8 +153,8 @@ async def _login(u):
 
 
 @pytest.mark.anyio
-async def test_reopen_reads_durable_and_makes_no_workspace(flag_on_harness):
-    u, web_mod, store, acct, work_dir = flag_on_harness
+async def test_reopen_reads_durable_and_makes_no_workspace(reopen_harness):
+    u, web_mod, store, acct, work_dir = reopen_harness
     pid = _persist_durable(store, acct.id, "bmp280 reader", "USB_BMP280_READER")
 
     await _login(u)
