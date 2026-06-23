@@ -22,6 +22,27 @@ from pathlib import Path
 from .config import Settings
 
 
+def _kicraft_dir(root: Path) -> Path:
+    """Run-metadata dir for a *workspace* (``.kicraft``, dotted) OR a *durable*
+    project (``kicraft``, no dot). Prefer whichever already exists; default to the
+    durable name for paths about to be created. This is the one seam that lets a
+    reader take either root unchanged — see docs/plans/view-from-durable-refactor-v2.md
+    ("The core friction") and CLAUDE.md "Storage model"."""
+    for cand in (root / ".kicraft", root / "kicraft"):
+        if cand.is_dir():
+            return cand
+    return root / "kicraft"
+
+
+def _state_path(root: Path) -> Path:
+    """Resolved ``state.json`` for a root: under ``.kicraft``/``kicraft`` if present,
+    else a legacy top-level ``state.json`` (durable projects predating the kicraft/
+    tree). Lets the readers work against a workspace, a durable project, or a legacy
+    project with one call."""
+    p = _kicraft_dir(root) / "state.json"
+    return p if p.is_file() else (root / "state.json")
+
+
 def _new_workspace(prefix: str) -> Path:
     """A run workspace under the shared work dir (KICRAFT_WORK_DIR), NOT /tmp:
     the standalone build worker is a separate systemd unit, and PrivateTmp would
@@ -72,7 +93,7 @@ def _rehydrate_workspace(project) -> Path:
 def _read_project_stem(ws: Path) -> str | None:
     """The project_stem committed by the intent stage (UPPER_SNAKE_CASE)."""
     try:
-        data = json.loads((ws / ".kicraft" / "state.json").read_text(encoding="utf-8"))
+        data = json.loads(_state_path(ws).read_text(encoding="utf-8"))
         stem = data.get("project_stem")
         if stem:
             return str(stem)

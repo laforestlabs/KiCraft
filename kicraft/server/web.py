@@ -88,10 +88,12 @@ from .stagetabs import StageTabs, demo_events
 from .storage import (
     _discover_generated_dir,
     _gc_workspaces,
+    _kicraft_dir,
     _new_workspace,
     _persisted_generated_dir,
     _read_project_stem,
     _rehydrate_workspace,
+    _state_path,
 )
 from .pricing import (  # pure BOM-pricing helpers; fetch/cache stay below
     _LCSC_CODE_RE,
@@ -388,7 +390,7 @@ def _erc_offenders(ws: Path) -> list[str]:
     [] if ERC was not the failing check (so recovery only fires for real ERC
     errors, not other synth failures). check_erc stores up to 20 offenders."""
     try:
-        sc = json.loads((ws / ".kicraft" / "synthesis_check.json").read_text(encoding="utf-8"))
+        sc = json.loads((_kicraft_dir(ws) / "synthesis_check.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
     for c in sc.get("checks") or []:
@@ -404,7 +406,7 @@ def _synth_check_failures(ws: Path | None) -> list[str]:
     if ws is None:
         return []
     try:
-        sc = json.loads((ws / ".kicraft" / "synthesis_check.json").read_text(encoding="utf-8"))
+        sc = json.loads((_kicraft_dir(ws) / "synthesis_check.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []
     out: list[str] = []
@@ -610,7 +612,7 @@ def _read_state_json(ws: Path) -> dict:
     """The progressively-built ConversationState (each stage commits a slot); {}
     if absent or mid-write."""
     try:
-        data = json.loads((ws / ".kicraft" / "state.json").read_text(encoding="utf-8"))
+        data = json.loads(_state_path(ws).read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
@@ -770,7 +772,7 @@ def _load_price_cache(ws: Path) -> None:
     Files written by an older pricing schema (or the pre-schema flat format) are
     ignored so a _pick_price change re-fetches instead of serving stale prices."""
     try:
-        data = json.loads((ws / ".kicraft" / _PRICE_FILE).read_text(encoding="utf-8"))
+        data = json.loads((_kicraft_dir(ws) / _PRICE_FILE).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return
     if not isinstance(data, dict) or data.get("_schema") != _PRICE_SCHEMA:
@@ -790,7 +792,7 @@ def _save_price_cache(ws: Path, keys: set[str]) -> None:
         snap = {k: _PRICE_CACHE[k] for k in keys
                 if k in _PRICE_CACHE and _PRICE_CACHE[k] is not _UNAVAILABLE}
     try:
-        d = ws / ".kicraft"
+        d = _kicraft_dir(ws)
         d.mkdir(parents=True, exist_ok=True)
         (d / _PRICE_FILE).write_text(
             json.dumps({"_schema": _PRICE_SCHEMA, "prices": snap}, indent=2),
@@ -2666,7 +2668,7 @@ def _quality_badge_from_ws(ws: Path | None) -> str:
         return "unverified"
     try:
         sc = json.loads(
-            (ws / ".kicraft" / "synthesis_check.json").read_text(encoding="utf-8"))
+            (_kicraft_dir(ws) / "synthesis_check.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return "unverified"
     if not isinstance(sc, dict) or sc.get("status") is None:
@@ -4690,7 +4692,7 @@ def index(prompt: str = "", project: str = ""):
                 if view.get("prices_loaded_ws") != state["ws"]:
                     view["prices_loaded_ws"] = state["ws"]
                     _load_price_cache(Path(state["ws"]))
-                mt = _mtime(Path(state["ws"]) / ".kicraft" / "state.json")
+                mt = _mtime(_state_path(Path(state["ws"])))
                 if mt and mt != view["state_mtime"]:
                     view["state_mtime"] = mt
                     sj = _read_state_json(Path(state["ws"]))
