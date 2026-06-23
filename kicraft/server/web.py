@@ -1088,6 +1088,19 @@ def _file_failure_report(state: dict) -> None:
         pass
 
 
+def _project_dir(state: dict) -> Path | None:
+    """The durable project directory (projects_dir/<uid>/<pid>/) -- the ONE place a
+    project lives AND builds (build-in-place: no scratch workspace, no copytree).
+    Created on demand. None for a run with no user/project id yet (e.g. an admin
+    self-eval scratch run, which still uses a throwaway tempdir)."""
+    uid, pid = state.get("user_id"), state.get("project_id")
+    if not uid or not pid:
+        return None
+    d = _store().projects_dir / str(uid) / str(pid)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def _persist_project(ws: Path | None, state: dict) -> None:
     """Copy the run's durable artifacts out of the tempdir and finalize the row.
 
@@ -1115,11 +1128,20 @@ def _persist_project(ws: Path | None, state: dict) -> None:
         with (base / "events.jsonl").open("w", encoding="utf-8") as f:
             for ev in state.get("events", []):
                 f.write(json.dumps(ev, ensure_ascii=False, default=str) + "\n")
-        if ws is not None:
-            # Save the WHOLE .kicraft/ (state.json + parts/ + check files) so a
-            # later resume or edit-and-rebuild has the fetched LCSC bundles, not
-            # just the state. Keep a top-level state.json copy too, for readers
-            # that expect it and for legacy projects predating the kicraft/ tree.
+        in_place = ws is not None and Path(ws).resolve() == base.resolve()
+        if in_place:
+            # Build-in-place: the run's .kicraft/, generated/ and kicraft_project.zip
+            # were written directly under `base` -- nothing to copy. Just point the
+            # row at the zip. (Readers resolve the metadata dir via _state_path /
+            # _kicraft_dir, which accept the build's native `.kicraft/`.)
+            z = base / "kicraft_project.zip"
+            if z.is_file():
+                zip_path = str(z)
+                state["zip"] = zip_path
+        elif ws is not None:
+            # Legacy scratch-tempdir build (id-less/admin runs): copy the durable
+            # artifacts out. Save the WHOLE .kicraft/ (state + fetched LCSC bundles +
+            # check files) plus a top-level state.json copy for readers that expect it.
             kdir = ws / ".kicraft"
             if kdir.is_dir():
                 kdst = base / "kicraft"
@@ -1341,7 +1363,11 @@ def _execute_claimed_job_local(ws: Path, state: dict, job_id: int, progress,
     kept as the fallback for deploys without the worker unit. The 30m wall
     clock restarts at the slot-acquired marker so time spent queued for a host
     build slot is not billed against the job."""
-    cmd = KICRAFT + list(_JOB_KIND_ARGS[kind])
+    # Point the relative state-path arg at the resolved metadata dir (build-native +
+    # build-in-place use `.kicraft/`; pre-build-in-place durable projects use `kicraft/`).
+    meta = _kicraft_dir(ws).name
+    cmd = KICRAFT + [a.replace(".kicraft/state.json", f"{meta}/state.json")
+                     for a in _JOB_KIND_ARGS[kind]]
     if kind == "build":
         quality = _store().build_quality_for_user(state.get("user_id"))
         if quality:  # tier override (free tier -> draft); None = default
@@ -1379,7 +1405,7 @@ def _drive_build_queue(ws: Path, state: dict, progress, *,
     reaper requeues it), which this loop simply handles again."""
     progress({"kind": "build_start"})
     store = _store()
-    log_path = ws / ".kicraft" / "build.log"
+    log_path = _kicraft_dir(ws) / "build.log"
     job_id = store.enqueue_build(
         workspace=str(ws), project_id=state.get("project_id"),
         user_id=state.get("user_id"), log_path=str(log_path), kind=kind)
@@ -1472,35 +1498,26 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
 
 
 def _ensure_workspace(state: dict, project=None) -> Path | None:
-    """Materialize a scratch workspace on demand for a WRITE action (continue, edit,
-    answer, manual layout, rebuild). Idempotent: a no-op when one already exists --
-    the case for live runs and once a reopened project has been written to.
-
-    A reopened project reads its durable tree directly, so state["ws"] is None until
-    the first write; rehydrate from the durable tree (copytree) so previously-committed
-    slots + fetched parts are present BEFORE _run_design -- whose empty `kicraft_web_`
-    fallback would otherwise silently drop them (the §4 data-loss bug in the plan).
-    MUST run on the UI thread, before _run_design / the build enqueue (the worker is a
-    separate process reading the row).
+    """Ensure state["ws"] points at the project's build directory for a WRITE action
+    (continue, edit, answer, manual layout, rebuild). Build-in-place: that directory
+    IS the durable project dir, so this just resolves `_project_dir` -- no copy, no
+    scratch workspace. Idempotent; a no-op once ws is set (live runs, and reopened
+    projects whose ws was set on open). Returns None only for an id-less scratch run.
+    `project` is accepted for call-site compatibility but unused (uid/pid drive it).
     """
     if state.get("ws"):
         return Path(state["ws"])
-    if project is None and state.get("project_id"):
-        try:
-            project = _store().get_project(state["project_id"])
-        except Exception:
-            project = None
-    if project is None or not getattr(project, "dir_path", None):
-        return None  # a brand-new run with nothing durable to rehydrate
-    ws = _rehydrate_workspace(project)
-    state["ws"] = str(ws)
-    state["view_root"] = None  # a real workspace now owns the reads
-    pd = _discover_generated_dir(ws)
-    if pd is not None:
-        state["stem"] = pd.name
-        state["project_dir"] = str(pd)
-        state["token"] = _register_project_dir(pd)
-    return ws
+    pd = _project_dir(state)
+    if pd is None:
+        return None
+    state["ws"] = str(pd)
+    state["view_root"] = None
+    gen = _discover_generated_dir(pd)
+    if gen is not None:
+        state["stem"] = gen.name
+        state["project_dir"] = str(gen)
+        state["token"] = _register_project_dir(gen)
+    return pd
 
 
 def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
@@ -1623,9 +1640,11 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
 
 
 def _design_worker(brief: str, state: dict) -> None:
-    """Initial design from a brief: a fresh workspace, all schematic stages, build."""
+    """Initial design from a brief: build IN the durable project dir (build-in-place,
+    no scratch workspace), running all schematic stages + the deterministic build."""
     state["brief"] = brief
-    state["ws"] = None  # force a fresh tempdir
+    pd = _project_dir(state)  # the durable dir IS the workspace
+    state["ws"] = str(pd) if pd else None  # None only for an id-less scratch run
     _run_design(state, list(DESIGN_STAGES))
 
 
@@ -2761,17 +2780,17 @@ def _board_source(gen: Path, stem: str, token: str):
 
 
 def _load_persisted_state(dir_path) -> dict | None:
-    """Read a persisted project's state.json (top-level copy, or the kicraft/ copy),
-    for the detail page's BOM. None if neither is readable."""
+    """Read a persisted project's state.json for the detail page's BOM. Resolves the
+    metadata dir via _state_path (build-in-place projects keep the pipeline's native
+    `.kicraft/`; older ones have `kicraft/` or a top-level copy). None if unreadable."""
     if not dir_path:
         return None
-    base = Path(dir_path)
-    for cand in (base / "state.json", base / "kicraft" / "state.json"):
-        if cand.is_file():
-            try:
-                return json.loads(cand.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                return None
+    p = _state_path(Path(dir_path))
+    if p.is_file():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
     return None
 
 
@@ -4347,11 +4366,11 @@ def index(prompt: str = "", project: str = ""):
                 refresh_account_ui()
                 return
             if p.dir_path:
-                # Read straight from the durable tree -- no 17-29 MB scratch copy on
-                # every reopen. A workspace is materialized lazily by
-                # _ensure_workspace on the first WRITE action (continue/edit/rebuild).
+                # Build-in-place: the durable project dir IS the workspace -- reads
+                # AND any later writes (continue/edit/rebuild) happen here, with no
+                # scratch copy and no copytree on reopen.
                 read_root = Path(p.dir_path)
-                ws_str, view_root = None, str(p.dir_path)
+                ws_str, view_root = str(p.dir_path), None
                 project_dir = _persisted_generated_dir(p.dir_path, p.project_stem)
             else:
                 # Legacy project with no durable dir_path: rehydrate a scratch workspace.

@@ -1369,13 +1369,15 @@ class AccountStore:
     # ---- public browser: search index -------------------------------------
 
     def _load_project_state(self, project: Project) -> dict | None:
-        """Read a project's persisted design state for indexing. The web worker
-        writes a top-level state.json copy next to brief.txt; fall back to the
-        copy inside the kicraft/ subtree. Returns None if neither is readable."""
+        """Read a project's persisted design state for indexing. Resolves the metadata
+        dir across layouts: a build-in-place project keeps the pipeline's native
+        ``.kicraft/``; older ones have a top-level copy or a ``kicraft/`` subtree.
+        Returns None if none is readable."""
         if not project or not project.dir_path:
             return None
         base = Path(project.dir_path)
-        for cand in (base / "state.json", base / "kicraft" / "state.json"):
+        for cand in (base / "state.json", base / "kicraft" / "state.json",
+                     base / ".kicraft" / "state.json"):
             if cand.is_file():
                 try:
                     return json.loads(cand.read_text())

@@ -10,7 +10,6 @@ dir_path still fall back to an eager rehydrate.
 from __future__ import annotations
 
 import importlib
-import json
 import os
 import shutil
 import sys
@@ -44,17 +43,6 @@ class _Proj:
         self.id = 1
 
 
-def _durable_tree(tmp_path, stem="USB_BMP280_READER") -> Path:
-    """A finished durable project tree: kicraft/state.json + generated/<stem>/."""
-    base = tmp_path / "projects" / "1" / "1"
-    (base / "kicraft").mkdir(parents=True)
-    shutil.copy2(STATE_FIXTURE, base / "kicraft" / "state.json")
-    gen = base / "generated" / stem
-    gen.mkdir(parents=True)
-    (gen / f"{stem}.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")
-    return base
-
-
 def test_ensure_workspace_noop_when_ws_exists(tmp_path):
     state = {"ws": str(tmp_path)}
     assert web._ensure_workspace(state, _Proj(tmp_path, "X")) == tmp_path
@@ -65,26 +53,34 @@ def test_ensure_workspace_none_without_project():
     assert web._ensure_workspace({"ws": None, "project_id": None}, None) is None
 
 
-def test_ensure_workspace_rehydrates_durable_with_prior_slots(tmp_path, monkeypatch):
+def test_ensure_workspace_resolves_durable_project_dir(tmp_path, monkeypatch):
+    """Build-in-place: _ensure_workspace points ws at the durable project dir itself
+    (no scratch workspace, no copy) when ws is None but a project id is set, and
+    re-points project_dir/token at its generated tree."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-not-used")
-    monkeypatch.setenv("KICRAFT_WORK_DIR", str(tmp_path / "work"))
-    base = _durable_tree(tmp_path)
-    state = {"ws": None, "view_root": str(base)}
-    ws = web._ensure_workspace(state, _Proj(base, "USB_BMP280_READER"))
+    store = AccountStore(tmp_path / "accounts.db", tmp_path / "projects")
+    acct = store.create_user("ew@example.com", "hunter2hunter2")
+    pid = store.create_project(acct.id, "bmp280 reader")
+    base = store.projects_dir / str(acct.id) / str(pid)  # the durable build dir
+    (base / ".kicraft").mkdir(parents=True)               # the build's native layout
+    shutil.copy2(STATE_FIXTURE, base / ".kicraft" / "state.json")
+    gen = base / "generated" / "USB_BMP280_READER"
+    gen.mkdir(parents=True)
+    (gen / "USB_BMP280_READER.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")
 
-    assert ws is not None
-    # A real scratch workspace now exists under KICRAFT_WORK_DIR; view_root cleared
-    # (ws is again the truth for "a real workspace exists").
-    assert state["ws"] == str(ws)
-    assert state["view_root"] is None
-    assert Path(ws).parent == tmp_path / "work"
-    # Rehydrated, NOT an empty kicraft_web_ fallback: the committed slots survived.
-    sj = json.loads((ws / ".kicraft" / "state.json").read_text())
-    assert sj.get("project_stem") == "USB_BMP280_READER"
-    assert sj.get("intent") and sj.get("bom")  # prior slots present
-    assert (ws / "generated" / "USB_BMP280_READER").is_dir()  # generated copied too
-    # project_dir/token re-pointed at the scratch copy (writes land in scratch).
-    assert state["project_dir"] == str(ws / "generated" / "USB_BMP280_READER")
+    prev = web._STORE
+    web._STORE = store
+    try:
+        state = {"ws": None, "view_root": None, "user_id": acct.id, "project_id": pid,
+                 "stem": None, "project_dir": None, "token": None}
+        ws = web._ensure_workspace(state)
+        assert ws == base                       # the durable dir IS the workspace
+        assert state["ws"] == str(base)
+        assert Path(ws).parent == store.projects_dir / str(acct.id)
+        assert state["project_dir"] == str(gen)  # generated tree, in place (not copied)
+        assert web._ensure_workspace(state) == base  # idempotent no-op
+    finally:
+        web._STORE = prev
 
 
 # --------------- integration: reopen reads durable, makes NO workspace -----------
