@@ -4,13 +4,14 @@
 env/stale failures; pass count rises only by newly-added tests):** Phase 1, Phase 2, the Phase 3
 `storage.py` + `pricing.py` + `render_serving.py` + **`routes_admin.py` (3a, commit `58701d5`)** cuts
 (**web.py 7,292 → 5,031**), Phase 4(c), the **Phase 4(a) step 1 storage accessors (`_kicraft_dir`/
-`_state_path` + reader conversion, commit `5ae1278`)**, the **Phase 4(a) read-side: view-from-durable
-reopen (`b3b7f44`), flag collapsed so it's the only path (`e8d0265`)** — reopen reads durable
-directly, no per-reopen copy, workspace materialized lazily on write; and Phase 5 (`build_jobs`
-leak + README install fix). **Remaining (full per-item plan in
-`docs/plans/refactor-handoff-remaining.md`):** Phase 4(a) WRITE-side collapse (build in the durable
-dir, drop the finalize copytree + the `.kicraft`/`kicraft` split — where the workspace concept and
-real line count go away); `project_view` split; `build_orchestration`
+`_state_path` + reader conversion, commit `5ae1278`)**, **Phase 4(a) DONE — the workspace↔durable
+duality is collapsed:** read-side view-from-durable reopen (`b3b7f44`, flag collapsed `e8d0265`) +
+write-side **build-in-place (`9aa0e39`)** — a project lives AND builds in one dir
+(`projects_dir/<uid>/<pid>/`), no scratch workspace, no `copytree` either way; verified with a real
+design+build through the web lifecycle. Plus Phase 5 (`build_jobs` leak + README install fix).
+**Remaining (full per-item plan in `docs/plans/refactor-handoff-remaining.md`):** Phase 4(a)
+tidy-up (stale `_gc_workspaces` docstring, vestigial `view_root`/`_read_root`); `project_view`
+split; `build_orchestration`
 **reassessed → sequence with Phase 4(b)** (its `_LIVE_RUNS`/`_persist_project` rebind-seams make a
 clean move depend on the 4b state-consolidation); `cli_app.py` `parts_cli` cut **once its CLI tests
 are green** (they fail on env-data today, so the move can't be verified); Phase 4(a)/(b); Phase 5
@@ -155,12 +156,21 @@ done blind in an unattended push. Detailed spec for (a): `docs/plans/view-from-d
     `tests/test_web_view_from_durable.py`. NOTE: this is the **read/reopen half** of (a). web.py
     line count is ~flat — `_rehydrate_workspace` stays for legacy + the lazy write path, so the win
     is conceptual.
-  - **Step 3 (remaining — the WRITE-side collapse, bigger).** Build IN the durable dir (or an
-    atomically-promoted `.build/`), so a build no longer mints a scratch workspace and finalize no
-    longer `copytree`s workspace→durable; unify the `.kicraft` (workspace) vs `kicraft` (durable)
-    name split — then `_rehydrate_workspace`/`_ensure_workspace`/the whole workspace concept can go.
-    THIS is where the real line + concept reduction lands. Minor: spec phase 6 GC docstring
-    (`build_jobs` leak already closed `ae6199b`).
+  - **Step 3 ✅ DONE — build in place (`9aa0e39`).** A project now lives AND builds in ONE dir
+    (`projects_dir/<uid>/<pid>/`): `_project_dir(state)` is created at design start and IS the build
+    dir; `_design_worker`/`_ensure_workspace`/`open_project` point `state["ws"]` there;
+    `_persist_project` detects in-place (`ws == base`) and **skips the copytree**. No scratch
+    workspace under `KICRAFT_WORK_DIR`, no forward/backward copy. Build-in-place keeps the
+    pipeline's native `.kicraft/`, so durable readers (`_load_persisted_state`,
+    `accounts._load_project_state`) + the build invocation (`build_worker._meta_dir_name`,
+    `_execute_claimed_job_local` via `_kicraft_dir().name`, `cli_app._find_state_json`) resolve the
+    metadata-dir name, so pre-build-in-place `kicraft/` (no-dot) projects still rebuild. Verified: a
+    REAL design+build through the web lifecycle (mock LLM, real place/route) built entirely in the
+    durable dir with **zero** scratch workspaces; full suite at 27 baseline (zero new). `_ensure_workspace`
+    is now just `_project_dir`; `_rehydrate_workspace` survives only for legacy no-`dir_path`
+    projects + id-less/admin runs (which still use a throwaway tempdir). **Remaining tidy-up:**
+    `_gc_workspaces` docstring is now stale (it reaps only id-less tempdirs); the vestigial
+    `view_root`/`_read_root` (always `ws` now) can be inlined; `build_jobs` leak already closed (`ae6199b`).
 - **(b) One source of truth for project state.** Today "what state / is it live?" is smeared
   across the `projects` table, `state.json`, the in-process `_LIVE_RUNS` dict, and the
   `build_jobs` queue. Pick one owner. This is the root of the "reopen is missing things / is

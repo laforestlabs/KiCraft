@@ -10,12 +10,15 @@
 (events.jsonl, `7b24c0a`), phase 2 (accessors + reader conversion, `5ae1278`), phases 0/3/4/5 (flag,
 reopen-reads-durable + view-loop redirect, `_ensure_workspace` at the write gates, price
 write-through). Verified as the default: whole suite holds at the 27 baseline; integration reopen
-makes zero workspace dirs. **Remaining:** this was the READ/reopen half — the WRITE-side collapse
-(build in the durable dir, drop the finalize workspace→durable copytree, unify the `.kicraft`
-(workspace) vs `kicraft` (durable) name split, then retire the workspace concept entirely) is the
-bigger remaining piece, where the real line/concept reduction lands. Minor: phase 6 GC docstring
-(`build_jobs` leak already closed, `ae6199b`). Tests: `tests/test_web_storage_accessors.py`,
-`tests/test_web_view_from_durable.py`.
+makes zero workspace dirs. **WRITE-side collapse also DONE — build in place (`9aa0e39`):** a project lives
+AND builds in `projects_dir/<uid>/<pid>/` (build native `.kicraft/`); `_project_dir` is the build
+dir, `_persist_project` skips the copytree when `ws == base`, no scratch workspace. The
+workspace↔durable duality is gone (the `.kicraft`/`kicraft` *name* split is now bridged by
+accessors for legacy projects rather than eliminated). Verified with a real design+build through
+the web lifecycle (zero scratch). **Remaining:** minor tidy-up — `_gc_workspaces` docstring is now
+stale (reaps only id-less tempdirs); the vestigial `view_root`/`_read_root` (always `ws`) can be
+inlined; phase 6 GC (`build_jobs` leak already closed, `ae6199b`). Tests:
+`tests/test_web_storage_accessors.py`, `tests/test_web_view_from_durable.py`.
 **Date:** 2026-06-22
 **Supersedes:** `view-from-durable-refactor.md` (keeps its core idea; corrects motivation,
 the reader inventory, the lazy-workspace correctness model, and the delete/GC scope).

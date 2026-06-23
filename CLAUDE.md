@@ -10,10 +10,10 @@ and gotchas live in the auto-memory index; deeper plans in `docs/plans/`.)
 ```
   user ── NiceGUI web app ──(LLM, in-thread)──► synthesis stages ──► state.json + generated/
   (kicraft/server/web.py)                                                     │
-        │ enqueues a build_jobs row (SQLite)                                  │ workspace tree
+        │ enqueues a build_jobs row (SQLite)                                  │ project tree
         ▼                                                                     ▼
   build worker (separate process, kicraft/server/build_worker.py)
-        │ runs:  python -m kicraft.design.cli_app build .kicraft/state.json generated   (cwd = workspace)
+        │ runs:  python -m kicraft.design.cli_app build .kicraft/state.json generated   (cwd = the project dir)
         ▼
   place/route pipeline (no LLM): autoexperiment → per-leaf solve → compose parent → freeroute
         │                        (cli/autoexperiment, cli/solve_subcircuits,
@@ -31,17 +31,19 @@ and gotchas live in the auto-memory index; deeper plans in `docs/plans/`.)
   `.kicad_pcb`, and the heavy `.experiments/`). If you change that on-disk shape, you change a
   contract three processes depend on.
 
-## Storage model (two locations, two layouts — a known wart, see Phase 4)
+## Storage model (one project dir, build-in-place — Phase 4a done)
 
-- **Workspace** (scratch): `~/.kicraft/work/kicraft_*/` — run metadata under `.kicraft/`
-  (dotted), plus `generated/`. Created per run/resume; lives under `KICRAFT_WORK_DIR` so both
-  the web and worker processes can see it. Reaped after 2 days by `_gc_workspaces`.
-- **Durable** (saved project): `~/.kicraft/projects/<uid>/<pid>/` — run metadata under
-  `kicraft/` (**no dot**), plus `generated/`, `events.jsonl`, `brief.txt`, the zip. Written at
-  finalize by `copytree`. **Reopen currently `copytree`s durable → a fresh workspace** (the
-  thing the storage-collapse refactor removes).
-- The `.kicraft` (workspace) vs `kicraft` (durable) name split is accidental and is the source
-  of much friction. See `docs/plans/refactor-roadmap.md` Phase 4 + `view-from-durable-refactor-v2.md`.
+- **One project dir, build-in-place** (Phase 4a, `9aa0e39`): a project lives AND builds in
+  `~/.kicraft/projects/<uid>/<pid>/` — run metadata under `.kicraft/` (the pipeline's native
+  dotted name) plus `generated/` (incl. the heavy `.experiments/`), `events.jsonl`, `brief.txt`,
+  the zip. The build runs here directly (cwd = this dir, via `_project_dir`); reopen reads it in
+  place. **No scratch workspace, no `copytree` either way** — the workspace↔durable duality is gone.
+- `KICRAFT_WORK_DIR` (`~/.kicraft/work/`) now holds only throwaway tempdirs for id-less/admin
+  (self-eval) runs, reaped by `_gc_workspaces`.
+- **Legacy projects** persisted before build-in-place use `kicraft/` (no dot) + a top-level
+  `state.json`. Readers and the build resolve either name via `_kicraft_dir`/`_state_path`
+  (`storage.py`), `build_worker._meta_dir_name`, and `cli_app._find_state_json`. See
+  `docs/plans/refactor-roadmap.md` Phase 4 + `view-from-durable-refactor-v2.md`.
 
 ## Subsystem map (packages)
 
