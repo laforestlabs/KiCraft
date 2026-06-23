@@ -92,8 +92,10 @@ from .storage import (
     _new_workspace,
     _persisted_generated_dir,
     _read_project_stem,
+    _read_root,
     _rehydrate_workspace,
     _state_path,
+    _view_from_durable,
 )
 from .pricing import (  # pure BOM-pricing helpers; fetch/cache stay below
     _LCSC_CODE_RE,
@@ -1034,15 +1036,19 @@ def _collect_support_diagnostics(state: dict) -> dict:
     summary, not the full event stream (which _persist_project already saves
     per project): this payload is what automated review reads first."""
     events = state.get("events") or []
+    # Read root: the scratch workspace, or (view-from-durable reopen) the durable
+    # project root -- so a reopened FAILED project still yields its synth-check / ERC
+    # evidence in the support report instead of an empty one.
+    read_root = _read_root(state)
     build_tail = [e.get("text", "") for e in events
                   if e.get("kind") == "build_log"][-60:]
     # Durable per-stage outcomes first (they cover stages run before a resume);
     # the in-memory event scan remains as the legacy fallback.
-    ss = (read_state(state["ws"]) if state.get("ws") else {}).get("stage_status") or {}
+    ss = (read_state(read_root) if read_root else {}).get("stage_status") or {}
     stages_done = ([s for s in DESIGN_STAGES
                     if isinstance(ss.get(s), dict) and ss[s].get("ok")]
                    or [e.get("stage") for e in events if e.get("kind") == "stage_done"])
-    ws = Path(state["ws"]) if state.get("ws") else None
+    ws = read_root
     if state.get("status"):
         run_status = state["status"]
     elif state.get("ok") is None:
@@ -1261,6 +1267,10 @@ def _fresh_run_state() -> dict:
     return {
         "events": [], "running": False, "done": False, "ok": None,
         "spend": None, "zip": None, "ws": None, "token": None,
+        # Durable read root for a reopened project in view-from-durable mode
+        # (p.dir_path); None for live/scratch runs. `ws` stays the scratch
+        # workspace and remains the truth for "a real workspace exists".
+        "view_root": None,
         "project_dir": None, "stem": None, "pcb_ready": False,
         # True only for a REOPENED project whose persisted status is
         # "failed" (a live failure sets ok=False instead); the rescue
@@ -1460,6 +1470,38 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
         if (pid and state.get("status") != "awaiting_input"
                 and _LIVE_RUNS.get(pid) is state):
             _LIVE_RUNS.pop(pid, None)
+
+
+def _ensure_workspace(state: dict, project=None) -> Path | None:
+    """Materialize a scratch workspace on demand for a WRITE action (continue, edit,
+    answer, manual layout, rebuild). Idempotent: a no-op when one already exists --
+    which is ALWAYS the case in the flag-off path and for live runs, so calling this
+    at a write gate is safe regardless of KICRAFT_VIEW_FROM_DURABLE.
+
+    In view-from-durable mode a reopened project has ws=None; rehydrate from the
+    durable tree (copytree) so previously-committed slots + fetched parts are present
+    BEFORE _run_design -- whose empty `kicraft_web_` fallback would otherwise silently
+    drop them (the §4 data-loss bug in the plan). MUST run on the UI thread, before
+    _run_design / the build enqueue (the worker is a separate process reading the row).
+    """
+    if state.get("ws"):
+        return Path(state["ws"])
+    if project is None and state.get("project_id"):
+        try:
+            project = _store().get_project(state["project_id"])
+        except Exception:
+            project = None
+    if project is None or not getattr(project, "dir_path", None):
+        return None  # a brand-new run with nothing durable to rehydrate
+    ws = _rehydrate_workspace(project)
+    state["ws"] = str(ws)
+    state["view_root"] = None  # a real workspace now owns the reads
+    pd = _discover_generated_dir(ws)
+    if pd is not None:
+        state["stem"] = pd.name
+        state["project_dir"] = str(pd)
+        state["token"] = _register_project_dir(pd)
+    return ws
 
 
 def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
@@ -4100,6 +4142,7 @@ def index(prompt: str = "", project: str = ""):
         def _answer_and_resume(stage, answers):
             if state["running"]:
                 return
+            _ensure_workspace(state)  # view-from-durable: rehydrate before the write
             ws = state["ws"]
             if not ws:
                 ui.notify("No open design.", color="warning")
@@ -4124,11 +4167,12 @@ def index(prompt: str = "", project: str = ""):
             """(Re)build the stage editor for the currently open design."""
             edit_box.clear()
             with edit_box:
-                if not state["ws"]:
+                read_root = _read_root(state)  # durable root in view mode (ws=None)
+                if not read_root:
                     ui.label("Open or run a design first, then edit a stage here.") \
                         .classes("text-xs").style("color:#64748b")
                     return
-                sj = read_state(state["ws"])
+                sj = read_state(read_root)
                 editable = [s for s in ("intent", "functional_spec", "architecture", "bom")
                             if sj.get(s)]
                 if not editable:
@@ -4202,6 +4246,7 @@ def index(prompt: str = "", project: str = ""):
             if state["running"]:
                 ui.notify("A run is already in progress.", color="warning")
                 return
+            _ensure_workspace(state)  # view-from-durable: rehydrate before the edit/rerun
             ws = state["ws"]
             if not ws:
                 ui.notify("No open design.", color="warning")
@@ -4240,6 +4285,7 @@ def index(prompt: str = "", project: str = ""):
             """Run the stages still missing from the current (reopened) design."""
             if state["running"]:
                 return
+            _ensure_workspace(state)  # view-from-durable: rehydrate before continuing
             sj = read_state(state["ws"]) if state["ws"] else {}
             rem = remaining_stages(sj)
             if not rem:
@@ -4301,15 +4347,25 @@ def index(prompt: str = "", project: str = ""):
                               color="positive")
                 refresh_account_ui()
                 return
-            ws = _rehydrate_workspace(p)
-            sj = read_state(ws)
+            if _view_from_durable() and p.dir_path:
+                # Read straight from the durable tree -- no 17-29 MB scratch copy on
+                # every reopen. A workspace is materialized lazily by
+                # _ensure_workspace on the first WRITE action (continue/edit/rebuild).
+                read_root = Path(p.dir_path)
+                ws_str, view_root = None, str(p.dir_path)
+                project_dir = _persisted_generated_dir(p.dir_path, p.project_stem)
+            else:
+                read_root = _rehydrate_workspace(p)
+                ws_str, view_root = str(read_root), None
+                project_dir = _discover_generated_dir(read_root)
+            sj = read_state(read_root)
             zip_ok = bool(p.zip_path and Path(p.zip_path).is_file())
             completed = p.status == "ok"
             state = _fresh_run_state()
             state.update(done=completed, ok=(True if completed else None),
                          failed=(p.status == "failed"),
                          spend=p.cost_usd, zip=(p.zip_path if zip_ok else None),
-                         ws=str(ws), stem=p.project_stem,
+                         ws=ws_str, view_root=view_root, stem=p.project_stem,
                          user_id=user.id, project_id=p.id, brief=p.brief or "",
                          board_code=p.board_code,
                          status=("awaiting_input" if p.status == "awaiting_input" else None),
@@ -4324,15 +4380,16 @@ def index(prompt: str = "", project: str = ""):
             view["account_refreshed"] = True
             tabs.reset()
             new_btn.set_visibility(False)  # "New design" lives in the header now
-            project_dir = _discover_generated_dir(ws)  # restored artifacts -> schematic /
-            if project_dir is not None:                # PCB render, even if the run FAILED
+            # project_dir resolved above (durable or rehydrated workspace); restored
+            # artifacts -> schematic / PCB render, even if the run FAILED.
+            if project_dir is not None:
                 state["stem"] = project_dir.name
                 state["project_dir"] = str(project_dir)
                 state["token"] = _register_project_dir(project_dir)
                 state["pcb_ready"] = (project_dir / f"{project_dir.name}.kicad_pcb").is_file()
             # Stage icons reflect the persisted progress, not just live events:
             # without this every reopened project showed all-pending tabs.
-            tabs.set_statuses(_derived_statuses(ws, sj, p.status, zip_ok),
+            tabs.set_statuses(_derived_statuses(read_root, sj, p.status, zip_ok),
                               sj.get("stage_status"))
             if state["failed"] and state["pcb_ready"]:
                 _mark_fab_invalid()
@@ -4482,6 +4539,10 @@ def index(prompt: str = "", project: str = ""):
                 ui.notify("The layout editor needs a Pro or Max plan. "
                           "See Pricing.", color="warning")
                 return
+            # The editor's _on_save writes manual_layout.json/preview/stamp.log into
+            # state["project_dir"]; in view mode that is the DURABLE tree, so
+            # materialize a scratch workspace first and re-point project_dir at it.
+            _ensure_workspace(state)
             view["layout_editor"] = True
 
             def _do_open():
@@ -4514,6 +4575,7 @@ def index(prompt: str = "", project: str = ""):
                 ui.notify("Routing a manual layout needs a Pro or Max plan.",
                           color="warning")
                 return
+            _ensure_workspace(state)  # defensive: editor-open should have made it
             if not state.get("ws") or not state.get("project_dir"):
                 return
             ml = (Path(state["project_dir"]) / ".experiments" / "manual"
@@ -4534,6 +4596,7 @@ def index(prompt: str = "", project: str = ""):
                 ui.notify("Wait for the current run to finish first.",
                           color="warning")
                 return
+            _ensure_workspace(state)  # rules edits (commit_slot) must land in scratch
             if not state["project_dir"] or not state.get("ws"):
                 return
             u = _current_user()
@@ -4571,6 +4634,7 @@ def index(prompt: str = "", project: str = ""):
             if state["running"]:
                 ui.notify("A run is already in progress.", color="warning")
                 return
+            _ensure_workspace(state)  # view-from-durable: rehydrate before the build enqueue
             if not state.get("ws") or not state.get("project_dir"):
                 return
             state.update(running=True, done=False, ok=None, status=None)
@@ -4686,16 +4750,19 @@ def index(prompt: str = "", project: str = ""):
                 build_question_panel()
 
             # Design-stage inspectors: rebuild from state.json whenever it changes.
-            if state["ws"]:
+            # read_root is the scratch workspace, or (view-from-durable) the durable
+            # project root -- the readers resolve either via the step-1 accessors.
+            read_root = _read_root(state)
+            if read_root:
                 # Seed the price cache from this project's persisted prices once
                 # (so a reopen shows costs immediately, before any new fetch).
-                if view.get("prices_loaded_ws") != state["ws"]:
-                    view["prices_loaded_ws"] = state["ws"]
-                    _load_price_cache(Path(state["ws"]))
-                mt = _mtime(_state_path(Path(state["ws"])))
+                if view.get("prices_loaded_ws") != str(read_root):
+                    view["prices_loaded_ws"] = str(read_root)
+                    _load_price_cache(read_root)
+                mt = _mtime(_state_path(read_root))
                 if mt and mt != view["state_mtime"]:
                     view["state_mtime"] = mt
-                    sj = _read_state_json(Path(state["ws"]))
+                    sj = _read_state_json(read_root)
                     if not sj:
                         # Caught the file mid-write: un-consume the mtime and
                         # retry next tick instead of wiping the inspectors.
@@ -4713,13 +4780,16 @@ def index(prompt: str = "", project: str = ""):
                         # are instant).
                         bom_parts = (sj.get("bom") or {}).get("parts") or []
                         if bom_parts:
-                            _ensure_bom_prices(bom_parts, state["ws"], state)
+                            # In view mode str(read_root) is the durable root, so the
+                            # background _save_price_cache writes through to durable
+                            # kicraft/<price file> -- the intended cache, no workspace.
+                            _ensure_bom_prices(bom_parts, str(read_root), state)
 
             # Prices arrive on a background thread; re-render the BOM when they do.
-            if state["ws"] and state.get("prices_rev") != view.get("prices_rev_seen"):
+            if read_root and state.get("prices_rev") != view.get("prices_rev_seen"):
                 view["prices_rev_seen"] = state.get("prices_rev")
                 spec = _inspector_spec(
-                    "bom", _read_state_json(Path(state["ws"])), {}, None,
+                    "bom", _read_state_json(read_root), {}, None,
                     view["build_lines"])
                 if spec:
                     tabs.set_inspector("bom", spec)
@@ -4728,8 +4798,8 @@ def index(prompt: str = "", project: str = ""):
             # writes the sheets: discover the generated dir from the workspace so the
             # viewer never depends on a project_stem being recorded or on the pre-build
             # wiring having found one. Self-heals on both live and reopened runs.
-            if state["project_dir"] is None and state["ws"]:
-                pd = _discover_generated_dir(Path(state["ws"]))
+            if state["project_dir"] is None and read_root:
+                pd = _discover_generated_dir(read_root)
                 if pd is not None:
                     state["stem"] = pd.name
                     state["project_dir"] = str(pd)
@@ -4741,7 +4811,7 @@ def index(prompt: str = "", project: str = ""):
             if project_dir is not None and view["sch_view"] is None:
                 srcs = _schematic_sources(project_dir, state["stem"], state["token"])
                 if srcs:
-                    sj = _read_state_json(Path(state["ws"])) if state["ws"] else {}
+                    sj = _read_state_json(read_root) if read_root else {}
                     tabs.set_inspector("synthesize", _inspector_spec(
                         "synthesize", sj, {}, project_dir, view["build_lines"]))
                     slot = tabs.view_slot("synthesize")
@@ -4838,7 +4908,7 @@ def index(prompt: str = "", project: str = ""):
                     status.text = "Done. Your KiCad project is ready."
                     if not view["fab_done"]:
                         view["fab_done"] = True
-                        sj = _read_state_json(Path(state["ws"])) if state["ws"] else {}
+                        sj = _read_state_json(read_root) if read_root else {}
                         rs = _read_run_status(project_dir) if project_dir else {}
                         for stg in ("synthesize", "place_route", "fab"):  # finalize build logs
                             tabs.set_inspector(stg, _inspector_spec(
