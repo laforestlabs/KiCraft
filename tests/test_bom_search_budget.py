@@ -13,7 +13,45 @@ import types
 
 from kicraft.parts_library import mpn_cache
 from kicraft.server import stage_driver
-from kicraft.server.stage_driver import _bom_executor, _normalize_mpn
+from kicraft.server.stage_driver import _bom_executor, _new_bundle_rows, _normalize_mpn
+
+
+_LIST_PARTS_SAMPLE = """## Available parts
+
+Some preamble prose about how to use bundles.
+
+| name | mpn | sourcing | tags | symbol | footprint | tier | badge |
+|---|---|---|---|---|---|---|---|
+| `a4988` | A4988SETTR-T | lcsc:C38437 | stepper | `a4988:A4988SETTR-T` | `a4988:WQFN-28` | vendored | production |
+| `bmp280-bosch-sensor` | BMP280 | lcsc:C83291 | sensor | `bmp280-bosch-sensor:BMP280` | `bmp280-bosch-sensor:LGA-8` | home | prototype |
+| `ch224k` | CH224K | lcsc:C970725 | usb-pd | `ch224k:CH224K` | `ch224k:ESSOP-10` | home | prototype |
+"""
+
+
+def test_new_bundle_rows_keeps_only_the_fetched_row():
+    out = _new_bundle_rows(_LIST_PARTS_SAMPLE, "C83291", None)
+    # the header (column row) is preserved so the model can read the columns
+    assert "| name | mpn | sourcing" in out
+    # only the matching bundle's row is included, by its LCSC C-number
+    assert "bmp280-bosch-sensor:BMP280" in out
+    assert "a4988" not in out and "ch224k" not in out
+    # and the whole-table dump is gone (far smaller than the input)
+    assert len(out) < len(_LIST_PARTS_SAMPLE)
+
+
+def test_new_bundle_rows_matches_by_slug_and_handles_url_lcsc():
+    out = _new_bundle_rows(_LIST_PARTS_SAMPLE,
+                           "https://lcsc.com/product-detail/C970725.html", "ch224k")
+    assert "ch224k:CH224K" in out
+    assert "bmp280" not in out
+
+
+def test_new_bundle_rows_falls_back_when_row_absent():
+    # add-part failed -> the new C-number is not in the table; still return the
+    # header plus a hint, never crash or silently drop everything.
+    out = _new_bundle_rows(_LIST_PARTS_SAMPLE, "C99999999", None)
+    assert "| name | mpn | sourcing" in out
+    assert "call list_parts" in out
 
 
 def test_key_for_folds_whitespace_case_and_lcsc_url(monkeypatch):

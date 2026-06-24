@@ -379,6 +379,33 @@ _MEMOIZED_BOM_TOOLS = frozenset(
     {"lookup_symbol", "lookup_footprint", "search_symbols", "search_footprints"})
 
 
+def _new_bundle_rows(list_parts_stdout: str, lcsc_id: str, name: str | None) -> str:
+    """After add_part_from_lcsc, the model needs the exact '<name>:<symbol>' /
+    '<name>:<footprint>' strings for the ONE bundle it just fetched -- not the
+    whole ~42 KB parts table re-dumped (which then rides the conversation in
+    every later tool round, the dominant BOM token cost). Return the markdown
+    table header plus only the row(s) for the new bundle, matched by its LCSC
+    C-number (rendered 'lcsc:C#####' in the sourcing column) or its slug. Falls
+    back to a bounded slice if the row can't be located (e.g. add-part failed),
+    so the model always gets something actionable."""
+    lines = (list_parts_stdout or "").splitlines()
+    sep = next((i for i, ln in enumerate(lines)
+                if re.match(r"\s*\|\s*-{2,}", ln)), None)
+    if sep is None:  # unexpected format -> don't silently hide it, just bound it
+        return (list_parts_stdout or "")[:8000]
+    m = _LCSC_ID_RE.search(lcsc_id or "")
+    cnum = m.group(0).upper() if m else ""
+    slug = (name or "").strip().lower()
+    rows = [ln for ln in lines[sep + 1:]
+            if ln.lstrip().startswith("|")
+            and ((cnum and cnum in ln.upper())
+                 or (slug and f"`{slug}`" in ln.lower()))]
+    header = "\n".join(lines[:sep + 1])
+    if not rows:  # couldn't pin the new row; give the model the header + a hint
+        return header + "\n(new row not located; call list_parts for the full table)"
+    return (header + "\n" + "\n".join(rows))[:8000]
+
+
 def _bom_executor(workspace: Path):
     """Return an executor(name, args) -> str backed by the kicraft CLI (cwd=workspace)."""
     lcsc_calls: dict[str, int] = {}  # normalized MPN -> attempts this stage (search budget)
@@ -432,13 +459,20 @@ def _bom_executor(workspace: Path):
             # the model needs once is then reused by every later design as a
             # `prototype`-badged bundle, so the catalog self-grows and repeated
             # LCSC fetches (the dominant BOM cost) amortize away.
-            cmd = ["add-part", "--from-lcsc", str(args.get("lcsc_id", "")), "--into", "home"]
-            if args.get("name"):
-                cmd += ["--name", str(args["name"])]
+            lcsc_id = str(args.get("lcsc_id", ""))
+            name = str(args["name"]) if args.get("name") else None
+            cmd = ["add-part", "--from-lcsc", lcsc_id, "--into", "home"]
+            if name:
+                cmd += ["--name", name]
             r = _run(KICRAFT + cmd, workspace)
             lp = _run(KICRAFT + ["list-parts"], workspace)
+            # Return ONLY the freshly-fetched bundle's row(s), not the whole
+            # ~42 KB table: the dump would otherwise persist in context for every
+            # later round. The model can still call list_parts for the full table.
             return (f"add-part exit={r.returncode}\n{(r.stdout + chr(10) + r.stderr).strip()[:1500]}"
-                    f"\n\nCURRENT PARTS LIBRARY:\n{lp.stdout[:40000]}")
+                    f"\n\nNEWLY ADDED BUNDLE (use these strings verbatim; call "
+                    f"list_parts for the full library):\n"
+                    f"{_new_bundle_rows(lp.stdout, lcsc_id, name)}")
         return f"unknown tool: {name}"
     return execute
 
