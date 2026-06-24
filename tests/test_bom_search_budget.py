@@ -1,9 +1,13 @@
-"""BOM-stage cost controls: the per-MPN search budget and the MPN->LCSC cache.
+"""BOM-stage cost controls: the per-MPN search budget, the MPN->LCSC cache, the
+read-only-lookup memo, and the add_part result trim.
 
-These directly target the dominant BOM cost identified in the part-query log:
-lookup_lcsc_id is 56% of all BOM tool calls, and a single part was looked up
-47x across a window because resolved parts were never cached and a weak model
-re-spells the same MPN for round after round.
+These target repeated BOM tool work seen in the part-query log: a single part
+re-resolved many times (e.g. BMP280) because resolved parts were never cached,
+plus symbol/footprint verifications re-issued round after round. Note the
+per-MPN cap and the cache key on the *exact normalized spelling* — they kill
+exact-repeat churn, but a part re-spelled three ways (VL53L1X / VL53L1C /
+VL53L1CXV0FY/1) is three distinct keys; that re-spelling churn is addressed by
+vendoring the part, not here.
 """
 from __future__ import annotations
 

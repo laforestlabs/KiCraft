@@ -29,9 +29,9 @@ child CPU, tool rounds, and tool calls durably per stage, not just LLM cost.
 
 ### Phase B: BOM LLM-cost fixes
 
-Targeted the churn measured in `~/.kicraft/part_queries.jsonl` (395 events:
-`lookup_lcsc_id` = 56% of all queries; BMP280 resolved 47x; VL53L1 re-spelled
-56x).
+Targeted repeated part-resolution churn seen in `~/.kicraft/part_queries.jsonl`
+(a part like BMP280 re-resolved dozens of times because resolved parts were
+never cached).
 
 - **Server-side per-MPN search budget** (`_bom_executor`): normalizes the MPN
   (case + whitespace + collapses pasted lcsc.com/jlcpcb.com URLs to the bare
@@ -40,15 +40,27 @@ Targeted the churn measured in `~/.kicraft/part_queries.jsonl` (395 events:
 - **Persistent MPN->LCSC cache** (`kicraft/parts_library/mpn_cache.py` + the
   `lookup-lcsc-id` CLI): a part resolved once on a machine resolves instantly,
   offline, on every later run. Stored as `~/.kicraft/mpn_cache.json` (override
-  `$KICRAFT_MPN_CACHE`). Verified: BMP280 -> cached -> `bmp280` resolves in
-  0.31s with `source: mpn-cache(via parts-library)`, no network.
+  `$KICRAFT_MPN_CACHE`).
+
+**Scope of Phase B (important, was overstated):** both the cap and the cache
+key on the *exact normalized spelling*. They eliminate **exact-repeat** churn
+(the same MPN looked up identically). They do **not** stop **re-spelling**
+churn — a weak model spelling one part three ways (`VL53L1X`, `VL53L1C`,
+`VL53L1CXV0FY/1`) produces three distinct keys, so neither mechanism merges
+them (`test_bom_executor_budget_is_per_spelling` pins this as intended). The
+re-spelling case is only truly killed by **vendoring** the part (R2). The
+cache's primary win is latency/network + suppressing wrong-answer retries; it
+reduces LLM *rounds* only when it lets the model converge sooner on a spelling
+it reuses.
 
 ### Tests
 
 - `tests/test_stage_resource_telemetry.py`: model fields; all three sinks
   (caller return, state.json, ledger); intent-null-rounds; report aggregation.
 - `tests/test_bom_search_budget.py`: cache roundtrip/corrupt-file/URL-folding;
-  per-MPN cap; per-spelling budget independence.
+  per-MPN cap; per-spelling budget independence; `cacheable` precise-only gate;
+  keyword no-cache; read-only-lookup memo (and list_parts NOT memoized);
+  `_new_bundle_rows` keeps only the fetched row / slug+URL match / fallback.
 - `tests/test_spend_guard.py`: `record_stage` writes the row, nulls rounds for
   single-shot stages, does not inflate the spend ceiling.
 
@@ -203,3 +215,54 @@ stages). To see place/route CPU in the same report, have
 around the FreeRouting JVM. The column and report already render build-phase
 rows; only the writer is missing. This is the lever for the
 separately-scoped place/route effort.
+
+## Critical-analysis review (2026-06-24) — findings + what shipped
+
+A critical pass over this branch turned up gaps between what Phases A/B claim
+and what they do. Fixes that were small + low-risk landed now; the rest is
+folded into R1–R5.
+
+**Shipped this pass:**
+
+1. **Cache hardening** (`mpn_cache.cacheable`, cache read moved after the
+   parts-library tier). The cache short-circuited *before* the authoritative
+   offline library and froze fuzzy keyword 'best match' results per-machine
+   with no TTL/invalidation. Now only precise identifiers (a C-number, or a
+   whitespace-free token with a digit) are cached, and a freshly-vendored
+   bundle always wins. Also isolated `KICRAFT_MPN_CACHE` in the resolver tests
+   (the real home cache was leaking in — two tests were already red) and fixed
+   two stale easyeda-fall-through tests that used the now-vendored BMP280.
+2. **Read-only-lookup memo** (`_MEMOIZED_BOM_TOOLS` in `_bom_executor`).
+   `lookup_symbol` / `lookup_footprint` / `search_symbols` / `search_footprints`
+   are ~70% of BOM tool calls in the live log and are pure for the life of a
+   stage; an exact repeat now skips the subprocess. (Targets the resource that
+   the cap+cache, aimed at the ~21% `lookup_lcsc_id` slice, left untouched.)
+3. **add_part trim** (`_new_bundle_rows`). `add_part_from_lcsc` re-dumped the
+   whole ~42 KB parts table into the tool result, which then rode the
+   conversation every later round; now it returns only the fetched bundle's
+   row(s) — 41,430 → 774 chars on the real library. This is the larger LLM
+   *token* lever (vs the cap/cache, which mostly cut latency).
+4. **cpu_s honesty**. `RUSAGE_CHILDREN` is per-process; the web app runs
+   designs in concurrent `_run_design` threads, so concurrent stages
+   cross-contaminate each other's `cpu_s` delta. Documented in
+   `_child_cpu_s`, `record_stage`, and a footnote in the cost report;
+   `wall_s` is unaffected. **This changes R1's acceptance:** capture the cpu/wall
+   baseline **serially** (one self-eval at a time), or the "low single-digit
+   cpu/wall = latency-bound" signal is corrupted by concurrency. A real fix is
+   a `cpu_contended` flag per `stage_runs` row (set when other stages overlap
+   the window) so the report can exclude contaminated rows — deferred.
+
+**Measurement correction (feeds R1):** the "395 events / `lookup_lcsc_id` = 56%
+/ BMP280 47x / VL53L1 56x" figures came from a small slice. The live dev log is
+~10,355 events where `lookup_lcsc_id` is ~21% and the top queries include test
+fixtures (`DEFINITELY_NOT_A_PART_X1` 77x, a truncated product URL 64x).
+Symbol/footprint lookups+searches are ~70%. So: (a) the dev log is
+test-contaminated — R1's clean hosted baseline is the only trustworthy
+measurement; (b) the highest-volume churn is symbol/footprint resolution, not
+part-resolution, which is why the memo (item 2) and a future cross-run
+symbol/footprint cache matter as much as the MPN cache.
+
+**Re-prioritized remaining work:** R2 (vendoring) stays highest-leverage — it
+is the *only* thing that kills re-spelling churn. Add to R3/R4 a cross-run
+symbol/footprint resolution cache (the within-stage memo is the cheap first
+step; a persistent one would cut the 70% slice across runs).

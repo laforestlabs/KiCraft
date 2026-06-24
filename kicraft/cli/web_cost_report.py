@@ -253,6 +253,8 @@ def format_stage_runs(rows) -> str:
             s["rounds"] or "-", s["tool_calls"] or "-", s["fails"]))
         out.append("      {:<14} cpu/wall {:.0f}%  mean wall {:.1f}s".format(
             "", cpu_pct, (s["wall_s"] / s["n"]) if s["n"] else 0.0))
+    out.append("    note: cpu_s is process-global (RUSAGE_CHILDREN) and reliable "
+               "only when designs run serially; wall_s is always accurate.")
     return "\n".join(out)
 
 

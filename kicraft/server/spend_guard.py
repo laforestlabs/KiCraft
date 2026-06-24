@@ -171,7 +171,12 @@ class SpendGuard:
         wall-clock duration and child-CPU seconds (LLM latency + subprocess tool
         calls). ``cost_usd`` mirrors the summed LLM spend for the side-by-side
         report; it is intentionally NOT added to the ``spend`` ceiling (the
-        per-call rows there already enforce it)."""
+        per-call rows there already enforce it).
+
+        Note: ``cpu_s`` comes from RUSAGE_CHILDREN, which is per-process, so it
+        is only trustworthy when designs run serially — concurrent stages in the
+        same web process cross-contaminate each other's child-CPU delta (see
+        stage_driver._child_cpu_s). ``wall_s`` is unaffected."""
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO stage_runs (ts, run_id, stage, ok, attempts, rounds, "

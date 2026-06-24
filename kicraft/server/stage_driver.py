@@ -40,7 +40,17 @@ def _child_cpu_s() -> float:
     (the stage-prep/commit calls and BOM tool lookups). RUSAGE_CHILDREN accumulates
     over the whole process, so the driver snapshots a before/after delta per stage.
     On non-POSIX this reports 0 (resource.RUSAGE_CHILDREN is unavailable); the
-    ledger column then stays null."""
+    ledger column then stays null.
+
+    CAVEAT — reliable only single-flight: RUSAGE_CHILDREN is per-PROCESS, not
+    per-thread. The web app runs designs in concurrent _run_design threads in one
+    process, so when two designs are in flight the stage windows overlap and each
+    one's cpu_s delta absorbs the other's subprocess CPU. wall_s (a monotonic
+    delta) stays correct under concurrency; cpu_s does not. Trust cpu_s only for
+    serial measurement (one design at a time, e.g. a single self-eval), and read
+    the aggregate cpu/wall ratio as a rough latency-vs-CPU signal, not an exact
+    per-stage figure. A future fix could tag each stage_runs row as
+    cpu-contended when other stages overlapped its window."""
     try:
         u = resource.getrusage(resource.RUSAGE_CHILDREN)
     except (AttributeError, ValueError):
