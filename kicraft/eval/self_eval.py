@@ -271,7 +271,7 @@ def _make_judge_client(s, judge_model, skip_judge: bool):
 
 
 def evaluate_one(client, idx: int, entry: dict, out_dir: Path, *,
-                 judge_model, skip_judge: bool, judge_client=None,
+                 judge_model, skip_judge: bool, judge_client=None, rep: int | None = None,
                  max_park_rounds: int = 12,
                  build_timeout_s: int = 2400, build_gate=None,
                  full_events: bool = True) -> dict:
@@ -287,7 +287,7 @@ def evaluate_one(client, idx: int, entry: dict, out_dir: Path, *,
     t0 = time.time()
     started_at = _now_iso()
     prompt = entry["brief"]
-    stem = _stem_for(idx, entry)
+    stem = _stem_for(idx, entry) + (f"__r{rep}" if rep else "")
     rundir = out_dir / stem
     (rundir / ".kicraft").mkdir(parents=True, exist_ok=True)
     (rundir / "brief.txt").write_text(prompt + "\n", encoding="utf-8")
@@ -296,7 +296,8 @@ def evaluate_one(client, idx: int, entry: dict, out_dir: Path, *,
 
     # ``prompt`` is kept as the record field name (the web admin + report read it) and
     # mirrors entry["brief"]; ``slug``/``archetype`` are the new corpus identity.
-    rec: dict = {"index": idx, "slug": entry["slug"], "archetype": entry["archetype"],
+    rec: dict = {"index": idx, "slug": entry["slug"], "repeat": rep,
+                 "archetype": entry["archetype"],
                  "prompt": prompt, "stem": stem, "rundir": str(rundir)}
     try:
         d = run_design(client, prompt, rundir, progress,
@@ -365,6 +366,41 @@ def _archetype_stats(records: list[dict]) -> dict[str, dict]:
     return out
 
 
+def _iqr(vals: list[float]) -> float:
+    """Inter-quartile range (Q3-Q1); 0.0 with fewer than 2 samples."""
+    if len(vals) < 2:
+        return 0.0
+    q = statistics.quantiles(vals, n=4, method="inclusive")
+    return round(q[2] - q[0], 1)
+
+
+def _per_brief_stats(records: list[dict]) -> dict[str, dict]:
+    """Group the N repeats of each brief and summarize its score distribution:
+    median (the regression signal that survives the ~12-pt run-to-run noise) and
+    IQR (the spread that *measures* that noise). Keyed by slug, first-seen order;
+    a no-op shape for a single-repeat batch (median == the one value, IQR 0)."""
+    out: dict[str, dict] = {}
+    for r in records:
+        slug = r.get("slug") or "—"
+        st = out.setdefault(slug, {"slug": slug, "archetype": r.get("archetype"),
+                                   "n": 0, "_finals": [], "fab_ready": 0, "grades": []})
+        st["n"] += 1
+        if isinstance(r.get("final"), (int, float)):
+            st["_finals"].append(r["final"])
+        if r.get("build_rc") == 0:
+            st["fab_ready"] += 1
+        st["grades"].append(r.get("grade") or ("ERROR" if r.get("error") else "—"))
+    for st in out.values():
+        fin = st.pop("_finals")
+        st["graded_n"] = len(fin)
+        st["median_final"] = round(statistics.median(fin), 1) if fin else None
+        st["mean_final"] = round(statistics.fmean(fin), 1) if fin else None
+        st["iqr"] = _iqr(fin) if fin else None
+        st["min_final"] = round(min(fin), 1) if fin else None
+        st["max_final"] = round(max(fin), 1) if fin else None
+    return out
+
+
 def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
     """Write ``summary.json`` + ``summary.md`` and return the summary dict."""
     finals = [r["final"] for r in records if isinstance(r.get("final"), (int, float))]
@@ -377,17 +413,32 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
         for gid in r.get("gates") or []:
             gate_counts[gid] = gate_counts.get(gid, 0) + 1
 
+    per_brief = _per_brief_stats(records)
+    # With repeats, the trustworthy cross-brief signal aggregates each brief's
+    # MEDIAN (one vote per brief), so a single noisy run can't sway the headline.
+    brief_medians = [b["median_final"] for b in per_brief.values()
+                     if b.get("median_final") is not None]
+    repeats = meta.get("repeats", 1)
+
     summary = {
         **meta,
         "n": len(records),
+        "n_briefs": len(per_brief),
         "graded_n": len(finals),
         "n_errored": sum(1 for r in records if r.get("error")),
         "fab_ready": sum(1 for r in records if r.get("build_rc") == 0),
         "mean_final": round(statistics.fmean(finals), 1) if finals else None,
         "median_final": round(statistics.median(finals), 1) if finals else None,
+        # per-brief-median aggregates (== flat mean/median when repeats == 1)
+        "brief_median_mean": round(statistics.fmean(brief_medians), 1) if brief_medians else None,
+        "brief_median_median": round(statistics.median(brief_medians), 1) if brief_medians else None,
+        "median_iqr": (round(statistics.median([b["iqr"] for b in per_brief.values()
+                                                if b.get("iqr") is not None]), 1)
+                       if repeats > 1 and brief_medians else None),
         "grade_counts": grade_counts,
         "gate_counts": gate_counts,
         "archetype_stats": _archetype_stats(records),
+        "per_brief": per_brief,
         "total_cost_usd": round(sum(_run_cost(r) for r in records), 4),
         "runs": records,
     }
@@ -398,10 +449,15 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
 
 def _render_md(s: dict) -> str:
     L: list[str] = [f"# KiCraft self-eval — {s.get('started_at', '')}", ""]
-    L.append(f"- briefs: **{s['n']}**  ·  graded: **{s['graded_n']}**  ·  "
+    repeats = s.get("repeats", 1)
+    rep_note = f" ({repeats} repeats, {s['n']} runs)" if repeats > 1 else ""
+    L.append(f"- briefs: **{s.get('n_briefs', s['n'])}**{rep_note}  ·  graded runs: **{s['graded_n']}**  ·  "
              f"fab-ready builds: **{s['fab_ready']}/{s['n']}**  ·  errored: **{s['n_errored']}**")
     if s.get("mean_final") is not None:
         L.append(f"- score (0–100): mean **{s['mean_final']}** · median **{s['median_final']}**")
+    if repeats > 1 and s.get("brief_median_mean") is not None:
+        L.append(f"- per-brief median (de-noised, 1 vote/brief): mean **{s['brief_median_mean']}** "
+                 f"· median **{s['brief_median_median']}**  ·  typical IQR **{s.get('median_iqr')}**")
     L.append("- grades: " + "  ".join(f"{g}:{n}" for g, n in sorted(s["grade_counts"].items())))
     if s["gate_counts"]:
         L.append("- gates: " + ", ".join(f"{k}×{v}" for k, v in s["gate_counts"].items()))
@@ -428,7 +484,30 @@ def _render_md(s: dict) -> str:
             ]) + " |")
         L.append("")
 
-    L.append("## Per brief")
+    per_brief = s.get("per_brief") or {}
+    if repeats > 1 and per_brief:
+        L.append("## Per brief (median over repeats)")
+        L.append("")
+        L.append("| slug | archetype | n | median | IQR | min–max | fab-ready | grades |")
+        L.append("|------|-----------|---|--------|-----|---------|-----------|--------|")
+        for b in per_brief.values():
+            med = b.get("median_final")
+            rng = (f"{b['min_final']}–{b['max_final']}"
+                   if b.get("min_final") is not None else "—")
+            grds = " ".join(b.get("grades") or [])
+            L.append("| " + " | ".join([
+                b.get("slug") or "—",
+                str(b.get("archetype") or "—"),
+                str(b.get("n", 0)),
+                (str(med) if med is not None else "—"),
+                (str(b.get("iqr")) if b.get("iqr") is not None else "—"),
+                rng,
+                f"{b.get('fab_ready', 0)}/{b.get('n', 0)}",
+                grds,
+            ]) + " |")
+        L.append("")
+
+    L.append("## Per run" if repeats > 1 else "## Per brief")
     L.append("")
     L.append("| # | slug | archetype | grade | final | verdict | build | Q | $ |")
     L.append("|---|------|-----------|-------|-------|---------|-------|---|---|")
@@ -439,9 +518,10 @@ def _render_md(s: dict) -> str:
             build = r.get("build_label") or str(r.get("build_rc"))
         verdict = r.get("verdict") or ("ERROR" if r.get("error") else r.get("design_status") or "—")
         final = r.get("final")
+        slug_cell = str(r.get("slug") or "—") + (f" r{r['repeat']}" if r.get("repeat") else "")
         L.append("| " + " | ".join([
             str(r["index"]),
-            str(r.get("slug") or "—"),
+            slug_cell,
             str(r.get("archetype") or "—"),
             r.get("grade") or "—",
             (str(final) if final is not None else "—"),
@@ -504,16 +584,24 @@ def _select(entries: list[dict], limit, only) -> list[tuple[int, dict]]:
     return rows
 
 
+def _run_key(slug: str, rep: int | None) -> str:
+    """Stable per-run key. For a single run (rep is None) it is just the brief
+    slug (so --resume stays robust to corpus reordering); for an N-repeat run it
+    is ``<slug>__r<K>`` so the N runs of one brief don't collide."""
+    return slug if rep is None else f"{slug}__r{rep}"
+
+
 def _load_prior_records(out_dir: Path) -> dict[str, dict]:
-    """Per-brief records from an existing batch's ``summary.json``, keyed by brief
-    slug (robust to corpus reordering between a batch and its --resume). Empty when
-    the batch never wrote a checkpoint (or it is unreadable)."""
+    """Per-run records from an existing batch's ``summary.json``, keyed by run key
+    (slug, or slug__rK for repeats; robust to corpus reordering between a batch
+    and its --resume). Empty when the batch never wrote a checkpoint (or it is
+    unreadable)."""
     path = out_dir / "summary.json"
     if not path.exists():
         return {}
     try:
         runs = json.loads(path.read_text(encoding="utf-8")).get("runs") or []
-        return {r["slug"]: r for r in runs if r.get("slug")}
+        return {_run_key(r["slug"], r.get("repeat")): r for r in runs if r.get("slug")}
     except Exception:  # noqa: BLE001 - unreadable summary == nothing to reuse
         return {}
 
@@ -546,6 +634,11 @@ def main(argv=None) -> int:
                          "the full reasoning/answer stream. Default is full fidelity, so a "
                          "run replays in the web viewer like a live build (~+0.5-2MB/run)")
     ap.add_argument("--judge-model", default=None, help="judge model override")
+    ap.add_argument("--repeats", type=int, default=1,
+                    help="run each brief N times and report per-brief median + IQR "
+                         "(default 1). N>=3 makes the ~12-pt run-to-run noise floor "
+                         "legible: a regression is a drop in the per-brief MEDIAN, not "
+                         "a single noisy run. Cost scales ~N (combine with --parallel).")
     ap.add_argument("--max-park-rounds", type=int, default=12,
                     help="cap on park/auto-answer resume rounds per brief")
     ap.add_argument("--build-timeout", type=int, default=2400,
@@ -589,13 +682,20 @@ def main(argv=None) -> int:
                else (Path(args.out) if args.out else _default_out_dir())).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    repeats = max(1, args.repeats)
+    reps = [None] if repeats == 1 else list(range(1, repeats + 1))
+
     prior = _load_prior_records(out_dir) if resume_dir else {}
     if resume_dir and prior and not args.only and args.limit is None:
         # default a resume to the batch's own brief set, not the whole catalog
-        selected = [(i, e) for i, e in selected if e["slug"] in prior]
-    reused = {e["slug"]: prior[e["slug"]] for _, e in selected
-              if _reusable(prior.get(e["slug"]))}
-    todo = [(i, e) for i, e in selected if e["slug"] not in reused]
+        prior_slugs = {r["slug"] for r in prior.values() if r.get("slug")}
+        selected = [(i, e) for i, e in selected if e["slug"] in prior_slugs]
+    # Expand to one (idx, entry, rep) per run; reuse / re-run is decided per run.
+    all_runs = [(i, e, rep) for i, e in selected for rep in reps]
+    reused = {_run_key(e["slug"], rep): prior[_run_key(e["slug"], rep)]
+              for _, e, rep in all_runs if _reusable(prior.get(_run_key(e["slug"], rep)))}
+    todo = [(i, e, rep) for i, e, rep in all_runs
+            if _run_key(e["slug"], rep) not in reused]
     parallel = max(1, min(args.parallel, len(todo) or 1))
 
     meta = {
@@ -605,6 +705,7 @@ def main(argv=None) -> int:
         "judge": not args.no_judge,
         "judge_model": None if args.no_judge else judge_model,
         "rubric_version": None,
+        "repeats": repeats,
         "parallel": parallel,
         "build_slots": max(1, args.build_slots),
         "full_events": not args.lean_events,
@@ -619,7 +720,8 @@ def main(argv=None) -> int:
 
     # flush every progress line: batches run for an hour-plus redirected to run.log,
     # and block buffering would otherwise hide per-brief lines until exit
-    print(f"self-eval: {len(selected)} brief(s) -> {out_dir}", flush=True)
+    rep_note = f" x{repeats} repeats ({len(all_runs)} runs)" if repeats > 1 else ""
+    print(f"self-eval: {len(selected)} brief(s){rep_note} -> {out_dir}", flush=True)
     if resume_dir:
         print(f"  resume: {len(reused)} reused · {len(todo)} to run", flush=True)
     print(f"  design model={meta['design_model']}  "
@@ -627,31 +729,33 @@ def main(argv=None) -> int:
           + (f"  parallel={parallel} build_slots={meta['build_slots']}" if parallel > 1 else ""),
           flush=True)
 
-    # A re-run brief must start from a clean slate: stale .kicraft state would make
+    # A re-run must start from a clean slate: stale .kicraft state would make
     # run_design resume mid-chain and stale events.jsonl would skew the Class-C scorers.
     if resume_dir:
-        for idx, entry in todo:
-            stale = out_dir / _stem_for(idx, entry)
+        for idx, entry, rep in todo:
+            stale = out_dir / (_stem_for(idx, entry) + (f"__r{rep}" if rep else ""))
             if stale.exists():
                 shutil.rmtree(stale)
 
     t_mono = time.monotonic()
-    by_slug: dict[str, dict] = dict(reused)
+    by_run: dict[str, dict] = dict(reused)
     ckpt_lock = threading.Lock()
 
     def _checkpoint() -> None:
-        # Live partial summary after every brief: what --resume reads back when a
+        # Live partial summary after every run: what --resume reads back when a
         # batch is interrupted, and a progress view for the admin GUI. Call with
-        # ckpt_lock held.
-        recs = [by_slug[e["slug"]] for _, e in selected if e["slug"] in by_slug]
+        # ckpt_lock held. Ordered by (brief, repeat) so the report is stable.
+        recs = [by_run[k] for _, e, rep in all_runs
+                if (k := _run_key(e["slug"], rep)) in by_run]
         compile_report(recs, out_dir, meta)
 
     if parallel <= 1:
         judge_client = _make_judge_client(s, judge_model, args.no_judge)
-        for n, (idx, entry) in enumerate(todo, start=1):
-            print(f"\n[{n}/{len(todo)}] #{idx} {entry['slug']}: {entry['brief']}", flush=True)
+        for n, (idx, entry, rep) in enumerate(todo, start=1):
+            label = entry["slug"] + (f" r{rep}" if rep else "")
+            print(f"\n[{n}/{len(todo)}] #{idx} {label}: {entry['brief']}", flush=True)
             rec = evaluate_one(client, idx, entry, out_dir, judge_model=judge_model,
-                               skip_judge=args.no_judge, judge_client=judge_client,
+                               skip_judge=args.no_judge, judge_client=judge_client, rep=rep,
                                max_park_rounds=args.max_park_rounds,
                                build_timeout_s=args.build_timeout,
                                full_events=not args.lean_events)
@@ -663,23 +767,23 @@ def main(argv=None) -> int:
                       f"build={rec.get('build_label')} cost=${_run_cost(rec)} "
                       f"({rec.get('duration_s')}s)", flush=True)
             with ckpt_lock:
-                by_slug[rec["slug"]] = rec
+                by_run[_run_key(rec["slug"], rec.get("repeat"))] = rec
                 _checkpoint()
     else:
         gate = threading.BoundedSemaphore(max(1, args.build_slots))
         print_lock = threading.Lock()
 
-        def _worker(idx: int, entry: dict) -> dict:
-            # One client per brief: client instances are not safe to share across
+        def _worker(idx: int, entry: dict, rep: int | None) -> dict:
+            # One client per run: client instances are not safe to share across
             # threads (construction is ~ms; the spend ledger is WAL sqlite). Routed
             # through make_client so KICRAFT_LLM_MODE=replay drives the corpus at $0.
             wclient = make_client(s)
             wjudge = _make_judge_client(s, judge_model, args.no_judge)
-            stem = _stem_for(idx, entry)
+            stem = _stem_for(idx, entry) + (f"__r{rep}" if rep else "")
             with print_lock:
                 print(f"[{stem}] start: {entry['brief']}", flush=True)
             rec = evaluate_one(wclient, idx, entry, out_dir, judge_model=judge_model,
-                               skip_judge=args.no_judge, judge_client=wjudge,
+                               skip_judge=args.no_judge, judge_client=wjudge, rep=rep,
                                max_park_rounds=args.max_park_rounds,
                                build_timeout_s=args.build_timeout, build_gate=gate,
                                full_events=not args.lean_events)
@@ -694,16 +798,17 @@ def main(argv=None) -> int:
             return rec
 
         with ThreadPoolExecutor(max_workers=parallel) as ex:
-            futures = [ex.submit(_worker, idx, entry) for idx, entry in todo]
+            futures = [ex.submit(_worker, idx, entry, rep) for idx, entry, rep in todo]
             for fut in as_completed(futures):
                 rec = fut.result()  # evaluate_one never raises
                 with ckpt_lock:
-                    by_slug[rec["slug"]] = rec
+                    by_run[_run_key(rec["slug"], rec.get("repeat"))] = rec
                     _checkpoint()
 
     meta["finished_at"] = _now_iso()
     meta["wall_s"] = round(time.monotonic() - t_mono, 1)
-    records = [by_slug[e["slug"]] for _, e in selected if e["slug"] in by_slug]
+    records = [by_run[k] for _, e, rep in all_runs
+               if (k := _run_key(e["slug"], rep)) in by_run]
     summary = compile_report(records, out_dir, meta)
 
     print(f"\n=== self-eval complete: {summary['graded_n']}/{summary['n']} graded · "
