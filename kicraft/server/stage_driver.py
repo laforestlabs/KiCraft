@@ -20,9 +20,11 @@ import datetime as dt
 import json
 import os
 import re
+import resource
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from kicraft.design import models
@@ -31,6 +33,32 @@ from .client import make_client
 
 # The repo venv has no `kicraft` console script; cli_app.py has a __main__ guard.
 KICRAFT = [sys.executable, "-m", "kicraft.design.cli_app"]
+
+
+def _child_cpu_s() -> float:
+    """User+system CPU seconds consumed by this process's child subprocesses
+    (the stage-prep/commit calls and BOM tool lookups). RUSAGE_CHILDREN accumulates
+    over the whole process, so the driver snapshots a before/after delta per stage.
+    On non-POSIX this reports 0 (resource.RUSAGE_CHILDREN is unavailable); the
+    ledger column then stays null."""
+    try:
+        u = resource.getrusage(resource.RUSAGE_CHILDREN)
+    except (AttributeError, ValueError):
+        return 0.0
+    return float(u.ru_utime + u.ru_stime)
+
+
+def _record_stage_ledger(client, *, run_id, stage, **kw) -> None:
+    """Best-effort write to the spend ledger's ``stage_runs`` table. Real clients
+    carry a ``guard`` (SpendGuard) that owns ``record_stage``; the mock/replay
+    client's guard does not, so this is a silent no-op there."""
+    guard = getattr(client, "guard", None)
+    if guard is None or not hasattr(guard, "record_stage"):
+        return
+    try:
+        guard.record_stage(run_id=run_id, stage=stage, **kw)
+    except Exception:  # ledger trouble must never fail a design run
+        pass
 
 _REPO = Path(__file__).resolve().parents[2]
 _SPEC_DIRS = [
@@ -321,8 +349,27 @@ def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess
                           cwd=(str(cwd) if cwd else None))
 
 
+# A part's MPN spelling variants all mean the same lookup: normalize before the
+# per-MPN budget key and the resolution cache. Strip whitespace, uppercase, and
+# collapse any pasted lcsc.com/jlcpcb.com product URL to its bare C-number.
+def _normalize_mpn(raw: str) -> str:
+    s = (raw or "").strip().upper()
+    m = _LCSC_ID_RE.search(s)
+    return m.group(0).upper() if m else s
+
+
+# The BOM SEARCH BUDGET tells the model "1 lookup_lcsc_id query + at most 1
+# retry per part." A weak model (deepseek-v4-flash) ignores that and re-spells
+# the same MPN for round after round (e.g. VL53L1CXV0FY/1, VL53L1C, VL53L1X:
+# 56 lookups for one part). Enforce it server-side instead: cap calls per
+# normalized MPN within one stage attempt, then return a terminal result that
+# forbids further retries for that part.
+_BOM_MPN_QUERY_CAP = 2
+
+
 def _bom_executor(workspace: Path):
     """Return an executor(name, args) -> str backed by the kicraft CLI (cwd=workspace)."""
+    lcsc_calls: dict[str, int] = {}  # normalized MPN -> attempts this stage (search budget)
     def execute(name: str, args: dict) -> str:
         if name == "list_parts":
             # Generous cap: the vendored library alone renders ~600 chars per
@@ -343,7 +390,22 @@ def _bom_executor(workspace: Path):
             r = _run(KICRAFT + ["lookup-footprint", str(args.get("footprint", ""))], workspace)
             return (r.stdout or r.stderr)[:3000]
         if name == "lookup_lcsc_id":
-            r = _run(KICRAFT + ["lookup-lcsc-id", str(args.get("mpn", ""))], workspace)
+            mpn = str(args.get("mpn", ""))
+            key = _normalize_mpn(mpn)
+            lcsc_calls[key] = lcsc_calls.get(key, 0) + 1
+            if lcsc_calls[key] > _BOM_MPN_QUERY_CAP:
+                # SEARCH BUDGET exceeded for this MPN: the result cannot change
+                # by retrying, so stop the wasted subprocess + the LLM round it
+                # triggers. Tell the model to stop retrying this part.
+                return (f"Resolution for '{mpn}' has already been attempted "
+                        f"{_BOM_MPN_QUERY_CAP} times; repeating it cannot change "
+                        "the answer. STOP retrying this part: use the result from "
+                        "the first lookup above, ask the user for an exact LCSC "
+                        "C-number (C#####), or use the closest stock KiCad "
+                        "symbol/footprint and record the substitution in "
+                        "assumptions. Do NOT call lookup_lcsc_id for this MPN "
+                        "again this stage.")
+            r = _run(KICRAFT + ["lookup-lcsc-id", mpn], workspace)
             return (r.stdout or r.stderr)[:3000]
         if name == "add_part_from_lcsc":
             # Persist fetched parts to the shared HOME tier (not project): a part
@@ -380,13 +442,17 @@ def _commit(stage, slot, state_path, brief, project_stem=None, workspace=None) -
 
 
 def _stamp_stage_status(state_path, stage: str, ok: bool, *,
-                        cost_usd=None, attempts=None) -> None:
+                        cost_usd=None, attempts=None, rounds=None,
+                        tool_calls=None, wall_s=None, cpu_s=None) -> None:
     """Record a stage's durable outcome in state.json's stage_status block (a real
     ConversationState field, so the CLI's load/validate/dump round-trip preserves
     it). This is what lets a reopened project restore its pipeline progress
-    without the ephemeral event stream. Tolerates a missing state.json (a
-    first-stage failure before any commit). Atomic write: the web render timer
-    reads this file concurrently."""
+    without the ephemeral event stream. wall_s/cpu_s/rounds/tool_calls fill the
+    prior measurement gap: how long a stage took, how much child CPU it burned,
+    and how many tool rounds it cost (the written ledger records the same for the
+    cross-run report). Tolerates a missing state.json (a first-stage failure
+    before any commit). Atomic write: the web render timer reads this file
+    concurrently."""
     p = Path(state_path)
     try:
         sj = json.loads(p.read_text(encoding="utf-8"))
@@ -398,6 +464,14 @@ def _stamp_stage_status(state_path, stage: str, ok: bool, *,
         entry["cost_usd"] = round(float(cost_usd), 6)
     if attempts is not None:
         entry["attempts"] = int(attempts)
+    if wall_s is not None:
+        entry["wall_s"] = round(float(wall_s), 3)
+    if cpu_s is not None:
+        entry["cpu_s"] = round(float(cpu_s), 3)
+    if rounds is not None:
+        entry["rounds"] = int(rounds)
+    if tool_calls is not None:
+        entry["tool_calls"] = int(tool_calls)
     block = sj.get("stage_status") or {}
     block[stage] = entry
     sj["stage_status"] = block
@@ -496,15 +570,24 @@ def _client_model(client) -> str | None:
 def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, max_retries=2,
                 progress=None, answers=None, instruction=None, meta_ctx=None,
                 core_defaults=None) -> dict:
+    run_id = (meta_ctx or {}).get("run_id")
+    t0 = time.monotonic()
+    cpu0 = _child_cpu_s()
     if progress:
         progress({"kind": "stage_start", "stage": stage, "model": _client_model(client)})
     prep = _run(KICRAFT + ["stage-prep", stage, str(state_path)], workspace)
     if prep.returncode != 0:
         err = (prep.stderr.strip() or prep.stdout.strip())[:600]
-        _stamp_stage_status(state_path, stage, False)
+        _wall = round(time.monotonic() - t0, 3)
+        _cpu = round(_child_cpu_s() - cpu0, 3)
+        _stamp_stage_status(state_path, stage, False, wall_s=_wall, cpu_s=_cpu)
+        _record_stage_ledger(client, run_id=run_id, stage=stage, ok=False,
+                             attempts=None, rounds=None, tool_calls=None,
+                             wall_s=_wall, cpu_s=_cpu, cost_usd=0.0)
         if progress:
             progress({"kind": "stage_done", "stage": stage, "ok": False})
         return {"stage": stage, "commit_ok": False, "cost_usd": 0.0,
+                "wall_s": _wall, "cpu_s": _cpu,
                 "error": f"stage-prep failed: {err}"}
     prep_json = json.loads(prep.stdout)
     extras = prep_json.get("extras") or {}
@@ -604,26 +687,43 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         project_stem = obj.pop("project_stem", None)
         ok, out = _commit(stage, dict(obj), state_path, brief, project_stem, workspace)
         if ok:
+            _wall = round(time.monotonic() - t0, 3)
+            _cpu = round(_child_cpu_s() - cpu0, 3)
             _stamp_stage_status(state_path, stage, True,
-                                cost_usd=total_cost, attempts=attempt + 1)
+                                cost_usd=total_cost, attempts=attempt + 1,
+                                rounds=rounds, tool_calls=tool_calls_ct,
+                                wall_s=_wall, cpu_s=_cpu)
+            _record_stage_ledger(client, run_id=run_id, stage=stage, ok=True,
+                                 attempts=attempt + 1, rounds=rounds,
+                                 tool_calls=tool_calls_ct, wall_s=_wall,
+                                 cpu_s=_cpu, cost_usd=total_cost)
             if progress:
                 progress({"kind": "stage_done", "stage": stage, "ok": True,
                           "cost": total_cost, "attempts": attempt + 1})
             return {"stage": stage, "commit_ok": True, "cost_usd": total_cost,
                     "attempts": attempt + 1, "rounds": rounds, "tool_calls": tool_calls_ct,
-                    "commit": out, "slot": obj}
+                    "wall_s": _wall, "cpu_s": _cpu, "commit": out, "slot": obj}
         last = {"commit": out}
         if progress:
             progress({"kind": "retry", "stage": stage, "errors": out.get("errors"),
                       "offenders": out.get("offenders")})
         messages.append({"role": "user", "content": _retry_feedback(out)})
 
+    _wall = round(time.monotonic() - t0, 3)
+    _cpu = round(_child_cpu_s() - cpu0, 3)
     _stamp_stage_status(state_path, stage, False,
-                        cost_usd=total_cost, attempts=max_retries + 1)
+                        cost_usd=total_cost, attempts=max_retries + 1,
+                        rounds=rounds, tool_calls=tool_calls_ct,
+                        wall_s=_wall, cpu_s=_cpu)
+    _record_stage_ledger(client, run_id=run_id, stage=stage, ok=False,
+                         attempts=max_retries + 1, rounds=rounds,
+                         tool_calls=tool_calls_ct, wall_s=_wall, cpu_s=_cpu,
+                         cost_usd=total_cost)
     if progress:
         progress({"kind": "stage_done", "stage": stage, "ok": False, "cost": total_cost})
     return {"stage": stage, "commit_ok": False, "cost_usd": total_cost,
-            "attempts": max_retries + 1, "tool_calls": tool_calls_ct, **last}
+            "attempts": max_retries + 1, "rounds": rounds, "tool_calls": tool_calls_ct,
+            "wall_s": _wall, "cpu_s": _cpu, **last}
 
 
 def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_stage=None,

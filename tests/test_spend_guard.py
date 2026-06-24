@@ -62,3 +62,31 @@ def test_spent_by_day_counts_all_calls(guard):
     # ...and the all-day total equals the ledger total (matches OpenRouter)
     assert sum(series.values()) == pytest.approx(guard.spent_total())
     assert sum(dict(guard.spent_by_day(5)).values()) == pytest.approx(0.10)  # window
+
+
+def test_record_stage_writes_resource_row(guard):
+    guard.record_stage(run_id="p1-1", stage="bom", ok=True, attempts=1,
+                       rounds=4, tool_calls=12, wall_s=33.7, cpu_s=1.8, cost_usd=0.04)
+    with sqlite3.connect(guard.path) as c:
+        row = c.execute(
+            "SELECT run_id, stage, ok, attempts, rounds, tool_calls, wall_s, cpu_s, "
+            "cost_usd FROM stage_runs").fetchone()
+    assert row == ("p1-1", "bom", 1, 1, 4, 12, 33.7, 1.8, 0.04)
+
+
+def test_record_stage_nulls_rounds_for_single_shot_stages(guard):
+    guard.record_stage(run_id="p1-1", stage="intent", ok=True, attempts=2,
+                       rounds=None, tool_calls=None, wall_s=2.1, cpu_s=0.05,
+                       cost_usd=0.01)
+    with sqlite3.connect(guard.path) as c:
+        row = c.execute("SELECT rounds, tool_calls FROM stage_runs").fetchone()
+    assert row == (None, None)
+
+
+def test_record_stage_does_not_inflate_spend_ceiling(guard):
+    # stage_runs cost mirrors LLM spend for the report but must NOT be summed
+    # into the spend ceiling (the per-call `spend` rows own that).
+    guard.record_stage(run_id="p1-1", stage="bom", ok=True, attempts=1,
+                       rounds=1, tool_calls=1, wall_s=1.0, cpu_s=0.0, cost_usd=5.0)
+    assert guard.spent_total() == 0.0
+    assert guard.spent_today() == 0.0

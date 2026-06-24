@@ -81,6 +81,7 @@ from .synthesis.validation import (
     reconcile_inter_sheet_nets,
 )
 from kicraft.parts_library import Maturity
+from kicraft.parts_library import mpn_cache
 from kicraft.parts_library.query_log import record as _log_query
 
 # `placement` is deterministic (user placement rules, no LLM); committing it
@@ -636,8 +637,24 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
         lcsc = m.group(0).upper()
         _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=lcsc,
                    source="explicit-id")
+        mpn_cache.put(mpn, lcsc, "explicit-id")
         print(json.dumps(
             {"ok": True, "mpn": mpn, "lcsc": lcsc, "source": "explicit-id"},
+            indent=2,
+        ))
+        return 0
+
+    # 0b. Persistent MPN->LCSC resolution cache: a part resolved once on this
+    #     machine resolves instantly, offline, on every later run, so a
+    #     re-resolved MPN (e.g. BMP280, 47 lookups in one window) never hits the
+    #     network again. The cache stores only {lcsc, source, ts}.
+    cached = mpn_cache.get(mpn)
+    if cached and cached.get("lcsc"):
+        _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=cached["lcsc"],
+                   source="mpn-cache")
+        print(json.dumps(
+            {"ok": True, "mpn": mpn, "lcsc": cached["lcsc"],
+             "source": f"mpn-cache(via {cached.get('source', '?')})"},
             indent=2,
         ))
         return 0
@@ -651,6 +668,7 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
             if lcsc:
                 _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=lcsc,
                            source="parts-library", library_name=man.name)
+                mpn_cache.put(mpn, lcsc, "parts-library")
                 print(json.dumps(
                     {"ok": True, "mpn": mpn, "lcsc": lcsc,
                      "source": "parts-library", "name": man.name},
@@ -670,6 +688,7 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
             if best and best.get("lcsc"):
                 _log_query("lookup_lcsc_id", outcome="resolved", query=mpn,
                            lcsc=best["lcsc"], source="jlcparts")
+                mpn_cache.put(mpn, best["lcsc"], "jlcparts")
                 print(json.dumps(
                     {"ok": True, "mpn": mpn, "lcsc": best["lcsc"],
                      "source": "jlcparts",
@@ -709,6 +728,7 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
     if best and best.get("lcsc"):
         _log_query("lookup_lcsc_id", outcome="resolved", query=mpn,
                    lcsc=best["lcsc"], source="easyeda")
+        mpn_cache.put(mpn, best["lcsc"], "easyeda")
         print(json.dumps(
             {"ok": True, "mpn": mpn, "lcsc": best["lcsc"], "source": "easyeda",
              "match": {k: best.get(k) for k in fields}},

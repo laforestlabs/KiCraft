@@ -188,6 +188,74 @@ def format_report(summary, by="run") -> str:
     return "\n".join(out)
 
 
+def load_stage_runs(db_path, since=None) -> list[dict]:
+    """Per-stage resource rows from the ledger's ``stage_runs`` table (a stage's
+    wall_s/cpu_s/rounds/tool_calls/cost, one row per completed stage). Older
+    ledgers predate the table -> returns []."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        q = ("SELECT ts, run_id, stage, ok, attempts, rounds, tool_calls, "
+             "wall_s, cpu_s, cost_usd FROM stage_runs")
+        params: tuple = ()
+        if since:
+            q += " WHERE ts >= ?"
+            params = (since,)
+        q += " ORDER BY ts"
+        try:
+            cur = conn.execute(q, params)
+        except sqlite3.OperationalError:  # no stage_runs table on this ledger
+            return []
+        rows = []
+        for ts, run_id, stage, ok, att, rnd, tc, wall, cpu, cost in cur.fetchall():
+            rows.append({
+                "ts": ts, "run_id": run_id, "stage": stage, "ok": bool(ok),
+                "attempts": att, "rounds": rnd, "tool_calls": tc,
+                "wall_s": wall, "cpu_s": cpu, "cost_usd": cost,
+            })
+        return rows
+    finally:
+        conn.close()
+
+
+def summarize_stage_runs(rows) -> dict:
+    """Aggregate stage_runs into per-stage {n, wall_s, cpu_s, cost, rounds,
+    tool_calls, attempts, fails}. This is the resource breakdown that lets you
+    see which stages burn wall time vs CPU vs LLM tokens side by side."""
+    agg: dict[str, dict] = {}
+    for r in rows:
+        s = agg.setdefault(r["stage"], {
+            "n": 0, "wall_s": 0.0, "cpu_s": 0.0, "cost": 0.0,
+            "rounds": 0, "tool_calls": 0, "attempts": 0, "fails": 0})
+        s["n"] += 1
+        s["wall_s"] += r["wall_s"] or 0.0
+        s["cpu_s"] += r["cpu_s"] or 0.0
+        s["cost"] += r["cost_usd"] or 0.0
+        s["rounds"] += r["rounds"] or 0
+        s["tool_calls"] += r["tool_calls"] or 0
+        s["attempts"] += r["attempts"] or 0
+        if not r["ok"]:
+            s["fails"] += 1
+    return agg
+
+
+def format_stage_runs(rows) -> str:
+    agg = summarize_stage_runs(rows)
+    if not agg:
+        return ""
+    out = ["", "  " + "-" * 68,
+           "  By stage (wall / CPU / LLM cost / tool rounds, all runs):",
+           "    {:<14} {:>4} {:>9} {:>8} {:>9} {:>6} {:>6} {:>4}".format(
+               "stage", "n", "wall_s", "cpu_s", "cost", "rounds", "tools", "fail")]
+    for stage, s in sorted(agg.items(), key=lambda kv: -kv[1]["wall_s"]):
+        cpu_pct = (s["cpu_s"] / s["wall_s"] * 100.0) if s["wall_s"] else 0.0
+        out.append("    {:<14} {:>4} {:>9.1f} {:>8.2f} {:>9.4f} {:>6} {:>6} {:>3}".format(
+            str(stage)[:14], s["n"], s["wall_s"], s["cpu_s"], s["cost"],
+            s["rounds"] or "-", s["tool_calls"] or "-", s["fails"]))
+        out.append("      {:<14} cpu/wall {:.0f}%  mean wall {:.1f}s".format(
+            "", cpu_pct, (s["wall_s"] / s["n"]) if s["n"] else 0.0))
+    return "\n".join(out)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Summarize the web server's OpenRouter spend ledger by "
@@ -212,10 +280,15 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 0
     summary = summarize(rows, spike_threshold=args.spike_threshold)
+    stage_runs = load_stage_runs(args.ledger, since=args.since)
+    summary["stage_runs"] = summarize_stage_runs(stage_runs)
     if args.json:
         print(json.dumps(summary, indent=2, default=str))
     else:
         print(format_report(summary, by=args.by))
+        extra = format_stage_runs(stage_runs)
+        if extra:
+            print(extra)
     return 0
 
 

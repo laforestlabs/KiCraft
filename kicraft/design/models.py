@@ -680,6 +680,10 @@ class StageStatus(BaseModel):
     cost_usd: float | None = None
     attempts: int | None = None
     finished_at: str | None = None  # UTC ISO timestamp
+    wall_s: float | None = None
+    cpu_s: float | None = None
+    rounds: int | None = None  # BOM tool-loop rounds (None for single-shot stages)
+    tool_calls: int | None = None  # total BOM tool calls (None for non-BOM stages)
 
 
 class ConversationState(BaseModel):
