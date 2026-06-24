@@ -8,6 +8,24 @@ import json
 import sys
 
 
+def _scale_parent_route_budget(n_interconnect: int, cfg: dict) -> tuple[int, int]:
+    """C2: scale the PARENT FreeRouting budget to the cross-leaf interconnect count.
+
+    A parent with many inter-leaf nets needs more passes AND more wall-time to
+    converge; the fixed parent default (20 passes / 60 s) leaves the densest
+    cross-leaf nets unrouted (rs485 4 nets across 3 leaves, can-node CAN_RX,
+    esp32 MOTOR_B2_DIR). Bumping passes is the lowest-risk lever -- strictly more
+    routing effort, bounded by the timeout, no geometry change. ONLY raises the
+    budget (never lowers a hand-tuned config). Returns (max_passes, timeout_s)."""
+    base_passes = int(cfg.get("freerouting_max_passes", 20))
+    base_timeout = int(cfg.get("freerouting_timeout_s", 60))
+    threshold = int(cfg.get("parent_dense_interconnect_threshold", 10))
+    if n_interconnect < threshold:
+        return base_passes, base_timeout
+    passes = max(base_passes, int(cfg.get("parent_dense_max_passes", 40)))
+    timeout = max(base_timeout, int(cfg.get("parent_dense_timeout_s", 180)))
+    return passes, timeout
+
 
 def _route_parent_board(
     stamped_pcb: Path,
@@ -49,6 +67,18 @@ def _route_parent_board(
     route_cfg["freerouting_preserve_existing_copper"] = True
     route_cfg["freerouting_clear_existing_copper"] = False
     route_cfg["freerouting_clear_zones"] = False
+
+    # C2: scale the parent routing budget to the cross-leaf interconnect count so
+    # a high-fan-out parent gets enough passes/time to close every inter-leaf net
+    # (the dominant parent-stage unconnected cause). Only raises; bounded by the
+    # timeout. inferred_interconnect_nets is the parent's cross-leaf net map.
+    n_interconnect = len(getattr(composition, "inferred_interconnect_nets", {}) or {})
+    mp, to = _scale_parent_route_budget(n_interconnect, route_cfg)
+    if mp != route_cfg.get("freerouting_max_passes") or to != route_cfg.get("freerouting_timeout_s"):
+        print(f"  parent route: {n_interconnect} inter-leaf nets -> "
+              f"{mp} passes / {to}s budget")
+    route_cfg["freerouting_max_passes"] = mp
+    route_cfg["freerouting_timeout_s"] = to
 
     # Ground handling: route signals first, pour ground last (standard practice,
     # and what the leaves already do). The stamped parent carries each leaf's GND

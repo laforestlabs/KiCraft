@@ -397,6 +397,100 @@ def test_main_resume_reuses_completed_and_reruns_failed(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # selection + report compilation
 # --------------------------------------------------------------------------- #
+def _write_synth_check(rundir: Path, failed: list[str]) -> None:
+    d = rundir / ".kicraft"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "synthesis_check.json").write_text(json.dumps({"failed_checks": failed}))
+
+
+def test_make_judge_client_relaxes_routing_for_stronger_judge(monkeypatch):
+    from kicraft.server.config import Settings
+    captured = {}
+
+    def fake_make_client(settings=None):
+        captured["settings"] = settings
+        return object()
+
+    monkeypatch.setattr(se, "make_client", fake_make_client, raising=False)
+    monkeypatch.setattr("kicraft.server.client.make_client", fake_make_client)
+
+    s = Settings(api_key="k", model="deepseek/deepseek-v4-flash",
+                 review_model="minimax/minimax-m3")
+    # judge != design model -> a routing-relaxed client is built
+    jc = se._make_judge_client(s, "minimax/minimax-m3", skip_judge=False)
+    assert jc is not None
+    relaxed = captured["settings"]
+    assert relaxed.provider_order == [] and relaxed.max_price_prompt == 0.0
+
+    # judge == design model -> reuse the design client (None)
+    assert se._make_judge_client(s, s.model, skip_judge=False) is None
+    # --no-judge -> no judge client
+    assert se._make_judge_client(s, "minimax/minimax-m3", skip_judge=True) is None
+
+
+def test_build_label_rc5_distinguishes_failed_check(tmp_path):
+    # rc=5 fires for ANY failed §9.x check, not just ERC — the label must read
+    # synthesis_check.json instead of hard-coding "ERC errors".
+    erc = tmp_path / "erc"
+    _write_synth_check(erc, ["9.12 ERC", "9.10 pin existence"])
+    assert se._build_label(5, erc) == "ERC errors"
+
+    netlist = tmp_path / "netlist"  # #11 fpc-breakout: 0 ERC errors, §9.13 failed
+    _write_synth_check(netlist, ["9.13 netlist faithfulness"])
+    assert se._build_label(5, netlist) == "netlist faithfulness"
+
+    other = tmp_path / "other"
+    _write_synth_check(other, ["9.7 refdes uniqueness"])
+    assert se._build_label(5, other) == "synthesis check failed"
+
+    missing = tmp_path / "missing"  # no synthesis_check.json -> safe fallback
+    missing.mkdir()
+    assert se._build_label(5, missing) == "synthesis check failed"
+
+    # Non-rc5 labels and None are unchanged.
+    assert se._build_label(0, erc) == "fab-ready"
+    assert se._build_label(7, erc) == "not fab-ready (DRC)"
+    assert se._build_label(None, erc) is None
+
+
+def test_run_key_single_vs_repeats():
+    assert se._run_key("buck-3a", None) == "buck-3a"
+    assert se._run_key("buck-3a", 2) == "buck-3a__r2"
+
+
+def test_per_brief_stats_median_and_iqr():
+    recs = [
+        {"slug": "a", "archetype": "x", "final": 50.0, "build_rc": 0, "grade": "C"},
+        {"slug": "a", "archetype": "x", "final": 90.0, "build_rc": 7, "grade": "A"},
+        {"slug": "a", "archetype": "x", "final": 70.0, "build_rc": 0, "grade": "B"},
+        {"slug": "b", "archetype": "y", "final": 80.0, "build_rc": 0, "grade": "B"},
+    ]
+    pb = se._per_brief_stats(recs)
+    assert pb["a"]["n"] == 3 and pb["a"]["median_final"] == 70.0
+    assert pb["a"]["min_final"] == 50.0 and pb["a"]["max_final"] == 90.0
+    assert pb["a"]["iqr"] > 0           # spread across the 3 repeats
+    assert pb["a"]["fab_ready"] == 2    # two of three rc==0
+    assert pb["b"]["median_final"] == 80.0 and pb["b"]["iqr"] == 0.0  # single sample
+
+
+def test_compile_report_repeats_aggregates_brief_medians(tmp_path):
+    # Two briefs, 2 repeats each; brief medians de-noise the headline.
+    records = []
+    for slug, finals in (("aa", [60.0, 80.0]), ("bb", [40.0, 90.0])):
+        for rep, f in enumerate(finals, start=1):
+            records.append({"index": 1, "slug": slug, "repeat": rep, "archetype": "z",
+                            "prompt": "p", "stem": f"run_01_{slug}__r{rep}", "rundir": "/r",
+                            "grade": "B", "final": f, "verdict": "OK", "build_rc": 0})
+    meta = {"started_at": "t", "out_dir": str(tmp_path), "repeats": 2, "judge": False}
+    summary = se.compile_report(records, tmp_path, meta)
+    assert summary["n"] == 4 and summary["n_briefs"] == 2
+    # brief medians: aa -> 70, bb -> 65; mean of those = 67.5
+    assert summary["brief_median_mean"] == 67.5
+    assert "per_brief" in summary and set(summary["per_brief"]) == {"aa", "bb"}
+    md = (tmp_path / "summary.md").read_text()
+    assert "median over repeats" in md and "per-brief median" in md
+
+
 def test_select_limit_and_only():
     es = [{"slug": f"s{i}", "archetype": "a", "brief": f"p{i}"} for i in range(1, 10)]
     assert [i for i, _ in se._select(es, 3, None)] == [1, 2, 3]

@@ -86,13 +86,13 @@ class _RecordingClient:
     def __init__(self):
         self.calls: list[list[dict]] = []
 
-    def chat(self, messages, max_tokens=4096, progress=None, meta_ctx=None):
+    def chat(self, messages, max_tokens=4096, temperature=0.2, progress=None, meta_ctx=None):
         self.calls.append([dict(m) for m in messages])
         return {"text": "not json", "cost_usd": 0.0, "reasoning": "",
                 "finish_reason": "stop"}
 
     def chat_with_tools(self, messages, tools, executor, max_tokens=4096,
-                        max_rounds=6, progress=None, meta_ctx=None):
+                        temperature=0.2, max_rounds=6, progress=None, meta_ctx=None):
         self.calls.append([dict(m) for m in messages])
         return {"text": "not json", "cost_usd": 0.0, "rounds": 1,
                 "tool_calls": 0, "finish_reason": "stop"}

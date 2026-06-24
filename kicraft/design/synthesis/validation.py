@@ -1266,6 +1266,161 @@ def check_family_wiring_contracts(bom) -> CheckResult:
     )
 
 
+# ---------- §9.21 MCU first-flash / programming path (advisory) ----------
+#
+# A programmable MCU with no way to enter its bootloader/debug interface is the
+# `unprogrammable_mcu` defect -- a true positive in every self-eval case: an
+# ESP32 with IO0/GPIO0 hard-tied to +3V3 (cannot be pulled LOW into download
+# mode), an RP2040 with no BOOTSEL button AND SWD left no-connect. The netlist is
+# ERC/DRC clean, so only a role-aware check sees it, and it is immune to the model
+# nondeterministically deleting the boot-strap resistors between runs.
+#
+# This is ADVISORY: cli_app surfaces a failure as a wiring open_question (a
+# fab-readiness caveat), NEVER as a hard synthesis-check failure -- the per-family
+# heuristic is med-high confidence and a board can be flashed by other means
+# (pogo pins, pre-programmed parts). It fails OPEN (no flag) whenever the pinout
+# is unresolvable or a programming affordance plausibly exists, so a sound design
+# never trips it.
+
+_ESP_FAMILY_RE = re.compile(r"esp32|esp8266|esp32c|esp32s", re.I)
+_RP2040_FAMILY_RE = re.compile(r"rp2040", re.I)
+_GENERIC_MCU_RE = re.compile(
+    r"stm32|atmega|attiny|atsam|samd\d|samc\d|samr\d|nrf52|nrf51|nrf53|"
+    r"gd32|msp430|efm32|max32|apollo\d|hc32|ch32|py32",
+    re.I,
+)
+_BOOT0_PIN_RE = re.compile(r"^(IO0|GPIO0|BOOT0?)$", re.I)
+_SWD_PIN_RE = re.compile(r"SWCLK|SWDIO|^SWD$|^TCK$|^TMS$|^TDI$|^TDO$|JTAG", re.I)
+
+
+def _ref_prefix(ref: str) -> str:
+    m = re.match(r"[A-Za-z]+", ref or "")
+    return m.group(0).upper() if m else ""
+
+
+def _esp_boot_problem(pins, wired):
+    """ESP32/8266: the IO0/GPIO0 download-mode strap must be drivable LOW. A bare
+    hard-tie to a positive rail is the documented unprogrammable case."""
+    boot = [num for num, p in pins.items() if _BOOT0_PIN_RE.search(p["name"])]
+    if not boot:
+        return None  # pinout doesn't expose IO0 -> can't judge (fail open)
+    for num in boot:
+        net = wired.get(num)
+        if net is None:
+            continue  # NC handled by the family default; an unwired strap is rare
+        if _net_is_positive_rail(net):
+            return (f"IO0/GPIO0 (download-mode strap) is hard-tied to rail {net!r}; it "
+                    "cannot be pulled LOW to enter the ROM bootloader (needs a boot "
+                    "button/strap to GND)")
+    return None
+
+
+def _rp2040_boot_problem(pins, wired, nc, ref, bom):
+    """RP2040: programmable iff SWD (SWCLK/SWDIO) is broken out OR a BOOTSEL button
+    exists to ground the flash CS. Fails only when NEITHER is present."""
+    swd = [num for num, p in pins.items() if _SWD_PIN_RE.search(p["name"])]
+    swd_wired = any(wired.get(num) is not None and (ref, num) not in nc for num in swd)
+    has_button = any(_ref_prefix(p.ref) == "SW" for p in bom.parts)
+    if swd_wired or has_button:
+        return None
+    return ("no programming path: SWD (SWCLK/SWDIO) is not broken out and there is no "
+            "BOOTSEL button to ground QSPI_CS")
+
+
+def _generic_mcu_problem(pins, wired, nc, ref):
+    """Other MCUs: flag only the unambiguous case -- the part exposes a SWD/JTAG
+    debug interface and EVERY one of those pins is left unconnected (no debug
+    header). Conservative: an MCU with no recognizable debug pins is not judged."""
+    swd = [num for num, p in pins.items() if _SWD_PIN_RE.search(p["name"])]
+    if not swd:
+        return None
+    if any(wired.get(num) is not None and (ref, num) not in nc for num in swd):
+        return None
+    return ("the SWD/JTAG debug interface is left unconnected and no programming "
+            "header is provided -- the MCU cannot be flashed")
+
+
+def check_mcu_programming_path(bom) -> CheckResult:
+    """§9.21 (advisory) -- assert a reachable first-flash path for each MCU.
+
+    See the section comment. Returns offenders as ``"<ref> (<part>): <reason>"``;
+    the caller turns each into a wiring open_question. Never raises; unresolvable
+    pinouts are skipped.
+    """
+    info, _ = _pin_info_by_ref(bom)
+    nets = _nets_by_ref(bom)
+    nc = {(ep.ref, ep.pin) for ep in (bom.no_connect_pins or [])}
+    bad: list[str] = []
+    for part in bom.parts:
+        ident = f"{part.symbol} {part.value}".strip()
+        pins = info.get(part.ref, {})
+        wired = nets.get(part.ref, {})
+        if _ESP_FAMILY_RE.search(ident):
+            problem = _esp_boot_problem(pins, wired)
+        elif _RP2040_FAMILY_RE.search(ident):
+            problem = _rp2040_boot_problem(pins, wired, nc, part.ref, bom)
+        elif _GENERIC_MCU_RE.search(ident):
+            problem = _generic_mcu_problem(pins, wired, nc, part.ref)
+        else:
+            continue
+        if problem:
+            bad.append(f"{part.ref} ({ident}): {problem}")
+    return CheckResult(
+        name="9.21 MCU programming path",
+        ok=not bad,
+        message=(
+            "every MCU has a first-flash path"
+            if not bad
+            else f"{len(bad)} MCU(s) have no guaranteed programming path"
+        ),
+        offenders=bad,
+    )
+
+
+# ---------- §9.22 breakout / adapter intent (advisory) ----------
+#
+# A "breakout" or "adapter" board's whole job is to map one connector's pins onto
+# another's, so at least one net must BRIDGE the two connectors. #11 fpc-breakout
+# emitted 49 nets with NONE spanning both connectors -- J1 (FPC) and J2 (header)
+# on mutually disconnected nets -- so the breakout did nothing. ERC/DRC are clean
+# (every pin is on a legal net), so only an intent-aware check sees it.
+#
+# A DETECTOR, not a normalizer: the actual pin mapping is a synthesis-intent
+# decision, not mechanically derivable. Advisory like §9.21 -- surfaced as a
+# wiring open_question, never a hard fab gate -- and gated on a breakout/adapter
+# brief with >=2 connectors, so a normal multi-connector board never trips it.
+
+_BREAKOUT_RE = re.compile(
+    r"break[- ]?out|breakout|adapter|adaptor|pass[- ]?through|fan[- ]?out", re.I)
+_CONNECTOR_PREFIXES = frozenset({"J", "P", "CN", "CONN", "X"})
+
+
+def check_breakout_connectivity(intent, bom) -> CheckResult:
+    """§9.22 (advisory) -- on a breakout/adapter brief, at least one net must
+    bridge the two connectors. See the section comment."""
+    name = "9.22 breakout connectivity"
+    if intent is None or bom is None or not bom.connections:
+        return CheckResult(name=name, ok=True, message="not applicable")
+    text = " ".join([intent.goal or ""] + list(getattr(intent, "constraints", []) or []))
+    if not _BREAKOUT_RE.search(text):
+        return CheckResult(name=name, ok=True, message="not a breakout/adapter brief")
+    conns = {p.ref for p in bom.parts if _ref_prefix(p.ref) in _CONNECTOR_PREFIXES}
+    if len(conns) < 2:
+        return CheckResult(name=name, ok=True, message="fewer than two connectors")
+    bridging = sum(1 for c in bom.connections
+                   if len({ep.ref for ep in c.endpoints if ep.ref in conns}) >= 2)
+    if bridging == 0:
+        return CheckResult(
+            name=name, ok=False,
+            message="breakout/adapter brief but no net bridges the connectors",
+            offenders=[f"connectors {sorted(conns)} share zero bridging nets -- the "
+                       "breakout's job (mapping one connector's pins to the other) is "
+                       "undone"],
+        )
+    return CheckResult(name=name, ok=True,
+                       message=f"{bridging} net(s) bridge the connectors")
+
+
 # ---------- §9.9 connectivity (Stage B) ----------
 
 

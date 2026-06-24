@@ -117,7 +117,7 @@ class _FakeClient:
         self._replies = list(replies)
         self.guard = _FakeGuard()
 
-    def chat(self, messages, max_tokens=4096, progress=None, meta_ctx=None):
+    def chat(self, messages, max_tokens=4096, temperature=0.2, progress=None, meta_ctx=None):
         return {"text": self._replies.pop(0), "cost_usd": 0.0, "reasoning": "",
                 "finish_reason": "stop"}
 

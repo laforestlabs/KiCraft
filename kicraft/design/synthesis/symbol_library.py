@@ -171,6 +171,17 @@ _REFERENCE_PROP_RE = re.compile(r'\(property\s+"Reference"\s+"([^"]*)"')
 _REF_ALPHA_PREFIX_RE = re.compile(r"[A-Za-z]+")
 _PIN_INPUT_RE = re.compile(r"(\(pin\s+)input\b")
 
+# Switch/phase node of a switching regulator — the pin that drives the
+# inductor. Vendored/easyeda-imported regulator symbols routinely mistype it as
+# `power_in` (it is an *output*), so KiCad ERC flags ``power_pin_not_driven`` on
+# the legitimately-wired {SW, D, L} net. The pin must be typed `power_in` AND
+# named exactly one of these tokens, so this can never touch a real power input.
+_SWITCH_NODE_PIN_RE = re.compile(
+    r'(\(pin\s+)power_in'
+    r'(\s+\w+(?:\s*\([^()]*\))*?\s*\(name\s+"(?:PH|SW|LX|PHASE|SWITCH)")',
+    re.IGNORECASE,
+)
+
 
 def _normalize_passive_device_pins(symbol_text: str) -> str:
     """Retype `input` pins as `passive` on passive/electromechanical symbols.
@@ -196,6 +207,21 @@ def _normalize_passive_device_pins(symbol_text: str) -> str:
     if not pm or pm.group(0).upper() not in _PASSIVE_DEVICE_REF_PREFIXES:
         return symbol_text
     return _PIN_INPUT_RE.sub(r"\1passive", symbol_text)
+
+
+def _normalize_switch_node_pins(symbol_text: str) -> str:
+    """Retype a regulator switch/phase node from `power_in` to `power_out`.
+
+    The switch node (PH / SW / LX / PHASE / SWITCH) of a switching regulator
+    drives the inductor — it is an *output*. Vendored and easyeda2kicad-imported
+    regulator symbols routinely mistype it as ``power_in``; KiCad ERC then flags
+    ``power_pin_not_driven`` on the correctly-wired switch net (self-eval #18,
+    TPS54331 pin 8). Retyping it ``power_out`` at this single choke point fixes
+    every switcher symbol, not just the one vendored part. The match requires
+    both the ``power_in`` type and an exact switch-node pin name, so it can never
+    mistype a genuine power input (GND/EP/VIN stay ``power_in``).
+    """
+    return _SWITCH_NODE_PIN_RE.sub(r"\1power_out\2", symbol_text)
 
 
 # ---------- public API ----------
@@ -232,7 +258,7 @@ def extract_symbol_block(
     lib_text = lib_path.read_text()
     resolved = _resolve_extends_chain(lib_text, symbol_name)
     qualified = _qualify_with_prefix(resolved, symbol_name, library)
-    return _normalize_passive_device_pins(qualified)
+    return _normalize_switch_node_pins(_normalize_passive_device_pins(qualified))
 
 
 def search_symbols(

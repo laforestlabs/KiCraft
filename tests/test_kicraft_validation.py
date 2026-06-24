@@ -826,3 +826,147 @@ def test_family_contract_flags_can_rs_on_rail(monkeypatch) -> None:
     res = check_family_wiring_contracts(bom)
     assert not res.ok
     assert any("U3.8" in o for o in res.offenders)
+
+
+# ---------- §9.21 MCU first-flash / programming path (advisory) ----------
+
+from kicraft.design.synthesis.validation import (  # noqa: E402
+    check_mcu_programming_path,
+)
+
+
+def test_mcu_prog_path_flags_esp32_boot_strap_hard_tied(monkeypatch) -> None:
+    # #12 esp32-s3: IO0 hard-tied to +3V3 -> cannot enter download mode.
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"esp32:ESP32-S3": [
+        ("1", "VDD", "power_in"), ("2", "GND", "power_in"), ("3", "IO0", "bidirectional"),
+    ]}))
+    bom = BOM(parts=[_bpart("U1", "esp32:ESP32-S3")], connections=[
+        NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="1")]),
+        NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="2")]),
+        NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="3")]),
+    ])
+    res = check_mcu_programming_path(bom)
+    assert not res.ok and any("U1" in o and "IO0/GPIO0" in o for o in res.offenders)
+
+
+def test_mcu_prog_path_passes_esp32_drivable_strap(monkeypatch) -> None:
+    # IO0 on a signal net (a boot button/strap can pull it low) -> OK.
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"esp32:ESP32-S3": [
+        ("3", "IO0", "bidirectional"),
+    ]}))
+    bom = BOM(parts=[_bpart("U1", "esp32:ESP32-S3"),
+                     BomPart(ref="SW1", value="boot", symbol="Switch:SW_Push",
+                             footprint="Button_Switch_SMD:SW_SPST", sheet="MCU")],
+              connections=[
+        NetConnection(net_name="BOOT", sheet="MCU", endpoints=[
+            PinEndpoint(ref="U1", pin="3"), PinEndpoint(ref="SW1", pin="1")]),
+    ])
+    assert check_mcu_programming_path(bom).ok
+
+
+def test_mcu_prog_path_flags_rp2040_no_swd_no_button(monkeypatch) -> None:
+    # #10 rp2040-min: SWD no-connect + no BOOTSEL button -> unprogrammable.
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"rp2040:RP2040": [
+        ("1", "VDD", "power_in"), ("2", "SWCLK", "input"), ("3", "SWDIO", "bidirectional"),
+    ]}))
+    bom = BOM(parts=[_bpart("U1", "rp2040:RP2040")], connections=[
+        NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="1")]),
+    ], no_connect_pins=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="U1", pin="3")])
+    res = check_mcu_programming_path(bom)
+    assert not res.ok and any("SWD" in o for o in res.offenders)
+
+
+def test_mcu_prog_path_passes_rp2040_with_swd_broken_out(monkeypatch) -> None:
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"rp2040:RP2040": [
+        ("2", "SWCLK", "input"), ("3", "SWDIO", "bidirectional"),
+    ]}))
+    bom = BOM(parts=[_bpart("U1", "rp2040:RP2040")], connections=[
+        NetConnection(net_name="SWCLK", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="2")]),
+        NetConnection(net_name="SWDIO", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="3")]),
+    ])
+    assert check_mcu_programming_path(bom).ok
+
+
+def test_mcu_prog_path_passes_rp2040_with_bootsel_button(monkeypatch) -> None:
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"rp2040:RP2040": [
+        ("2", "SWCLK", "input"), ("3", "SWDIO", "bidirectional"),
+    ]}))
+    bom = BOM(parts=[_bpart("U1", "rp2040:RP2040"),
+                     BomPart(ref="SW1", value="boot", symbol="Switch:SW_Push",
+                             footprint="Button_Switch_SMD:SW_SPST", sheet="MCU")],
+              connections=[
+        NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="SW1", pin="1")]),
+    ], no_connect_pins=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="U1", pin="3")])
+    assert check_mcu_programming_path(bom).ok
+
+
+def test_mcu_prog_path_ignores_non_mcu_parts(monkeypatch) -> None:
+    # A plain regulator is not an MCU -> never flagged.
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"Regulator:AMS1117": [
+        ("1", "GND", "power_in"), ("2", "VOUT", "power_out"), ("3", "VIN", "power_in"),
+    ]}))
+    bom = BOM(parts=[_bpart("U1", "Regulator:AMS1117")], connections=[
+        NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="1")]),
+    ])
+    assert check_mcu_programming_path(bom).ok
+
+
+def test_mcu_prog_path_flags_generic_mcu_unconnected_swd(monkeypatch) -> None:
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"MCU_ST:STM32F030": [
+        ("1", "VDD", "power_in"), ("2", "SWCLK", "input"), ("3", "SWDIO", "bidirectional"),
+    ]}))
+    bom = BOM(parts=[_bpart("U1", "MCU_ST:STM32F030")], connections=[
+        NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="1")]),
+    ], no_connect_pins=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="U1", pin="3")])
+    res = check_mcu_programming_path(bom)
+    assert not res.ok and any("SWD/JTAG" in o for o in res.offenders)
+
+
+# ---------- §9.22 breakout / adapter intent (advisory) ----------
+
+from kicraft.design.synthesis.validation import (  # noqa: E402
+    check_breakout_connectivity,
+)
+from kicraft.design.models import IntentSlot  # noqa: E402
+
+
+def _conn(ref, sheet="IO"):
+    return BomPart(ref=ref, value="hdr", symbol="Connector:Conn_01x04",
+                   footprint="Connector_PinHeader:PinHeader_1x04", sheet=sheet)
+
+
+def test_breakout_flags_unbridged_connectors() -> None:
+    # #11 fpc-breakout: two connectors, no net spans both -> intent undone.
+    intent = IntentSlot(goal="A simple FPC-to-header breakout board")
+    bom = BOM(parts=[_conn("J1"), _conn("J2")], connections=[
+        NetConnection(net_name="A", sheet="IO", endpoints=[PinEndpoint(ref="J1", pin="1")]),
+        NetConnection(net_name="B", sheet="IO", endpoints=[PinEndpoint(ref="J2", pin="1")]),
+    ])
+    res = check_breakout_connectivity(intent, bom)
+    assert not res.ok and any("J1" in o and "J2" in o for o in res.offenders)
+
+
+def test_breakout_passes_when_a_net_bridges() -> None:
+    intent = IntentSlot(goal="A USB breakout / adapter")
+    bom = BOM(parts=[_conn("J1"), _conn("J2")], connections=[
+        NetConnection(net_name="D+", sheet="IO", endpoints=[
+            PinEndpoint(ref="J1", pin="1"), PinEndpoint(ref="J2", pin="1")]),
+    ])
+    assert check_breakout_connectivity(intent, bom).ok
+
+
+def test_breakout_skips_non_breakout_brief() -> None:
+    intent = IntentSlot(goal="A 3.3V buck regulator board")
+    bom = BOM(parts=[_conn("J1"), _conn("J2")], connections=[
+        NetConnection(net_name="A", sheet="IO", endpoints=[PinEndpoint(ref="J1", pin="1")]),
+        NetConnection(net_name="B", sheet="IO", endpoints=[PinEndpoint(ref="J2", pin="1")]),
+    ])
+    assert check_breakout_connectivity(intent, bom).ok  # not a breakout -> not judged
+
+
+def test_breakout_skips_single_connector() -> None:
+    intent = IntentSlot(goal="A sensor breakout board")
+    bom = BOM(parts=[_conn("J1")], connections=[
+        NetConnection(net_name="A", sheet="IO", endpoints=[PinEndpoint(ref="J1", pin="1")]),
+    ])
+    assert check_breakout_connectivity(intent, bom).ok  # <2 connectors -> not judged

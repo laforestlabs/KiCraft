@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
+import requests
+
 from kicraft.server import client as client_mod
 from kicraft.server.client import CappedOpenRouterClient
 from kicraft.server.config import Settings
@@ -28,10 +31,17 @@ from kicraft.cli import web_cost_report
 
 class _FakeResp:
     """A minimal stand-in for requests' streaming Response (context manager)."""
-    def __init__(self, chunks):
+    def __init__(self, chunks, status_code=200, reason="OK"):
         self._lines = [f"data: {json.dumps(c)}" for c in chunks] + ["data: [DONE]"]
+        self.status_code = status_code
+        self.reason = reason
 
     def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.exceptions.HTTPError(
+                f"{self.status_code} {self.reason}", response=self)
+
+    def close(self):
         pass
 
     def iter_lines(self, decode_unicode=True):
@@ -142,6 +152,99 @@ def test_stream_cache_control_gated_off(monkeypatch):
     assert fake_post.payload["messages"][0]["content"] == "SYS"   # left as a plain string
 
 
+# ---- transient-failure retry (D5) -----------------------------------------
+
+def _ok_chunks():
+    return [{"choices": [{"delta": {"content": "{}"}}]},
+            {"choices": [{"finish_reason": "stop", "delta": {}}]},
+            _usage_chunk()]
+
+
+def test_open_stream_retries_transient_5xx_then_succeeds(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=None):
+        calls["n"] += 1
+        if calls["n"] <= 2:                      # two 503s, then a good stream
+            return _FakeResp([], status_code=503, reason="Service Unavailable")
+        return _FakeResp(_ok_chunks())
+
+    sleeps = []
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    monkeypatch.setattr(client_mod.time, "sleep", lambda s: sleeps.append(s))
+    s = Settings(api_key="k", llm_max_retries=3, llm_retry_backoff_s=0.5)
+    c = CappedOpenRouterClient(s, guard=_RecordingGuard())
+    msg, cost = c._stream({"messages": [{"role": "user", "content": "hi"}]})
+    assert calls["n"] == 3                        # 2 failures + 1 success
+    assert sleeps == [0.5, 1.0]                   # exponential backoff between attempts
+    assert cost == 0.001
+
+
+def test_open_stream_retries_connection_error(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise requests.exceptions.ConnectionError("reset by peer")
+        return _FakeResp(_ok_chunks())
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    monkeypatch.setattr(client_mod.time, "sleep", lambda s: None)
+    s = Settings(api_key="k", llm_max_retries=2)
+    c = CappedOpenRouterClient(s, guard=_RecordingGuard())
+    c._stream({"messages": [{"role": "user", "content": "hi"}]})
+    assert calls["n"] == 2
+
+
+def test_open_stream_does_not_retry_4xx(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=None):
+        calls["n"] += 1
+        return _FakeResp([], status_code=400, reason="Bad Request")
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    monkeypatch.setattr(client_mod.time, "sleep", lambda s: None)
+    s = Settings(api_key="k", llm_max_retries=3)
+    c = CappedOpenRouterClient(s, guard=_RecordingGuard())
+    with pytest.raises(requests.exceptions.HTTPError):
+        c._stream({"messages": [{"role": "user", "content": "hi"}]})
+    assert calls["n"] == 1                        # client error: no retry
+
+
+def test_open_stream_raises_after_exhausting_retries(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=None):
+        calls["n"] += 1
+        return _FakeResp([], status_code=503, reason="Service Unavailable")
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    monkeypatch.setattr(client_mod.time, "sleep", lambda s: None)
+    s = Settings(api_key="k", llm_max_retries=2)
+    c = CappedOpenRouterClient(s, guard=_RecordingGuard())
+    with pytest.raises(requests.exceptions.HTTPError):
+        c._stream({"messages": [{"role": "user", "content": "hi"}]})
+    assert calls["n"] == 3                        # 1 initial + 2 retries, then give up
+
+
+# ---- design temperature (D3) ----------------------------------------------
+
+def test_design_temperature_defaults_to_zero_and_is_configurable():
+    from kicraft.server.stage_driver import _design_temperature
+    c = CappedOpenRouterClient(Settings(api_key="k"), guard=_RecordingGuard())
+    assert c.s.design_temperature == 0.0                # new default cuts variance
+    assert _design_temperature(c) == 0.0
+    c2 = CappedOpenRouterClient(Settings(api_key="k", design_temperature=0.3),
+                                guard=_RecordingGuard())
+    assert _design_temperature(c2) == 0.3
+
+    class _NoSettings:           # mock-style client without .s -> historical 0.2
+        pass
+    assert _design_temperature(_NoSettings()) == 0.2
+
+
 # ---- spend ledger: structured meta round-trips ----------------------------
 
 def test_spend_guard_serializes_dict_meta(tmp_path):
@@ -211,7 +314,7 @@ class _TruncThenOkClient:
                         "daily_ceiling_usd": 5.0}
         self.guard = _G()
 
-    def chat(self, messages, max_tokens=4096, progress=None, meta_ctx=None):
+    def chat(self, messages, max_tokens=4096, temperature=0.2, progress=None, meta_ctx=None):
         self.max_tokens_seen.append(max_tokens)
         self._n += 1
         if self._n == 1:

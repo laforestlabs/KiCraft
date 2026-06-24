@@ -68,14 +68,18 @@ def build_run_digest(project_dir, m, *, budget: int = 16000) -> str:
 
 
 def evaluate_project(project_dir, client, *, rubric: dict | None = None,
-                     judge_model: str | None = None, ledger_path=None,
+                     judge_model: str | None = None, judge_client=None,
+                     ledger_path=None,
                      started_at: str | None = None, finished_at: str | None = None,
                      skip_judge: bool = False) -> dict:
     """Score one finished web project and write ``eval/report.json``.
 
-    Class-C is always scored from artifacts. Class-J is graded by the injected
-    client's judge unless ``skip_judge`` (or no client) is given, in which case the
-    judgment dimensions stay null and the run is not finalized (Class-C only).
+    Class-C is always scored from artifacts. Class-J is graded unless
+    ``skip_judge`` (or no client) is given, in which case the judgment dimensions
+    stay null and the run is not finalized (Class-C only). The judge uses
+    ``judge_client`` when supplied (a client with routing relaxed for a stronger,
+    steadier judge model that may be off the design provider tier), else
+    ``client``.
     """
     rubric = rubric or load_rubric()
     pd = Path(project_dir)
@@ -88,7 +92,7 @@ def evaluate_project(project_dir, client, *, rubric: dict | None = None,
     judge = None
     if not skip_judge and client is not None:
         digest = build_run_digest(pd, m)
-        judge = grade_class_j(client, digest, rubric, model=judge_model)
+        judge = grade_class_j(judge_client or client, digest, rubric, model=judge_model)
         for did, jv in judge["dimensions"].items():
             if did in dims:
                 dims[did]["level"] = jv["level"]
@@ -181,6 +185,7 @@ def main(argv=None) -> int:
         raise SystemExit(f"not a directory: {pd}")
 
     client = None
+    judge_client = None
     judge_model = args.model
     ledger_path = None
     users_db = None
@@ -191,16 +196,22 @@ def main(argv=None) -> int:
         default_ledger = Path.home() / ".kicraft" / "spend_ledger.db"
         ledger_path = default_ledger if default_ledger.is_file() else None
     else:
-        from kicraft.server.client import CappedOpenRouterClient
+        from kicraft.server.client import CappedOpenRouterClient, make_client
         from kicraft.server.config import Settings
         s = Settings.from_env()
         client = CappedOpenRouterClient(s)
-        judge_model = args.model or getattr(s, "eval_judge_model", None) or s.model
+        # Judge defaults to a stronger, steadier model than the design model; it
+        # gets a routing-relaxed client when it is not the design model.
+        judge_model = (args.model or getattr(s, "eval_judge_model", None)
+                       or getattr(s, "review_model", None) or s.model)
+        if judge_model and judge_model != s.model:
+            judge_client = make_client(s.for_judge())
         ledger_path = s.ledger_path
         users_db = s.users_db_path
 
     started_at, finished_at = _project_times(pd, users_db)
-    report = evaluate_project(pd, client, judge_model=judge_model, ledger_path=ledger_path,
+    report = evaluate_project(pd, client, judge_model=judge_model, judge_client=judge_client,
+                              ledger_path=ledger_path,
                               started_at=started_at, finished_at=finished_at,
                               skip_judge=args.no_judge)
 

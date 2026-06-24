@@ -174,6 +174,42 @@ def test_active_device_input_pins_preserved(tmp_path: Path) -> None:
     assert "(pin input" in block
 
 
+@pytest.mark.parametrize("node", ["PH", "SW", "LX", "PHASE", "SWITCH"])
+def test_switch_node_pin_retyped_power_out(tmp_path: Path, node: str) -> None:
+    # A switching regulator's switch/phase node drives the inductor — it is an
+    # output. Vendored/easyeda symbols mistype it `power_in`, tripping ERC
+    # power_pin_not_driven on the wired switch net. extract_symbol_block must
+    # retype it `power_out` while leaving genuine power inputs (VIN/GND) alone.
+    lib = tmp_path / "Reg.kicad_sym"
+    lib.write_text(
+        '(kicad_symbol_lib (version 20211014)\n'
+        '\t(symbol "BUCK"\n'
+        '\t\t(property "Reference" "U" (at 0 0 0))\n'
+        '\t\t(symbol "BUCK_0_1"\n'
+        '\t\t\t(pin power_in line (at -10 5 0) (length 5)'
+        ' (name "VIN") (number "1"))\n'
+        '\t\t\t(pin power_in line (at -10 -5 0) (length 5)'
+        ' (name "GND") (number "2"))\n'
+        f'\t\t\t(pin power_in line (at 10 0 180) (length 5)'
+        f' (name "{node}") (number "3"))\n'
+        '\t\t)\n'
+        '\t)\n'
+        ')\n'
+    )
+    block = extract_symbol_block("Reg", "BUCK", stock_dir=tmp_path)
+    assert f'power_out line (at 10 0 180) (length 5) (name "{node}")' in block
+    # VIN/GND power inputs are untouched.
+    assert block.count("(pin power_in") == 2
+
+
+def test_tps54331_vendored_symbol_ph_is_power_out() -> None:
+    # The vendored TPS54331 data fix (+ the generalized normalizer): pin 8 "PH"
+    # must resolve to power_out, not power_in.
+    block = extract_symbol_block("tps54331", "TPS54331DDAR")
+    m = re.search(r'\(pin\s+(\w+)\b[^()]*(?:\([^()]*\)[^()]*)*?\(name\s+"PH"', block)
+    assert m is not None and m.group(1) == "power_out"
+
+
 def test_custom_symbol_dir(tmp_path: Path) -> None:
     fake_lib = tmp_path / "Fake.kicad_sym"
     fake_lib.write_text(

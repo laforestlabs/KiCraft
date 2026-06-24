@@ -253,6 +253,14 @@ DEFAULT_CONFIG = {
     "java_bin": "java",
     "freerouting_timeout_s": 60,
     "freerouting_max_passes": 20,
+    # Parent inter-leaf routing convergence (C2): a parent with many cross-leaf
+    # nets needs more passes + wall-time than the flat defaults, or the densest
+    # interconnects stay unrouted (the dominant parent-stage unconnected cause).
+    # When the parent's inferred_interconnect_net count reaches the threshold the
+    # PARENT route (only) is raised to these budgets. Bounded; only raises.
+    "parent_dense_interconnect_threshold": 10,
+    "parent_dense_max_passes": 40,
+    "parent_dense_timeout_s": 180,
     # Leaf freerouting timeout scales with component count: a large array leaf
     # (e.g. a 200-LED matrix, ~600 nets) routes fine but takes minutes, and the
     # fixed 60s default cut freerouting off mid-route. The leaf budget is
