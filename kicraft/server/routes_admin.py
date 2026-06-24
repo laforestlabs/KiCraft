@@ -11,8 +11,8 @@ time, and ``_store`` still reads ``web._STORE`` so the test seam is unchanged. C
 use NiceGUI's bundled ECharts primitive (the ``server`` extra has no plotly).
 """
 from __future__ import annotations
-
 import json
+import math
 import os
 import re
 import subprocess
@@ -31,6 +31,7 @@ from .accounts import (
     is_admin,
 )
 from .config import Settings
+from .host_metrics import HostMetricsStore
 from .kicanvas import KiCanvasSource, KiCanvasView, kicanvas_head
 from .render_serving import _register_project_dir, _resolve_project_token
 from .spend_guard import SpendGuard
@@ -160,6 +161,100 @@ def _echart_scatter(series, *, title: str, x_name: str = "", y_name: str = "") -
                   "splitLine": {"lineStyle": {"color": _CHART_GRID}}},
         "series": s,
     }
+
+
+# Host-resource (drive / RAM / CPU) trends ---------------------------------- #
+# Timescales for the host-usage charts; the default ("7d") matches the user's
+# request. ``_HOST_TIMESCALE_SECONDS`` -> None means "all history".
+_HOST_TIMESCALES = ["1h", "6h", "24h", "7d", "30d", "90d", "all"]
+_HOST_TIMESCALE_SECONDS = {
+    "1h": 3600.0, "6h": 21600.0, "24h": 86400.0,
+    "7d": 604800.0, "30d": 2592000.0, "90d": 7776000.0, "all": None,
+}
+
+
+def _host_downsample(rows: list[dict], max_points: int = 240) -> list[dict]:
+    """Mean-bucket the host series to <= ``max_points`` rows so a 30-day /
+    30-second-cadence window (~86k rows) keeps a small JSON payload for the
+    browser. The last ``ts`` in each bucket anchors it; metrics are averaged."""
+    if len(rows) <= max_points:
+        return rows
+    bucket = math.ceil(len(rows) / max_points)
+    keys = ("cpu_pct", "mem_pct", "disk_pct", "mem_used_mb",
+            "disk_used_mb", "disk_total_mb")
+    out: list[dict] = []
+    for i in range(0, len(rows), bucket):
+        chunk = rows[i:i + bucket]
+        agg: dict = {"ts": chunk[-1]["ts"]}
+        for k in keys:
+            vals = [c[k] for c in chunk if c.get(k) is not None]
+            agg[k] = round(sum(vals) / len(vals), 2) if vals else None
+        out.append(agg)
+    return out
+
+
+def _host_usage_chart(rows: list[dict], key: str, *, title: str,
+                      color: str, y_name: str = "", y_max: float | None = 100.0,
+                      y_fmt: str | None = None) -> dict:
+    """ECharts *time-axis* area line for one host metric (pure; see
+    ``_echart_bar``). Points are ``[ts_ms, value]`` so ECharts picks axis ticks
+    and tooltip time formatting itself -- better than a category axis for a
+    multi-timescale view. ``y_max=100`` pins percent charts 0..100; pass None
+    for an auto-scaled axis (drive MB shows raw magnitude)."""
+    pts = [[r["ts"] * 1000.0, r[key]] for r in rows if r.get(key) is not None]
+    yaxis: dict = {"type": "value", "name": y_name,
+                   "nameTextStyle": {"color": _CHART_AXIS},
+                   "axisLabel": {"color": _CHART_AXIS},
+                   "splitLine": {"lineStyle": {"color": _CHART_GRID}}}
+    if y_fmt is not None:
+        yaxis["axisLabel"]["formatter"] = y_fmt
+    if y_max is not None:
+        yaxis["min"], yaxis["max"] = 0, y_max
+    return {
+        "backgroundColor": "transparent",
+        "title": {"text": title, "textStyle": {"color": "#e2e8f0", "fontSize": 13}},
+        "tooltip": {"trigger": "axis"},
+        "grid": {"left": 48, "right": 18, "top": 44, "bottom": 32},
+        "xAxis": {"type": "time",
+                  "axisLabel": {"color": _CHART_AXIS, "fontSize": 10},
+                  "splitLine": {"lineStyle": {"color": _CHART_GRID}}},
+        "yAxis": yaxis,
+        "series": [{"type": "line", "data": pts, "smooth": True,
+                    "showSymbol": False, "connectNulls": True,
+                    "itemStyle": {"color": color}, "lineStyle": {"color": color},
+                    "areaStyle": {"color": color, "opacity": 0.15}}],
+    }
+
+
+def _render_host_charts(selection: str) -> None:
+    """Build the three host-usage charts (drive / RAM / CPU) for the given
+    timescale label. Pure on the rows read from the host-metrics store; never
+    raises -- a missing/empty store shows a friendly placeholder card so the
+    admin overview always renders even before the sampler has any data."""
+    seconds = _HOST_TIMESCALE_SECONDS.get(selection)
+    since = None if seconds is None else (time.time() - seconds)
+    try:
+        rows = HostMetricsStore().series(since=since)
+    except Exception:
+        rows = []
+    rows = _host_downsample(rows)
+
+    def _card(key: str, title: str, color: str) -> None:
+        with ui.card().classes("flex-1").style(_admin_card_style()):
+            if rows:
+                ui.echart(_host_usage_chart(rows, key, title=title, color=color,
+                         y_name="%")) \
+                    .classes("w-full").style("height:240px")
+            else:
+                ui.label("No host metrics yet — the sampler starts with the "
+                         "web server.").classes("text-xs") \
+                    .style("color:#64748b;align-self:center")
+
+    with ui.row().classes("w-full flex-wrap gap-3"):
+        _card("cpu_pct", "CPU usage (%)", "#60a5fa")
+        _card("mem_pct", "RAM usage (%)", "#f472b6")
+        _card("disk_pct", "Drive usage (%)", "#22d3ee")
+
 
 
 def _admin_header(active: str) -> None:
@@ -1485,6 +1580,25 @@ def admin_overview_page():
                 ui.echart(_echart_pie(store.tier_distribution(), title="User tiers")) \
                     .classes("w-full").style("height:260px")
 
+        # Host-resource trends: drive / RAM / CPU over time. A background
+        # sampler (started by the web process, kicraft/server/host_metrics.py)
+        # appends a row every ~30 s; the admin page only reads. The timescale
+        # selector rebuilds the three charts in place via ui.refreshable.
+        ui.label("Host usage (drive · RAM · CPU)").classes(
+            "text-base font-semibold text-white mt-2")
+        with ui.row().classes("items-center gap-2 flex-wrap"):
+            ui.label("Window").classes("text-xs").style("color:#94a3b8")
+
+            @ui.refreshable
+            def host_charts(selection: str) -> None:
+                _render_host_charts(selection)
+
+            def _on_window(e, hc=host_charts) -> None:
+                hc.refresh(e.value)
+
+            ui.select(_HOST_TIMESCALES, value="7d", on_change=_on_window) \
+                .props("dark dense options-dense no-caps").style("width:110px")
+            host_charts("7d")
         ui.label("Top users by projects") \
             .classes("text-base font-semibold text-white mt-2")
         top = sorted(store.users_with_project_counts(),

@@ -5062,6 +5062,15 @@ def main() -> None:
     _gc_workspaces()
     # Recover builds that outlived the previous web process (see _orphan_reaper).
     threading.Thread(target=_orphan_reaper, daemon=True).start()
+    # Always-on host-resource sampler feeding the /admin usage charts
+    # (drive / RAM / CPU over time). Idempotent + daemon; failures are
+    # swallowed inside the sampler so they never affect serving.
+    try:
+        from .host_metrics import start_host_metrics_sampler
+        start_host_metrics_sampler()
+    except Exception:  # pragma: no cover - diagnostics only
+        print("WARNING: host-metrics sampler failed to start; "
+              "/admin usage charts will be empty until restart.")
     ui.run(
         host=os.environ.get("KICRAFT_WEB_HOST", "0.0.0.0"),
         port=int(os.environ.get("KICRAFT_WEB_PORT", "8080")),
