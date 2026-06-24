@@ -4,7 +4,7 @@
   "description": "SHOU HAN(\u9996\u97e9) SS13D07VG4",
   "footprint_name": "SW-TH_SS13D07VG4",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "production",
   "mpn": "SS13D07VG4",
   "name": "ss13d07vg4",
   "provenance": {

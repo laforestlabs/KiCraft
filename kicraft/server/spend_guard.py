@@ -56,6 +56,27 @@ class SpendGuard:
                 "cost_usd REAL NOT NULL,"
                 "meta TEXT)"
             )
+            # One row per completed pipeline stage (design or build): the durable
+            # per-stage resource record. cost_usd duplicates the summed LLM spend
+            # (present for the report's side-by-side view) but is NOT summed into
+            # the spend ceiling (that lives in `spend`). wall_s/cpu_s are the
+            # gap metrics: a stage's wall-clock duration and child-CPU seconds,
+            # captured by the stage driver around the LLM tool loop + subprocess
+            # tool calls.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS stage_runs ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "ts TEXT NOT NULL,"
+                "run_id TEXT,"
+                "stage TEXT NOT NULL,"
+                "ok INTEGER,"
+                "attempts INTEGER,"
+                "rounds INTEGER,"
+                "tool_calls INTEGER,"
+                "wall_s REAL,"
+                "cpu_s REAL,"
+                "cost_usd REAL)"
+            )
 
     def _sum(self, where: str = "", params: tuple = ()) -> float:
         with self._conn() as conn:
@@ -140,4 +161,31 @@ class SpendGuard:
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (_utcnow_iso(), model, int(input_tokens or 0), int(output_tokens or 0),
                  float(cost_usd or 0.0), meta_str),
+            )
+
+    def record_stage(self, *, run_id: str | None, stage: str, ok: bool,
+                     attempts: int | None, rounds: int | None, tool_calls: int | None,
+                     wall_s: float | None, cpu_s: float | None, cost_usd: float) -> None:
+        """Append one completed stage to ``stage_runs`` — the durable per-stage
+        resource record. ``wall_s``/``cpu_s`` are the gap metrics: a stage's
+        wall-clock duration and child-CPU seconds (LLM latency + subprocess tool
+        calls). ``cost_usd`` mirrors the summed LLM spend for the side-by-side
+        report; it is intentionally NOT added to the ``spend`` ceiling (the
+        per-call rows there already enforce it).
+
+        Note: ``cpu_s`` comes from RUSAGE_CHILDREN, which is per-process, so it
+        is only trustworthy when designs run serially — concurrent stages in the
+        same web process cross-contaminate each other's child-CPU delta (see
+        stage_driver._child_cpu_s). ``wall_s`` is unaffected."""
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO stage_runs (ts, run_id, stage, ok, attempts, rounds, "
+                "tool_calls, wall_s, cpu_s, cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (_utcnow_iso(), run_id, stage, int(bool(ok)),
+                 int(attempts) if attempts is not None else None,
+                 int(rounds) if rounds is not None else None,
+                 int(tool_calls) if tool_calls is not None else None,
+                 float(wall_s) if wall_s is not None else None,
+                 float(cpu_s) if cpu_s is not None else None,
+                 float(cost_usd or 0.0)),
             )

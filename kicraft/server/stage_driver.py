@@ -20,9 +20,11 @@ import datetime as dt
 import json
 import os
 import re
+import resource
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from kicraft.design import models
@@ -31,6 +33,42 @@ from .client import make_client
 
 # The repo venv has no `kicraft` console script; cli_app.py has a __main__ guard.
 KICRAFT = [sys.executable, "-m", "kicraft.design.cli_app"]
+
+
+def _child_cpu_s() -> float:
+    """User+system CPU seconds consumed by this process's child subprocesses
+    (the stage-prep/commit calls and BOM tool lookups). RUSAGE_CHILDREN accumulates
+    over the whole process, so the driver snapshots a before/after delta per stage.
+    On non-POSIX this reports 0 (resource.RUSAGE_CHILDREN is unavailable); the
+    ledger column then stays null.
+
+    CAVEAT — reliable only single-flight: RUSAGE_CHILDREN is per-PROCESS, not
+    per-thread. The web app runs designs in concurrent _run_design threads in one
+    process, so when two designs are in flight the stage windows overlap and each
+    one's cpu_s delta absorbs the other's subprocess CPU. wall_s (a monotonic
+    delta) stays correct under concurrency; cpu_s does not. Trust cpu_s only for
+    serial measurement (one design at a time, e.g. a single self-eval), and read
+    the aggregate cpu/wall ratio as a rough latency-vs-CPU signal, not an exact
+    per-stage figure. A future fix could tag each stage_runs row as
+    cpu-contended when other stages overlapped its window."""
+    try:
+        u = resource.getrusage(resource.RUSAGE_CHILDREN)
+    except (AttributeError, ValueError):
+        return 0.0
+    return float(u.ru_utime + u.ru_stime)
+
+
+def _record_stage_ledger(client, *, run_id, stage, **kw) -> None:
+    """Best-effort write to the spend ledger's ``stage_runs`` table. Real clients
+    carry a ``guard`` (SpendGuard) that owns ``record_stage``; the mock/replay
+    client's guard does not, so this is a silent no-op there."""
+    guard = getattr(client, "guard", None)
+    if guard is None or not hasattr(guard, "record_stage"):
+        return
+    try:
+        guard.record_stage(run_id=run_id, stage=stage, **kw)
+    except Exception:  # ledger trouble must never fail a design run
+        pass
 
 _REPO = Path(__file__).resolve().parents[2]
 _SPEC_DIRS = [
@@ -321,9 +359,75 @@ def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess
                           cwd=(str(cwd) if cwd else None))
 
 
+# A part's MPN spelling variants all mean the same lookup: normalize before the
+# per-MPN budget key and the resolution cache. Strip whitespace, uppercase, and
+# collapse any pasted lcsc.com/jlcpcb.com product URL to its bare C-number.
+def _normalize_mpn(raw: str) -> str:
+    s = (raw or "").strip().upper()
+    m = _LCSC_ID_RE.search(s)
+    return m.group(0).upper() if m else s
+
+
+# The BOM SEARCH BUDGET tells the model "1 lookup_lcsc_id query + at most 1
+# retry per part." A weak model (deepseek-v4-flash) ignores that and re-spells
+# the same MPN for round after round (e.g. VL53L1CXV0FY/1, VL53L1C, VL53L1X:
+# 56 lookups for one part). Enforce it server-side instead: cap calls per
+# normalized MPN within one stage attempt, then return a terminal result that
+# forbids further retries for that part.
+_BOM_MPN_QUERY_CAP = 2
+
+
+# Read-only BOM tools that are pure for the life of a stage: the stock KiCad
+# symbol/footprint libraries don't change mid-stage, so an identical call always
+# returns the same answer. A weak model re-issues these verifications round after
+# round (symbol/footprint lookups+searches are ~70% of BOM tool calls in the
+# part-query log), so memoize them per stage -- an exact repeat then skips the
+# CLI subprocess entirely. list_parts and add_part_from_lcsc are excluded (the
+# library mutates when a part is fetched), and lookup_lcsc_id is excluded (it
+# owns the per-MPN cap + the network resolution cache).
+_MEMOIZED_BOM_TOOLS = frozenset(
+    {"lookup_symbol", "lookup_footprint", "search_symbols", "search_footprints"})
+
+
+def _new_bundle_rows(list_parts_stdout: str, lcsc_id: str, name: str | None) -> str:
+    """After add_part_from_lcsc, the model needs the exact '<name>:<symbol>' /
+    '<name>:<footprint>' strings for the ONE bundle it just fetched -- not the
+    whole ~42 KB parts table re-dumped (which then rides the conversation in
+    every later tool round, the dominant BOM token cost). Return the markdown
+    table header plus only the row(s) for the new bundle, matched by its LCSC
+    C-number (rendered 'lcsc:C#####' in the sourcing column) or its slug. Falls
+    back to a bounded slice if the row can't be located (e.g. add-part failed),
+    so the model always gets something actionable."""
+    lines = (list_parts_stdout or "").splitlines()
+    sep = next((i for i, ln in enumerate(lines)
+                if re.match(r"\s*\|\s*-{2,}", ln)), None)
+    if sep is None:  # unexpected format -> don't silently hide it, just bound it
+        return (list_parts_stdout or "")[:8000]
+    m = _LCSC_ID_RE.search(lcsc_id or "")
+    cnum = m.group(0).upper() if m else ""
+    slug = (name or "").strip().lower()
+    rows = [ln for ln in lines[sep + 1:]
+            if ln.lstrip().startswith("|")
+            and ((cnum and cnum in ln.upper())
+                 or (slug and f"`{slug}`" in ln.lower()))]
+    header = "\n".join(lines[:sep + 1])
+    if not rows:  # couldn't pin the new row; give the model the header + a hint
+        return header + "\n(new row not located; call list_parts for the full table)"
+    return (header + "\n" + "\n".join(rows))[:8000]
+
+
 def _bom_executor(workspace: Path):
     """Return an executor(name, args) -> str backed by the kicraft CLI (cwd=workspace)."""
+    lcsc_calls: dict[str, int] = {}  # normalized MPN -> attempts this stage (search budget)
+    memo: dict[tuple[str, str], str] = {}  # read-only lookups, deduped per stage
     def execute(name: str, args: dict) -> str:
+        ckey: tuple[str, str] | None = None
+        if name in _MEMOIZED_BOM_TOOLS:
+            arg = str(args.get("symbol") or args.get("footprint")
+                      or args.get("query") or "").strip()
+            ckey = (name, arg)
+            if ckey in memo:  # identical lookup already answered this stage
+                return memo[ckey]
         if name == "list_parts":
             # Generous cap: the vendored library alone renders ~600 chars per
             # bundle, and the core-defaults adoption rule sends the model HERE
@@ -332,31 +436,53 @@ def _bom_executor(workspace: Path):
             return (r.stdout or r.stderr)[:40000]
         if name == "lookup_symbol":
             r = _run(KICRAFT + ["lookup-symbol", str(args.get("symbol", ""))], workspace)
-            return (r.stdout or r.stderr)[:3000]
+            return memo.setdefault(ckey, (r.stdout or r.stderr)[:3000])
         if name == "search_symbols":
             r = _run(KICRAFT + ["search-symbols", str(args.get("query", ""))], workspace)
-            return (r.stdout or r.stderr)[:3000]
+            return memo.setdefault(ckey, (r.stdout or r.stderr)[:3000])
         if name == "search_footprints":
             r = _run(KICRAFT + ["search-footprints", str(args.get("query", ""))], workspace)
-            return (r.stdout or r.stderr)[:3000]
+            return memo.setdefault(ckey, (r.stdout or r.stderr)[:3000])
         if name == "lookup_footprint":
             r = _run(KICRAFT + ["lookup-footprint", str(args.get("footprint", ""))], workspace)
-            return (r.stdout or r.stderr)[:3000]
+            return memo.setdefault(ckey, (r.stdout or r.stderr)[:3000])
         if name == "lookup_lcsc_id":
-            r = _run(KICRAFT + ["lookup-lcsc-id", str(args.get("mpn", ""))], workspace)
+            mpn = str(args.get("mpn", ""))
+            key = _normalize_mpn(mpn)
+            lcsc_calls[key] = lcsc_calls.get(key, 0) + 1
+            if lcsc_calls[key] > _BOM_MPN_QUERY_CAP:
+                # SEARCH BUDGET exceeded for this MPN: the result cannot change
+                # by retrying, so stop the wasted subprocess + the LLM round it
+                # triggers. Tell the model to stop retrying this part.
+                return (f"Resolution for '{mpn}' has already been attempted "
+                        f"{_BOM_MPN_QUERY_CAP} times; repeating it cannot change "
+                        "the answer. STOP retrying this part: use the result from "
+                        "the first lookup above, ask the user for an exact LCSC "
+                        "C-number (C#####), or use the closest stock KiCad "
+                        "symbol/footprint and record the substitution in "
+                        "assumptions. Do NOT call lookup_lcsc_id for this MPN "
+                        "again this stage.")
+            r = _run(KICRAFT + ["lookup-lcsc-id", mpn], workspace)
             return (r.stdout or r.stderr)[:3000]
         if name == "add_part_from_lcsc":
             # Persist fetched parts to the shared HOME tier (not project): a part
             # the model needs once is then reused by every later design as a
             # `prototype`-badged bundle, so the catalog self-grows and repeated
             # LCSC fetches (the dominant BOM cost) amortize away.
-            cmd = ["add-part", "--from-lcsc", str(args.get("lcsc_id", "")), "--into", "home"]
-            if args.get("name"):
-                cmd += ["--name", str(args["name"])]
+            lcsc_id = str(args.get("lcsc_id", ""))
+            name = str(args["name"]) if args.get("name") else None
+            cmd = ["add-part", "--from-lcsc", lcsc_id, "--into", "home"]
+            if name:
+                cmd += ["--name", name]
             r = _run(KICRAFT + cmd, workspace)
             lp = _run(KICRAFT + ["list-parts"], workspace)
+            # Return ONLY the freshly-fetched bundle's row(s), not the whole
+            # ~42 KB table: the dump would otherwise persist in context for every
+            # later round. The model can still call list_parts for the full table.
             return (f"add-part exit={r.returncode}\n{(r.stdout + chr(10) + r.stderr).strip()[:1500]}"
-                    f"\n\nCURRENT PARTS LIBRARY:\n{lp.stdout[:40000]}")
+                    f"\n\nNEWLY ADDED BUNDLE (use these strings verbatim; call "
+                    f"list_parts for the full library):\n"
+                    f"{_new_bundle_rows(lp.stdout, lcsc_id, name)}")
         return f"unknown tool: {name}"
     return execute
 
@@ -380,13 +506,17 @@ def _commit(stage, slot, state_path, brief, project_stem=None, workspace=None) -
 
 
 def _stamp_stage_status(state_path, stage: str, ok: bool, *,
-                        cost_usd=None, attempts=None) -> None:
+                        cost_usd=None, attempts=None, rounds=None,
+                        tool_calls=None, wall_s=None, cpu_s=None) -> None:
     """Record a stage's durable outcome in state.json's stage_status block (a real
     ConversationState field, so the CLI's load/validate/dump round-trip preserves
     it). This is what lets a reopened project restore its pipeline progress
-    without the ephemeral event stream. Tolerates a missing state.json (a
-    first-stage failure before any commit). Atomic write: the web render timer
-    reads this file concurrently."""
+    without the ephemeral event stream. wall_s/cpu_s/rounds/tool_calls fill the
+    prior measurement gap: how long a stage took, how much child CPU it burned,
+    and how many tool rounds it cost (the written ledger records the same for the
+    cross-run report). Tolerates a missing state.json (a first-stage failure
+    before any commit). Atomic write: the web render timer reads this file
+    concurrently."""
     p = Path(state_path)
     try:
         sj = json.loads(p.read_text(encoding="utf-8"))
@@ -398,6 +528,14 @@ def _stamp_stage_status(state_path, stage: str, ok: bool, *,
         entry["cost_usd"] = round(float(cost_usd), 6)
     if attempts is not None:
         entry["attempts"] = int(attempts)
+    if wall_s is not None:
+        entry["wall_s"] = round(float(wall_s), 3)
+    if cpu_s is not None:
+        entry["cpu_s"] = round(float(cpu_s), 3)
+    if rounds is not None:
+        entry["rounds"] = int(rounds)
+    if tool_calls is not None:
+        entry["tool_calls"] = int(tool_calls)
     block = sj.get("stage_status") or {}
     block[stage] = entry
     sj["stage_status"] = block
@@ -496,15 +634,24 @@ def _client_model(client) -> str | None:
 def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, max_retries=2,
                 progress=None, answers=None, instruction=None, meta_ctx=None,
                 core_defaults=None) -> dict:
+    run_id = (meta_ctx or {}).get("run_id")
+    t0 = time.monotonic()
+    cpu0 = _child_cpu_s()
     if progress:
         progress({"kind": "stage_start", "stage": stage, "model": _client_model(client)})
     prep = _run(KICRAFT + ["stage-prep", stage, str(state_path)], workspace)
     if prep.returncode != 0:
         err = (prep.stderr.strip() or prep.stdout.strip())[:600]
-        _stamp_stage_status(state_path, stage, False)
+        _wall = round(time.monotonic() - t0, 3)
+        _cpu = round(_child_cpu_s() - cpu0, 3)
+        _stamp_stage_status(state_path, stage, False, wall_s=_wall, cpu_s=_cpu)
+        _record_stage_ledger(client, run_id=run_id, stage=stage, ok=False,
+                             attempts=None, rounds=None, tool_calls=None,
+                             wall_s=_wall, cpu_s=_cpu, cost_usd=0.0)
         if progress:
             progress({"kind": "stage_done", "stage": stage, "ok": False})
         return {"stage": stage, "commit_ok": False, "cost_usd": 0.0,
+                "wall_s": _wall, "cpu_s": _cpu,
                 "error": f"stage-prep failed: {err}"}
     prep_json = json.loads(prep.stdout)
     extras = prep_json.get("extras") or {}
@@ -604,26 +751,43 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         project_stem = obj.pop("project_stem", None)
         ok, out = _commit(stage, dict(obj), state_path, brief, project_stem, workspace)
         if ok:
+            _wall = round(time.monotonic() - t0, 3)
+            _cpu = round(_child_cpu_s() - cpu0, 3)
             _stamp_stage_status(state_path, stage, True,
-                                cost_usd=total_cost, attempts=attempt + 1)
+                                cost_usd=total_cost, attempts=attempt + 1,
+                                rounds=rounds, tool_calls=tool_calls_ct,
+                                wall_s=_wall, cpu_s=_cpu)
+            _record_stage_ledger(client, run_id=run_id, stage=stage, ok=True,
+                                 attempts=attempt + 1, rounds=rounds,
+                                 tool_calls=tool_calls_ct, wall_s=_wall,
+                                 cpu_s=_cpu, cost_usd=total_cost)
             if progress:
                 progress({"kind": "stage_done", "stage": stage, "ok": True,
                           "cost": total_cost, "attempts": attempt + 1})
             return {"stage": stage, "commit_ok": True, "cost_usd": total_cost,
                     "attempts": attempt + 1, "rounds": rounds, "tool_calls": tool_calls_ct,
-                    "commit": out, "slot": obj}
+                    "wall_s": _wall, "cpu_s": _cpu, "commit": out, "slot": obj}
         last = {"commit": out}
         if progress:
             progress({"kind": "retry", "stage": stage, "errors": out.get("errors"),
                       "offenders": out.get("offenders")})
         messages.append({"role": "user", "content": _retry_feedback(out)})
 
+    _wall = round(time.monotonic() - t0, 3)
+    _cpu = round(_child_cpu_s() - cpu0, 3)
     _stamp_stage_status(state_path, stage, False,
-                        cost_usd=total_cost, attempts=max_retries + 1)
+                        cost_usd=total_cost, attempts=max_retries + 1,
+                        rounds=rounds, tool_calls=tool_calls_ct,
+                        wall_s=_wall, cpu_s=_cpu)
+    _record_stage_ledger(client, run_id=run_id, stage=stage, ok=False,
+                         attempts=max_retries + 1, rounds=rounds,
+                         tool_calls=tool_calls_ct, wall_s=_wall, cpu_s=_cpu,
+                         cost_usd=total_cost)
     if progress:
         progress({"kind": "stage_done", "stage": stage, "ok": False, "cost": total_cost})
     return {"stage": stage, "commit_ok": False, "cost_usd": total_cost,
-            "attempts": max_retries + 1, "tool_calls": tool_calls_ct, **last}
+            "attempts": max_retries + 1, "rounds": rounds, "tool_calls": tool_calls_ct,
+            "wall_s": _wall, "cpu_s": _cpu, **last}
 
 
 def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_stage=None,

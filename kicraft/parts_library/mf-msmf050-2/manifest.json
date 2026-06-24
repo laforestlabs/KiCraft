@@ -4,7 +4,7 @@
   "description": "BOURNS MF-MSMF050-2",
   "footprint_name": "F1812",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "production",
   "mpn": "MF-MSMF050-2",
   "name": "mf-msmf050-2",
   "provenance": {

@@ -4,7 +4,7 @@
   "description": "HXY MOSFET(\u534e\u8f69\u9633\u7535\u5b50) XC6206P332MR",
   "footprint_name": "SOT-23-3_L2.9-W1.3-P1.90-LS2.4-BR",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "production",
   "mpn": "XC6206P332MR",
   "name": "xc6206p332mr",
   "provenance": {

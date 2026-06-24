@@ -81,6 +81,7 @@ from .synthesis.validation import (
     reconcile_inter_sheet_nets,
 )
 from kicraft.parts_library import Maturity
+from kicraft.parts_library import mpn_cache
 from kicraft.parts_library.query_log import record as _log_query
 
 # `placement` is deterministic (user placement rules, no LLM); committing it
@@ -636,13 +637,16 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
         lcsc = m.group(0).upper()
         _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=lcsc,
                    source="explicit-id")
+        mpn_cache.put(mpn, lcsc, "explicit-id")
         print(json.dumps(
             {"ok": True, "mpn": mpn, "lcsc": lcsc, "source": "explicit-id"},
             indent=2,
         ))
         return 0
 
-    # 1. Parts-library manifests — authoritative and offline.
+    # 1. Parts-library manifests — authoritative and offline. Runs BEFORE the
+    #    resolution cache so a freshly-vendored bundle always wins over any
+    #    older cached resolution (a part can be re-vendored to a better LCSC id).
     active, _broken = _load_library_parts(Path.cwd())
     for part in active:
         man = part.manifest
@@ -651,12 +655,31 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
             if lcsc:
                 _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=lcsc,
                            source="parts-library", library_name=man.name)
+                mpn_cache.put(mpn, lcsc, "parts-library")
                 print(json.dumps(
                     {"ok": True, "mpn": mpn, "lcsc": lcsc,
                      "source": "parts-library", "name": man.name},
                     indent=2,
                 ))
                 return 0
+
+    # 1b. Persistent MPN->LCSC resolution cache: a part resolved once on this
+    #     machine resolves instantly, offline, on every later run, so a
+    #     re-resolved MPN (e.g. BMP280, 47 lookups in one window) never hits the
+    #     network/catalog again. Sits AFTER the authoritative parts-library tier
+    #     (which can't be shadowed by a stale cache) and only ever holds precise
+    #     identifiers — see mpn_cache.cacheable, which keeps fuzzy keyword
+    #     searches out of the cache entirely. Stores only {lcsc, source, ts}.
+    cached = mpn_cache.get(mpn)
+    if cached and cached.get("lcsc"):
+        _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=cached["lcsc"],
+                   source="mpn-cache")
+        print(json.dumps(
+            {"ok": True, "mpn": mpn, "lcsc": cached["lcsc"],
+             "source": f"mpn-cache(via {cached.get('source', '?')})"},
+            indent=2,
+        ))
+        return 0
 
     # 2. Offline JLC catalog (jlcparts dump) — richer than the network search
     #    (live stock, Basic/Extended, qty-1 price) and answers without network.
@@ -670,6 +693,7 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
             if best and best.get("lcsc"):
                 _log_query("lookup_lcsc_id", outcome="resolved", query=mpn,
                            lcsc=best["lcsc"], source="jlcparts")
+                mpn_cache.put(mpn, best["lcsc"], "jlcparts")
                 print(json.dumps(
                     {"ok": True, "mpn": mpn, "lcsc": best["lcsc"],
                      "source": "jlcparts",
@@ -709,6 +733,7 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
     if best and best.get("lcsc"):
         _log_query("lookup_lcsc_id", outcome="resolved", query=mpn,
                    lcsc=best["lcsc"], source="easyeda")
+        mpn_cache.put(mpn, best["lcsc"], "easyeda")
         print(json.dumps(
             {"ok": True, "mpn": mpn, "lcsc": best["lcsc"], "source": "easyeda",
              "match": {k: best.get(k) for k in fields}},
@@ -3377,6 +3402,66 @@ def _cmd_artifacts(args: argparse.Namespace) -> int:
     return 0
 
 
+def _hoist_positionals(parser: argparse.ArgumentParser, argv: list[str]) -> list[str]:
+    """Move a subcommand's positional args ahead of its options.
+
+    Python 3.12's argparse will not bind an *optional* positional (``nargs="?"``)
+    that appears AFTER an option: ``stage-commit intent --slot-file x state.json``
+    fails with "unrecognized arguments: state.json" even though the same tokens
+    in positionals-first order parse fine. Several subcommands here take such a
+    positional (``state``/``out_dir`` on stage-commit/stage-prep/replay/archive),
+    so users -- and any caller that lists options first -- would hit this.
+
+    Rewrite the chosen subcommand's tokens to ``[name, *positionals, *options]``
+    before argparse sees them. argparse resolves options by name, not position,
+    so hoisting positionals is parse-equivalent for these subparsers. The pass is
+    deliberately conservative: on ANYTHING it can't classify with certainty (an
+    unknown/abbreviated option, an option with variable nargs, a ``--`` end-of-
+    options marker, a positional that looks like an option) it returns ``argv``
+    unchanged, so it can only fix the broken ordering, never break a working one.
+    """
+    if not argv:
+        return argv
+    subs = next((a for a in parser._actions
+                 if isinstance(a, argparse._SubParsersAction)), None)
+    if subs is None or argv[0] not in subs.choices:
+        return argv  # not a subcommand we own (e.g. -h, or bare prog)
+    sub = subs.choices[argv[0]]
+    # option string -> values it consumes after itself (0 = flag, 1 = single
+    # value, None = variable/uncertain -> we will bail if it appears).
+    consumes: dict[str, int | None] = {}
+    for act in sub._actions:
+        n: int | None = 0 if act.nargs == 0 else (1 if act.nargs in (None, 1) else None)
+        for opt in act.option_strings:
+            consumes[opt] = n
+    positionals: list[str] = []
+    options: list[str] = []
+    rest = list(argv[1:])
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok == "--":
+            return argv  # end-of-options marker: leave ordering to argparse
+        if len(tok) > 1 and tok[0] == "-":
+            if tok.startswith("--") and "=" in tok:  # --opt=value is self-contained
+                options.append(tok)
+                i += 1
+                continue
+            n = consumes.get(tok)
+            if n is None:  # unknown/abbreviated option or variable nargs -> bail
+                return argv
+            options.append(tok)
+            i += 1
+            for _ in range(n):  # pull the option's value(s) along with it
+                if i < len(rest):
+                    options.append(rest[i])
+                    i += 1
+        else:
+            positionals.append(tok)
+            i += 1
+    return [argv[0], *positionals, *options]
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="kicraft",
@@ -3905,7 +3990,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_arch.set_defaults(func=_cmd_archive)
 
-    args = ap.parse_args(argv)
+    if argv is None:
+        argv = sys.argv[1:]
+    args = ap.parse_args(_hoist_positionals(ap, list(argv)))
     return args.func(args)
 
 

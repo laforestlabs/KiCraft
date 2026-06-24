@@ -20,6 +20,10 @@ from kicraft.design.synthesis.symbol_library import DEFAULT_KICAD_SYMBOL_DIR
 
 
 def _run(capsys: pytest.CaptureFixture, *argv: str) -> tuple[int, dict]:
+    # Args are listed options-first with `state` LAST on purpose: the CLI's
+    # _hoist_positionals must accept the state positional in any position
+    # (Python 3.12 argparse otherwise refuses a nargs="?" positional after an
+    # option). This exercises that fix directly.
     rc = main(list(argv))
     out = capsys.readouterr().out
     try:

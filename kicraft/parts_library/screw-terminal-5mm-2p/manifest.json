@@ -4,7 +4,7 @@
   "description": "WJ126V-5.0-2P",
   "footprint_name": "CONN-TH_WJ126V-5.0-2P",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "production",
   "mpn": "WJ126V-5.0-2P",
   "name": "screw-terminal-5mm-2p",
   "provenance": {

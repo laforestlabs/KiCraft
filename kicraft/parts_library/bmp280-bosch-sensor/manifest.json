@@ -4,7 +4,7 @@
   "description": "Bosch(\u535a\u4e16) BMP280",
   "footprint_name": "LGA-8_L2.5-W2.0-P0.65_AMP6127",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "production",
   "mpn": "BMP280",
   "name": "bmp280-bosch-sensor",
   "provenance": {
