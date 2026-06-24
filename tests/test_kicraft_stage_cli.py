@@ -19,8 +19,37 @@ from kicraft.design.synthesis.parts_lookup import DEFAULT_KICAD_FOOTPRINT_DIR
 from kicraft.design.synthesis.symbol_library import DEFAULT_KICAD_SYMBOL_DIR
 
 
+# stage-commit / stage-prep take `state` as a `nargs="?"` positional. On
+# Python 3.12 argparse will not bind such a positional when it is placed AFTER
+# an option (`... --slot-file X --no-archive state.json` -> "unrecognized
+# arguments: state.json"). Production never hits this because it passes
+# positionals first (see stage_driver._commit). Mirror that here so the tests
+# exercise the real invocation order regardless of how a call site lists args.
+_VALUE_OPTS = frozenset({"--slot-file", "--questions-file", "--history-message",
+                         "--project-stem", "--archive-root"})
+
+
+def _positionals_first(argv: list[str]) -> list[str]:
+    if len(argv) < 2 or argv[0] not in ("stage-commit", "stage-prep"):
+        return argv
+    head, rest = list(argv[:2]), list(argv[2:])  # subcommand + stage stay put
+    positionals, options, i = [], [], 0
+    while i < len(rest):
+        tok = rest[i]
+        if isinstance(tok, str) and tok.startswith("-"):
+            options.append(tok)
+            if tok in _VALUE_OPTS and i + 1 < len(rest):
+                options.append(rest[i + 1])
+                i += 2
+                continue
+        else:
+            positionals.append(tok)
+        i += 1
+    return head + positionals + options
+
+
 def _run(capsys: pytest.CaptureFixture, *argv: str) -> tuple[int, dict]:
-    rc = main(list(argv))
+    rc = main(_positionals_first(list(argv)))
     out = capsys.readouterr().out
     try:
         return rc, json.loads(out) if out.strip() else {}
