@@ -45,6 +45,25 @@ def key_for(mpn: str) -> str:
     return s.upper()
 
 
+def cacheable(mpn: str) -> bool:
+    """Whether a query is a *precise* part identifier safe to freeze, vs a fuzzy
+    free-text search that should re-resolve every time.
+
+    Caching a keyword search ('SPDT slide switch SMD', 'BME280 Bosch') would
+    freeze one heuristic 'best match' per machine forever — a wrong first hit
+    can never be corrected, and a re-phrasing should be free to find a better
+    part. So we cache ONLY: a bare LCSC C-number, or a single whitespace-free
+    token that carries at least one digit (real MPNs effectively always do:
+    BMP280, VL53L1CXV0FY/1, SK-12D07VG4). A descriptive phrase (has whitespace)
+    or a bare word ('diode', no digit) is never cached."""
+    s = (mpn or "").strip()
+    if not s:
+        return False
+    if _LCSC_RE.search(s):
+        return True
+    return (not any(c.isspace() for c in s)) and any(c.isdigit() for c in s)
+
+
 def _load() -> dict:
     try:
         return json.loads(cache_path().read_text(encoding="utf-8"))
@@ -59,8 +78,11 @@ def get(mpn: str) -> dict | None:
 
 
 def put(mpn: str, lcsc: str, source: str) -> None:
-    """Record a successful single-LCSC resolution. Best-effort: never raises."""
-    if not lcsc:
+    """Record a successful single-LCSC resolution. Best-effort: never raises.
+
+    No-ops for fuzzy free-text queries (see ``cacheable``): only a precise part
+    identifier is frozen, so a heuristic keyword match is never cached."""
+    if not lcsc or not cacheable(mpn):
         return
     try:
         data = _load()
@@ -76,4 +98,4 @@ def put(mpn: str, lcsc: str, source: str) -> None:
         pass
 
 
-__all__ = ["ENV_PATH", "cache_path", "key_for", "get", "put"]
+__all__ = ["ENV_PATH", "cache_path", "key_for", "cacheable", "get", "put"]

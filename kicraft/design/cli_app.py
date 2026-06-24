@@ -644,22 +644,9 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
         ))
         return 0
 
-    # 0b. Persistent MPN->LCSC resolution cache: a part resolved once on this
-    #     machine resolves instantly, offline, on every later run, so a
-    #     re-resolved MPN (e.g. BMP280, 47 lookups in one window) never hits the
-    #     network again. The cache stores only {lcsc, source, ts}.
-    cached = mpn_cache.get(mpn)
-    if cached and cached.get("lcsc"):
-        _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=cached["lcsc"],
-                   source="mpn-cache")
-        print(json.dumps(
-            {"ok": True, "mpn": mpn, "lcsc": cached["lcsc"],
-             "source": f"mpn-cache(via {cached.get('source', '?')})"},
-            indent=2,
-        ))
-        return 0
-
-    # 1. Parts-library manifests — authoritative and offline.
+    # 1. Parts-library manifests — authoritative and offline. Runs BEFORE the
+    #    resolution cache so a freshly-vendored bundle always wins over any
+    #    older cached resolution (a part can be re-vendored to a better LCSC id).
     active, _broken = _load_library_parts(Path.cwd())
     for part in active:
         man = part.manifest
@@ -675,6 +662,24 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
                     indent=2,
                 ))
                 return 0
+
+    # 1b. Persistent MPN->LCSC resolution cache: a part resolved once on this
+    #     machine resolves instantly, offline, on every later run, so a
+    #     re-resolved MPN (e.g. BMP280, 47 lookups in one window) never hits the
+    #     network/catalog again. Sits AFTER the authoritative parts-library tier
+    #     (which can't be shadowed by a stale cache) and only ever holds precise
+    #     identifiers — see mpn_cache.cacheable, which keeps fuzzy keyword
+    #     searches out of the cache entirely. Stores only {lcsc, source, ts}.
+    cached = mpn_cache.get(mpn)
+    if cached and cached.get("lcsc"):
+        _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=cached["lcsc"],
+                   source="mpn-cache")
+        print(json.dumps(
+            {"ok": True, "mpn": mpn, "lcsc": cached["lcsc"],
+             "source": f"mpn-cache(via {cached.get('source', '?')})"},
+            indent=2,
+        ))
+        return 0
 
     # 2. Offline JLC catalog (jlcparts dump) — richer than the network search
     #    (live stock, Basic/Extended, qty-1 price) and answers without network.

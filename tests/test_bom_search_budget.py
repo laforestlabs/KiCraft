@@ -40,6 +40,33 @@ def test_mpncache_survives_corrupt_file(monkeypatch, tmp_path):
     assert mpn_cache.get("anything") is None          # corrupt -> empty, no raise
 
 
+def test_cacheable_only_freezes_precise_identifiers():
+    # precise: a bare C-number, or a whitespace-free token that carries a digit
+    assert mpn_cache.cacheable("C190004")
+    assert mpn_cache.cacheable("BMP280")
+    assert mpn_cache.cacheable("VL53L1CXV0FY/1")
+    assert mpn_cache.cacheable("SK-12D07VG4")
+    assert mpn_cache.cacheable("https://lcsc.com/p/C7386355.html")
+    # fuzzy: a descriptive phrase (whitespace) or a bare word (no digit) is NOT
+    # frozen -- a heuristic 'best match' must stay free to re-resolve.
+    assert not mpn_cache.cacheable("BME280 Bosch")
+    assert not mpn_cache.cacheable("SPDT slide switch SMD")
+    assert not mpn_cache.cacheable("diode")
+    assert not mpn_cache.cacheable("")
+
+
+def test_mpncache_put_noops_for_fuzzy_keyword(monkeypatch, tmp_path):
+    """A keyword search result must never be cached: freezing one heuristic
+    match per machine would make a wrong first hit permanent."""
+    monkeypatch.setenv(mpn_cache.ENV_PATH, str(tmp_path / "cache.json"))
+    mpn_cache.put("SPDT slide switch SMD", "C431540", "easyeda")
+    assert mpn_cache.get("SPDT slide switch SMD") is None
+    # a precise MPN resolved by the same network tier still caches
+    mpn_cache.put("CH224K", "C970725", "easyeda")
+    assert mpn_cache.get("CH224K") == {"lcsc": "C970725", "source": "easyeda",
+                                       "ts": mpn_cache.get("CH224K")["ts"]}
+
+
 def _executor(monkeypatch, tmp_path):
     # keep the cache + query log off the real user machine while spawning the CLI
     monkeypatch.setenv(mpn_cache.ENV_PATH, str(tmp_path / "cache.json"))

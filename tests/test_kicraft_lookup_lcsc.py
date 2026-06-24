@@ -55,8 +55,14 @@ def test_pick_lcsc_ambiguous_returns_none():
 def _no_local_jlc_catalog(tmp_path, monkeypatch):
     """Point the offline JLC catalog at a missing file so these tests
     exercise the explicit-id / parts-library / easyeda paths regardless of
-    whether the host has the real 5 GB catalog installed."""
+    whether the host has the real 5 GB catalog installed. Also isolate the
+    persistent MPN->LCSC cache to a per-test temp file: otherwise the host's
+    real ~/.kicraft/mpn_cache.json short-circuits the tier under test (a
+    previously-resolved MPN returns 'mpn-cache' instead of exercising
+    parts-library/easyeda), and a test resolution would pollute the real cache."""
     monkeypatch.setenv("KICRAFT_JLCPARTS_DB", str(tmp_path / "absent.sqlite3"))
+    from kicraft.parts_library import mpn_cache
+    monkeypatch.setenv(mpn_cache.ENV_PATH, str(tmp_path / "mpn_cache.json"))
 
 
 def test_lookup_library_hit(capsys):
@@ -69,14 +75,16 @@ def test_lookup_library_hit(capsys):
 
 
 def test_lookup_search_hit_monkeypatched(capsys, monkeypatch):
+    # A synthetic MPN that is NOT in the vendored parts-library, so resolution
+    # actually falls through to the (monkeypatched) easyeda search under test.
     canned = [
-        {"lcsc": "C83291", "model": "BMP280", "brand": "Bosch",
+        {"lcsc": "C83291", "model": "ICTESTPRESSURE1", "brand": "Bosch",
          "package": "LGA-8", "description": "pressure sensor"},
-        {"lcsc": "C999", "model": "BMP280_3.3", "brand": "x",
+        {"lcsc": "C999", "model": "ICTESTPRESSURE1_3.3", "brand": "x",
          "package": "y", "description": None},
     ]
     monkeypatch.setattr(cli_app, "_search_easyeda_components", lambda kw, **_: canned)
-    rc, payload = _run(capsys, "lookup-lcsc-id", "BMP280")
+    rc, payload = _run(capsys, "lookup-lcsc-id", "ICTESTPRESSURE1")
     assert rc == 0
     assert payload["ok"] is True
     assert payload["lcsc"] == "C83291"
@@ -177,10 +185,12 @@ def test_lookup_jlcparts_miss_falls_through_to_easyeda(capsys, monkeypatch, tmp_
     _mk_catalog(tmp_path, monkeypatch, [
         (25744, "RC0805FR-07100KL", "0805", "YAGEO", "base", 1, "1-:0.0041", "res"),
     ])
-    canned = [{"lcsc": "C83291", "model": "BMP280", "brand": "Bosch",
+    canned = [{"lcsc": "C83291", "model": "ICTESTPRESSURE1", "brand": "Bosch",
                "package": "LGA-8", "description": None}]
     monkeypatch.setattr(cli_app, "_search_easyeda_components", lambda kw, **_: canned)
-    rc, payload = _run(capsys, "lookup-lcsc-id", "BMP280")
+    # Synthetic, unvendored MPN: misses the catalog and the parts-library, so it
+    # exercises the jlcparts -> easyeda fall-through this test is named for.
+    rc, payload = _run(capsys, "lookup-lcsc-id", "ICTESTPRESSURE1")
     assert rc == 0
     assert payload["lcsc"] == "C83291" and payload["source"] == "easyeda"
 
