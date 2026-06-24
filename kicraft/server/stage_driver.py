@@ -367,10 +367,30 @@ def _normalize_mpn(raw: str) -> str:
 _BOM_MPN_QUERY_CAP = 2
 
 
+# Read-only BOM tools that are pure for the life of a stage: the stock KiCad
+# symbol/footprint libraries don't change mid-stage, so an identical call always
+# returns the same answer. A weak model re-issues these verifications round after
+# round (symbol/footprint lookups+searches are ~70% of BOM tool calls in the
+# part-query log), so memoize them per stage -- an exact repeat then skips the
+# CLI subprocess entirely. list_parts and add_part_from_lcsc are excluded (the
+# library mutates when a part is fetched), and lookup_lcsc_id is excluded (it
+# owns the per-MPN cap + the network resolution cache).
+_MEMOIZED_BOM_TOOLS = frozenset(
+    {"lookup_symbol", "lookup_footprint", "search_symbols", "search_footprints"})
+
+
 def _bom_executor(workspace: Path):
     """Return an executor(name, args) -> str backed by the kicraft CLI (cwd=workspace)."""
     lcsc_calls: dict[str, int] = {}  # normalized MPN -> attempts this stage (search budget)
+    memo: dict[tuple[str, str], str] = {}  # read-only lookups, deduped per stage
     def execute(name: str, args: dict) -> str:
+        ckey: tuple[str, str] | None = None
+        if name in _MEMOIZED_BOM_TOOLS:
+            arg = str(args.get("symbol") or args.get("footprint")
+                      or args.get("query") or "").strip()
+            ckey = (name, arg)
+            if ckey in memo:  # identical lookup already answered this stage
+                return memo[ckey]
         if name == "list_parts":
             # Generous cap: the vendored library alone renders ~600 chars per
             # bundle, and the core-defaults adoption rule sends the model HERE
@@ -379,16 +399,16 @@ def _bom_executor(workspace: Path):
             return (r.stdout or r.stderr)[:40000]
         if name == "lookup_symbol":
             r = _run(KICRAFT + ["lookup-symbol", str(args.get("symbol", ""))], workspace)
-            return (r.stdout or r.stderr)[:3000]
+            return memo.setdefault(ckey, (r.stdout or r.stderr)[:3000])
         if name == "search_symbols":
             r = _run(KICRAFT + ["search-symbols", str(args.get("query", ""))], workspace)
-            return (r.stdout or r.stderr)[:3000]
+            return memo.setdefault(ckey, (r.stdout or r.stderr)[:3000])
         if name == "search_footprints":
             r = _run(KICRAFT + ["search-footprints", str(args.get("query", ""))], workspace)
-            return (r.stdout or r.stderr)[:3000]
+            return memo.setdefault(ckey, (r.stdout or r.stderr)[:3000])
         if name == "lookup_footprint":
             r = _run(KICRAFT + ["lookup-footprint", str(args.get("footprint", ""))], workspace)
-            return (r.stdout or r.stderr)[:3000]
+            return memo.setdefault(ckey, (r.stdout or r.stderr)[:3000])
         if name == "lookup_lcsc_id":
             mpn = str(args.get("mpn", ""))
             key = _normalize_mpn(mpn)

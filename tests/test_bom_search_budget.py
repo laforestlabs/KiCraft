@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import json
 
+import types
+
 from kicraft.parts_library import mpn_cache
+from kicraft.server import stage_driver
 from kicraft.server.stage_driver import _bom_executor, _normalize_mpn
 
 
@@ -108,3 +111,34 @@ def test_normalize_mpn_helper():
     assert _normalize_mpn("  bmp280 ") == "BMP280"
     assert _normalize_mpn("https://lcsc.com/p/C7386355.html") == "C7386355"
     assert _normalize_mpn("") == ""
+
+
+def test_read_only_lookups_memoized_within_stage(monkeypatch, tmp_path):
+    """An identical symbol/footprint lookup or search is answered once per stage
+    and reused, so a re-issuing model does not re-spawn the CLI subprocess. The
+    library-mutating tools (list_parts) are NOT memoized."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, cwd=None):
+        calls.append(cmd)
+        return types.SimpleNamespace(stdout=f"out:{cmd[-1]}", stderr="", returncode=0)
+
+    monkeypatch.setattr(stage_driver, "_run", fake_run)
+    ex = _bom_executor(tmp_path)
+
+    a = ex("lookup_symbol", {"symbol": "Device:R"})
+    b = ex("lookup_symbol", {"symbol": "Device:R"})      # exact repeat -> memo
+    assert a == b
+    assert sum("lookup-symbol" in c for c in calls) == 1   # only one subprocess
+
+    ex("lookup_symbol", {"symbol": "Device:C"})          # different arg -> runs
+    assert sum("lookup-symbol" in c for c in calls) == 2
+
+    ex("search_footprints", {"query": "0603"})
+    ex("search_footprints", {"query": "0603"})           # memoized
+    assert sum("search-footprints" in c for c in calls) == 1
+
+    # list_parts mutates conceptually (a fetch can add bundles) -> never memoized
+    ex("list_parts", {})
+    ex("list_parts", {})
+    assert sum("list-parts" in c for c in calls) == 2
