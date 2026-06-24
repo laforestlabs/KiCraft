@@ -70,6 +70,7 @@ from .synthesis.validation import (
     bridge_duplicate_pins,
     check_family_wiring_contracts,
     check_inter_sheet_nets_realized,
+    check_mcu_programming_path,
     check_net_coverage,
     check_no_dangling_signal_nets,
     check_pin_existence,
@@ -2042,6 +2043,25 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                 )
             )
             return 2
+
+    # §9.21 (advisory): guarantee a first-flash / programming path for every MCU.
+    # A missing path (ESP32 IO0 hard-tied to a rail, RP2040 with no BOOTSEL + SWD
+    # no-connect) is a true-positive defect that is ERC/DRC-clean, so surface it
+    # as a deterministic wiring caveat (open_question) -- immune to the model
+    # nondeterministically dropping the boot-strap resistors between runs. Never a
+    # hard fab gate (the heuristic is med-high confidence). Idempotent: these are
+    # stage="wiring" questions, replaced on every re-commit above.
+    if stage == "wiring" and state.bom is not None and state.bom.connections:
+        prog = check_mcu_programming_path(state.bom)
+        for off in prog.offenders:
+            new_questions.append(Question(
+                text=(f"No guaranteed first-flash path: {off}. Add a programming "
+                      "interface (boot strap + button, or an SWD/UART header) so the "
+                      "MCU can be flashed."),
+                stage="wiring", blocking=False, material=True))
+        if prog.offenders:
+            wiring_normalizations.append(
+                f"programming_path: {len(prog.offenders)} MCU(s) flagged")
 
     state.replace_open_questions_for_stage(stage, new_questions)
 
