@@ -920,3 +920,53 @@ def test_mcu_prog_path_flags_generic_mcu_unconnected_swd(monkeypatch) -> None:
     ], no_connect_pins=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="U1", pin="3")])
     res = check_mcu_programming_path(bom)
     assert not res.ok and any("SWD/JTAG" in o for o in res.offenders)
+
+
+# ---------- §9.22 breakout / adapter intent (advisory) ----------
+
+from kicraft.design.synthesis.validation import (  # noqa: E402
+    check_breakout_connectivity,
+)
+from kicraft.design.models import IntentSlot  # noqa: E402
+
+
+def _conn(ref, sheet="IO"):
+    return BomPart(ref=ref, value="hdr", symbol="Connector:Conn_01x04",
+                   footprint="Connector_PinHeader:PinHeader_1x04", sheet=sheet)
+
+
+def test_breakout_flags_unbridged_connectors() -> None:
+    # #11 fpc-breakout: two connectors, no net spans both -> intent undone.
+    intent = IntentSlot(goal="A simple FPC-to-header breakout board")
+    bom = BOM(parts=[_conn("J1"), _conn("J2")], connections=[
+        NetConnection(net_name="A", sheet="IO", endpoints=[PinEndpoint(ref="J1", pin="1")]),
+        NetConnection(net_name="B", sheet="IO", endpoints=[PinEndpoint(ref="J2", pin="1")]),
+    ])
+    res = check_breakout_connectivity(intent, bom)
+    assert not res.ok and any("J1" in o and "J2" in o for o in res.offenders)
+
+
+def test_breakout_passes_when_a_net_bridges() -> None:
+    intent = IntentSlot(goal="A USB breakout / adapter")
+    bom = BOM(parts=[_conn("J1"), _conn("J2")], connections=[
+        NetConnection(net_name="D+", sheet="IO", endpoints=[
+            PinEndpoint(ref="J1", pin="1"), PinEndpoint(ref="J2", pin="1")]),
+    ])
+    assert check_breakout_connectivity(intent, bom).ok
+
+
+def test_breakout_skips_non_breakout_brief() -> None:
+    intent = IntentSlot(goal="A 3.3V buck regulator board")
+    bom = BOM(parts=[_conn("J1"), _conn("J2")], connections=[
+        NetConnection(net_name="A", sheet="IO", endpoints=[PinEndpoint(ref="J1", pin="1")]),
+        NetConnection(net_name="B", sheet="IO", endpoints=[PinEndpoint(ref="J2", pin="1")]),
+    ])
+    assert check_breakout_connectivity(intent, bom).ok  # not a breakout -> not judged
+
+
+def test_breakout_skips_single_connector() -> None:
+    intent = IntentSlot(goal="A sensor breakout board")
+    bom = BOM(parts=[_conn("J1")], connections=[
+        NetConnection(net_name="A", sheet="IO", endpoints=[PinEndpoint(ref="J1", pin="1")]),
+    ])
+    assert check_breakout_connectivity(intent, bom).ok  # <2 connectors -> not judged

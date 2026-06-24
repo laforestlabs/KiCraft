@@ -68,6 +68,7 @@ from .synthesis.validation import (
     CheckResult,
     SynthesisValidationError,
     bridge_duplicate_pins,
+    check_breakout_connectivity,
     check_family_wiring_contracts,
     check_inter_sheet_nets_realized,
     check_mcu_programming_path,
@@ -2062,6 +2063,18 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         if prog.offenders:
             wiring_normalizations.append(
                 f"programming_path: {len(prog.offenders)} MCU(s) flagged")
+
+        # §9.22 (advisory): on a breakout/adapter brief, the connectors must be
+        # bridged. Surface a missing bridge as a wiring caveat (#11 fpc-breakout
+        # left J1<->J2 entirely disconnected). Detector, not a fab gate.
+        breakout = check_breakout_connectivity(state.intent, state.bom)
+        for off in breakout.offenders:
+            new_questions.append(Question(
+                text=(f"Breakout/adapter intent unmet: {off}. Wire the intended "
+                      "pin-to-pin mapping between the connectors."),
+                stage="wiring", blocking=False, material=True))
+        if breakout.offenders:
+            wiring_normalizations.append("breakout: connectors not bridged")
 
     state.replace_open_questions_for_stage(stage, new_questions)
 

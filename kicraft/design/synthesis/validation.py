@@ -1377,6 +1377,50 @@ def check_mcu_programming_path(bom) -> CheckResult:
     )
 
 
+# ---------- §9.22 breakout / adapter intent (advisory) ----------
+#
+# A "breakout" or "adapter" board's whole job is to map one connector's pins onto
+# another's, so at least one net must BRIDGE the two connectors. #11 fpc-breakout
+# emitted 49 nets with NONE spanning both connectors -- J1 (FPC) and J2 (header)
+# on mutually disconnected nets -- so the breakout did nothing. ERC/DRC are clean
+# (every pin is on a legal net), so only an intent-aware check sees it.
+#
+# A DETECTOR, not a normalizer: the actual pin mapping is a synthesis-intent
+# decision, not mechanically derivable. Advisory like §9.21 -- surfaced as a
+# wiring open_question, never a hard fab gate -- and gated on a breakout/adapter
+# brief with >=2 connectors, so a normal multi-connector board never trips it.
+
+_BREAKOUT_RE = re.compile(
+    r"break[- ]?out|breakout|adapter|adaptor|pass[- ]?through|fan[- ]?out", re.I)
+_CONNECTOR_PREFIXES = frozenset({"J", "P", "CN", "CONN", "X"})
+
+
+def check_breakout_connectivity(intent, bom) -> CheckResult:
+    """§9.22 (advisory) -- on a breakout/adapter brief, at least one net must
+    bridge the two connectors. See the section comment."""
+    name = "9.22 breakout connectivity"
+    if intent is None or bom is None or not bom.connections:
+        return CheckResult(name=name, ok=True, message="not applicable")
+    text = " ".join([intent.goal or ""] + list(getattr(intent, "constraints", []) or []))
+    if not _BREAKOUT_RE.search(text):
+        return CheckResult(name=name, ok=True, message="not a breakout/adapter brief")
+    conns = {p.ref for p in bom.parts if _ref_prefix(p.ref) in _CONNECTOR_PREFIXES}
+    if len(conns) < 2:
+        return CheckResult(name=name, ok=True, message="fewer than two connectors")
+    bridging = sum(1 for c in bom.connections
+                   if len({ep.ref for ep in c.endpoints if ep.ref in conns}) >= 2)
+    if bridging == 0:
+        return CheckResult(
+            name=name, ok=False,
+            message="breakout/adapter brief but no net bridges the connectors",
+            offenders=[f"connectors {sorted(conns)} share zero bridging nets -- the "
+                       "breakout's job (mapping one connector's pins to the other) is "
+                       "undone"],
+        )
+    return CheckResult(name=name, ok=True,
+                       message=f"{bridging} net(s) bridge the connectors")
+
+
 # ---------- §9.9 connectivity (Stage B) ----------
 
 
