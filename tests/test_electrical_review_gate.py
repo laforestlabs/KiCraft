@@ -122,3 +122,46 @@ def test_gate_fail_soft_on_bad_model_output(monkeypatch, tmp_path):
     _enable(monkeypatch, "not json at all")   # review_design fails closed (ok=False)
     r = _maybe_electrical_review(_state(), tmp_path)
     assert r["ran"] is False and r["blocked"] is False
+
+
+# --------------------------------------------------------------------------- #
+# A3: surface >=WARNING findings into user-facing state
+# --------------------------------------------------------------------------- #
+from kicraft.design.cli_app import _surface_review_findings
+
+
+def test_surface_review_findings_copies_warnings_to_assumptions(tmp_path):
+    st = _state()
+    sp = tmp_path / ".kicraft" / "state.json"
+    findings = [
+        {"severity": "note", "area": "nitpick", "issue": "tiny", "category": "other"},
+        {"severity": "warning", "area": "decoupling", "issue": "U1 bulk cap small",
+         "suggestion": "use 22uF", "category": "other"},
+    ]
+    _surface_review_findings(st, sp, findings)
+    # note dropped; warning surfaced with its fix; persisted to disk.
+    assert any("U1 bulk cap small" in a and "22uF" in a for a in st.bom.assumptions)
+    assert not any("tiny" in a for a in st.bom.assumptions)
+    assert sp.exists() and "U1 bulk cap small" in sp.read_text()
+
+
+def test_surface_review_findings_escalates_programming_path_to_open_question(tmp_path):
+    st = _state()
+    sp = tmp_path / ".kicraft" / "state.json"
+    findings = [{"severity": "warning", "area": "programming",
+                 "issue": "U1 has no first-flash path", "category": "programming-path"}]
+    _surface_review_findings(st, sp, findings)
+    assert any("first-flash" in a for a in st.bom.assumptions)
+    qs = [q for q in st.open_questions if q.stage == "review"]
+    assert qs and any("first-flash" in q.text for q in qs)
+
+
+def test_surface_review_findings_is_idempotent(tmp_path):
+    st = _state()
+    sp = tmp_path / ".kicraft" / "state.json"
+    findings = [{"severity": "blocker", "area": "current-limit",
+                 "issue": "R5 missing", "category": "current-limit"}]
+    _surface_review_findings(st, sp, findings)
+    _surface_review_findings(st, sp, findings)  # rebuild: must not duplicate
+    assert sum("R5 missing" in a for a in st.bom.assumptions) == 1
+    assert sum("R5 missing" in q.text for q in st.open_questions) == 1

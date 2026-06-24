@@ -28,9 +28,15 @@ SHEET_STEM_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 PIN_NUMBER_RE = re.compile(r"^[A-Za-z0-9+~_/.\-']+$")
 
 POWER_NET_PATTERNS = [
-    re.compile(r"^[+]?\d+\.?\d*V$", re.IGNORECASE),
-    re.compile(r"^[+]?\d+V\d+$", re.IGNORECASE),
-    re.compile(r"^V(CC|DD|BAT|BUS|SYS|IN|OUT)\b", re.IGNORECASE),
+    # A leading sign is optional so negative rails (-12V, -5V, -3.3V) classify
+    # as power too — the op-amp/audio/analog dual-supply case. Without the `-`
+    # the negative rail never gets a PWR_FLAG and KiCad ERC flags VCC- as
+    # undriven (self-eval #28 audio-jack-buffer). See is_power_or_ground_name.
+    re.compile(r"^[+-]?\d+\.?\d*V$", re.IGNORECASE),
+    re.compile(r"^[+-]?\d+V\d+$", re.IGNORECASE),  # covers -3V3
+    # VEE = negative supply, VSS = negative/ground reference; router and
+    # placement already special-case both for the ground-symbol choice.
+    re.compile(r"^V(CC|DD|BAT|BUS|SYS|IN|OUT|EE|SS)\b", re.IGNORECASE),
 ]
 GND_NET_PATTERNS = [
     re.compile(r"^(P|A|D)?GND$", re.IGNORECASE),

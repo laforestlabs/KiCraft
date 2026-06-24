@@ -42,6 +42,16 @@ def test_power_names_recognized(name: str) -> None:
     assert is_power_or_ground_name(name)
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["-12V", "-5V", "-3.3V", "-3V3", "VEE", "VSS", "/-12V", "/VEE"],
+)
+def test_negative_supply_rails_recognized(name: str) -> None:
+    # Dual-supply / negative-rail boards (op-amp front-ends, audio): without
+    # this the negative rail gets no PWR_FLAG and ERC flags VCC- as undriven.
+    assert is_power_or_ground_name(name)
+
+
 @pytest.mark.parametrize("name", ["GND", "PGND", "AGND", "DGND", "VBAT_GND"])
 def test_ground_names_recognized(name: str) -> None:
     assert is_power_or_ground_name(name)
