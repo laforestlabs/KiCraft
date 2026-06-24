@@ -3402,6 +3402,66 @@ def _cmd_artifacts(args: argparse.Namespace) -> int:
     return 0
 
 
+def _hoist_positionals(parser: argparse.ArgumentParser, argv: list[str]) -> list[str]:
+    """Move a subcommand's positional args ahead of its options.
+
+    Python 3.12's argparse will not bind an *optional* positional (``nargs="?"``)
+    that appears AFTER an option: ``stage-commit intent --slot-file x state.json``
+    fails with "unrecognized arguments: state.json" even though the same tokens
+    in positionals-first order parse fine. Several subcommands here take such a
+    positional (``state``/``out_dir`` on stage-commit/stage-prep/replay/archive),
+    so users -- and any caller that lists options first -- would hit this.
+
+    Rewrite the chosen subcommand's tokens to ``[name, *positionals, *options]``
+    before argparse sees them. argparse resolves options by name, not position,
+    so hoisting positionals is parse-equivalent for these subparsers. The pass is
+    deliberately conservative: on ANYTHING it can't classify with certainty (an
+    unknown/abbreviated option, an option with variable nargs, a ``--`` end-of-
+    options marker, a positional that looks like an option) it returns ``argv``
+    unchanged, so it can only fix the broken ordering, never break a working one.
+    """
+    if not argv:
+        return argv
+    subs = next((a for a in parser._actions
+                 if isinstance(a, argparse._SubParsersAction)), None)
+    if subs is None or argv[0] not in subs.choices:
+        return argv  # not a subcommand we own (e.g. -h, or bare prog)
+    sub = subs.choices[argv[0]]
+    # option string -> values it consumes after itself (0 = flag, 1 = single
+    # value, None = variable/uncertain -> we will bail if it appears).
+    consumes: dict[str, int | None] = {}
+    for act in sub._actions:
+        n: int | None = 0 if act.nargs == 0 else (1 if act.nargs in (None, 1) else None)
+        for opt in act.option_strings:
+            consumes[opt] = n
+    positionals: list[str] = []
+    options: list[str] = []
+    rest = list(argv[1:])
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok == "--":
+            return argv  # end-of-options marker: leave ordering to argparse
+        if len(tok) > 1 and tok[0] == "-":
+            if tok.startswith("--") and "=" in tok:  # --opt=value is self-contained
+                options.append(tok)
+                i += 1
+                continue
+            n = consumes.get(tok)
+            if n is None:  # unknown/abbreviated option or variable nargs -> bail
+                return argv
+            options.append(tok)
+            i += 1
+            for _ in range(n):  # pull the option's value(s) along with it
+                if i < len(rest):
+                    options.append(rest[i])
+                    i += 1
+        else:
+            positionals.append(tok)
+            i += 1
+    return [argv[0], *positionals, *options]
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="kicraft",
@@ -3930,7 +3990,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_arch.set_defaults(func=_cmd_archive)
 
-    args = ap.parse_args(argv)
+    if argv is None:
+        argv = sys.argv[1:]
+    args = ap.parse_args(_hoist_positionals(ap, list(argv)))
     return args.func(args)
 
 
