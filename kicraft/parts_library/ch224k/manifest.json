@@ -4,7 +4,7 @@
   "description": "WCH(\u5357\u4eac\u6c81\u6052) CH224K",
   "footprint_name": "ESSOP-10_L4.9-W3.9-P1.0-LS6.0-TL-EP",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "production",
   "mpn": "CH224K",
   "name": "ch224k",
   "provenance": {
