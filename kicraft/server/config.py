@@ -80,6 +80,18 @@ class Settings:
     legal_dir: Path = _DEFAULT_LEGAL_DIR
     kill_switch: bool = False
     request_timeout_s: int = 120
+    # Bounded retry on TRANSIENT OpenRouter failures (HTTP 5xx / 429 / connection
+    # reset / timeout) before any token is streamed. A one-off 503 dropped a whole
+    # brief from a self-eval batch (#24 daq-8ch) and masqueraded as a design
+    # failure; a few backed-off retries make a transient blip invisible. The retry
+    # only fires before streaming begins, so it can never double-emit tokens. 0
+    # disables. KICRAFT_LLM_MAX_RETRIES / KICRAFT_LLM_RETRY_BACKOFF_S.
+    llm_max_retries: int = 3
+    llm_retry_backoff_s: float = 1.0
+    # Sampling temperature for the DESIGN stages (intent..wiring). Was hardcoded
+    # 0.2; lowering toward 0 cuts run-to-run variance (the self-eval noise floor),
+    # making real regressions legible. KICRAFT_DESIGN_TEMPERATURE.
+    design_temperature: float = 0.0
 
     # --- Outbound email + public URL (password-reset delivery) ---------------
     # public_url is the externally reachable origin (e.g. https://kicraft.io); it
@@ -221,6 +233,12 @@ class Settings:
             work_dir=Path(os.environ.get("KICRAFT_WORK_DIR", str(cls.work_dir))),
             legal_dir=Path(os.environ.get("KICRAFT_LEGAL_DIR", str(cls.legal_dir))),
             kill_switch=_env_bool("KICRAFT_KILL_SWITCH"),
+            llm_max_retries=int(
+                os.environ.get("KICRAFT_LLM_MAX_RETRIES", cls.llm_max_retries)),
+            llm_retry_backoff_s=float(
+                os.environ.get("KICRAFT_LLM_RETRY_BACKOFF_S", cls.llm_retry_backoff_s)),
+            design_temperature=float(
+                os.environ.get("KICRAFT_DESIGN_TEMPERATURE", cls.design_temperature)),
             public_url=os.environ.get(
                 "KICRAFT_PUBLIC_URL", cls.public_url).strip().rstrip("/") or cls.public_url,
             email_from=(os.environ.get("KICRAFT_EMAIL_FROM", "").strip()
@@ -282,6 +300,17 @@ class Settings:
                        max_price_prompt=self.review_max_price_prompt,
                        max_price_completion=self.review_max_price_completion)
 
+    def for_judge(self) -> "Settings":
+        """A copy with provider routing relaxed for the Class-J eval judge call.
+        The judge should be a stronger, steadier model than the cheap design
+        model; that model is usually NOT on the fp8 caching tier and may exceed
+        the design price cap, so -- like the review call -- the judge is allowed
+        past the pin (empty provider order = OpenRouter picks; no price cap). The
+        design stages keep the global cap and the spend guard still bounds total
+        spend (the judge is one call per graded run)."""
+        return replace(self, provider_order=[], max_price_prompt=0.0,
+                       max_price_completion=0.0)
+
     def review_reasoning(self) -> dict | None:
         """OpenRouter reasoning control for the review: effort-based when
         review_reasoning_effort is set (portable across the slate; minimax/glm
@@ -328,4 +357,6 @@ class Settings:
             "enable_prompt_cache": self.enable_prompt_cache,
             "enable_core_defaults": self.enable_core_defaults,
             "eval_judge_model": self.eval_judge_model,
+            "design_temperature": self.design_temperature,
+            "llm_max_retries": self.llm_max_retries,
         }

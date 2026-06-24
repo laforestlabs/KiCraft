@@ -9,11 +9,20 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import requests
 
 from .config import Settings
 from .spend_guard import SpendGuard
+
+# Transient failures worth a bounded retry (before any token is streamed): all
+# 5xx + 429 (rate limit) on the HTTP status, plus connection resets / timeouts.
+_RETRY_NETWORK_EXC = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
 
 # Conservative fallback prices (USD per million tokens, input/output). OpenRouter
 # normally returns the real cost; this is used only if it omits it, and it errs
@@ -99,6 +108,43 @@ class CappedOpenRouterClient:
                                  "cache_control": {"type": "ephemeral"}}]
             break
 
+    def _open_stream(self, payload: dict):
+        """POST and return a streamed Response with a non-retryable status.
+
+        Retries TRANSIENT failures (HTTP >=500 / 429, connection reset, timeout)
+        with exponential backoff BEFORE any token is consumed, so a one-off 503
+        no longer drops the call. Once a 2xx response is returned, streaming
+        proceeds in ``_stream`` and is never retried (it could double-emit). Other
+        4xx errors raise immediately via ``raise_for_status`` (not transient)."""
+        url = f"{self.s.base_url}/chat/completions"
+        headers = {"Authorization": f"Bearer {self.s.api_key}",
+                   "Content-Type": "application/json", "X-Title": "KiCraft"}
+        max_retries = max(0, int(getattr(self.s, "llm_max_retries", 0)))
+        backoff = float(getattr(self.s, "llm_retry_backoff_s", 1.0))
+        for attempt in range(max_retries + 1):
+            try:
+                resp = requests.post(url, headers=headers, json=payload,
+                                     timeout=self.s.request_timeout_s, stream=True)
+                if resp.status_code >= 500 or resp.status_code == 429:
+                    transient = requests.exceptions.HTTPError(
+                        f"{resp.status_code} {resp.reason}", response=resp)
+                    resp.close()
+                    raise transient
+                resp.raise_for_status()  # other 4xx: not transient -> propagate
+                return resp
+            except (*_RETRY_NETWORK_EXC, requests.exceptions.HTTPError) as e:
+                # Only 5xx/429 HTTPErrors reach here as retryable; a 4xx
+                # raise_for_status raised above is also an HTTPError, but it was
+                # already returned... so distinguish: a 4xx has a response with a
+                # client-error code and must NOT retry.
+                code = getattr(getattr(e, "response", None), "status_code", None)
+                is_http = isinstance(e, requests.exceptions.HTTPError)
+                if is_http and code is not None and code < 500 and code != 429:
+                    raise
+                if attempt >= max_retries:
+                    raise
+                time.sleep(backoff * (2 ** attempt))
+
     def _stream(self, body: dict, on_delta=None) -> tuple[dict, float]:
         """One capped streaming completion (SSE).
 
@@ -127,13 +173,8 @@ class CappedOpenRouterClient:
         finish = None
         provider = None
         usage: dict = {}
-        with requests.post(
-            f"{self.s.base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {self.s.api_key}",
-                     "Content-Type": "application/json", "X-Title": "KiCraft"},
-            json=payload, timeout=self.s.request_timeout_s, stream=True,
-        ) as resp:
-            resp.raise_for_status()
+        resp = self._open_stream(payload)
+        with resp:
             for raw in resp.iter_lines(decode_unicode=True):
                 if not raw or not raw.startswith("data:"):
                     continue

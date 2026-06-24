@@ -631,6 +631,13 @@ def _client_model(client) -> str | None:
     return getattr(getattr(client, "s", None), "model", None)
 
 
+def _design_temperature(client) -> float:
+    """Sampling temperature for the design stages, from settings (default 0.2 when
+    a client carries no settings, e.g. the mock). Lowering it toward 0 cuts the
+    run-to-run variance that makes self-eval regressions hard to read."""
+    return float(getattr(getattr(client, "s", None), "design_temperature", 0.2))
+
+
 def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, max_retries=2,
                 progress=None, answers=None, instruction=None, meta_ctx=None,
                 core_defaults=None) -> dict:
@@ -693,11 +700,13 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
     total_cost = 0.0
     last: dict = {}
     cur_max_tokens = max_tokens
+    temperature = _design_temperature(client)
     for attempt in range(max_retries + 1):
         ctx = {**(meta_ctx or {}), "stage": stage, "attempt": attempt}
         tool_calls_ct = None
         if tools:
             r = client.chat_with_tools(messages, tools, executor, max_tokens=cur_max_tokens,
+                                       temperature=temperature,
                                        max_rounds=_BOM_MAX_ROUNDS, progress=progress,
                                        meta_ctx=ctx)
             raw, rounds = r["text"], r.get("rounds")
@@ -705,7 +714,8 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
             finish = r.get("finish_reason")
             total_cost += r["cost_usd"]
         else:
-            res = client.chat(messages, max_tokens=cur_max_tokens, progress=progress, meta_ctx=ctx)
+            res = client.chat(messages, max_tokens=cur_max_tokens, temperature=temperature,
+                              progress=progress, meta_ctx=ctx)
             raw, rounds = (res["text"] or res.get("reasoning") or ""), None
             finish = res.get("finish_reason")
             total_cost += res["cost_usd"]

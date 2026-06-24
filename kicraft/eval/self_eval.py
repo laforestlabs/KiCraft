@@ -84,10 +84,39 @@ _BUILD_RC_LABEL = {
     2: "state unreadable",
     3: "incomplete (no wiring)",
     4: "synthesis input error",
-    5: "ERC errors",
+    5: "synthesis check failed",  # refined per failed check by _build_label()
     6: "route/infra failed",
     7: "not fab-ready (DRC)",
 }
+
+
+def _rc5_label(rundir: Path) -> str:
+    """Distinguish the rc=5 ("synthesis check failed") sub-causes.
+
+    rc=5 fires for *any* failed §9.x synthesis check, not just ERC — e.g.
+    #11 fpc-breakout had 0 ERC errors but failed §9.13 netlist faithfulness.
+    Reading ``synthesis_check.json``'s ``failed_checks`` lets the summary name
+    the real failure instead of mislabelling every rc=5 as "ERC errors"."""
+    try:
+        checks = sorted(rundir.rglob("synthesis_check.json"))
+        if not checks:
+            return _BUILD_RC_LABEL[5]
+        failed = json.loads(checks[0].read_text()).get("failed_checks", [])
+    except (OSError, json.JSONDecodeError, KeyError):
+        return _BUILD_RC_LABEL[5]
+    if any("ERC" in name for name in failed):
+        return "ERC errors"
+    if any("netlist faithfulness" in name for name in failed):
+        return "netlist faithfulness"
+    return _BUILD_RC_LABEL[5]
+
+
+def _build_label(build_rc: int | None, rundir: Path) -> str | None:
+    if build_rc is None:
+        return None
+    if build_rc == 5:
+        return _rc5_label(rundir)
+    return _BUILD_RC_LABEL.get(build_rc, f"rc={build_rc}")
 
 
 # --------------------------------------------------------------------------- #
@@ -230,8 +259,20 @@ def run_build(rundir: Path, progress, *, timeout_s: int = 2400) -> int:
     return rc if rc is not None else -1
 
 
+def _make_judge_client(s, judge_model, skip_judge: bool):
+    """A routing-relaxed client for the judge when it differs from the design
+    model (a stronger judge is usually off the fp8 design tier and above the
+    price cap), else None (reuse the design client). Built per-thread by the
+    caller -- client instances are not safe to share across threads."""
+    from kicraft.server.client import make_client
+    if skip_judge or not judge_model or judge_model == getattr(s, "model", None):
+        return None
+    return make_client(s.for_judge())
+
+
 def evaluate_one(client, idx: int, entry: dict, out_dir: Path, *,
-                 judge_model, skip_judge: bool, max_park_rounds: int = 12,
+                 judge_model, skip_judge: bool, judge_client=None,
+                 max_park_rounds: int = 12,
                  build_timeout_s: int = 2400, build_gate=None,
                  full_events: bool = True) -> dict:
     """Drive + build + score one benchmark brief into ``out_dir/<stem>/``. ``entry``
@@ -269,15 +310,15 @@ def evaluate_one(client, idx: int, entry: dict, out_dir: Path, *,
         else:
             build_rc = None
         rec["build_rc"] = build_rc
-        rec["build_label"] = (None if build_rc is None
-                              else _BUILD_RC_LABEL.get(build_rc, f"rc={build_rc}"))
+        rec["build_label"] = _build_label(build_rc, rundir)
 
         # We know the real design+build wall-clock window (the same span the web app
         # measures), so pass it explicitly: the latency dimension's state-history ->
         # synth-checked_at fallback can return None, which leaves latency ungraded and
         # withholds the whole letter grade. An exact window always scores it.
         report = evaluate_project(rundir, None if skip_judge else client,
-                                  judge_model=judge_model, skip_judge=skip_judge,
+                                  judge_model=judge_model, judge_client=judge_client,
+                                  skip_judge=skip_judge,
                                   started_at=started_at, finished_at=_now_iso())
         sc, judge = report["score"], report["judge"]
         rec.update(
@@ -533,7 +574,12 @@ def main(argv=None) -> int:
     from kicraft.server.config import Settings
     s = Settings.from_env()
     client = make_client(s)
-    judge_model = args.judge_model or getattr(s, "eval_judge_model", None) or getattr(s, "model", None)
+    # The judge defaults to a STRONGER, steadier model than the cheap design model
+    # (the review model -- the in-product design judge -- then the design model), so
+    # judge-side sampling noise does not muddy the J dimensions. --judge-model /
+    # KICRAFT_EVAL_JUDGE_MODEL override.
+    judge_model = (args.judge_model or getattr(s, "eval_judge_model", None)
+                   or getattr(s, "review_model", None) or getattr(s, "model", None))
 
     # Resolve to an absolute path: design stages run subprocesses with cwd=workspace,
     # so a relative rundir would make them resolve state/output paths against the
@@ -601,10 +647,12 @@ def main(argv=None) -> int:
         compile_report(recs, out_dir, meta)
 
     if parallel <= 1:
+        judge_client = _make_judge_client(s, judge_model, args.no_judge)
         for n, (idx, entry) in enumerate(todo, start=1):
             print(f"\n[{n}/{len(todo)}] #{idx} {entry['slug']}: {entry['brief']}", flush=True)
             rec = evaluate_one(client, idx, entry, out_dir, judge_model=judge_model,
-                               skip_judge=args.no_judge, max_park_rounds=args.max_park_rounds,
+                               skip_judge=args.no_judge, judge_client=judge_client,
+                               max_park_rounds=args.max_park_rounds,
                                build_timeout_s=args.build_timeout,
                                full_events=not args.lean_events)
             if rec.get("error"):
@@ -626,11 +674,13 @@ def main(argv=None) -> int:
             # threads (construction is ~ms; the spend ledger is WAL sqlite). Routed
             # through make_client so KICRAFT_LLM_MODE=replay drives the corpus at $0.
             wclient = make_client(s)
+            wjudge = _make_judge_client(s, judge_model, args.no_judge)
             stem = _stem_for(idx, entry)
             with print_lock:
                 print(f"[{stem}] start: {entry['brief']}", flush=True)
             rec = evaluate_one(wclient, idx, entry, out_dir, judge_model=judge_model,
-                               skip_judge=args.no_judge, max_park_rounds=args.max_park_rounds,
+                               skip_judge=args.no_judge, judge_client=wjudge,
+                               max_park_rounds=args.max_park_rounds,
                                build_timeout_s=args.build_timeout, build_gate=gate,
                                full_events=not args.lean_events)
             with print_lock:

@@ -397,6 +397,62 @@ def test_main_resume_reuses_completed_and_reruns_failed(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # selection + report compilation
 # --------------------------------------------------------------------------- #
+def _write_synth_check(rundir: Path, failed: list[str]) -> None:
+    d = rundir / ".kicraft"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "synthesis_check.json").write_text(json.dumps({"failed_checks": failed}))
+
+
+def test_make_judge_client_relaxes_routing_for_stronger_judge(monkeypatch):
+    from kicraft.server.config import Settings
+    captured = {}
+
+    def fake_make_client(settings=None):
+        captured["settings"] = settings
+        return object()
+
+    monkeypatch.setattr(se, "make_client", fake_make_client, raising=False)
+    monkeypatch.setattr("kicraft.server.client.make_client", fake_make_client)
+
+    s = Settings(api_key="k", model="deepseek/deepseek-v4-flash",
+                 review_model="minimax/minimax-m3")
+    # judge != design model -> a routing-relaxed client is built
+    jc = se._make_judge_client(s, "minimax/minimax-m3", skip_judge=False)
+    assert jc is not None
+    relaxed = captured["settings"]
+    assert relaxed.provider_order == [] and relaxed.max_price_prompt == 0.0
+
+    # judge == design model -> reuse the design client (None)
+    assert se._make_judge_client(s, s.model, skip_judge=False) is None
+    # --no-judge -> no judge client
+    assert se._make_judge_client(s, "minimax/minimax-m3", skip_judge=True) is None
+
+
+def test_build_label_rc5_distinguishes_failed_check(tmp_path):
+    # rc=5 fires for ANY failed §9.x check, not just ERC — the label must read
+    # synthesis_check.json instead of hard-coding "ERC errors".
+    erc = tmp_path / "erc"
+    _write_synth_check(erc, ["9.12 ERC", "9.10 pin existence"])
+    assert se._build_label(5, erc) == "ERC errors"
+
+    netlist = tmp_path / "netlist"  # #11 fpc-breakout: 0 ERC errors, §9.13 failed
+    _write_synth_check(netlist, ["9.13 netlist faithfulness"])
+    assert se._build_label(5, netlist) == "netlist faithfulness"
+
+    other = tmp_path / "other"
+    _write_synth_check(other, ["9.7 refdes uniqueness"])
+    assert se._build_label(5, other) == "synthesis check failed"
+
+    missing = tmp_path / "missing"  # no synthesis_check.json -> safe fallback
+    missing.mkdir()
+    assert se._build_label(5, missing) == "synthesis check failed"
+
+    # Non-rc5 labels and None are unchanged.
+    assert se._build_label(0, erc) == "fab-ready"
+    assert se._build_label(7, erc) == "not fab-ready (DRC)"
+    assert se._build_label(None, erc) is None
+
+
 def test_select_limit_and_only():
     es = [{"slug": f"s{i}", "archetype": "a", "brief": f"p{i}"} for i in range(1, 10)]
     assert [i for i, _ in se._select(es, 3, None)] == [1, 2, 3]

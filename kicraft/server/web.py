@@ -1622,12 +1622,17 @@ def _run_eval(project_dir: Path) -> dict:
     persisted project dir (Class-C from artifacts + Class-J via the LLM judge)."""
     from kicraft.eval.run_web import _project_times, evaluate_project
 
-    from .client import CappedOpenRouterClient
+    from .client import CappedOpenRouterClient, make_client
     s = Settings.from_env()
     client = CappedOpenRouterClient(s)
-    judge_model = getattr(s, "eval_judge_model", None) or s.model
+    # Judge defaults to a stronger, steadier model than the design model, with a
+    # routing-relaxed client when it differs from the design model.
+    judge_model = (getattr(s, "eval_judge_model", None)
+                   or getattr(s, "review_model", None) or s.model)
+    judge_client = make_client(s.for_judge()) if judge_model != s.model else None
     started, finished = _project_times(project_dir, s.users_db_path)
     return evaluate_project(project_dir, client, judge_model=judge_model,
+                            judge_client=judge_client,
                             ledger_path=s.ledger_path, started_at=started,
                             finished_at=finished)
 
