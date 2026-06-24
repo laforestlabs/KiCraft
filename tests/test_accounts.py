@@ -307,8 +307,8 @@ def test_pro_and_max_limits(store):
     for _ in range(5):
         store.finish_project(store.create_project(u.id, "x"), "ok")
     assert store.quota_status(u)["remaining"] == 0
-    u = store.set_tier("p@e.st", "max")  # same 5 now count against 25
-    assert store.quota_status(u)["remaining"] == 20
+    u = store.set_tier("p@e.st", "max")  # same 5 now count against 20
+    assert store.quota_status(u)["remaining"] == 15
 
 
 def test_window_expiry_for_month_tier(store):
