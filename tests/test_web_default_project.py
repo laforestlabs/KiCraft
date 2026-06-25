@@ -192,6 +192,44 @@ def test_reconcile_leaves_live_recent_and_build_stage_runs(store, user_id, live_
     assert store.get_project(build_stage).status == "running"
 
 
+# ---- projects-row status/colour (_row_status_display) ------------------------
+
+
+def test_row_status_running_live_is_green():
+    """A 'running' row with a live worker shows 'running' and paints green."""
+    assert web._row_status_display("running", {"running": True}) == ("running", True)
+
+
+def test_row_status_running_no_worker_reads_interrupted_and_grey():
+    """A 'running' row the server lost (no live dict) relabels to 'interrupted'
+    and must NOT be green -- 'interrupted' is never a live state."""
+    assert web._row_status_display("running", None) == ("interrupted", False)
+
+
+def test_row_status_durable_interrupted_with_live_dict_stays_grey():
+    """The reported bug: a durable 'interrupted' row that briefly coexists with a
+    live run dict (e.g. mid-rebuild, before the status flips back to 'running')
+    must render grey, never the live-green colour."""
+    assert web._row_status_display("interrupted", {"running": True}) \
+        == ("interrupted", False)
+
+
+def test_row_status_failed_or_ok_with_live_dict_stays_grey():
+    """Defence in depth: no terminal status is ever painted live-green even if a
+    transient live dict exists for that id."""
+    assert web._row_status_display("failed", {"x": 1}) == ("failed", False)
+    assert web._row_status_display("ok", {"x": 1}) == ("ok", False)
+
+
+def test_row_status_awaiting_input_live_is_green_but_grey_when_lost():
+    """A parked run is genuinely live while its dict survives (green); once lost
+    to a restart it falls back to grey."""
+    assert web._row_status_display("awaiting_input", {"x": 1}) \
+        == ("awaiting_input", True)
+    assert web._row_status_display("awaiting_input", None) \
+        == ("awaiting_input", False)
+
+
 # ---- live-run registry around _run_design ------------------------------------
 
 

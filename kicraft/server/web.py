@@ -1318,6 +1318,27 @@ def _pick_default_project(user_id: int):
     return None
 
 
+def _row_status_display(status, live) -> tuple[str, bool]:
+    """The status text + live-colour flag for one 'My Projects' row.
+
+    A row paints from two independent signals -- the durable DB `status` (text)
+    and whether a live run dict exists in this process (`live`, the colour) --
+    which must never contradict. Rules:
+      * a 'running' row with no live worker reads as 'interrupted' (the run was
+        lost to a restart/crash), and
+      * the green "this is an active design" colour is granted only to a status
+        that is genuinely live ('running'/'awaiting_input'); a stale
+        'interrupted'/'failed'/'ok' row that briefly coexists with a live dict
+        (e.g. during a rebuild, before its status flips back to 'running') must
+        stay grey rather than masquerade as live.
+    Returns (shown_text, is_live)."""
+    shown = status
+    if status == "running" and live is None:
+        shown = "interrupted"
+    is_live = live is not None and shown in ("running", "awaiting_input")
+    return shown, is_live
+
+
 _JOB_KIND_ARGS = {
     "build": ["build", ".kicraft/state.json", "generated", "--no-archive"],
     "manual_route": ["manual-route", ".kicraft/state.json", "generated"],
@@ -1423,6 +1444,12 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
     ws = Path(state["ws"])
     pid = state.get("project_id")
     if pid:
+        # Reset the durable row to 'running' BEFORE going live: a rebuild can
+        # target a project whose durable status is still 'interrupted'/'failed'/
+        # 'ok' (from a prior reap or build), and once _LIVE_RUNS holds this run
+        # the projects page would otherwise paint that stale status with the
+        # live-green colour. Mirrors the answer/continue resume paths.
+        _store().update_project_status(pid, "running")
         _LIVE_RUNS[pid] = state
 
     def progress(ev):
@@ -2336,11 +2363,9 @@ def projects_page():
                             .tooltip("Board ID. Quote it when reporting an issue.")
                     # A 'running' row with no live worker is a run the server lost
                     # (restart/crash mid-run): say so instead of a phantom run.
-                    shown = p.status
-                    if p.status == "running" and live is None:
-                        shown = "interrupted"
+                    shown, is_live = _row_status_display(p.status, live)
                     ui.label(shown).classes("text-xs").style(
-                        "color:#4ade80" if live is not None else "color:#94a3b8")
+                        "color:#4ade80" if is_live else "color:#94a3b8")
                     ui.label(p.created_at[:19].replace("T", " ")) \
                         .classes("text-xs").style("color:#64748b")
                     ui.space()
