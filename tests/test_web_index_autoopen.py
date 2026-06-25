@@ -49,6 +49,8 @@ async def harness(tmp_path):
         real_fetch = web._safe_fetch
         web._safe_fetch = lambda key: web._FETCH_ERROR
         acct = store.create_user(EMAIL, PASSWORD)
+        acct = store.consume_verification_token(
+            store.create_verification_token(acct.id))  # verified so clone works
         store.record_consent(acct.id, LEGAL_VERSION)
         try:
             yield u, web, store, acct

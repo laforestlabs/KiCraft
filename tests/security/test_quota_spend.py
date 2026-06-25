@@ -11,6 +11,10 @@ from kicraft.server.spend_guard import BudgetExceeded, KillSwitchEngaged, SpendG
 
 def test_free_user_quota_is_bounded(store):
     u = store.create_user("free@x.io", "pw", tier="free")
+    # Email verification is a separate gate (see test_accounts); verify it here so
+    # this test isolates the quota bound rather than the verification gate.
+    tok = store.create_verification_token(u.id)
+    u = store.consume_verification_token(tok)
     limit = TIERS["free"]["limit"]
     assert store.can_design(u) is True
     for _ in range(limit):

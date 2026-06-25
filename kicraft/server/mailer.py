@@ -29,6 +29,7 @@ from .config import Settings
 log = logging.getLogger("kicraft.mailer")
 
 _RESET_SUBJECT = "Reset your KiCraft password"
+_VERIFY_SUBJECT = "Confirm your KiCraft email"
 _RESEND_ENDPOINT = "https://api.resend.com/emails"
 # A descriptive User-Agent is required: the Resend API is fronted by Cloudflare,
 # which 403s the stdlib default "Python-urllib/x.y" signature (Cloudflare error
@@ -65,6 +66,33 @@ def send_reset_email(settings: Settings, to_addr: str, reset_url: str,
                      ttl_minutes: int = 60) -> bool:
     """Compose and send the reset email. See `send_email` for the return contract."""
     msg = build_reset_email(to_addr, _from_addr(settings), reset_url, ttl_minutes)
+    return _send(settings, msg)
+
+
+def build_verification_email(to_addr: str, from_addr: str, verify_url: str,
+                             ttl_hours: int = 24) -> EmailMessage:
+    """Compose the signup email-verification email. Pure (no I/O), unit-testable."""
+    msg = EmailMessage()
+    msg["Subject"] = _VERIFY_SUBJECT
+    msg["From"] = from_addr
+    msg["To"] = to_addr
+    msg.set_content(
+        "Welcome to KiCraft! Confirm your email to start designing boards.\n\n"
+        f"Open this link to verify your address (valid for {ttl_hours} hours):\n\n"
+        f"    {verify_url}\n\n"
+        "You can browse example boards while unverified, but the Design button "
+        "stays disabled until you confirm.\n\n"
+        "If you did not create a KiCraft account you can ignore this email.\n"
+    )
+    return msg
+
+
+def send_verification_email(settings: Settings, to_addr: str, verify_url: str,
+                            ttl_hours: int = 24) -> bool:
+    """Compose and send the signup verification email. See `send_email` for the
+    return contract."""
+    msg = build_verification_email(to_addr, _from_addr(settings), verify_url,
+                                   ttl_hours)
     return _send(settings, msg)
 
 
