@@ -8,23 +8,45 @@ import json
 import sys
 
 
-def _scale_parent_route_budget(n_interconnect: int, cfg: dict) -> tuple[int, int]:
-    """C2: scale the PARENT FreeRouting budget to the cross-leaf interconnect count.
+def _scale_parent_route_budget(
+    n_interconnect: int, n_components: int, cfg: dict
+) -> tuple[int, int]:
+    """Scale the PARENT FreeRouting budget to board complexity.
 
-    A parent with many inter-leaf nets needs more passes AND more wall-time to
-    converge; the fixed parent default (20 passes / 60 s) leaves the densest
-    cross-leaf nets unrouted (rs485 4 nets across 3 leaves, can-node CAN_RX,
-    esp32 MOTOR_B2_DIR). Bumping passes is the lowest-risk lever -- strictly more
-    routing effort, bounded by the timeout, no geometry change. ONLY raises the
-    budget (never lowers a hand-tuned config). Returns (max_passes, timeout_s)."""
+    Two independent scalers, both ONLY raise (never lower a hand-tuned config):
+
+    1. Component-count timeout (the dominant cost on large parents): FreeRouting
+       loads and processes the ENTIRE board -- every component, every fixed wire
+       from the leaf routing -- even when only a handful of interconnect nets
+       remain unrouted. A 200-LED parent needs ~170 s (72 s routing + 94 s
+       optimization) though it has only 3 unrouted nets; the fixed 60 s default
+       kills it mid-route. The per-component floor mirrors the leaf budget
+       (leaf_freerouting_s_per_component) at a lower rate because the parent
+       starts from pre-routed leaf copper, not scratch.
+
+    2. Dense-interconnect passes/time (C2): a parent with many inter-leaf nets
+       needs more passes to converge every cross-leaf net.
+
+    Returns (max_passes, timeout_s)."""
     base_passes = int(cfg.get("freerouting_max_passes", 20))
     base_timeout = int(cfg.get("freerouting_timeout_s", 60))
+
+    # Component-count timeout floor: FreeRouting's wall-time is dominated by
+    # board size (it processes all fixed wires + optimizes all traces), not by
+    # the count of unrouted nets. Scale the timeout so a dense parent (200-LED
+    # matrix, 50-component MCU board) gets enough time to finish.
+    per_comp = float(cfg.get("parent_freerouting_s_per_component", 1.0))
+    cap = int(cfg.get("parent_freerouting_timeout_cap_s", 600))
+    comp_timeout = min(cap, int(n_components * per_comp)) if n_components > 0 else 0
+    timeout = max(base_timeout, comp_timeout)
+
+    # Dense-interconnect passes/time (C2).
     threshold = int(cfg.get("parent_dense_interconnect_threshold", 10))
-    if n_interconnect < threshold:
-        return base_passes, base_timeout
-    passes = max(base_passes, int(cfg.get("parent_dense_max_passes", 40)))
-    timeout = max(base_timeout, int(cfg.get("parent_dense_timeout_s", 180)))
-    return passes, timeout
+    if n_interconnect >= threshold:
+        timeout = max(timeout, int(cfg.get("parent_dense_timeout_s", 180)))
+        base_passes = max(base_passes, int(cfg.get("parent_dense_max_passes", 40)))
+
+    return base_passes, timeout
 
 
 def _route_parent_board(
@@ -66,16 +88,29 @@ def _route_parent_board(
     route_cfg = dict(cfg)
     route_cfg["freerouting_preserve_existing_copper"] = True
     route_cfg["freerouting_clear_existing_copper"] = False
-    route_cfg["freerouting_clear_zones"] = False
+    # Clear zones before DSN export. The stamped parent carries each leaf's
+    # filled GND zone on F.Cu; that copper pour makes FreeRouting hang
+    # indefinitely (it never completes a single routing pass on a board with a
+    # large filled zone). The leaf routing also clears zones
+    # (cleared_zones_before_export=True) and routes fine. GND is re-poured on
+    # both B.Cu and F.Cu AFTER routing (pour_gnd_planes below), so clearing
+    # here is safe -- it only removes the pre-route zone, not the post-route
+    # fill that ties in every GND pad.
+    route_cfg["freerouting_clear_zones"] = True
 
-    # C2: scale the parent routing budget to the cross-leaf interconnect count so
-    # a high-fan-out parent gets enough passes/time to close every inter-leaf net
-    # (the dominant parent-stage unconnected cause). Only raises; bounded by the
-    # timeout. inferred_interconnect_nets is the parent's cross-leaf net map.
+    # Scale the parent routing budget to board complexity. FreeRouting
+    # processes the ENTIRE board (every component, every fixed leaf wire)
+    # even when only a few interconnect nets remain unrouted, so wall-time
+    # scales with component count, not interconnect count. A 200-LED parent
+    # needs ~170 s though it has only 3 unrouted nets; the fixed 60 s default
+    # kills it mid-route.
     n_interconnect = len(getattr(composition, "inferred_interconnect_nets", {}) or {})
-    mp, to = _scale_parent_route_budget(n_interconnect, route_cfg)
+    n_components = getattr(state, "component_count", 0) or len(
+        getattr(composition, "board_state", None) and composition.board_state.components or {}
+    )
+    mp, to = _scale_parent_route_budget(n_interconnect, n_components, route_cfg)
     if mp != route_cfg.get("freerouting_max_passes") or to != route_cfg.get("freerouting_timeout_s"):
-        print(f"  parent route: {n_interconnect} inter-leaf nets -> "
+        print(f"  parent route: {n_components} components, {n_interconnect} inter-leaf nets -> "
               f"{mp} passes / {to}s budget")
     route_cfg["freerouting_max_passes"] = mp
     route_cfg["freerouting_timeout_s"] = to

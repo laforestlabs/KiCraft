@@ -261,6 +261,17 @@ DEFAULT_CONFIG = {
     "parent_dense_interconnect_threshold": 10,
     "parent_dense_max_passes": 40,
     "parent_dense_timeout_s": 180,
+    # Parent freerouting timeout scales with component count, mirroring the
+    # leaf budget at a lower rate (the parent starts from pre-routed leaf
+    # copper, so per-component cost is lower than routing from scratch).
+    # FreeRouting processes the ENTIRE board -- every component, every fixed
+    # leaf wire -- even when only a few interconnect nets remain unrouted, so
+    # wall-time scales with board size, not unrouted-net count. A 200-LED
+    # parent needs ~170 s (72 s routing + 94 s optimization) with only 3
+    # unrouted nets; the fixed 60 s default killed it mid-route (rc=-1).
+    # Budget is max(freerouting_timeout_s, n_components * s_per_component), capped.
+    "parent_freerouting_s_per_component": 1.0,
+    "parent_freerouting_timeout_cap_s": 600,
     # Leaf freerouting timeout scales with component count: a large array leaf
     # (e.g. a 200-LED matrix, ~600 nets) routes fine but takes minutes, and the
     # fixed 60s default cut freerouting off mid-route. The leaf budget is

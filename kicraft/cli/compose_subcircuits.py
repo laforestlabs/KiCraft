@@ -3200,9 +3200,10 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     error_msg = routing_result.get("error", "unknown error")
                     print(
-                        f"warning: parent routing failed: {error_msg}",
+                        f"error: parent routing failed: {error_msg}",
                         file=sys.stderr,
                     )
+                    return 1
         except Exception as exc:
             print(f"error: parent stamping/routing failed: {exc}", file=sys.stderr)
             return 1
