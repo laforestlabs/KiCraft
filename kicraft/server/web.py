@@ -39,6 +39,7 @@ from starlette.responses import PlainTextResponse, RedirectResponse
 
 from .accounts import (
     _RESET_TTL_SECONDS,
+    _VERIFY_TTL_SECONDS,
     DEFAULT_TIER,
     TIERS,
     AccountStore,
@@ -54,7 +55,7 @@ from .layout_panel import (
     user_may_edit_layout,
 )
 from .rules_panel import PlacementRulesPanel
-from .mailer import send_reset_email
+from .mailer import send_reset_email, send_verification_email
 from ..parts_library import Tier
 from ..parts_library import jlcparts
 from .parts_catalog import (
@@ -138,6 +139,8 @@ _BUILD_VIEW_STYLE = "height:calc(100vh - 380px);min-height:460px"
 
 # Shown in the reset email; derived from the token TTL so the two never drift.
 _RESET_TTL_MINUTES = _RESET_TTL_SECONDS // 60
+# Shown in the verification email; derived from the token TTL so the two never drift.
+_VERIFY_TTL_HOURS = _VERIFY_TTL_SECONDS // 3600
 
 
 _STORE: AccountStore | None = None
@@ -286,6 +289,20 @@ def _signup_code() -> str:
     the DB from /admin/invites."""
     return (os.environ.get("KICRAFT_SIGNUP_CODE")
             or os.environ.get("KICRAFT_ACCESS_PASSWORD", "")).strip()
+
+
+def _client_ip(request) -> str:
+    """Best-effort client IP for the per-IP signup throttle. Honors
+    X-Forwarded-For (the box runs behind a proxy) and falls back to the direct
+    peer address. Empty string when no request/peer is available."""
+    if request is None:
+        return ""
+    fwd = request.headers.get("x-forwarded-for") if hasattr(request, "headers") else None
+    if fwd:
+        # leftmost is the originating client; subsequent hops are proxies
+        return fwd.split(",")[0].strip()
+    peer = getattr(request, "client", None)
+    return peer.host if peer else ""
 
 
 def _current_user():
@@ -1858,6 +1875,12 @@ def login_page(prompt: str = ""):
 def signup_page(prompt: str = ""):
     ui.dark_mode().enable()
     ui.query("body").style("background:#0b1120")
+    # Capture the client IP once at page load (it's the HTTP request peer, not
+    # available inside the websocket submit callback) for the per-IP throttle.
+    try:
+        signup_ip = _client_ip(app.get_request())
+    except Exception:
+        signup_ip = ""
     with ui.card().classes("absolute-center w-96") \
             .style("background:#0f172a;border:1px solid #1e293b"):
         ui.label("Create your account").classes("text-2xl font-bold text-white")
@@ -1907,6 +1930,13 @@ def signup_page(prompt: str = ""):
                 ui.notify("Please accept the Terms of Service and Privacy Policy "
                           "to create an account.", color="warning")
                 return
+            # Per-IP signup throttle: blunts automated throwaway-account
+            # creation across the multi-worker deployment (DB-backed counter).
+            if store.count_recent_signups_by_ip(signup_ip, 3600) >= 5:
+                ui.notify("Too many signups from this network — try again later.",
+                          color="negative")
+                return
+            store.record_signup_attempt(signup_ip)
             try:
                 user = store.create_user(
                     email.value or "", pw.value or "",
@@ -1920,6 +1950,17 @@ def signup_page(prompt: str = ""):
                 return
             if grant:  # only a real signup consumes one of the code's uses
                 store.record_invite_use(grant["id"])
+            # Mint + send the verification link. The user is auto-logged-in but
+            # unverified, so the Design button stays disabled until they click.
+            token = store.create_verification_token(user.id)
+            if token:
+                try:
+                    s = Settings.from_env()
+                    send_verification_email(
+                        s, user.email,
+                        f"{s.public_url}/verify?token={token}", _VERIFY_TTL_HOURS)
+                except Exception:
+                    pass  # mail trouble must never block a successful signup
             app.storage.user["user_id"] = user.id
             app.storage.user["email"] = user.email
             app.storage.user["session_epoch"] = user.session_epoch
@@ -2027,6 +2068,70 @@ def reset_page(token: str = ""):
         pw.on("keydown.enter", submit)
         pw2.on("keydown.enter", submit)
         ui.button("Set new password and sign in", on_click=submit).classes("w-full")
+        _legal_footer()
+
+
+@ui.page("/verify")
+def verify_page(token: str = ""):
+    """Consume an email-verification token on GET. Single-use and short-lived, so
+    consuming on GET is safe. On success the user can start designing on their
+    next page load (no session change). The 'already verified -> success'
+    fallback makes email-scanner prefetch double-hits harmless: the scanner
+    consumes the token first, and the user's real click still sees success."""
+    ui.dark_mode().enable()
+    ui.query("body").style("background:#0b1120")
+    updated = _store().consume_verification_token(token) if token else None
+    with ui.card().classes("absolute-center w-96") \
+            .style("background:#0f172a;border:1px solid #1e293b"):
+        if updated is not None:
+            ui.label("Email confirmed").classes("text-2xl font-bold text-white")
+            ui.label("You can start designing now. Head back to the workspace.") \
+                .classes("text-sm").style("color:#94a3b8")
+            ui.button("Go to workspace", on_click=lambda: ui.navigate.to("/")) \
+                .classes("w-full")
+            _legal_footer()
+            return
+        # Token invalid/expired/already-used. If the logged-in user is already
+        # verified, treat it as success (scanner prefetch consumed it first).
+        current = _current_user()
+        if current is not None and current.email_verified:
+            ui.label("Email confirmed").classes("text-2xl font-bold text-white")
+            ui.label("Your email is already verified.") \
+                .classes("text-sm").style("color:#94a3b8")
+            ui.button("Go to workspace", on_click=lambda: ui.navigate.to("/")) \
+                .classes("w-full")
+            _legal_footer()
+            return
+        ui.label("Verification link invalid or expired") \
+            .classes("text-2xl font-bold text-white")
+        ui.label("Verification links are single-use and expire after 24 hours. "
+                 "Request a fresh one to continue.") \
+            .classes("text-sm").style("color:#94a3b8")
+
+        def resend():
+            u = _current_user()
+            if u is None:
+                ui.navigate.to("/login")
+                return
+            new_token = _store().create_verification_token(u.id)
+            if new_token is None:
+                ui.notify("A verification link was sent recently — check your inbox "
+                          "in a minute.", color="warning")
+                return
+            try:
+                s = Settings.from_env()
+                send_verification_email(
+                    s, u.email, f"{s.public_url}/verify?token={new_token}",
+                    _VERIFY_TTL_HOURS)
+            except Exception:
+                pass
+            ui.notify("Verification link sent. Check your email.", color="positive")
+
+        if current is not None:
+            ui.button("Resend verification link", on_click=resend).classes("w-full")
+        else:
+            ui.button("Sign in to resend",
+                      on_click=lambda: ui.navigate.to("/login")).classes("w-full")
         _legal_footer()
 
 
@@ -3878,6 +3983,36 @@ def index(prompt: str = "", project: str = ""):
                                      on_click=lambda: ui.navigate.to("/pricing")) \
                 .props("flat dense no-caps color=primary").classes("text-xs")
             upgrade_link.set_visibility(False)
+        # Unverified-email banner: shown when a non-staff user hasn't confirmed
+        # their signup email. The Design button (managed in refresh_account_ui)
+        # stays disabled until they verify; the Resend button mints a fresh link.
+        with ui.row().classes("items-center gap-2 kc-unverified") as unverified_row:
+            unverified_label = ui.label(
+                "Verify your email to start designing. Check your inbox for the "
+                "confirmation link.").classes("text-xs").style("color:#f59e0b")
+
+            def _resend_verify():
+                u = _current_user()
+                if u is None:
+                    return
+                token = _store().create_verification_token(u.id)
+                if token is None:
+                    ui.notify("A verification link was sent recently — check your "
+                              "inbox in a minute.", color="warning")
+                    return
+                try:
+                    s = Settings.from_env()
+                    send_verification_email(
+                        s, u.email, f"{s.public_url}/verify?token={token}",
+                        _VERIFY_TTL_HOURS)
+                except Exception:
+                    pass
+                ui.notify("Verification link sent. Check your email.",
+                          color="positive")
+
+            ui.button("Resend verification link", on_click=_resend_verify) \
+                .props("flat dense no-caps color=primary").classes("text-xs")
+        unverified_row.set_visibility(False)
 
         if first_run:
             with ui.row().classes("w-full items-start justify-between kc-welcome") \
@@ -4435,6 +4570,18 @@ def index(prompt: str = "", project: str = ""):
                 return
             q = _store().quota_status(u)
             period = "week" if q["window_days"] <= 7 else "month"
+            # Unverified non-staff users get the verify banner and a disabled
+            # Design button, shown instead of a misleading "0 of 1 left".
+            needs_verify = (not is_admin(u)) and not u.email_verified
+            unverified_row.set_visibility(needs_verify)
+            if needs_verify:
+                quota_label.text = "Email not verified — verify to start designing."
+                quota_label.style("color:#f59e0b")
+                design_btn.disable()
+                # A free unverified user has no quota story to upgrade past yet.
+                upgrade_link.set_visibility(False)
+                build_edit_panel()
+                return
             if q.get("unlimited"):
                 quota_label.text = f"{q['label']} tier: unlimited designs (staff)."
             else:
@@ -4486,6 +4633,11 @@ def index(prompt: str = "", project: str = ""):
                 return
             if not (brief.value or "").strip():
                 ui.notify("Enter a brief first.", color="warning")
+                return
+            if not is_admin(u) and not u.email_verified:
+                ui.notify("Verify your email first — check your inbox for the "
+                          "confirmation link (or click Resend above).",
+                          color="warning")
                 return
             q = _store().quota_status(u)
             if q["remaining"] <= 0:

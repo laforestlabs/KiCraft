@@ -30,6 +30,7 @@ from kicraft.parts_library.core_blocks import (
     CORE_COMPONENT_CATEGORIES,
     FUNCTION_KEY_RE as _FUNCTION_KEY_RE,
 )
+from .disposable_domains import DISPOSABLE_DOMAINS
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +75,12 @@ _SCRYPT_P = 1
 # public /forgot page from being turned into an email-spam relay.
 _RESET_TTL_SECONDS = 3600
 _RESET_COOLDOWN_SECONDS = 60
+
+# Email-verification tokens: longer-lived than reset (a user may not click the
+# link for hours) but still single-use; the cooldown stops the resend button
+# from being turned into an email-spam relay. Mirrors the reset flow.
+_VERIFY_TTL_SECONDS = 86400        # 24h
+_VERIFY_COOLDOWN_SECONDS = 60      # anti-spam, same as reset
 
 # Board IDs: short, human-quotable codes (KC-7G4K2M) stamped on every project so
 # a user can read one off the workspace and quote it in a support report. The
@@ -245,6 +252,10 @@ class User:
     stripe_customer_id: str | None = None
     stripe_subscription_id: str | None = None
     subscription_status: str | None = None
+    # Email verified at signup (see create_verification_token / can_design).
+    # Defaults True so in-memory Users (admin-CLI builds, tests) are treated as
+    # verified; create_user flips it False to match the DB row's DEFAULT 0.
+    email_verified: bool = True
 
 
 @dataclass
@@ -395,6 +406,7 @@ class AccountStore:
                 "session_epoch INTEGER NOT NULL DEFAULT 0,"
                 "tier_expires_at TEXT,"
                 "notify_email INTEGER NOT NULL DEFAULT 1,"
+                "email_verified INTEGER NOT NULL DEFAULT 0,"
                 "stripe_customer_id TEXT,"
                 "stripe_subscription_id TEXT,"
                 "subscription_status TEXT)"
@@ -443,6 +455,34 @@ class AccountStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_password_resets_token "
                 "ON password_resets(token_hash)"
+            )
+            # Email-verification tokens: parallel to password_resets (single-use,
+            # hashed, TTL-bounded) but keyed by user_id and consumed at signup.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS email_verifications ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "user_id INTEGER NOT NULL,"
+                "token_hash TEXT NOT NULL,"
+                "created_at TEXT NOT NULL,"
+                "expires_at TEXT NOT NULL,"
+                "used_at TEXT,"
+                "FOREIGN KEY(user_id) REFERENCES users(id))"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_email_verifications_token "
+                "ON email_verifications(token_hash)"
+            )
+            # Per-IP signup throttle: a DB-backed counter so the cap holds across
+            # the multi-worker deployment (an in-process counter would not).
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS signup_attempts ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "ip TEXT NOT NULL,"
+                "created_at TEXT NOT NULL)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_signup_attempts_ip_created "
+                "ON signup_attempts(ip, created_at)"
             )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS projects ("
@@ -621,6 +661,14 @@ class AccountStore:
             conn.execute("ALTER TABLE users ADD COLUMN stripe_subscription_id TEXT")
         if "subscription_status" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN subscription_status TEXT")
+        if "email_verified" not in cols:
+            # Email verification gate (see create_verification_token /
+            # can_design). DEFAULT 0 makes NEW signups land unverified; the
+            # one-time backfill below marks every pre-existing account
+            # verified so this upgrade never locks out deployed users.
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0")
+            conn.execute("UPDATE users SET email_verified=1")  # grandfather all existing accounts
         if "role" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
             # One-time backfill: the retired 'admin' billing tier becomes the admin
@@ -723,7 +771,8 @@ class AccountStore:
                     notify_email=bool(row["notify_email"]),
                     stripe_customer_id=row["stripe_customer_id"],
                     stripe_subscription_id=row["stripe_subscription_id"],
-                    subscription_status=row["subscription_status"])
+                    subscription_status=row["subscription_status"],
+                    email_verified=bool(row["email_verified"]))
 
     def _downgrade_if_expired(self, conn: sqlite3.Connection,
                               row: sqlite3.Row | None) -> sqlite3.Row | None:
@@ -757,6 +806,9 @@ class AccountStore:
         em = self._norm_email(email)
         if not em or "@" not in em:
             raise ValueError("a valid email is required")
+        domain = em.rsplit("@", 1)[-1]
+        if domain in DISPOSABLE_DOMAINS:
+            raise ValueError("Please use a non-disposable email address.")
         if not password:
             raise ValueError("a password is required")
         if tier not in TIERS:
@@ -779,7 +831,8 @@ class AccountStore:
                     role=DEFAULT_ROLE,
                     accepted_terms_version=accepted_terms_version,
                     accepted_terms_at=accepted_at, allow_training=allow_training,
-                    tier_expires_at=tier_expires_at)
+                    tier_expires_at=tier_expires_at,
+                    email_verified=False)
 
     def get_user(self, user_id: int) -> User | None:
         with self._conn() as conn:
@@ -1022,6 +1075,81 @@ class AccountStore:
             conn.execute("UPDATE password_resets SET used_at=? WHERE id=?",
                          (now, row["id"]))
         return self.get_user(user_id)
+
+    # ---- email verification -----------------------------------------------
+
+    def create_verification_token(self, user_id: int) -> str | None:
+        """Mint a single-use, time-limited email-verification token for `user_id`.
+
+        Mirrors create_reset_token but keyed by user_id (we have it at signup, so
+        there is no email-enumeration concern). Returns the raw token for the
+        caller to deliver out-of-band (only its hash is stored), or None inside
+        the cooldown window so the resend button can't be turned into an email
+        relay. Minting a token invalidates the user's prior unused tokens.
+        """
+        now = _utcnow()
+        with self._conn() as conn:
+            recent = conn.execute(
+                "SELECT created_at FROM email_verifications WHERE user_id=? "
+                "AND used_at IS NULL ORDER BY id DESC LIMIT 1",
+                (user_id,)).fetchone()
+            if recent is not None:
+                try:
+                    created = dt.datetime.fromisoformat(recent["created_at"])
+                    if (now - created).total_seconds() < _VERIFY_COOLDOWN_SECONDS:
+                        return None  # a fresh link is already in flight
+                except ValueError:
+                    pass  # unparseable timestamp: fall through and mint a new one
+            token = secrets.token_urlsafe(32)
+            expires = (now + dt.timedelta(seconds=_VERIFY_TTL_SECONDS)).isoformat()
+            conn.execute(
+                "UPDATE email_verifications SET used_at=? WHERE user_id=? "
+                "AND used_at IS NULL", (now.isoformat(), user_id))
+            conn.execute(
+                "INSERT INTO email_verifications "
+                "(user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                (user_id, self._hash_token(token), now.isoformat(), expires))
+        return token
+
+    def consume_verification_token(self, token: str) -> User | None:
+        """Spend a verification token: mark the user verified and the token used,
+        in one transaction. Returns the refreshed user, or None if the token is
+        invalid, expired, or already used. Does NOT bump session_epoch (unlike
+        reset) -- we must not evict the user's own just-created signup session."""
+        if not token:
+            return None
+        now = _utcnow().isoformat()
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT id, user_id FROM email_verifications WHERE token_hash=? "
+                "AND used_at IS NULL AND expires_at >= ?",
+                (self._hash_token(token), now)).fetchone()
+            if row is None:
+                return None
+            user_id = int(row["user_id"])
+            conn.execute("UPDATE users SET email_verified=1 WHERE id=?",
+                         (user_id,))
+            conn.execute("UPDATE email_verifications SET used_at=? WHERE id=?",
+                         (now, row["id"]))
+        return self.get_user(user_id)
+
+    # ---- signup throttle --------------------------------------------------
+
+    def record_signup_attempt(self, ip: str) -> None:
+        """Record one signup attempt from `ip`. Counted by count_recent_signups_by_ip."""
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO signup_attempts (ip, created_at) VALUES (?, ?)",
+                (ip or "", _utcnow_iso()))
+
+    def count_recent_signups_by_ip(self, ip: str, window_seconds: int) -> int:
+        """How many signup attempts `ip` has made in the trailing window. Used by
+        the signup page to blunt automated account creation across workers."""
+        cutoff = (_utcnow() - dt.timedelta(seconds=window_seconds)).isoformat()
+        with self._conn() as conn:
+            return int(conn.execute(
+                "SELECT COUNT(*) FROM signup_attempts WHERE ip=? AND created_at >= ?",
+                (ip or "", cutoff)).fetchone()[0])
 
     # ---- consent + data controls -----------------------------------------
 
@@ -1571,6 +1699,12 @@ class AccountStore:
         }
 
     def can_design(self, user: User) -> bool:
+        # Unverified users can browse but not spend compute: the threat is build
+        # cost, incurred only when a design starts, so the gate lives here (every
+        # costly site -- start() and _clone_project -- already calls can_design).
+        # Admins bypass outright.
+        if not is_admin(user) and not user.email_verified:
+            return False
         return is_admin(user) or self.quota_status(user)["remaining"] > 0
 
     def build_quality_for_user(self, user_id: int | None) -> str | None:

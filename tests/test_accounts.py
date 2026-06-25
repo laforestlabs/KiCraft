@@ -50,6 +50,22 @@ def _set_reset_times(store, *, created_secs_ago=None, expires_secs_from_now=None
         conn.execute(f"UPDATE password_resets SET {', '.join(sets)}", params)
 
 
+def _set_verify_times(store, *, created_secs_ago=None, expires_secs_from_now=None):
+    """Rewrite every email_verifications row's created_at / expires_at to a
+    relative time, so tests can step past the cooldown or force a token to
+    expire without sleeping. A negative expires_secs_from_now puts expiry in
+    the past. Mirrors _set_reset_times."""
+    now = dt.datetime.now(dt.timezone.utc)
+    sets, params = [], []
+    if created_secs_ago is not None:
+        sets.append("created_at=?")
+        params.append((now - dt.timedelta(seconds=created_secs_ago)).isoformat())
+    if expires_secs_from_now is not None:
+        sets.append("expires_at=?")
+        params.append((now + dt.timedelta(seconds=expires_secs_from_now)).isoformat())
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(f"UPDATE email_verifications SET {', '.join(sets)}", params)
+
 # ---- password hashing -----------------------------------------------------
 
 def test_password_roundtrip():
@@ -479,6 +495,9 @@ def test_admin_is_no_longer_a_billing_tier(store):
 
 def test_staff_bypass_quota(store):
     u = store.create_user("op@e.st", "pw")  # free tier: 1/week
+    # Verify so the block below is the quota, not the email-verification gate.
+    store.consume_verification_token(store.create_verification_token(u.id))
+    u = store.get_user(u.id)
     store.create_project(u.id, "b1")        # consume the one slot
     assert store.can_design(u) is False
     assert store.quota_status(u)["unlimited"] is False
@@ -974,3 +993,138 @@ def test_support_reports_exported_and_purged_with_user(store):
     store.delete_user(u.id)
     remaining = store.list_support_reports()
     assert [r.id for r in remaining] == [other_rid]  # other users' reports intact
+
+
+# ---- email verification -------------------------------------------------
+
+def test_new_user_is_unverified(store):
+    u = store.create_user("v1@e.st", "pw")
+    assert u.email_verified is False
+    assert store.get_user(u.id).email_verified is False  # round-trips through DB
+
+
+def test_verification_token_roundtrip(store):
+    u = store.create_user("v2@e.st", "pw")
+    token = store.create_verification_token(u.id)
+    assert token and len(token) > 20
+    updated = store.consume_verification_token(token)
+    assert updated is not None and updated.id == u.id
+    assert store.get_user(u.id).email_verified is True
+
+
+def test_verification_token_is_single_use(store):
+    u = store.create_user("once2@e.st", "pw")
+    token = store.create_verification_token(u.id)
+    assert store.consume_verification_token(token) is not None
+    assert store.consume_verification_token(token) is None  # already spent
+
+
+def test_verification_token_expires(store):
+    u = store.create_user("expv@e.st", "pw")
+    token = store.create_verification_token(u.id)
+    _set_verify_times(store, expires_secs_from_now=-1)  # already expired
+    assert store.consume_verification_token(token) is None
+    assert store.get_user(u.id).email_verified is False  # unchanged
+
+
+def test_new_verification_token_invalidates_prior(store):
+    u = store.create_user("rotate2@e.st", "pw")
+    first = store.create_verification_token(u.id)
+    _set_verify_times(store, created_secs_ago=120)  # step past the cooldown
+    second = store.create_verification_token(u.id)
+    assert second and second != first
+    assert store.consume_verification_token(first) is None  # old link dead
+    assert store.consume_verification_token(second).id == u.id
+
+
+def test_create_verification_token_cooldown(store):
+    u = store.create_user("coolv@e.st", "pw")
+    assert store.create_verification_token(u.id) is not None
+    assert store.create_verification_token(u.id) is None  # within cooldown
+    _set_verify_times(store, created_secs_ago=120)
+    assert store.create_verification_token(u.id) is not None  # cooldown elapsed
+
+
+def test_consume_garbage_and_empty_token(store):
+    u = store.create_user("gbv@e.st", "pw")
+    assert store.consume_verification_token("not-a-real-token") is None
+    assert store.consume_verification_token("") is None
+    assert store.get_user(u.id).email_verified is False  # nothing changed
+
+
+def test_verification_does_not_bump_session_epoch(store):
+    """Explicit contrast with the reset flow: verifying email must NOT evict the
+    user's just-created signup session (reset does bump it)."""
+    u = store.create_user("epochv@e.st", "pw")
+    assert u.session_epoch == 0
+    token = store.create_verification_token(u.id)
+    updated = store.consume_verification_token(token)
+    assert updated.session_epoch == 0  # untouched, unlike consume_reset_token
+
+
+def test_can_design_blocks_unverified_user(store):
+    u = store.create_user("block@e.st", "pw")
+    assert store.quota_status(u)["remaining"] > 0  # has quota...
+    assert store.can_design(u) is False            # ...but still blocked
+    token = store.create_verification_token(u.id)
+    store.consume_verification_token(token)
+    u = store.get_user(u.id)
+    assert store.can_design(u) is True             # re-enabled after verify
+
+
+def test_admin_bypasses_verification(store):
+    u = store.create_user("adminv@e.st", "pw")
+    store.set_role("adminv@e.st", "admin")
+    u = store.get_user_by_email("adminv@e.st")
+    assert u.email_verified is False               # still unverified in DB...
+    assert is_admin(u) is True
+    assert store.can_design(u) is True             # ...but staff bypasses
+
+
+def test_legacy_db_users_are_grandfathered_verified(tmp_path):
+    """The critical lock-out regression: a DB created before email_verified gains
+    the column on open and every pre-existing account is marked verified, so the
+    upgrade never locks out deployed users."""
+    db = tmp_path / "accounts.db"
+    with sqlite3.connect(db) as conn:  # pre-email_verified users schema
+        conn.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,"
+            "tier TEXT NOT NULL DEFAULT 'free', created_at TEXT NOT NULL,"
+            "last_login_at TEXT)")
+        conn.execute(
+            "INSERT INTO users (email, password_hash, tier, created_at) "
+            "VALUES ('old@e.st', 'scrypt$x', 'pro', '2026-01-01T00:00:00+00:00')")
+    store = AccountStore(db, tmp_path / "projects")  # _ensure_columns migrates
+    u = store.get_user_by_email("old@e.st")
+    assert u is not None
+    assert u.email_verified is True  # grandfathered, not locked out
+    assert store.can_design(u) is True
+
+
+def test_disposable_domain_rejected_at_signup(store):
+    with pytest.raises(ValueError):
+        store.create_user("x@mailinator.com", "pw")
+    # a real domain still works, and the disposable one was never persisted
+    u = store.create_user("ok@realdomain.example", "pw")
+    assert u.email is not None
+    assert store.get_user_by_email("x@mailinator.com") is None
+
+
+def test_signup_ip_throttle_blocks_after_n(store):
+    """The web layer rejects once count_recent_signups_by_ip >= 5; verify the
+    DB-backed counter that backs it, including window expiry."""
+    ip = "203.0.113.7"
+    for _ in range(5):
+        store.record_signup_attempt(ip)
+    assert store.count_recent_signups_by_ip(ip, 3600) == 5
+    assert store.count_recent_signups_by_ip(ip, 3600) >= 5  # 6th would be blocked
+    store.record_signup_attempt(ip)  # the blocked attempt is still recorded
+    assert store.count_recent_signups_by_ip(ip, 3600) == 6
+    # Outside the window: not counted.
+    old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=3700)).isoformat()
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("UPDATE signup_attempts SET created_at=? WHERE ip=?", (old, ip))
+    assert store.count_recent_signups_by_ip(ip, 3600) == 0
+    # Different IP is a separate counter.
+    assert store.count_recent_signups_by_ip("198.51.100.2", 3600) == 0

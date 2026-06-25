@@ -23,6 +23,12 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setattr(web, "_STORE", st)  # web._store() returns this
     return st
 
+def _verify(store, user):
+    """Mark a user email-verified via the real token flow, returning the refreshed
+    user. Clone/quota tests isolate that gate from the email-verification gate."""
+    tok = store.create_verification_token(user.id)
+    return store.consume_verification_token(tok)
+
 
 def _persist(store, user_id, brief, *, stem="BOARD", status="ok", is_public=True,
              with_render=False, with_pcb=True, parts=None):
@@ -117,6 +123,7 @@ def test_quality_badge_from_ws(tmp_path):
 def test_clone_creates_owned_public_copy(store):
     a = store.create_user("owner@e.st", "pw")
     b = store.create_user("cloner@e.st", "pw")
+    b = _verify(store, b)  # isolate clone behavior from the verification gate
     src_id = _persist(store, a.id, "esp32 board", stem="SRC",
                       parts=[{"ref": "U1", "mpn": "ESP32-S3"}])
     new_id, err = web._clone_project(store.get_project(src_id), b, make_private=False)
@@ -135,7 +142,7 @@ def test_clone_creates_owned_public_copy(store):
 
 def test_clone_free_user_forced_public(store):
     a = store.create_user("owner@e.st", "pw")
-    free = store.create_user("free@e.st", "pw")  # free tier
+    free = _verify(store, store.create_user("free@e.st", "pw"))  # free tier
     source = store.get_project(_persist(store, a.id, "b"))
     new_id, err = web._clone_project(source, free, make_private=True)  # asks private
     assert err is None
@@ -146,6 +153,7 @@ def test_clone_paid_user_can_be_private(store):
     a = store.create_user("owner@e.st", "pw")
     store.create_user("paid@e.st", "pw")
     paid = store.set_tier("paid@e.st", "pro")
+    paid = _verify(store, paid)
     source = store.get_project(_persist(store, a.id, "b"))
     new_id, err = web._clone_project(source, paid, make_private=True)
     assert err is None
@@ -154,7 +162,7 @@ def test_clone_paid_user_can_be_private(store):
 
 def test_clone_blocked_by_quota(store):
     a = store.create_user("owner@e.st", "pw")
-    free = store.create_user("free2@e.st", "pw")  # free: 1 design / week
+    free = _verify(store, store.create_user("free2@e.st", "pw"))  # free: 1 design / week
     store.finish_project(store.create_project(free.id, "mine"), "ok")  # use the slot
     source = store.get_project(_persist(store, a.id, "b"))
     new_id, err = web._clone_project(source, free, make_private=False)
