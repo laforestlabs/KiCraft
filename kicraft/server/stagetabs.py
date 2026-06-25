@@ -456,6 +456,7 @@ class StagePanel:
           {"type": "kv",    "title": str, "rows": [(k, v), ...]}
           {"type": "list",  "title": str, "items": [str, ...]}
           {"type": "table", "title": str, "columns": [str, ...], "rows": [[...], ...]}
+          {"type": "graph", "title": str, "option": <echarts option dict>}
 
         Empty `sections` means "nothing committed yet": keep an in-progress live
         draft on screen rather than wiping it back to the placeholder (the draft
@@ -524,6 +525,8 @@ def _render_section(sec: dict, accent: str) -> None:
         note = sec.get("note")
         if note:
             ui.label(str(note)).classes("text-xs italic mt-0.5").style(f"color:{_DIMMER}")
+    elif kind == "graph":
+        ui.echart(sec.get("option", {})).classes("w-full").style("height:360px")
 
 
 def _cell_html(cell) -> str:

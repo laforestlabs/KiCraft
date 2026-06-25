@@ -86,6 +86,7 @@ from kicraft.build_slots import ACQUIRED_MARKER, slot_count
 from . import billing, notify
 from .stage_driver import DESIGN_STAGES, KICRAFT, SLOT_MODEL
 from .stagetabs import StageTabs, demo_events
+from . import stage_diagram
 from .storage import (
     _discover_generated_dir,
     _gc_workspaces,
@@ -906,10 +907,14 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
         sl = sj.get("functional_spec") or {}
         if not sl:
             return []
-        secs = [{"type": "table", "title": "Functional blocks",
-                 "columns": ["name", "category", "purpose"],
-                 "rows": [[b.get("name"), b.get("category"), b.get("purpose")]
-                          for b in sl.get("blocks", [])]}]
+        secs: list[dict] = []
+        opt = stage_diagram.functional_spec_diagram(sl)
+        if opt is not None:
+            secs.append({"type": "graph", "title": "Concept diagram", "option": opt})
+        secs.append({"type": "table", "title": "Functional blocks",
+                     "columns": ["name", "category", "purpose"],
+                     "rows": [[b.get("name"), b.get("category"), b.get("purpose")]
+                              for b in sl.get("blocks", [])]})
         if sl.get("connections"):
             secs.append({"type": "table", "title": "Block connections",
                          "columns": ["from", "to", "signal"],
@@ -923,9 +928,13 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
         sl = sj.get("architecture") or {}
         if not sl:
             return []
-        secs = [{"type": "table", "title": "Sheets", "columns": ["name", "stem", "function"],
+        secs: list[dict] = []
+        opt = stage_diagram.architecture_diagram(sl)
+        if opt is not None:
+            secs.append({"type": "graph", "title": "Concept diagram", "option": opt})
+        secs.append({"type": "table", "title": "Sheets", "columns": ["name", "stem", "function"],
                  "rows": [[s.get("name"), s.get("stem"), s.get("function")]
-                          for s in sl.get("sheets", [])]}]
+                          for s in sl.get("sheets", [])]})
         if sl.get("power_nets"):
             secs.append({"type": "list", "title": "Power nets", "items": sl["power_nets"]})
         if sl.get("rail_voltages"):
