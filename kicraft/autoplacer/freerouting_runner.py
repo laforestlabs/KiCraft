@@ -696,6 +696,114 @@ def _inject_netclass_clearances(dsn_path: str) -> None:
         print(f"  warning: netclass clearance injection skipped: {exc}")
 
 
+def _strip_nets_from_dsn(dsn_path: str, skip_nets: "list[str] | None") -> None:
+    """Remove whole nets from a Specctra DSN so FreeRouting will not route them.
+
+    Keeps GND (and any other poured-plane net) off the parent autorouter: GND is
+    poured as a plane AFTER routing, so FreeRouting must neither route it as a
+    dense web of point-to-point traces across an array -- which never converges
+    (KC-VKRFR7) -- nor see a large filled GND plane in the DSN, which hangs
+    FreeRouting 1.9.0 (the KC-SMQ3HX 200-LED hang). Each skipped net is removed
+    from ``(network ...)`` (its ``(net NAME (pins ...))`` block), from every
+    ``(class ...)`` membership list, and from ``(wiring ...)`` (any ``(wire
+    ...)``/``(via ...)`` on it). Its pads remain as netless obstacles the router
+    routes around. Only the DSN is edited -- the net is untouched on the
+    ``.kicad_pcb`` -- so the post-route pour reconnects every pad.
+
+    The board must carry no copper on the skipped net at export time
+    (``strip_net_copper``); a removed via is no longer an obstacle, so stamping
+    skipped-net copper before routing would let the router cross it. Best-effort:
+    any parse failure leaves the DSN unchanged.
+    """
+    if not skip_nets:
+        return
+    names = {str(n) for n in skip_nets}
+
+    def _name(tok: str) -> str:
+        return tok[1:-1] if len(tok) >= 2 and tok[0] == '"' == tok[-1] else tok
+
+    def _end(s: str, start: int) -> int:
+        depth = 0
+        for i in range(start, len(s)):
+            if s[i] == "(":
+                depth += 1
+            elif s[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+        return -1
+
+    def _drop_blocks(text: str, keyword: str, match) -> str:
+        out, i, n, klen = [], 0, len(text), len(keyword)
+        while i < n:
+            if text.startswith(keyword, i) and (
+                i + klen >= n or text[i + klen] in " \t\n)"
+            ):
+                end = _end(text, i)
+                if end > 0 and match(text[i:end]):
+                    i = end
+                    while i < n and text[i] in " \t":
+                        i += 1
+                    if i < n and text[i] == "\n":
+                        i += 1
+                    continue
+            out.append(text[i])
+            i += 1
+        return "".join(out)
+
+    try:
+        with open(dsn_path) as f:
+            content = f.read()
+
+        # 1) (net NAME (pins ...)) -- a network net block (has a (pins ...) child).
+        def _is_skipped_net_block(b: str) -> bool:
+            toks = _split_dsn_tokens(b[len("(net"):])
+            return bool(toks) and "(pins" in b and _name(toks[0]) in names
+
+        content = _drop_blocks(content, "(net", _is_skipped_net_block)
+
+        # 2) (wire ...(net NAME)...) and (via ...NAME...) in (wiring ...).
+        def _wire_on_skipped(b: str) -> bool:
+            m = re.search(r"\(net\s+(\"[^\"]*\"|\S+?)\s*\)", b)
+            return bool(m) and _name(m.group(1)) in names
+
+        def _via_on_skipped(b: str) -> bool:
+            # (via padstack x y NET) -- net is a bare token (the trailing ) may be
+            # glued to it); or a (net NAME) child. Strip stray parens off tokens.
+            return any(
+                _name(t.strip("()")) in names for t in _split_dsn_tokens(b)
+            )
+
+        content = _drop_blocks(content, "(wire", _wire_on_skipped)
+        content = _drop_blocks(content, "(via", _via_on_skipped)
+
+        # 3) Drop NAME from every (class ...) membership header.
+        def _fix_class(block: str) -> str:
+            hdr_end = block.find("(", len("(class"))
+            if hdr_end < 0:
+                return block
+            head = _split_dsn_tokens(block[:hdr_end])  # ['(class', cls, net, ...]
+            kept = [t for t in head if _name(t) not in names]
+            return " ".join(kept) + "\n      " + block[hdr_end:]
+
+        out, i, n = [], 0, len(content)
+        while i < n:
+            if content.startswith("(class", i):
+                end = _end(content, i)
+                if end > 0:
+                    out.append(_fix_class(content[i:end]))
+                    i = end
+                    continue
+            out.append(content[i])
+            i += 1
+        content = "".join(out)
+
+        with open(dsn_path, "w") as f:
+            f.write(content)
+    except Exception as exc:  # noqa: BLE001 -- never break routing over this
+        print(f"  warning: DSN net-skip ({sorted(names)}) skipped: {exc}")
+
+
 def _propagate_sibling_pro(src_pcb_path: str, dst_pcb_path: str) -> None:
     """Copy ``src``'s sibling ``.kicad_pro`` onto ``dst``'s, when present.
 
@@ -1052,6 +1160,10 @@ def route_with_freerouting(
                 target_clearance_um=target_clearance_um,
                 target_width_um=target_width_um,
             )
+            # Keep designated nets (e.g. GND on a parent) off the autorouter:
+            # remove them from the DSN so FreeRouting routes neither a dense
+            # trace web nor hangs on a filled plane -- they are poured after.
+            _strip_nets_from_dsn(dsn_path, config.get("freerouting_skip_nets"))
 
             passes = max_passes if attempt == 0 else max(10, max_passes // 2)
             stats = run_freerouting(

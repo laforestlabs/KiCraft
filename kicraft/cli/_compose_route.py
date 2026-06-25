@@ -88,14 +88,11 @@ def _route_parent_board(
     route_cfg = dict(cfg)
     route_cfg["freerouting_preserve_existing_copper"] = True
     route_cfg["freerouting_clear_existing_copper"] = False
-    # Clear zones before DSN export. The stamped parent carries each leaf's
-    # filled GND zone on F.Cu; that copper pour makes FreeRouting hang
-    # indefinitely (it never completes a single routing pass on a board with a
-    # large filled zone). The leaf routing also clears zones
-    # (cleared_zones_before_export=True) and routes fine. GND is re-poured on
-    # both B.Cu and F.Cu AFTER routing (pour_gnd_planes below), so clearing
-    # here is safe -- it only removes the pre-route zone, not the post-route
-    # fill that ties in every GND pad.
+    # Clear any stray copper zone before DSN export: a filled zone makes
+    # FreeRouting 1.9.0 hang (it never completes a pass on a board with a large
+    # filled plane -- the KC-SMQ3HX 200-LED hang). GND is stripped + skipped
+    # below and re-poured after routing, so there is normally no zone left to
+    # clear; this is defensive against a leaf zone surviving the strip.
     route_cfg["freerouting_clear_zones"] = True
 
     # Scale the parent routing budget to board complexity. FreeRouting
@@ -115,15 +112,21 @@ def _route_parent_board(
     route_cfg["freerouting_max_passes"] = mp
     route_cfg["freerouting_timeout_s"] = to
 
-    # Ground handling: route signals first, pour ground last (standard practice,
-    # and what the leaves already do). The stamped parent carries each leaf's GND
-    # as a web of F.Cu traces; that saturates the signal layer so FreeRouting
-    # cannot complete a cross-block signal interconnect (a lone MCU pin to a
-    # sensor net stays unrouted while the dense GND web blocks every path). So
-    # strip the GND copper and pour a B.Cu GND plane up front: GND pads then
-    # connect via the plane, FreeRouting skips GND, and F.Cu is clear for the
-    # signal interconnects. The plane is refilled after routing to close around
-    # the new traces and tie in every GND pad.
+    # Ground handling is adaptive, because FreeRouting 1.9.0 has two opposite
+    # failure modes on a parent and no single GND strategy beats both:
+    #   * A filled GND plane in the DSN HANGS it on a large board (zero output
+    #     for the whole timeout -- the 200-LED KC-SMQ3HX hang).
+    #   * Skipping GND entirely leaves dense-array pads stranded -- a tiny 1515
+    #     pad can't host a via and FreeRouting, not caring about GND, boxes it in
+    #     with signal traces (the KC-VKRFR7 1-unconnected-pad tail).
+    # So: strip the leaf GND web (its F.Cu traces saturate the signal layer) and
+    # pour a B.Cu GND plane + thermal vias up front, then route with the plane
+    # PRESENT (clear_zones=False) -- FreeRouting actively keeps every GND pad tied
+    # to the plane while it routes signals, which routes a dense array cleanly
+    # (0 unconnected). Only if that route fails to produce a board (the plane hung
+    # FreeRouting) do we fall back to GND-skip: strip GND, remove it from the DSN,
+    # route signals alone, and rebuild GND as a plane after. GND is always poured
+    # on both layers post-route to close around the new traces.
     from kicraft.autoplacer.brain.gnd_pour import (
         add_gnd_pour_and_thermal_vias,
         pour_gnd_planes,
@@ -131,65 +134,91 @@ def _route_parent_board(
     from kicraft.autoplacer.freerouting_runner import strip_net_copper
 
     gnd_net = cfg.get("gnd_zone_net", "GND")
-    # The pre-route GND strip/pour and the route itself all shell out to pcbnew;
-    # any of them can fail (e.g. a pcbnew SIGSEGV mid-strip). Guard the whole
-    # block so a failure returns a discardable result and the search tries the
-    # next round, instead of an uncaught exception killing the compose subprocess
-    # and taking the entire build down with it.
+
+    def _stamp_shield_ties(pcb_path: str) -> None:
+        # Re-stamp connector shield ties: a THT shield leg sits where the B.Cu
+        # fill loses its thermal spokes to the slot holes, so without an explicit
+        # tie it returns as the 8/8 'unconnected GND at J1' rc7 signature. The
+        # stamper's pad/track guards drop any tie that would cross routed copper;
+        # it is a no-op on a board with no connector (e.g. an LED array).
+        if not cfg.get("shield_tie_enabled", True):
+            return
+        try:
+            from kicraft.autoplacer.freerouting_runner import _run_pcbnew_script
+
+            _tie_cfg = json.dumps({
+                k: cfg[k]
+                for k in (
+                    "shield_tie_enabled",
+                    "shield_tie_exclude_refs",
+                    "shield_tie_max_mm",
+                    "freerouting_min_clearance_mm",
+                    "freerouting_fine_pitch_track_mm",
+                    "gnd_zone_net",
+                )
+                if k in cfg
+            })
+            _run_pcbnew_script(
+                "import pcbnew, json\n"
+                "from kicraft.autoplacer.brain.breakout_stubs import (\n"
+                "    add_breakout_stubs, shield_tie_specs)\n"
+                f"cfg = json.loads({_tie_cfg!r})\n"
+                f"board = pcbnew.LoadBoard({pcb_path!r})\n"
+                "specs = shield_tie_specs(board, cfg)\n"
+                "del board\n"
+                f"s = add_breakout_stubs({pcb_path!r}, specs, cfg=cfg)\n"
+                "print('parent shield ties:', s['stubs'], 'stamped,',\n"
+                "      len(s['skipped']), 'skipped')\n"
+            )
+        except Exception as exc:
+            print(f"warning: parent shield re-tie failed: {exc}", file=sys.stderr)
+
+    # The GND prep and the route shell out to pcbnew/FreeRouting; any can fail
+    # (a pcbnew SIGSEGV mid-strip, a routing hang). Guard the whole block so a
+    # failure returns a discardable result and the search tries the next round,
+    # instead of crashing the compose subprocess and taking the build down.
+    used_gnd_skip = False
     try:
         if gnd_net:
-            # Strip the leaf-composed GND web and pour a B.Cu GND plane (+ IC
-            # thermal vias) before routing, so FreeRouting ties GND to the plane
-            # with short drops instead of re-creating the dense cross-block GND
-            # web that saturates F.Cu and blocks signal interconnects.
             strip_net_copper(str(stamped_pcb), gnd_net)
             add_gnd_pour_and_thermal_vias(str(stamped_pcb), cfg)
-            # The strip just deleted the leaves' locked shield ties along with
-            # the GND web -- and the plane cannot replace them: a connector's
-            # through-hole shield legs sit where the B.Cu fill loses its
-            # thermal spokes to the slot holes, so without the ties they come
-            # back as the 8/8 'unconnected GND at J1' rc7 signature. Re-stamp
-            # them here, pre-route; the stamper's pad/track guards drop any
-            # tie that would cross the composed leaf copper.
-            if cfg.get("shield_tie_enabled", True):
-                try:
-                    from kicraft.autoplacer.freerouting_runner import (
-                        _run_pcbnew_script,
-                    )
-
-                    _tie_cfg = json.dumps({
-                        k: cfg[k]
-                        for k in (
-                            "shield_tie_enabled",
-                            "shield_tie_exclude_refs",
-                            "shield_tie_max_mm",
-                            "freerouting_min_clearance_mm",
-                            "freerouting_fine_pitch_track_mm",
-                            "gnd_zone_net",
-                        )
-                        if k in cfg
-                    })
-                    _run_pcbnew_script(
-                        "import pcbnew, json\n"
-                        "from kicraft.autoplacer.brain.breakout_stubs import (\n"
-                        "    add_breakout_stubs, shield_tie_specs)\n"
-                        f"cfg = json.loads({_tie_cfg!r})\n"
-                        f"board = pcbnew.LoadBoard({str(stamped_pcb)!r})\n"
-                        "specs = shield_tie_specs(board, cfg)\n"
-                        "del board\n"
-                        f"s = add_breakout_stubs({str(stamped_pcb)!r}, specs, cfg=cfg)\n"
-                        "print('parent shield ties:', s['stubs'], 'stamped,',\n"
-                        "      len(s['skipped']), 'skipped')\n"
-                    )
-                except Exception as exc:
-                    print(f"warning: parent shield re-tie failed: {exc}",
-                          file=sys.stderr)
-        freerouting_stats = route_with_freerouting(
-            kicad_pcb_path=str(stamped_pcb),
-            output_path=str(routed_pcb),
-            jar_path=jar_path,
-            config=route_cfg,
+            _stamp_shield_ties(str(stamped_pcb))
+        # Attempt 1: route with the GND plane present (clear_zones=False). Cap the
+        # timeout so a hang (the large-plane failure mode) is detected promptly
+        # and we fall back, rather than burning the full component-scaled budget.
+        route_cfg["freerouting_clear_zones"] = False
+        probe_cfg = dict(route_cfg)
+        probe_cfg["freerouting_timeout_s"] = min(
+            int(route_cfg.get("freerouting_timeout_s", 60)),
+            int(cfg.get("parent_gnd_plane_probe_timeout_s", 120)),
         )
+        try:
+            freerouting_stats = route_with_freerouting(
+                kicad_pcb_path=str(stamped_pcb),
+                output_path=str(routed_pcb),
+                jar_path=jar_path,
+                config=probe_cfg,
+            )
+        except Exception as exc:
+            # The filled GND plane hung FreeRouting (large board). Fall back to
+            # GND-skip: strip every scrap of GND copper -- including the plane +
+            # vias we just poured; a stray one makes FreeRouting warn 'net not
+            # found' and could be crossed by a signal -- remove GND from the DSN,
+            # and rebuild it after routing.
+            print(f"  parent route: GND-plane route failed ({exc}); "
+                  f"retrying with GND skipped", file=sys.stderr)
+            if gnd_net:
+                strip_net_copper(str(stamped_pcb), gnd_net)
+                route_cfg["freerouting_clear_zones"] = True
+                route_cfg["freerouting_skip_nets"] = list(dict.fromkeys(
+                    [*route_cfg.get("freerouting_skip_nets", []), gnd_net]))
+            used_gnd_skip = True
+            freerouting_stats = route_with_freerouting(
+                kicad_pcb_path=str(stamped_pcb),
+                output_path=str(routed_pcb),
+                jar_path=jar_path,
+                config=route_cfg,
+            )
     except Exception as exc:
         return {
             "failed": True,
@@ -201,11 +230,22 @@ def _route_parent_board(
             "freerouting_stats": {},
         }
 
-    # Pour GND on BOTH layers, closing around the freshly-routed interconnects.
-    # The F.Cu pour is what ties in every F.Cu GND pad via thermal relief on its
-    # own layer (a B.Cu-only plane can't reach an F.Cu SMD pad without a via),
-    # tied down to the B.Cu plane through the thermal vias placed pre-route.
+    # GND, post-route. On the skip fallback FreeRouting routed nothing for GND, so
+    # rebuild it around the freshly-routed signals: pour the B.Cu plane +
+    # collision-guarded thermal vias (runs on the ROUTED board, so _via_blocked
+    # drops any via that would cross another net) and re-stamp the shield ties
+    # stripped with the GND copper. The plane-route path already carries those.
     if gnd_net:
+        if used_gnd_skip:
+            try:
+                add_gnd_pour_and_thermal_vias(str(routed_pcb), cfg)
+            except Exception as exc:
+                print(f"warning: post-route GND stitch failed: {exc}",
+                      file=sys.stderr)
+            _stamp_shield_ties(str(routed_pcb))
+        # Pour GND on BOTH layers, closing around the routed interconnects. The
+        # F.Cu pour ties F.Cu GND pads on their own layer; the thermal vias bond
+        # the two planes (a B.Cu-only plane can't reach an F.Cu SMD pad).
         pour_gnd_planes(str(routed_pcb), cfg, layers=("B.Cu", "F.Cu"))
 
     # Pour the primary power rail (e.g. VBUS) as an F.Cu plane, post-route only:
