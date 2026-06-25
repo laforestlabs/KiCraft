@@ -210,6 +210,12 @@ def _stage_extra(stage: str) -> str:
             "search_footprints, search_symbols, or lookup_lcsc_id for different parts), "
             "request them TOGETHER in a single turn (emit multiple tool calls at once) "
             "instead of one per turn. It is faster and far cheaper.\n"
+            "- COMPACT OUTPUT: when the BOM has many parts (e.g. a 200-LED array + decoupling "
+            "caps = 400+ parts), use COMPACT single-line JSON per part — no pretty-printing, "
+            "no indentation. OMIT null fields (datasheet, mpn, sourcing_note, side, source_leaf "
+            "when null). For array members that are identical except ref, emit each on one line "
+            "with only the fields that differ (ref) plus value/symbol/footprint/sheet. The "
+            "output token budget is finite; verbose JSON truncates and fails.\n"
             "- Every symbol AND footprint MUST resolve to a real file. When finished, output "
             "ONLY the BOM slot JSON.")
     if stage == "wiring":
@@ -564,10 +570,11 @@ def _stage_max_retries(stage: str, default: int) -> int:
 _BOM_MAX_ROUNDS = 6
 
 
-# Per-stage output token budget. Wiring emits the whole-board netlist in one slot;
-# on a complex board that overflows the default cap and truncates into invalid
-# JSON ("no JSON in reply"), so wiring floors higher.
-_STAGE_MIN_TOKENS = {"wiring": 8192}
+# Per-stage output token budget. Wiring emits the whole-board netlist in one
+# slot; BOM for a large array (200 LEDs + 200 decoupling caps = 401 parts)
+# emits every part in one JSON object. Both overflow the default cap and
+# truncate into invalid JSON ("no JSON in reply"), so they floor higher.
+_STAGE_MIN_TOKENS = {"wiring": 8192, "bom": 16384}
 
 
 def _stage_max_tokens(stage: str, default: int) -> int:
@@ -591,6 +598,8 @@ def _retry_feedback(out: dict) -> str:
             "'real options: ...', replace the bad id with ONE of those exact ids verbatim "
             "(do not invent or abbreviate); otherwise call search_symbols / search_footprints "
             "to find a real id. Do not drop or alter parts of the slot that were not flagged. "
+            "Use COMPACT single-line JSON per part (omit null fields) so the output fits the "
+            "token budget — verbose pretty-printed JSON truncates and fails. "
             "Output ONLY the slot JSON.")
     return msg
 
@@ -730,7 +739,7 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
                 # The reply hit the output cap and came back as truncated, invalid
                 # JSON. A plain "try again" just truncates at the same spot, burning
                 # another full-context call; give it more room for the next attempt.
-                cur_max_tokens = min(cur_max_tokens * 2, 16384)
+                cur_max_tokens = min(cur_max_tokens * 2, 32768)
                 messages.append({"role": "user", "content":
                                  "Your reply was cut off at the output token limit, so the "
                                  "JSON was truncated and invalid. The limit has been raised; "
