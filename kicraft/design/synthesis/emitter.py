@@ -831,10 +831,18 @@ def _emit_leaf(
         paper = "A4"
 
     # Build lib_symbols: component symbols + every power:* symbol used.
+    # Map each symbol to its assigned refdes so pin-type normalization can
+    # classify the device from KiCraft's own designator (e.g. J2 -> connector),
+    # not easyeda's arbitrary intrinsic Reference (a microSD socket is "Card").
     pairs = [_split_lib_id(p.symbol) for p in sheet_inst.parts]
+    ref_prefixes = {
+        _split_lib_id(p.symbol): p.ref for p in sheet_inst.parts if p.ref
+    }
     power_lib_ids = sorted({p.lib_id for p in routed.power_symbols})
     power_pairs = [_split_lib_id(s) for s in power_lib_ids]
-    lib_block = build_lib_symbols_block(pairs + power_pairs)
+    lib_block = build_lib_symbols_block(
+        pairs + power_pairs, ref_prefixes=ref_prefixes
+    )
 
     # Obstacles for field placement: estimated rects of net labels and
     # power-symbol graphics+text, grown with each part's chosen fields so

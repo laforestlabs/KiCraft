@@ -102,11 +102,12 @@ def test_build_lib_symbols_empty_returns_short_form() -> None:
 
 
 def test_passive_device_input_pins_retyped_passive(tmp_path: Path) -> None:
-    # easyeda2kicad imports switch/connector contacts typed `input`, which
-    # trips KiCad ERC pin_not_driven ("Input pin not driven by any Output
-    # pins") on every non-power net. extract_symbol_block must retype them
-    # `passive` (how KiCad's own Switch:/Connector: symbols model a contact),
-    # keyed off the symbol's intrinsic Reference prefix.
+    # easyeda2kicad imports switch contacts typed `input`, which trips KiCad ERC
+    # pin_not_driven ("Input pin not driven by any Output pins") on every
+    # non-power net. extract_symbol_block must retype a *passive* device's pins
+    # `passive` (how KiCad's own Switch:/Device: symbols model a contact), keyed
+    # off the symbol's intrinsic Reference prefix. (Connectors -> bidirectional;
+    # see test_connector_input_pins_retyped_bidirectional.)
     lib = tmp_path / "Sw.kicad_sym"
     lib.write_text(
         '(kicad_symbol_lib (version 20211014)\n'
@@ -152,6 +153,103 @@ def test_relay_input_pins_retyped_passive(tmp_path: Path) -> None:
     block = extract_symbol_block("Rly", "SRD", stock_dir=tmp_path)
     assert "(pin input" not in block
     assert block.count("(pin passive") == 3
+
+
+def test_battery_input_pins_retyped_passive(tmp_path: Path) -> None:
+    # An easyeda2kicad battery holder (Reference "BT") arrives with `input`
+    # terminals, tripping ERC pin_not_driven. A battery cell is a passive source
+    # in KiCad's stock model (Device:Battery_Cell pins are passive), so the
+    # normalizer must retype its contacts `passive`.
+    lib = tmp_path / "Bat.kicad_sym"
+    lib.write_text(
+        '(kicad_symbol_lib (version 20211014)\n'
+        '\t(symbol "HOLDER"\n'
+        '\t\t(property "Reference" "BT" (at 0 0 0))\n'
+        '\t\t(symbol "HOLDER_0_1"\n'
+        '\t\t\t(pin input line (at -10 2.54 0) (length 5)'
+        ' (name "+") (number "1"))\n'
+        '\t\t\t(pin input line (at -10 0 0) (length 5)'
+        ' (name "-") (number "2"))\n'
+        '\t\t)\n'
+        '\t)\n'
+        ')\n'
+    )
+    block = extract_symbol_block("Bat", "HOLDER", stock_dir=tmp_path)
+    assert "(pin input" not in block
+    assert block.count("(pin passive") == 2
+
+
+def test_connector_input_pins_retyped_bidirectional(tmp_path: Path) -> None:
+    # A connector is a boundary to a possibly-active off-board device (a socketed
+    # microSD card, a sensor module). Its signal contacts carry a live bus whose
+    # driver may be off-schematic, so the normalizer retypes connector `input`
+    # pins `bidirectional` -- NOT `passive`, which would declare the bus inert
+    # and mask a genuinely floating host-driven line.
+    lib = tmp_path / "Conn.kicad_sym"
+    lib.write_text(
+        '(kicad_symbol_lib (version 20211014)\n'
+        '\t(symbol "SOCKET"\n'
+        '\t\t(property "Reference" "J" (at 0 0 0))\n'
+        '\t\t(symbol "SOCKET_0_1"\n'
+        '\t\t\t(pin input line (at -10 2.54 0) (length 5)'
+        ' (name "CMD") (number "3"))\n'
+        '\t\t\t(pin input line (at -10 0 0) (length 5)'
+        ' (name "CLK") (number "5"))\n'
+        '\t\t)\n'
+        '\t)\n'
+        ')\n'
+    )
+    block = extract_symbol_block("Conn", "SOCKET", stock_dir=tmp_path)
+    assert "(pin input" not in block
+    assert block.count("(pin bidirectional") == 2
+    assert "(pin passive" not in block
+
+
+def test_assigned_refdes_overrides_bogus_intrinsic_reference(tmp_path: Path) -> None:
+    # KC-8DXUS6: easyeda fills a microSD socket's intrinsic Reference with the
+    # arbitrary string "Card", which is in neither device-class set, so the
+    # intrinsic-Reference path is a no-op and the `input` contacts survive into
+    # the schematic (ERC pin_not_driven on CMD/CLK). KiCraft's assigned refdes
+    # (J2) is authoritative and must classify it as a connector regardless.
+    lib = tmp_path / "Card.kicad_sym"
+    lib.write_text(
+        '(kicad_symbol_lib (version 20211014)\n'
+        '\t(symbol "TF"\n'
+        '\t\t(property "Reference" "Card" (at 0 0 0))\n'
+        '\t\t(symbol "TF_0_1"\n'
+        '\t\t\t(pin input line (at -10 2.54 0) (length 5)'
+        ' (name "CMD") (number "3"))\n'
+        '\t\t)\n'
+        '\t)\n'
+        ')\n'
+    )
+    # Without the assigned refdes: "Card" is unrecognized -> no-op (the bug).
+    untouched = extract_symbol_block("Card", "TF", stock_dir=tmp_path)
+    assert "(pin input" in untouched
+    # With the assigned refdes J2 -> connector -> bidirectional.
+    fixed = extract_symbol_block("Card", "TF", stock_dir=tmp_path, ref_prefix="J2")
+    assert "(pin input" not in fixed
+    assert fixed.count("(pin bidirectional") == 1
+
+
+def test_assigned_refdes_does_not_retype_ic_pins(tmp_path: Path) -> None:
+    # The assigned-refdes path must stay as conservative as the intrinsic one:
+    # an IC (refdes U3) keeps its `input` pins so a genuinely floating MCU input
+    # still trips ERC.
+    lib = tmp_path / "Mcu.kicad_sym"
+    lib.write_text(
+        '(kicad_symbol_lib (version 20211014)\n'
+        '\t(symbol "MCU"\n'
+        '\t\t(property "Reference" "U" (at 0 0 0))\n'
+        '\t\t(symbol "MCU_0_1"\n'
+        '\t\t\t(pin input line (at -10 0 0) (length 5)'
+        ' (name "IN") (number "1"))\n'
+        '\t\t)\n'
+        '\t)\n'
+        ')\n'
+    )
+    block = extract_symbol_block("Mcu", "MCU", stock_dir=tmp_path, ref_prefix="U3")
+    assert "(pin input" in block
 
 
 def test_active_device_input_pins_preserved(tmp_path: Path) -> None:

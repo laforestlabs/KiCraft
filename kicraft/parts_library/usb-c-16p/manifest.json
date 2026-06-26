@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:6a69c3d3f0d3c33bdd7a00df75d926240923c32e4a1c8f8362b2007f49954612",
+  "content_hash": "sha256:fa95a2396472a9bbff2ffbcec1e6333d2b16b2beaf782f2cd91a5f133ef17517",
   "datasheet_url": "https://lcsc.com/product-detail/USB-Type-C_Korean-Hroparts-Elec-TYPE-C-31-M-12_C165948.html",
   "description": "Korean Hroparts TYPE-C-31-M-12 \u2014 16-pin USB-C receptacle, surface-mount with through-hole shield-retention tabs. 5 A / 20 V rated, 10 000 mating cycles. The most common low-cost USB-C connector for maker boards; KiCad ships a matching footprint as USB_C_Receptacle_HRO_TYPE-C-31-M-12.",
   "footprint_name": "USB-C_SMD-TYPE-C-31-M-12_1",
@@ -25,6 +25,6 @@
     "smd",
     "receptacle"
   ],
-  "version": "0.1.0",
-  "watch_out_for": "CRITICAL: install 5.1 k\u03a9 resistors to GND on BOTH CC1 and CC2 (one EACH, separately \u2014 NEVER tie them together). Without these, USB-C source chargers will refuse to enumerate as a UFP and the board will see 0 V on VBUS. Shield tabs are through-hole for mechanical strength \u2014 design the PCB with the matching THT holes through-shield-clearance pad sizes or the connector will tear off after a few insertions. USB 2.0 data pins only (D+/D\u2212); not wired for USB 3.0 SuperSpeed pairs. SBU1/SBU2 are unused for plain 2.0 \u2014 leave unconnected. Verify both rows of D+/D\u2212 are bridged on the PCB so the cable orientation doesn't matter."
+  "version": "0.2.0",
+  "watch_out_for": "easyeda2kicad import defects fixed by hand: the 4 power pads (A1B12/B1A12/B4A9/A4B9) were smd-custom gr_poly with a 0.1mm stroke halo that shrank inter-pad clearance to 0.10mm -> now solid rect 0.6x1.3; the two center alignment-post holes were PTH size=drill=0.75 (0 annular) -> now np_thru_hole (NPTH). Re-import will reintroduce both."
 }

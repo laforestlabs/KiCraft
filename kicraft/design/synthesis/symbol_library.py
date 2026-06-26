@@ -134,26 +134,36 @@ def _qualify_with_prefix(symbol_text: str, symbol_name: str, library: str) -> st
     )
 
 
-# Reference-designator prefixes for device classes whose pins are *passive*
-# contacts in correct KiCad modeling -- switches, connectors, discrete
-# passives, and bare electromechanical parts (relays, solenoids, motors).
-# KiCad's own libraries type every pin of these `passive` (Switch:SW_DIP_x03,
-# Connector:*, Device:R/C/L/D, Relay:* coil+contacts ...). Parts imported from
-# LCSC via easyeda2kicad, however, inherit EasyEDA's careless pin metadata and
-# routinely arrive typed `input`. KiCad ERC then demands an Output driver for
-# every `input` pin and raises "Input pin not driven by any Output pins"
-# (pin_not_driven) on any net that isn't power-flagged -- even though a switch
-# contact, connector terminal, or relay coil neither drives nor is driven. None
-# of these classes owns a logic input that legitimately needs a driver (a bare
-# relay coil is a passive load, not a logic input), so retyping their `input`
-# pins to `passive` only ever corrects an import artifact; it can never mask a
-# real floating-input error. Active devices (ICs: U/Q/...) and
-# crystals/oscillators (Y/X, whose enable IS a driven input) are deliberately
-# excluded. NB: the prefix is the symbol's intrinsic Reference (e.g. easyeda
-# types a relay symbol "RLY" even when instances are placed as K1..Kn).
+# Reference-designator prefixes for device classes whose `input` pins are an
+# easyeda2kicad import artifact, not a real logic input. Parts imported from
+# LCSC via easyeda2kicad inherit EasyEDA's careless pin metadata and routinely
+# arrive typed `input`. KiCad ERC then demands an Output driver for every
+# `input` pin and raises "Input pin not driven by any Output pins"
+# (pin_not_driven) on any net that isn't power-flagged. KiCad's own stock
+# libraries never type these contacts `input`, so we retype them at the embed
+# choke point. The *target* type depends on the class:
+#
+#   * Connectors (below) are a boundary to a possibly-active off-board device --
+#     a socketed microSD card, a sensor module, a daughterboard. Their signal
+#     contacts carry live signals whose driver may be off-schematic, so modeling
+#     them `passive` would wrongly declare a hot bus inert and could MASK a
+#     genuinely floating host-driven line. KiCad's idiom for such a boundary is
+#     `bidirectional` (needs no driver, yet satisfies a connected input).
+#   * Truly passive / electromechanical parts (`_PASSIVE_DEVICE_REF_PREFIXES`)
+#     -- switches, discrete passives, relay coils, transducers -- have no logic
+#     input and neither drive nor are driven, so `passive` is correct and can
+#     never mask a real error.
+#
+# Active devices (ICs: U/Q/...) and crystals/oscillators (Y/X, whose enable IS a
+# driven input) are deliberately excluded from both sets. The device class is
+# read from KiCraft's assigned instance refdes when available (authoritative:
+# easyeda fills the symbol's intrinsic Reference with arbitrary strings like
+# "Card"), falling back to the symbol's own Reference prefix otherwise.
+_CONNECTOR_REF_PREFIXES = frozenset({
+    "J", "P", "CN", "CON", "JP",               # connectors / headers / jumpers / sockets
+})
 _PASSIVE_DEVICE_REF_PREFIXES = frozenset({
     "SW", "BTN", "PB", "KEY",                  # switches / buttons
-    "J", "P", "CN", "CON", "JP",               # connectors / headers / jumpers
     "R", "RN", "RV", "RT", "RP", "VR", "POT",  # resistors / networks / thermistors / pots
     "C",                                       # capacitors
     "L", "FB", "FL",                           # inductors / ferrite beads
@@ -161,6 +171,7 @@ _PASSIVE_DEVICE_REF_PREFIXES = frozenset({
     "F", "FU",                                 # fuses
     "K", "RLY", "RL", "RY",                    # relays (coil + contacts are passive)
     "SOL", "MTR", "M",                         # solenoids / motors (passive loads)
+    "BT", "BAT", "BATT",                       # battery holders / cells (passive, per KiCad)
     "TP",                                      # test points
     "LS", "SP", "BZ", "MK", "MIC",             # transducers (speaker / buzzer / mic)
     "ANT", "AE",                               # antennas
@@ -170,6 +181,14 @@ _PASSIVE_DEVICE_REF_PREFIXES = frozenset({
 _REFERENCE_PROP_RE = re.compile(r'\(property\s+"Reference"\s+"([^"]*)"')
 _REF_ALPHA_PREFIX_RE = re.compile(r"[A-Za-z]+")
 _PIN_INPUT_RE = re.compile(r"(\(pin\s+)input\b")
+
+
+def _ref_alpha_prefix(ref: str | None) -> str | None:
+    """Uppercase alphabetic prefix of a refdes (``J2`` -> ``J``), or None."""
+    if not ref:
+        return None
+    pm = _REF_ALPHA_PREFIX_RE.match(ref)
+    return pm.group(0).upper() if pm else None
 
 # Switch/phase node of a switching regulator — the pin that drives the
 # inductor. Vendored/easyeda-imported regulator symbols routinely mistype it as
@@ -183,30 +202,40 @@ _SWITCH_NODE_PIN_RE = re.compile(
 )
 
 
-def _normalize_passive_device_pins(symbol_text: str) -> str:
-    """Retype `input` pins as `passive` on passive/electromechanical symbols.
+def _normalize_passive_device_pins(
+    symbol_text: str, ref_prefix: str | None = None
+) -> str:
+    """Retype easyeda2kicad's bogus `input` pins by device class.
 
     easyeda2kicad-imported switches, connectors, and discrete passives often
     carry EasyEDA's bogus `input` pin type. KiCad ERC then flags those pins
     ``pin_not_driven`` ("Input pin not driven by any Output pins") on every
-    non-power net, because an `input` pin requires an Output driver and a
-    switch/connector contact has none. KiCad's stock libraries model these
-    contacts as `passive` (which needs no driver), so we do the same.
+    non-power net, because an `input` pin requires an Output driver. KiCad's
+    stock libraries never type these contacts `input`, so we retype them here:
 
-    The device class is read from the symbol's own ``Reference`` prefix
-    (intrinsic to the library symbol, e.g. ``SW``/``J``/``R``); only classes in
-    :data:`_PASSIVE_DEVICE_REF_PREFIXES` -- none of which has a logic input that
-    legitimately needs a driver -- are touched, so this can never mask a real
-    floating-input error on an IC. A no-op on correctly-typed symbols (KiCad
-    stock passives already carry no `input` pins).
+      * connectors (:data:`_CONNECTOR_REF_PREFIXES`) -> ``bidirectional`` -- a
+        connector is a boundary to a possibly-active off-board device, so its
+        contacts model a live bus, not an inert terminal;
+      * passive / electromechanical parts (:data:`_PASSIVE_DEVICE_REF_PREFIXES`)
+        -> ``passive`` -- they neither drive nor are driven.
+
+    The device class is taken from KiCraft's assigned instance refdes
+    (``ref_prefix``, e.g. ``J2``) when supplied -- it is authoritative, where
+    easyeda fills the symbol's intrinsic ``Reference`` with arbitrary strings
+    (a microSD socket arrives ``"Card"``). Falls back to the symbol's own
+    Reference prefix otherwise. Active devices (ICs: U/Q, crystals Y/X) are in
+    neither set, so this can never mask a real floating-input error on an IC.
+    A no-op on correctly-typed symbols (KiCad stock passives carry no `input`).
     """
-    m = _REFERENCE_PROP_RE.search(symbol_text)
-    if not m:
-        return symbol_text
-    pm = _REF_ALPHA_PREFIX_RE.match(m.group(1))
-    if not pm or pm.group(0).upper() not in _PASSIVE_DEVICE_REF_PREFIXES:
-        return symbol_text
-    return _PIN_INPUT_RE.sub(r"\1passive", symbol_text)
+    cls = _ref_alpha_prefix(ref_prefix)
+    if cls is None:
+        m = _REFERENCE_PROP_RE.search(symbol_text)
+        cls = _ref_alpha_prefix(m.group(1)) if m else None
+    if cls in _CONNECTOR_REF_PREFIXES:
+        return _PIN_INPUT_RE.sub(r"\1bidirectional", symbol_text)
+    if cls in _PASSIVE_DEVICE_REF_PREFIXES:
+        return _PIN_INPUT_RE.sub(r"\1passive", symbol_text)
+    return symbol_text
 
 
 def _normalize_switch_node_pins(symbol_text: str) -> str:
@@ -232,6 +261,7 @@ def extract_symbol_block(
     symbol_name: str,
     project_root: Path | None = None,
     stock_dir: Path = DEFAULT_KICAD_SYMBOL_DIR,
+    ref_prefix: str | None = None,
 ) -> str:
     """Return the fully-resolved, qualified `(symbol "Library:Name" ...)` text.
 
@@ -245,6 +275,10 @@ def extract_symbol_block(
         project_root: Defaults to ``Path.cwd()``. Pass explicitly when
             invoking from a directory other than the KiCraft project.
         stock_dir: KiCad stock-library directory used as tier 5.
+        ref_prefix: KiCraft's assigned instance refdes (e.g. ``J2``), used to
+            classify the device for pin-type normalization. Authoritative over
+            the symbol's intrinsic ``Reference`` (which easyeda fills with
+            arbitrary strings). See :func:`_normalize_passive_device_pins`.
 
     Raises:
         SymbolNotFoundError: library file missing, or symbol not in it.
@@ -258,7 +292,9 @@ def extract_symbol_block(
     lib_text = lib_path.read_text()
     resolved = _resolve_extends_chain(lib_text, symbol_name)
     qualified = _qualify_with_prefix(resolved, symbol_name, library)
-    return _normalize_switch_node_pins(_normalize_passive_device_pins(qualified))
+    return _normalize_switch_node_pins(
+        _normalize_passive_device_pins(qualified, ref_prefix)
+    )
 
 
 def search_symbols(
@@ -306,11 +342,15 @@ def build_lib_symbols_block(
     project_root: Path | None = None,
     stock_dir: Path = DEFAULT_KICAD_SYMBOL_DIR,
     indent: str = "\t",
+    ref_prefixes: dict[tuple[str, str], str] | None = None,
 ) -> str:
     """Build a complete `(lib_symbols ...)` block from a list of (library, name) pairs.
 
     Pairs are deduplicated; missing symbols raise SymbolNotFoundError before any
-    output is produced (no partial blocks).
+    output is produced (no partial blocks). ``ref_prefixes`` optionally maps a
+    ``(library, name)`` pair to the assigned instance refdes (e.g. ``J2``) so
+    pin-type normalization can classify the device authoritatively rather than
+    trust easyeda's intrinsic ``Reference`` (see :func:`extract_symbol_block`).
     """
     unique: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -323,8 +363,15 @@ def build_lib_symbols_block(
     if not unique:
         return f"{indent}(lib_symbols)"
 
+    ref_prefixes = ref_prefixes or {}
     blocks = [
-        extract_symbol_block(lib, name, project_root=project_root, stock_dir=stock_dir)
+        extract_symbol_block(
+            lib,
+            name,
+            project_root=project_root,
+            stock_dir=stock_dir,
+            ref_prefix=ref_prefixes.get((lib, name)),
+        )
         for lib, name in unique
     ]
     body = "\n".join(f"{indent}\t{b}" for b in blocks)
