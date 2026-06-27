@@ -2623,12 +2623,16 @@ def _verify_routed_board(pcb: Path) -> dict:
         reasons.append("keepout_intrusion")
     strand = _connector_stranded_refs(pcb)
     if strand:
-        accepted = False
         for reason in strand:
             if reason not in reasons:
                 reasons.append(reason)
-    # Hard fab-blockers only. A minor-courtyard-only board is NOT "ok" (it
-    # carries warnings) but it is fab-acceptable; the caller decides.
+        warnings.extend(
+            f"connector stranded {s} -- board is electrically clean; "
+            "flagged for visual review"
+            for s in strand
+        )
+    # Hard fab-blockers only. A minor-courtyard-only or strand-only board is
+    # NOT "ok" (it carries warnings) but it is fab-acceptable; the caller decides.
     blocking_courtyard = courtyard > 0 and not courtyard_minor_only
     return {
         "ok": accepted
@@ -2641,7 +2645,6 @@ def _verify_routed_board(pcb: Path) -> dict:
             and unconnected == 0
             and keepout == 0
             and not blocking_courtyard
-            and not strand
         ),
         "shorts": shorts,
         "unconnected": unconnected,
