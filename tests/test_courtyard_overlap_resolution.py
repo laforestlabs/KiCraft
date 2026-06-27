@@ -88,6 +88,100 @@ def test_non_overlapping_parts_untouched():
     assert comps["R1"].pos.x == 10.0 and comps["R2"].pos.x == 30.0
 
 
+def test_push_falls_back_to_free_axis_when_pinned_axis_blocked():
+    # A free part flush against the RIGHT board edge whose smaller overlap with a
+    # locked neighbour is on the X (board-edge) axis: pushing it further right is
+    # clamped, so the pass must fall back to the Y axis. Without the fallback the
+    # pair never separates (the run_06 USB-C breakout courtyard survivor).
+    # Board is 60x60; clamp pins x at 60 - hw - 1 = 57.
+    comps = {
+        "J1": _comp("J1", 54.0, 14.0, w=4.0, h=4.0, locked=True),
+        "R1": _comp("R1", 57.0, 15.0, w=4.0, h=4.0),  # already at the x-clamp
+    }
+    s = _solver(comps)
+    assert _courtyards_overlap(comps["J1"], comps["R1"])  # precondition
+    # smaller overlap is on X (the blocked, board-edge axis)
+    ox, oy = _bbox_overlap_xy(
+        *_effective_bbox(comps["J1"], 0.0), *_effective_bbox(comps["R1"], 0.0)
+    )
+    assert ox < oy
+
+    s._resolve_courtyard_overlaps(comps)
+
+    assert comps["J1"].pos.x == 54.0 and comps["J1"].pos.y == 14.0  # locked
+    assert comps["R1"].pos.x == 57.0  # pinned x axis preserved (only y moved)
+    assert not _courtyards_overlap(comps["J1"], comps["R1"])  # separated via Y
+
+
+# --- parent-side exemption: only OPPOSITE-side stacks are courtyard-exempt ---
+
+from kicraft.autoplacer.brain.placement_utils import _back_courtyard  # noqa: E402
+from kicraft.autoplacer.brain.subcircuit_composer import LeafBlockerSet  # noqa: E402
+
+
+def _empty_blocker() -> LeafBlockerSet:
+    # No real copper -> can_overlap_sparse() returns True for any pair, so the
+    # pair is "copper compatible". Courtyard exemption must then turn on the
+    # SIDE, not on copper compatibility.
+    return LeafBlockerSet(
+        front_pads=(), back_pads=(), tht_drills=(),
+        leaf_outline=(Point(0.0, 0.0), Point(2.0, 2.0)),
+    )
+
+
+def _block(ref: str, x: float, y: float, side: str, *, w: float = 4.0,
+           h: float = 4.0) -> Component:
+    return Component(
+        ref=ref, value="", pos=Point(x, y), rotation=0.0, layer=Layer.FRONT,
+        width_mm=w, height_mm=h, kind="subcircuit", locked=False,
+        body_center=Point(x, y), block_blocker_set=_empty_blocker(),
+        block_side=side,
+    )
+
+
+def test_back_courtyard_predicate():
+    assert _back_courtyard(_block("A", 0, 0, "back")) is True
+    assert _back_courtyard(_block("A", 0, 0, "front")) is False
+    assert _back_courtyard(_block("A", 0, 0, "none")) is False
+    forced = _block("A", 0, 0, "front")
+    forced.block_force_back_only = True
+    assert _back_courtyard(forced) is True
+
+
+def test_same_side_compatible_blocks_are_separated():
+    # Two copper-compatible SAME-side blocks (e.g. two THT pin-headers whose
+    # annular rings don't touch) still share one courtyard layer -> a real
+    # courtyards_overlap DRC. Copper compatibility must NOT exempt them.
+    comps = {
+        "A": _block("A", 10.0, 10.0, "none"),
+        "B": _block("B", 11.0, 10.0, "none"),
+    }
+    s = _solver(comps)
+    assert _courtyards_overlap(comps["A"], comps["B"])  # precondition
+
+    s._resolve_courtyard_overlaps(comps)
+
+    assert not _courtyards_overlap(comps["A"], comps["B"])  # separated
+
+
+def test_opposite_side_stack_is_exempt():
+    # A genuine opposite-side stack (front block over a back block) has its
+    # courtyards on different copper layers (F.CrtYd vs B.CrtYd) and never
+    # DRC-overlaps -- the pass must leave the deliberate stack intact.
+    comps = {
+        "A": _block("A", 10.0, 10.0, "front"),
+        "B": _block("B", 11.0, 10.0, "back"),
+    }
+    s = _solver(comps)
+    assert _courtyards_overlap(comps["A"], comps["B"])  # precondition
+
+    s._resolve_courtyard_overlaps(comps)
+
+    # Untouched: the stack is preserved.
+    assert comps["A"].pos.x == 10.0 and comps["B"].pos.x == 11.0
+    assert _courtyards_overlap(comps["A"], comps["B"])
+
+
 # --- magnitude classification (verify-gate severity) ---
 
 from kicraft.autoplacer.courtyard_overlap import (  # noqa: E402

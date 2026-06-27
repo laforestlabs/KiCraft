@@ -84,63 +84,106 @@ different net occupies the same position before placing a label.
 
 ---
 
-## 3. NOT DONE — Cluster A: Connector stranding + stranded high-speed nets
+## 3. INVESTIGATED — Cluster A: the rotation-stranding mechanism is REFUTED
 
-**Symptom.** Edge connectors placed inboard (negative mm from edge) → `connector_stranded:<ref>@-N.NNmm(<edge>)`.
+**The plan's stated mechanism does not hold.** Reproduced deterministically
+(`replay --no-route` on run_25/run_05/run_02/run_09/run_22) and traced the code:
 
-**Status.** Root cause identified but fix not implemented. The issue is in
-`placement_solver.py:_pin_edge_components` / `_connector_edge_x`:
-`_pin_edge_components` pins a subcircuit block at a position computed for
-rotation 0 (from the zone's `chosen_rotation` field). The solver then rotates
-the block (typically 270° for packing), and `_restore_pinned_positions` snaps
-it back to the rotation-0 position. The anchor offset's Y component (from
-content bbox center → component center) becomes an X shift after 270° rotation,
-stranding the connector ~2.3mm inboard.
+- The failing designs carry **no subcircuit blocks** — they are single-leaf
+  boards whose `component_zones` are plain connectors, so the
+  `_connector_edge_x`/`_connector_edge_y` subcircuit/`anchor_offset_mm` branch
+  never executes.
+- An edge-pinned block is **never re-rotated** after `_pin_edge_components`:
+  it is added to `self._pinned_targets` and `_optimize_rotations` skips any ref
+  in `_pinned_targets` (`placement_solver.py:2157`); `_sa_refine` only moves the
+  `unlocked` set. `_restore_pinned_positions` only translates, reusing the
+  current rotation. So "Y→X after 270°" has no trigger.
+- `connector_stranded` is a KiCraft synthetic acceptance-gate verdict, not a
+  KiCad DRC type; it never appears in the `drc` counts. It is independent of the
+  `copper_edge_clearance` failures the corpus actually shows.
 
-Required investigation (using replay on `run_06` and `run_25`):
-1. Trace the anchor offset computation in `_compute_local_anchor_offset`
-   and `attachment_constraints_to_zones` — the body center from `_content_bbox`
-   differs from the component center for tall components, creating a Y offset
-   that becomes X displacement after rotation.
-2. Fix the single point: either in `_connector_edge_x` (use unrotated width,
-   not rotated anchor offset), or in `_restore_pinned_positions` (recompute
-   position for the solver's final rotation), or in the zone entry (set
-   `anchor_offset.y = 0` by using component center as reference instead of
-   content bbox center).
+**The real adjacent cluster is `copper_edge_clearance` (5 designs: run_02, 05,
+09, 22, 25).** Root cause (reproduced): `_compute_final_outline`
+(`compose_subcircuits.py:740`) snaps each EDGE-constrained side to the connector
+mouth anchor (`return c_val`) and discards the placed-child geometry `g_val`, so
+a corner-mount pad or a leaf-routed track sitting 0–0.2 mm proud of the mouth is
+left over the edge.
 
-Load-bearing code:
-- `kicraft/autoplacer/brain/placement_solver.py` `_pin_edge_components`
-  (edge-group placement, `_connector_edge_x` for subcircuit blocks)
-- `kicraft/autoplacer/brain/parent_adapter.py` `attachment_constraints_to_zones`
-  (anchor offset computation)
-- `kicraft/autoplacer/brain/subcircuit_composer.py` `_compute_local_anchor_offset`
-  (anchor point selection)
+**Deferred — needs the copper envelope, not the body bbox.** The naive fix
+("keep clearance from `g_val`") regresses mouthed connectors with
+`connector_edge_overhang_mm`: `placed_bboxes` is the *content* bbox (body +
+copper), so it cannot tell a connector's overhanging **mouth/body** (which is
+supposed to stick past the edge) from stray **copper** (pads/tracks) that must be
+cleared (verified: it breaks `test_edge_connector_pinned_to_parent_bottom_outline`
+and `test_compute_final_outline_edge_pinned_no_margin`). A correct fix must thread
+the per-child **copper** extent (`child_layer_envelopes`, excluding the body) into
+`_compute_final_outline`, or extend `_repair_parent_outline`
+(`_compose_validate.py`) to enumerate transformed child footprint pads/traces (it
+is currently blind to intra-leaf copper, which is also why
+`geometry_validation.outside_pad_count` reads 0 while pads sit outside).
 
 ---
 
-## 4. NOT DONE — Cluster C: `courtyards_overlap`
+## 4. DONE — Cluster C: `courtyards_overlap`  *(uncommitted)*
 
-**Symptom.** `reasons=['courtyards_overlap']` in parent verdict.
+**Files changed:** `placement_utils.py`, `placement_solver.py`, `compose_subcircuits.py`
+(+ tests in `test_courtyard_overlap_resolution.py`).
 
-**Residual cases** after KC-59PTZA fix:
-- Intra-leaf: edge-pinned connector vs neighbor (Step 16 declines to move
-  the pinned member)
-- Inter-leaf: overlaps created at rigid compose stamping (leaf-scoped Step 16
-  can't see them)
+**Real root cause (reproduced on run_06, instrumented).** Two compounding bugs
+at the **parent-compose** level — block-level courtyard overlaps were 0 right
+after `solve()` but 2 after the post-solve geometry steps:
 
-**Approach.**
-1. Allow Step 16 to slide the non-pinned member while the pinned member
-   holds the edge.
-2. Add a parent/compose-level courtyard-separation pass for inter-leaf overlaps.
+1. **`_ensure_edge_blocks_extremal` reintroduces overlaps after the solver's
+   last courtyard pass.** The solver runs Step 16 (`_resolve_courtyard_overlaps`)
+   at the end of `solve()`, but compose then runs `_slide_constrained_to_cluster`
+   + `_ensure_edge_blocks_extremal`, which align same-edge blocks to the same
+   perpendicular extreme — collapsing the X-separation Step 16 relied on. This is
+   the KC-59PTZA "final pass isn't last" pattern, one level up.
+2. **The Step-16 exemption conflated copper-compat with courtyard-compat.**
+   `_blocker_pair_compatible` (= `can_overlap_sparse`) returns True for two
+   same-side THT pin-headers whose annular rings don't touch — but their
+   courtyards share ONE layer (F.CrtYd) and DO produce a real `courtyards_overlap`
+   DRC. The exemption is meant only for genuine opposite-side stacks (F.CrtYd vs
+   B.CrtYd, different layers).
+
+**Fix (three surgical changes):**
+- `placement_utils._back_courtyard(comp)`: True iff a block sits on the back
+  copper layer (`block_side == "back"` or `block_force_back_only`).
+- `placement_solver._resolve_courtyard_overlaps`: exempt a pair only when
+  `_blocker_pair_compatible(a,b) AND _back_courtyard(a) != _back_courtyard(b)`
+  (genuine opposite-side stack). Same-side compatible pairs are now separated.
+- `placement_solver._push_clear`: when the smaller-overlap-axis push is fully
+  blocked by the board edge (an edge-pinned connector can't move further out on
+  its pinned axis), fall back to the other axis instead of giving up.
+- `compose_subcircuits._compose_artifacts`: re-run `_resolve_courtyard_overlaps`
+  after `_ensure_edge_blocks_extremal`, so the courtyard pass is the GENUINE last
+  geometry step (only unlocked blocks move; edge flush/extremity preserved).
+
+**Verification (`replay --no-route`, parent courtyard measured with
+`courtyard_overlap.measure_courtyard_overlaps`):**
+- run_06 usb-c-full-breakout: 2 gross → **0**
+- run_23 can-node: 2 → **0**; run_04 speaker-crossover: 1 → **0**;
+  run_12 esp32-s3-sensor: 1 → **0**
+- run_01 rc-lowpass-bnc: 1 → 1 (unchanged; pre-existing intra-leaf J1↔RV1, not
+  regressed)
+- **No regression:** run_19 relay-quad (full routed build) produces an IDENTICAL
+  verdict under old and new code (`connector_stranded:J4@-4.85mm`,
+  `unconnected_nets`) — run_19's full-build rejection is pre-existing
+  replay-vs-original nondeterminism, not this change. run_06's ~4 stranded
+  connectors are also pre-existing (the original strands J1/J4/J5/J3 — 5
+  connectors crammed on one short edge is a synthesis over-constraint).
+- Full test suite: 2046 passed (+4 new courtyard tests), same 14 pre-existing
+  failures, 0 regressions.
 
 ---
 
 ## 5. NOT DONE — Cluster D: Route/infra fail (no routable parent)
 
-**Designs:** #10 rp2040-min, #17 led-cc-driver, #20 encoder-oled-panel.
-Memory flags these as historically never routing. Diagnose with
-`/kicraft-investigate`; likely individual model/route issues, not one
-shared bug.
+**Designs:** #10 rp2040-min, #17 led-cc-driver (rc=6), #20 encoder-oled-panel
+(rc=1, a hard error). Memory flags these as historically never routing. The
+diagnosis agent was cut off before reporting; treat as individual model/route
+issues, not one shared bug. Diagnose run_20's rc=1 exception first (most likely
+to be a generic code defect worth a guard).
 
 ---
 
