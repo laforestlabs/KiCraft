@@ -78,6 +78,7 @@ def _record_placed_extent(
     timings[f"{prefix}_placed_h_mm"] = h
 from .placement_scorer import PlacementScorer
 from .placement_utils import (
+    _back_courtyard,
     _bbox_overlap_amount,
     _bbox_overlap_xy,
     _blocker_pair_compatible,
@@ -3654,26 +3655,46 @@ class PlacementSolver:
         refs = list(comps.keys())
 
         def _push_clear(free_c: Component, fix_tl: Point, fix_br: Point) -> bool:
-            """Push unlocked ``free_c`` minimally out of ``[fix_tl, fix_br]``
-            along the smaller-overlap axis. Returns True if it moved."""
+            """Push unlocked ``free_c`` minimally out of ``[fix_tl, fix_br]``.
+
+            Prefers the smaller-overlap axis, but if that push is fully blocked
+            by the board edge (e.g. an edge-pinned connector already flush
+            against the boundary cannot move further out on its pinned axis),
+            falls back to the other axis. Without the fallback a same-edge pair
+            whose smaller overlap is on the pinned (perpendicular) axis can never
+            separate -- the survivor of the run_06 USB-C breakout courtyard
+            overlap. Returns True if it moved."""
             f_tl, f_br = _effective_bbox(free_c, half_gap)
             ox, oy = _bbox_overlap_xy(fix_tl, fix_br, f_tl, f_br)
             if ox <= 0 or oy <= 0:
                 return False
             hw, hh = _pad_half_extents(free_c)
-            old = Point(free_c.pos.x, free_c.pos.y)
-            if ox <= oy:
+
+            def _try_x() -> bool:
+                old = Point(free_c.pos.x, free_c.pos.y)
                 center = (fix_tl.x + fix_br.x) / 2.0
                 sign = 1.0 if free_c.pos.x >= center else -1.0
                 nx = free_c.pos.x + sign * (ox + 0.02)
                 free_c.pos.x = max(tl.x + hw + 1.0, min(br.x - hw - 1.0, nx))
-            else:
+                if abs(free_c.pos.x - old.x) <= 1e-3:
+                    return False
+                _update_pad_positions(free_c, old, free_c.rotation)
+                return True
+
+            def _try_y() -> bool:
+                old = Point(free_c.pos.x, free_c.pos.y)
                 center = (fix_tl.y + fix_br.y) / 2.0
                 sign = 1.0 if free_c.pos.y >= center else -1.0
                 ny = free_c.pos.y + sign * (oy + 0.02)
                 free_c.pos.y = max(tl.y + hh + 1.0, min(br.y - hh - 1.0, ny))
-            _update_pad_positions(free_c, old, free_c.rotation)
-            return abs(free_c.pos.x - old.x) > 1e-3 or abs(free_c.pos.y - old.y) > 1e-3
+                if abs(free_c.pos.y - old.y) <= 1e-3:
+                    return False
+                _update_pad_positions(free_c, old, free_c.rotation)
+                return True
+
+            if ox <= oy:
+                return _try_x() or _try_y()
+            return _try_y() or _try_x()
 
         unresolved = 0
         for _ in range(200):
@@ -3691,7 +3712,14 @@ class PlacementSolver:
                     # Opposite-side dual-layer stack: courtyards are on
                     # different copper layers; KiCad never flags them as a
                     # same-side courtyards_overlap. Leave the stack intact.
-                    if _blocker_pair_compatible(a, b):
+                    # Copper-compatibility alone is NOT enough -- two SAME-side
+                    # leaves whose sparse copper happens not to conflict (e.g.
+                    # two THT pin-headers whose annular rings don't touch) still
+                    # share one courtyard layer and DO produce a real
+                    # courtyards_overlap DRC, so they must be separated here.
+                    if _blocker_pair_compatible(a, b) and _back_courtyard(
+                        a
+                    ) != _back_courtyard(b):
                         continue
                     if getattr(a, "array_member", False) and getattr(
                         b, "array_member", False

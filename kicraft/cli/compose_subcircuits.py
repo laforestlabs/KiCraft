@@ -1426,6 +1426,18 @@ def _compose_artifacts(
             if _shifted:
                 logger.info("composition: shifted edge blocks to extremity: %s", _shifted)
 
+        # Re-run the solver's courtyard-separation pass as the GENUINE last
+        # geometry step. The solver runs it at the end of solve(), but the
+        # cluster-slide and edge-extremity shifts above move blocks AFTER that
+        # -- aligning two same-edge blocks to the same perpendicular extreme can
+        # collapse the separation the solver had relied on, reintroducing a
+        # same-side courtyards_overlap that nothing else re-resolves. Running it
+        # here (only unlocked blocks move, along the smaller-overlap axis, so
+        # edge flush + extremity are preserved) guarantees the stamped parent
+        # has no same-side courtyard overlap.
+        if cfg.get("resolve_courtyard_overlaps", True):
+            solver._resolve_courtyard_overlaps(solved)
+
         # --- Recover artifact placements from solver output ---
         placements_dict = placements_from_solved_state(solved, list(loaded_artifacts), synthetic_refs)
         parent_local_solved: dict[str, Component] = {

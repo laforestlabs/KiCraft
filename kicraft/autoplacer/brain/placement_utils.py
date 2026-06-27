@@ -92,6 +92,21 @@ def _blocker_pair_compatible(a: Component, b: Component) -> bool:
     )
 
 
+def _back_courtyard(comp: Component) -> bool:
+    """True when a block's footprints sit on the back copper layer, so its
+    courtyard is ``B.CrtYd`` rather than the default ``F.CrtYd``.
+
+    KiCad reports ``courtyards_overlap`` only between courtyards on the SAME
+    layer. Two blocks on opposite sides therefore never DRC-overlap, while a
+    same-side pair does -- even when their sparse copper is compatible (e.g.
+    two THT pin-headers whose annular rings don't touch). Used by the
+    courtyard-separation pass to exempt only genuine opposite-side stacks.
+    """
+    return getattr(comp, "block_side", None) == "back" or bool(
+        getattr(comp, "block_force_back_only", False)
+    )
+
+
 def _pad_half_extents(comp: Component) -> tuple[float, float]:
     """Return pad-aware half-extents (max distance from pos to any pad or body edge).
 
