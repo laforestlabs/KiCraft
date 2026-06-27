@@ -246,11 +246,36 @@ def _normalize_switch_node_pins(symbol_text: str) -> str:
     regulator symbols routinely mistype it as ``power_in``; KiCad ERC then flags
     ``power_pin_not_driven`` on the correctly-wired switch net (self-eval #18,
     TPS54331 pin 8). Retyping it ``power_out`` at this single choke point fixes
-    every switcher symbol, not just the one vendored part. The match requires
     both the ``power_in`` type and an exact switch-node pin name, so it can never
     mistype a genuine power input (GND/EP/VIN stay ``power_in``).
     """
     return _SWITCH_NODE_PIN_RE.sub(r"\1power_out\2", symbol_text)
+def _normalize_regulator_output_pins(symbol_text: str) -> str:
+    """Retype easyeda2kicad's `power_in` regulator outputs to `power_out`.
+
+    The VREG/VOUT pin of a linear regulator, and the VCP charge-pump pin of a
+    stepper/motor driver, is an *output* from the regulator. Vendored and
+    easyeda2kicad-imported symbols routinely mistype these as ``power_in``;
+    KiCad ERC then flags ``power_pin_not_driven`` on the correctly-wired net
+    (self-eval #27, A4988 VREG). Retyping it ``power_out`` at this single choke
+    point fixes every regulator symbol, not just the one vendored part.
+    The match requires both ``power_in`` type and a known regulator-output pin
+    name, so it can never mistype a genuine power input (VIN stays ``power_in``).
+    """
+    _REGULATOR_OUTPUT_PIN_RE = re.compile(
+        r'(\(pin\s+)power_in'
+        r'(\s+\w+(?:\s*\([^()]*\))*?\s*\(name\s+"(?:VREG|VOUT|VCP|VREG_OUT|LDO_OUT)")',
+        re.IGNORECASE,
+    )
+    return _REGULATOR_OUTPUT_PIN_RE.sub(r"\1power_out\2", symbol_text)
+
+
+def _normalize_ic_pins(symbol_text: str) -> str:
+    """Apply all IC-level pin-type normalizations in order."""
+    return _normalize_regulator_output_pins(
+        _normalize_switch_node_pins(symbol_text)
+    )
+
 
 
 # ---------- public API ----------
@@ -292,7 +317,7 @@ def extract_symbol_block(
     lib_text = lib_path.read_text()
     resolved = _resolve_extends_chain(lib_text, symbol_name)
     qualified = _qualify_with_prefix(resolved, symbol_name, library)
-    return _normalize_switch_node_pins(
+    return _normalize_ic_pins(
         _normalize_passive_device_pins(qualified, ref_prefix)
     )
 

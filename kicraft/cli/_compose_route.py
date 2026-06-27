@@ -259,11 +259,14 @@ def _route_parent_board(
             str(routed_pcb), cfg, layers=(cfg.get("power_plane_layer", "F.Cu"),)
         )
 
-    # GND strand repair: a THT connector GND pin can end up on a tiny plane
-    # fragment with no path to the main pour (FreeRouting never routes GND,
-    # a 2-pad connector has no shield-tie mate, and no via drops through).
-    # Find every GND cluster isolated from the main plane and tie it back
-    # with a guarded same-net track, then refill. pcbnew work -> subprocess.
+    # GND island repair (convergence loop): the single-pass track-based
+    # repair (repair_stranded_gnd) ties stranded fill islands with same-net
+    # tracks, but the parent re-pour after power-plane addition refills ALL
+    # zones (including GND) at higher priority, which can re-fragment the
+    # GND plane -- leaving islands that a second pass would tie. The
+    # convergence loop also tries via-stitching for cross-layer overlapping
+    # fill islands (B.Cu <-> F.Cu), which the track-only pass cannot bridge.
+    # pcbnew work -> subprocess.
     if gnd_net and cfg.get("gnd_strand_repair_enabled", True):
         try:
             from kicraft.autoplacer.freerouting_runner import _run_pcbnew_script
@@ -274,21 +277,26 @@ def _route_parent_board(
                     "gnd_zone_net",
                     "gnd_strand_repair_enabled",
                     "gnd_strand_repair_max_mm",
+                    "gnd_parent_repair_max_iter",
                     "freerouting_min_clearance_mm",
                     "freerouting_fine_pitch_track_mm",
+                    "via_drill_mm",
+                    "via_size_mm",
+                    "hole_to_hole_min_mm",
                 )
                 if k in cfg
             })
             _run_pcbnew_script(
                 "import json\n"
-                "from kicraft.autoplacer.brain.gnd_pour import repair_stranded_gnd\n"
+                "from kicraft.autoplacer.brain.gnd_pour import repair_parent_gnd_islands\n"
                 f"cfg = json.loads({_rep_cfg!r})\n"
-                f"s = repair_stranded_gnd({str(routed_pcb)!r}, cfg)\n"
-                "print('gnd strand repair:', s['stranded'], 'stranded,',\n"
-                "      s['tied'], 'tied,', len(s['skipped']), 'skipped')\n"
+                f"s = repair_parent_gnd_islands({str(routed_pcb)!r}, cfg)\n"
+                "print('parent gnd island repair:', s['stranded'], 'stranded,',\n"
+                "      s['tied_pads'], 'tied,', s['vias'], 'vias,',\n"
+                "      s['unresolved'], 'unresolved, iterations:', s['iterations'])\n"
             )
         except Exception as exc:
-            print(f"warning: gnd strand repair failed: {exc}", file=sys.stderr)
+            print(f"warning: parent gnd island repair failed: {exc}", file=sys.stderr)
 
     # Power strand repair: the power-rail pour fragments exactly like the GND
     # plane (KC-Z57JEZ: +3V3 split into two F.Cu islands around a fine-pitch

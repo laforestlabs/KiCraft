@@ -53,6 +53,33 @@ _GND_ANGLE = {"down": 0, "left": 90, "up": 180, "right": 270}
 _LABEL_ANGLE = {"right": 0, "up": 90, "left": 180, "down": 270}
 
 
+def _label_position_free(
+    x_mm: float, y_mm: float,
+    net_name: str,
+    existing: list[NetLabel],
+    hier_existing: list[HierLabelPlacement],
+    tolerance_mm: float = 0.05,
+) -> bool:
+    """True when no label from a *different* net occupies the same position.
+
+    KiCad merges two net labels at the same coordinates into one shared net,
+    silently shorting the two nets (the "label slide" defect: a label from
+    one net lands on another net's label and bridges them). This check
+    prevents new labels from colliding with existing ones from other nets.
+    """
+    for lab in existing:
+        if lab.text == net_name:
+            continue  # same net, safe to share position
+        if abs(lab.x_mm - x_mm) < tolerance_mm and abs(lab.y_mm - y_mm) < tolerance_mm:
+            return False
+    for hlab in hier_existing:
+        if hlab.name == net_name:
+            continue
+        if abs(hlab.x_mm - x_mm) < tolerance_mm and abs(hlab.y_mm - y_mm) < tolerance_mm:
+            return False
+    return True
+
+
 @dataclass(frozen=True)
 class WireSegment:
     x1_mm: float
@@ -261,6 +288,13 @@ def route_sheet(
             if segs is not None:
                 routed.wires.extend(segs)
                 lx, ly = _label_anchor(segs)
+                if not _label_position_free(lx, ly, conn.net_name,
+                                            routed.labels, routed.hier_labels):
+                    # Offset to avoid label-slide net merge
+                    lx = lx + 0.2
+                    if not _label_position_free(lx, ly, conn.net_name,
+                                                routed.labels, routed.hier_labels):
+                        lx = lx - 0.4  # try the other direction
                 routed.labels.append(NetLabel(
                     text=conn.net_name, x_mm=lx, y_mm=ly, angle_deg=0))
                 continue
@@ -280,13 +314,22 @@ def route_sheet(
             if (ex, ey) != (e.x, e.y):
                 routed.wires.append(WireSegment(e.x, e.y, ex, ey))
             angle = _LABEL_ANGLE[e.exit]
+            lx, ly = ex, ey
+            # Prevent label-slide net merge: if another net's label already
+            # sits at this position, offset to avoid KiCad merging the nets.
             if is_inter:
+                if not _label_position_free(lx, ly, conn.net_name,
+                                            routed.labels, routed.hier_labels):
+                    lx = lx + 0.2
                 routed.hier_labels.append(HierLabelPlacement(
                     name=conn.net_name, direction=hier_dir,
-                    x_mm=ex, y_mm=ey, angle_deg=angle))
+                    x_mm=lx, y_mm=ly, angle_deg=angle))
             else:
+                if not _label_position_free(lx, ly, conn.net_name,
+                                            routed.labels, routed.hier_labels):
+                    lx = lx + 0.2
                 routed.labels.append(NetLabel(
-                    text=conn.net_name, x_mm=ex, y_mm=ey, angle_deg=angle))
+                    text=conn.net_name, x_mm=lx, y_mm=ly, angle_deg=angle))
 
     # Everything stamped so far is signal copper the power pass must avoid;
     # power-vs-power conflicts stay the job of the power_stubs ledger.

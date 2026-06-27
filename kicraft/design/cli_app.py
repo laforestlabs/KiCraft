@@ -69,6 +69,7 @@ from .synthesis.validation import (
     SynthesisValidationError,
     bridge_duplicate_pins,
     check_breakout_connectivity,
+    check_named_part_substitutions,
     check_family_wiring_contracts,
     check_inter_sheet_nets_realized,
     check_mcu_programming_path,
@@ -2075,6 +2076,19 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                 stage="wiring", blocking=False, material=True))
         if breakout.offenders:
             wiring_normalizations.append("breakout: connectors not bridged")
+
+    # §9.23 (advisory): when a resolved BOM part is a class substitution of
+    # what the brief named (e.g. "binding-post terminals" → screw-terminal
+    # with a "binding-post substitute" note), surface it as an open_question
+    # rather than committing silently. The detector is a substring match:
+    # each named part token must appear in some BOM part's value/note, so a
+    # "binding-post terminals" vs "screw-terminal-5mm-2p" mismatch is caught.
+    if stage == "bom" and state.bom is not None:
+        sub = check_named_part_substitutions(state.intent, state.bom)
+        for off in sub.offenders:
+            new_questions.append(Question(
+                text=f"Part substitution detected: {off}. Confirm the part class matches your intent, or update the BOM before synthesis.",
+                stage="bom", blocking=False, material=True))
 
     state.replace_open_questions_for_stage(stage, new_questions)
 

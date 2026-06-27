@@ -1821,3 +1821,53 @@ def run_solve_subcircuits_smoke(
     return CheckResult(
         name="9.7 solve-subcircuits smoke", ok=True, message="exit 0"
     )
+
+
+# ---------------------------------------------------------------------------
+# §9.23 — named-part substitution detection: when a resolved BOM part is a
+# class substitution of what the brief named (e.g. "binding-post terminals"
+# → screw-terminal-5mm-2p), surface it rather than silently committing.
+# ---------------------------------------------------------------------------
+
+def check_named_part_substitutions(intent, bom) -> CheckResult:
+    """§9.23 (advisory) — detect BOM parts that silently substituted a named
+    part from the intent.
+
+    Each named part from ``intent.named_parts`` should appear (as a substring)
+    in at least one BOM part's value, mpn, or sourcing_note. When a named part
+    doesn't match anything, it was likely substituted with a different class
+    of component — warn via open_question rather than committing silently.
+    """
+    name = "9.23 named-part substitution"
+    if intent is None or bom is None:
+        return CheckResult(name=name, ok=True, message="not applicable")
+    named = list(getattr(intent, "named_parts", None) or [])
+    if not named:
+        return CheckResult(name=name, ok=True, message="no named parts in intent")
+    parts_text = " ".join(
+        f"{p.value} {p.mpn or ''} {p.sourcing_note or ''}"
+        for p in (bom.parts or [])
+    ).lower()
+    offenders: list[str] = []
+    for np in named:
+        np_lower = np.lower()
+        if np_lower not in parts_text:
+            # Check a relaxed token-level match: every token of the named part
+            # should appear somewhere in the parts corpus (e.g. "binding post"
+            # tokens "binding" + "post" both appear, but "binding-post terminals"
+            # vs "screw-terminal" — "terminals" appears but "binding" does not).
+            tokens = [t for t in np_lower.replace("-", " ").replace("_", " ").split()
+                      if len(t) > 2]  # skip short tokens like "a", "1u"
+            missing = [t for t in tokens if t not in parts_text]
+            if len(missing) >= len(tokens) // 2:
+                offenders.append(
+                    f"named part {np!r} not found in BOM values/notes "
+                    f"(missing tokens: {missing})"
+                )
+    if offenders:
+        return CheckResult(
+            name=name, ok=False,
+            message=f"{len(offenders)} named part(s) may have been substituted",
+            offenders=offenders,
+        )
+    return CheckResult(name=name, ok=True, message="all named parts match BOM")

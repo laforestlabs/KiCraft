@@ -943,3 +943,227 @@ def add_gnd_pour_and_thermal_vias(
 
     board.Save(pcb_path)
     return summary
+
+
+def repair_parent_gnd_islands(
+    pcb_path: str,
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Convergence-loop GND strand/plane repair for the parent board.
+
+    The single-pass ``repair_stranded_gnd`` ties stranded GND fill islands
+    back with same-net tracks, but the parent re-pour after power-plane
+    addition (``pour_power_planes`` refills ALL zones, including GND, at
+    higher priority) can re-fragment the GND plane -- leaving islands that
+    a second repair pass would tie. Furthermore, the single-pass track-based
+    repair cannot connect a B.Cu-only island that has no overlapping node
+    from the main cluster on the same layer: a via between the B.Cu island
+    and an overlapping F.Cu island from another cluster merges both into
+    one.
+
+    Strategy (loop until convergence, cap at ``max_iter``):
+    1. Collect GND clusters via ``_collect_net_clusters``.
+    2. If ≤1 cluster, done.
+    3. **Via stitching** -- for each non-main cluster, find overlapping fill
+       islands with the main cluster (or another non-main cluster) on the
+       opposite layer; stamp a via at the overlap to merge them.
+    4. **Track stitching** -- run the existing ``repair_stranded_net``.
+    5. Refill all zones and re-check. If any islands remain, go to 1.
+
+    Returns ``{net, clusters, stranded, tied_pads, vias, unresolved}``.
+    Logs a warning if the loop exhausts without full convergence.
+    """
+    cfg = cfg or {}
+    gnd_name = cfg.get("gnd_zone_net", "GND")
+    max_iter = int(cfg.get("gnd_parent_repair_max_iter", 5))
+    summary: dict[str, Any] = {
+        "net": gnd_name,
+        "iterations": 0,
+        "clusters": 0,
+        "stranded": 0,
+        "tied_pads": 0,
+        "vias": 0,
+        "unresolved": 0,
+        "converged": False,
+    }
+    if not gnd_name:
+        return summary
+
+    # Reuse the via collision guard from add_gnd_pour_and_thermal_vias.
+    from kicraft.autoplacer.brain.breakout_stubs import _own_clearance_mm
+
+    F, B = pcbnew.F_Cu, pcbnew.B_Cu
+    # --- Collect obstacles and holes once (they don't change between iters) ---
+    board0 = pcbnew.LoadBoard(pcb_path)
+    gnd_net = board0.GetNetInfo().GetNetItem(gnd_name)
+    if not gnd_net or gnd_net.GetNetCode() == 0:
+        summary["error"] = f"net {gnd_name!r} not found"
+        return summary
+    gnd_code = gnd_net.GetNetCode()
+    floor_mm = float(cfg.get("freerouting_min_clearance_mm", 0.153))
+    via_drill = pcbnew.FromMM(float(cfg.get("via_drill_mm", 0.3)))
+    via_size = pcbnew.FromMM(float(cfg.get("via_size_mm", 0.6)))
+    via_r_mm = pcbnew.ToMM(via_size) / 2.0
+    via_drill_r_mm = pcbnew.ToMM(via_drill) / 2.0
+
+    # Copper obstacles (non-GND tracks/pads) for via collision check.
+    copper_obstacles: list[tuple[Any, int]] = []
+    for t in board0.GetTracks():
+        if t.GetNetCode() == gnd_code:
+            continue
+        t_layer = pcbnew.B_Cu if t.GetClass() == "PCB_VIA" else t.GetLayer()
+        item_cl = _own_clearance_mm(t, t_layer, floor_mm)
+        copper_obstacles.append(
+            (t, int(pcbnew.FromMM(via_r_mm + max(floor_mm, item_cl))))
+        )
+    for ofp in board0.GetFootprints():
+        for op in ofp.Pads():
+            if op.GetNetCode() == gnd_code:
+                continue
+            item_cl = _own_clearance_mm(op, pcbnew.B_Cu, floor_mm)
+            copper_obstacles.append(
+                (op, int(pcbnew.FromMM(via_r_mm + max(floor_mm, item_cl))))
+            )
+
+    # Drilled holes.
+    h2h = pcbnew.ToMM(board0.GetDesignSettings().m_HoleToHoleMin)
+    hole_min_mm = h2h if h2h > 0 else float(cfg.get("hole_to_hole_min_mm", 0.25))
+    holes: list[tuple[float, float, float]] = []
+    for t in board0.GetTracks():
+        if t.GetClass() == "PCB_VIA":
+            p = t.GetPosition()
+            holes.append((pcbnew.ToMM(p.x), pcbnew.ToMM(p.y),
+                          pcbnew.ToMM(t.GetDrillValue()) / 2.0))
+    for ofp in board0.GetFootprints():
+        for op in ofp.Pads():
+            ds = op.GetDrillSize()
+            if ds.x > 0 or ds.y > 0:
+                p = op.GetPosition()
+                holes.append((pcbnew.ToMM(p.x), pcbnew.ToMM(p.y),
+                              max(pcbnew.ToMM(ds.x), pcbnew.ToMM(ds.y)) / 2.0))
+    del board0
+
+    def _via_blocked(x_iu: int, y_iu: int) -> bool:
+        pt = pcbnew.VECTOR2I(x_iu, y_iu)
+        if any(item.HitTest(pt, margin) for item, margin in copper_obstacles):
+            return True
+        xm, ym = pcbnew.ToMM(x_iu), pcbnew.ToMM(y_iu)
+        return any(
+            ((xm - hx) ** 2 + (ym - hy) ** 2) ** 0.5
+            < hr + via_drill_r_mm + hole_min_mm
+            for hx, hy, hr in holes
+        )
+
+    def _add_via(x_iu: int, y_iu: int) -> bool:
+        if _via_blocked(x_iu, y_iu):
+            return False
+        via = pcbnew.PCB_VIA(board)
+        via.SetPosition(pcbnew.VECTOR2I(x_iu, y_iu))
+        via.SetDrill(via_drill)
+        try:
+            via.SetWidth(via_size)
+        except TypeError:
+            via.SetWidth(pcbnew.F_Cu, via_size)
+        via.SetNetCode(gnd_code)
+        board.Add(via)
+        holes.append((pcbnew.ToMM(x_iu), pcbnew.ToMM(y_iu), via_drill_r_mm))
+        return True
+
+    for iteration in range(1, max_iter + 1):
+        board = pcbnew.LoadBoard(pcb_path)
+        clusters, all_nodes = _collect_net_clusters(board, gnd_name)
+        n_clusters = len(clusters)
+        summary["iterations"] = iteration
+        summary["clusters"] = n_clusters
+        if iteration == 1:
+            summary["stranded"] = max(0, n_clusters - 1)
+
+        if n_clusters <= 1:
+            summary["converged"] = True
+            summary["unresolved"] = 0
+            del board
+            break
+
+        # --- Via stitching: connect overlap islands on opposite layers ---
+        main_root = max(clusters, key=lambda r: len(clusters[r]))
+        main_cluster = set(clusters[main_root])
+        main_islands = [
+            all_nodes[i] for i in main_cluster
+            if all_nodes[i]["kind"] == "island"
+        ]
+
+        for root, members in clusters.items():
+            if root == main_root:
+                continue
+            # Find islands in this stranded cluster
+            stranded_islands = [
+                all_nodes[i] for i in members
+                if all_nodes[i]["kind"] == "island"
+            ]
+            for si in stranded_islands:
+                si_layer = next(iter(si["layers"]))
+                si_pts = si["fill"].Outline(si["idx"])
+                # Check against main-cluster islands on the OPPOSITE layer
+                for mi in main_islands:
+                    mi_layer = next(iter(mi["layers"]))
+                    if mi_layer == si_layer:
+                        continue  # same-layer overlap irrelevant for vias
+                    # Test whether any point from si's outline falls inside mi's fill
+                    for k in range(si_pts.PointCount()):
+                        p = si_pts.CPoint(k)
+                        px_iu, py_iu = p.x, p.y
+                        if mi["fill"].Contains(
+                            pcbnew.VECTOR2I(px_iu, py_iu), mi["idx"]
+                        ):
+                            if _add_via(px_iu, py_iu):
+                                summary["vias"] += 1
+                            break
+                    else:
+                        # Also test the island centre
+                        bb = si_pts.BBox()
+                        cx, cy = bb.GetCentre().x, bb.GetCentre().y
+                        if mi["fill"].Contains(
+                            pcbnew.VECTOR2I(cx, cy), mi["idx"]
+                        ):
+                            if _add_via(cx, cy):
+                                summary["vias"] += 1
+
+        # Save vias, then run the track-based repair
+        board.Save(pcb_path)
+        del board
+
+        if summary["vias"] > 0:
+            # Refill so the new vias merge clusters before track repair
+            board = pcbnew.LoadBoard(pcb_path)
+            pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+            board.Save(pcb_path)
+            del board
+
+        # Run track-based repair
+        track_res = repair_stranded_net(pcb_path, gnd_name, cfg)
+        summary["tied_pads"] += track_res.get("tied", 0)
+
+        # Check convergence after track repair + refill
+        board = pcbnew.LoadBoard(pcb_path)
+        clusters, _ = _collect_net_clusters(board, gnd_name)
+        n_remaining = len(clusters)
+        summary["clusters"] = n_remaining
+        if n_remaining <= 1:
+            summary["converged"] = True
+            summary["unresolved"] = 0
+            del board
+            break
+        del board
+
+    # --- Final refill ---
+    board = pcbnew.LoadBoard(pcb_path)
+    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    board.Save(pcb_path)
+    del board
+
+    if not summary.get("converged"):
+        print(f"  WARNING: parent GND island repair did not converge "
+              f"after {max_iter} iterations; "
+              f"{summary.get('clusters', '?')} clusters remain.")
+
+    return summary
