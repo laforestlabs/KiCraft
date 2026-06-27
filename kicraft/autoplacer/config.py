@@ -85,6 +85,28 @@ DEFAULT_CONFIG = {
     # courtyard overlaps.  Drives the optimizer to leave breathing room.
     # 1.30mm chosen via parameter sweep (top-quintile median).
     "courtyard_padding_mm": 1.30,
+    # Final courtyard-separation legalization (Step 16, the genuine last
+    # geometry step in solve()).  The earlier overlap passes run BEFORE
+    # pinned-position restore / board clamp / keep-out clear, each of which
+    # can nudge a part back into a neighbour's courtyard with nothing
+    # re-resolving it -- the root cause of the systematic courtyards_overlap
+    # DRC failures.  This pass runs last and pushes only the unlocked partner
+    # of each overlapping SAME-SIDE pair apart by a hair, so it cleans up
+    # whatever the final steps introduced without re-bloating a tight board.
+    "resolve_courtyard_overlaps": True,
+    # Target gap (mm) the final courtyard pass separates overlapping
+    # courtyards by -- just enough to clear the courtyards_overlap DRC, not
+    # the full placement clearance (which would undo tight packing).
+    "courtyard_overlap_min_gap_mm": 0.15,
+    # Verify-gate severity thresholds for a residual courtyard overlap the
+    # placement pass could not remove (e.g. between two pinned parts). A clip
+    # shallower than BOTH thresholds, on a board that is otherwise electrically
+    # perfect (0 shorts / 0 unconnected), is a WARNING (board still exported +
+    # 3D-rendered for inspection), not a hard fab failure -- courtyards carry an
+    # assembly margin, so a fraction-of-a-mm clip usually still assembles. A
+    # deeper overlap (parts physically colliding) still hard-fails.
+    "courtyard_overlap_warn_penetration_mm": 0.5,
+    "courtyard_overlap_warn_area_mm2": 0.5,
     # Pad inset margin — minimum distance (mm) all electrical pads must be
     # inside the board Edge.Cuts boundary.  Pads outside are unfabricatable.
     "pad_inset_margin_mm": 0.3,

@@ -128,6 +128,48 @@ def test_verify_gate_fails_on_courtyard_overlap(monkeypatch, tmp_path):
     assert gate["courtyard"] == 2
 
 
+def test_verify_gate_minor_courtyard_is_warning_not_fail(monkeypatch, tmp_path):
+    # A fraction-of-a-mm courtyard clip on an electrically-perfect board is a
+    # WARNING (board still fab-acceptable + 3D-rendered), not a hard failure.
+    from kicraft.autoplacer.courtyard_overlap import CourtyardOverlap
+
+    _patch_validate(
+        monkeypatch, accepted=True,
+        drc={"shorts": 0, "unconnected": 0, "courtyard": 1},
+    )
+    monkeypatch.setattr(cli_app, "_connector_stranded_refs", lambda _pcb: [])
+    monkeypatch.setattr(
+        "kicraft.autoplacer.courtyard_overlap.measure_courtyard_overlaps",
+        lambda _p: [CourtyardOverlap("R7", "SW2", "F", area_mm2=0.23, penetration_mm=0.31)],
+    )
+    gate = cli_app._verify_routed_board(tmp_path / "board.kicad_pcb")
+    assert gate["ok"] is False             # not a pristine board
+    assert gate["fab_acceptable"] is True  # ...but still buildable + exportable
+    assert gate["courtyard_minor_only"] is True
+    assert "courtyards_overlap" not in gate["reasons"]
+    assert gate["warnings"] and "R7" in gate["warnings"][0]
+
+
+def test_verify_gate_gross_courtyard_still_fails(monkeypatch, tmp_path):
+    # A deep overlap (parts physically colliding) still hard-fails.
+    from kicraft.autoplacer.courtyard_overlap import CourtyardOverlap
+
+    _patch_validate(
+        monkeypatch, accepted=True,
+        drc={"shorts": 0, "unconnected": 0, "courtyard": 1},
+    )
+    monkeypatch.setattr(cli_app, "_connector_stranded_refs", lambda _pcb: [])
+    monkeypatch.setattr(
+        "kicraft.autoplacer.courtyard_overlap.measure_courtyard_overlaps",
+        lambda _p: [CourtyardOverlap("U1", "U2", "F", area_mm2=4.0, penetration_mm=1.5)],
+    )
+    gate = cli_app._verify_routed_board(tmp_path / "board.kicad_pcb")
+    assert gate["ok"] is False
+    assert gate["fab_acceptable"] is False
+    assert gate["courtyard_minor_only"] is False
+    assert "courtyards_overlap" in gate["reasons"]
+
+
 def test_verify_gate_fails_on_keepout_intrusion(monkeypatch, tmp_path):
     # Copper inside an antenna keep-out (items_not_allowed) is electrically
     # invisible but ruins RF / collides -> not fab-ready (KC-8AG6FU backstop).

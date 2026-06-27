@@ -671,6 +671,10 @@ class ArtifactPaths(BaseModel):
     step_file: Path | None = None  # set by `build`: STEP export of the assembled board
     board_3d_png: Path | None = None  # set by `build`: rendered 3D view of the board
     status: str = "ok"  # "ok" if all §9 checks passed, else "failed"
+    # Non-blocking fab-readiness warnings (e.g. a minor, fraction-of-a-mm
+    # courtyard clip). The board IS fab-exported + 3D-rendered; these surface as
+    # a yellow caution in the UI rather than a red failure.
+    build_warnings: list[str] = Field(default_factory=list)
 
 
 # ---------- Conversation state ----------

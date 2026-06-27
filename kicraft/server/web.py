@@ -5071,16 +5071,40 @@ def index(prompt: str = "", project: str = ""):
                     except Exception:
                         pass
                 if state["ok"]:
-                    status.text = "Done. Your KiCad project is ready."
+                    status.text = (
+                        "Done (with a caution). Your KiCad project is ready."
+                        if view.get("fab_caution")
+                        else "Done. Your KiCad project is ready."
+                    )
                     if not view["fab_done"]:
                         view["fab_done"] = True
                         sj = _read_state_json(read_root) if read_root else {}
                         rs = _read_run_status(project_dir) if project_dir else {}
+                        # Non-blocking fab warnings (e.g. a minor courtyard clip):
+                        # the project IS ready + 3D-rendered, but we flag the gap
+                        # in yellow rather than a plain green "Done".
+                        build_warnings = list(
+                            (sj.get("artifacts") or {}).get("build_warnings") or []
+                        )
+                        view["fab_caution"] = bool(build_warnings)
+                        if build_warnings:
+                            status.text = "Done (with a caution). Your KiCad project is ready."
                         for stg in ("synthesize", "place_route", "fab"):  # finalize build logs
                             tabs.set_inspector(stg, _inspector_spec(
                                 stg, sj, rs, project_dir, view["build_lines"]))
                         if state["zip"]:
                             with tabs.view_slot("fab"):
+                                if build_warnings:
+                                    with ui.element("div").classes(
+                                        "w-full max-w-3xl q-mb-sm q-pa-sm rounded-borders"
+                                    ).style("background:#422006;border:1px solid #eab308"):
+                                        ui.label("⚠ Fabricable, with a caution").classes(
+                                            "text-sm text-weight-medium"
+                                        ).style("color:#eab308")
+                                        for w in build_warnings:
+                                            ui.label(w).classes("text-xs").style(
+                                                "color:#fde68a"
+                                            )
                                 # Assembled-board 3D render from the fab stage
                                 # (best-effort artifact: absent when kicad-cli
                                 # render failed; the package is still complete).
