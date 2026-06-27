@@ -271,7 +271,8 @@ def _make_judge_client(s, judge_model, skip_judge: bool):
 
 
 def evaluate_one(client, idx: int, entry: dict, out_dir: Path, *,
-                 judge_model, skip_judge: bool, judge_client=None, rep: int | None = None,
+                 judge_model, skip_judge: bool, judge_client=None,
+                 judge_max_tokens: int | None = None, rep: int | None = None,
                  max_park_rounds: int = 12,
                  build_timeout_s: int = 2400, build_gate=None,
                  full_events: bool = True) -> dict:
@@ -319,6 +320,7 @@ def evaluate_one(client, idx: int, entry: dict, out_dir: Path, *,
         # withholds the whole letter grade. An exact window always scores it.
         report = evaluate_project(rundir, None if skip_judge else client,
                                   judge_model=judge_model, judge_client=judge_client,
+                                  judge_max_tokens=judge_max_tokens,
                                   skip_judge=skip_judge,
                                   started_at=started_at, finished_at=_now_iso())
         sc, judge = report["score"], report["judge"]
@@ -673,6 +675,9 @@ def main(argv=None) -> int:
     # KICRAFT_EVAL_JUDGE_MODEL override.
     judge_model = (args.judge_model or getattr(s, "eval_judge_model", None)
                    or getattr(s, "review_model", None) or getattr(s, "model", None))
+    # Headroom for reasoning judges (minimax-m3 burns 10-23k reasoning tokens
+    # before the JSON answer); too small a cap truncates and drops the grade.
+    judge_max_tokens = getattr(s, "eval_judge_max_tokens", None)
 
     # Resolve to an absolute path: design stages run subprocesses with cwd=workspace,
     # so a relative rundir would make them resolve state/output paths against the
@@ -755,7 +760,8 @@ def main(argv=None) -> int:
             label = entry["slug"] + (f" r{rep}" if rep else "")
             print(f"\n[{n}/{len(todo)}] #{idx} {label}: {entry['brief']}", flush=True)
             rec = evaluate_one(client, idx, entry, out_dir, judge_model=judge_model,
-                               skip_judge=args.no_judge, judge_client=judge_client, rep=rep,
+                               skip_judge=args.no_judge, judge_client=judge_client,
+                               judge_max_tokens=judge_max_tokens, rep=rep,
                                max_park_rounds=args.max_park_rounds,
                                build_timeout_s=args.build_timeout,
                                full_events=not args.lean_events)
@@ -783,7 +789,8 @@ def main(argv=None) -> int:
             with print_lock:
                 print(f"[{stem}] start: {entry['brief']}", flush=True)
             rec = evaluate_one(wclient, idx, entry, out_dir, judge_model=judge_model,
-                               skip_judge=args.no_judge, judge_client=wjudge, rep=rep,
+                               skip_judge=args.no_judge, judge_client=wjudge,
+                               judge_max_tokens=judge_max_tokens, rep=rep,
                                max_park_rounds=args.max_park_rounds,
                                build_timeout_s=args.build_timeout, build_gate=gate,
                                full_events=not args.lean_events)

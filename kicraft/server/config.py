@@ -156,6 +156,14 @@ class Settings:
     # at a more capable id for better judgments; that is an admin action, since a
     # different model may need its own provider routing.
     eval_judge_model: str | None = None
+    # Answer-token budget for the Class-J eval judge. Same trap as
+    # review_max_tokens below: the 2026 reasoning judges (minimax-m3 is the
+    # default, via the review_model fallback) burn 10-23k reasoning tokens before
+    # the JSON answer, so a small cap truncates (finish=length) and the parser
+    # reports "no JSON object found in reply" -- silently dropping the grade.
+    # Cheap judges stop well under this, so the headroom only costs the heavy
+    # reasoners. KICRAFT_EVAL_JUDGE_MAX_TOKENS.
+    eval_judge_max_tokens: int = 24000
     # --- Layer-3 electrical-review pass (the in-product design "judge") --------
     # Reviews a committed design for topology/value/completeness defects the
     # deterministic §9 gates cannot judge. Runs the DESIGN model by default
@@ -270,6 +278,8 @@ class Settings:
             enable_prompt_cache=_env_bool_default("KICRAFT_ENABLE_PROMPT_CACHE", True),
             enable_core_defaults=_env_bool_default("KICRAFT_CORE_DEFAULTS", True),
             eval_judge_model=(os.environ.get("KICRAFT_EVAL_JUDGE_MODEL", "").strip() or None),
+            eval_judge_max_tokens=int(
+                os.environ.get("KICRAFT_EVAL_JUDGE_MAX_TOKENS", cls.eval_judge_max_tokens)),
             review_model=(os.environ.get("KICRAFT_REVIEW_MODEL", "").strip() or cls.review_model),
             review_reasoning_tokens=int(
                 os.environ.get("KICRAFT_REVIEW_REASONING_TOKENS", cls.review_reasoning_tokens)),

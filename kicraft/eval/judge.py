@@ -166,7 +166,7 @@ def _validate(verdict, jdims: list[dict], ogates: list[dict]):
 
 
 def grade_class_j(client, digest: str, rubric: dict, *, model: str | None = None,
-                  max_tokens: int = 1600, temperature: float = 0.0,
+                  max_tokens: int = 24000, temperature: float = 0.0,
                   max_attempts: int = 2) -> dict:
     """Grade the five Class-J dimensions and detect observer gates with an LLM.
 
