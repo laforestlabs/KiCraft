@@ -69,7 +69,7 @@ def test_no_strand_never_promotes():
     assert not _promotable_strand_only(["illegal_routed_geometry"], [], {})
 
 
-# --- _verify_routed_board: a stranded board is NEVER fab-ready (the guarantee)
+# --- _verify_routed_board: a stranded board is non-blocking (warns, still fab-acceptable)
 
 
 def _patch_validate(monkeypatch, *, accepted, drc=None, reasons=None):
@@ -85,14 +85,25 @@ def _patch_validate(monkeypatch, *, accepted, drc=None, reasons=None):
         "kicraft.autoplacer.freerouting_runner.validate_routed_board", _fake
     )
 
-
-def test_verify_gate_fails_on_stranded_connector(monkeypatch, tmp_path):
-    # validate_routed_board sees a clean, accepted board (DRC blind to stranding)
+def test_verify_gate_strand_is_warning_not_fail(monkeypatch, tmp_path):
+    # A stranded connector on an electrically-clean board is a WARNING
+    # (board still fab-acceptable + 3D-rendered), not a hard failure.
     _patch_validate(monkeypatch, accepted=True)
-    # ...but a connector is stranded -> the gate must reject it.
+    monkeypatch.setattr(cli_app, "_connector_stranded_refs", lambda _pcb: list(STRAND))
+    gate = cli_app._verify_routed_board(tmp_path / "board.kicad_pcb")
+    assert gate["ok"] is True              # electrically clean
+    assert gate["fab_acceptable"] is True  # strand-only is buildable + exportable
+    assert STRAND[0] in gate["reasons"]
+    assert gate["warnings"] and "connector stranded" in gate["warnings"][0]
+
+
+def test_verify_gate_strand_plus_shorts_still_fails(monkeypatch, tmp_path):
+    # Strand + real electrical defect -> still hard-fails (regression guard).
+    _patch_validate(monkeypatch, accepted=True, drc={"shorts": 1, "unconnected": 0})
     monkeypatch.setattr(cli_app, "_connector_stranded_refs", lambda _pcb: list(STRAND))
     gate = cli_app._verify_routed_board(tmp_path / "board.kicad_pcb")
     assert gate["ok"] is False
+    assert gate["fab_acceptable"] is False
     assert STRAND[0] in gate["reasons"]
 
 
