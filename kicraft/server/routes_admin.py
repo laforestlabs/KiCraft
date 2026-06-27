@@ -1210,6 +1210,59 @@ def admin_self_eval_run_page(run: str = ""):
             ui.label(f"(+{len(leaves) - 8} more leaves not shown)") \
                 .classes("text-xs").style("color:#64748b")
 
+        # Bill of materials -- the same read-only table the project viewer renders,
+        # built from the run's committed state.json so an eval run is inspectable to
+        # a real board's depth. Lazy import: web.py imports THIS module at its bottom,
+        # so a module-level `from .web import ...` would be circular.
+        try:
+            from .web import _load_persisted_state, _render_bom_table
+            bom_state = _load_persisted_state(run_dir)
+            if bom_state is not None:
+                _render_bom_table(bom_state)
+        except Exception:  # noqa: BLE001 - BOM is best-effort; never break the page
+            pass
+
+        # Thinking stream -- the model's per-stage reasoning, replayed read-only from
+        # events.jsonl (the self-eval full-fidelity sink keeps reasoning/answer
+        # deltas). Mirrors a live run's Thinking panes: reasoning per stage, falling
+        # back to the answer channel for stages that emit no reasoning. A stage that
+        # retried appears more than once, in order -- the real trace, warts and all.
+        ev_path = run_dir / "events.jsonl"
+        if ev_path.is_file():
+            run_stages: list[dict] = []
+            cur_stage = None
+            for ln in ev_path.read_text(errors="replace").splitlines():
+                try:
+                    e = json.loads(ln)
+                except Exception:  # noqa: BLE001 - skip a torn/partial line
+                    continue
+                k = e.get("kind")
+                if k == "stage_start":
+                    cur_stage = {"stage": e.get("stage") or "stage",
+                                 "reason": [], "answer": []}
+                    run_stages.append(cur_stage)
+                elif cur_stage is not None and k == "reasoning_delta":
+                    cur_stage["reason"].append(e.get("text", ""))
+                elif cur_stage is not None and k == "answer_delta":
+                    cur_stage["answer"].append(e.get("text", ""))
+            blocks = []
+            for s in run_stages:
+                txt = "".join(s["reason"]).strip() or "".join(s["answer"]).strip()
+                if txt:
+                    blocks.append((s["stage"], txt))
+            if blocks:
+                with ui.card().classes("w-full") \
+                        .style("background:#0f172a;border:1px solid #1e293b"):
+                    ui.label("Thinking stream — the model's reasoning per stage") \
+                        .classes("text-xs font-medium").style("color:#94a3b8")
+                    for i, (stg, txt) in enumerate(blocks):
+                        with ui.expansion(stg, icon="psychology",
+                                          value=(i == 0)).classes("w-full") \
+                                .props("dense"):
+                            ui.label(txt).classes("text-xs font-mono w-full").style(
+                                "white-space:pre-wrap;color:#cbd5e1;display:block;"
+                                "max-height:360px;overflow:auto")
+
         ui.label(f"artifacts: {run_dir}").classes("text-xs font-mono mt-2") \
             .style("color:#64748b")
         ui.label(f"deep DRC inspection: kicraft-gui {gen}") \

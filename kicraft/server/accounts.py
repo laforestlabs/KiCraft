@@ -98,44 +98,6 @@ def new_board_code() -> str:
     return f"KC-{body}"
 
 
-def new_eval_board_code() -> str:
-    """Like ``new_board_code`` but ``EV-`` prefixed, so self-eval runs registered
-    as admin projects read as eval artifacts at a glance, not real KC- boards."""
-    body = "".join(secrets.choice(_BOARD_CODE_ALPHABET)
-                   for _ in range(_BOARD_CODE_LENGTH))
-    return f"EV-{body}"
-
-
-def eval_run_roots() -> list[Path]:
-    """The two self-eval batch roots the harness writes to (admin GUI scans both):
-    the in-repo ``logs/self_eval`` and ``~/.kicraft/self_eval``."""
-    return [Path.cwd() / "logs" / "self_eval", Path.home() / ".kicraft" / "self_eval"]
-
-
-def _eval_run_meta(rundir: Path) -> dict:
-    """Brief / stem / status / created-timestamp for a self-eval run dir, read
-    from the run's own artifacts (best-effort; never raises). ``status`` is 'ok'
-    once a routed/placed board exists, else 'failed'."""
-    bt = rundir / "brief.txt"
-    brief = (bt.read_text(encoding="utf-8").strip()
-             if bt.is_file() else "(self-eval run)")[:500]
-    stem = None
-    try:
-        sj = rundir / ".kicraft" / "state.json"
-        stem = json.loads(sj.read_text(encoding="utf-8")).get("project_stem")
-    except Exception:  # noqa: BLE001 - missing/partial state just means no stem
-        pass
-    gen = rundir / "generated"
-    has_board = gen.is_dir() and any(gen.glob("*/*.kicad_pcb"))
-    try:
-        created = dt.datetime.fromtimestamp(
-            rundir.stat().st_mtime, dt.timezone.utc).isoformat(timespec="seconds")
-    except OSError:
-        created = _utcnow_iso()
-    return {"brief": brief, "stem": stem,
-            "status": "ok" if has_board else "failed", "created": created}
-
-
 def _utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -1299,52 +1261,6 @@ class AccountStore:
                 "SELECT id FROM users WHERE role=? ORDER BY id LIMIT 1",
                 (ADMIN_ROLE,)).fetchone()
         return int(row[0]) if row else None
-
-    def sync_eval_projects(self, roots=None, *, owner_id: int | None = None) -> dict:
-        """Register self-eval run dirs as private admin projects so they open in
-        the standard project viewer alongside real builds.
-
-        A run dir is any directory holding ``.kicraft/state.json`` (a committed
-        design) under one of ``roots`` (default ``eval_run_roots()``). Each is
-        inserted owned by ``owner_id`` (default the first admin) with
-        ``is_public=0`` and an ``EV-`` board code; brief/stem/status/timestamps
-        come from the run itself. Idempotent and cheap to re-run: keyed on
-        ``dir_path``, so only runs not already registered are added. Returns
-        ``{registered, skipped, owner_id}``."""
-        owner = owner_id if owner_id is not None else self.first_admin_id()
-        if owner is None:
-            return {"registered": 0, "skipped": 0, "owner_id": None}
-        roots = [Path(r) for r in (roots or eval_run_roots()) if Path(r).is_dir()]
-        registered = skipped = 0
-        with self._conn() as conn:
-            known = {r[0] for r in conn.execute(
-                "SELECT dir_path FROM projects WHERE dir_path IS NOT NULL").fetchall()}
-            run_states: list[Path] = []
-            for root in roots:
-                run_states += sorted(root.glob("*/run_*/.kicraft/state.json"))
-                run_states += sorted(root.glob("run_*/.kicraft/state.json"))
-            for sj in run_states:
-                rundir = sj.parent.parent
-                dp = str(rundir)
-                if dp in known:
-                    skipped += 1
-                    continue
-                meta = _eval_run_meta(rundir)
-                for _ in range(5):  # retry on the rare board-code collision
-                    try:
-                        conn.execute(
-                            "INSERT INTO projects (user_id, brief, project_stem, "
-                            "status, created_at, finished_at, is_public, board_code, "
-                            "dir_path, viewed_at) VALUES (?,?,?,?,?,?,0,?,?,?)",
-                            (owner, meta["brief"], meta["stem"], meta["status"],
-                             meta["created"], meta["created"], new_eval_board_code(),
-                             dp, meta["created"]))
-                        known.add(dp)
-                        registered += 1
-                        break
-                    except sqlite3.IntegrityError:
-                        continue
-        return {"registered": registered, "skipped": skipped, "owner_id": owner}
 
     def list_orphaned_running_projects(
             self, older_than_s: float = 120) -> list[Project]:
