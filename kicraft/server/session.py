@@ -83,13 +83,23 @@ def derive_stage_statuses(state: dict, *, project_status: str | None = None,
     out["synthesize"] = ("done" if synth_ok
                          else "failed" if design_complete and failed
                          else "pending")
-    out["place_route"] = ("done" if design_complete and pcb_ready
+    # A fab-acceptable board can still carry non-blocking warnings (e.g. a
+    # minor, fraction-of-a-mm courtyard clip): the build succeeded and exported
+    # the package + 3D model, but the gap is surfaced as a yellow 'warning'
+    # rather than a green 'done'.
+    has_warnings = bool((state.get("artifacts") or {}).get("build_warnings"))
+    # A produced board means place/route succeeded; a failed build localizes to
+    # the FAB gate, not here -- so "done"/"warning" (board exists) outrank
+    # "failed" exactly as the original done-first precedence did.
+    out["place_route"] = ("warning" if design_complete and pcb_ready and has_warnings
+                          else "done" if design_complete and pcb_ready
                           else "failed" if synth_ok and failed
                           else "pending")
     # failed-with-a-board outranks zip_ok: after a failed (re)build the board
     # on disk is the failed candidate, so any surviving zip from an earlier
     # successful build is stale -- the tab must read failed, not done.
     out["fab"] = ("failed" if design_complete and pcb_ready and failed
+                  else "warning" if design_complete and zip_ok and has_warnings
                   else "done" if design_complete and zip_ok
                   else "pending")
     return out

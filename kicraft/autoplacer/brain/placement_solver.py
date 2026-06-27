@@ -1092,6 +1092,26 @@ class PlacementSolver:
             if self._clear_pinned_from_keepouts(best_comps):
                 self._clamp_pads_to_board(best_comps)
 
+        with _timed_phase(phase_t, "solve_courtyard_ms", capture_comps=lambda: best_comps):
+            # Step 16: Final courtyard-separation legalization -- the GENUINE
+            # last geometry step. Steps 13-15 (pinned restore, board clamp,
+            # keep-out clear) all move parts AFTER the last _resolve_overlaps,
+            # with nothing re-resolving courtyards -- so a same-side pair the
+            # solver had separated can drift back into overlap and survive to
+            # the routed board (the systematic courtyards_overlap DRC failure).
+            # Running this last guarantees the placement handed to the router
+            # has no same-side courtyard overlap. Only unlocked parts move, so
+            # pinned connectors/holes keep the positions Steps 13-15 set.
+            if self.cfg.get("resolve_courtyard_overlaps", True):
+                unresolved = self._resolve_courtyard_overlaps(best_comps)
+                self._clamp_pads_to_board(best_comps)
+                if unresolved:
+                    print(
+                        f"  WARNING: {unresolved} courtyard overlap(s) between two "
+                        "locked/pinned parts could not be legalized (left for the "
+                        "minor-overlap gate tolerance)"
+                    )
+
         # Final score
         work_state.components = best_comps
         final = PlacementScorer(work_state, self.cfg).score()
@@ -3600,6 +3620,111 @@ class PlacementSolver:
 
             if not moved:
                 break  # fully separated
+
+    def _resolve_courtyard_overlaps(self, comps: dict[str, Component]) -> int:
+        """Final guarantee: no two SAME-SIDE parts have overlapping courtyards.
+
+        The full overlap resolution (Step 9 / 13.5) runs BEFORE the pinned-
+        position restore, board clamp and keep-out-clear passes -- each of
+        which can nudge a component back into a neighbour's courtyard with
+        nothing re-resolving it. That ordering gap is the root cause of the
+        systematic ``courtyards_overlap`` DRC failures: a same-side pair the
+        solver correctly separated drifts back together in the final steps and
+        survives to the routed board. This pass runs LAST, so it cleans up
+        whatever those steps introduced.
+
+        Unlike ``_resolve_overlaps`` (which separates every pair to the full
+        placement clearance), this only touches pairs whose courtyards actually
+        overlap and pushes them apart by a hair (``courtyard_overlap_min_gap_mm``)
+        -- enough to clear the DRC without re-bloating a tight board.
+
+        Pinned/locked parts (edge connectors, mounting holes) are never moved;
+        only the unlocked partner is pushed. Opposite-side dual-layer stacks are
+        exempt via ``_blocker_pair_compatible`` (their courtyards sit on
+        different copper layers and never DRC-overlap), as are array-grid
+        members (self-legal by construction).
+
+        Returns the number of overlapping pairs left unresolved (both parts
+        locked -- the pass cannot fix those without disturbing a pinned
+        position), for telemetry.
+        """
+        gap = float(self.cfg.get("courtyard_overlap_min_gap_mm", 0.15))
+        half_gap = gap / 2.0
+        tl, br = self.state.board_outline
+        refs = list(comps.keys())
+
+        def _push_clear(free_c: Component, fix_tl: Point, fix_br: Point) -> bool:
+            """Push unlocked ``free_c`` minimally out of ``[fix_tl, fix_br]``
+            along the smaller-overlap axis. Returns True if it moved."""
+            f_tl, f_br = _effective_bbox(free_c, half_gap)
+            ox, oy = _bbox_overlap_xy(fix_tl, fix_br, f_tl, f_br)
+            if ox <= 0 or oy <= 0:
+                return False
+            hw, hh = _pad_half_extents(free_c)
+            old = Point(free_c.pos.x, free_c.pos.y)
+            if ox <= oy:
+                center = (fix_tl.x + fix_br.x) / 2.0
+                sign = 1.0 if free_c.pos.x >= center else -1.0
+                nx = free_c.pos.x + sign * (ox + 0.02)
+                free_c.pos.x = max(tl.x + hw + 1.0, min(br.x - hw - 1.0, nx))
+            else:
+                center = (fix_tl.y + fix_br.y) / 2.0
+                sign = 1.0 if free_c.pos.y >= center else -1.0
+                ny = free_c.pos.y + sign * (oy + 0.02)
+                free_c.pos.y = max(tl.y + hh + 1.0, min(br.y - hh - 1.0, ny))
+            _update_pad_positions(free_c, old, free_c.rotation)
+            return abs(free_c.pos.x - old.x) > 1e-3 or abs(free_c.pos.y - old.y) > 1e-3
+
+        unresolved = 0
+        for _ in range(200):
+            moved = False
+            unresolved = 0
+            for i in range(len(refs)):
+                a = comps[refs[i]]
+                a_tl, a_br = _effective_bbox(a, half_gap)
+                for j in range(i + 1, len(refs)):
+                    b = comps[refs[j]]
+                    b_tl, b_br = _effective_bbox(b, half_gap)
+                    ox, oy = _bbox_overlap_xy(a_tl, a_br, b_tl, b_br)
+                    if ox <= 0 or oy <= 0:
+                        continue
+                    # Opposite-side dual-layer stack: courtyards are on
+                    # different copper layers; KiCad never flags them as a
+                    # same-side courtyards_overlap. Leave the stack intact.
+                    if _blocker_pair_compatible(a, b):
+                        continue
+                    if getattr(a, "array_member", False) and getattr(
+                        b, "array_member", False
+                    ):
+                        continue
+                    if a.locked and b.locked:
+                        # Cannot move either without disturbing a pinned
+                        # position; surface it and let the (minor) gate
+                        # tolerance handle a fraction-of-a-mm residual.
+                        unresolved += 1
+                        continue
+                    if a.locked:
+                        if _push_clear(b, a_tl, a_br):
+                            b_tl, b_br = _effective_bbox(b, half_gap)
+                            moved = True
+                    elif b.locked:
+                        if _push_clear(a, b_tl, b_br):
+                            a_tl, a_br = _effective_bbox(a, half_gap)
+                            moved = True
+                    else:
+                        # Both free: move the smaller part out of the larger,
+                        # so a big IC/connector stays put and a passive yields.
+                        if a.width_mm * a.height_mm <= b.width_mm * b.height_mm:
+                            if _push_clear(a, b_tl, b_br):
+                                a_tl, a_br = _effective_bbox(a, half_gap)
+                                moved = True
+                        else:
+                            if _push_clear(b, a_tl, a_br):
+                                b_tl, b_br = _effective_bbox(b, half_gap)
+                                moved = True
+            if not moved:
+                break  # fully separated
+        return unresolved
 
     def legality_diagnostics(self, comps: dict[str, Component]) -> dict[str, object]:
         tl, br = self.state.board_outline

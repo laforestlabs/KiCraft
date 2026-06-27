@@ -2553,6 +2553,10 @@ def _verify_routed_board(pcb: Path) -> dict:
     board (it does not gate the compose candidate search, so it can't starve it).
     """
     from kicraft.autoplacer.config import DEFAULT_CONFIG
+    from kicraft.autoplacer.courtyard_overlap import (
+        classify_courtyard_overlaps,
+        measure_courtyard_overlaps,
+    )
     from kicraft.autoplacer.freerouting_runner import validate_routed_board
 
     v = validate_routed_board(str(pcb), cfg=dict(DEFAULT_CONFIG))
@@ -2563,9 +2567,43 @@ def _verify_routed_board(pcb: Path) -> dict:
     keepout = int(drc.get("items_not_allowed", 0) or 0)
     accepted = bool(v.get("accepted", False))
     reasons = list(v.get("rejection_reasons", []))
-    if courtyard > 0 and "courtyards_overlap" not in reasons:
-        accepted = False
-        reasons.append("courtyards_overlap")
+
+    # Courtyard severity: a residual overlap the placement pass could not remove
+    # (e.g. between two pinned parts) is graded by real intersection geometry.
+    # A clip shallower than the warn thresholds, on a board that is otherwise
+    # electrically perfect, is a WARNING (still fab-exported + 3D-rendered), not
+    # a hard failure. A deeper overlap (parts colliding) still hard-fails.
+    courtyard_overlaps: list[dict] = []
+    courtyard_minor_only = False
+    warnings: list[str] = []
+    if courtyard > 0:
+        measured = measure_courtyard_overlaps(str(pcb))
+        minor, gross = classify_courtyard_overlaps(
+            measured,
+            max_penetration_mm=float(
+                DEFAULT_CONFIG.get("courtyard_overlap_warn_penetration_mm", 0.5)
+            ),
+            max_area_mm2=float(
+                DEFAULT_CONFIG.get("courtyard_overlap_warn_area_mm2", 0.5)
+            ),
+        )
+        courtyard_overlaps = [o.to_dict() for o in measured]
+        # Downgrade to a warning ONLY with positive evidence: the measurement
+        # ran, saw every flagged overlap, and found them all minor. If it could
+        # not measure (pcbnew missing) or saw a gross/unmeasured overlap, keep
+        # the conservative hard-fail.
+        courtyard_minor_only = bool(measured) and not gross
+        if courtyard_minor_only:
+            warnings.extend(
+                f"minor courtyard overlap {o.ref_a}<->{o.ref_b} "
+                f"({o.penetration_mm:.2f}mm, {o.area_mm2:.2f}mm^2) -- assemblable, "
+                "flagged for review"
+                for o in minor
+            )
+        else:
+            if "courtyards_overlap" not in reasons:
+                accepted = False
+                reasons.append("courtyards_overlap")
     if keepout > 0 and "keepout_intrusion" not in reasons:
         accepted = False
         reasons.append("keepout_intrusion")
@@ -2575,17 +2613,30 @@ def _verify_routed_board(pcb: Path) -> dict:
         for reason in strand:
             if reason not in reasons:
                 reasons.append(reason)
+    # Hard fab-blockers only. A minor-courtyard-only board is NOT "ok" (it
+    # carries warnings) but it is fab-acceptable; the caller decides.
+    blocking_courtyard = courtyard > 0 and not courtyard_minor_only
     return {
         "ok": accepted
         and shorts == 0
         and unconnected == 0
         and courtyard == 0
         and keepout == 0,
+        "fab_acceptable": (
+            shorts == 0
+            and unconnected == 0
+            and keepout == 0
+            and not blocking_courtyard
+            and not strand
+        ),
         "shorts": shorts,
         "unconnected": unconnected,
         "courtyard": courtyard,
+        "courtyard_minor_only": courtyard_minor_only,
+        "courtyard_overlaps": courtyard_overlaps,
         "keepout": keepout,
         "reasons": reasons,
+        "warnings": warnings,
         "tracks": v.get("track_summary", {}) or {},
     }
 
@@ -2701,6 +2752,34 @@ def _maybe_electrical_review(state, project_dir: Path) -> dict:
     except (Exception, SystemExit) as e:  # Settings.from_env raises SystemExit w/o a key
         print(f"[build] electrical review skipped ({type(e).__name__}: {e})", file=sys.stderr)
         return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
+
+
+def _surface_build_warnings(
+    state, state_path: Path, artifacts, warnings: list[str]
+) -> None:
+    """Record non-blocking fab warnings so the UI and eval digest see them.
+
+    A minor courtyard clip leaves the board fab-acceptable (exported + 3D-
+    rendered), but the gap must be honestly surfaced -- not hidden behind a
+    clean build. The warnings ride on ``artifacts.build_warnings`` (the durable
+    carrier the web reads to paint a yellow caution + still show the 3D model)
+    and are mirrored into ``bom.assumptions`` so the judge digest sees them.
+    Idempotent: dedup by text. Persisted immediately so the note survives even
+    if a later fab-export step raises."""
+    if artifacts is not None:
+        artifacts.build_warnings = list(warnings)
+    if state is not None and state.bom is not None:
+        existing = set(state.bom.assumptions)
+        for w in warnings:
+            line = f"fab warning: {w}"
+            if line not in existing:
+                state.bom.assumptions.append(line)
+                existing.add(line)
+    if artifacts is not None:
+        _persist_artifacts(state, state_path, artifacts)
+    else:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(state.model_dump_json(indent=2) + "\n")
 
 
 def _surface_review_findings(state, state_path: Path, findings: list[dict]) -> None:
@@ -2852,7 +2931,7 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
         f"traces={gate['tracks'].get('traces', '?')} "
         f"components={gate['tracks'].get('footprints', '?')}/{len(expected_refs) or '?'}"
     )
-    if not gate["ok"] or missing_refs:
+    if not gate.get("fab_acceptable", gate["ok"]) or missing_refs:
         print(
             f"[build]     kept failed board {pcb.name} for inspection "
             "(no fab package exported; any earlier package is now stale)",
@@ -2865,7 +2944,7 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
                 f"{', '.join(missing_refs)}",
                 file=sys.stderr,
             )
-        if not gate["ok"]:
+        if not gate.get("fab_acceptable", gate["ok"]):
             print(
                 f"error: routed board is NOT fab-ready -- shorts={gate['shorts']}, "
                 f"unconnected={gate['unconnected']}, courtyard={gate.get('courtyard', 0)}, "
@@ -2873,6 +2952,18 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
                 file=sys.stderr,
             )
         return 7
+
+    # 4a. Non-blocking warnings (a minor, fraction-of-a-mm courtyard clip on an
+    #     otherwise electrically-perfect board). The board IS fab-exported and
+    #     3D-rendered -- the warning is surfaced for visual review, not a gate.
+    build_warnings: list[str] = list(gate.get("warnings", []) or [])
+    if build_warnings:
+        for w in build_warnings:
+            print(f"[build]     WARNING: {w}")
+        try:
+            _surface_build_warnings(state, state_path, artifacts, build_warnings)
+        except Exception as e:  # noqa: BLE001 - bookkeeping must never break the build
+            print(f"[build]     (could not surface build warnings: {e})", file=sys.stderr)
 
     # 4b. Layer-4 electrical-review gate (cost-gated, off by default): catches
     #     designs that are structurally fab-ready (DRC-clean, all parts present)

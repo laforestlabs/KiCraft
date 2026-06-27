@@ -57,11 +57,13 @@ _OK = "#34d399"
 _FAIL = "#f87171"
 _DIM = "#94a3b8"       # slate-400, secondary text
 _DIMMER = "#64748b"    # slate-500, tertiary / glyphs
+_WARN = "#eab308"      # yellow-500: succeeded-with-a-caution (e.g. minor courtyard clip)
 _STATUS_COLOR = {
     "pending": "#64748b",
     "active": "#fbbf24",
     "parked": "#fbbf24",   # waiting on the user's answer (amber, like active)
     "done": "#34d399",
+    "warning": _WARN,      # build succeeded but carries a non-blocking warning
     "failed": "#f87171",
 }
 _RESULT_FOLD_OVER = 300  # tool results longer than this fold into an expansion
@@ -769,6 +771,10 @@ class StageTabs:
             self._set_tab_status(key, st)
             e = meta.get(key) if isinstance(meta.get(key), dict) else {}
             if st == "done":
+                p.set_status(True, cost=e.get("cost_usd"), attempts=e.get("attempts"))
+            elif st == "warning":
+                # Succeeded with a non-blocking caution: keep the panel content
+                # (fab package + 3D model) visible; the yellow tab flags the gap.
                 p.set_status(True, cost=e.get("cost_usd"), attempts=e.get("attempts"))
             elif st == "failed":
                 p.set_status(False)
