@@ -2985,6 +2985,9 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     # 4b. Layer-4 electrical-review gate (cost-gated, off by default): catches
     #     designs that are structurally fab-ready (DRC-clean, all parts present)
     #     but electrically wrong -- the class deterministic checks cannot judge.
+    # Stage-boundary marker so the GUI transitions to the electrical-review tab
+    # before findings stream in.
+    print("[build]     electrical review: scanning design for electrical defects ...", flush=True)
     review = _maybe_electrical_review(state, project_dir)
     if review["ran"]:
         for f in review["findings"]:

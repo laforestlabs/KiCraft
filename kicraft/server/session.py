@@ -22,7 +22,7 @@ from .storage import _state_path
 # The deterministic build sub-phases, in pipeline order after DESIGN_STAGES.
 # Their status is always derived from artifacts (sheets / board / fab zip), never
 # persisted: artifacts cannot go stale against themselves.
-BUILD_PHASES = ("synthesize", "place_route", "fab")
+BUILD_PHASES = ("synthesize", "place_route", "electrical_review", "fab")
 
 
 def _stage_done(stage: str, state: dict) -> bool:

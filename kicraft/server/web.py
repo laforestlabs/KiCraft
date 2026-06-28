@@ -645,7 +645,11 @@ def _build_lines_for(stage: str, lines: list[str]) -> list[str]:
     def sub(t: str) -> str | None:
         if "1/5" in t or "synthesized " in t:
             return "synthesize"
-        if "2/5" in t or "3/5" in t or "4/5" in t:
+        tl = t.lower()
+        if any(m in tl for m in ("review blocker", "review warning", "review note",
+                                  "electrical review")):
+            return "electrical_review"
+        if "2/5" in t or "3/5" in t or ("4/5" in t and "verify" in tl):
             return "place_route"
         if "5/5" in t:
             return "fab"
@@ -658,6 +662,27 @@ def _build_lines_for(stage: str, lines: list[str]) -> list[str]:
         if cur == stage:
             out.append(ln)
     return out
+
+_REVIEW_FINDING_RE = __import__("re").compile(
+    r"review (BLOCKER|WARNING|NOTE):\s*\[([^\]]+)\]\s*(.+)")
+
+def _parse_review_findings(lines: list[str]) -> list[dict]:
+    """Parse structured electrical-review findings from build_log lines.
+
+    Each finding line has the form:
+        review SEVERITY: [area] issue text
+    Returns a list of {severity, area, issue} dicts.
+    """
+    findings = []
+    for ln in lines:
+        m = _REVIEW_FINDING_RE.search(ln)
+        if m:
+            findings.append({
+                "severity": m.group(1).lower(),
+                "area": m.group(2).strip(),
+                "issue": m.group(3).strip(),
+            })
+    return findings
 
 
 # ---- BOM part pricing (live LCSC lookups, cached) ---------------------------
@@ -1034,6 +1059,29 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
         log = _build_lines_for("place_route", build_lines)
         if log:
             secs.append({"type": "list", "title": "Place / route", "items": log})
+        return secs
+
+    if stage == "electrical_review":
+        secs = []
+        # Parse review findings from build log lines
+        findings = _parse_review_findings(build_lines)
+        if findings:
+            secs.append({"type": "kv", "title": "Review outcome",
+                         "rows": [("findings", len(findings)),
+                                  ("blocked", any(f["severity"] == "blocker" for f in findings))]})
+            rows = []
+            for f in findings:
+                sev = f["severity"].upper()
+                area = f.get("area", "")
+                issue = f.get("issue", "")[:120]
+                rows.append([sev, area, issue])
+            secs.append({"type": "table", "title": "Findings",
+                         "columns": ["severity", "area", "issue"],
+                         "rows": rows})
+        else:
+            log = _build_lines_for("electrical_review", build_lines)
+            if log:
+                secs.append({"type": "list", "title": "Electrical review", "items": log})
         return secs
 
     if stage == "fab":
@@ -5057,7 +5105,7 @@ def index(prompt: str = "", project: str = ""):
                         view["fab_caution"] = bool(build_warnings)
                         if build_warnings:
                             status.text = "Done (with a caution). Your KiCad project is ready."
-                        for stg in ("synthesize", "place_route", "fab"):  # finalize build logs
+                        for stg in ("synthesize", "place_route", "electrical_review", "fab"):  # finalize build logs
                             tabs.set_inspector(stg, _inspector_spec(
                                 stg, sj, rs, project_dir, view["build_lines"]))
                         if state["zip"]:
@@ -5209,7 +5257,7 @@ if os.environ.get("KICRAFT_WEB_DEMO"):
                             stg, _DEMO_STATE, {}, None, [], prices=_DEMO_PRICES))
                     elif e.get("kind") == "build_done":
                         rs = {"phase": "done", "progress_percent": 100}
-                        for stg in ("synthesize", "place_route", "fab"):
+                        for stg in ("synthesize", "place_route", "electrical_review", "fab"):
                             tabs.set_inspector(stg, _inspector_spec(
                                 stg, _DEMO_STATE, rs, None, d["build_lines"]))
                     d["i"] += 1

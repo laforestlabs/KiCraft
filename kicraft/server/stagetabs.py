@@ -38,7 +38,7 @@ from nicegui import app, ui
 
 # Phase identity: (key, label, Material icon, accent hex). Order is the pipeline
 # order and drives both the tab row and each panel's accenting. The first five
-# are the LLM design stages (DESIGN_STAGES); the last three are the deterministic
+# are the LLM design stages (DESIGN_STAGES); the last four are the deterministic
 # build sub-phases, fed from the single `kicraft build` log stream.
 PHASES: list[tuple[str, str, str, str]] = [
     ("intent",          "Intent",        "lightbulb",       "#38bdf8"),  # sky
@@ -48,10 +48,11 @@ PHASES: list[tuple[str, str, str, str]] = [
     ("wiring",          "Wiring",         "cable",          "#34d399"),  # emerald
     ("synthesize",      "Synthesize",    "bolt",            "#f472b6"),  # pink
     ("place_route",     "Place/Route",   "developer_board", "#60a5fa"),  # blue
+    ("electrical_review", "Elec Review", "plagiarism",      "#f59e0b"),  # amber-yellow
     ("fab",             "Fab",           "inventory",       "#818cf8"),  # indigo
 ]
 _META = {k: (label, icon, accent) for k, label, icon, accent in PHASES}
-_BUILD_STAGES = ("synthesize", "place_route", "fab")
+_BUILD_STAGES = ("synthesize", "place_route", "electrical_review", "fab")
 
 _OK = "#34d399"
 _FAIL = "#f87171"
@@ -805,9 +806,15 @@ class StageTabs:
 
 def _build_substage(text: str) -> str | None:
     """Map a `kicraft build` log line to its tab (markers from cli_app build)."""
+    t = text.lower()
     if "1/5" in text or "synthesized " in text:
         return "synthesize"
-    if "2/5" in text or "3/5" in text or "4/5" in text:
+    # Electrical review: intercept "review BLOCKER/WARNING/NOTE" and the
+    # "electrical review" heading before the generic 4/5 (verify) check.
+    if any(m in t for m in ("review blocker", "review warning", "review note",
+                             "electrical review")):
+        return "electrical_review"
+    if "2/5" in text or "3/5" in text or ("4/5" in text and "verify" in t):
         return "place_route"
     if "5/5" in text:
         return "fab"
