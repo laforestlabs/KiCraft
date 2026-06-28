@@ -3003,6 +3003,23 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
             _surface_review_findings(state, state_path, review["findings"])
         except Exception as e:  # noqa: BLE001 - surfacing must never break the build
             print(f"[build]     (could not surface review findings: {e})", file=sys.stderr)
+        # Persist structured findings on artifacts so the GUI electrical-review
+        # inspector renders rich cards (severity badge, area, issue, suggestion)
+        # even on reopen, not just the flat build_log text lines.
+        try:
+            from .models import ReviewFinding
+            artifacts.review_findings = [
+                ReviewFinding(
+                    severity=f.get("severity", "note"),
+                    area=f.get("area", ""),
+                    issue=f.get("issue", ""),
+                    suggestion=f.get("suggestion", ""),
+                )
+                for f in review["findings"]
+            ]
+            _persist_artifacts(state, state_path, artifacts)
+        except Exception as e:  # noqa: BLE001 - bookkeeping must never break the build
+            print(f"[build]     (could not persist review findings on artifacts: {e})", file=sys.stderr)
         if review["blocked"]:
             print(
                 f"[build]     kept board {pcb.name} for inspection (no fab package; "

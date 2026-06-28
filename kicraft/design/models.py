@@ -658,6 +658,14 @@ class PlacementSection(BaseModel):
 # ---------- Artifacts (set after synthesis) ----------
 
 
+class ReviewFinding(BaseModel):
+    """A single electrical-review finding, persisted so the GUI inspector can
+    render it richly (severity badge, area, issue, suggestion) even on reopen."""
+    severity: Literal["blocker", "warning", "note"]
+    area: str = ""
+    issue: str
+    suggestion: str = ""
+
 class ArtifactPaths(BaseModel):
     project_dir: Path
     project_stem: str
@@ -675,6 +683,9 @@ class ArtifactPaths(BaseModel):
     # courtyard clip). The board IS fab-exported + 3D-rendered; these surface as
     # a yellow caution in the UI rather than a red failure.
     build_warnings: list[str] = Field(default_factory=list)
+    # Electrical-review findings persisted for the GUI inspector (structured,
+    # with suggestions, vs the build_log lines which are bare text).
+    review_findings: list[ReviewFinding] = Field(default_factory=list)
 
 
 # ---------- Conversation state ----------

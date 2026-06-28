@@ -1063,21 +1063,31 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
 
     if stage == "electrical_review":
         secs = []
-        # Parse review findings from build log lines
-        findings = _parse_review_findings(build_lines)
+        arts = sj.get("artifacts") or {}
+        # Prefer structured findings from artifacts (persisted by the build,
+        # includes suggestions); fall back to parsing build_log lines.
+        raw = arts.get("review_findings") or []
+        if raw:
+            findings = [{"severity": f.get("severity", "note"),
+                         "area": f.get("area", ""),
+                         "issue": f.get("issue", ""),
+                         "suggestion": f.get("suggestion", "")}
+                        for f in raw]
+        else:
+            findings = _parse_review_findings(build_lines)
         if findings:
+            blocked = any(f["severity"] == "blocker" for f in findings)
+            n_blockers = sum(1 for f in findings if f["severity"] == "blocker")
+            n_warnings = sum(1 for f in findings if f["severity"] == "warning")
+            n_notes = sum(1 for f in findings if f["severity"] == "note")
+            status = "BLOCKED" if blocked else ("reviewed" if findings else "pending")
             secs.append({"type": "kv", "title": "Review outcome",
-                         "rows": [("findings", len(findings)),
-                                  ("blocked", any(f["severity"] == "blocker" for f in findings))]})
-            rows = []
-            for f in findings:
-                sev = f["severity"].upper()
-                area = f.get("area", "")
-                issue = f.get("issue", "")[:120]
-                rows.append([sev, area, issue])
-            secs.append({"type": "table", "title": "Findings",
-                         "columns": ["severity", "area", "issue"],
-                         "rows": rows})
+                         "rows": [("status", status),
+                                  ("blockers", n_blockers),
+                                  ("warnings", n_warnings),
+                                  ("notes", n_notes)]})
+            secs.append({"type": "findings", "title": "Findings",
+                         "items": findings})
         else:
             log = _build_lines_for("electrical_review", build_lines)
             if log:

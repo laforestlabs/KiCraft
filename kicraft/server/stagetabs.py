@@ -530,6 +530,33 @@ def _render_section(sec: dict, accent: str) -> None:
             ui.label(str(note)).classes("text-xs italic mt-0.5").style(f"color:{_DIMMER}")
     elif kind == "graph":
         ui.echart(sec.get("option", {})).classes("w-full").style("height:360px")
+    elif kind == "findings":
+        items = sec.get("items", [])
+        if not items:
+            ui.label("No findings — design passed review.")                 .classes("text-xs italic").style(f"color:{_DIMMER}")
+        _SEV_COLOR = {"blocker": _FAIL, "warning": _WARN, "note": _DIMMER}
+        _SEV_BG = {"blocker": "rgba(248,113,113,0.12)", "warning": "rgba(234,179,8,0.10)",
+                    "note": "rgba(100,116,139,0.08)"}
+        _SEV_BORDER = {"blocker": "rgba(248,113,113,0.45)", "warning": "rgba(234,179,8,0.40)",
+                        "note": "rgba(100,116,139,0.30)"}
+        with ui.column().classes("w-full gap-2"):
+            for f in items:
+                sev = f.get("severity", "note")
+                area = f.get("area", "")
+                issue = f.get("issue", "")
+                suggestion = f.get("suggestion", "")
+                color = _SEV_COLOR.get(sev, _DIMMER)
+                bg = _SEV_BG.get(sev, "rgba(100,116,139,0.08)")
+                border = _SEV_BORDER.get(sev, "rgba(100,116,139,0.30)")
+                with ui.element("div").classes("w-full rounded p-2").style(
+                        f"border-left:3px solid {border};background:{bg}"):
+                    with ui.row().classes("w-full no-wrap gap-2 items-center mb-1"):
+                        ui.label(sev.upper()).classes("text-xs font-bold px-1.5 py-0.5 rounded")                             .style(f"color:{color};background:rgba(0,0,0,0.2)")
+                        if area:
+                            ui.label(f"[{area}]").classes("text-xs font-mono")                                 .style(f"color:{_DIMMER}")
+                    ui.label(issue).classes("text-sm leading-snug whitespace-pre-wrap")                         .style(f"color:{_DIM}")
+                    if suggestion:
+                        ui.label(f"→ {suggestion}").classes("text-xs italic mt-1")                             .style(f"color:{_DIMMER}")
 
 
 def _cell_html(cell) -> str:
