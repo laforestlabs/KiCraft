@@ -197,9 +197,9 @@ def run(
     from kicraft.design.synthesis.array_decaps import (
         drop_decap_only_arrays,
         isolate_array_sheets,
+        isolate_opposite_edge_connectors,
         normalize_array_decaps,
     )
-
     # A decap-only ArraySpec (per-LED bypass caps mistakenly declared as their
     # own grid) would grid the caps on top of the LED array -> data ties blocked
     # -> doomed route. Drop it first so the caps become array companions.
@@ -214,6 +214,11 @@ def run(
     # leaf solver (KC-WXN3SN). Move it to its own sheet -> its own leaf, composed
     # adjacent to the array. Adds a sheet, so re-guard the root-stem collision.
     isolate_array_sheets(state.bom, state.architecture)
+    # A sheet with edge-zoned connectors on opposite edges (e.g. J1 bottom +
+    # J2/J3 top on the same sheet) can never compose into a single rigid leaf
+    # (KC-58KPS3). Move the minority-edge connectors to their own sheet so
+    # each leaf has compatible edge constraints.
+    isolate_opposite_edge_connectors(state.bom, state.architecture)
     ensure_leaf_stems_distinct(state.project_stem, state.architecture.sheets)
 
     sheet_instances = build_sheet_instances(state.architecture, state.bom)

@@ -1871,3 +1871,57 @@ def check_named_part_substitutions(intent, bom) -> CheckResult:
             offenders=offenders,
         )
     return CheckResult(name=name, ok=True, message="all named parts match BOM")
+
+
+
+# ---------- §9.24 opposite-edge connector conflict ----------
+
+_OPPOSITE_EDGES = frozenset({frozenset({"top", "bottom"}), frozenset({"left", "right"})})
+
+
+def check_sheet_connector_edge_conflicts(bom) -> CheckResult:
+    """§9.24 — no sheet has edge-zoned connectors on opposite edges.
+
+    A single rigid leaf can only satisfy one edge per axis.  Connectors
+    zoned to opposite edges on one sheet guarantee one will strand inboard
+    at compose time.  The synthesis stage auto-splits such sheets before
+    they reach the BOM commit; this check is a safety net for any case
+    the auto-split doesn't cover (e.g. sheet-name collisions).
+    """
+    ref_sheet: dict[str, str] = {}
+    for p in (bom.parts or []):
+        if p.sheet and p.ref:
+            ref_sheet[p.ref] = p.sheet
+
+    sheet_edges: dict[str, set[str]] = defaultdict(set)
+    for ref, zone in (bom.component_zones or {}).items():
+        edge = zone.get("edge") if isinstance(zone, dict) else None
+        sheet = ref_sheet.get(ref)
+        if edge and sheet:
+            sheet_edges[sheet].add(edge)
+
+    offenders: list[str] = []
+    for sheet, edges in sorted(sheet_edges.items()):
+        for pair in _OPPOSITE_EDGES:
+            if pair.issubset(edges):
+                conflicting = sorted(
+                    ref for ref, zone in (bom.component_zones or {}).items()
+                    if isinstance(zone, dict)
+                    and zone.get("edge") in pair
+                    and ref_sheet.get(ref) == sheet
+                )
+                offenders.append(
+                    f"sheet {sheet!r} has connectors on opposite edges "
+                    f"{sorted(pair)}: {', '.join(conflicting)}"
+                )
+
+    return CheckResult(
+        name="9.24 no opposite-edge connectors on one sheet",
+        ok=not offenders,
+        message=(
+            "every sheet has compatible edge zones"
+            if not offenders
+            else f"{len(offenders)} sheet(s) with opposite-edge connectors"
+        ),
+        offenders=offenders,
+    )

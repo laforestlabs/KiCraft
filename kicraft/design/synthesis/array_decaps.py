@@ -17,6 +17,7 @@ kicraft-no-fallbacks-fail-loudly). High-current arrays (a 50-LED+ WS2812 string 
 ~3 A or more) stay fully per-LED-decoupled.
 """
 from __future__ import annotations
+from collections import defaultdict
 
 from kicraft.design.models import (
     BOM,
@@ -381,6 +382,108 @@ def isolate_array_sheets(bom: BOM, architecture: Architecture) -> list[str]:
             f"sheet {sh!r} onto a dedicated sheet {name!r} so the array leaf stays a "
             f"pure grid (a stray part otherwise strands far from the array)"
         )
+
+    if not moved:
+        return []
+    _resplit_connections_by_sheet(bom)
+    _declare_cross_sheet_signal_nets(bom, architecture)
+    for note in notes:
+        print(f"  [synth] {note}")
+        bom.assumptions.append(note)
+    return sorted(set(moved), key=_ref_sort_key)
+
+
+# ---------- opposite-edge connector isolation ----------
+
+_OPPOSITE_EDGES = frozenset({frozenset({"top", "bottom"}), frozenset({"left", "right"})})
+# When both edges have the same count, prefer moving this edge's connectors.
+_DEFAULT_MOVE_EDGE: dict[frozenset[str], str] = {
+    frozenset({"top", "bottom"}): "top",
+    frozenset({"left", "right"}): "left",
+}
+
+
+def isolate_opposite_edge_connectors(
+    bom: BOM, architecture: Architecture
+) -> list[str]:
+    """Split sheets whose edge-zoned connectors demand opposite edges.
+
+    A single rigid leaf can only sit at one edge per axis — connectors
+    zoned to opposite edges on one sheet guarantee one will strand inboard
+    at compose time (KC-58KPS3: J1 bottom + J2/J3 top on "USB PD INPUT").
+
+    This moves the minority-edge connectors to a dedicated sheet → their
+    own leaf, which the parent composer places at the correct edge via the
+    normal leaf-composition path.  Connections are re-split per sheet and
+    the now cross-sheet signal nets are declared inter-sheet so the
+    schematic still wires them.  LOUD + recorded in ``bom.assumptions``.
+    Mutates ``bom`` and ``architecture`` in place; returns moved refs
+    (``[]`` when every sheet has compatible edge zones).
+    """
+    if not bom.component_zones:
+        return []
+
+    # Map ref -> sheet from BOM parts
+    ref_sheet: dict[str, str] = {}
+    for p in (bom.parts or []):
+        if p.sheet and p.ref:
+            ref_sheet[p.ref] = p.sheet
+
+    parts_by_ref = {p.ref: p for p in bom.parts}
+
+    # Collect edges per sheet
+    sheet_edge_refs: dict[str, dict[str, list[str]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for ref, zone in bom.component_zones.items():
+        edge = zone.get("edge") if isinstance(zone, dict) else None
+        sheet = ref_sheet.get(ref)
+        if edge and sheet:
+            sheet_edge_refs[sheet][edge].append(ref)
+
+    # Find sheets with opposite-edge conflicts
+    taken_names = {s.name for s in architecture.sheets}
+    taken_stems = {s.stem for s in architecture.sheets}
+    moved: list[str] = []
+    notes: list[str] = []
+
+    for sheet, edge_refs in sorted(sheet_edge_refs.items()):
+        for pair in _OPPOSITE_EDGES:
+            present = [e for e in pair if e in edge_refs]
+            if len(present) < 2:
+                continue
+            # Pick the minority edge to move; on tie, use _DEFAULT_MOVE_EDGE
+            e1, e2 = present
+            c1, c2 = len(edge_refs[e1]), len(edge_refs[e2])
+            if c1 < c2:
+                move_edge = e1
+            elif c2 < c1:
+                move_edge = e2
+            else:
+                move_edge = _DEFAULT_MOVE_EDGE.get(pair, e1)
+
+            move_refs = sorted(edge_refs[move_edge], key=_ref_sort_key)
+            name, stem = _isolation_sheet_names(move_refs, taken_names, taken_stems)
+            taken_names.add(name)
+            taken_stems.add(stem)
+            architecture.sheets.append(
+                Sheet(name=name, stem=stem, function="interface")
+            )
+            for ref in move_refs:
+                if ref in parts_by_ref:
+                    parts_by_ref[ref].sheet = name
+                # Keep the edge zone — the new single-edge leaf can satisfy it.
+                # Unlike isolate_array_sheets (where the moved part is a stray
+                # internal component), these connectors genuinely belong at an
+                # edge, and their new leaf has only same-edge connectors.
+            moved.extend(move_refs)
+            keep_edge = e1 if move_edge == e2 else e2
+            notes.append(
+                f"split sheet {sheet!r}: moved {len(move_refs)} "
+                f"{move_edge}-edge connector(s) ({', '.join(move_refs)}) "
+                f"to sheet {name!r} so the original leaf keeps the "
+                f"{keep_edge}-edge connector(s)"
+            )
 
     if not moved:
         return []

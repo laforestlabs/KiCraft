@@ -69,6 +69,7 @@ from .synthesis.validation import (
     SynthesisValidationError,
     bridge_duplicate_pins,
     check_breakout_connectivity,
+    check_sheet_connector_edge_conflicts,
     check_named_part_substitutions,
     check_family_wiring_contracts,
     check_inter_sheet_nets_realized,
@@ -330,6 +331,14 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         if not sp.ok:
             print(f"{sp.name}: {sp.message}", file=sys.stderr)
             for o in sp.offenders[:20]:
+                print(f"  - {o}", file=sys.stderr)
+            return 3
+
+    if state.bom is not None:
+        sc = check_sheet_connector_edge_conflicts(state.bom)
+        if not sc.ok:
+            print(f"{sc.name}: {sc.message}", file=sys.stderr)
+            for o in sc.offenders[:20]:
                 print(f"  - {o}", file=sys.stderr)
             return 3
 
@@ -2173,6 +2182,21 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                         "ok": False,
                         "errors": [f"{sp.name}: {sp.message}"],
                         "offenders": sp.offenders[:20],
+                    },
+                    indent=2,
+                )
+            )
+            return 3
+
+    if stage == "bom" and state.bom is not None:
+        sc = check_sheet_connector_edge_conflicts(state.bom)
+        if not sc.ok:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": [f"{sc.name}: {sc.message}"],
+                        "offenders": sc.offenders[:20],
                     },
                     indent=2,
                 )

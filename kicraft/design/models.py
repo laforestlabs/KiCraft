@@ -37,6 +37,9 @@ POWER_NET_PATTERNS = [
     # VEE = negative supply, VSS = negative/ground reference; router and
     # placement already special-case both for the ground-symbol choice.
     re.compile(r"^V(CC|DD|BAT|BUS|SYS|IN|OUT|EE|SS)\b", re.IGNORECASE),
+    # VDD_3V3, VCC_5V, VBUS_RAW, etc. — locally-named supply nets that the
+    # canonical patterns (bare 3V3 / ^VDD\b) miss because _ is a word char.
+    re.compile(r"^V(CC|DD|BAT|BUS|SYS|IN|OUT|EE|SS)_", re.IGNORECASE),
 ]
 GND_NET_PATTERNS = [
     re.compile(r"^(P|A|D)?GND$", re.IGNORECASE),
