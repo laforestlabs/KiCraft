@@ -25,7 +25,7 @@ from kicraft.design.models import (
     PinEndpoint,
     Sheet,
 )
-from kicraft.design.synthesis.emitter import _power_nets_with_driver
+from kicraft.design.synthesis.emitter import _power_nets_by_pins, _power_nets_with_driver
 from kicraft.design.synthesis.placement import place_sheet
 from kicraft.design.synthesis.router import _POWER_SYMBOL_MAP, route_sheet
 from kicraft.design.synthesis.symbol_library import (
@@ -169,3 +169,54 @@ def test_vbat_rail_synthesizes_without_crash_and_erc_clean(tmp_path) -> None:
     sch = (tmp_path / "MAIN.kicad_sch").read_text()
     assert 'global_label "VBAT"' in sch
     assert "power:VBAT" not in sch
+
+
+
+def test_pin_detected_power_net_gets_pwr_flag() -> None:
+    """A net not matching POWER_NET_PATTERNS (e.g. PD_20V) but carrying
+    power_in pins must still be detected as a power net and receive a
+    PWR_FLAG when undriven.  Regression: KC-HFW3R6 — PD_20V feeds three
+    buck regulator VIN pins (all power_in) but the source PFET has only
+    unspecified pins, so the net went undetected and ERC flagged every
+    regulator's VIN as undriven."""
+    from kicraft.design.synthesis.emitter import _power_nets_by_pins, _power_nets_with_driver
+
+    sheet = Sheet(name="RAIL", stem="RAIL", function="buck")
+    # U1: TPS54331 buck — VIN (pin 2) = power_in, PH (pin 8) = power_out
+    # Q1: AO3401A PFET — all pins unspecified (simulates the real case)
+    parts = [
+        BomPart(ref="U1", value="TPS54331DDAR", symbol="tps54331:TPS54331DDAR",
+                footprint="tps54331:SOIC-8_L4.9-W3.9-P1.27-LS6.0-BL-EP",
+                sheet="RAIL"),
+        BomPart(ref="Q1", value="AO3401A", symbol="ao3401a:AO3401A",
+                footprint="ao3401a:SOT-23_L2.9-W1.3-P1.90-LS2.4-BR",
+                sheet="RAIL"),
+    ]
+    conns = [
+        # PD_20V: Q1.3 (source, unspecified) → U1.2 (VIN, power_in)
+        NetConnection(net_name="PD_20V", sheet="RAIL", endpoints=[
+            PinEndpoint(ref="Q1", pin="3"),
+            PinEndpoint(ref="U1", pin="2"),
+        ]),
+        # +12V: U1.8 (PH, power_out) → output
+        NetConnection(net_name="+12V", sheet="RAIL", endpoints=[
+            PinEndpoint(ref="U1", pin="8"),
+        ]),
+        NetConnection(net_name="GND", sheet="RAIL", endpoints=[
+            PinEndpoint(ref="U1", pin="7"),
+        ]),
+    ]
+    bom = BOM(parts=parts, connections=conns)
+
+    pin_power = _power_nets_by_pins(bom)
+    assert "PD_20V" in pin_power, (
+        "PD_20V must be detected as a power net — U1.2 is power_in"
+    )
+
+    driven = _power_nets_with_driver(bom)
+    assert "PD_20V" not in driven, (
+        "PD_20V must NOT be driven — Q1.3 is unspecified, not power_out"
+    )
+    assert "+12V" in driven, (
+        "+12V must be driven — U1.8 is power_out"
+    )

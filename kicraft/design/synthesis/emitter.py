@@ -1046,6 +1046,91 @@ def _power_nets_with_driver(bom: BOM) -> set[str]:
     return driven
 
 
+def _power_nets_by_pins(bom: BOM) -> set[str]:
+    """Net names that carry at least one power_in or power_out pin.
+
+    Name-based heuristics (``is_power_or_ground_name``) miss intermediate
+    power-distribution buses like ``PD_20V``, ``VBUS``, ``VIN`` whose
+    names don't match the stock ``+12V``/``VCC``/``VBAT`` patterns but
+    whose KiCad symbol pins declare ``power_in`` or ``power_out``
+    electrical types.  This function catches them by scanning every
+    connection's endpoint pins against the actual symbol libraries so the
+    PWR_FLAG assigner and the driven-net detector both treat them as
+    power nets.
+
+    Symbols that cannot be resolved are skipped (conservative: we do NOT
+    treat the net as a power net when we can't inspect its pins, because a
+    false-positive PWR_FLAG on a non-power net is harmless but a false
+    negative on a real power net leaves an ERC-undriven error).
+    """
+    symbol_by_ref: dict[str, str] = {p.ref: p.symbol for p in bom.parts}
+    power_nets: set[str] = set()
+    for c in bom.connections:
+        if c.net_name in power_nets:
+            continue
+        for ep in c.endpoints:
+            symbol = symbol_by_ref.get(ep.ref)
+            if symbol is None:
+                continue
+            try:
+                pins = lookup_pins(symbol)["pins"]
+            except (SymbolNotFoundError, ValueError, KeyError):
+                continue
+            if any(
+                p["number"] == ep.pin
+                and p["electrical_type"] in ("power_in", "power_out")
+                for p in pins
+            ):
+                power_nets.add(c.net_name)
+                break
+    return power_nets
+
+def _power_nets_with_driver(bom: BOM) -> set[str]:
+    """Names of power/ground nets already driven by a real power-output pin.
+
+    A ``PWR_FLAG`` carries its own ``power_out`` pin, so adding one to a net a
+    component already drives (a charger's V_BAT output, an LDO/regulator VOUT,
+    a boost converter's output rail, …) trips KiCad ERC's *"Pins of type Power
+    output and Power output are connected"*. Those nets must therefore be
+    EXCLUDED from PWR_FLAG assignment — the flag exists only to mark a power net
+    that is real-but-undriven (fed from a connector / battery / passive pin) so
+    ERC stops reporting its power-input pins as undriven.
+
+    Power nets are global by name across the whole hierarchy, so a driver on
+    ANY sheet protects the entire net: we scan every connection, not just one
+    sheet's. Symbols whose pins can't be resolved are treated as non-drivers
+    (the conservative choice: we keep the flag rather than risk an undriven net).
+
+    Scans both name-matched power nets (``+12V``, ``VCC``, ``GND``) **and**
+    nets detected by their pin electrical types (``power_in``/``power_out``)
+    via ``_power_nets_by_pins`` so intermediate buses like ``PD_20V`` and
+    ``VBUS`` that miss the naming heuristics still get proper PWR_FLAG treatment.
+    """
+    symbol_by_ref: dict[str, str] = {p.ref: p.symbol for p in bom.parts}
+    pin_power_nets = _power_nets_by_pins(bom)
+    driven: set[str] = set()
+    for c in bom.connections:
+        is_power = (
+            is_power_or_ground_name(c.net_name)
+            or c.net_name in pin_power_nets
+        )
+        if not is_power or c.net_name in driven:
+            continue
+        for ep in c.endpoints:
+            symbol = symbol_by_ref.get(ep.ref)
+            if symbol is None:
+                continue
+            try:
+                pins = lookup_pins(symbol)["pins"]
+            except (SymbolNotFoundError, ValueError, KeyError):
+                continue
+            if any(p["number"] == ep.pin and p["electrical_type"] == "power_out"
+                   for p in pins):
+                driven.add(c.net_name)
+                break
+    return driven
+
+
 def emit_schematic(
     project_dir: Path,
     project_stem: str,
@@ -1090,18 +1175,23 @@ def emit_schematic(
     # "Power output and Power output are connected" (e.g. a charger's V_BAT
     # output rail). See _power_nets_with_driver.
     driven_power_nets = _power_nets_with_driver(bom)
+    pin_power_nets = _power_nets_by_pins(bom)
     flag_by_sheet: dict[str, set[str]] = {}
     seen_power: set[str] = set()
     for si in sheet_insts:
         if si.sheet.name in skip:
             continue
         for c in bom.connections:
+            is_power = (
+                is_power_or_ground_name(c.net_name)
+                or c.net_name in pin_power_nets
+            )
             # Every undriven power/ground net gets exactly one PWR_FLAG, whether
             # the router renders it as a stock power symbol or as a global label
             # (the no-stock-symbol fallback) -- both can carry the flag.
             if (
                 c.sheet == si.sheet.name
-                and is_power_or_ground_name(c.net_name)
+                and is_power
                 and c.net_name not in seen_power
                 and c.net_name not in driven_power_nets
             ):
