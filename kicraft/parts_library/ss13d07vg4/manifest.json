@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:98627f803672e33c7f6d97015a4449f169ea81a943ab7c8b7bc579b9e036cde6",
   "datasheet_url": "https://www.lcsc.com/datasheet/C2681578.pdf",
-  "description": "SHOU HAN(\u9996\u97e9) SS13D07VG4",
+  "description": "Shou Han SS13D07VG4 — SPDT slide switch, 3-pin through-hole. Rated 0.5A @ 30V DC. 13×3.5mm body. Common power/selector switch for small boards.",
   "footprint_name": "SW-TH_SS13D07VG4",
   "kicad_version_min": "9.0.0",
   "maturity": "production",
@@ -18,7 +18,13 @@
     "lcsc": "C2681578"
   },
   "symbol_name": "SS13D07VG4",
-  "tags": [],
+  "tags": [
+    "switch",
+    "slide",
+    "spdt",
+    "tht",
+    "3-pin"
+  ],
   "version": "0.1.0",
-  "watch_out_for": null
+  "watch_out_for": "SPDT slide switch, 3-pin through-hole. Rated 0.5A @ 30V DC. Body 13×3.5mm. Travel 2mm. Momentary contact bounce ~10ms — debounce in firmware."
 }

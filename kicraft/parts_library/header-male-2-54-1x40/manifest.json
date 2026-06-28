@@ -1,0 +1,31 @@
+{
+  "content_hash": "sha256:0512ea144a9b38ecfdc6cc7992a9dec85c652a5a13ba9f7ad2ba749f7d77ea12",
+  "datasheet_url": "https://lcsc.com/product-detail/Male-Header_2-54mm-1-40P-Straight-Headers-Pins_C2337.html",
+  "description": "BOOMELE 2.54mm 1x40P male pin header, straight, through-hole. Standard breadboard/perfboard interconnect. Cut to desired length.",
+  "footprint_name": "HDR-TH_40P-P2.54-V-M-1",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "2.54-1*40P\u76f4\u9488",
+  "name": "header-male-2-54-1x40",
+  "provenance": {
+    "added_at": "2026-06-28T02:28:48Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2337"
+  },
+  "symbol_name": "Header-Male-2.54_1x40",
+  "tags": [
+    "connector",
+    "pin-header",
+    "2.54mm",
+    "male",
+    "1x40",
+    "tht"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Breakaway type \u2014 cut to desired pin count. 40 pins total. Mates with 2.54mm female header/socket. Gold flash plating. Rated 3A per pin."
+}

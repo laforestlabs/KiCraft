@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:4c5d4bdc5fddf6647680e54cc80e0a337cfd0b0ba25b12c35b9448a0bfd9138b",
   "datasheet_url": "https://lcsc.com/product-detail/Surface-Mount-Fuses_BOURNS_MF-MSMF050-2_0-5A-15V-Self-healing-fuse_C17313.html",
-  "description": "BOURNS MF-MSMF050-2",
+  "description": "Bourns MF-MSMF050-2 — PTC resettable fuse, 0.50A hold current, 1.00A trip, 15V max. 1812 SMD package. Polymer PTC — resets after fault removal and cool-down.",
   "footprint_name": "F1812",
   "kicad_version_min": "9.0.0",
   "maturity": "production",
@@ -18,7 +18,14 @@
     "lcsc": "C17313"
   },
   "symbol_name": "MF-MSMF050-2",
-  "tags": [],
+  "tags": [
+    "protection",
+    "fuse",
+    "ptc",
+    "resettable",
+    "1812",
+    "smd"
+  ],
   "version": "0.1.0",
-  "watch_out_for": null
+  "watch_out_for": "Hold current 0.50A, trip current 1.00A at 23°C. Trip current derates at elevated ambient — size for your max expected temperature. 1812 SMD footprint. Max voltage 15V DC."
 }

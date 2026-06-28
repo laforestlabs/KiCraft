@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:ff3822af2a5b4f7f72be98655a0793de14bc7b597c0da02dbd1c86560392cb99",
+  "datasheet_url": "https://lcsc.com/product-detail/PMIC-Current-Power-Monitors-Regulators_TI_INA219AIDCNR_INA219AIDCNR_C87469.html",
+  "description": "TI INA219 \u2014 I2C current/power monitor, \u00b126V common-mode range, 12-bit ADC, programmable gain (\u00f71 to \u00f78). SOT-23-8 (DCN) package. Measures bus voltage (0-26V) and shunt voltage drop (\u00b1320mV max) for true power calculation. No calibration math needed \u2014 reports current in amps and power in watts directly.",
+  "footprint_name": "SOT-23-8_L3.0-W1.7-P0.65-LS2.8-BR",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "INA219AIDCNR",
+  "name": "ina219",
+  "provenance": {
+    "added_at": "2026-06-28T02:31:04Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C87469"
+  },
+  "symbol_name": "INA219AIDCNR",
+  "tags": [
+    "sensor",
+    "current-sense",
+    "power-monitor",
+    "i2c",
+    "sot-23-8"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Shunt resistor NOT included \u2014 choose based on max expected current (e.g., 0.1\u03a9 for 3.2A range). I2C address configurable via A0/A1 pins (16 possible addresses). Vbus measurement range 0-32V but 26V spec max. Input filter recommended for noisy environments. Calibration register must be set after power-up for accurate readings."
+}

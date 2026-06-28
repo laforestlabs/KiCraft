@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:0a1cc51a5fb3415608fca7a4bd101e829b7f9f642d7aaea0915dafe24133b151",
   "datasheet_url": "https://www.lcsc.com/datasheet/C779278.pdf",
-  "description": "Bosch(\u535a\u4e16) BMP388",
+  "description": "Bosch BMP388 — high-performance digital barometric pressure sensor, 300-1250 hPa, ±0.5 hPa relative accuracy, I2C/SPI. LGA-10 package. Successor to BMP280 with better noise performance.",
   "footprint_name": "SENSORM-SMD_BMP388",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

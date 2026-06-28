@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:5dc61c5fa2b3dbfb676d7db83e3d7098080876be7b434c189d5d70f54c2a9c6d",
   "datasheet_url": "https://lcsc.com/product-detail/Magnetic-Sensors_MEMSIC-MMC5603NJ_C404328.html",
-  "description": "MEMSIC(\u7f8e\u65b0) MMC5603NJ",
+  "description": "MEMSIC MMC5603NJ — 3-axis magnetometer, ±30 Gauss range, 20-bit resolution, I2C, zero-drift auto-degaussing. WLP-4 package. Highest dynamic range magnetometer in production.",
   "footprint_name": "FLIPCHIP-4_L0.8-W0.8-R2-C2-P0.40-TL",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:e1776a8aed3f9a657981bdd7527bbb26aac57895e3a18beed76a654f1bf8ac6f",
   "datasheet_url": "https://www.lcsc.com/datasheet/C42422128.pdf",
-  "description": "TDSEMIC(\u62d3\u7535\u534a\u5bfc\u4f53) TTP223-TD",
+  "description": "TDSemicon TTP223 — capacitive touch sensor, single-channel, active-high or active-low output. SOT-23-6 package. 2.0-5.5V supply, ~3µA standby. Direct replacement for mechanical button.",
   "footprint_name": "SOT-23-6_L2.9-W1.6-P0.95-LS2.9-BL",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

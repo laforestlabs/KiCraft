@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:53670dc297232e342dc5c5ccf90120c72e93e3b0d2c42c8c077867142d39f81a",
+  "datasheet_url": "https://lcsc.com/product-detail/Low-Power-OpAmps_MICROCHIP_MCP6001T-I-OT_MCP6001T-I-OT_C116490.html",
+  "description": "Microchip MCP6001 \u2014 single rail-to-rail I/O op-amp, 1.8-6V supply, 1 MHz GBW, 100\u00b5A quiescent current. SOT-23-5 package. The go-to jellybean op-amp for low-voltage single-supply designs.",
+  "footprint_name": "SOT-23-5_L3.0-W1.7-P0.95-LS2.8-BR",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "MCP6001T-I/OT",
+  "name": "mcp6001",
+  "provenance": {
+    "added_at": "2026-06-28T02:31:03Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C116490"
+  },
+  "symbol_name": "MCP6001T-I_OT",
+  "tags": [
+    "analog",
+    "op-amp",
+    "rail-to-rail",
+    "single",
+    "sot-23-5"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Gain-bandwidth product 1 MHz \u2014 not for audio or high-speed. Input bias current ~1pA typical. Phase reversal does NOT occur when input exceeds common-mode range. Output swings within ~25mV of rails. Stable at unity gain with 100pF load."
+}

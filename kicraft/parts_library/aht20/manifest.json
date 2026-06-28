@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:a69f002a66b9482b11a4c1f1eeaabdbbac3edec29ce594e67912fcab91632bee",
   "datasheet_url": "https://www.lcsc.com/datasheet/C2757850.pdf",
-  "description": "\u5e7f\u5dde\u5965\u677e AHT20",
+  "description": "Aosong AHT20 — digital temperature and humidity sensor, I2C interface, ±0.3°C accuracy, 0-100% RH. Factory-calibrated. DFN-6 package.",
   "footprint_name": "SENSOR-SMD_L3.0-W3.0-P1.00-BR",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:1d7419ec0381f78c4dc3cda1cf5495f81234ced59a2fe437ac4e0d703e516786",
   "datasheet_url": "https://lcsc.com/product-detail/Low-Dropout-Regulators-LDO_DIODES_AZ1084CD-3-3TRG1_AZ1084CD-3-3TRG1_C151391.html",
-  "description": "DIODES(\u7f8e\u53f0) AZ1084CD-3.3TRG1",
+  "description": "Diodes AZ1084C — 3.3V fixed LDO regulator, 5A max output, 1.3V typical dropout at 5A. TO-252 (DPAK) package. For high-current 3.3V rails where AMS1117 is insufficient.",
   "footprint_name": "TO-252-2_L6.5-W6.1-P4.58-LS10.0-TL",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:b926452322cce01e941a6a507db96e5c33a2b490874c3fed8a9a462e5b317217",
   "datasheet_url": "https://www.lcsc.com/datasheet/C5148692.pdf",
-  "description": "HXY MOSFET(\u534e\u8f69\u9633\u7535\u5b50) XC6206P332MR",
+  "description": "Torex XC6206P332MR — 3.3V fixed LDO regulator, 200mA max, ultra-low quiescent current ~1µA. SOT-23-3 package. Ultra-low dropout ~250mV at 100mA. Excellent for always-on battery rails with very light loads.",
   "footprint_name": "SOT-23-3_L2.9-W1.3-P1.90-LS2.4-BR",
   "kicad_version_min": "9.0.0",
   "maturity": "production",
@@ -18,7 +18,13 @@
     "lcsc": "C5148692"
   },
   "symbol_name": "XC6206P332MR_C5148692",
-  "tags": [],
+  "tags": [
+    "regulator",
+    "ldo",
+    "linear",
+    "3v3",
+    "sot-23"
+  ],
   "version": "0.1.0",
-  "watch_out_for": null
+  "watch_out_for": "3.3V fixed output, 200mA max. Dropout ~250mV at 100mA. Ultra-low quiescent current ~1µA. SOT-23-3 package. Input cap 1µF + output cap 1µF ceramic minimum. Not suitable for >200mA loads — step up to ME6211 or AP2112K."
 }

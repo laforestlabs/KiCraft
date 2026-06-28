@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:832b8e394251c5da62f14f8a225d3ec9e1ffcd447c41dcd7160c56761cf23f61",
   "datasheet_url": "https://lcsc.com/product-detail/Low-Dropout-Regulators-LDO_ME6211C33M5G-N_C82942.html",
-  "description": "ME6211C33M5G-N",
+  "description": "Microne ME6211C33 — 3.3V fixed LDO, 500mA output, ultra-low dropout ~100mV at 100mA, low quiescent current ~40µA. SOT-23-5 package. Good middle-ground between XC6206 (200mA) and AP2112K (600mA).",
   "footprint_name": "SOT-23-5_L3.0-W1.7-P0.95-LS2.8-BL",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

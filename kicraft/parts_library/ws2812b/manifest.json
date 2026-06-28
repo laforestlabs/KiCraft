@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:34b0a56fe881a42f9dfa040adf977fab86023c613cfd0b802571f2e980f82c15",
   "datasheet_url": "https://www.lcsc.com/datasheet/C2761795.pdf",
-  "description": "worldsemi WS2812B-B/T",
+  "description": "Worldsemi WS2812B — 5×5mm addressable RGB LED with built-in WS2812 IC, 5V supply, 24-bit color. 5050 package. Daisy-chain data: DIN→DOUT. Requires 3.3V→5V level shift on data line when driven by 3.3V MCU.",
   "footprint_name": "LED-SMD_4P-L5.0-W5.0-TL_WS2812B-B",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

@@ -1,10 +1,10 @@
 {
-  "content_hash": "sha256:7c7b26ab5e0f38248ec96e88b8317432ea4373caa9ebc7615e2f4885de004ce6",
+  "content_hash": "sha256:642c0e3b85fd11d0525c8ef55f3a48259620613a48555426901a2ae91b7a4842",
   "datasheet_url": "https://lcsc.com/product-detail/Card-Sockets_TF-01A_C91145.html",
-  "description": "\u97e9\u56fd\u97e9\u8363 TF-01A",
+  "description": "Hroparts TF-01A — microSD card socket, push-push type, SMD with card-detect switch. Accepts standard microSD/microSDHC cards. 9-pin + 2 shield tabs.",
   "footprint_name": "TF-SMD_TF-01A",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "reviewed",
   "mpn": "TF-01A",
   "name": "microsd-tf01a",
   "provenance": {
@@ -18,7 +18,13 @@
     "lcsc": "C91145"
   },
   "symbol_name": "TF-01A",
-  "tags": [],
+  "tags": [
+    "connector",
+    "microsd",
+    "storage",
+    "smd",
+    "card-socket"
+  ],
   "version": "0.3.0",
   "watch_out_for": "Hand-corrected easyeda2kicad import defects. SYMBOL: signal contacts (CMD/CLK/CS/DAT0-3) bidirectional, power (VDD/VSS/GND) power_in, CD passive, Reference 'J' (was 'Card'). FOOTPRINT: the two centre alignment-post holes were thru_hole size=drill=1.00 (0 annular) -> np_thru_hole (NPTH). Re-import will reintroduce both."
 }

@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:772843458e76034725f55d8341c0fd269d79ea661958edd7157c81792c604d23",
+  "datasheet_url": "https://lcsc.com/product-detail/Interface-ICs_TI_TXS0108EPWR_TXS0108EPWR_C17206.html",
+  "description": "TI TXS0108E \u2014 8-bit bidirectional level shifter, auto-direction sensing, 1.4-3.6V \u2194 1.65-5.5V, 60 Mbps max data rate. No direction pin needed. TSSOP-20 package. The standard solution for 3.3V \u2194 5V logic translation.",
+  "footprint_name": "TSSOP-20_L6.5-W4.4-P0.65-LS6.4-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "TXS0108EPWR",
+  "name": "txs0108e",
+  "provenance": {
+    "added_at": "2026-06-28T02:31:05Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C17206"
+  },
+  "symbol_name": "TXS0108EPWR",
+  "tags": [
+    "interface",
+    "level-shifter",
+    "bidirectional",
+    "8-bit",
+    "tssop-20"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Auto-direction sensing works for push-pull and open-drain. ONE-SHOT edge acceleration \u2014 may cause increased EMI on long traces. 10k\u03a9 internal pull-ups on I/O lines. Not suitable for I2C (use PCA9306 or dedicated I2C level shifter). VCCA \u2264 VCCB always. OE pin (active low) can disable all outputs."
+}

@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:266c22021e986e9eb4df0561d62f3a5ab9c274e1a1e7024ca0bfd2994db8daca",
   "datasheet_url": "https://lcsc.com/product-detail/PMIC-Battery-Management_UMW-Youtai-Semiconductor-Co-Ltd-TP4056_C725790.html",
-  "description": "UMW(\u53cb\u53f0\u534a\u5bfc\u4f53) TP4056",
+  "description": "UMW TP4056 — single-cell Li-Ion/LiPo linear charger, 1A max charge current (resistor-programmable), 4.2V float. ESOP-8 package. Charge status output. Standard hobby LiPo charger IC.",
   "footprint_name": "ESOP-8_L4.9-W3.9-P1.27-LS6.0-BL-EP",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

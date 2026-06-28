@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:1694925261df45337a8d4269ebac2cf83b820ab1e8be05654450a2b597c990ae",
   "datasheet_url": "https://www.lcsc.com/datasheet/C2682616.pdf",
-  "description": "ADI(\u4e9a\u5fb7\u8bfa)/MAXIM(\u7f8e\u4fe1) MAX17048G+T10",
+  "description": "Maxim MAX17048 — I2C LiPo fuel gauge with ModelGauge algorithm, no sense resistor needed. TDFN-8 package. Reports % SOC, voltage, and charge rate from a single cell.",
   "footprint_name": "TDFN-8_L2.0-W2.0-P0.50-BL-EP1.2",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

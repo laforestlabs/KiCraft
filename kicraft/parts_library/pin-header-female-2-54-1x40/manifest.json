@@ -1,0 +1,31 @@
+{
+  "content_hash": "sha256:d109235cfbeaa575dfb69a47033055241f56f8e91075a16f4208c16d4cc16cfc",
+  "datasheet_url": "https://lcsc.com/product-detail/Female-Header_2-54mm-1-40-Female-header-height5-7mm_C47940.html",
+  "description": "BOOMELE 2.54mm 1x40P female pin header socket, straight through-hole, square hole. Mates with standard 0.64mm square male pins. Breakaway type \u2014 cut to desired pin count. Gold flash contacts, rated 3A per pin.",
+  "footprint_name": "HDR-TH_40P-P2.54-V-F",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "2.54-1*40P\u6bcd\u9ad85.7",
+  "name": "pin-header-female-2-54-1x40",
+  "provenance": {
+    "added_at": "2026-06-28T02:30:27Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C47940"
+  },
+  "symbol_name": "2.54MM140HEIGHT5.7MM",
+  "tags": [
+    "connector",
+    "pin-header",
+    "2.54mm",
+    "female",
+    "1x40",
+    "tht"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Mates with 0.64mm square male header pins. Break to desired length. Gold flash contacts \u2014 do not mix with tin-only male headers to avoid galvanic corrosion. Rated 3A per pin at 25\u00b0C."
+}

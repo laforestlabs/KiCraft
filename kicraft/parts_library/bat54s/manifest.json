@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:2e6818663a2baf39ebad74ad4564749414f7ab7f6ebb07b6337ac029a07f958c",
+  "datasheet_url": "https://lcsc.com/product-detail/Schottky-Barrier-Diodes-SBD_ON_BAT54SLT1G_BAT54SLT1G_C19726.html",
+  "description": "onsemi BAT54SLT1G \u2014 dual series Schottky diode, 30V reverse, 200mA forward, Vf=320mV at 1mA / 800mV at 100mA. SOT-23-3 package. Common applications: reverse-polarity protection, signal clamping, OR-ing power supplies, and boost converter bootstrap.",
+  "footprint_name": "SOT-23_L2.9-W1.3-P1.90-LS2.4-BR",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "BAT54SLT1G",
+  "name": "bat54s",
+  "provenance": {
+    "added_at": "2026-06-28T02:31:03Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C19726"
+  },
+  "symbol_name": "BAT54SLT1G",
+  "tags": [
+    "diode",
+    "schottky",
+    "dual",
+    "sot-23"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Dual series-connected (common cathode not common anode). Pin 1=A1, Pin 3=A2, Pin 2=common cathode. 30V reverse rating \u2014 not for >24V nominal rails. Leakage current increases with temperature (~2\u00b5A at 25\u00b0C, ~100\u00b5A at 75\u00b0C). SOT-23 marking: 'L1' or 'S4' depending on manufacturer."
+}

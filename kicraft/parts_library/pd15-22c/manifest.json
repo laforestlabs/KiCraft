@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:383ee60e9948c3d040ac27aba23d153874524c4765a84bfac1f4015cbfd0245d",
   "datasheet_url": "https://lcsc.com/product-detail/Infrared-Receivers_PD15-22C-TR8_C146236.html",
-  "description": "EVERLIGHT(\u4ebf\u5149) PD15-22C/TR8",
+  "description": "Everlight PD15-22C — high-speed silicon PIN photodiode, 940nm peak sensitivity, 1.5×1.5mm active area. SMD package. Fast rise time ~50ns for IR remote/communication.",
   "footprint_name": "SENSOR-SMD_PD15-22C-TR8",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

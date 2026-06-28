@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:c835764413e622fe83024c02b5a9b50c6e9f7ef7761be4eddbd62c859d4e1dff",
   "datasheet_url": "https://lcsc.com/product-detail/Motion-Sensors-Accelerometers_STMicroelectronics_LIS2DH12TR_STMicroelectronics-LIS2DH12TR_C110926.html",
-  "description": "ST(\u610f\u6cd5\u534a\u5bfc\u4f53) LIS2DH12TR",
+  "description": "ST LIS2DH12 — ultra-low-power 3-axis accelerometer, ±2/4/8/16g ranges, I2C/SPI, 0.5µA in low-power mode. LGA-12 package. Motion-triggered wake-up interrupt.",
   "footprint_name": "LGA-12_L2.0-W2.0-P0.50-BL",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

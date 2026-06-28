@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:cbbb449ba3bd4e7d3a7b569abfd42dee6ab8583f9032a30021a1854fc528da6a",
+  "datasheet_url": "https://lcsc.com/product-detail/Timer_UMW-Youtai-Semiconductor-Co-Ltd-NE555DR_C695838.html",
+  "description": "UMW NE555 \u2014 precision timer IC, 4.5-16V supply, up to 100kHz astable operation. SOP-8 package. The classic 555 timer for monostable/astable multivibrator, PWM generation, missing-pulse detection, and pulse-width modulation.",
+  "footprint_name": "SOP-8_L5.0-W4.0-P1.27-LS6.0-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "NE555DR",
+  "name": "ne555",
+  "provenance": {
+    "added_at": "2026-06-28T02:31:05Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C695838"
+  },
+  "symbol_name": "NE555DR_C695838",
+  "tags": [
+    "analog",
+    "timer",
+    "sop-8"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Bipolar (not CMOS) \u2014 output can source/sink 200mA. Reset pin (active low) must be tied to VCC if unused. Control voltage pin should have 10nF to GND for noise immunity. Timing accuracy depends on capacitor quality \u2014 use film or NP0/C0G ceramic for timing. TLC555 (CMOS version) preferred for low-power/battery applications."
+}

@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:b527c2cfb9d7051abe44091fd668c2847c603a5e042a4e8c19addd3115eadd49",
   "datasheet_url": "https://lcsc.com/product-detail/DC-DC-Converters_Texas-Instruments_TLV62569DBVR_Texas-Instruments-TI-TLV62569DBVR_C141836.html",
-  "description": "TI(\u5fb7\u5dde\u4eea\u5668) TLV62569DBVR",
+  "description": "TI TLV62569 — 3.3V fixed-output synchronous buck converter, 2A, 2.5-5.5V input. SOT-23-5 package. 1.5MHz switching frequency, tiny 2.2µH inductor.",
   "footprint_name": "SOT-23-5_L3.0-W1.7-P0.95-LS2.8-BR",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

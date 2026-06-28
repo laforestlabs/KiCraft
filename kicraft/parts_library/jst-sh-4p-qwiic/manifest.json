@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:5df6a8c230cbe2d8e1428671b066362898e22cf4cc3578b8664994903ab6027a",
   "datasheet_url": "https://lcsc.com/product-detail/Others_JST-Sales-America__JST-Sales-America-SM04B-SRSS-TB-LF-SN_C160404.html",
-  "description": "JST SM04B-SRSS-TB(LF)(SN)",
+  "description": "JST SM04B-SRSS-TB — 4-pin SH-series wire-to-board connector, 1.0mm pitch, side-entry SMD. Used in Qwiic/Stemma QT ecosystem. Mates with JST SHR-04V-S-B crimp housing.",
   "footprint_name": "CONN-SMD_4P-P1.00_SM04B-SRSS-TB-LF-SN",
   "kicad_version_min": "9.0.0",
   "maturity": "production",
@@ -18,7 +18,15 @@
     "lcsc": "C160404"
   },
   "symbol_name": "SM04B-SRSS-TB",
-  "tags": [],
+  "tags": [
+    "connector",
+    "jst",
+    "sh",
+    "i2c",
+    "qwiic",
+    "4-pin",
+    "smd"
+  ],
   "version": "0.1.0",
-  "watch_out_for": null
+  "watch_out_for": "1.0mm pitch — fine-pitch soldering. Mates with JST SH 1.0mm plugs. Qwiic/Stemma standard pinout: 1=GND(black), 2=VCC(red), 3=SDA(blue), 4=SCL(yellow). Not keyed — verify orientation."
 }

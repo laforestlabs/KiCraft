@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:86f03212e63edf544820a63cbc0bddac4958d37bd76e9208fdebbb8dca934c4d",
   "datasheet_url": "https://www.lcsc.com/datasheet/C2678753.pdf",
-  "description": "NXP(\u6069\u667a\u6d66) PCA9685PW,118",
+  "description": "NXP PCA9685 — 16-channel 12-bit PWM driver, I2C controlled, 5.5V tolerant outputs. TSSOP-28 package. Built-in 25MHz oscillator. The standard servo/LED PWM driver.",
   "footprint_name": "TSSOP-28_L9.7-W4.4-P0.65-LS6.4-TL",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

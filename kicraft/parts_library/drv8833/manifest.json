@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:66ec2918b4b37ede67362f9869bbf245cc0dc66ed9114ec8b58a925b684c7ecb",
   "datasheet_url": "https://lcsc.com/product-detail/Motor-Drivers_TI_DRV8833PWP_DRV8833PWP_C50506.html",
-  "description": "TI(\u5fb7\u5dde\u4eea\u5668) DRV8833PWPR",
+  "description": "TI DRV8833 — dual H-bridge motor driver, 2.7-10.8V motor supply, 1.5A continuous per channel (2A peak). TSSOP-16 package. Low RDS(on) ~550mΩ HS+LS.",
   "footprint_name": "TSSOP-16_L5.0-W4.4-P0.65-LS6.4-BL-EP",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:e1651ee5ee8351d3d4c33b0819a84f4140e9e5e3c9dd1d3e0a195c594a510140",
   "datasheet_url": "https://lcsc.com/product-detail/Logic-ICs_TI_TCA9548APWR_TCA9548APWR_C130026.html",
-  "description": "TI(\u5fb7\u5dde\u4eea\u5668) TCA9548APWR",
+  "description": "TI TCA9548A — I2C 8-channel multiplexer with reset, 1.65-5.5V. TSSOP-24 package. Switch between 8 downstream I2C buses with voltage-level translation per channel.",
   "footprint_name": "TSSOP-24_L7.8-W4.4-P0.65-LS6.4-BL",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

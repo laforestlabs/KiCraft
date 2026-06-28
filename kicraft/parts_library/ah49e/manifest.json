@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:0324bfe757719581f2e3c05872d8c16232393446ce7977b1bd94c298f5bdf5b1",
   "datasheet_url": "https://lcsc.com/product-detail/Others_Diodes-Incorporated_AH49ENTR-G1_Diodes-Incorporated-AH49ENTR-G1_C314698.html",
-  "description": "DIODES(\u7f8e\u53f0) AH49ENTR-G1",
+  "description": "Diodes AH49E — ratiometric linear Hall-effect sensor, 2.5-5.5V supply, analog output proportional to magnetic flux density. SOT-23 package. Omnipolar.",
   "footprint_name": "SOT-23-3_L2.9-W1.3-P1.90-LS2.4-BR",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

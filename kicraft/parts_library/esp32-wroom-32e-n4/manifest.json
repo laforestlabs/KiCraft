@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:7fe4076b5e9b067f7fc3b6808b98fda45f029890fb16d7ad7280077ea28c9c8f",
   "datasheet_url": "https://lcsc.com/product-detail/WIFI-Modules_Espressif-Systems-ESP32-WROOM-32E-4MB_C701341.html",
-  "description": "ESPRESSIF(\u4e50\u946b) ESP32-WROOM-32E-N4",
+  "description": "Espressif ESP32-WROOM-32E — dual-core Xtensa LX6 MCU module (240 MHz), 4MB flash, 2.4GHz Wi-Fi + Bluetooth 4.2/5.0. The default go-to ESP32 module for most designs. 18×25.5mm PCB antenna.",
   "footprint_name": "WIFI-SMD_ESP32-WROOM-32E",
   "kicad_version_min": "9.0.0",
   "maturity": "production",
@@ -18,7 +18,14 @@
     "lcsc": "C701341"
   },
   "symbol_name": "ESP32-WROOM-32E",
-  "tags": [],
+  "tags": [
+    "mcu",
+    "microcontroller",
+    "wifi",
+    "bluetooth",
+    "esp32",
+    "module"
+  ],
   "version": "0.1.0",
-  "watch_out_for": null
+  "watch_out_for": "3.3V logic only — all GPIOs are NOT 5V tolerant. 500mA peak current; a 500mA LDO minimum. EN pin needs RC delay (10kΩ + 1µF) for reliable boot. Strapping pins: GPIO0/2/5/12/15 affect boot mode."
 }

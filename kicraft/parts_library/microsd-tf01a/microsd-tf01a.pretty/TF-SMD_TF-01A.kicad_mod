@@ -40,7 +40,7 @@
 	(fp_line (start -7.38 -4.93) (end 7.38 -4.93) (layer F.CrtYd) (width 0.05))
 	(fp_line (start 7.38 -4.93) (end 7.38 9.57) (layer F.CrtYd) (width 0.05))
 	(fp_line (start 7.38 9.57) (end -7.38 9.57) (layer F.CrtYd) (width 0.05))
-	(model "/TF-SMD_TF-01A.wrl"
+	(model "${KIPRJMOD}/3dmodels/microsd-tf01a/TF-SMD_TF-01A.wrl"
 		(offset (xyz 0.000 0.000 0.000))
 		(scale (xyz 1 1 1))
 		(rotate (xyz 0 0 0))

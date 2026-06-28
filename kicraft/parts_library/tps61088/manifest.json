@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:1d4f6683783e9c13aedab9eb8e032a37fc3e4bd232126094ad3449ea1f24eaa9",
   "datasheet_url": "https://lcsc.com/product-detail/DC-DC-Converters_TI_TPS61088RHLR_TPS61088RHLR_C87357.html",
-  "description": "TI(\u5fb7\u5dde\u4eea\u5668) TPS61088RHLR",
+  "description": "TI TPS61088 — 10A synchronous boost converter, 2.7-12V input, up to 12.6V output. VQFN-20 package. Integrated 11mΩ/13mΩ power MOSFETs. For high-current boost: USB-PD, battery-to-5V, LED backlight.",
   "footprint_name": "VQFN-20_L4.6-W3.6-P0.50-BL",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

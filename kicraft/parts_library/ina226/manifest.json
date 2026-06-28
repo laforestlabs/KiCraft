@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:80fa509895efef03f7a598215d923214d3bc6e452698d81a577ec98f13d0c89d",
   "datasheet_url": "https://lcsc.com/product-detail/PMIC-Current-Regulation_TI_INA226AIDGSR_INA226AIDGSR_C49851.html",
-  "description": "TI(\u5fb7\u5dde\u4eea\u5668) INA226AIDGSR",
+  "description": "TI INA226 — I2C current/power monitor with 16-bit ADC, 0-36V bus voltage, programmable shunt full-scale range. MSOP-10 package. Measures both shunt voltage and bus voltage for true power calculation.",
   "footprint_name": "MSOP-10_L3.0-W3.0-P0.50-LS5.0-BL",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

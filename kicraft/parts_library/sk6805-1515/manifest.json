@@ -1,10 +1,10 @@
 {
   "content_hash": "sha256:33b981cf179cb4b89d70ee1ee95c31375be26c7b151ee49ec00e3d593b144640",
   "datasheet_url": "https://www.lcsc.com/datasheet/C2890035.pdf",
-  "description": "\u6b27\u601d\u79d1\u5149\u7535 SK6805-EC15",
+  "description": "Opsco SK6805-EC15 — 1.5×1.5mm addressable RGB LED, built-in IC, 5V supply. 1515 package. Smaller alternative to SK6812/WS2812 for ultra-compact designs.",
   "footprint_name": "LED-SMD_4P-L1.5-W1.5-BL",
   "kicad_version_min": "9.0.0",
-  "maturity": "reviewed",
+  "maturity": "production",
   "mpn": "SK6805-EC15",
   "name": "sk6805-1515",
   "provenance": {
@@ -18,7 +18,14 @@
     "lcsc": "C2890035"
   },
   "symbol_name": "SK6805-EC15",
-  "tags": [],
+  "tags": [
+    "led",
+    "addressable",
+    "rgb",
+    "1515",
+    "mini",
+    "smd"
+  ],
   "version": "0.1.0",
   "watch_out_for": "Genuine 1.5x1.5mm addressable RGB LED (SK6805-EC15, LCSC C2890035), WS2812-protocol compatible. easyeda2kicad symbol pins verified correct: DIN(1)/VDD(2)/DOUT(3)/GND(4), data pins diagonal. Use this for '1515' array requests."
 }

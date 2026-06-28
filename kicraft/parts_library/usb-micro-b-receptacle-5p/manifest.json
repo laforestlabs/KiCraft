@@ -1,0 +1,31 @@
+{
+  "content_hash": "sha256:065eed8304006d35a2a20df368e20eb38256f700262f8c628a963fe4e611e57c",
+  "datasheet_url": "https://lcsc.com/product-detail/Micro-USB-Connectors_micro-5PFour-feet-full-of-sticks-without-holes0-2Half-gold-tin-High-temperature_C40945.html",
+  "description": "USB micro-B receptacle, 5-pin SMD with through-hole shield tabs. Standard USB 2.0 device-side connector for embedded boards. 5-pin includes ID pin for OTG host/device detection.",
+  "footprint_name": "MICRO-USB-SMD_5P_C40945",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "920-D62A2021S10106",
+  "name": "usb-micro-b-receptacle-5p",
+  "provenance": {
+    "added_at": "2026-06-28T02:30:35Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C40945"
+  },
+  "symbol_name": "USB-micro-B-5P",
+  "tags": [
+    "connector",
+    "usb",
+    "micro-usb",
+    "receptacle",
+    "5-pin",
+    "smd"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Pin 4 (ID): float = B-device, grounded = OTG A-device. Shield tabs need solid GND pour. Micro-USB is mechanically weaker than USB-C. ESD protection on D+/D- strongly recommended. 5-pin micro-B, not micro-A (visually similar but incompatible)."
+}

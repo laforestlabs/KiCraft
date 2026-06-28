@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:8f0c5bca2e7eed84c26d88e02ce416e11675695e4c845e3fe920e1142ef32d93",
   "datasheet_url": "https://www.lcsc.com/datasheet/C910588.pdf",
-  "description": "Nsiway(\u7eb3\u82af\u5a01) NS4168",
+  "description": "Nsiway NS4168 — 5W mono Class-D audio amplifier, I2S digital input, 2.5-6.5V supply. ESOP-8 package. Filterless output — direct speaker drive.",
   "footprint_name": "ESOP-8_L4.9-W3.9-P1.27-LS6.0-BL-EP",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:9570ce82bb40459e748acf134fee8262a2c4d792dfb3569e8d7c12c70fcbd403",
   "datasheet_url": "https://lcsc.com/product-detail/USB_CH340C_C84681.html",
-  "description": "WCH(\u5357\u4eac\u6c81\u6052) CH340C",
+  "description": "WCH CH340C — USB 2.0 full-speed to UART bridge, built-in crystal oscillator, supports 5V and 3.3V I/O. SOP-16 package. CTS/RTS hardware flow control. Drivers available for all major OSes.",
   "footprint_name": "SOP-16_L10.0-W3.9-P1.27-LS6.0-BL",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

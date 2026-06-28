@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:4bd2cf217c2958aef0939782c5f53b3e4bc7a3fba5975f10d94b8f06a4784772",
   "datasheet_url": "https://lcsc.com/product-detail/Real-time-Clocks_GATEMODE-BM8563ESA_C269877.html",
-  "description": "GATEMODE(\u6377\u8302\u5fae) BM8563ESA",
+  "description": "GateMode BM8563 — I2C real-time clock/calendar with alarm and timer functions, 1.2-5.5V supply, 0.5µA backup current. SOP-8 package. Drop-in for PCF8563.",
   "footprint_name": "SOP-8_L5.0-W4.0-P1.27-LS6.0-BL",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

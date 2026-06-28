@@ -1,7 +1,7 @@
 {
   "content_hash": "sha256:5f4a34c36960e4a39692c19d19f92d90d54332c59ecf0fed824d114ebec533c9",
   "datasheet_url": "https://www.lcsc.com/datasheet/C504893.pdf",
-  "description": "VISHAY(\u5a01\u4e16) VEML7700-TR",
+  "description": "Vishay VEML7700 — I2C ambient light sensor, 0-120 klx range, 16-bit resolution. SMD-4 package. Human-eye response curve. Ultra-low shutdown current ~0.5µA.",
   "footprint_name": "LED-SMD_4P-L6.8-W2.4_VEML7700-TR",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

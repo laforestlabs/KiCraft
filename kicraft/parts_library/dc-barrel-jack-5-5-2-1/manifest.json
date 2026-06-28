@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:6be09ba4aeca11c975bded27c0fdbd2bc869328d1f3fb3387abbf362a8f95025",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C9900003477.pdf",
+  "description": "DC-005 style barrel jack, 5.5mm outer / 2.1mm inner diameter, through-hole with 3 contacts (center pin + outer sleeve + switch). Standard DC power input for embedded boards. Built-in normally-closed switch detects plug insertion.",
+  "footprint_name": "DC-IN-TH_DC005-5.5-2.1",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "DC005\u56db\u811a\u8d34\u72475.5*2.1",
+  "name": "dc-barrel-jack-5-5-2-1",
+  "provenance": {
+    "added_at": "2026-06-28T02:30:27Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C9900003477"
+  },
+  "symbol_name": "DC0055.52.1",
+  "tags": [
+    "connector",
+    "barrel-jack",
+    "dc-power",
+    "5.5mm",
+    "tht"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Center-positive is standard but verify your wall adapter. Switch contact allows battery/DC auto-switching: connect battery to switch pin and load from center pin. Not suitable above 24V/3A. Add reverse-polarity protection on the input rail."
+}
