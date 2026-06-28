@@ -1,0 +1,35 @@
+{
+  "content_hash": "sha256:c9223712e8e749a1231351d9203d1207c93e47e123311504f76a5467fbd4550f",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C7437327.pdf",
+  "description": "Amass 24.245.2 \u2014 4mm banana socket (female jack), black, straight/long-body, through-hole PCB mount. 33mm body extends well past board edge for enclosure access. Accepts standard 4mm banana plugs. 24A 1kV rated. Four mounting legs + center signal contact.",
+  "footprint_name": "ANT-TH_L33.0-W12.0_BLACK",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "24.245.2",
+  "name": "banana-jack-black",
+  "provenance": {
+    "added_at": "2026-06-28T13:41:14Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C7437327"
+  },
+  "symbol_name": "24.245.2",
+  "tags": [
+    "connector",
+    "banana",
+    "jack",
+    "socket",
+    "4mm",
+    "binding-post",
+    "test-equipment",
+    "tht",
+    "black",
+    "high-voltage"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Long-body design (33mm) \u2014 ideal for protruding through enclosure walls. Four THT mounting legs (1.3mm drill, 10.16mm square pitch) + center signal pad (2.2mm drill). 1kV/24A rating. Mates with standard 4mm banana plugs. Red variant: Amass 24.245.1 (C7437326)."
+}
