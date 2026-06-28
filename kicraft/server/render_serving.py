@@ -116,6 +116,30 @@ def serve_project_render(token: str, subpath: str):
     )
 
 
+@app.get("/project/{token}/board/{subpath:path}")
+def serve_project_board(token: str, subpath: str):
+    """Serve a .kicad_pcb from any subdirectory of a tokened project dir.
+
+    The place/route progress UI renders live KiCanvas views of the current
+    leaf and parent boards as they are being placed and routed, and those
+    live deep in .experiments/. This endpoint allows fetching them with
+    the same token-gated security as serve_project_render but for .kicad_pcb
+    files instead of .png renders.
+    """
+    base = _resolve_project_token(token)
+    if base is None:
+        return PlainTextResponse("not found", status_code=404)
+    target = (base / subpath).resolve()
+    if (not target.is_relative_to(base.resolve())
+            or target.suffix != ".kicad_pcb" or not target.is_file()):
+        return PlainTextResponse("not found", status_code=404)
+    return FileResponse(
+        str(target),
+        media_type="text/plain; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 # Part-library previews: KiCanvas can't render a bare .kicad_sym/.kicad_mod, so the
 # /parts catalog shows symbols and footprints as SVGs produced by kicad-cli and cached
 # by content-hash (see parts_catalog). These are library reference assets (no per-user

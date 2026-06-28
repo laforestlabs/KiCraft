@@ -519,6 +519,44 @@ def _leaf_layout_progress(project_dir: Path, token: str) -> list[dict]:
     return out
 
 
+def _live_board_urls(run_status: dict, project_dir: Path, token: str) -> dict:
+    """KiCanvas source URLs for the current leaf and parent boards on disk.
+
+    Reads ``preview_paths`` from run_status.json (written by the layout engine)
+    and returns a dict with ``leaf`` and ``parent`` keys, each a (url, filename)
+    tuple or None. Prefers routed over stamped boards.
+    """
+    previews = run_status.get("preview_paths") or {}
+    hier = run_status.get("hierarchy") or {}
+    if not previews:
+        previews = hier.get("preview_paths") or {}
+    result = {"leaf": None, "parent": None}
+
+    def _relative(p: str) -> str | None:
+        try:
+            return Path(p).resolve().relative_to(project_dir.resolve()).as_posix()
+        except (ValueError, OSError):
+            return None
+
+    for key in ("leaf_round_routed_board", "leaf_round_pre_route_board"):
+        p = previews.get(key)
+        if p and Path(p).is_file():
+            rel = _relative(p)
+            if rel:
+                result["leaf"] = (f"/project/{token}/board/{rel}", Path(p).name)
+                break
+
+    for key in ("parent_routed_board", "parent_stamped_board"):
+        p = previews.get(key)
+        if p and Path(p).is_file():
+            rel = _relative(p)
+            if rel:
+                result["parent"] = (f"/project/{token}/board/{rel}", Path(p).name)
+                break
+
+    return result
+
+
 def _nonpower_symbol_count(sch_path: Path) -> int:
     """Number of placed (non-power) symbol instances in a ``.kicad_sch``.
 
@@ -594,29 +632,119 @@ def _render_synth_view(
     return view
 
 
-def _render_leaf_gallery(prog: list[dict], run_status: dict) -> None:
-    """Per-leaf placement/route thumbnails for the Place/Route tab, so the build
-    communicates progress (placement renders appear before routing). Built inside
-    the place_route view_slot; the caller clears the slot before each rebuild."""
+def _fmt_duration(seconds: float) -> str:
+    """Human-readable duration: ``2m 34s`` or ``48s``."""
+    if seconds < 1:
+        return "0s"
+    m, s = divmod(int(seconds), 60)
+    if m > 0:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def _fmt_eta(seconds: float) -> str:
+    """Human-readable ETA: ``~2m`` or ``<1m``."""
+    if seconds < 1:
+        return "<1m"
+    m = round(seconds / 60)
+    if m < 1:
+        return "<1m"
+    return f"~{m}m"
+
+
+def _build_place_route_progress(run_status: dict, leaf_prog: list[dict]) -> dict:
+    """Build a 'progress' inspector section from run_status.json fields."""
     h = run_status.get("hierarchy") or {}
-    lw = h.get("leaf_workers") or {}
-    total = h.get("leaf_total")
+    phase_raw = run_status.get("phase", "")
+    pct = run_status.get("progress_percent", 0)
+    elapsed = run_status.get("elapsed_s", 0)
+    eta = run_status.get("eta_s", 0)
     action = h.get("current_action") or run_status.get("current_action") or ""
-    head = "Leaf layout progress"
-    if total:
-        head += f"  ({lw.get('completed') or 0}/{total} leaves)"
-    ui.label(head).classes("text-xs font-medium").style("color:#94a3b8")
-    if action:
-        ui.label(str(action)).classes("text-xs").style("color:#64748b")
-    with ui.row().classes("w-full flex-wrap gap-2"):
-        for d in prog:
-            chip = "#34d399" if d["status"] == "Routed" else "#fbbf24"
-            with ui.column().classes("gap-0 items-center").style("width:118px"):
-                ui.image(d["url"]).classes("w-full rounded border border-slate-700") \
-                    .style("background:#0b1120")
-                ui.label(d["sheet_name"]).classes("text-xs truncate w-full text-center") \
-                    .style("color:#cbd5e1")
-                ui.label(d["status"]).classes("text-xs").style(f"color:{chip}")
+
+    if phase_raw == "done" or h.get("current_stage") == "complete":
+        phase = "Layout complete"
+        bar_color = "#34d399"
+        action = f"{h.get('leaf_total','?')} leaves, parent routed"
+    elif h.get("current_stage") == "leaves" or phase_raw == "leaf":
+        phase = "Leaf phase"
+        bar_color = "#60a5fa"
+        completed = h.get("leaf_workers", {}).get("completed", 0)
+        total = h.get("leaf_total", 0)
+        if total:
+            action = f"solving leaf circuits ({completed}/{total})"
+    elif h.get("current_stage") == "parent" or phase_raw in ("parent", "compose"):
+        phase = "Parent phase"
+        bar_color = "#a78bfa"
+        round_num = run_status.get("round", 0)
+        total_rounds = run_status.get("total_rounds", 0)
+        if total_rounds:
+            action = f"compose + route round {round_num}/{total_rounds}"
+    else:
+        phase = "Place & route"
+        bar_color = "#60a5fa"
+
+    elapsed_str = _fmt_duration(elapsed) if elapsed else ""
+    eta_str = _fmt_eta(eta) if eta and phase_raw != "done" else ""
+
+    chips = []
+    for d in (leaf_prog or []):
+        chips.append({
+            "label": d.get("sheet_name", "?"),
+            "done": d.get("status") == "Routed",
+            "active": d.get("status") == "Placed",
+        })
+
+    return {
+        "type": "progress",
+        "title": "Layout progress",
+        "phase": phase,
+        "action": action,
+        "percent": pct,
+        "elapsed": elapsed_str,
+        "eta": eta_str,
+        "bar_color": bar_color,
+        "items": chips,
+    }
+
+
+def _render_leaf_gallery(prog: list[dict], run_status: dict) -> None:
+    """Render live KiCanvas views of the current leaf and parent boards, plus
+    completed leaf thumbnails below. Built inside the place_route view_slot;
+    the caller clears the slot before each rebuild."""
+    leaf_src = run_status.get("_live_leaf_source")
+    parent_src = run_status.get("_live_parent_source")
+
+    if leaf_src or parent_src:
+        with ui.row().classes("w-full gap-2").style(
+                "height:calc(100vh - 500px);min-height:320px"):
+            with ui.column().classes("flex-1 min-w-0 h-full gap-1"):
+                ui.label("Current leaf").classes("text-xs font-medium").style("color:#60a5fa")
+                if leaf_src:
+                    KiCanvasView([KiCanvasSource(leaf_src[0], leaf_src[1])],
+                                 height="", style="flex:1;min-height:0")
+                else:
+                    ui.label("(waiting for leaf board…)").classes("text-xs italic") \
+                        .style("color:#64748b")
+            with ui.column().classes("flex-1 min-w-0 h-full gap-1"):
+                ui.label("Parent board").classes("text-xs font-medium").style("color:#a78bfa")
+                if parent_src:
+                    KiCanvasView([KiCanvasSource(parent_src[0], parent_src[1])],
+                                 height="", style="flex:1;min-height:0")
+                else:
+                    ui.label("(waiting for parent board…)").classes("text-xs italic") \
+                        .style("color:#64748b")
+
+    if prog:
+        ui.label("Leaves").classes("text-xs font-medium mt-2").style("color:#94a3b8")
+        with ui.row().classes("w-full flex-wrap gap-2"):
+            for d in prog:
+                chip = "#34d399" if d.get("status") == "Routed" else "#fbbf24"
+                with ui.column().classes("gap-0 items-center").style("width:118px"):
+                    ui.image(d.get("url", "")).classes("w-full rounded border border-slate-700") \
+                        .style("background:#0b1120")
+                    ui.label(d.get("sheet_name", "?")).classes(
+                        "text-xs truncate w-full text-center").style("color:#cbd5e1")
+                    ui.label(d.get("status", "?")).classes("text-xs").style(f"color:{chip}")
 
 
 def _mtime(path: Path) -> float | None:
@@ -1052,13 +1180,25 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
 
     if stage == "place_route":
         secs = []
-        scalars = [(k, v) for k, v in (run_status or {}).items()
-                   if isinstance(v, (str, int, float, bool))]
-        if scalars:
-            secs.append({"type": "kv", "title": "Run status", "rows": scalars})
-        log = _build_lines_for("place_route", build_lines)
-        if log:
-            secs.append({"type": "list", "title": "Place / route", "items": log})
+        if run_status:
+            leaf_prog = run_status.get("_leaf_progress") or []
+            secs.append(_build_place_route_progress(run_status, leaf_prog))
+            h = run_status.get("hierarchy") or {}
+            copper = h.get("copper_accounting") or {}
+            kv_rows = []
+            for k in ("best_score", "kept_count"):
+                v = run_status.get(k)
+                if v is not None:
+                    kv_rows.append((k, v))
+            if copper:
+                kv_rows.append(("traces", copper.get("routed_total_trace_count", "?")))
+                kv_rows.append(("vias", copper.get("routed_total_via_count", "?")))
+            if kv_rows:
+                secs.append({"type": "kv", "title": "Stats", "rows": kv_rows})
+        else:
+            log = _build_lines_for("place_route", build_lines)
+            if log:
+                secs.append({"type": "list", "title": "Place / route", "items": log})
         return secs
 
     if stage == "electrical_review":
@@ -5015,25 +5155,31 @@ def index(prompt: str = "", project: str = ""):
                     # mark it for a re-fit when the user first reveals it.
                     view["sch_revealed"] = tabs.active() == "synthesize"
 
-            # Place/route: a per-leaf placement gallery streams progress while the
-            # board builds; the routed parent replaces it once the build succeeds.
+            # Place/route: live progress bar (inspector) + KiCanvas board views
+            # (view_slot) during the build, replaced by the final PCB when done.
             if project_dir is not None:
                 rmt = _mtime(project_dir / ".experiments" / "run_status.json")
                 if rmt and rmt != view["run_mtime"]:
                     view["run_mtime"] = rmt
                     rs = _read_run_status(project_dir)
+                    if rs and state.get("token"):
+                        # Inject live board URLs + leaf progress so the inspector
+                        # and view_slot renderers can use them without re-reading disk.
+                        urls = _live_board_urls(rs, project_dir, state["token"])
+                        rs["_live_leaf_source"] = urls["leaf"]
+                        rs["_live_parent_source"] = urls["parent"]
+                        rs["_leaf_progress"] = _leaf_layout_progress(project_dir, state["token"])
                     tabs.set_inspector("place_route", _inspector_spec(
                         "place_route", {}, rs, project_dir, view["build_lines"]))
                     if (not state["pcb_ready"] and state["token"]
                             and not view.get("layout_editor")):
-                        prog = _leaf_layout_progress(project_dir, state["token"])
-                        sig = tuple((d["sheet_name"], d["status"]) for d in prog)
-                        if prog and sig != view["leaf_progress_sig"]:
-                            view["leaf_progress_sig"] = sig
-                            slot = tabs.view_slot("place_route")
-                            slot.clear()
-                            with slot:
-                                _render_leaf_gallery(prog, rs)
+                        prog = rs.get("_leaf_progress") or []
+                        # Rebuild whenever run_status changes (leaf completion,
+                        # phase transitions, board URLs update).
+                        slot = tabs.view_slot("place_route")
+                        slot.clear()
+                        with slot:
+                            _render_leaf_gallery(prog, rs)
                 if state["pcb_ready"] and not view.get("layout_editor"):
                     pcb_name = f"{state['stem']}.kicad_pcb"
                     pcb_path = project_dir / pcb_name

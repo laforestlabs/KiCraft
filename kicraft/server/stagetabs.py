@@ -559,6 +559,53 @@ def _render_section(sec: dict, accent: str) -> None:
                         ui.label(f"→ {suggestion}").classes("text-xs italic mt-1")                             .style(f"color:{_DIMMER}")
 
 
+    elif kind == "progress":
+        pct = max(0, min(100, int(float(sec.get("percent", 0)))))
+        phase = sec.get("phase", "")
+        action = sec.get("action", "")
+        elapsed = sec.get("elapsed", "")
+        eta = sec.get("eta", "")
+        bar_color = sec.get("bar_color", accent)
+        with ui.column().classes("w-full gap-1.5"):
+            # Phase + action label
+            if phase:
+                with ui.row().classes("w-full no-wrap gap-2 items-center"):
+                    ui.label(phase).classes("text-sm font-semibold")                         .style(f"color:{bar_color}")
+                    if action:
+                        ui.label(action).classes("text-xs").style(f"color:{_DIMMER}")
+            # Progress bar (pure CSS, no JS)
+            with ui.element("div").classes("w-full").style(
+                    "height:8px;border-radius:4px;background:#1e293b;overflow:hidden"):
+                with ui.element("div").style(
+                        f"height:100%;width:{pct}%;border-radius:4px;"
+                        f"background:{bar_color};transition:width 0.5s"):
+                    pass
+            ui.label(f"{pct}%").classes("text-xs font-mono").style(f"color:{_DIMMER}")
+            # Elapsed / ETA line
+            if elapsed or eta:
+                parts = []
+                if elapsed:
+                    parts.append(f"Elapsed: {elapsed}")
+                if eta:
+                    parts.append(f"ETA: {eta}")
+                ui.label(" · ".join(parts)).classes("text-xs").style(f"color:{_DIMMER}")
+        # Leaf status chips (if present)
+        items = sec.get("items") or []
+        if items:
+            with ui.row().classes("w-full flex-wrap gap-1.5 mt-1"):
+                for it in items:
+                    label = it.get("label", "?")
+                    done = it.get("done", False)
+                    active = it.get("active", False)
+                    if done:
+                        chip_color = _OK; bg = "rgba(52,211,153,0.15)"
+                    elif active:
+                        chip_color = bar_color; bg = "rgba(96,165,250,0.15)"
+                    else:
+                        chip_color = _DIMMER; bg = "rgba(100,116,139,0.08)"
+                    ui.label(label).classes("text-xs px-1.5 py-0.5 rounded")                         .style(f"color:{chip_color};background:{bg}")
+
+
 def _cell_html(cell) -> str:
     """One <td> body. A cell is either a scalar (rendered as escaped text) or a
     ``{"text", "href"}`` dict (rendered as a new-tab link, e.g. a vendor lookup)."""
