@@ -13,7 +13,8 @@ import shutil
 import pytest
 
 from kicraft.design.models import (
-    BOM, Architecture, BomPart, NetConnection, PinEndpoint, Sheet)
+    BOM, Architecture, BomPart, InterSheetNet, NetConnection, PinEndpoint,
+    Sheet, SheetPin)
 from kicraft.design.synthesis.emitter import emit_schematic
 from kicraft.design.synthesis.symbol_library import DEFAULT_KICAD_SYMBOL_DIR
 from kicraft.design.synthesis.validation import check_erc
@@ -115,9 +116,58 @@ def _usb_uart() -> tuple[Architecture, BOM]:
     return arch, bom
 
 
+def _usb_pd_buck() -> tuple[Architecture, BOM]:
+    """KC-W93GXR shape: a SOURCE sheet whose connector feeds an intermediate
+    input bus V20_BUS (undriven -- connector pins are passive) that crosses to a
+    BUCK sheet feeding the regulator's VI (power_in). V20_BUS misses the
+    power-NAME patterns, so it is rendered as a hierarchical (signal) inter-sheet
+    net; its PWR_FLAG must be placed by route_sheet for ERC to pass."""
+    source = Sheet(name="SOURCE", stem="SOURCE", function="usb-pd input")
+    buck = Sheet(name="BUCK", stem="BUCK", function="buck")
+    arch = Architecture(
+        sheets=[source, buck],
+        power_nets=["V20_BUS", "+3V3", "GND"],
+        inter_sheet_nets=[InterSheetNet(name="V20_BUS", endpoints=[
+            SheetPin(sheet="SOURCE", direction="output"),
+            SheetPin(sheet="BUCK", direction="input")])],
+    )
+    parts = [
+        BomPart(ref="J1", value="USB-PD", symbol="Connector:Conn_01x02_Pin",
+                footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+                sheet="SOURCE"),
+        BomPart(ref="U1", value="AMS1117-3.3", symbol="Regulator_Linear:AMS1117-3.3",
+                footprint="Package_TO_SOT_SMD:SOT-223-3_TabPin2", sheet="BUCK"),
+        BomPart(ref="C1", value="10uF", symbol="Device:C",
+                footprint="Capacitor_SMD:C_0805_2012Metric", sheet="BUCK"),
+        BomPart(ref="C2", value="22uF", symbol="Device:C",
+                footprint="Capacitor_SMD:C_0805_2012Metric", sheet="BUCK"),
+    ]
+    bom = BOM(parts=parts, connections=[
+        NetConnection(net_name="V20_BUS", sheet="SOURCE", endpoints=[_P("J1", "1")]),
+        NetConnection(net_name="GND", sheet="SOURCE", endpoints=[_P("J1", "2")]),
+        NetConnection(net_name="V20_BUS", sheet="BUCK", endpoints=[
+            _P("U1", "3"), _P("C1", "1")]),      # U1.3 = VI (power_in)
+        NetConnection(net_name="+3V3", sheet="BUCK", endpoints=[
+            _P("U1", "2"), _P("C2", "1")]),      # U1.2 = VO (power_out) -> driven
+        NetConnection(net_name="GND", sheet="BUCK", endpoints=[
+            _P("U1", "1"), _P("C1", "2"), _P("C2", "2")]),
+    ])
+    return arch, bom
+
+
 @pytest.mark.parametrize("builder,stem", [(_ldo, "LDODEMO"), (_usb_uart, "UARTDEMO")])
 def test_clustered_sheet_is_erc_clean(tmp_path, builder, stem) -> None:
     arch, bom = builder()
     emit_schematic(tmp_path, stem, arch, bom, title=stem)
     result = check_erc(tmp_path, stem)
     assert result.ok, f"{stem} ERC: {result.message}\n" + "\n".join(result.offenders)
+
+
+def test_intermediate_input_bus_is_erc_clean(tmp_path) -> None:
+    """A pin-detected, signal-rendered inter-sheet power bus must be ERC-clean:
+    route_sheet places the PWR_FLAG the emitter assigned, so the regulator's
+    VI pin is no longer reported undriven (the KC-W93GXR failure)."""
+    arch, bom = _usb_pd_buck()
+    emit_schematic(tmp_path, "PDBUCK", arch, bom, title="PDBUCK")
+    result = check_erc(tmp_path, "PDBUCK")
+    assert result.ok, f"PDBUCK ERC: {result.message}\n" + "\n".join(result.offenders)

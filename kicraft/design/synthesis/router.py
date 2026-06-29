@@ -334,13 +334,14 @@ def route_sheet(
     # Everything stamped so far is signal copper the power pass must avoid;
     # power-vs-power conflicts stay the job of the power_stubs ledger.
     signal_wires = list(routed.wires)
+    flagged_nets: set[str] = set()
     for conn in power_conns:
         eps = _resolve_eps(conn)
         if not eps:
             continue
         _route_power(
             routed, conn.net_name, eps, flag_nets, all_pins, power_stubs,
-            signal_wires,
+            signal_wires, flagged_nets,
         )
 
     # no_connect markers.
@@ -379,6 +380,46 @@ def route_sheet(
         body_rects.append((ps.x_mm - 3.0, ps.y_mm - 4.0, ps.x_mm + 3.0, ps.y_mm + 4.0))
 
     _resolve_label_collisions(routed, body_rects, all_pins)
+
+    # Flag-net placement sweep: every net in flag_nets must carry exactly one
+    # PWR_FLAG so ERC sees it driven. _route_power already stamped the
+    # name-power subset (recorded in flagged_nets); the remainder were rendered
+    # by the SIGNAL pass as hier/local labels -- an intermediate power bus like
+    # V20_BUS/PD_20V whose name misses the power patterns but whose pins are
+    # power_in (so the emitter put it in flag_nets via _power_nets_by_pins).
+    # Drop one PWR_FLAG on the wire endpoint where each such net's label sits,
+    # so its pin (at the symbol origin) coincides with the net's copper -- the
+    # same connectivity contract _route_power's own flag relies on. This does
+    # NOT change how the net is rendered, only marks it driven.
+    unflagged = flag_nets - flagged_nets
+    if unflagged:
+        anchors: dict[str, tuple[float, float]] = {}
+        for h in routed.hier_labels:
+            anchors.setdefault(h.name, (h.x_mm, h.y_mm))
+        for lab in routed.labels:
+            anchors.setdefault(lab.text, (lab.x_mm, lab.y_mm))
+        for g in routed.global_labels:
+            anchors.setdefault(g.text, (g.x_mm, g.y_mm))
+        wire_ends = [(w.x1_mm, w.y1_mm) for w in routed.wires] + \
+                    [(w.x2_mm, w.y2_mm) for w in routed.wires]
+        for net in unflagged:
+            pt = anchors.get(net)
+            if pt is None:
+                continue  # no copper for this net on this sheet; nothing to flag
+            ax, ay = pt
+            # Snap to the nearest wire endpoint: recovers the true stub end when
+            # the label was nudged +0.2mm to dodge a slide-merge, guaranteeing
+            # the flag pin lands on the net's wire rather than just beside it.
+            best, best_d = None, 0.6
+            for ex, ey in wire_ends:
+                d = abs(ex - ax) + abs(ey - ay)
+                if d <= best_d:
+                    best_d, best = d, (ex, ey)
+            if best is not None:
+                ax, ay = best
+            routed.power_symbols.append(PowerSymbol(
+                lib_id="power:PWR_FLAG", x_mm=ax, y_mm=ay, angle_deg=0))
+            flagged_nets.add(net)
 
     return routed
 
@@ -628,6 +669,7 @@ def _route_power(
     all_pins: list[tuple[float, float, str, str]],
     power_stubs: list[tuple[str, float, float, float, float]],
     signal_wires: list[WireSegment] = (),
+    flagged_nets: set[str] | None = None,
 ) -> None:
     """A stub + power symbol (or global label) at every pin of a power net.
 
@@ -715,6 +757,8 @@ def _route_power(
         routed.power_symbols.append(PowerSymbol(
             lib_id="power:PWR_FLAG", x_mm=flag_spot[0], y_mm=flag_spot[1],
             angle_deg=flag_spot[2]))
+        if flagged_nets is not None:
+            flagged_nets.add(net_name)
 
 
 def _merge_stacked_power_pins(

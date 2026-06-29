@@ -21,9 +21,11 @@ from kicraft.design.models import (
     FunctionalBlock,
     FunctionalSpec,
     IntentSlot,
+    InterSheetNet,
     NetConnection,
     PinEndpoint,
     Sheet,
+    SheetPin,
 )
 from kicraft.design.synthesis.emitter import _power_nets_by_pins, _power_nets_with_driver
 from kicraft.design.synthesis.placement import place_sheet
@@ -170,6 +172,67 @@ def test_vbat_rail_synthesizes_without_crash_and_erc_clean(tmp_path) -> None:
     assert 'global_label "VBAT"' in sch
     assert "power:VBAT" not in sch
 
+
+
+def _usb_pd_buck_state() -> ConversationState:
+    """KC-W93GXR end-to-end: a 2-sheet USB-PD supply where an intermediate input
+    bus (V20_BUS) crosses from a SOURCE connector sheet to a BUCK sheet and
+    feeds the regulator's VI (power_in). V20_BUS misses the power-NAME patterns
+    and has no power_out driver (the connector pins are passive), so the build
+    used to die at the ERC gate with VI 'not driven'."""
+    source = Sheet(name="SOURCE", stem="SOURCE", function="usb-pd input")
+    buck = Sheet(name="BUCK", stem="BUCK", function="3v3 buck")
+    arch = Architecture(
+        sheets=[source, buck],
+        power_nets=["V20_BUS", "+3V3", "GND"],
+        inter_sheet_nets=[InterSheetNet(name="V20_BUS", endpoints=[
+            SheetPin(sheet="SOURCE", direction="output"),
+            SheetPin(sheet="BUCK", direction="input")])],
+    )
+    parts = [
+        BomPart(ref="J1", value="USB-PD", symbol="Connector:Conn_01x02_Pin",
+                footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+                sheet="SOURCE"),
+        BomPart(ref="U1", value="AMS1117-3.3", symbol="Regulator_Linear:AMS1117-3.3",
+                footprint="Package_TO_SOT_SMD:SOT-223-3_TabPin2", sheet="BUCK"),
+        BomPart(ref="C1", value="10uF", symbol="Device:C",
+                footprint="Capacitor_SMD:C_0805_2012Metric", sheet="BUCK"),
+        BomPart(ref="C2", value="22uF", symbol="Device:C",
+                footprint="Capacitor_SMD:C_0805_2012Metric", sheet="BUCK"),
+    ]
+    conns = [
+        NetConnection(net_name="V20_BUS", sheet="SOURCE", endpoints=[
+            PinEndpoint(ref="J1", pin="1")]),
+        NetConnection(net_name="GND", sheet="SOURCE", endpoints=[
+            PinEndpoint(ref="J1", pin="2")]),
+        NetConnection(net_name="V20_BUS", sheet="BUCK", endpoints=[      # VI power_in
+            PinEndpoint(ref="U1", pin="3"), PinEndpoint(ref="C1", pin="1")]),
+        NetConnection(net_name="+3V3", sheet="BUCK", endpoints=[         # VO power_out
+            PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="C2", pin="1")]),
+        NetConnection(net_name="GND", sheet="BUCK", endpoints=[
+            PinEndpoint(ref="U1", pin="1"), PinEndpoint(ref="C1", pin="2"),
+            PinEndpoint(ref="C2", pin="2")]),
+    ]
+    return ConversationState(
+        project_stem="USB_PD_BUCK",
+        intent=IntentSlot(goal="usb-pd buck supply"),
+        functional_spec=FunctionalSpec(blocks=[
+            FunctionalBlock(name="POWER", category="power", purpose="usb-pd to 3v3")]),
+        architecture=arch,
+        bom=BOM(parts=parts, connections=conns),
+    )
+
+
+@pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="kicad-cli not installed")
+def test_intermediate_input_bus_synthesizes_erc_clean(tmp_path) -> None:
+    """KC-W93GXR regression, the actual build gate: an undriven intermediate
+    input bus feeding a regulator's VI (power_in) must synthesize ERC-clean.
+    The emitter assigns V20_BUS a flag (pin-aware); the fix makes route_sheet
+    place it even though the bus is rendered as a signal/hier net."""
+    _artifacts, results = run(_usb_pd_buck_state(), tmp_path)
+
+    erc = next((r for r in results if r.name.startswith("9.12")), None)
+    assert erc is not None and erc.ok, f"ERC: {erc.message if erc else 'missing'}"
 
 
 def test_pin_detected_power_net_gets_pwr_flag() -> None:

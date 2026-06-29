@@ -185,6 +185,58 @@ def test_power_inter_sheet_net_uses_power_symbol_not_hier_label() -> None:
     assert [p.lib_id for p in routed.power_symbols] == ["power:VBUS"]
 
 
+def test_signal_routed_flag_net_gets_pwr_flag() -> None:
+    # KC-W93GXR regression. PD_20V is an intermediate input bus: it misses the
+    # power-NAME patterns but carries a power_in pin (U1.2 VIN), so the emitter
+    # puts it in flag_nets (pin-aware). The router's name-only split still
+    # routes it as a SIGNAL/inter-sheet net (hier label) -- and that must NOT
+    # change -- but route_sheet must place its PWR_FLAG on the net's own wire so
+    # ERC sees it driven. The switch node PH (also pin-power, but driven and
+    # NOT in flag_nets) must stay a local signal net and get no flag.
+    sheet = Sheet(name="RAIL", stem="RAIL", function="buck")
+    arch = Architecture(
+        sheets=[sheet],
+        power_nets=["PD_20V", "GND"],
+        inter_sheet_nets=[InterSheetNet(
+            name="PD_20V",
+            endpoints=[SheetPin(sheet="RAIL", direction="input"),
+                       SheetPin(sheet="RAIL", direction="output")])],
+    )
+    parts = [
+        BomPart(ref="U1", value="TPS54331DDAR", symbol="tps54331:TPS54331DDAR",
+                footprint="tps54331:SOIC-8_L4.9-W3.9-P1.27-LS6.0-BL-EP", sheet="RAIL"),
+        BomPart(ref="Q1", value="AO3401A", symbol="ao3401a:AO3401A",
+                footprint="ao3401a:SOT-23_L2.9-W1.3-P1.90-LS2.4-BR", sheet="RAIL"),
+    ]
+    conns = [
+        NetConnection(net_name="PD_20V", sheet="RAIL", endpoints=[
+            PinEndpoint(ref="Q1", pin="3"),     # source (unspecified) -> no driver
+            PinEndpoint(ref="U1", pin="2")]),   # VIN (power_in)
+        NetConnection(net_name="PH", sheet="RAIL", endpoints=[
+            PinEndpoint(ref="U1", pin="8"),     # PH (power_out) switch node
+            PinEndpoint(ref="Q1", pin="1")]),
+    ]
+    bom = BOM(parts=parts, connections=conns)
+    routed = route_sheet("RAIL", "RAIL", place_sheet(sheet, parts, bom), bom, arch,
+                         flag_nets=frozenset({"PD_20V"}))
+
+    flags = [p for p in routed.power_symbols if p.lib_id == "power:PWR_FLAG"]
+    assert len(flags) == 1, "exactly one PWR_FLAG for the one undriven flag net"
+    # The flag pin lands on a wire endpoint -- so it actually drives the net,
+    # not just floats beside the hierarchical label.
+    wire_ends = {(round(w.x1_mm, 2), round(w.y1_mm, 2)) for w in routed.wires} | \
+                {(round(w.x2_mm, 2), round(w.y2_mm, 2)) for w in routed.wires}
+    assert (round(flags[0].x_mm, 2), round(flags[0].y_mm, 2)) in wire_ends
+    # Rendering is unchanged: PD_20V is still a hierarchical label, NOT promoted
+    # to a power symbol or a hierarchy-wide global label.
+    assert any(h.name == "PD_20V" for h in routed.hier_labels)
+    assert all(g.text != "PD_20V" for g in routed.global_labels)
+    # PH stays a LOCAL signal net (name-only split unchanged) and gets no flag.
+    assert any(lab.text == "PH" for lab in routed.labels)
+    assert all(h.name != "PH" for h in routed.hier_labels)
+    assert all(g.text != "PH" for g in routed.global_labels)
+
+
 def test_no_connect_pins_emit_markers() -> None:
     routed = _do_route(
         connections=[
