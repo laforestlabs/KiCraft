@@ -111,6 +111,30 @@ def _trace_set_origin(traces: list[Any]) -> tuple[float, float]:
     return (min_x if min_x != float("inf") else 0.0, min_y if min_y != float("inf") else 0.0)
 
 
+def _trace_length(trace: Any) -> float:
+    """Calculate the length of a trace segment in mm."""
+    if hasattr(trace, "length"):
+        return trace.length
+    if hasattr(trace, "start"):
+        dx = trace.end.x - trace.start.x
+        dy = trace.end.y - trace.start.y
+        return (dx * dx + dy * dy) ** 0.5
+    dx = float(trace.get("end_x", 0)) - float(trace.get("start_x", 0))
+    dy = float(trace.get("end_y", 0)) - float(trace.get("start_y", 0))
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def _child_entry_to_dict(entry: ChildCopperEntry) -> dict[str, Any]:
+    """Serialize a ChildCopperEntry, omitting fingerprint lists for brevity."""
+    return {
+        "instance_path": entry.instance_path,
+        "sheet_name": entry.sheet_name,
+        "trace_count": entry.trace_count,
+        "via_count": entry.via_count,
+        "total_length_mm": round(entry.total_length_mm, 3),
+    }
+
+
 def fingerprint_trace(trace: Any, origin: tuple[float, float] = (0.0, 0.0)) -> Fingerprint:
     """Create a geometric fingerprint for a trace segment.
 
