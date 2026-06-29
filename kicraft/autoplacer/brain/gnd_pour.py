@@ -1121,7 +1121,7 @@ def repair_parent_gnd_islands(
                     else:
                         # Also test the island centre
                         bb = si_pts.BBox()
-                        cx, cy = bb.GetCentre().x, bb.GetCentre().y
+                        cx, cy = bb.GetCenter().x, bb.GetCenter().y
                         if mi["fill"].Contains(
                             pcbnew.VECTOR2I(cx, cy), mi["idx"]
                         ):
