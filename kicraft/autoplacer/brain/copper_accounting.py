@@ -90,7 +90,28 @@ class CopperManifest:
 # ---------------------------------------------------------------------------
 
 
-def fingerprint_trace(trace: Any) -> Fingerprint:
+def _trace_set_origin(traces: list[Any]) -> tuple[float, float]:
+    """Compute the minimum (x, y) across a set of traces, used to make
+    fingerprints translation-invariant so they survive A4-page centering
+    and other uniform coordinate shifts between manifest-build and
+    post-route verification time.
+    """
+    min_x = min_y = float("inf")
+    for t in traces:
+        if hasattr(t, "start"):
+            sx, sy = t.start.x, t.start.y
+            ex, ey = t.end.x, t.end.y
+        else:
+            sx = float(t.get("start_x", 0))
+            sy = float(t.get("start_y", 0))
+            ex = float(t.get("end_x", 0))
+            ey = float(t.get("end_y", 0))
+        min_x = min(min_x, sx, ex)
+        min_y = min(min_y, sy, ey)
+    return (min_x if min_x != float("inf") else 0.0, min_y if min_y != float("inf") else 0.0)
+
+
+def fingerprint_trace(trace: Any, origin: tuple[float, float] = (0.0, 0.0)) -> Fingerprint:
     """Create a geometric fingerprint for a trace segment.
 
     Accepts either a ``TraceSegment`` object (with ``.start``, ``.end``,
@@ -99,74 +120,53 @@ def fingerprint_trace(trace: Any) -> Fingerprint:
 
     The fingerprint rounds coordinates to 0.01 mm and widths to 0.001 mm
     so that floating-point jitter from transform round-trips does not break
-    matching.
+    matching.  When *origin* is provided, coordinates are made relative to
+    it so fingerprints survive uniform translation (A4 centering).
     """
+    ox, oy = origin
     if hasattr(trace, "start"):
         # TraceSegment object
         return (
-            round(trace.start.x, 2),
-            round(trace.start.y, 2),
-            round(trace.end.x, 2),
-            round(trace.end.y, 2),
+            round(trace.start.x - ox, 2),
+            round(trace.start.y - oy, 2),
+            round(trace.end.x - ox, 2),
+            round(trace.end.y - oy, 2),
             str(getattr(trace.layer, "name", trace.layer)),
             round(trace.width_mm, 3),
         )
     # Dict fallback
     return (
-        round(float(trace.get("start_x", 0)), 2),
-        round(float(trace.get("start_y", 0)), 2),
-        round(float(trace.get("end_x", 0)), 2),
-        round(float(trace.get("end_y", 0)), 2),
+        round(float(trace.get("start_x", 0)) - ox, 2),
+        round(float(trace.get("start_y", 0)) - oy, 2),
+        round(float(trace.get("end_x", 0)) - ox, 2),
+        round(float(trace.get("end_y", 0)) - oy, 2),
         str(trace.get("layer", "")),
         round(float(trace.get("width", trace.get("width_mm", 0))), 3),
     )
 
 
-def fingerprint_via(via: Any) -> Fingerprint:
+def fingerprint_via(via: Any, origin: tuple[float, float] = (0.0, 0.0)) -> Fingerprint:
     """Create a geometric fingerprint for a via.
 
     Accepts either a ``Via`` object (with ``.pos``, ``.drill_mm``,
     ``.size_mm`` attributes) or a plain dict.
     """
+    ox, oy = origin
     if hasattr(via, "pos"):
         # Via object
         return (
-            round(via.pos.x, 2),
-            round(via.pos.y, 2),
+            round(via.pos.x - ox, 2),
+            round(via.pos.y - oy, 2),
             round(via.drill_mm, 3),
             round(via.size_mm, 3),
         )
     # Dict fallback
     return (
-        round(float(via.get("x", 0)), 2),
-        round(float(via.get("y", 0)), 2),
+        round(float(via.get("x", 0)) - ox, 2),
+        round(float(via.get("y", 0)) - oy, 2),
         round(float(via.get("drill", via.get("drill_mm", 0))), 3),
         round(float(via.get("size", via.get("size_mm", 0))), 3),
     )
-
-
-def _trace_length(trace: Any) -> float:
-    """Calculate the length of a trace segment in mm."""
-    if hasattr(trace, "length"):
-        return trace.length
-    if hasattr(trace, "start"):
-        dx = trace.end.x - trace.start.x
-        dy = trace.end.y - trace.start.y
-        return (dx * dx + dy * dy) ** 0.5
-    dx = float(trace.get("end_x", 0)) - float(trace.get("start_x", 0))
-    dy = float(trace.get("end_y", 0)) - float(trace.get("start_y", 0))
-    return (dx * dx + dy * dy) ** 0.5
-
-
-def _child_entry_to_dict(entry: ChildCopperEntry) -> dict[str, Any]:
-    """Serialize a ChildCopperEntry, omitting fingerprint lists for brevity."""
-    return {
-        "instance_path": entry.instance_path,
-        "sheet_name": entry.sheet_name,
-        "trace_count": entry.trace_count,
-        "via_count": entry.via_count,
-        "total_length_mm": round(entry.total_length_mm, 3),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -203,13 +203,24 @@ def build_copper_manifest(
     """
     manifest = CopperManifest()
 
+    # Collect all child traces to compute a single origin so fingerprints
+    # are translation-invariant.  Each child is in the same coordinate
+    # space (pre-stamp parent composition), and the parent compose may
+    # later apply a uniform A4-page-centering translation before saving
+    # the board.  Fingerprints relative to the trace-set origin survive
+    # that translation.
+    all_child_traces: list[Any] = []
+    for child in composed_children:
+        all_child_traces.extend(child.transformed.transformed_traces)
+    _origin = _trace_set_origin(all_child_traces)
+
     for child in composed_children:
         transformed = child.transformed
         traces = transformed.transformed_traces
         vias = transformed.transformed_vias
 
-        trace_fps = [fingerprint_trace(t) for t in traces]
-        via_fps = [fingerprint_via(v) for v in vias]
+        trace_fps = [fingerprint_trace(t, origin=_origin) for t in traces]
+        via_fps = [fingerprint_via(v, origin=_origin) for v in vias]
         total_length = sum(_trace_length(t) for t in traces)
 
         entry = ChildCopperEntry(
@@ -270,19 +281,19 @@ def verify_copper_preservation(
         Structured verification report with ``status``, per-child
         preservation rates, and any issues found.
     """
-    # Build fingerprint multisets from post-route copper.
-    # Use a dict to handle duplicate fingerprints (multiple traces with
-    # same geometry).
+    # Build fingerprint multisets from post-route copper, made relative
+    # to the post-route trace-set origin so they match the manifest's
+    # translation-invariant fingerprints.
+    _post_origin = _trace_set_origin(post_route_traces)
     post_trace_fps: dict[Fingerprint, int] = {}
     for t in post_route_traces:
-        fp = fingerprint_trace(t)
+        fp = fingerprint_trace(t, origin=_post_origin)
         post_trace_fps[fp] = post_trace_fps.get(fp, 0) + 1
 
     post_via_fps: dict[Fingerprint, int] = {}
     for v in post_route_vias:
-        fp = fingerprint_via(v)
+        fp = fingerprint_via(v, origin=_post_origin)
         post_via_fps[fp] = post_via_fps.get(fp, 0) + 1
-
     # Match against each child's expected copper.
     # We consume from the multiset so a single post-route trace is not
     # double-counted across multiple children.

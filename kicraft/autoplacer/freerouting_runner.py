@@ -1424,6 +1424,13 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
                 counts["unconnected"] += 1
             elif vtype in ("clearance", "hole_clearance"):
                 counts["clearance"] += 1
+                # KiCad 9 reports copper-to-copper proximity violations as
+                # [clearance] (not [shorting_items]). A clearance violation
+                # with actual 0.0 mm is a genuine short — copper from one
+                # pad touching another pad — and must gate fab acceptance.
+                actual_m = re.search(r"actual\s+([\d.]+)\s*mm", line)
+                if actual_m and float(actual_m.group(1)) <= 0.001:
+                    counts["shorts"] += 1
             elif vtype == "copper_edge_clearance":
                 counts["copper_edge_clearance"] += 1
             elif vtype == "courtyards_overlap":

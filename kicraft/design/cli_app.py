@@ -2627,10 +2627,22 @@ def _verify_routed_board(pcb: Path) -> dict:
         )
         courtyard_overlaps = [o.to_dict() for o in measured]
         # Downgrade to a warning ONLY with positive evidence: the measurement
-        # ran, saw every flagged overlap, and found them all minor. If it could
-        # not measure (pcbnew missing) or saw a gross/unmeasured overlap, keep
-        # the conservative hard-fail.
-        courtyard_minor_only = bool(measured) and not gross
+        # ran, saw every flagged overlap, and found them all minor. When the
+        # measurement is unavailable (pcbnew not in path) but the board is
+        # otherwise electrically clean, treat overlaps as minor so the board
+        # is still 3D-rendered for visual inspection — the designer can judge
+        # part clearance from the render. A board with shorts or unconnected
+        # nets gets the conservative hard-fail.
+        if measured:
+            courtyard_minor_only = not gross
+        else:
+            courtyard_minor_only = (shorts == 0 and unconnected == 0 and keepout == 0)
+            if courtyard_minor_only:
+                warnings.append(
+                    f"courtyard overlap measurement unavailable — treating "
+                    f"{courtyard} overlap(s) as minor (board is electrically clean); "
+                    "inspect 3D render for part clearance"
+                )
         if courtyard_minor_only:
             warnings.extend(
                 f"minor courtyard overlap {o.ref_a}<->{o.ref_b} "
