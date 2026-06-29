@@ -3004,6 +3004,26 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
                 f"keepout={gate.get('keepout', 0)}, reasons={gate['reasons']}",
                 file=sys.stderr,
             )
+        # Best-effort 3D render so the designer can visually inspect the
+        # failure (courtyard overlaps, stranded connectors, etc.) directly
+        # in the GUI.  Never let a render failure change the exit code.
+        try:
+            import subprocess as _sp
+            render_path = project_dir / f"{stem}_3d.png"
+            render_path.unlink(missing_ok=True)
+            _sp.run(
+                ["kicad-cli", "pcb", "render", "-o", str(render_path),
+                 "--quality", "high", "--background", "opaque",
+                 "--rotate", "-30,0,30", "--zoom", "0.9",
+                 "-w", "1600", "-h", "1200", str(pcb)],
+                capture_output=True, text=True, timeout=120,
+            )
+            if render_path.exists():
+                artifacts.board_3d_png = render_path
+                _persist_artifacts(state, state_path, artifacts)
+                print(f"[build]     3D inspection render saved: {render_path.name}")
+        except Exception:
+            pass
         return 7
 
     # 4a. Non-blocking warnings (a minor, fraction-of-a-mm courtyard clip on an
