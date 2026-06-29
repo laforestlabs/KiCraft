@@ -1069,16 +1069,28 @@ def power_net_names(bom: BOM) -> set[str]:
     } | _power_nets_by_pins(bom)
 
 
+#: Pin electrical types that already DRIVE a net, making a PWR_FLAG (whose own
+#: pin is a ``power_out``) both redundant and an ERC short. ``power_out`` shorts
+#: as *"Power output and Power output are connected"*; a regular ``output`` (an
+#: op-amp / logic / DAC output such as an MCP6001 ``VOUT``) shorts as *"Output
+#: and Power output are connected"* — both fire only because a flag was added to
+#: a net the component already drives.
+_DRIVER_PIN_TYPES = ("power_out", "output")
+
+
 def _power_nets_with_driver(bom: BOM) -> set[str]:
-    """Names of power/ground nets already driven by a real power-output pin.
+    """Names of power/ground nets already driven by a real output pin.
 
     A ``PWR_FLAG`` carries its own ``power_out`` pin, so adding one to a net a
-    component already drives (a charger's V_BAT output, an LDO/regulator VOUT,
-    a boost converter's output rail, …) trips KiCad ERC's *"Pins of type Power
-    output and Power output are connected"*. Those nets must therefore be
-    EXCLUDED from PWR_FLAG assignment — the flag exists only to mark a power net
-    that is real-but-undriven (fed from a connector / battery / passive pin) so
-    ERC stops reporting its power-input pins as undriven.
+    component already drives trips KiCad ERC. The driver may be a true power
+    output (a charger's V_BAT output, an LDO/regulator VOUT, a boost converter's
+    output rail → *"Power output and Power output are connected"*) **or** a plain
+    signal output whose net merely matches a power name (an op-amp / DAC ``VOUT``
+    pin typed ``output``, name-classified as power by the ``^V…OUT`` pattern →
+    *"Output and Power output are connected"*). Both cases must be EXCLUDED from
+    PWR_FLAG assignment — the flag exists only to mark a power net that is
+    real-but-undriven (fed from a connector / battery / passive pin) so ERC stops
+    reporting its power-input pins as undriven. See ``_DRIVER_PIN_TYPES``.
 
     Power nets are global by name across the whole hierarchy, so a driver on
     ANY sheet protects the entire net: we scan every connection, not just one
@@ -1104,7 +1116,8 @@ def _power_nets_with_driver(bom: BOM) -> set[str]:
                 pins = lookup_pins(symbol)["pins"]
             except (SymbolNotFoundError, ValueError, KeyError):
                 continue
-            if any(p["number"] == ep.pin and p["electrical_type"] == "power_out"
+            if any(p["number"] == ep.pin
+                   and p["electrical_type"] in _DRIVER_PIN_TYPES
                    for p in pins):
                 driven.add(c.net_name)
                 break

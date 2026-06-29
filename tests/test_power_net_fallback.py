@@ -147,6 +147,70 @@ def test_driven_power_rail_excluded_from_pwr_flag() -> None:
     assert _power_nets_with_driver(bom) == {"+3V3"}
 
 
+def _opamp_vout_state() -> ConversationState:
+    """An MCP6001 op-amp whose VOUT (pin 1, electrical_type ``output``) feeds an
+    output header. ``VOUT`` matches the ``^V…OUT`` power-name pattern, so it is
+    name-classified as a power net — but its only driver is a *signal* output,
+    not a ``power_out``. The regression (run_02 r2r-dac): VOUT slipped the
+    power_out-only driver check, got a PWR_FLAG, and ERC reported 'Output and
+    Power output are connected'."""
+    sheet = Sheet(name="DAC", stem="DAC", function="r2r dac output buffer")
+    arch = Architecture(sheets=[sheet], power_nets=["VCC", "VOUT", "GND"],
+                        inter_sheet_nets=[])
+    # Unity-gain buffer so every op-amp pin connects (VIN- ← VOUT feedback,
+    # VIN+ ← AIN input) — keeps the test focused on the VOUT power-output short,
+    # not on floating-input ERC noise.
+    parts = [
+        BomPart(ref="U1", value="MCP6001", symbol="mcp6001:MCP6001T-I_OT",
+                footprint="Package_TO_SOT_SMD:SOT-23-5", sheet="DAC"),
+        BomPart(ref="J1", value="OUT", symbol="Connector:Conn_01x04_Pin",
+                footprint="Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
+                sheet="DAC"),
+    ]
+    conns = [
+        NetConnection(net_name="VCC", sheet="DAC", endpoints=[      # U1.5 VDD power_in
+            PinEndpoint(ref="U1", pin="5"), PinEndpoint(ref="J1", pin="2")]),
+        NetConnection(net_name="GND", sheet="DAC", endpoints=[      # U1.2 VSS power_in
+            PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="J1", pin="3")]),
+        NetConnection(net_name="VOUT", sheet="DAC", endpoints=[     # U1.1 VOUT output
+            PinEndpoint(ref="U1", pin="1"),                         # → J1.1 + VIN- fb
+            PinEndpoint(ref="U1", pin="4"), PinEndpoint(ref="J1", pin="1")]),
+        NetConnection(net_name="AIN", sheet="DAC", endpoints=[      # U1.3 VIN+ input
+            PinEndpoint(ref="U1", pin="3"), PinEndpoint(ref="J1", pin="4")]),
+    ]
+    return ConversationState(
+        project_stem="R2R_DAC",
+        intent=IntentSlot(goal="r2r dac"),
+        functional_spec=FunctionalSpec(blocks=[
+            FunctionalBlock(name="DAC", category="process", purpose="r2r dac buffer")]),
+        architecture=arch,
+        bom=BOM(parts=parts, connections=conns),
+    )
+
+
+def test_signal_output_driven_power_net_excluded_from_pwr_flag() -> None:
+    """A power-named net driven by a plain ``output`` pin (an op-amp VOUT) is
+    reported as driven and must NOT get a PWR_FLAG. Regression run_02 r2r-dac:
+    the driver check recognized only ``power_out``, so VOUT got a redundant flag
+    and ERC shorted 'Output and Power output are connected'. VCC (undriven
+    power_in) is still flagged."""
+    bom = _opamp_vout_state().bom
+    driven = _power_nets_with_driver(bom)
+    assert "VOUT" in driven
+    assert "VCC" not in driven
+
+
+@pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="kicad-cli not installed")
+def test_opamp_vout_synthesizes_erc_clean_no_output_power_short(tmp_path) -> None:
+    """End-to-end run_02 regression: an op-amp VOUT (name-classified power,
+    driven by a signal output) must synthesize ERC-clean — no 'Output and Power
+    output are connected' from a redundant PWR_FLAG."""
+    _artifacts, results = run(_opamp_vout_state(), tmp_path)
+
+    erc = next((r for r in results if r.name.startswith("9.12")), None)
+    assert erc is not None and erc.ok, f"ERC: {erc.message if erc else 'missing'}"
+
+
 @pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="kicad-cli not installed")
 def test_driven_rail_synthesizes_erc_clean_no_power_output_short(tmp_path) -> None:
     """End-to-end: a regulator-driven rail must be ERC-clean. With the old
