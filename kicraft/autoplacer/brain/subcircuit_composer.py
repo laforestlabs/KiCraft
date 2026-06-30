@@ -186,6 +186,17 @@ class LeafBlockerSet:
     # the pad/courtyard bbox edge on the constrained side so the attached
     # parent edge aligns to the marker rather than the pad cluster.
     edge_reference_points: dict[str, Point] = field(default_factory=dict)
+    # Per-connector edge-facing PAD-FACE anchor (leaf-local coords) for
+    # LONG-BARREL edge connectors (right-angle BNC, barrel jacks) that lack an
+    # explicit "PCB Edge" marker. The point sits on the connector's edge-facing
+    # solder-pad face in its opening direction; the parent board edge is then
+    # pinned just outboard of the pads (one pad clearance) so the protruding
+    # barrel OVERHANGS the edge instead of the outline growing out to swallow
+    # it. Only populated when the courtyard extends past the pads by more than
+    # ``_CONNECTOR_BARREL_MIN_OVERHANG_MM`` in that direction -- shallow /
+    # mouthless connectors keep the courtyard-extremity anchor. Consumed (after
+    # ``edge_reference_points``) in ``_compute_local_anchor_offset``.
+    connector_pad_edge_anchors: dict[str, Point] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -198,6 +209,12 @@ class AttachmentConstraint:
     source: Literal["child_artifact", "parent_local"]
     child_index: int | None
     strict: bool = True
+    # True for a long-barrel edge connector pinned by its PAD face (the anchor
+    # is the pads, not the courtyard, so its protruding barrel overhangs). The
+    # board edge then legitimately sits far INBOARD of the placed geometry edge
+    # (the barrel tip), which the outline's anchor-slack sanity clamp must trust
+    # rather than reject as a transform bug. See ``connector_pad_edge_anchors``.
+    barrel_overhang: bool = False
 
 
 @dataclass(slots=True)
@@ -248,6 +265,21 @@ def derive_attachment_constraints(
     child_constraints: dict[int, list[AttachmentConstraint]] = {}
     logger = logging.getLogger(__name__)
 
+    _blocker_cache: dict[int, LeafBlockerSet] = {}
+
+    def _is_pad_anchored_connector(child_index: int | None, ref: str) -> bool:
+        """True when ``ref`` is a long-barrel edge connector whose board edge
+        should pin to its PADS (so the protruding barrel overhangs). Keyed off
+        the SAME ``connector_pad_edge_anchors`` the anchor uses, so the edge
+        position and this inward/outward decision never disagree."""
+        if child_index is None:
+            return False
+        bs = _blocker_cache.get(child_index)
+        if bs is None:
+            bs = extract_leaf_blocker_set(loaded_artifacts[child_index])
+            _blocker_cache[child_index] = bs
+        return ref in bs.connector_pad_edge_anchors
+
     for ref, zone_spec in component_zones.items():
         if isinstance(zone_spec, dict):
             if not zone_spec:
@@ -293,6 +325,7 @@ def derive_attachment_constraints(
 
         is_hole = ref.startswith("H") or ("hole" in getattr(comp, "kind", "").lower())
         is_conn = ref.startswith("J") or ("connector" in getattr(comp, "kind", "").lower())
+        barrel_overhang = False
 
         if is_hole:
             # The mounting hole's keepout zone (component-free area) defines
@@ -324,10 +357,20 @@ def derive_attachment_constraints(
             # the single place the connector-side edge is finalized against the
             # placed pad copper.
             has_mouth = getattr(comp, "opening_direction", None) is not None
-            inward = 0.0
-            if has_mouth:
+            if _is_pad_anchored_connector(child_idx, ref):
+                # Long-barrel connector (right-angle BNC, barrel jack): the
+                # anchor is the edge-facing PAD face, so the board edge sits one
+                # pad-clearance OUTBOARD of the pads and the barrel overhangs.
+                # inward = pad clearance, outward = 0 (no extra body overhang --
+                # the barrel already overhangs by its full length).
+                inward = max(0.0, float(cfg.get("connector_edge_pad_clearance_mm", 0.2)))
+                outward = 0.0
+                barrel_overhang = True
+            elif has_mouth:
+                inward = 0.0
                 outward = max(0.0, float(cfg.get("connector_edge_overhang_mm", 0.5)))
             else:
+                inward = 0.0
                 outward = 0.0
         else:
             inward = 0.0
@@ -343,6 +386,7 @@ def derive_attachment_constraints(
                 source=source,
                 child_index=child_idx,
                 strict=target in ("edge", "corner"),
+                barrel_overhang=barrel_overhang,
             )
         )
         constraint = constraints[-1]
@@ -643,7 +687,12 @@ def _compute_local_anchor_offset(
 
     edge_marker: Point | None = None
     if blocker_set is not None:
+        # Explicit author "PCB Edge" marker wins; otherwise the computed
+        # pad-face anchor for a long-barrel connector (so its barrel overhangs
+        # the edge rather than the outline growing out to the barrel tip).
         raw_marker = blocker_set.edge_reference_points.get(constraint.ref)
+        if raw_marker is None:
+            raw_marker = blocker_set.connector_pad_edge_anchors.get(constraint.ref)
         if raw_marker is not None:
             edge_marker = _transform_local_point(raw_marker, Point(0.0, 0.0), rotation_deg)
 
@@ -1659,6 +1708,58 @@ def _extract_blockers_from_layout(
     )
 
 
+# Minimum distance (mm) a connector's courtyard must extend past its edge-facing
+# pads, in its opening direction, before the parent board edge is pinned to the
+# PADS (so the protruding body OVERHANGS) instead of to the courtyard extremity.
+# Targets long-barrel edge connectors (right-angle BNC, barrel jacks) whose body
+# is a deep protrusion well beyond the mounting flange; shallow connectors (pin
+# headers, a USB-C shell a few mm proud) stay on the courtyard-extremity anchor.
+# Single source of truth: the same value gates both the anchor population here
+# and the inward/outward in ``derive_attachment_constraints`` (via membership in
+# ``connector_pad_edge_anchors``), so the two never disagree.
+_CONNECTOR_BARREL_MIN_OVERHANG_MM = 5.0
+
+
+def _connector_barrel_edge_anchor(
+    court_min: Point,
+    court_max: Point,
+    pad_min: Point,
+    pad_max: Point,
+) -> Point | None:
+    """Edge-facing pad-face anchor for a long-barrel edge connector, or None.
+
+    ``court_*`` is the courtyard bbox and ``pad_*`` the pad-cluster bbox (both
+    same frame). When the courtyard juts past the pads by more than
+    ``_CONNECTOR_BARREL_MIN_OVERHANG_MM`` on one *unambiguous* side -- the
+    connector's mating barrel -- return the point on the edge-facing pad face in
+    that direction (the board edge belongs at the pads, the barrel overhangs).
+    Roughly-symmetric or shallow bodies return None (keep courtyard anchor).
+    """
+    extension = {
+        "right": court_max.x - pad_max.x,
+        "left": pad_min.x - court_min.x,
+        "bottom": court_max.y - pad_max.y,
+        "top": pad_min.y - court_min.y,
+    }
+    side, depth = max(extension.items(), key=lambda kv: kv[1])
+    if depth < _CONNECTOR_BARREL_MIN_OVERHANG_MM:
+        return None
+    # Require the barrel direction to clearly dominate the next-deepest side so a
+    # near-symmetric courtyard doesn't get a spurious anchor on an arbitrary side.
+    second_depth = sorted(extension.values(), reverse=True)[1]
+    if depth - second_depth < 1.0:
+        return None
+    pad_cx = (pad_min.x + pad_max.x) / 2.0
+    pad_cy = (pad_min.y + pad_max.y) / 2.0
+    if side == "right":
+        return Point(pad_max.x, pad_cy)
+    if side == "left":
+        return Point(pad_min.x, pad_cy)
+    if side == "bottom":
+        return Point(pad_cx, pad_max.y)
+    return Point(pad_cx, pad_min.y)  # top
+
+
 def _extract_blockers_from_pcb(
     artifact: LoadedSubcircuitArtifact,
     *,
@@ -1701,6 +1802,7 @@ def _extract_blockers_from_pcb(
     }
     component_rects: dict[str, tuple[Point, Point]] = {}
     edge_reference_points: dict[str, Point] = {}
+    connector_pad_edge_anchors: dict[str, Point] = {}
 
     def _bbox_to_rect(bbox) -> tuple[Point, Point]:
         return (
@@ -1762,6 +1864,9 @@ def _extract_blockers_from_pcb(
         if body_bbox is None:
             body_bbox = footprint.GetBoundingBox(False, False)
         rect_min, rect_max = _bbox_to_rect(body_bbox)
+        court_min, court_max = rect_min, rect_max  # courtyard-only (pre pad union)
+        pad_lo: Point | None = None  # pad-cluster-only bbox, for barrel-overhang anchor
+        pad_hi: Point | None = None
         for pad in footprint.Pads():
             drill = pad.GetDrillSize()
             drill_x_mm = drill.x / 1e6
@@ -1807,12 +1912,26 @@ def _extract_blockers_from_pcb(
             pad_min, pad_max = _bbox_to_rect(pad_bbox)
             rect_min = Point(min(rect_min.x, pad_min.x), min(rect_min.y, pad_min.y))
             rect_max = Point(max(rect_max.x, pad_max.x), max(rect_max.y, pad_max.y))
+            if pad_lo is None:
+                pad_lo, pad_hi = pad_min, pad_max
+            else:
+                pad_lo = Point(min(pad_lo.x, pad_min.x), min(pad_lo.y, pad_min.y))
+                pad_hi = Point(max(pad_hi.x, pad_max.x), max(pad_hi.y, pad_max.y))
 
         ref = footprint.GetReferenceAsString()
         component_rects[ref] = (rect_min, rect_max)
         edge_marker = _find_edge_reference(footprint)
         if edge_marker is not None:
             edge_reference_points[ref] = edge_marker
+        # Long-barrel edge connector with no explicit author marker: anchor the
+        # board edge to its edge-facing pad face so the protruding barrel
+        # overhangs (KC-Y5WXQ9 BNC) instead of the outline swallowing it.
+        elif ref.startswith("J") and pad_lo is not None:
+            barrel_anchor = _connector_barrel_edge_anchor(
+                court_min, court_max, pad_lo, pad_hi
+            )
+            if barrel_anchor is not None:
+                connector_pad_edge_anchors[ref] = barrel_anchor
 
     board_edges = board.GetBoardEdgesBoundingBox()
     outline_rect = _bbox_to_rect(board_edges)
@@ -1858,6 +1977,10 @@ def _extract_blockers_from_pcb(
         edge_reference_points={
             ref: Point(point.x - shift_x, point.y - shift_y)
             for ref, point in edge_reference_points.items()
+        },
+        connector_pad_edge_anchors={
+            ref: Point(point.x - shift_x, point.y - shift_y)
+            for ref, point in connector_pad_edge_anchors.items()
         },
     )
 
