@@ -779,9 +779,18 @@ def _compute_final_outline(
     corner_constrained_sides = {
         "left": False, "right": False, "top": False, "bottom": False,
     }
+    # Sides pinned by a long-barrel connector's PAD face (right-angle BNC,
+    # barrel jack): the board edge legitimately sits far inboard of the placed
+    # geometry edge (the overhanging barrel tip), so the anchor-slack clamp
+    # below must TRUST the anchor instead of rejecting it as a transform bug.
+    barrel_sides = {
+        "left": False, "right": False, "top": False, "bottom": False,
+    }
     for c in constraints:
         if c.target == "edge":
             edge_constrained_sides[c.value] = True
+            if getattr(c, "barrel_overhang", False) and c.value in barrel_sides:
+                barrel_sides[c.value] = True
         elif c.target == "corner":
             for side in c.value.split("-"):
                 if side in corner_constrained_sides:
@@ -814,6 +823,10 @@ def _compute_final_outline(
     anchor_slack_mm = spacing_mm + 2.0
 
     def _resolve_min(side: str, c_val: float, g_val: float) -> float:
+        if barrel_sides[side]:
+            # Pad-anchored long-barrel connector: trust the anchor (the barrel
+            # overhangs by design, so c_val is meant to sit inboard of g_val).
+            return c_val
         if edge_constrained_sides[side]:
             if abs(c_val - g_val) > anchor_slack_mm:
                 print(
@@ -829,6 +842,11 @@ def _compute_final_outline(
         return min(c_val, g_val)
 
     def _resolve_max(side: str, c_val: float, g_val: float) -> float:
+        if barrel_sides[side]:
+            # Pad-anchored long-barrel connector: trust the anchor (the barrel
+            # overhangs by design, so the board edge c_val sits inboard of the
+            # placed geometry edge g_val at the barrel tip).
+            return c_val
         if edge_constrained_sides[side]:
             if abs(c_val - g_val) > anchor_slack_mm:
                 print(
