@@ -12,10 +12,12 @@ like the snowman** (leaf→region mapping). Tier 4 (full polygon-containment pla
 deferred. **Geometry engine: Shapely (GEOS).** Each tier ships independently and gets its
 own self-eval coverage.
 
-**Progress:**
-- ✅ **Phase 1 — capture** (commits `3fd1a33`, `b17c752` on `feat/outline-shapes-phase1`).
-  Shape captured from the brief into `IntentSlot.form_factor`. Next: Phase 2 (flow into
-  the build).
+**Progress** (branch `feat/outline-shapes-phase1`):
+- ✅ **Phase 1 — capture** (`3fd1a33`, `b17c752`). Shape captured from the brief into
+  `IntentSlot.form_factor`.
+- ✅ **Phase 2 — flow** (`628c0e6`). `form_factor` → `autoplacer.json` `board_outline` →
+  `ParentCompositionState.requested_shape`. Next: **Phase 3** (Shapely shape-eval +
+  outline fit — where geometry is actually built).
 
 ---
 
@@ -207,13 +209,15 @@ user intent. Built:
 Deferred (not needed for brief→shape): a `placement.board.shape` *override* surface in the
 rules panel. Add later if users want to set/override the shape post-intent.
 
-### Phase 2 — flow (all tiers)
-- `design/synthesis/autoplacer.py` (~`:199`): emit a `board_outline` block (shape +
-  params / program) into `autoplacer.json`, sourced from **`intent.form_factor`** (a
-  future `placement.board.shape` override would win when present).
-- `cli/_compose_state.py:123`: add `requested_shape` to `ParentCompositionState`.
-- `cli/compose_subcircuits.py:~1811`: populate `requested_shape` from the autoplacer config
-  when there's no manual layout.
+### Phase 2 — flow (all tiers) — ✅ DONE
+- `design/synthesis/autoplacer.py`: `write_autoplacer_json(form_factor=…)` emits a
+  top-level `board_outline` block (`{shape, corner_radius_mm?, chamfer_mm?, size_mm?}`)
+  for any non-rect shape; rect/absent emits nothing. `synthesize.py` passes
+  `state.intent.form_factor`. (A future `placement.board` shape override would win here.)
+- `cli/_compose_state.py`: `ParentCompositionState.requested_shape` (shape intent only —
+  no min/max; distinct from the authoritative `manual_outline`).
+- `cli/compose_subcircuits.py`: populated from `cfg["board_outline"]` when no manual
+  layout is present. Verified `load_project_config` passes the block through to `cfg`.
 
 ### Phase 3 — shape evaluation + outline fit
 - New `shapes/` module: shape-program evaluator (named library → primitives → boolean
