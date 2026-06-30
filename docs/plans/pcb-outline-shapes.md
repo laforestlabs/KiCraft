@@ -12,7 +12,8 @@ like the snowman** (leaf→region mapping). Tier 4 (full polygon-containment pla
 deferred. **Geometry engine: Shapely (GEOS).** Each tier ships independently and gets its
 own self-eval coverage.
 
-**Progress** (branch `feat/outline-shapes-phase1`):
+**Progress** (work branch `feat/outline-shapes-phase3b`; 1–3b also on
+`feat/outline-shapes-phase1` + `main` via `c01d3b2`):
 - ✅ **Phase 1 — capture** (`3fd1a33`, `b17c752`). Shape captured from the brief into
   `IntentSlot.form_factor`.
 - ✅ **Phase 2 — flow** (`628c0e6`). `form_factor` → `autoplacer.json` `board_outline` →
@@ -22,17 +23,19 @@ own self-eval coverage.
   compose (`outline.circumscribe` + `_compose_validate._fit_requested_shape`, wired into
   `_compose_stamp`) and flows through the existing shape-aware stamp + validate + zone-clip
   path. No placement changes, no new dep.
-- 🚧 **Phase 3b (foundation)** — Shapely `kicraft/shapes/` (`9d8f10d`). Named/compound
-  shape library (hexagon…snowman) + `circumscribe()` polygon, standalone + tested.
-  **Remaining for 3b: wire named/polygon shapes through compose** (see note below).
+- ✅ **Phase 3b — Shapely named/compound shapes** (`9d8f10d` foundation, `675e85a`
+  integration). `kicraft/shapes/` library (hexagon…snowman, snowman = boolean union of
+  circles) + polygon `circumscribe()`. Wired into compose via a `fitted_polygon` state
+  channel kept OFF the JS-mirrored `OutlineSpec`: `_fit_requested_shape` dispatches
+  parametric→`manual_outline` vs named→`fitted_polygon`; `_validate_parent_geometry`
+  duck-types the containment checker (`OutlineSpec` or shapely `PolygonOutline`);
+  `_compose_stamp` stamps the ring straight to `Edge.Cuts`. **Verification gap:** a full
+  place+route build emitting an actual snowman board hasn't been run yet — only geometry/
+  wiring units. Close it in Phase 6 (self-eval).
 
-**Phase 3b integration note (next increment):** `OutlineSpec` is mirrored by the layout
-canvas JS and guarded by a cross-language agreement test — do NOT add a `polygon` shape to
-it. Instead carry an auto polygon outline on its own state channel (e.g.
-`state.fitted_polygon: list[[x,y]]`): `_fit_requested_shape` sets it from
-`shapes.circumscribe(...)` for named shapes; `_compose_stamp` stamps `outline_data
-["polyline"]` directly from it; `_validate_parent_geometry` checks containment via the
-`PolygonOutline`/shapely path. This keeps the JS-mirrored model untouched.
+**Next:** Phase 4 (compound/Tier-3 region mapping — leaf→blob anchors + necks) and/or
+Phase 6 (self-eval category) to lock 3b in with a real shaped build. Edge-connector
+handling (Phase 5) for shapes without a flat run.
 
 ---
 
