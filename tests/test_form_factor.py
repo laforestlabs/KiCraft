@@ -133,3 +133,90 @@ def test_extractor_no_size_is_none():
     ff = extract_form_factor("a circular LED ring board")
     assert ff is not None
     assert ff.size_mm is None
+
+
+# --------------------------------------------------------------------------- #
+# Intent stage-commit wiring (the deterministic safety net)
+# --------------------------------------------------------------------------- #
+
+import json  # noqa: E402
+
+from kicraft.design.cli_app import main  # noqa: E402
+
+
+def _commit_intent(tmp_path, capsys, intent: dict, brief: str | None = None):
+    """Drive `stage-commit intent` against a production-shaped project dir
+    (``<proj>/.kicraft/state.json`` + ``<proj>/brief.txt``) and return
+    ``(rc, payload, written_state)``."""
+    kdir = tmp_path / ".kicraft"
+    kdir.mkdir(parents=True, exist_ok=True)
+    state_path = kdir / "state.json"
+    if brief is not None:
+        (tmp_path / "brief.txt").write_text(brief)
+    slot = tmp_path / "intent_slot.json"
+    slot.write_text(json.dumps(intent))
+    rc = main(
+        [
+            "stage-commit", "intent",
+            "--slot-file", str(slot),
+            "--project-stem", "FF_TEST",
+            "--no-archive",
+            str(state_path),
+        ]
+    )
+    out = capsys.readouterr().out
+    payload = json.loads(out) if out.strip() else {}
+    written = json.loads(state_path.read_text())
+    return rc, payload, written
+
+
+def _intent(goal: str, **extra) -> dict:
+    return {
+        "goal": goal,
+        "constraints": [],
+        "named_parts": [],
+        "assumptions": [],
+        "inferred_expertise": "intermediate",
+        **extra,
+    }
+
+
+def test_intent_commit_captures_round_shape(tmp_path, capsys):
+    rc, payload, written = _commit_intent(
+        tmp_path, capsys,
+        _intent("A round coaster temperature sensor board, 50 mm diameter."),
+    )
+    assert rc == 0, payload
+    assert payload.get("form_factor") == "circle"
+    assert written["intent"]["form_factor"]["shape"] == "circle"
+    assert written["intent"]["form_factor"]["size_mm"] == 50.0
+
+
+def test_intent_commit_rectangular_leaves_form_factor_none(tmp_path, capsys):
+    rc, payload, written = _commit_intent(
+        tmp_path, capsys,
+        _intent("An ESP32-S3 plant monitor with soil moisture and BME280."),
+    )
+    assert rc == 0, payload
+    assert "form_factor" not in payload
+    assert written["intent"]["form_factor"] is None
+
+
+def test_intent_commit_preserves_explicit_shape(tmp_path, capsys):
+    # The model set a shape plain text wouldn't reveal; the extractor must defer.
+    rc, payload, written = _commit_intent(
+        tmp_path, capsys,
+        _intent("A small badge board.", form_factor={"shape": "hexagon"}),
+    )
+    assert rc == 0, payload
+    assert written["intent"]["form_factor"]["shape"] == "hexagon"
+
+
+def test_intent_commit_reads_brief_when_goal_drops_shape(tmp_path, capsys):
+    rc, payload, written = _commit_intent(
+        tmp_path, capsys,
+        _intent("An LED ornament with warm-white LEDs."),
+        brief="Make me a snowman-shaped LED ornament for the tree.",
+    )
+    assert rc == 0, payload
+    assert written["intent"]["form_factor"]["shape"] == "snowman"

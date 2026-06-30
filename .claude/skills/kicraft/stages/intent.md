@@ -7,6 +7,7 @@ Slot shape (`IntentSlot`):
 - `named_parts`: list of any specific MPNs, ICs, connectors, or batteries the user has named. Empty list if none.
 - `inferred_expertise`: one of `"beginner"` / `"intermediate"` / `"expert"`, inferred from vocabulary and constraint specificity.
 - `assumptions`: defaults you applied because the user didn't say. Each entry MUST end with `(defaulted)` so the user can spot and override (e.g. `"target fab: JLCPCB (defaulted)"`).
+- `form_factor` (optional): set ONLY when the user asks for a non-rectangular board outline. `{"shape": "...", "size_mm": <headline dimension if stated>}`. Parametric shapes: `"circle"`, `"rounded_rect"` (+`"corner_radius_mm"`), `"chamfered_rect"` (+`"chamfer_mm"`). Named shapes are also allowed: `"hexagon"`, `"octagon"`, `"triangle"`, `"pentagon"`, `"star"`, `"heart"`, `"gear"`, `"snowman"`. Omit the field (or use `"rect"`) for a conventional rectangular board — don't infer a shape the user didn't ask for. A deterministic extractor also fills this from the brief, so it's a safety net, but set it when the request is clear (especially for paraphrased shapes the keyword matcher might miss). Also keep the user's shape wording in `constraints`.
 
 `project_stem` rule (top-level state field, NOT inside the slot — pass via `--project-stem`):
 

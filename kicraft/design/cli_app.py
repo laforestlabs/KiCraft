@@ -59,6 +59,7 @@ from .synthesis.footprint_library import (
     lookup_footprint,
     search_footprints,
 )
+from .synthesis.form_factor import extract_form_factor
 from .synthesis.symbol_pinout import SymbolNotFoundError, lookup_pins
 from .synthesis.parts_lookup import (
     LibraryNotFoundError,
@@ -2021,6 +2022,31 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         )
         return 3
 
+    # Intent form-factor capture (deterministic; a safety net for the LLM). When
+    # the brief unambiguously asks for a non-rectangular board and the model did
+    # not already record one, classify the shape from the committed intent text
+    # (+ the raw brief when present) so downstream synthesis can shape Edge.Cuts.
+    # Never overrides an explicit non-rect shape the model set.
+    form_factor_capture: str | None = None
+    if stage == "intent" and state.intent is not None:
+        existing = state.intent.form_factor
+        if existing is None or existing.shape in ("", "rect"):
+            sources = [
+                state.intent.goal,
+                *state.intent.constraints,
+                *state.intent.assumptions,
+            ]
+            try:
+                brief = (state_path.resolve().parent.parent / "brief.txt").read_text()
+            except OSError:
+                brief = ""
+            if brief:
+                sources.append(brief)
+            detected = extract_form_factor("\n".join(s for s in sources if s))
+            if detected is not None:
+                state.intent.form_factor = detected
+                form_factor_capture = detected.shape
+
     # Wiring netlist normalization (deterministic; a no-op on an already-correct
     # netlist). Runs before validation + persistence, so the committed state and
     # the emitter both see the repaired netlist:
@@ -2273,6 +2299,8 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         summary["archive_warning"] = archive_warning
     if wiring_normalizations:
         summary["wiring_normalizations"] = wiring_normalizations
+    if form_factor_capture:
+        summary["form_factor"] = form_factor_capture
     # Placement rules referencing refs the BOM no longer carries are
     # tolerated (parts churn across BOM re-runs); synthesis drops them
     # with a warning. Surface them at commit time too so the UI can show
