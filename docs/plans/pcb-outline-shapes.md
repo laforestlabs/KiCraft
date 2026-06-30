@@ -33,9 +33,19 @@ own self-eval coverage.
   place+route build emitting an actual snowman board hasn't been run yet — only geometry/
   wiring units. Close it in Phase 6 (self-eval).
 
-**Next:** Phase 4 (compound/Tier-3 region mapping — leaf→blob anchors + necks) and/or
-Phase 6 (self-eval category) to lock 3b in with a real shaped build. Edge-connector
-handling (Phase 5) for shapes without a flat run.
+- 🚧 **Phase 6 — outline-shape self-eval** (`a11b4c1` classifier, `f7f184d` scorer +
+  corpus). Deterministic `render.edge_cuts.classify_edge_cuts_shape` /
+  `family_for_shape` + `eval.outline_check.evaluate_outline_shape` (0-4 grade) +
+  `benchmark.SHAPED_OUTLINE_PROMPTS` (6 briefs: circle, rounded-rect+USB-C, chamfer,
+  hexagon, star, snowman). **Remaining:** add an `outline_shape_correctness` Class-C
+  dimension to `eval/rubric.yaml` (recompute its sha256 via `bin/rubric_hash.py`),
+  register a scorer in `eval/scoring.py`, and thread each entry's `outline_shape` through
+  the harness into the metrics dict. The scoring logic + corpus are done; that's plumbing.
+
+**Next:** the rubric/metrics plumbing above to activate the shape check in a self-eval run
+(which is also the cleanest way to close the 3b **verification gap** — a real shaped build).
+Then Phase 4 (compound/Tier-3 region mapping — leaf→blob anchors + necks) for boards that
+*use* the whole snowman, and Phase 5 (edge-connector flat-run handling).
 
 ---
 
