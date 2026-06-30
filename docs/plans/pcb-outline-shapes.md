@@ -33,19 +33,28 @@ own self-eval coverage.
   place+route build emitting an actual snowman board hasn't been run yet — only geometry/
   wiring units. Close it in Phase 6 (self-eval).
 
-- 🚧 **Phase 6 — outline-shape self-eval** (`a11b4c1` classifier, `f7f184d` scorer +
-  corpus). Deterministic `render.edge_cuts.classify_edge_cuts_shape` /
-  `family_for_shape` + `eval.outline_check.evaluate_outline_shape` (0-4 grade) +
-  `benchmark.SHAPED_OUTLINE_PROMPTS` (6 briefs: circle, rounded-rect+USB-C, chamfer,
-  hexagon, star, snowman). **Remaining:** add an `outline_shape_correctness` Class-C
-  dimension to `eval/rubric.yaml` (recompute its sha256 via `bin/rubric_hash.py`),
-  register a scorer in `eval/scoring.py`, and thread each entry's `outline_shape` through
-  the harness into the metrics dict. The scoring logic + corpus are done; that's plumbing.
+- ✅ **Phase 6 — outline-shape self-eval** (`a11b4c1`, `f7f184d`, `8636fb2`).
+  `classify_edge_cuts_shape` / `family_for_shape` + `evaluate_outline_shape` (0-4) +
+  `SHAPED_OUTLINE_PROMPTS` (6 briefs) + harness wiring (`--include-shaped` /
+  `--shaped-only`; `evaluate_one` runs the check on the built parent board; `compile_report`
+  emits `outline_stats`). **Design correction from the written plan:** the check is reported
+  ALONGSIDE the rubric score, NOT as a Class-C dimension — `finalize_report` rejects any
+  None-level dimension and weights must sum to 100, so an N/A-for-rect dimension would break
+  the 28 rectangular briefs' finalize and distort the scale. The rubric contract
+  (yaml/hash/version) is left untouched.
 
-**Next:** the rubric/metrics plumbing above to activate the shape check in a self-eval run
-(which is also the cleanest way to close the 3b **verification gap** — a real shaped build).
-Then Phase 4 (compound/Tier-3 region mapping — leaf→blob anchors + necks) for boards that
-*use* the whole snowman, and Phase 5 (edge-connector flat-run handling).
+**✅ Verification gap CLOSED.** End-to-end proof on real boards:
+- *Capture+flow* (live LLM synth, `hex-env-sensor`): `intent.form_factor={shape:hexagon}` →
+  `autoplacer.json board_outline={shape:hexagon}`.
+- *Stamping* (deterministic `replay --no-route` on the `USB_PD_TRIGGER` fixture with an
+  injected `board_outline`): a **hexagon** board out of compose — Edge.Cuts classifies
+  hexagon/polygon (6 corners, circ 0.907), `evaluate_outline_shape` level 4. This is the
+  named/`fitted_polygon` path the snowman shares; the parametric `circle`/`manual_outline`
+  path is the one `test_outline_shape_stamping` already covers.
+
+**Next:** Phase 4 (compound/Tier-3 region mapping — leaf→blob anchors + necks) for boards
+that *use* the whole snowman (today named shapes circumscribe the rectangular content, so
+the head/base are decorative), and Phase 5 (edge-connector flat-run handling).
 
 ---
 
