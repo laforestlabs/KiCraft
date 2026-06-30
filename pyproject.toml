@@ -24,6 +24,10 @@ design = [
     "pydantic>=2.6",
     "kicad-skip>=0.2",
     "easyeda2kicad>=1.0",
+    # Robust 2D geometry for non-rectangular board outlines: boolean union of
+    # shape-program primitives (e.g. a snowman = union of circles), polygon
+    # offset, and point/rect-in-polygon containment. See kicraft/shapes/.
+    "shapely>=2.0",
 ]
 tuning = [
     "cma>=4.0",
