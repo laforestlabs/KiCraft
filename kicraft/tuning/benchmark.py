@@ -104,9 +104,39 @@ BENCHMARK_PROMPTS: list[dict[str, str]] = [
 ]
 
 
+# Non-rectangular outline category for the self-eval. Kept SEPARATE from
+# BENCHMARK_PROMPTS so the place/route tuner corpus is undisturbed. Each entry
+# adds an ``outline_shape`` the deterministic outline check
+# (kicraft.eval.outline_check) grades the built board against. Briefs are
+# decorative / low-interconnect on purpose -- the regime shaped boards suit (a
+# pinched silhouette can't carry a dense bus through its necks). Coverage:
+# circle without an edge connector, rounded-rect WITH a USB-C edge port (the
+# flat-run path), a chamfered badge, a hexagon (polygon), a star, and a snowman
+# (compound / multi-blob).
+SHAPED_OUTLINE_PROMPTS: list[dict[str, str]] = [
+    {"slug": "round-led-ring", "outline_shape": "circle",
+     "brief": "A round 60 mm LED ring board: twelve WS2812B addressable LEDs evenly spaced in a circle, driven by an ATtiny412, powered from a 2-pin JST-PH header. No edge connectors."},
+    {"slug": "rounded-c3-devboard", "outline_shape": "rounded_rect",
+     "brief": "A rounded-corner ESP32-C3 development board with a USB-C connector on one edge and a 2x10 0.1-inch GPIO header along the opposite edge."},
+    {"slug": "chamfered-badge", "outline_shape": "chamfered_rect",
+     "brief": "A chamfered-corner conference badge: an ATtiny1614 driving six 0805 LEDs and a CR2032 coin-cell holder, with two capacitive-touch pads."},
+    {"slug": "hex-env-sensor", "outline_shape": "hexagon",
+     "brief": "A hexagonal environmental sensor board: a BME280 temperature/humidity/pressure sensor on an I2C Qwiic header, with a power LED."},
+    {"slug": "star-ornament", "outline_shape": "star",
+     "brief": "A star-shaped holiday ornament: five warm-white LEDs at the points driven by an ATtiny402, powered by a CR2032 coin cell, with a hang hole at the top."},
+    {"slug": "snowman-ornament", "outline_shape": "snowman",
+     "brief": "A snowman-shaped LED ornament in three stacked sections (base, body, head) with warm-white LEDs in each, driven by an ATtiny402 from a CR2032 coin cell."},
+]
+
+
 def briefs() -> list[str]:
     """Plain brief strings (drop-in for EXAMPLE_PROMPTS-style synthesis driving)."""
     return [e["brief"] for e in BENCHMARK_PROMPTS]
+
+
+def shaped_briefs() -> list[dict[str, str]]:
+    """The non-rectangular outline category (slug / brief / outline_shape)."""
+    return list(SHAPED_OUTLINE_PROMPTS)
 
 
 def by_archetype() -> dict[str, list[dict[str, str]]]:
