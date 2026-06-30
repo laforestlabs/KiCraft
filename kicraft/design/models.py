@@ -108,12 +108,60 @@ class ChatMsg(BaseModel):
 # ---------- Stage 1: Intent ----------
 
 
+# Parametric outline shapes that map one-to-one onto
+# ``layout_editor.outline.OutlineSpec``. Anything else in ``FormFactor.shape``
+# (``hexagon``, ``snowman``, ...) is a named-library shape the shapes module
+# expands to a polygon downstream; unknown names are tolerated here and degrade
+# to a warning at synthesis rather than bricking the intent commit.
+PARAMETRIC_OUTLINE_SHAPES: tuple[str, ...] = (
+    "rect",
+    "rounded_rect",
+    "circle",
+    "chamfered_rect",
+)
+
+
+class FormFactor(BaseModel):
+    """Requested board outline shape, captured from the brief at the intent
+    stage and resolved to concrete ``Edge.Cuts`` geometry downstream
+    (autoplacer + parent compose). ``shape`` is either a parametric shape
+    (:data:`PARAMETRIC_OUTLINE_SHAPES`) or a named-library shape. Validation is
+    deliberately lenient: an unknown shape name is NOT rejected (a brief may ask
+    for a novel shape), mirroring the placement-rules leniency -- it degrades to
+    a warning when the shapes module cannot resolve it at synthesis."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    shape: str = "rect"
+    corner_radius_mm: float | None = None  # rounded_rect
+    chamfer_mm: float | None = None  # chamfered_rect
+    size_mm: float | None = None  # headline dimension the brief stated (advisory)
+    note: str | None = None  # the phrase that triggered the classification
+
+    @field_validator("shape")
+    @classmethod
+    def _normalize_shape(cls, v: str) -> str:
+        v = (v or "rect").strip().lower()
+        return v or "rect"
+
+    @field_validator("corner_radius_mm", "chamfer_mm", "size_mm")
+    @classmethod
+    def _non_negative(cls, v: float | None) -> float | None:
+        if v is not None and v < 0:
+            raise ValueError("form-factor dimensions must be >= 0 mm")
+        return v
+
+
 class IntentSlot(BaseModel):
     goal: str
     constraints: list[str] = Field(default_factory=list)
     named_parts: list[str] = Field(default_factory=list)
     inferred_expertise: Literal["beginner", "intermediate", "expert"] = "intermediate"
     assumptions: list[str] = Field(default_factory=list)
+    # Requested non-rectangular board shape, when the brief asks for one. Set by
+    # the intent stage (LLM + a deterministic extractor at stage-commit). None /
+    # shape "rect" means a conventional rectangular board.
+    form_factor: FormFactor | None = None
 
 
 # ---------- Stage 2: Functional spec ----------
