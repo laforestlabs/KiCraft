@@ -18,7 +18,6 @@ import hmac
 import importlib
 import json
 import os
-import random
 import re
 import shutil
 import ssl
@@ -47,7 +46,7 @@ from .accounts import (
     is_admin,
 )
 from .config import LEGAL_VERSION, Settings, default_legal_dir
-from .examples import CHIP_PROMPTS, EXAMPLE_PROMPTS
+from .examples import EXAMPLE_PROMPTS
 from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView, kicanvas_head
 from .layout_panel import (
     LayoutEditorPanel,
@@ -58,6 +57,7 @@ from .rules_panel import PlacementRulesPanel
 from .mailer import send_reset_email, send_verification_email
 from ..parts_library import Tier
 from ..parts_library import jlcparts
+from ..tuning.benchmark import briefs as _selfeval_briefs
 from .parts_catalog import (
     catalog,
     footprint_svg,
@@ -4229,10 +4229,10 @@ def index(prompt: str = "", project: str = ""):
             placeholder="Describe your board, big or small. Be bold.") \
             .props("rows=4 stack-label").classes("w-full kc-brief")
 
-        # One-click inspiration: chips drop a full brief into the box (the cycling
-        # placeholder in kc_onboarding.js supplies passive ideas). Created here for
-        # position, populated below once the Design button exists so use_prompt can
-        # nudge it.
+        # One-click inspiration: "Surprise me" streams the vetted self-eval corpus
+        # (the cycling placeholder in kc_onboarding.js supplies passive ideas).
+        # Created here for position; its click handler is wired below once `start`
+        # exists so it can both load the next brief AND launch the run.
         chips_row = ui.row().classes("items-center gap-2 kc-chips")
 
         with ui.row().classes("items-center gap-2"):
@@ -4269,13 +4269,12 @@ def index(prompt: str = "", project: str = ""):
             design_btn.classes(add="kc-pulse")  # draw the eye to the next click
 
         with chips_row:
-            for _chip in CHIP_PROMPTS:
-                ui.button(_chip["label"],
-                          on_click=lambda p=_chip["prompt"]: use_prompt(p)) \
-                    .props("outline rounded dense no-caps").classes("kc-chip")
-            ui.button("Surprise me", icon="casino",
-                      on_click=lambda: use_prompt(random.choice(EXAMPLE_PROMPTS))) \
-                .props("flat rounded dense no-caps").classes("kc-chip")
+            # Streams the vetted self-eval corpus in order and runs each one
+            # (handler wired below, once `start` is defined).
+            surprise_btn = ui.button("Surprise me", icon="casino") \
+                .props("flat rounded dense no-caps").classes("kc-chip") \
+                .tooltip("Run the next vetted self-eval brief — a known-good "
+                         "design. Click again for the next one.")
 
         def _enter_run_view(prompt_text: str) -> None:
             """A design is open (started / attached / reopened): collapse the
@@ -4839,6 +4838,24 @@ def index(prompt: str = "", project: str = ""):
             threading.Thread(target=_design_worker, args=(brief.value, state), daemon=True).start()
 
         design_btn.on_click(start)
+
+        def surprise():
+            """Load the next vetted self-eval brief and launch it. The corpus
+            (kicraft.tuning.benchmark) is walked in order via a persistent global
+            counter, so repeated clicks stream the whole set one at a time — a
+            continuous feed of known-good designs. `start` enforces the usual
+            quota / verification gates."""
+            if state["running"]:
+                return
+            briefs = _selfeval_briefs()
+            if not briefs:
+                ui.notify("No self-eval briefs are configured.", color="warning")
+                return
+            idx = _store().next_cycle_index("surprise_me_idx", len(briefs))
+            brief.value = briefs[idx]
+            start()
+
+        surprise_btn.on_click(surprise)
 
         def _close_layout_editor():
             """Leave the manual layout editor; the render timer repaints

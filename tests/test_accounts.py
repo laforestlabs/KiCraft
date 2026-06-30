@@ -738,6 +738,25 @@ def test_get_setting_default(store):
     assert store.get_setting("k") == "v2"
 
 
+def test_next_cycle_index_wraps_in_order(store):
+    # Walks 0..n-1 in order, then wraps -- one brief per "Surprise me" click.
+    seen = [store.next_cycle_index("surprise", 3) for _ in range(7)]
+    assert seen == [0, 1, 2, 0, 1, 2, 0]
+
+
+def test_next_cycle_index_persists_and_is_robust(store):
+    assert store.next_cycle_index("k", 5) == 0
+    assert store.next_cycle_index("k", 5) == 1
+    # A shrinking modulo re-bases the stored counter into range.
+    assert store.next_cycle_index("k", 2) == 0
+    # Non-positive modulo is a no-op that returns 0.
+    assert store.next_cycle_index("k", 0) == 0
+    # A garbage stored value degrades to 0 rather than raising.
+    store.set_setting("bad", "not-an-int")
+    assert store.next_cycle_index("bad", 4) == 0
+    assert store.next_cycle_index("bad", 4) == 1
+
+
 def test_users_with_project_counts_left_join(store):
     a = store.create_user("a@e.st", "pw")
     store.create_user("zero@e.st", "pw")  # no projects

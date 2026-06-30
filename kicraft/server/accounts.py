@@ -1976,6 +1976,28 @@ class AccountStore:
                 "INSERT INTO app_settings (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
+    def next_cycle_index(self, key: str, modulo: int) -> int:
+        """Return a persistent wraparound counter's current value and advance it.
+
+        Atomic read-modify-write in one transaction (SQLite serializes writers),
+        so concurrent clicks from any session/user never hand out the same index.
+        Backs the "Surprise me" button, which streams the self-eval corpus in
+        order one brief per click. Returns 0 when ``modulo`` is non-positive."""
+        if modulo <= 0:
+            return 0
+        with self._conn() as conn:
+            row = conn.execute("SELECT value FROM app_settings WHERE key=?",
+                               (key,)).fetchone()
+            try:
+                cur = int(row["value"]) % modulo if row else 0
+            except (TypeError, ValueError):
+                cur = 0
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, str((cur + 1) % modulo)))
+        return cur
+
     def signup_open(self) -> bool:
         """Whether anyone may register on the free tier WITHOUT an invite code.
         Defaults closed (invite-only beta); flipped from /admin/invites at
