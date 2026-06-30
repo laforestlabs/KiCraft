@@ -7,6 +7,7 @@ from __future__ import annotations
 import shutil
 import sys
 
+from kicraft.cli._compose_validate import _fit_requested_shape
 from kicraft.cli._compose_validate import _repair_parent_outline
 from kicraft.cli._compose_validate import _validate_parent_geometry
 from pathlib import Path
@@ -130,6 +131,12 @@ def _stamp_parent_board(
     # placements on quality (overlap/packing/net-distance) rather than on
     # overflowing a too-small outline, and FreeRouting gets a valid board.
     _repair_parent_outline(state)
+
+    # Circumscribe a brief-requested non-rect shape around the grown AABB (auto
+    # path; no-op for manual layouts and rectangular boards). Sets
+    # state.manual_outline so the polyline stamp + shape-aware geometry
+    # validation below consume the true shape.
+    _fit_requested_shape(state)
 
     # Compute the board outline from the composition
     outline = board_state.board_outline

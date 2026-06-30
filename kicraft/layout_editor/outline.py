@@ -304,3 +304,69 @@ class OutlineSpec:
 
         per_axis = entry / _SQRT2 + inset_mm
         return Point(cx + sx * per_axis, cy + sy * per_axis)
+
+
+def circumscribe(
+    shape: str,
+    min_pt: Point,
+    max_pt: Point,
+    *,
+    corner_radius_mm: float | None = None,
+    chamfer_mm: float | None = None,
+    margin_mm: float = 0.5,
+) -> "OutlineSpec":
+    """Smallest ``OutlineSpec`` of ``shape`` that fully contains the rectangle
+    ``(min_pt, max_pt)``, centered on it.
+
+    The "circumscribe" outline strategy for auto-synthesized boards: the placed
+    circuit lives in the rectangular content AABB, and the requested shape is
+    grown around it so nothing lands outside ``Edge.Cuts`` -- no placement
+    changes. Sizing is a binary search on a uniform scale using the analytic
+    :meth:`OutlineSpec.contains_rect`, exact for every parametric shape without
+    per-shape sagitta math. Shape parameters (corner radius / chamfer) are
+    absolute mm: a supplied value is honored, else a modest content-proportional
+    default is used; both stay fixed while the box grows. ``circle`` keeps a
+    square bounding box.
+    """
+    if shape not in SHAPES:
+        raise ValueError(f"circumscribe supports {SHAPES}, got {shape!r}")
+    cx = (min_pt.x + max_pt.x) / 2.0
+    cy = (min_pt.y + max_pt.y) / 2.0
+    hw = (max_pt.x - min_pt.x) / 2.0
+    hh = (max_pt.y - min_pt.y) / 2.0
+    content_min = min(max_pt.x - min_pt.x, max_pt.y - min_pt.y)
+    default_param = max(0.5, 0.15 * content_min)
+    radius = corner_radius_mm if (corner_radius_mm and corner_radius_mm > 0) else default_param
+    chamfer = chamfer_mm if (chamfer_mm and chamfer_mm > 0) else default_param
+
+    def _make(scale: float) -> OutlineSpec:
+        ehw = hw * scale + margin_mm
+        ehh = hh * scale + margin_mm
+        if shape == "circle":
+            ehw = ehh = max(ehw, ehh)
+        mn = Point(cx - ehw, cy - ehh)
+        mx = Point(cx + ehw, cy + ehh)
+        kwargs: dict[str, float] = {}
+        if shape == "rounded_rect":
+            kwargs["corner_radius_mm"] = radius
+        elif shape == "chamfered_rect":
+            kwargs["chamfer_mm"] = chamfer
+        return OutlineSpec(shape=shape, min_pt=mn, max_pt=mx, **kwargs)
+
+    def _ok(spec: OutlineSpec) -> bool:
+        return spec.contains_rect(min_pt.x, min_pt.y, max_pt.x, max_pt.y, tol=0.0)
+
+    # Grow an upper bound until it contains, then bisect for the smallest scale.
+    hi = 1.0
+    guard = 0
+    while not _ok(_make(hi)) and guard < 64:
+        hi *= 1.3
+        guard += 1
+    lo = hi / 1.3 if hi > 1.0 else 1.0
+    for _ in range(48):
+        mid = (lo + hi) / 2.0
+        if _ok(_make(mid)):
+            hi = mid
+        else:
+            lo = mid
+    return _make(hi)

@@ -154,6 +154,66 @@ def _repair_parent_outline(
     }
 
 
+def _as_float(v: Any) -> float | None:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
+    """Circumscribe the brief-requested outline shape around the (already
+    grown) rectangular content AABB, then hand it to the stamp/validate/pour
+    path as an authoritative outline.
+
+    Runs after :func:`_repair_parent_outline` on the auto (non-manual) path:
+    placement happened in the rectangular AABB, so growing the requested shape
+    around it keeps every part inside ``Edge.Cuts`` with no placement changes.
+    Sets ``state.manual_outline`` to the computed spec so the stamper writes the
+    shape polyline, the geometry validator checks the true shape (not just the
+    AABB), and the KiCad zone filler clips the GND pour to it.
+
+    No-op when a manual layout is authoritative, when no shape was requested,
+    when the request is rectangular, or when the shape is not a parametric
+    ``OutlineSpec`` shape (named / polygon shapes land in a later phase).
+    """
+    if state.manual_outline is not None:
+        return {"fitted": False, "reason": "manual outline authoritative"}
+    req = state.requested_shape
+    if not req:
+        return {"fitted": False, "reason": "no requested shape"}
+
+    from kicraft.layout_editor.outline import SHAPES, circumscribe
+
+    shape = str(req.get("shape", "rect")).strip().lower()
+    if shape in ("", "rect"):
+        return {"fitted": False, "reason": "rectangular"}
+    if shape not in SHAPES:
+        # hexagon / snowman / ... -> polygon support lands in a later phase.
+        return {"fitted": False, "reason": f"shape {shape!r} not yet supported"}
+
+    composition = state.composition
+    outline = composition.board_state.board_outline if composition is not None else None
+    if not outline or len(outline) < 2:
+        return {"fitted": False, "reason": "no outline"}
+
+    tl, br = outline
+    spec = circumscribe(
+        shape,
+        tl,
+        br,
+        corner_radius_mm=_as_float(req.get("corner_radius_mm")),
+        chamfer_mm=_as_float(req.get("chamfer_mm")),
+    )
+    composition.board_state.board_outline = spec.aabb()
+    state.manual_outline = spec.to_dict()
+    return {
+        "fitted": True,
+        "shape": shape,
+        "size_mm": [round(spec.width_mm, 2), round(spec.height_mm, 2)],
+    }
+
+
 def _validate_parent_geometry(
     state: ParentCompositionState,
 ) -> dict[str, Any]:
