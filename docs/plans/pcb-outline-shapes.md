@@ -16,8 +16,23 @@ own self-eval coverage.
 - ✅ **Phase 1 — capture** (`3fd1a33`, `b17c752`). Shape captured from the brief into
   `IntentSlot.form_factor`.
 - ✅ **Phase 2 — flow** (`628c0e6`). `form_factor` → `autoplacer.json` `board_outline` →
-  `ParentCompositionState.requested_shape`. Next: **Phase 3** (Shapely shape-eval +
-  outline fit — where geometry is actually built).
+  `ParentCompositionState.requested_shape`.
+- ✅ **Phase 3a — parametric circumscribe** (`bbb468b`). Tier 1 end-to-end: a brief-
+  requested circle / rounded_rect / chamfered_rect is grown around the placed content at
+  compose (`outline.circumscribe` + `_compose_validate._fit_requested_shape`, wired into
+  `_compose_stamp`) and flows through the existing shape-aware stamp + validate + zone-clip
+  path. No placement changes, no new dep.
+- 🚧 **Phase 3b (foundation)** — Shapely `kicraft/shapes/` (`9d8f10d`). Named/compound
+  shape library (hexagon…snowman) + `circumscribe()` polygon, standalone + tested.
+  **Remaining for 3b: wire named/polygon shapes through compose** (see note below).
+
+**Phase 3b integration note (next increment):** `OutlineSpec` is mirrored by the layout
+canvas JS and guarded by a cross-language agreement test — do NOT add a `polygon` shape to
+it. Instead carry an auto polygon outline on its own state channel (e.g.
+`state.fitted_polygon: list[[x,y]]`): `_fit_requested_shape` sets it from
+`shapes.circumscribe(...)` for named shapes; `_compose_stamp` stamps `outline_data
+["polyline"]` directly from it; `_validate_parent_geometry` checks containment via the
+`PolygonOutline`/shapely path. This keeps the JS-mirrored model untouched.
 
 ---
 

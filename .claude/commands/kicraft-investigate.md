@@ -432,11 +432,67 @@ for p in parts:
     print(f"  {p['ref']:5s} {c:11s} bom_mpn={bm!r} cat_mpn={cm!r} stock={row['stock']} [{tag}]")
     print(f"        cat desc: {(row['description'] or '')[:88]}")
 if not any_b: print("  (no BOM part carries an explicit LCSC C# — all generic/keyword-resolved; rely on Pass A)")
+print("\nPass C — orphan parts (never priced, no explicit C#, unverified library LCSC):")
+# Build the set of refs already covered by Pass A (priced) or Pass B (explicit C#)
+covered = set(prices.keys())
+for p in parts:
+    if cnum_of(p):
+        covered.add(p["ref"])
+# Try to load the parts-library manifests to check library-bundled LCSC validity.
+try:
+    sys.path.insert(0, str(Path(os.environ.get("REPO", str(Path.home() / "KiCraft")))))
+    from kicraft.design.library import _load_library_parts
+    active, _broken = _load_library_parts(run)
+    manifest_by_name = {pm.manifest.name: pm.manifest for pm in active}
+    has_lib = True
+except Exception:
+    has_lib = False
+    manifest_by_name = {}
+    print("  (cannot load parts-library manifests from this run — Pass C limited)")
+orphans = 0
+fabricated = 0
+for p in parts:
+    ref = p.get("ref")
+    if ref in covered:
+        continue
+    sym = p.get("symbol") or ""
+    fp = p.get("footprint") or ""
+    lib = (sym.split(":", 1)[0] if ":" in sym else
+           (fp.split(":", 1)[0] if ":" in fp else ""))
+    if not lib:
+        orphans += 1
+        print(f"  {ref:5s} ORPHAN: no library prefix (symbol={sym!r} footprint={fp!r}) — never priced, no LCSC path")
+        continue
+    if not has_lib:
+        print(f"  {ref:5s} UNVERIFIED: library={lib} (cannot load parts library)")
+        continue
+    man = manifest_by_name.get(lib)
+    if not man:
+        print(f"  {ref:5s} NO MANIFEST: library={lib} — ORPHAN (no loaded manifest for this library)")
+        orphans += 1
+        continue
+    lcsc = (man.sourcing or {}).get("lcsc")
+    if not lcsc:
+        print(f"  {ref:5s} NO LCSC: library={lib} manifest has no sourcing.lcsc — ORPHAN")
+        orphans += 1
+        continue
+    row = cat(lcsc)
+    if row is not None:
+        tag = "REAL (verified)" if con else "UNVERIFIED (no catalog)"
+        print(f"  {ref:5s} LIBRARY-BUNDLE ({tag}): library={lib} lcsc={lcsc} stock={row['stock']} mfr={row['mfr']!r} — not yet priced, but sourceable")
+    elif con is not None:
+        fabricated += 1
+        print(f"  {ref:5s} FABRICATED LCSC: library={lib} claims {lcsc} which is NOT in the catalog — part has no real source")
+    else:
+        print(f"  {ref:5s} UNVERIFIED (no catalog): library={lib} lcsc={lcsc}")
+if orphans: print(f"  -> {orphans} orphan part(s) (no library manifest, no LCSC, never priced)")
+if fabricated: print(f"  -> {fabricated} fabricated LCSC(s) in library manifests (not in catalog)")
+if not orphans and not fabricated and not [p for p in parts if p.get("ref") not in covered]:
+    print("  (all parts covered by Pass A, Pass B, or have a verified library bundle)")
 if con: con.close()
 PY
 ```
-
-**Read it:** Pass A `SUSPECT/HALLUCINATED` = a part number the pipeline priced but that does **not** exist in the catalog (a fabricated C# — investigate `parts_catalog.py`/`pricing.py` resolution, or an online-easyeda fallback that bypassed the offline catalog). `REAL-but-OUT-OF-STOCK` = orderable risk, not fab-blocking. Pass B `MPN-MISMATCH` or a `cat desc` unrelated to the part's intended role (compare against its `sheet`/function and `value`) = the model picked the **wrong real part** — a model-output defect, quote ref + both MPNs. All `REAL`/`MATCH` with stock > 0 = a clean BOM.
+**Read it:** Pass A `SUSPECT/HALLUCINATED` = a part number the pipeline priced but that does **not** exist in the catalog (a fabricated C# — investigate `parts_catalog.py`/`pricing.py` resolution, or an online-easyeda fallback that bypassed the offline catalog). `REAL-but-OUT-OF-STOCK` = orderable risk, not fab-blocking. Pass B `MPN-MISMATCH` or a `cat desc` unrelated to the part's intended role (compare against its `sheet`/function and `value`) = the model picked the **wrong real part** — a model-output defect, quote ref + both MPNs. Pass C `ORPHAN` = a part the pipeline never priced, carries no explicit LCSC in its BOM fields, and has no library manifest with a valid sourcing LCSC — a hole in part coverage. `FABRICATED LCSC` = a library manifest claims an LCSC that doesn't exist in the catalog — the bundled part has no real source; re-vendor it with a valid part number. `LIBRARY-BUNDLE (REAL)` = a part not yet priced but sourceable (the library manifest has a valid LCSC). All `REAL`/`MATCH` with stock > 0 = a clean BOM.
 
 ## 8. Design-quality audit C — thinking-trace wheel-spin (is the agent going in circles?)
 

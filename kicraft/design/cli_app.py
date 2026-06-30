@@ -206,6 +206,39 @@ def _unresolved_symbols(bom) -> list[str]:
     return bad
 
 
+def _unresolved_lcsc(bom, project_root: Path) -> list[str]:
+    """Return BOM parts whose library manifest claims an LCSC that isn't
+    in the offline catalog.
+
+    Mirrors the pattern of ``_unresolved_symbols`` / ``_unresolved_footprints``:
+    an empty list means every library-backed LCSC resolves (or the catalog is
+    absent and we can't verify). Catches fabricated C#s smuggled into the
+    parts library without catalog validation.
+    """
+    if not jlcparts.available():
+        return []  # can't verify — don't block
+    active, _broken = _load_library_parts(project_root)
+    manifest_by_name = {p.manifest.name: p.manifest for p in active}
+    bad: list[str] = []
+    for part in (bom.parts or []):
+        # Resolve the library name from the symbol or footprint prefix.
+        lib = _lib_prefix(part.symbol) or _lib_prefix(part.footprint or "")
+        if not lib:
+            continue
+        man = manifest_by_name.get(lib)
+        if not man:
+            continue
+        lcsc = (man.sourcing or {}).get("lcsc")
+        if not lcsc:
+            continue
+        if not jlcparts.lcsc_exists(lcsc):
+            bad.append(
+                f"{part.ref}: library '{lib}' claims LCSC {lcsc} "
+                f"which is not in the offline catalog"
+            )
+    return bad
+
+
 def _read_or_create_session_id(state_dir: Path, state: ConversationState) -> str:
     sid_path = state_dir / "session_id"
     if sid_path.exists():
@@ -666,15 +699,24 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
         if (man.mpn or "").strip().upper() == target:
             lcsc = (man.sourcing or {}).get("lcsc")
             if lcsc:
-                _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=lcsc,
-                           source="parts-library", library_name=man.name)
-                mpn_cache.put(mpn, lcsc, "parts-library")
-                print(json.dumps(
-                    {"ok": True, "mpn": mpn, "lcsc": lcsc,
-                     "source": "parts-library", "name": man.name},
-                    indent=2,
-                ))
-                return 0
+                # Validate against offline catalog before trusting the manifest.
+                # A fabricated C# from a bad bundle must never propagate.
+                if jlcparts.available() and not jlcparts.lcsc_exists(lcsc):
+                    _log_query("lookup_lcsc_id", outcome="miss", query=mpn,
+                               lcsc=lcsc, source="parts-library",
+                               error="lcsc-not-in-catalog")
+                    # Fall through — do NOT return a fabricated LCSC
+                else:
+                    # Catalog absent (degraded) OR LCSC exists → trust the manifest
+                    _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=lcsc,
+                               source="parts-library", library_name=man.name)
+                    mpn_cache.put(mpn, lcsc, "parts-library")
+                    print(json.dumps(
+                        {"ok": True, "mpn": mpn, "lcsc": lcsc,
+                         "source": "parts-library", "name": man.name},
+                        indent=2,
+                    ))
+                    return 0
 
     # 1b. Persistent MPN->LCSC resolution cache: a part resolved once on this
     #     machine resolves instantly, offline, on every later run, so a
@@ -685,14 +727,23 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
     #     searches out of the cache entirely. Stores only {lcsc, source, ts}.
     cached = mpn_cache.get(mpn)
     if cached and cached.get("lcsc"):
-        _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=cached["lcsc"],
-                   source="mpn-cache")
-        print(json.dumps(
-            {"ok": True, "mpn": mpn, "lcsc": cached["lcsc"],
-             "source": f"mpn-cache(via {cached.get('source', '?')})"},
-            indent=2,
-        ))
-        return 0
+        cached_lcsc = cached["lcsc"]
+        # A previously-resolved LCSC might be fabricated (from a bad library
+        # bundle that has since been replaced). Validate before returning.
+        if jlcparts.available() and not jlcparts.lcsc_exists(cached_lcsc):
+            _log_query("lookup_lcsc_id", outcome="miss", query=mpn,
+                       lcsc=cached_lcsc, source="mpn-cache",
+                       error="lcsc-not-in-catalog")
+            # Fall through — stale cache; let later tiers resolve it fresh
+        else:
+            _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=cached_lcsc,
+                       source="mpn-cache")
+            print(json.dumps(
+                {"ok": True, "mpn": mpn, "lcsc": cached_lcsc,
+                 "source": f"mpn-cache(via {cached.get('source', '?')})"},
+                indent=2,
+            ))
+            return 0
 
     # 2. Offline JLC catalog (jlcparts dump) — richer than the network search
     #    (live stock, Basic/Extended, qty-1 price) and answers without network.
@@ -742,6 +793,16 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
         return 4
 
     fields = ("lcsc", "model", "brand", "package", "description")
+    # Filter out EasyEDA results whose LCSC isn't in the offline catalog.
+    # EasyEDA can return internal placeholder IDs (e.g. C9900001223) that
+    # have CAD data but are not real orderable part numbers.
+    if jlcparts.available() and results:
+        valid = [r for r in results if jlcparts.lcsc_exists(r.get("lcsc", ""))]
+        if not valid and results:
+            _log_query("lookup_lcsc_id", outcome="miss", query=mpn,
+                       n_candidates=len(results),
+                       error="all-easyeda-results-fabricated")
+        results = valid
     best = _pick_lcsc(mpn, results)
     if best and best.get("lcsc"):
         _log_query("lookup_lcsc_id", outcome="resolved", query=mpn,
@@ -1258,6 +1319,25 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
 
     lcsc_id = args.from_lcsc
 
+
+    # Validate LCSC ID exists in offline catalog before fetching.
+    # A fabricated C# (e.g. EasyEDA-internal placeholder) slips through the
+    # EasyEDA API search fallback and produces a bundle with an unresolvable
+    # part number that can never be priced.
+    if jlcparts.available() and not jlcparts.lcsc_exists(lcsc_id):
+        print(
+            f"error: LCSC {lcsc_id} not found in the offline parts catalog.\n"
+            f"  Verify the part number or run `kicraft jlcparts-update` to refresh.\n"
+            f"  If this is a new part not yet in the catalog, retry after updating.",
+            file=sys.stderr,
+        )
+        return 2
+    if not jlcparts.available():
+        print(
+            f"warning: offline parts catalog not available — proceeding with "
+            f"{lcsc_id} without catalog validation",
+            file=sys.stderr,
+        )
     print(f"fetching {lcsc_id} from EasyEDA/LCSC...", file=sys.stderr)
     api = EasyedaApi(use_cache=False)
     cad_data = api.get_cad_data_of_component(lcsc_id=lcsc_id)
@@ -2262,6 +2342,29 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                             "use the lookup tools to fix the BOM"
                         ],
                         "offenders": bad_syms[:20],
+                    },
+                    indent=2,
+                )
+            )
+            return 3
+
+    # Reject parts whose library manifest claims an LCSC that isn't in the
+    # offline catalog. A fabricated C# in the manifest can never be priced.
+    if stage == "bom" and state.bom is not None:
+        bad_lcsc = _unresolved_lcsc(
+            state.bom, state_path.resolve().parent.parent
+        )
+        if bad_lcsc:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": [
+                            "part library manifest(s) claim an LCSC that is not "
+                            "in the offline parts catalog; re-vendor the part "
+                            "with a valid LCSC or update the manifest"
+                        ],
+                        "offenders": bad_lcsc[:20],
                     },
                     indent=2,
                 )

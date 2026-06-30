@@ -160,6 +160,27 @@ def lookup(lcsc_id: str | int) -> dict | None:
     return cand
 
 
+def lcsc_exists(lcsc: str) -> bool:
+    """True if `lcsc` (e.g. 'C2837587' or '2837587') is in the offline catalog.
+
+    Returns False when the catalog is absent, the id is non-numeric, or the
+    part simply doesn't exist. Fast — one index-lookup SELECT."""
+    if not available():
+        return False
+    try:
+        num = int(str(lcsc).strip().upper().lstrip("C"))
+    except (ValueError, TypeError):
+        return False
+    con = _connect()
+    try:
+        row = con.execute(
+            "SELECT 1 FROM jlc_components WHERE lcsc=? LIMIT 1", (num,)
+        ).fetchone()
+    finally:
+        con.close()
+    return row is not None
+
+
 # ----------------------------------------------- split-zip (zip -s) extraction
 # The dump ships as cache.z01..cache.zNN + cache.zip (the last volume, holding
 # the central directory). Python's zipfile refuses multi-disk archives and the
