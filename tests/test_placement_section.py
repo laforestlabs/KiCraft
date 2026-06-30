@@ -23,6 +23,7 @@ from kicraft.design.models import (
     Architecture,
     BomPart,
     ConversationState,
+    FormFactor,
     PlacementSection,
     Sheet,
 )
@@ -164,3 +165,51 @@ def test_write_autoplacer_without_placement_keeps_size_search():
         cfg = json.loads(out.read_text(encoding="utf-8"))
         assert cfg["enable_board_size_search"] is True
         assert "board_width_mm" not in cfg
+
+
+# ---- form-factor outline (Phase 2: flow into autoplacer.json) -------------------
+
+
+def test_write_autoplacer_emits_board_outline_for_shape(tmp_path):
+    out = write_autoplacer_json(
+        tmp_path, "WIDGET", _arch(), _bom(),
+        form_factor=FormFactor(shape="circle", size_mm=50.0),
+    )
+    cfg = json.loads(out.read_text(encoding="utf-8"))
+    assert cfg["board_outline"] == {"shape": "circle", "size_mm": 50.0}
+
+
+def test_write_autoplacer_emits_shape_params(tmp_path):
+    out = write_autoplacer_json(
+        tmp_path, "WIDGET", _arch(), _bom(),
+        form_factor=FormFactor(shape="rounded_rect", corner_radius_mm=3.0),
+    )
+    cfg = json.loads(out.read_text(encoding="utf-8"))["board_outline"]
+    assert cfg["shape"] == "rounded_rect"
+    assert cfg["corner_radius_mm"] == 3.0
+    assert "size_mm" not in cfg  # not stated -> not emitted
+
+
+def test_write_autoplacer_omits_board_outline_for_rect(tmp_path):
+    # No form factor, or an explicit rectangle, leaves the default path untouched.
+    out_none = write_autoplacer_json(tmp_path, "A", _arch(), _bom())
+    assert "board_outline" not in json.loads(out_none.read_text())
+    out_rect = write_autoplacer_json(
+        tmp_path, "B", _arch(), _bom(), form_factor=FormFactor(shape="rect"),
+    )
+    assert "board_outline" not in json.loads(out_rect.read_text())
+
+
+def test_board_outline_survives_project_config_load(tmp_path):
+    # Contract the compose pipeline depends on: the emitted board_outline block
+    # is NOT whitelisted away by the project-config loader -- it reaches `cfg`
+    # so compose can populate ParentCompositionState.requested_shape from it.
+    from kicraft.autoplacer.config import load_project_config
+
+    out = write_autoplacer_json(
+        tmp_path, "WIDGET", _arch(), _bom(),
+        form_factor=FormFactor(shape="hexagon", size_mm=40.0),
+    )
+    cfg = load_project_config(str(out))
+    assert isinstance(cfg.get("board_outline"), dict)
+    assert cfg["board_outline"]["shape"] == "hexagon"

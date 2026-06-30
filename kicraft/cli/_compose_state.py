@@ -121,6 +121,13 @@ class ParentCompositionState:
     # the AABB), and the stamper writes the shape's polyline to
     # Edge.Cuts for non-rect shapes.
     manual_outline: dict[str, Any] | None = None
+    # Non-rectangular outline shape requested from the brief (captured at the
+    # intent stage as ``intent.form_factor``, emitted into autoplacer.json as the
+    # ``board_outline`` block). Distinct from ``manual_outline``: this carries
+    # only the shape INTENT (shape tag + params, no min/max), to be sized to the
+    # placed content by the compose pipeline (Phase 3 circumscribe/inscribe).
+    # None on a rectangular board or when a manual layout supplies the outline.
+    requested_shape: dict[str, Any] | None = None
     # Stock mounting-hole footprints to load onto the stamped board for
     # user holes without a backing H-ref (manual mode). Entries:
     # {ref, x, y, lib_dir, fp_name, screw}; coordinates in the same

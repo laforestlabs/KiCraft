@@ -68,6 +68,7 @@ def write_autoplacer_json(
     library_fragments: dict[str, Any] | None = None,
     library_leaves: dict[str, dict[str, Any]] | None = None,
     placement=None,
+    form_factor=None,
 ) -> Path:
     """Write `<project_stem>_autoplacer.json` to project_dir. Returns the path.
 
@@ -206,5 +207,25 @@ def write_autoplacer_json(
         body["enable_board_size_search"] = bool(board.size_search)
     else:
         body["enable_board_size_search"] = True
+
+    # Requested non-rectangular outline shape (captured at the intent stage as
+    # ``intent.form_factor``). Flows to the compose pipeline, which resolves it
+    # to ``Edge.Cuts`` geometry. "rect" / absent emits nothing, leaving the
+    # default rectangular path untouched. A future ``placement.board`` shape
+    # override would take precedence over the captured intent here.
+    if form_factor is not None and getattr(form_factor, "shape", "rect") not in (
+        "",
+        "rect",
+        None,
+    ):
+        outline: dict[str, Any] = {"shape": form_factor.shape}
+        if form_factor.corner_radius_mm is not None:
+            outline["corner_radius_mm"] = float(form_factor.corner_radius_mm)
+        if form_factor.chamfer_mm is not None:
+            outline["chamfer_mm"] = float(form_factor.chamfer_mm)
+        if form_factor.size_mm is not None:
+            outline["size_mm"] = float(form_factor.size_mm)
+        body["board_outline"] = outline
+
     out.write_text(json.dumps(body, indent=2) + "\n")
     return out

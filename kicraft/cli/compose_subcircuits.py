@@ -1811,6 +1811,14 @@ def _compose_artifacts(
         manual_outline=(
             manual_layout.outline.to_dict() if manual_layout is not None else None
         ),
+        # Brief-captured outline shape (autoplacer.json ``board_outline``), only
+        # when no manual layout supplies an authoritative outline. Resolved to
+        # Edge.Cuts geometry by the compose pipeline (Phase 3).
+        requested_shape=(
+            cfg.get("board_outline")
+            if manual_layout is None and isinstance(cfg.get("board_outline"), dict)
+            else None
+        ),
         synthesized_footprints=list(synthesized_footprints),
     )
     state.phase_timings.update(solver_phase_timings)

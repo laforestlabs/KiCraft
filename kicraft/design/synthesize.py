@@ -254,6 +254,7 @@ def run(
         library_fragments=fragments or None,
         library_leaves=library_leaves or None,
         placement=getattr(state, "placement", None),
+        form_factor=state.intent.form_factor if state.intent else None,
     )
     write_empty_pcb(project_dir, state.project_stem, state.bom)
     stage_3d_models(project_dir, state.bom)
