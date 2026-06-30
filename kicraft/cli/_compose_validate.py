@@ -169,13 +169,18 @@ def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
     Runs after :func:`_repair_parent_outline` on the auto (non-manual) path:
     placement happened in the rectangular AABB, so growing the requested shape
     around it keeps every part inside ``Edge.Cuts`` with no placement changes.
-    Sets ``state.manual_outline`` to the computed spec so the stamper writes the
-    shape polyline, the geometry validator checks the true shape (not just the
-    AABB), and the KiCad zone filler clips the GND pour to it.
+    Two output channels:
 
-    No-op when a manual layout is authoritative, when no shape was requested,
-    when the request is rectangular, or when the shape is not a parametric
-    ``OutlineSpec`` shape (named / polygon shapes land in a later phase).
+    * **Parametric** shapes (circle / rounded_rect / chamfered_rect) -> an
+      exact ``OutlineSpec`` on ``state.manual_outline`` (no Shapely).
+    * **Named / compound** shapes (hexagon, star, snowman, ...) -> a general
+      polygon ring on ``state.fitted_polygon`` (Shapely), kept off the
+      JS-mirrored ``OutlineSpec``.
+
+    Either way the stamper writes the shape to ``Edge.Cuts``, the geometry
+    validator checks true-shape containment, and the KiCad zone filler clips the
+    GND pour to it. No-op when a manual layout is authoritative, no shape was
+    requested, the request is rectangular, or the name has no generator.
     """
     if state.manual_outline is not None:
         return {"fitted": False, "reason": "manual outline authoritative"}
@@ -183,35 +188,55 @@ def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
     if not req:
         return {"fitted": False, "reason": "no requested shape"}
 
-    from kicraft.layout_editor.outline import SHAPES, circumscribe
-
     shape = str(req.get("shape", "rect")).strip().lower()
     if shape in ("", "rect"):
         return {"fitted": False, "reason": "rectangular"}
-    if shape not in SHAPES:
-        # hexagon / snowman / ... -> polygon support lands in a later phase.
-        return {"fitted": False, "reason": f"shape {shape!r} not yet supported"}
 
     composition = state.composition
     outline = composition.board_state.board_outline if composition is not None else None
     if not outline or len(outline) < 2:
         return {"fitted": False, "reason": "no outline"}
-
     tl, br = outline
-    spec = circumscribe(
-        shape,
-        tl,
-        br,
-        corner_radius_mm=_as_float(req.get("corner_radius_mm")),
-        chamfer_mm=_as_float(req.get("chamfer_mm")),
-    )
-    composition.board_state.board_outline = spec.aabb()
-    state.manual_outline = spec.to_dict()
-    return {
-        "fitted": True,
-        "shape": shape,
-        "size_mm": [round(spec.width_mm, 2), round(spec.height_mm, 2)],
-    }
+
+    # Parametric convex shapes: exact OutlineSpec path (circle wins here over the
+    # polygon path -- simpler, JS-mirror-compatible).
+    from kicraft.layout_editor.outline import SHAPES, circumscribe
+
+    if shape in SHAPES:
+        spec = circumscribe(
+            shape,
+            tl,
+            br,
+            corner_radius_mm=_as_float(req.get("corner_radius_mm")),
+            chamfer_mm=_as_float(req.get("chamfer_mm")),
+        )
+        composition.board_state.board_outline = spec.aabb()
+        state.manual_outline = spec.to_dict()
+        return {
+            "fitted": True,
+            "shape": shape,
+            "kind": "parametric",
+            "size_mm": [round(spec.width_mm, 2), round(spec.height_mm, 2)],
+        }
+
+    # Named / compound shapes: general polygon via Shapely on fitted_polygon.
+    from kicraft.shapes import KNOWN_SHAPES
+    from kicraft.shapes import circumscribe as circumscribe_polygon
+
+    if shape in KNOWN_SHAPES:
+        poly = circumscribe_polygon(shape, tl, br)
+        (minx, miny), (maxx, maxy) = poly.aabb()
+        composition.board_state.board_outline = (Point(minx, miny), Point(maxx, maxy))
+        state.fitted_polygon = [[float(x), float(y)] for x, y in poly.points()]
+        return {
+            "fitted": True,
+            "shape": shape,
+            "kind": "polygon",
+            "vertices": len(state.fitted_polygon),
+            "size_mm": [round(maxx - minx, 2), round(maxy - miny, 2)],
+        }
+
+    return {"fitted": False, "reason": f"shape {shape!r} not supported"}
 
 
 def _validate_parent_geometry(
@@ -264,6 +289,10 @@ def _validate_parent_geometry(
     # true shape (analytic containment), not just the AABB: a leaf
     # tucked into the corner of a circular board is inside the AABB
     # but off the physical board.
+    # ``shape_spec`` is any object exposing contains_rect / contains_point with
+    # a tolerance -- OutlineSpec for manual + parametric-auto outlines, or a
+    # shapely-backed PolygonOutline for named/compound auto outlines. Both share
+    # the same surface, so the checks below are identical for either.
     shape_spec = None
     if (
         state.manual_outline is not None
@@ -272,6 +301,10 @@ def _validate_parent_geometry(
         from kicraft.layout_editor.outline import OutlineSpec
 
         shape_spec = OutlineSpec.from_dict(state.manual_outline)
+    elif state.fitted_polygon:
+        from kicraft.shapes import polygon_outline_from_points
+
+        shape_spec = polygon_outline_from_points(state.fitted_polygon)
 
     def _bbox_outside(bx0: float, by0: float, bx1: float, by1: float) -> bool:
         if bx0 < min_x or by0 < min_y or bx1 > max_x or by1 > max_y:

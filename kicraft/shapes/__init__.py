@@ -36,6 +36,7 @@ __all__ = [
     "PolygonOutline",
     "build_unit_polygon",
     "circumscribe",
+    "polygon_outline_from_points",
 ]
 
 
@@ -158,6 +159,12 @@ class PolygonOutline:
     ) -> bool:
         geom = self.polygon.buffer(tol) if tol else self.polygon
         return bool(geom.covers(box(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))))
+
+
+def polygon_outline_from_points(points) -> PolygonOutline:
+    """Rebuild a :class:`PolygonOutline` from a closed ring of ``[x, y]`` points
+    (the on-state ``fitted_polygon``), for containment checks at validation."""
+    return PolygonOutline(Polygon([(float(p[0]), float(p[1])) for p in points]))
 
 
 def circumscribe(

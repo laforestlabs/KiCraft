@@ -114,11 +114,50 @@ def test_fit_noop_when_manual_outline_authoritative():
     assert "manual" in res["reason"]
 
 
+def test_fit_circle_uses_parametric_path():
+    # circle is in both shape sets; the parametric (OutlineSpec) path wins.
+    st = _state({"shape": "circle"})
+    res = _fit_requested_shape(st)
+    assert res["fitted"] is True
+    assert res["kind"] == "parametric"
+    assert st.manual_outline is not None
+    assert getattr(st, "fitted_polygon", None) in (None, [])
+
+
+@pytest.mark.parametrize("shape", ["hexagon", "octagon", "star", "heart", "snowman", "triangle"])
+def test_fit_named_shape_sets_fitted_polygon(shape):
+    st = _state({"shape": shape})
+    st.fitted_polygon = None
+    res = _fit_requested_shape(st)
+    assert res["fitted"] is True, res
+    assert res["kind"] == "polygon"
+    # Polygon channel set; the JS-mirrored OutlineSpec channel left untouched.
+    assert st.manual_outline is None
+    assert st.fitted_polygon and len(st.fitted_polygon) >= 3
+    # board_outline AABB now tracks the polygon bbox (as Points).
+    tl, br = st.composition.board_state.board_outline
+    assert br.x > tl.x and br.y > tl.y
+
+
+def test_fit_named_shape_polygon_contains_content():
+    # The validator rebuilds containment from fitted_polygon; it must enclose
+    # the original placed content.
+    from kicraft.shapes import polygon_outline_from_points
+
+    st = _state({"shape": "snowman"})
+    st.fitted_polygon = None
+    _fit_requested_shape(st)
+    checker = polygon_outline_from_points(st.fitted_polygon)
+    assert checker.contains_rect(0.0, 0.0, 40.0, 20.0, tol=0.05)
+
+
 def test_fit_skips_unsupported_named_shape():
-    # Named/polygon shapes (hexagon, snowman) are a later phase; until then the
-    # fit is a no-op and the board stays rectangular rather than crashing.
-    st = _state({"shape": "hexagon"})
+    # A name with no generator (e.g. "gear") is a graceful no-op -> rect board,
+    # not a crash.
+    st = _state({"shape": "gear"})
+    st.fitted_polygon = None
     res = _fit_requested_shape(st)
     assert res["fitted"] is False
-    assert "not yet supported" in res["reason"]
+    assert "not supported" in res["reason"]
     assert st.manual_outline is None
+    assert st.fitted_polygon is None

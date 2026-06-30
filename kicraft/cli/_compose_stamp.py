@@ -166,6 +166,11 @@ def _stamp_parent_board(
                 }
             )
             outline_data["polyline"] = [[p.x, p.y] for p in _spec.polyline()]
+        elif state.fitted_polygon:
+            # Named / compound auto outline (hexagon, snowman, ...): stamp the
+            # resolved polygon ring straight to Edge.Cuts. Already in the
+            # parent-local frame, shifted alongside components downstream.
+            outline_data["polyline"] = [[float(x), float(y)] for x, y in state.fitted_polygon]
 
     geometry_validation = _validate_parent_geometry(state)
     if not geometry_validation.get("accepted", False):

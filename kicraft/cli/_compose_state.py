@@ -128,6 +128,13 @@ class ParentCompositionState:
     # placed content by the compose pipeline (Phase 3 circumscribe/inscribe).
     # None on a rectangular board or when a manual layout supplies the outline.
     requested_shape: dict[str, Any] | None = None
+    # Resolved arbitrary (named / compound) outline as a closed ring of [x, y]
+    # points in the parent-local frame, set by ``_fit_requested_shape`` for
+    # shapes that need a general polygon (hexagon, star, snowman, ...). Kept
+    # OFF the JS-mirrored OutlineSpec/manual_outline: the stamper writes these
+    # points straight to Edge.Cuts and the geometry validator checks containment
+    # via shapely. None for rectangular / parametric / manual boards.
+    fitted_polygon: list[list[float]] | None = None
     # Stock mounting-hole footprints to load onto the stamped board for
     # user holes without a backing H-ref (manual mode). Entries:
     # {ref, x, y, lib_dir, fp_name, screw}; coordinates in the same
