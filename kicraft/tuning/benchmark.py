@@ -26,6 +26,7 @@ ARCHETYPE_TRAITS = {
     "mixed_tht_smt": "through-hole + SMT on both sides, mounting holes",
     "hi_pin_hierarchical": "high pin-count MCU, multi-leaf hierarchy",
     "connector_dense_io": "connector-heavy I/O, repeated edge headers",
+    "shaped_outline": "non-rectangular board outline (circle/polygon/compound)",
 }
 
 # Each entry: a unique kebab slug, its archetype, and the one-line brief.
@@ -114,17 +115,17 @@ BENCHMARK_PROMPTS: list[dict[str, str]] = [
 # flat-run path), a chamfered badge, a hexagon (polygon), a star, and a snowman
 # (compound / multi-blob).
 SHAPED_OUTLINE_PROMPTS: list[dict[str, str]] = [
-    {"slug": "round-led-ring", "outline_shape": "circle",
+    {"slug": "round-led-ring", "archetype": "shaped_outline", "outline_shape": "circle",
      "brief": "A round 60 mm LED ring board: twelve WS2812B addressable LEDs evenly spaced in a circle, driven by an ATtiny412, powered from a 2-pin JST-PH header. No edge connectors."},
-    {"slug": "rounded-c3-devboard", "outline_shape": "rounded_rect",
+    {"slug": "rounded-c3-devboard", "archetype": "shaped_outline", "outline_shape": "rounded_rect",
      "brief": "A rounded-corner ESP32-C3 development board with a USB-C connector on one edge and a 2x10 0.1-inch GPIO header along the opposite edge."},
-    {"slug": "chamfered-badge", "outline_shape": "chamfered_rect",
+    {"slug": "chamfered-badge", "archetype": "shaped_outline", "outline_shape": "chamfered_rect",
      "brief": "A chamfered-corner conference badge: an ATtiny1614 driving six 0805 LEDs and a CR2032 coin-cell holder, with two capacitive-touch pads."},
-    {"slug": "hex-env-sensor", "outline_shape": "hexagon",
+    {"slug": "hex-env-sensor", "archetype": "shaped_outline", "outline_shape": "hexagon",
      "brief": "A hexagonal environmental sensor board: a BME280 temperature/humidity/pressure sensor on an I2C Qwiic header, with a power LED."},
-    {"slug": "star-ornament", "outline_shape": "star",
+    {"slug": "star-ornament", "archetype": "shaped_outline", "outline_shape": "star",
      "brief": "A star-shaped holiday ornament: five warm-white LEDs at the points driven by an ATtiny402, powered by a CR2032 coin cell, with a hang hole at the top."},
-    {"slug": "snowman-ornament", "outline_shape": "snowman",
+    {"slug": "snowman-ornament", "archetype": "shaped_outline", "outline_shape": "snowman",
      "brief": "A snowman-shaped LED ornament in three stacked sections (base, body, head) with warm-white LEDs in each, driven by an ATtiny402 from a CR2032 coin cell."},
 ]
 

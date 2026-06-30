@@ -77,4 +77,59 @@ def test_corpus_entries_are_well_formed():
         assert e["slug"] not in slugs, f"duplicate slug {e['slug']}"
         slugs.add(e["slug"])
         assert e["outline_shape"] in known, f"{e['slug']}: unbuildable shape {e['outline_shape']}"
+        assert e["archetype"] == "shaped_outline"
         assert e["brief"].strip()
+
+
+# --------------------------------------------------------------------------- #
+# self-eval harness glue
+# --------------------------------------------------------------------------- #
+
+def _make_run(tmp_path, shape):
+    """A synthetic run dir with a shaped parent board + an ignored leaf board."""
+    gen = tmp_path / "generated" / "BOARD"
+    gen.mkdir(parents=True)
+    ring = circ_poly(shape, SimpleNamespace(x=0.0, y=0.0),
+                     SimpleNamespace(x=40.0, y=20.0)).points()
+    lines = [
+        f'  (gr_line (start {x0} {y0}) (end {x1} {y1}) (layer "Edge.Cuts"))'
+        for (x0, y0), (x1, y1) in zip(ring, ring[1:] + ring[:1])
+    ]
+    (gen / "BOARD.kicad_pcb").write_text("(kicad_pcb\n" + "\n".join(lines) + "\n)\n")
+    leaf = gen / ".experiments" / "subcircuits" / "x"
+    leaf.mkdir(parents=True)
+    (leaf / "leaf_routed.kicad_pcb").write_text("(kicad_pcb)")
+    return tmp_path
+
+
+def test_find_parent_board_skips_leaves(tmp_path):
+    from kicraft.eval.self_eval import _find_parent_board
+
+    board = _find_parent_board(_make_run(tmp_path, "hexagon"))
+    assert board is not None and board.name == "BOARD.kicad_pcb"
+    assert ".experiments" not in board.parts
+
+
+def test_outline_check_passes_on_matching_build(tmp_path):
+    from kicraft.eval.self_eval import _outline_check
+
+    oc = _outline_check({"slug": "h", "outline_shape": "hexagon"},
+                        _make_run(tmp_path, "hexagon"))
+    assert oc["pass"] is True and oc["level"] == 4
+
+
+def test_outline_check_none_for_rectangular_brief(tmp_path):
+    from kicraft.eval.self_eval import _outline_check
+
+    assert _outline_check({"slug": "rc", "archetype": "single_passive"}, tmp_path) is None
+
+
+def test_outline_stats_aggregates(tmp_path):
+    from kicraft.eval.self_eval import _outline_check, _outline_stats
+
+    oc = _outline_check({"slug": "h", "outline_shape": "hexagon"},
+                        _make_run(tmp_path, "hexagon"))
+    stats = _outline_stats([{"slug": "h", "outline_check": oc, "build_rc": 0},
+                            {"slug": "plain"}])
+    assert stats["n"] == 1 and stats["pass"] == 1
+    assert stats["by_brief"]["h"]["detected"] == "polygon"

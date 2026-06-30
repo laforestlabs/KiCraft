@@ -59,8 +59,34 @@ from pathlib import Path
 from kicraft.build_slots import ACQUIRED_MARKER
 from kicraft.server.session import read_state, record_answers, remaining_stages, run_session
 from kicraft.tuning.benchmark import BENCHMARK_PROMPTS as BRIEFS
+from kicraft.tuning.benchmark import SHAPED_OUTLINE_PROMPTS
 
+from .outline_check import evaluate_outline_shape
 from .run_web import evaluate_project
+
+
+def _find_parent_board(rundir: Path) -> Path | None:
+    """The built final/parent board: ``generated/<stem>/<stem>.kicad_pcb``. Leaf
+    boards live deeper under ``.experiments/`` so the shallow glob skips them."""
+    gen = rundir / "generated"
+    cands = [p for p in gen.glob("*/*.kicad_pcb") if ".experiments" not in p.parts]
+    return cands[0] if cands else None
+
+
+def _outline_check(entry: dict, rundir: Path) -> dict | None:
+    """Deterministic outline-shape grade for a shaped brief (entries carrying
+    ``outline_shape``); ``None`` for ordinary rectangular briefs."""
+    expected = entry.get("outline_shape")
+    if not expected:
+        return None
+    board = _find_parent_board(rundir)
+    res = evaluate_outline_shape(board, expected) if board else {
+        "level": 0, "partial": False, "detected_family": None,
+        "rationale": "no built board to classify",
+        "expected_shape": expected,
+    }
+    res["pass"] = res.get("level") == 4
+    return res
 
 # Deterministic build, mirroring the web worker (kicraft.server.web): relative paths
 # resolved against the run dir, no archive sweep. KICRAFT mirrors stage_driver.
@@ -332,6 +358,13 @@ def evaluate_one(client, idx: int, entry: dict, out_dir: Path, *,
             dims={k: v.get("level") for k, v in report["dimensions"].items()},
             report_path=str(rundir / "eval" / "report.json"),
         )
+        # Deterministic outline-shape check (shaped briefs only). Reported
+        # alongside the rubric score, not folded into the 100-pt scale -- the
+        # rubric's finalize rejects N/A dimensions, and it would only apply to
+        # this category anyway.
+        oc = _outline_check(entry, rundir)
+        if oc is not None:
+            rec["outline_check"] = oc
     except Exception as e:  # noqa: BLE001 - record and keep the batch going
         rec["error"] = f"{type(e).__name__}: {e}"[:600]
     rec["duration_s"] = round(time.time() - t0, 1)
@@ -440,6 +473,7 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
         "grade_counts": grade_counts,
         "gate_counts": gate_counts,
         "archetype_stats": _archetype_stats(records),
+        "outline_stats": _outline_stats(records),
         "per_brief": per_brief,
         "total_cost_usd": round(sum(_run_cost(r) for r in records), 4),
         "runs": records,
@@ -447,6 +481,27 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     (out_dir / "summary.md").write_text(_render_md(summary), encoding="utf-8")
     return summary
+
+
+def _outline_stats(records) -> dict | None:
+    """Aggregate the deterministic outline-shape check over shaped briefs."""
+    shaped = [r for r in records if r.get("outline_check")]
+    if not shaped:
+        return None
+    return {
+        "n": len(shaped),
+        "pass": sum(1 for r in shaped if r["outline_check"].get("pass")),
+        "by_brief": {
+            r.get("slug"): {
+                "expected": r["outline_check"].get("expected_shape"),
+                "detected": r["outline_check"].get("detected_family"),
+                "level": r["outline_check"].get("level"),
+                "pass": r["outline_check"].get("pass"),
+                "build_rc": r.get("build_rc"),
+            }
+            for r in shaped
+        },
+    }
 
 
 def _render_md(s: dict) -> str:
@@ -658,9 +713,21 @@ def main(argv=None) -> int:
                     help="finish an existing batch dir: reuse completed briefs from its "
                          "summary.json, wipe + re-run only errored/missing ones. Combine "
                          "with --only/--limit to restrict the considered set.")
+    ap.add_argument("--include-shaped", action="store_true",
+                    help="also run the non-rectangular outline category "
+                         "(SHAPED_OUTLINE_PROMPTS); each board's Edge.Cuts is graded "
+                         "against the requested shape (deterministic, reported as "
+                         "outline_check alongside the rubric score)")
+    ap.add_argument("--shaped-only", action="store_true",
+                    help="run ONLY the non-rectangular outline category")
     args = ap.parse_args(argv)
 
-    selected = _select(list(BRIEFS), args.limit, args.only)
+    corpus = list(BRIEFS)
+    if args.shaped_only:
+        corpus = list(SHAPED_OUTLINE_PROMPTS)
+    elif args.include_shaped:
+        corpus = corpus + list(SHAPED_OUTLINE_PROMPTS)
+    selected = _select(corpus, args.limit, args.only)
     if not selected:
         print("no briefs selected (check --limit / --only)", file=sys.stderr)
         return 2
