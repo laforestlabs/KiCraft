@@ -24,6 +24,7 @@ from kicraft.design.models import (
 from kicraft.design.synthesis.validation import (
     SynthesisValidationError,
     check_autoplacer_is_valid_json,
+    check_capacitor_polarity_consistency,
     check_footprints_nonempty,
     check_inter_sheet_nets_realized,
     check_named_refs_exist,
@@ -970,3 +971,69 @@ def test_breakout_skips_single_connector() -> None:
         NetConnection(net_name="A", sheet="IO", endpoints=[PinEndpoint(ref="J1", pin="1")]),
     ])
     assert check_breakout_connectivity(intent, bom).ok  # <2 connectors -> not judged
+
+
+# ---------- §9.25 capacitor symbol/footprint polarity consistency ----------
+
+
+def _cap(ref: str, symbol: str, footprint: str) -> BomPart:
+    return BomPart(
+        ref=ref, value="10uF", symbol=symbol, footprint=footprint, sheet="PWR"
+    )
+
+
+def test_cap_polarity_flags_nonpolar_symbol_on_polarized_footprint() -> None:
+    # The KC-U2VAA8 defect: a film cap (Device:C) given an electrolytic can.
+    bom = BOM(
+        parts=[_cap("C1", "Device:C", "Capacitor_THT:CP_Radial_D12.5mm_P7.50mm")]
+    )
+    r = check_capacitor_polarity_consistency(bom)
+    assert not r.ok
+    assert r.offenders and "C1" in r.offenders[0]
+
+
+def test_cap_polarity_flags_polar_symbol_on_nonpolarized_footprint() -> None:
+    bom = BOM(
+        parts=[_cap("C2", "Device:CP", "Capacitor_SMD:C_0805_2012Metric")]
+    )
+    assert not check_capacitor_polarity_consistency(bom).ok
+
+
+def test_cap_polarity_flags_tantalum_footprint_on_nonpolar_symbol() -> None:
+    bom = BOM(
+        parts=[_cap("C3", "Device:C", "Capacitor_Tantalum_SMD:CP_EIA-3216-18")]
+    )
+    assert not check_capacitor_polarity_consistency(bom).ok
+
+
+def test_cap_polarity_passes_matching_nonpolarized() -> None:
+    bom = BOM(parts=[_cap("C4", "Device:C", "Capacitor_SMD:C_0805_2012Metric")])
+    assert check_capacitor_polarity_consistency(bom).ok
+
+
+def test_cap_polarity_passes_matching_polarized() -> None:
+    bom = BOM(
+        parts=[_cap("C5", "Device:CP", "Capacitor_THT:CP_Radial_D8.0mm_P3.50mm")]
+    )
+    assert check_capacitor_polarity_consistency(bom).ok
+
+
+def test_cap_polarity_ignores_non_capacitors() -> None:
+    # Resistors, inductors, diodes, crystals, MCUs must never trip the gate.
+    bom = BOM(
+        parts=[
+            _part("R1", "PWR"),
+            _cap("L1", "Device:L", "Inductor_THT:L_Radial_D21.0mm"),
+            _cap("D1", "Device:D", "Diode_SMD:D_SOD-123"),
+            _cap("Y1", "Device:Crystal", "Crystal:Crystal_SMD_3225-4Pin"),
+            _cap("U1", "MCU_ST:STM32", "Package_QFP:LQFP-48"),
+        ]
+    )
+    assert check_capacitor_polarity_consistency(bom).ok
+
+
+def test_cap_polarity_skips_unrecognized_names() -> None:
+    # Custom/vendored names that don't follow the C/CP convention are skipped,
+    # not guessed (no false positive).
+    bom = BOM(parts=[_cap("C6", "vendored:FilmBox", "vendored:film_5mm")])
+    assert check_capacitor_polarity_consistency(bom).ok

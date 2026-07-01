@@ -1925,3 +1925,93 @@ def check_sheet_connector_edge_conflicts(bom) -> CheckResult:
         ),
         offenders=offenders,
     )
+
+
+# ---------- §9.25 capacitor symbol/footprint polarity consistency ----------
+#
+# KiCad's capacitor naming convention is unambiguous and machine-checkable:
+#   symbol  Device:C*   -> NON-polarized (ceramic/film/etc.)
+#   symbol  Device:CP*  -> POLARIZED (aluminium electrolytic / tantalum)
+#   footprint  <lib>:C_*        -> NON-polarized
+#   footprint  <lib>:CP_*       -> POLARIZED (has a + / cathode marking + a
+#                                   physical orientation)
+#   any Capacitor_Tantalum_*    -> POLARIZED
+# A part whose symbol polarity disagrees with its footprint polarity is always
+# wrong: a non-polarized ``Device:C`` on a polarized ``CP_Radial`` footprint (the
+# KC-U2VAA8 speaker-crossover film caps -- the BOM stage picked an electrolytic
+# can for a film cap) has no polarity to mark, and a ``Device:CP`` on a plain
+# ``C_`` footprint loses the + marking. This is DRC/ERC-invisible (both are legal
+# in isolation) but a real electrical/assembly defect, so it is gated at BOM
+# commit where the model can still re-pick a matching footprint.
+
+
+def _cap_symbol_polarity(symbol: str) -> str | None:
+    """"polarized" / "nonpolarized" for a KiCad capacitor symbol, else None.
+
+    Classifies by the symbol NAME (the part after ``:``) using the C/CP
+    convention. Returns None for anything that is not clearly a capacitor
+    symbol, so the check never guesses on custom or unrelated symbols.
+    """
+    name = symbol.split(":", 1)[1] if ":" in symbol else symbol
+    upper = name.upper()
+    if upper.startswith("CP") or "POLAR" in upper:
+        return "polarized"
+    if name == "C" or name.startswith("C_"):
+        return "nonpolarized"
+    return None
+
+
+def _cap_footprint_polarity(footprint: str) -> str | None:
+    """"polarized" / "nonpolarized" for a capacitor footprint, else None."""
+    lib, _, name = footprint.partition(":")
+    if "Tantalum" in lib:
+        return "polarized"
+    upper = name.upper()
+    if upper.startswith("CP_") or "POLAR" in upper:
+        return "polarized"
+    if upper.startswith("C_"):
+        return "nonpolarized"
+    return None
+
+
+def check_capacitor_polarity_consistency(bom) -> CheckResult:
+    """§9.25 -- a capacitor's symbol polarity must match its footprint polarity.
+
+    Fires only when BOTH the symbol and the footprint are unambiguously
+    classified (KiCad C/CP naming, or a tantalum footprint) AND they disagree,
+    so a correctly-paired part never trips and custom/odd names are skipped.
+    """
+    bad: list[str] = []
+    for p in (bom.parts or []):
+        sym_pol = _cap_symbol_polarity(p.symbol or "")
+        if sym_pol is None:
+            continue  # not a recognized capacitor symbol
+        fp_pol = _cap_footprint_polarity(p.footprint or "")
+        if fp_pol is None:
+            continue  # unrecognized footprint naming -- don't guess
+        if sym_pol == fp_pol:
+            continue
+        if sym_pol == "nonpolarized":
+            hint = (
+                "a non-polarized cap must use a non-polarized (C_*) footprint, "
+                "not a polarized CP_/tantalum one"
+            )
+        else:
+            hint = (
+                "a polarized cap needs a polarized (CP_*) footprint with a + "
+                "marking, not a plain C_* one"
+            )
+        bad.append(
+            f"{p.ref}: symbol {p.symbol!r} is {sym_pol} but footprint "
+            f"{p.footprint!r} is {fp_pol} -- {hint}"
+        )
+    return CheckResult(
+        name="9.25 capacitor polarity consistency",
+        ok=not bad,
+        message=(
+            "capacitor symbol/footprint polarity agree"
+            if not bad
+            else f"{len(bad)} capacitor(s) with mismatched symbol/footprint polarity"
+        ),
+        offenders=bad,
+    )
