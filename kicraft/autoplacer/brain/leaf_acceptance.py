@@ -87,6 +87,16 @@ class LeafAcceptanceConfig:
     poured_nets: frozenset[str] = frozenset()
     require_routed_board: bool = True
     require_no_python_exception: bool = True
+    # Reject a leaf whose routed board has a GROSS same-side courtyard overlap
+    # (one exceeding the minor-clip thresholds below). A leaf courtyard overlap
+    # is stamped rigidly into the parent and becomes a terminal
+    # ``courtyards_overlap`` rc7, so surfacing it here -- with the SAME
+    # magnitude tolerance the final fab gate uses -- lets the solver re-place
+    # instead of shipping a doomed leaf. A fraction-of-a-mm clip is tolerated,
+    # exactly as the terminal gate tolerates it.
+    require_no_gross_courtyard_overlap: bool = True
+    courtyard_warn_penetration_mm: float = 0.5
+    courtyard_warn_area_mm2: float = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +316,59 @@ def _gate_drc_clearance(
     return True, detail
 
 
+def _gate_no_gross_courtyard_overlap(
+    validation: dict[str, Any],
+    _anchor: dict[str, Any],
+    cfg: LeafAcceptanceConfig,
+) -> tuple[bool, dict[str, Any]]:
+    """Gate: no GROSS same-side courtyard overlap on the routed leaf board.
+
+    Mirrors the terminal fab gate (``cli_app._promote_verify_fab``): measure
+    the actual F/B.CrtYd polygon intersections and classify each by magnitude,
+    failing only on a *gross* overlap while tolerating a fraction-of-a-mm clip.
+    A leaf overlap is stamped rigidly into the parent, so catching it here
+    turns a late, misleading parent ``courtyards_overlap`` rc7 into an early
+    leaf rejection that the solver can re-place around.
+    """
+    drc = validation.get("drc", {})
+    count = int(drc.get("courtyard", 0))
+    detail: dict[str, Any] = {"courtyard_overlaps": count}
+
+    if not cfg.require_no_gross_courtyard_overlap:
+        detail["passed"] = True
+        detail["skipped"] = True
+        detail["reason"] = "require_no_gross_courtyard_overlap is False"
+        return True, detail
+
+    if count == 0:
+        detail["passed"] = True
+        return True, detail
+
+    from kicraft.autoplacer.courtyard_overlap import (
+        classify_courtyard_overlaps,
+        measure_courtyard_overlaps,
+    )
+
+    board_path = validation.get("board_path", "") or ""
+    measured = measure_courtyard_overlaps(board_path) if board_path else []
+    minor, gross = classify_courtyard_overlaps(
+        measured,
+        max_penetration_mm=cfg.courtyard_warn_penetration_mm,
+        max_area_mm2=cfg.courtyard_warn_area_mm2,
+    )
+    # DRC flagged an overlap but we could not measure it (no board path or a
+    # pcbnew hiccup) -> keep the conservative hard-fail rather than mis-grading
+    # an unmeasured overlap as minor, matching the terminal gate's stance.
+    unmeasurable = count > 0 and not measured
+    passed = (not gross) and (not unmeasurable)
+
+    detail["passed"] = passed
+    detail["gross"] = [o.to_dict() for o in gross]
+    detail["minor"] = [o.to_dict() for o in minor]
+    detail["unmeasurable"] = unmeasurable
+    return passed, detail
+
+
 def _gate_anchor_completeness(
     _validation: dict[str, Any],
     anchor_validation: dict[str, Any],
@@ -390,6 +453,7 @@ _GATES: list[tuple[str, Any]] = [
     ("no_unconnected", _gate_no_unconnected),
     ("no_illegal_geometry", _gate_no_illegal_geometry),
     ("drc_clearance", _gate_drc_clearance),
+    ("no_gross_courtyard_overlap", _gate_no_gross_courtyard_overlap),
     ("anchor_completeness", _gate_anchor_completeness),
     ("routed_board", _gate_routed_board),
 ]
@@ -444,6 +508,7 @@ def evaluate_leaf_acceptance(
         "unconnected": int(drc.get("unconnected", 0)),
         "unconnected_nets": list(drc.get("unconnected_nets", []) or []),
         "clearance": int(drc.get("clearance", 0)),
+        "courtyard": int(drc.get("courtyard", 0)),
         "footprint_internal_clearance_count": int(
             validation.get("footprint_internal_clearance_count", 0)
         ),
@@ -521,6 +586,9 @@ def acceptance_config_from_dict(cfg: dict[str, Any]) -> LeafAcceptanceConfig:
     - ``leaf_acceptance_poured_nets`` (list of net names)
     - ``leaf_acceptance_require_routed_board`` (bool)
     - ``leaf_acceptance_require_no_python_exception`` (bool)
+    - ``leaf_acceptance_require_no_gross_courtyard_overlap`` (bool)
+    - ``courtyard_overlap_warn_penetration_mm`` (float, shared with the fab gate)
+    - ``courtyard_overlap_warn_area_mm2`` (float, shared with the fab gate)
 
     Parameters
     ----------
@@ -554,10 +622,23 @@ def acceptance_config_from_dict(cfg: dict[str, Any]) -> LeafAcceptanceConfig:
             "leaf_acceptance_require_no_python_exception",
             "require_no_python_exception",
         ),
+        (
+            "leaf_acceptance_require_no_gross_courtyard_overlap",
+            "require_no_gross_courtyard_overlap",
+        ),
     ]
     for cfg_key, attr_name in _BOOL_KEYS:
         if cfg_key in cfg:
             kwargs[attr_name] = bool(cfg[cfg_key])
+
+    # The courtyard minor-clip thresholds default to the shared fab-gate values
+    # so the leaf gate and the terminal gate tolerate exactly the same clip.
+    for cfg_key, attr_name in (
+        ("courtyard_overlap_warn_penetration_mm", "courtyard_warn_penetration_mm"),
+        ("courtyard_overlap_warn_area_mm2", "courtyard_warn_area_mm2"),
+    ):
+        if cfg_key in cfg:
+            kwargs[attr_name] = float(cfg[cfg_key])
 
     if "leaf_acceptance_max_shorts" in cfg:
         kwargs["max_shorts"] = int(cfg["leaf_acceptance_max_shorts"])
