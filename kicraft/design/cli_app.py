@@ -70,6 +70,7 @@ from .synthesis.validation import (
     SynthesisValidationError,
     bridge_duplicate_pins,
     check_breakout_connectivity,
+    check_capacitor_polarity_consistency,
     check_sheet_connector_edge_conflicts,
     check_named_part_substitutions,
     check_family_wiring_contracts,
@@ -373,6 +374,15 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         if not sc.ok:
             print(f"{sc.name}: {sc.message}", file=sys.stderr)
             for o in sc.offenders[:20]:
+                print(f"  - {o}", file=sys.stderr)
+            return 3
+        # §9.25 -- parts-only, so it runs even before the wiring stage adds
+        # connections; a polarity mismatch is fixed by re-picking the footprint
+        # at the BOM stage, not by the wiring stage.
+        cp = check_capacitor_polarity_consistency(state.bom)
+        if not cp.ok:
+            print(f"{cp.name}: {cp.message}", file=sys.stderr)
+            for o in cp.offenders[:20]:
                 print(f"  - {o}", file=sys.stderr)
             return 3
 
@@ -2235,6 +2245,25 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                     )
                 )
                 return 3
+
+    # §9.25 capacitor polarity -- parts-only, so it fires at BOM commit (before
+    # the wiring stage adds connections). A non-polarized Device:C on a polarized
+    # CP_/tantalum footprint (the KC-U2VAA8 film caps) is fixed by re-picking the
+    # footprint here, where the model is still choosing parts.
+    if state.bom is not None:
+        cp = check_capacitor_polarity_consistency(state.bom)
+        if not cp.ok:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": [f"{cp.name}: {cp.message}"],
+                        "offenders": cp.offenders[:20],
+                    },
+                    indent=2,
+                )
+            )
+            return 3
 
     if state.bom is not None and state.bom.connections:
         checks = [
