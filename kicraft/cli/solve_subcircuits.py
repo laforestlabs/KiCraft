@@ -637,6 +637,27 @@ def _solve_one_round(
     )
 
 
+def _round_yielded_routed_board(result: SolveRoundResult) -> bool:
+    """Whether a round produced a usable routed board.
+
+    True for a cleanly routed round (``result.routed``) AND for a
+    freerouting-"failed" partial route that still stamped a ``routed_board_path``
+    on disk -- the latter is a legitimate best-effort fallback: its residual
+    unconnected nets close at parent route/pour. Only a genuine infrastructure
+    failure (freerouting produced no board) is excluded.
+
+    Gating ``best_routed`` on ``result.routed`` alone (which is ``False`` for any
+    round freerouting flagged ``failed``) was the rc=1 "board-only leaf" bug: a
+    leaf whose board routed but was gate-rejected had no ``best_routed``, so the
+    no-accepted-round recovery never fired, nothing serialized, and the auto-pin
+    safety net refused to compose -- dropping the whole block off-board.
+    """
+    if getattr(result, "routed", False):
+        return True
+    board = result.routing.get("routed_board_path")
+    return bool(board) and Path(str(board)).exists()
+
+
 def _solve_leaf_subcircuit(
     node: HierarchyNode,
     full_state: BoardState,
@@ -809,8 +830,11 @@ def _solve_leaf_subcircuit(
             }
         )
 
-        # A routed round (even one the gate rejects) is a best-effort fallback.
-        if result.routed and (
+        # A routed round is a best-effort fallback (used when no round is
+        # accepted) -- including one freerouting marked "failed" for residual
+        # opens, as long as it stamped a board on disk. See
+        # _round_yielded_routed_board.
+        if _round_yielded_routed_board(result) and (
             best_routed is None or result.score > best_routed.score
         ):
             best_routed = result
