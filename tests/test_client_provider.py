@@ -357,3 +357,67 @@ def test_erc_offenders_empty_when_erc_clean(tmp_path):
     _write_synth_check(tmp_path, [{"name": "9.12 ERC", "ok": True, "offenders": []}])
     assert _erc_offenders(tmp_path) == []                        # nothing to recover
     assert _erc_offenders(tmp_path / "nope") == []               # missing file -> []
+
+
+# ---- UTF-8 SSE decoding regression (KC-U2VAA8 "12 ÂµF" mojibake) -----------
+
+
+class _ByteStreamResp:
+    """Fake streaming Response that decodes exactly like ``requests``:
+    ``iter_lines(decode_unicode=True)`` uses ``self.encoding``, which requests
+    defaults to ISO-8859-1 for a ``text/event-stream`` body with no charset --
+    the bug that turned a UTF-8 ``µ`` (0xC2 0xB5) into ``Âµ``."""
+
+    def __init__(self, chunks, status_code=200, reason="OK"):
+        lines = [f"data: {json.dumps(c, ensure_ascii=False)}" for c in chunks]
+        lines.append("data: [DONE]")
+        self._raw = [ln.encode("utf-8") for ln in lines]
+        self.status_code = status_code
+        self.reason = reason
+        self.headers = {"content-type": "text/event-stream"}
+        self.encoding = "ISO-8859-1"  # requests' buggy default for text/* w/o charset
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.exceptions.HTTPError(
+                f"{self.status_code} {self.reason}", response=self)
+
+    def close(self):
+        pass
+
+    def iter_lines(self, decode_unicode=True):
+        for b in self._raw:
+            yield b.decode(self.encoding) if decode_unicode else b
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_open_stream_pins_utf8_and_avoids_mojibake(monkeypatch):
+    # The BOM value "12 µF" arrived over the SSE stream as bytes; without the
+    # encoding pin, requests decoded them as Latin-1 -> "12 ÂµF" landed in
+    # state.json. _open_stream must set resp.encoding = "utf-8".
+    chunks = [
+        {"choices": [{"delta": {"content": "value: 12 µF, 4.7 kΩ, 10 °C"}}]},
+        {"choices": [{"finish_reason": "stop", "delta": {}}]},
+        _usage_chunk(),
+    ]
+    holder = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=None):
+        r = _ByteStreamResp(chunks)
+        holder["resp"] = r
+        return r
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    c = CappedOpenRouterClient(Settings(api_key="k"), guard=_RecordingGuard())
+    msg, _cost = c._stream({"messages": [{"role": "user", "content": "hi"}]})
+
+    assert holder["resp"].encoding == "utf-8"          # _open_stream pinned it
+    assert "12 µF" in msg["content"]                   # decoded on the wire bytes
+    assert "4.7 kΩ" in msg["content"]
+    assert "10 °C" in msg["content"]
+    assert "Â" not in msg["content"]                   # no double-encoding

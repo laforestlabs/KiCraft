@@ -131,6 +131,13 @@ class CappedOpenRouterClient:
                     resp.close()
                     raise transient
                 resp.raise_for_status()  # other 4xx: not transient -> propagate
+                # OpenRouter's SSE stream is UTF-8 but sends `text/event-stream`
+                # with NO charset, so requests falls back to ISO-8859-1 for
+                # `iter_lines(decode_unicode=True)` -- which turns a UTF-8 `µ`
+                # (0xC2 0xB5) into "Âµ" and every other multibyte char into
+                # mojibake that then lands verbatim in the BOM value / state.json.
+                # Pin UTF-8 so the decoded stream matches the bytes on the wire.
+                resp.encoding = "utf-8"
                 return resp
             except (*_RETRY_NETWORK_EXC, requests.exceptions.HTTPError) as e:
                 # Only 5xx/429 HTTPErrors reach here as retryable; a 4xx
