@@ -1,20 +1,21 @@
 /* Public landing page for KiCraft (see web._render_landing + kc_landing.js).
-   Dark-theme tokens mirror web.py / kc_onboarding.css:
-     bg #0b1120 . panel #0f172a . border #1e293b
-     primary #60a5fa . violet #a78bfa . text #e2e8f0 . muted #94a3b8 / #64748b
+   Dark-theme tokens mirror the global palette in kicraft.server.theme:
+     bg #0b0f14 . panel #12171f . border #232c38
+     brand #4ade80 (circuit-green) . accent #22d3ee (cyan, gradient partner)
+     text #e8eef5 . muted #9aa7b5 / #657085
    Everything is scoped under .kc-landing so it never leaks into the auth cards. */
 
 .kc-landing {
-  --kc-bg: #0b1120;
-  --kc-panel: #0f172a;
-  --kc-border: #1e293b;
-  --kc-blue: #60a5fa;
-  --kc-violet: #a78bfa;
-  --kc-text: #e2e8f0;
-  --kc-muted: #94a3b8;
-  --kc-dim: #64748b;
+  --kc-bg: #0b0f14;
+  --kc-panel: #12171f;
+  --kc-border: #232c38;
+  --kc-brand: #4ade80;
+  --kc-accent: #22d3ee;
+  --kc-text: #e8eef5;
+  --kc-muted: #9aa7b5;
+  --kc-dim: #657085;
   color: var(--kc-text);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--kc-font-sans, "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
   line-height: 1.55;
   overflow-x: hidden;
 }
@@ -66,20 +67,20 @@
   white-space: nowrap;
 }
 .kc-btn-primary {
-  color: #0b1120;
-  background: linear-gradient(135deg, var(--kc-blue), var(--kc-violet));
-  box-shadow: 0 8px 24px -8px rgba(96, 165, 250, 0.6);
+  color: #0b0f14;
+  background: linear-gradient(135deg, var(--kc-brand), var(--kc-accent));
+  box-shadow: 0 8px 24px -8px rgba(74, 222, 128, 0.6);
 }
 .kc-btn-primary:hover {
   transform: translateY(-2px);
-  box-shadow: 0 12px 30px -8px rgba(124, 137, 250, 0.75);
+  box-shadow: 0 12px 30px -8px rgba(45, 212, 191, 0.75);
 }
 .kc-btn-ghost {
   color: var(--kc-text);
   border: 1px solid var(--kc-border);
   background: rgba(255, 255, 255, 0.02);
 }
-.kc-btn-ghost:hover { border-color: var(--kc-blue); color: #fff; }
+.kc-btn-ghost:hover { border-color: var(--kc-brand); color: #fff; }
 .kc-btn-lg { font-size: 1.05rem; padding: 14px 26px; }
 .kc-nav-signin { font-size: 0.92rem; color: var(--kc-muted); font-weight: 600; }
 .kc-nav-signin:hover { color: #fff; }
@@ -100,9 +101,9 @@
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--kc-blue);
-  background: rgba(96, 165, 250, 0.1);
-  border: 1px solid rgba(96, 165, 250, 0.25);
+  color: var(--kc-brand);
+  background: rgba(74, 222, 128, 0.1);
+  border: 1px solid rgba(74, 222, 128, 0.25);
   padding: 5px 12px;
   border-radius: 999px;
 }
@@ -114,7 +115,7 @@
   margin: 20px 0 0;
 }
 .kc-grad {
-  background: linear-gradient(110deg, var(--kc-blue) 10%, var(--kc-violet) 70%);
+  background: linear-gradient(110deg, var(--kc-brand) 10%, var(--kc-accent) 70%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -138,7 +139,7 @@
 /* Faux prompt console: the typewriter types example briefs into it. */
 .kc-console {
   margin-top: 26px;
-  background: #0a0f1e;
+  background: #08090d;
   border: 1px solid var(--kc-border);
   border-radius: 12px;
   padding: 14px 16px;
@@ -149,7 +150,7 @@
 .kc-console-bar { display: flex; gap: 6px; margin-bottom: 10px; }
 .kc-console-bar i {
   width: 11px; height: 11px; border-radius: 50%; display: inline-block;
-  background: #334155;
+  background: #2e3a49;
 }
 .kc-console-bar i:nth-child(1) { background: #ef4444aa; }
 .kc-console-bar i:nth-child(2) { background: #f59e0baa; }
@@ -162,14 +163,14 @@
   color: var(--kc-text);
   min-height: 4.65em;          /* ~3 wrapped lines at the console line-height */
 }
-.kc-console-line .kc-prompt { color: var(--kc-blue); margin-right: 8px; }
+.kc-console-line .kc-prompt { color: var(--kc-brand); margin-right: 8px; }
 @media (max-width: 440px) {
   .kc-console-line { min-height: 6.2em; }   /* narrow phones wrap to ~4 lines */
 }
 .kc-caret {
   display: inline-block;
   width: 8px;
-  background: var(--kc-blue);
+  background: var(--kc-brand);
   margin-left: 2px;
   animation: kc-blink 1.05s steps(1) infinite;
 }
@@ -182,7 +183,7 @@
   position: absolute;
   inset: -6% -2% 6% -2%;
   background: radial-gradient(60% 55% at 50% 45%,
-              rgba(124, 137, 250, 0.32), transparent 70%);
+              rgba(45, 212, 191, 0.32), transparent 70%);
   filter: blur(14px);
   z-index: 0;
 }
@@ -231,7 +232,7 @@
   z-index: 0;
 }
 .kc-glow-a { top: -120px; right: -80px; width: 420px; height: 420px;
-  background: radial-gradient(circle, rgba(96,165,250,0.5), transparent 70%); }
+  background: radial-gradient(circle, rgba(74,222,128,0.5), transparent 70%); }
 .kc-glow-b { top: 380px; left: -140px; width: 460px; height: 460px;
   background: radial-gradient(circle, rgba(167,139,250,0.42), transparent 70%); }
 
@@ -239,7 +240,7 @@
 .kc-section { padding: 56px 0; }
 .kc-kicker {
   font-size: 0.8rem; font-weight: 700; letter-spacing: 0.08em;
-  text-transform: uppercase; color: var(--kc-violet); text-align: center;
+  text-transform: uppercase; color: var(--kc-accent); text-align: center;
 }
 .kc-h2 {
   font-size: clamp(1.7rem, 3vw, 2.3rem);
@@ -276,7 +277,7 @@
 }
 .kc-step .kc-step-name { font-weight: 700; margin-top: 4px; font-size: 0.92rem; }
 .kc-step .kc-step-d { font-size: 0.8rem; color: var(--kc-muted); margin-top: 4px; }
-.kc-step.kc-step-build { border-color: rgba(124, 137, 250, 0.45); }
+.kc-step.kc-step-build { border-color: rgba(45, 212, 191, 0.45); }
 
 @media (max-width: 1000px) {
   .kc-pipe { grid-template-columns: repeat(3, 1fr); }   /* 3 + 3 + capstone */
@@ -300,14 +301,14 @@
 }
 .kc-card:hover {
   transform: translateY(-4px);
-  border-color: rgba(96, 165, 250, 0.45);
-  box-shadow: 0 18px 40px -22px rgba(96, 165, 250, 0.55);
+  border-color: rgba(74, 222, 128, 0.45);
+  box-shadow: 0 18px 40px -22px rgba(74, 222, 128, 0.55);
 }
 .kc-card .kc-ic {
   display: inline-flex; align-items: center; justify-content: center;
   width: 42px; height: 42px; border-radius: 10px; margin-bottom: 12px;
-  background: rgba(96, 165, 250, 0.12); color: var(--kc-blue);
-  border: 1px solid rgba(96, 165, 250, 0.25);
+  background: rgba(74, 222, 128, 0.12); color: var(--kc-brand);
+  border: 1px solid rgba(74, 222, 128, 0.25);
 }
 .kc-card .kc-ic .material-icons { font-size: 22px; }
 .kc-card h3 { font-size: 1.06rem; font-weight: 700; margin: 0 0 6px; }
@@ -329,13 +330,13 @@
 .kc-sample:hover {
   transform: translateY(-5px);
   border-color: rgba(167, 139, 250, 0.5);
-  box-shadow: 0 24px 50px -26px rgba(124, 137, 250, 0.7);
+  box-shadow: 0 24px 50px -26px rgba(45, 212, 191, 0.7);
 }
 .kc-sample-art {
   position: relative;
   background:
-    radial-gradient(70% 80% at 50% 30%, rgba(96,165,250,0.16), transparent 70%),
-    #0a0f1e;
+    radial-gradient(70% 80% at 50% 30%, rgba(74,222,128,0.16), transparent 70%),
+    #08090d;
   padding: 20px 18px 8px;
   display: flex; align-items: center; justify-content: center;
   min-height: 168px;
@@ -347,8 +348,8 @@
 .kc-badge {
   position: absolute; top: 12px; left: 12px;
   font-size: 0.7rem; font-weight: 700; letter-spacing: 0.03em;
-  color: var(--kc-blue); background: rgba(11,17,32,0.7);
-  border: 1px solid rgba(96,165,250,0.3); border-radius: 999px;
+  color: var(--kc-brand); background: rgba(11,17,32,0.7);
+  border: 1px solid rgba(74,222,128,0.3); border-radius: 999px;
   padding: 3px 10px;
 }
 .kc-sample-body { padding: 16px 18px 20px; display: flex; flex-direction: column; flex: 1; }
@@ -364,7 +365,7 @@
 .kc-sample-cta {
   margin-top: auto; padding-top: 16px;
   display: inline-flex; align-items: center; gap: 6px;
-  font-weight: 600; font-size: 0.92rem; color: var(--kc-blue);
+  font-weight: 600; font-size: 0.92rem; color: var(--kc-brand);
 }
 .kc-sample-cta .material-icons { font-size: 18px; transition: transform 0.18s ease; }
 .kc-sample:hover .kc-sample-cta .material-icons { transform: translateX(4px); }
@@ -378,7 +379,7 @@
 }
 .kc-how .kc-num {
   font-size: 2rem; font-weight: 800; line-height: 1;
-  background: linear-gradient(135deg, var(--kc-blue), var(--kc-violet));
+  background: linear-gradient(135deg, var(--kc-brand), var(--kc-accent));
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
 .kc-how h3 { font-size: 1.1rem; font-weight: 700; margin: 12px 0 6px; }
@@ -391,7 +392,7 @@
   background:
     radial-gradient(80% 140% at 50% 0%, rgba(124,137,250,0.18), transparent 70%),
     var(--kc-panel);
-  border: 1px solid rgba(124, 137, 250, 0.35);
+  border: 1px solid rgba(45, 212, 191, 0.35);
   border-radius: 20px;
   padding: 48px 28px;
 }
@@ -424,11 +425,11 @@
   border-radius: 14px; padding: 26px 24px;
 }
 .kc-price-featured {
-  border-color: rgba(124, 137, 250, 0.45);
+  border-color: rgba(45, 212, 191, 0.45);
   background:
-    radial-gradient(90% 120% at 50% 0%, rgba(124, 137, 250, 0.14), transparent 70%),
+    radial-gradient(90% 120% at 50% 0%, rgba(45, 212, 191, 0.14), transparent 70%),
     var(--kc-panel);
-  box-shadow: 0 18px 40px -18px rgba(96, 165, 250, 0.35);
+  box-shadow: 0 18px 40px -18px rgba(74, 222, 128, 0.35);
 }
 .kc-price-pop { left: auto; right: 12px; } /* reuses .kc-badge, pinned top-right */
 .kc-price-card h3 { font-size: 1.15rem; font-weight: 700; margin: 0; }
@@ -445,7 +446,7 @@
 }
 .kc-price-feats li::before {
   content: "✓"; position: absolute; left: 2px; top: 0;
-  color: var(--kc-blue); font-weight: 700;
+  color: var(--kc-brand); font-weight: 700;
 }
 .kc-price-cta { justify-content: center; }
 .kc-price-chip {

@@ -131,6 +131,13 @@ app.add_static_files(_LAYOUT_ASSET_MOUNT, str(_LAYOUT_STATIC_DIR))
 # curated, finished demos, so serving them costs nothing and needs no auth.
 app.add_static_files("/samples", str(SAMPLES_DIR))
 
+# Global visual theme: palette + fonts + depth, injected once into every page's
+# head (shared). The single source of truth for the app's look lives in
+# kicraft.server.theme; import color constants from there instead of hex.
+from . import theme as _theme  # noqa: E402
+
+_theme.install()
+
 # Sizing for the in-tab KiCanvas on the build stages (the schematic on Synthesize
 # and the routed board on Place/Route). Both should nearly fill the (widened)
 # inspector column so the artifact is large enough to visually inspect; the offset
@@ -741,7 +748,7 @@ def _render_leaf_gallery(prog: list[dict], run_status: dict) -> None:
                 chip = "#34d399" if d.get("status") == "Routed" else "#fbbf24"
                 with ui.column().classes("gap-0 items-center").style("width:118px"):
                     ui.image(d.get("url", "")).classes("w-full rounded border border-slate-700") \
-                        .style("background:#0b1120")
+                        .style("background:var(--kc-bg)")
                     ui.label(d.get("sheet_name", "?")).classes(
                         "text-xs truncate w-full text-center").style("color:#cbd5e1")
                     ui.label(d.get("status", "?")).classes("text-xs").style(f"color:{chip}")
@@ -1965,7 +1972,7 @@ def open_eval_dialog(project_dir, title: str) -> None:
             holder["done"] = True
 
     with ui.dialog() as dlg, ui.card().classes("w-[780px] max-w-[95vw]") \
-            .style("background:#0f172a;border:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
         with ui.row().classes("w-full items-center justify-between"):
             ui.label(f"Self-evaluation: {title}").classes("text-base font-bold") \
                 .style("color:#e2e8f0")
@@ -2018,14 +2025,14 @@ def _legal_page(title: str, name: str) -> None:
     """Render a legal document. Public: no login required, so prospective users
     can read the Terms and Privacy Policy before signing up."""
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     with ui.column().classes("w-full max-w-3xl mx-auto p-6 gap-3"):
         with ui.row().classes("items-center justify-between w-full"):
             ui.label(f"KiCraft {title}").classes("text-2xl font-bold text-white")
             ui.button("Back", icon="arrow_back",
                       on_click=lambda: ui.navigate.to("/login")) \
                 .props("flat dense color=white")
-        with ui.card().classes("w-full").style("background:#0f172a;border:1px solid #1e293b"):
+        with ui.card().classes("w-full").style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
             ui.markdown(_legal_markdown(name)).classes("w-full").style("color:#cbd5e1")
 
 
@@ -2042,9 +2049,9 @@ def privacy_page():
 @ui.page("/login")
 def login_page(prompt: str = ""):
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     with ui.card().classes("absolute-center w-96") \
-            .style("background:#0f172a;border:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
         ui.label("KiCraft").classes("text-2xl font-bold text-white")
         ui.label("Sign in to design a board.").classes("text-sm").style("color:#94a3b8")
         email = ui.input("Email").classes("w-full")
@@ -2068,7 +2075,7 @@ def login_page(prompt: str = ""):
             ui.button("Forgot password?",
                       on_click=lambda: ui.navigate.to("/forgot")) \
                 .props("flat dense no-caps").classes("text-xs")
-        ui.separator().style("background:#1e293b")
+        ui.separator().style("background:var(--kc-border)")
         with ui.row().classes("items-center justify-between w-full"):
             ui.label("New to KiCraft?").classes("text-xs").style("color:#94a3b8")
             ui.button("Create an account",
@@ -2081,7 +2088,7 @@ def login_page(prompt: str = ""):
 @ui.page("/signup")
 def signup_page(prompt: str = ""):
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     # Capture the client IP once at page load (it's the HTTP request peer, not
     # available inside the websocket submit callback) for the per-IP throttle.
     try:
@@ -2089,7 +2096,7 @@ def signup_page(prompt: str = ""):
     except Exception:
         signup_ip = ""
     with ui.card().classes("absolute-center w-96") \
-            .style("background:#0f172a;border:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
         ui.label("Create your account").classes("text-2xl font-bold text-white")
         ui.label("Free tier: one design per week. No credit card.") \
             .classes("text-sm").style("color:#94a3b8")
@@ -2184,7 +2191,7 @@ def signup_page(prompt: str = ""):
                       on_click=lambda: ui.navigate.to(
                           f"/login?prompt={quote(prompt)}" if prompt else "/login")) \
                 .props("flat dense")
-        ui.separator().style("background:#1e293b")
+        ui.separator().style("background:var(--kc-border)")
         _laforest_footer()
 
 
@@ -2193,9 +2200,9 @@ def forgot_page():
     """Public: request a password-reset link. Always shows the same neutral
     confirmation, so it never reveals whether an email is registered."""
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     with ui.card().classes("absolute-center w-96") \
-            .style("background:#0f172a;border:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
         ui.label("Reset your password").classes("text-2xl font-bold text-white")
         ui.label("Enter your account email and we'll send a link to set a new "
                  "password.").classes("text-sm").style("color:#94a3b8")
@@ -2220,7 +2227,7 @@ def forgot_page():
 
         email.on("keydown.enter", submit)
         ui.button("Send reset link", on_click=submit).classes("w-full")
-        ui.separator().style("background:#1e293b")
+        ui.separator().style("background:var(--kc-border)")
         with ui.row().classes("items-center justify-between w-full"):
             ui.label("Remembered it?").classes("text-xs").style("color:#94a3b8")
             ui.button("Back to sign in",
@@ -2234,10 +2241,10 @@ def reset_page(token: str = ""):
     auto-signed-in; the new session carries the bumped epoch, so every other
     session (an attacker's included) is evicted."""
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     user = _store().verify_reset_token(token)
     with ui.card().classes("absolute-center w-96") \
-            .style("background:#0f172a;border:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
         if user is None:
             ui.label("Reset link invalid or expired") \
                 .classes("text-2xl font-bold text-white")
@@ -2286,10 +2293,10 @@ def verify_page(token: str = ""):
     fallback makes email-scanner prefetch double-hits harmless: the scanner
     consumes the token first, and the user's real click still sees success."""
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     updated = _store().consume_verification_token(token) if token else None
     with ui.card().classes("absolute-center w-96") \
-            .style("background:#0f172a;border:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
         if updated is not None:
             ui.label("Email confirmed").classes("text-2xl font-bold text-white")
             ui.label("You can start designing now. Head back to the workspace.") \
@@ -2353,9 +2360,9 @@ def consent_page():
     if user.accepted_terms_version == LEGAL_VERSION:
         return RedirectResponse("/")
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     with ui.card().classes("absolute-center w-96") \
-            .style("background:#0f172a;border:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
         ui.label("Please review our terms").classes("text-2xl font-bold text-white")
         ui.label("We've updated our Terms of Service and Privacy Policy. Please "
                  "accept to continue.").classes("text-sm").style("color:#94a3b8")
@@ -2398,7 +2405,7 @@ def profile_page():
     q = _store().quota_status(user)
 
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     _mobile_head()
 
     def logout():
@@ -2407,7 +2414,7 @@ def profile_page():
         ui.navigate.to("/login")
 
     with ui.header().classes("items-center justify-between") \
-            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border-bottom:1px solid var(--kc-border)"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
             ui.label("your profile").classes("text-sm kc-tagline").style("color:#94a3b8")
@@ -2425,7 +2432,7 @@ def profile_page():
         ui.label("Profile").classes("text-2xl font-bold text-white")
 
         with ui.card().classes("w-full gap-2") \
-                .style("background:#0f172a;border:1px solid #1e293b"):
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
             ui.label("Account").classes("text-base font-semibold text-white")
             with ui.row().classes("items-center gap-2"):
                 ui.icon("mail").style("color:#94a3b8")
@@ -2451,7 +2458,7 @@ def profile_page():
                 .classes("text-xs").style("color:#64748b")
 
         with ui.card().classes("w-full gap-2") \
-                .style("background:#0f172a;border:1px solid #1e293b"):
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
             ui.label("Plan & billing").classes("text-base font-semibold text-white")
             billing_on = Settings.from_env().billing_enabled
             if user.subscription_status:
@@ -2482,7 +2489,7 @@ def profile_page():
                                  "cancel, download invoices")
 
         with ui.card().classes("w-full gap-2") \
-                .style("background:#0f172a;border:1px solid #1e293b"):
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
             ui.label("Privacy & data").classes("text-base font-semibold text-white")
             train_sw = ui.switch(
                 "Allow KiCraft to use my designs to improve its AI models",
@@ -2498,7 +2505,7 @@ def profile_page():
                      "[CONTACT EMAIL].").classes("text-xs").style("color:#64748b")
 
         with ui.card().classes("w-full gap-2") \
-                .style("background:#0f172a;border:1px solid #1e293b"):
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
             ui.label("Community visibility").classes("text-base font-semibold text-white")
             if _can_make_private(user):
                 ui.label("Choose which of your completed projects appear in the "
@@ -2536,7 +2543,7 @@ def projects_page():
         return RedirectResponse("/consent")
 
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     _mobile_head()
 
     # Whether this plan may keep a project private. Re-checked server-side on every
@@ -2544,7 +2551,7 @@ def projects_page():
     can_private = _can_make_private(user)
 
     with ui.header().classes("items-center justify-between") \
-            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border-bottom:1px solid var(--kc-border)"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
             ui.label("your projects").classes("text-sm kc-tagline").style("color:#94a3b8")
@@ -2576,7 +2583,7 @@ def projects_page():
         # parks its target here, then opens it.
         del_target = {"pid": None, "stem": None}
         with ui.dialog() as del_dialog, ui.card().classes("gap-2") \
-                .style("background:#0f172a;border:1px solid #1e293b"):
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
             ui.label("Delete project?").classes("text-base font-semibold text-white")
             del_msg = ui.label().classes("text-sm").style("color:#e2e8f0")
             ui.label("This permanently removes the design, its files, and any "
@@ -2638,7 +2645,7 @@ def projects_page():
         def _render_row(p):
             live = _LIVE_RUNS.get(p.id)
             with ui.card().classes("w-full gap-2") \
-                    .style("background:#0f172a;border:1px solid #1e293b"):
+                    .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
                 with ui.row().classes("w-full items-center gap-3"):
                     ui.label(p.project_stem or "(building…)") \
                         .classes("text-sm font-semibold").style("color:#e2e8f0")
@@ -2773,7 +2780,7 @@ def _render_pricing(user, error: str = "") -> None:
     deliberately no kc-reveal/JS dependency, so it renders fully without
     kc_landing.js."""
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     ui.add_head_html('<link rel="stylesheet" href="/static/kc_landing.css">')
 
     billing_on = Settings.from_env().billing_enabled
@@ -2932,9 +2939,9 @@ async def billing_success_page(session_id: str = ""):
     q = _store().quota_status(fresh)
 
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     with ui.card().classes("absolute-center w-96 items-center gap-2") \
-            .style("background:#0f172a;border:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
         ui.icon("check_circle").classes("text-4xl").style("color:#34d399")
         ui.label(f"You're on {q['label']}").classes("text-xl font-bold text-white")
         period = "week" if q["window_days"] <= 7 else "month"
@@ -2974,7 +2981,7 @@ def _quality_chip(quality) -> None:
     """A small colored badge for a project's build quality."""
     label, color = _QUALITY_CHIP.get(quality or "unverified", _QUALITY_CHIP["unverified"])
     ui.label(label).classes("text-xs rounded").style(
-        f"background:#0b1120;border:1px solid {color};color:{color};padding:1px 8px")
+        f"background:var(--kc-bg);border:1px solid {color};color:{color};padding:1px 8px")
 
 
 def _stat_icon(icon: str, n) -> None:
@@ -3132,7 +3139,7 @@ def _project_card(r: dict) -> None:
     stem = r.get("project_stem") or "Untitled board"
     thumb = _board_thumb_url(r.get("dir_path"), r.get("project_stem"))
     card = ui.card().classes("w-72 gap-1 cursor-pointer") \
-        .style("background:#0f172a;border:1px solid #1e293b")
+        .style("background:var(--kc-surface);border:1px solid var(--kc-border)")
     with card:
         if thumb:
             ui.image(thumb).props("fit=contain") \
@@ -3140,7 +3147,7 @@ def _project_card(r: dict) -> None:
         else:
             with ui.element("div").classes("w-full rounded flex items-center justify-center") \
                     .style("height:150px;background:#0a0f1e"):
-                ui.icon("developer_board").style("color:#334155;font-size:46px")
+                ui.icon("developer_board").style("color:var(--kc-border-strong);font-size:46px")
         with ui.row().classes("w-full items-center justify-between gap-1"):
             ui.label(stem).classes("text-base font-semibold text-white")
             _quality_chip(r.get("quality"))
@@ -3168,11 +3175,11 @@ def browse_page():
         return RedirectResponse("/consent")
 
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     _mobile_head()
 
     with ui.header().classes("items-center justify-between") \
-            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border-bottom:1px solid var(--kc-border)"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
             ui.label("community browser").classes("text-sm kc-tagline").style("color:#94a3b8")
@@ -3268,12 +3275,12 @@ def public_project_page(project_id: str):
         return RedirectResponse("/consent")
 
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     kicanvas_head()
     _mobile_head()
 
     with ui.header().classes("items-center justify-between") \
-            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border-bottom:1px solid var(--kc-border)"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
             ui.label("community project").classes("text-sm kc-tagline").style("color:#94a3b8")
@@ -3340,12 +3347,12 @@ def public_project_page(project_id: str):
             srcs = _schematic_sources(gen, p.project_stem or "", token)
             if srcs:
                 with ui.card().classes("w-full") \
-                        .style("background:#0f172a;border:1px solid #1e293b"):
+                        .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
                     _render_synth_view(srcs, p.project_stem or "", gen)
             board = _board_source(gen, p.project_stem or "", token)
             if board:
                 with ui.card().classes("w-full") \
-                        .style("background:#0f172a;border:1px solid #1e293b"):
+                        .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
                     ui.label("Board").classes("text-xs font-medium").style("color:#94a3b8")
                     KiCanvasView([KiCanvasSource(board[0], board[1])], height="h-[520px]")
         else:
@@ -3377,7 +3384,7 @@ def _clone_button(source, user) -> None:
     if _can_make_private(user):
         def open_dialog():
             with ui.dialog() as dlg, ui.card().classes("gap-2") \
-                    .style("background:#0f172a;border:1px solid #1e293b"):
+                    .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
                 ui.label("Clone this project").classes("text-base font-bold text-white")
                 ui.label("A copy lands in your workspace; you can open and re-run it.") \
                     .classes("text-xs").style("color:#94a3b8")
@@ -3399,7 +3406,7 @@ def _render_bom_table(state) -> None:
     """A compact, read-only bill of materials for the detail page."""
     parts = (((state or {}).get("bom") or {}).get("parts")) or []
     with ui.card().classes("w-full gap-1") \
-            .style("background:#0f172a;border:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
         ui.label(f"Bill of materials ({len(parts)} parts)") \
             .classes("text-xs font-medium").style("color:#94a3b8")
         if not parts:
@@ -3413,7 +3420,7 @@ def _render_bom_table(state) -> None:
             ui.label("sheet").style("width:120px")
         for prt in parts:
             with ui.row().classes("w-full items-center gap-2 text-xs") \
-                    .style("border-top:1px solid #1e293b;padding:3px 0"):
+                    .style("border-top:1px solid var(--kc-border);padding:3px 0"):
                 ui.label(str(prt.get("ref") or "")).classes("font-mono") \
                     .style("width:64px;color:#e2e8f0")
                 ui.label(str(prt.get("value") or "")).style("width:170px;color:#cbd5e1")
@@ -3436,7 +3443,7 @@ def samples_page():
         return RedirectResponse("/consent")
 
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     kicanvas_head()
     _mobile_head()
     if any(s.has_3d() for s in available_samples()):
@@ -3446,7 +3453,7 @@ def samples_page():
             '<script type="module" src="/static/model-viewer.min.js"></script>')
 
     with ui.header().classes("items-center justify-between") \
-            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border-bottom:1px solid var(--kc-border)"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
             ui.label("example boards").classes("text-sm kc-tagline").style("color:#94a3b8")
@@ -3483,7 +3490,7 @@ def samples_page():
                 # schematic and routed board in KiCanvas.
                 if s.has_3d():
                     with ui.card().classes("w-full") \
-                            .style("background:#0f172a;border:1px solid #1e293b"):
+                            .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
                         ui.label("3D model").classes("text-xs font-medium") \
                             .style("color:#94a3b8")
                         # sanitize=False: NiceGUI would strip the custom element.
@@ -3493,10 +3500,10 @@ def samples_page():
                 # a KiCanvas WebGL canvas built inside a hidden container can size to
                 # zero and never repaint, so keeping both on-screen avoids that.
                 with ui.card().classes("w-full") \
-                        .style("background:#0f172a;border:1px solid #1e293b"):
+                        .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
                     _render_synth_view(s.schematic_sources(), s.stem, s.dir)
                 with ui.card().classes("w-full") \
-                        .style("background:#0f172a;border:1px solid #1e293b"):
+                        .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
                     ui.label("Board").classes("text-xs font-medium").style("color:#94a3b8")
                     url, name = s.board_source()
                     KiCanvasView([KiCanvasSource(url, name)], height="h-[520px]")
@@ -3507,7 +3514,7 @@ def samples_page():
         with grid:
             for s in samples:
                 card = ui.card().classes("w-72 gap-1 cursor-pointer") \
-                    .style("background:#0f172a;border:1px solid #1e293b")
+                    .style("background:var(--kc-surface);border:1px solid var(--kc-border)")
                 with card:
                     ui.image(s.board_png_url).props("fit=contain") \
                         .style("height:150px;background:#0a0f1e").classes("w-full rounded")
@@ -3528,7 +3535,7 @@ def _parts_header(subtitle_btn_label: str, subtitle_btn_target: str) -> None:
     """The shared dark header for the /parts pages: brand + a single back button."""
     _mobile_head()
     with ui.header().classes("items-center justify-between") \
-            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border-bottom:1px solid var(--kc-border)"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
             ui.label("part library").classes("text-sm kc-tagline").style("color:#94a3b8")
@@ -3556,7 +3563,7 @@ def parts_page():
         return RedirectResponse("/consent")
 
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     _parts_header("Back to workspace", "/")
 
     parts = catalog()
@@ -3604,7 +3611,7 @@ def parts_page():
                     row = ui.row().classes(
                         "w-full items-center gap-3 cursor-pointer p-3 rounded "
                         "hover:bg-slate-800").style(
-                        "background:#0f172a;border:1px solid #1e293b")
+                        "background:var(--kc-surface);border:1px solid var(--kc-border)")
                     with row:
                         with ui.column().classes("gap-0").style("min-width:170px"):
                             ui.label(m.mpn).classes("text-sm font-bold text-white")
@@ -3617,7 +3624,7 @@ def parts_page():
                         code = (m.sourcing or {}).get("lcsc", "").strip().upper()
                         if _LCSC_CODE_RE.match(code):
                             ui.label(code).classes("text-xs font-mono rounded") \
-                                .style("background:#1e293b;color:#94a3b8;padding:2px 8px")
+                                .style("background:var(--kc-border);color:#94a3b8;padding:2px 8px")
                     row.on("click",
                            lambda pp=p: ui.navigate.to(f"/parts/{pp.manifest.name}"))
 
@@ -3638,7 +3645,7 @@ def part_detail_page(name: str):
         return RedirectResponse("/consent")
 
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     _parts_header("Back to library", "/parts")
 
     part = get_part(name)
@@ -3662,7 +3669,7 @@ def part_detail_page(name: str):
         img_style = "height:260px;background:#ffffff;padding:10px"
         with ui.row().classes("w-full gap-4 flex-wrap"):
             with ui.card().classes("flex-grow").style(
-                    "background:#0f172a;border:1px solid #1e293b;min-width:300px"):
+                    "background:var(--kc-surface);border:1px solid var(--kc-border);min-width:300px"):
                 ui.label("Symbol").classes("text-xs font-medium").style("color:#94a3b8")
                 syms = symbol_svgs(part) if kicad_cli_available() else []
                 if syms:
@@ -3673,7 +3680,7 @@ def part_detail_page(name: str):
                     ui.label("Preview unavailable").classes("text-xs") \
                         .style("color:#64748b;padding:16px")
             with ui.card().classes("flex-grow").style(
-                    "background:#0f172a;border:1px solid #1e293b;min-width:300px"):
+                    "background:var(--kc-surface);border:1px solid var(--kc-border);min-width:300px"):
                 ui.label("Footprint").classes("text-xs font-medium") \
                     .style("color:#94a3b8")
                 fp = footprint_svg(part) if kicad_cli_available() else None
@@ -3702,12 +3709,12 @@ def part_detail_page(name: str):
         code = (m.sourcing or {}).get("lcsc", "").strip().upper()
         if _LCSC_CODE_RE.match(code):
             with ui.card().classes("w-full") \
-                    .style("background:#0f172a;border:1px solid #1e293b"):
+                    .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
                 with ui.row().classes("items-center gap-2"):
                     ui.label("LCSC pricing").classes("text-sm font-medium") \
                         .style("color:#94a3b8")
                     ui.label(code).classes("text-xs font-mono rounded") \
-                        .style("background:#1e293b;color:#cbd5e1;padding:2px 8px")
+                        .style("background:var(--kc-border);color:#cbd5e1;padding:2px 8px")
                 price_row = ui.row().classes("items-center gap-6")
                 with price_row:
                     ui.label("Loading live price…").classes("text-sm") \
@@ -3748,7 +3755,7 @@ def part_detail_page(name: str):
                     .style("color:#64748b")
 
         with ui.card().classes("w-full") \
-                .style("background:#0f172a;border:1px solid #1e293b"):
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
             ui.markdown(usage_markdown(part)).classes("w-full").style("color:#cbd5e1")
 
 
@@ -3875,7 +3882,7 @@ def _render_landing() -> None:
     signup. Pure static content: the showcase boards are prebuilt assets, so nothing
     here calls a model (no token spend before a valid email signup)."""
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     ui.add_head_html('<link rel="stylesheet" href="/static/kc_landing.css">')
     ui.add_head_html('<style>html{scroll-behavior:smooth}</style>')
     ui.add_head_html(
@@ -4032,7 +4039,7 @@ def index(prompt: str = "", project: str = ""):
         f"{json.dumps('Describe your board, big or small. Be bold.')};</script>")
     ui.add_head_html('<script src="/static/kc_onboarding.js" defer></script>')
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     first_run = not _store().list_projects(user.id)
     welcome_card = None
     arrow_hint = None
@@ -4072,7 +4079,7 @@ def index(prompt: str = "", project: str = ""):
         ui.navigate.to("/login")
 
     with ui.header().classes("items-center justify-between") \
-            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border-bottom:1px solid var(--kc-border)"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
             ui.label("design a PCB from a sentence").classes("text-sm kc-tagline") \
@@ -4128,7 +4135,7 @@ def index(prompt: str = "", project: str = ""):
             m_tier_badge = ui.badge(q0["label"], color="primary")
             with ui.button(icon="menu").props("flat dense color=white"):
                 with ui.menu().props("auto-close") \
-                        .style("background:#0f172a;border:1px solid #1e293b"):
+                        .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
                     ui.menu_item("New design", lambda: start_fresh())
                     ui.menu_item("My projects", lambda: ui.navigate.to("/projects"))
                     ui.menu_item("Examples", lambda: ui.navigate.to("/samples"))
@@ -4191,7 +4198,7 @@ def index(prompt: str = "", project: str = ""):
 
         if first_run:
             with ui.row().classes("w-full items-start justify-between kc-welcome") \
-                    .style("background:#0f172a;border:1px solid #1e293b;"
+                    .style("background:var(--kc-surface);border:1px solid var(--kc-border);"
                            "border-radius:8px;padding:12px 14px") as welcome_card:
                 with ui.column().classes("gap-1"):
                     ui.label("Welcome to KiCraft") \
@@ -4215,7 +4222,7 @@ def index(prompt: str = "", project: str = ""):
         # below collapses and only this read-only prompt header stays at the top.
         # _enter_run_view / _enter_compose_view (defined below) toggle the two.
         prompt_display = ui.column().classes("w-full gap-1 kc-prompt-shown") \
-            .style("background:#0f172a;border:1px solid #1e293b;"
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border);"
                    "border-radius:8px;padding:12px 14px")
         with prompt_display:
             ui.label("Your prompt").classes("text-xs uppercase tracking-wide") \
@@ -4308,7 +4315,7 @@ def index(prompt: str = "", project: str = ""):
             # The open design's unique, human-quotable id. Always on screen while
             # a board is open so a user can quote it in any support report.
             board_label = ui.label("").classes("text-xs font-mono cursor-pointer") \
-                .style("color:#94a3b8;border:1px solid #334155;"
+                .style("color:#94a3b8;border:1px solid var(--kc-border-strong);"
                        "border-radius:4px;padding:1px 8px") \
                 .tooltip("This board's unique ID. Click to copy; quote it when "
                          "reporting an issue.")
@@ -4341,7 +4348,7 @@ def index(prompt: str = "", project: str = ""):
             code = state.get("board_code")
             support_dialog.clear()
             with support_dialog, ui.card().classes("w-[680px] max-w-[95vw] gap-2") \
-                    .style("background:#0f172a;border:1px solid #334155"):
+                    .style("background:var(--kc-surface);border:1px solid var(--kc-border-strong)"):
                 ui.label("Something went wrong" if auto else "Contact support") \
                     .classes("text-lg font-bold text-white")
                 if auto:
@@ -4360,7 +4367,7 @@ def index(prompt: str = "", project: str = ""):
                         .classes("text-sm font-mono font-bold") \
                         .style("color:#e2e8f0" if code else "color:#64748b")
                 with ui.expansion("Details that will be sent").classes("w-full") \
-                        .style("background:#0b1120;border:1px solid #1e293b"):
+                        .style("background:var(--kc-bg);border:1px solid var(--kc-border)"):
                     ui.label(json.dumps(diag, indent=2, ensure_ascii=False)) \
                         .classes("text-xs font-mono whitespace-pre-wrap") \
                         .style("color:#94a3b8;max-height:240px;overflow:auto")
@@ -4416,13 +4423,16 @@ def index(prompt: str = "", project: str = ""):
         tabs.on_show("place_route", lambda: _reveal_view("pcb_view", "pcb_revealed"))
 
         with ui.expansion("Edit a stage & re-run").classes("w-full mt-2") \
-                .style("background:#0f172a;border:1px solid #1e293b"):
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
             edit_box = ui.column().classes("w-full gap-2 p-2")
         edit_ctx: dict = {"getter": None, "raw": None, "instr": None}
 
         def build_question_panel():
-            """(Re)build the clarifying-question panel for a parked run. Always
-            offers a freeform text answer; suggested options just fill it in."""
+            """(Re)build the clarifying-question panel for a parked run as a
+            conversational card: each question is an agent 'bubble', suggested
+            options are tappable quick-pick chips that fill the reply box, and a
+            clearly-outlined answer field carries a green focus ring. Freeform
+            text is always accepted; chips are just shortcuts."""
             question_box.clear()
             view["questions_rendered"] = state.get("questions")
             qs = state.get("questions") or []
@@ -4430,32 +4440,60 @@ def index(prompt: str = "", project: str = ""):
                 return
             stage = qs[0].get("stage", "")
             with question_box:
-                with ui.card().classes("w-full") \
-                        .style("background:#1f1300;border:1px solid #92400e"):
-                    ui.label("The agent needs your input").classes("text-base font-bold") \
-                        .style("color:#fbbf24")
-                    if stage:
-                        ui.label(f"Stage: {stage}").classes("text-xs").style("color:#d4d4d8")
+                with ui.column().classes("w-full kc-qcard gap-3") \
+                        .style("padding:16px 18px"):
+                    with ui.row().classes("items-center gap-2 w-full"):
+                        ui.icon("smart_toy").classes("text-lg") \
+                            .style("color:var(--kc-brand)")
+                        ui.label("KiCraft needs a detail") \
+                            .classes("text-sm font-semibold") \
+                            .style("color:var(--kc-text)")
+                        ui.space()
+                        if stage:
+                            ui.label(stage).classes("text-xs kc-stage-pill")
                     widgets = []
                     for q in qs:
-                        ui.label(q.get("text", "")).classes("text-sm mt-2").style("color:#fde68a")
-                        ans = ui.input(placeholder="Type your answer (or pick a suggestion)") \
-                            .classes("w-full")
-                        for opt in (q.get("options") or []):
-                            ui.button(opt, on_click=lambda o=opt, a=ans: a.set_value(o)) \
-                                .props("flat dense").classes("text-xs")
+                        with ui.row().classes("w-full"):
+                            with ui.element("div").classes("kc-bubble") \
+                                    .style("padding:10px 14px;max-width:640px"):
+                                ui.label(q.get("text", "")).classes("text-sm") \
+                                    .style("color:var(--kc-text);white-space:pre-wrap")
+                        ans = ui.input(placeholder="Type your answer…") \
+                            .props("outlined dense") \
+                            .classes("w-full").style("max-width:640px")
+                        opts = q.get("options") or []
+                        if opts:
+                            with ui.row().classes("items-center gap-2 flex-wrap"):
+                                ui.label("Quick pick").classes("text-xs") \
+                                    .style("color:var(--kc-dim)")
+                                for opt in opts:
+                                    ui.button(
+                                        opt,
+                                        on_click=lambda o=opt, a=ans: (
+                                            a.set_value(o), a.run_method("focus"))) \
+                                        .props("flat dense no-caps") \
+                                        .classes("kc-qchip text-xs")
                         widgets.append((q, ans))
 
                     def submit_answers():
                         answers = [{"text": q.get("text", ""),
-                                    "answer": (a.value or "").strip()} for q, a in widgets]
+                                    "answer": (a.value or "").strip()}
+                                   for q, a in widgets]
                         if not any(x["answer"] for x in answers):
-                            ui.notify("Type or pick at least one answer.", color="warning")
+                            ui.notify("Type or pick at least one answer.",
+                                      color="warning")
                             return
                         _answer_and_resume(stage, answers)
 
-                    ui.button("Submit answer & continue", icon="send", color="primary",
-                              on_click=submit_answers).classes("mt-2")
+                    # Enter submits from any answer field (single-question is the
+                    # common case; multi still validates every field).
+                    for _q, _a in widgets:
+                        _a.on("keydown.enter", lambda: submit_answers())
+
+                    with ui.row().classes("w-full justify-end mt-1"):
+                        ui.button("Submit & continue", icon="send",
+                                  on_click=submit_answers) \
+                            .props("unelevated no-caps color=primary")
 
         def _answer_and_resume(stage, answers):
             if state["running"]:
@@ -4549,7 +4587,7 @@ def index(prompt: str = "", project: str = ""):
             verb = f"Re-draft {stage} and re-run " if instruction else "Re-run "
             tail = ", ".join(down) if down else "nothing downstream"
             with ui.dialog() as dlg, ui.card() \
-                    .style("background:#0f172a;border:1px solid #1e293b"):
+                    .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
                 ui.label("Re-run stages?").classes("text-lg font-bold text-white")
                 ui.label(verb + tail + ".") \
                     .classes("text-sm").style("color:#94a3b8")
@@ -5345,7 +5383,7 @@ def index(prompt: str = "", project: str = ""):
     # away with it (fixed=False) rather than pinning to the viewport bottom --
     # on mobile the pinned banner used to overlap the composer.
     with ui.footer(fixed=False).classes("justify-center py-1") \
-            .style("background:#0b1120;border-top:1px solid #1e293b"):
+            .style("background:var(--kc-bg);border-top:1px solid var(--kc-border)"):
         _laforest_footer()
 
 
@@ -5404,10 +5442,10 @@ if os.environ.get("KICRAFT_WEB_DEMO"):
         and styling can be previewed and screenshotted with no spend or network.
         Registered only when KICRAFT_WEB_DEMO is set (off in production)."""
         ui.dark_mode().enable()
-        ui.query("body").style("background:#0b1120")
+        ui.query("body").style("background:var(--kc-bg)")
         _mobile_head()
         with ui.header().classes("items-center justify-between") \
-                .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+                .style("background:var(--kc-surface);border-bottom:1px solid var(--kc-border)"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
             ui.label("design preview (demo)").classes("text-sm kc-tagline").style("color:#94a3b8")
         with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1600px"):

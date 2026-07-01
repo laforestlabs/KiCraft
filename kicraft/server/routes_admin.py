@@ -58,8 +58,11 @@ from .web import (
 # charts use the ECharts primitive bundled with NiceGUI (the web server ships
 # under the `server` extra, which has no plotly -- that is a `gui`-extra dep).
 # --------------------------------------------------------------------------- #
-_CHART_AXIS = "#94a3b8"
-_CHART_GRID = "#1e293b"
+# Chart colors are baked into echart option dicts, which render to <canvas> and
+# cannot resolve CSS var()s — so these stay concrete hex (kept in step with the
+# theme palette by hand). Everything else in this file is CSS and uses tokens.
+_CHART_AXIS = "#9aa7b5"
+_CHART_GRID = "#232c38"
 
 
 def _echart_bar(labels, values, *, title: str, color: str = "#60a5fa") -> dict:
@@ -260,7 +263,7 @@ def _render_host_charts(selection: str) -> None:
 def _admin_header(active: str) -> None:
     """Shared header for the admin pages; `active` names the current sub-page."""
     with ui.header().classes("items-center justify-between") \
-            .style("background:#0f172a;border-bottom:1px solid #1e293b"):
+            .style("background:var(--kc-surface);border-bottom:1px solid var(--kc-border)"):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
             ui.label(f"admin · {active}").classes("text-sm").style("color:#94a3b8")
@@ -295,7 +298,7 @@ def _admin_header(active: str) -> None:
 
 
 def _admin_card_style() -> str:
-    return "background:#0f172a;border:1px solid #1e293b;min-width:380px"
+    return "background:var(--kc-surface);border:1px solid var(--kc-border);min-width:380px"
 
 
 # --------------------------------------------------------------------------- #
@@ -420,7 +423,7 @@ def _tuning_detail_ui(d: dict) -> None:
                 tr = d["param_traces"].get(p, [])
                 cur = tr[-1]["value"] if tr else None
                 with ui.row().classes("w-full gap-3 text-xs").style(
-                        "border-top:1px solid #1e293b;padding:3px 0"):
+                        "border-top:1px solid var(--kc-border);padding:3px 0"):
                     ui.label(p).classes("font-mono").style("width:260px;color:#cbd5e1")
                     ui.label(f"{d['defaults'].get(p, 0):.4g}").style(
                         "width:110px;color:#94a3b8")
@@ -443,7 +446,7 @@ def admin_tuning_page():
         ui.label("CMA-ES tuning of the default placement/routing config against the "
                  "routed Pareto objective (fab-ready · DRC · build time).") \
             .classes("text-sm").style("color:#94a3b8")
-        ui.separator().style("background:#1e293b;margin-top:4px")
+        ui.separator().style("background:var(--kc-border);margin-top:4px")
         runs_box = ui.column().classes("w-full gap-0")
 
         def render_list():
@@ -470,7 +473,7 @@ def admin_tuning_page():
                            "new": "#64748b"}[state]
                     row = ui.row().classes(
                         "w-full items-center gap-3 text-xs cursor-pointer").style(
-                        "border-top:1px solid #1e293b;padding:5px 6px")
+                        "border-top:1px solid var(--kc-border);padding:5px 6px")
                     tok = _register_project_dir(Path(r["path"]))
                     row.on("click", lambda _e=None, t=tok:
                            ui.navigate.to(f"/admin/tuning/run?run={quote(t)}"))
@@ -878,7 +881,7 @@ def admin_self_eval_page():
         ui.label("All runs").classes("text-sm font-bold mt-2").style("color:#cbd5e1")
         runs_box = ui.column().classes("w-full gap-0")
 
-        ui.separator().style("background:#1e293b;margin-top:6px")
+        ui.separator().style("background:var(--kc-border);margin-top:6px")
         head = ui.row().classes("items-center gap-4 text-sm font-mono") \
             .style("color:#cbd5e1")
         table = ui.column().classes("w-full gap-0")
@@ -920,7 +923,7 @@ def admin_self_eval_page():
                 selected = (b["path"] == view["dir"])
                 bg = "#13233f" if selected else "transparent"
                 row = ui.row().classes("w-full items-center gap-3 text-xs cursor-pointer") \
-                    .style(f"border-top:1px solid #1e293b;padding:4px 6px;background:{bg}")
+                    .style(f"border-top:1px solid var(--kc-border);padding:4px 6px;background:{bg}")
                 row.on("click", lambda _e=None, p=b["path"]: select_batch(p))
                 with row:
                     ui.icon("check_circle" if b["done"] else "play_circle") \
@@ -951,7 +954,7 @@ def admin_self_eval_page():
                 ui.label("").style("width:56px")
             for idx, entry in selected:
                 with ui.row().classes("w-full items-center gap-2 text-xs") \
-                        .style("border-top:1px solid #1e293b;padding:3px 0"):
+                        .style("border-top:1px solid var(--kc-border);padding:3px 0"):
                     ui.label(str(idx)).style("width:24px;color:#cbd5e1")
                     st_l = ui.label("pending").style("width:108px;color:#64748b")
                     gr_l = ui.label("").style("width:60px;color:#e2e8f0")
@@ -1083,7 +1086,7 @@ def admin_self_eval_run_page(run: str = ""):
     if redirect is not None:
         return redirect
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     kicanvas_head()
     _admin_header("self-eval")
 
@@ -1162,7 +1165,7 @@ def admin_self_eval_run_page(run: str = ""):
         # Schematic (interactive). Kept on-screen (not in a tab/dialog) because a
         # KiCanvas WebGL canvas built in a hidden / zero-size container never repaints.
         with ui.card().classes("w-full") \
-                .style("background:#0f172a;border:1px solid #1e293b"):
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
             srcs = _schematic_sources(gen, stem, token)
             if srcs:
                 _render_synth_view(srcs, stem, gen)
@@ -1174,7 +1177,7 @@ def admin_self_eval_run_page(run: str = ""):
         # build failed before composing a parent.
         parent_pcb = gen / f"{stem}.kicad_pcb"
         with ui.card().classes("w-full") \
-                .style("background:#0f172a;border:1px solid #1e293b"):
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
             ui.label("Parent board").classes("text-xs font-medium").style("color:#94a3b8")
             if parent_pcb.is_file():
                 KiCanvasView([KiCanvasSource(f"/project/{token}/{parent_pcb.name}",
@@ -1197,7 +1200,7 @@ def admin_self_eval_run_page(run: str = ""):
                 .style("color:#94a3b8")
         for b in leaves[:8]:
             with ui.card().classes("w-full") \
-                    .style("background:#0f172a;border:1px solid #1e293b"):
+                    .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
                 lab, col = b["label"], "#cbd5e1"
                 if b["accepted"]:
                     lab += "  ✓ accepted"; col = "#4ade80"
@@ -1252,7 +1255,7 @@ def admin_self_eval_run_page(run: str = ""):
                     blocks.append((s["stage"], txt))
             if blocks:
                 with ui.card().classes("w-full") \
-                        .style("background:#0f172a;border:1px solid #1e293b"):
+                        .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
                     ui.label("Thinking stream — the model's reasoning per stage") \
                         .classes("text-xs font-medium").style("color:#94a3b8")
                     for i, (stg, txt) in enumerate(blocks):
@@ -1347,7 +1350,7 @@ def admin_loadtest_page():
         ui.label("Build-storm (replay, $0) and full-pipeline (mock LLM, $0) scenarios. "
                  "Find the build-slot saturation knee and what breaks first.") \
             .classes("text-sm").style("color:#94a3b8")
-        ui.separator().style("background:#1e293b")
+        ui.separator().style("background:var(--kc-border)")
 
         with ui.row().classes("items-end gap-3 w-full"):
             scen = ui.select(["build-storm", "pipeline"], value=cfg["scenario"],
@@ -1421,7 +1424,7 @@ def admin_loadtest_page():
                 for r in runs:
                     s = r["summary"] or {}
                     with ui.row().classes("w-full items-center gap-3 text-xs").style(
-                            "border-top:1px solid #1e293b;padding:5px 6px"):
+                            "border-top:1px solid var(--kc-border);padding:5px 6px"):
                         ui.label(r["run_id"]).classes("font-mono").style(
                             "width:280px;color:#e2e8f0")
                         ui.label(r["scenario"] or "").style("width:110px;color:#cbd5e1")
@@ -1484,7 +1487,7 @@ def admin_security_page():
                  "scanning (gitleaks). Acknowledge a triaged finding to hide it from "
                  "the open list (it survives a re-scan).").classes("text-sm") \
             .style("color:#94a3b8")
-        ui.separator().style("background:#1e293b")
+        ui.separator().style("background:var(--kc-border)")
 
         with ui.row().classes("items-center gap-3"):
             run_btn = ui.button("Run scans", icon="play_arrow")
@@ -1526,7 +1529,7 @@ def admin_security_page():
                            "medium": "#f59e0b", "low": "#60a5fa"}.get(
                         f["severity"], "#94a3b8")
                     with ui.row().classes("w-full items-center gap-2 text-xs").style(
-                            "border-top:1px solid #1e293b;padding:4px 6px"):
+                            "border-top:1px solid var(--kc-border);padding:4px 6px"):
                         ui.label(f["severity"]).style(f"width:70px;color:{col}")
                         ui.label(f["tool"]).style("width:80px;color:#cbd5e1")
                         ui.label(f["rule"]).classes("font-mono").style(
@@ -1573,7 +1576,7 @@ def admin_overview_page():
         ledger_total = None
         ledger_by_day = store.spend_per_day(30)
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     _admin_header("overview")
 
     def money(x):
@@ -1589,7 +1592,7 @@ def admin_overview_page():
 
         def card(label: str, value: str, hint: str = "") -> None:
             with ui.card().classes("gap-0 items-start") \
-                    .style("background:#0f172a;border:1px solid #1e293b;min-width:150px"):
+                    .style("background:var(--kc-surface);border:1px solid var(--kc-border);min-width:150px"):
                 ui.label(value).classes("text-2xl font-bold").style("color:#e2e8f0")
                 ui.label(label).classes("text-xs").style("color:#94a3b8")
                 if hint:
@@ -1659,7 +1662,7 @@ def admin_overview_page():
         with ui.column().classes("w-full gap-1"):
             for r in top:
                 with ui.row().classes("w-full items-center gap-3 text-xs") \
-                        .style("border-top:1px solid #1e293b;padding:3px 0"):
+                        .style("border-top:1px solid var(--kc-border);padding:3px 0"):
                     ui.label(r["email"]).style("width:260px;color:#e2e8f0")
                     ui.badge(r["tier"], color="primary")
                     if r["role"] == "admin":
@@ -1680,7 +1683,7 @@ def admin_users_page():
 
     store = _store()
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     _admin_header("users")
 
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1400px"):
@@ -1733,7 +1736,7 @@ def admin_users_page():
                 return
             url = f"{Settings.from_env().public_url}/reset?token={token}"
             with ui.dialog() as dlg, ui.card() \
-                    .style("background:#0f172a;border:1px solid #1e293b;min-width:520px"):
+                    .style("background:var(--kc-surface);border:1px solid var(--kc-border);min-width:520px"):
                 ui.label(f"Password-reset link for {email}") \
                     .classes("text-sm font-bold").style("color:#e2e8f0")
                 ui.label(f"Valid ~{_RESET_TTL_SECONDS // 60} min, single use. "
@@ -1783,7 +1786,7 @@ def admin_users_page():
                 build_users()
 
             with ui.dialog() as dlg, ui.card() \
-                    .style("background:#0f172a;border:1px solid #1e293b;min-width:420px"):
+                    .style("background:var(--kc-surface);border:1px solid var(--kc-border);min-width:420px"):
                 ui.label(f"Delete {row['email']}?") \
                     .classes("text-base font-bold").style("color:#e2e8f0")
                 ui.label("Removes their account, project rows, and stored files. "
@@ -1817,7 +1820,7 @@ def admin_users_page():
                     is_admin_row = r["role"] == "admin"
                     is_self = me is not None and r["id"] == me.id
                     with ui.row().classes("w-full items-center gap-2 text-xs") \
-                            .style("border-top:1px solid #1e293b;padding:4px 0"):
+                            .style("border-top:1px solid var(--kc-border);padding:4px 0"):
                         ui.label(r["email"] + ("  (you)" if is_self else "")) \
                             .style("width:230px;color:#e2e8f0")
                         ui.select({"free": "Free", "pro": "Pro", "max": "Max"},
@@ -1872,7 +1875,7 @@ def admin_invites_page():
 
     store = _store()
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     _admin_header("invites")
 
     tier_options = {t: TIERS[t]["label"] for t in TIERS}
@@ -1889,7 +1892,7 @@ def admin_invites_page():
 
         # -- public-launch switch -------------------------------------------
         with ui.card().classes("w-full gap-1") \
-                .style("background:#0f172a;border:1px solid #1e293b"):
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
             ui.label("Public signup").classes("text-base font-semibold text-white")
 
             def on_toggle(e) -> None:
@@ -1911,7 +1914,7 @@ def admin_invites_page():
 
         # -- mint a new code --------------------------------------------------
         with ui.card().classes("w-full gap-1") \
-                .style("background:#0f172a;border:1px solid #1e293b"):
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
             ui.label("New invite code").classes("text-base font-semibold text-white")
             with ui.row().classes("w-full items-end gap-3 flex-wrap"):
                 code_in = ui.input("Code", placeholder="FREEMAX") \
@@ -1981,7 +1984,7 @@ def admin_invites_page():
                         .classes("text-sm").style("color:#94a3b8")
                 for r in rows:
                     with ui.row().classes("w-full items-center gap-2 text-xs") \
-                            .style("border-top:1px solid #1e293b;padding:4px 0"):
+                            .style("border-top:1px solid var(--kc-border);padding:4px 0"):
                         ui.label(r["code"]).style(
                             "width:170px;color:#e2e8f0;font-family:monospace")
                         ui.badge(TIERS[r["tier"]]["label"]
@@ -2040,7 +2043,7 @@ def admin_core_components_page():
 
     store = _store()
     ui.dark_mode().enable()
-    ui.query("body").style("background:#0b1120")
+    ui.query("body").style("background:var(--kc-bg)")
     _admin_header("core components")
 
     def guard() -> bool:
@@ -2054,7 +2057,7 @@ def admin_core_components_page():
         ui.label("Core components").classes("text-2xl font-bold text-white")
 
         with ui.card().classes("w-full gap-1") \
-                .style("background:#0f172a;border:1px solid #1e293b"):
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
             with ui.row().classes("w-full items-center gap-3"):
                 ui.label("Default part per functional block") \
                     .classes("text-base font-semibold text-white")
@@ -2138,7 +2141,7 @@ def admin_core_components_page():
                         dim = "" if r["enabled"] else "opacity:0.45;"
                         with ui.row().classes(
                                 "w-full items-center gap-2 text-xs") \
-                                .style("border-top:1px solid #1e293b;"
+                                .style("border-top:1px solid var(--kc-border);"
                                        f"padding:4px 0;{dim}"):
                             ui.label(r["function_key"]).style(
                                 "width:140px;color:#e2e8f0;font-family:monospace")

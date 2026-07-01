@@ -1,25 +1,25 @@
 /* Onboarding chrome for the KiCraft landing page (see web.index + kc_onboarding.js).
-   Dark-theme tokens mirror web.py: primary #60a5fa, cards #0f172a / border #1e293b,
-   muted text #94a3b8 / #64748b. */
+   Colors reference the global theme tokens (kicraft.server.theme injects them on
+   :root for every page); the brand accent is circuit-green. */
 
 /* Half-grey cycling placeholder. Quasar already dims the native placeholder; we pin a
-   readable slate tone (opacity:1 so the typewriter text stays legible at rest). */
+   readable tone (opacity:1 so the typewriter text stays legible at rest). */
 .kc-brief textarea::placeholder {
-  color: #64748b !important;
+  color: var(--kc-dim) !important;
   opacity: 1;
 }
 
 /* Pulsing glow on the Design button so a first-timer sees where to click. */
 @keyframes kc-pulse {
-  0%   { box-shadow: 0 0 0 0 rgba(96, 165, 250, 0.55); }
-  70%  { box-shadow: 0 0 0 12px rgba(96, 165, 250, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(96, 165, 250, 0); }
+  0%   { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.55); }
+  70%  { box-shadow: 0 0 0 12px rgba(74, 222, 128, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(74, 222, 128, 0); }
 }
 .kc-pulse { animation: kc-pulse 1.8s ease-out infinite; }
 
 /* "click to start" hint next to the Design button. */
 .kc-arrow {
-  color: #60a5fa;
+  color: var(--kc-brand);
   font-size: 0.8rem;
   display: inline-flex;
   align-items: center;
@@ -34,16 +34,16 @@
 /* Suggestion chips: normal case (Quasar can uppercase), muted, low-key. */
 .kc-chip {
   text-transform: none !important;
-  color: #cbd5e1 !important;
+  color: var(--kc-muted) !important;
 }
 
 /* Welcome card accent (the card's bg/border are set inline in web.py). */
-.kc-welcome { border-left: 3px solid #60a5fa !important; }
+.kc-welcome { border-left: 3px solid var(--kc-brand) !important; }
 
 @media (prefers-reduced-motion: reduce) {
   .kc-pulse {
     animation: none;
-    box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.45);
+    box-shadow: 0 0 0 3px rgba(74, 222, 128, 0.45);
   }
   .kc-arrow .kc-arrow-icon { animation: none; }
 }

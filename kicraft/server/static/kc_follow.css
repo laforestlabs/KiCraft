@@ -24,13 +24,13 @@
 .kc-table th {
   text-align: left;
   font-weight: 700;
-  color: #94a3b8;
+  color: var(--kc-muted);
   background: rgba(148, 163, 184, 0.08);
   padding: 0.3rem 0.7rem;
   white-space: nowrap;
 }
 .kc-table td {
-  color: #94a3b8;
+  color: var(--kc-muted);
   padding: 0.24rem 0.7rem;
   white-space: nowrap;
   vertical-align: top;

@@ -155,7 +155,7 @@ class StagePanel:
                     ui.label("Project state").classes(
                         "text-xs font-bold uppercase tracking-wide").style(f"color:{_DIM}")
                     insp = ui.scroll_area().classes("w-full rounded kc-stage-insp").style(
-                        "flex:1;min-height:0;background:#0f172a;border:1px solid #1e293b")
+                        "flex:1;min-height:0;background:var(--kc-surface);border:1px solid var(--kc-border)")
                     with insp:
                         self.view_slot = ui.column().classes("w-full p-2 gap-2")
                         self._insp = ui.column().classes("w-full p-2 gap-3")
@@ -171,7 +171,7 @@ class StagePanel:
                     with ui.element("div").classes(
                             "w-full rounded kc-follow kc-stage-think").style(
                             "height:58%;overflow-y:auto;"
-                            "background:#0f172a;border:1px solid #1e293b"):
+                            "background:var(--kc-surface);border:1px solid var(--kc-border)"):
                         self._think = ui.column().classes("w-full p-2 gap-0")
 
                     ui.label("Activity / log").classes(
@@ -179,7 +179,7 @@ class StagePanel:
                     with ui.element("div").classes(
                             "w-full rounded kc-follow kc-stage-act").style(
                             "flex:1;min-height:0;overflow-y:auto;"
-                            "background:#0f172a;border:1px solid #1e293b"):
+                            "background:var(--kc-surface);border:1px solid var(--kc-border)"):
                         self._act = ui.column().classes("w-full p-2 gap-1")
 
         self.clear()
@@ -575,7 +575,7 @@ def _render_section(sec: dict, accent: str) -> None:
                         ui.label(action).classes("text-xs").style(f"color:{_DIMMER}")
             # Progress bar (pure CSS, no JS)
             with ui.element("div").classes("w-full").style(
-                    "height:8px;border-radius:4px;background:#1e293b;overflow:hidden"):
+                    "height:8px;border-radius:4px;background:var(--kc-border);overflow:hidden"):
                 with ui.element("div").style(
                         f"height:100%;width:{pct}%;border-radius:4px;"
                         f"background:{bar_color};transition:width 0.5s"):
