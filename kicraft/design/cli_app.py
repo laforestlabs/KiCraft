@@ -3981,6 +3981,26 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
 
         board_metrics = board_utilization(pcb)
         gate["board_metrics"] = board_metrics
+        # Warning-level area observation (area-compaction plan, Phase 4):
+        # part of the acceptance record when the board ships, never a gate.
+        # Thresholds match the leaf-side observation (15% util at >=5 parts,
+        # aspect 4).
+        _util = float(board_metrics.get("area_utilization", 0.0))
+        _aspect = float(board_metrics.get("aspect_ratio", 0.0))
+        _nparts = int(board_metrics.get("footprint_count", 0))
+        if _nparts >= 5 and 0.0 < _util < 0.15:
+            gate.setdefault("warnings", []).append(
+                f"board area utilization {_util * 100:.1f}% is below 15% "
+                f"({_nparts} parts on "
+                f"{board_metrics.get('board_width_mm', 0):.0f}x"
+                f"{board_metrics.get('board_height_mm', 0):.0f}mm) -- "
+                "wasteful outline, review placement"
+            )
+        if _aspect > 4.0:
+            gate.setdefault("warnings", []).append(
+                f"board aspect ratio {_aspect:.2f} exceeds 4:1 -- "
+                "elongated outline, review placement"
+            )
     except Exception:
         board_metrics = {}
     _util_suffix = (
