@@ -52,7 +52,7 @@ and gotchas live in the auto-memory index; deeper plans in `docs/plans/`.)
 | `kicraft/server/` | **The product.** NiceGUI web app (`web.py`), SQLite store (`accounts.py`: users, projects, `build_jobs` queue, likes, fts), the standalone `build_worker.py`, panels (`layout_panel.py`, `rules_panel.py`, `stagetabs.py`), `session.py`/`stage_driver.py` (state.json read/commit). |
 | `kicraft/design/` | Synthesis pipeline. `cli_app.py` is the CLI the web/worker drive (`build`, stage-commit, etc.); `synthesis/` holds emitter/validation/router for the schematic + seed PCB + ERC. |
 | `kicraft/autoplacer/` | Placement + routing engine (the geometry/DRC core). `brain/placement_solver.py`, `brain/subcircuit_composer.py`, `freerouting_runner.py`, `brain/leaf_routing.py`, `brain/gnd_pour.py`, `brain/breakout_stubs.py`. **Treat as load-bearing; surgical fixes only.** |
-| `kicraft/cli/` | Command-line orchestration invoked as subprocesses: `autoexperiment.py` (the optimizing search), `solve_subcircuits.py` (per-leaf), `compose_subcircuits.py` (parent), `inspect_parent.py`, `split_schematic.py`, `generate_report.py`. |
+| `kicraft/cli/` | Command-line orchestration invoked as subprocesses: `autoexperiment.py` (the optimizing search), `solve_subcircuits.py` (per-leaf), `compose_subcircuits.py` (parent), `inspect_parent.py`. |
 | `kicraft/layout_editor/` | **Shared** manual-layout model/geometry/canvas (model, outline, holes, leaves, rules, nicegui_panels). Used by `server/` and by the compose pipeline — not standalone. |
 | `kicraft/parts_library/`, `server/parts_catalog.py` | Part resolution + offline JLC pricing catalog. |
 | `kicraft/render/`, `kicraft/leaf_library/` | Board/preview rendering; reusable promoted leaf circuits. |

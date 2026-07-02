@@ -66,7 +66,6 @@ render-failure-heatmap = "kicraft.cli.render_failure_heatmap:main"
 
 # Analysis
 diff-rounds = "kicraft.cli.diff_rounds:main"
-generate-report = "kicraft.cli.generate_report:main"
 plot-results = "kicraft.cli.plot_results:main"
 token-report = "kicraft.cli.token_report:main"
 web-cost-report = "kicraft.cli.web_cost_report:main"
@@ -93,7 +92,6 @@ arrange-grid = "kicraft.cli.arrange_grid:main"
 add-gnd-zone = "kicraft.cli.add_gnd_zone:main"
 add-group-labels = "kicraft.cli.add_group_labels:main"
 cleanup-routing = "kicraft.cli.cleanup_routing:main"
-split-schematic = "kicraft.cli.split_schematic:main"
 
 # KiCraft design CLI: deterministic helpers; LLM stages run in the Claude Code skill
 kicraft = "kicraft.design.cli_app:main"
