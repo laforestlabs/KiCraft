@@ -683,6 +683,23 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
     # Bookkeeping the model has no use for stays out of its prompt.
     prompt_state = dict(prep_json["state"])
     prompt_state.pop("stage_status", None)
+    # R5: For the wiring stage, project the BOM to a compact digest
+    # (ref, sheet, symbol, value) instead of the full BOM slot. Pin data
+    # already arrives via the symbol_pinouts extras; the full BOM's
+    # sourcing/footprint/datasheet fields are noise for wiring. This is
+    # PROMPT-ONLY — committed state is untouched (nothing persists
+    # prompt_state).
+    if stage == "wiring" and isinstance(prompt_state.get("bom"), dict):
+        full_bom = prompt_state["bom"]
+        prompt_state["bom"] = {
+            "parts": [
+                {"ref": p.get("ref"), "sheet": p.get("sheet"),
+                 "symbol": p.get("symbol"), "value": p.get("value")}
+                for p in full_bom.get("parts", [])
+            ],
+            "connections": full_bom.get("connections", []),
+            "no_connect_pins": full_bom.get("no_connect_pins", []),
+        }
     user = (f"PROJECT BRIEF:\n{brief}\n\n"
             f"CURRENT DESIGN STATE (JSON):\n{json.dumps(prompt_state)}")
     if extras:
