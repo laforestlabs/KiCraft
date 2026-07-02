@@ -688,7 +688,7 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
     if extras:
         # bom carries the full parts table + core defaults (the adoption rule
         # depends on both being complete), wiring carries symbol_pinouts.
-        budget = {"wiring": 40000, "bom": 48000}.get(stage, 24000)
+        budget = {"wiring": 40000, "bom": 20000}.get(stage, 24000)
         user += f"\n\nSTAGE EXTRAS (reference data from stage-prep):\n{json.dumps(extras)[:budget]}"
     if answers:
         qa = "\n".join(f"Q: {a.get('text', '')}\nA: {a.get('answer', '')}" for a in answers)

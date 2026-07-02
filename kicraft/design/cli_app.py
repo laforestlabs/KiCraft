@@ -1937,6 +1937,18 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
 
     elif stage == "bom":
         parts, _broken = _load_library_parts(state_path.parent.parent.resolve())
+        # Filter to core_defaults parts (curated core_blocks catalog entries) —
+        # the full 247-bundle library is too large for the BOM prompt. Parts not
+        # in the catalog are excluded; the model can still find them via
+        # search_footprints / add_part_from_lcsc tools (graceful degradation).
+        try:
+            from kicraft.parts_library.core_blocks import load_core_catalog
+
+            _catalog = load_core_catalog()
+            _core_names = {b.bundle for b in _catalog.blocks if b.bundle}
+            parts = [p for p in parts if p.manifest.name in _core_names]
+        except Exception:  # noqa: BLE001
+            pass  # catalog unavailable — don't filter
         extras["parts_block"] = _format_available_parts_block(parts)
 
     elif stage == "wiring":
