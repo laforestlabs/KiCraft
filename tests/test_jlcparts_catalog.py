@@ -78,6 +78,38 @@ def test_search_terms_fallback_over_description(catalog):
     assert rows[0]["package"] is None                   # '-' normalized to None
 
 
+def test_is_multi_element_array_signals():
+    # Any one signal triggers: joints, LCSC array package convention, or an
+    # "array" description. A plain 2-joint chip passive is not an array.
+    assert jlcparts.is_multi_element_array({"joints": 8})
+    assert jlcparts.is_multi_element_array({"package": "0603x4"})
+    assert jlcparts.is_multi_element_array(
+        {"description": "10kΩ 4 0603x4 Resistor Networks, Arrays"})
+    assert not jlcparts.is_multi_element_array(
+        {"joints": 2, "package": "0603",
+         "description": "100mW 10kΩ 75V Thick Film Resistor"})
+
+
+def test_chip_value_matches_requires_clean_numeric_boundaries():
+    # "10k" must not match inside "510kΩ" (the substring search does) and a
+    # dotted value must not match a superstring ("4.7k" vs "14.7kΩ").
+    assert jlcparts.chip_value_matches(
+        "10k", {"description": "100mW 10kΩ 75V Thick Film Resistor"})
+    assert not jlcparts.chip_value_matches(
+        "10k", {"description": "100mW 510kΩ 75V Thick Film Resistor"})
+    assert jlcparts.chip_value_matches("4.7k", {"description": "4.7kΩ 0603"})
+    assert not jlcparts.chip_value_matches("4.7k", {"description": "14.7kΩ 0603"})
+    # right boundary: "10" is not "105"
+    assert not jlcparts.chip_value_matches("10", {"description": "105Ω 0603"})
+    # matches any searched field, e.g. the model string
+    assert jlcparts.chip_value_matches("100nF", {"model": "GRM188-100nF-X7R"})
+    # a token absent from the visible fields is NOT evidence of a wrong
+    # value (descriptions are truncated) — keep the row
+    assert jlcparts.chip_value_matches("100nF", {"model": "CL10B104KB8NNNC"})
+    # an empty token filters nothing
+    assert jlcparts.chip_value_matches("", {"description": "whatever"})
+
+
 def test_parse_ladder_and_price_at():
     ladder = jlcparts.parse_ladder("1-9:4.817,10-29:4.27,garbage,1000-:3.16")
     assert ladder == [{"qty_from": 1, "qty_to": 9, "price": 4.817},
@@ -160,8 +192,15 @@ def test_update_end_to_end_over_file_urls_prunes_low_stock(tmp_path):
     con.execute(_SCHEMA)
     con.executemany(
         "INSERT INTO jlc_components (lcsc, mfr, package, manufacturer, library_type, stock, price, description) VALUES (?,?,?,?,?,?,?,?)",
-        ((i, f"P{i}", "0805", "m", "base", 7 if i % 2 == 0 else 1, "1-:0.01", "r")
+        ((i, f"P{i}", "0805", "m", "expand", 7 if i % 2 == 0 else 1, "1-:0.01", "r")
          for i in range(100_002)))
+    # A Basic-tier row caught on a dry night must SURVIVE the prune: deleting
+    # it turns a transient stock-out into a week-long catalog hole (C25804,
+    # the canonical 10k 0603, vanished this way and killed KC-8XZS9Q).
+    con.execute(
+        "INSERT INTO jlc_components (lcsc, mfr, package, manufacturer, library_type, stock, price, description) VALUES (?,?,?,?,?,?,?,?)",
+        (200_001, "0603WAF1002T5E", "0603", "UNI-ROYAL", "base", 0,
+         "1-:0.002", "10kΩ 0603 Chip Resistor"))
     con.execute("CREATE TABLE lcsc_components (lcsc INTEGER PRIMARY KEY)")
     con.commit()
     con.close()
@@ -175,10 +214,16 @@ def test_update_end_to_end_over_file_urls_prunes_low_stock(tmp_path):
     msgs = []
     stats = jlcparts.update(dest=dest, base_url=site.as_uri() + "/",
                             progress=msgs.append)
-    assert stats["rows"] == 50_001 and stats["pruned"] == 50_001
+    assert stats["rows"] == 50_002 and stats["pruned"] == 50_001
     con = sqlite3.connect(dest)
-    assert con.execute("SELECT COUNT(*) FROM jlc_components").fetchone()[0] == 50_001
-    assert con.execute("SELECT MIN(stock) FROM jlc_components").fetchone()[0] >= 5
+    assert con.execute("SELECT COUNT(*) FROM jlc_components").fetchone()[0] == 50_002
+    assert con.execute(
+        "SELECT MIN(stock) FROM jlc_components WHERE library_type <> 'base'"
+    ).fetchone()[0] >= 5
+    # the dry Basic row is still there, honestly out of stock
+    assert con.execute(
+        "SELECT stock FROM jlc_components WHERE lcsc = 200001"
+    ).fetchone() == (0,)
     names = {r[0] for r in con.execute("SELECT name FROM sqlite_master")}
     con.close()
     assert "idx_jlc_mfr" in names                       # exact-MPN lookups stay fast

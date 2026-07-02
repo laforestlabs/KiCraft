@@ -11,7 +11,9 @@ from __future__ import annotations
 import re
 from urllib.parse import quote
 
-from kicraft.parts_library.jlcparts import bom_keyword
+from kicraft.parts_library.jlcparts import (
+    bom_keyword, chip_value_matches, is_multi_element_array,
+)
 
 from .parts_catalog import get_part
 
@@ -122,6 +124,13 @@ def _stock_floor() -> int:
         return _KW_STOCK_FLOOR
 
 
+# A "<value> <chip size>" keyword (bom_keyword's generic-passive shape,
+# e.g. "10k 0603"; the size token mirrors jlcparts._FP_CHIP_SIZE_RE): the
+# pick below must be a single 2-pad part of that value, so array rows and
+# wrong-value substring matches are ineligible.
+_CHIP_KW_RE = re.compile(r"^(\S+)\s+(\d{3,4})$")
+
+
 def _pick_price(kind: str, query: str, results: list[dict]) -> dict | None:
     """Choose one JLCPCB search result and pull its unit price. For an LCSC id
     the exact id wins (it names a specific part; a different row must never be
@@ -155,6 +164,15 @@ def _pick_price(kind: str, query: str, results: list[dict]) -> dict | None:
             return None
     else:
         pool = [x for x in priced if (x.get("stock") or 0) > 0]
+        if kind == "kw":
+            m = _CHIP_KW_RE.match(query.strip())
+            if m:
+                # Generic chip passive: never price an array or a
+                # wrong-value substring match (10k vs 510kΩ) — the same
+                # ineligibility the §9.26 BOM walk applies when pinning.
+                pool = [x for x in pool
+                        if not is_multi_element_array(x)
+                        and chip_value_matches(m.group(1), x)]
         if not pool:
             return None  # honest "no price" beats pricing a dead pick
         floor = _stock_floor()

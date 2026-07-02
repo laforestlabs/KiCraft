@@ -35,6 +35,11 @@ from pydantic import ValidationError
 
 from kicraft.cli import artifact_paths
 from kicraft.parts_library import jlcparts, lcsc_retail
+# Pure candidate predicates, imported directly (not via the swappable
+# `jlcparts` module attribute): no I/O, so tests never need to fake them.
+from kicraft.parts_library.jlcparts import (
+    chip_value_matches, is_multi_element_array,
+)
 
 from .library import (
     ArchitectureLibraryError,
@@ -340,18 +345,14 @@ _SOURCING_LCSC_RE = re.compile(r"\bC\d{4,}\b")
 _BOM_STOCK_FLOOR = 500
 # How many candidates per MPN/keyword get a live lcsc.com retail check before
 # the walk gives up (each miss is one storefront hit; TTL-cached after that).
+# The kw cap is deeper: generic-passive searches carry more near-miss rows
+# and common values can be retail-dry several candidates deep (KC-8XZS9Q's
+# "10k 0603" had its first retail-stocked single at position 5).
 _RETAIL_WALK_CAP_MPN = 4
-_RETAIL_WALK_CAP_KW = 5
+_RETAIL_WALK_CAP_KW = 8
 # The daily refresh timer plus one day of slack; an older dump means the
 # JLC-side stock verdicts below are guesses, so say so.
 _DUMP_AGE_WARN_DAYS = 8
-
-
-# §9.28 — reject a multi-element array LCSC part on a single 2-pad passive
-# footprint (an 8-pin 0603x4 resistor array on R_0603 can never land: the
-# footprint has fewer pads than the part has pins). The LCSC array naming
-# convention embeds the element count: "0603x4" = four resistors, 8 joints.
-_ARRAY_PKG_RE = re.compile(r"\d{3,4}x\d+")
 
 
 def _is_single_passive_footprint(fp: str) -> bool:
@@ -389,9 +390,10 @@ def _check_passive_array_mismatch(bom, project_root: Path) -> list[str]:
     A 4-resistor 0603x4 array (8 joints) on a 2-pad R_0603 footprint can never
     land — the footprint has fewer pads than the part has pins. Catches the
     C29718-on-R_0603 mismatch and the general case (cap arrays, inductor
-    arrays). Three signals, any one triggers the reject: ``joints > 2``, the
-    package matches the LCSC array convention ``\\d{3,4}x\\d+`` (e.g.
-    "0603x4"), or the description contains "array".
+    arrays). The predicate is ``jlcparts.is_multi_element_array`` — the same
+    one the §9.26 candidate walks filter on, so the pipeline can no longer
+    auto-pin a part this gate would reject; a hit here is an explicit
+    model/bundle pin.
     """
     if not jlcparts.available():
         return []
@@ -407,19 +409,12 @@ def _check_passive_array_mismatch(bom, project_root: Path) -> list[str]:
         hit = jlcparts.lookup(cid)
         if hit is None:
             continue
-        joints = hit.get("joints") or 0
-        pkg = hit.get("package") or ""
-        desc = (hit.get("description") or "").lower()
-        is_array = (
-            joints > 2
-            or bool(_ARRAY_PKG_RE.search(pkg))
-            or "array" in desc
-        )
-        if is_array:
+        if is_multi_element_array(hit):
             bad.append(
                 f"{part.ref}: footprint {part.footprint!r} is a single "
-                f"2-pad passive but LCSC {cid} (package {pkg!r}, "
-                f"{joints} pins) is a multi-element array — pick a "
+                f"2-pad passive but LCSC {cid} (package "
+                f"{hit.get('package') or ''!r}, {hit.get('joints') or 0} "
+                f"pins) is a multi-element array — pick a "
                 f"single-element part with lookup_lcsc_id"
             )
     return bad
@@ -454,6 +449,10 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
         qualifier tokens are relaxed away on a miss). Floor-clearing
         Basic-tier candidates are walked first, then floor-clearing Extended;
         the first also in stock at retail is AUTO-PINNED like the MPN tier.
+        For a single 2-pad passive, multi-element arrays and wrong-value
+        substring matches ("10k" inside "510kΩ") are ineligible in BOTH
+        walks — auto-pinning an array §9.28 then rejects was the KC-8XZS9Q
+        unwinnable-retry deadlock.
         Only a part with NOTHING searchable (no value, no package) is an
         offender; a keyword whose matches are all retail-dry (or that finds
         none) stays unpinned and visibly unpriced rather than bouncing the
@@ -512,8 +511,8 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
     active, _broken = _load_library_parts(project_root)
     manifest_by_name = {p.manifest.name: p.manifest for p in active}
     bad: list[str] = []
-    best_by_mpn: dict[str, tuple[dict | None, list[str], bool]] = {}
-    best_by_kw: dict[str, tuple[dict | None, bool, bool]] = {}
+    best_by_mpn: dict[tuple[str, bool], tuple[dict | None, list[str], bool]] = {}
+    best_by_kw: dict[tuple[str, bool], tuple[dict | None, bool, bool]] = {}
     for part in (bom.parts or []):
         mpn = (part.mpn or "").strip()
         note = part.sourcing_note or ""
@@ -592,10 +591,21 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                     f"sourcing_note (lookup_lcsc_id / add_part_from_lcsc)"
                 )
                 continue
-            if kw not in best_by_kw:
+            single = _is_single_passive_footprint(part.footprint or "")
+            if (kw, single) not in best_by_kw:
                 def _kw_candidates(term: str) -> list[dict]:
                     stocked = [c for c in jlcparts.search(term, limit=10)
                                if (c.get("stock") or 0) >= floor]
+                    if single:
+                        # Never hand a 2-pad passive a multi-element array
+                        # (§9.28 would bounce the pin right back — the
+                        # KC-8XZS9Q deadlock), and never a wrong-value row
+                        # the substring search let through ("10k" matching
+                        # inside "510kΩ").
+                        vtok = term.split()[0]
+                        stocked = [c for c in stocked
+                                   if not is_multi_element_array(c)
+                                   and chip_value_matches(vtok, c)]
                     # Prefer JLC Basic (the stable no-setup-fee tier;
                     # Extended long-tail rows churn out within weeks).
                     return ([c for c in stocked if c.get("type") == "Basic"]
@@ -619,8 +629,8 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                         unv = True
                         break
                     # "dry": walk on to the next JLC-stocked candidate.
-                best_by_kw[kw] = (best, unv, bool(cands))
-            best, unv, had_cands = best_by_kw[kw]
+                best_by_kw[(kw, single)] = (best, unv, bool(cands))
+            best, unv, had_cands = best_by_kw[(kw, single)]
             if best is not None:
                 part.sourcing_note = (
                     (f"{note} " if note else "") + f"LCSC {best['lcsc']}"
@@ -640,17 +650,29 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
             # exotic values) and bouncing those to the model just
             # whack-a-moles. It stays visibly unpriced in the BOM/cost UI.
             continue
-        key = mpn.upper()
+        single = _is_single_passive_footprint(part.footprint or "")
+        mkey = mpn.upper()
+        key = (mkey, single)
         if key not in best_by_mpn:
             matches: list[dict] = []
+            skipped_arrays: list[str] = []
             for cand in jlcparts.search(mpn, limit=10):
                 model = (cand.get("model") or "").upper()
                 # Exact model, or the orderable MPN extends the family name
                 # (e.g. "SS34" -> "SS34F"). Results are stock-ordered, so
                 # earlier matches are better-stocked.
-                if model == key or model.startswith(key):
+                if model == mkey or model.startswith(mkey):
+                    if single and is_multi_element_array(cand):
+                        # Family broadening must not swap a single passive
+                        # for its array sibling — §9.28 rejects those pins.
+                        skipped_arrays.append(
+                            f"{cand.get('model')} ({cand['lcsc']}) is a "
+                            f"multi-element array — unusable on a single "
+                            f"2-pad footprint"
+                        )
+                        continue
                     matches.append(cand)
-            tried: list[str] = []
+            tried: list[str] = skipped_arrays
             eligible: list[dict] = []
             for cand in matches:
                 if (cand.get("stock") or 0) >= floor:
