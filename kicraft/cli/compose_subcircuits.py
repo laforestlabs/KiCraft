@@ -739,6 +739,10 @@ def _compute_final_outline(
     constraints: list[AttachmentConstraint],
     anchor_positions: dict[str, Point],
     spacing_mm: float,
+    *,
+    edge_constrained_refs: set[str] | None = None,
+    edge_zoned_outline_sides: frozenset[str] | None = None,
+    pad_edge_clearance_mm: float = 0.2,
 ) -> tuple[Point, Point]:
     """Final outline tracks ``constraint_aware_outline`` (which already
     applies ``margin_mm`` to unconstrained sides and snaps constrained
@@ -862,6 +866,48 @@ def _compute_final_outline(
     out_min_y = _resolve_min("top", constraint_outline[0].y, geom_min_y)
     out_max_x = _resolve_max("right", constraint_outline[1].x, geom_max_x)
     out_max_y = _resolve_max("bottom", constraint_outline[1].y, geom_max_y)
+
+    # --- Containment invariant (Phase 3A) ---
+    # The outline must enclose every placed block bbox with spacing_mm of
+    # copper-to-edge breathing room on NON-connector sides, mirroring the
+    # grow _repair_parent_outline applies downstream. Connector-defined sides
+    # (edge_zoned_outline_sides) are anchor-authoritative: the barrel/edge
+    # branches above already placed the edge at the mouth + overhang, and a
+    # bbox-level floor there would wrongly enclose the overhanging barrel body
+    # (the block bbox includes the barrel tip). Pad/trace/via containment on
+    # those sides is finalized by the verify-only _repair_parent_outline.
+    # ``edge_constrained_refs`` is accepted for the future pad-level path but
+    # unused at the bbox level (no pad data here).
+    _ = edge_constrained_refs
+    conn_sides = (
+        edge_zoned_outline_sides
+        if edge_zoned_outline_sides is not None
+        else frozenset(
+            side
+            for c in constraints
+            if c.target in ("edge", "corner")
+            and not _is_mounting_hole_ref(c.ref)
+            for side in (
+                [c.value]
+                if c.target == "edge"
+                and c.value in ("left", "right", "top", "bottom")
+                else [
+                    s
+                    for s in c.value.split("-")
+                    if s in ("left", "right", "top", "bottom")
+                ]
+            )
+        )
+    )
+    _ = pad_edge_clearance_mm  # reserved for the pad-level containment path
+    if "left" not in conn_sides:
+        out_min_x = min(out_min_x, geom_min_x - spacing_mm)
+    if "top" not in conn_sides:
+        out_min_y = min(out_min_y, geom_min_y - spacing_mm)
+    if "right" not in conn_sides:
+        out_max_x = max(out_max_x, geom_max_x + spacing_mm)
+    if "bottom" not in conn_sides:
+        out_max_y = max(out_max_y, geom_max_y + spacing_mm)
     return (Point(out_min_x, out_min_y), Point(out_max_x, out_max_y))
 
 
@@ -1471,7 +1517,26 @@ def _compose_artifacts(
             placed_child_bboxes[index] for index in sorted(placed_child_bboxes)
         ]
         exact_outline = _compute_final_outline(
-            placed_bbox_list, all_constraints, child_anchor_positions, spacing_mm
+            placed_bbox_list, all_constraints, child_anchor_positions, spacing_mm,
+            edge_constrained_refs={
+                c.ref for c in all_constraints if c.target in ("edge", "corner")
+            },
+            edge_zoned_outline_sides=frozenset(
+                side
+                for c in all_constraints
+                if c.target in ("edge", "corner")
+                and not _is_mounting_hole_ref(c.ref)
+                for side in (
+                    [c.value]
+                    if c.target == "edge"
+                    and c.value in ("left", "right", "top", "bottom")
+                    else [
+                        s
+                        for s in c.value.split("-")
+                        if s in ("left", "right", "top", "bottom")
+                    ]
+                )
+            ),
         )
 
         # Snap parent-local components to exact constraint coordinates.
@@ -2885,12 +2950,22 @@ def main(argv: list[str] | None = None) -> int:
                 pad_edge_clearance_mm=float(
                     cfg.get("connector_edge_pad_clearance_mm", 0.2)
                 ),
+                verify_only=True,
             )
             if outline_repair.get("repaired"):
                 print(
                     "parent_outline_repaired: "
                     f"{outline_repair['old_size_mm']} -> {outline_repair['new_size_mm']} mm "
                     "(grown to enclose placed geometry)"
+                )
+            if outline_repair.get("would_repair"):
+                # Verify-only breadcrumb (Phase 3A): the bbox-level containment
+                # clamp in _compute_final_outline missed geometry the repair
+                # would have grown to cover. Not mutated; logged for diagnosis.
+                print(
+                    "parent_outline_would_repair: "
+                    f"{outline_repair['old_size_mm']} -> {outline_repair['new_size_mm']} mm "
+                    f"(delta {outline_repair['would_change_mm']}); not grown (verify-only)"
                 )
             geometry_validation = _validate_parent_geometry(state)
             geometry_accepted = bool(geometry_validation.get("accepted", False))

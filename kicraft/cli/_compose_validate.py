@@ -19,6 +19,7 @@ def _repair_parent_outline(
     *,
     margin_mm: float = 2.0,
     pad_edge_clearance_mm: float = 0.2,
+    verify_only: bool = False,
 ) -> dict[str, Any]:
     """Grow the parent board outline so it encloses all placed geometry.
 
@@ -48,6 +49,13 @@ def _repair_parent_outline(
     grow is needed; :func:`_stamp_parent_board` then derives ``Edge.Cuts``
     from it, keeping the artifact and in-memory state in sync. Returns a small
     dict describing whether the outline changed and its old/new size.
+
+    When ``verify_only=True`` (Phase 3A), the outline is NOT mutated: the
+    function computes whether a grow WOULD be needed and emits a diagnostic
+    (stderr) when it would, acting as a verify-only assert that the
+    containment invariant in :func:`_compute_final_outline` held. The
+    returned dict carries ``would_repair``/``would_change_mm`` instead of
+    mutating.
     """
     composition = state.composition
     if composition is None:
@@ -145,6 +153,33 @@ def _repair_parent_outline(
         or abs(new_br.x - br.x) > 1e-6
         or abs(new_br.y - br.y) > 1e-6
     )
+    if verify_only:
+        # Verify-only assert (Phase 3A): do NOT mutate. The containment
+        # invariant in _compute_final_outline should make this unreachable;
+        # a would-change hit means the bbox-level clamp missed geometry the
+        # repair covers (pads / traces / vias, or a corner-escape case) and
+        # is a breadcrumb for tightening the pure function, not a silent fix.
+        if changed:
+            import sys as _sys
+            print(
+                "[outline] verify-only _repair_parent_outline WOULD grow: "
+                f"{[round(br.x - tl.x, 2), round(br.y - tl.y, 2)]} -> "
+                f"{[round(new_br.x - new_tl.x, 2), round(new_br.y - new_tl.y, 2)]} mm "
+                f"(delta x=[{round(new_tl.x - tl.x, 3)},{round(new_br.x - br.x, 3)}] "
+                f"y=[{round(new_tl.y - tl.y, 3)},{round(new_br.y - br.y, 3)}]); "
+                "bbox-level containment clamp did not cover this geometry",
+                file=_sys.stderr,
+            )
+        return {
+            "repaired": False,
+            "would_repair": changed,
+            "old_size_mm": [round(br.x - tl.x, 2), round(br.y - tl.y, 2)],
+            "new_size_mm": [round(new_br.x - new_tl.x, 2), round(new_br.y - new_tl.y, 2)],
+            "would_change_mm": [
+                round(new_br.x - new_tl.x - (br.x - tl.x), 3),
+                round(new_br.y - new_tl.y - (br.y - tl.y), 3),
+            ],
+        }
     if changed:
         composition.board_state.board_outline = (new_tl, new_br)
     return {

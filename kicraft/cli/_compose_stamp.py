@@ -130,7 +130,7 @@ def _stamp_parent_board(
     # only) makes geometry valid for every candidate, so the search judges
     # placements on quality (overlap/packing/net-distance) rather than on
     # overflowing a too-small outline, and FreeRouting gets a valid board.
-    _repair_parent_outline(state)
+    _repair_parent_outline(state, verify_only=True)
 
     # Circumscribe a brief-requested non-rect shape around the grown AABB (auto
     # path; no-op for manual layouts and rectangular boards). Sets
