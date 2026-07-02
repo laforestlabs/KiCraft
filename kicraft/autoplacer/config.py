@@ -459,6 +459,12 @@ DEFAULT_CONFIG = {
     # so a dense leaf that only routes with generous slack still routes --
     # fab-ready rate can't regress by construction.
     "leaf_canvas_fill_ladder": [0.22, 0.17],
+    # Post-SA deterministic compaction squeeze (area-compaction Phase 3):
+    # slides each unlocked leaf part toward the placed-bbox centroid as far
+    # as legality allows, closing the slack force equilibrium leaves. None =
+    # follow the canvas mode (on for "content", off for "seed-bbox" so that
+    # mode stays byte-identical to history); True/False forces it.
+    "leaf_compaction_pass": None,
     # Parent spacing — gap (mm) between child subcircuit bounding boxes when
     # composing them into the parent board.  1.17mm packs leaves tightly
     # without compromising routability (r=-0.41 in parents-only sweep).

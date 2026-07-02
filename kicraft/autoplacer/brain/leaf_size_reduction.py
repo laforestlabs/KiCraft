@@ -138,6 +138,27 @@ def local_solver_config(
         float(base_cfg.get("placement_convergence_threshold", 0.2)),
     )
 
+    # Post-SA compaction squeeze (area-compaction Phase 3): leaf solves only.
+    # Default follows the canvas mode -- on for content-derived canvases, off
+    # in seed-bbox mode (which must stay byte-identical to the historical
+    # behavior for replay A/B). An explicit leaf_compaction_pass in the
+    # project config overrides either way.
+    _compaction_explicit = base_cfg.get("leaf_compaction_pass")
+    cfg["leaf_compaction_pass"] = (
+        str(base_cfg.get("leaf_canvas_mode", "content")) == "content"
+        if _compaction_explicit is None
+        else bool(_compaction_explicit)
+    )
+    # NOTE (area-compaction Phase 2): the canvas-invariant scorer modes
+    # (placement_score_net_scale="content", placement_compactness_curve=
+    # "strict") are implemented but deliberately NOT defaulted here -- an
+    # auto-opt-in for leaf solves flipped the 535-class LED board's J1 leaf
+    # from routing at fill 0.28 to laddering back to the seed-bbox envelope
+    # and stranding at compose (replay A/B 2026-07-02). The psw weights were
+    # tuned against the legacy score shapes; flip these defaults only with
+    # the CMA-ES tuner re-run (plan Phase 2 item 4). Explicit project-config
+    # values pass through untouched.
+
     cfg["signal_flow_order"] = list(base_cfg.get("leaf_signal_flow_order", []))
     cfg["ic_groups"] = dict(
         base_cfg.get("leaf_ic_groups", base_cfg.get("ic_groups", {}))
