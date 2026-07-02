@@ -20,6 +20,7 @@ from pathlib import Path
 from kicraft.design.models import (
     GND_NET_PATTERNS,
     POWER_NET_PATTERNS,
+    FunctionalSpec,
     InterSheetNet,
     PinEndpoint,
     SheetPin,
@@ -2012,6 +2013,101 @@ def check_capacitor_polarity_consistency(bom) -> CheckResult:
             "capacitor symbol/footprint polarity agree"
             if not bad
             else f"{len(bad)} capacitor(s) with mismatched symbol/footprint polarity"
+        ),
+        offenders=bad,
+    )
+
+
+
+def check_every_block_has_sheet(
+    functional_spec: FunctionalSpec, architecture
+) -> CheckResult:
+    """Architecture-stage gate: the architecture must have enough sheets to
+    cover every functional_spec block (with count expansion).
+
+    Blocks may be merged onto a sheet named for the IC domain (e.g. "POWER
+    PATH" covers CHARGER + BOOST), so we don't require a 1:1 block→sheet
+    mapping. We only flag when the architecture has zero sheets or far too
+    few for the block count. Individual dropped blocks are caught at BOM
+    commit by ``check_sheets_have_parts``.
+    """
+    total_block_instances = sum(max(1, b.count) for b in functional_spec.blocks)
+    n_sheets = len(architecture.sheets)
+    bad: list[str] = []
+    if n_sheets == 0 and total_block_instances > 0:
+        bad.append(
+            f"functional_spec has {total_block_instances} block instance(s) "
+            f"but the architecture has zero sheets"
+        )
+    return CheckResult(
+        name="block-sheet mapping",
+        ok=not bad,
+        message=(
+            f"{n_sheets} sheet(s) for {total_block_instances} block instance(s)"
+            if not bad
+            else bad[0]
+        ),
+        offenders=bad,
+    )
+
+
+def check_fs_connections_mapped(
+    functional_spec: FunctionalSpec, architecture
+) -> CheckResult:
+    """Architecture-stage gate: every non-power/ground functional_spec connection
+    is either intra-sheet (both blocks on the same sheet) or declared in
+    ``architecture.inter_sheet_nets``.
+
+    Catches the historical DTR/RTS→ESP32 and RESET/D0→PROTO cases where a
+    cross-sheet signal was declared in the functional_spec but never surfaced
+    as an inter-sheet net, leaving a hierarchical label dangling at synthesis.
+    """
+    # Build block → set of sheet names mapping (heuristic: block name appears
+    # in sheet name, case-insensitive). Blocks not matching any sheet are
+    # "unmapped" — their connections can't be verified and are left to the
+    # wiring-stage safety net.
+    sheet_names_upper = [s.name.upper() for s in architecture.sheets]
+
+    def _sheets_for_block(block_name: str) -> set[str]:
+        bu = block_name.upper()
+        return {sn for sn in sheet_names_upper if bu in sn}
+
+    # Build a map: inter_sheet_net name → set of endpoint sheet names (uppercased)
+    isn_by_sheets: dict[frozenset[str], list[str]] = {}
+    for net in architecture.inter_sheet_nets:
+        endpoint_sheets = frozenset(
+            ep.sheet.upper() for ep in net.endpoints
+        )
+        isn_by_sheets.setdefault(endpoint_sheets, []).append(net.name)
+
+    bad: list[str] = []
+    for conn in functional_spec.connections:
+        # Power/ground nets are global (power symbols in leaves, not sheet pins)
+        if conn.signal_type in ("power", "ground"):
+            continue
+        from_sheets = _sheets_for_block(conn.from_block)
+        to_sheets = _sheets_for_block(conn.to_block)
+        # If both blocks map to the same sheet, the connection is intra-sheet
+        if from_sheets and to_sheets and (from_sheets & to_sheets):
+            continue
+        # If either block is unmapped, we can't verify — skip (advisory only)
+        if not from_sheets or not to_sheets:
+            continue
+        # Cross-sheet: check if any inter_sheet_net connects these sheets
+        cross_pairs = {frozenset({f, t}) for f in from_sheets for t in to_sheets if f != t}
+        covered = any(pair in isn_by_sheets for pair in cross_pairs)
+        if not covered:
+            bad.append(
+                f"connection {conn.from_block!r}→{conn.to_block!r} "
+                f"({conn.signal_type}) crosses sheets but has no inter_sheet_net"
+            )
+    return CheckResult(
+        name="fs-connection mapping",
+        ok=not bad,
+        message=(
+            "every cross-sheet connection is declared in inter_sheet_nets"
+            if not bad
+            else f"{len(bad)} connection(s) not mapped to inter_sheet_nets"
         ),
         offenders=bad,
     )

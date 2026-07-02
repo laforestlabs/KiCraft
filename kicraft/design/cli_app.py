@@ -70,6 +70,8 @@ from .synthesis.validation import (
     SynthesisValidationError,
     bridge_duplicate_pins,
     check_breakout_connectivity,
+    check_every_block_has_sheet,
+    check_fs_connections_mapped,
     check_capacitor_polarity_consistency,
     check_sheet_connector_edge_conflicts,
     check_named_part_substitutions,
@@ -238,6 +240,65 @@ def _unresolved_lcsc(bom, project_root: Path) -> list[str]:
                 f"which is not in the offline catalog"
             )
     return bad
+
+
+
+def _unresolved_architecture_parts(architecture, project_root: Path) -> list[str]:
+    """Pre-resolve named part families at architecture commit.
+
+    Scans the architecture's assumptions and topologies for core_defaults
+    bundle names. For each match, verifies the bundle's symbol resolves to a
+    pin inventory and its LCSC exists in the offline catalog. Returns a list
+    of error strings (empty = all resolved or catalog unavailable).
+    """
+    try:
+        from kicraft.parts_library.core_blocks import load_core_catalog
+
+        catalog = load_core_catalog()
+    except Exception:  # noqa: BLE001
+        return []  # catalog unavailable — can't verify
+    core_names = {b.bundle for b in catalog.blocks if b.bundle}
+    if not core_names:
+        return []
+    # Scan architecture text for bundle name references.
+    text_fields = list(architecture.assumptions) + list(
+        architecture.topologies.values()
+    )
+    combined_text = " ".join(text_fields)
+    # Load parts library to get manifests for matched bundles.
+    active, _broken = _load_library_parts(project_root)
+    manifest_by_name = {p.manifest.name: p.manifest for p in active}
+    errors: list[str] = []
+    for name in sorted(core_names):
+        if name not in combined_text:
+            continue
+        man = manifest_by_name.get(name)
+        if not man:
+            errors.append(
+                f"architecture references core default '{name}' "
+                f"but the bundle is not in the parts library"
+            )
+            continue
+        sym = f"{name}:{man.symbol_name}"
+        try:
+            info = lookup_pins(sym)
+            if not info.get("pins"):
+                errors.append(
+                    f"architecture references '{name}' but its symbol "
+                    f"{sym!r} exposes no pins"
+                )
+        except (SymbolNotFoundError, ValueError) as e:
+            errors.append(
+                f"architecture references '{name}' but its symbol "
+                f"{sym!r} did not resolve: {e}"
+            )
+        lcsc = (man.sourcing or {}).get("lcsc")
+        if lcsc and jlcparts.available() and not jlcparts.lcsc_exists(lcsc):
+            errors.append(
+                f"architecture references '{name}' but its LCSC {lcsc} "
+                f"is not in the offline catalog"
+            )
+    return errors
 
 
 def _read_or_create_session_id(state_dir: Path, state: ConversationState) -> str:
@@ -2201,6 +2262,58 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                     )
                 )
                 return 3
+
+    # R2: Pre-resolve named part families at architecture commit — catches
+    # "LCSC not in catalog" / "unresolved symbol" issues early, where the
+    # model can still fix the architecture before the BOM stage.
+    if stage == "architecture" and state.architecture is not None:
+        # R2: Pre-resolve named part families — catches "LCSC not in catalog"
+        # / "unresolved symbol" issues early, where the model can still fix the
+        # architecture before the BOM stage.
+        bad = _unresolved_architecture_parts(
+            state.architecture, state_path.resolve().parent.parent
+        )
+        if bad:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": [
+                            "architecture references parts that do not resolve; "
+                            "fix the references or use search_footprints "
+                            "to find alternatives"
+                        ],
+                        "offenders": bad[:20],
+                    },
+                    indent=2,
+                )
+            )
+            return 3
+        # R4: Validate the architecture inter-sheet contract — every FS block
+        # must map to a topology+sheet, and every cross-sheet FS connection
+        # must appear in inter_sheet_nets. Catches the DTR/RTS→ESP32 and
+        # RESET/D0→PROTO dangling-label cases at architecture commit.
+        if state.functional_spec is not None:
+            for check in (
+                check_every_block_has_sheet(
+                    state.functional_spec, state.architecture
+                ),
+                check_fs_connections_mapped(
+                    state.functional_spec, state.architecture
+                ),
+            ):
+                if not check.ok:
+                    print(
+                        json.dumps(
+                            {
+                                "ok": False,
+                                "errors": [f"{check.name}: {check.message}"],
+                                "offenders": check.offenders[:20],
+                            },
+                            indent=2,
+                        )
+                    )
+                    return 3
 
     # §9.25 capacitor polarity -- parts-only, so it fires at BOM commit (before
     # the wiring stage adds connections). A non-polarized Device:C on a polarized
