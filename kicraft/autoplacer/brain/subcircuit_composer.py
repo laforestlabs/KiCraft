@@ -1565,19 +1565,6 @@ def _constraint_local_rect(
     return _component_local_bbox(transformed.transformed_components[ref])
 
 
-def _placement_model_outline(
-    placement_model: PlacementModel,
-) -> tuple[Point, Point]:
-    blocker_set = placement_model.blocker_set
-    if blocker_set is not None:
-        return _transform_rect(
-            blocker_set.leaf_outline,
-            Point(0.0, 0.0),
-            placement_model.rotation,
-        )
-    return placement_model.transformed.bounding_box
-
-
 def _artifact_outline(artifact: LoadedSubcircuitArtifact) -> tuple[Point, Point]:
     transformed = transform_loaded_artifact(
         artifact,

@@ -29,26 +29,6 @@ VIA_DRILL_MM = 0.3
 VIA_SIZE_MM = 0.6
 
 
-_LEAF_OUTLINE_SILK_TAG = "leaf_outline"
-
-
-def _tag_leaf_outline_silk(shape) -> None:
-    """Mark a silk PCB_SHAPE so re-stamps can find and replace it."""
-    try:
-        shape.SetLocked(False)
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        # SetGroup is not portable; abuse the unique designator instead.
-        # Empty silk shapes don't carry refs natively, so we stash a
-        # short string in the shape's "User.1" field via the metadata
-        # dict if available. Fallback: rely on layer + width + segment
-        # geometry which is what the heuristic detector below uses.
-        pass
-    except Exception:  # noqa: BLE001
-        pass
-
-
 def _extract_leaf_outline_polyline_mm(silkscreen) -> list[tuple[float, float]] | None:
     """Pull the leaf-outline polyline (mm) out of a BoardState.silkscreen.
 

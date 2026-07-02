@@ -350,25 +350,6 @@ class BoardState:
         return Point((tl.x + br.x) / 2, (tl.y + br.y) / 2)
 
 
-@dataclass
-class PlacementIterationSnapshot:
-    """Snapshot of placement state at one iteration."""
-
-    iteration: int = 0
-    score: float = 0.0
-    max_displacement: float = 0.0
-    stagnant_count: int = 0
-    overlap_count: int = 0
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "iteration": self.iteration,
-            "score": round(self.score, 2),
-            "max_displacement": round(self.max_displacement, 2),
-            "stagnant": self.stagnant_count,
-            "overlaps": self.overlap_count,
-        }
-
 
 # Default weighting of the PlacementScore sub-scores -- the single source of
 # truth for what "good placement" means. Tunable per-config via ``psw_<key>``
@@ -464,35 +445,6 @@ class PlacementScore:
         weight_sum = sum(w.values()) or 1.0
         self.total = sum(getattr(self, k) * v for k, v in w.items()) / weight_sum
         return self.total
-
-
-@dataclass
-class DRCScore:
-    """DRC violation penalties. Higher = fewer violations. 0-100 scale."""
-
-    total: float = 100.0
-    shorts: float = 100.0
-    unconnected: float = 100.0
-    clearance: float = 100.0
-    courtyard: float = 100.0
-
-    @staticmethod
-    def from_counts(drc_dict: dict[str, Any]) -> "DRCScore":
-        """Convert quick_drc() output dict to DRCScore on 0-100 scale."""
-        import math
-
-        def _violation_score(count: int, weight: float) -> float:
-            if count == 0:
-                return weight
-            return max(0.0, weight * (1 - math.log10(1 + count) / math.log10(100)))
-
-        s = DRCScore()
-        s.shorts = _violation_score(drc_dict.get("shorts", 0), 40)
-        s.unconnected = _violation_score(drc_dict.get("unconnected", 0), 30)
-        s.clearance = _violation_score(drc_dict.get("clearance", 0), 20)
-        s.courtyard = _violation_score(drc_dict.get("courtyard", 0), 10)
-        s.total = s.shorts + s.unconnected + s.clearance + s.courtyard
-        return s
 
 
 
@@ -723,69 +675,3 @@ class HierarchyLevelState:
     constraints: dict[str, object] = field(default_factory=dict)
 
 
-@dataclass
-class FunctionalGroup:
-    """A functional group of components that belong together (e.g. one IC and
-    its supporting passives, as defined by a schematic sub-sheet)."""
-
-    name: str  # Human-readable name (e.g. "USB INPUT")
-    leader_ref: str  # Primary component reference (e.g. "U1")
-    member_refs: list[str]  # All component refs including leader
-    inter_group_nets: list[str] = field(
-        default_factory=list
-    )  # Nets connecting to other groups
-
-
-@dataclass
-class GroupSet:
-    """Complete set of functional groups for a project."""
-
-    groups: list[FunctionalGroup] = field(default_factory=list)
-    ungrouped_refs: list[str] = field(
-        default_factory=list
-    )  # Components not in any group
-    source: str = "auto"  # "schematic", "netlist", "manual", "auto"
-
-    def ref_to_group(self) -> dict[str, FunctionalGroup]:
-        """Build reverse map: component ref -> its FunctionalGroup."""
-        mapping = {}
-        for group in self.groups:
-            for ref in group.member_refs:
-                mapping[ref] = group
-        return mapping
-
-    def ref_to_leader(self) -> dict[str, str]:
-        """Build reverse map: component ref -> group leader ref."""
-        mapping = {}
-        for group in self.groups:
-            for ref in group.member_refs:
-                mapping[ref] = group.leader_ref
-        return mapping
-
-
-@dataclass
-class PlacedGroup:
-    """A functional group after intra-group placement.
-
-    Component positions are stored relative to the group origin (0, 0).
-    The bounding_box gives the overall envelope of the placed group.
-    """
-
-    group: FunctionalGroup
-    bounding_box: tuple[float, float]  # (width, height) in mm
-    component_positions: dict[
-        str, tuple[float, float, float]
-    ]  # ref -> (rel_x, rel_y, rotation)
-    component_layers: dict[str, Layer] = field(default_factory=dict)  # ref -> layer
-
-    @property
-    def width(self) -> float:
-        return self.bounding_box[0]
-
-    @property
-    def height(self) -> float:
-        return self.bounding_box[1]
-
-    @property
-    def area(self) -> float:
-        return self.bounding_box[0] * self.bounding_box[1]

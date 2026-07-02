@@ -136,13 +136,6 @@ def _pad_half_extents(comp: Component) -> tuple[float, float]:
     return hw, hh
 
 
-def _bbox_overlap(a: Component, b: Component, clearance: float = 0.5) -> bool:
-    """Check if two component bounding boxes overlap with clearance."""
-    a_tl, a_br = a.bbox(clearance / 2)
-    b_tl, b_br = b.bbox(clearance / 2)
-    return a_tl.x < b_br.x and a_br.x > b_tl.x and a_tl.y < b_br.y and a_br.y > b_tl.y
-
-
 def _bbox_overlap_amount(a: Component, b: Component) -> float:
     """Return overlap area (0 if no overlap)."""
     a_tl, a_br = a.bbox()

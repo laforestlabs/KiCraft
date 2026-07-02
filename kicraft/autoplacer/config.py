@@ -261,8 +261,6 @@ DEFAULT_CONFIG = {
     # Biases cluster centroids along the X-axis (left-to-right) during
     # initial placement.  Gives the layout a natural signal-flow direction.
     "signal_flow_order": [],
-    # Net priority overrides (higher = routed earlier among same class)
-    "net_priority": {},
     # Thermal
     "thermal_refs": [],
     "thermal_radius_mm": 3.0,
@@ -407,23 +405,10 @@ DEFAULT_CONFIG = {
     # Footprint refs whose internal clearance DRCs may be ignored when
     # the report parser cannot reliably extract refs from every violation.
     "ignorable_footprint_refs": [],
-    # --- Functional group settings ---
-    # Group source: how to discover functional groups.
-    #   "auto"      — try schematic sheets first, fall back to netlist analysis
-    #   "schematic" — only use schematic hierarchical sheets
-    #   "netlist"   — only use netlist community detection
-    #   "manual"    — only use ic_groups from config
-    # Manual ic_groups overrides are always applied on top of auto-detected
-    # groups regardless of this setting.
-    "group_source": "auto",
-    # When True, use hierarchical group-based placement: place components
-    # within each functional group first, then arrange groups on the board
-    # as rigid blocks.  When False, use flat global placement (legacy).
-    "hierarchical_placement": True,
     # Explicit IC groups (IC + supporting components that should stay together).
     # Each key is the group leader (typically an IC reference), value is a list
-    # of supporting component references.  Optional — when group_source is
-    # "auto" or "schematic", groups are auto-discovered from .kicad_sch files.
+    # of supporting component references.  Optional — groups are auto-discovered
+    # from .kicad_sch files when not specified manually.
     "ic_groups": {},
     # Human-readable group labels for silkscreen annotation.
     "group_labels": {},

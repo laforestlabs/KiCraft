@@ -20,7 +20,6 @@ def local_solver_config(
     cfg = dict(base_cfg)
 
     cfg["enable_board_size_search"] = False
-    cfg["hierarchical_placement"] = False
 
     # Start the local zone map from the parent's zones so axis hints
     # carry through unchanged for non-connector parts (batteries, ICs,
@@ -139,9 +138,6 @@ def local_solver_config(
         float(base_cfg.get("placement_convergence_threshold", 0.2)),
     )
 
-    # Leaf layouts should still respect grouping/ordering, but routed search needs
-    # enough exploration to produce meaningfully different candidate placements.
-    cfg["group_source"] = str(base_cfg.get("leaf_group_source", "netlist"))
     cfg["signal_flow_order"] = list(base_cfg.get("leaf_signal_flow_order", []))
     cfg["ic_groups"] = dict(
         base_cfg.get("leaf_ic_groups", base_cfg.get("ic_groups", {}))
