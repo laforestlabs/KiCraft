@@ -97,6 +97,15 @@ class LeafAcceptanceConfig:
     require_no_gross_courtyard_overlap: bool = True
     courtyard_warn_penetration_mm: float = 0.5
     courtyard_warn_area_mm2: float = 0.5
+    # Area-waste observation thresholds (area-compaction plan, Phase 4).
+    # These NEVER gate acceptance -- the gate always passes -- they only
+    # attach a structured warning + note when a leaf ships with poor area
+    # utilization (below *area_warn_utilization* with at least
+    # *area_warn_min_parts* parts) or an elongated outline (aspect ratio
+    # above *area_warn_aspect*). Fed from validation["board_metrics"].
+    area_warn_utilization: float = 0.15
+    area_warn_aspect: float = 4.0
+    area_warn_min_parts: int = 5
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +378,49 @@ def _gate_no_gross_courtyard_overlap(
     return passed, detail
 
 
+def _gate_area_utilization(
+    validation: dict[str, Any],
+    _anchor: dict[str, Any],
+    cfg: LeafAcceptanceConfig,
+) -> tuple[bool, dict[str, Any]]:
+    """Observation gate: area utilization / aspect ratio -- ALWAYS passes.
+
+    Area is an optimization target, never a new rc6/rc7 source (established
+    feedback: fix at the source, no masking gates). This gate exists so poor
+    utilization is part of the structured acceptance record -- surfaced in
+    debug.json, run_status and the web panel -- with ``warning: True`` when
+    the board ships wasteful, instead of being invisible until a fleet scan.
+    """
+    metrics = validation.get("board_metrics") or {}
+    detail: dict[str, Any] = {"passed": True, "warning": False}
+    if not isinstance(metrics, dict) or not metrics:
+        detail["skipped"] = True
+        detail["reason"] = "no board_metrics in validation"
+        return True, detail
+
+    util = float(metrics.get("area_utilization", 0.0) or 0.0)
+    aspect = float(metrics.get("aspect_ratio", 0.0) or 0.0)
+    parts = int(metrics.get("component_count", metrics.get("footprint_count", 0)) or 0)
+    detail["area_utilization"] = util
+    detail["aspect_ratio"] = aspect
+    detail["component_count"] = parts
+
+    warnings: list[str] = []
+    if parts >= cfg.area_warn_min_parts and 0.0 < util < cfg.area_warn_utilization:
+        warnings.append(
+            f"area utilization {util * 100:.1f}% below "
+            f"{cfg.area_warn_utilization * 100:.0f}% ({parts} parts)"
+        )
+    if aspect > cfg.area_warn_aspect:
+        warnings.append(
+            f"aspect ratio {aspect:.2f} above {cfg.area_warn_aspect:.1f}"
+        )
+    if warnings:
+        detail["warning"] = True
+        detail["warnings"] = warnings
+    return True, detail
+
+
 def _gate_anchor_completeness(
     _validation: dict[str, Any],
     anchor_validation: dict[str, Any],
@@ -454,6 +506,7 @@ _GATES: list[tuple[str, Any]] = [
     ("no_illegal_geometry", _gate_no_illegal_geometry),
     ("drc_clearance", _gate_drc_clearance),
     ("no_gross_courtyard_overlap", _gate_no_gross_courtyard_overlap),
+    ("area_utilization", _gate_area_utilization),
     ("anchor_completeness", _gate_anchor_completeness),
     ("routed_board", _gate_routed_board),
 ]
@@ -562,6 +615,11 @@ def evaluate_leaf_acceptance(
     if traces == 0 and vias == 0 and validation.get("board_exists", False):
         result.notes.append("Board exists but contains no routed copper")
 
+    for warning in result.gate_results.get("area_utilization", {}).get(
+        "warnings", []
+    ):
+        result.notes.append(f"AREA WARNING (not enforced): {warning}")
+
     result.accepted = all_passed
     return result
 
@@ -589,6 +647,9 @@ def acceptance_config_from_dict(cfg: dict[str, Any]) -> LeafAcceptanceConfig:
     - ``leaf_acceptance_require_no_gross_courtyard_overlap`` (bool)
     - ``courtyard_overlap_warn_penetration_mm`` (float, shared with the fab gate)
     - ``courtyard_overlap_warn_area_mm2`` (float, shared with the fab gate)
+    - ``leaf_area_warn_utilization`` (float, warning-only observation)
+    - ``leaf_area_warn_aspect`` (float, warning-only observation)
+    - ``leaf_area_warn_min_parts`` (int, warning-only observation)
 
     Parameters
     ----------
@@ -636,9 +697,14 @@ def acceptance_config_from_dict(cfg: dict[str, Any]) -> LeafAcceptanceConfig:
     for cfg_key, attr_name in (
         ("courtyard_overlap_warn_penetration_mm", "courtyard_warn_penetration_mm"),
         ("courtyard_overlap_warn_area_mm2", "courtyard_warn_area_mm2"),
+        ("leaf_area_warn_utilization", "area_warn_utilization"),
+        ("leaf_area_warn_aspect", "area_warn_aspect"),
     ):
         if cfg_key in cfg:
             kwargs[attr_name] = float(cfg[cfg_key])
+
+    if "leaf_area_warn_min_parts" in cfg:
+        kwargs["area_warn_min_parts"] = int(cfg["leaf_area_warn_min_parts"])
 
     if "leaf_acceptance_max_shorts" in cfg:
         kwargs["max_shorts"] = int(cfg["leaf_acceptance_max_shorts"])

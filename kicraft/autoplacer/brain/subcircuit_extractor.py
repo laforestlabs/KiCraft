@@ -18,6 +18,7 @@ This module is intentionally pure Python and does not depend on pcbnew.
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -282,6 +283,106 @@ def extract_leaf_board_state(
         translation=translation,
         notes=notes,
     )
+
+
+def derive_content_canvas(
+    components: dict[str, Component],
+    *,
+    fill_target: float,
+    placement_clearance_mm: float = 2.84,
+    component_zones: dict[str, Any] | None = None,
+    min_side_mm: float = 5.0,
+) -> tuple[float, float]:
+    """Solve-canvas size derived from component CONTENT, not seed positions.
+
+    The seed scatter grid (kicad_pcb_stub.write_empty_pcb) is throwaway
+    geometry, but the seed-bbox envelope treated it as load-bearing: an
+    11-part leaf inherited a ~195 mm-wide canvas and the flow targets +
+    force equilibrium spread parts across all of it (RC1/RC2 of the PCB
+    area-compaction plan). This derives the canvas from what actually has
+    to fit:
+
+    - ``target_area = max(sum(component physical-bbox areas) / fill_target,
+      clearance-padded packing floor)``. The packing floor keeps a
+      many-small-parts leaf (where placement clearance dwarfs part area)
+      from getting a canvas the legalizer can never satisfy.
+    - Aspect: near-square by default; widened along X (or Y) when
+      component zones pin parts to BOTH opposite edges of that axis --
+      the signal-flow axis wants the longer dimension.
+    - Floors: each side >= the largest single part's max dimension plus
+      margin (rotation-safe), and >= *min_side_mm*.
+    """
+    fill = max(0.05, float(fill_target))
+    clearance = max(0.0, float(placement_clearance_mm))
+
+    comp_area = 0.0
+    padded_area = 0.0
+    max_part_dim = 0.0
+    for comp in components.values():
+        tl, br = comp.physical_bbox()
+        w = max(0.0, br.x - tl.x)
+        h = max(0.0, br.y - tl.y)
+        comp_area += w * h
+        padded_area += (w + clearance) * (h + clearance)
+        max_part_dim = max(max_part_dim, w, h)
+
+    # 1.15: legalization slack over the theoretical clearance-padded packing.
+    target_area = max(comp_area / fill, padded_area * 1.15)
+
+    zones = component_zones or {}
+    edges = {
+        str(spec.get("edge"))
+        for ref, spec in zones.items()
+        if ref in components and isinstance(spec, dict) and spec.get("edge")
+    }
+    horizontal_span = {"left", "right"} <= edges
+    vertical_span = {"top", "bottom"} <= edges
+    if horizontal_span and not vertical_span:
+        aspect = 1.4
+    elif vertical_span and not horizontal_span:
+        aspect = 1.0 / 1.4
+    else:
+        aspect = 1.0
+
+    width = math.sqrt(target_area * aspect)
+    height = target_area / width if width > 0 else 0.0
+
+    axis_margin = max(2.0, clearance)
+    side_floor = max(min_side_mm, max_part_dim + 2.0 * axis_margin)
+    width = max(width, side_floor)
+    height = max(height, side_floor)
+
+    return (round(width, 2), round(height, 2))
+
+
+def set_extraction_canvas(
+    extraction: ExtractedSubcircuitBoard,
+    width_mm: float,
+    height_mm: float,
+    *,
+    note: str = "",
+) -> ExtractedSubcircuitBoard:
+    """Replace an extraction's local canvas with a (0,0)-(W,H) outline.
+
+    Component positions and ``translation`` are deliberately left untouched:
+    the placement solver re-scatters every unlocked component inside the
+    board outline (``_place_clusters``) and pins connectors to the *current*
+    outline's edges, while ``local_solver_config``'s nearest-edge fallback
+    maps seed positions back to the SOURCE board frame via ``translation`` --
+    both stay correct only if positions and translation are unchanged.
+    """
+    extraction.local_state.board_outline = (
+        Point(0.0, 0.0),
+        Point(float(width_mm), float(height_mm)),
+    )
+    if extraction.envelope is not None:
+        extraction.envelope.top_left = Point(0.0, 0.0)
+        extraction.envelope.bottom_right = Point(float(width_mm), float(height_mm))
+        extraction.envelope.width_mm = float(width_mm)
+        extraction.envelope.height_mm = float(height_mm)
+    if note:
+        extraction.notes.append(note)
+    return extraction
 
 
 def summarize_extraction(extraction: ExtractedSubcircuitBoard) -> str:
@@ -576,8 +677,10 @@ __all__ = [
     "ExtractedSubcircuitBoard",
     "LocalEnvelope",
     "NetPartition",
+    "derive_content_canvas",
     "extract_leaf_board_state",
     "extract_parent_local_components",
     "extraction_debug_dict",
+    "set_extraction_canvas",
     "summarize_extraction",
 ]

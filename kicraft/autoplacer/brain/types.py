@@ -366,7 +366,11 @@ DEFAULT_PLACEMENT_WEIGHTS: dict[str, float] = {
     "courtyard_overlap": 0.10,
     "smt_opposite_tht": 0.15,  # SMT on opposite side of THT
     "group_coherence": 0.08,  # functional groups stay compact
-    "aspect_ratio": 0.02,  # penalize elongated board shapes
+    "aspect_ratio": 0.02,  # penalize elongated board shapes. NOTE
+    # (area-compaction Phase 2): a raise to ~0.08 was tried and REGRESSED
+    # parent compose/route on multi-leaf boards (535/530 replay A/B) --
+    # the weight also steers the parent block placement, which was tuned
+    # against 0.02. Re-raise only via the CMA-ES tuner re-run, not by hand.
     "topology_structure": 0.05,  # reward topology-aware passive ordering
     "bbox_packing": 0.15,  # tight packing vs placed bbox (dynamic
     # under SA, unlike compactness which is fixed for the solve).

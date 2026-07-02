@@ -232,6 +232,17 @@ DEFAULT_CONFIG = {
     "psw_group_coherence": 0.08,
     "psw_topology_structure": 0.05,
     "psw_aspect_ratio": 0.02,
+    # Scorer normalization modes (area-compaction Phase 2). "content" makes
+    # net-distance canvas-invariant (normalized by the component-area-derived
+    # ideal-canvas diagonal, not the arbitrary solve-canvas diagonal);
+    # "strict" zeroes compactness below ~5% fill. None (default) = the legacy
+    # board_diag/legacy scoring EVERYWHERE: replay A/B 2026-07-02 showed both
+    # a global and a leaf-scoped flip regress routing (parent 530/535; leaf
+    # 535 J1) because the psw weights were tuned against the legacy score
+    # shapes. These are the knobs for the pending CMA-ES retune campaign
+    # (plan Phase 2 item 4); flip the defaults only with retuned weights.
+    "placement_score_net_scale": None,
+    "placement_compactness_curve": None,
     # Through-hole backside threshold — THT components with bounding-box area
     # above this value (mm²) are placed on B.Cu so SMT parts can use F.Cu.
     # SMT passives always stay on F.Cu — IC group connectivity forces keep
@@ -432,6 +443,28 @@ DEFAULT_CONFIG = {
     # so a generous extraction margin costs nothing in the final geometry
     # -- it only buys the placement solver more search room.
     "subcircuit_margin_mm": 10.82,
+    # Leaf solve-canvas derivation (PCB area-compaction plan, Phase 1).
+    # "content": the canvas is sized from component area (see
+    # derive_content_canvas) -- Σ physical-bbox area / leaf_canvas_fill_target,
+    # near-square, floored for the largest part + clearance packing. This
+    # replaces the seed-scatter-bbox canvas that let 11-part leaves inherit a
+    # ~195 mm-wide board (RC1) and the flow targets spread across it (RC2).
+    # "seed-bbox": the historical envelope (seed component bbox +
+    # subcircuit_margin_mm), byte-for-byte, kept for replay A/B comparison.
+    "leaf_canvas_mode": "content",
+    "leaf_canvas_fill_target": 0.28,
+    # Grow-on-failure ladder: when NO round is accepted at the fill target,
+    # the leaf is re-extracted at each looser fill in turn; after the ladder
+    # is exhausted it falls back to the seed-bbox canvas (today's behavior),
+    # so a dense leaf that only routes with generous slack still routes --
+    # fab-ready rate can't regress by construction.
+    "leaf_canvas_fill_ladder": [0.22, 0.17],
+    # Post-SA deterministic compaction squeeze (area-compaction Phase 3):
+    # slides each unlocked leaf part toward the placed-bbox centroid as far
+    # as legality allows, closing the slack force equilibrium leaves. None =
+    # follow the canvas mode (on for "content", off for "seed-bbox" so that
+    # mode stays byte-identical to history); True/False forces it.
+    "leaf_compaction_pass": None,
     # Parent spacing — gap (mm) between child subcircuit bounding boxes when
     # composing them into the parent board.  1.17mm packs leaves tightly
     # without compromising routability (r=-0.41 in parents-only sweep).
@@ -526,6 +559,9 @@ CONFIG_SEARCH_SPACE = {
     "connector_gap_mm": {"min": 0.46, "max": 7.50, "sigma": 0.7, "type": "float"},
     "max_placement_iterations": {"min": 829, "max": 4551, "sigma": 370, "type": "int"},
     "subcircuit_margin_mm": {"min": 6.97, "max": 13.38, "sigma": 0.6, "type": "float"},
+    # Content-canvas fill target (area-compaction Phase 1): higher = tighter
+    # boards but harder routing; the grow ladder catches per-leaf failures.
+    "leaf_canvas_fill_target": {"min": 0.15, "max": 0.45, "sigma": 0.03, "type": "float"},
     "connector_edge_inset_mm": {"min": 0.47, "max": 4.32, "sigma": 0.4, "type": "float"},
     "sa_refine_cooling_rate": {"min": 0.9076, "max": 0.99, "sigma": 0.008, "type": "float"},
     "sa_refine_rotation_probability": {"min": 0.05, "max": 0.85, "sigma": 0.08, "type": "float"},

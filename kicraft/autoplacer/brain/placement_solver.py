@@ -607,6 +607,38 @@ class PlacementSolver:
             if self._clear_pinned_from_keepouts(best_comps):
                 self._clamp_pads_to_board(best_comps)
 
+        with _timed_phase(phase_t, "solve_compaction_ms", capture_comps=lambda: best_comps):
+            # Step 15.5: Deterministic compaction squeeze (area-compaction
+            # Phase 3). Force equilibrium + SA leave multi-mm slack between
+            # parts even on a right-sized canvas; this slides each unlocked
+            # part toward the placed-bbox centroid as far as legality allows
+            # (clearance, keep-outs, keep-ins, board bounds). Leaf-only:
+            # local_solver_config enables it for content-canvas leaf solves;
+            # the parent/compose path never sets the flag. Runs before Step
+            # 16 so the courtyard pass still has the last word, and re-snaps
+            # aligned pairs it may have skewed.
+            if self.cfg.get("leaf_compaction_pass", False):
+                from kicraft.autoplacer.brain.leaf_compaction import (
+                    compact_toward_centroid,
+                )
+
+                compaction = compact_toward_centroid(
+                    best_comps,
+                    board_outline=self.state.board_outline,
+                    clearance_mm=self.clearance,
+                    keepout_rects=self.state.keepout_rects,
+                    keep_in_specs=self.cfg.get("parent_keep_in_rects", []),
+                    pad_inset_mm=float(self.cfg.get("pad_inset_margin_mm", 0.3)),
+                )
+                if compaction["total_slide_mm"] > 0.0:
+                    print(
+                        f"  Compaction squeeze: {compaction['moved_components']} "
+                        f"slide(s), {compaction['total_slide_mm']:.1f}mm total "
+                        f"over {compaction['passes']} pass(es)"
+                    )
+                    self._re_snap_aligned_pairs(best_comps)
+                    self._clamp_pads_to_board(best_comps)
+
         with _timed_phase(phase_t, "solve_courtyard_ms", capture_comps=lambda: best_comps):
             # Step 16: Final courtyard-separation legalization -- the GENUINE
             # last geometry step. Steps 13-15 (pinned restore, board clamp,

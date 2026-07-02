@@ -52,7 +52,7 @@ class PlacementScorer:
         total_component_area = sum(
             c.area for c in self.state.components.values()
         )
-        s.net_distance = self._score_net_distance(mst_cache)
+        s.net_distance = self._score_net_distance(mst_cache, total_component_area)
         s.crossover_count = count_crossings(self.state, mst_cache)
         s.crossover_score = self._crossover_to_score(s.crossover_count)
         s.compactness = self._score_compactness(total_component_area)
@@ -77,12 +77,39 @@ class PlacementScorer:
         s.compute_total(weights=placement_weights_from_config(self.cfg))
         return s
 
-    def _score_net_distance(self, mst_cache=None) -> float:
+    def _score_net_distance(
+        self, mst_cache=None, total_component_area: float | None = None
+    ) -> float:
         """Score based on total MST ratsnest length.
-        Shorter = better. Normalized to 0-100."""
+        Shorter = better. Normalized to 0-100.
+
+        Normalization scale (area-compaction Phase 2, RC4): "content"
+        (default) uses the diagonal of the ideal content canvas --
+        sqrt(2 x component area / fill target) -- so the score is
+        CANVAS-INVARIANT: the same absolute sprawl scores the same no
+        matter how big the (arbitrary) solve canvas is. "board_diag" keeps
+        the legacy canvas-diagonal normalization, where a bigger canvas
+        made the same sprawl score better; retained for replay A/B only.
+        """
         total_len = total_ratsnest_length(self.state, mst_cache)
-        # Heuristic: board diagonal is worst case per net
-        diag = math.hypot(self.state.board_width, self.state.board_height)
+        if total_component_area is None:
+            total_component_area = sum(
+                c.area for c in self.state.components.values()
+            )
+        # None/unset -> legacy board_diag: only leaf solves opt into the
+        # content scale (via local_solver_config); the parent path keeps the
+        # scoring it was tuned against.
+        scale_mode = str(self.cfg.get("placement_score_net_scale") or "board_diag")
+        if scale_mode == "content" and total_component_area > 0.0:
+            fill = max(0.05, float(self.cfg.get("leaf_canvas_fill_target", 0.28)))
+            # 2x headroom over the ideal-canvas diagonal: keeps a usable
+            # gradient for layouts sprawled beyond the content canvas (the
+            # seed-bbox ladder fallback and the parent board-size search),
+            # instead of clamping every such layout to a flat 0.
+            diag = 2.0 * math.sqrt(2.0 * total_component_area / fill)
+        else:
+            # Legacy heuristic: board diagonal is worst case per net
+            diag = math.hypot(self.state.board_width, self.state.board_height)
         n_nets = max(
             1,
             len(
@@ -110,14 +137,26 @@ class PlacementScorer:
         return max(0, min(100, (1.0 - ratio) * 100))
 
     def _score_compactness(self, total_area: float | None = None) -> float:
-        """Ratio of component area to board area. Gentle reward for smaller layouts.
-        20% fill = 50, 40% fill = 75, 60%+ = 100. Not heavily penalized."""
+        """Ratio of component area to board area.
+
+        "strict" curve (leaf-solve default; area-compaction Phase 2): <=5%
+        fill scores 0, linear up to 100 at 45% fill -- sprawl is genuinely
+        expensive. The legacy "gentle" curve (10% fill ~ 40, 50%+ ~ 90+)
+        gave even a 7%-fill board a 35-point floor; it stays the
+        parent-path default (None -> legacy). (Default weight is 0 --
+        absorbed by bbox_packing -- so this only shapes scores for configs
+        that re-weight it.)
+        """
         if total_area is None:
             total_area = sum(c.area for c in self.state.components.values())
         board_area = self.state.board_width * self.state.board_height
         if board_area == 0:
             return 0.0
         fill = total_area / board_area
+        # None/unset -> legacy curve; leaf solves opt into "strict" via
+        # local_solver_config (same auto split as placement_score_net_scale).
+        if str(self.cfg.get("placement_compactness_curve") or "legacy") == "strict":
+            return max(0.0, min(100.0, (fill - 0.05) / 0.40 * 100.0))
         # Gentle curve: 10% fill ≈ 40, 30% ≈ 65, 50%+ ≈ 90+
         return min(100, fill * 150 + 25)
 

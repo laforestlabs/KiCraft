@@ -1,6 +1,8 @@
 # PCB area compaction — investigation + resolution plan
 
-**Status:** investigation complete (2026-07-02, driven by KC-4W7KNW); resolution not started.
+**Status:** Phases 0–4 IMPLEMENTED 2026-07-02 (same day as the investigation); Phase 5
+(parent packing) deferred pending fleet re-baseline, CMA-ES retune (Phase 2 item 4) still
+to be launched. Implementation summary at the bottom of this file.
 **Owner:** next implementing agent. Read the whole causal chain before touching anything —
 every mechanism below was verified against run `~/.kicraft/projects/1/554` (KC-4W7KNW) and a
 30-board fleet scan; file:line references are to `main @ d0d34e4`.
@@ -227,3 +229,66 @@ here.
 
 Do 0 → 1 → verify → 2 → verify → 3 → 4. Phase 1 alone should collapse the worst of the
 fleet (every ~200 mm-wide board is RC1 bleed-through).
+
+## 5. Implementation record (2026-07-02)
+
+Phases 0–4 implemented in one pass; every change is config-gated with the old behavior as
+fallback. Key artifacts:
+
+- **Phase 0:** `placement_utils.board_utilization_metrics` (solver-side) +
+  `inspect_parent.board_utilization` (pcbnew-side, exact courtyard sums). Persisted:
+  leaf `debug.json` (`solve_summary.scheduling_metadata.board_metrics` +
+  `extra.board_metrics`), parent `parent_pipeline.json`
+  (`state.packing_metadata.board_metrics`), `run_status.json`
+  (`hierarchy.board_metrics` via `autoexperiment._extract_parent_board_metrics`),
+  the `[build] 4/5 verify:` line (`util= aspect= bbox_util=` suffix), web build panel
+  KV rows. Baseline: `scripts/board_utilization_report.py` (reproduced the §0 numbers:
+  15/30 below 15 % util).
+- **Phase 1:** `derive_content_canvas` + `set_extraction_canvas`
+  (`subcircuit_extractor.py`); ladder in `_solve_leaf_subcircuit` (content fills →
+  seed-bbox terminal fallback, per-attempt extraction tracked with the winning round).
+  Config: `leaf_canvas_mode` ("content" default / "seed-bbox"),
+  `leaf_canvas_fill_target` 0.28 (tuner range 0.15–0.45), `leaf_canvas_fill_ladder`
+  [0.22, 0.17]. Array leaves exempt (grid-placed; already content-sized).
+  **Byte-parity verified:** seed-bbox mode reproduces pre-change placements exactly
+  (USB_PD_TRIGGER corpus fixture, PYTHONHASHSEED=0).
+- **Phase 2:** `_score_net_distance` normalized by 2×√(2·ΣA/fill) in "content" mode
+  (`placement_score_net_scale`, canvas-invariant; 2× headroom keeps gradient on
+  seed-bbox/parent canvases); `_score_compactness` strict curve
+  (`placement_compactness_curve`, ≤5 % fill → 0). **Both are implemented + tested but
+  OPT-IN (default None = legacy)**, and `psw_aspect_ratio` stays 0.02: replay A/B showed
+  a global flip regresses parent route (530/535) and even a leaf-scoped flip regresses
+  the 535 J1 leaf (routes at fill 0.28 under legacy scoring, ladders to seed-bbox and
+  strands under content scoring) — the psw weights were tuned against the legacy score
+  shapes. **These knobs are the CMA-ES retune campaign's search surface (item 4, NOT yet
+  run; i-series protocol in the tuning memory); flip defaults only with retuned weights.**
+- **Phase 3:** `brain/leaf_compaction.compact_toward_centroid` — per-axis
+  nearest-centroid-first slide, clearance/keep-out/keep-in/board-bound aware,
+  deterministic; wired as Step 15.5 in `PlacementSolver.solve()` gated on
+  `leaf_compaction_pass` (None = follow canvas mode; forced off for seed-bbox attempts
+  including the ladder's terminal fallback).
+- **Phase 4:** `leaf_acceptance` `area_utilization` observation gate (ALWAYS passes;
+  structured `warning: True` + notes; thresholds `leaf_area_warn_utilization` 0.15 @ ≥5
+  parts, `leaf_area_warn_aspect` 4.0) fed from `validation["board_metrics"]` at persist
+  time; parent-side `gate["warnings"]` entries in `_promote_verify_fab` on shipped
+  wasteful boards.
+
+**Targeted A/B (replay --quality fast, seed 0; "old" = `leaf_canvas_mode="seed-bbox"`,
+"new" = shipping defaults: content canvas + squeeze, legacy scoring):**
+
+| board | old (seed-bbox) | new (shipping defaults) |
+|---|---|---|
+| 554 KC-4W7KNW | rc0, 186×27 mm, 7.1 % util, aspect 6.9 | rc0, **36.6×37.1 mm, 25.8 % util, aspect 1.03** |
+| 533 RC/BNC | rc0, 33×23 (already tight) | rc0, 33×22 (unchanged) |
+| 535 LED array | rc6 (connector stranded −109 mm) | **rc0, ships** (custom-outline resolver governs its area) |
+| 530 USB-PD multi-leaf | rc6 (parent search shorts @187×167) | rc7 (routes clean, 2 courtyard overlaps; parent packing = Phase 5) |
+
+Fab-ready 2/4 → 3/4; no board got worse; Phase-4 warnings fire on the wasteful boards.
+Remaining waste lives in the array/custom-outline class and parent-level packing — both
+explicitly Phase 5. Tests: `test_content_canvas.py`, `test_leaf_compaction.py`,
+`test_scorer_canvas_invariance.py`, `test_leaf_acceptance_area.py`.
+
+**Verification gotcha for future A/Bs:** a replay arm that fails BEFORE promote leaves
+the copied production `<stem>.kicad_pcb` untouched — measuring it "as the arm's board"
+silently compares against production. Check the arm's rc (and `[build] 3/5 promoted`)
+before measuring.

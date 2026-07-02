@@ -1875,6 +1875,15 @@ def _compose_artifacts(
         "board_width_mm": round(outline_w, 2),
         "board_height_mm": round(outline_h, 2),
     }
+    # Area-waste visibility (PCB area-compaction plan, Phase 0): parent-level
+    # utilization/aspect metrics ride in packing_metadata -> parent_pipeline.json
+    # (state.packing_metadata + composition.debug.packing_metadata), where the
+    # autoexperiment status writer picks them up for run_status.json.
+    from kicraft.autoplacer.brain.placement_utils import board_utilization_metrics
+
+    packing_metadata["board_metrics"] = board_utilization_metrics(
+        composition.board_state.components, outline_w, outline_h
+    )
 
     project_dir = ""
     if loaded_artifacts:
