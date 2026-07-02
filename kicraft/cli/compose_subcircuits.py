@@ -276,20 +276,17 @@ def _filter_artifacts_for_parent(
 
 
 # Pure bbox/rect/envelope geometry helpers live in _compose_geometry (Lever 2.5
-# split); re-exported so existing `compose_subcircuits import _rect_area` etc. and
-# internal references keep resolving.
+# split); imported here for internal use.
 from kicraft.cli._compose_geometry import (  # noqa: E402
     _bbox_disjoint,
-    _bbox_size,
     _component_geometry_bbox,
     _rect_area,
     _rect_lists_disjoint,
-    _shift_bbox,
     _shift_envelope,
-    _shift_layer_envelopes,
     _shift_rect,
-    _shift_rects,
 )
+
+
 def _resolve_parent_local_allowlist(component_zones: dict[str, Any], loaded_artifacts) -> set[str]:
     child_refs = set()
     for artifact in loaded_artifacts:
