@@ -125,10 +125,13 @@ from kicraft.autoplacer.brain.leaf_geometry import (
 from kicraft.autoplacer.brain.leaf_passive_ordering import (
     apply_leaf_passive_ordering,
 )
+from kicraft.autoplacer.brain.placement_utils import board_utilization_metrics
 from kicraft.autoplacer.brain.subcircuit_extractor import (
     ExtractedSubcircuitBoard,
+    derive_content_canvas,
     extract_leaf_board_state,
     extraction_debug_dict,
+    set_extraction_canvas,
     summarize_extraction,
 )
 from kicraft.autoplacer.brain.subcircuit_artifacts import (
@@ -676,29 +679,71 @@ def _solve_leaf_subcircuit(
 ) -> SolvedLeafSubcircuit:
     leaf_total_start = time.monotonic()
 
-    extraction_start = time.monotonic()
-    extraction = extract_leaf_board_state(
-        subcircuit=node.definition,
-        full_state=full_state,
-        margin_mm=float(cfg.get("subcircuit_margin_mm", 0.0)),
-        include_power_externals=bool(
-            cfg.get("subcircuit_include_power_externals", True)
-        ),
-        ignored_nets=set(cfg.get("subcircuit_ignored_nets", [])),
-    )
-    extraction_elapsed_s = round(max(0.0, time.monotonic() - extraction_start), 3)
+    # -- Canvas plan (PCB area-compaction plan, Phase 1) -------------------
+    # In "content" mode the leaf solves on a canvas sized from its component
+    # area instead of the synthesis seed-scatter bbox. When no round is
+    # accepted at the fill target, a grow-on-failure ladder re-extracts at
+    # each looser fill, ending at the seed-bbox envelope (the historical
+    # canvas) so fab-ready rate cannot regress. Array leaves are exempt:
+    # their grid is placed deterministically (skips force/SA) and the
+    # size-reduction pass already crops the outline to the grid.
+    canvas_mode = str(cfg.get("leaf_canvas_mode", "content"))
+    _array_refs = {
+        str(ref)
+        for spec in (cfg.get("arrays") or [])
+        for ref in (spec.get("refs") or [])
+    }
+    is_array_leaf = bool(_array_refs & set(node.definition.component_refs))
+    canvas_fills: list[float | None]
+    if canvas_mode == "content" and not is_array_leaf:
+        _fill_target = float(cfg.get("leaf_canvas_fill_target", 0.28))
+        _ladder = [float(f) for f in (cfg.get("leaf_canvas_fill_ladder") or [])]
+        canvas_fills = [_fill_target, *_ladder, None]
+    else:
+        canvas_fills = [None]
 
-    local_cfg_start = time.monotonic()
-    local_cfg = _local_solver_config(cfg, extraction)
-    local_cfg_elapsed_s = round(max(0.0, time.monotonic() - local_cfg_start), 3)
+    def _build_extraction(fill: float | None) -> ExtractedSubcircuitBoard:
+        extraction = extract_leaf_board_state(
+            subcircuit=node.definition,
+            full_state=full_state,
+            margin_mm=float(cfg.get("subcircuit_margin_mm", 0.0)),
+            include_power_externals=bool(
+                cfg.get("subcircuit_include_power_externals", True)
+            ),
+            ignored_nets=set(cfg.get("subcircuit_ignored_nets", [])),
+        )
+        if fill is not None:
+            width_mm, height_mm = derive_content_canvas(
+                extraction.local_state.components,
+                fill_target=fill,
+                placement_clearance_mm=float(
+                    cfg.get("placement_clearance_mm", 2.84)
+                ),
+                component_zones=cfg.get("component_zones") or {},
+            )
+            set_extraction_canvas(
+                extraction,
+                width_mm,
+                height_mm,
+                note=(
+                    f"content_canvas fill_target={fill:.2f} "
+                    f"size={width_mm:.1f}x{height_mm:.1f}mm"
+                ),
+            )
+        return extraction
+
     rng = random.Random(base_seed)
 
     round_results: list[SolveRoundResult] = []
     best: SolveRoundResult | None = None
+    # The extraction (canvas) the best round was solved against -- size
+    # reduction and persistence must use the SAME canvas the round used.
+    best_extraction: ExtractedSubcircuitBoard | None = None
     # Best ROUTED round regardless of acceptance. If no round passes the gate,
     # the leaf is composed best-effort from this round rather than dropped --
     # which would strand all its components off the parent board.
     best_routed: SolveRoundResult | None = None
+    best_routed_extraction: ExtractedSubcircuitBoard | None = None
 
     # Within a single autoexperiment run, a leaf may be solved across
     # multiple parent rounds (one invocation per parent round). Each
@@ -712,7 +757,7 @@ def _solve_leaf_subcircuit(
     # indices by max(prior_round_index) + 1.
     base_offset = 0
     prior_all_rounds: list[dict[str, Any]] = []
-    schematic_path = getattr(extraction.subcircuit, "schematic_path", None)
+    schematic_path = getattr(node.definition, "schematic_path", None)
     if schematic_path:
         try:
             paths = resolve_artifact_paths(
@@ -745,21 +790,21 @@ def _solve_leaf_subcircuit(
 
     effective_rounds = rounds
     if route:
-        if bool(local_cfg.get("subcircuit_fast_smoke_mode", False)):
+        if bool(cfg.get("subcircuit_fast_smoke_mode", False)):
             effective_rounds = max(
                 1,
-                int(local_cfg.get("leaf_fast_smoke_route_rounds", rounds)),
+                int(cfg.get("leaf_fast_smoke_route_rounds", rounds)),
             )
         else:
             # Honor the user-configured round count. A legacy floor of
             # `leaf_min_route_rounds` (default 8) used to silently raise the
             # effective count; it is only applied now if explicitly set in the
             # config, so CLI/monitor values are authoritative by default.
-            configured_floor = local_cfg.get("leaf_min_route_rounds")
+            configured_floor = cfg.get("leaf_min_route_rounds")
             if configured_floor is not None:
                 effective_rounds = max(rounds, int(configured_floor))
 
-    fast_smoke_mode = bool(local_cfg.get("subcircuit_fast_smoke_mode", False))
+    fast_smoke_mode = bool(cfg.get("subcircuit_fast_smoke_mode", False))
 
     failure_reasons: list[str] = []
     failure_rows: list[dict[str, Any]] = []
@@ -767,124 +812,162 @@ def _solve_leaf_subcircuit(
     failed_round_count = 0
     acceptance_cfg = acceptance_config_from_dict(cfg)
 
-    for local_round_index in range(effective_rounds):
-        round_index = base_offset + local_round_index
-        seed = rng.randint(0, 2**31 - 1)
-        round_cfg = dict(local_cfg)
-        if route and not fast_smoke_mode:
-            if local_round_index % 3 == 1:
-                round_cfg["randomize_group_layout"] = True
-                round_cfg["orderedness"] = max(
-                    0.15,
-                    float(round_cfg.get("orderedness", 0.25)) - 0.10,
-                )
-            elif local_round_index % 3 == 2:
-                round_cfg["randomize_group_layout"] = True
-                round_cfg["scatter_mode"] = "random"
-                round_cfg["orderedness"] = max(
-                    0.10,
-                    float(round_cfg.get("orderedness", 0.25)) - 0.15,
-                )
-        result = _solve_one_round(extraction, round_cfg, seed, round_index, route)
-        result.timing_breakdown["leaf_extraction_s"] = extraction_elapsed_s
-        result.timing_breakdown["local_solver_config_s"] = local_cfg_elapsed_s
-        round_results.append(result)
+    canvas_attempts_run: list[str] = []
+    for attempt_index, canvas_fill in enumerate(canvas_fills):
+        extraction_start = time.monotonic()
+        extraction = _build_extraction(canvas_fill)
+        extraction_elapsed_s = round(max(0.0, time.monotonic() - extraction_start), 3)
 
-        routing = result.routing or {}
-        validation = routing.get("validation", {}) or {}
+        local_cfg_start = time.monotonic()
+        local_cfg = _local_solver_config(cfg, extraction)
+        # A seed-bbox canvas attempt (terminal ladder fallback, seed-bbox
+        # mode, array exemption) runs the pure historical solve -- no
+        # compaction squeeze -- unless the project config forces it. This is
+        # what makes "fab-ready rate can't regress" hold by construction.
+        if canvas_fill is None and cfg.get("leaf_compaction_pass") is None:
+            local_cfg["leaf_compaction_pass"] = False
+        local_cfg_elapsed_s = round(max(0.0, time.monotonic() - local_cfg_start), 3)
 
-        # -- Structured round acceptance via leaf_acceptance gates --
-        if not route:
-            # No routing requested -- placement-only round is always accepted
-            accepted = True
-            round_acceptance = None
-        elif routing.get("reason") == "no_internal_nets":
-            # Trivial pass -- nothing to route for this leaf
-            accepted = True
-            round_acceptance = None
-        elif routing.get("failed", False):
-            # Clear routing infrastructure failure -- reject without gate eval
-            accepted = False
-            round_acceptance = None
-        else:
-            # Normal routed result -- evaluate through structured acceptance
-            # gates.  Anchor validation is deferred to persist time; pass
-            # empty dict here so anchor gates are skipped for per-round eval.
-            round_acceptance = evaluate_leaf_acceptance(
-                validation=validation,
-                anchor_validation={},
-                config=acceptance_cfg,
-            )
-            accepted = round_acceptance.accepted
-
-        # Stash the structured acceptance result on the routing dict for
-        # downstream persistence and debugging.
-        result.routing["_round_acceptance"] = (
-            {
-                "accepted": round_acceptance.accepted,
-                "rejection_reasons": list(round_acceptance.rejection_reasons),
-                "gate_results": dict(round_acceptance.gate_results),
-                "drc_summary": dict(round_acceptance.drc_summary),
-                "notes": list(round_acceptance.notes),
-            }
-            if round_acceptance is not None
-            else {
-                "accepted": accepted,
-                "rejection_reasons": [],
-                "gate_results": {},
-                "drc_summary": {},
-                "notes": [],
-            }
+        canvas_attempts_run.append(
+            "seed-bbox" if canvas_fill is None else f"{canvas_fill:.2f}"
         )
+        if attempt_index > 0:
+            print(
+                f"  canvas ladder: no accepted round for "
+                f"{node.definition.id.instance_path} at the previous canvas; "
+                f"retrying at "
+                + ("the seed-bbox envelope" if canvas_fill is None else f"fill={canvas_fill:.2f}")
+                + f" ({extraction.local_state.board_width:.1f}x"
+                f"{extraction.local_state.board_height:.1f}mm)"
+            )
 
-        # A routed round is a best-effort fallback (used when no round is
-        # accepted) -- including one freerouting marked "failed" for residual
-        # opens, as long as it stamped a board on disk. See
-        # _round_yielded_routed_board.
-        if _round_yielded_routed_board(result) and (
-            best_routed is None or result.score > best_routed.score
-        ):
-            best_routed = result
+        for local_round_index in range(effective_rounds):
+            round_index = base_offset + len(round_results)
+            seed = rng.randint(0, 2**31 - 1)
+            round_cfg = dict(local_cfg)
+            if route and not fast_smoke_mode:
+                if local_round_index % 3 == 1:
+                    round_cfg["randomize_group_layout"] = True
+                    round_cfg["orderedness"] = max(
+                        0.15,
+                        float(round_cfg.get("orderedness", 0.25)) - 0.10,
+                    )
+                elif local_round_index % 3 == 2:
+                    round_cfg["randomize_group_layout"] = True
+                    round_cfg["scatter_mode"] = "random"
+                    round_cfg["orderedness"] = max(
+                        0.10,
+                        float(round_cfg.get("orderedness", 0.25)) - 0.15,
+                    )
+            result = _solve_one_round(extraction, round_cfg, seed, round_index, route)
+            result.timing_breakdown["leaf_extraction_s"] = extraction_elapsed_s
+            result.timing_breakdown["local_solver_config_s"] = local_cfg_elapsed_s
+            round_results.append(result)
 
-        if accepted:
-            accepted_round_count += 1
-        else:
-            failed_round_count += 1
-            if round_acceptance is not None:
-                reason = (
-                    ",".join(round_acceptance.rejection_reasons)
-                    or "unknown_gate_failure"
-                )
+            routing = result.routing or {}
+            validation = routing.get("validation", {}) or {}
+
+            # -- Structured round acceptance via leaf_acceptance gates --
+            if not route:
+                # No routing requested -- placement-only round is always accepted
+                accepted = True
+                round_acceptance = None
+            elif routing.get("reason") == "no_internal_nets":
+                # Trivial pass -- nothing to route for this leaf
+                accepted = True
+                round_acceptance = None
+            elif routing.get("failed", False):
+                # Clear routing infrastructure failure -- reject without gate eval
+                accepted = False
+                round_acceptance = None
             else:
-                reason = (
-                    validation.get("rejection_stage")
-                    or validation.get("rejection_message")
-                    or routing.get("reason")
-                    or "unknown_leaf_failure"
+                # Normal routed result -- evaluate through structured acceptance
+                # gates.  Anchor validation is deferred to persist time; pass
+                # empty dict here so anchor gates are skipped for per-round eval.
+                round_acceptance = evaluate_leaf_acceptance(
+                    validation=validation,
+                    anchor_validation={},
+                    config=acceptance_cfg,
                 )
-            failure_reasons.append(str(reason))
-            failure_rows.append(
+                accepted = round_acceptance.accepted
+
+            # Stash the structured acceptance result on the routing dict for
+            # downstream persistence and debugging.
+            result.routing["_round_acceptance"] = (
                 {
-                    "round_index": result.round_index,
-                    "seed": result.seed,
-                    "reason": str(reason),
-                    "router": str(routing.get("router", "") or ""),
-                    "failed": bool(routing.get("failed", False)),
-                    "failed_internal_nets": list(
-                        routing.get("failed_internal_nets", []) or []
-                    ),
-                    "timing_breakdown": dict(result.timing_breakdown),
-                    "acceptance_gate_results": (
-                        dict(round_acceptance.gate_results)
-                        if round_acceptance
-                        else {}
-                    ),
+                    "accepted": round_acceptance.accepted,
+                    "rejection_reasons": list(round_acceptance.rejection_reasons),
+                    "gate_results": dict(round_acceptance.gate_results),
+                    "drc_summary": dict(round_acceptance.drc_summary),
+                    "notes": list(round_acceptance.notes),
+                }
+                if round_acceptance is not None
+                else {
+                    "accepted": accepted,
+                    "rejection_reasons": [],
+                    "gate_results": {},
+                    "drc_summary": {},
+                    "notes": [],
                 }
             )
-            continue
 
-        if best is None or result.score > best.score:
-            best = result
+            # A routed round is a best-effort fallback (used when no round is
+            # accepted) -- including one freerouting marked "failed" for residual
+            # opens, as long as it stamped a board on disk. See
+            # _round_yielded_routed_board.
+            if _round_yielded_routed_board(result) and (
+                best_routed is None or result.score > best_routed.score
+            ):
+                best_routed = result
+                best_routed_extraction = extraction
+
+            if accepted:
+                accepted_round_count += 1
+            else:
+                failed_round_count += 1
+                if round_acceptance is not None:
+                    reason = (
+                        ",".join(round_acceptance.rejection_reasons)
+                        or "unknown_gate_failure"
+                    )
+                else:
+                    reason = (
+                        validation.get("rejection_stage")
+                        or validation.get("rejection_message")
+                        or routing.get("reason")
+                        or "unknown_leaf_failure"
+                    )
+                failure_reasons.append(str(reason))
+                failure_rows.append(
+                    {
+                        "round_index": result.round_index,
+                        "seed": result.seed,
+                        "reason": str(reason),
+                        "router": str(routing.get("router", "") or ""),
+                        "failed": bool(routing.get("failed", False)),
+                        "failed_internal_nets": list(
+                            routing.get("failed_internal_nets", []) or []
+                        ),
+                        "timing_breakdown": dict(result.timing_breakdown),
+                        "acceptance_gate_results": (
+                            dict(round_acceptance.gate_results)
+                            if round_acceptance
+                            else {}
+                        ),
+                    }
+                )
+                continue
+
+            if best is None or result.score > best.score:
+                best = result
+                best_extraction = extraction
+
+        # Grow-on-failure ladder: an accepted round at this canvas ends the
+        # search; otherwise the next (looser) canvas gets its own full set of
+        # rounds. Single-entry canvas plans (seed-bbox mode, array leaves)
+        # run exactly one pass -- the historical behavior.
+        if best is not None:
+            break
 
     if best is None and best_routed is not None:
         # No round passed acceptance, but at least one routed. Compose the leaf
@@ -893,6 +976,7 @@ def _solve_leaf_subcircuit(
         # whole leaf and stranding its components off-board. The acceptance
         # verdict (accepted=False) is still recorded downstream for quality.
         best = best_routed
+        best_extraction = best_routed_extraction
         print(
             f"  WARNING: no accepted round for "
             f"{node.definition.id.instance_path}; composing best-effort from "
@@ -926,9 +1010,15 @@ def _solve_leaf_subcircuit(
         unique_reasons = sorted(set(failure_reasons))
         raise RuntimeError(
             "No accepted routed leaf artifact produced for "
-            f"{node.definition.id.instance_path} after {effective_rounds} round(s): "
+            f"{node.definition.id.instance_path} after {len(round_results)} round(s) "
+            f"across {len(canvas_attempts_run)} canvas attempt(s) "
+            f"({', '.join(canvas_attempts_run)}): "
             + ",".join(unique_reasons or ["unknown_leaf_failure"])
         )
+
+    # From here on, everything (size reduction, artifacts, metadata) must use
+    # the canvas the winning round was actually solved against.
+    extraction = best_extraction if best_extraction is not None else extraction
 
     size_reduction_start = time.monotonic()
     reduced_extraction, reduced_best, size_reduction = _attempt_leaf_size_reduction(
@@ -957,6 +1047,9 @@ def _solve_leaf_subcircuit(
         "via_count": len(extraction.internal_vias),
         "effective_rounds": effective_rounds,
         "fast_smoke_mode": fast_smoke_mode,
+        "canvas_mode": "seed-bbox" if is_array_leaf else canvas_mode,
+        "canvas_array_leaf_exempt": is_array_leaf,
+        "canvas_attempts": list(canvas_attempts_run),
         "best_round_index": reduced_best.round_index,
         "best_score": reduced_best.score,
         "leaf_total_s": leaf_total_elapsed_s,
@@ -1095,28 +1188,6 @@ def _persist_solution(
         )
     routing_validation = dict(solved.best_round.routing.get("validation", {}))
 
-    # -- Full acceptance evaluation with anchor validation --
-    persist_acceptance_cfg = acceptance_config_from_dict(cfg)
-    full_acceptance = evaluate_leaf_acceptance(
-        validation=routing_validation,
-        anchor_validation=anchor_validation,
-        config=persist_acceptance_cfg,
-    )
-    routing_validation["leaf_acceptance_result"] = {
-        "accepted": full_acceptance.accepted,
-        "rejection_reasons": list(full_acceptance.rejection_reasons),
-        "gate_results": dict(full_acceptance.gate_results),
-        "drc_summary": dict(full_acceptance.drc_summary),
-        "anchor_summary": dict(full_acceptance.anchor_summary),
-        "notes": list(full_acceptance.notes),
-    }
-    # Propagate final acceptance verdict to top-level validation field
-    routing_validation["accepted"] = full_acceptance.accepted
-
-    canonical_layout = solved.canonical_layout_artifact(cfg)
-    canonical_layout["validation"] = routing_validation
-    canonical_layout["scheduling_metadata"] = dict(solved.scheduling_metadata or {})
-    canonical_layout["failure_summary"] = dict(solved.failure_summary or {})
     size_reduction = dict(solved.size_reduction or {})
     # The post-route silk re-stamp in leaf_routing._outline_around_geometry
     # shrinks Edge.Cuts to hug the actual placed/routed geometry, so the
@@ -1145,6 +1216,52 @@ def _persist_solution(
             size_reduction.get("reduced_outline", _solved_local_outline(solved.extraction))
         )
     original_outline = dict(size_reduction.get("original_outline", reduced_outline))
+
+    # Area-waste visibility (PCB area-compaction plan, Phase 0): utilization /
+    # aspect metrics for the final on-disk leaf outline. Injected into
+    # scheduling_metadata BEFORE solved.to_dict() so the numbers ride inside
+    # debug.json's solve_summary, and into routing_validation BEFORE the
+    # acceptance evaluation so the (warning-only) area_utilization gate sees
+    # them (Phase 4).
+    board_metrics = board_utilization_metrics(
+        solved.best_round.components,
+        float(reduced_outline.get("width_mm", 0.0) or 0.0),
+        float(reduced_outline.get("height_mm", 0.0) or 0.0),
+    )
+    board_metrics["component_count"] = len(solved.best_round.components)
+    solved.scheduling_metadata["board_metrics"] = dict(board_metrics)
+    routing_validation["board_metrics"] = dict(board_metrics)
+    print(
+        f"  leaf board metrics: util={board_metrics['area_utilization'] * 100:.1f}% "
+        f"aspect={board_metrics['aspect_ratio']:.2f} "
+        f"bbox_util={board_metrics['bbox_utilization'] * 100:.1f}%"
+    )
+
+    # -- Full acceptance evaluation with anchor validation --
+    persist_acceptance_cfg = acceptance_config_from_dict(cfg)
+    full_acceptance = evaluate_leaf_acceptance(
+        validation=routing_validation,
+        anchor_validation=anchor_validation,
+        config=persist_acceptance_cfg,
+    )
+    routing_validation["leaf_acceptance_result"] = {
+        "accepted": full_acceptance.accepted,
+        "rejection_reasons": list(full_acceptance.rejection_reasons),
+        "gate_results": dict(full_acceptance.gate_results),
+        "drc_summary": dict(full_acceptance.drc_summary),
+        "anchor_summary": dict(full_acceptance.anchor_summary),
+        "notes": list(full_acceptance.notes),
+    }
+    # Propagate final acceptance verdict to top-level validation field
+    routing_validation["accepted"] = full_acceptance.accepted
+    for note in full_acceptance.notes:
+        if note.startswith("AREA WARNING"):
+            print(f"  {note}")
+
+    canonical_layout = solved.canonical_layout_artifact(cfg)
+    canonical_layout["validation"] = routing_validation
+    canonical_layout["scheduling_metadata"] = dict(solved.scheduling_metadata or {})
+    canonical_layout["failure_summary"] = dict(solved.failure_summary or {})
     extraction = build_leaf_extraction(
         subcircuit=solved.node.definition,
         project_dir=solved.extraction.subcircuit.schematic_path
@@ -1284,6 +1401,7 @@ def _persist_solution(
             "size_reduction": size_reduction,
             "original_outline": original_outline,
             "reduced_outline": reduced_outline,
+            "board_metrics": dict(board_metrics),
             "size_reduction_validation": size_reduction.get("validation", {}),
             "canonical_solved_layout": canonical_layout,
             "canonical_solved_layout_path": str(solved_layout_json or ""),

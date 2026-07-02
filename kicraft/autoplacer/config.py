@@ -432,6 +432,22 @@ DEFAULT_CONFIG = {
     # so a generous extraction margin costs nothing in the final geometry
     # -- it only buys the placement solver more search room.
     "subcircuit_margin_mm": 10.82,
+    # Leaf solve-canvas derivation (PCB area-compaction plan, Phase 1).
+    # "content": the canvas is sized from component area (see
+    # derive_content_canvas) -- Σ physical-bbox area / leaf_canvas_fill_target,
+    # near-square, floored for the largest part + clearance packing. This
+    # replaces the seed-scatter-bbox canvas that let 11-part leaves inherit a
+    # ~195 mm-wide board (RC1) and the flow targets spread across it (RC2).
+    # "seed-bbox": the historical envelope (seed component bbox +
+    # subcircuit_margin_mm), byte-for-byte, kept for replay A/B comparison.
+    "leaf_canvas_mode": "content",
+    "leaf_canvas_fill_target": 0.28,
+    # Grow-on-failure ladder: when NO round is accepted at the fill target,
+    # the leaf is re-extracted at each looser fill in turn; after the ladder
+    # is exhausted it falls back to the seed-bbox canvas (today's behavior),
+    # so a dense leaf that only routes with generous slack still routes --
+    # fab-ready rate can't regress by construction.
+    "leaf_canvas_fill_ladder": [0.22, 0.17],
     # Parent spacing — gap (mm) between child subcircuit bounding boxes when
     # composing them into the parent board.  1.17mm packs leaves tightly
     # without compromising routability (r=-0.41 in parents-only sweep).
@@ -526,6 +542,9 @@ CONFIG_SEARCH_SPACE = {
     "connector_gap_mm": {"min": 0.46, "max": 7.50, "sigma": 0.7, "type": "float"},
     "max_placement_iterations": {"min": 829, "max": 4551, "sigma": 370, "type": "int"},
     "subcircuit_margin_mm": {"min": 6.97, "max": 13.38, "sigma": 0.6, "type": "float"},
+    # Content-canvas fill target (area-compaction Phase 1): higher = tighter
+    # boards but harder routing; the grow ladder catches per-leaf failures.
+    "leaf_canvas_fill_target": {"min": 0.15, "max": 0.45, "sigma": 0.03, "type": "float"},
     "connector_edge_inset_mm": {"min": 0.47, "max": 4.32, "sigma": 0.4, "type": "float"},
     "sa_refine_cooling_rate": {"min": 0.9076, "max": 0.99, "sigma": 0.008, "type": "float"},
     "sa_refine_rotation_probability": {"min": 0.05, "max": 0.85, "sigma": 0.08, "type": "float"},
