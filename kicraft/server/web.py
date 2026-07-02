@@ -1237,6 +1237,20 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
             if copper:
                 kv_rows.append(("traces", copper.get("routed_total_trace_count", "?")))
                 kv_rows.append(("vias", copper.get("routed_total_via_count", "?")))
+            bm = h.get("board_metrics") or {}
+            if bm:
+                kv_rows.append((
+                    "board size",
+                    f"{bm.get('board_width_mm', 0):.1f} x "
+                    f"{bm.get('board_height_mm', 0):.1f} mm",
+                ))
+                kv_rows.append((
+                    "area utilization",
+                    f"{float(bm.get('area_utilization', 0.0)) * 100:.1f}%",
+                ))
+                kv_rows.append(
+                    ("aspect ratio", f"{float(bm.get('aspect_ratio', 0.0)):.2f}")
+                )
             if kv_rows:
                 secs.append({"type": "kv", "title": "Stats", "rows": kv_rows})
         else:

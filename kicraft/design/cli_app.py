@@ -3972,11 +3972,30 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     gate = _verify_routed_board(pcb)
     expected_refs = {p.ref for p in (state.bom.parts if state and state.bom else [])}
     missing_refs = _missing_component_refs(expected_refs, gate["tracks"].get("footprint_refs"))
+    # Area-waste visibility (PCB area-compaction plan, Phase 0): utilization /
+    # aspect metrics on the promoted board ride the verify line and the gate
+    # record. Diagnostic only -- never a promote/fab gate input.
+    board_metrics: dict[str, float] = {}
+    try:
+        from kicraft.cli.inspect_parent import board_utilization
+
+        board_metrics = board_utilization(pcb)
+        gate["board_metrics"] = board_metrics
+    except Exception:
+        board_metrics = {}
+    _util_suffix = (
+        f" util={board_metrics.get('area_utilization', 0.0) * 100:.1f}%"
+        f" aspect={board_metrics.get('aspect_ratio', 0.0):.2f}"
+        f" bbox_util={board_metrics.get('bbox_utilization', 0.0) * 100:.1f}%"
+        if board_metrics
+        else ""
+    )
     print(
         f"[build] 4/5 verify: shorts={gate['shorts']} unconnected={gate['unconnected']} "
         f"courtyard={gate.get('courtyard', 0)} keepout={gate.get('keepout', 0)} "
         f"traces={gate['tracks'].get('traces', '?')} "
         f"components={gate['tracks'].get('footprints', '?')}/{len(expected_refs) or '?'}"
+        f"{_util_suffix}"
     )
     if not gate.get("fab_acceptable", gate["ok"]) or missing_refs:
         print(

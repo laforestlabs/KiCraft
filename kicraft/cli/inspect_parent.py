@@ -115,6 +115,55 @@ def _footprint_courtyard(footprint) -> Bbox:
     return _bbox_from_kibbox(footprint.GetBoundingBox(False, False))
 
 
+def board_utilization(pcb_path: str | Path) -> dict[str, float]:
+    """Exact area-utilization metrics for a .kicad_pcb (no grid rasterization).
+
+    Returns ``area_utilization`` (Σ footprint courtyard-bbox areas / board
+    area), ``aspect_ratio`` (max/min of the Edge.Cuts bbox), and
+    ``bbox_utilization`` (Σ areas / bbox around all courtyards). Mirrors
+    ``placement_utils.board_utilization_metrics`` for the on-disk board so the
+    fab verify line and the fleet report agree with the solver-side numbers.
+    PCB area-compaction plan, Phase 0.
+    """
+    board = pcbnew.LoadBoard(str(pcb_path))
+    outline = _board_outline_bbox(board)
+    courtyards = [_footprint_courtyard(fp) for fp in board.GetFootprints()]
+
+    component_area = sum(c.area for c in courtyards)
+    board_area = outline.area
+    metrics: dict[str, float] = {
+        "component_area_mm2": round(component_area, 3),
+        "board_area_mm2": round(board_area, 3),
+        "board_width_mm": round(outline.width, 3),
+        "board_height_mm": round(outline.height, 3),
+        "footprint_count": len(courtyards),
+        "area_utilization": 0.0,
+        "aspect_ratio": 0.0,
+        "bbox_utilization": 0.0,
+        "placed_bbox_area_mm2": 0.0,
+    }
+    if board_area > 0.0 and component_area > 0.0:
+        metrics["area_utilization"] = round(component_area / board_area, 4)
+    if outline.width > 0.0 and outline.height > 0.0:
+        metrics["aspect_ratio"] = round(
+            max(outline.width, outline.height) / min(outline.width, outline.height),
+            3,
+        )
+    if courtyards:
+        placed = Bbox(
+            min_x=min(c.min_x for c in courtyards),
+            min_y=min(c.min_y for c in courtyards),
+            max_x=max(c.max_x for c in courtyards),
+            max_y=max(c.max_y for c in courtyards),
+        )
+        metrics["placed_bbox_area_mm2"] = round(placed.area, 3)
+        if placed.area > 0.0 and component_area > 0.0:
+            metrics["bbox_utilization"] = round(
+                min(1.0, component_area / placed.area), 4
+            )
+    return metrics
+
+
 def _edge_marker(footprint) -> tuple[float, float] | None:
     """Return ('PCB Edge' marker world position, mm) or None.
 

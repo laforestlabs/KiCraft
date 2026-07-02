@@ -1079,6 +1079,27 @@ def _extract_parent_copper_accounting(project_dir: Path) -> dict[str, int]:
     return {}
 
 
+def _extract_parent_board_metrics(parent_output_json: Path) -> dict[str, float]:
+    """Parent-level utilization/aspect metrics from parent_pipeline.json.
+
+    Reads ``state.packing_metadata.board_metrics`` (stamped by
+    compose_subcircuits; PCB area-compaction plan Phase 0). Returns {} when
+    the file is missing or predates the metric.
+    """
+    try:
+        payload = _load_json(parent_output_json)
+    except Exception:
+        return {}
+    state = payload.get("state", {})
+    if not isinstance(state, dict):
+        return {}
+    packing = state.get("packing_metadata", {})
+    if not isinstance(packing, dict):
+        return {}
+    metrics = packing.get("board_metrics", {})
+    return dict(metrics) if isinstance(metrics, dict) else {}
+
+
 def _extract_parent_board_dimensions(
     parent_output_json: Path,
 ) -> tuple[float, float]:
@@ -1352,6 +1373,7 @@ def _write_live_status(
     top_level_status: str | None = None,
     composition_status: str | None = None,
     copper_accounting: dict[str, int] | None = None,
+    board_metrics: dict[str, float] | None = None,
     current_action: str | None = None,
     current_command: str | None = None,
     preview_paths: dict[str, str] | None = None,
@@ -1433,6 +1455,7 @@ def _write_live_status(
             "top_level_status": hierarchy_top_level_status,
             "composition_status": hierarchy_composition_status,
             "copper_accounting": copper,
+            "board_metrics": dict(board_metrics or {}),
             "leaf_timing_summary": dict(leaf_timing_summary or {}),
         },
         "timestamp_epoch_s": time.time(),
@@ -1486,6 +1509,13 @@ def _write_live_status(
                 (f"  added_parent_traces: {copper.get('added_parent_trace_count', 0)}"),
                 (f"  added_parent_vias: {copper.get('added_parent_via_count', 0)}"),
             ]
+        )
+    if board_metrics:
+        lines.append(
+            "board_metrics: "
+            f"util={float(board_metrics.get('area_utilization', 0.0)) * 100:.1f}% "
+            f"aspect={float(board_metrics.get('aspect_ratio', 0.0)):.2f} "
+            f"bbox_util={float(board_metrics.get('bbox_utilization', 0.0)) * 100:.1f}%"
         )
     if preview_paths:
         lines.append("preview_paths:")
@@ -2592,6 +2622,7 @@ def main(argv: list[str] | None = None) -> int:
                 pass
             parent_routed = parent_route_rc == 0
             parent_copper_accounting = _extract_parent_copper_accounting(project_dir)
+            parent_board_metrics = _extract_parent_board_metrics(parent_output_json)
             parent_routed_validation = _extract_parent_routed_validation(
                 parent_output_json
             )
@@ -2624,6 +2655,7 @@ def main(argv: list[str] | None = None) -> int:
                 if parent_routed
                 else "parent_failed",
                 copper_accounting=parent_copper_accounting,
+                board_metrics=parent_board_metrics,
                 current_action="parent routing complete; scoring round",
                 preview_paths=_discover_live_preview_paths(project_dir, mtime_floor=round_wall_started_at),
                 leaf_timing_summary=leaf_timing_summary,

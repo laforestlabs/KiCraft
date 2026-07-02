@@ -19,6 +19,56 @@ class PackingMetrics(NamedTuple):
     score: float  # 0-100, = min(100, density * fill_multiplier)
 
 
+def board_utilization_metrics(
+    components: dict[str, Component],
+    board_width_mm: float,
+    board_height_mm: float,
+) -> dict[str, float]:
+    """Area-waste metrics for one board (leaf or parent).
+
+    - ``area_utilization``: Σ component courtyard-bbox area / board area.
+    - ``aspect_ratio``: max(w,h)/min(w,h) of the board outline (>= 1.0).
+    - ``bbox_utilization``: Σ area / area of the bbox around all placed
+      component physical extents -- board-outline-independent, so it
+      separates "outline too big" from "parts spread out".
+
+    Degenerate inputs (no components, zero-area board) yield 0.0 metrics
+    rather than a fake-perfect score ("absent != perfect").
+    """
+    board_area = max(0.0, board_width_mm) * max(0.0, board_height_mm)
+    component_area = sum(c.area for c in components.values())
+
+    metrics: dict[str, float] = {
+        "component_area_mm2": round(component_area, 3),
+        "board_area_mm2": round(board_area, 3),
+        "board_width_mm": round(board_width_mm, 3),
+        "board_height_mm": round(board_height_mm, 3),
+        "area_utilization": 0.0,
+        "aspect_ratio": 0.0,
+        "bbox_utilization": 0.0,
+        "placed_bbox_area_mm2": 0.0,
+    }
+    if board_area > 0.0 and component_area > 0.0:
+        metrics["area_utilization"] = round(component_area / board_area, 4)
+    if board_width_mm > 0.0 and board_height_mm > 0.0:
+        metrics["aspect_ratio"] = round(
+            max(board_width_mm, board_height_mm)
+            / min(board_width_mm, board_height_mm),
+            3,
+        )
+    if components:
+        bboxes = [c.physical_bbox() for c in components.values()]
+        placed_w = max(b[1].x for b in bboxes) - min(b[0].x for b in bboxes)
+        placed_h = max(b[1].y for b in bboxes) - min(b[0].y for b in bboxes)
+        placed_area = placed_w * placed_h
+        metrics["placed_bbox_area_mm2"] = round(placed_area, 3)
+        if placed_area > 0.0 and component_area > 0.0:
+            metrics["bbox_utilization"] = round(
+                min(1.0, component_area / placed_area), 4
+            )
+    return metrics
+
+
 def packing_metrics(
     component_area: float,
     placed_bbox_area: float,
