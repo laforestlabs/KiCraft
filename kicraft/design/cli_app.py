@@ -2905,13 +2905,20 @@ def _verify_routed_board(pcb: Path) -> dict:
         if measured:
             courtyard_minor_only = not gross
         else:
-            courtyard_minor_only = (shorts == 0 and unconnected == 0 and keepout == 0)
-            if courtyard_minor_only:
-                warnings.append(
-                    f"courtyard overlap measurement unavailable — treating "
-                    f"{courtyard} overlap(s) as minor (board is electrically clean); "
-                    "inspect 3D render for part clearance"
-                )
+            # 3B: unmeasured + courtyard > 0 is now BLOCKING (rc7), not a
+            # minor waiver. The old behavior waived overlaps of unknown
+            # magnitude as minor when the board was electrically clean —
+            # a CI/degraded-env hole. In production pcbnew IS available,
+            # so this only closes the degraded-env gap. Distinct reason
+            # so it's diagnosable.
+            courtyard_minor_only = False
+            if "courtyard_unmeasured" not in reasons:
+                accepted = False
+                reasons.append("courtyard_unmeasured")
+            warnings.append(
+                f"courtyard overlap measurement unavailable — {courtyard} "
+                f"overlap(s) treated as BLOCKING (cannot verify magnitude)"
+            )
         if courtyard_minor_only:
             warnings.extend(
                 f"minor courtyard overlap {o.ref_a}<->{o.ref_b} "
