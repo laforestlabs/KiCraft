@@ -56,7 +56,7 @@ from .layout_panel import (
 from .rules_panel import PlacementRulesPanel
 from .mailer import send_reset_email, send_verification_email
 from ..parts_library import Tier
-from ..parts_library import jlcparts
+from ..parts_library import jlcparts, lcsc_retail
 from ..tuning.benchmark import briefs as _selfeval_briefs
 from .parts_catalog import (
     catalog,
@@ -99,6 +99,7 @@ from .storage import (
 from .pricing import (  # pure BOM-pricing helpers; fetch/cache stay below
     _LCSC_CODE_RE,
     _fmt_price,
+    _fmt_stock,
     _fmt_total,
     _pick_price,
     _price_key,
@@ -840,7 +841,11 @@ class _SourceUnavailable(Exception):
 # v3 caches so the breaks backfill. v5: keyword/MPN picks prefer Basic parts +
 # a stock floor over bare-cheapest (KC-V8YWN8: the cheapest-Extended 1k pick
 # 404'd on live LCSC); drop v4 caches so old churn-prone picks re-resolve.
-_PRICE_SCHEMA = 5
+# v6: live lcsc.com retail stock rides every pick (retail_stock/retail_min_buy;
+# KC-4AZ7PE: JLC dump said millions, storefront had 0); OOS rows can no longer
+# win kw/mpn picks and id keys never price a substitute part — drop v5 caches
+# so old picks re-resolve and pick up the retail reading.
+_PRICE_SCHEMA = 6
 
 # easyeda.com product endpoint: serves the same data KiCraft fetches symbols and
 # footprints from, and -- unlike jlcpcb.com's keyword-search API -- is NOT behind
@@ -889,7 +894,11 @@ def _easyeda_lcsc_price(cid: str) -> dict | None:
         raise _SourceUnavailable(f"easyeda {cid}: {e}") from e
     result = (data or {}).get("result") or {}
     best = None
-    for tier in ("lcsc", "szlcsc"):  # global LCSC first, then the China catalogue
+    # NB: neither tier tracks the lcsc.com retail storefront — "lcsc" follows
+    # JLC-side inventory (verified: parts the storefront shows sold out report
+    # millions here) and "szlcsc" the China catalogue. Retail stock comes from
+    # lcsc_retail.stock(), not from this endpoint.
+    for tier in ("lcsc", "szlcsc"):
         d = result.get(tier) or {}
         try:
             price = float(d.get("price"))
@@ -904,26 +913,46 @@ def _easyeda_lcsc_price(cid: str) -> dict | None:
     return best
 
 
+def _attach_retail(pick: dict) -> dict:
+    """Best-effort live lcsc.com retail reading for the picked part.
+    ``retail_stock`` None = unverified (endpoint disabled or unreachable):
+    the cost UI shows it as such and ``_load_price_cache`` refuses to merge
+    it, so a reopen re-checks instead of freezing an unknown."""
+    pick["retail_stock"] = None
+    pick["retail_min_buy"] = None
+    cid = pick.get("lcsc")
+    if cid and lcsc_retail.enabled():
+        try:
+            info = lcsc_retail.stock(str(cid))
+            pick["retail_stock"] = info["stock"]
+            pick["retail_min_buy"] = info["min_buy"]
+        except lcsc_retail.RetailUnavailable:
+            pass
+    return pick
+
+
 def _fetch_price(key: str) -> dict:
-    """Resolve one price key to ``{"unit_price","lcsc","stock"}`` (plus
-    ``price_10``/``price_100`` breaks when the offline catalog has them), or
-    raise ``_SourceUnavailable`` when nothing can price it right now.
+    """Resolve one price key to ``{"unit_price","lcsc","stock",
+    "retail_stock","retail_min_buy"}`` (plus ``price_10``/``price_100``
+    breaks when the offline catalog has them), or raise ``_SourceUnavailable``
+    when nothing can price it right now.
 
     ``id:`` keys (curated-library + easyeda-vendored parts, which dominate BOM
     cost) price via the offline JLC catalog first (qty ladder + live stock, no
     network), then the easyeda.com endpoint. ``mpn:``/``kw:`` keys (un-vendored
     MPNs, generic passives) keyword-search the offline catalog; without it
-    installed they have no source (jlcpcb.com's API is WAF-blocked)."""
+    installed they have no source (jlcpcb.com's API is WAF-blocked). Every
+    pick carries a live lcsc.com retail reading (see ``_attach_retail``)."""
     kind, _, query = key.partition(":")
     if kind == "id":
         pick = _jlcparts_price(query) or _easyeda_lcsc_price(query)
         if pick is not None:
-            return pick
+            return _attach_retail(pick)
         raise _SourceUnavailable(f"no price source for {query}")
     pick = _pick_price(kind, query, jlcparts.search(query))
     if pick is None:
         raise _SourceUnavailable(f"keyword pricing unavailable for {query!r}")
-    return pick
+    return _attach_retail(pick)
 
 
 def _safe_fetch(key: str):
@@ -947,6 +976,10 @@ def _load_price_cache(ws: Path) -> None:
         return
     with _PRICE_LOCK:
         for k, v in (data.get("prices") or {}).items():
+            if isinstance(v, dict) and v.get("retail_stock") is None:
+                # Retail was unverified when this was saved — leave the key
+                # unmerged so the reopen re-fetches and self-heals.
+                continue
             if k not in _PRICE_CACHE:
                 _PRICE_CACHE[k] = v if isinstance(v, dict) else None
 
@@ -1114,6 +1147,7 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
         rows, total, priced, pending, blocked = [], 0.0, 0, False, 0
         for p in parts:
             key = _price_key(p)
+            stock_cell = ""
             if key is None:
                 cost = "n/a"
             elif key in prices:
@@ -1122,6 +1156,8 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
                     total += res["unit_price"]
                     priced += 1
                     cost = _fmt_price(res["unit_price"])
+                    stock_cell = (f"{_fmt_stock(res.get('stock'))} / "
+                                  f"{_fmt_stock(res.get('retail_stock'))}")
                 elif res is _UNAVAILABLE:
                     cost = "—"  # priced source unreachable -> not free, just unknown
                     blocked += 1
@@ -1130,22 +1166,26 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
             else:
                 cost = "..."  # fetch in flight
                 pending = True
-            rows.append([p.get("ref"), p.get("value"), cost, _vendor_cell(p, prices),
+            rows.append([p.get("ref"), p.get("value"), cost, stock_cell,
+                         _vendor_cell(p, prices),
                          p.get("footprint"), p.get("sheet"), p.get("symbol")])
         if pending and priced == 0:
             total_txt, note = "pricing...", f"fetching live LCSC prices... (0/{len(parts)} so far)"
         else:
             total_txt = _fmt_total(total)
-            note = f"est. unit price, cheapest in-stock LCSC match ({priced}/{len(parts)} priced)"
+            note = (f"est. unit price, cheapest in-stock LCSC match "
+                    f"({priced}/{len(parts)} priced); stock = JLCPCB assembly "
+                    f"/ lcsc.com retail ('—' = retail unverified)")
             if pending:
                 note = f"fetching live LCSC prices... ({priced}/{len(parts)} so far)"
             elif blocked:
                 note += f"; {blocked} unavailable (live qty-break vendor API blocked)"
         secs = [{"type": "kv", "title": "Summary", "rows": [("parts", len(parts))]},
                 {"type": "table", "title": "Parts",
-                 "columns": ["ref", "value", "cost", "vendor", "footprint", "sheet", "symbol"],
+                 "columns": ["ref", "value", "cost", "stock (JLC/retail)",
+                             "vendor", "footprint", "sheet", "symbol"],
                  "rows": rows,
-                 "foot": [["", "TOTAL (est.)", total_txt, "", "", "", ""]],
+                 "foot": [["", "TOTAL (est.)", total_txt, "", "", "", "", ""]],
                  "note": note}]
         return secs
 
@@ -3755,10 +3795,22 @@ def part_detail_page(name: str):
                                              else "n/a") \
                                         .classes("text-sm font-mono text-white")
                             with ui.column().classes("gap-0 items-start"):
-                                ui.label("in stock").classes("text-xs") \
+                                ui.label("JLC stock").classes("text-xs") \
                                     .style("color:#64748b")
                                 ui.label(f"{res.get('stock') or 0:,}") \
                                     .classes("text-sm font-mono text-white")
+                            with ui.column().classes("gap-0 items-start"):
+                                ui.label("LCSC retail").classes("text-xs") \
+                                    .style("color:#64748b")
+                                retail = res.get("retail_stock")
+                                if retail is None:
+                                    ui.label("unverified").classes("text-xs") \
+                                        .style("color:#64748b;padding-top:2px")
+                                else:
+                                    ui.label(f"{retail:,}") \
+                                        .classes("text-sm font-mono") \
+                                        .style("color:#f87171" if retail == 0
+                                               else "color:#ffffff")
                         else:  # _UNAVAILABLE
                             ui.label("Live pricing unavailable (vendor API "
                                      "blocked).").classes("text-sm") \
@@ -3769,7 +3821,9 @@ def part_detail_page(name: str):
                     timer = ui.timer(1.0,
                                      lambda: _fill_price() and timer.deactivate())
                 ui.label("LCSC pricing; 10/100-pc breaks come from the offline "
-                         "JLC catalog when it covers the part.").classes("text-xs") \
+                         "JLC catalog when it covers the part. JLC stock = "
+                         "JLCPCB assembly inventory; LCSC retail = live "
+                         "lcsc.com storefront.").classes("text-xs") \
                     .style("color:#64748b")
 
         with ui.card().classes("w-full") \

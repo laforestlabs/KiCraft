@@ -47,7 +47,8 @@ def dump_age_days() -> float | None:
     weeks-old snapshot are routinely stale — KC-V8YWN8's cheapest 1k pick was
     delisted on live LCSC three weeks after the dump was built — so verifiers
     should show this next to any 'REAL/in stock' verdict, and hosts should
-    re-run ``kicraft jlcparts-update`` on a schedule (weekly is plenty)."""
+    re-run ``kicraft jlcparts-update`` on a schedule (daily: the §9.26 gate
+    hard-blocks on this dump's JLC stock, and upstream publishes nightly)."""
     import time
     try:
         return max(0.0, (time.time() - db_path().stat().st_mtime) / 86400.0)

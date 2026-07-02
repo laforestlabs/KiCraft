@@ -1,17 +1,20 @@
-"""§9.26 — _resolve_bom_mpn_sourcing: every BOM part that names an MPN must be
-a real, orderable LCSC part.
+"""§9.26 — _resolve_bom_mpn_sourcing: every BOM part must be a real part in
+stock BOTH for JLCPCB assembly (offline jlcparts dump) AND at the lcsc.com
+retail storefront (live lcsc_retail check).
 
-Regression source (KC-T6ERHM): J1/J2 shipped an out-of-stock terminal block and
-D1/L1 carried MPNs no pipeline stage ever verified — MPN strings on
-stock-symbol parts were unchecked LLM prose, and the fab BOM's LCSC column
-shipped blank. The gate verifies against the offline jlcparts catalog and
-auto-pins confident matches into sourcing_note (where fab_export reads the C#).
+Regression sources: KC-T6ERHM (J1/J2 shipped an out-of-stock terminal block;
+MPN strings were unchecked LLM prose and the fab BOM's LCSC column shipped
+blank) and KC-4AZ7PE (auto-picked 0603 passives had millions in the JLC dump
+but 0 at the retail storefront — the two inventories are separate pools).
+The gate verifies against the offline catalog + live retail and auto-pins
+confident matches into sourcing_note (where fab_export reads the C#).
 """
 from __future__ import annotations
 
 import kicraft.design.cli_app as cli_app
 from kicraft.design.cli_app import _resolve_bom_mpn_sourcing
 from kicraft.design.models import BOM, BomPart
+from kicraft.parts_library.lcsc_retail import RetailUnavailable
 
 
 def _part(ref="D1", mpn="SS34", note=None, symbol="Device:D_Schottky",
@@ -29,13 +32,17 @@ class _FakeCatalog:
     pure keyword helpers delegate to the real module — they touch no I/O and
     the gate's tier-4 behavior depends on their real normalization."""
 
-    def __init__(self, by_mpn=None, by_lcsc=None, up=True):
+    def __init__(self, by_mpn=None, by_lcsc=None, up=True, age=None):
         self.by_mpn = by_mpn or {}
         self.by_lcsc = by_lcsc or {}
         self.up = up
+        self.age = age
 
     def available(self):
         return self.up
+
+    def dump_age_days(self):
+        return self.age
 
     def search(self, query, limit=10):
         return self.by_mpn.get(query.upper(), [])
@@ -59,8 +66,48 @@ class _FakeCatalog:
         return is_unsourceable_hardware(footprint)
 
 
-def _install(monkeypatch, catalog):
+class _FakeRetail:
+    """Stands in for the lcsc_retail module. Default: everything plentiful at
+    retail, so tests that aren't about retail behave as before the check."""
+
+    RetailUnavailable = RetailUnavailable
+
+    def __init__(self, by_lcsc=None, up=True, on=True, default_stock=1_000_000):
+        self.by_lcsc = by_lcsc or {}
+        self.up = up
+        self.on = on
+        self.default_stock = default_stock
+        self.calls: list[str] = []
+
+    def enabled(self):
+        return self.on
+
+    def retail_floor(self):
+        import os
+        try:
+            return int(os.environ.get("KICRAFT_BOM_RETAIL_STOCK_FLOOR", "")
+                       or 100)
+        except ValueError:
+            return 100
+
+    def stock(self, cid):
+        cid = str(cid).upper()
+        self.calls.append(cid)
+        if not self.up:
+            raise RetailUnavailable("storefront down")
+        e = self.by_lcsc.get(cid, {"stock": self.default_stock, "min_buy": 1})
+        return {"lcsc": cid, "stock": e["stock"],
+                "min_buy": e.get("min_buy", 1), "checked_at": "t"}
+
+    def in_stock(self, cid, *, picky):
+        info = self.stock(cid)
+        need = max(info["min_buy"], self.retail_floor() if picky else 1)
+        return info["stock"] >= need, info
+
+
+def _install(monkeypatch, catalog, retail=None):
     monkeypatch.setattr(cli_app, "jlcparts", catalog)
+    monkeypatch.setattr(cli_app, "lcsc_retail", retail or _FakeRetail())
     # No library bundles in play: parts resolve purely by MPN in these tests.
     monkeypatch.setattr(cli_app, "_load_library_parts", lambda root: ([], []))
 
@@ -69,15 +116,16 @@ def test_real_mpn_is_auto_pinned_into_sourcing_note(tmp_path, monkeypatch):
     _install(monkeypatch, _FakeCatalog(by_mpn={
         "SS34": [{"lcsc": "C8678", "model": "SS34", "stock": 3941831}]}))
     p = _part()
-    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == []
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
     assert p.sourcing_note == "LCSC C8678"
 
 
 def test_hallucinated_mpn_is_an_offender(tmp_path, monkeypatch):
     _install(monkeypatch, _FakeCatalog())
     p = _part(mpn="TOTALLYFAKE-99")
-    bad = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    bad, warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
     assert len(bad) == 1 and "TOTALLYFAKE-99" in bad[0] and "not found" in bad[0]
+    assert warns == []
     assert p.sourcing_note is None  # never pin what we couldn't verify
 
 
@@ -87,8 +135,8 @@ def test_low_stock_is_an_offender(tmp_path, monkeypatch):
         "SRR1280-100M": [{"lcsc": "C2041557", "model": "SRR1280-100M", "stock": 49}]}))
     p = _part(ref="L1", mpn="SRR1280-100M", symbol="Device:L",
               footprint="Inductor_SMD:L_12x12mm_H4.5mm")
-    bad = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
-    assert len(bad) == 1 and "49 in stock" in bad[0]
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    assert len(bad) == 1 and "JLC stock 49" in bad[0]
     assert p.sourcing_note is None
 
 
@@ -97,7 +145,7 @@ def test_stock_floor_env_override(tmp_path, monkeypatch):
     _install(monkeypatch, _FakeCatalog(by_mpn={
         "SRR1280-100M": [{"lcsc": "C2041557", "model": "SRR1280-100M", "stock": 49}]}))
     p = _part(ref="L1", mpn="SRR1280-100M")
-    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == []
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
     assert p.sourcing_note == "LCSC C2041557"
 
 
@@ -107,7 +155,7 @@ def test_family_prefix_match_pins_the_orderable_variant(tmp_path, monkeypatch):
         "SS34": [{"lcsc": "C407539", "model": "SS34F", "stock": 900000},
                  {"lcsc": "C8678", "model": "SS34", "stock": 100}]}))
     p = _part()
-    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == []
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
     assert p.sourcing_note == "LCSC C407539"
 
 
@@ -116,14 +164,14 @@ def test_explicit_sourcing_note_lcsc_is_verified_not_searched(tmp_path, monkeypa
                                           "stock": 148617}})
     _install(monkeypatch, cat)
     p = _part(ref="U1", mpn="TPS5430DDAR", note="LCSC C9864 (buck IC)")
-    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == []
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
     assert p.sourcing_note == "LCSC C9864 (buck IC)"  # untouched
 
 
 def test_fabricated_sourcing_note_lcsc_is_an_offender(tmp_path, monkeypatch):
     _install(monkeypatch, _FakeCatalog())
     p = _part(ref="U1", mpn="TPS5430DDAR", note="LCSC C99999999")
-    bad = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
     assert len(bad) == 1 and "C99999999" in bad[0]
 
 
@@ -136,7 +184,7 @@ def test_mpnless_passive_with_no_match_stays_unpinned_not_blocked(
     _install(monkeypatch, _FakeCatalog())
     p = _part(ref="C1", mpn=None, symbol="Device:C",
               footprint="Capacitor_SMD:C_0603_1608Metric")
-    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == []
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
     assert p.sourcing_note is None
 
 
@@ -154,7 +202,7 @@ def test_mpnless_passive_is_keyword_pinned(tmp_path, monkeypatch):
     p = _part(ref="C1", mpn=None, symbol="Device:C",
               footprint="Capacitor_SMD:C_0603_1608Metric")
     p.value = "100nF"
-    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == []
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
     assert p.sourcing_note == "LCSC C1590"
 
 
@@ -166,7 +214,7 @@ def test_keyword_pick_prefers_basic_over_stocked_extended(tmp_path, monkeypatch)
     p = _part(ref="R2", mpn=None, symbol="Device:R",
               footprint="Resistor_SMD:R_0603_1608Metric")
     p.value = "1k"
-    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == []
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
     assert p.sourcing_note == "LCSC CBAS"
 
 
@@ -178,7 +226,7 @@ def test_keyword_qualifiers_relax_on_miss(tmp_path, monkeypatch):
     p = _part(ref="C2", mpn=None, symbol="Device:C",
               footprint="Capacitor_SMD:C_0603_1608Metric")
     p.value = "0.1uF 25V X7R"
-    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == []
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
     assert p.sourcing_note == "LCSC C14663"
 
 
@@ -191,7 +239,7 @@ def test_pin_header_kicadism_is_normalized_and_pinned(tmp_path, monkeypatch):
     p = _part(ref="J2", mpn=None, symbol="Connector_Generic:Conn_01x02",
               footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical")
     p.value = "PinHeader_1x02"
-    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == []
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
     assert p.sourcing_note == "LCSC C492401"
 
 
@@ -200,7 +248,7 @@ def test_test_points_are_not_sourcing_offenders(tmp_path, monkeypatch):
     p = _part(ref="TP1", mpn=None, symbol="Connector:TestPoint",
               footprint="TestPoint:TestPoint_Pad_D1.5mm")
     p.value = "TestPoint"
-    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == []
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
     assert p.sourcing_note is None
 
 
@@ -208,32 +256,208 @@ def test_part_with_nothing_searchable_is_an_offender(tmp_path, monkeypatch):
     _install(monkeypatch, _FakeCatalog())
     p = _part(ref="X1", mpn=None, symbol="foo:bar", footprint="foo:bar")
     p.value = ""
-    bad = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
     assert len(bad) == 1 and "X1" in bad[0] and "unsourceable" in bad[0]
 
 
 def test_catalog_unavailable_fails_open(tmp_path, monkeypatch):
     _install(monkeypatch, _FakeCatalog(up=False))
     p = _part(mpn="TOTALLYFAKE-99")
-    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == []
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
     assert p.sourcing_note is None
 
 
-def test_library_bundle_parts_are_skipped(tmp_path, monkeypatch):
-    """Parts whose symbol resolves to a library bundle with a manifest LCSC are
-    the _unresolved_lcsc gate's territory — no search, no pin here."""
+# ------------------------------------------------- library bundles (stock)
 
-    class _Man:
-        name = "tps5430"
-        sourcing = {"lcsc": "C9864"}
+class _Man:
+    name = "tps5430"
+    sourcing = {"lcsc": "C9864"}
 
-    class _Loaded:
-        manifest = _Man()
 
-    monkeypatch.setattr(cli_app, "jlcparts", _FakeCatalog())  # search would MISS
+class _Loaded:
+    manifest = _Man()
+
+
+def _install_bundle(monkeypatch, catalog, retail=None):
+    monkeypatch.setattr(cli_app, "jlcparts", catalog)
+    monkeypatch.setattr(cli_app, "lcsc_retail", retail or _FakeRetail())
     monkeypatch.setattr(cli_app, "_load_library_parts",
                         lambda root: ([_Loaded()], []))
-    p = _part(ref="U1", mpn="TPS5430DDAR", symbol="tps5430:TPS5430DDAR",
-              footprint="tps5430:ESOP-8")
-    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == []
+
+
+def _bundle_part():
+    return _part(ref="U1", mpn="TPS5430DDAR", symbol="tps5430:TPS5430DDAR",
+                 footprint="tps5430:ESOP-8")
+
+
+def test_library_bundle_in_stock_everywhere_passes_unpinned(tmp_path, monkeypatch):
+    """Existence stays the _unresolved_lcsc gate's territory — no search, no
+    pin here — but the manifest C# is now stock-checked in both inventories."""
+    _install_bundle(monkeypatch, _FakeCatalog(by_lcsc={
+        "C9864": {"lcsc": "C9864", "model": "TPS5430DDAR", "stock": 148617}}))
+    p = _bundle_part()
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
     assert p.sourcing_note is None
+
+
+def test_library_bundle_low_jlc_stock_is_an_offender(tmp_path, monkeypatch):
+    # Bundles were previously exempt from stock checks entirely.
+    _install_bundle(monkeypatch, _FakeCatalog(by_lcsc={
+        "C9864": {"lcsc": "C9864", "model": "TPS5430DDAR", "stock": 12}}))
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(_bundle_part()), tmp_path)
+    assert len(bad) == 1 and "tps5430" in bad[0] and "only 12" in bad[0]
+    assert "add_part_from_lcsc" in bad[0]
+
+
+def test_library_bundle_retail_dry_is_an_offender(tmp_path, monkeypatch):
+    _install_bundle(
+        monkeypatch,
+        _FakeCatalog(by_lcsc={
+            "C9864": {"lcsc": "C9864", "model": "TPS5430DDAR", "stock": 148617}}),
+        _FakeRetail(by_lcsc={"C9864": {"stock": 0, "min_buy": 1}}))
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(_bundle_part()), tmp_path)
+    assert len(bad) == 1 and "retail storefront" in bad[0]
+    assert "add_part_from_lcsc" in bad[0]
+
+
+def test_shared_bundle_lcsc_is_live_checked_once(tmp_path, monkeypatch):
+    retail = _FakeRetail()
+    _install_bundle(monkeypatch, _FakeCatalog(by_lcsc={
+        "C9864": {"lcsc": "C9864", "model": "TPS5430DDAR", "stock": 148617}}),
+        retail)
+    parts = [_bundle_part() for _ in range(5)]
+    for i, p in enumerate(parts):
+        p.ref = f"U{i + 1}"
+    assert _resolve_bom_mpn_sourcing(_bom(*parts), tmp_path) == ([], [])
+    assert retail.calls == ["C9864"]  # memoized per gate pass
+
+
+# ------------------------------------------------- retail-dry picks (KC-4AZ7PE)
+
+def test_explicit_pin_retail_dry_is_an_offender_naming_both(tmp_path, monkeypatch):
+    # The KC-4AZ7PE shape: millions in the JLC dump, 0 at the storefront.
+    _install(monkeypatch,
+             _FakeCatalog(by_lcsc={
+                 "C25804": {"lcsc": "C25804", "model": "0603WAF1002T5E",
+                            "stock": 7_612_043}}),
+             _FakeRetail(by_lcsc={"C25804": {"stock": 0, "min_buy": 100}}))
+    p = _part(ref="R1", mpn=None, note="LCSC C25804")
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    assert len(bad) == 1
+    assert "JLCPCB assembly" in bad[0] and "retail storefront" in bad[0]
+    assert "BOTH" in bad[0]
+
+
+def test_explicit_pin_low_retail_but_orderable_passes(tmp_path, monkeypatch):
+    # Veto threshold is the listing's own min buy, not the picky floor: a
+    # deliberately chosen niche part with 40 sellable units is orderable.
+    _install(monkeypatch,
+             _FakeCatalog(by_lcsc={
+                 "C77": {"lcsc": "C77", "model": "NICHE-IC", "stock": 9000}}),
+             _FakeRetail(by_lcsc={"C77": {"stock": 40, "min_buy": 1}}))
+    p = _part(ref="U3", mpn=None, note="LCSC C77")
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
+
+
+def test_mpn_walk_skips_retail_dry_variant_to_next_in_stock(tmp_path, monkeypatch):
+    _install(monkeypatch,
+             _FakeCatalog(by_mpn={"SS34": [
+                 {"lcsc": "C407539", "model": "SS34F", "stock": 900_000},
+                 {"lcsc": "C8678", "model": "SS34", "stock": 800_000}]}),
+             _FakeRetail(by_lcsc={"C407539": {"stock": 0, "min_buy": 1}}))
+    p = _part()
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
+    assert p.sourcing_note == "LCSC C8678"  # dry SS34F skipped, not bounced
+
+
+def test_mpn_walk_exhausted_is_an_offender_enumerating_tries(tmp_path, monkeypatch):
+    _install(monkeypatch,
+             _FakeCatalog(by_mpn={"SS34": [
+                 {"lcsc": "C407539", "model": "SS34F", "stock": 900_000},
+                 {"lcsc": "C8678", "model": "SS34", "stock": 100}]}),
+             _FakeRetail(by_lcsc={"C407539": {"stock": 0, "min_buy": 1}}))
+    p = _part()
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    assert len(bad) == 1 and "no orderable variant" in bad[0]
+    assert "SS34F" in bad[0] and "retail stock 0" in bad[0]
+    assert "SS34 (C8678) JLC stock 100" in bad[0]
+    assert p.sourcing_note is None
+
+
+def test_kw_walk_picks_next_candidate_when_basic_is_retail_dry(tmp_path, monkeypatch):
+    _install(monkeypatch,
+             _kw_catalog("1k 0603", [
+                 {"lcsc": "CEXT", "model": "CHURN", "stock": 2_000_000,
+                  "type": "Extended"},
+                 {"lcsc": "CBAS", "model": "0603WAF1001T5E", "stock": 900_000,
+                  "type": "Basic"}]),
+             _FakeRetail(by_lcsc={"CBAS": {"stock": 0, "min_buy": 100}}))
+    p = _part(ref="R2", mpn=None, symbol="Device:R",
+              footprint="Resistor_SMD:R_0603_1608Metric")
+    p.value = "1k"
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
+    assert p.sourcing_note == "LCSC CEXT"  # Basic preferred but dry → next
+
+
+def test_kw_walk_exhausted_stays_unpinned_with_warning_not_offender(
+        tmp_path, monkeypatch):
+    retail = _FakeRetail(default_stock=0)  # everything dry at retail
+    _install(monkeypatch,
+             _kw_catalog("1k 0603", [
+                 {"lcsc": "CBAS", "model": "0603WAF1001T5E", "stock": 900_000,
+                  "type": "Basic"}]),
+             retail)
+    p = _part(ref="R2", mpn=None, symbol="Device:R",
+              footprint="Resistor_SMD:R_0603_1608Metric")
+    p.value = "1k"
+    bad, warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    assert bad == []
+    assert len(warns) == 1 and "R2" in warns[0] and "retail" in warns[0]
+    assert p.sourcing_note is None
+
+
+def test_kw_walk_respects_the_live_check_cap(tmp_path, monkeypatch):
+    rows = [{"lcsc": f"C{i}", "model": f"R{i}", "stock": 1_000_000,
+             "type": "Extended"} for i in range(10)]
+    retail = _FakeRetail(default_stock=0)  # all dry → full walk
+    _install(monkeypatch, _kw_catalog("1k 0603", rows), retail)
+    p = _part(ref="R2", mpn=None, symbol="Device:R",
+              footprint="Resistor_SMD:R_0603_1608Metric")
+    p.value = "1k"
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    assert bad == [] and p.sourcing_note is None
+    assert len(retail.calls) == cli_app._RETAIL_WALK_CAP_KW
+
+
+def test_retail_outage_fails_open_with_a_warning(tmp_path, monkeypatch):
+    _install(monkeypatch,
+             _FakeCatalog(by_mpn={
+                 "SS34": [{"lcsc": "C8678", "model": "SS34", "stock": 3_941_831}]}),
+             _FakeRetail(up=False))
+    p = _part()
+    bad, warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    assert bad == []
+    assert p.sourcing_note == "LCSC C8678"  # accepted, not bounced
+    assert len(warns) == 1 and "unverified" in warns[0] and "C8678" in warns[0]
+
+
+def test_retail_disabled_makes_zero_live_calls_and_no_warnings(
+        tmp_path, monkeypatch):
+    retail = _FakeRetail(on=False, default_stock=0)  # would be dry if consulted
+    _install(monkeypatch,
+             _FakeCatalog(by_mpn={
+                 "SS34": [{"lcsc": "C8678", "model": "SS34", "stock": 3_941_831}]}),
+             retail)
+    p = _part()
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
+    assert p.sourcing_note == "LCSC C8678"
+    assert retail.calls == []
+
+
+def test_stale_dump_age_emits_a_warning(tmp_path, monkeypatch):
+    _install(monkeypatch, _FakeCatalog(by_mpn={
+        "SS34": [{"lcsc": "C8678", "model": "SS34", "stock": 3_941_831}]},
+        age=21.0))
+    bad, warns = _resolve_bom_mpn_sourcing(_bom(_part()), tmp_path)
+    assert bad == []
+    assert any("21 days old" in w and "jlcparts-update" in w for w in warns)

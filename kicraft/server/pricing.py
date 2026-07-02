@@ -124,13 +124,16 @@ def _stock_floor() -> int:
 
 def _pick_price(kind: str, query: str, results: list[dict]) -> dict | None:
     """Choose one JLCPCB search result and pull its unit price. For an LCSC id
-    the exact id wins (it names a specific part). For an MPN/keyword, prefer
-    JLC **Basic** parts, then rows clearing the stock floor, then cheapest.
-    Cheapest-only (the old rule) systematically landed on $0.0008 Extended
-    long-tail listings that delist within weeks of the offline dump; Basic
-    parts are JLC's stable no-setup-fee tier and are the anti-churn signal.
-    Cheapest still breaks ties (a vague MPN/keyword pulls in false positives:
-    e.g. "USB1046" returns both $4+ TI TUSB1046 muxes and the $0.84 GCT USB
+    the exact id wins (it names a specific part; a different row must never be
+    priced in its place — None when the exact id is absent). For an
+    MPN/keyword, only in-stock rows are eligible (an out-of-stock part must
+    never be selected — None beats a dead pick), preferring JLC **Basic**
+    parts, then rows clearing the stock floor, then cheapest. Cheapest-only
+    (the old rule) systematically landed on $0.0008 Extended long-tail
+    listings that delist within weeks of the offline dump; Basic parts are
+    JLC's stable no-setup-fee tier and are the anti-churn signal. Cheapest
+    still breaks ties (a vague MPN/keyword pulls in false positives: e.g.
+    "USB1046" returns both $4+ TI TUSB1046 muxes and the $0.84 GCT USB
     connector, and the connector is the one we want). Returns ``{"unit_price",
     "lcsc","stock","type"}`` or None when nothing usable came back. Pure: no
     network."""
@@ -142,11 +145,18 @@ def _pick_price(kind: str, query: str, results: list[dict]) -> dict | None:
     priced = [r for r in results if (price_of(r) or 0) > 0]
     if not priced:
         return None
-    pool = [x for x in priced if (x.get("stock") or 0) > 0] or priced
     if kind == "id":
-        r = next((x for x in pool if str(x.get("lcsc", "")).upper() == query.upper()),
-                 min(pool, key=price_of))
+        # The id names the exact part the BOM ships: price it even when out
+        # of stock (its stock rides along so the UI can flag it) and never
+        # substitute another row.
+        r = next((x for x in priced
+                  if str(x.get("lcsc", "")).upper() == query.upper()), None)
+        if r is None:
+            return None
     else:
+        pool = [x for x in priced if (x.get("stock") or 0) > 0]
+        if not pool:
+            return None  # honest "no price" beats pricing a dead pick
         floor = _stock_floor()
         r = min(pool, key=lambda x: (
             0 if x.get("type") == "Basic" else 1,
@@ -159,6 +169,22 @@ def _pick_price(kind: str, query: str, results: list[dict]) -> dict | None:
 
 def _fmt_price(x: float) -> str:
     return f"${x:.4f}"
+
+
+def _fmt_stock(n) -> str:
+    """Compact stock count for the BOM table: 8912345 -> '8.9M', 16614 ->
+    '16.6k', 0 -> '0', None -> '—' (unverified/unknown)."""
+    if n is None:
+        return "—"
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return "—"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
 
 
 def _fmt_total(x: float) -> str:

@@ -220,6 +220,83 @@ def test_parse_easyeda_search_flattens_and_dedupes():
     assert rows[1]["package"] is None  # non-dict dataStr tolerated
 
 
+# ---------- live retail stock on lookup results ----------
+
+
+class _FakeRetail:
+    """Stands in for cli_app.lcsc_retail (module attribute monkeypatch), so
+    these tests bypass the suite-wide KICRAFT_LCSC_RETAIL=0 guard without any
+    network."""
+
+    from kicraft.parts_library.lcsc_retail import RetailUnavailable
+
+    def __init__(self, by=None, up=True):
+        self.by = by or {}
+        self.up = up
+
+    def enabled(self):
+        return True
+
+    def retail_floor(self):
+        return 100
+
+    def stock(self, cid):
+        if not self.up:
+            raise self.RetailUnavailable("storefront down")
+        e = self.by.get(str(cid).upper(), {"stock": 100_000, "min_buy": 1})
+        return {"lcsc": str(cid).upper(), "stock": e["stock"],
+                "min_buy": e.get("min_buy", 1), "checked_at": "t"}
+
+    def in_stock(self, cid, *, picky):
+        info = self.stock(cid)
+        need = max(info["min_buy"], self.retail_floor() if picky else 1)
+        return info["stock"] >= need, info
+
+
+def test_lookup_jlcparts_retail_dry_winner_surfaces_candidates(
+        capsys, monkeypatch, tmp_path):
+    # KC-4AZ7PE: JLC stock alone isn't orderable. A catalog winner that is
+    # dry at the lcsc.com storefront must NOT resolve — the model gets the
+    # candidate list now instead of a §9.26 bounce a commit later.
+    _mk_catalog(tmp_path, monkeypatch, [
+        (190004, "VL53L1CXV0FY/1", "LGA-12", "ST", "expand", 5640, "1-:4.8", "ToF"),
+    ])
+    monkeypatch.setattr(cli_app, "lcsc_retail",
+                        _FakeRetail({"C190004": {"stock": 0, "min_buy": 1}}))
+    rc, payload = _run(capsys, "lookup-lcsc-id", "VL53L1CXV0FY/1")
+    assert rc == 4 and payload["ok"] is False
+    assert "retail storefront" in payload["hint"]
+    assert [c["lcsc"] for c in payload["candidates"]] == ["C190004"]
+    from kicraft.parts_library import mpn_cache
+    assert mpn_cache.get("VL53L1CXV0FY/1") is None  # dry winner never cached
+
+
+def test_lookup_payloads_carry_retail_stock(capsys, monkeypatch, tmp_path):
+    monkeypatch.setattr(cli_app, "lcsc_retail",
+                        _FakeRetail({"C7386355": {"stock": 4321, "min_buy": 5}}))
+    rc, payload = _run(capsys, "lookup-lcsc-id", "C7386355")
+    assert rc == 0 and payload["source"] == "explicit-id"
+    assert payload["retail_stock"] == 4321 and payload["retail_min_buy"] == 5
+
+    _mk_catalog(tmp_path, monkeypatch, [
+        (190004, "VL53L1CXV0FY/1", "LGA-12", "ST", "expand", 5640, "1-:4.8", "ToF"),
+    ])
+    rc, payload = _run(capsys, "lookup-lcsc-id", "VL53L1CXV0FY/1")
+    assert rc == 0 and payload["source"] == "jlcparts"
+    assert payload["retail_stock"] == 100_000  # fake default: plentiful
+
+
+def test_lookup_retail_outage_is_unverified_not_blocking(
+        capsys, monkeypatch, tmp_path):
+    _mk_catalog(tmp_path, monkeypatch, [
+        (190004, "VL53L1CXV0FY/1", "LGA-12", "ST", "expand", 5640, "1-:4.8", "ToF"),
+    ])
+    monkeypatch.setattr(cli_app, "lcsc_retail", _FakeRetail(up=False))
+    rc, payload = _run(capsys, "lookup-lcsc-id", "VL53L1CXV0FY/1")
+    assert rc == 0 and payload["lcsc"] == "C190004"  # fail open
+    assert payload["retail"] == "unverified"
+
+
 def test_pick_lcsc_zero_stock_exact_defers_to_in_stock_candidates():
     # "VL53L1X" exact-matches a zero-stock placeholder row; the orderable
     # real MPN (in stock) must surface as a candidate instead of losing.

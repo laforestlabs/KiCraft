@@ -28,8 +28,10 @@ import time
 from pathlib import Path
 
 from kicraft.design import models
+from kicraft.parts_library import jlcparts
 
 from .client import make_client
+from .pricing import _stock_floor
 
 # The repo venv has no `kicraft` console script; cli_app.py has a __main__ guard.
 KICRAFT = [sys.executable, "-m", "kicraft.design.cli_app"]
@@ -167,6 +169,11 @@ def _stage_extra(stage: str) -> str:
             "pins); lookup_footprint (verify a footprint exists + pad count); lookup_lcsc_id "
             "(MPN/keyword -> LCSC C-number); add_part_from_lcsc (fetch a real symbol+footprint "
             "bundle into the project).\n"
+            "- STOCK IS A HARD GATE: never specify an out-of-stock part. A pick must be in "
+            "stock BOTH for JLCPCB assembly ('stock' in lookup_lcsc_id output) AND at the "
+            "lcsc.com retail storefront ('retail_stock'); the commit gate bounces a pick that "
+            "fails either. Generic passives always have in-stock equivalents — never fight "
+            "for a specific dry C#.\n"
             "- NEVER guess a stock 'Library:Name'. If unsure of the exact symbol OR footprint id, "
             "call search_symbols / search_footprints by keyword (e.g. 'conn 02x08', "
             "'pinheader 2x08', 'barreljack') to find it; a symbol or footprint that does not "
@@ -236,8 +243,28 @@ def _format_core_defaults_block(rows) -> str | None:
     synced into /admin/core-components). The notes and price/stock snapshots
     are deliberately dropped; this table rides the user prompt through every
     BOM tool round, so it must stay small (~6KB for 43 rows). Rows the admin
-    disabled are skipped; None when nothing remains."""
+    disabled are skipped, and rows whose default C# is missing or below the
+    JLC stock floor in the current offline catalog are omitted (with a caveat
+    line) so the model never adopts a dry default — no live retail lookup
+    here; the lookup tool + §9.26 gate own that. None when nothing remains."""
     live = [r for r in (rows or []) if r.get("enabled", True)]
+    dropped = []
+    if live and jlcparts.available():
+        floor = _stock_floor()
+        kept = []
+        for r in live:
+            cid = (r.get("default_lcsc") or "").strip()
+            if cid:
+                hit = jlcparts.lookup(cid)
+                # None = pruned out of the catalog (curated C#s are real
+                # parts, so absence means effectively dry) — same fate as a
+                # sub-floor row.
+                if hit is None or (hit.get("stock") or 0) < floor:
+                    dropped.append(
+                        f"{r.get('function_key')} ({r.get('default_mpn')})")
+                    continue
+            kept.append(r)
+        live = kept
     if not live:
         return None
     lines = [
@@ -269,6 +296,10 @@ def _format_core_defaults_block(rows) -> str | None:
                 "is required, research an alternative instead of adopting it.")
     if caveats:
         lines += ["", "### Package caveats", *caveats]
+    if dropped:
+        lines += ["", f"({len(dropped)} core default(s) omitted — below the "
+                      f"JLC stock floor in the current catalog: "
+                      f"{', '.join(dropped)})"]
     return "\n".join(lines)
 
 

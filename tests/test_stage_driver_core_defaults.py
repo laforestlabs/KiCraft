@@ -10,6 +10,8 @@ call. Offline: real stage-prep subprocesses, fake LLM client, no network.
 """
 from __future__ import annotations
 
+import pytest
+
 from kicraft.parts_library.core_blocks import load_core_catalog, resolve_block
 from kicraft.server.session import run_session
 from kicraft.server.stage_driver import (
@@ -17,6 +19,16 @@ from kicraft.server.stage_driver import (
     build_system,
     drive_stage,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_local_jlc_catalog(tmp_path_factory, monkeypatch):
+    """Point the offline JLC catalog at a missing file: the formatter now
+    drops rows that are dry in the catalog, and these tests must not depend
+    on whichever real dump the host happens to have installed (fail-open =
+    unfiltered). The filtering itself is tested below with a fixture DB."""
+    monkeypatch.setenv("KICRAFT_JLCPARTS_DB",
+                       str(tmp_path_factory.mktemp("jlc") / "absent.sqlite3"))
 
 
 def _catalog_rows() -> list[dict]:
@@ -61,6 +73,61 @@ def test_block_filters_disabled_and_empties_to_none():
     assert _format_core_defaults_block(rows) is None
     rows[0]["enabled"] = True
     assert "x-block" in _format_core_defaults_block(rows)
+
+
+def _mk_catalog(tmp_path, monkeypatch, rows):
+    import sqlite3
+    db = tmp_path / "jlc.sqlite3"
+    con = sqlite3.connect(db)
+    con.execute("""CREATE TABLE jlc_components (
+        lcsc INTEGER PRIMARY KEY, mfr TEXT, package TEXT, manufacturer TEXT,
+        library_type TEXT, stock INTEGER, price TEXT, description TEXT)""")
+    con.executemany("INSERT INTO jlc_components VALUES (?,?,?,?,?,?,?,?)", rows)
+    con.commit()
+    con.close()
+    monkeypatch.setenv("KICRAFT_JLCPARTS_DB", str(db))
+
+
+def _row(key, mpn, lcsc):
+    return {"function_key": key, "display_name": key, "qualifier": None,
+            "default_mpn": mpn, "default_lcsc": lcsc, "package": "SOIC-8",
+            "enabled": True}
+
+
+def test_block_drops_rows_dry_in_the_catalog_with_a_caveat(tmp_path, monkeypatch):
+    # A core default the current dump shows draining (or pruned out entirely)
+    # must not be offered to the model as a no-research adoption.
+    _mk_catalog(tmp_path, monkeypatch, [
+        (100, "GOOD-IC", "SOIC-8", "x", "base", 500_000, "1-:0.1", "good"),
+        (200, "DRY-IC", "SOIC-8", "x", "expand", 12, "1-:0.1", "draining"),
+    ])
+    block = _format_core_defaults_block([
+        _row("good-block", "GOOD-IC", "C100"),
+        _row("dry-block", "DRY-IC", "C200"),
+        _row("gone-block", "GONE-IC", "C300"),  # pruned out of the catalog
+    ])
+    assert "good-block" in block
+    assert "| dry-block |" not in block and "| gone-block |" not in block
+    assert "2 core default(s) omitted" in block
+    assert "DRY-IC" in block and "GONE-IC" in block  # named in the caveat
+
+
+def test_block_keeps_lcsc_less_series_rows_when_filtering(tmp_path, monkeypatch):
+    # Passive-series rows carry no C-number: nothing to stock-check.
+    _mk_catalog(tmp_path, monkeypatch, [
+        (100, "GOOD-IC", "SOIC-8", "x", "base", 500_000, "1-:0.1", "good"),
+    ])
+    row = _row("passive-series", "UNI-ROYAL 0603WAF series", None)
+    block = _format_core_defaults_block([_row("good-block", "GOOD-IC", "C100"),
+                                         row])
+    assert "passive-series" in block and "omitted" not in block
+
+
+def test_block_unfiltered_when_catalog_absent(tmp_path, monkeypatch):
+    # Fail open: with no dump installed the block renders as before.
+    monkeypatch.setenv("KICRAFT_JLCPARTS_DB", str(tmp_path / "absent.sqlite3"))
+    block = _format_core_defaults_block([_row("x-block", "M1", "C1")])
+    assert "x-block" in block and "omitted" not in block
 
 
 # ---- system prompts carry the adoption rule ------------------------------------

@@ -65,9 +65,24 @@ def test_pick_price_id_prefers_exact_match_over_cheapest():
     assert web._pick_price("id", "C2151061", _RESULTS)["lcsc"] == "C2151061"
 
 
-def test_pick_price_falls_back_to_cheapest_when_all_out_of_stock():
+def test_pick_price_id_prices_an_oos_exact_match_honestly():
+    # The id names the exact part the BOM ships: price it even out of stock
+    # (the stock rides along so the UI can flag it) — never substitute.
+    r = web._pick_price("id", "C5815145", _RESULTS)
+    assert r["lcsc"] == "C5815145" and r["stock"] == 0
+
+
+def test_pick_price_id_returns_none_when_exact_id_absent():
+    # Pricing a DIFFERENT part under an id key was a lie; now it's "no price".
+    assert web._pick_price("id", "C0000001", _RESULTS) is None
+
+
+def test_pick_price_returns_none_when_all_out_of_stock():
+    # KC-4AZ7PE hardening: an out-of-stock row must never win a kw/mpn pick —
+    # an honest "no price" beats presenting a dead part as the priced source.
     oos = [{"lcsc": "A", "price": 2.0, "stock": 0}, {"lcsc": "B", "price": 1.0, "stock": 0}]
-    assert web._pick_price("kw", "x", oos)["lcsc"] == "B"
+    assert web._pick_price("kw", "x", oos) is None
+    assert web._pick_price("mpn", "x", oos) is None
 
 
 def test_pick_price_none_when_nothing_priced():
@@ -98,23 +113,28 @@ _SJ = {"bom": {"parts": [
 def test_bom_cost_column_pending_when_unpriced():
     secs = web._inspector_spec("bom", _SJ, {}, None, [], prices={})
     parts = next(s for s in secs if s["title"] == "Parts")
-    assert parts["columns"] == ["ref", "value", "cost", "vendor",
-                                "footprint", "sheet", "symbol"]
+    assert parts["columns"] == ["ref", "value", "cost", "stock (JLC/retail)",
+                                "vendor", "footprint", "sheet", "symbol"]
     assert [r[2] for r in parts["rows"]] == ["...", "..."]      # cost cells
     assert parts["foot"][0][2] == "pricing..."
     assert "fetching" in parts["note"]
 
 
 def test_bom_cost_column_and_total_when_priced():
-    seed = {"kw:5.1k 0402": {"unit_price": 0.0009, "lcsc": "C25905"},
-            "id:C2687116": {"unit_price": 0.18, "lcsc": "C2687116"}}
+    seed = {"kw:5.1k 0402": {"unit_price": 0.0009, "lcsc": "C25905",
+                             "stock": 8_912_345, "retail_stock": 16_614},
+            "id:C2687116": {"unit_price": 0.18, "lcsc": "C2687116",
+                            "stock": 500, "retail_stock": None}}
     secs = web._inspector_spec("bom", _SJ, {}, None, [], prices=seed)
     parts = next(s for s in secs if s["title"] == "Parts")
     assert [r[2] for r in parts["rows"]] == ["$0.0009", "$0.1800"]
+    # both inventories render compactly; None retail = unverified dash
+    assert [r[3] for r in parts["rows"]] == ["8.9M / 16.6k", "500 / —"]
     # total row sits under the cost column (index 2), label under value (index 1)
     assert parts["foot"][0][1] == "TOTAL (est.)"
     assert parts["foot"][0][2] == "$0.18"          # 0.0009 + 0.18, money-rounded
     assert "(2/2 priced)" in parts["note"]
+    assert "JLCPCB assembly" in parts["note"]      # the stock-column legend
 
 
 def test_bom_cost_na_for_unmatched_and_unresolvable():
@@ -151,11 +171,22 @@ def test_price_cache_ignores_stale_schema_and_roundtrips(tmp_path):
     (kdir / web._PRICE_FILE).write_text(json.dumps({"_schema": 1, "prices": {k: {"unit_price": 9.0}}}))
     web._load_price_cache(tmp_path)
     assert k not in web._PRICE_CACHE
-    # a current-schema file loads
+    # a current-schema entry whose retail reading was unverified (None) is
+    # left unmerged so the reopen re-fetches and self-heals
     (kdir / web._PRICE_FILE).write_text(
-        json.dumps({"_schema": web._PRICE_SCHEMA, "prices": {k: {"unit_price": 1.0, "lcsc": "CY"}}}))
+        json.dumps({"_schema": web._PRICE_SCHEMA,
+                    "prices": {k: {"unit_price": 1.0, "lcsc": "CY",
+                                   "retail_stock": None}}}))
     web._load_price_cache(tmp_path)
-    assert web._PRICE_CACHE.get(k) == {"unit_price": 1.0, "lcsc": "CY"}
+    assert k not in web._PRICE_CACHE
+    # a current-schema file with a verified retail reading loads
+    (kdir / web._PRICE_FILE).write_text(
+        json.dumps({"_schema": web._PRICE_SCHEMA,
+                    "prices": {k: {"unit_price": 1.0, "lcsc": "CY",
+                                   "retail_stock": 5}}}))
+    web._load_price_cache(tmp_path)
+    assert web._PRICE_CACHE.get(k) == {"unit_price": 1.0, "lcsc": "CY",
+                                       "retail_stock": 5}
     # save writes the current schema (so it round-trips)
     web._save_price_cache(tmp_path, {k})
     written = json.loads((kdir / web._PRICE_FILE).read_text())
@@ -219,6 +250,58 @@ def test_fetch_price_keyword_unavailable_without_catalog(tmp_path, monkeypatch):
     import pytest
     with pytest.raises(web._SourceUnavailable):
         web._fetch_price("kw:100nF 0805")
+
+
+# --------------------------------------------- retail stock rides every pick
+
+class _FakeRetail:
+    """Stands in for web.lcsc_retail: enabled + stock, no network."""
+
+    from kicraft.parts_library.lcsc_retail import RetailUnavailable
+
+    def __init__(self, stock_by_lcsc=None, up=True):
+        self.by = stock_by_lcsc or {}
+        self.up = up
+
+    def enabled(self):
+        return True
+
+    def stock(self, cid):
+        if not self.up:
+            raise self.RetailUnavailable("down")
+        return {"lcsc": cid, "stock": self.by.get(cid, 5000), "min_buy": 1,
+                "checked_at": "t"}
+
+
+def test_fetch_price_attaches_live_retail_stock(tmp_path, monkeypatch):
+    _mk_catalog(tmp_path, monkeypatch, [
+        (190004, "VL53L1CXV0FY/1", "LGA-12", "ST", "expand", 5640,
+         "1-9:4.817,1000-:3.1586", "ToF"),
+    ])
+    monkeypatch.setattr(web, "lcsc_retail", _FakeRetail({"C190004": 321}))
+    r = web._fetch_price("id:C190004")
+    assert r["retail_stock"] == 321 and r["retail_min_buy"] == 1
+
+
+def test_fetch_price_retail_outage_marks_unverified(tmp_path, monkeypatch):
+    _mk_catalog(tmp_path, monkeypatch, [
+        (190004, "VL53L1CXV0FY/1", "LGA-12", "ST", "expand", 5640,
+         "1-:4.817", "ToF"),
+    ])
+    monkeypatch.setattr(web, "lcsc_retail", _FakeRetail(up=False))
+    r = web._fetch_price("id:C190004")
+    assert r["retail_stock"] is None  # unverified — not persisted, self-heals
+
+
+def test_fetch_price_retail_disabled_marks_unverified(tmp_path, monkeypatch):
+    # The suite-wide conftest sets KICRAFT_LCSC_RETAIL=0: the real module is
+    # in place but disabled, so picks carry retail_stock None with no fetch.
+    _mk_catalog(tmp_path, monkeypatch, [
+        (190004, "VL53L1CXV0FY/1", "LGA-12", "ST", "expand", 5640,
+         "1-:4.817", "ToF"),
+    ])
+    r = web._fetch_price("id:C190004")
+    assert r["retail_stock"] is None and r["retail_min_buy"] is None
 
 
 # ----------------------------------------------- _pick_price anti-churn ranking

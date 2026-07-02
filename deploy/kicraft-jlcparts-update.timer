@@ -1,11 +1,12 @@
 [Unit]
-Description=Weekly refresh of the offline JLC parts catalog
+Description=Daily refresh of the offline JLC parts catalog
 
 [Timer]
-# Weekly is plenty: the dump is ~650 MB compressed and stock churn matters on
-# the weeks scale, not days. Randomized delay avoids hammering GitHub Pages
-# at a popular instant.
-OnCalendar=Sun 04:00
+# Daily: upstream (yaqwsx/jlcparts) publishes nightly, and stock freshness is
+# load-bearing since the §9.26 gate hard-blocks on the dump's JLC stock — a
+# weeks-old snapshot said millions for parts that were long dry (KC-4AZ7PE).
+# Randomized delay avoids hammering GitHub Pages at a popular instant.
+OnCalendar=*-*-* 04:00
 RandomizedDelaySec=2h
 Persistent=true
 

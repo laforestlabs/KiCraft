@@ -34,7 +34,7 @@ from typing import get_args
 from pydantic import ValidationError
 
 from kicraft.cli import artifact_paths
-from kicraft.parts_library import jlcparts
+from kicraft.parts_library import jlcparts, lcsc_retail
 
 from .library import (
     ArchitectureLibraryError,
@@ -338,75 +338,167 @@ _SOURCING_LCSC_RE = re.compile(r"\bC\d{4,}\b")
 # time anyone orders. Overridable per-host via KICRAFT_BOM_STOCK_FLOOR (0
 # disables the floor; realness is still enforced).
 _BOM_STOCK_FLOOR = 500
+# How many candidates per MPN/keyword get a live lcsc.com retail check before
+# the walk gives up (each miss is one storefront hit; TTL-cached after that).
+_RETAIL_WALK_CAP_MPN = 4
+_RETAIL_WALK_CAP_KW = 5
+# The daily refresh timer plus one day of slack; an older dump means the
+# JLC-side stock verdicts below are guesses, so say so.
+_DUMP_AGE_WARN_DAYS = 8
 
 
-def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> list[str]:
-    """§9.26 — every BOM part that names an MPN must be a real, orderable part.
+def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[str]]:
+    """§9.26 — every BOM part must be a real, orderable part, in stock BOTH
+    for JLCPCB assembly (the offline jlcparts dump) AND at the lcsc.com
+    retail storefront (live check via ``lcsc_retail``). The two inventories
+    are separate pools: KC-4AZ7PE's 0603 passives had 5-15M in the dump
+    while the storefront had 0 of every one of them.
 
     Before this gate, MPN strings on stock-symbol parts (connectors, diodes,
     inductors) were unverified LLM prose: a hallucinated or out-of-stock part
     sailed through to the fab BOM. Four tiers, by how a part carries sourcing:
 
-      - explicit C# in ``sourcing_note``  -> must exist in the offline catalog
-        and clear the stock floor;
-      - library-bundle part (manifest carries the LCSC) -> skipped here;
-        existence is already gated by ``_unresolved_lcsc``;
-      - bare MPN -> offline catalog search. An exact-model match with healthy
-        stock is AUTO-PINNED into ``sourcing_note`` (``fab_export`` reads the
-        C# from there, so the fab BOM csv stops shipping blank LCSC columns);
-        no match means unorderable -> error back to the model while its lookup
-        tools are still in reach.
+      - explicit C# in ``sourcing_note``  -> must exist in the offline
+        catalog, clear the JLC stock floor, and be orderable at retail;
+      - library-bundle part (manifest carries the LCSC) -> existence is gated
+        by ``_unresolved_lcsc``; here the manifest C# must clear the JLC
+        floor and be orderable at retail (bundles were previously exempt
+        from stock checks entirely, so a long-vendored part could run dry
+        without anything noticing);
+      - bare MPN -> offline catalog search. The exact/family-prefix matches
+        (e.g. "SS34" -> "SS34F") are walked best-JLC-stock-first; the first
+        one also in stock at retail is AUTO-PINNED into ``sourcing_note``
+        (``fab_export`` reads the C# from there, so the fab BOM csv stops
+        shipping blank LCSC columns); none orderable -> error back to the
+        model while its lookup tools are still in reach.
       - no MPN at all -> keyword search by value + package
         (``jlcparts.bom_keyword``: "1k 0603", "pin header 2.54mm 1x2P";
-        qualifier tokens are relaxed away on a miss). Basic-tier
-        floor-clearing matches win, then any floor-clearing row; the winner
-        is AUTO-PINNED like the MPN tier — before KC-V8YWN8 such parts (J2,
-        a bare pin header) shipped with NO part number, cost or vendor link
-        anywhere. Only a part with NOTHING searchable (no value, no package)
-        is an offender; a keyword that finds no match stays unpinned and
-        visibly unpriced rather than bouncing the model (the search misses
+        qualifier tokens are relaxed away on a miss). Floor-clearing
+        Basic-tier candidates are walked first, then floor-clearing Extended;
+        the first also in stock at retail is AUTO-PINNED like the MPN tier.
+        Only a part with NOTHING searchable (no value, no package) is an
+        offender; a keyword whose matches are all retail-dry (or that finds
+        none) stays unpinned and visibly unpriced rather than bouncing the
+        model (generics have dozens of equivalents; the search also misses
         legitimate specialty parts). Test points / mounting holes / net ties
         are bare copper, not orderable parts, and are skipped.
 
-    Returns offender strings (empty = all sourceable, or catalog unavailable).
-    Only mutation is appending ``LCSC <C#>`` pins to ``sourcing_note``.
+    Retail checks fail OPEN ("can't verify — don't block"): an unreachable
+    storefront never bounces the model, it downgrades to a warning. A
+    deliberately chosen part (explicit pin, bundle) is vetoed only when its
+    retail stock is below the listing's own minimum buy; walk-time candidates
+    must also clear the retail floor (KICRAFT_BOM_RETAIL_STOCK_FLOOR).
+
+    Returns ``(offenders, warnings)`` (both empty = all sourceable, or the
+    catalog is unavailable). Only mutation is appending ``LCSC <C#>`` pins to
+    ``sourcing_note``.
     """
     if not jlcparts.available():
-        return []  # can't verify — don't block
+        return [], []  # can't verify — don't block
     try:
         floor = int(os.environ.get("KICRAFT_BOM_STOCK_FLOOR", "")
                     or _BOM_STOCK_FLOOR)
     except ValueError:
         floor = _BOM_STOCK_FLOOR
+    warnings: list[str] = []
+    age = jlcparts.dump_age_days()
+    if age is not None and age > _DUMP_AGE_WARN_DAYS:
+        warnings.append(
+            f"offline JLC catalog is {age:.0f} days old; JLC-side stock "
+            f"verdicts may be stale — run 'kicraft jlcparts-update'"
+        )
+    retail_on = lcsc_retail.enabled()
+    retail_info: dict[str, dict | None] = {}  # C# -> reading; None = outage
+    unverified: list[str] = []
+
+    def _retail_verdict(cid: str, *, picky: bool) -> tuple[str, dict | None]:
+        """"ok"/"dry"/"unverified"/"off" for one C#. One live hit per C# per
+        gate pass (memoized here; TTL disk cache spans the commit retries)."""
+        if not retail_on:
+            return "off", None
+        if cid not in retail_info:
+            try:
+                retail_info[cid] = lcsc_retail.stock(cid)
+                _log_query("retail_stock", outcome="hit", query=cid,
+                           stock=retail_info[cid]["stock"])
+            except lcsc_retail.RetailUnavailable:
+                retail_info[cid] = None
+                _log_query("retail_stock", outcome="error", query=cid)
+        info = retail_info[cid]
+        if info is None:
+            return "unverified", None
+        need = max(info["min_buy"],
+                   lcsc_retail.retail_floor() if picky else 1)
+        return ("ok" if info["stock"] >= need else "dry"), info
+
     active, _broken = _load_library_parts(project_root)
     manifest_by_name = {p.manifest.name: p.manifest for p in active}
     bad: list[str] = []
-    best_by_mpn: dict[str, dict | None] = {}
-    best_by_kw: dict[str, dict | None] = {}
+    best_by_mpn: dict[str, tuple[dict | None, list[str], bool]] = {}
+    best_by_kw: dict[str, tuple[dict | None, bool, bool]] = {}
     for part in (bom.parts or []):
         mpn = (part.mpn or "").strip()
         note = part.sourcing_note or ""
         pinned = _SOURCING_LCSC_RE.search(note)
         if pinned:
             label = mpn or (part.value or "").strip() or part.symbol
-            hit = jlcparts.lookup(pinned.group(0))
+            cid = pinned.group(0)
+            hit = jlcparts.lookup(cid)
             if hit is None:
                 bad.append(
                     f"{part.ref} ({label}): sourcing_note claims LCSC "
-                    f"{pinned.group(0)} which is not in the offline catalog; "
+                    f"{cid} which is not in the offline catalog; "
                     f"find the real C# with lookup_lcsc_id"
                 )
             elif (hit.get("stock") or 0) < floor:
                 bad.append(
-                    f"{part.ref} ({label}): LCSC {pinned.group(0)} has only "
+                    f"{part.ref} ({label}): LCSC {cid} has only "
                     f"{hit.get('stock') or 0} in stock (< {floor}); pick a "
                     f"better-stocked alternative"
                 )
+            else:
+                verdict, info = _retail_verdict(cid, picky=False)
+                if verdict == "dry":
+                    bad.append(
+                        f"{part.ref} ({label}): LCSC {cid} has "
+                        f"{hit.get('stock') or 0} in stock for JLCPCB "
+                        f"assembly but only {info['stock']} at the lcsc.com "
+                        f"retail storefront (min buy {info['min_buy']}) — a "
+                        f"pick must be in stock at BOTH; find an alternative "
+                        f"with lookup_lcsc_id"
+                    )
+                elif verdict == "unverified":
+                    unverified.append(f"{part.ref} ({cid})")
             continue
         lib = _lib_prefix(part.symbol) or _lib_prefix(part.footprint or "")
         man = manifest_by_name.get(lib) if lib else None
         if man is not None and (man.sourcing or {}).get("lcsc"):
-            continue  # curated/fetched bundle: gated by _unresolved_lcsc
+            # Curated/fetched bundle: existence is gated by _unresolved_lcsc;
+            # stock (both inventories) is gated here.
+            cid = str((man.sourcing or {}).get("lcsc")).strip().upper()
+            hit = jlcparts.lookup(cid)
+            if hit is not None and (hit.get("stock") or 0) < floor:
+                bad.append(
+                    f"{part.ref}: library bundle '{lib}' sources LCSC {cid} "
+                    f"which has only {hit.get('stock') or 0} in stock for "
+                    f"JLCPCB assembly (< {floor}); fetch an in-stock "
+                    f"alternative with lookup_lcsc_id + add_part_from_lcsc "
+                    f"and point this part at the new bundle"
+                )
+            else:
+                verdict, info = _retail_verdict(cid, picky=False)
+                if verdict == "dry":
+                    bad.append(
+                        f"{part.ref}: library bundle '{lib}' sources LCSC "
+                        f"{cid} which is out of stock at the lcsc.com retail "
+                        f"storefront ({info['stock']} available, min buy "
+                        f"{info['min_buy']}); fetch an in-stock alternative "
+                        f"with lookup_lcsc_id + add_part_from_lcsc and point "
+                        f"this part at the new bundle"
+                    )
+                elif verdict == "unverified":
+                    unverified.append(f"{part.ref} ({cid})")
+            continue
         if not mpn:
             # Tier 4: generic part sourced by value/package keyword. Bare
             # board features (test points, mounting holes) have nothing to
@@ -423,62 +515,114 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> list[str]:
                 )
                 continue
             if kw not in best_by_kw:
-                def _kw_pick(term: str) -> dict | None:
+                def _kw_candidates(term: str) -> list[dict]:
                     stocked = [c for c in jlcparts.search(term, limit=10)
                                if (c.get("stock") or 0) >= floor]
                     # Prefer JLC Basic (the stable no-setup-fee tier;
                     # Extended long-tail rows churn out within weeks).
-                    return next(
-                        (c for c in stocked if c.get("type") == "Basic"),
-                        stocked[0] if stocked else None,
-                    )
-                best = _kw_pick(kw)
-                if best is None:
+                    return ([c for c in stocked if c.get("type") == "Basic"]
+                            + [c for c in stocked if c.get("type") != "Basic"])
+                cands = _kw_candidates(kw)
+                if not cands:
                     # Voltage/dielectric qualifiers over-constrain the ANDed
                     # search ("0.1uF 25V X7R 0603"); retry without them.
                     relaxed = jlcparts.relax_keyword(kw)
                     if relaxed:
-                        best = _kw_pick(relaxed)
-                best_by_kw[kw] = best
-            best = best_by_kw[kw]
+                        cands = _kw_candidates(relaxed)
+                best = None
+                unv = False
+                for cand in cands[:_RETAIL_WALK_CAP_KW]:
+                    verdict, _info = _retail_verdict(cand["lcsc"], picky=True)
+                    if verdict in ("ok", "off"):
+                        best = cand
+                        break
+                    if verdict == "unverified":
+                        best = cand  # fail open: accept, but say so
+                        unv = True
+                        break
+                    # "dry": walk on to the next JLC-stocked candidate.
+                best_by_kw[kw] = (best, unv, bool(cands))
+            best, unv, had_cands = best_by_kw[kw]
             if best is not None:
                 part.sourcing_note = (
                     (f"{note} " if note else "") + f"LCSC {best['lcsc']}"
                 )
-            # A generic with a keyword but no catalog match is NOT blocked:
-            # the search misses legitimate parts (specialty jacks, exotic
-            # values) and bouncing those to the model just whack-a-moles.
-            # It stays visibly unpriced in the BOM/cost UI instead.
+                if unv:
+                    unverified.append(f"{part.ref} ({best['lcsc']})")
+            elif had_cands:
+                # Every catalog match is dry at retail: stay unpinned (never
+                # select an OOS part) but don't bounce — see below.
+                warnings.append(
+                    f"{part.ref}: every catalog match for '{kw}' is out of "
+                    f"stock at the lcsc.com retail storefront; left "
+                    f"unpinned/unpriced"
+                )
+            # A generic with a keyword but no orderable catalog match is NOT
+            # blocked: the search misses legitimate parts (specialty jacks,
+            # exotic values) and bouncing those to the model just
+            # whack-a-moles. It stays visibly unpriced in the BOM/cost UI.
             continue
         key = mpn.upper()
         if key not in best_by_mpn:
-            best = None
+            matches: list[dict] = []
             for cand in jlcparts.search(mpn, limit=10):
                 model = (cand.get("model") or "").upper()
                 # Exact model, or the orderable MPN extends the family name
-                # (e.g. "SS34" -> "SS34F"). Results are stock-ordered, so the
-                # first match is the best-stocked one.
+                # (e.g. "SS34" -> "SS34F"). Results are stock-ordered, so
+                # earlier matches are better-stocked.
                 if model == key or model.startswith(key):
+                    matches.append(cand)
+            tried: list[str] = []
+            eligible: list[dict] = []
+            for cand in matches:
+                if (cand.get("stock") or 0) >= floor:
+                    eligible.append(cand)
+                else:
+                    tried.append(
+                        f"{cand.get('model')} ({cand['lcsc']}) JLC stock "
+                        f"{cand.get('stock') or 0} < {floor}"
+                    )
+            best = None
+            unv = False
+            for cand in eligible[:_RETAIL_WALK_CAP_MPN]:
+                verdict, info = _retail_verdict(cand["lcsc"], picky=True)
+                if verdict in ("ok", "off"):
                     best = cand
                     break
-            best_by_mpn[key] = best
-        best = best_by_mpn[key]
-        if best is None:
+                if verdict == "unverified":
+                    best = cand  # fail open: accept, but say so
+                    unv = True
+                    break
+                tried.append(
+                    f"{cand.get('model')} ({cand['lcsc']}) retail stock "
+                    f"{info['stock']}"
+                )
+            best_by_mpn[key] = (best, tried, unv)
+        best, tried, unv = best_by_mpn[key]
+        if best is None and not tried:
             bad.append(
                 f"{part.ref}: MPN '{mpn}' not found in the LCSC catalog — "
                 f"likely not a real orderable part; resolve it with "
                 f"lookup_lcsc_id / add_part_from_lcsc, pick a core default, "
                 f"or drop the MPN and record the substitution in assumptions"
             )
-        elif (best.get("stock") or 0) < floor:
+        elif best is None:
             bad.append(
-                f"{part.ref}: {mpn} ({best['lcsc']}) has only "
-                f"{best.get('stock') or 0} in stock (< {floor}); pick a "
-                f"better-stocked alternative"
+                f"{part.ref}: no orderable variant of '{mpn}': "
+                + "; ".join(tried[:4])
+                + " — pick a different part (a pick must be in stock at BOTH "
+                  "JLCPCB assembly and the lcsc.com retail storefront)"
             )
         else:
             part.sourcing_note = (f"{note} " if note else "") + f"LCSC {best['lcsc']}"
-    return bad
+            if unv:
+                unverified.append(f"{part.ref} ({best['lcsc']})")
+    if unverified:
+        warnings.append(
+            "retail stock unverified (lcsc.com unreachable at commit) for: "
+            + ", ".join(dict.fromkeys(unverified))
+        )
+    return bad, warnings
 
 
 
@@ -917,6 +1061,23 @@ def _pick_lcsc(mpn: str, results: list[dict]) -> dict | None:
     return None
 
 
+def _attach_retail(payload: dict, lcsc: str) -> dict:
+    """Best-effort live lcsc.com retail stock on a lookup result, so the BOM
+    model can self-select an in-stock part instead of being bounced by the
+    §9.26 gate one commit later. ``retail_stock``/``retail_min_buy`` on
+    success, ``retail: "unverified"`` on an outage; silent no-op when the
+    retail check is disabled."""
+    if not lcsc_retail.enabled():
+        return payload
+    try:
+        info = lcsc_retail.stock(lcsc)
+        payload["retail_stock"] = info["stock"]
+        payload["retail_min_buy"] = info["min_buy"]
+    except lcsc_retail.RetailUnavailable:
+        payload["retail"] = "unverified"
+    return payload
+
+
 def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
     """Resolve an MPN / keyword / pasted LCSC id-or-URL to an LCSC part number.
 
@@ -939,7 +1100,9 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
                    source="explicit-id")
         mpn_cache.put(mpn, lcsc, "explicit-id")
         print(json.dumps(
-            {"ok": True, "mpn": mpn, "lcsc": lcsc, "source": "explicit-id"},
+            _attach_retail(
+                {"ok": True, "mpn": mpn, "lcsc": lcsc, "source": "explicit-id"},
+                lcsc),
             indent=2,
         ))
         return 0
@@ -966,8 +1129,10 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
                                source="parts-library", library_name=man.name)
                     mpn_cache.put(mpn, lcsc, "parts-library")
                     print(json.dumps(
-                        {"ok": True, "mpn": mpn, "lcsc": lcsc,
-                         "source": "parts-library", "name": man.name},
+                        _attach_retail(
+                            {"ok": True, "mpn": mpn, "lcsc": lcsc,
+                             "source": "parts-library", "name": man.name},
+                            lcsc),
                         indent=2,
                     ))
                     return 0
@@ -993,8 +1158,10 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
             _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=cached_lcsc,
                        source="mpn-cache")
             print(json.dumps(
-                {"ok": True, "mpn": mpn, "lcsc": cached_lcsc,
-                 "source": f"mpn-cache(via {cached.get('source', '?')})"},
+                _attach_retail(
+                    {"ok": True, "mpn": mpn, "lcsc": cached_lcsc,
+                     "source": f"mpn-cache(via {cached.get('source', '?')})"},
+                    cached_lcsc),
                 indent=2,
             ))
             return 0
@@ -1009,13 +1176,43 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
                       "price", "description")
             best = _pick_lcsc(mpn, results)
             if best and best.get("lcsc"):
+                # Veto a winner that is dry at the lcsc.com retail storefront
+                # (JLC stock alone isn't orderable — KC-4AZ7PE): surface the
+                # candidate list so the model picks an in-stock part now
+                # instead of being bounced by §9.26 a commit later. Outages
+                # fail open (same convention as the gate).
+                veto_dry = False
+                if lcsc_retail.enabled():
+                    try:
+                        ok_retail, _info = lcsc_retail.in_stock(
+                            best["lcsc"], picky=False)
+                        veto_dry = not ok_retail
+                    except lcsc_retail.RetailUnavailable:
+                        veto_dry = False
+                if veto_dry:
+                    _log_query("lookup_lcsc_id", outcome="miss", query=mpn,
+                               lcsc=best["lcsc"], error="retail-out-of-stock")
+                    print(json.dumps(
+                        {"ok": False, "mpn": mpn,
+                         "candidates": [{k: r.get(k) for k in fields}
+                                        for r in results],
+                         "hint": f"exact match {best['lcsc']} is out of stock "
+                                 f"at the lcsc.com retail storefront; pick an "
+                                 f"in-stock candidate (a part must be in stock "
+                                 f"both for JLCPCB assembly and at retail) or "
+                                 f"choose a different part"},
+                        indent=2,
+                    ))
+                    return 4
                 _log_query("lookup_lcsc_id", outcome="resolved", query=mpn,
                            lcsc=best["lcsc"], source="jlcparts")
                 mpn_cache.put(mpn, best["lcsc"], "jlcparts")
                 print(json.dumps(
-                    {"ok": True, "mpn": mpn, "lcsc": best["lcsc"],
-                     "source": "jlcparts",
-                     "match": {k: best.get(k) for k in fields}},
+                    _attach_retail(
+                        {"ok": True, "mpn": mpn, "lcsc": best["lcsc"],
+                         "source": "jlcparts",
+                         "match": {k: best.get(k) for k in fields}},
+                        best["lcsc"]),
                     indent=2,
                 ))
                 return 0
@@ -1063,8 +1260,11 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
                    lcsc=best["lcsc"], source="easyeda")
         mpn_cache.put(mpn, best["lcsc"], "easyeda")
         print(json.dumps(
-            {"ok": True, "mpn": mpn, "lcsc": best["lcsc"], "source": "easyeda",
-             "match": {k: best.get(k) for k in fields}},
+            _attach_retail(
+                {"ok": True, "mpn": mpn, "lcsc": best["lcsc"],
+                 "source": "easyeda",
+                 "match": {k: best.get(k) for k in fields}},
+                best["lcsc"]),
             indent=2,
         ))
         return 0
@@ -2774,13 +2974,14 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             )
             return 3
 
-    # §9.26: every part that names an MPN must be a real, orderable LCSC part.
-    # Runs after the manifest gate (which owns library-backed parts); confident
-    # matches are pinned into sourcing_note so the fab BOM carries the C#, and
-    # the commit below persists the pins. A miss goes back to the model while
-    # its lookup tools are still in reach.
+    # §9.26: every part must be a real, orderable LCSC part — in stock both
+    # for JLCPCB assembly (offline dump) and at the lcsc.com retail storefront
+    # (live check). Confident matches are pinned into sourcing_note so the fab
+    # BOM carries the C#, and the commit below persists the pins. A miss goes
+    # back to the model while its lookup tools are still in reach.
+    bom_warnings: list[str] = []
     if stage == "bom" and state.bom is not None:
-        bad_mpn = _resolve_bom_mpn_sourcing(
+        bad_mpn, bom_warnings = _resolve_bom_mpn_sourcing(
             state.bom, state_path.resolve().parent.parent
         )
         if bad_mpn:
@@ -2789,9 +2990,10 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                     {
                         "ok": False,
                         "errors": [
-                            "9.26 BOM MPN(s) not real/orderable: each part that "
-                            "names an MPN must exist in the LCSC catalog with "
-                            "healthy stock"
+                            "9.26 BOM part(s) not orderable: each part must "
+                            "exist in the LCSC catalog with healthy stock for "
+                            "JLCPCB assembly AND be in stock at the lcsc.com "
+                            "retail storefront"
                         ],
                         "offenders": bad_mpn[:20],
                     },
@@ -2829,6 +3031,8 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     }
     if archive_warning:
         summary["archive_warning"] = archive_warning
+    if bom_warnings:
+        summary["warnings"] = bom_warnings
     if wiring_normalizations:
         summary["wiring_normalizations"] = wiring_normalizations
     if form_factor_capture:

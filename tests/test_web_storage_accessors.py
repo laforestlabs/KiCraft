@@ -79,8 +79,10 @@ def test_price_cache_roundtrips_through_dotkicraft(tmp_path):
     back from the same place -- the build-in-place price cache, no copy."""
     root = _root(tmp_path, state=False, check=False)
     key = "C999"
+    # retail_stock must be a verified (non-None) reading: the schema-6 load
+    # skips retail-unverified entries so they re-fetch on reopen.
     with web._PRICE_LOCK:
-        web._PRICE_CACHE[key] = {"unit": 1.23}
+        web._PRICE_CACHE[key] = {"unit": 1.23, "retail_stock": 7}
     try:
         web._save_price_cache(root, {key})
         assert (root / ".kicraft" / web._PRICE_FILE).is_file()
@@ -88,7 +90,8 @@ def test_price_cache_roundtrips_through_dotkicraft(tmp_path):
             web._PRICE_CACHE.pop(key, None)
         web._load_price_cache(root)
         with web._PRICE_LOCK:
-            assert web._PRICE_CACHE.get(key) == {"unit": 1.23}
+            assert web._PRICE_CACHE.get(key) == {"unit": 1.23,
+                                                 "retail_stock": 7}
     finally:
         with web._PRICE_LOCK:
             web._PRICE_CACHE.pop(key, None)
