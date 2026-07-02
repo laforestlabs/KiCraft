@@ -2263,6 +2263,46 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                 )
                 return 3
 
+    # R6: functional_spec sanity gate — no self-loop connections, no fully
+    # isolated blocks (every block appears in ≥1 connection), block count 1–12.
+    if stage == "functional_spec" and state.functional_spec is not None:
+        fs = state.functional_spec
+        errors: list[str] = []
+        # Self-loop check
+        for c in fs.connections:
+            if c.from_block == c.to_block:
+                errors.append(
+                    f"self-loop connection: {c.from_block!r} → {c.to_block!r}"
+                )
+        # Isolated block check
+        connected = {c.from_block for c in fs.connections} | {
+            c.to_block for c in fs.connections
+        }
+        block_names = {b.name for b in fs.blocks}
+        isolated = block_names - connected
+        if isolated and len(fs.blocks) > 1:
+            errors.append(
+                f"isolated block(s) with no connections: {sorted(isolated)}"
+            )
+        # Block count check
+        if len(fs.blocks) < 1:
+            errors.append("functional_spec has zero blocks")
+        elif len(fs.blocks) > 12:
+            errors.append(
+                f"functional_spec has {len(fs.blocks)} blocks (max 12)"
+            )
+        if errors:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": errors,
+                    },
+                    indent=2,
+                )
+            )
+            return 3
+
     # R2: Pre-resolve named part families at architecture commit — catches
     # "LCSC not in catalog" / "unresolved symbol" issues early, where the
     # model can still fix the architecture before the BOM stage.
@@ -3267,60 +3307,10 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
         except Exception as e:  # noqa: BLE001 - bookkeeping must never break the build
             print(f"[build]     (could not surface build warnings: {e})", file=sys.stderr)
 
-    # 4b. Layer-4 electrical-review gate (cost-gated, off by default): catches
-    #     designs that are structurally fab-ready (DRC-clean, all parts present)
-    #     but electrically wrong -- the class deterministic checks cannot judge.
-    # Stage-boundary marker so the GUI transitions to the electrical-review tab
-    # before findings stream in.
-    print("[build]     electrical review: scanning design for electrical defects ...", flush=True)
-    review = _maybe_electrical_review(state, project_dir)
-    if review["ran"]:
-        for f in review["findings"]:
-            sev = f.get("severity", "note").upper()
-            issue = f.get("issue", "")
-            if f.get("demoted_from"):  # blocker that a 2nd pass did not corroborate
-                issue = f"{issue} [demoted to warning: not corroborated by a 2nd pass]"
-            print(f"[build]     review {sev}: [{f.get('area', '')}] {issue}")
-        # Surface the >=WARNING findings into user-facing state (assumptions /
-        # open_questions) so a known gap is honestly reported, not hidden behind
-        # a clean build. Best-effort: never let bookkeeping fail the build.
-        try:
-            _surface_review_findings(state, state_path, review["findings"])
-        except Exception as e:  # noqa: BLE001 - surfacing must never break the build
-            print(f"[build]     (could not surface review findings: {e})", file=sys.stderr)
-        # Persist structured findings on artifacts so the GUI electrical-review
-        # inspector renders rich cards (severity badge, area, issue, suggestion)
-        # even on reopen, not just the flat build_log text lines.
-        try:
-            from .models import ReviewFinding
-            artifacts.review_findings = [
-                ReviewFinding(
-                    severity=f.get("severity", "note"),
-                    area=f.get("area", ""),
-                    issue=f.get("issue", ""),
-                    suggestion=f.get("suggestion", ""),
-                )
-                for f in review["findings"]
-            ]
-            _persist_artifacts(state, state_path, artifacts)
-        except Exception as e:  # noqa: BLE001 - bookkeeping must never break the build
-            print(f"[build]     (could not persist review findings on artifacts: {e})", file=sys.stderr)
-        if review["blocked"]:
-            print(
-                f"[build]     kept board {pcb.name} for inspection (no fab package; "
-                f"electrical review found a blocker)",
-                file=sys.stderr,
-            )
-            blockers = "; ".join(f["issue"] for f in review["findings"]
-                                 if f.get("severity") == "blocker")
-            print(
-                f"error: routed board is NOT fab-ready -- electrical review blocker(s): {blockers}",
-                file=sys.stderr,
-            )
-            return 7
-        print(f"[build] 4/5 electrical review: "
-              f"{len(review['findings'])} non-blocking finding(s), "
-              f"cost ${review['cost_usd']:.4f}")
+    # R3: The LLM electrical review now runs post-wiring (in web.py _run_design)
+    # BEFORE the build starts, not at build tail. This avoids wasting the
+    # ~11-min place/route on a design with a corroborated electrical blocker.
+    # The review findings are still surfaced by the web layer.
 
     if not do_fab:
         print(f"[build] 5/5 skipped fab export (--no-fab); verified board at {pcb.name}")

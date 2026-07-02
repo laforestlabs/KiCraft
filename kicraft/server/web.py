@@ -1793,6 +1793,53 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
         if res["status"] != "ok":
             state["ok"] = False
             return
+        # R3: LLM electrical review post-wiring, BEFORE the build. The review
+        # needs only intent+bom+netlist (all present at wiring commit). It
+        # deliberately ignores routed geometry. A corroborated blocker gets
+        # ONE wiring re-drive (mirroring the ERC-recovery pattern below),
+        # then proceeds; a second blocker surfaces as today.
+        try:
+            from kicraft.design.cli_app import (
+                _load_state as _cli_load_state,
+                _maybe_electrical_review,
+                _surface_review_findings,
+            )
+            state_path = ws / ".kicraft" / "state.json"
+            _state = _cli_load_state(state_path) if state_path.exists() else None
+            if _state and _state.bom and _state.bom.connections:
+                review = _maybe_electrical_review(_state, project_dir := ws)
+                if review["ran"] and review["blocked"]:
+                    blockers = "; ".join(
+                        f["issue"] for f in review["findings"]
+                        if f.get("severity") == "blocker"
+                    )
+                    progress({"kind": "build_log",
+                              "text": f"[elec-review] blocker: {blockers}; "
+                                      "re-driving wiring once to fix"})
+                    instr = (f"The electrical review found a blocker: {blockers}. "
+                             "Adjust the BOM/wiring to resolve it, keeping "
+                             "everything else consistent.")
+                    rr = run_session(ws, state.get("brief", ""), ["wiring"],
+                                     instruction=instr, progress=progress,
+                                     run_id=run_id)
+                    if rr.get("guard"):
+                        state["spend"] = _project_spend_usd(state.get("project_id"))
+                    # Re-review after re-drive; surface findings either way
+                    _state = _cli_load_state(state_path) if state_path.exists() else None
+                    if _state:
+                        review2 = _maybe_electrical_review(_state, ws)
+                        if review2["ran"]:
+                            try:
+                                _surface_review_findings(_state, state_path, review2["findings"])
+                            except Exception:  # noqa: BLE001
+                                pass
+                elif review["ran"]:
+                    try:
+                        _surface_review_findings(_state, state_path, review["findings"])
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception:  # noqa: BLE001
+            pass  # fail-soft: review must never block a sound build
 
         # Deterministic (zero-LLM) build: synthesize -> place -> route -> verify ->
         # fab. `build` re-runs synthesize first, so the schematic appears as soon
