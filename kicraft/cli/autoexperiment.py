@@ -361,12 +361,19 @@ def _auto_pin_best_leaves(project_dir: Path) -> None:
     # silently missing a leaf.
     dropped = [d.name for d in _board_only_leaf_dirs(project_dir)]
     if dropped:
+        # Historically blamed on "solver serialization"; both real incidents
+        # (2026-06-10, KC-V8YWN8 2026-07-02) were leaves whose solve FAILED
+        # every round (routing_exception / all-rounds rejection), so nothing
+        # was ever persisted. Point the reader at the per-leaf solve errors
+        # echoed above instead of asserting a cause.
         raise RuntimeError(
-            "leaf(s) routed but serialized no result, so they would be silently "
-            "dropped from the parent board: "
+            "leaf(s) produced round boards but never persisted a result "
+            "(metadata.json/solved_layout.json), so the parent compose would "
+            "silently drop them: "
             + ", ".join(dropped)
-            + " -- solver serialization bug; refusing to compose an incomplete "
-            "board"
+            + " -- usually the leaf's solve failed every round (see the "
+            "'[solve]' error lines earlier in this log for the per-leaf "
+            "reason); refusing to compose an incomplete board"
         )
 
     print(f"Auto-pin summary: {pinned} pinned, {cleared} cleared, {skipped} skipped")
@@ -2392,6 +2399,19 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"[timing] round {round_num} solve_subcircuits_total={solve_elapsed_s:.3f}s"
             )
+            if solve_rc != 0:
+                # Per-leaf failures live on the solve subprocess's stderr; until
+                # KC-V8YWN8 they only survived inside rounds/round_NNNN.json
+                # (logs.solve_stderr_tail) while the build log showed a clean
+                # leaf phase right up to the auto-pin safety net. Echo them so
+                # the build log names the failing leaves and their errors.
+                failure_lines = [
+                    line for line in solve_stderr.splitlines()
+                    if line.startswith(("warning: leaf", "error:", "WARNING:"))
+                ]
+                print(f"[round {round_num}] solve_subcircuits rc={solve_rc}:")
+                for line in failure_lines[-20:] or solve_stderr.splitlines()[-5:]:
+                    print(f"  [solve] {line}")
 
         solve_payload = _extract_solve_json_payload(solve_stdout)
         leaf_timing_summary = _extract_leaf_timing_summary(solve_payload)

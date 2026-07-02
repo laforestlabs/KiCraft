@@ -268,6 +268,7 @@ def route_local_subcircuit(
             cfg=cfg,
             round_index=round_index,
             generate_diagnostics=generate_diagnostics,
+            render_intermediate=render_intermediate,
             fast_smoke_mode=fast_smoke_mode,
         )
 
@@ -1259,6 +1260,7 @@ def _stamp_trivial_leaf(
     cfg: dict[str, Any],
     round_index: int | None,
     generate_diagnostics: bool,
+    render_intermediate: bool,
     fast_smoke_mode: bool,
 ) -> tuple[dict[str, Any], dict[str, float]]:
     """Stamp a placed-but-not-routed PCB for a leaf with no internal nets.
