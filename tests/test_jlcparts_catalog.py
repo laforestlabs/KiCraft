@@ -18,7 +18,7 @@ from kicraft.parts_library import jlcparts
 _SCHEMA = """CREATE TABLE jlc_components (
     lcsc INTEGER PRIMARY KEY NOT NULL, mfr TEXT NOT NULL, package TEXT NOT NULL,
     manufacturer TEXT NOT NULL, library_type TEXT NOT NULL, stock INTEGER NOT NULL,
-    price TEXT NOT NULL, description TEXT NOT NULL)"""
+    price TEXT NOT NULL, description TEXT NOT NULL, joints INTEGER)"""
 
 _ROWS = [
     # lcsc, mfr, package, manufacturer, type, stock, price, description
@@ -39,7 +39,7 @@ def catalog(tmp_path, monkeypatch) -> Path:
     db = tmp_path / "cache.sqlite3"
     con = sqlite3.connect(db)
     con.execute(_SCHEMA)
-    con.executemany("INSERT INTO jlc_components VALUES (?,?,?,?,?,?,?,?)", _ROWS)
+    con.executemany("INSERT INTO jlc_components (lcsc, mfr, package, manufacturer, library_type, stock, price, description) VALUES (?,?,?,?,?,?,?,?)", _ROWS)
     con.commit()
     con.close()
     monkeypatch.setenv("KICRAFT_JLCPARTS_DB", str(db))
@@ -159,7 +159,7 @@ def test_update_end_to_end_over_file_urls_prunes_low_stock(tmp_path):
     con = sqlite3.connect(src_db)
     con.execute(_SCHEMA)
     con.executemany(
-        "INSERT INTO jlc_components VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO jlc_components (lcsc, mfr, package, manufacturer, library_type, stock, price, description) VALUES (?,?,?,?,?,?,?,?)",
         ((i, f"P{i}", "0805", "m", "base", 7 if i % 2 == 0 else 1, "1-:0.01", "r")
          for i in range(100_002)))
     con.execute("CREATE TABLE lcsc_components (lcsc INTEGER PRIMARY KEY)")
@@ -194,7 +194,7 @@ def test_search_prefix_fallback_finds_family_in_pruned_catalog(tmp_path, monkeyp
     db = tmp_path / "pruned.sqlite3"
     con = sqlite3.connect(db)
     con.execute(_SCHEMA)
-    con.execute("INSERT INTO jlc_components VALUES (?,?,?,?,?,?,?,?)",
+    con.execute("INSERT INTO jlc_components (lcsc, mfr, package, manufacturer, library_type, stock, price, description) VALUES (?,?,?,?,?,?,?,?)",
                 (190004, "VL53L1CXV0FY/1", "LGA-12", "ST", "expand", 5640,
                  "1-:4.8", "ToF"))
     con.commit()

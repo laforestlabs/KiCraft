@@ -1,7 +1,7 @@
 {
-  "content_hash": "sha256:9d6a0e7bbfe7b7625b67ca69e23ffefa6c16e7319d79d89ff0d7581aaf0a76bf",
+  "content_hash": "sha256:51b5f7fb0ed8e3462b3fc9baf95df0dbb583c18ce90c11073c82c1f9b88ac866",
   "datasheet_url": "https://lcsc.com/product-detail/Terminal-Blocks_WJ126V-5-0-2P_C8404.html",
-  "description": "WJ126V-5.0-2P — 2-pin pluggable screw terminal block, 5.0mm pitch, through-hole. Accepts 24-12 AWG wire. Rated 300V/16A. Mates with matching 5.0mm plug.",
+  "description": "WJ126V-5.0-2P \u2014 2-pin pluggable screw terminal block, 5.0mm pitch, through-hole. Accepts 24-12 AWG wire. Rated 300V/16A. Mates with matching 5.0mm plug.",
   "footprint_name": "CONN-TH_WJ126V-5.0-2P",
   "kicad_version_min": "9.0.0",
   "maturity": "production",
@@ -27,5 +27,5 @@
     "tht"
   ],
   "version": "0.1.0",
-  "watch_out_for": "5.0mm pitch. Wire range 24-12 AWG. Rated 300V/16A. Through-hole — needs hand soldering or wave. Mating plug is WJ126V-5.0-2P series (sold separately)."
+  "watch_out_for": "5.0mm pitch. Wire range 24-12 AWG. Rated 300V/16A. Through-hole \u2014 needs hand soldering or wave. Mating plug is WJ126V-5.0-2P series (sold separately)."
 }

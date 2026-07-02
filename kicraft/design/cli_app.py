@@ -347,6 +347,84 @@ _RETAIL_WALK_CAP_KW = 5
 _DUMP_AGE_WARN_DAYS = 8
 
 
+# §9.28 — reject a multi-element array LCSC part on a single 2-pad passive
+# footprint (an 8-pin 0603x4 resistor array on R_0603 can never land: the
+# footprint has fewer pads than the part has pins). The LCSC array naming
+# convention embeds the element count: "0603x4" = four resistors, 8 joints.
+_ARRAY_PKG_RE = re.compile(r"\d{3,4}x\d+")
+
+
+def _is_single_passive_footprint(fp: str) -> bool:
+    """True for a 2-pad single R/C/L, NOT an array/network footprint.
+
+    Restricts the §9.28 array check to standard single-passive footprints so
+    it never touches ICs, connectors, or array-named footprints.
+    """
+    lib = fp.split(":")[0] if ":" in fp else ""
+    leaf = fp.split(":")[1] if ":" in fp else fp
+    if lib not in ("Resistor_SMD", "Capacitor_SMD", "Inductor_SMD"):
+        return False
+    return not re.search(r"array|network|x\d", leaf, re.IGNORECASE)
+
+
+def _resolve_part_lcsc(part, manifest_by_name: dict) -> str | None:
+    """The C# a BOM part resolves to: an explicit pin in ``sourcing_note``
+    (via ``_SOURCING_LCSC_RE``) wins; else the library-bundle manifest's
+    ``sourcing.lcsc`` (via ``_lib_prefix`` + ``manifest_by_name``), the same
+    pattern ``_resolve_bom_mpn_sourcing`` follows."""
+    note = part.sourcing_note or ""
+    m = _SOURCING_LCSC_RE.search(note)
+    if m:
+        return m.group(0)
+    lib = _lib_prefix(part.symbol) or _lib_prefix(part.footprint or "")
+    man = manifest_by_name.get(lib) if lib else None
+    if man and (man.sourcing or {}).get("lcsc"):
+        return str((man.sourcing or {}).get("lcsc")).strip().upper()
+    return None
+
+
+def _check_passive_array_mismatch(bom, project_root: Path) -> list[str]:
+    """§9.28 — reject a multi-element array LCSC on a single-passive footprint.
+
+    A 4-resistor 0603x4 array (8 joints) on a 2-pad R_0603 footprint can never
+    land — the footprint has fewer pads than the part has pins. Catches the
+    C29718-on-R_0603 mismatch and the general case (cap arrays, inductor
+    arrays). Three signals, any one triggers the reject: ``joints > 2``, the
+    package matches the LCSC array convention ``\\d{3,4}x\\d+`` (e.g.
+    "0603x4"), or the description contains "array".
+    """
+    if not jlcparts.available():
+        return []
+    active, _ = _load_library_parts(project_root)
+    manifest_by_name = {p.manifest.name: p.manifest for p in active}
+    bad: list[str] = []
+    for part in (bom.parts or []):
+        if not _is_single_passive_footprint(part.footprint or ""):
+            continue
+        cid = _resolve_part_lcsc(part, manifest_by_name)
+        if cid is None:
+            continue
+        hit = jlcparts.lookup(cid)
+        if hit is None:
+            continue
+        joints = hit.get("joints") or 0
+        pkg = hit.get("package") or ""
+        desc = (hit.get("description") or "").lower()
+        is_array = (
+            joints > 2
+            or bool(_ARRAY_PKG_RE.search(pkg))
+            or "array" in desc
+        )
+        if is_array:
+            bad.append(
+                f"{part.ref}: footprint {part.footprint!r} is a single "
+                f"2-pad passive but LCSC {cid} (package {pkg!r}, "
+                f"{joints} pins) is a multi-element array — pick a "
+                f"single-element part with lookup_lcsc_id"
+            )
+    return bad
+
+
 def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[str]]:
     """§9.26 — every BOM part must be a real, orderable part, in stock BOTH
     for JLCPCB assembly (the offline jlcparts dump) AND at the lcsc.com
@@ -2996,6 +3074,29 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                             "retail storefront"
                         ],
                         "offenders": bad_mpn[:20],
+                    },
+                    indent=2,
+                )
+            )
+            return 3
+
+    # §9.28: an array LCSC on a single-passive footprint can't land — an
+    # 8-pin 0603x4 resistor array on a 2-pad R_0603 has fewer pads than pins.
+    if stage == "bom" and state.bom is not None:
+        bad_arrays = _check_passive_array_mismatch(
+            state.bom, state_path.resolve().parent.parent
+        )
+        if bad_arrays:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": [
+                            "9.28 BOM part(s) are multi-element arrays on "
+                            "single-passive footprints — pick a single-element "
+                            "LCSC part with lookup_lcsc_id"
+                        ],
+                        "offenders": bad_arrays[:20],
                     },
                     indent=2,
                 )

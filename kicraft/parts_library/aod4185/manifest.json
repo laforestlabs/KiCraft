@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:0428dbeebb665a6a1db56c6cf163cda785d5d9c6171d16b5ad8ee4e764838a59",
+  "datasheet_url": "https://lcsc.com/product-detail/MOSFET_Alpha-Omega-Semicon-AOS-AOD4185_C400894.html",
+  "description": "AOS AOD4185",
+  "footprint_name": "TO-252-3_L6.6-W6.1-P4.57-LS9.9-BR-CW",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "AOD4185",
+  "name": "aod4185",
+  "provenance": {
+    "added_at": "2026-07-02T16:27:12Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C400894"
+  },
+  "symbol_name": "AOD4185_C400894",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

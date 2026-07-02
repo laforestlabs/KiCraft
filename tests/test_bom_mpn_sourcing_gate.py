@@ -12,7 +12,9 @@ confident matches into sourcing_note (where fab_export reads the C#).
 from __future__ import annotations
 
 import kicraft.design.cli_app as cli_app
-from kicraft.design.cli_app import _resolve_bom_mpn_sourcing
+from kicraft.design.cli_app import (
+    _check_passive_array_mismatch, _resolve_bom_mpn_sourcing,
+)
 from kicraft.design.models import BOM, BomPart
 from kicraft.parts_library.lcsc_retail import RetailUnavailable
 
@@ -461,3 +463,28 @@ def test_stale_dump_age_emits_a_warning(tmp_path, monkeypatch):
     bad, warns = _resolve_bom_mpn_sourcing(_bom(_part()), tmp_path)
     assert bad == []
     assert any("21 days old" in w and "jlcparts-update" in w for w in warns)
+
+
+# ------------------------------------------------- §9.28 array-on-passive
+
+def test_array_lcsc_on_single_resistor_is_an_offender(tmp_path, monkeypatch):
+    # §9.28: an 8-pin 0603x4 resistor array (C29718) on a 2-pad R_0603
+    # footprint can never land — fewer pads than pins.
+    _install(monkeypatch, _FakeCatalog(by_lcsc={
+        "C29718": {"lcsc": "C29718", "package": "0603x4", "joints": 8,
+                   "stock": 826216, "description": "10kΩ 4 RES ARRAY 0603x4"}}))
+    p = _part(ref="R1", mpn=None, note="LCSC C29718", symbol="Device:R",
+              footprint="Resistor_SMD:R_0603_1608Metric")
+    bad = _check_passive_array_mismatch(_bom(p), tmp_path)
+    assert len(bad) == 1
+    assert "C29718" in bad[0] and "array" in bad[0]
+
+
+def test_single_resistor_lcsc_passes(tmp_path, monkeypatch):
+    # A genuine 2-joint 0603 resistor on R_0603 is not an array — no offender.
+    _install(monkeypatch, _FakeCatalog(by_lcsc={
+        "C25804": {"lcsc": "C25804", "package": "0603", "joints": 2,
+                   "stock": 1000}}))
+    p = _part(ref="R1", mpn=None, note="LCSC C25804", symbol="Device:R",
+              footprint="Resistor_SMD:R_0603_1608Metric")
+    assert _check_passive_array_mismatch(_bom(p), tmp_path) == []

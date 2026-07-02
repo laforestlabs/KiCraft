@@ -202,8 +202,9 @@ def _mk_catalog(tmp_path, monkeypatch, rows):
     con = sqlite3.connect(db)
     con.execute("""CREATE TABLE jlc_components (
         lcsc INTEGER PRIMARY KEY, mfr TEXT, package TEXT, manufacturer TEXT,
-        library_type TEXT, stock INTEGER, price TEXT, description TEXT)""")
-    con.executemany("INSERT INTO jlc_components VALUES (?,?,?,?,?,?,?,?)", rows)
+        library_type TEXT, stock INTEGER, price TEXT, description TEXT,
+        joints INTEGER)""")
+    con.executemany("INSERT INTO jlc_components (lcsc, mfr, package, manufacturer, library_type, stock, price, description) VALUES (?,?,?,?,?,?,?,?)", rows)
     con.commit()
     con.close()
     monkeypatch.setenv("KICRAFT_JLCPARTS_DB", str(db))

@@ -32,6 +32,7 @@
 	(fp_line (start 4.00 5.00) (end -3.80 5.00) (layer F.CrtYd) (width 0.05))
 	(fp_poly (pts (xy -3.099994 -2.799994) (xy -3.099994 -2.299995) (xy -2.799994 -2.599995) (xy -3.099994 -2.799994)) (stroke (width 0) (type solid)) (fill solid) (layer "F.SilkS"))
 	(fp_poly (pts (xy -3.099994 2.201266) (xy -3.099994 2.701265) (xy -2.799994 2.401265) (xy -3.099994 2.201266)) (stroke (width 0) (type solid)) (fill solid) (layer "F.SilkS"))
+	(fp_text user "PCB Edge" (at -3.8 0) (layer Dwgs.User) (effects (font (size 1 1) (thickness 0.15))))
 	(model "${KIPRJMOD}/3dmodels/screw-terminal-5mm-2p/CONN-TH_DB5.00-LI-2P-126.wrl"
 		(offset (xyz 0.000 0.000 0.000))
 		(scale (xyz 1 1 1))

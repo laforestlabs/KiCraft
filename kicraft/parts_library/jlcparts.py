@@ -25,7 +25,7 @@ from pathlib import Path
 DATA_URL = "https://yaqwsx.github.io/jlcparts/data/"
 
 _CANDIDATE_COLS = ("lcsc, mfr, package, manufacturer, library_type, stock, "
-                   "price, description")
+                   "price, description, joints")
 
 
 # --------------------------------------------------------------------- reads
@@ -156,6 +156,7 @@ def _candidate(row: sqlite3.Row) -> dict:
         "brand": row["manufacturer"] or None,
         "package": (row["package"] or None) if row["package"] != "-" else None,
         "stock": row["stock"],
+        "joints": row["joints"],
         "type": "Basic" if row["library_type"] == "base" else "Extended",
         "price": price_at(ladder, 1),
         "description": desc[:120] or None,
