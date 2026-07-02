@@ -1471,19 +1471,42 @@ def _compose_artifacts(
         solved = solver.solve()
         solver_phase_timings = dict(getattr(solver, "last_solve_phase_timings", {}))
 
+        # 3D step-1: Instrument the three compose post-passes to count when
+        # they change anything. The goal is to eventually move edge-extremity
+        # into the parent solver itself so these post-passes become
+        # verify-only. This instrumentation reports the counts so we know
+        # which boards still need the compose mutations.
+        _3d_slide_changes = 0
+        _3d_extremal_changes = 0
+        _3d_courtyard_resolved = 0
+
         # Slide any edge-constrained block whose free axis drifted outside the
         # rest of the cluster's perpendicular span. The solver pins X (or Y)
         # to the board edge but lets the free axis float; a leaf parked in a
         # corner inflates the final outline because the orthogonal sides snap
         # to include it. Bringing it back inside the cluster span lets
         # _compute_final_outline shrink the board.
+        _pre_slide_positions = {r: (c.pos.x, c.pos.y) for r, c in solved.items()}
         _slide_constrained_to_cluster(solved, derived, synthetic_refs)
+        _3d_slide_changes = sum(
+            1 for r, c in solved.items()
+            if r in _pre_slide_positions
+            and (abs(c.pos.x - _pre_slide_positions[r][0]) > 1e-6
+                 or abs(c.pos.y - _pre_slide_positions[r][1]) > 1e-6)
+        )
 
         # Make each edge-zoned block the extremity on its side so its connector
         # defines the board edge and stays flush (KC-S8PC37 J1) instead of being
         # stranded inboard by another block edging past it.
         if cfg.get("connector_edge_block_extremity", True):
+            _pre_extremal_positions = {r: (c.pos.x, c.pos.y) for r, c in solved.items()}
             _shifted = _ensure_edge_blocks_extremal(solved, block_zones)
+            _3d_extremal_changes = sum(
+                1 for r, c in solved.items()
+                if r in _pre_extremal_positions
+                and (abs(c.pos.x - _pre_extremal_positions[r][0]) > 1e-6
+                     or abs(c.pos.y - _pre_extremal_positions[r][1]) > 1e-6)
+            )
             if _shifted:
                 logger.info("composition: shifted edge blocks to extremity: %s", _shifted)
 
@@ -1497,7 +1520,23 @@ def _compose_artifacts(
         # edge flush + extremity are preserved) guarantees the stamped parent
         # has no same-side courtyard overlap.
         if cfg.get("resolve_courtyard_overlaps", True):
+            _pre_courtyard_positions = {r: (c.pos.x, c.pos.y) for r, c in solved.items()}
             solver._resolve_courtyard_overlaps(solved)
+            _3d_courtyard_resolved = sum(
+                1 for r, c in solved.items()
+                if r in _pre_courtyard_positions
+                and (abs(c.pos.x - _pre_courtyard_positions[r][0]) > 1e-6
+                     or abs(c.pos.y - _pre_courtyard_positions[r][1]) > 1e-6)
+            )
+
+        if _3d_slide_changes or _3d_extremal_changes or _3d_courtyard_resolved:
+            print(
+                f"[3d-instrument] post-pass changes: "
+                f"slide={_3d_slide_changes} "
+                f"extremal={_3d_extremal_changes} "
+                f"courtyard={_3d_courtyard_resolved}",
+                flush=True,
+            )
 
         # --- Recover artifact placements from solver output ---
         placements_dict = placements_from_solved_state(solved, list(loaded_artifacts), synthetic_refs)
