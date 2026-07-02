@@ -119,6 +119,47 @@ def relax_keyword(kw: str) -> str | None:
     return relaxed if kept and relaxed != kw else None
 
 
+# LCSC's array naming convention embeds the element count in the package:
+# "0603x4" = four resistors in one chip, 8 joints.
+_ARRAY_PKG_RE = re.compile(r"\d{3,4}x\d+")
+
+
+def is_multi_element_array(cand: dict) -> bool:
+    """True when a candidate/lookup row is a multi-element passive array
+    (resistor network, capacitor array). An array can never land on a single
+    2-pad passive footprint — more pins than pads. Three signals, any one
+    triggers: ``joints > 2``, an array-convention package ("0603x4"), or an
+    "array" description. Shared by the §9.26 candidate walks (skip these for
+    single-passive parts) and the §9.28 commit gate (reject one that slipped
+    through an explicit pin) so both use one definition. KC-8XZS9Q died on
+    the walk auto-pinning Basic array C29718 for a generic "10k 0603"."""
+    joints = cand.get("joints") or 0
+    pkg = cand.get("package") or ""
+    desc = (cand.get("description") or "").lower()
+    return joints > 2 or bool(_ARRAY_PKG_RE.search(pkg)) or "array" in desc
+
+
+def chip_value_matches(value_token: str, cand: dict) -> bool:
+    """False when the candidate's text shows the chip-passive *value token*
+    ONLY inside another number. ``search()`` ANDs substring LIKEs, so a
+    "10k 0603" query also returns 510kΩ rows (the "10k" inside "510kΩ") —
+    picking one would silently ship a wrong-value resistor. Rejects on
+    evidence of a wrong value: the token occurs somewhere, but never with a
+    clean numeric boundary (not preceded by a digit/dot, not followed by a
+    digit). A row whose visible fields don't carry the token at all is kept
+    — the candidate dict truncates descriptions, so absence isn't proof."""
+    tok = (value_token or "").strip()
+    if not tok:
+        return True
+    hay = " ".join(str(cand.get(k) or "")
+                   for k in ("model", "brand", "description", "package"))
+    if tok.lower() not in hay.lower():
+        return True  # can't judge from the visible fields — keep
+    pat = re.compile(r"(?<![0-9.])" + re.escape(tok) + r"(?![0-9])",
+                     re.IGNORECASE)
+    return bool(pat.search(hay))
+
+
 def _connect() -> sqlite3.Connection:
     con = sqlite3.connect(f"file:{db_path()}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
@@ -419,10 +460,20 @@ def prune(db_file: Path, min_stock: int, progress=lambda msg: None) -> int:
     The full dump is ~70% out-of-stock rows KiCraft can neither pick (the
     in-stock-first ranking skips them) nor order; pruning cuts the on-disk
     catalog to a fraction. Returns the number of rows removed.
+
+    JLC **Basic**-tier rows are kept regardless of stock (a few hundred rows):
+    deleting one turns a transient stock-out into a week-long hole in the
+    catalog — C25804, THE canonical 10k 0603, vanished from a June dump this
+    way, leaving a resistor array as the only Basic "10k 0603" match and
+    killing KC-8XZS9Q. A kept dry row still can't be *picked* (the walks
+    filter on stock), but it stays visible to lookup()/§9.28 and explicit
+    pins bounce with an honest stock count instead of "not in the catalog".
     """
     con = sqlite3.connect(db_file)
     try:
-        cur = con.execute("DELETE FROM jlc_components WHERE stock < ?", (min_stock,))
+        cur = con.execute(
+            "DELETE FROM jlc_components WHERE stock < ? "
+            "AND library_type <> 'base'", (min_stock,))
         removed = cur.rowcount
         # The dump also ships a 4M-row lcsc_components side table KiCraft
         # never reads; drop it wholesale before VACUUM reclaims its pages.

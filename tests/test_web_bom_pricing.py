@@ -89,6 +89,36 @@ def test_pick_price_none_when_nothing_priced():
     assert web._pick_price("kw", "x", [{"price": 0, "stock": 1}, {"price": None}]) is None
 
 
+def test_pick_price_kw_chip_passive_skips_arrays_and_wrong_values():
+    # A "<value> <size>" keyword prices a single 2-pad part of that value:
+    # never the Basic resistor ARRAY (KC-8XZS9Q's C29718) and never a
+    # wrong-value substring match ("10k" inside "510kΩ").
+    rows = [
+        {"lcsc": "C29718", "type": "Basic", "stock": 826_216, "price": 0.0095,
+         "joints": 8, "package": "0603x4",
+         "description": "10kΩ 4 0603x4 Resistor Networks, Arrays"},
+        {"lcsc": "C23192", "type": "Basic", "stock": 419_842, "price": 0.0018,
+         "joints": 2, "package": "0603",
+         "description": "100mW 510kΩ 0603 Chip Resistor"},
+        {"lcsc": "C5126214", "type": "Extended", "stock": 979_259,
+         "price": 0.0062, "joints": 2, "package": "0603",
+         "description": "100mW 10kΩ 0603 Chip Resistor"},
+    ]
+    assert web._pick_price("kw", "10k 0603", rows)["lcsc"] == "C5126214"
+    # only ineligible rows -> honest None, not an array price
+    assert web._pick_price("kw", "10k 0603", rows[:2]) is None
+
+
+def test_pick_price_kw_non_chip_query_keeps_multi_pin_parts():
+    # Connectors have many joints; the chip-passive filter must not touch
+    # non-"<value> <size>" keywords.
+    rows = [{"lcsc": "C2935151", "type": "Extended", "stock": 50_000,
+             "price": 0.05, "joints": 16, "package": "P2.54",
+             "description": "pin header 1x2P 2.54mm"}]
+    assert web._pick_price(
+        "kw", "pin header 2.54mm 1x2P", rows)["lcsc"] == "C2935151"
+
+
 def test_vendor_cell_links_to_priced_product_when_available():
     # Once priced, the vendor link points to the exact product we priced (so the
     # link and the cost agree), even for an MPN that would otherwise be a search.

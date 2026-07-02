@@ -488,3 +488,109 @@ def test_single_resistor_lcsc_passes(tmp_path, monkeypatch):
     p = _part(ref="R1", mpn=None, note="LCSC C25804", symbol="Device:R",
               footprint="Resistor_SMD:R_0603_1608Metric")
     assert _check_passive_array_mismatch(_bom(p), tmp_path) == []
+
+
+# --------------------------------------- §9.26 walk vs arrays / wrong values
+# KC-8XZS9Q: the tier-4 keyword walk auto-pinned the Basic 0603x4 resistor
+# array C29718 for a generic "10k 0603" — §9.28 then rejected the pipeline's
+# own pin, an unwinnable retry loop. The walk (kw AND MPN-family tiers) must
+# never offer a multi-element array, or a wrong-value substring match
+# ("10k" inside "510kΩ"), to a single 2-pad passive.
+
+def _kw_row(lcsc, model, typ, stock, desc, joints=2, package="0603"):
+    return {"lcsc": lcsc, "model": model, "brand": None, "package": package,
+            "stock": stock, "joints": joints, "type": typ, "price": 0.001,
+            "description": desc}
+
+
+# The real "10k 0603" catalog top rows (stock-ordered), abridged.
+_KW_10K_0603 = [
+    _kw_row("C2930027", "FRC0603J103", "Extended", 2_042_275,
+            "100mW 10kΩ 75V Thick Film Resistor ±5% 0603 Chip Resistor"),
+    _kw_row("C2907178", "FRC0603J514", "Extended", 1_373_394,
+            "100mW 510kΩ 75V Thick Film Resistor ±5% 0603 Chip Resistor"),
+    _kw_row("C5126214", "FRH0603B1002TS", "Extended", 979_259,
+            "100mW 10kΩ 75V Thick Film Resistor ±0.1% 0603 Chip Resistor"),
+    _kw_row("C29718", "4D03WGJ0103T5E", "Basic", 826_216,
+            "10kΩ 4 62.5mW 8 ±5% 0603x4 Resistor Networks, Arrays",
+            joints=8, package="0603x4"),
+    _kw_row("C23192", "0603WAF5103T5E", "Basic", 419_842,
+            "100mW 510kΩ 75V Thick Film Resistor ±1% 0603 Chip Resistor"),
+]
+
+
+def _generic_10k(ref="R1"):
+    return BomPart(ref=ref, value="10k", symbol="Device:R",
+                   footprint="Resistor_SMD:R_0603_1608Metric", sheet="A")
+
+
+def test_kw_walk_pins_a_true_single_never_the_array_or_a_wrong_value(
+        tmp_path, monkeypatch):
+    # Basic-first ranking would try C29718 (array) then C23192 (510kΩ) —
+    # both ineligible. First true single C2930027 is retail-dry, so the
+    # walk must land on C5126214, and §9.28 must agree with the pin.
+    retail = _FakeRetail(by_lcsc={"C2930027": {"stock": 0}})
+    _install(monkeypatch, _FakeCatalog(
+        by_mpn={"10K 0603": _KW_10K_0603},
+        by_lcsc={"C5126214": {"lcsc": "C5126214", "package": "0603",
+                              "joints": 2, "stock": 979_259}}), retail)
+    p = _generic_10k()
+    bad, warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    assert (bad, warns) == ([], [])
+    assert p.sourcing_note == "LCSC C5126214"
+    # ineligible rows never even reached a retail check
+    assert retail.calls == ["C2930027", "C5126214"]
+    assert _check_passive_array_mismatch(_bom(p), tmp_path) == []
+
+
+def test_kw_walk_all_matches_ineligible_stays_unpinned_not_bounced(
+        tmp_path, monkeypatch):
+    # Only an array and a wrong-value row match: nothing is pinnable, and
+    # nothing bounces to the model — the part stays visibly unpriced.
+    _install(monkeypatch, _FakeCatalog(
+        by_mpn={"10K 0603": [_KW_10K_0603[3], _KW_10K_0603[4]]}))
+    p = _generic_10k()
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    assert bad == []
+    assert p.sourcing_note is None
+
+
+def test_kw_walk_array_footprint_may_pin_an_array_part(tmp_path, monkeypatch):
+    # A genuine resistor-array footprint is NOT a single passive: the array
+    # part stays eligible (no over-filtering).
+    _install(monkeypatch, _FakeCatalog(by_mpn={"10K": [_KW_10K_0603[3]]}))
+    p = BomPart(ref="RN1", value="10k", symbol="Device:R_Network04",
+                footprint="Resistor_SMD:R_Array_Convex_4x0603", sheet="A")
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    assert bad == []
+    assert p.sourcing_note == "LCSC C29718"
+
+
+def test_mpn_family_walk_skips_array_sibling_on_single_passive(
+        tmp_path, monkeypatch):
+    # Family-prefix broadening must not swap a single passive for its
+    # better-stocked array sibling.
+    _install(monkeypatch, _FakeCatalog(by_mpn={"YC164": [
+        _kw_row("C110924", "YC164-FR-0710KL", "Extended", 5_000_000,
+                "10kΩ x4 RES ARRAY 0603x4", joints=8, package="0603x4"),
+        _kw_row("C98220", "YC164S", "Extended", 2_000_000,
+                "100mW 10kΩ 0603 Chip Resistor"),
+    ]}))
+    p = BomPart(ref="R1", value="10k", symbol="Device:R", mpn="YC164",
+                footprint="Resistor_SMD:R_0603_1608Metric", sheet="A")
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    assert bad == []
+    assert p.sourcing_note == "LCSC C98220"
+
+
+def test_mpn_only_array_variants_is_an_offender_that_says_why(
+        tmp_path, monkeypatch):
+    _install(monkeypatch, _FakeCatalog(by_mpn={"YC164": [
+        _kw_row("C110924", "YC164-FR-0710KL", "Extended", 5_000_000,
+                "10kΩ x4 RES ARRAY 0603x4", joints=8, package="0603x4"),
+    ]}))
+    p = BomPart(ref="R1", value="10k", symbol="Device:R", mpn="YC164",
+                footprint="Resistor_SMD:R_0603_1608Metric", sheet="A")
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    assert len(bad) == 1 and "multi-element array" in bad[0]
+    assert p.sourcing_note is None
