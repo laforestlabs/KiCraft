@@ -140,20 +140,23 @@ def minimum_spanning_tree(nodes: list[str],
     return edges
 
 
-def count_crossings(state: BoardState) -> int:
-    """Estimate ratsnest crossings by counting intersecting MST edges across all nets.
+def build_net_mst_cache(
+    state: BoardState,
+) -> dict[str, list[tuple[Point, Point, float]]]:
+    """Pre-compute per-net MST edges once so multiple consumers
+    (``total_ratsnest_length`` and ``count_crossings``) can share them
+    inside a single ``score()`` call instead of recomputing Prim's MST
+    per net per consumer.
 
-    For each net, build MST of its pad positions. Then count how many
-    MST edges from different nets cross each other. This is a fast
-    O(E^2) proxy for routing difficulty.
+    Returns ``{net_name: [(start_point, end_point, edge_length), ...]}``
+    for every routable net (skipping GND/``/GND`` and nets with fewer
+    than two resolvable pads), in the same net iteration order the two
+    consumers used independently.
     """
-    # Build MST edges per net (as line segments)
-    all_edges: list[tuple[Point, Point, str]] = []  # (start, end, net_name)
-
+    cache: dict[str, list[tuple[Point, Point, float]]] = {}
     for net in state.nets.values():
         if net.name in ("GND", "/GND") or len(net.pad_refs) < 2:
             continue
-        # Gather pad positions
         pad_positions: list[Point] = []
         for ref, pad_id in net.pad_refs:
             comp = state.components.get(ref)
@@ -166,14 +169,36 @@ def count_crossings(state: BoardState) -> int:
         if len(pad_positions) < 2:
             continue
 
-        # MST via Prim's
         pnames = [f"{i}" for i in range(len(pad_positions))]
         pos_map = {pnames[i]: pad_positions[i] for i in range(len(pad_positions))}
         mst = minimum_spanning_tree(
             pnames, lambda a, b: pos_map[a].dist(pos_map[b])
         )
-        for a, b, _ in mst:
-            all_edges.append((pos_map[a], pos_map[b], net.name))
+        cache[net.name] = [
+            (pos_map[a], pos_map[b], d) for a, b, d in mst
+        ]
+    return cache
+
+
+def count_crossings(state: BoardState, mst_cache=None) -> int:
+    """Estimate ratsnest crossings by counting intersecting MST edges across all nets.
+
+    For each net, build MST of its pad positions. Then count how many
+    MST edges from different nets cross each other. This is a fast
+    O(E^2) proxy for routing difficulty.
+
+    ``mst_cache`` (from :func:`build_net_mst_cache`) lets a caller that
+    already needs the per-net MSTs (e.g. ``total_ratsnest_length`` in
+    the same ``score()`` call) skip recomputing Prim's MST per net.
+    """
+    # Build MST edges per net (as line segments)
+    all_edges: list[tuple[Point, Point, str]] = []  # (start, end, net_name)
+
+    if mst_cache is None:
+        mst_cache = build_net_mst_cache(state)
+    for net_name, edges in mst_cache.items():
+        for start, end, _ in edges:
+            all_edges.append((start, end, net_name))
 
     # Count crossings between edges of different nets
     crossings = 0
@@ -208,29 +233,13 @@ def _segments_intersect(p1: Point, p2: Point, p3: Point, p4: Point) -> bool:
     return False
 
 
-def total_ratsnest_length(state: BoardState) -> float:
-    """Sum of MST edge lengths across all nets. Lower = better placement."""
-    total = 0.0
-    for net in state.nets.values():
-        if net.name in ("GND", "/GND") or len(net.pad_refs) < 2:
-            continue
-        pad_positions: list[Point] = []
-        for ref, pad_id in net.pad_refs:
-            comp = state.components.get(ref)
-            if comp:
-                for p in comp.pads:
-                    if p.pad_id == pad_id and p.net == net.name:
-                        pad_positions.append(p.pos)
-                        break
+def total_ratsnest_length(state: BoardState, mst_cache=None) -> float:
+    """Sum of MST edge lengths across all nets. Lower = better placement.
 
-        if len(pad_positions) < 2:
-            continue
-
-        pnames = [f"{i}" for i in range(len(pad_positions))]
-        pos_map = {pnames[i]: pad_positions[i] for i in range(len(pad_positions))}
-        mst = minimum_spanning_tree(
-            pnames, lambda a, b: pos_map[a].dist(pos_map[b])
-        )
-        total += sum(d for _, _, d in mst)
-
-    return total
+    ``mst_cache`` (from :func:`build_net_mst_cache`) lets a caller that
+    already needs the per-net MSTs (e.g. ``count_crossings`` in the same
+    ``score()`` call) skip recomputing Prim's MST per net.
+    """
+    if mst_cache is None:
+        mst_cache = build_net_mst_cache(state)
+    return sum(d for edges in mst_cache.values() for _, _, d in edges)

@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 
-from .graph import count_crossings, total_ratsnest_length
+from .graph import build_net_mst_cache, count_crossings, total_ratsnest_length
 from .placement_utils import _blocker_pair_compatible, packing_metrics
 from .types import (
     BoardState,
@@ -42,10 +42,20 @@ class PlacementScorer:
         if not self.state.components:
             s.total = 0.0
             return s
-        s.net_distance = self._score_net_distance()
-        s.crossover_count = count_crossings(self.state)
+        # 4B memoization: build the per-net MST edge sets ONCE per score()
+        # call and share them between count_crossings and total_ratsnest_length
+        # (via _score_net_distance), which otherwise each rebuild Prim's MST
+        # for every net. Hoist the all-component area sum too — it's reused by
+        # _score_compactness and _score_bbox_packing. Pure memoization: the
+        # produced scores are byte-identical to the un-memoized path.
+        mst_cache = build_net_mst_cache(self.state)
+        total_component_area = sum(
+            c.area for c in self.state.components.values()
+        )
+        s.net_distance = self._score_net_distance(mst_cache)
+        s.crossover_count = count_crossings(self.state, mst_cache)
         s.crossover_score = self._crossover_to_score(s.crossover_count)
-        s.compactness = self._score_compactness()
+        s.compactness = self._score_compactness(total_component_area)
         s.edge_compliance = self._score_edge_compliance()
         s.rotation_score = self._score_rotation()
         s.board_containment = self._score_board_containment()
@@ -54,7 +64,7 @@ class PlacementScorer:
         s.group_coherence = self._score_group_coherence()
         s.topology_structure = self._score_topology_structure()
         s.block_opposite_side = self._score_block_opposite_side()
-        s.bbox_packing = self._score_bbox_packing()
+        s.bbox_packing = self._score_bbox_packing(total_component_area)
 
         # Board aspect ratio scoring
         board_w = self.state.board_width
@@ -67,10 +77,10 @@ class PlacementScorer:
         s.compute_total(weights=placement_weights_from_config(self.cfg))
         return s
 
-    def _score_net_distance(self) -> float:
+    def _score_net_distance(self, mst_cache=None) -> float:
         """Score based on total MST ratsnest length.
         Shorter = better. Normalized to 0-100."""
-        total_len = total_ratsnest_length(self.state)
+        total_len = total_ratsnest_length(self.state, mst_cache)
         # Heuristic: board diagonal is worst case per net
         diag = math.hypot(self.state.board_width, self.state.board_height)
         n_nets = max(
@@ -99,10 +109,11 @@ class PlacementScorer:
         ratio = crossings / max_expected
         return max(0, min(100, (1.0 - ratio) * 100))
 
-    def _score_compactness(self) -> float:
+    def _score_compactness(self, total_area: float | None = None) -> float:
         """Ratio of component area to board area. Gentle reward for smaller layouts.
         20% fill = 50, 40% fill = 75, 60%+ = 100. Not heavily penalized."""
-        total_area = sum(c.area for c in self.state.components.values())
+        if total_area is None:
+            total_area = sum(c.area for c in self.state.components.values())
         board_area = self.state.board_width * self.state.board_height
         if board_area == 0:
             return 0.0
@@ -110,7 +121,7 @@ class PlacementScorer:
         # Gentle curve: 10% fill ≈ 40, 30% ≈ 65, 50%+ ≈ 90+
         return min(100, fill * 150 + 25)
 
-    def _score_bbox_packing(self) -> float:
+    def _score_bbox_packing(self, total_area: float | None = None) -> float:
         """Reward tight clustering measured against the placed-component bbox.
 
         ``_score_compactness`` divides by the *seed* board area, which is
@@ -124,7 +135,8 @@ class PlacementScorer:
         comps = list(self.state.components.values())
         if len(comps) < 2:
             return 100.0  # no spread to score
-        total_area = sum(c.area for c in comps)
+        if total_area is None:
+            total_area = sum(c.area for c in comps)
         if total_area <= 0.0:
             return 100.0  # degenerate input
         bboxes = [c.physical_bbox() for c in comps]
