@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:e99776532122021c545605eb87c027ac89acb12c0d61d90271fcd057d6eda0c7",
+  "datasheet_url": "https://lcsc.com/product-detail/Precision-Potentiometer_BOURNS_3296W-1-103LF_10KR_C34846.html",
+  "description": "10K\u03a9",
+  "footprint_name": "RES-ADJ-TH_3296W",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "3296W-1-103LF",
+  "name": "trim-pot-3296w-10k",
+  "provenance": {
+    "added_at": "2026-07-02T17:58:54Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C34846"
+  },
+  "symbol_name": "3296W-1-103LF",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

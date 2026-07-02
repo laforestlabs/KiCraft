@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:efa18012c32427f7582967192f1e27423409f6ed2a7d196f55b354cf1e14c4db",
+  "datasheet_url": "https://lcsc.com/product-detail/Sensors_Bosch_BME280_BME280_C92489.html",
+  "description": "Bosch(\u535a\u4e16) BME280",
+  "footprint_name": "LGA-8_BME280_BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "BME280",
+  "name": "bme280-bosch-sensor",
+  "provenance": {
+    "added_at": "2026-07-02T17:58:47Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C92489"
+  },
+  "symbol_name": "BME280",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

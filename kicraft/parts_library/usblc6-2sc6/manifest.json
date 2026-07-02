@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:958b37c5a5ac452239c791beb5df391b429d527ef70553a1f272120a1bb19654",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C2687116.pdf",
+  "description": "UMW(\u53cb\u53f0\u534a\u5bfc\u4f53) USBLC6-2SC6",
+  "footprint_name": "SOT-23-6_L2.9-W1.6-P0.95-LS2.8-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "USBLC6-2SC6",
+  "name": "usblc6-2sc6",
+  "provenance": {
+    "added_at": "2026-07-02T17:58:45Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2687116"
+  },
+  "symbol_name": "USBLC6-2SC6_C2687116",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

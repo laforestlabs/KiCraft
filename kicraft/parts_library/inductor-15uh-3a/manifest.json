@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:d0fdab7009245e3d248e474c4bee51aad7f7616f4275af9f08f0b89c55dc4b44",
+  "datasheet_url": "https://lcsc.com/product-detail/Power-Inductors_15uH-20_C177243.html",
+  "description": "cjiang(\u957f\u6c5f\u5fae\u7535) FXL0630-150-M",
+  "footprint_name": "IND-SMD_L7.0-W6.6_FXL0630",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "FXL0630-150-M",
+  "name": "inductor-15uh-3a",
+  "provenance": {
+    "added_at": "2026-07-02T17:58:48Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C177243"
+  },
+  "symbol_name": "FXL0630-150-M",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

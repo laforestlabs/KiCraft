@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:65819235d412d2f0c4dd7d3526a86ff2c9963ac082c4edfe0d94a72c7d4350c1",
+  "datasheet_url": "https://lcsc.com/product-detail/Surface-Mount-Fuses_BOURNS_MF-MSMF200-2_BOURNS-MF-MSMF200-2_C210837.html",
+  "description": "BOURNS MF-MSMF200-2",
+  "footprint_name": "F1812",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "MF-MSMF200-2",
+  "name": "ptc-2a-1812",
+  "provenance": {
+    "added_at": "2026-07-02T17:58:49Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C210837"
+  },
+  "symbol_name": "MF-MSMF200-2",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

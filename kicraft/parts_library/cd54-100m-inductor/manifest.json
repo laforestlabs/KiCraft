@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:728f1aebbf3ca526d19e43c860f224d56a5675da2f8104aa129a5b727fefa12a",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C2826662.pdf",
+  "description": "DMBJ(\u632f\u5b9d\u4f73) CD54-100M 10UH",
+  "footprint_name": "IND-SMD_L5.8-W5.2",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "CD54-100M 10UH",
+  "name": "cd54-100m-inductor",
+  "provenance": {
+    "added_at": "2026-07-02T17:58:51Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2826662"
+  },
+  "symbol_name": "CD54-100M",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}
