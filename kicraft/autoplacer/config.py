@@ -232,6 +232,17 @@ DEFAULT_CONFIG = {
     "psw_group_coherence": 0.08,
     "psw_topology_structure": 0.05,
     "psw_aspect_ratio": 0.02,
+    # Scorer normalization modes (area-compaction Phase 2). "content" makes
+    # net-distance canvas-invariant (normalized by the component-area-derived
+    # ideal-canvas diagonal, not the arbitrary solve-canvas diagonal);
+    # "strict" zeroes compactness below ~5% fill. None (default) = the legacy
+    # board_diag/legacy scoring EVERYWHERE: replay A/B 2026-07-02 showed both
+    # a global and a leaf-scoped flip regress routing (parent 530/535; leaf
+    # 535 J1) because the psw weights were tuned against the legacy score
+    # shapes. These are the knobs for the pending CMA-ES retune campaign
+    # (plan Phase 2 item 4); flip the defaults only with retuned weights.
+    "placement_score_net_scale": None,
+    "placement_compactness_curve": None,
     # Through-hole backside threshold — THT components with bounding-box area
     # above this value (mm²) are placed on B.Cu so SMT parts can use F.Cu.
     # SMT passives always stay on F.Cu — IC group connectivity forces keep

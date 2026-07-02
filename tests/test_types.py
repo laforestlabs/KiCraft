@@ -302,11 +302,14 @@ class TestPlacementScore:
             bbox_packing=0.0,  # else the 100.0 default would contribute 1.0
         )
         total = ps.compute_total()
-        # compute_total now normalizes by the weight sum (~1.14) so the result is
-        # a true 0-100 weighted average. Only net_distance (weight 0.20) is
-        # nonzero at 50, so total = 50 * 0.20 / sum(default_weights) ~= 8.77 --
-        # below the un-normalized 10.0 it reported before the >100-score fix.
-        assert total == pytest.approx(50 * 0.20 / 1.14)
+        # compute_total normalizes by the weight sum so the result is a true
+        # 0-100 weighted average. Only net_distance (weight 0.20) is nonzero
+        # at 50, so total = 50 * 0.20 / sum(default_weights) -- derived from
+        # the live defaults so a deliberate weight change doesn't need this
+        # constant re-hardcoded.
+        assert total == pytest.approx(
+            50 * 0.20 / sum(DEFAULT_PLACEMENT_WEIGHTS.values())
+        )
 
     def test_compute_total_custom_weights(self):
         ps = PlacementScore(net_distance=80.0, compactness=60.0)
