@@ -6,6 +6,11 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from kicraft.cli._compose_state import ParentCompositionState
 
 
 def _scale_parent_route_budget(

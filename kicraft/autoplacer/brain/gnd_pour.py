@@ -1055,9 +1055,11 @@ def repair_parent_gnd_islands(
         )
 
     def _add_via(x_iu: int, y_iu: int) -> bool:
+        # `board` is late-bound: assigned by the iteration loop below before
+        # this closure is ever called.
         if _via_blocked(x_iu, y_iu):
             return False
-        via = pcbnew.PCB_VIA(board)
+        via = pcbnew.PCB_VIA(board)  # noqa: F821
         via.SetPosition(pcbnew.VECTOR2I(x_iu, y_iu))
         via.SetDrill(via_drill)
         try:
@@ -1065,7 +1067,7 @@ def repair_parent_gnd_islands(
         except TypeError:
             via.SetWidth(pcbnew.F_Cu, via_size)
         via.SetNetCode(gnd_code)
-        board.Add(via)
+        board.Add(via)  # noqa: F821
         holes.append((pcbnew.ToMM(x_iu), pcbnew.ToMM(y_iu), via_drill_r_mm))
         return True
 

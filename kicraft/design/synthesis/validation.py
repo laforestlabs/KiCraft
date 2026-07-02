@@ -22,6 +22,7 @@ from kicraft.design.models import (
     POWER_NET_PATTERNS,
     FunctionalSpec,
     InterSheetNet,
+    NetConnection,
     PinEndpoint,
     SheetPin,
     is_power_or_ground_name,

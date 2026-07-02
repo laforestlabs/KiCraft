@@ -6,11 +6,15 @@ from __future__ import annotations
 
 import shutil
 import sys
+from typing import TYPE_CHECKING, Any
 
 from kicraft.cli._compose_validate import _fit_requested_shape
 from kicraft.cli._compose_validate import _repair_parent_outline
 from kicraft.cli._compose_validate import _validate_parent_geometry
 from pathlib import Path
+
+if TYPE_CHECKING:
+    from kicraft.cli._compose_state import ParentCompositionState
 
 
 def _stamp_parent_board(

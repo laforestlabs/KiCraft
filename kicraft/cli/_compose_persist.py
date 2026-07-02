@@ -6,9 +6,13 @@ from __future__ import annotations
 
 import json
 import time
+from typing import TYPE_CHECKING, Any
 
 from kicraft.autoplacer.brain.copper_accounting import verify_copper_preservation
 from pathlib import Path
+
+if TYPE_CHECKING:
+    from kicraft.cli._compose_state import ParentCompositionState
 
 
 def _persist_parent_artifact(
