@@ -167,3 +167,67 @@ def test_on_tab_change_runs_show_hook_and_toggles_follow():
     StageTabs._on_tab_change(stub, SimpleNamespace(value="bom"))
     assert fired == ["synthesize"]
     assert stub._auto_follow is True
+
+
+# ------------------------------------------------- build-log tab classifier
+
+from kicraft.server.stagetabs import _build_substage
+
+
+def test_build_substage_step_markers_anchor_to_line_head():
+    assert _build_substage("[build] 1/5 synthesize (schematic + seed PCB + ERC) ...") == "synthesize"
+    assert _build_substage("[build]     synthesized /x/generated/FOO (ERC clean)") == "synthesize"
+    assert _build_substage("[build] 2/5 place + route (quality=good, seed=auto) ...") == "place_route"
+    assert _build_substage("[build] 3/5 promoted routed parent -> FOO.kicad_pcb") == "place_route"
+    assert _build_substage("[build] 4/5 verify: shorts=0 unconnected=0 ...") == "place_route"
+    assert _build_substage("[build] 5/5 export fab package (Gerbers + drill) ...") == "fab"
+
+
+def test_build_substage_project_path_is_not_a_step_marker():
+    """Regression: '1/5' matched as a bare substring, so any line carrying a
+    project path like /projects/1/550/ flipped the tab machine back to
+    synthesize mid-build (every project id starting with 5 was affected)."""
+    for line in (
+        "Log:        /home/k/.kicraft/projects/1/550/generated/X/.experiments/experiments.jsonl",
+        "[timing] round 1 solve_subcircuits_total=37.218s",
+        "[round 2] --leaves-only: skipping parent compose",
+        "BUILD COMPLETE: TPS5430_BUCK",
+        "  routed PCB : /home/k/.kicraft/projects/1/550/generated/X/X.kicad_pcb",
+        "[build]   leaf phase: 3x3 designs/leaf + auto-pin best ...",
+    ):
+        assert _build_substage(line) is None, line
+
+
+def test_build_substage_review_markers():
+    assert _build_substage(
+        "[build]     electrical review: scanning design for electrical defects ..."
+    ) == "electrical_review"
+    assert _build_substage(
+        "[build]     review BLOCKER: [power] VSENSE divider swapped"
+    ) == "electrical_review"
+    assert _build_substage(
+        "[build]     review WARNING: [esd] no TVS on USB"
+    ) == "electrical_review"
+    assert _build_substage(
+        "[build]     electrical review found a blocker; re-driving wiring once to fix"
+    ) == "electrical_review"
+
+
+def test_build_lines_for_splits_a_real_stream():
+    """web._build_lines_for shares the classifier: a run-550-shaped stream (paths
+    containing '1/5' everywhere) must keep place/route lines out of synthesize."""
+    from kicraft.server.web import _build_lines_for
+
+    lines = [
+        "[build] 1/5 synthesize (schematic + seed PCB + ERC) ...",
+        "[build]     synthesized /home/k/.kicraft/projects/1/550/generated/X (ERC clean)",
+        "[build] 2/5 place + route (quality=good, seed=auto) ...",
+        "[timing] round 1 solve_subcircuits_total=37.218s",
+        "Log:        /home/k/.kicraft/projects/1/550/generated/X/.experiments/experiments.jsonl",
+        "[build] 4/5 verify: shorts=0 unconnected=0 courtyard=0",
+        "[build] 5/5 export fab package ...",
+        "  routed PCB : /home/k/.kicraft/projects/1/550/generated/X/X.kicad_pcb",
+    ]
+    assert _build_lines_for("synthesize", lines) == lines[:2]
+    assert _build_lines_for("place_route", lines) == lines[2:6]
+    assert _build_lines_for("fab", lines) == lines[6:]

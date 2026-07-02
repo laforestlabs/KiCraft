@@ -235,3 +235,25 @@ def test_lcsc_only_catalog_row_is_rejected():
         _catalog_of({"function_key": "lcsc-only", "display_name": "X",
                      "category": "power", "default_lcsc": "C123",
                      "default_mpn": "MPN1"})
+
+
+# ---- KC-T6ERHM regression rows: generic-hardware families the R1 parts_block
+# filter must keep visible (the filter keeps only core-default bundles, which
+# used to hide the curated screw terminal + schottky and let the BOM stage
+# freestyle unverified MPNs).
+
+def test_catalog_covers_screw_terminal_and_schottky():
+    catalog = load_core_catalog()
+    by_key = {b.function_key: b for b in catalog.blocks}
+    assert by_key["screw-terminal-2p"].bundle == "screw-terminal-5mm-2p"
+    assert by_key["schottky-1a"].bundle == "ss14"
+
+
+def test_new_core_bundles_resolve_in_the_parts_library():
+    from pathlib import Path
+
+    from kicraft.design.cli_app import _load_library_parts
+
+    active, _broken = _load_library_parts(Path(__file__).resolve().parents[1])
+    names = {p.manifest.name for p in active}
+    assert {"screw-terminal-5mm-2p", "ss14"} <= names

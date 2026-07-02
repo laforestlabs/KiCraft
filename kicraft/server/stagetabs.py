@@ -878,18 +878,27 @@ class StageTabs:
 
 
 def _build_substage(text: str) -> str | None:
-    """Map a `kicraft build` log line to its tab (markers from cli_app build)."""
+    """Map a `kicraft build` log line to its tab (markers from cli_app build).
+
+    The step markers are anchored to the "[build] N/5" line head: a bare
+    substring match ("1/5" in text) misfired on any line carrying a path like
+    /projects/1/550/... — every project whose id starts with 5 flip-flopped
+    the tab state machine mid-build.
+    """
     t = text.lower()
-    if "1/5" in text or "synthesized " in text:
-        return "synthesize"
-    # Electrical review: intercept "review BLOCKER/WARNING/NOTE" and the
-    # "electrical review" heading before the generic 4/5 (verify) check.
+    # Electrical review first: finding lines + the stage heading (these carry
+    # no [build] N/5 marker of their own on the re-review path).
     if any(m in t for m in ("review blocker", "review warning", "review note",
                              "electrical review")):
         return "electrical_review"
-    if "2/5" in text or "3/5" in text or ("4/5" in text and "verify" in t):
+    if not text.startswith("[build]"):
+        return None  # timing/round/tool output: keep the current sub-stage
+    if text.startswith("[build] 1/5") or "synthesized " in text:
+        return "synthesize"
+    if (text.startswith("[build] 2/5") or text.startswith("[build] 3/5")
+            or text.startswith("[build] 4/5")):
         return "place_route"
-    if "5/5" in text:
+    if text.startswith("[build] 5/5"):
         return "fab"
     return None  # unmarked continuation: keep the current sub-stage
 

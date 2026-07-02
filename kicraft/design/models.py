@@ -773,6 +773,11 @@ class ConversationState(BaseModel):
     open_questions: list[Question] = Field(default_factory=list)
     history: list[ChatMsg] = Field(default_factory=list)
     artifacts: ArtifactPaths | None = None
+    # Electrical-review findings from the post-wiring review. Lives at the top
+    # level (not on artifacts) because the review runs BEFORE the build, when
+    # artifacts is still None. The GUI electrical-review inspector reads this
+    # first, falling back to artifacts.review_findings for legacy projects.
+    review_findings: list[ReviewFinding] = Field(default_factory=list)
     expert_mode: bool = False
     stage_status: dict[str, StageStatus] = Field(default_factory=dict)
 

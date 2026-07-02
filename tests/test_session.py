@@ -144,3 +144,50 @@ def test_run_session_parks_on_question_then_resumes(tmp_path):
     assert read_state(tmp_path)["intent"]["goal"] == "a USB-powered LED"
     # The driver stamps the durable outcome the GUI restores stage tabs from.
     assert read_state(tmp_path)["stage_status"]["intent"]["ok"] is True
+
+
+# ---- derive_stage_statuses: electrical_review tab -----------------------------
+
+from kicraft.server.session import derive_stage_statuses
+
+
+def _er_state(ok=True, findings=None, where="top"):
+    st = {"stage_status": {"electrical_review": {"ok": ok, "cost_usd": 0.05}}}
+    if findings is not None:
+        if where == "top":
+            st["review_findings"] = findings
+        else:  # legacy build-tail location
+            st["artifacts"] = {"review_findings": findings}
+    return st
+
+
+def test_electrical_review_done_when_ran_clean():
+    out = derive_stage_statuses(_er_state(findings=[]))
+    assert out["electrical_review"] == "done"
+
+
+def test_electrical_review_warning_on_uncleared_blocker():
+    out = derive_stage_statuses(_er_state(findings=[
+        {"severity": "blocker", "issue": "VSENSE divider swapped"}]))
+    assert out["electrical_review"] == "warning"
+
+
+def test_electrical_review_done_with_only_warnings():
+    out = derive_stage_statuses(_er_state(findings=[
+        {"severity": "warning", "issue": "no TVS"}]))
+    assert out["electrical_review"] == "done"
+
+
+def test_electrical_review_legacy_artifacts_findings():
+    out = derive_stage_statuses(_er_state(findings=[
+        {"severity": "blocker", "issue": "x"}], where="artifacts"))
+    assert out["electrical_review"] == "warning"
+
+
+def test_electrical_review_pending_without_stage_status():
+    # Pre-R3 projects / skipped reviews claim nothing.
+    assert derive_stage_statuses({})["electrical_review"] == "pending"
+
+
+def test_electrical_review_failed_status():
+    assert derive_stage_statuses(_er_state(ok=False))["electrical_review"] == "failed"

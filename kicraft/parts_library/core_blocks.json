@@ -442,6 +442,26 @@
       "selection_notes": "The Adafruit address-conflict fixer, cheap enough to default. PCA9548APW (C21198, $0.99) is the same function from NXP.",
       "sort_order": 440,
       "bundle": "tca9548a"
+    },
+    {
+      "function_key": "schottky-1a",
+      "display_name": "Schottky diode 1A/40V",
+      "category": "power",
+      "qualifier": "1A / 40V, SMA (DO-214AC)",
+      "package": "SMA (DO-214AC)",
+      "selection_notes": "Generic SS14, the maker-default freewheel/catch diode (boost converters, reverse-polarity protection, relay coils). For 2-3A converters step up to the SS34 family (e.g. C8678, 3A/40V SMA) via lookup_lcsc_id instead of overdriving this one.",
+      "sort_order": 130,
+      "bundle": "ss14"
+    },
+    {
+      "function_key": "screw-terminal-2p",
+      "display_name": "Screw terminal 2-pin (wire in/out)",
+      "category": "interface",
+      "qualifier": "2-pin, 5.0mm pitch, THT, 300V/16A, 24-12 AWG",
+      "package": "THT 5.0mm pitch",
+      "selection_notes": "WJ126V-5.0-2P (LCSC C8404) pluggable screw terminal, curated bundle. The default for wire-in power input/output terminals; use one bundle instance per 2-wire connection.",
+      "sort_order": 450,
+      "bundle": "screw-terminal-5mm-2p"
     }
   ]
 }

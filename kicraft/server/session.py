@@ -102,6 +102,31 @@ def derive_stage_statuses(state: dict, *, project_status: str | None = None,
                   else "warning" if design_complete and zip_ok and has_warnings
                   else "done" if design_complete and zip_ok
                   else "pending")
+    # Electrical review: the post-wiring review writes its durable outcome to
+    # stage_status (like the design stages) and its findings to the top-level
+    # review_findings slot (artifacts.review_findings on legacy projects). A
+    # blocker the re-drive did not clear reads as a yellow 'warning' (the run
+    # proceeded; the gap is recorded), never a red failure. No stage_status
+    # entry (review skipped / pre-R3 project) stays 'pending'.
+    er = ss.get("electrical_review")
+    findings = (state.get("review_findings")
+                or (state.get("artifacts") or {}).get("review_findings") or [])
+    has_blocker = any(isinstance(f, dict) and f.get("severity") == "blocker"
+                      for f in findings)
+    if isinstance(er, dict) and er.get("ok") is True:
+        out["electrical_review"] = "warning" if has_blocker else "done"
+    elif isinstance(er, dict) and er.get("ok") is False:
+        out["electrical_review"] = "failed"
+    elif findings:
+        # Legacy build-tail review: persisted findings but no stage_status.
+        out["electrical_review"] = "warning" if has_blocker else "done"
+    elif design_complete and zip_ok and not failed:
+        # Legacy successful build with no recorded review outcome: the
+        # (build-tail) review gate passed or was disabled — either way it did
+        # not block, so a finished project's review tab must not sit gray.
+        out["electrical_review"] = "done"
+    else:
+        out["electrical_review"] = "pending"
     return out
 
 
