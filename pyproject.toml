@@ -17,8 +17,6 @@ scoring = [
 ]
 experiment = [
     "matplotlib>=3.7",
-    "flask>=3.0",
-    "structlog>=23.0",
 ]
 design = [
     "pydantic>=2.6",
@@ -115,7 +113,6 @@ inspect-solved-subcircuits = "kicraft.cli.inspect_solved_subcircuits:main"
 include = ["kicraft*"]
 
 [tool.setuptools.package-data]
-"kicraft.cli" = ["program.md"]
 "kicraft.eval" = ["rubric.yaml"]
 "kicraft.layout_editor" = ["static/*.js"]
 "kicraft.parts_library" = ["core_blocks.json"]

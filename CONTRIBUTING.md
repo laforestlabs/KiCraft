@@ -11,10 +11,10 @@ pip install -e ".[dev]"
 ```
 
 The `dev` extra pulls in `ruff`, `pytest`, and other development dependencies.
-Other optional groups (`gui`, `scoring`, `experiment`) can be installed as needed:
+Other optional groups (`scoring`, `experiment`) can be installed as needed:
 
 ```bash
-pip install -e ".[dev,gui,scoring,experiment]"
+pip install -e ".[dev,scoring,experiment]"
 ```
 
 **Python 3.10+** is required. CI tests against 3.10, 3.12, and 3.13.
@@ -77,7 +77,6 @@ kicraft/
 │   │   └── adapter.py   #   Board read/write interface
 │   └── config.py        #   Default config + project config loader
 ├── scoring/             # Layout quality scoring checks
-├── gui/                 # NiceGUI experiment manager
 └── cli/                 # CLI entry points
     ├── autoexperiment.py
     ├── solve_subcircuits.py
