@@ -216,6 +216,11 @@ def route_local_subcircuit(
     round_index: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, float]]:
     fast_smoke_mode = bool(cfg.get("subcircuit_fast_smoke_mode", False))
+    # Intermediate per-round diagnostics: headless build/worker runs set
+    # subcircuit_render_intermediate=False to skip per-round PNG/DRC renders;
+    # the winning round's canonical renders are produced downstream and are
+    # unaffected by this flag. Defaults True for interactive/debug parity.
+    render_intermediate = bool(cfg.get("subcircuit_render_intermediate", True))
     render_pre_route_board_views = bool(
         cfg.get("subcircuit_render_pre_route_board_views", not fast_smoke_mode)
     )
@@ -765,7 +770,7 @@ def route_local_subcircuit(
         print(
             f"  Pre-route DRC info: {len(pre_route_drc['violations'])} violations ({', '.join(sorted(pre_route_violation_types))})"
         )
-    if generate_diagnostics:
+    if generate_diagnostics and render_intermediate:
         pre_route_render_start = time.monotonic()
         leaf_diagnostics = generate_leaf_diagnostic_artifacts(
             artifact_dir=artifact_paths.artifact_dir,
@@ -975,7 +980,7 @@ def route_local_subcircuit(
     route_timing["routed_validation_s"] = round(
         max(0.0, time.monotonic() - routed_validation_start), 3
     )
-    if generate_diagnostics:
+    if generate_diagnostics and render_intermediate:
         routed_render_start = time.monotonic()
         leaf_diagnostics = generate_leaf_diagnostic_artifacts(
             artifact_dir=artifact_paths.artifact_dir,
@@ -1387,7 +1392,7 @@ def _stamp_trivial_leaf(
                 round_board_routed = str(dst)
 
     diagnostics_payload: dict[str, Any]
-    if generate_diagnostics and not fast_smoke_mode:
+    if generate_diagnostics and render_intermediate and not fast_smoke_mode:
         try:
             _no_drc_opts = LeafStageOpts(
                 render_board_views=True,

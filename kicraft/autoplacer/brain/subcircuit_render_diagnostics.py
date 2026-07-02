@@ -129,6 +129,87 @@ def promote_to_round_snapshot(
     return dst
 
 
+# Suffixes (after the ``round_NNNN_`` prefix) of artifacts that MUST be
+# kept for every round -- the manual-pin path (pins.py) reads the
+# .kicad_pcb files and the pin picker / inspect tooling reads the small
+# metadata JSON. These are never trimmed.
+_KEEP_ROUND_SUFFIXES = frozenset({
+    "leaf_routed.kicad_pcb",
+    "leaf_pre_freerouting.kicad_pcb",
+    "solved_layout.json",
+    "debug.json",
+    "metadata.json",
+})
+
+# Diagnostic file suffixes safe to trim from losing rounds.
+_TRIM_DIAGNOSTIC_SUFFIXES = (".png", "_drc.json", "_drc_report.txt")
+
+
+def trim_losing_round_diagnostics(
+    artifact_dir: str | Path,
+    winner_round_index: int | None,
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Delete heavy diagnostic artifacts from non-winning leaf rounds.
+
+    After the winner is chosen, losing rounds' render PNGs and DRC
+    JSON/report files are pure overhead in headless builds. This trims
+    them while keeping every round's ``.kicad_pcb`` (the manual-pin path
+    in ``pins.py`` reads losing rounds' boards) and small metadata JSON
+    (``solved_layout`` / ``debug`` / ``metadata``).
+
+    Gated on ``cfg['keep_all_round_artifacts']`` (default False) -- when
+    True, no files are deleted (restores today's keep-everything behavior).
+
+    Returns a summary dict with counts of trimmed/kept files for logging.
+    """
+    cfg = cfg or {}
+    if bool(cfg.get("keep_all_round_artifacts", False)):
+        return {"trimmed": 0, "kept": 0, "skipped": "keep_all_round_artifacts"}
+
+    base = Path(artifact_dir)
+    renders_dir = base / "renders"
+    search_dirs = [d for d in (base, renders_dir) if d.is_dir()]
+
+    winner_key: str | None = None
+    if winner_round_index is not None:
+        winner_key = f"round_{int(winner_round_index):04d}"
+
+    trimmed = 0
+    kept = 0
+    for search_dir in search_dirs:
+        for entry in sorted(search_dir.iterdir()):
+            name = entry.name
+            if not name.startswith("round_") or not entry.is_file():
+                continue
+            # Parse ``round_NNNN_<suffix>``.
+            parts = name.split("_", 2)
+            if len(parts) < 3:
+                continue
+            round_key = f"{parts[0]}_{parts[1]}"
+            suffix = parts[2]
+            # Keep the winner's full diagnostics.
+            if winner_key is not None and round_key == winner_key:
+                kept += 1
+                continue
+            # Keep small metadata / board files for every round.
+            if suffix in _KEEP_ROUND_SUFFIXES:
+                kept += 1
+                continue
+            # Trim diagnostic artifacts (PNGs, DRC JSON, DRC reports).
+            if suffix.endswith(_TRIM_DIAGNOSTIC_SUFFIXES):
+                try:
+                    entry.unlink()
+                    trimmed += 1
+                except OSError:
+                    kept += 1
+                continue
+            # Unknown round_NNNN_ file -- keep it (safe default).
+            kept += 1
+
+    return {"trimmed": trimmed, "kept": kept}
+
+
 def write_leaf_drc_json(drc_dict: dict[str, Any], output_path: str | Path) -> str:
     """Persist a DRC payload as pretty JSON."""
     out = Path(output_path)

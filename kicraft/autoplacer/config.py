@@ -444,6 +444,20 @@ DEFAULT_CONFIG = {
     # inside _search_best_layout so K=8 candidates already explore a
     # spread of seed shapes.
     "parent_seed_area_overhead": 2.5,
+    # Intermediate per-round diagnostic renders (PNG board views, DRC overlays,
+    # contact sheets) are produced inside every leaf routing round. They are
+    # useful for interactive/debug runs but are pure overhead in headless
+    # build/worker runs, where only the winning round's canonical renders
+    # matter. Default True keeps interactive/debug behavior unchanged; the
+    # build worker path sets this False to skip per-round diagnostics.
+    "subcircuit_render_intermediate": True,
+    # Trim losing rounds' heavy diagnostic artifacts after the winner is
+    # chosen. When False (default), losing rounds keep their .kicad_pcb
+    # (the manual-pin path in pins.py reads them) and small metadata JSON
+    # (solved_layout/debug/metadata), but their per-round render PNGs and
+    # DRC JSON/report files are deleted to shrink .experiments/. When True,
+    # restores today's behavior -- every round keeps its full diagnostics.
+    "keep_all_round_artifacts": False,
 }
 
 

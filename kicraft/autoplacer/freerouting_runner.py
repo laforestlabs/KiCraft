@@ -323,6 +323,50 @@ def clear_zones(kicad_pcb_path: str) -> None:
     )
 
 
+def _clear_traces_and_zones(
+    kicad_pcb_path: str,
+    *,
+    preserve_thermal_vias: bool = True,
+    thermal_refs: list[str] | None = None,
+    thermal_radius_mm: float = 3.0,
+) -> None:
+    """Remove all traces/vias AND copper zones in one pcbnew subprocess call.
+
+    Equivalent to ``clear_traces(...)`` followed by ``clear_zones(...)``, but
+    loads and saves the board once instead of twice — halving the pcbnew
+    spawn count for this pair (Phase 4C).
+    """
+    thermal_refs = thermal_refs or []
+    _run_pcbnew_script(
+        "import math, pcbnew\n"
+        f"board = pcbnew.LoadBoard({kicad_pcb_path!r})\n"
+        "if board is None:\n"
+        f"    raise RuntimeError('Failed to load board: {kicad_pcb_path}')\n"
+        f"thermal_refs = {thermal_refs!r}\n"
+        f"thermal_radius_mm = {thermal_radius_mm!r}\n"
+        f"preserve = {preserve_thermal_vias!r}\n"
+        "thermal_centers = []\n"
+        "if preserve:\n"
+        "    for ref in thermal_refs:\n"
+        "        fp = board.FindFootprintByReference(ref)\n"
+        "        if fp:\n"
+        "            pos = fp.GetPosition()\n"
+        "            thermal_centers.append((pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y)))\n"
+        "to_remove = []\n"
+        "for t in board.GetTracks():\n"
+        "    if preserve and isinstance(t, pcbnew.PCB_VIA):\n"
+        "        vpos = t.GetPosition()\n"
+        "        vx, vy = pcbnew.ToMM(vpos.x), pcbnew.ToMM(vpos.y)\n"
+        "        if any(math.hypot(vx-cx, vy-cy) <= thermal_radius_mm for cx,cy in thermal_centers):\n"
+        "            continue\n"
+        "    to_remove.append(t)\n"
+        "for t in to_remove: board.Remove(t)\n"
+        "for z in list(board.Zones()):\n"
+        "    board.Remove(z)\n"
+        f"board.Save({kicad_pcb_path!r})\n"
+    )
+
+
 def strip_net_copper(kicad_pcb_path: str, net_name: str) -> None:
     """Remove all tracks/vias and copper zones belonging to a single net.
 
@@ -368,13 +412,12 @@ def _unlock_traces(kicad_pcb_path: str) -> None:
 
 def prepare_board_for_placement(kicad_pcb_path: str) -> None:
     """Strip stale routing artifacts so placement starts from a clean board."""
-    clear_traces(
+    _clear_traces_and_zones(
         kicad_pcb_path,
         preserve_thermal_vias=False,
         thermal_refs=[],
         thermal_radius_mm=0.0,
     )
-    clear_zones(kicad_pcb_path)
 
 
 def count_board_tracks(kicad_pcb_path: str) -> dict[str, Any]:
@@ -1123,14 +1166,20 @@ def route_with_freerouting(
     clear_existing_zones = bool(config.get("freerouting_clear_zones", True))
 
     if not preserve_existing_copper:
-        clear_traces(
-            kicad_pcb_path,
-            preserve_thermal_vias=True,
-            thermal_refs=config.get("thermal_refs", []),
-            thermal_radius_mm=config.get("thermal_radius_mm", 3.0),
-        )
         if clear_existing_zones:
-            clear_zones(kicad_pcb_path)
+            _clear_traces_and_zones(
+                kicad_pcb_path,
+                preserve_thermal_vias=True,
+                thermal_refs=config.get("thermal_refs", []),
+                thermal_radius_mm=config.get("thermal_radius_mm", 3.0),
+            )
+        else:
+            clear_traces(
+                kicad_pcb_path,
+                preserve_thermal_vias=True,
+                thermal_refs=config.get("thermal_refs", []),
+                thermal_radius_mm=config.get("thermal_radius_mm", 3.0),
+            )
     elif clear_existing_zones:
         clear_zones(kicad_pcb_path)
 

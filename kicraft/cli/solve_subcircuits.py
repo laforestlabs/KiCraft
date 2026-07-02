@@ -111,6 +111,9 @@ from kicraft.autoplacer.brain.leaf_acceptance import (
 )
 from kicraft.autoplacer.brain.placement_solver import PlacementSolver
 from kicraft.autoplacer.brain.leaf_routing import route_local_subcircuit
+from kicraft.autoplacer.brain.subcircuit_render_diagnostics import (
+    trim_losing_round_diagnostics,
+)
 from kicraft.autoplacer.brain.leaf_size_reduction import (
     attempt_leaf_size_reduction,
     local_solver_config,
@@ -532,6 +535,10 @@ def _solve_one_round(
                 extraction,
                 solved_components,
                 cfg,
+                # Headless build/worker runs set subcircuit_render_intermediate
+                # False to skip per-round diagnostic renders; the winning round's
+                # canonical renders are produced downstream and are unaffected.
+                generate_diagnostics=cfg.get("subcircuit_render_intermediate", True),
                 round_index=round_index,
             )
             round_timing.update(route_timing)
@@ -1359,6 +1366,22 @@ def _persist_solution(
             shutil.copy2(
                 canonical_metadata, artifact_dir / f"{round_prefix}_metadata.json"
             )
+
+    # Trim losing rounds' heavy diagnostic artifacts (per-round render
+    # PNGs, DRC JSON/reports) to shrink .experiments/. Keeps every round's
+    # .kicad_pcb (the manual-pin path in pins.py reads losing rounds'
+    # boards) and small metadata JSON. Gated off by
+    # keep_all_round_artifacts for debug runs that want everything.
+    _trim_summary = trim_losing_round_diagnostics(
+        artifact_dir,
+        solved.best_round.round_index,
+        cfg,
+    )
+    if _trim_summary.get("trimmed"):
+        print(
+            f"  trimmed {_trim_summary['trimmed']} losing-round "
+            f"diagnostic files (kept {_trim_summary['kept']})"
+        )
 
     return metadata.to_dict()
 
