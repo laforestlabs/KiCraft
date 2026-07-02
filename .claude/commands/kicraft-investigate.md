@@ -391,8 +391,12 @@ parts = (json.loads(sf.read_text()).get("bom") or {}).get("parts") or []
 db = Path(os.environ.get("KICRAFT_JLCPARTS_DB") or home / ".kicraft" / "jlcparts" / "cache.sqlite3")
 con = None
 if db.is_file():
+    import time
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True); con.row_factory = sqlite3.Row
-    print(f"catalog: {db} ({con.execute('SELECT count(*) FROM jlc_components').fetchone()[0]} rows)")
+    age_d = (time.time() - db.stat().st_mtime) / 86400.0
+    print(f"catalog: {db} ({con.execute('SELECT count(*) FROM jlc_components').fetchone()[0]} rows; "
+          f"dump {age_d:.0f} days old — every REAL/stock verdict below is as-of that snapshot"
+          + (", STALE: spot-check resolved C#s on lcsc.com before trusting them" if age_d > 14 else ""))
 else:
     print(f"catalog MISSING ({db}) — realness limited to bom_prices.json stock the resolver recorded")
 def cat(cnum):

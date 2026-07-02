@@ -42,6 +42,82 @@ def available() -> bool:
         return False
 
 
+def dump_age_days() -> float | None:
+    """Age of the offline dump in days (None when absent). Stock/listings in a
+    weeks-old snapshot are routinely stale — KC-V8YWN8's cheapest 1k pick was
+    delisted on live LCSC three weeks after the dump was built — so verifiers
+    should show this next to any 'REAL/in stock' verdict, and hosts should
+    re-run ``kicraft jlcparts-update`` on a schedule (weekly is plenty)."""
+    import time
+    try:
+        return max(0.0, (time.time() - db_path().stat().st_mtime) / 86400.0)
+    except OSError:
+        return None
+
+
+# Imperial chip size in a footprint leaf, e.g. the 0603 in "R_0603_1608Metric".
+_FP_CHIP_SIZE_RE = re.compile(r"_(\d{3,4})(?:_|$)")
+# KiCad pin-header footprint leaf, e.g. "PinHeader_1x02_P2.54mm_Vertical".
+_FP_PIN_HEADER_RE = re.compile(r"PinHeader_(\d+)x(\d+)_P([\d.]+)mm", re.IGNORECASE)
+# Board features that LOOK like BOM parts but are bare copper/holes — nothing
+# to order, so sourcing checks must skip them rather than flag them.
+_UNSOURCEABLE_FP_RE = re.compile(
+    r"^(TestPoint|MountingHole|NetTie|Jumper|Fiducial|Symbol|Logo)",
+    re.IGNORECASE,
+)
+# Qualifier tokens the ANDed description search chokes on: a real 0.1uF 0603
+# is findable, but "0.1uF 25V X7R 0603" demands every token including the
+# voltage/dielectric appear verbatim, which most catalog rows fail.
+_KW_QUALIFIER_RE = re.compile(
+    r"^(\d+(\.\d+)?V|X[57]R|C0G|NP0|Y5V|±?\d+(\.\d+)?%)$", re.IGNORECASE
+)
+
+
+def is_unsourceable_hardware(footprint: str) -> bool:
+    """True for board features with no orderable part behind them (test
+    points, mounting holes, net ties, fiducials, solder jumpers)."""
+    fp = footprint or ""
+    lib, _, leaf = fp.partition(":")
+    return bool(_UNSOURCEABLE_FP_RE.match(leaf or lib)
+                or _UNSOURCEABLE_FP_RE.match(lib))
+
+
+def bom_keyword(value: str, footprint: str) -> str | None:
+    """The catalog search term for a generic (no-MPN, no-C#) BOM part.
+
+    Generic passives search as ``<value> <size>`` ("1k 0603"). KiCad-ism
+    values like "PinHeader_1x02" match NOTHING in the catalog — J2-class parts
+    previously fell through pricing silently, ending up with no part number,
+    no cost and no vendor link anywhere — so known footprint families are
+    normalized to terms the catalog actually answers ("pin header 2.54mm
+    1x2P"), µ/Ω spellings become the dump's ASCII (u / bare suffix), and
+    mojibake from the pre-`d8fc7b3` SSE decode bug ("1ÂµF") is repaired.
+    Returns None when the part has nothing searchable; callers should treat
+    that as unsourceable rather than skipping it quietly.
+    """
+    fp_leaf = (footprint or "").split(":", 1)[-1]
+    m = _FP_PIN_HEADER_RE.search(fp_leaf)
+    if m:
+        rows, cols, pitch = int(m.group(1)), int(m.group(2)), m.group(3)
+        return f"pin header {pitch}mm {rows}x{cols}P"
+    val = (value or "").strip()
+    val = val.replace("Â", "").replace("µ", "u").replace("Ω", "")
+    if val in ("0", "0R", "0 ohm"):
+        val = "0R"  # zero-ohm links list as 0R00-style models
+    size = _FP_CHIP_SIZE_RE.search(fp_leaf)
+    terms = " ".join(t for t in (val, size.group(1) if size else "") if t)
+    return terms or None
+
+
+def relax_keyword(kw: str) -> str | None:
+    """Drop qualifier tokens (voltage, dielectric, tolerance) from a keyword
+    that matched nothing, e.g. "0.1uF 25V X7R 0603" -> "0.1uF 0603". Returns
+    None when nothing would change (no retry worth making)."""
+    kept = [t for t in kw.split() if not _KW_QUALIFIER_RE.match(t)]
+    relaxed = " ".join(kept)
+    return relaxed if kept and relaxed != kw else None
+
+
 def _connect() -> sqlite3.Connection:
     con = sqlite3.connect(f"file:{db_path()}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row

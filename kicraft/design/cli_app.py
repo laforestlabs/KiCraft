@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -51,6 +52,8 @@ from .models import (
     FunctionalSpec,
     IntentSlot,
     Question,
+    ReviewFinding,
+    StageStatus,
 )
 from .synthesize import SynthesisInputError, run as run_synth
 from .synthesis.symbol_library import search_symbols
@@ -209,6 +212,91 @@ def _unresolved_symbols(bom) -> list[str]:
     return bad
 
 
+# Pad tokens in a .kicad_mod: quoted since the v6 s-expr format, but tolerate
+# a bare token for older files. Empty numbers (NPTH/mounting) never bind nets.
+_PAD_NUM_RE = re.compile(r'\(pad\s+(?:"([^"]*)"|([^\s()"]+))')
+# Symbol pin types that can never carry a net, so a missing pad is harmless.
+_UNWIREABLE_PIN_TYPES = {"no_connect", "free"}
+
+
+def _footprint_pad_numbers(fp_id: str, project_root: Path) -> set[str] | None:
+    """The set of pad numbers a footprint exposes, or None when the footprint
+    doesn't resolve (that case is owned by ``_unresolved_footprints``)."""
+    library, _, name = (fp_id or "").partition(":")
+    if not library or not name:
+        return None
+    try:
+        pretty = resolve_footprint_library_path(library, project_root=project_root)
+    except LibraryNotFoundError:
+        return None
+    mod = pretty / f"{name}.kicad_mod"
+    if not mod.is_file():
+        return None
+    try:
+        text = mod.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    pads: set[str] = set()
+    for m in _PAD_NUM_RE.finditer(text):
+        num = m.group(1) if m.group(1) is not None else m.group(2)
+        if num:
+            pads.add(num)
+    return pads
+
+
+def _symbol_footprint_pin_mismatches(bom, project_root: Path) -> list[str]:
+    """§9.27 — every wireable symbol pin number must exist as a footprint pad.
+
+    KiCad binds nets to copper by matching the symbol's pin NUMBER to the
+    footprint's pad number. Generic schematic-only symbols use letters as
+    their literal pin numbers (``Device:Q_NPN`` -> B/C/E, ``Device:Q_NMOS``
+    -> G/D/S), which can never match a numbered footprint like SOT-23 — the
+    part passes ERC (the schematic is self-consistent) yet every pad stays
+    netless on the board, and netless pads produce no ratsnest, so DRC's
+    unconnected gate can never see the dead copper either (KC-V8YWN8: dead
+    gate-drive transistor; KC-B8NQEE: three dead LED drivers). Reject the
+    pairing at BOM commit while the model still has its lookup tools.
+
+    The footprint may expose EXTRA pads (thermal, shield, mounting) — only a
+    symbol pin with no home is an error. Unresolvable symbols/footprints are
+    skipped here; those belong to ``_unresolved_symbols``/``_unresolved_footprints``.
+    """
+    bad: list[str] = []
+    pads_by_fp: dict[str, set[str] | None] = {}
+    for part in bom.parts:
+        sym = part.symbol or ""
+        fp = part.footprint or ""
+        if not sym or not fp:
+            continue
+        try:
+            info = lookup_pins(sym, project_root=project_root)
+        except (SymbolNotFoundError, ValueError):
+            continue
+        if fp not in pads_by_fp:
+            pads_by_fp[fp] = _footprint_pad_numbers(fp, project_root)
+        pads = pads_by_fp[fp]
+        if not pads:
+            continue
+        missing = sorted({
+            str(pin.get("number"))
+            for pin in info.get("pins", [])
+            if pin.get("number")
+            and pin.get("electrical_type") not in _UNWIREABLE_PIN_TYPES
+            and str(pin.get("number")) not in pads
+        })
+        if missing:
+            bad.append(
+                f"{part.ref}: symbol {sym!r} pin number(s) "
+                f"{', '.join(missing)} have no matching pad on footprint "
+                f"{fp!r} (pads: {', '.join(sorted(pads))}); nets wired to "
+                "those pins would become invisible dead copper on the board "
+                "-- pick a symbol whose pin NUMBERS match the footprint's "
+                "pads (a numbered variant or a vendored part), or the "
+                "matching footprint for this symbol"
+            )
+    return bad
+
+
 def _unresolved_lcsc(bom, project_root: Path) -> list[str]:
     """Return BOM parts whose library manifest claims an LCSC that isn't
     in the offline catalog.
@@ -239,6 +327,157 @@ def _unresolved_lcsc(bom, project_root: Path) -> list[str]:
                 f"{part.ref}: library '{lib}' claims LCSC {lcsc} "
                 f"which is not in the offline catalog"
             )
+    return bad
+
+
+# A C-number smuggled in prose ("LCSC C8678", "use C9864"); same shape the fab
+# BOM exporter reads back out of sourcing_note (fab_export._LCSC_RE).
+_SOURCING_LCSC_RE = re.compile(r"\bC\d{4,}\b")
+# Reject parts the offline snapshot already shows draining: a popular part
+# with a few hundred units in the (weeks-old) dump is routinely dry by the
+# time anyone orders. Overridable per-host via KICRAFT_BOM_STOCK_FLOOR (0
+# disables the floor; realness is still enforced).
+_BOM_STOCK_FLOOR = 500
+
+
+def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> list[str]:
+    """§9.26 — every BOM part that names an MPN must be a real, orderable part.
+
+    Before this gate, MPN strings on stock-symbol parts (connectors, diodes,
+    inductors) were unverified LLM prose: a hallucinated or out-of-stock part
+    sailed through to the fab BOM. Four tiers, by how a part carries sourcing:
+
+      - explicit C# in ``sourcing_note``  -> must exist in the offline catalog
+        and clear the stock floor;
+      - library-bundle part (manifest carries the LCSC) -> skipped here;
+        existence is already gated by ``_unresolved_lcsc``;
+      - bare MPN -> offline catalog search. An exact-model match with healthy
+        stock is AUTO-PINNED into ``sourcing_note`` (``fab_export`` reads the
+        C# from there, so the fab BOM csv stops shipping blank LCSC columns);
+        no match means unorderable -> error back to the model while its lookup
+        tools are still in reach.
+      - no MPN at all -> keyword search by value + package
+        (``jlcparts.bom_keyword``: "1k 0603", "pin header 2.54mm 1x2P";
+        qualifier tokens are relaxed away on a miss). Basic-tier
+        floor-clearing matches win, then any floor-clearing row; the winner
+        is AUTO-PINNED like the MPN tier — before KC-V8YWN8 such parts (J2,
+        a bare pin header) shipped with NO part number, cost or vendor link
+        anywhere. Only a part with NOTHING searchable (no value, no package)
+        is an offender; a keyword that finds no match stays unpinned and
+        visibly unpriced rather than bouncing the model (the search misses
+        legitimate specialty parts). Test points / mounting holes / net ties
+        are bare copper, not orderable parts, and are skipped.
+
+    Returns offender strings (empty = all sourceable, or catalog unavailable).
+    Only mutation is appending ``LCSC <C#>`` pins to ``sourcing_note``.
+    """
+    if not jlcparts.available():
+        return []  # can't verify — don't block
+    try:
+        floor = int(os.environ.get("KICRAFT_BOM_STOCK_FLOOR", "")
+                    or _BOM_STOCK_FLOOR)
+    except ValueError:
+        floor = _BOM_STOCK_FLOOR
+    active, _broken = _load_library_parts(project_root)
+    manifest_by_name = {p.manifest.name: p.manifest for p in active}
+    bad: list[str] = []
+    best_by_mpn: dict[str, dict | None] = {}
+    best_by_kw: dict[str, dict | None] = {}
+    for part in (bom.parts or []):
+        mpn = (part.mpn or "").strip()
+        note = part.sourcing_note or ""
+        pinned = _SOURCING_LCSC_RE.search(note)
+        if pinned:
+            label = mpn or (part.value or "").strip() or part.symbol
+            hit = jlcparts.lookup(pinned.group(0))
+            if hit is None:
+                bad.append(
+                    f"{part.ref} ({label}): sourcing_note claims LCSC "
+                    f"{pinned.group(0)} which is not in the offline catalog; "
+                    f"find the real C# with lookup_lcsc_id"
+                )
+            elif (hit.get("stock") or 0) < floor:
+                bad.append(
+                    f"{part.ref} ({label}): LCSC {pinned.group(0)} has only "
+                    f"{hit.get('stock') or 0} in stock (< {floor}); pick a "
+                    f"better-stocked alternative"
+                )
+            continue
+        lib = _lib_prefix(part.symbol) or _lib_prefix(part.footprint or "")
+        man = manifest_by_name.get(lib) if lib else None
+        if man is not None and (man.sourcing or {}).get("lcsc"):
+            continue  # curated/fetched bundle: gated by _unresolved_lcsc
+        if not mpn:
+            # Tier 4: generic part sourced by value/package keyword. Bare
+            # board features (test points, mounting holes) have nothing to
+            # order and are skipped outright.
+            if jlcparts.is_unsourceable_hardware(part.footprint or ""):
+                continue
+            kw = jlcparts.bom_keyword(part.value or "", part.footprint or "")
+            if not kw:
+                bad.append(
+                    f"{part.ref}: part carries no MPN, no LCSC and no "
+                    f"searchable value/package — unsourceable as written; "
+                    f"give it a real MPN or an explicit 'LCSC C#' in "
+                    f"sourcing_note (lookup_lcsc_id / add_part_from_lcsc)"
+                )
+                continue
+            if kw not in best_by_kw:
+                def _kw_pick(term: str) -> dict | None:
+                    stocked = [c for c in jlcparts.search(term, limit=10)
+                               if (c.get("stock") or 0) >= floor]
+                    # Prefer JLC Basic (the stable no-setup-fee tier;
+                    # Extended long-tail rows churn out within weeks).
+                    return next(
+                        (c for c in stocked if c.get("type") == "Basic"),
+                        stocked[0] if stocked else None,
+                    )
+                best = _kw_pick(kw)
+                if best is None:
+                    # Voltage/dielectric qualifiers over-constrain the ANDed
+                    # search ("0.1uF 25V X7R 0603"); retry without them.
+                    relaxed = jlcparts.relax_keyword(kw)
+                    if relaxed:
+                        best = _kw_pick(relaxed)
+                best_by_kw[kw] = best
+            best = best_by_kw[kw]
+            if best is not None:
+                part.sourcing_note = (
+                    (f"{note} " if note else "") + f"LCSC {best['lcsc']}"
+                )
+            # A generic with a keyword but no catalog match is NOT blocked:
+            # the search misses legitimate parts (specialty jacks, exotic
+            # values) and bouncing those to the model just whack-a-moles.
+            # It stays visibly unpriced in the BOM/cost UI instead.
+            continue
+        key = mpn.upper()
+        if key not in best_by_mpn:
+            best = None
+            for cand in jlcparts.search(mpn, limit=10):
+                model = (cand.get("model") or "").upper()
+                # Exact model, or the orderable MPN extends the family name
+                # (e.g. "SS34" -> "SS34F"). Results are stock-ordered, so the
+                # first match is the best-stocked one.
+                if model == key or model.startswith(key):
+                    best = cand
+                    break
+            best_by_mpn[key] = best
+        best = best_by_mpn[key]
+        if best is None:
+            bad.append(
+                f"{part.ref}: MPN '{mpn}' not found in the LCSC catalog — "
+                f"likely not a real orderable part; resolve it with "
+                f"lookup_lcsc_id / add_part_from_lcsc, pick a core default, "
+                f"or drop the MPN and record the substitution in assumptions"
+            )
+        elif (best.get("stock") or 0) < floor:
+            bad.append(
+                f"{part.ref}: {mpn} ({best['lcsc']}) has only "
+                f"{best.get('stock') or 0} in stock (< {floor}); pick a "
+                f"better-stocked alternative"
+            )
+        else:
+            part.sourcing_note = (f"{note} " if note else "") + f"LCSC {best['lcsc']}"
     return bad
 
 
@@ -2486,6 +2725,32 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             )
             return 3
 
+    # §9.27: every wireable symbol pin number must exist as a footprint pad.
+    # A letter-pinned generic symbol (Device:Q_NPN -> B/C/E) on a numbered
+    # footprint passes ERC yet leaves every pad netless on the board — dead
+    # copper no DRC gate can see (KC-V8YWN8 / KC-B8NQEE).
+    if stage == "bom" and state.bom is not None:
+        bad_pins = _symbol_footprint_pin_mismatches(
+            state.bom, state_path.resolve().parent.parent
+        )
+        if bad_pins:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": [
+                            "9.27 symbol pin numbers do not match the "
+                            "footprint's pads; nets on those pins can never "
+                            "bind to copper — pick a pin-number-compatible "
+                            "symbol/footprint pair"
+                        ],
+                        "offenders": bad_pins[:20],
+                    },
+                    indent=2,
+                )
+            )
+            return 3
+
     # Reject parts whose library manifest claims an LCSC that isn't in the
     # offline catalog. A fabricated C# in the manifest can never be priced.
     if stage == "bom" and state.bom is not None:
@@ -2503,6 +2768,32 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                             "with a valid LCSC or update the manifest"
                         ],
                         "offenders": bad_lcsc[:20],
+                    },
+                    indent=2,
+                )
+            )
+            return 3
+
+    # §9.26: every part that names an MPN must be a real, orderable LCSC part.
+    # Runs after the manifest gate (which owns library-backed parts); confident
+    # matches are pinned into sourcing_note so the fab BOM carries the C#, and
+    # the commit below persists the pins. A miss goes back to the model while
+    # its lookup tools are still in reach.
+    if stage == "bom" and state.bom is not None:
+        bad_mpn = _resolve_bom_mpn_sourcing(
+            state.bom, state_path.resolve().parent.parent
+        )
+        if bad_mpn:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": [
+                            "9.26 BOM MPN(s) not real/orderable: each part that "
+                            "names an MPN must exist in the LCSC catalog with "
+                            "healthy stock"
+                        ],
+                        "offenders": bad_mpn[:20],
                     },
                     indent=2,
                 )
@@ -3081,6 +3372,128 @@ def _maybe_electrical_review(state, project_dir: Path) -> dict:
     except (Exception, SystemExit) as e:  # Settings.from_env raises SystemExit w/o a key
         print(f"[build] electrical review skipped ({type(e).__name__}: {e})", file=sys.stderr)
         return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
+
+
+def _emit_review_findings(progress, findings: list[dict]) -> None:
+    """One build_log line per finding, in the exact format the GUI's tab
+    classifier (`review BLOCKER/WARNING/NOTE`) and the reopen-time parser
+    (web._REVIEW_FINDING_RE: ``review SEV: [area] issue``) both match."""
+    for f in findings:
+        sev = (f.get("severity") or "note").upper()
+        issue = f.get("issue", "")
+        if f.get("demoted_from"):  # blocker that a 2nd pass did not corroborate
+            issue = f"{issue} [demoted to warning: not corroborated by a 2nd pass]"
+        progress({"kind": "build_log",
+                  "text": f"[build]     review {sev}: [{f.get('area', '')}] {issue}"})
+
+
+def run_post_wiring_review(state_path: Path, project_dir: Path,
+                           progress, rewire=None) -> dict:
+    """R3 driver: LLM electrical review between the wiring commit and the build.
+
+    Owns the whole review lifecycle so the web layer stays thin:
+      - emits ``stage_start``/``stage_done`` (stage=``electrical_review``) plus
+        classifier-friendly build_log lines, so the GUI tab activates live and
+        the multi-minute review is never a silent gap;
+      - on a corroborated blocker, re-drives wiring ONCE via ``rewire(instruction)``
+        (the caller wraps run_session) and re-reviews;
+      - persists the final findings durably: ``state.review_findings`` (the GUI
+        inspector's source on reopen), ``stage_status["electrical_review"]``
+        (tab color on reopen), and ``_surface_review_findings`` (assumptions /
+        open_questions for the user + judge digest).
+
+    Fail-soft like ``_maybe_electrical_review``: any error is logged and the
+    build proceeds. Returns the last review result dict for observability.
+    """
+    skipped = {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
+    if os.environ.get("KICRAFT_ELECTRICAL_REVIEW", "").strip().lower() in (
+        "0", "false", "no", "off"
+    ):
+        return skipped  # explicit opt-out: don't even paint the tab
+    state = _load_state(state_path) if state_path.exists() else None
+    if state is None or state.bom is None or not state.bom.connections:
+        return skipped
+    model = None
+    try:
+        from kicraft.server.config import Settings
+
+        s = Settings.from_env()
+        model = s.review_model or s.model
+    except (Exception, SystemExit):  # noqa: BLE001 - model chip is cosmetic
+        pass
+    t0 = time.monotonic()
+    total_cost = 0.0
+    progress({"kind": "stage_start", "stage": "electrical_review", "model": model})
+    try:
+        progress({"kind": "build_log", "text": "[build]     electrical review: "
+                  "scanning design for electrical defects ..."})
+        review = _maybe_electrical_review(state, project_dir)
+        total_cost += review.get("cost_usd") or 0.0
+        if not review["ran"]:
+            progress({"kind": "build_log",
+                      "text": "[build]     electrical review skipped "
+                              "(no result; see server log)"})
+            progress({"kind": "stage_done", "stage": "electrical_review", "ok": True})
+            return review
+        _emit_review_findings(progress, review["findings"])
+        findings = review["findings"]
+        if review["blocked"] and rewire is not None:
+            blockers = "; ".join(f["issue"] for f in findings
+                                 if f.get("severity") == "blocker")
+            progress({"kind": "build_log",
+                      "text": "[build]     electrical review found a blocker; "
+                              "re-driving wiring once to fix"})
+            # Close this review segment: the wiring re-drive emits its own
+            # stage events, then a fresh stage_start reopens this tab for
+            # the (minutes-long) second pass.
+            progress({"kind": "stage_done", "stage": "electrical_review",
+                      "ok": True, "cost": total_cost})
+            rewire(f"The electrical review found a blocker: {blockers}. "
+                   "Adjust the BOM/wiring to resolve it, keeping "
+                   "everything else consistent.")
+            state = _load_state(state_path)  # wiring commit rewrote state.json
+            progress({"kind": "stage_start", "stage": "electrical_review",
+                      "model": model})
+            progress({"kind": "build_log", "text": "[build]     electrical review: "
+                      "re-reviewing after the wiring fix ..."})
+            review = _maybe_electrical_review(state, project_dir)
+            total_cost += review.get("cost_usd") or 0.0
+            if review["ran"]:
+                findings = review["findings"]
+                _emit_review_findings(progress, findings)
+            # else: keep pass-1 findings — the best information we have.
+        # Persist the outcome durably (state.review_findings + stage_status feed
+        # the reopened GUI; _surface_review_findings feeds the user-facing
+        # assumptions/open_questions and writes state.json as a side effect,
+        # but early-returns on a clean review — hence the unconditional write).
+        state.review_findings = [
+            ReviewFinding(
+                severity=f.get("severity", "note"),
+                area=f.get("area", ""),
+                issue=f.get("issue", ""),
+                suggestion=f.get("suggestion") or "",
+            )
+            for f in findings
+        ]
+        state.stage_status["electrical_review"] = StageStatus(
+            ok=True, cost_usd=round(total_cost, 6),
+            finished_at=_dt.datetime.now(_dt.timezone.utc).isoformat(),
+            wall_s=round(time.monotonic() - t0, 3))
+        try:
+            _surface_review_findings(state, state_path, findings)
+        except Exception as e:  # noqa: BLE001 - surfacing must never break the run
+            print(f"[review] could not surface findings: {e}", file=sys.stderr)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(state.model_dump_json(indent=2) + "\n")
+        progress({"kind": "stage_done", "stage": "electrical_review",
+                  "ok": True, "cost": total_cost})
+        return review
+    except Exception as e:  # noqa: BLE001 - fail-soft: never block a sound build
+        progress({"kind": "build_log",
+                  "text": f"[build]     electrical review skipped "
+                          f"({type(e).__name__}: {e})"})
+        progress({"kind": "stage_done", "stage": "electrical_review", "ok": True})
+        return skipped
 
 
 def _surface_build_warnings(

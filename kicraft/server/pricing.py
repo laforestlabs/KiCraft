@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 from urllib.parse import quote
 
+from kicraft.parts_library.jlcparts import bom_keyword
+
 from .parts_catalog import get_part
 
 # LCSC part id baked into a vendored symbol/footprint name (e.g.
@@ -19,8 +21,6 @@ from .parts_catalog import get_part
 _LCSC_ID_RE = re.compile(r"(?<![A-Za-z0-9])C\d{4,}")
 # A bare LCSC catalogue id (full string), e.g. a manifest's "C16581".
 _LCSC_CODE_RE = re.compile(r"C\d{4,}$")
-# Imperial package size in a footprint leaf, e.g. the 0805 in "C_0805_2012Metric".
-_FP_SIZE_RE = re.compile(r"_(\d{3,4})(?:_|$)")
 # Curated parts-library bundle name -> its LCSC code (or None), memoized. A
 # bundle's symbol/footprint id is "<name>:<...>" with no embedded catalogue id,
 # but its manifest records the exact LCSC part it was built from.
@@ -50,14 +50,20 @@ def _lib_lcsc(lib: str) -> str | None:
 
 def _resolve_part(p: dict) -> tuple[str, str] | None:
     """How to find this part at a vendor, as ``(kind, query)``: an LCSC id baked
-    into the symbol/footprint name ("id", vendored easyeda parts); else the exact
-    LCSC id from a curated-bundle manifest ("id"); else the manufacturer part
-    number ("mpn"); else a keyword from value + package size ("kw", generic
-    passives). None when there is nothing to go on. Shared by the vendor link and
-    the price lookup so both point at the same part."""
+    into the symbol/footprint name ("id", vendored easyeda parts); else the C#
+    the §9.26 BOM gate pinned into ``sourcing_note`` ("id" — keeps the UI cost
+    and vendor link on the exact part the fab BOM ships); else the exact LCSC
+    id from a curated-bundle manifest ("id"); else the manufacturer part
+    number ("mpn"); else a keyword from value + package ("kw", generic
+    passives — see ``jlcparts.bom_keyword``). None when there is nothing to go
+    on. Shared by the vendor link and the price lookup so both point at the
+    same part."""
     sym = p.get("symbol") or ""
     fp = p.get("footprint") or ""
     m = _LCSC_ID_RE.search(sym) or _LCSC_ID_RE.search(fp)
+    if m:
+        return ("id", m.group(0))
+    m = _LCSC_ID_RE.search(p.get("sourcing_note") or "")
     if m:
         return ("id", m.group(0))
     # A part drawn from a curated parts-library bundle ("<lib>:<name>"): price by
@@ -71,9 +77,7 @@ def _resolve_part(p: dict) -> tuple[str, str] | None:
     mpn = (p.get("mpn") or "").strip()
     if mpn:
         return ("mpn", mpn)
-    val = (p.get("value") or "").strip()
-    size = _FP_SIZE_RE.search(fp.split(":", 1)[-1])
-    terms = " ".join(t for t in (val, size.group(1) if size else "") if t)
+    terms = bom_keyword(p.get("value") or "", fp)
     return ("kw", terms) if terms else None
 
 
@@ -102,13 +106,34 @@ def _price_key(p: dict) -> str | None:
     return f"{r[0]}:{r[1]}" if r else None
 
 
+# Rank keyword/MPN picks away from the churn-prone bottom of the catalog: a
+# sub-floor Extended row is routinely delisted or drained weeks after the dump
+# is built (KC-V8YWN8's R2 pick 404'd on live LCSC three weeks in). Same env
+# knob as the §9.26 BOM gate so both floors move together.
+_KW_STOCK_FLOOR = 500
+
+
+def _stock_floor() -> int:
+    import os
+    try:
+        return int(os.environ.get("KICRAFT_BOM_STOCK_FLOOR", "")
+                   or _KW_STOCK_FLOOR)
+    except ValueError:
+        return _KW_STOCK_FLOOR
+
+
 def _pick_price(kind: str, query: str, results: list[dict]) -> dict | None:
-    """Choose one JLCPCB search result and pull its unit price. For an LCSC id the
-    exact id wins (it names a specific part); otherwise the cheapest in-stock match.
-    Cheapest (not first) matters because a vague MPN/keyword pulls in false
-    positives: e.g. "USB1046" returns both $4+ TI TUSB1046 muxes and the $0.84 GCT
-    USB connector, and the connector is the one we want. Returns ``{"unit_price",
-    "lcsc","stock"}`` or None when nothing usable came back. Pure: no network."""
+    """Choose one JLCPCB search result and pull its unit price. For an LCSC id
+    the exact id wins (it names a specific part). For an MPN/keyword, prefer
+    JLC **Basic** parts, then rows clearing the stock floor, then cheapest.
+    Cheapest-only (the old rule) systematically landed on $0.0008 Extended
+    long-tail listings that delist within weeks of the offline dump; Basic
+    parts are JLC's stable no-setup-fee tier and are the anti-churn signal.
+    Cheapest still breaks ties (a vague MPN/keyword pulls in false positives:
+    e.g. "USB1046" returns both $4+ TI TUSB1046 muxes and the $0.84 GCT USB
+    connector, and the connector is the one we want). Returns ``{"unit_price",
+    "lcsc","stock","type"}`` or None when nothing usable came back. Pure: no
+    network."""
     def price_of(r):
         try:
             return float(r.get("price"))
@@ -122,8 +147,14 @@ def _pick_price(kind: str, query: str, results: list[dict]) -> dict | None:
         r = next((x for x in pool if str(x.get("lcsc", "")).upper() == query.upper()),
                  min(pool, key=price_of))
     else:
-        r = min(pool, key=price_of)  # cheapest in-stock for both MPN and keyword
-    return {"unit_price": price_of(r), "lcsc": r.get("lcsc"), "stock": r.get("stock")}
+        floor = _stock_floor()
+        r = min(pool, key=lambda x: (
+            0 if x.get("type") == "Basic" else 1,
+            0 if (x.get("stock") or 0) >= floor else 1,
+            price_of(x),
+        ))
+    return {"unit_price": price_of(r), "lcsc": r.get("lcsc"),
+            "stock": r.get("stock"), "type": r.get("type")}
 
 
 def _fmt_price(x: float) -> str:

@@ -219,3 +219,52 @@ def test_fetch_price_keyword_unavailable_without_catalog(tmp_path, monkeypatch):
     import pytest
     with pytest.raises(web._SourceUnavailable):
         web._fetch_price("kw:100nF 0805")
+
+
+# ----------------------------------------------- _pick_price anti-churn ranking
+
+# KC-V8YWN8: cheapest-only keyword picks landed on $0.0008 Extended long-tail
+# rows that delisted within weeks of the offline dump (R2's C22356624 404'd on
+# live LCSC). Basic parts and floor-clearing stock now outrank bare price.
+
+def test_pick_price_prefers_basic_over_cheaper_extended():
+    rows = [
+        {"lcsc": "EXT", "price": 0.0008, "stock": 2_000_000, "type": "Extended"},
+        {"lcsc": "BAS", "price": 0.0030, "stock": 800_000, "type": "Basic"},
+    ]
+    r = web._pick_price("kw", "1k 0603", rows)
+    assert r["lcsc"] == "BAS" and r["type"] == "Basic"
+
+
+def test_pick_price_prefers_floor_clearing_stock_over_cheaper_trickle():
+    rows = [
+        {"lcsc": "DRY", "price": 0.001, "stock": 49, "type": "Extended"},
+        {"lcsc": "WET", "price": 0.002, "stock": 100_000, "type": "Extended"},
+    ]
+    assert web._pick_price("kw", "10k 0603", rows)["lcsc"] == "WET"
+
+
+def test_pick_price_cheapest_still_breaks_ties_within_a_tier():
+    rows = [
+        {"lcsc": "DEAR", "price": 0.02, "stock": 90_000, "type": "Basic"},
+        {"lcsc": "CHEAP", "price": 0.01, "stock": 80_000, "type": "Basic"},
+    ]
+    assert web._pick_price("kw", "100 0603", rows)["lcsc"] == "CHEAP"
+
+
+def test_pick_price_stock_floor_env_override(monkeypatch):
+    rows = [
+        {"lcsc": "LOW", "price": 0.001, "stock": 60, "type": "Extended"},
+        {"lcsc": "HIGH", "price": 0.002, "stock": 100_000, "type": "Extended"},
+    ]
+    monkeypatch.setenv("KICRAFT_BOM_STOCK_FLOOR", "50")
+    # Floor lowered to 50 -> both clear it -> cheapest wins again.
+    assert web._pick_price("kw", "x", rows)["lcsc"] == "LOW"
+
+
+def test_pick_price_id_exact_match_ignores_ranking():
+    rows = [
+        {"lcsc": "C1", "price": 4.0, "stock": 10, "type": "Extended"},
+        {"lcsc": "C2", "price": 0.5, "stock": 1_000_000, "type": "Basic"},
+    ]
+    assert web._pick_price("id", "C1", rows)["lcsc"] == "C1"

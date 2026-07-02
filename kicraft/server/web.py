@@ -85,7 +85,7 @@ from kicraft.build_slots import ACQUIRED_MARKER, slot_count
 
 from . import billing, notify
 from .stage_driver import DESIGN_STAGES, KICRAFT, SLOT_MODEL
-from .stagetabs import StageTabs, demo_events
+from .stagetabs import StageTabs, _build_substage, demo_events
 from . import stage_diagram
 from .storage import (
     _discover_generated_dir,
@@ -775,22 +775,11 @@ def _endpoints_str(eps) -> str:
 
 
 def _build_lines_for(stage: str, lines: list[str]) -> list[str]:
-    """Build-log lines that belong to a given build sub-phase, by marker."""
-    def sub(t: str) -> str | None:
-        if "1/5" in t or "synthesized " in t:
-            return "synthesize"
-        tl = t.lower()
-        if any(m in tl for m in ("review blocker", "review warning", "review note",
-                                  "electrical review")):
-            return "electrical_review"
-        if "2/5" in t or "3/5" in t or ("4/5" in t and "verify" in tl):
-            return "place_route"
-        if "5/5" in t:
-            return "fab"
-        return None
+    """Build-log lines that belong to a given build sub-phase, by marker.
+    Shares the live tabs' classifier so reopen and live agree on the split."""
     out, cur = [], None
     for ln in lines:
-        s = sub(ln)
+        s = _build_substage(ln)
         if s:
             cur = s
         if cur == stage:
@@ -848,8 +837,10 @@ class _SourceUnavailable(Exception):
 # (the JLCPCB keyword API is WAF-blocked); this also drops the frozen $0.00 caches
 # written while every lookup was returning "no match". v4: the offline jlcparts
 # catalog adds 10/100-pc break prices and keyword pricing; drop the single-price
-# v3 caches so the breaks backfill.
-_PRICE_SCHEMA = 4
+# v3 caches so the breaks backfill. v5: keyword/MPN picks prefer Basic parts +
+# a stock floor over bare-cheapest (KC-V8YWN8: the cheapest-Extended 1k pick
+# 404'd on live LCSC); drop v4 caches so old churn-prone picks re-resolve.
+_PRICE_SCHEMA = 5
 
 # easyeda.com product endpoint: serves the same data KiCraft fetches symbols and
 # footprints from, and -- unlike jlcpcb.com's keyword-search API -- is NOT behind
@@ -971,8 +962,15 @@ def _save_price_cache(ws: Path, keys: set[str]) -> None:
     try:
         d = _kicraft_dir(ws)
         d.mkdir(parents=True, exist_ok=True)
+        age = jlcparts.dump_age_days()
         (d / _PRICE_FILE).write_text(
-            json.dumps({"_schema": _PRICE_SCHEMA, "prices": snap}, indent=2),
+            json.dumps({"_schema": _PRICE_SCHEMA,
+                        # Staleness provenance: every REAL/stock verdict an
+                        # audit derives from this file is as-of the dump, not
+                        # live LCSC (KC-V8YWN8: a 3-week-old dump said 2M
+                        # stock for a part live LCSC 404'd).
+                        "catalog_age_days": round(age, 1) if age is not None else None,
+                        "prices": snap}, indent=2),
             encoding="utf-8")
     except OSError:
         pass
@@ -1210,9 +1208,10 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
     if stage == "electrical_review":
         secs = []
         arts = sj.get("artifacts") or {}
-        # Prefer structured findings from artifacts (persisted by the build,
-        # includes suggestions); fall back to parsing build_log lines.
-        raw = arts.get("review_findings") or []
+        # Prefer structured findings: top-level state.review_findings (written
+        # by the post-wiring review), then artifacts.review_findings (legacy
+        # build-tail location); fall back to parsing build_log lines.
+        raw = sj.get("review_findings") or arts.get("review_findings") or []
         if raw:
             findings = [{"severity": f.get("severity", "note"),
                          "area": f.get("area", ""),
@@ -1797,47 +1796,21 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
         # needs only intent+bom+netlist (all present at wiring commit). It
         # deliberately ignores routed geometry. A corroborated blocker gets
         # ONE wiring re-drive (mirroring the ERC-recovery pattern below),
-        # then proceeds; a second blocker surfaces as today.
+        # then proceeds; a second blocker surfaces in the persisted findings.
+        # run_post_wiring_review owns the lifecycle: stage events + build_log
+        # lines for the GUI tab, durable persistence for reopen.
         try:
-            from kicraft.design.cli_app import (
-                _load_state as _cli_load_state,
-                _maybe_electrical_review,
-                _surface_review_findings,
-            )
-            state_path = ws / ".kicraft" / "state.json"
-            _state = _cli_load_state(state_path) if state_path.exists() else None
-            if _state and _state.bom and _state.bom.connections:
-                review = _maybe_electrical_review(_state, project_dir := ws)
-                if review["ran"] and review["blocked"]:
-                    blockers = "; ".join(
-                        f["issue"] for f in review["findings"]
-                        if f.get("severity") == "blocker"
-                    )
-                    progress({"kind": "build_log",
-                              "text": f"[elec-review] blocker: {blockers}; "
-                                      "re-driving wiring once to fix"})
-                    instr = (f"The electrical review found a blocker: {blockers}. "
-                             "Adjust the BOM/wiring to resolve it, keeping "
-                             "everything else consistent.")
-                    rr = run_session(ws, state.get("brief", ""), ["wiring"],
-                                     instruction=instr, progress=progress,
-                                     run_id=run_id)
-                    if rr.get("guard"):
-                        state["spend"] = _project_spend_usd(state.get("project_id"))
-                    # Re-review after re-drive; surface findings either way
-                    _state = _cli_load_state(state_path) if state_path.exists() else None
-                    if _state:
-                        review2 = _maybe_electrical_review(_state, ws)
-                        if review2["ran"]:
-                            try:
-                                _surface_review_findings(_state, state_path, review2["findings"])
-                            except Exception:  # noqa: BLE001
-                                pass
-                elif review["ran"]:
-                    try:
-                        _surface_review_findings(_state, state_path, review["findings"])
-                    except Exception:  # noqa: BLE001
-                        pass
+            from kicraft.design.cli_app import run_post_wiring_review
+
+            def _rewire(instr: str) -> None:
+                rr = run_session(ws, state.get("brief", ""), ["wiring"],
+                                 instruction=instr, progress=progress,
+                                 run_id=run_id)
+                if rr.get("guard"):
+                    state["spend"] = _project_spend_usd(state.get("project_id"))
+
+            run_post_wiring_review(ws / ".kicraft" / "state.json", ws,
+                                   progress, _rewire)
         except Exception:  # noqa: BLE001
             pass  # fail-soft: review must never block a sound build
 

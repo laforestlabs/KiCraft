@@ -30,6 +30,17 @@ class FootprintNotFoundError(LookupError):
     """Raised when a footprint cannot be loaded from the resolver chain."""
 
 
+class PadBindingError(ValueError):
+    """A wired endpoint's pin matches no pad on the part's footprint.
+
+    Silently skipping the endpoint (the pre-KC-V8YWN8 behaviour) leaves the
+    pad netless: netless pads produce no ratsnest, so the board routes and
+    passes DRC with electrically dead copper. The §9.27 BOM-commit gate
+    rejects incompatible symbol/footprint pairs upstream; this raise is the
+    defense-in-depth for states that predate the gate.
+    """
+
+
 def _split_footprint_id(fid: str) -> tuple[str, str]:
     library, _, name = fid.partition(":")
     if not library or not name:
@@ -129,13 +140,30 @@ def write_empty_pcb(
             by_num.setdefault(num, []).append(pad)
         pads_by_ref_num[ref] = by_num
 
+    unbound: list[str] = []
     for conn in bom.connections:
         net = pcbnew.NETINFO_ITEM(board, conn.net_name)
         board.Add(net)
         net_code = net.GetNetCode()
         for ep in conn.endpoints:
-            for pad in pads_by_ref_num.get(ep.ref, {}).get(ep.pin, ()):
+            pads = pads_by_ref_num.get(ep.ref, {}).get(ep.pin, ())
+            if not pads:
+                # A no-op here ships dead copper (see PadBindingError);
+                # collect every miss so one error names the whole problem.
+                have = sorted(pads_by_ref_num.get(ep.ref, {}))
+                unbound.append(
+                    f"{ep.ref}.{ep.pin} (net {conn.net_name!r}; "
+                    f"footprint pads: {', '.join(have) or 'none'})"
+                )
+                continue
+            for pad in pads:
                 pad.SetNetCode(net_code)
+    if unbound:
+        raise PadBindingError(
+            "wired endpoint(s) match no footprint pad and would become "
+            "invisible dead copper: " + "; ".join(unbound[:20])
+            + (f" (+{len(unbound) - 20} more)" if len(unbound) > 20 else "")
+        )
 
     _draw_board_outline(pcbnew, board, fps_by_ref.values())
 

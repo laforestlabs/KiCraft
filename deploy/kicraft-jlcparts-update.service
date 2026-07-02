@@ -1,0 +1,12 @@
+[Unit]
+Description=KiCraft offline JLC parts catalog refresh (jlcparts nightly dump)
+# A weeks-old dump silently rots: KC-V8YWN8's cheapest keyword pick 404'd on
+# live LCSC three weeks after the dump was built while the snapshot still said
+# 2M stock. The updater swaps the DB atomically; readers open per-call, so a
+# refresh never breaks the running web app or build worker.
+
+[Service]
+Type=oneshot
+User=kicraft
+ExecStart=/home/kicraft/KiCraft/.venv/bin/python -m kicraft.design.cli_app jlcparts-update
+TimeoutStartSec=3600
