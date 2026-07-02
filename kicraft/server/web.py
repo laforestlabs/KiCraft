@@ -94,7 +94,6 @@ from .storage import (
     _new_workspace,
     _persisted_generated_dir,
     _read_project_stem,
-    _read_root,
     _state_path,
 )
 from .pricing import (  # pure BOM-pricing helpers; fetch/cache stay below
@@ -1268,7 +1267,7 @@ def _collect_support_diagnostics(state: dict) -> dict:
     # Read root: the scratch workspace, or (on a reopen) the durable project
     # root -- so a reopened FAILED project still yields its synth-check / ERC
     # evidence in the support report instead of an empty one.
-    read_root = _read_root(state)
+    read_root = Path(state["ws"]) if state.get("ws") else None
     build_tail = [e.get("text", "") for e in events
                   if e.get("kind") == "build_log"][-60:]
     # Durable per-stage outcomes first (they cover stages run before a resume);
@@ -1718,13 +1717,12 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
             _LIVE_RUNS.pop(pid, None)
 
 
-def _ensure_workspace(state: dict, project=None) -> Path | None:
+def _ensure_workspace(state: dict) -> Path | None:
     """Ensure state["ws"] points at the project's build directory for a WRITE action
     (continue, edit, answer, manual layout, rebuild). Build-in-place: that directory
     IS the durable project dir, so this just resolves `_project_dir` -- no copy, no
     scratch workspace. Idempotent; a no-op once ws is set (live runs, and reopened
     projects whose ws was set on open). Returns None only for an id-less scratch run.
-    `project` is accepted for call-site compatibility but unused (uid/pid drive it).
     """
     if state.get("ws"):
         return Path(state["ws"])
@@ -4523,7 +4521,7 @@ def index(prompt: str = "", project: str = ""):
             """(Re)build the stage editor for the currently open design."""
             edit_box.clear()
             with edit_box:
-                read_root = _read_root(state)  # durable root in view mode (ws=None)
+                read_root = Path(state["ws"]) if state.get("ws") else None  # durable root in view mode (ws=None)
                 if not read_root:
                     ui.label("Open or run a design first, then edit a stage here.") \
                         .classes("text-xs").style("color:#64748b")
@@ -5139,7 +5137,7 @@ def index(prompt: str = "", project: str = ""):
             # Design-stage inspectors: rebuild from state.json whenever it changes.
             # read_root is the scratch workspace, or (on a reopen) the durable
             # project root -- the readers resolve either via the storage accessors.
-            read_root = _read_root(state)
+            read_root = Path(state["ws"]) if state.get("ws") else None
             if read_root:
                 # Seed the price cache from this project's persisted prices once
                 # (so a reopen shows costs immediately, before any new fetch).

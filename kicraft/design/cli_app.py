@@ -504,62 +504,6 @@ def _cmd_search_footprints(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_electrical_review(args: argparse.Namespace) -> int:
-    """Layer 3: independent LLM electrical review of a committed design.
-
-    Reviews the BOM + function-named netlist for topology/value/completeness
-    defects the deterministic §9 gates cannot judge. Prints a JSON report.
-    Exits 3 when --fail-on-blocker is set and a blocker is found.
-    """
-    from .synthesis.electrical_review import (
-        build_design_digest,
-        has_blocker,
-        review_design,
-    )
-
-    state_path = Path(args.state)
-    try:
-        state = _load_state(state_path)
-    except ValidationError as e:
-        print(f"schema validation failed:\n{e}", file=sys.stderr)
-        return 2
-    except (OSError, json.JSONDecodeError) as e:
-        print(f"could not read {state_path}: {e}", file=sys.stderr)
-        return 2
-
-    if state.bom is None or not state.bom.connections:
-        print(json.dumps({"ok": False, "error": "no wired BOM to review",
-                          "findings": []}, indent=2))
-        return 0
-
-    project_root = state_path.resolve().parent.parent
-    digest = build_design_digest(state, project_root=project_root)
-    if args.digest_only:
-        print(digest)
-        return 0
-
-    from kicraft.server.client import make_client
-    from kicraft.server.config import Settings
-
-    settings = Settings.from_env()
-    client = make_client(settings.for_review())
-    # Default to the design model (deepseek-v4-flash -- cheap) but give it a
-    # higher thinking budget; the review is a one-shot reasoning task.
-    model = args.model or settings.review_model or settings.model
-    reasoning = settings.review_reasoning()
-    result = review_design(client, digest, model=model, reasoning=reasoning,
-                           max_tokens=settings.review_max_tokens)
-    print(json.dumps({
-        "ok": result["ok"],
-        "error": result["error"],
-        "cost_usd": round(result["cost_usd"], 6),
-        "findings": result["findings"],
-    }, indent=2))
-    if args.fail_on_blocker and result["ok"] and has_blocker(result["findings"]):
-        return 3
-    return 0
-
-
 def _cmd_list_leaves(_: argparse.Namespace) -> int:
     leaves = _load_library_leaves()
     block = _format_available_leaves_block(leaves)
@@ -3908,19 +3852,6 @@ def main(argv: list[str] | None = None) -> int:
     p_val = sub.add_parser("validate", help="validate a state.json file")
     p_val.add_argument("state", help="path to state.json")
     p_val.set_defaults(func=_cmd_validate)
-
-    p_erev = sub.add_parser(
-        "electrical-review",
-        help="LLM electrical review (Layer 3) of a committed design: topology, "
-             "values, decoupling, programming path, protection",
-    )
-    p_erev.add_argument("state", help="path to state.json")
-    p_erev.add_argument("--model", default=None, help="review model override")
-    p_erev.add_argument("--digest-only", action="store_true",
-                        help="print the structured review digest and exit (no LLM call)")
-    p_erev.add_argument("--fail-on-blocker", action="store_true",
-                        help="exit 3 if the review reports a blocker-severity finding")
-    p_erev.set_defaults(func=_cmd_electrical_review)
 
     p_list = sub.add_parser(
         "list-leaves",

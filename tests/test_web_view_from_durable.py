@@ -25,31 +25,16 @@ from kicraft.server.config import LEGAL_VERSION
 STATE_FIXTURE = Path(__file__).parent / "fixtures" / "bmp280_reader_state.json"
 
 
-# --------------------------- _read_root / flag (pure) ---------------------------
-
-def test_read_root_is_ws_or_none():
-    assert web._read_root({"ws": "/w"}) == Path("/w")
-    assert web._read_root({"ws": None}) is None
-    assert web._read_root({}) is None
-
-
 # ------------------------------ _ensure_workspace -------------------------------
-
-class _Proj:
-    def __init__(self, dir_path, stem):
-        self.dir_path = str(dir_path)
-        self.project_stem = stem
-        self.id = 1
-
 
 def test_ensure_workspace_noop_when_ws_exists(tmp_path):
     state = {"ws": str(tmp_path)}
-    assert web._ensure_workspace(state, _Proj(tmp_path, "X")) == tmp_path
+    assert web._ensure_workspace(state) == tmp_path
     assert state["ws"] == str(tmp_path)  # unchanged
 
 
 def test_ensure_workspace_none_without_project():
-    assert web._ensure_workspace({"ws": None, "project_id": None}, None) is None
+    assert web._ensure_workspace({"ws": None, "project_id": None}) is None
 
 
 def test_ensure_workspace_resolves_durable_project_dir(tmp_path, monkeypatch):

@@ -28,7 +28,6 @@ from kicraft.layout_editor.model import (
 )
 from kicraft.layout_editor.render import render_leaf_canvas
 from kicraft.layout_editor.runner import (
-    find_latest_parent_pcb,
     load_initial_layout,
     run_manual_compose,
     save_manual_layout_json,
@@ -46,7 +45,6 @@ __all__ = [
     "default_asset_url",
     "discover_leaves",
     "experiments_mount_url_for",
-    "find_latest_parent_pcb",
     "load_initial_layout",
     "load_manual_layout",
     "render_leaf_canvas",

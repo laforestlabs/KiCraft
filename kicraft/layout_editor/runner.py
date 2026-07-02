@@ -138,29 +138,6 @@ def save_manual_layout_json(
     return save_manual_layout(layout, out_path)
 
 
-def find_latest_parent_pcb(experiments_dir: Path) -> Path | None:
-    """Find the most recent parent_routed/parent_pre_freerouting PCB.
-
-    Prefers ``parent_routed.kicad_pcb`` when it exists and is newer
-    than the stamped board; otherwise returns the stamped board so the
-    user can inspect a saved layout that hasn't been routed yet.
-    Returns None when neither file exists.
-    """
-    sub_root = experiments_dir / "subcircuits"
-    if not sub_root.is_dir():
-        return None
-    candidates: list[Path] = []
-    for d in sub_root.iterdir():
-        if not d.is_dir():
-            continue
-        for name in ("parent_routed.kicad_pcb", "parent_pre_freerouting.kicad_pcb"):
-            f = d / name
-            if f.is_file():
-                candidates.append(f)
-    if not candidates:
-        return None
-    return max(candidates, key=lambda p: p.stat().st_mtime)
-
 
 async def run_manual_compose(
     *,

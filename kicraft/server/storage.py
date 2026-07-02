@@ -22,14 +22,6 @@ from pathlib import Path
 from .config import Settings
 
 
-def _read_root(state: dict) -> Path | None:
-    """The project's directory for this session -- where state + artifacts are read AND
-    written (build-in-place: the durable project dir). None for a brand-new run before
-    it exists."""
-    r = state.get("ws")
-    return Path(r) if r else None
-
-
 def _kicraft_dir(root: Path) -> Path:
     """The run-metadata dir for a project: always ``<root>/.kicraft/`` (state.json,
     fetched parts, check files). One name, no fallback -- see CLAUDE.md "Storage model"."""
