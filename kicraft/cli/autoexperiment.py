@@ -1682,33 +1682,6 @@ def _write_frame_metadata(
     _write_json(frames_dir / f"frame_{round_result.round_num:04d}.json", payload)
 
 
-def _select_preview_image(parent_output_dir: Path) -> Path | None:
-    candidates = [
-        parent_output_dir / "parent_routed.png",
-        parent_output_dir / "routed.png",
-        parent_output_dir / "parent_stamped.png",
-        parent_output_dir / "board_routed.png",
-        parent_output_dir / "board.png",
-        parent_output_dir / "snapshot.png",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-
-    pngs = sorted(
-        parent_output_dir.glob("*.png"),
-        key=lambda path: (
-            0
-            if "routed" in path.name.lower()
-            else 1
-            if "stamped" in path.name.lower()
-            else 2,
-            path.name.lower(),
-        ),
-    )
-    return pngs[0] if pngs else None
-
-
 def _leaf_feasible_min_board(
     leaf_artifacts: list[dict[str, Any]] | None,
     spacing_mm: float = 4.0,
@@ -1910,33 +1883,6 @@ def _build_solve_cmd(
         cmd.extend(["--only", selector])
     for selector in leaf_order or []:
         cmd.extend(["--leaf-order", selector])
-    return cmd
-
-
-def _build_visible_cmd(
-    *,
-    project_dir: Path,
-    schematic: Path,
-    pcb: Path,
-    parent: str,
-    output_dir: Path,
-    config: str | None,
-    rounds: int,
-    seed: int,
-    only: list[str],
-) -> list[str]:
-    cmd = [
-        sys.executable,
-        str(SCRIPT_DIR / "solve_hierarchy.py"),
-        str(schematic),
-        "--pcb",
-        str(pcb),
-        "--rounds",
-        str(max(1, rounds)),
-        "--route",
-    ]
-    for selector in only:
-        cmd.extend(["--only", selector])
     return cmd
 
 

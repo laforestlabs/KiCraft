@@ -51,7 +51,6 @@ PHASES: list[tuple[str, str, str, str]] = [
     ("electrical_review", "Elec Review", "plagiarism",      "#f59e0b"),  # amber-yellow
     ("fab",             "Fab",           "inventory",       "#818cf8"),  # indigo
 ]
-_META = {k: (label, icon, accent) for k, label, icon, accent in PHASES}
 _BUILD_STAGES = ("synthesize", "place_route", "electrical_review", "fab")
 
 _OK = "#34d399"

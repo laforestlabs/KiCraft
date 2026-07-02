@@ -255,11 +255,6 @@ _SAMPLER: HostMetricsSampler | None = None
 _SAMPLER_LOCK = threading.Lock()
 
 
-def get_store(path: str | Path | None = None) -> HostMetricsStore:
-    """Convenience accessor the admin route uses to read the series."""
-    return HostMetricsStore(path)
-
-
 def start_host_metrics_sampler(*, interval_s: float | None = None,
                                disk_path: str | Path | None = None,
                                store: HostMetricsStore | None = None) -> HostMetricsSampler:

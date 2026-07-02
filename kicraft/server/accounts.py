@@ -1253,15 +1253,6 @@ class AccountStore:
                 (user_id,)).fetchall()
         return [self._row_to_project(r) for r in rows]
 
-    def first_admin_id(self) -> int | None:
-        """The lowest-id user holding the admin role -- the canonical owner for
-        machine-registered artifacts (self-eval runs) when no owner is given."""
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT id FROM users WHERE role=? ORDER BY id LIMIT 1",
-                (ADMIN_ROLE,)).fetchone()
-        return int(row[0]) if row else None
-
     def list_orphaned_running_projects(
             self, older_than_s: float = 120) -> list[Project]:
         """Projects stuck at 'running' that never enqueued a build (no build_jobs

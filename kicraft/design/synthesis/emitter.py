@@ -1211,26 +1211,3 @@ def build_sheet_instances(
     return _build_sheet_instances(architecture, bom)
 
 
-# ---------- aggregate entry point ----------
-
-
-def synthesize_project(
-    project_dir: Path,
-    project_stem: str,
-    architecture: Architecture,
-    bom: BOM,
-    title: str | None = None,
-) -> ArtifactPaths:
-    """Emit ONLY the schematic files. Caller is responsible for kicad_pro +
-    autoplacer.json + validation; this function exists so unit tests can
-    exercise schematic emission without pulling in the full synthesis stack.
-    """
-    root, leaves = emit_schematic(project_dir, project_stem, architecture, bom, title=title)
-    return ArtifactPaths(
-        project_dir=project_dir,
-        project_stem=project_stem,
-        root_sch=root,
-        leaf_schs=leaves,
-        kicad_pro=project_dir / f"{project_stem}.kicad_pro",
-        autoplacer_json=project_dir / f"{project_stem}_autoplacer.json",
-    )

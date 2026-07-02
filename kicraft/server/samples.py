@@ -174,11 +174,6 @@ def available_samples() -> list[Sample]:
     return [s for s in SAMPLES if s.exists()]
 
 
-def get_sample(sample_id: str) -> Sample | None:
-    """The Sample with this id, or None."""
-    return next((s for s in SAMPLES if s.id == sample_id), None)
-
-
 def featured_sample() -> Sample | None:
     """The hero sample: the one flagged ``featured`` (else the first available)."""
     avail = available_samples()
