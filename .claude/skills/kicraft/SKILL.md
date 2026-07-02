@@ -136,7 +136,7 @@ This pipeline does not stop at the schematic. When all four slots are populated,
 kicraft build .kicraft/state.json <out_dir> --quality good
 ```
 
-`build` drives the whole pipeline in one bundled call: synthesize (schematic + seed PCB + ERC gate), then place + route (leaves, then the parent board), promote the routed parent to the project PCB, a fab-readiness gate (0 shorts, 0 unconnected), and export of the fab package (Gerbers + drill + CPL + BOM, zipped). Place + route can take minutes; if the Experiment Manager GUI is open it shows live progress. `--quality fast` is a single-pass router (quick, lower success rate); `good` (default) and `best` run the optimizing router with progressively more rounds.
+`build` drives the whole pipeline in one bundled call: synthesize (schematic + seed PCB + ERC gate), then place + route (leaves, then the parent board), promote the routed parent to the project PCB, a fab-readiness gate (0 shorts, 0 unconnected), and export of the fab package (Gerbers + drill + CPL + BOM, zipped). Place + route can take minutes; if the web monitor is open it shows live progress. `--quality fast` is a single-pass router (quick, lower success rate); `good` (default) and `best` run the optimizing router with progressively more rounds.
 
 This is the only mid-conversation Bash call you make directly from the main thread; it does not go through the sub-agent because it is already one bundled call.
 

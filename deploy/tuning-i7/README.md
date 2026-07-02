@@ -33,7 +33,7 @@ docker build -t kicraft-tune .                # first build pulls KiCad; ~10-20 
 
 docker run -d --name kicraft-tune \
   -v /mnt/user/appdata/kicraft-tune:/data \
-  -e GENS=40 -e SEEDS=0,1 -e POPSIZE=8 -e TIMEOUT=600 -e RUN_ID=i7 \
+  -e GENS=40 -e SEEDS=0,1 -e POPSIZE=8 -e TIMEOUT=600 -e RUN_ID=i11 \
   kicraft-tune
 ```
 First start clones the repo, builds the venv, sanity-checks `pcbnew` + `cma`,
@@ -42,7 +42,7 @@ then begins tuning. Watch it:
 docker logs -f kicraft-tune
 ```
 You'll see a baseline pass, then `gen N: ... bestJ=...` lines. Each generation
-checkpoints to `/mnt/user/appdata/kicraft-tune/runs/i7/checkpoint.json`, so it's
+checkpoints to `/mnt/user/appdata/kicraft-tune/runs/i11/checkpoint.json`, so it's
 safe to stop/restart anytime.
 
 ### Or with docker compose
@@ -60,7 +60,7 @@ docker compose logs -f
 | `POPSIZE` | 8 | candidates per generation |
 | `SCAL` | `balanced` | objective weighting: `correctness` \| `balanced` \| `speed` |
 | `TIMEOUT` | 600 | per-eval cap (s); a board that can't route in this fails |
-| `RUN_ID` | `i7` | run name → `/data/runs/<RUN_ID>` |
+| `RUN_ID` | `i11` | run name → `/data/runs/<RUN_ID>` |
 | `KICRAFT_BUILD_SLOTS` | cores/4 | concurrent evals (each is itself multi-threaded) |
 | `ACTIVE` | 8 spacing/clearance params | override the tuned param set |
 

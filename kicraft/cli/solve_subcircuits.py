@@ -695,7 +695,7 @@ def _solve_leaf_subcircuit(
 
     # Within a single autoexperiment run, a leaf may be solved across
     # multiple parent rounds (one invocation per parent round). Each
-    # invocation appends its rounds to the leaf's debug.json so the GUI
+    # invocation appends its rounds to the leaf's debug.json so the monitor
     # can show, filter, and pin from any parent round's leaf solves.
     # Cross-run leakage is prevented separately by the run-start cleanup
     # in experiment_runner._purge_prior_run_artifacts, which wipes
@@ -719,7 +719,7 @@ def _solve_leaf_subcircuit(
                 raw_prior = prior_extra.get("all_rounds", []) if isinstance(prior_extra, dict) else []
                 if isinstance(raw_prior, list):
                     # Drop legacy rounds that predate experiment_round
-                    # instrumentation; they confuse the GUI's round filter.
+                    # instrumentation; they confuse the monitor's round filter.
                     prior_all_rounds = [
                         r for r in raw_prior
                         if isinstance(r, dict)
@@ -747,7 +747,7 @@ def _solve_leaf_subcircuit(
             # Honor the user-configured round count. A legacy floor of
             # `leaf_min_route_rounds` (default 8) used to silently raise the
             # effective count; it is only applied now if explicitly set in the
-            # config, so CLI/GUI values are authoritative by default.
+            # config, so CLI/monitor values are authoritative by default.
             configured_floor = local_cfg.get("leaf_min_route_rounds")
             if configured_floor is not None:
                 effective_rounds = max(rounds, int(configured_floor))
@@ -895,7 +895,7 @@ def _solve_leaf_subcircuit(
 
     if best is None:
         # Append the failed rounds to debug.json before raising. Without
-        # this, the GUI's per-leaf timeline silently drops every attempt
+        # this, the monitor's per-leaf timeline silently drops every attempt
         # in this parent-round (it filters by debug.json entries with
         # matching experiment_round). For a leaf that succeeded in an
         # earlier parent-round and then failed every retry, the user
@@ -1001,7 +1001,7 @@ def _append_failed_rounds_to_debug(
     sweep that strands a particular leaf, freerouting timeout on a dense
     leaf, etc.), the function raises and ``_persist_solution`` never
     runs -- so the prior debug.json (from earlier exp_rounds in this
-    same run) is left untouched and the GUI has no record this exp_
+    same run) is left untouched and the monitor has no record this exp_
     round even tried. Append the new failed rounds here so the per-leaf
     timeline reflects every attempt the runner made.
 
@@ -1229,7 +1229,7 @@ def _persist_solution(
     solved.best_round.timing_breakdown["persist_solution_s"] = persist_elapsed_s
 
     # Stamp each new round record with the experiment_round it belongs
-    # to so the GUI can filter per-parent-round within this run, then
+    # to so the monitor can filter per-parent-round within this run, then
     # merge with any prior rounds carried on solved.prior_rounds (rounds
     # written by earlier parent-round invocations of the same leaf in
     # this run). Cross-run leakage is prevented by the run-start cleanup
@@ -1473,7 +1473,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--experiment-round",
         type=int,
         default=0,
-        help="Autoexperiment parent round this solve run belongs to. Stamped onto each leaf round record so the GUI can filter per-parent-round. 0 = standalone/unknown.",
+        help="Autoexperiment parent round this solve run belongs to. Stamped onto each leaf round record so the monitor can filter per-parent-round. 0 = standalone/unknown.",
     )
     return parser.parse_args(argv)
 

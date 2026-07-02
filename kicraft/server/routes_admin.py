@@ -1268,7 +1268,7 @@ def admin_self_eval_run_page(run: str = ""):
 
         ui.label(f"artifacts: {run_dir}").classes("text-xs font-mono mt-2") \
             .style("color:#64748b")
-        ui.label(f"deep DRC inspection: kicraft-gui {gen}") \
+        ui.label(f"deep DRC inspection: kicraft inspect-parent {gen}") \
             .classes("text-xs font-mono").style("color:#64748b")
 
 

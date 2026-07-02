@@ -115,9 +115,9 @@ def downstream_stages(stage: str) -> list[str]:
 
 def read_state(ws) -> dict:
     """Best-effort load of a committed state.json (or {} if absent). Resolves the
-    workspace (``.kicraft``), durable (``kicraft``), or legacy (top-level) layout
-    via ``_state_path``; the workspace writers below keep their explicit
-    ``.kicraft`` path, which they always run against."""
+    workspace (``.kicraft``) or durable (``kicraft``) layout via ``_state_path``;
+    the workspace writers below keep their explicit ``.kicraft`` path, which they
+    always run against."""
     p = _state_path(Path(ws))
     try:
         return json.loads(p.read_text(encoding="utf-8"))

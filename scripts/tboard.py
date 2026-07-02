@@ -20,11 +20,11 @@ import statistics
 import sys
 from collections import defaultdict
 
-DEFAULT_DB = "/data/runs/i8/tuning.db"
-
-
 def main(argv: list[str]) -> int:
-    db_path = argv[1] if len(argv) > 1 else DEFAULT_DB
+    if len(argv) < 2:
+        print(f"usage: {argv[0]} <tuning.db>", file=sys.stderr)
+        return 2
+    db_path = argv[1]
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     by_board: dict[str, list[sqlite3.Row]] = defaultdict(list)

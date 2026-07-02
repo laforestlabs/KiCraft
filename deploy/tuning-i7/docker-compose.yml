@@ -16,7 +16,7 @@ services:
       POPSIZE: "8"
       SCAL: "all_four"    # correctness | balanced | speed | all_four (fab+drc+time+area+order)
       TIMEOUT: "600"      # per-eval cap (s)
-      RUN_ID: "i10"       # fresh run id (i7/i8/i9 are prior runs; don't reuse)
+      RUN_ID: "i11"       # fresh run id (i7/i8/i9/i10 are prior runs; don't reuse)
       # TOPK: "12"                 # active params after screening (default 12)
       # KICRAFT_BUILD_SLOTS: "18"  # concurrent evals; default = cores*3/4 (eval pool = slots-1). Lower if RAM-bound.
       # KICRAFT_BRANCH: "main"

@@ -13,9 +13,9 @@
 set -euo pipefail
 
 # --- configure these (or pass as env) ---------------------------------------
-RUN_DIR="${RUN_DIR:-/mnt/user/appdata/kicraft-tune/runs/i7}"
+RUN_DIR="${RUN_DIR:-/mnt/user/appdata/kicraft-tune/runs/i11}"
 CLOUD="${CLOUD:-kicraft@YOUR_CLOUD_HOST}"        # ssh user@host of the kicraft.io box
-RUN_ID="${RUN_ID:-i7}"                           # admin will list this as the run name
+RUN_ID="${RUN_ID:-i11}"                           # admin will list this as the run name
 CLOUD_DIR="${CLOUD_DIR:-.kicraft/tuning/$RUN_ID}"  # relative to the cloud user's $HOME
 SSH_KEY="${SSH_KEY:-/boot/config/ssh/kicraft_tune_id}"
 # ----------------------------------------------------------------------------

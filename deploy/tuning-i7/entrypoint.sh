@@ -58,7 +58,7 @@ echo "[entrypoint] cores=$cores  build_slots=$KICRAFT_BUILD_SLOTS"
 
 cd "$REPO"
 if [ "${1:-tune}" = "tune" ]; then
-    OUT="${OUT:-$DATA/runs/${RUN_ID:-i10}}"
+    OUT="${OUT:-$DATA/runs/${RUN_ID:-i11}}"
     mkdir -p "$OUT"
     # Param-selection mode (mutually exclusive, ACTIVE wins):
     #   ACTIVE=<csv>  -> tune EXACTLY these, skip screening (legacy behavior)
@@ -81,7 +81,7 @@ if [ "${1:-tune}" = "tune" ]; then
         --gens "${GENS:-40}" --popsize "${POPSIZE:-8}" \
         --timeout "${TIMEOUT:-600}" --top-k "${TOPK:-12}" \
         "${sel[@]}" \
-        --run-id "${RUN_ID:-i10}"
+        --run-id "${RUN_ID:-i11}"
 fi
 
 # Any other command (e.g. `bash`, or `python -m kicraft.tuning.cli report ...`)
