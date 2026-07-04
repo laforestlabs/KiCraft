@@ -1,9 +1,11 @@
 ---
-description: Investigate why a KiCraft run failed — across BOTH the schematic (ERC) and the PCB placement/routing (DRC) — and audit design quality on every run (pass or fail). Locates the run, prints the build verdict, localizes the ERC/DRC failures, classifies systematic code/footprint bugs vs per-design model gaps across all runs, and recommends a generalizable fix. Also audits part-library provenance (curated default vs auto-fetched/unknown lib), BOM realness (real/in-stock vs hallucinated or wrong part, via the offline jlcparts catalog), and LLM thinking-trace wheel-spin (retry/tool/reasoning loops).
+description: Investigate why a KiCraft run failed — across BOTH the schematic (ERC) and the PCB placement/routing (DRC) — and audit design quality on every run (pass or fail). Locates the run, prints the build verdict, localizes the ERC/DRC failures, classifies systematic code/footprint bugs vs per-design model gaps across all runs, and recommends a generalizable fix. Also audits part-library provenance (curated default vs auto-fetched/unknown lib), BOM realness (real/in-stock vs hallucinated or wrong part, via the offline jlcparts catalog), and LLM thinking-trace wheel-spin (retry/tool/reasoning loops). Deliverable: a ranked pipeline-gap report — each finding deduped against known/deferred issues, replay-reproduced on current code, and mapped to its owning module and the gate that should have caught it.
 argument-hint: "[KC-XXXXXX board code | uid/pid | pid | /path/to/run] (optional; default: most recent run)"
 ---
 
 Investigate a failed KiCraft run and hand back a fast, accurate picture of **why** it failed and **whether the fix is generalizable** (a synthesis/layout-code or footprint-library bug that hits *every* design) **or per-design** (this design's model output). Target run: `$ARGUMENTS` (may be empty → most recent run).
+
+**The board is the witness, not the patient.** This skill exists to find **pipeline gaps** — the code/gate/library/prompt changes that improve every *future* board — not to hand-fix this board. A candidate finding from any section below is not reportable until it passes §9 (prior-art dedup + replay reproduction on current code) and lands in §10's gap contract with an owning module, the gate that should have caught it, and a verification recipe.
 
 A KiCraft `build` is sequential: **synthesize+ERC → place leaves → compose+route parent → verify (DRC)**. The exit code tells you the stage it died at, so the investigation **branches**:
 
@@ -123,7 +125,7 @@ PY
 
 Read off: which stage failed, the ERC errors (×100 coords), and the LAYOUT line. **Route yourself:** ERC errors / rc≤5 → **§2**. `LAYOUT … routed board EXISTS` or `NO routed parent board` → **§3**. A `stage = FAIL` the journal shows as *"parked: awaiting a clarifying answer"* is the pipeline **waiting on the user**, not a crash.
 
-**Then — regardless of the build rc, and even for a fab-ready (rc0) board — run the design-quality audits §6 (part-library provenance), §7 (BOM realness), and §8 (wheel-spin).** They surface a different, orthogonal class of defect (wrong/missing library, hallucinated or mis-chosen part, an LLM stage going in circles) that the ERC/DRC gates do **not** catch.
+**Then — regardless of the build rc, and even for a fab-ready (rc0) board — run the design-quality audits §6 (part-library provenance), §7 (BOM realness), and §8 (wheel-spin).** They surface a different, orthogonal class of defect (wrong/missing library, hallucinated or mis-chosen part, an LLM stage going in circles) that the ERC/DRC gates do **not** catch. Every candidate finding — from any section — must then pass §9 (dedup + replay) before it may appear in the §10 report.
 
 ## 2. Schematic deep-dive (ERC) — when the build died at/before the ERC gate
 
@@ -177,7 +179,7 @@ for (sheet, net), cs in sorted(nets.items()):
 PY
 ```
 
-Then jump to §9 (the ERC root-cause table).
+Then gate the finding through §9 and report via §10 (the ERC root-cause lookup table lives there).
 
 ## 3. PCB deep-dive (placement + routing) — when rc=6/7
 
@@ -258,12 +260,17 @@ This is the heart of the request: scan **every** run's layout artifacts and rank
 
 ```bash
 "<PY>" - "<PROJECTS>" "$HOME/.kicraft/self_eval" "$HOME/KiCraft/logs/self_eval" <<'PY'
-import json, sys, collections
+import json, re, sys, collections, datetime
 from pathlib import Path
 roots = [Path(a) for a in sys.argv[1:]]
 def L(p):
     try: return json.loads(Path(p).read_text())
     except Exception: return {}
+def norm(r):
+    # collapse per-instance payloads (refdes, mm offsets, edges) so ONE failure family
+    # counts as one row — 'connector_stranded:J1@-4.41mm(left)' -> 'connector_stranded:<ref>'
+    r = re.sub(r"@-?\d+(\.\d+)?mm(\((left|right|top|bottom)\))?", "", str(r))
+    return re.sub(r"\b[A-Z]{1,3}\d+\b", "<ref>", r)
 def verdict(exp):
     pps = sorted(exp.glob("hierarchical_autoexperiment/round_*/parent_pipeline.json"))
     routed = [L(pp).get("state", {}) for pp in pps if (L(pp).get("state", {}) or {}).get("routed_validation") is not None]
@@ -276,31 +283,33 @@ def verdict(exp):
         leaves.append((bool(la.get("accepted")), fs.get("unique_reasons") or []))
     return rb, st.get("routed_validation"), leaves
 runs = sorted({exp.parent.parent.parent for root in roots if root.is_dir() for exp in root.rglob(".experiments")})
-tier = collections.Counter()
+tier = collections.Counter(); when = {}
 reject = collections.defaultdict(set); drc = collections.defaultdict(set); fp = collections.defaultdict(set)
 nets = collections.defaultdict(set); lreason = collections.defaultdict(set)
 for run in runs:
     exp = next((run/"generated").glob("*/.experiments"), None)
     if not exp: continue
     tag = run.name; rb, rv, leaves = verdict(exp)
+    when[tag] = datetime.date.fromtimestamp(run.stat().st_mtime).isoformat()
     tier["route_fail (no parent board, rc6)" if not rb else
          ("dirty (routed, not fab-ready, rc7)" if rv and rv.get("accepted") is False else
           ("clean (fab-ready)" if rv and rv.get("accepted") else "unknown"))] += 1
     if rv:
-        for r in rv.get("rejection_reasons") or []: reject[r].add(tag)
+        for r in rv.get("rejection_reasons") or []: reject[norm(r)].add(tag)
         d = rv.get("drc", {})
         for k in ("shorts", "unconnected", "clearance", "annular_width", "padstack"):
             if (d.get(k) or 0) > 0: drc[k].add(tag)
         for ref in d.get("clearance_footprint_refs") or []: fp[ref].add(tag)
         for net in d.get("unconnected_nets") or []: nets[net].add(tag)
     for _acc, reasons in leaves:
-        for r in reasons: lreason[r].add(tag)
+        for r in reasons: lreason[norm(r)].add(tag)
 print(f"=== CROSS-RUN PCB SCAN: {len(runs)} runs with layout artifacts ===")
 print("tiers:", dict(tier))
 def show(title, d):
-    rows = sorted(((k, len(v), sorted(v)[:3]) for k, v in d.items()), key=lambda x: -x[1])
-    print(f"\n{title}  (-> #designs; >1 = SYSTEMATIC, fix generalizes; 1 = this design):")
-    for k, n, eg in rows: print(f"  {k}: {n}  e.g. {eg}")
+    rows = sorted(((k, len(v), max((when.get(t, "") for t in v), default="") or "?", sorted(v)[:3])
+                   for k, v in d.items()), key=lambda x: -x[1])
+    print(f"\n{title}  (-> #designs; >1 = SYSTEMATIC, fix generalizes; 1 = this design; latest = most recent affected run):")
+    for k, n, latest, eg in rows: print(f"  {k}: {n}  latest={latest}  e.g. {eg}")
 show("parent rejection reasons", reject)
 show("parent DRC error types", drc)
 show("clearance footprint refs (a recurring ref = footprint-library bug, one .kicad_mod fix)", fp)
@@ -310,6 +319,8 @@ PY
 ```
 
 The output tells you, for each failure mode, the exact set of designs it hits. **A ref like `J1` or a net like `CC2`/`GND` recurring across many designs is your generalizable fix** — change the one footprint / add the one tie-or-pour rule and every affected board improves.
+
+**Read `latest=` before calling anything systematic.** Runs record no code version, and the scan mixes runs built across many code generations — a mode whose latest hit predates the relevant fix's merge/deploy date (check the auto-memory index and `git log`) is *stale evidence*, not a live gap; a mode still hitting **after** that date is a **regression**, which is a headline finding. Either way, §9's replay settles whether the gap is live on today's code.
 
 ## 5. Build log around the run (per-run `.kicraft/build.log` first; journal as fallback)
 
@@ -553,9 +564,50 @@ PY
 
 **Read it:** `high_attempts`/`recurring_error` = the stage kept failing commit-validation on the **same** error and re-prompting to exhaustion (the classic wiring whack-a-mole — e.g. an unwinnable inter-sheet contract from architecture; see the `wiring-unwinnable-intersheet-contract` memory). `bom_rounds_maxed`/`tool_loop` = BOM thrashed the part-lookup tools without converging (drives cost — see `pipeline-cost-bom-retries`). A high reasoning-char count with `recurring_error` is the strongest "stuck" signal; line-level `reasoning_repeat` is a weaker supplement (long stages aren't usually literally line-duplicated). **Many designs hitting the same stuck stage + same recurring error = a systematic prompt/validation-contract bug** (fix the stage spec or add an upstream reconcile/normalizer so the model is never handed an unwinnable task), not a per-design hiccup.
 
-## 9. Report — failing stage, true root cause, and a GENERALIZABLE fix
+## 9. Gate every candidate finding — is it NEW, LIVE, and REPRODUCIBLE?
 
-Summarise crisply: the failing stage, the specific failure (with the right coords — ERC ×100, DRC real-mm), **code-bug vs footprint-library-bug vs model output**, the suspect module, and a recommended fix. **Lead with §4's #-designs-affected count** — if a failure hits many designs, name the *one* change that fixes the class. **Then report the design-quality audits (§6–§8) even when the build passed** — a wrong/missing library, a hallucinated or mis-chosen part, or a wheel-spinning stage is a real defect the ERC/DRC gates never see.
+Findings from §2–§8 are *candidates*. Three cheap checks stand between a candidate and the report. Skipping them is how an investigation re-reports a bug fixed last week against stale runs, or proposes a band-aid for a known walled-off cluster.
+
+**(a) Prior-art dedup.** Grep the auto-memory index and the plans for the failure signature (error type, footprint ref, net family, gate name, rejection reason):
+
+```bash
+grep -rli '<signature>' ~/.claude/projects/-home-kicraft-KiCraft/memory/ "<REPO>/docs/plans/" 2>/dev/null | head
+```
+
+- **KNOWN-FIXED** (a memory/plan says FIXED/MERGED/DEPLOYED): compare the fix's merge/deploy date to the affected runs' `latest=` dates (§4 prints them). All hits predate the fix → stale evidence; drop it from the gap list (one appendix line: "fixed, awaiting fresh runs"). Any hit **after** the fix deployed → a **REGRESSION** — headline finding; name the commit it regressed.
+- **KNOWN-DEFERRED / WALLED-OFF** (e.g. the `unconnected=1` `no_clear_path` cluster, routed-GND islands): report as "known-deferred, +N runs affected since <date>", cite the plan/memory, and do **NOT** invent a workaround — masking gates and post-route band-aids are rejected on principle here (fix-at-source feedback). The only new information worth reporting is growth in breadth/severity or a genuinely new lever on the root cause.
+- **NEW** → (b).
+
+**(b) Replay-reproduce on current code — $0, no LLM.** A single run's route verdict is noisy (routing is best-effort-stable; self-eval measured run-to-run deltas that cross grade buckets on identical input), and the run may predate a fix. Replay the frozen workspace under today's code:
+
+```bash
+STEM_DIR=$(find "<RUN>/generated" -maxdepth 1 -mindepth 1 -type d | head -1)
+WORK=$(mktemp -d); cp -a "$STEM_DIR" "$WORK/replay"   # replay REGENERATES .experiments in place — never burn the evidence
+"<PY>" -m kicraft.design.cli_app replay --project "$WORK/replay" --quality good --seed 0
+"<PY>" -m kicraft.design.cli_app artifacts --project "$WORK/replay"   # honest post-replay verdict + board paths
+```
+
+Match `--quality` to the original run (`grep 'quality=' "<RUN>/.kicraft/build.log"`); use `--no-route` to isolate the fully deterministic placement layer from best-effort routing. Reproduces → the gap is **live**; report it. Doesn't reproduce → either fixed-since-run (recheck (a)) or route noise — replay 2–3× before claiming either. **Never compare artifacts across two separate replay runs** (cross-run contamination) — measure any leaf-vs-parent or before/after claim inside ONE replay.
+
+**(c) Name the gate that should have caught it.** For every defect that survived past its origin stage — and especially anything wrong on a "fab-ready" board — answer: which pipeline gate (the synthesis-side numbered checks 9.x at BOM/wiring commit, the wiring normalizers, leaf acceptance, composer stamp-DRC, promote verify, review clamp) could have **deterministically** caught it at the earliest stage where it was visible, and why did the existing one miss it? "Extend gate X to catch Y at stage Z" is the single most common shape of a shipped systemic fix in this pipeline; a finding with no gate answer is usually under-investigated.
+
+## 10. Report — the ranked pipeline-gap contract (the deliverable)
+
+The report is a **ranked list of pipeline gaps, not a story about this board.** Rank by breadth (§2a/§4 #designs) × recency (`latest=`) × severity (fab-blocking > silently-wrong-board > quality > cost). Cap the ranked list at the **top 3** gaps; everything else gets one appendix line each. Every ranked gap must fill all six fields — a field you can't fill means the investigation isn't finished:
+
+```
+GAP <n>: <one-line name>                [code | footprint-library | gate-hole | prompt/contract | infra]
+  evidence:  N/M designs, latest <date> — <≤4 run ids>; if N==1: replay-verified? y/n
+  detect:    earliest stage/gate that could have deterministically caught it + why the current one missed (§9c)
+  source:    <file:func> — the single point that sets the bad value; fix THERE, never a downstream mask
+  fix:       <the one change>; guard: <the test that keeps it fixed>
+  verify:    replay <run(s)> → expect <specific delta, e.g. unconnected 2→0, rc7→rc0>
+  prior-art: NEW | REGRESSION of <commit/memory> | KNOWN-DEFERRED <plan/memory> (+N runs since)
+```
+
+After the gap list: a one-paragraph per-run verdict (failing stage, the specific failure, right coords — ERC ×100, DRC real-mm) and the §6–§8 audit findings **even when the build passed**. Pure per-design model output (a one-off wrong wire or part pick) goes in the appendix, not the gap list — *unless* the same model mistake recurs across designs, which makes it a prompt/validation-contract gap: the fix is the stage spec or an upstream reconcile-normalizer, and it belongs in the ranked list.
+
+**Root-cause lookup tables** — symptom → owning module; use these to fill each gap's `source:` field.
 
 **Schematic (ERC) root causes** — the real KiCad `type` strings §1/§2a print:
 
@@ -593,4 +645,4 @@ Summarise crisply: the failing stage, the specific failure (with the right coord
 | §8 `high_attempts`/`recurring_error` on a stage | stage looped commit-validation on the same error to exhaustion (whack-a-mole) | code (prompt/validation contract) if many designs | fix the stage spec / add an upstream reconcile-normalizer (`wiring-unwinnable-intersheet-contract`, `reconcile-stage-plan`) |
 | §8 `bom_rounds_maxed`/`tool_loop` | BOM thrashed the part-lookup tools without converging | code/model (cost driver) | BOM tool-loop convergence; candidate suggestions on a miss (`pipeline-cost-bom-retries`) |
 
-**Rule of thumb:** the failure's **breadth across designs (§2a for ERC, §4 for PCB, and a recurring §6/§8 finding) is the verdict.** Many designs → a synthesis/layout **code** bug or a **footprint-library** bug whose single fix generalizes (name it). One design → that design's **model** output (wiring/part choice). Quote the offending ref + real-mm DRC coord (or ×100 ERC pos) so the next agent can open the board/schematic straight to the spot.
+**Rule of thumb:** the failure's **breadth across designs (§2a for ERC, §4 for PCB, and a recurring §6/§8 finding) is the verdict — but only live, reproducible breadth counts (§9).** Many designs → a synthesis/layout **code** bug, a **footprint-library** bug, or a **gate hole** whose single fix generalizes (name it in a GAP block). One design → that design's **model** output (appendix), unless the same mistake recurs across designs — then it's a prompt/contract gap and belongs in the ranked list. Quote the offending ref + real-mm DRC coord (or ×100 ERC pos) so the next agent can open the board/schematic straight to the spot.
