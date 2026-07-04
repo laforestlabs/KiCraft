@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from typing import Any
 
 from kicraft.autoplacer.brain.leaf_geometry import (
@@ -224,6 +225,38 @@ def local_solver_config(
     return cfg
 
 
+_PRESERVED_BOARD_KEYS = (
+    "routed_board_path",
+    "pre_route_board_path",
+    "round_board_routed",
+    "round_board_pre_route",
+)
+
+
+def _preserve_round_boards(routing: dict[str, Any]) -> dict[str, bytes]:
+    """Snapshot the winner's board files before a candidate reroute.
+
+    ``route_local_subcircuit`` overwrites BOTH the shared canonical boards and
+    the winner's ``round_NNNN_*`` snapshots (the reroute runs under the
+    winner's round_index). Without preserving them, a REJECTED candidate
+    leaves its own geometry on disk while the round record still claims the
+    validated winner -- every later consumer (canonical layout, auto-pin)
+    then reads placement the acceptance gates never saw (KC-FGRSQF).
+    """
+    saved: dict[str, bytes] = {}
+    for key in _PRESERVED_BOARD_KEYS:
+        path = routing.get(key)
+        if path and Path(path).is_file():
+            saved[str(path)] = Path(path).read_bytes()
+    return saved
+
+
+def _restore_round_boards(saved: dict[str, bytes]) -> None:
+    """Put the preserved winner boards back after a rejected candidate."""
+    for path, data in saved.items():
+        Path(path).write_bytes(data)
+
+
 def attempt_leaf_size_reduction(
     extraction: ExtractedSubcircuitBoard,
     best_round: SolveRoundResult,
@@ -430,6 +463,7 @@ def attempt_leaf_size_reduction(
                 not should_reroute
                 and current_round.routing.get("validation", {}).get("accepted", False)
             )
+            preserved_boards: dict[str, bytes] = {}
             if can_reuse:
                 rerouted = copy.deepcopy(current_round.routing)
                 rerouted["validation"] = copy.deepcopy(
@@ -441,6 +475,10 @@ def attempt_leaf_size_reduction(
                 }
                 rerouted["size_reduction_reused_route"] = True
             else:
+                # The reroute overwrites the current winner's boards on disk
+                # (shared canonical + its round snapshot); preserve them so a
+                # rejected candidate can be rolled back byte-for-byte.
+                preserved_boards = _preserve_round_boards(current_round.routing)
                 try:
                     rerouted, reroute_timing = route_local_subcircuit(
                         candidate_extraction,
@@ -450,6 +488,7 @@ def attempt_leaf_size_reduction(
                         round_index=current_round.round_index,
                     )
                 except Exception as exc:
+                    _restore_round_boards(preserved_boards)
                     attempt_record["rejection_reason"] = f"reroute_exception:{exc}"
                     summary["attempts"].append(attempt_record)
                     continue
@@ -462,6 +501,7 @@ def attempt_leaf_size_reduction(
             attempt_record["size_reduction_validation"] = copy.deepcopy(validation)
 
             if rerouted.get("failed", False) or not validation.get("accepted", False):
+                _restore_round_boards(preserved_boards)
                 attempt_record["rejection_reason"] = (
                     validation.get("rejection_stage")
                     or validation.get("rejection_message")

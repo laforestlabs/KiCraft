@@ -406,20 +406,38 @@ class KiCadAdapter:
             pos = fp.GetPosition()
             # Use courtyard bbox for physical size — it represents the keep-out
             # area on the PCB plane (excludes battery tube space above board).
-            # Fall back to copper bounding box if no courtyard is defined.
+            # A courtyard is only trusted when it encloses the pad copper: a
+            # malformed (non-closing / self-intersecting) courtyard degenerates
+            # to a stroke-width sliver that still passes a bare ">0" size check,
+            # and a sliver extent lets the solver pack neighbours into the
+            # part's real body. Fall back to the copper/graphics bounding box
+            # when there is no usable courtyard.
             body_ctr = None
             try:
                 cy = fp.GetCourtyard(
                     pcbnew.F_CrtYd if fp.GetLayer() == pcbnew.F_Cu else pcbnew.B_CrtYd
                 )
                 cbox = cy.BBox()
-                if cbox.GetWidth() > 0 and cbox.GetHeight() > 0:
-                    w_mm = pcbnew.ToMM(cbox.GetWidth())
-                    h_mm = pcbnew.ToMM(cbox.GetHeight())
-                    cc = cbox.GetCenter()
-                    body_ctr = Point(pcbnew.ToMM(cc.x), pcbnew.ToMM(cc.y))
-                else:
+                if cbox.GetWidth() <= 0 or cbox.GetHeight() <= 0:
                     raise ValueError("empty courtyard")
+                pads_box = None
+                for _pad in fp.Pads():
+                    pb = _pad.GetBoundingBox()
+                    if pads_box is None:
+                        pads_box = pb
+                    else:
+                        pads_box.Merge(pb)
+                if pads_box is not None:
+                    tol = pcbnew.FromMM(0.1)  # vendor hygiene grows real ones
+                    if (cbox.GetLeft() > pads_box.GetLeft() + tol
+                            or cbox.GetTop() > pads_box.GetTop() + tol
+                            or cbox.GetRight() < pads_box.GetRight() - tol
+                            or cbox.GetBottom() < pads_box.GetBottom() - tol):
+                        raise ValueError("courtyard does not enclose pad copper")
+                w_mm = pcbnew.ToMM(cbox.GetWidth())
+                h_mm = pcbnew.ToMM(cbox.GetHeight())
+                cc = cbox.GetCenter()
+                body_ctr = Point(pcbnew.ToMM(cc.x), pcbnew.ToMM(cc.y))
             except Exception:
                 fp_bbox = fp.GetBoundingBox(False, False)
                 w_mm = pcbnew.ToMM(fp_bbox.GetWidth())

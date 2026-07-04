@@ -262,7 +262,7 @@ def _board_only_leaf_dirs(project_dir: Path) -> list[Path]:
 
 
 def _auto_pin_best_leaves(project_dir: Path) -> None:
-    """Pin each leaf to its highest-scoring round of THIS run.
+    """Pin each leaf to its best ACCEPTANCE-PASSING round of THIS run.
 
     Run after ``--leaves-only`` completes. The run-start purge wipes
     each leaf's ``round_NNNN_*`` snapshot files and ``debug.json``,
@@ -273,16 +273,64 @@ def _auto_pin_best_leaves(project_dir: Path) -> None:
     with the best round of the just-finished leaves-only run gives
     the user an immediately usable parent-only invocation.
 
+    Selection applies the SAME leaf-acceptance gates the solver used to
+    choose its winner. A bare ``(routed, score)`` key used to pin
+    gate-REJECTED rounds over the validated winner -- KC-FGRSQF pinned a
+    round whose own validation recorded ``drc.courtyard=3`` (three gross
+    same-edge connector overlaps) because it scored highest, and that
+    geometry surfaced only as a parent-level ``courtyards_overlap`` rc7.
+
     For each leaf:
-      * Read ``debug.json`` -> ``extra.all_rounds`` for per-round scores.
-      * Pick the round with the highest score (routed preferred over
-        pre-route, ``-inf`` scores skipped).
+      * Read ``debug.json`` -> ``extra.all_rounds`` for per-round scores
+        and stored validation dicts.
+      * Re-evaluate leaf acceptance per round (validation graded against
+        the round's OWN snapshot board, since the shared canonical path
+        gets clobbered by later rounds).
+      * Pick by ``(accepted, routed, score)``; when NO round passes the
+        gates, fall back to ``(routed, score)`` with a loud warning so a
+        board still ships for inspection (the terminal fab gate keeps it
+        from being called fab-ready).
       * Call ``pin_leaf`` with ``source="auto-leaves-only"``.
       * If no scoreable rounds exist (trivial leaf, or every round
         failed), clear any stale pin so pins.json doesn't carry a
         broken reference.
     """
     from kicraft.autoplacer.brain import pins as pins_module
+    from kicraft.autoplacer.brain.leaf_acceptance import (
+        acceptance_config_from_dict,
+        evaluate_leaf_acceptance,
+    )
+
+    def _leaf_acceptance_cfg(artifact_dir: Path):
+        """Recover the final solve's config for this leaf (the reference
+        acceptance thresholds). ``solved_layout.json`` embeds the full cfg
+        dump in ``config_hash``; fall back to gate defaults when absent."""
+        try:
+            payload = _load_json(artifact_dir / "solved_layout.json")
+            cfg = json.loads(payload.get("config_hash", ""))
+            if isinstance(cfg, dict):
+                return acceptance_config_from_dict(cfg)
+        except Exception:  # noqa: BLE001 -- defaults mirror the solve gates
+            pass
+        return acceptance_config_from_dict({})
+
+    def _round_accepted(r: dict, artifact_dir: Path, config) -> bool:
+        """Re-run the leaf-acceptance gates against this round's snapshot."""
+        validation = (r.get("routing") or {}).get("validation")
+        if not isinstance(validation, dict):
+            return False
+        idx = r.get("round_index")
+        snapshot = artifact_dir / f"round_{int(idx):04d}_leaf_routed.kicad_pcb"
+        graded = dict(validation)
+        if snapshot.is_file():
+            # The stored board_path is the shared canonical file, long since
+            # overwritten -- grade overlap magnitudes on the round's own board.
+            graded["board_path"] = str(snapshot)
+        # anchor_validation={} mirrors the solver's per-round gating; the
+        # anchors gate is a winner-level concern.
+        return bool(
+            evaluate_leaf_acceptance(graded, {}, config=config).accepted
+        )
 
     experiments_dir = project_dir / ".experiments"
     artifacts = _all_leaf_artifacts(project_dir)
@@ -312,7 +360,8 @@ def _auto_pin_best_leaves(project_dir: Path) -> None:
         extra = debug.get("extra", {}) if isinstance(debug, dict) else {}
         all_rounds = extra.get("all_rounds") if isinstance(extra, dict) else None
 
-        best: tuple[tuple[int, float], int, float, bool] | None = None
+        acceptance_cfg = _leaf_acceptance_cfg(artifact_dir)
+        best: tuple[tuple[int, int, float], int, float, bool] | None = None
         if isinstance(all_rounds, list):
             for r in all_rounds:
                 if not isinstance(r, dict):
@@ -326,7 +375,8 @@ def _auto_pin_best_leaves(project_dir: Path) -> None:
                 if not isinstance(idx, int):
                     continue
                 routed = bool(r.get("routed", False))
-                key = (1 if routed else 0, float(score))
+                accepted = _round_accepted(r, artifact_dir, acceptance_cfg)
+                key = (1 if accepted else 0, 1 if routed else 0, float(score))
                 if best is None or key > best[0]:
                     best = (key, idx, float(score), routed)
 
@@ -338,15 +388,23 @@ def _auto_pin_best_leaves(project_dir: Path) -> None:
                 skipped += 1
             continue
 
-        _, best_idx, best_score, best_routed = best
+        (best_accepted, _, _), best_idx, best_score, best_routed = best
+        if not best_accepted:
+            print(
+                f"  WARNING: {leaf_key}: NO round passed leaf acceptance; "
+                f"pinning best-scoring routed round R{best_idx} anyway for "
+                f"inspection (the fab gate will not call this board ready)"
+            )
         try:
             pins_module.pin_leaf(
                 experiments_dir, leaf_key, best_idx, source="auto-leaves-only"
             )
             pinned += 1
             tag = "routed" if best_routed else "pre-route"
+            gate = "accepted" if best_accepted else "UNACCEPTED"
             print(
-                f"  pinned {leaf_key} -> R{best_idx} ({tag}, score={best_score:.2f})"
+                f"  pinned {leaf_key} -> R{best_idx} "
+                f"({tag}, {gate}, score={best_score:.2f})"
             )
         except FileNotFoundError as exc:
             print(f"  pin failed for {leaf_key}: {exc}")

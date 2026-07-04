@@ -294,7 +294,18 @@ class SolvedLeafSubcircuit:
         )
 
     def best_round_to_layout(self, cfg: dict[str, Any] | None = None):
-        return self.round_to_layout(self.best_round, cfg=cfg)
+        # Prefer the winner's own per-round snapshot over the shared canonical
+        # leaf_routed.kicad_pcb: the canonical is overwritten by EVERY
+        # route_local_subcircuit call, so by materialization time it can hold
+        # a later round's (or a rejected size-reduction candidate's) geometry
+        # -- placement the acceptance gates never validated (KC-FGRSQF).
+        override = None
+        snapshot = (self.best_round.routing or {}).get("round_board_routed")
+        if snapshot and Path(snapshot).is_file():
+            override = snapshot
+        return self.round_to_layout(
+            self.best_round, cfg=cfg, routed_board_path_override=override
+        )
 
     def canonical_layout_artifact(self, cfg: dict[str, Any]) -> dict[str, Any]:
         layout = self.best_round_to_layout(cfg=cfg)
