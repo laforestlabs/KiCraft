@@ -65,3 +65,48 @@ def test_board_does_not_grow_when_group_already_fits():
 
     tl, br = solver.state.board_outline
     assert (br.x, br.y) == (50.0, 40.0), "board grew when the group already fit"
+
+
+def test_rotated_edge_connectors_pack_by_oriented_extent():
+    """Regression (KC-FGRSQF): WIDE connectors pinned to a left/right edge are
+    rotated 90 degrees so their long axis runs along the edge -- the pack must
+    space them by that ORIENTED extent, not the pre-rotation height.
+
+    Four 15.35 x 8.15 mm screw terminals (the WJ126V-5.0-3P courtyard) zoned
+    right used to pack at 8.15mm + gap while each rotated part actually spans
+    15.35mm along the edge: three guaranteed ~2.3mm courtyard overlaps that
+    surfaced only as a parent-level courtyards_overlap rc7.
+    """
+    comps = {f"J{i}": _conn(f"J{i}", w=15.35, h=8.15) for i in range(3, 7)}
+    state = BoardState(
+        components=dict(comps), board_outline=(Point(0.0, 0.0), Point(60.0, 55.0))
+    )
+    cfg = {
+        "component_zones": {f"J{i}": {"edge": "right"} for i in range(3, 7)},
+        "connector_gap_mm": 3.58,
+        "edge_margin_mm": 2.0,
+    }
+    solver = PlacementSolver(state, cfg, seed=0)
+    solver._pin_edge_components(comps)
+
+    # The aspect heuristic rotates each wide connector 90deg onto the edge,
+    # and the extents must follow the rotation.
+    for c in comps.values():
+        assert c.rotation % 180 == 90.0, f"{c.ref} not rotated onto the edge"
+        assert abs(c.height_mm - 15.35) < 1e-6, (
+            f"{c.ref} height_mm={c.height_mm} not swapped with width after rotation"
+        )
+
+    # Packed pitch respects the oriented (long) extent: no courtyard overlap.
+    ys = sorted(c.pos.y for c in comps.values())
+    pitches = [b - a for a, b in zip(ys, ys[1:])]
+    assert all(p >= 15.35 for p in pitches), (
+        f"same-edge connectors packed tighter than their oriented extent: {pitches}"
+    )
+
+    # And the grow-to-fit trigger used the oriented extents too:
+    # 4 * 15.35 + 3 * 3.58 + 2 * margin = 76.14 > the 55mm start height.
+    tl, br = solver.state.board_outline
+    assert (br.y - tl.y) >= 4 * 15.35 + 3 * 3.58, (
+        f"board height {br.y - tl.y:.2f} did not grow for the oriented column"
+    )

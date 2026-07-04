@@ -1001,18 +1001,37 @@ class PlacementSolver:
             else:  # bottom
                 return br.y - connector_inset - hh
 
-        def _orient_and_place(comp: Component, edge: str, pos: Point):
-            """Orient connector to face inward and move to position."""
-            old_pos = Point(comp.pos.x, comp.pos.y)
-            old_rot = comp.rotation
-            # Auto-orient unless config specifies explicit rotation
+        def _orient_for_edge(comp: Component, edge: str):
+            """Rotate the connector to face the edge, keeping extents honest.
+
+            ``width_mm``/``height_mm`` describe the part at its CURRENT
+            rotation, so a 90-degree turn must swap them. Orientation runs
+            BEFORE the group pack measures sizes: without the swap, a
+            connector rotated onto a left/right edge is spaced by its short
+            side while its long side runs along the edge -- adjacent
+            courtyards then overlap by design (KC-FGRSQF J3-J6: 15.35mm-tall
+            terminals packed at 8.15mm + gap), and the flush inset uses the
+            wrong half-extent.
+            """
             zone_cfg = zones.get(comp.ref, {})
             if "rotation" in zone_cfg:
-                comp.rotation = zone_cfg["rotation"]
+                new_rot = zone_cfg["rotation"]
             else:
-                comp.rotation = self._best_rotation_for_edge(comp, edge)
+                new_rot = self._best_rotation_for_edge(comp, edge)
+            old_rot = comp.rotation
+            if abs((new_rot - old_rot) % 360.0) < 0.001:
+                return
+            comp.rotation = new_rot
+            # Rotate pads + body_center in place around the current position.
+            _update_pad_positions(comp, comp.pos, old_rot)
+            if round((new_rot - old_rot) / 90.0) % 2 != 0:
+                comp.width_mm, comp.height_mm = comp.height_mm, comp.width_mm
+
+        def _place_at(comp: Component, edge: str, pos: Point):
+            """Translate an already-oriented connector to its packed slot."""
+            old_pos = Point(comp.pos.x, comp.pos.y)
             comp.pos = pos
-            _update_pad_positions(comp, old_pos, old_rot)
+            _update_pad_positions(comp, old_pos, comp.rotation)
             _shift_pads_inside(comp, assigned_edge=edge)
 
         # --- Collect edge-pinned connectors by edge for grouped placement ---
@@ -1113,6 +1132,12 @@ class PlacementSolver:
             if corner_b and _has_corner_mount(corner_b):
                 _corner_reserve += corner_keep * 2
 
+            # Orient every group member BEFORE measuring: the pack pitch,
+            # grow-to-fit trigger, and flush inset must all use the extents
+            # of the part as it will actually sit on the edge.
+            for i in order:
+                _orient_for_edge(group_comps[i], edge)
+
             if edge in ("left", "right"):
                 # Column along Y axis — body edge flush with board edge
                 sizes = [group_comps[i].height_mm for i in order]
@@ -1153,7 +1178,7 @@ class PlacementSolver:
                     comp = group_comps[idx]
                     fixed_x = _connector_edge_x(comp, edge)
                     pos = Point(fixed_x, cursor_y)
-                    _orient_and_place(comp, edge, pos)
+                    _place_at(comp, edge, pos)
                     self._pinned_targets[refs[idx]] = Point(comp.pos.x, comp.pos.y)
                     comp.locked = not unlock_all
                     cursor_y += comp.height_mm + connector_gap
@@ -1189,7 +1214,7 @@ class PlacementSolver:
                     comp = group_comps[idx]
                     fixed_y = _connector_edge_y(comp, edge)
                     pos = Point(cursor_x, fixed_y)
-                    _orient_and_place(comp, edge, pos)
+                    _place_at(comp, edge, pos)
                     self._pinned_targets[refs[idx]] = Point(comp.pos.x, comp.pos.y)
                     comp.locked = not unlock_all
                     cursor_x += comp.width_mm + connector_gap

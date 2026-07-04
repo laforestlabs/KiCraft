@@ -1634,21 +1634,25 @@ def _ensure_vendored_courtyard_clearance(
     *,
     min_clearance_mm: float = 0.2,
 ) -> None:
-    """Footprint-hygiene check run when vendoring a part: grow the footprint's
-    courtyard so it clears every pad by ``min_clearance_mm``.
+    """Footprint-hygiene check run when vendoring a part: rebuild a malformed
+    (non-closing / self-intersecting) courtyard, then grow the courtyard so it
+    clears every pad by ``min_clearance_mm``.
 
-    A courtyard that sits at (or inside) its own pad copper makes the part read
-    as physically smaller than its copper, which downstream board-outline /
-    placement geometry treats as the part's extent. Keeping the courtyard a
-    clearance outboard of the pads keeps that geometry honest. Best-effort: only
-    re-saves (round-trips through pcbnew) when a grow is actually needed, and
-    skips silently if pcbnew is unavailable, so it never blocks a part fetch.
+    A courtyard that sits at (or inside) its own pad copper -- or one whose
+    drawn segments never form a closed area, so its bbox degenerates to a
+    stroke-width sliver -- makes the part read as physically smaller than it
+    is, which downstream board-outline / placement geometry treats as the
+    part's extent. Repairing both at vendor time keeps that geometry honest.
+    Best-effort: only re-saves (round-trips through pcbnew) when a change is
+    actually needed, and skips silently if pcbnew is unavailable, so it never
+    blocks a part fetch.
     """
     try:
         import pcbnew
 
         from kicraft.parts_library.footprint_courtyard import (
             ensure_courtyard_clears_pads,
+            repair_malformed_courtyard,
         )
     except ImportError:
         return
@@ -1656,13 +1660,22 @@ def _ensure_vendored_courtyard_clearance(
         fp = pcbnew.FootprintLoad(str(pretty_dir), footprint_name)
         if fp is None:
             return
-        if ensure_courtyard_clears_pads(fp, min_clearance_mm=min_clearance_mm):
+        repaired = repair_malformed_courtyard(fp)
+        grew = ensure_courtyard_clears_pads(fp, min_clearance_mm=min_clearance_mm)
+        if repaired or grew:
             pcbnew.PCB_IO_KICAD_SEXPR().FootprintSave(str(pretty_dir), fp)
-            print(
-                f"add-part: grew {footprint_name} courtyard to clear pads by "
-                f">= {min_clearance_mm} mm",
-                file=sys.stderr,
-            )
+            if repaired:
+                print(
+                    f"add-part: rebuilt {footprint_name} malformed courtyard "
+                    f"from its pads + body extent",
+                    file=sys.stderr,
+                )
+            if grew:
+                print(
+                    f"add-part: grew {footprint_name} courtyard to clear pads by "
+                    f">= {min_clearance_mm} mm",
+                    file=sys.stderr,
+                )
     except Exception as exc:  # noqa: BLE001 - hygiene check, never fatal
         print(
             f"add-part: courtyard clearance check skipped "
@@ -2234,6 +2247,34 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    # (5) The footprint's courtyard must form a usable keep-out: a malformed
+    # (non-closing / self-intersecting) courtyard degenerates to a sliver that
+    # downstream placement reads as the part's physical extent. pcbnew-gated:
+    # skipped (not failed) when KiCad bindings are unavailable.
+    try:
+        import pcbnew as _pcbnew
+
+        from kicraft.parts_library.footprint_courtyard import (
+            malformed_courtyard_layers,
+        )
+    except ImportError:
+        _pcbnew = None
+    if _pcbnew is not None:
+        loaded_fp = _pcbnew.FootprintLoad(str(fp.parent), manifest.footprint_name)
+        bad_layers = malformed_courtyard_layers(loaded_fp) if loaded_fp else []
+        if bad_layers:
+            names = ", ".join(
+                _pcbnew.BOARD.GetStandardLayerName(layer) for layer in bad_layers
+            )
+            print(
+                f"malformed courtyard on {names}: the drawn segments do not "
+                f"form a closed keep-out (placement would read the part as a "
+                f"sliver)\n  fix by re-vendoring (`add-part` now rebuilds it) "
+                f"or hand-editing the courtyard, then rerun with --update-hash",
+                file=sys.stderr,
+            )
+            return 2
 
     actual = compute_content_hash(part_dir)
     if actual != manifest.content_hash:

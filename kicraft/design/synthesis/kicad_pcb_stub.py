@@ -71,6 +71,13 @@ def _load_footprint(
         raise FootprintNotFoundError(
             f"footprint {library}:{name} not found in {lib_dir}"
         )
+    # Every footprint enters a board through this load. Rebuild any malformed
+    # (non-closing / self-intersecting) courtyard here so all downstream
+    # geometry -- which reads the courtyard as the part's physical extent --
+    # sees the real part size instead of a degenerate sliver.
+    from kicraft.parts_library.footprint_courtyard import repair_malformed_courtyard
+
+    repair_malformed_courtyard(fp)
     return fp
 
 
