@@ -437,6 +437,45 @@ def _auto_pin_best_leaves(project_dir: Path) -> None:
     print(f"Auto-pin summary: {pinned} pinned, {cleared} cleared, {skipped} skipped")
 
 
+def _pin_best_parent(project_dir: Path, best_dir: Path, best_round) -> None:
+    """Re-pin the BEST round's routed parent over the canonical parent artifact.
+
+    Every parent round overwrites the shared canonical
+    ``subcircuits/<parent>/parent_routed.kicad_pcb``, so at run end that file
+    holds the LAST round's board -- even a discarded, gate-rejected one.
+    Downstream promotion resolves the canonical path by recency
+    (``artifact_paths.resolve_parent_board``), so without this re-pin the
+    build ships whatever was written last instead of the round the search
+    selected. Parent-side twin of ``_auto_pin_best_leaves``.
+    """
+    if best_round is None or not best_round.parent_routed:
+        return
+    best_board = best_dir / "parent_routed.kicad_pcb"
+    if not best_board.is_file():
+        return
+    parent_dir = _discover_latest_parent_artifact_dir(project_dir)
+    if parent_dir is None:
+        return
+    canonical = parent_dir / "parent_routed.kicad_pcb"
+    try:
+        clobbered = (
+            canonical.is_file()
+            and canonical.read_bytes() != best_board.read_bytes()
+        )
+    except OSError:
+        clobbered = True
+    if clobbered:
+        print(
+            f"  [pin-parent] canonical {canonical} held a non-best round's "
+            f"board; restoring best round {best_round.round_num}"
+        )
+    _copy_if_exists(best_board, canonical)
+    for ext in (".kicad_pro", ".kicad_prl"):
+        _copy_if_exists(
+            best_dir / f"parent_routed{ext}", parent_dir / f"parent_routed{ext}"
+        )
+
+
 def _all_leaf_artifacts(project_dir: Path) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
     for artifact_dir in _discover_artifact_dirs(project_dir):
@@ -3086,6 +3125,10 @@ def main(argv: list[str] | None = None) -> int:
         print()
         print("=== Auto-pinning best round of each leaf ===")
         _auto_pin_best_leaves(project_dir)
+    else:
+        # Parent rounds ran: make the canonical parent artifact hold the
+        # SELECTED round's board, not the last-written one.
+        _pin_best_parent(project_dir, best_dir, best_round)
 
     print()
     print("=== Hierarchical Autoexperiment Complete ===")
