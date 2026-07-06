@@ -594,3 +594,113 @@ def test_mpn_only_array_variants_is_an_offender_that_says_why(
     bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
     assert len(bad) == 1 and "multi-element array" in bad[0]
     assert p.sourcing_note is None
+
+
+# ------------------------------------- §9.26 identity cross-check (KC-9EZE3S)
+# A pinned C# that is real and in stock can still be the WRONG PART: KC-9EZE3S
+# shipped "fab-ready" with RV1 (trimmer symbol, 3296W THT footprint) pinned to
+# C852472 — a 100k 0402 chip resistor (the value matched, the category didn't)
+# — and vertical Amphenol BNC footprints pinned to an elbow BNC. The gate must
+# compare what the catalog says the part IS against what the BOM claims.
+
+_RV1_CHIP_RESISTOR = _kw_row(
+    "C852472", "RT0402BRD07100KL", "Extended", 470_011,
+    "-55℃~+155℃ 100kΩ 50V 62.5mW Thin Film Resistor ±0.1% 0402 "
+    "Chip Resistor - Surface Mount ROHS", package="0402")
+
+_ELBOW_BNC = _kw_row(
+    "C2837587", "KH-BNC50-3511", "Extended", 8_954,
+    "-55℃~+155℃ 1 3GHz 50Ω 9.5mm BNC Board Side Elbow Inner Bore 插件 "
+    "Coaxial Connectors (RF) ROHS", package="插件")
+
+_REAL_3296W_TRIMMER = _kw_row(
+    "C5501675", "3296W-1-104", "Extended", 60_000,
+    "100kΩ ±10% 3296W Trimmer Potentiometer Through Hole ROHS",
+    package="插件", joints=3)
+
+
+def test_chip_resistor_pinned_to_trimmer_footprint_is_an_offender(
+        tmp_path, monkeypatch):
+    # The KC-9EZE3S RV1: identity conflict must bounce even though the part
+    # is real, floor-clearing, and retail-stocked.
+    _install(monkeypatch, _FakeCatalog(by_lcsc={"C852472": _RV1_CHIP_RESISTOR}))
+    p = _part(ref="RV1", mpn="", note="LCSC C852472",
+              symbol="Device:R_Potentiometer_Trim",
+              footprint="Potentiometer_THT:Potentiometer_Bourns_3296W_Vertical")
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    assert len(bad) == 1
+    assert "C852472" in bad[0]
+    assert "fixed resistor" in bad[0] or "chip package" in bad[0]
+
+
+def test_elbow_bnc_pinned_to_vertical_footprint_is_an_offender(
+        tmp_path, monkeypatch):
+    # The KC-9EZE3S J1/J2: a right-angle part cannot mount on the vertical
+    # Amphenol footprint the BOM chose.
+    _install(monkeypatch, _FakeCatalog(by_lcsc={"C2837587": _ELBOW_BNC}))
+    p = _part(ref="J1", mpn="", note="LCSC C2837587",
+              symbol="Connector:Conn_Coaxial",
+              footprint="Connector_Coaxial:BNC_Amphenol_031-5539_Vertical")
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    assert len(bad) == 1
+    assert "C2837587" in bad[0] and "elbow" in bad[0].lower()
+
+
+def test_matching_trimmer_pin_passes_identity(tmp_path, monkeypatch):
+    # The pick the model was actually offered (Bourns 3296W-1-104): same
+    # footprint, matching part — no offender.
+    _install(monkeypatch,
+             _FakeCatalog(by_lcsc={"C5501675": _REAL_3296W_TRIMMER}))
+    p = _part(ref="RV1", mpn="", note="LCSC C5501675",
+              symbol="Device:R_Potentiometer_Trim",
+              footprint="Potentiometer_THT:Potentiometer_Bourns_3296W_Vertical")
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
+
+
+def test_tht_pinheader_with_tht_package_passes_identity(tmp_path, monkeypatch):
+    # "Vertical" in a footprint name must only conflict with an explicit
+    # elbow/right-angle catalog description — a plain THT part is fine.
+    row = _kw_row("C124375", "PZ254V-11-40P", "Extended", 500_000,
+                  "2.54mm 1x40P male pin header Through Hole ROHS",
+                  package="插件", joints=40)
+    _install(monkeypatch, _FakeCatalog(by_lcsc={"C124375": row}))
+    p = _part(ref="J3", mpn="", note="LCSC C124375",
+              symbol="Connector_Generic:Conn_01x40",
+              footprint=("Connector_PinHeader_2.54mm:"
+                         "PinHeader_1x40_P2.54mm_Vertical"))
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
+
+
+def test_bundle_footprint_is_exempt_from_identity_heuristics(
+        tmp_path, monkeypatch):
+    # A curated bundle's footprint is drawn for its own part; bundle naming
+    # (e.g. 'ANT-TH_KH-BNC50-3511') doesn't follow stock conventions, so the
+    # heuristics must not read it. Same elbow part, bundle footprint: passes.
+    class _Man:
+        name = "bnc-pcb-jack"
+        sourcing = {"lcsc": "C2837587"}
+
+    class _Loaded:
+        manifest = _Man()
+
+    _install(monkeypatch, _FakeCatalog(by_lcsc={"C2837587": _ELBOW_BNC}))
+    monkeypatch.setattr(cli_app, "_load_library_parts",
+                        lambda root: ([_Loaded()], []))
+    p = _part(ref="J1", mpn="", note="LCSC C2837587",
+              symbol="bnc-pcb-jack:KH-BNC50-3511",
+              footprint="bnc-pcb-jack:ANT-TH_KH-BNC50-3511")
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
+
+
+def test_identity_conflict_outranks_stock_verdicts(tmp_path, monkeypatch):
+    # A wrong part must bounce AS a wrong part, not as a stock problem —
+    # here the wrong part is also below the JLC floor, and the identity
+    # message must win (the stock message would send the model hunting for
+    # a better-stocked wrong part).
+    row = dict(_RV1_CHIP_RESISTOR, stock=3)
+    _install(monkeypatch, _FakeCatalog(by_lcsc={"C852472": row}))
+    p = _part(ref="RV1", mpn="", note="LCSC C852472",
+              symbol="Device:R_Potentiometer_Trim",
+              footprint="Potentiometer_THT:Potentiometer_Bourns_3296W_Vertical")
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
+    assert len(bad) == 1 and "drawn for" in bad[0]

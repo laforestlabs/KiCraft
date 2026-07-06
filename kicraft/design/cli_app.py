@@ -421,6 +421,50 @@ def _check_passive_array_mismatch(bom, project_root: Path) -> list[str]:
     return bad
 
 
+# --- §9.26 identity cross-check (KC-9EZE3S) --------------------------------
+# A pinned C# that IS real and IS in stock can still be the wrong part
+# entirely: KC-9EZE3S shipped a "fab-ready" board whose RV1 (trimmer symbol
+# on a 3296W THT footprint) was pinned to C852472 — a 100k 0402 chip
+# resistor — and whose vertical Amphenol BNC footprints were pinned to an
+# elbow BNC. Existence/stock/retail all passed because nothing compared what
+# the catalog says the part IS against what the BOM says it is. The checks
+# are deliberately few and one-sided: only a CONFIDENT contradiction bounces.
+_SMD_CHIP_PKG_RE = re.compile(
+    r"^(01005|0201|0402|0603|0805|1206|1210|1806|1812|2010|2512)$")
+_POT_PART_RE = re.compile(r"potentiometer|trimmer|trimpot", re.IGNORECASE)
+_POT_DESC_RE = re.compile(
+    r"potentiometer|trimmer|trimpot|variable|adjustable|rheostat",
+    re.IGNORECASE)
+_RIGHT_ANGLE_DESC_RE = re.compile(r"elbow|right[ -]?angle", re.IGNORECASE)
+
+
+def _lcsc_identity_conflict(part, hit: dict) -> str | None:
+    """A confident contradiction between what the BOM claims a part is (its
+    symbol/footprint) and what the offline catalog says the pinned C# is;
+    ``None`` when nothing contradicts.
+
+    Only meaningful for STOCK-footprint parts: a curated bundle's footprint
+    is drawn for the manifest's own part, and bundle naming doesn't follow
+    the stock conventions these heuristics read — the caller exempts them.
+    """
+    ident = f"{part.symbol or ''} {part.footprint or ''}"
+    desc = hit.get("description") or ""
+    pkg = (hit.get("package") or "").strip()
+    fp_lib = _lib_prefix(part.footprint or "") or ""
+    fp_name = (part.footprint or "").split(":", 1)[-1]
+    if (_POT_PART_RE.search(ident) and "resistor" in desc.lower()
+            and not _POT_DESC_RE.search(desc)):
+        return ("the catalog part is a fixed resistor, not a "
+                "potentiometer/trimmer")
+    if "_THT" in fp_lib and _SMD_CHIP_PKG_RE.match(pkg):
+        return (f"the catalog part is an SMD {pkg} chip package but the "
+                f"footprint is through-hole")
+    if "vertical" in fp_name.lower() and _RIGHT_ANGLE_DESC_RE.search(desc):
+        return ("the catalog part is a right-angle/elbow variant but the "
+                "footprint is the vertical/straight one")
+    return None
+
+
 def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[str]]:
     """§9.26 — every BOM part must be a real, orderable part, in stock BOTH
     for JLCPCB assembly (the offline jlcparts dump) AND at the lcsc.com
@@ -433,7 +477,10 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
     sailed through to the fab BOM. Four tiers, by how a part carries sourcing:
 
       - explicit C# in ``sourcing_note``  -> must exist in the offline
-        catalog, clear the JLC stock floor, and be orderable at retail;
+        catalog, BE the part the symbol/footprint describe (the KC-9EZE3S
+        identity cross-check, stock footprints only —
+        :func:`_lcsc_identity_conflict`), clear the JLC stock floor, and be
+        orderable at retail;
       - library-bundle part (manifest carries the LCSC) -> existence is gated
         by ``_unresolved_lcsc``; here the manifest C# must clear the JLC
         floor and be orderable at retail (bundles were previously exempt
@@ -521,11 +568,27 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
         if cid:
             label = mpn or (part.value or "").strip() or part.symbol
             hit = jlcparts.lookup(cid)
+            # Bundle footprints are drawn for their manifest's own part;
+            # the identity heuristics read stock naming conventions only.
+            fp_is_bundle = (_lib_prefix(part.footprint or "")
+                            in manifest_by_name)
+            conflict = (None if (hit is None or fp_is_bundle)
+                        else _lcsc_identity_conflict(part, hit))
             if hit is None:
                 bad.append(
                     f"{part.ref} ({label}): sourcing_note claims LCSC "
                     f"{cid} which is not in the offline catalog; "
                     f"find the real C# with lookup_lcsc_id"
+                )
+            elif conflict:
+                bad.append(
+                    f"{part.ref} ({label}): sourcing_note pins LCSC {cid}, "
+                    f"but the catalog lists it as "
+                    f"{(hit.get('description') or '')[:80]!r} (package "
+                    f"{(hit.get('package') or '?')!r}) — {conflict}. The C# "
+                    f"must be the exact part the symbol/footprint were drawn "
+                    f"for: find it with lookup_lcsc_id, or add_part_from_lcsc "
+                    f"{cid} and use that bundle's own symbol/footprint ids"
                 )
             elif (hit.get("stock") or 0) < floor:
                 bad.append(
