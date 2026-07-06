@@ -921,12 +921,16 @@ def route_local_subcircuit(
             )
         except Exception as exc:  # finishing step must never fail the leaf
             print(f"  WARNING: GND plane step failed: {exc}")
+        route_timing["gnd_pour_s"] = round(
+            max(0.0, time.monotonic() - gnd_pour_start), 3
+        )
 
     # Power-plane finishing (default on): pour the primary power rail on the
     # layer opposite GND so paired connector power pads / regulator input / bulk
     # caps connect through copper. Runs before acceptance so the now-connected
     # power pads are reflected in the unconnected count.
     if cfg.get("power_plane_enabled", True):
+        power_pour_start = time.monotonic()
         try:
             from kicraft.autoplacer.brain.gnd_pour import (
                 pour_power_planes,
@@ -955,8 +959,8 @@ def route_local_subcircuit(
                     )
         except Exception as exc:  # finishing step must never fail the leaf
             print(f"  WARNING: power plane step failed: {exc}")
-        route_timing["gnd_pour_s"] = round(
-            max(0.0, time.monotonic() - gnd_pour_start), 3
+        route_timing["power_pour_s"] = round(
+            max(0.0, time.monotonic() - power_pour_start), 3
         )
 
     routed_validation_start = time.monotonic()

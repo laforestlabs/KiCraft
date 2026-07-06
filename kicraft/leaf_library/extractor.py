@@ -1,9 +1,9 @@
 """Build a library-leaf directory from a source project's pinned round.
 
-The extractor is invoked by the GUI Promote wizard once the user has
-chosen a (source project, sheet name, round) tuple and filled in the
-manifest metadata. It writes a new directory under the library root,
-atomically.
+``extract_leaf`` is the promotion entry point (the desktop-GUI Promote
+wizard that wrapped it was removed 2026-06-22): the caller chooses a
+(source project, sheet name, round) tuple and fills in the manifest
+metadata. It writes a new directory under the library root, atomically.
 
 Inputs the caller must provide because they're not derivable from the
 on-disk leaf directly:
@@ -161,12 +161,11 @@ def _render_views(pcb_path: Path, renders_dir: Path) -> None:
     contexts without KiCad available (e.g. unit tests that don't render).
     """
     from kicraft.render.pcb_renderer import render_views
-    from kicraft.render.views import VIEW_DEFINITIONS  # noqa: F401
 
     renders_dir.mkdir(parents=True, exist_ok=True)
     render_views(
-        pcb_path=pcb_path,
-        out_dir=renders_dir,
+        pcb_path,
+        renders_dir,
         views=["front_all", "back_copper", "copper_both"],
         name_template="{view}.png",
     )

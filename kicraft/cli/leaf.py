@@ -1,7 +1,8 @@
 """``kicraft-leaf`` command-line tool — read-only views over the leaf library.
 
-Promotion and removal are GUI-driven (the wizard in ``kicraft/gui/pages/
-leaf_library.py``); the CLI exists for scripting and inspection only.
+Promotion goes through ``kicraft.leaf_library.extractor.extract_leaf`` (the
+desktop GUI that wrapped it was removed 2026-06-22); the CLI exists for
+scripting and inspection only.
 """
 
 from __future__ import annotations

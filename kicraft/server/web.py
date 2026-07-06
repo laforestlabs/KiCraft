@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shutil
+import zipfile
 import ssl
 import subprocess
 import threading
@@ -264,8 +265,11 @@ def _orphan_reaper() -> None:
                     _finalize_orphan(job)
                 elif (job.status == "queued" and not worker_up
                         and _iso_age_s(job.created_at) > 120):
-                    store.finish_build(job.id, rc=None, status="failed")
-                    _finalize_orphan(store.get_build_job(job.id))
+                    # expect='queued': if a worker claimed it in the meantime,
+                    # this no-ops instead of failing a now-running build.
+                    if store.finish_build(job.id, rc=None, status="failed",
+                                          expect="queued"):
+                        _finalize_orphan(store.get_build_job(job.id))
             # Runs lost before they ever enqueued a build (LLM-stage death) have
             # no build_jobs row above to trigger finalization -- close them here.
             _reconcile_orphan_projects()
@@ -403,11 +407,20 @@ async def stripe_webhook(request: Request):
 
 
 def _zip_generated(ws: Path) -> str | None:
+    """Zip the user-facing KiCad project. Skips the internal .experiments/ tree
+    (per-round search state, renders): it dwarfs the actual project files and
+    is useless to the person opening the download in KiCad."""
     gen = ws / "generated"
     if not gen.is_dir():
         return None
-    base = str(ws / "kicraft_project")
-    return shutil.make_archive(base, "zip", root_dir=str(gen))
+    out = ws / "kicraft_project.zip"
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+        for p in sorted(gen.rglob("*")):
+            rel = p.relative_to(gen)
+            if ".experiments" in rel.parts or p.is_dir():
+                continue
+            zf.write(p, str(rel))
+    return str(out)
 
 
 def _erc_offenders(ws: Path) -> list[str]:
@@ -1404,9 +1417,14 @@ def _persist_project(state: dict) -> None:
         base.mkdir(parents=True, exist_ok=True)
         dir_path = str(base)
         (base / "brief.txt").write_text(state.get("brief", "") or "", encoding="utf-8")
-        with (base / "events.jsonl").open("w", encoding="utf-8") as f:
-            for ev in state.get("events", []):
-                f.write(json.dumps(ev, ensure_ascii=False, default=str) + "\n")
+        # Never truncate an existing transcript with an empty snapshot: a
+        # restart-recovery finalize (_finalize_orphan) has no in-memory events,
+        # and the file on disk is the project's only persisted design timeline.
+        events = state.get("events", [])
+        if events or not (base / "events.jsonl").exists():
+            with (base / "events.jsonl").open("w", encoding="utf-8") as f:
+                for ev in events:
+                    f.write(json.dumps(ev, ensure_ascii=False, default=str) + "\n")
         # Build-in-place: this project's .kicraft/, generated/ and kicraft_project.zip
         # are already under `base` (the build dir IS the durable dir) -- nothing to
         # copy. Point the row at the zip if the build produced one.
@@ -1421,8 +1439,11 @@ def _persist_project(state: dict) -> None:
         try:
             store.finish_project(pid, status, stem=stem, cost_usd=state.get("spend"),
                                  dir_path=dir_path, zip_path=zip_path)
-        except Exception:
-            pass
+        except Exception as e:
+            # This write flips the durable row to its terminal status; losing it
+            # silently leaves a phantom 'running' project with no diagnostics.
+            print(f"[persist] finish_project({pid}, {status}) failed: {e}",
+                  flush=True)
         # Catalog: stamp the quality badge and (re)index for the community browser.
         # reindex_search indexes only public, completed projects and removes anything
         # else, so a failed/awaiting/private run is correctly kept out. Best-effort:
@@ -1530,6 +1551,22 @@ def _render_slot_form(model, slot: dict):
 # Single-process registry: ui.run() serves from one process (reload=False), and
 # dict get/set/pop are atomic under the GIL, so no lock is needed.
 _LIVE_RUNS: dict[int, dict] = {}
+
+
+def _project_run_live(state: dict) -> bool:
+    """True when a run for this page's project is already live anywhere in this
+    process. The rebuild/resume guards must check _LIVE_RUNS as well as the
+    page-local dict: two tabs opened on the same FINISHED project each hold an
+    independent state dict (open_project's non-live branch), so guarding only
+    state['running'] lets both start a build in the same build-in-place
+    project dir -- two cli_app processes racing on one state.json."""
+    if state.get("running"):
+        return True
+    pid = state.get("project_id")
+    if not pid:
+        return False
+    live = _LIVE_RUNS.get(pid)
+    return live is not None and live is not state and bool(live.get("running"))
 
 
 def _fresh_run_state() -> dict:
@@ -1673,13 +1710,21 @@ def _drive_build_queue(ws: Path, state: dict, progress, *,
     progress({"kind": "build_start"})
     store = _store()
     log_path = ws / ".kicraft" / "build.log"
+    # The worker APPENDS to build.log, so start tailing at the current end
+    # (measured BEFORE enqueue, so no new line can be missed): from byte 0 a
+    # rebuild would replay the entire previous build's log into this run's
+    # event stream before the new build writes anything.
+    try:
+        offset = log_path.stat().st_size
+    except OSError:
+        offset = 0
     job_id = store.enqueue_build(
         workspace=str(ws), project_id=state.get("project_id"),
         user_id=state.get("user_id"), log_path=str(log_path), kind=kind)
     _ACTIVE_JOBS.add(job_id)
     try:
         last_pos = None
-        offset, tail_buf = 0, ""
+        tail_buf = ""
         while True:
             job = store.get_build_job(job_id)
             if job is None:
@@ -2573,8 +2618,24 @@ def profile_page():
                     .classes("text-xs").style("color:#60a5fa")
                 ui.link("Privacy Policy", "/privacy", new_tab=True) \
                     .classes("text-xs").style("color:#60a5fa")
-            ui.label("To export or delete all your data, contact "
-                     "[CONTACT EMAIL].").classes("text-xs").style("color:#64748b")
+            def _file_data_request(action: str):
+                rid = _store().create_support_report(
+                    user_id=user.id, kind="data_request",
+                    message=f"User requests {action} of all their data "
+                            f"(account {user.email}).")
+                ui.notify(f"Request filed (ref #{rid}). We'll follow up at "
+                          f"{user.email}.", color="positive")
+
+            ui.label("To export or delete all your data, file a request "
+                     "below; we follow up at your account email.") \
+                .classes("text-xs").style("color:#64748b")
+            with ui.row().classes("gap-2"):
+                ui.button("Request data export",
+                          on_click=lambda: _file_data_request("an export")) \
+                    .props("outline no-caps size=sm color=white")
+                ui.button("Request account deletion",
+                          on_click=lambda: _file_data_request("deletion")) \
+                    .props("outline no-caps size=sm color=negative")
 
         with ui.card().classes("w-full gap-2") \
                 .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
@@ -2689,7 +2750,15 @@ def projects_page():
                           "start a new one) before deleting.", color="warning")
                 del_dialog.close()
                 return
-            _store().delete_project(pid)
+            try:
+                _store().delete_project(pid)
+            except ValueError:
+                # A build that survived a web restart is not in _LIVE_RUNS but
+                # still owns the project dir (build-in-place).
+                ui.notify("A build is still running for this design -- try "
+                          "again once it finishes.", color="warning")
+                del_dialog.close()
+                return
             # Notify + refresh BEFORE closing the dialog: closing first drops the
             # slot ui.notify resolves through, so the toast is lost (and the list
             # never repaints). The clicked button lives in the dialog, not in
@@ -4582,7 +4651,7 @@ def index(prompt: str = "", project: str = ""):
                             .props("unelevated no-caps color=primary")
 
         def _answer_and_resume(stage, answers):
-            if state["running"]:
+            if _project_run_live(state):
                 return
             _ensure_workspace(state)  # rehydrate the durable project before the write
             ws = state["ws"]
@@ -4685,7 +4754,7 @@ def index(prompt: str = "", project: str = ""):
             dlg.open()
 
         def _do_rerun(stage, slot_dict, instruction, runs):
-            if state["running"]:
+            if _project_run_live(state):
                 ui.notify("A run is already in progress.", color="warning")
                 return
             _ensure_workspace(state)  # rehydrate the durable project before the edit/rerun
@@ -4725,7 +4794,7 @@ def index(prompt: str = "", project: str = ""):
 
         def _continue():
             """Run the stages still missing from the current (reopened) design."""
-            if state["running"]:
+            if _project_run_live(state):
                 return
             _ensure_workspace(state)  # rehydrate the durable project before continuing
             sj = read_state(state["ws"]) if state["ws"] else {}
@@ -5040,7 +5109,7 @@ def index(prompt: str = "", project: str = ""):
             """Enqueue a manual_route job for this project's workspace and
             return the tab to the live build view; logs + queue position
             stream through the same plumbing as a normal build."""
-            if state["running"]:
+            if _project_run_live(state):
                 ui.notify("A run is already in progress.", color="warning")
                 return
             u = _current_user()
@@ -5104,7 +5173,7 @@ def index(prompt: str = "", project: str = ""):
             """LLM-free rebuild (synthesize -> place -> route -> fab): after a
             committed placement-rules edit, or directly from the Rebuild
             button (e.g. to retry a failed board on a newer pipeline)."""
-            if state["running"]:
+            if _project_run_live(state):
                 ui.notify("A run is already in progress.", color="warning")
                 return
             _ensure_workspace(state)  # rehydrate the durable project before the build enqueue
@@ -5178,10 +5247,13 @@ def index(prompt: str = "", project: str = ""):
 
         def _live_sig():
             # Includes the running flag so a run parking on a question (it stays
-            # registered) still refreshes the list's status label.
+            # registered) still refreshes the list's status label. list() first:
+            # design/build threads insert and pop entries concurrently, and
+            # iterating the live dict here raises 'dictionary changed size'.
             return tuple(sorted(
                 (pid, bool(st.get("running")))
-                for pid, st in _LIVE_RUNS.items() if st.get("user_id") == user.id))
+                for pid, st in list(_LIVE_RUNS.items())
+                if st.get("user_id") == user.id))
 
         def render():
             # This timer only ticks while the page's websocket is connected, so it

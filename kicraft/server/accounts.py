@@ -1161,6 +1161,15 @@ class AccountStore:
                 if self._fts_enabled:
                     conn.execute("DELETE FROM projects_fts WHERE project_id=?", (pid,))
             conn.execute("DELETE FROM support_reports WHERE user_id=?", (user_id,))
+            # build_jobs rows are never otherwise deleted, and reset/verification
+            # token rows carry the user's id -- the promised deletion must not
+            # leave either queryable.
+            for pid in pids:
+                conn.execute("DELETE FROM build_jobs WHERE project_id=?", (pid,))
+            conn.execute("DELETE FROM build_jobs WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM password_resets WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM email_verifications WHERE user_id=?",
+                         (user_id,))
             conn.execute("DELETE FROM projects WHERE user_id=?", (user_id,))
             conn.execute("DELETE FROM users WHERE id=?", (user_id,))
         tree = self.projects_dir / str(user_id)
@@ -1448,7 +1457,14 @@ class AccountStore:
         Mirrors the per-project cleanup delete_user does, scoped to a single
         project so a user can remove one design without dropping the account.
         Ownership is enforced by the caller. Returns the filesystem path purged
-        (for logging), or None if the project or its tree did not exist."""
+        (for logging), or None if the project or its tree did not exist.
+
+        Refuses (ValueError) while a build_jobs row is 'running': under
+        build-in-place the project tree IS the running build's cwd, so deleting
+        would rmtree under a live worker subprocess and orphan an untrackable
+        build (the in-process _LIVE_RUNS guard misses builds that survived a
+        web restart). A dead claimant's row is requeued/failed by the janitor
+        within ~30s, so the caller can simply retry."""
         stale_ws: list[str] = []
         with self._conn() as conn:
             row = conn.execute(
@@ -1456,26 +1472,33 @@ class AccountStore:
             if row is None:
                 return None
             uid = row["user_id"]
+            running = conn.execute(
+                "SELECT COUNT(*) FROM build_jobs WHERE project_id=? "
+                "AND status='running'", (project_id,)).fetchone()[0]
+            if running:
+                raise ValueError(
+                    f"project {project_id} has a running build; "
+                    "wait for it to finish before deleting")
             conn.execute("DELETE FROM project_likes WHERE project_id=?", (project_id,))
             if self._fts_enabled:
                 conn.execute("DELETE FROM projects_fts WHERE project_id=?", (project_id,))
             conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
             # build_jobs rows are never otherwise deleted, so the rows (and the
             # scratch workspaces they point at) would leak forever. The project is
-            # going away, so drop all of its rows; reap the workspaces of the
-            # TERMINAL ones only -- a still-running worker (a separate process) owns
-            # its workspace, so leave that to the 2-day workspace GC rather than
-            # yanking it mid-build.
+            # going away, so drop all of its rows and reap their workspaces (all
+            # terminal or queued-unclaimed after the running guard above).
             jobs = conn.execute(
                 "SELECT workspace, status FROM build_jobs WHERE project_id=?",
                 (project_id,)).fetchall()
             stale_ws = [j["workspace"] for j in jobs
                         if j["workspace"] and j["status"] in ("done", "failed")]
             conn.execute("DELETE FROM build_jobs WHERE project_id=?", (project_id,))
-        for ws in stale_ws:
-            if os.path.isdir(ws):
-                shutil.rmtree(ws, ignore_errors=True)
         tree = self.projects_dir / str(uid) / str(project_id)
+        for ws in stale_ws:
+            # Build-in-place jobs' workspace IS the tree; leave those to the
+            # tree rmtree below so the purged path is reported correctly.
+            if os.path.abspath(ws) != os.path.abspath(tree) and os.path.isdir(ws):
+                shutil.rmtree(ws, ignore_errors=True)
         if tree.exists():
             shutil.rmtree(tree, ignore_errors=True)
             return str(tree)
@@ -1816,7 +1839,20 @@ class AccountStore:
     def enqueue_build(self, *, workspace: str, project_id: int | None = None,
                       user_id: int | None = None, log_path: str | None = None,
                       kind: str = "build") -> int:
+        """Queue one job. Idempotent per (workspace, kind): when a job of this
+        kind is already queued/running for the workspace, return that job's id
+        instead of inserting -- two Rebuild clicks from two tabs must never
+        become two concurrent cli_app processes racing on the same
+        build-in-place project dir (state.json, generated/); the second caller
+        simply tails the job already in flight."""
         with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")  # serialize the check-then-insert
+            row = conn.execute(
+                "SELECT id FROM build_jobs WHERE workspace=? AND kind=? "
+                "AND status IN ('queued', 'running') ORDER BY id LIMIT 1",
+                (workspace, kind)).fetchone()
+            if row is not None:
+                return int(row["id"])
             cur = conn.execute(
                 "INSERT INTO build_jobs (project_id, user_id, workspace, status, "
                 "created_at, log_path, kind) VALUES (?, ?, ?, 'queued', ?, ?, ?)",
@@ -1853,14 +1889,24 @@ class AccountStore:
             # Lost the race for that row; the next loop sees the new queue head.
 
     def finish_build(self, job_id: int, *, rc: int | None,
-                     status: str = "done") -> None:
+                     status: str = "done", expect: str = "running") -> bool:
         """`done` = the build process ran to an exit code (rc, any value);
         `failed` = it could not run at all (missing workspace, attempts
-        exhausted, aborted by a worker shutdown)."""
+        exhausted, aborted by a worker shutdown).
+
+        Guarded like claim_build/requeue_build: only a row still in `expect`
+        (default 'running') is finalized, so a concurrent requeue (worker
+        shutdown) or a finished row can never be clobbered by a stale writer
+        -- e.g. the web janitor failing a job the worker just finished, or the
+        worker stamping 'done' over a row a SIGTERM handler requeued. The
+        orphan reaper passes expect='queued' to fail jobs nothing will run.
+        Returns True when this call finalized the row."""
         with self._conn() as conn:
-            conn.execute(
-                "UPDATE build_jobs SET status=?, rc=?, finished_at=? WHERE id=?",
-                (status, rc, _utcnow_iso(), job_id))
+            cur = conn.execute(
+                "UPDATE build_jobs SET status=?, rc=?, finished_at=? "
+                "WHERE id=? AND status=?",
+                (status, rc, _utcnow_iso(), job_id, expect))
+            return cur.rowcount == 1
 
     def requeue_build(self, job_id: int) -> None:
         """Put a claimed-but-aborted job back at its queue position (id order)."""
@@ -1977,6 +2023,10 @@ class AccountStore:
         if modulo <= 0:
             return 0
         with self._conn() as conn:
+            # BEGIN IMMEDIATE takes the write lock BEFORE the read: under the
+            # default deferred mode the SELECT runs in autocommit, so two
+            # concurrent callers could both read N and both write N+1.
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT value FROM app_settings WHERE key=?",
                                (key,)).fetchone()
             try:

@@ -32,6 +32,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
 from kicraft.build_slots import ACQUIRED_MARKER, slot_count
@@ -114,7 +115,11 @@ class BuildWorker:
         with self._lock:
             live = dict(self._procs)
         for job_id, proc in live.items():
-            _kill_build(proc)
+            # Requeue/fail BEFORE killing: the kill wakes the _run_job reader,
+            # whose finish_build('done', rc=-9) would otherwise race this
+            # thread and stamp the row terminal, silently losing the retry.
+            # Once the row has left 'running', that finalize no-ops (guarded
+            # UPDATE), so the order closes the race.
             job = self.store.get_build_job(job_id)
             if job is not None and job.attempts >= _MAX_ATTEMPTS:
                 self.store.finish_build(job_id, rc=None, status="failed")
@@ -122,12 +127,35 @@ class BuildWorker:
             else:
                 self.store.requeue_build(job_id)
                 _log(f"job {job_id}: aborted by shutdown -> requeued")
+            _kill_build(proc)
         for t in self._threads:
             t.join(timeout=10)
         _log("stopped")
 
     # ---- one job --------------------------------------------------------------
     def _run_job(self, job: BuildJob) -> None:
+        """Crash barrier around one job: any unexpected exception (a non-UTF-8
+        byte in the build output, a sqlite error, ...) must finalize the row.
+        Without this the thread dies, the row wedges in 'running' with a live
+        claimant pid, and requeue_stale_builds skips it forever."""
+        try:
+            self._execute_job(job)
+        except Exception:  # noqa: BLE001 -- see docstring
+            _log(f"job {job.id}: crashed:\n{traceback.format_exc()}")
+            with self._lock:
+                proc = self._procs.pop(job.id, None)
+            if proc is not None:
+                _kill_build(proc)
+            cur = self.store.get_build_job(job.id)
+            if cur is not None and cur.status == "running":
+                if cur.attempts >= _MAX_ATTEMPTS:
+                    self.store.finish_build(job.id, rc=None, status="failed")
+                    _log(f"job {job.id}: crashed on final attempt -> failed")
+                else:
+                    self.store.requeue_build(job.id)
+                    _log(f"job {job.id}: crashed -> requeued")
+
+    def _execute_job(self, job: BuildJob) -> None:
         ws = Path(job.workspace)
         log_path = Path(job.log_path or (ws / ".kicraft" / "build.log"))
         if not (ws / ".kicraft" / "state.json").is_file():
@@ -152,10 +180,13 @@ class BuildWorker:
                 _log(f"job {job.id}: tier quality override --quality {quality}")
         try:
             with log_path.open("a", encoding="utf-8") as logf:
+                # errors="replace": build tools (freerouting JVM, kicad-cli) can
+                # emit non-UTF-8 bytes; a strict decode would kill the reader
+                # loop mid-build.
                 proc = subprocess.Popen(
                     cmd, cwd=str(ws), stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT, text=True, bufsize=1, env=env,
-                    start_new_session=True)
+                    stderr=subprocess.STDOUT, text=True, errors="replace",
+                    bufsize=1, env=env, start_new_session=True)
                 with self._lock:
                     self._procs[job.id] = proc
                 # The watchdog enforces the wall clock even when the build goes
@@ -192,11 +223,9 @@ class BuildWorker:
         finally:
             with self._lock:
                 self._procs.pop(job.id, None)
-        # A shutdown abort already requeued/failed the row; the guarded UPDATE in
-        # finish_build would clobber 'queued' back to 'done', so re-check first.
-        cur = self.store.get_build_job(job.id)
-        if cur is not None and cur.status == "running":
-            self.store.finish_build(job.id, rc=rc, status="done")
+        # A shutdown abort already requeued/failed the row; finish_build's
+        # status guard makes this a no-op in that case (no TOCTOU window).
+        if self.store.finish_build(job.id, rc=rc, status="done"):
             _log(f"job {job.id}: done rc={rc}")
 
 
