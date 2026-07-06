@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 
 from kicraft.design import models
+from kicraft.fsutil import atomic_write_text
 from kicraft.parts_library import jlcparts
 
 from .client import make_client
@@ -577,9 +578,7 @@ def _stamp_stage_status(state_path, stage: str, ok: bool, *,
     block[stage] = entry
     sj["stage_status"] = block
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(sj, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, p)
+    atomic_write_text(p, json.dumps(sj, indent=2) + "\n")
 
 
 # Per-stage self-correction budget. Wiring must satisfy whole-board net coverage
@@ -663,7 +662,7 @@ def _attach_questions(state_path, stage: str, questions: list[dict]) -> None:
     kept = [q for q in (sj.get("open_questions") or []) if q.get("stage") != stage]
     sj["open_questions"] = kept + list(questions)
     Path(state_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(state_path).write_text(json.dumps(sj, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(state_path, json.dumps(sj, indent=2) + "\n")
 
 
 def _client_model(client) -> str | None:

@@ -76,6 +76,12 @@
     so the shared wrapper stays under test.
   - **C13**: only `_build_merged_nets` got the seen-set; `_append_pad_ref` operates on
     interface-port lists (tiny N), left as-is.
+- **2026-07-06** — fourth batch (2 items): B8, B40. `kicraft/fsutil.py` provides the one
+  `atomic_write_text` (same-dir pid-suffixed tmp + os.replace); ALL state.json writers now
+  use it (cli_app ×5, session ×2, stage_driver ×2 incl. the previously hand-rolled one).
+  Read side: `session._read_state_for_update` refuses (None) on an existing-but-unparsable
+  state.json — `record_answers` skips its stamp, `null_downstream` raises loud — so a torn
+  read can never be written back as `{}` over the committed design.
 
 ## 1. Bug fixes
 
@@ -252,7 +258,7 @@
     model is bounced forever — it cannot 'fix' wiring that is already correct. The router's own
     _is_ground special-cases VSS/VEE as ground; this predicate never did.
 
-- [ ] **B8** `kicraft/design/cli_app.py:3170` — Every state.json persist (stage commit, artifact persist, review persist) is a non-atomic truncate-then-write with no tmp+rename, so a crash mid-write permanently corrupts the file three processes depend on, and concurrent cross-process readers can see torn JSON.
+- [x] **B8** `kicraft/design/cli_app.py:3170` — Every state.json persist (stage commit, artifact persist, review persist) is a non-atomic truncate-then-write with no tmp+rename, so a crash mid-write permanently corrupts the file three processes depend on, and concurrent cross-process readers can see torn JSON.
   - **Severity:** high · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     state.json is the sole IPC channel between the web app, the build worker, and this CLI (per
@@ -715,7 +721,7 @@
     schematic embeds a symbol from a different bundle than the one the BOM validated, a WS2812-class
     invisible pinout divergence that no gate ties back together.
 
-- [ ] **B40** `kicraft/server/session.py:173` — record_answers/null_downstream (and stage_driver._attach_questions, cli_app's five state writes) rewrite state.json with plain non-atomic write_text, and the read half maps ANY failed/torn read to {} — so one torn read silently truncates the committed design state to near-empty.
+- [x] **B40** `kicraft/server/session.py:173` — record_answers/null_downstream (and stage_driver._attach_questions, cli_app's five state writes) rewrite state.json with plain non-atomic write_text, and the read half maps ANY failed/torn read to {} — so one torn read silently truncates the committed design state to near-empty.
   - **Severity:** medium · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     All state.json writers except _stamp_stage_status (stage_driver.py:581, made atomic explicitly

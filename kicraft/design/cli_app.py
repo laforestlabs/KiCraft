@@ -34,6 +34,7 @@ from typing import get_args
 from pydantic import ValidationError
 
 from kicraft.cli import artifact_paths
+from kicraft.fsutil import atomic_write_text
 from kicraft.parts_library import jlcparts, lcsc_retail
 # Pure candidate predicates, imported directly (not via the swappable
 # `jlcparts` module attribute): no I/O, so tests never need to fake them.
@@ -3158,7 +3159,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             return 3
 
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(state.model_dump_json(indent=2) + "\n")
+    atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
 
     archive_warning: str | None = None
     if not args.no_archive:
@@ -3216,7 +3217,7 @@ def _persist_artifacts(state, state_path: Path, artifacts) -> None:
     tooling sees the produced paths + status even when checks failed."""
     state.artifacts = artifacts
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(state.model_dump_json(indent=2) + "\n")
+    atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
 
 
 def _write_synthesis_check(
@@ -3843,7 +3844,7 @@ def run_post_wiring_review(state_path: Path, project_dir: Path,
         except Exception as e:  # noqa: BLE001 - surfacing must never break the run
             print(f"[review] could not surface findings: {e}", file=sys.stderr)
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(state.model_dump_json(indent=2) + "\n")
+        atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
         progress({"kind": "stage_done", "stage": "electrical_review",
                   "ok": True, "cost": total_cost})
         return review
@@ -3880,7 +3881,7 @@ def _surface_build_warnings(
         _persist_artifacts(state, state_path, artifacts)
     else:
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(state.model_dump_json(indent=2) + "\n")
+        atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
 
 
 def _surface_review_findings(state, state_path: Path, findings: list[dict]) -> None:
@@ -3927,7 +3928,7 @@ def _surface_review_findings(state, state_path: Path, findings: list[dict]) -> N
         state.open_questions = kept + [q for q in new_q if not (q.text in seen or seen.add(q.text))]
 
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(state.model_dump_json(indent=2) + "\n")
+    atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
 
 
 def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,

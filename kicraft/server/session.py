@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from kicraft.fsutil import atomic_write_text
+
 from .stage_driver import DESIGN_STAGES, drive_chain
 from .storage import _state_path
 
@@ -160,16 +162,32 @@ def commit_slot(ws, stage: str, slot: dict, brief: str = "", project_stem=None):
     return ok, out
 
 
+def _read_state_for_update(ws) -> dict | None:
+    """read_state for read-modify-write callers: returns None (refuse) when
+    state.json exists but cannot be parsed, instead of the {} read_state
+    hands to render paths -- writing that {} back would wipe every committed
+    slot with no error surfaced anywhere."""
+    p = _state_path(Path(ws))
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def record_answers(ws, stage: str, answers: list[dict]) -> None:
     """Stamp the user's answers onto the stage's open_questions in state.json (for
     the record; the answers are also injected into the re-run prompt)."""
     state_path = Path(ws) / ".kicraft" / "state.json"
-    sj = read_state(ws)
+    sj = _read_state_for_update(ws)
+    if sj is None:  # unreadable state: skip the stamp, never write {} over it
+        return
     by_text = {a.get("text"): a.get("answer") for a in (answers or [])}
     for q in sj.get("open_questions") or []:
         if q.get("stage") == stage and q.get("text") in by_text:
             q["answer"] = by_text[q["text"]]
-    state_path.write_text(json.dumps(sj, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(state_path, json.dumps(sj, indent=2) + "\n")
 
 
 def null_downstream(ws, stage: str) -> list[str]:
@@ -178,7 +196,12 @@ def null_downstream(ws, stage: str) -> list[str]:
     data lives in the bom slot, so clearing it empties bom.connections /
     no_connect_pins. Returns the stages cleared."""
     state_path = Path(ws) / ".kicraft" / "state.json"
-    sj = read_state(ws)
+    sj = _read_state_for_update(ws)
+    if sj is None:
+        # Unreadable committed state: fail LOUD rather than write {} back
+        # (which would wipe every slot) or silently skip the clear (which
+        # would leave stale downstream data behind an edit).
+        raise RuntimeError(f"state.json unreadable in {ws}; cannot edit stages")
     cleared = downstream_stages(stage)
     for s in cleared:
         if s == "wiring":
@@ -193,7 +216,7 @@ def null_downstream(ws, stage: str) -> list[str]:
             ss.pop(s, None)
     sj["open_questions"] = [q for q in (sj.get("open_questions") or [])
                             if q.get("stage") not in cleared]
-    state_path.write_text(json.dumps(sj, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(state_path, json.dumps(sj, indent=2) + "\n")
     return cleared
 
 
