@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:07d9737f10ad8422a255cf4fb953eb6b8c19f0b870574854ad718cf7a3143d08",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C558584.pdf",
+  "description": "MICROCHIP(\u7f8e\u56fd\u5fae\u82af) MCP23017T-E/SS",
+  "footprint_name": "SSOP-28_L10.2-W5.3-P0.65-LS7.8-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "MCP23017T-E/SS",
+  "name": "mcp23017t-e-ss",
+  "provenance": {
+    "added_at": "2026-07-06T03:28:16Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C558584"
+  },
+  "symbol_name": "MCP23017T-E_SS",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}
