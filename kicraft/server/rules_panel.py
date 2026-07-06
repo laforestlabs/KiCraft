@@ -174,7 +174,13 @@ class PlacementRulesPanel:
                 value_select.disable()
                 _set_anchor(self.holder, ref, "none", None)
             else:
-                value_select.enable()  # written once a value is picked
+                value_select.enable()
+                # Clear the PREVIOUS target's override now (the new one is
+                # written once a value is picked): the UI shows the new target
+                # with an empty value, so leaving e.g. the old {"edge":"left"}
+                # in the holder would silently re-pin the part to the left
+                # edge on Apply & re-place.
+                _set_anchor(self.holder, ref, "none", None)
 
         anchor_select.on("update:model-value", _on_anchor_change)
         value_select.on(

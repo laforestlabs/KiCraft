@@ -1165,16 +1165,8 @@ def _attach_retail(payload: dict, lcsc: str) -> dict:
     model can self-select an in-stock part instead of being bounced by the
     §9.26 gate one commit later. ``retail_stock``/``retail_min_buy`` on
     success, ``retail: "unverified"`` on an outage; silent no-op when the
-    retail check is disabled."""
-    if not lcsc_retail.enabled():
-        return payload
-    try:
-        info = lcsc_retail.stock(lcsc)
-        payload["retail_stock"] = info["stock"]
-        payload["retail_min_buy"] = info["min_buy"]
-    except lcsc_retail.RetailUnavailable:
-        payload["retail"] = "unverified"
-    return payload
+    retail check is disabled. One shared wrap: lcsc_retail.attach_stock."""
+    return lcsc_retail.attach_stock(payload, lcsc, nullable=False)
 
 
 def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:

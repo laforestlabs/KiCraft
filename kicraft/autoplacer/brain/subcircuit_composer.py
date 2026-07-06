@@ -1046,6 +1046,10 @@ def _build_merged_nets(
 ) -> dict[str, Net]:
     """Build merged net map from component pads plus optional parent nets."""
     merged: dict[str, Net] = {}
+    # Seen-set per net alongside the list (same pattern as the interconnect
+    # merge below): `pad_ref not in net.pad_refs` rescanned the whole list per
+    # pad, O(pads^2) on big-array parents where GND carries hundreds of pads.
+    seen_by_net: dict[str, set] = {}
 
     for comp in components.values():
         for pad in comp.pads:
@@ -1055,8 +1059,10 @@ def _build_merged_nets(
             if net is None:
                 net = Net(name=pad.net)
                 merged[pad.net] = net
+                seen_by_net[pad.net] = set()
             pad_ref = (pad.ref, pad.pad_id)
-            if pad_ref not in net.pad_refs:
+            if pad_ref not in seen_by_net[pad.net]:
+                seen_by_net[pad.net].add(pad_ref)
                 net.pad_refs.append(pad_ref)
 
     for name, net in interconnect_nets.items():

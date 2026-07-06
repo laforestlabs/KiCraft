@@ -14,12 +14,18 @@ import re
 from pathlib import Path
 
 # Matches a top-level ``(gr_<kind> ...)`` block and stops at the next
-# ``(gr_`` / ``(footprint`` / end-of-file. Non-greedy ``.*?`` plus the
-# lookahead handles arbitrarily-nested geometry tokens inside the
-# block (``(start ...)`` / ``(xy ...)`` etc.) because s-expression
-# children don't start with ``(gr_`` or ``(footprint``.
+# top-level section token or end-of-file. KiCad writes tracks
+# (``segment``/``arc``/``via``), zones, and groups AFTER graphics, so the
+# last gr_ block used to swallow all of them and fold their start/end/xy
+# points into the "Edge.Cuts" extent whenever no gr_/footprint followed
+# (verified on 88/400 real generated boards). The lookahead lists every
+# section token that can follow graphics EXCEPT ``(arc`` -- a gr_poly's
+# ``pts`` may legitimately embed ``(arc (start..) (mid..) (end..))``
+# points (which _POINT_RE's ``mid`` case parses), and KiCraft boards'
+# tracks are FreeRouting segments/vias, never leading track arcs.
 _BLOCK_RE = re.compile(
-    r'\(gr_(line|arc|rect|poly|circle)\s+(.*?)\)\s*(?=\(gr_|\(footprint|\Z)',
+    r'\(gr_(line|arc|rect|poly|circle)\s+(.*?)\)\s*'
+    r'(?=\(gr_|\(footprint|\(segment|\(via|\(zone|\(group|\(dimension|\(image|\Z)',
     re.S,
 )
 _POINT_RE = re.compile(

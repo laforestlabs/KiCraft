@@ -285,23 +285,20 @@ def test_fetch_price_keyword_unavailable_without_catalog(tmp_path, monkeypatch):
 
 # --------------------------------------------- retail stock rides every pick
 
-class _FakeRetail:
-    """Stands in for web.lcsc_retail: enabled + stock, no network."""
-
+def _fake_retail(monkeypatch, stock_by_lcsc=None, up=True):
+    """Fake the retail PRIMITIVES (enabled/stock) on the real lcsc_retail
+    module, so the shared attach_stock wrapper stays under test."""
     from kicraft.parts_library.lcsc_retail import RetailUnavailable
+    by = stock_by_lcsc or {}
 
-    def __init__(self, stock_by_lcsc=None, up=True):
-        self.by = stock_by_lcsc or {}
-        self.up = up
-
-    def enabled(self):
-        return True
-
-    def stock(self, cid):
-        if not self.up:
-            raise self.RetailUnavailable("down")
-        return {"lcsc": cid, "stock": self.by.get(cid, 5000), "min_buy": 1,
+    def _stock(cid):
+        if not up:
+            raise RetailUnavailable("down")
+        return {"lcsc": cid, "stock": by.get(cid, 5000), "min_buy": 1,
                 "checked_at": "t"}
+
+    monkeypatch.setattr(web.lcsc_retail, "enabled", lambda: True)
+    monkeypatch.setattr(web.lcsc_retail, "stock", _stock)
 
 
 def test_fetch_price_attaches_live_retail_stock(tmp_path, monkeypatch):
@@ -309,7 +306,7 @@ def test_fetch_price_attaches_live_retail_stock(tmp_path, monkeypatch):
         (190004, "VL53L1CXV0FY/1", "LGA-12", "ST", "expand", 5640,
          "1-9:4.817,1000-:3.1586", "ToF"),
     ])
-    monkeypatch.setattr(web, "lcsc_retail", _FakeRetail({"C190004": 321}))
+    _fake_retail(monkeypatch, {"C190004": 321})
     r = web._fetch_price("id:C190004")
     assert r["retail_stock"] == 321 and r["retail_min_buy"] == 1
 
@@ -319,7 +316,7 @@ def test_fetch_price_retail_outage_marks_unverified(tmp_path, monkeypatch):
         (190004, "VL53L1CXV0FY/1", "LGA-12", "ST", "expand", 5640,
          "1-:4.817", "ToF"),
     ])
-    monkeypatch.setattr(web, "lcsc_retail", _FakeRetail(up=False))
+    _fake_retail(monkeypatch, up=False)
     r = web._fetch_price("id:C190004")
     assert r["retail_stock"] is None  # unverified — not persisted, self-heals
 

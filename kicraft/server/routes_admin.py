@@ -22,6 +22,8 @@ from urllib.parse import quote
 
 from nicegui import ui
 
+from kicraft.cli.artifact_paths import LEAF_ROUTED, artifact_root
+
 from . import billing
 from .accounts import (
     CORE_COMPONENT_CATEGORIES,
@@ -831,8 +833,10 @@ def _self_eval_leaf_boards(gen_dir: Path) -> list:
     directly, so a failed route is zoomable in-page even after the live ``renders/``
     previews have been cleaned up on a finished batch."""
     out = []
-    for leaf in sorted(Path(gen_dir).glob(
-            ".experiments/subcircuits/*/leaf_routed.kicad_pcb")):
+    # Layout + filename come from artifact_paths (docs/ARTIFACTS.md: never
+    # hand-code these literals), so a canonical-name move can't silently make
+    # this viewer render zero leaves.
+    for leaf in sorted(artifact_root(gen_dir).glob(f"*/{LEAF_ROUTED}")):
         leafdir = leaf.parent
         tok = _register_project_dir(leafdir)
         out.append({

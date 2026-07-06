@@ -200,6 +200,34 @@ def stock(cid: str) -> dict:
                 float(entry["ts"]), _dt.timezone.utc).isoformat()}
 
 
+def attach_stock(payload: dict, cid: str | None, *, nullable: bool) -> dict:
+    """Pin ``retail_stock``/``retail_min_buy`` from the live storefront onto
+    ``payload`` -- the ONE wrap of enabled()/stock()/RetailUnavailable shared
+    by the BOM lookup tool (cli_app) and the web pricing cache, which used to
+    carry drifting copies with different outage encodings.
+
+    nullable=True (web pricing): both keys are always present and None means
+    unverified -- the cost UI shows it as such and the price cache refuses to
+    merge None, so a reopen re-checks. nullable=False (BOM lookup): keys
+    appear only on success and an outage sets ``payload["retail"] =
+    "unverified"`` for the model to read; disabled is a silent no-op."""
+    if nullable:
+        # Reset, not setdefault: the keys mean THIS call's reading, so a
+        # stale value from an earlier merge must not survive an outage.
+        payload["retail_stock"] = None
+        payload["retail_min_buy"] = None
+    if not cid or not enabled():
+        return payload
+    try:
+        info = stock(str(cid))
+        payload["retail_stock"] = info["stock"]
+        payload["retail_min_buy"] = info["min_buy"]
+    except RetailUnavailable:
+        if not nullable:
+            payload["retail"] = "unverified"
+    return payload
+
+
 def in_stock(cid: str, *, picky: bool) -> tuple[bool, dict]:
     """Whether ``cid`` is orderable at retail, plus the reading.
 
@@ -223,5 +251,6 @@ def clear_cache() -> None:
         _last_hit = 0.0
 
 
-__all__ = ["ENV_PATH", "RETAIL_URL", "RetailUnavailable", "cache_path",
-           "clear_cache", "enabled", "in_stock", "retail_floor", "stock"]
+__all__ = ["ENV_PATH", "RETAIL_URL", "RetailUnavailable", "attach_stock",
+           "cache_path", "clear_cache", "enabled", "in_stock", "retail_floor",
+           "stock"]

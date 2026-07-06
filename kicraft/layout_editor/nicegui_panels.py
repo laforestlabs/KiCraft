@@ -108,7 +108,17 @@ def outline_controls(canvas_id: str, initial: dict[str, Any]) -> None:
 
     def _push_shape() -> None:
         shape = str(shape_select.value or "rect")
-        param = float(shape_param_input.value or 0.0)
+        try:
+            param = float(shape_param_input.value)
+        except (TypeError, ValueError):
+            param = 0.0
+        if shape in ("rounded_rect", "chamfered_rect") and param < 0.5:
+            # A cleared field arrives as None (bypassing the widget's min=0.5),
+            # and OutlineSpec.from_dict rejects rounded/chamfered with
+            # param <= 0 at save -- clamp and reflect it in the input so the
+            # canvas never shows an outline the pipeline refuses to persist.
+            param = 0.5
+            shape_param_input.set_value(param)
         spec = {
             "shape": shape,
             "corner_radius_mm": param if shape == "rounded_rect" else 0.0,
@@ -134,14 +144,20 @@ def mounting_hole_panel(canvas_id: str, initial_holes: list[dict]) -> None:
         screw = h.get("screw")
         if screw not in MOUNTING_HOLE_SCREW_OPTIONS:
             screw = "M3"
-        state.append(
-            {
-                "index": int(h.get("index", i)),
-                "corner": corner,
-                "inset_mm": float(h.get("inset_mm", 5.0)),
-                "screw": screw,
-            }
-        )
+        entry = {
+            "index": int(h.get("index", i)),
+            "corner": corner,
+            "inset_mm": float(h.get("inset_mm", 5.0)),
+            "screw": screw,
+        }
+        # Keep the saved position: an unpinned (corner=None) hole's pos is
+        # authoritative from manual_layout.json, and the mount-time push used
+        # to drop it -- the canvas then reset the hole to the board's top-left
+        # corner, which Save persisted and the composer stamped half off-board.
+        pos = h.get("pos")
+        if isinstance(pos, dict) and "x" in pos and "y" in pos:
+            entry["pos"] = {"x": float(pos["x"]), "y": float(pos["y"])}
+        state.append(entry)
 
     with ui.expansion(
         "Mounting Holes",
@@ -243,13 +259,14 @@ def view_options_panel(canvas_id: str) -> None:
 
     Defaults match the historical canvas behavior (grid on, snap on,
     0 mm gap) so opening the expansion without changing anything is a
-    no-op. The spacing field defaults to 1 mm so flipping it on visibly
-    opens up gaps between snapped leaves.
+    no-op -- the mount-time push below sends these values, so a nonzero
+    spacing default here would silently break flush edge-to-edge snapping
+    (and grow every stamped board) for users who never touched the field.
     """
     options: dict[str, Any] = {
         "show_grid": True,
         "snap_enabled": True,
-        "snap_spacing_mm": 1.0,
+        "snap_spacing_mm": 0.0,
     }
 
     def _push() -> None:

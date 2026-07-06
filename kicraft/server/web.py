@@ -60,6 +60,7 @@ from ..parts_library import Tier
 from ..parts_library import jlcparts, lcsc_retail
 from ..tuning.benchmark import briefs as _selfeval_briefs
 from .parts_catalog import (
+    _content_hash_key,
     catalog,
     footprint_svg,
     get_part,
@@ -932,18 +933,9 @@ def _attach_retail(pick: dict) -> dict:
     """Best-effort live lcsc.com retail reading for the picked part.
     ``retail_stock`` None = unverified (endpoint disabled or unreachable):
     the cost UI shows it as such and ``_load_price_cache`` refuses to merge
-    it, so a reopen re-checks instead of freezing an unknown."""
-    pick["retail_stock"] = None
-    pick["retail_min_buy"] = None
-    cid = pick.get("lcsc")
-    if cid and lcsc_retail.enabled():
-        try:
-            info = lcsc_retail.stock(str(cid))
-            pick["retail_stock"] = info["stock"]
-            pick["retail_min_buy"] = info["min_buy"]
-        except lcsc_retail.RetailUnavailable:
-            pass
-    return pick
+    it, so a reopen re-checks instead of freezing an unknown. One shared
+    wrap: lcsc_retail.attach_stock."""
+    return lcsc_retail.attach_stock(pick, pick.get("lcsc"), nullable=True)
 
 
 def _fetch_price(key: str) -> dict:
@@ -3820,10 +3812,14 @@ def part_detail_page(name: str):
             with ui.card().classes("flex-grow").style(
                     "background:var(--kc-surface);border:1px solid var(--kc-border);min-width:300px"):
                 ui.label("Symbol").classes("text-xs font-medium").style("color:#94a3b8")
+                # ?v=<content-hash> makes the URL content-addressed so the
+                # long-lived immutable cache header in serve_part_preview is
+                # safe: an edited bundle changes the hash, hence the URL.
+                ver = _content_hash_key(m)
                 syms = symbol_svgs(part) if kicad_cli_available() else []
                 if syms:
                     for i in range(len(syms)):
-                        ui.image(f"/part-preview/{m.name}/symbol-{i + 1}.svg") \
+                        ui.image(f"/part-preview/{m.name}/symbol-{i + 1}.svg?v={ver}") \
                             .props("fit=contain").classes("w-full rounded").style(img_style)
                 else:
                     ui.label("Preview unavailable").classes("text-xs") \
@@ -3834,7 +3830,7 @@ def part_detail_page(name: str):
                     .style("color:#94a3b8")
                 fp = footprint_svg(part) if kicad_cli_available() else None
                 if fp:
-                    ui.image(f"/part-preview/{m.name}/footprint.svg") \
+                    ui.image(f"/part-preview/{m.name}/footprint.svg?v={ver}") \
                         .props("fit=contain").classes("w-full rounded").style(img_style)
                 else:
                     ui.label("Preview unavailable").classes("text-xs") \

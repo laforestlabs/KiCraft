@@ -60,6 +60,22 @@
   - **B34**: `_round_index()` helper replaces the five `int(x or -1)` sites.
   - **C6**: `build_worker.JOB_KIND_COMMANDS` is now the one kind→argv map; web.py's
     `_JOB_KIND_ARGS` deleted, fallback imports the worker's map + `_kill_build`.
+- **2026-07-06** — third batch (12 items): B15, B37, B50–B55, C9, C10, C13, V2. Notes:
+  - **B15**: contextmenu/keydown registration moved to a once-per-IIFE `bindGlobalEvents`
+    called from `fireRender` (render() replaces svg CHILDREN only, so the svg element and
+    document accumulated one handler per repaint).
+  - **B37**: fixed at both ends — the Python panel preserves a saved `pos`, AND the canvas's
+    `setMountingHoles` keeps the live pos (matched by index) when a pushed hole lacks one
+    (new-hole fallback is board center, not the min corner).
+  - **B50**: `parent_local` is now an opaque canvas passthrough (state + getState echo);
+    `_layout_to_canvas` emits it, so web-panel saves round-trip it.
+  - **B54**: `_BLOCK_RE` lookahead extended with segment/via/zone/group/dimension/image —
+    deliberately NOT `\(arc`, which legitimately nests inside gr_poly `pts`.
+  - **C10**: shared wrap is `lcsc_retail.attach_stock(payload, cid, nullable=)`;
+    the two retail-fake test harnesses now patch the module PRIMITIVES (enabled/stock)
+    so the shared wrapper stays under test.
+  - **C13**: only `_build_merged_nets` got the seen-set; `_append_pad_ref` operates on
+    interface-port lists (tiny N), left as-is.
 
 ## 1. Bug fixes
 
@@ -330,7 +346,7 @@
     metadata.json still exists so the _board_only_leaf_dirs RuntimeError net (autoexperiment.py:420)
     never fires and the previous run's board ships.
 
-- [ ] **B15** `kicraft/layout_editor/static/layout_canvas.js:826` — bindLeafEvents is called from render() on every repaint (including every mousemove during a drag) and each call registers a new document-level 'keydown' listener (line 826) and a new svg-level 'contextmenu' listener (line 807) that are never removed, so duplicate rotate handlers accumulate without bound within one canvas init.
+- [x] **B15** `kicraft/layout_editor/static/layout_canvas.js:826` — bindLeafEvents is called from render() on every repaint (including every mousemove during a drag) and each call registers a new document-level 'keydown' listener (line 826) and a new svg-level 'contextmenu' listener (line 807) that are never removed, so duplicate rotate handlers accumulate without bound within one canvas init.
   - **Severity:** high · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     User drags a leaf for a few seconds (~200 mousemove renders), then presses 'r' or right-clicks a
@@ -666,7 +682,7 @@
     subsequent save/stamp or queued build; repeated retries stack unlimited concurrent pcbnew
     processes despite the 2-slot semaphore.
 
-- [ ] **B37** `kicraft/layout_editor/nicegui_panels.py:137` — mounting_hole_panel rebuilds its hole state from initial_holes but drops the 'pos' field, and its unconditional setMountingHoles push makes the canvas reset every corner=None hole to the outline AABB min corner (layout_canvas.js:1063-1064), which getState then persists and the composer stamps verbatim.
+- [x] **B37** `kicraft/layout_editor/nicegui_panels.py:137` — mounting_hole_panel rebuilds its hole state from initial_holes but drops the 'pos' field, and its unconditional setMountingHoles push makes the canvas reset every corner=None hole to the outline AABB min corner (layout_canvas.js:1063-1064), which getState then persists and the composer stamps verbatim.
   - **Severity:** medium · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     User selects 'None (unpinned)' for a hole (or reopens a layout whose unpinned hole had a real
@@ -850,7 +866,7 @@
     inspection board is strictly worse than the one the search found, even though per-round
     snapshots (round_NNNN_parent_routed.kicad_pcb, line 2828) exist to restore it.
 
-- [ ] **B50** `kicraft/layout_editor/runner.py:370` — _layout_to_canvas discards the saved layout's parent_local list (and layout_canvas.js getState never emits one), so any manual_layout.json containing parent_local overrides has them silently replaced with [] on the next web-panel save, even though the composer still honors them (compose_subcircuits.py:1363-1367).
+- [x] **B50** `kicraft/layout_editor/runner.py:370` — _layout_to_canvas discards the saved layout's parent_local list (and layout_canvas.js getState never emits one), so any manual_layout.json containing parent_local overrides has them silently replaced with [] on the next web-panel save, even though the composer still honors them (compose_subcircuits.py:1363-1367).
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     A project carries a manual_layout.json with parent_local entries (written by the removed offline
@@ -859,7 +875,7 @@
     never contained the key, and the next manual compose snaps the connector back to its constraint-
     derived position, undoing the user's persisted override with no warning.
 
-- [ ] **B51** `kicraft/layout_editor/nicegui_panels.py:252` — view_options_panel initializes options with snap_spacing_mm=1.0 and unconditionally pushes it to the canvas via ui.timer 0.3s after mount, overriding the canvas's documented 0 mm default even though the function's own docstring says defaults match historical behavior (0 mm gap) and that opening the expansion is a no-op.
+- [x] **B51** `kicraft/layout_editor/nicegui_panels.py:252` — view_options_panel initializes options with snap_spacing_mm=1.0 and unconditionally pushes it to the canvas via ui.timer 0.3s after mount, overriding the canvas's documented 0 mm default even though the function's own docstring says defaults match historical behavior (0 mm gap) and that opening the expansion is a no-op.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     User opens the layout editor and drags two leaves together expecting the historical flush snap:
@@ -867,7 +883,7 @@
     no longer be snapped flush (and the stamped parent board is correspondingly larger) unless the
     user finds View options and manually types 0 into a field they never touched.
 
-- [ ] **B52** `kicraft/layout_editor/nicegui_panels.py:111` — _push_shape coerces a cleared radius/chamfer input to 0.0 and the canvas accepts it, but OutlineSpec.from_dict rejects rounded_rect/chamfered_rect with param <= 0, so the UI renders an outline state that save_manual_layout_json can never persist.
+- [x] **B52** `kicraft/layout_editor/nicegui_panels.py:111` — _push_shape coerces a cleared radius/chamfer input to 0.0 and the canvas accepts it, but OutlineSpec.from_dict rejects rounded_rect/chamfered_rect with param <= 0, so the UI renders an outline state that save_manual_layout_json can never persist.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     User picks shape 'Rounded' and clears the 'Radius/chamfer (mm)' field (on_value_change fires
@@ -876,7 +892,7 @@
     'rounded_rect outline requires corner_radius_mm > 0', leaving the user with a layout the UI
     accepted but the pipeline refuses until they guess the field must be repopulated.
 
-- [ ] **B53** `kicraft/server/rules_panel.py:177` — _on_anchor_change only writes the override when the new target is 'none' or when a value is later picked, so switching a component's anchor from e.g. edge to corner without selecting a corner value leaves the stale edge override in holder.component_zone_overrides while the UI shows the new target with an empty value.
+- [x] **B53** `kicraft/server/rules_panel.py:177` — _on_anchor_change only writes the override when the new target is 'none' or when a value is later picked, so switching a component's anchor from e.g. edge to corner without selecting a corner value leaves the stale edge override in holder.component_zone_overrides while the UI shows the new target with an empty value.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     A component has anchor edge=left; the user changes the Anchor dropdown to 'corner', leaves Value
@@ -884,7 +900,7 @@
     re-place': _build_slot commits {"edge": "left"} to the placement slot, so the rebuild still pins
     the part to the left edge even though the panel displayed anchor=corner with no value.
 
-- [ ] **B54** `kicraft/render/edge_cuts.py:21` — _BLOCK_RE terminates a gr_ block only at the next (gr_ / (footprint / EOF, but KiCad writes segment/via/zone sections AFTER graphics, so the last gr_ block swallows all trailing tracks and zones (verified on 88 of 400 real generated boards) and parse_edge_cuts_aabb then folds their start/end/xy points into the 'Edge.Cuts' AABB.
+- [x] **B54** `kicraft/render/edge_cuts.py:21` — _BLOCK_RE terminates a gr_ block only at the next (gr_ / (footprint / EOF, but KiCad writes segment/via/zone sections AFTER graphics, so the last gr_ block swallows all trailing tracks and zones (verified on 88 of 400 real generated boards) and parse_edge_cuts_aabb then folds their start/end/xy points into the 'Edge.Cuts' AABB.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     A board whose last Edge.Cuts gr_line is not followed by another gr_/footprint token (no gr_text
@@ -895,7 +911,7 @@
     extent silently exceed the physical Edge.Cuts; currently latent (0/3000 boards showed a >0.01mm
     delta) but the regex's stated invariant is falsified by real files.
 
-- [ ] **B55** `kicraft/server/parts_catalog.py:202` — symbol_svgs (and footprint_svg at lines 219-220) return sorted(out_dir.glob('*.svg')) even when _run_ok reported the kicad-cli export FAILED, so partially written SVGs from a failed/timed-out export are served as valid previews while the missing .ok sentinel re-spawns the failing 30s kicad-cli run on every subsequent catalog page view.
+- [x] **B55** `kicraft/server/parts_catalog.py:202` — symbol_svgs (and footprint_svg at lines 219-220) return sorted(out_dir.glob('*.svg')) even when _run_ok reported the kicad-cli export FAILED, so partially written SVGs from a failed/timed-out export are served as valid previews while the missing .ok sentinel re-spawns the failing 30s kicad-cli run on every subsequent catalog page view.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     A multi-unit symbol bundle where `kicad-cli sym export svg` writes one unit's SVG then errors or
@@ -1013,7 +1029,7 @@
   - **Key line(s):** `ui.label("To export or delete all your data, contact "
                      "[CONTACT EMAIL].").classes("text-xs")   (web.py:2576-2577)`
 
-- [ ] **C9** `kicraft/server/render_serving.py:175` — Part-preview SVGs are served with Cache-Control: no-store even though they are immutable per content_hash (the on-disk cache dir is already keyed by the hash), forcing every page view to refetch and re-trigger the server-side bundle re-hash.
+- [x] **C9** `kicraft/server/render_serving.py:175` — Part-preview SVGs are served with Cache-Control: no-store even though they are immutable per content_hash (the on-disk cache dir is already keyed by the hash), forcing every page view to refetch and re-trigger the server-side bundle re-hash.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     Each revisit of /parts/<name> refires the symbol+footprint preview requests; each request re-
@@ -1023,7 +1039,7 @@
     pattern render URLs in web.py already use -- and serve with a long max-age/immutable so
     unchanged previews never hit the server again.
 
-- [ ] **C10** `kicraft/design/cli_app.py:1164` — _attach_retail in cli_app.py duplicates web.py's _attach_retail (kicraft/server/web.py:916) -- both wrap lcsc_retail.enabled()/stock()/RetailUnavailable to pin retail_stock/retail_min_buy onto a pick dict, differing only in outage encoding (payload['retail']='unverified' vs retail_stock=None); fold into one helper in kicraft/parts_library/lcsc_retail.py with an explicit outage-marker parameter.
+- [x] **C10** `kicraft/design/cli_app.py:1164` — _attach_retail in cli_app.py duplicates web.py's _attach_retail (kicraft/server/web.py:916) -- both wrap lcsc_retail.enabled()/stock()/RetailUnavailable to pin retail_stock/retail_min_buy onto a pick dict, differing only in outage encoding (payload['retail']='unverified' vs retail_stock=None); fold into one helper in kicraft/parts_library/lcsc_retail.py with an explicit outage-marker parameter.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     A change to the retail reading (e.g. surfacing min_buy multiples or a new RetailUnavailable
@@ -1049,7 +1065,7 @@
     CLAUDE.md's storage model explicitly forbids ('One name, no fallback'), or wastes time hunting
     for a fallback path that does not exist in the code.
 
-- [ ] **C13** `kicraft/autoplacer/brain/subcircuit_composer.py:1059` — _build_merged_nets dedupes pad refs with a linear `pad_ref not in net.pad_refs` list-membership per pad, making net assembly O(pads^2) per net; _append_pad_ref (line 1244) repeats the pattern.
+- [x] **C13** `kicraft/autoplacer/brain/subcircuit_composer.py:1059` — _build_merged_nets dedupes pad refs with a linear `pad_ref not in net.pad_refs` list-membership per pad, making net assembly O(pads^2) per net; _append_pad_ref (line 1244) repeats the pattern.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     On a large-array parent (e.g. the 200-LED KC-SMQ3HX class board) the GND net accumulates
@@ -1093,7 +1109,7 @@
     extract_leaf in kicraft/leaf_library/extractor.py is the only remaining promote entry point — in
     a codebase whose CLAUDE.md explicitly maintains docs as the map for agents.
 
-- [ ] **V2** `kicraft/server/routes_admin.py:835` — _self_eval_leaf_boards hand-globs '.experiments/subcircuits/*/leaf_routed.kicad_pcb', hard-coding the artifact layout and filename instead of importing LEAF_ROUTED/artifact_root from kicraft/cli/artifact_paths.py.
+- [x] **V2** `kicraft/server/routes_admin.py:835` — _self_eval_leaf_boards hand-globs '.experiments/subcircuits/*/leaf_routed.kicad_pcb', hard-coding the artifact layout and filename instead of importing LEAF_ROUTED/artifact_root from kicraft/cli/artifact_paths.py.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     docs/ARTIFACTS.md states the contract: filename literals are defined once in artifact_paths.py

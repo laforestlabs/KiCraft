@@ -406,4 +406,11 @@ def _layout_to_canvas(
             }
             for h in layout.mounting_holes
         ],
+        # Opaque canvas passthrough (the canvas echoes it via getState):
+        # dropping it here made every web-panel save wipe the layout's
+        # parent_local overrides while the composer still honors them.
+        "parent_local": [
+            {"ref": p.ref, "pos": {"x": p.pos.x, "y": p.pos.y}}
+            for p in layout.parent_local
+        ],
     }

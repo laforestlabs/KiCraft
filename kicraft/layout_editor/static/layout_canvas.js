@@ -184,6 +184,12 @@ window.kicraftInitLayoutCanvas = function(cfg) {
         || { shape: 'rect', corner_radius_mm: 0.0, chamfer_mm: 0.0 }
       ),
       mounting_holes: deepCopy(cfg.initial.mounting_holes || []),
+      // Opaque passthrough: per-component parent-local overrides (edge
+      // connectors pinned by hand or by the removed offline GUI). The
+      // canvas neither renders nor edits them, but getState() must echo
+      // them back or every web-panel save wipes manual_layout.json's
+      // parent_local to [] while the composer still honors the key.
+      parent_local: deepCopy(cfg.initial.parent_local || []),
       selected: null,
       snap_active: null,
       // Per-axis edge pair that the latest snap pinned, populated by
@@ -804,7 +810,17 @@ window.kicraftInitLayoutCanvas = function(cfg) {
         e.preventDefault();
       });
     });
+  }
+
+  // Registered ONCE per IIFE (from fireRender), NOT from render(): render()
+  // runs on every repaint (every mousemove during a drag), and the svg
+  // element + document persist across repaints (render only replaces svg
+  // CHILDREN), so registering here used to stack one duplicate rotate
+  // handler per repaint -- a single 'r' press after a short drag applied
+  // ~200 stacked -90deg rotations and ~200 re-renders.
+  function bindGlobalEvents(svg) {
     svg.addEventListener('contextmenu', (e) => {
+      if (!isCurrent()) return;  // stale IIFE from a prior refresh
       const target = e.target.closest('.ml-leaf');
       if (target) {
         e.preventDefault();
@@ -1009,6 +1025,7 @@ window.kicraftInitLayoutCanvas = function(cfg) {
           chamfer_mm: Math.round((shape.chamfer_mm || 0) * 100) / 100,
         },
         mounting_holes: mounting_holes,
+        parent_local: deepCopy(state.parent_local || []),
       };
     },
     reset: function() {
@@ -1053,16 +1070,28 @@ window.kicraftInitLayoutCanvas = function(cfg) {
     },
     setMountingHoles: function(holes) {
       // Replace the entire mounting-holes list. Caller (Python side)
-      // owns count + per-hole corner/inset choices; the canvas just
-      // visualises and re-pegs positions to corners on every render.
-      state.mounting_holes = (holes || []).map((h, i) => ({
-        index: typeof h.index === 'number' ? h.index : i,
-        corner: h.corner || null,
-        inset_mm: Number(h.inset_mm) || 5.0,
-        screw: typeof h.screw === 'string' && h.screw ? h.screw : 'M3',
-        pos: h.pos ? { x: Number(h.pos.x) || 0, y: Number(h.pos.y) || 0 }
-                   : { x: state.board_outline.min.x, y: state.board_outline.min.y },
-      }));
+      // owns count + per-hole corner/inset choices; the canvas owns
+      // positions: a pushed hole without pos keeps the live pos of the
+      // hole it replaces (matched by index). Defaulting a pos-less hole
+      // to the outline min corner used to teleport every unpinned hole
+      // to the board's top-left, which Save then persisted.
+      const prevByIndex = {};
+      for (const h of state.mounting_holes) prevByIndex[h.index] = h;
+      const out = state.board_outline;
+      state.mounting_holes = (holes || []).map((h, i) => {
+        const idx = typeof h.index === 'number' ? h.index : i;
+        const prev = prevByIndex[idx];
+        return {
+          index: idx,
+          corner: h.corner || null,
+          inset_mm: Number(h.inset_mm) || 5.0,
+          screw: typeof h.screw === 'string' && h.screw ? h.screw : 'M3',
+          pos: h.pos ? { x: Number(h.pos.x) || 0, y: Number(h.pos.y) || 0 }
+               : (prev ? prev.pos
+                       : { x: (out.min.x + out.max.x) / 2,
+                           y: (out.min.y + out.max.y) / 2 }),
+        };
+      });
       render();
     },
     getMountingHoles: function() {
@@ -1107,7 +1136,9 @@ window.kicraftInitLayoutCanvas = function(cfg) {
   // settle before the first paint.
   function fireRender() {
     if (!isCurrent()) return;
-    if (!document.getElementById(SVG_ID)) return;
+    const svg = document.getElementById(SVG_ID);
+    if (!svg) return;
+    bindGlobalEvents(svg);  // once per IIFE; render() must never re-register
     requestAnimationFrame(function() {
       if (!isCurrent()) return;
       render();

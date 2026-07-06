@@ -224,34 +224,24 @@ def test_parse_easyeda_search_flattens_and_dedupes():
 # ---------- live retail stock on lookup results ----------
 
 
-class _FakeRetail:
-    """Stands in for cli_app.lcsc_retail (module attribute monkeypatch), so
-    these tests bypass the suite-wide KICRAFT_LCSC_RETAIL=0 guard without any
-    network."""
+def _fake_retail(monkeypatch, by=None, up=True):
+    """Fake the retail PRIMITIVES (enabled/stock/retail_floor) on the real
+    lcsc_retail module, so the shared in_stock/attach_stock wrappers stay
+    under test; bypasses the suite-wide KICRAFT_LCSC_RETAIL=0 guard without
+    any network."""
+    from kicraft.parts_library import lcsc_retail
+    data = by or {}
 
-    from kicraft.parts_library.lcsc_retail import RetailUnavailable
-
-    def __init__(self, by=None, up=True):
-        self.by = by or {}
-        self.up = up
-
-    def enabled(self):
-        return True
-
-    def retail_floor(self):
-        return 100
-
-    def stock(self, cid):
-        if not self.up:
-            raise self.RetailUnavailable("storefront down")
-        e = self.by.get(str(cid).upper(), {"stock": 100_000, "min_buy": 1})
+    def _stock(cid):
+        if not up:
+            raise lcsc_retail.RetailUnavailable("storefront down")
+        e = data.get(str(cid).upper(), {"stock": 100_000, "min_buy": 1})
         return {"lcsc": str(cid).upper(), "stock": e["stock"],
                 "min_buy": e.get("min_buy", 1), "checked_at": "t"}
 
-    def in_stock(self, cid, *, picky):
-        info = self.stock(cid)
-        need = max(info["min_buy"], self.retail_floor() if picky else 1)
-        return info["stock"] >= need, info
+    monkeypatch.setattr(lcsc_retail, "enabled", lambda: True)
+    monkeypatch.setattr(lcsc_retail, "retail_floor", lambda: 100)
+    monkeypatch.setattr(lcsc_retail, "stock", _stock)
 
 
 def test_lookup_jlcparts_retail_dry_winner_surfaces_candidates(
@@ -262,8 +252,7 @@ def test_lookup_jlcparts_retail_dry_winner_surfaces_candidates(
     _mk_catalog(tmp_path, monkeypatch, [
         (190004, "VL53L1CXV0FY/1", "LGA-12", "ST", "expand", 5640, "1-:4.8", "ToF"),
     ])
-    monkeypatch.setattr(cli_app, "lcsc_retail",
-                        _FakeRetail({"C190004": {"stock": 0, "min_buy": 1}}))
+    _fake_retail(monkeypatch, {"C190004": {"stock": 0, "min_buy": 1}})
     rc, payload = _run(capsys, "lookup-lcsc-id", "VL53L1CXV0FY/1")
     assert rc == 4 and payload["ok"] is False
     assert "retail storefront" in payload["hint"]
@@ -273,8 +262,7 @@ def test_lookup_jlcparts_retail_dry_winner_surfaces_candidates(
 
 
 def test_lookup_payloads_carry_retail_stock(capsys, monkeypatch, tmp_path):
-    monkeypatch.setattr(cli_app, "lcsc_retail",
-                        _FakeRetail({"C7386355": {"stock": 4321, "min_buy": 5}}))
+    _fake_retail(monkeypatch, {"C7386355": {"stock": 4321, "min_buy": 5}})
     rc, payload = _run(capsys, "lookup-lcsc-id", "C7386355")
     assert rc == 0 and payload["source"] == "explicit-id"
     assert payload["retail_stock"] == 4321 and payload["retail_min_buy"] == 5
@@ -292,7 +280,7 @@ def test_lookup_retail_outage_is_unverified_not_blocking(
     _mk_catalog(tmp_path, monkeypatch, [
         (190004, "VL53L1CXV0FY/1", "LGA-12", "ST", "expand", 5640, "1-:4.8", "ToF"),
     ])
-    monkeypatch.setattr(cli_app, "lcsc_retail", _FakeRetail(up=False))
+    _fake_retail(monkeypatch, up=False)
     rc, payload = _run(capsys, "lookup-lcsc-id", "VL53L1CXV0FY/1")
     assert rc == 0 and payload["lcsc"] == "C190004"  # fail open
     assert payload["retail"] == "unverified"

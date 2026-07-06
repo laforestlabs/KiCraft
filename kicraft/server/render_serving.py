@@ -194,8 +194,12 @@ def serve_part_preview(name: str, asset: str):
                 target = svgs[idx]
     if target is None or not target.is_file():
         return PlainTextResponse("not found", status_code=404)
+    # Immutable: the pages minting these URLs append ?v=<content-hash> (the
+    # same key the on-disk cache dir uses), so changed bundles get a new URL.
+    # no-store here forced every /parts revisit to re-fetch (and server-side
+    # re-hash) previews that can never change under their URL.
     return FileResponse(
         str(target),
         media_type="image/svg+xml",
-        headers={"Cache-Control": "no-store"},
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )

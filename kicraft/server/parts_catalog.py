@@ -182,40 +182,56 @@ def _run_ok(cmd: list[str]) -> bool:
     return True
 
 
+def _export_cached(out_dir: Path, cmd: list[str]) -> bool:
+    """Run one preview export with both outcomes cached.
+
+    ``.ok`` marks success; ``.failed`` marks a failed/timed-out export so the
+    same 30s ``kicad-cli`` run is NOT re-spawned on every later page view
+    (the cache dir is content-hash keyed, so fixing the bundle naturally
+    retries in a fresh dir). Partial SVGs from a failed export are removed --
+    serving them presented a half-rendered multi-unit symbol as the preview.
+    """
+    if (out_dir / ".ok").exists():
+        return True
+    if (out_dir / ".failed").exists():
+        return False
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if _run_ok(cmd):
+        (out_dir / ".ok").touch()
+        return True
+    for p in out_dir.glob("*.svg"):
+        p.unlink(missing_ok=True)
+    (out_dir / ".failed").touch()
+    return False
+
+
 def symbol_svgs(part: LoadedPart) -> list[Path]:
     """Cached SVG(s) for the part's symbol: one per unit (usually a single file).
 
     Empty list if ``kicad-cli`` is missing or the export fails.
     """
     out_dir = _cache_dir(part) / "symbol"
-    if not (out_dir / ".ok").exists():
-        out_dir.mkdir(parents=True, exist_ok=True)
-        sym_file = symbol_file_path(part.dir)
-        ok = _run_ok([
-            _KICAD_CLI, "sym", "export", "svg",
-            "-o", str(out_dir),
-            "--symbol", part.manifest.symbol_name,
-            str(sym_file),
-        ])
-        if ok:
-            (out_dir / ".ok").touch()
+    if not _export_cached(out_dir, [
+        _KICAD_CLI, "sym", "export", "svg",
+        "-o", str(out_dir),
+        "--symbol", part.manifest.symbol_name,
+        str(symbol_file_path(part.dir)),
+    ]):
+        return []
     return sorted(out_dir.glob("*.svg"))
 
 
 def footprint_svg(part: LoadedPart) -> Path | None:
     """Cached SVG for the part's footprint (front side), or None on failure."""
     out_dir = _cache_dir(part) / "footprint"
-    if not (out_dir / ".ok").exists():
-        out_dir.mkdir(parents=True, exist_ok=True)
-        ok = _run_ok([
-            _KICAD_CLI, "fp", "export", "svg",
-            "-o", str(out_dir),
-            "--footprint", part.manifest.footprint_name,
-            "--layers", _FP_LAYERS,
-            str(footprint_dir_path(part.dir)),
-        ])
-        if ok:
-            (out_dir / ".ok").touch()
+    if not _export_cached(out_dir, [
+        _KICAD_CLI, "fp", "export", "svg",
+        "-o", str(out_dir),
+        "--footprint", part.manifest.footprint_name,
+        "--layers", _FP_LAYERS,
+        str(footprint_dir_path(part.dir)),
+    ]):
+        return None
     svgs = sorted(out_dir.glob("*.svg"))
     return svgs[0] if svgs else None
 
