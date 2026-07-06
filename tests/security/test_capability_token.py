@@ -9,7 +9,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import os
 
 import pytest
 
@@ -72,12 +71,23 @@ def test_serve_handler_rejects_traversal_filenames(tmp_path, monkeypatch):
     assert getattr(web.serve_project_file(tok, "evil.sh"), "status_code", None) == 404
 
 
-def test_default_dev_secret_is_a_known_weakness(monkeypatch):
-    """A config assertion: shipping prod with the default secret means anyone can
-    forge tokens. This test documents the gap so deploy never relies on the default."""
+def test_missing_secret_does_not_fall_open_to_a_public_default(tmp_path, monkeypatch):
+    """With KICRAFT_STORAGE_SECRET unset the server must NOT fall back to the
+    old public constant ('kicraft-dev-secret'): anyone could compute
+    payload+HMAC themselves and read any tenant's project files. The fallback
+    is a random per-process secret: stable within the process (tokens minted
+    now still verify now) but never the known constant."""
     web = _web()
     monkeypatch.delenv("KICRAFT_STORAGE_SECRET", raising=False)
-    # the default is a literal, public constant -> forgeable by anyone
-    assert web._project_secret() == b"kicraft-dev-secret"
-    # deploy/03-service-setup.sh must set KICRAFT_STORAGE_SECRET; flag if it is the default.
-    assert os.environ.get("KICRAFT_STORAGE_SECRET", "kicraft-dev-secret") is not None
+    assert web._project_secret() != b"kicraft-dev-secret"
+    assert web._project_secret() == web._project_secret()  # stable in-process
+    # A token forged with the old well-known default must not verify.
+    payload = base64.urlsafe_b64encode(
+        str(tmp_path).encode()).decode().rstrip("=")
+    forged_sig = base64.urlsafe_b64encode(
+        hmac.new(b"kicraft-dev-secret", payload.encode(), hashlib.sha256).digest()
+    ).decode().rstrip("=")
+    assert web._resolve_project_token(f"{payload}.{forged_sig}") is None
+    # ...while a token minted by this process does.
+    assert web._resolve_project_token(web._register_project_dir(tmp_path)) \
+        == tmp_path.resolve()

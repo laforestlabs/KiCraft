@@ -49,6 +49,15 @@ _BUILD_CMD = [sys.executable, "-m", "kicraft.design.cli_app",
 _MANUAL_ROUTE_CMD = [sys.executable, "-m", "kicraft.design.cli_app",
                      "manual-route", ".kicraft/state.json", "generated"]
 
+# The kind -> argv contract, THE single spelling of what each job kind runs.
+# The web app's in-process fallback (_execute_claimed_job_local) imports this
+# so a flag/path change can never make a build behave differently depending on
+# whether the standalone worker happened to be heartbeating at claim time.
+JOB_KIND_COMMANDS: dict[str, list[str]] = {
+    "build": _BUILD_CMD,
+    "manual_route": _MANUAL_ROUTE_CMD,
+}
+
 _MAX_ATTEMPTS = 2  # claims a job may burn before it is failed instead of requeued
 
 
@@ -71,7 +80,8 @@ class BuildWorker:
         # must never run the wrong command on a job from a newer web).
         self.commands = (
             {k: list(v) for k, v in commands.items()} if commands is not None
-            else {"build": self.build_cmd, "manual_route": list(_MANUAL_ROUTE_CMD)}
+            else {**{k: list(v) for k, v in JOB_KIND_COMMANDS.items()},
+                  "build": self.build_cmd}
         )
         self.timeout_s = timeout_s
         self.poll_s = poll_s

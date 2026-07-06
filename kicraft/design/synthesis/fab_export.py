@@ -31,6 +31,31 @@ _FAB_LAYERS = (
     "F.Cu,B.Cu,F.Paste,B.Paste,F.Silkscreen,B.Silkscreen,F.Mask,B.Mask,Edge.Cuts"
 )
 _LCSC_RE = re.compile(r"\bC\d{4,}\b")
+# Chip R/C/L imperial size codes that LOOK like C-numbers when prefixed with
+# 'C' in prose ("100nF X7R, package C0603") -- never LCSC pins. Real LCSC
+# part numbers also never lead with 0, which excludes C0201/C0402/... and
+# C01005 by shape alone; this set catches the nonzero-led sizes too.
+_PACKAGE_SIZE_CODES = frozenset({
+    "1008", "1111", "1206", "1210", "1218", "1812", "1825",
+    "2010", "2220", "2225", "2512", "2920",
+})
+
+
+def extract_lcsc_pin(text: str) -> str | None:
+    """The explicit LCSC C-number pinned in prose, or None.
+
+    Shared by the BOM sourcing resolution (cli_app) and the fab BOM export so
+    both always agree on what counts as a pin. Package-size tokens (C0603,
+    C1206, ...) are excluded: treating "package C0603" as a pin either bounced
+    correct BOM commits at the sourcing gate or exported an unrelated real
+    part into the fab BOM.
+    """
+    for m in _LCSC_RE.finditer(text or ""):
+        digits = m.group(0)[1:]
+        if digits.startswith("0") or digits in _PACKAGE_SIZE_CODES:
+            continue
+        return m.group(0)
+    return None
 
 
 def _run(cmd: list[str], timeout: float | None = None) -> None:
@@ -48,13 +73,12 @@ def _write_bom_csv(path: Path, parts: list[dict[str, Any]]) -> None:
         w.writerow(["ref", "value", "footprint", "mpn", "lcsc", "sheet"])
         for p in parts:
             note = p.get("sourcing_note") or ""
-            m = _LCSC_RE.search(note)
             w.writerow([
                 p.get("ref", ""),
                 p.get("value", ""),
                 p.get("footprint", ""),
                 p.get("mpn") or "",
-                m.group(0) if m else "",
+                extract_lcsc_pin(note) or "",
                 p.get("sheet", ""),
             ])
 

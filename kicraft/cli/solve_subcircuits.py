@@ -51,6 +51,21 @@ from pathlib import Path
 from typing import Any
 
 
+def _round_index(r: dict, default: int = -1) -> int:
+    """``r['round_index']`` as an int, defaulting only for missing/None/junk.
+
+    NOT ``int(r.get("round_index", -1) or -1)``: that idiom collapses a
+    legitimate round 0 (falsy) to -1, which broke the base_offset that keeps
+    leaf round numbering monotonic across parent rounds whenever the only
+    prior round was round 0 (single-round smoke/fast configs)."""
+    v = r.get("round_index")
+    if v is None:
+        return default
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
 
 def _ensure_kicad_python_path() -> None:
     """Ensure KiCad Python bindings are importable."""
@@ -791,7 +806,7 @@ def _solve_leaf_subcircuit(
                     ]
                     if prior_all_rounds:
                         max_idx = max(
-                            int(r.get("round_index", -1) or -1) for r in prior_all_rounds
+                            _round_index(r) for r in prior_all_rounds
                         )
                         if max_idx >= 0:
                             base_offset = max_idx + 1
@@ -1145,11 +1160,11 @@ def _append_failed_rounds_to_debug(
         rec = r.to_dict()
         rec["experiment_round"] = int(experiment_round or 0)
         new_dicts.append(rec)
-    new_indices = {int(r.get("round_index", -1) or -1) for r in new_dicts}
+    new_indices = {_round_index(r) for r in new_dicts}
     merged = [
         r
         for r in prior_all_rounds
-        if int(r.get("round_index", -1) or -1) not in new_indices
+        if _round_index(r) not in new_indices
     ]
     merged.extend(new_dicts)
     merged.sort(key=lambda r: int(r.get("round_index", 0) or 0))
@@ -1376,11 +1391,11 @@ def _persist_solution(
         rec["experiment_round"] = int(solved.experiment_round or 0)
         new_round_dicts.append(rec)
 
-    new_indices = {int(r.get("round_index", -1) or -1) for r in new_round_dicts}
+    new_indices = {_round_index(r) for r in new_round_dicts}
     merged_rounds = [
         r
         for r in solved.prior_rounds
-        if int(r.get("round_index", -1) or -1) not in new_indices
+        if _round_index(r) not in new_indices
     ]
     merged_rounds.extend(new_round_dicts)
     merged_rounds.sort(key=lambda r: int(r.get("round_index", 0) or 0))

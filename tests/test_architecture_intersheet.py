@@ -133,6 +133,44 @@ def test_fs_connections_mapped_cross_sheet_covered():
     assert result.offenders == []
 
 
+def test_fs_connections_mapped_shared_bus_covers_pairwise_connections():
+    """A single inter_sheet_net declared across 3+ sheets (a shared bus, e.g.
+    I2C over MCU/SENSOR/DISPLAY) covers every pairwise functional-spec
+    connection between its endpoints. The gate used to require an EXACT
+    2-sheet endpoint match, bouncing this correct architecture forever."""
+    fs = _fs(
+        FunctionalBlock(name="MCU", category="process", purpose="mcu"),
+        FunctionalBlock(name="SENSOR", category="sense", purpose="sensor"),
+        FunctionalBlock(name="DISPLAY", category="interface", purpose="display"),
+        connections=[
+            BlockConnection(from_block="MCU", to_block="SENSOR",
+                            signal_type="digital", description="I2C"),
+            BlockConnection(from_block="MCU", to_block="DISPLAY",
+                            signal_type="digital", description="I2C"),
+        ],
+    )
+    arch = _arch(
+        [
+            Sheet(name="MCU", stem="MCU", function="mcu"),
+            Sheet(name="SENSOR", stem="SENSOR", function="sensor"),
+            Sheet(name="DISPLAY", stem="DISPLAY", function="display"),
+        ],
+        inter_sheet_nets=[
+            InterSheetNet(
+                name="I2C_SDA",
+                endpoints=[
+                    SheetPin(sheet="MCU", direction="bidirectional"),
+                    SheetPin(sheet="SENSOR", direction="bidirectional"),
+                    SheetPin(sheet="DISPLAY", direction="bidirectional"),
+                ],
+            ),
+        ],
+    )
+    result = check_fs_connections_mapped(fs, arch)
+    assert result.ok is True
+    assert result.offenders == []
+
+
 def test_fs_connections_mapped_power_exempt():
     fs = _fs(
         FunctionalBlock(name="MCU", category="process", purpose="mcu"),

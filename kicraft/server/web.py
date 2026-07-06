@@ -85,7 +85,8 @@ from kicraft import __version__ as KICRAFT_VERSION
 from kicraft.build_slots import ACQUIRED_MARKER, slot_count
 
 from . import billing, notify
-from .stage_driver import DESIGN_STAGES, KICRAFT, SLOT_MODEL
+from .build_worker import JOB_KIND_COMMANDS, _kill_build
+from .stage_driver import DESIGN_STAGES, SLOT_MODEL
 from .stagetabs import StageTabs, _build_substage, demo_events
 from . import stage_diagram
 from .storage import (
@@ -107,7 +108,8 @@ from .pricing import (  # pure BOM-pricing helpers; fetch/cache stay below
     _resolve_part,  # noqa: F401  re-exported for tests / back-compat
     _vendor_cell,
 )
-from .render_serving import (  # importing registers the /project/<token>/... + /part-preview routes
+from . import render_serving  # importing registers the /project/<token>/... + /part-preview routes
+from .render_serving import (
     _project_secret,  # noqa: F401  re-exported for tests
     _register_project_dir,
     _resolve_project_token,  # noqa: F401  re-exported for tests (security/test_capability_token)
@@ -1659,37 +1661,43 @@ def _row_status_display(status, live) -> tuple[str, bool]:
     return shown, is_live
 
 
-_JOB_KIND_ARGS = {
-    "build": ["build", ".kicraft/state.json", "generated", "--no-archive"],
-    "manual_route": ["manual-route", ".kicraft/state.json", "generated"],
-}
-
-
 def _execute_claimed_job_local(ws: Path, state: dict, job_id: int, progress,
                                *, kind: str = "build") -> int:
     """Execute our own (self-claimed) job in-process: the pre-queue behavior,
     kept as the fallback for deploys without the worker unit. The 30m wall
     clock restarts at the slot-acquired marker so time spent queued for a host
     build slot is not billed against the job."""
-    cmd = KICRAFT + list(_JOB_KIND_ARGS[kind])
+    cmd = list(JOB_KIND_COMMANDS[kind])
     if kind == "build":
         quality = _store().build_quality_for_user(state.get("user_id"))
         if quality:  # tier override (free tier -> draft); None = default
             cmd += ["--quality", quality]
     proc = subprocess.Popen(
         cmd, cwd=str(ws), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1)
-    deadline = time.monotonic() + 1800
+        text=True, errors="replace", bufsize=1, start_new_session=True)
+    # Watchdog thread, mirroring the standalone worker: the deadline must fire
+    # even when the build goes silent (a hung FreeRouting prints nothing, so a
+    # per-line check blocks in readline forever and the job stays 'running'
+    # until the web process restarts).
+    wd = {"deadline": time.monotonic() + 1800, "killed": False}
+
+    def _watchdog() -> None:
+        while proc.poll() is None:
+            if time.monotonic() > wd["deadline"]:
+                wd["killed"] = True
+                _kill_build(proc)
+                return
+            time.sleep(5.0)
+
+    threading.Thread(target=_watchdog, daemon=True).start()
     for line in proc.stdout or []:
         text = line.rstrip()
         progress({"kind": "build_log", "text": text[:500]})
         if ACQUIRED_MARKER in text:
-            deadline = time.monotonic() + 1800
-        if time.monotonic() > deadline:  # hard wall-clock bound
-            proc.kill()
-            progress({"kind": "build_log", "text": "[build exceeded 30m, killed]"})
-            break
+            wd["deadline"] = time.monotonic() + 1800
     rc = proc.wait()
+    if wd["killed"]:
+        progress({"kind": "build_log", "text": "[build exceeded 30m, killed]"})
     _store().finish_build(job_id, rc=rc)
     progress({"kind": "build_done", "ok": rc == 0})
     return rc
@@ -3200,9 +3208,9 @@ def _board_source(gen: Path, stem: str, token: str):
 
 
 def _load_persisted_state(dir_path) -> dict | None:
-    """Read a persisted project's state.json for the detail page's BOM. Resolves the
-    metadata dir via _state_path (build-in-place projects keep the pipeline's native
-    `.kicraft/`; older ones have `kicraft/` or a top-level copy). None if unreadable."""
+    """Read a persisted project's state.json for the detail page's BOM. The
+    metadata dir is always `.kicraft/` via _state_path (one layout, no fallback;
+    pre-Phase-4a projects were purged). None if unreadable."""
     if not dir_path:
         return None
     p = _state_path(Path(dir_path))
@@ -5675,7 +5683,9 @@ def main() -> None:
         host=os.environ.get("KICRAFT_WEB_HOST", "0.0.0.0"),
         port=int(os.environ.get("KICRAFT_WEB_PORT", "8080")),
         title="KiCraft",
-        storage_secret=os.environ.get("KICRAFT_STORAGE_SECRET", "kicraft-dev-secret"),
+        # Shared with the capability tokens; never falls open to a public
+        # default (render_serving generates a per-process secret when unset).
+        storage_secret=render_serving.storage_secret(),
         reload=False,
         show=False,
     )

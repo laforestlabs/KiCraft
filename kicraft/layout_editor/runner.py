@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -191,8 +193,24 @@ async def run_manual_compose(
             cwd=str(project_root),
             stdout=log_fh,
             stderr=log_fh.fileno(),
+            start_new_session=True,
         )
-        rc = await proc.wait()
+        try:
+            rc = await proc.wait()
+        except asyncio.CancelledError:
+            # The awaiting task was cancelled (layout_panel's wait_for stamp
+            # timeout): kill the whole compose process group -- pcbnew /
+            # kicad-cli children included -- or the orphan keeps writing
+            # parent_pre_freerouting.kicad_pcb / manual_stamped.json into the
+            # workspace, racing the next save/stamp or queued build.
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                try:
+                    proc.kill()
+                except (ProcessLookupError, OSError):
+                    pass
+            raise
     finally:
         log_fh.close()
     elapsed = time.perf_counter() - t0

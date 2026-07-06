@@ -10,17 +10,6 @@ from __future__ import annotations
 from kicraft.autoplacer.brain.types import Point
 
 
-def _bbox_size(bbox: tuple[Point, Point]) -> tuple[float, float]:
-    return (bbox[1].x - bbox[0].x, bbox[1].y - bbox[0].y)
-
-
-def _shift_bbox(bbox: tuple[Point, Point], origin: Point) -> tuple[Point, Point]:
-    return (
-        Point(bbox[0].x + origin.x, bbox[0].y + origin.y),
-        Point(bbox[1].x + origin.x, bbox[1].y + origin.y),
-    )
-
-
 def _shift_envelope(
     envelope: tuple[Point, Point],
     origin: Point,
@@ -31,37 +20,11 @@ def _shift_envelope(
     )
 
 
-def _shift_layer_envelopes(
-    envelopes: tuple[
-        list[tuple[Point, Point]],
-        list[tuple[Point, Point]],
-        list[tuple[Point, Point]],
-    ],
-    origin: Point,
-) -> tuple[
-    list[tuple[Point, Point]],
-    list[tuple[Point, Point]],
-    list[tuple[Point, Point]],
-]:
-    return (
-        [_shift_envelope(envelope, origin) for envelope in envelopes[0]],
-        [_shift_envelope(envelope, origin) for envelope in envelopes[1]],
-        [_shift_envelope(envelope, origin) for envelope in envelopes[2]],
-    )
-
-
 def _shift_rect(rect: tuple[Point, Point], origin: Point) -> tuple[Point, Point]:
     return (
         Point(rect[0].x + origin.x, rect[0].y + origin.y),
         Point(rect[1].x + origin.x, rect[1].y + origin.y),
     )
-
-
-def _shift_rects(
-    rects: tuple[tuple[Point, Point], ...],
-    origin: Point,
-) -> list[tuple[Point, Point]]:
-    return [_shift_rect(rect, origin) for rect in rects]
 
 
 def _rect_area(rect: tuple[Point, Point]) -> float:

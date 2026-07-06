@@ -1033,35 +1033,6 @@ def import_ses(kicad_pcb_path: str, ses_path: str, output_path: str) -> None:
     )
 
 
-def _build_contact_sheet(image_paths: list[str], output_path: str) -> bool:
-    """Build a simple contact sheet from existing images using ImageMagick."""
-    existing = [path for path in image_paths if path and os.path.exists(path)]
-    if not existing:
-        return False
-
-    magick = shutil.which("magick")
-    if magick is None:
-        return False
-
-    result = subprocess.run(
-        [
-            magick,
-            *existing,
-            "-background",
-            "white",
-            "-tile",
-            "2x2",
-            "-geometry",
-            "+8+8",
-            "montage",
-            output_path,
-        ],
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode == 0 and os.path.exists(output_path)
-
-
 def _resolve_fine_pitch_rule(
     kicad_pcb_path: str, config: dict[str, Any]
 ) -> tuple[int | None, int | None]:

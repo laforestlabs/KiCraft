@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import os
 import re
+import secrets
 from pathlib import Path
 
 from nicegui import app
@@ -31,11 +32,35 @@ from .parts_catalog import footprint_svg, get_part, symbol_svgs
 _ALLOWED_SUFFIXES = (".kicad_sch", ".kicad_pcb", ".kicad_pro")
 
 
+_EPHEMERAL_SECRET: str | None = None
+
+
+def storage_secret() -> str:
+    """The server secret: signs both the session cookie (ui.run storage_secret)
+    and the capability tokens below. From KICRAFT_STORAGE_SECRET (the box .env);
+    when unset, a random per-process secret is generated instead of falling open
+    to a public, well-known default -- with a known constant, an unauthenticated
+    attacker could compute payload+HMAC themselves and read any tenant's project
+    files. The ephemeral fallback keeps local dev working (tokens verify within
+    the process) but tokens/sessions die on restart, which is the visible nudge
+    to set the env var on a real deploy."""
+    env = os.environ.get("KICRAFT_STORAGE_SECRET")
+    if env:
+        return env
+    global _EPHEMERAL_SECRET
+    if _EPHEMERAL_SECRET is None:
+        _EPHEMERAL_SECRET = secrets.token_hex(32)
+        print("[render-serving] KICRAFT_STORAGE_SECRET unset; generated a random "
+              "per-process secret (tokens/sessions will not survive a restart)",
+              flush=True)
+    return _EPHEMERAL_SECRET
+
+
 def _project_secret() -> bytes:
-    """The HMAC key for project-file tokens: the same stable storage secret used to
-    sign the session cookie (env in the box .env, default for local dev). Stable
-    across restarts, so a token minted before a deploy still verifies afterwards."""
-    return os.environ.get("KICRAFT_STORAGE_SECRET", "kicraft-dev-secret").encode("utf-8")
+    """The HMAC key for project-file tokens. Stable across restarts when
+    KICRAFT_STORAGE_SECRET is set, so a token minted before a deploy still
+    verifies afterwards."""
+    return storage_secret().encode("utf-8")
 
 
 def _b64e(raw: bytes) -> str:

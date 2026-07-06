@@ -27,24 +27,6 @@ def _which_or_warn(name: str) -> str | None:
     return path
 
 
-def render_all(
-    pcb_path: str,
-    output_dir: str,
-    views: list[str] | None = None,
-) -> dict[str, str]:
-    """Compat shim for legacy callers. New code should call
-    ``kicraft.render.render_views`` directly."""
-    if _which_or_warn("kicad-cli") is None or _which_or_warn("magick") is None:
-        return {}
-    results = render_views(Path(pcb_path), Path(output_dir), views=views)
-    out: dict[str, str] = {}
-    for name, path in results.items():
-        out[name] = str(path)
-        size_kb = os.path.getsize(path) / 1024
-        print(f"  {name}: {path} ({size_kb:.0f} KB)")
-    return out
-
-
 def main():
     parser = argparse.ArgumentParser(description="Render PCB layers to PNG")
     parser.add_argument("pcb", help="Path to .kicad_pcb file")

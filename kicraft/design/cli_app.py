@@ -61,6 +61,7 @@ from .models import (
     StageStatus,
 )
 from .synthesize import SynthesisInputError, run as run_synth
+from .synthesis.fab_export import extract_lcsc_pin
 from .synthesis.symbol_library import search_symbols
 from .synthesis.footprint_library import (
     FootprintNotFoundError,
@@ -335,9 +336,9 @@ def _unresolved_lcsc(bom, project_root: Path) -> list[str]:
     return bad
 
 
-# A C-number smuggled in prose ("LCSC C8678", "use C9864"); same shape the fab
-# BOM exporter reads back out of sourcing_note (fab_export._LCSC_RE).
-_SOURCING_LCSC_RE = re.compile(r"\bC\d{4,}\b")
+# A C-number smuggled in prose ("LCSC C8678", "use C9864") is an explicit pin;
+# fab_export.extract_lcsc_pin is the ONE definition (also the fab BOM readback),
+# and it excludes package-size tokens like C0603 that are not part numbers.
 # Reject parts the offline snapshot already shows draining: a popular part
 # with a few hundred units in the (weeks-old) dump is routinely dry by the
 # time anyone orders. Overridable per-host via KICRAFT_BOM_STOCK_FLOOR (0
@@ -370,13 +371,12 @@ def _is_single_passive_footprint(fp: str) -> bool:
 
 def _resolve_part_lcsc(part, manifest_by_name: dict) -> str | None:
     """The C# a BOM part resolves to: an explicit pin in ``sourcing_note``
-    (via ``_SOURCING_LCSC_RE``) wins; else the library-bundle manifest's
-    ``sourcing.lcsc`` (via ``_lib_prefix`` + ``manifest_by_name``), the same
-    pattern ``_resolve_bom_mpn_sourcing`` follows."""
-    note = part.sourcing_note or ""
-    m = _SOURCING_LCSC_RE.search(note)
-    if m:
-        return m.group(0)
+    (via ``fab_export.extract_lcsc_pin``) wins; else the library-bundle
+    manifest's ``sourcing.lcsc`` (via ``_lib_prefix`` + ``manifest_by_name``),
+    the same pattern ``_resolve_bom_mpn_sourcing`` follows."""
+    pin = extract_lcsc_pin(part.sourcing_note or "")
+    if pin:
+        return pin
     lib = _lib_prefix(part.symbol) or _lib_prefix(part.footprint or "")
     man = manifest_by_name.get(lib) if lib else None
     if man and (man.sourcing or {}).get("lcsc"):
@@ -516,10 +516,9 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
     for part in (bom.parts or []):
         mpn = (part.mpn or "").strip()
         note = part.sourcing_note or ""
-        pinned = _SOURCING_LCSC_RE.search(note)
-        if pinned:
+        cid = extract_lcsc_pin(note)
+        if cid:
             label = mpn or (part.value or "").strip() or part.symbol
-            cid = pinned.group(0)
             hit = jlcparts.lookup(cid)
             if hit is None:
                 bad.append(

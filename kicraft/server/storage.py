@@ -1,15 +1,14 @@
-"""Run-storage lifecycle: workspaces (scratch) and the durable project tree.
+"""Run-storage layout + throwaway workspaces (the single layout definition).
 
-Extracted from web.py (refactor roadmap Phase 3) so the workspace<->durable
-mechanics live in one small module instead of being scattered through the web
-monolith. A *workspace* is scratch space under KICRAFT_WORK_DIR that the web and
-build-worker processes share; the *durable* copy lives under projects_dir. See
-CLAUDE.md "Storage model" and docs/plans/view-from-durable-refactor-v2.md for the
-planned collapse of the `.kicraft`/`kicraft` duality.
+Extracted from web.py (refactor roadmap Phase 3). Since Phase 4a
+(build-in-place) a project lives AND builds in projects_dir/<uid>/<pid>/ with
+its metadata always under `.kicraft/` -- one name, no fallback, no
+workspace<->durable duality (see CLAUDE.md "Storage model"). What remains of
+"workspaces" is KICRAFT_WORK_DIR tempdirs for id-less/admin runs only.
 
-NOTE: persistence (workspace -> durable, ``_persist_project``) still lives in
-web.py for now because it is coupled to the accounts store + notifications; it
-moves here when build orchestration is extracted.
+NOTE: persistence (``_persist_project``) still lives in web.py for now because
+it is coupled to the accounts store + notifications; it moves here when build
+orchestration is extracted.
 """
 from __future__ import annotations
 

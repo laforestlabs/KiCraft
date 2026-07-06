@@ -43,6 +43,23 @@
     `docs/legal/*.md` still carry `[CONTACT EMAIL]` placeholders — operator decision.
   - **B30**: `gnd_pour_s` timing moved into the gnd-plane block; the power block records
     its own `power_pour_s` (no consumers of either key outside leaf_routing).
+- **2026-07-06** — second batch (12 items): B6, B20, B23, B34, B36, B44, B45, C6, C11, C12,
+  C14, C15. Fix-shape notes:
+  - **B6**: no refuse-to-start — when KICRAFT_STORAGE_SECRET is unset,
+    `render_serving.storage_secret()` generates a random per-process secret (dev keeps
+    working; tokens/sessions just don't survive restarts) and web.py's `ui.run` cookie
+    secret now shares it. The tautological guard test was replaced with a real
+    forged-with-default-secret-must-fail assertion.
+  - **B20**: the in-process fallback got the worker's watchdog-thread pattern verbatim,
+    plus `errors="replace"` + `start_new_session` + group kill (B1's siblings on this path).
+  - **B45**: one shared `fab_export.extract_lcsc_pin` used by BOTH the §9.26 sourcing gate
+    and the fab BOM readback; excludes zero-led digit runs (C0201/C0402/C0603/C01005 — real
+    LCSC numbers never lead with 0) plus a deny-list of nonzero-led package codes
+    (C1206/C2512/...). Four other C-number regexes exist codebase-wide but are match-only
+    (id extraction from known-id fields), left alone.
+  - **B34**: `_round_index()` helper replaces the five `int(x or -1)` sites.
+  - **C6**: `build_worker.JOB_KIND_COMMANDS` is now the one kind→argv map; web.py's
+    `_JOB_KIND_ARGS` deleted, fallback imports the worker's map + `_kill_build`.
 
 ## 1. Bug fixes
 
@@ -189,7 +206,7 @@
                 ui.notify("A run is already in progress.", color="warning")
                 return   (web.py:5107)  ...  _LIVE_RUNS[pid] = state   (web.py:1736, unconditional)`
 
-- [ ] **B6** `kicraft/server/render_serving.py:38` — Capability-token file serving falls open to the public, well-known default secret 'kicraft-dev-secret' when KICRAFT_STORAGE_SECRET is unset, and the sole guard test is a tautology, so a misconfigured prod box lets anyone forge tokens for any project dir.
+- [x] **B6** `kicraft/server/render_serving.py:38` — Capability-token file serving falls open to the public, well-known default secret 'kicraft-dev-secret' when KICRAFT_STORAGE_SECRET is unset, and the sole guard test is a tautology, so a misconfigured prod box lets anyone forge tokens for any project dir.
   - **Severity:** high · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     _project_secret() (render_serving.py:38, mirrored in web.py:5606) returns b'kicraft-dev-secret'
@@ -424,7 +441,7 @@
     content on each edit-rerun.
   - **Key line(s):** `with tabs.view_slot("fab"):   (web.py:5409, inside 'if not view["fab_done"]:' at 5392)  ...  _mark_fab_invalid: 'if view.get("fab_invalid"): return' then 'with tabs.view_slot("fab"):' paints the red card (5129-5136)`
 
-- [ ] **B20** `kicraft/server/web.py:1651` — The in-process build fallback's 30-minute 'hard wall-clock bound' is only checked after a stdout line arrives, so a build that hangs silently is never killed and the run/job is stuck 'running' forever.
+- [x] **B20** `kicraft/server/web.py:1651` — The in-process build fallback's 30-minute 'hard wall-clock bound' is only checked after a stdout line arrives, so a build that hangs silently is never killed and the run/job is stuck 'running' forever.
   - **Severity:** medium · **Status:** VERIFIED-CONFIRMED
   - **Failure scenario:**
     No standalone worker heartbeating (fallback deploy) -> _drive_build_queue self-claims the job
@@ -489,7 +506,7 @@
     routed board and schematic indefinitely. Making a project private does not change the durable
     dir path, so the old token stays valid.
 
-- [ ] **B23** `kicraft/design/synthesis/validation.py:2099` — check_fs_connections_mapped requires an inter_sheet_net whose endpoint-sheet set EXACTLY equals the {from,to} pair, so a correctly-declared 3+-endpoint net (a shared bus) fails the hard architecture-commit gate with a misleading 'no inter_sheet_net' rejection.
+- [x] **B23** `kicraft/design/synthesis/validation.py:2099` — check_fs_connections_mapped requires an inter_sheet_net whose endpoint-sheet set EXACTLY equals the {from,to} pair, so a correctly-declared 3+-endpoint net (a shared bus) fails the hard architecture-commit gate with a misleading 'no inter_sheet_net' rejection.
   - **Severity:** medium · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     Architecture declares one inter-sheet net with 3+ endpoints (e.g. I2C_SDA across MCU, SENSOR and
@@ -615,7 +632,7 @@
     freshness gate as the misleading rc6 'no routed parent / route-infra failed' verdict (the exact
     cluster documented in the 0d9ec74 memory), instead of at the phase boundary built to catch it.
 
-- [ ] **B34** `kicraft/cli/solve_subcircuits.py:794` — int(r.get("round_index", -1) or -1) collapses a legitimate round_index of 0 to -1 (the exact 'x or -1 collapses 0' pitfall), so the base_offset that keeps leaf round numbering monotonic across parent rounds (docstring lines 766-768) is computed wrong when the only prior round is round 0; the same idiom repeats at lines 1148, 1152, 1379, 1383.
+- [x] **B34** `kicraft/cli/solve_subcircuits.py:794` — int(r.get("round_index", -1) or -1) collapses a legitimate round_index of 0 to -1 (the exact 'x or -1 collapses 0' pitfall), so the base_offset that keeps leaf round numbering monotonic across parent rounds (docstring lines 766-768) is computed wrong when the only prior round is round 0; the same idiom repeats at lines 1148, 1152, 1379, 1383.
   - **Severity:** medium · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     A leaf solved with effective_rounds==1 (subcircuit_fast_smoke_mode with
@@ -639,7 +656,7 @@
     _run_kicad_cli_drc reach the loud re-raise branch at line 3117, and the two most common failure
     modes never do.
 
-- [ ] **B36** `kicraft/layout_editor/runner.py:195` — run_manual_compose never kills the compose_subcircuits subprocess when the awaiting task is cancelled: asyncio.wait_for in layout_panel._on_save cancels 'await proc.wait()' on timeout but nothing calls proc.kill(), contradicting layout_panel.py:48-50 which claims the subprocess is killed.
+- [x] **B36** `kicraft/layout_editor/runner.py:195` — run_manual_compose never kills the compose_subcircuits subprocess when the awaiting task is cancelled: asyncio.wait_for in layout_panel._on_save cancels 'await proc.wait()' on timeout but nothing calls proc.kill(), contradicting layout_panel.py:48-50 which claims the subprocess is killed.
   - **Severity:** medium · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     A stamp hangs past _STAMP_TIMEOUT_S=180s (e.g. pcbnew/kicad-cli DRC wedge): wait_for raises
@@ -766,7 +783,7 @@
                 (pid, bool(st.get("running")))
                 for pid, st in _LIVE_RUNS.items() if st.get("user_id") == user.id))   (web.py:5182-5184)`
 
-- [ ] **B44** `kicraft/design/synthesis/validation.py:309` — check_refdes_uniqueness scans references with a regex that excludes the suffixed refdes forms the ref grammar allows (D1A, J1-PWR), leaving the §9.7 duplicate gate blind to collisions among exactly the leaf-library-renumbered refs it was built to catch.
+- [x] **B44** `kicraft/design/synthesis/validation.py:309` — check_refdes_uniqueness scans references with a regex that excludes the suffixed refdes forms the ref grammar allows (D1A, J1-PWR), leaving the §9.7 duplicate gate blind to collisions among exactly the leaf-library-renumbered refs it was built to catch.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     §9.7 exists to catch leaf-library renumber-map bugs that produce the same refdes in two
@@ -778,7 +795,7 @@
     leaf-library refs) sail through the uniqueness gate and surface later as a silent refdes
     collision on the board — the exact class the check was written to stop.
 
-- [ ] **B45** `kicraft/design/cli_app.py:340` — _SOURCING_LCSC_RE treats capacitor package tokens like 'C0603'/'C1206' in sourcing_note prose as an explicit LCSC part pin, causing false §9.26 commit rejections or, worse, pricing/exporting the wrong real part into the fab BOM.
+- [x] **B45** `kicraft/design/cli_app.py:340` — _SOURCING_LCSC_RE treats capacitor package tokens like 'C0603'/'C1206' in sourcing_note prose as an explicit LCSC part pin, causing false §9.26 commit rejections or, worse, pricing/exporting the wrong real part into the fab BOM.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     _SOURCING_LCSC_RE (\bC\d{4,}\b) is the highest-priority sourcing tier in
@@ -941,7 +958,7 @@
     created (jlcparts.py:539) and query it for the substring/keyword tiers (~ms each); the _widen
     prefix probes can use LIKE 'q%' which the existing NOCASE index serves.
 
-- [ ] **C6** `kicraft/server/web.py:1625` — _JOB_KIND_ARGS duplicates the cross-process build invocation already defined as _BUILD_CMD/_MANUAL_ROUTE_CMD in build_worker.py:43-49, spelling the job-kind -> command contract in two processes.
+- [x] **C6** `kicraft/server/web.py:1625` — _JOB_KIND_ARGS duplicates the cross-process build invocation already defined as _BUILD_CMD/_MANUAL_ROUTE_CMD in build_worker.py:43-49, spelling the job-kind -> command contract in two processes.
   - **Severity:** low · **Status:** VERIFIED-CONFIRMED
   - **Failure scenario:**
     The exact argv ['build', '.kicraft/state.json', 'generated', '--no-archive'] and the manual-
@@ -1014,14 +1031,14 @@
     the BOM-lookup path and the pricing-cache path can disagree about whether the same part's retail
     state was checked.
 
-- [ ] **C11** `kicraft/autoplacer/freerouting_runner.py:1036` — _build_contact_sheet is dead (private, zero callers repo-wide) and duplicates the live contact-sheet implementation in kicraft/autoplacer/brain/subcircuit_render_diagnostics.build_leaf_contact_sheet (line 326); delete it.
+- [x] **C11** `kicraft/autoplacer/freerouting_runner.py:1036` — _build_contact_sheet is dead (private, zero callers repo-wide) and duplicates the live contact-sheet implementation in kicraft/autoplacer/brain/subcircuit_render_diagnostics.build_leaf_contact_sheet (line 326); delete it.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     27 dead lines in the load-bearing routing module, including a suspicious ImageMagick invocation
     ('montage' passed as a trailing argument to `magick` before the output path) that would silently
     return False if anyone revived it instead of reusing build_leaf_contact_sheet.
 
-- [ ] **C12** `kicraft/server/session.py:144` — read_state's docstring claims _state_path 'resolves the workspace (.kicraft) or durable (kicraft) layout', but _state_path (storage.py:31-33) is single-layout — stale pre-Phase-4a dual-name documentation contradicting the one-name .kicraft/ rule.
+- [x] **C12** `kicraft/server/session.py:144` — read_state's docstring claims _state_path 'resolves the workspace (.kicraft) or durable (kicraft) layout', but _state_path (storage.py:31-33) is single-layout — stale pre-Phase-4a dual-name documentation contradicting the one-name .kicraft/ rule.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     Three docstrings still describe the removed .kicraft/kicraft duality: session.py:142-145,
@@ -1042,14 +1059,14 @@
     seen-set. Cheaper: keep the same seen-set alongside the list in both _build_merged_nets and
     _append_pad_ref (pure bookkeeping; does not touch placement/routing decisions).
 
-- [ ] **C14** `kicraft/cli/_compose_geometry.py:34` — Four helpers in _compose_geometry.py are dead: _bbox_size (line 13), _shift_bbox (line 17), _shift_layer_envelopes (line 34), and _shift_rects (line 60) have zero references anywhere in kicraft/, tests/, tools/ or scripts/ (compose_subcircuits imports only the other six helpers); delete them.
+- [x] **C14** `kicraft/cli/_compose_geometry.py:34` — Four helpers in _compose_geometry.py are dead: _bbox_size (line 13), _shift_bbox (line 17), _shift_layer_envelopes (line 34), and _shift_rects (line 60) have zero references anywhere in kicraft/, tests/, tools/ or scripts/ (compose_subcircuits imports only the other six helpers); delete them.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     About 40 of the module's 98 lines are unreachable in a file documented as 'shared by the
     outline, slide, stamp and validation code', so readers and future refactors of the compose
     pipeline must reverse-engineer which third of the 'shared' helpers is actually load-bearing.
 
-- [ ] **C15** `kicraft/cli/render_pcb.py:30` — render_all is a self-described 'Compat shim for legacy callers' with zero remaining callers anywhere (the render-pcb entry point in pyproject.toml uses main(), and all other consumers call kicraft.render.render_views directly); delete it.
+- [x] **C15** `kicraft/cli/render_pcb.py:30` — render_all is a self-described 'Compat shim for legacy callers' with zero remaining callers anywhere (the render-pcb entry point in pyproject.toml uses main(), and all other consumers call kicraft.render.render_views directly); delete it.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     16 lines of dead wrapper invite new code to call the shim (which adds print side effects and

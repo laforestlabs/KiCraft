@@ -306,7 +306,11 @@ def check_refdes_uniqueness(project_dir: Path, project_stem: str) -> CheckResult
     import json as _json
     import re
 
-    ref_re = re.compile(r'\(property\s+"Reference"\s+"([A-Z]+[0-9]+)"')
+    # Full REF_RE grammar (models.py): suffixed refs like D1A / J1-PWR are
+    # exactly what leaf-library renumbering emits, so the duplicate scan must
+    # see them too -- requiring the closing quote right after the digits left
+    # the gate blind to collisions among suffixed refs.
+    ref_re = re.compile(r'\(property\s+"Reference"\s+"([A-Z]+[0-9]+[A-Z0-9_-]*)"')
     ap_path = project_dir / f"{project_stem}_autoplacer.json"
     refs_by_origin: dict[str, list[str]] = {}
 
@@ -328,17 +332,17 @@ def check_refdes_uniqueness(project_dir: Path, project_stem: str) -> CheckResult
             d = ap.get(key, {})
             if isinstance(d, dict):
                 for k, v in d.items():
-                    if isinstance(k, str) and re.match(r"^[A-Z]+[0-9]+$", k):
+                    if isinstance(k, str) and re.match(r"^[A-Z]+[0-9]+[A-Z0-9_-]*$", k):
                         refs_by_origin.setdefault(k, []).append(f"ap:{key}")
                     if isinstance(v, list):
                         for item in v:
-                            if isinstance(item, str) and re.match(r"^[A-Z]+[0-9]+$", item):
+                            if isinstance(item, str) and re.match(r"^[A-Z]+[0-9]+[A-Z0-9_-]*$", item):
                                 refs_by_origin.setdefault(item, []).append(f"ap:{key}:member")
         for key in ("thermal_refs", "signal_flow_order"):
             lst = ap.get(key, [])
             if isinstance(lst, list):
                 for item in lst:
-                    if isinstance(item, str) and re.match(r"^[A-Z]+[0-9]+$", item):
+                    if isinstance(item, str) and re.match(r"^[A-Z]+[0-9]+[A-Z0-9_-]*$", item):
                         refs_by_origin.setdefault(item, []).append(f"ap:{key}")
 
     # Origins are recorded as a list of where the ref was *seen*; for
@@ -2094,9 +2098,15 @@ def check_fs_connections_mapped(
         # If either block is unmapped, we can't verify — skip (advisory only)
         if not from_sheets or not to_sheets:
             continue
-        # Cross-sheet: check if any inter_sheet_net connects these sheets
+        # Cross-sheet: check if any inter_sheet_net connects these sheets.
+        # Subset, not equality: a shared bus declared once across 3+ sheets
+        # (e.g. I2C_SDA over MCU/SENSOR/DISPLAY) covers every pairwise
+        # functional-spec connection between its endpoints; requiring an exact
+        # 2-sheet match would bounce that correct architecture forever.
         cross_pairs = {frozenset({f, t}) for f in from_sheets for t in to_sheets if f != t}
-        covered = any(pair in isn_by_sheets for pair in cross_pairs)
+        covered = any(pair <= endpoint_sheets
+                      for pair in cross_pairs
+                      for endpoint_sheets in isn_by_sheets)
         if not covered:
             bad.append(
                 f"connection {conn.from_block!r}→{conn.to_block!r} "
