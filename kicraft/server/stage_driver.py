@@ -97,8 +97,11 @@ BOM_TOOLS = [
         "name": "list_parts",
         "description": "List curated parts-library bundles available to this project "
                        "(vendored + any fetched). Returns a table with the exact symbol and "
-                       "footprint strings to use verbatim in the BOM.",
-        "parameters": {"type": "object", "properties": {}}}},
+                       "footprint strings to use verbatim in the BOM. The full table is "
+                       "large — pass 'query' keywords to filter it.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "optional keywords to filter the "
+                      "table, e.g. 'bnc' or 'trimmer 3296'"}}}}},
     {"type": "function", "function": {
         "name": "lookup_symbol",
         "description": "Verify a KiCad symbol in 'Library:Name' form exists and list its pins.",
@@ -107,17 +110,19 @@ BOM_TOOLS = [
                        "'usb-c-16p:TYPE-C-31-M-12'"}}, "required": ["symbol"]}}},
     {"type": "function", "function": {
         "name": "search_symbols",
-        "description": "Find the correct stock KiCad symbol id by keyword when you do not know "
-                       "the exact 'Library:Name'. Returns matching 'Library:Name' ids to use "
-                       "verbatim. Use this instead of guessing a symbol name.",
+        "description": "Find the correct symbol id by keyword when you do not know the exact "
+                       "'Library:Name'. Searches curated parts-library bundles first (returned "
+                       "as symbol+footprint pairs — adopt the pair), then stock KiCad symbols. "
+                       "Returns ids to use verbatim. Use this instead of guessing a symbol name.",
         "parameters": {"type": "object", "properties": {
             "query": {"type": "string", "description": "keywords, e.g. 'conn 02x08', 'crystal', "
                       "'n-channel mosfet'"}}, "required": ["query"]}}},
     {"type": "function", "function": {
         "name": "search_footprints",
-        "description": "Find the correct stock KiCad footprint id by keyword when you do not know "
-                       "the exact 'Library:Name'. Returns matching 'Library:Name' ids to use "
-                       "verbatim. Use this instead of guessing a footprint name.",
+        "description": "Find the correct footprint id by keyword when you do not know the exact "
+                       "'Library:Name'. Searches curated parts-library bundles first (returned "
+                       "as symbol+footprint pairs — adopt the pair), then stock KiCad footprints. "
+                       "Returns ids to use verbatim. Use this instead of guessing a footprint name.",
         "parameters": {"type": "object", "properties": {
             "query": {"type": "string", "description": "keywords, e.g. 'pinheader 2x08', "
                       "'barreljack', 'sot-23'"}}, "required": ["query"]}}},
@@ -195,7 +200,12 @@ def _stage_extra(stage: str) -> str:
             "search_footprints for a passive if the board needs a DIFFERENT package (e.g. 0402, or "
             "through-hole 'LED_THT:LED_D5.0mm...'). For connectors/mechanical, call "
             "search_footprints for the exact id (e.g. "
-            "'Connector_PinHeader_2.54mm:PinHeader_2x08_P2.54mm_Vertical').\n"
+            "'Connector_PinHeader_2.54mm:PinHeader_2x08_P2.54mm_Vertical'); when the results "
+            "include a curated bundle, the bundle WINS over a stock footprint. Connectors "
+            "with a mating or orientation constraint (RF/coax: BNC, SMA, U.FL; USB; card "
+            "sockets) are NOT generic: use a curated bundle, or resolve the real part with "
+            "lookup_lcsc_id + add_part_from_lcsc — never a stock footprint drawn for a "
+            "different manufacturer's connector.\n"
             "- ICs, sensors, MCUs, regulators, or ANY part where a specific MPN matters: do NOT "
             "pick a stock symbol/footprint. Resolve the real part: lookup_lcsc_id then "
             "add_part_from_lcsc, then list_parts to read the exact '<name>:<sym>' / '<name>:<fp>' "
@@ -469,9 +479,22 @@ def _bom_executor(workspace: Path):
         if name == "list_parts":
             # Generous cap: the vendored library alone renders ~600 chars per
             # bundle, and the core-defaults adoption rule sends the model HERE
-            # for exact ids, so truncating this table breaks bundle adoption.
-            r = _run(KICRAFT + ["list-parts"], workspace)
-            return (r.stdout or r.stderr)[:40000]
+            # for exact ids. The full table has outgrown the cap (~55KB for
+            # 260+ bundles), so a truncated tail must SAY so and point at the
+            # query filter — a silent cut reads as "that part doesn't exist".
+            cmd = KICRAFT + ["list-parts"]
+            query = str(args.get("query") or "").strip()
+            if query:
+                cmd.append(query)
+            r = _run(cmd, workspace)
+            out = r.stdout or r.stderr
+            if len(out) > 40000:
+                cut = out.rfind("\n", 0, 40000)
+                out = out[: cut if cut > 0 else 40000] + (
+                    "\n… TABLE TRUNCATED — call list_parts again with a "
+                    "'query' (e.g. {\"query\": \"bnc\"}) to see the rest."
+                )
+            return out
         if name == "lookup_symbol":
             r = _run(KICRAFT + ["lookup-symbol", str(args.get("symbol", ""))], workspace)
             return memo.setdefault(ckey, (r.stdout or r.stderr)[:3000])

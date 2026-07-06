@@ -13,6 +13,7 @@ relevant stage pastes into its sub-agent prompt.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from .models import Architecture
@@ -153,6 +154,61 @@ def _load_library_parts(project_root: Path | None = None) -> tuple[list, list]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("could not load parts library: %s", exc)
         return [], []
+
+
+# Query terms that describe the kind of thing being searched, not the part
+# (the model habitually appends them); matching ANDs terms, so one such token
+# would otherwise zero an otherwise-good query.
+_PART_SEARCH_STOPWORDS = frozenset(
+    {"footprint", "footprints", "symbol", "symbols", "part", "parts"}
+)
+
+
+def _collapse_alnum(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def search_library_parts(
+    query: str, project_root: Path | None = None, *, limit: int = 8
+) -> list:
+    """Curated parts-library bundles matching ``query``, best-first.
+
+    The curated tier of the BOM stage's keyword search (KC-9EZE3S: the stage
+    searched "BNC connector" seven ways and saw only stock KiCad ids — the
+    vendored ``bnc-pcb-jack`` bundle, whose footprint/LCSC/3D model agree,
+    was unreachable because the search tools were stock-only and the prompt
+    table is filtered to core_blocks). A bundle's haystack is its manifest
+    name, MPN, tags, description and symbol/footprint names; terms match
+    verbatim or with separators collapsed ("trimpot" hits "trim-pot-3296w").
+    Bundles matching every term rank before partial matches (most terms
+    first, then name), so a broad query like "BNC connector" still surfaces
+    a bundle that never says "connector".
+    """
+    terms = [t for t in (w.lower() for w in (query or "").split())
+             if t and t not in _PART_SEARCH_STOPWORDS]
+    if not terms:
+        return []
+    active, _broken = _load_library_parts(project_root)
+    scored: list[tuple[int, int, int, str, object]] = []
+    for part in active:
+        m = part.manifest
+        ident = _collapse_alnum(f"{m.name} {m.mpn or ''}")
+        hay = " ".join(
+            [m.name, m.mpn or "", " ".join(m.tags or []),
+             m.description or "", m.symbol_name or "", m.footprint_name or ""]
+        ).lower()
+        hay_collapsed = _collapse_alnum(hay)
+        n = sum(1 for t in terms
+                if t in hay or _collapse_alnum(t) in hay_collapsed)
+        if n:
+            # A name/MPN hit is the part itself; a description-only hit is
+            # often incidental prose ("…connector…"), so it ranks after.
+            ident_hit = any(_collapse_alnum(t) in ident for t in terms)
+            scored.append(
+                (-int(n == len(terms)), -n, -int(ident_hit), m.name, part)
+            )
+    scored.sort(key=lambda s: s[:4])
+    return [entry[4] for entry in scored[:limit]]
 
 
 def _format_available_parts_block(loaded_parts: list) -> str | None:

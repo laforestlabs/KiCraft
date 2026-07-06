@@ -49,6 +49,7 @@ from .library import (
     _load_library_leaves,
     _load_library_parts,
     _validate_library_picks,
+    search_library_parts,
 )
 from .models import (
     Architecture,
@@ -1004,14 +1005,36 @@ def _cmd_lookup_symbol(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_curated_part_matches(curated: list) -> None:
+    """Curated-bundle hits for the search tools' stdout, ids paired.
+
+    Both ids ride one line so the model adopts a bundle's symbol+footprint
+    as a PAIR — pairing a bundle id with a stock id for the same part is
+    exactly the KC-9EZE3S footprint/part mismatch.
+    """
+    print("curated bundles (use the symbol+footprint PAIR verbatim):")
+    for part in curated:
+        m = part.manifest
+        print(f"  symbol {m.name}:{m.symbol_name}  "
+              f"footprint {m.name}:{m.footprint_name}  "
+              f"— {m.mpn}; {m.description} [{m.maturity}]")
+
+
 def _cmd_search_symbols(args: argparse.Namespace) -> int:
+    curated = search_library_parts(args.query, Path.cwd())
     matches = search_symbols(args.query, limit=args.limit)
-    _log_query("search_symbols", outcome=("hit" if matches else "miss"),
-               query=args.query, n_matches=len(matches))
-    if not matches:
-        print(f"no stock KiCad symbols match {args.query!r}; try fewer or broader terms",
+    _log_query("search_symbols",
+               outcome=("hit" if (curated or matches) else "miss"),
+               query=args.query, n_matches=len(curated) + len(matches))
+    if not curated and not matches:
+        print(f"no curated bundles or stock KiCad symbols match "
+              f"{args.query!r}; try fewer or broader terms",
               file=sys.stderr)
         return 0
+    if curated:
+        _print_curated_part_matches(curated)
+        if matches:
+            print("stock KiCad symbols:")
     for sym in matches:
         print(sym)
     return 0
@@ -1036,13 +1059,20 @@ def _cmd_lookup_footprint(args: argparse.Namespace) -> int:
 
 
 def _cmd_search_footprints(args: argparse.Namespace) -> int:
+    curated = search_library_parts(args.query, Path.cwd())
     matches = search_footprints(args.query, limit=args.limit)
-    _log_query("search_footprints", outcome=("hit" if matches else "miss"),
-               query=args.query, n_matches=len(matches))
-    if not matches:
-        print(f"no stock KiCad footprints match {args.query!r}; try fewer or broader terms",
+    _log_query("search_footprints",
+               outcome=("hit" if (curated or matches) else "miss"),
+               query=args.query, n_matches=len(curated) + len(matches))
+    if not curated and not matches:
+        print(f"no curated bundles or stock KiCad footprints match "
+              f"{args.query!r}; try fewer or broader terms",
               file=sys.stderr)
         return 0
+    if curated:
+        _print_curated_part_matches(curated)
+        if matches:
+            print("stock KiCad footprints:")
     for fp in matches:
         print(fp)
     return 0
@@ -1058,9 +1088,21 @@ def _cmd_list_leaves(_: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_list_parts(_: argparse.Namespace) -> int:
-    active, _broken = _load_library_parts(Path.cwd())
-    _log_query("list_parts", outcome="listed", n_active=len(active))
+def _cmd_list_parts(args: argparse.Namespace) -> int:
+    query = (getattr(args, "query", None) or "").strip()
+    if query:
+        # Filtered view: the full table has grown past what a tool round
+        # can carry (~55KB); a keyword slice keeps every bundle reachable.
+        active = search_library_parts(query, Path.cwd(), limit=64)
+        _log_query("list_parts", outcome="listed", n_active=len(active),
+                   query=query)
+        if not active:
+            print(f"(no library parts match {query!r}; run without a "
+                  f"query for the full table)")
+            return 0
+    else:
+        active, _broken = _load_library_parts(Path.cwd())
+        _log_query("list_parts", outcome="listed", n_active=len(active))
     block = _format_available_parts_block(active)
     if block is None:
         print("(no parts available in the library)")
@@ -2571,9 +2613,12 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
     elif stage == "bom":
         parts, _broken = _load_library_parts(state_path.parent.parent.resolve())
         # Filter to core_defaults parts (curated core_blocks catalog entries) —
-        # the full 247-bundle library is too large for the BOM prompt. Parts not
-        # in the catalog are excluded; the model can still find them via
-        # search_footprints / add_part_from_lcsc tools (graceful degradation).
+        # the full 260+-bundle library is too large for the BOM prompt. Parts
+        # not in the catalog stay reachable through the stage tools:
+        # search_symbols / search_footprints rank curated bundles first, and
+        # list_parts takes a keyword query (KC-9EZE3S: before that, non-core
+        # bundles were invisible and the model paired stock footprints with
+        # mismatched LCSC picks).
         try:
             from kicraft.parts_library.core_blocks import load_core_catalog
 
@@ -4800,6 +4845,10 @@ def main(argv: list[str] | None = None) -> int:
             "(project / home / vendored / extras tiers)"
         ),
     )
+    p_list_parts.add_argument(
+        "query", nargs="?", default=None,
+        help="optional keywords to filter the table (e.g. 'bnc' or 'trimmer 3296')",
+    )
     p_list_parts.set_defaults(func=_cmd_list_parts)
 
     p_lcsc = sub.add_parser(
@@ -5023,7 +5072,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p_search = sub.add_parser(
         "search-symbols",
-        help="list stock KiCad symbols whose Library:Name matches keywords",
+        help=(
+            "list curated parts-library bundles and stock KiCad symbols "
+            "matching keywords (curated first)"
+        ),
     )
     p_search.add_argument("query", help="keywords, e.g. 'conn 02x08' or 'crystal'")
     p_search.add_argument("--limit", type=int, default=40)
@@ -5040,7 +5092,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p_search_fp = sub.add_parser(
         "search-footprints",
-        help="list stock KiCad footprints whose Library:Name matches keywords",
+        help=(
+            "list curated parts-library bundles and stock KiCad footprints "
+            "matching keywords (curated first)"
+        ),
     )
     p_search_fp.add_argument("query", help="keywords, e.g. 'pinheader 2x08' or 'barreljack'")
     p_search_fp.add_argument("--limit", type=int, default=40)
