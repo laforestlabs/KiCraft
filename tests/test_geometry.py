@@ -100,6 +100,17 @@ def test_rotate_component_in_place_90():
     assert (c.width_mm, c.height_mm) == (4.0, 2.0)
 
 
+def test_rotate_component_in_place_rotates_pad_size_aabb():
+    # pad.size_mm is a WORLD-axis-aligned AABB (types.Pad contract) and must
+    # re-rotate with the pad -- at 90/270 the extents swap exactly.
+    c = _comp()
+    c.pads[0].size_mm = Point(1.5, 0.8)
+    geometry.rotate_component_in_place(c, 90)
+    assert _close(c.pads[0].size_mm, Point(0.8, 1.5))
+    geometry.rotate_component_in_place(c, 90)  # now at 180 total
+    assert _close(c.pads[0].size_mm, Point(1.5, 0.8))
+
+
 def test_rotate_component_in_place_noop_for_zero():
     c = _comp()
     geometry.rotate_component_in_place(c, 0)
@@ -127,3 +138,32 @@ def test_transform_point_agrees_with_pcbnew(deg):
     pcb_pt = Point(round(pcbnew.ToMM(pos.x), 6), round(pcbnew.ToMM(pos.y), 6))
     ours = geometry.transform_point(Point(1.0, 0.0), Point(0.0, 0.0), deg)
     assert _close(ours, pcb_pt, tol=1e-4), f"deg={deg}: ours={ours} pcbnew={pcb_pt}"
+
+
+@pytest.mark.parametrize("deg", [0, 90, 180, 270])
+def test_flip_composition_is_local_y_mirror_then_rotate(deg):
+    """The stamp sites compose ``fp.Flip(pos)`` + ``SetOrientationDegrees``;
+    the net world transform is R_cw(deg) applied to the Y-MIRRORED local
+    offset. _assign_layers' back-side flip models this with a Y mirror about
+    pos (an X mirror -- the pre-B24 behavior -- only agrees at 180-deg-offset
+    orientations and swaps 2-pad identities)."""
+    pcbnew = pytest.importorskip("pcbnew")
+    local = Point(3.0, 1.0)
+    board = pcbnew.BOARD()
+    fp = pcbnew.FOOTPRINT(board)
+    board.Add(fp)
+    fp.SetPosition(pcbnew.VECTOR2I(0, 0))
+    pad = pcbnew.PAD(fp)
+    pad.SetPosition(
+        pcbnew.VECTOR2I(pcbnew.FromMM(local.x), pcbnew.FromMM(local.y))
+    )
+    fp.Add(pad)
+    fp.Flip(fp.GetPosition(), False)
+    fp.SetOrientationDegrees(deg)
+
+    pos = pad.GetPosition()
+    stamped = Point(round(pcbnew.ToMM(pos.x), 6), round(pcbnew.ToMM(pos.y), 6))
+    model = geometry.rotate_vector(Point(local.x, -local.y), deg)
+    assert _close(model, stamped, tol=1e-4), (
+        f"deg={deg}: model={model} stamped={stamped}"
+    )

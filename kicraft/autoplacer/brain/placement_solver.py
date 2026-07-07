@@ -76,6 +76,7 @@ def _record_placed_extent(
         h = 0.0
     timings[f"{prefix}_placed_w_mm"] = w
     timings[f"{prefix}_placed_h_mm"] = h
+from .geometry import rotate_component_in_place, rotate_vector
 from .placement_scorer import PlacementScorer
 from .placement_utils import (
     _back_courtyard,
@@ -700,7 +701,7 @@ class PlacementSolver:
                         dist += 2
                     else:
                         break
-            accessible += dist
+                accessible += dist
 
         # Higher = more accessible area around pads
         access_score = min(100, accessible / 10)
@@ -814,10 +815,11 @@ class PlacementSolver:
             if comp.kind == "subcircuit":
                 anchor_off = zones.get(comp.ref, {}).get("anchor_offset_mm")
                 if anchor_off is not None:
-                    rad = math.radians(comp.rotation)
-                    cos_r, sin_r = math.cos(rad), math.sin(rad)
-                    cx -= anchor_off.x * cos_r - anchor_off.y * sin_r
-                    cy -= anchor_off.x * sin_r + anchor_off.y * cos_r
+                    # KiCad-CW, matching how the block is actually stamped
+                    # (parent_adapter._rotated / _world_artifact_origin).
+                    off = rotate_vector(anchor_off, comp.rotation)
+                    cx -= off.x
+                    cy -= off.y
 
             # Clamp to board
             hw, hh = comp.width_mm / 2, comp.height_mm / 2
@@ -963,9 +965,8 @@ class PlacementSolver:
             if comp.kind == "subcircuit":
                 anchor_off = zones.get(comp.ref, {}).get("anchor_offset_mm")
                 if anchor_off is not None:
-                    rad = math.radians(comp.rotation)
-                    cos_r, sin_r = math.cos(rad), math.sin(rad)
-                    rotated_x = anchor_off.x * cos_r - anchor_off.y * sin_r
+                    # KiCad-CW rotation, matching the stamp transform.
+                    rotated_x = rotate_vector(anchor_off, comp.rotation).x
                     if edge == "left":
                         return tl.x + connector_inset - rotated_x
                     else:
@@ -988,9 +989,8 @@ class PlacementSolver:
             if comp.kind == "subcircuit":
                 anchor_off = zones.get(comp.ref, {}).get("anchor_offset_mm")
                 if anchor_off is not None:
-                    rad = math.radians(comp.rotation)
-                    cos_r, sin_r = math.cos(rad), math.sin(rad)
-                    rotated_y = anchor_off.x * sin_r + anchor_off.y * cos_r
+                    # KiCad-CW rotation, matching the stamp transform.
+                    rotated_y = rotate_vector(anchor_off, comp.rotation).y
                     if edge == "top":
                         return tl.y + connector_inset - rotated_y
                     else:
@@ -1174,14 +1174,21 @@ class PlacementSolver:
                     start_y = usable_top  # not enough room, pack from top
 
                 cursor_y = start_y
-                for idx in order:
+                for k, idx in enumerate(order):
                     comp = group_comps[idx]
                     fixed_x = _connector_edge_x(comp, edge)
                     pos = Point(fixed_x, cursor_y)
                     _place_at(comp, edge, pos)
                     self._pinned_targets[refs[idx]] = Point(comp.pos.x, comp.pos.y)
                     comp.locked = not unlock_all
-                    cursor_y += comp.height_mm + connector_gap
+                    # The cursor is the part CENTER, so the pitch is
+                    # half-this + gap + half-next (keeps the packed span
+                    # equal to total_h; full-extent pitch overlaps a
+                    # taller-but-smaller-area follower).
+                    if k + 1 < len(order):
+                        cursor_y += (
+                            sizes[k] / 2 + connector_gap + sizes[k + 1] / 2
+                        )
             else:
                 # Row along X axis — body edge flush with board edge
                 sizes = [group_comps[i].width_mm for i in order]
@@ -1210,14 +1217,18 @@ class PlacementSolver:
                 else:
                     start_x = usable_left
                 cursor_x = start_x
-                for idx in order:
+                for k, idx in enumerate(order):
                     comp = group_comps[idx]
                     fixed_y = _connector_edge_y(comp, edge)
                     pos = Point(cursor_x, fixed_y)
                     _place_at(comp, edge, pos)
                     self._pinned_targets[refs[idx]] = Point(comp.pos.x, comp.pos.y)
                     comp.locked = not unlock_all
-                    cursor_x += comp.width_mm + connector_gap
+                    # Half-extent pitch; see the column branch above.
+                    if k + 1 < len(order):
+                        cursor_x += (
+                            sizes[k] / 2 + connector_gap + sizes[k + 1] / 2
+                        )
 
         # --- Non-edge constraints (corners, zones, mounting holes) ---
         for ref, comp in comps.items():
@@ -1246,13 +1257,12 @@ class PlacementSolver:
                 # outside the zone after edge-of-zone jitter.
                 if comp.kind == "subcircuit":
                     anchor_off = zone_cfg.get("anchor_offset_mm")
-                    rad = math.radians(comp.rotation)
-                    cos_r, sin_r = math.cos(rad), math.sin(rad)
                     off_x = 0.0
                     off_y = 0.0
                     if anchor_off is not None:
-                        off_x = anchor_off.x * cos_r - anchor_off.y * sin_r
-                        off_y = anchor_off.x * sin_r + anchor_off.y * cos_r
+                        # KiCad-CW rotation, matching the stamp transform.
+                        off = rotate_vector(anchor_off, comp.rotation)
+                        off_x, off_y = off.x, off.y
                     target_x = self.rng.uniform(
                         zx0 + hw, max(zx0 + hw + 1, zx1 - hw)
                     )
@@ -1449,19 +1459,26 @@ class PlacementSolver:
                         zx0, zy0 = tl.x + margin, tl.y + margin
                         zx1, zy1 = br.x - margin, br.y - margin
 
-                    hw, hh = comps[ref].width_mm / 2, comps[ref].height_mm / 2
+                    # Random allowed rotation -- applied FIRST so the position
+                    # bounds below use the post-rotation extents and the AABB
+                    # (width/height) tracks the new orientation.
+                    new_rot = comps[ref].rotation
+                    if comps[ref].kind == "ic":
+                        new_rot = self.rng.choice([0, 90, 180, 270])
+                    elif comps[ref].kind == "passive":
+                        new_rot = self.rng.choice([0, 90])
                     old_pos = Point(comps[ref].pos.x, comps[ref].pos.y)
-                    old_rot = comps[ref].rotation
+                    rotate_component_in_place(
+                        comps[ref], new_rot - comps[ref].rotation
+                    )
+                    hw, hh = comps[ref].width_mm / 2, comps[ref].height_mm / 2
                     comps[ref].pos = Point(
                         self.rng.uniform(zx0 + hw, max(zx0 + hw + 1, zx1 - hw)),
                         self.rng.uniform(zy0 + hh, max(zy0 + hh + 1, zy1 - hh)),
                     )
-                    # Random allowed rotation
-                    if comps[ref].kind == "ic":
-                        comps[ref].rotation = self.rng.choice([0, 90, 180, 270])
-                    elif comps[ref].kind == "passive":
-                        comps[ref].rotation = self.rng.choice([0, 90])
-                    _update_pad_positions(comps[ref], old_pos, old_rot)
+                    # Rotation already applied in place; this is now a pure
+                    # translation to the drawn position.
+                    _update_pad_positions(comps[ref], old_pos, comps[ref].rotation)
                 continue
 
             # --- Cluster mode: centroid-based with signal-flow bias ---
@@ -1574,10 +1591,6 @@ class PlacementSolver:
                 # Early rotation: try all 4 orientations for ICs at placement
                 # time — prevents suboptimal rotations from locking in.
                 if comps[ref].kind == "ic" and len(comps[ref].pads) >= 2:
-                    pad_offsets = [
-                        (p.pos.x - comps[ref].pos.x, p.pos.y - comps[ref].pos.y)
-                        for p in comps[ref].pads
-                    ]
                     orig_rot = comps[ref].rotation
                     best_rot = orig_rot
                     best_rscore = -1.0
@@ -1589,31 +1602,21 @@ class PlacementSolver:
                         else [0, 90, 180, 270]
                     )
                     for rot in rotations:
-                        delta = math.radians(rot - orig_rot)
-                        cos_d, sin_d = math.cos(delta), math.sin(delta)
-                        for k, p in enumerate(comps[ref].pads):
-                            ox, oy = pad_offsets[k]
-                            p.pos = Point(
-                                comps[ref].pos.x + ox * cos_d + oy * sin_d,
-                                comps[ref].pos.y - ox * sin_d + oy * cos_d,
-                            )
-                        comps[ref].rotation = rot
+                        # rotate_component_in_place keeps pads, body_center
+                        # and the width/height AABB in sync with rotation.
+                        rotate_component_in_place(
+                            comps[ref], rot - comps[ref].rotation
+                        )
                         rscore = self._score_rotation_for_routing(
                             temp_state, comps[ref]
                         )
                         if rscore > best_rscore:
                             best_rscore = rscore
                             best_rot = rot
-                    # Apply best rotation
-                    delta = math.radians(best_rot - orig_rot)
-                    cos_d, sin_d = math.cos(delta), math.sin(delta)
-                    for k, p in enumerate(comps[ref].pads):
-                        ox, oy = pad_offsets[k]
-                        p.pos = Point(
-                            comps[ref].pos.x + ox * cos_d + oy * sin_d,
-                            comps[ref].pos.y - ox * sin_d + oy * cos_d,
-                        )
-                    comps[ref].rotation = best_rot
+                    # Apply best rotation (revert from last-tried candidate)
+                    rotate_component_in_place(
+                        comps[ref], best_rot - comps[ref].rotation
+                    )
 
                 placed_this_cluster.add(ref)
 
@@ -1752,11 +1755,6 @@ class PlacementSolver:
             if len(comp.pads) < 2:
                 continue
 
-            # Store pad offsets relative to component center
-            pad_offsets = []
-            for p in comp.pads:
-                pad_offsets.append((p.pos.x - comp.pos.x, p.pos.y - comp.pos.y))
-
             orig_rot = comp.rotation
             best_rot = orig_rot
             best_score = self._score_rotation_for_routing(work_state, comp)
@@ -1764,36 +1762,17 @@ class PlacementSolver:
             for rot in rotations:
                 if rot == orig_rot:
                     continue
-                # Apply rotation: rotate pad offsets by (rot - orig_rot)
-                # using KiCad convention (cos+sin, -sin+cos)
-                delta = math.radians(rot - orig_rot)
-                cos_d, sin_d = math.cos(delta), math.sin(delta)
-                for i, p in enumerate(comp.pads):
-                    ox, oy = pad_offsets[i]
-                    p.pos = Point(
-                        comp.pos.x + ox * cos_d + oy * sin_d,
-                        comp.pos.y - ox * sin_d + oy * cos_d,
-                    )
-                comp.rotation = rot
+                # rotate_component_in_place keeps pads, body_center and the
+                # width/height AABB in sync with the rotation (KiCad CW).
+                rotate_component_in_place(comp, rot - comp.rotation)
 
                 rot_score = self._score_rotation_for_routing(work_state, comp)
                 if rot_score > best_score:
                     best_score = rot_score
                     best_rot = rot
 
-            # Apply best rotation
-            if best_rot != orig_rot:
-                delta = math.radians(best_rot - orig_rot)
-            else:
-                delta = 0.0
-            cos_d, sin_d = math.cos(delta), math.sin(delta)
-            for i, p in enumerate(comp.pads):
-                ox, oy = pad_offsets[i]
-                p.pos = Point(
-                    comp.pos.x + ox * cos_d + oy * sin_d,
-                    comp.pos.y - ox * sin_d + oy * cos_d,
-                )
-            comp.rotation = best_rot
+            # Apply best rotation (revert from the last-tried candidate)
+            rotate_component_in_place(comp, best_rot - comp.rotation)
 
     def _optimize_block_rotation(
         self,
@@ -2347,9 +2326,23 @@ class PlacementSolver:
                 else:
                     # Try 90-degree rotation increments
                     new_rot = (old_rot + rng.choice([90.0, 180.0, 270.0])) % 360.0
-                old_pos = Point(comp.pos.x, comp.pos.y)
-                comp.rotation = new_rot
-                _update_pad_positions(comp, old_pos, old_rot)
+                # Keep the width/height AABB in sync with the rotation so
+                # the scorer/legality passes and the eventual stamp see the
+                # same extents. Blocks carry per-rotation geometry (not
+                # always exact transposes); skip the move if the target
+                # rotation has no geometry entry.
+                block_geom = None
+                if comp.kind == "subcircuit":
+                    block_geom = (comp.block_rotation_geometry or {}).get(
+                        float(new_rot)
+                    )
+                    if block_geom is None:
+                        continue
+                old_w, old_h = comp.width_mm, comp.height_mm
+                rotate_component_in_place(comp, new_rot - old_rot)
+                if block_geom is not None:
+                    comp.width_mm = block_geom.width_mm
+                    comp.height_mm = block_geom.height_mm
 
                 work_state.components = comps
                 new_score = scorer.score().total
@@ -2363,9 +2356,9 @@ class PlacementSolver:
                         best_comps = {r: copy.deepcopy(c) for r, c in comps.items()}
                         improved += 1
                 else:
-                    # Revert rotation
-                    comp.rotation = old_rot
-                    _update_pad_positions(comp, old_pos, new_rot)
+                    # Revert rotation and restore the exact saved extents
+                    rotate_component_in_place(comp, old_rot - new_rot)
+                    comp.width_mm, comp.height_mm = old_w, old_h
 
             else:
                 # Single component displacement
@@ -2717,19 +2710,33 @@ class PlacementSolver:
         dy = pos_y[:, np.newaxis] - pos_y[np.newaxis, :]
         dists = np.sqrt(dx * dx + dy * dy)
 
-        skip_mask = (dists > min_dists * 2) | (dists < 0.001)
+        skip_mask = dists > min_dists * 2
 
+        # Match the pure-Python path: clamp the magnitude distance to 0.1
+        # so near/coincident pairs get the STRONGEST repulsion (masking
+        # them out left stacked components with zero anti-coincidence
+        # force), and use a true unit direction vector.
+        clamped = np.maximum(dists, 0.1)
         force_mags = (
             self.k_repel
             * (areas[:, np.newaxis] * areas[np.newaxis, :])
-            / (dists * dists + 0.01)
+            / (clamped * clamped)
         )
         np.fill_diagonal(force_mags, 0)
         force_mags = np.where(skip_mask, 0, force_mags)
 
-        safe_dists = np.where(dists > 0.1, dists, 0.1)
-        norm_dx = dx / safe_dists
-        norm_dy = dy / safe_dists
+        # Exactly-coincident pairs have no defined direction; the Python
+        # path resolves them via atan2(0, 0) == 0, pushing the lower index
+        # +x and the higher -x. sign(col - row) reproduces that and keeps
+        # the matrix antisymmetric (entry [i, j] is the force ON i FROM j).
+        degenerate = dists < 1e-9
+        idx = np.arange(len(ref_list))
+        fallback_dx = np.sign(idx[np.newaxis, :] - idx[:, np.newaxis]).astype(
+            np.float64
+        )
+        safe_dists = np.where(degenerate, 1.0, dists)
+        norm_dx = np.where(degenerate, fallback_dx, dx / safe_dists)
+        norm_dy = np.where(degenerate, 0.0, dy / safe_dists)
 
         fx_matrix = force_mags * norm_dx
         fy_matrix = force_mags * norm_dy
@@ -3645,10 +3652,29 @@ class PlacementSolver:
             ):
                 continue
             if comp.layer != Layer.BACK:
-                # Mirror pad X offsets to match KiCad Flip() behavior:
-                # Flip negates absolute X offset from component center
+                # Mirror to match how the stamp composes KiCad Flip() +
+                # SetOrientationDegrees(): the net effect is a mirror of
+                # the footprint's LOCAL Y axis (verified against pcbnew),
+                # i.e. at flip-time rotation t0 the world reflection
+                # R(t0)*M_y*R(-t0). At t0=0 that is a pure Y mirror about
+                # pos -- NOT the X mirror formerly applied here, which put
+                # 2-pad THT pad identities on the wrong sides. body_center
+                # must mirror too, or the modeled courtyard stays on the
+                # pre-flip side while the stamped one moves (B24).
+                two_theta = math.radians(2.0 * comp.rotation)
+                c2, s2 = math.cos(two_theta), math.sin(two_theta)
+
+                def _reflect(p: Point) -> Point:
+                    ox, oy = p.x - comp.pos.x, p.y - comp.pos.y
+                    return Point(
+                        comp.pos.x + ox * c2 - oy * s2,
+                        comp.pos.y - ox * s2 - oy * c2,
+                    )
+
                 for pad in comp.pads:
-                    pad.pos.x = 2 * comp.pos.x - pad.pos.x
+                    pad.pos = _reflect(pad.pos)
+                if comp.body_center is not None:
+                    comp.body_center = _reflect(comp.body_center)
                 comp.layer = Layer.BACK
                 moved.append(ref)
         if moved:
