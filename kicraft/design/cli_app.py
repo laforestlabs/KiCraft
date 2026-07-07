@@ -136,10 +136,20 @@ def _resemble_candidates(ident: str, search_fn, limit: int = 6) -> list[str]:
     name_toks = [t for t in re.split(r"[^A-Za-z0-9]+", name or ident) if len(t) > 1]
     alpha = [t for t in name_toks if not any(c.isdigit() for c in t)]
     queries: list[str] = []
+    if lib_fam and name_toks:
+        # In-library first: a bare short name ("CP") substring-matches junk
+        # across libraries (Amplifier_Audio:SSM2211CP) and steers the model
+        # AWAY from the right family (self-eval 2026-07-07 run_19).
+        queries.append(" ".join([lib_fam] + name_toks))
     if name_toks:
         queries.append(" ".join(name_toks))               # exact-ish: truncation / pin-count
     if lib_fam and alpha:
         queries.append(" ".join([lib_fam] + alpha[:2]))   # category + family word
+    if library:
+        # The exact claimed library, any name: when the library is real but the
+        # name is invented (Package_SIP:SIP7_22.0x9.5mm), same-library options
+        # beat whatever alphabetically shares the family word (Package_BGA:...).
+        queries.append(library)
     if lib_fam:
         queries.append(lib_fam)                           # category only
     if alpha:
@@ -155,7 +165,24 @@ def _footprint_candidates(fp: str, limit: int = 6) -> list[str]:
     return _resemble_candidates(fp, search_footprints, limit)
 
 
+# KiCad renamed these between the v6-era names the model's training data knows
+# and the v9 stock library, and substring search cannot bridge them ("CP" is
+# not a substring of "C_Polarized"). Map the exact legacy ids to their modern
+# names so the rejection feedback carries the true fix instead of cross-library
+# noise (self-eval 2026-07-07 run_19 burned two BOM attempts on Device:CP1 ->
+# Device:CP -> exhaustion). Keys are lowercase.
+_LEGACY_SYMBOL_RENAMES: dict[str, list[str]] = {
+    "device:cp": ["Device:C_Polarized"],
+    "device:cp1": ["Device:C_Polarized"],
+    "device:cp_small": ["Device:C_Polarized_Small"],
+    "device:cp1_small": ["Device:C_Polarized_Small"],
+}
+
+
 def _symbol_candidates(sym: str, limit: int = 6) -> list[str]:
+    renamed = _LEGACY_SYMBOL_RENAMES.get((sym or "").lower())
+    if renamed:
+        return renamed[:limit]
     return _resemble_candidates(sym, search_symbols, limit)
 
 
@@ -571,8 +598,24 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
             hit = jlcparts.lookup(cid)
             # Bundle footprints are drawn for their manifest's own part;
             # the identity heuristics read stock naming conventions only.
-            fp_is_bundle = (_lib_prefix(part.footprint or "")
-                            in manifest_by_name)
+            fp_lib = _lib_prefix(part.footprint or "")
+            fp_is_bundle = fp_lib in manifest_by_name
+            if fp_is_bundle:
+                # Bundle-pin equality (KC-9EZE3S appendix): an explicit pin on
+                # a curated bundle that differs from the bundle's own C# is
+                # quiet part/footprint drift — the footprint was drawn for the
+                # manifest's part, but the fab BOM will order the pinned one.
+                # Warning, not offender: an intentional substitute (same
+                # package, better stock) is legitimate.
+                man_cid = str((manifest_by_name[fp_lib].sourcing or {})
+                              .get("lcsc") or "").strip().upper()
+                if man_cid and man_cid != cid.strip().upper():
+                    warnings.append(
+                        f"{part.ref} ({label}): sourcing_note pins LCSC {cid} "
+                        f"but its footprint's bundle '{fp_lib}' was drawn for "
+                        f"LCSC {man_cid} — verify the pinned part matches the "
+                        f"footprint's land pattern"
+                    )
             conflict = (None if (hit is None or fp_is_bundle)
                         else _lcsc_identity_conflict(part, hit))
             if hit is None:
@@ -3038,8 +3081,10 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     # §9.25 capacitor polarity -- parts-only, so it fires at BOM commit (before
     # the wiring stage adds connections). A non-polarized Device:C on a polarized
     # CP_/tantalum footprint (the KC-U2VAA8 film caps) is fixed by re-picking the
-    # footprint here, where the model is still choosing parts.
-    if state.bom is not None:
+    # footprint here, where the model is still choosing parts. BOM-stage commits
+    # get this check via the aggregated identity gates below instead, so all
+    # part-identity problems land in one rejection round.
+    if state.bom is not None and stage != "bom":
         cp = check_capacitor_polarity_consistency(state.bom)
         if not cp.ok:
             print(
@@ -3078,137 +3123,117 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             checks.append(
                 check_no_dangling_signal_nets(state.architecture, state.bom)
             )
-        for check in checks:
-            if not check.ok:
-                print(
-                    json.dumps(
-                        {
-                            "ok": False,
-                            "errors": [f"{check.name}: {check.message}"],
-                            "offenders": check.offenders[:20],
-                        },
-                        indent=2,
-                    )
-                )
-                return 3
-
-    # Every footprint must resolve to a real .kicad_mod before the BOM is
-    # committed — otherwise the bad name only surfaces at synthesis/PCB time.
-    # Architecture sheets the BOM left empty produce blank leaves and, where an
-    # inter-sheet net crosses them, orphan sheet pins. Catch it at BOM commit,
-    # where the model can still add the missing parts.
-    if stage == "bom" and state.bom is not None and state.architecture is not None:
-        sp = check_sheets_have_parts(state.architecture, state.bom)
-        if not sp.ok:
+        failing = [check for check in checks if not check.ok]
+        if failing:
+            # ALL failing wiring checks in one rejection: each retry costs one
+            # of the stage's few commit attempts, so discovering these gate
+            # classes one at a time is the dominant exhaustion mode.
             print(
                 json.dumps(
                     {
                         "ok": False,
-                        "errors": [f"{sp.name}: {sp.message}"],
-                        "offenders": sp.offenders[:20],
+                        "errors": [f"{c.name}: {c.message}" for c in failing],
+                        "offenders": [o for c in failing for o in c.offenders[:20]],
                     },
                     indent=2,
                 )
             )
             return 3
 
+    # --- BOM part-identity gates (aggregated) --------------------------------
+    # Every check here is cheap and local (no live lookups), so ALL failing
+    # classes are reported in ONE rejection: the model fixes polarity +
+    # missing sheets + edge conflicts + footprints + symbols + pin numbering +
+    # manifest C#s in a single guided round instead of burning one of its few
+    # commit attempts DISCOVERING each gate class in sequence (self-eval
+    # 2026-07-07 runs 18/19 exhausted 5 attempts exactly that way). The
+    # expensive/stateful gates (§9.26 live sourcing + §9.28 on the pinned ids)
+    # still run separately below, once every identity resolves.
+    #
+    # Gate notes, preserved from the serial blocks this replaces:
+    # - sheets-have-parts: an empty declared sheet produces a blank leaf and
+    #   orphan sheet pins where an inter-sheet net crosses it.
+    # - footprints: a hallucinated footprint otherwise only surfaces at
+    #   synthesis/PCB time; symbols: at wiring stage-prep — both past the
+    #   point where the model still has the BOM lookup tools.
+    # - §9.27: a letter-pinned generic symbol (Device:Q_NPN -> B/C/E) on a
+    #   numbered footprint passes ERC yet leaves every pad netless
+    #   (KC-V8YWN8 / KC-B8NQEE).
+    # - manifest LCSC: a fabricated C# in a bundle manifest can never be priced.
+    bom_normalizations: list[str] = []
     if stage == "bom" and state.bom is not None:
-        sc = check_sheet_connector_edge_conflicts(state.bom)
-        if not sc.ok:
-            print(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "errors": [f"{sc.name}: {sc.message}"],
-                        "offenders": sc.offenders[:20],
-                    },
-                    indent=2,
-                )
+        project_root = state_path.resolve().parent.parent
+        if state.architecture is not None:
+            # §9.24 normalizer (the KC-WFFXZ3 shape): the BOM model cannot edit
+            # architecture.sheets, so a single declared sheet whose connectors
+            # honestly demand opposite board edges (an Arduino shield's
+            # stacking headers) is an unwinnable contract at this stage — the
+            # model retries §9.24 to exhaustion (self-eval 2026-07-07 run_21).
+            # The same auto-split synthesis would run later fixes it HERE,
+            # before the gate, so §9.24 stays a safety net instead of a loop.
+            from kicraft.design.synthesis.array_decaps import (
+                isolate_opposite_edge_connectors,
             )
-            return 3
 
-    if stage == "bom" and state.bom is not None:
-        bad_fps = _unresolved_footprints(
-            state.bom, state_path.resolve().parent.parent
-        )
+            n_assumptions = len(state.bom.assumptions)
+            if isolate_opposite_edge_connectors(
+                state.bom, state.architecture, verbose=False
+            ):
+                bom_normalizations = list(state.bom.assumptions[n_assumptions:])
+        identity_checks = [check_capacitor_polarity_consistency(state.bom),
+                           check_sheet_connector_edge_conflicts(state.bom)]
+        if state.architecture is not None:
+            identity_checks.append(
+                check_sheets_have_parts(state.architecture, state.bom)
+            )
+        failures: list[tuple[str, list[str]]] = [
+            (f"{c.name}: {c.message}", list(c.offenders))
+            for c in identity_checks
+            if not c.ok
+        ]
+        bad_fps = _unresolved_footprints(state.bom, project_root)
         if bad_fps:
-            print(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "errors": ["footprint(s) do not resolve to a real .kicad_mod"],
-                        "offenders": bad_fps[:20],
-                    },
-                    indent=2,
-                )
+            failures.append(
+                ("footprint(s) do not resolve to a real .kicad_mod", bad_fps)
             )
-            return 3
-
-    # Every symbol must likewise resolve to a real pin inventory before commit,
-    # mirroring the footprint check. A hallucinated symbol name otherwise only
-    # surfaces at wiring stage-prep, where the model can no longer fix it with the
-    # BOM lookup tools.
-    if stage == "bom" and state.bom is not None:
         bad_syms = _unresolved_symbols(state.bom)
         if bad_syms:
-            print(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "errors": [
-                            "symbol(s) do not resolve to a pin inventory; "
-                            "use the lookup tools to fix the BOM"
-                        ],
-                        "offenders": bad_syms[:20],
-                    },
-                    indent=2,
+            failures.append(
+                (
+                    "symbol(s) do not resolve to a pin inventory; "
+                    "use the lookup tools to fix the BOM",
+                    bad_syms,
                 )
             )
-            return 3
-
-    # §9.27: every wireable symbol pin number must exist as a footprint pad.
-    # A letter-pinned generic symbol (Device:Q_NPN -> B/C/E) on a numbered
-    # footprint passes ERC yet leaves every pad netless on the board — dead
-    # copper no DRC gate can see (KC-V8YWN8 / KC-B8NQEE).
-    if stage == "bom" and state.bom is not None:
-        bad_pins = _symbol_footprint_pin_mismatches(
-            state.bom, state_path.resolve().parent.parent
-        )
+        bad_pins = _symbol_footprint_pin_mismatches(state.bom, project_root)
         if bad_pins:
-            print(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "errors": [
-                            "9.27 symbol pin numbers do not match the "
-                            "footprint's pads; nets on those pins can never "
-                            "bind to copper — pick a pin-number-compatible "
-                            "symbol/footprint pair"
-                        ],
-                        "offenders": bad_pins[:20],
-                    },
-                    indent=2,
+            failures.append(
+                (
+                    "9.27 symbol pin numbers do not match the footprint's "
+                    "pads; nets on those pins can never bind to copper — "
+                    "pick a pin-number-compatible symbol/footprint pair",
+                    bad_pins,
                 )
             )
-            return 3
-
-    # Reject parts whose library manifest claims an LCSC that isn't in the
-    # offline catalog. A fabricated C# in the manifest can never be priced.
-    if stage == "bom" and state.bom is not None:
-        bad_lcsc = _unresolved_lcsc(
-            state.bom, state_path.resolve().parent.parent
-        )
+        bad_lcsc = _unresolved_lcsc(state.bom, project_root)
         if bad_lcsc:
+            failures.append(
+                (
+                    "part library manifest(s) claim an LCSC that is not in "
+                    "the offline parts catalog; re-vendor the part with a "
+                    "valid LCSC or update the manifest",
+                    bad_lcsc,
+                )
+            )
+        if failures:
             print(
                 json.dumps(
                     {
                         "ok": False,
-                        "errors": [
-                            "part library manifest(s) claim an LCSC that is not "
-                            "in the offline parts catalog; re-vendor the part "
-                            "with a valid LCSC or update the manifest"
+                        "errors": [msg for msg, _ in failures],
+                        "offenders": [
+                            o for _, offs in failures for o in offs[:20]
                         ],
-                        "offenders": bad_lcsc[:20],
                     },
                     indent=2,
                 )
@@ -3299,6 +3324,8 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         summary["warnings"] = bom_warnings
     if wiring_normalizations:
         summary["wiring_normalizations"] = wiring_normalizations
+    if bom_normalizations:
+        summary["bom_normalizations"] = bom_normalizations
     if form_factor_capture:
         summary["form_factor"] = form_factor_capture
     # Placement rules referencing refs the BOM no longer carries are
@@ -4879,7 +4906,25 @@ def _hoist_positionals(parser: argparse.ArgumentParser, argv: list[str]) -> list
     return [argv[0], *positionals, *options]
 
 
+def _line_buffer_stdio() -> None:
+    """Make progress lines reach the caller AS they are produced.
+
+    Build output usually goes into a pipe (web build worker, self-eval
+    harness), where CPython block-buffers stdout — a watchdog SIGKILL then
+    destroys up to 40 minutes of buffered [build] evidence (the empty rc=-9
+    logs of the 2026-07-07 self-eval batch). Line-buffer our own stdio and
+    export PYTHONUNBUFFERED so the leaf-solver/compose subprocesses inherit
+    the same write-through behavior."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)  # type: ignore[union-attr]
+        except (AttributeError, OSError, ValueError):
+            pass  # non-standard stream (tests replace stdout); best-effort
+    os.environ.setdefault("PYTHONUNBUFFERED", "1")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _line_buffer_stdio()
     ap = argparse.ArgumentParser(
         prog="kicraft",
         description=(

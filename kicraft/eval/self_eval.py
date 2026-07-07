@@ -57,6 +57,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from kicraft.build_slots import ACQUIRED_MARKER
+from kicraft.proc_tree import kill_tree
 from kicraft.server.session import read_state, record_answers, remaining_stages, run_session
 from kicraft.tuning.benchmark import BENCHMARK_PROMPTS as BRIEFS
 from kicraft.tuning.benchmark import SHAPED_OUTLINE_PROMPTS
@@ -167,7 +168,12 @@ def _stem_for(idx: int, entry: dict) -> str:
 
 
 def _build_env() -> dict:
-    return {**os.environ, "KICRAFT_CALLER": os.environ.get("KICRAFT_CALLER", "web")}
+    # PYTHONUNBUFFERED (mirroring the web build worker): the build's stdout goes
+    # into a pipe, so without it the [build] lines sit block-buffered in the
+    # child and a watchdog SIGKILL destroys the whole evidence trail (the empty
+    # rc=-9 logs of the 2026-07-07 self-eval batch).
+    return {**os.environ, "PYTHONUNBUFFERED": "1",
+            "KICRAFT_CALLER": os.environ.get("KICRAFT_CALLER", "web")}
 
 
 def _event_writer(path: Path, *, full: bool = False):
@@ -262,17 +268,21 @@ def run_build(rundir: Path, progress, *, timeout_s: int = 2400) -> int:
     time spent queued for a host-wide build slot is never billed against the build.
     Returns the build exit code (negative if killed)."""
     progress({"kind": "build_start"})
+    # start_new_session + kill_tree (NOT proc.kill): the build fans out to leaf
+    # solvers and FreeRouting JVMs, and the JVM detaches into its own session
+    # (freerouting_runner), so killing only the direct child stranded orphan
+    # JVMs burning cores for days (self-eval-2026-07-07 FIX 1).
     proc = subprocess.Popen(_BUILD_CMD, cwd=str(rundir), text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            env=_build_env())
-    timer = threading.Timer(timeout_s, proc.kill)
+                            env=_build_env(), start_new_session=True)
+    timer = threading.Timer(timeout_s, kill_tree, args=(proc.pid,))
     timer.start()
     try:
         for line in proc.stdout:  # type: ignore[union-attr]
             progress({"kind": "build_log", "text": line.rstrip("\n")})
             if ACQUIRED_MARKER in line:
                 timer.cancel()
-                timer = threading.Timer(timeout_s, proc.kill)
+                timer = threading.Timer(timeout_s, kill_tree, args=(proc.pid,))
                 timer.start()
         proc.wait()
     finally:

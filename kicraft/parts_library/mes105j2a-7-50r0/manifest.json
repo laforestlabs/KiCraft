@@ -1,0 +1,32 @@
+{
+  "content_hash": "sha256:dedc5e040565fd68dae039d937d2ddeeac99561007e1273cb8dd97c9a14990d8",
+  "datasheet_url": "https://lcsc.com/product-detail/_Hongzhi-Elec-MES105J2A-7-50R0_C333829.html",
+  "description": "1 uF 100 V polypropylene film capacitor (CBB), radial THT P=5mm \u2014 film-cap class for audio/crossover briefs.",
+  "footprint_name": "CAP-TH_L7.2-W6.0-P5.00-D0.6_RED",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "MES105J2A-7-50R0",
+  "name": "mes105j2a-7-50r0",
+  "provenance": {
+    "added_at": "2026-07-07T11:55:53Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C333829"
+  },
+  "symbol_name": "MES105J2A-7-50R0",
+  "tags": [
+    "capacitor",
+    "film",
+    "polypropylene",
+    "cbb",
+    "1uf",
+    "tht",
+    "audio"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

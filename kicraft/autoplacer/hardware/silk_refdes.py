@@ -22,7 +22,12 @@ import pcbnew
 # Discrete text heights (mm) tried largest-first when fitting a refdes to its
 # courtyard. The smallest is the readability floor: a refdes that needs to go
 # below it to fit is hidden to Fab instead of shrunk into illegibility.
-_TEXT_HEIGHTS_MM = (1.0, 0.9, 0.8, 0.7)
+# The floor must not go below kicad_pro.DEFAULT_RULES["min_text_height"]
+# (0.8 mm): the old 0.7 step made every board with 0603-class parts warn
+# 'silk text height 0.7 < 0.8' — the noisiest fleet-wide DRC class
+# (self-eval 2026-07-07). A refdes that only fits at 0.7 goes to Fab, which
+# the silk text-height constraint doesn't police.
+_TEXT_HEIGHTS_MM = (1.0, 0.9, 0.8)
 _THICKNESS_RATIO = 0.15  # KiCad's nominal stroke:height ratio
 
 

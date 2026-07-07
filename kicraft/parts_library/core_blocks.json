@@ -462,6 +462,26 @@
       "selection_notes": "WJ126V-5.0-2P (LCSC C8404) pluggable screw terminal, curated bundle. The default for wire-in power input/output terminals; use one bundle instance per 2-wire connection.",
       "sort_order": 450,
       "bundle": "screw-terminal-5mm-2p"
+    },
+    {
+      "function_key": "power-led-1a",
+      "display_name": "Power LED (1A, 3535 white)",
+      "category": "drivers",
+      "qualifier": "1A-class high-power white LED, SMD3535",
+      "package": "SMD3535-3P",
+      "selection_notes": "The part class for 'power LED' / LED-driver briefs (constant-current drivers, torches) — NOT an 0805 indicator LED (Device:LED), which the observer flags as silent substitution (self-eval 2026-07-07 run_17). 1A 6000-7000K white, 2.8-3.6V.",
+      "sort_order": 270,
+      "bundle": "jnj-ltjw0115w120-63mil-6500-7000k"
+    },
+    {
+      "function_key": "oled-display-i2c",
+      "display_name": "OLED display 0.96\" I2C",
+      "category": "interface",
+      "qualifier": "0.96\" 128x64 I2C, SSD1315, SMT module",
+      "package": "module",
+      "selection_notes": "The part class for SMT I2C OLED panel briefs — NOT a bare 1x4 pin header standing in for the module (self-eval 2026-07-07 run_20 silent substitution).",
+      "sort_order": 460,
+      "bundle": "hs96l03w2c03"
     }
   ]
 }

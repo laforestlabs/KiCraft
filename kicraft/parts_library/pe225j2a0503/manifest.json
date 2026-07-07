@@ -1,0 +1,32 @@
+{
+  "content_hash": "sha256:bba2677018603e1d8fc8e73a104c29131774b1e2895a97724c60cc1b6aaf188b",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C3019042.pdf",
+  "description": "2.2 uF 100 V metallized polyester film capacitor, radial THT P=5mm \u2014 film-cap class for audio/speaker-crossover briefs.",
+  "footprint_name": "CAP-TH_L7.2-W6.0-P5.00-D0.6",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "PE225J2A0503",
+  "name": "pe225j2a0503",
+  "provenance": {
+    "added_at": "2026-07-07T11:55:54Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C3019042"
+  },
+  "symbol_name": "PE225J2A0503",
+  "tags": [
+    "capacitor",
+    "film",
+    "polyester",
+    "2.2uf",
+    "tht",
+    "audio",
+    "crossover"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

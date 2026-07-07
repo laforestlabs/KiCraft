@@ -36,6 +36,7 @@ import traceback
 from pathlib import Path
 
 from kicraft.build_slots import ACQUIRED_MARKER, slot_count
+from kicraft.proc_tree import kill_tree
 
 from .accounts import AccountStore, BuildJob
 
@@ -240,15 +241,16 @@ class BuildWorker:
 
 
 def _kill_build(proc: subprocess.Popen) -> None:
-    """Kill the build and its whole process tree (leaf solvers, FreeRouting JVMs);
-    the build runs in its own session, so the process group is ours to kill."""
+    """Kill the build and its whole process tree (leaf solvers, FreeRouting JVMs).
+    The build runs in its own session, but killing that group alone is not
+    enough: the FreeRouting JVM detaches into its OWN session
+    (freerouting_runner), so kill_tree walks the PPID tree and shoots every
+    group under the build -- otherwise timeouts strand orphan JVMs on init."""
+    kill_tree(proc.pid)
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        try:
-            proc.kill()
-        except OSError:
-            pass
+        proc.kill()  # belt-and-braces for the direct child
+    except OSError:
+        pass
 
 
 def _store_from_env() -> AccountStore:
