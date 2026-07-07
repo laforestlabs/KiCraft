@@ -4879,7 +4879,25 @@ def _hoist_positionals(parser: argparse.ArgumentParser, argv: list[str]) -> list
     return [argv[0], *positionals, *options]
 
 
+def _line_buffer_stdio() -> None:
+    """Make progress lines reach the caller AS they are produced.
+
+    Build output usually goes into a pipe (web build worker, self-eval
+    harness), where CPython block-buffers stdout — a watchdog SIGKILL then
+    destroys up to 40 minutes of buffered [build] evidence (the empty rc=-9
+    logs of the 2026-07-07 self-eval batch). Line-buffer our own stdio and
+    export PYTHONUNBUFFERED so the leaf-solver/compose subprocesses inherit
+    the same write-through behavior."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)  # type: ignore[union-attr]
+        except (AttributeError, OSError, ValueError):
+            pass  # non-standard stream (tests replace stdout); best-effort
+    os.environ.setdefault("PYTHONUNBUFFERED", "1")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _line_buffer_stdio()
     ap = argparse.ArgumentParser(
         prog="kicraft",
         description=(

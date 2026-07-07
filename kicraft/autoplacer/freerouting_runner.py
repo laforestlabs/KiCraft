@@ -1012,12 +1012,20 @@ def run_freerouting(
     try:
         stdout, stderr = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired:
-        # Kill entire process group (Java + any children)
+        # Kill entire process group (Java + any children); a wedged JVM can
+        # ignore SIGTERM, so escalate to SIGKILL rather than leave it running.
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         except OSError:
             pass
-        stdout, stderr = proc.communicate(timeout=5)
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except OSError:
+                pass
+            stdout, stderr = proc.communicate()
         return parse_freerouting_output(stdout, stderr, -1)
 
     return parse_freerouting_output(stdout, stderr, proc.returncode)
