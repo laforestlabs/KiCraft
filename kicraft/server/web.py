@@ -1071,6 +1071,58 @@ def _price_for_lcsc(cid: str):
     return None
 
 
+def _silk_sections(sj: dict, arts: dict) -> list[dict]:
+    """Read-only surface of the authored silkscreen plan and what the build-tail
+    placer actually stamped. Content lives in ``state.silk_plan`` (authored
+    pre-build, like ``review_findings``); placement truth in
+    ``state.artifacts.silk_placed`` / ``silk_dropped``. Silk is cosmetic — it
+    never gates a build — so this is purely informational. Returns [] when no
+    plan was committed (older projects, or authoring disabled/failed)."""
+    silk = sj.get("silk_plan") or {}
+    if not silk:
+        return []
+    labels = silk.get("labels") or []
+    placed = [str(x) for x in (arts.get("silk_placed") or [])]
+    place_dropped = [str(x) for x in (arts.get("silk_dropped") or [])]
+    lint_dropped = [str(x) for x in (silk.get("dropped_at_lint") or [])]
+    placed_ids = set(placed)
+    # Legend lines carry synthetic ids "legend:N"; separate them from content labels.
+    n_legend = sum(1 for p in placed if p.startswith("legend:"))
+    n_labels_placed = len(placed) - n_legend
+
+    secs: list[dict] = [{"type": "kv", "title": "Silkscreen", "rows": [
+        ("title", silk.get("title") or "(board stem)"),
+        ("board code", silk.get("board_code") or "(pending)"),
+        ("rev", silk.get("rev", "")),
+        ("legend lines", n_legend),
+        ("labels placed", f"{n_labels_placed} / {len(labels)}"),
+        ("dropped (no space)", len(place_dropped))]}]
+
+    if labels:
+        rows = []
+        for lb in labels:
+            lid = str(lb.get("id", ""))
+            text = (lb.get("text") or "").replace("\n", " / ")
+            anchor = (lb.get("anchor") or {}).get("ref") or ""
+            rows.append([lb.get("kind", "note"), text, anchor,
+                         lb.get("priority", 2),
+                         "yes" if lid in placed_ids else "no"])
+        note = None
+        if any(lb.get("kind") == "table" for lb in labels):
+            note = ("Tables (e.g. DIP-switch settings) are LLM-authored from the "
+                    "netlist — verify against the physical part before assembly.")
+        secs.append({"type": "table", "title": "Board labels",
+                     "columns": ["type", "text", "near", "priority", "placed"],
+                     "rows": rows, "note": note})
+    if place_dropped:
+        secs.append({"type": "list", "title": "Dropped — no clear silk space",
+                     "items": place_dropped})
+    if lint_dropped:
+        secs.append({"type": "list", "title": "Rejected by content lint",
+                     "items": lint_dropped})
+    return secs
+
+
 def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | None,
                     build_lines: list[str], *, prices: dict | None = None) -> list[dict]:
     """Build the structured project-state spec for a stage's inspector window.
@@ -1309,6 +1361,7 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
                 ("fab package", "ready" if arts.get("fab_zip") else "pending"),
                 ("STEP model", "ready" if arts.get("step_file") else "pending"),
                 ("3D render", "ready" if arts.get("board_3d_png") else "pending")]})
+            secs.extend(_silk_sections(sj, arts))
         log = _build_lines_for("fab", build_lines)
         if log:
             secs.append({"type": "list", "title": "Fab export", "items": log})

@@ -194,7 +194,7 @@ def _assert_report_shape(report):
     for key in ("scenario", "run_id", "rubric_version", "rubric_sha256",
                 "metrics", "dimensions", "gates", "score"):
         assert key in report, key
-    assert len(report["dimensions"]) == 10
+    assert len(report["dimensions"]) == 11
     for v in report["dimensions"].values():
         assert v["level"] is None or (isinstance(v["level"], int) and 0 <= v["level"] <= 4)
 
@@ -205,7 +205,7 @@ def test_evaluate_project_full(tmp_path):
     report = evaluate_project(base, client, judge_model="judge-x")
     _assert_report_shape(report)
     assert report["judge"]["ran"] and report["judge"]["ok"]
-    # all 10 dims graded -> finalized with a numeric grade
+    # all 11 dims graded -> finalized with a numeric grade
     assert all(v["level"] is not None for v in report["dimensions"].values())
     assert report["score"]["grade"] in ("A", "B", "C", "D", "F")
     assert report["score"]["final"] is not None
@@ -265,7 +265,7 @@ def test_rubric_hash_is_stable_and_verifies():
     # the moved rubric still matches its stamp.
     rub = load_rubric()
     assert rub["meta"]["sha256"] == rub["_computed_sha256"]
-    assert len(rub["dimensions"]) == 10
+    assert len(rub["dimensions"]) == 11
 
 
 # --------------------------------------------------------------------------- #

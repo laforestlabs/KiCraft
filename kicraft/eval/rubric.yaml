@@ -15,8 +15,8 @@
 # edit it directly (it stays valid) and re-run rubric_hash.py compute --write.
 
 meta:
-  version: 1
-  sha256: "df90130898218fba9dd75e19af5f6703b641c14607303c4e7bcbfc9948a6e5e9"
+  version: 2
+  sha256: "4ad2c2ceacb88417b4fee89e39f8554eaee94c58f920d6f4c31c5f50707718c8"
   scale_note: 'Every dimension is scored on an anchored 0-4 level. Weighted score = sum(weight_i * level_i
     / 4) over all dimensions; weights sum to 100, so a flawless run scores 100. The final score is then
     capped by the lowest hard-fail gate that triggered: final = min(weighted, min(triggered gate caps)).'
@@ -53,7 +53,7 @@ dimensions:
     4: 0 ERC errors, 0 failed checks, 0 ERC warnings.
 - id: convergence_efficiency
   class: C
-  weight: 8
+  weight: 6
   scored_by: script
   summary: Did it converge cleanly, or thrash through re-commits / aborts / retries?
   sources:
@@ -86,7 +86,7 @@ dimensions:
     4: 8 min or under.
 - id: interaction_friction
   class: C
-  weight: 8
+  weight: 6
   scored_by: script
   summary: User questions asked + permission prompts, judged against the scenario's expectation.
   sources:
@@ -205,6 +205,30 @@ dimensions:
     2: Surfaced problems late or incompletely.
     3: Surfaced the important issues; open_questions mostly truthful.
     4: Every uncertainty/limitation surfaced clearly; stopped cleanly on hard failure instead of improvising.
+- id: board_self_description
+  class: J
+  weight: 4
+  scored_by: observer
+  summary: Does the finished board describe itself in silkscreen - a legend (name/rev/maker) and, on a
+    functional board, at least one useful label (IO rating, DIP/jumper table, usage note)? Read from
+    state.silk_plan (authored content) and state.artifacts.silk_placed / silk_dropped (what the placer
+    actually stamped). Silk is cosmetic and never gates a build; this rewards a board a user can identify
+    and use without opening KiCad.
+  sources:
+  - state.silk_plan (title, board_code, rev, labels[], dropped_at_lint)
+  - state.artifacts.silk_placed / silk_dropped
+  notes: A trivial/passive board (bare breakout, single connector) needs only a legend - do not penalize
+    it for lacking functional labels. Judge "functional label" need against what the board actually does.
+    An authored label the placer dropped for lack of space is a near miss, not a zero. If the run never
+    reached the build tail (no artifacts), grade the plan content alone and mark partial in evidence.
+  anchors:
+    0: No legend and no labels - the board is anonymous copper (silk_plan absent/empty and nothing placed).
+    1: A legend was authored but not placed, or only a bare stem with neither maker/rev nor any label.
+    2: Legend present (name/rev/maker on the board), but a functional board carries no functional label.
+    3: Legend present plus at least one functional label; a minor authored label was dropped or a claim
+      is thin.
+    4: Legend present and every warranted functional label placed and corroborated; the board fully
+      self-describes.
 gates:
 - id: synthesis_broken
   detected_by: script
