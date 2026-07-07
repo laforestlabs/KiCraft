@@ -404,7 +404,7 @@ _DEFAULT_MOVE_EDGE: dict[frozenset[str], str] = {
 
 
 def isolate_opposite_edge_connectors(
-    bom: BOM, architecture: Architecture
+    bom: BOM, architecture: Architecture, *, verbose: bool = True
 ) -> list[str]:
     """Split sheets whose edge-zoned connectors demand opposite edges.
 
@@ -490,6 +490,9 @@ def isolate_opposite_edge_connectors(
     _resplit_connections_by_sheet(bom)
     _declare_cross_sheet_signal_nets(bom, architecture)
     for note in notes:
-        print(f"  [synth] {note}")
+        if verbose:
+            # stage-commit callers must stay quiet: their stdout is the JSON
+            # protocol the stage driver parses.
+            print(f"  [synth] {note}")
         bom.assumptions.append(note)
     return sorted(set(moved), key=_ref_sort_key)

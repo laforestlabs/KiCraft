@@ -545,3 +545,52 @@ def test_stage_prep_wiring_fails_loudly_on_unresolved_symbol(tmp_path, capsys):
     assert rc == 4
     assert payload["ok"] is False
     assert any("NoSuchLib" in off for off in payload["offenders"]), payload
+
+
+@_footprints_installed
+def test_stage_commit_bom_aggregates_identity_failures(tmp_path, capsys):
+    # One rejection must name ALL failing gate classes at once (bad footprint
+    # AND bad symbol on different parts), not reveal them one retry at a time --
+    # self-eval 2026-07-07 runs 18/19 exhausted their 5 commit attempts
+    # discovering one gate class per round.
+    state_path = _commit_chain_through_arch(tmp_path, capsys)
+    bad = _valid_bom()
+    bad["parts"][0]["footprint"] = "Button_Switch_SMD:SW_SPST_PTS645"
+    bad["parts"][1]["symbol"] = "NoSuchLib:DefinitelyMissing"
+    bom_slot = _write_slot(tmp_path, "bom", bad)
+    rc, payload = _run(
+        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
+        "--no-archive", str(state_path),
+    )
+    assert rc == 3
+    errors = " ".join(payload["errors"])
+    assert "footprint(s) do not resolve" in errors, payload
+    assert "symbol(s) do not resolve" in errors, payload
+    offenders = " ".join(payload["offenders"])
+    assert "SW_SPST_PTS645" in offenders and "NoSuchLib" in offenders, payload
+
+
+@_footprints_installed
+def test_stage_commit_bom_normalizes_opposite_edge_connectors(tmp_path, capsys):
+    # The run_21 proto-shield shape: connectors on ONE sheet honestly demanding
+    # opposite board edges. The BOM model cannot edit architecture.sheets, so
+    # rejecting via 9.24 was an unwinnable retry loop; the commit now runs the
+    # same auto-split synthesis uses (KC-WFFXZ3 normalizer shape) and accepts.
+    state_path = _commit_chain_through_arch(tmp_path, capsys)
+    bom = _valid_bom()
+    for ref, edge in (("J1", "top"), ("J2", "bottom")):
+        bom["parts"].append({
+            "ref": ref, "value": "header", "symbol": "Device:R",
+            "footprint": "Resistor_SMD:R_0402_1005Metric", "sheet": "MCU",
+        })
+        bom["component_zones"][ref] = {"edge": edge}
+    bom_slot = _write_slot(tmp_path, "bom", bom)
+    rc, payload = _run(
+        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
+        "--no-archive", str(state_path),
+    )
+    assert rc == 0, payload
+    assert payload.get("bom_normalizations"), payload
+    state = json.loads(state_path.read_text())
+    sheets = {p["sheet"] for p in state["bom"]["parts"] if p["ref"] in ("J1", "J2")}
+    assert len(sheets) == 2, sheets  # split across two single-edge sheets
