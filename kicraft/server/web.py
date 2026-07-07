@@ -1913,6 +1913,25 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
         except Exception:  # noqa: BLE001
             pass  # fail-soft: review must never block a sound build
 
+        # Author the silkscreen content plan (LLM authors WHAT the board
+        # says; the build tail decides WHERE — or drops it honestly). Runs
+        # here because the build worker is a no-LLM process: the plan is
+        # committed to state.silk_plan and consumed deterministically.
+        try:
+            from kicraft.design.cli_app import run_silk_plan_authoring
+
+            board_code = None
+            if pid:
+                try:
+                    proj = _store().get_project(pid)
+                    board_code = getattr(proj, "board_code", None)
+                except Exception:  # noqa: BLE001
+                    board_code = None
+            run_silk_plan_authoring(ws / ".kicraft" / "state.json", ws,
+                                    progress, board_code=board_code)
+        except Exception:  # noqa: BLE001
+            pass  # fail-soft: silk is cosmetic, never blocks a build
+
         # Deterministic (zero-LLM) build: synthesize -> place -> route -> verify ->
         # fab. `build` re-runs synthesize first, so the schematic appears as soon
         # as that step writes the sheets.

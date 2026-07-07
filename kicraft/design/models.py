@@ -706,6 +706,48 @@ class PlacementSection(BaseModel):
         return self
 
 
+# ---------- Silkscreen plan (authored post-wiring, placed at build tail) ----------
+
+
+class SilkAnchor(BaseModel):
+    """Semantic placement hint for one silk label. The LLM never emits
+    coordinates: ``ref`` names a BOM component and the build-tail placer
+    turns it into geometry (or drops the label honestly)."""
+
+    ref: str | None = None  # BOM refdes the label belongs beside
+    prefer: Literal["above", "below", "left", "right"] | None = None
+
+
+class SilkLabel(BaseModel):
+    """One functional silkscreen text block (an IO rating, a DIP-switch
+    table, a usage note). Content is linted before commit: anchors must
+    exist in the BOM and numeric claims must be corroborated by the design
+    state — an uncorroborated voltage on silk is worse than none."""
+
+    id: str
+    kind: Literal["io", "table", "note"] = "note"
+    text: str  # ASCII; '\n' separates lines
+    anchor: SilkAnchor | None = None
+    priority: int = Field(default=2, ge=1, le=3)  # 1 must-have .. 3 nice
+
+
+class SilkPlan(BaseModel):
+    """Top-level silkscreen content slot (like ``review_findings``, it is
+    authored in the web process BEFORE the build; the no-LLM build tail
+    consumes it deterministically). Absent slot => legend-only fallback."""
+
+    version: int = 1
+    title: str | None = None  # short board title for the legend line
+    board_code: str | None = None  # KC-XXXXXX; server-side knowledge
+    rev: str = "1.0"
+    labels: list[SilkLabel] = Field(default_factory=list)
+    # Lint honesty: labels the deterministic lint rejected, with reasons —
+    # surfaced so a missing table is a visible decision, not a silent drop.
+    dropped_at_lint: list[str] = Field(default_factory=list)
+    author_model: str | None = None
+    cost_usd: float = 0.0
+
+
 # ---------- Artifacts (set after synthesis) ----------
 
 
@@ -737,6 +779,10 @@ class ArtifactPaths(BaseModel):
     # Electrical-review findings persisted for the GUI inspector (structured,
     # with suggestions, vs the build_log lines which are bare text).
     review_findings: list[ReviewFinding] = Field(default_factory=list)
+    # Silk-legend honesty: what the build-tail placer actually did. Placed ids
+    # include "legend:N"; dropped entries are "id: reason" strings.
+    silk_placed: list[str] = Field(default_factory=list)
+    silk_dropped: list[str] = Field(default_factory=list)
 
 
 # ---------- Conversation state ----------
@@ -778,6 +824,10 @@ class ConversationState(BaseModel):
     # artifacts is still None. The GUI electrical-review inspector reads this
     # first, falling back to artifacts.review_findings for legacy projects.
     review_findings: list[ReviewFinding] = Field(default_factory=list)
+    # Silkscreen content plan, authored post-wiring in the web process (same
+    # lifecycle as review_findings). The build tail places it; None => the
+    # deterministic legend only.
+    silk_plan: SilkPlan | None = None
     expert_mode: bool = False
     stage_status: dict[str, StageStatus] = Field(default_factory=dict)
 

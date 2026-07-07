@@ -189,8 +189,12 @@ def test_cmd_manual_route_end_to_end_with_stubbed_router(tmp_path, monkeypatch):
     seen = {}
 
     def fake_run(cmd, cwd=None, **kw):
-        seen["cmd"] = cmd
-        seen["cwd"] = cwd
+        # The promote tail runs further subprocesses after compose (the
+        # silk-legend pcbnew pass): record the COMPOSE invocation, not
+        # whichever subprocess happened to run last.
+        if any("compose_subcircuits" in str(part) for part in cmd):
+            seen["cmd"] = cmd
+            seen["cwd"] = cwd
         routed_dir = pd / ".experiments" / "subcircuits" / "x"
         routed_dir.mkdir(parents=True, exist_ok=True)
         (routed_dir / "parent_routed.kicad_pcb").write_text(
