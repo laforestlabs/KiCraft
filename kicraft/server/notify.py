@@ -29,7 +29,7 @@ import time
 
 from .accounts import AccountStore
 from .config import Settings
-from .mailer import send_email
+from .mailer import render_html, send_email
 
 log = logging.getLogger("kicraft.notify")
 
@@ -55,25 +55,58 @@ def recently_active(user_id: int | None, window_s: float = ACTIVE_WINDOW_S) -> b
     return seen is not None and (time.monotonic() - seen) <= window_s
 
 
-def _subject_body(status: str, brief: str, url: str) -> tuple[str, str] | None:
+# Per-status copy for the walk-away emails. Each entry drives both the plain-text
+# body and the branded HTML (subject/heading/lead/CTA) rendered by _subject_body.
+_RUN_EVENTS = {
+    "ok": {
+        "subject": "Your KiCraft board is ready: {title}",
+        "heading": "Your board is ready",
+        "preheader": "The routed board and fab package are ready to download.",
+        "lead": ("Good news: your design “{title}” finished. The routed "
+                 "board and fab package are ready to download."),
+        "cta": "Download your board",
+    },
+    "failed": {
+        "subject": "Your KiCraft run did not finish: {title}",
+        "heading": "Your run didn't finish",
+        "preheader": "Open it to see how far it got and try again.",
+        "lead": ("Your design “{title}” ended without a finished board. "
+                 "Open it to see how far it got and what failed; you can edit a "
+                 "stage and re-run from there, or adjust the brief and try again."),
+        "cta": "Open your design",
+    },
+    "awaiting_input": {
+        "subject": "Your KiCraft design has a question: {title}",
+        "heading": "Your design has a question",
+        "preheader": "It's paused on a clarifying question and waiting for you.",
+        "lead": ("Your design “{title}” is paused on a clarifying "
+                 "question and will wait for you. Answer it to continue the run "
+                 "right where it stopped."),
+        "cta": "Answer and continue",
+    },
+}
+
+
+def _subject_body(status: str, brief: str, url: str) -> tuple[str, str, str] | None:
+    """Return (subject, plain_text, html) for a run transition, or None for a
+    status we don't email about."""
+    spec = _RUN_EVENTS.get(status)
+    if spec is None:
+        return None
     title = (brief or "your design").strip()
     if len(title) > 60:
         title = title[:57] + "..."
-    if status == "ok":
-        return (f"Your KiCraft board is ready: {title}",
-                "Good news: your design finished and the routed board + fab "
-                f"package are ready to download.\n\n    {url}\n")
-    if status == "failed":
-        return (f"Your KiCraft run did not finish: {title}",
-                "Your design run ended without a finished board. Open it to see "
-                "how far it got and what failed; you can edit a stage and re-run "
-                f"from there, or adjust the brief and try again.\n\n    {url}\n")
-    if status == "awaiting_input":
-        return (f"Your KiCraft design has a question: {title}",
-                "Your design run is paused on a clarifying question and will wait "
-                "for you. Answer it to continue the run right where it "
-                f"stopped.\n\n    {url}\n")
-    return None
+    lead = spec["lead"].format(title=title)
+    subject = spec["subject"].format(title=title)
+    text = f"{lead}\n\n    {url}\n"
+    html_body = render_html(
+        preheader=spec["preheader"],
+        heading=spec["heading"],
+        paragraphs=[lead],
+        cta_label=spec["cta"],
+        cta_url=url,
+    )
+    return subject, text, html_body
 
 
 def notify_run_event(store: AccountStore, settings: Settings, *,
@@ -97,7 +130,7 @@ def notify_run_event(store: AccountStore, settings: Settings, *,
         sb = _subject_body(status, brief, url)
         if sb is None:
             return False
-        sent = send_email(settings, user.email, sb[0], sb[1])
+        sent = send_email(settings, user.email, sb[0], sb[1], html_body=sb[2])
         if sent:
             log.info("notified %s: project %s -> %s", user.email, project_id, status)
         return sent
