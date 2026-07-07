@@ -82,6 +82,55 @@
   Read side: `session._read_state_for_update` refuses (None) on an existing-but-unparsable
   state.json — `record_answers` skips its stamp, `null_downstream` raises loud — so a torn
   read can never be written back as `{}` over the committed design.
+- **2026-07-07** — fifth batch (9 items, branch `codebase-review-batch5-geometry`,
+  `55b3306`): the autoplacer geometry family B9–B12, B24–B27, B46. All nine re-verified
+  against source by parallel adversarial agents before fixing (8 CONFIRMED, B27 PARTIAL).
+  Where the fix shape differs from the finding:
+  - **B24**: the finding's suggested fix (mirror `body_center.x`) was itself built on a
+    wrong model. Empirical pcbnew experiment (pinned as
+    `test_flip_composition_is_local_y_mirror_then_rotate`): the stamp's
+    `Flip(pos)` + `SetOrientationDegrees(θ)` composes to `R_cw(θ)·M_y·local` — a
+    **local-Y mirror**, not the world-X pad mirror `_assign_layers` applied. The fix
+    mirrors pads AND body_center with the local-Y reflection `R(θ0)·M_y·R(−θ0)` at
+    flip time, which makes the solver model equal the stamped board at ALL later
+    cardinal rotations and fixes silently swapped 2-pad identities (pad-net positions)
+    on flipped THT parts.
+  - **B10/B11**: consolidated — every hand-rolled rotation site (SA move,
+    `_optimize_rotations`, `_place_clusters` early-IC, random scatter) now delegates to
+    `geometry.rotate_component_in_place`. The SA move (a 4th desync site the findings
+    split across B10/B11) consults `block_rotation_geometry` for subcircuit blocks and
+    SKIPS the move when the target rotation has no geometry entry; revert restores the
+    exact saved extents (block per-rotation AABBs are not always transposes). Scatter
+    picks the rotation before drawing position bounds (bounds previously used
+    pre-rotation extents).
+  - **B25**: indent-only fix. Note for a future CMA-ES retune: with all four quadrants
+    contributing, `access_score = min(100, accessible/10)` saturates ~4× sooner on
+    high-pin-count parts; the /10 divisor may want rescaling, deliberately NOT done here.
+  - **B26**: half-extent pitch (`sizes[k]/2 + gap + sizes[k+1]/2`); this also makes the
+    packed span equal the `total_h`/`total_w` that the grow-to-fit trigger and usable-range
+    clamps already assumed (the internal inconsistency that proved the intent).
+  - **B27**: severity downgraded from the finding — the main leaf path self-heals (post-route
+    re-extraction from the routed board rebuilds `pad.size_mm` before the final outline), so
+    the harm was pre-route canvas under-reserve (~0.7 mm), metrics, and fallback
+    serialization paths, not shipped copper-to-edge faults. Fix per the artifact-path model
+    (`_rotate_size`): `bbox_after_rotation` on `pad.size_mm` inside
+    `rotate_component_in_place`.
+  - **B12**: replaced the aggregate-refs waiver with per-violation classification
+    (`_classify_clearance_violations`, works on report_text so the existing mocked tests
+    stay valid): waivable iff every item line in the block names the same single footprint.
+    The `ignorable_footprint_refs` escape hatch is TIGHTENED: it can waive fully-named
+    multi-footprint blocks but never a block containing a ref-less (routed-copper) item;
+    the dormant `clearance_count <= 10` blanket elif is gone.
+  - **B46**: numpy repulsion now matches the Python fallback exactly: distance clamped to
+    0.1 for magnitude (strongest force when coincident), true unit direction, and the
+    degenerate coincident direction resolved like `atan2(0,0)` (antisymmetric
+    `sign(col−row)` on +x).
+  - **B28** was fixed independently the same day by the self-eval session (`4fabc70`,
+    branch `self-eval-2026-07-07-fixes`) — see the item note.
+  Validation: full placement/compose/edge suite green (123 passed, 4 skipped); new
+  regression tests for the B12 ride-along hole, B27 pad-AABB rotation, and the B24 flip
+  composition (pcbnew-agreement, opt-in). Replay verdicts recorded below in this entry's
+  addendum once measured.
 
 ## 1. Bug fixes
 
@@ -273,7 +322,7 @@
     so a concurrently-timed read sees truncated JSON. Fix is the standard write-to-tmp + os.replace
     in one helper.
 
-- [ ] **B9** `kicraft/autoplacer/brain/placement_solver.py:968` — Four anchor_offset_mm consumption sites (_random_in_corner lines 819-820, _connector_edge_x line 968, _connector_edge_y line 993, zone branch lines 1254-1255) rotate the block anchor with the hand-rolled math-CCW formula (x*cos - y*sin, x*sin + y*cos) instead of geometry.rotate_vector's KiCad-CW convention that the block geometry is actually placed with (parent_adapter._rotated, subcircuit_instances._transform_point, _update_pad_positions all use +rot CW).
+- [x] **B9** `kicraft/autoplacer/brain/placement_solver.py:968` — Four anchor_offset_mm consumption sites (_random_in_corner lines 819-820, _connector_edge_x line 968, _connector_edge_y line 993, zone branch lines 1254-1255) rotate the block anchor with the hand-rolled math-CCW formula (x*cos - y*sin, x*sin + y*cos) instead of geometry.rotate_vector's KiCad-CW convention that the block geometry is actually placed with (parent_adapter._rotated, subcircuit_instances._transform_point, _update_pad_positions all use +rot CW).
   - **Severity:** high · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     Parent compose with an edge/corner-constrained leaf whose zone rotation is 90 or 270 (e.g. a
@@ -287,7 +336,7 @@
     '90/270 stranding' class the geometry.py docstring says was fixed at the origin-recovery sites
     but not at these four consumers.
 
-- [ ] **B10** `kicraft/autoplacer/brain/placement_solver.py:2351` — The SA rotation move sets comp.rotation and calls _update_pad_positions but never swaps width_mm/height_mm (nor consults block_rotation_geometry), so for pad-less subcircuit blocks an accepted 90/270 move changes NOTHING the scorer or legality passes can see, yet placements_from_solved_state (parent_adapter.py:325-333) stamps the real leaf at the new rotation with transposed extents.
+- [x] **B10** `kicraft/autoplacer/brain/placement_solver.py:2351` — The SA rotation move sets comp.rotation and calls _update_pad_positions but never swaps width_mm/height_mm (nor consults block_rotation_geometry), so for pad-less subcircuit blocks an accepted 90/270 move changes NOTHING the scorer or legality passes can see, yet placements_from_solved_state (parent_adapter.py:325-333) stamps the real leaf at the new rotation with transposed extents.
   - **Severity:** high · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     An unconstrained (unlocked) non-square leaf block, e.g. 30x10 mm, gets a 90-degree SA rotation
@@ -298,7 +347,7 @@
     surfacing as courtyards_overlap / copper-to-edge DRC the solver said was clean. Non-square leaf
     ICs hit the same dims-desync via the same move.
 
-- [ ] **B11** `kicraft/autoplacer/brain/placement_solver.py:1796` — _optimize_rotations (lines 1789-1796), the early IC rotation in _place_clusters (1608-1616), and random-scatter rotation (1461-1464) rotate pads to the new orientation but never swap width_mm/height_mm for 90/270 deltas and (in the first two) never rotate body_center - unlike geometry.rotate_component_in_place and _orient_for_edge (1027-1028) which both maintain the AABB.
+- [x] **B11** `kicraft/autoplacer/brain/placement_solver.py:1796` — _optimize_rotations (lines 1789-1796), the early IC rotation in _place_clusters (1608-1616), and random-scatter rotation (1461-1464) rotate pads to the new orientation but never swap width_mm/height_mm for 90/270 deltas and (in the first two) never rotate body_center - unlike geometry.rotate_component_in_place and _orient_for_edge (1027-1028) which both maintain the AABB.
   - **Severity:** high · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     A non-square IC (e.g. SOT-223 regulator, 7x3.5 mm courtyard) is rotated 90 degrees by
@@ -310,7 +359,7 @@
     courtyards_overlap fab-blocker family), or parts are needlessly pushed apart on the transposed
     long axis.
 
-- [ ] **B12** `kicraft/autoplacer/freerouting_runner.py:1590` — validate_routed_board's footprint-internal clearance waiver waives ALL clearance/hole_clearance violations — including track-to-track ones that name no footprint — whenever the only refs named come from a single footprint, and the elif fallback (line 1596) compares a double-counted mention tally (a pad-internal violation names its footprint twice) against the violation count, so a broken board passes the acceptance gate.
+- [x] **B12** `kicraft/autoplacer/freerouting_runner.py:1590` — validate_routed_board's footprint-internal clearance waiver waives ALL clearance/hole_clearance violations — including track-to-track ones that name no footprint — whenever the only refs named come from a single footprint, and the elif fallback (line 1596) compares a double-counted mention tally (a pad-internal violation names its footprint twice) against the violation count, so a broken board passes the acceptance gate.
   - **Severity:** high · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     Routed leaf/parent with 1 USB-C J1 pad-gap clearance violation (report lines 'Pad A5 [CC1] of
@@ -542,7 +591,7 @@
     split into redundant pairwise nets. The membership test should be a subset check (pair <=
     endpoint_sheets).
 
-- [ ] **B24** `kicraft/autoplacer/brain/placement_solver.py:3651` — _assign_layers' back-side flip mirrors each pad's X about comp.pos to match pcbnew Flip(), but does not mirror body_center.x (2*pos.x - body_center.x), so a flipped component with an origin-offset courtyard keeps its bbox on the pre-flip side.
+- [x] **B24** `kicraft/autoplacer/brain/placement_solver.py:3651` — _assign_layers' back-side flip mirrors each pad's X about comp.pos to match pcbnew Flip(), but does not mirror body_center.x (2*pos.x - body_center.x), so a flipped component with an origin-offset courtyard keeps its bbox on the pre-flip side.
   - **Severity:** medium · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     A large THT part with courtyard center offset from the footprint origin (battery holder -
@@ -552,7 +601,7 @@
     resolution and board clamps protect empty space on the wrong side, and the real flipped
     courtyard overlaps neighbours or the board edge undetected.
 
-- [ ] **B25** `kicraft/autoplacer/brain/placement_solver.py:703` — In _score_rotation_for_routing, `accessible += dist` is indented at the level of the `for dx, dy in dirs` loop (outside it), so only the last direction (-1,-1) contributes; the other three directions' openness is computed and discarded.
+- [x] **B25** `kicraft/autoplacer/brain/placement_solver.py:703` — In _score_rotation_for_routing, `accessible += dist` is indented at the level of the `for dx, dy in dirs` loop (outside it), so only the last direction (-1,-1) contributes; the other three directions' openness is computed and discarded.
   - **Severity:** medium · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     Every IC/connector rotation choice in _optimize_rotations and the early-rotation pass scores pad
@@ -561,7 +610,7 @@
     biasing 30% of the rotation score and picking routing-hostile orientations (e.g. pads facing a
     nearby board corner at top-left instead of open space at bottom-right).
 
-- [ ] **B26** `kicraft/autoplacer/brain/placement_solver.py:1184` — Edge-group packing advances the cursor by the CURRENT part's full extent plus gap (`cursor_y += comp.height_mm + connector_gap`, same on X at line 1220) instead of half-current + gap + half-next, while the order is sorted by AREA descending - so a taller-but-smaller-area follower overlaps its predecessor.
+- [x] **B26** `kicraft/autoplacer/brain/placement_solver.py:1184` — Edge-group packing advances the cursor by the CURRENT part's full extent plus gap (`cursor_y += comp.height_mm + connector_gap`, same on X at line 1220) instead of half-current + gap + half-next, while the order is sorted by AREA descending - so a taller-but-smaller-area follower overlaps its predecessor.
   - **Severity:** medium · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     Two connectors pinned to the left edge: J1 barrel jack (9x11 mm, area 99) then J2 screw terminal
@@ -570,7 +619,7 @@
     0.5 mm; _resolve_overlaps' both-pinned branch escapes one but _restore_pinned_positions snaps it
     back, and Step 16 counts it as unresolved both-locked, shipping a courtyards_overlap to DRC.
 
-- [ ] **B27** `kicraft/autoplacer/brain/geometry.py:86` — rotate_component_in_place rotates pad.pos and swaps comp width/height but never rotates/swaps pad.size_mm, whose contract (types.py:105-116) is a WORLD-axis-aligned AABB that must be re-rotated on any placement rotation (subcircuit_instances._rotate_size does this on the artifact path).
+- [x] **B27** `kicraft/autoplacer/brain/geometry.py:86` — rotate_component_in_place rotates pad.pos and swaps comp width/height but never rotates/swaps pad.size_mm, whose contract (types.py:105-116) is a WORLD-axis-aligned AABB that must be re-rotated on any placement rotation (subcircuit_instances._rotate_size does this on the artifact path).
   - **Severity:** medium · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     array_placement rotates matrix members 90 degrees via rotate_component_in_place
@@ -580,8 +629,10 @@
     (subcircuit_solver.py:197-209, leaf_compaction) under-reserve on the true long axis, yielding
     copper-to-edge clearance violations on rotated array rows.
 
-- [ ] **B28** `kicraft/autoplacer/freerouting_runner.py:1020` — run_freerouting's timeout path sends only SIGTERM to the process group and then calls proc.communicate(timeout=5) outside any try — a JVM/xvfb-run group that ignores SIGTERM or takes >5s to exit raises an uncaught second TimeoutExpired and the Java process is leaked (no SIGKILL escalation anywhere).
-  - **Severity:** medium · **Status:** NEEDS-VERIFICATION
+- [x] **B28** `kicraft/autoplacer/freerouting_runner.py:1020` — run_freerouting's timeout path sends only SIGTERM to the process group and then calls proc.communicate(timeout=5) outside any try — a JVM/xvfb-run group that ignores SIGTERM or takes >5s to exit raises an uncaught second TimeoutExpired and the Java process is leaked (no SIGKILL escalation anywhere).
+  - **Severity:** medium · **Status:** FIXED INDEPENDENTLY — `4fabc70` on branch `self-eval-2026-07-07-fixes`
+    (self-eval FIX 1: SIGTERM→SIGKILL escalation + kill_tree; two stranded July-4 JVMs confirmed
+    the failure live). Not part of the batch-5 commit; lands on main when that branch merges.
   - **Failure scenario:**
     FreeRouting 1.9.0 wedged in its known hang mode (e.g. locked wire corner outside the board,
     documented in breakout_stubs.py:386) with the leaf timeout scaled up to 1200 s:
@@ -831,7 +882,7 @@
     to exist in the catalog with stock, a completely unrelated part is silently priced and exported
     into the fab BOM (fab_export.py:33 reads the C# back out with the identical regex).
 
-- [ ] **B46** `kicraft/autoplacer/brain/placement_solver.py:2720` — _accumulate_repulsion_numpy's skip_mask zeroes repulsion for pairs with dists < 0.001, whereas the pure-Python fallback (lines 2679-2681) clamps d to 0.1 and applies the STRONGEST repulsion to coincident parts - the production (numpy) path silently drops the anti-coincidence force.
+- [x] **B46** `kicraft/autoplacer/brain/placement_solver.py:2720` — _accumulate_repulsion_numpy's skip_mask zeroes repulsion for pairs with dists < 0.001, whereas the pure-Python fallback (lines 2679-2681) clamps d to 0.1 and applies the STRONGEST repulsion to coincident parts - the production (numpy) path silently drops the anti-coincidence force.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     Two unlocked components seeded at the exact same point (cluster placement clamps both to the
