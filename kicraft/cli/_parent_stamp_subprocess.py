@@ -19,7 +19,27 @@ import sys
 import pcbnew
 
 from kicraft.autoplacer.hardware._pad_nets import propagate_pad_nets
+from kicraft.autoplacer.hardware.silk_geometry import (
+    bbox_inside_poly,
+    find_shift_into_poly,
+)
 from kicraft.autoplacer.hardware.silk_refdes import legalize_refdes
+
+
+def _outline_poly_mm(outline: dict | None) -> list[tuple[float, float]]:
+    """The payload outline as an mm point list ([] when unavailable)."""
+    if not outline:
+        return []
+    poly = outline.get("polyline")
+    if poly and len(poly) >= 3:
+        return [(float(x), float(y)) for x, y in poly]
+    try:
+        left, top = float(outline["tl_x"]), float(outline["tl_y"])
+        right = left + max(1.0, float(outline["br_x"]) - left)
+        bottom = top + max(1.0, float(outline["br_y"]) - top)
+    except (KeyError, TypeError, ValueError):
+        return []
+    return [(left, top), (right, top), (right, bottom), (left, bottom)]
 
 
 def main(argv: list[str]) -> int:
@@ -213,6 +233,12 @@ def main(argv: list[str]) -> int:
         board.Add(_tv)
 
     # --- stamp silkscreen graphics ---
+    # Text labels are clamped into the board outline: the group label is
+    # sized to the LEAF box, and after compose the parent outline (esp. a
+    # rounded corner) can crop it — KC-7A3VEX shipped with "PD TRIGGER"
+    # running off the edge. A label that cannot be pulled inside is dropped
+    # (loudly) rather than fabbed clipped.
+    _outline_mm = _outline_poly_mm(_outline)
     for _silk in _silkscreen:
         _slayer = _SILK_LAYER_MAP.get(_silk.get("layer", "F.SilkS"), pcbnew.F_SilkS)
         if _silk["kind"] == "poly":
@@ -244,6 +270,23 @@ def main(argv: list[str]) -> int:
             )
             _txt.SetTextThickness(pcbnew.FromMM(_silk.get("font_thickness", 0.15)))
             _txt.SetHorizJustify(pcbnew.GR_TEXT_H_ALIGN_LEFT)
+            if _outline_mm:
+                _bb = _txt.GetBoundingBox()
+                _box = (pcbnew.ToMM(_bb.GetLeft()), pcbnew.ToMM(_bb.GetTop()),
+                        pcbnew.ToMM(_bb.GetRight()), pcbnew.ToMM(_bb.GetBottom()))
+                if not bbox_inside_poly(_box, _outline_mm, 0.2):
+                    _shift = find_shift_into_poly(_box, _outline_mm, 0.2)
+                    if _shift is None:
+                        print(
+                            f"silk label {_silk.get('text', '')!r} dropped: "
+                            f"cannot fit inside the board outline",
+                            file=sys.stderr,
+                        )
+                        continue
+                    _txt.SetPosition(pcbnew.VECTOR2I(
+                        _txt.GetPosition().x + pcbnew.FromMM(_shift[0]),
+                        _txt.GetPosition().y + pcbnew.FromMM(_shift[1]),
+                    ))
             board.Add(_txt)
 
     # --- stamp parent-local rule-area keepouts (mounting holes etc.) ---

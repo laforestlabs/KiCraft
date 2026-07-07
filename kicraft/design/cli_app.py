@@ -3991,6 +3991,92 @@ def run_post_wiring_review(state_path: Path, project_dir: Path,
         return skipped
 
 
+def run_silk_plan_authoring(state_path: Path, project_dir: Path, progress,
+                            *, board_code: str | None = None) -> dict:
+    """Author the silkscreen content plan (web process, post-wiring).
+
+    Same lifecycle slot as ``run_post_wiring_review``: runs after the wiring
+    commit and BEFORE the build is enqueued, commits to the top-level
+    ``state.silk_plan``, and the no-LLM build tail places it geometrically.
+    The LLM authors content only; ``lint_labels`` drops anything the design
+    state cannot corroborate (recorded in ``SilkPlan.dropped_at_lint``).
+
+    Fail-soft like the review: on ANY error (no key, network, malformed
+    output) the slot stays unset and the build falls back to the
+    deterministic legend. ``KICRAFT_SILK_PLAN=0`` disables the LLM call but
+    still commits the metadata slot (title/board_code for the legend).
+    """
+    skipped = {"ran": False, "labels": 0, "cost_usd": 0.0}
+    state = _load_state(state_path) if state_path.exists() else None
+    if state is None or state.bom is None or not state.bom.parts:
+        return skipped
+    from kicraft.design.models import SilkPlan
+
+    t0 = time.monotonic()
+    total_cost = 0.0
+    llm_enabled = os.environ.get("KICRAFT_SILK_PLAN", "").strip().lower() not in (
+        "0", "false", "no", "off"
+    )
+    try:
+        title = ""
+        kept: list = []
+        dropped: list[str] = []
+        author_model = None
+        if llm_enabled:
+            progress({"kind": "build_log",
+                      "text": "[build]     silk plan: authoring board labels ..."})
+            from kicraft.server.client import make_client
+            from kicraft.server.config import Settings
+
+            from .synthesis.electrical_review import build_design_digest
+            from .synthesis.silk_plan import author_labels, lint_labels
+
+            s = Settings.from_env()
+            client = make_client(s.for_review())
+            author_model = s.review_model or s.model
+            digest = build_design_digest(state, project_root=project_dir)
+            # review_max_tokens, not a small local cap: the reasoning-heavy
+            # review models burn 10-23k thinking tokens before the JSON
+            # answer; a small cap truncates (finish=length) with EMPTY text
+            # (see the review_max_tokens note in server/config.py).
+            res = author_labels(client, digest, model=author_model,
+                                reasoning=s.review_reasoning(),
+                                max_tokens=s.review_max_tokens)
+            total_cost = res["cost_usd"]
+            if not res["ok"]:
+                progress({"kind": "build_log",
+                          "text": f"[build]     silk plan: authoring failed "
+                                  f"({res['error']}); legend-only fallback"})
+            else:
+                title = res["title"]
+                kept, dropped = lint_labels(res["labels"], state,
+                                            project_root=project_dir)
+
+        state.silk_plan = SilkPlan(
+            title=title or None, board_code=board_code, labels=kept,
+            dropped_at_lint=dropped, author_model=author_model,
+            cost_usd=round(total_cost, 6),
+        )
+        state.stage_status["silk_plan"] = StageStatus(
+            ok=True, cost_usd=round(total_cost, 6),
+            finished_at=_dt.datetime.now(_dt.timezone.utc).isoformat(),
+            wall_s=round(time.monotonic() - t0, 3))
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
+        progress({"kind": "build_log",
+                  "text": f"[build]     silk plan: {len(kept)} label(s) committed"
+                          + (f", {len(dropped)} dropped at lint" if dropped else "")})
+        for reason in dropped:
+            progress({"kind": "build_log",
+                      "text": f"[build]     silk plan lint dropped {reason}"})
+        return {"ran": llm_enabled, "labels": len(kept), "cost_usd": total_cost}
+    except (Exception, SystemExit) as e:  # noqa: BLE001 - never block the build
+        progress({"kind": "build_log",
+                  "text": f"[build]     silk plan skipped "
+                          f"({type(e).__name__}: {e})"})
+        return skipped
+
+
 def _surface_build_warnings(
     state, state_path: Path, artifacts, warnings: list[str]
 ) -> None:
@@ -4156,6 +4242,31 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     # lowered) clearance the board was routed to, so the verify gate validates
     # against the rule FreeRouting actually used, not a wider declared one.
     _align_project_clearance_to_routing(project_dir, stem, pcb)
+
+    # 3a. Silkscreen legend + authored labels. Runs on the promoted board
+    # AFTER routing/pour are final and BEFORE the verify gate, so the DRC
+    # pass below sees the added silk. Content comes from state.silk_plan
+    # (LLM-authored pre-build, linted); absent slot => deterministic legend
+    # only. Best-effort: silk is cosmetic and must never break the tail.
+    try:
+        from kicraft.autoplacer.hardware.silk_legend import apply_silk_legend
+
+        silk_res = apply_silk_legend(pcb, state)
+        _placed = silk_res.get("placed") or []
+        _dropped = silk_res.get("dropped") or []
+        print(
+            f"[build]     silk legend: placed={len(_placed)} "
+            f"dropped={len(_dropped)}"
+            + ("" if not _dropped else " ("
+               + "; ".join(f"{d['id']}: {d['reason']}" for d in _dropped) + ")")
+        )
+        if artifacts is not None:
+            artifacts.silk_placed = [str(p["id"]) for p in _placed]
+            artifacts.silk_dropped = [
+                f"{d['id']}: {d['reason']}" for d in _dropped
+            ]
+    except Exception as _silk_err:  # noqa: BLE001 - cosmetic, never a gate
+        print(f"[build]     silk legend skipped ({_silk_err})", file=sys.stderr)
 
     # 4. Verification gate: no shorts, no unconnected, and no silently-dropped
     #    components (a board that dropped parts can still verify "clean").
