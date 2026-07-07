@@ -85,6 +85,21 @@ on that board (`/kicraft-investigate <run dir>`) before changing any timeout.
 
 **Verify:** four solo replays with times logged in the investigation notes.
 
+**VERDICT (2026-07-07, solo replays, ACQUIRED-billed, quality=good seed=0,
+zero queue, zero stray JVMs):**
+
+| run | solo build | outcome | verdict |
+| --- | --- | --- | --- |
+| run_02 r2r-dac | 35.2 min | rc=0 fab-ready | **contention** (batch ran 2 slots on 2 cores + 2 stray JVMs) |
+| run_07 usb-a-power-splitter | 93.6 min | still killed | **genuine congestion** — investigate |
+| run_10 rp2040-min | 46.5 min | rc=7 | genuine (completes, over 40-min budget) |
+| run_27 stepper-a4988 | 58.3 min | rc=6 | genuine — all leaf phase; parent compose insta-fails 0.17 s/round |
+
+Follow-ups: `/kicraft-investigate` on run_07 (worst) and run_27 (leaf-phase
+sink + parent-compose failure); consider clamping the harness `--build-slots`
+default to `max(1, cores // 6)` (build_slots.py's own sizing) — 2 slots on a
+2-core box is guaranteed starvation. Per the ground rule, no timeout changes.
+
 ---
 
 ## FIX 3 — BOM stage dies to exhaustion with NO board (3/28 total losses)  [prompt/contract + tooling]
