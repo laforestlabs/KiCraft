@@ -66,11 +66,55 @@ def _outline_poly(board) -> list[tuple[float, float]]:
     return [(left, top), (right, top), (right, bottom), (left, bottom)]
 
 
+def _shape_stroke_boxes(shape) -> list[tuple[float, float, float, float]]:
+    """Thin per-edge mm boxes for an outline PCB_SHAPE, or [] for non-shapes.
+
+    A silk gr_poly/rect/segment is a STROKE, not a filled region: the leaf
+    group boxes span most of a compacted board, and treating their bbox as
+    solid walls off nearly all free silk (the replayed KC-7A3VEX dropped
+    every label that way). Text may sit INSIDE an outline box — only the
+    drawn edges themselves are obstacles.
+    """
+    try:
+        kind = shape.GetShape()
+    except AttributeError:
+        return []
+    half = pcbnew.ToMM(shape.GetWidth()) / 2.0 if hasattr(shape, "GetWidth") else 0.1
+
+    def _edge(x1, y1, x2, y2):
+        return (min(x1, x2) - half, min(y1, y2) - half,
+                max(x1, x2) + half, max(y1, y2) + half)
+
+    if kind == pcbnew.SHAPE_T_SEGMENT:
+        s, e = shape.GetStart(), shape.GetEnd()
+        return [_edge(pcbnew.ToMM(s.x), pcbnew.ToMM(s.y),
+                      pcbnew.ToMM(e.x), pcbnew.ToMM(e.y))]
+    if kind == pcbnew.SHAPE_T_RECT:
+        s, e = shape.GetStart(), shape.GetEnd()
+        x1, y1 = pcbnew.ToMM(s.x), pcbnew.ToMM(s.y)
+        x2, y2 = pcbnew.ToMM(e.x), pcbnew.ToMM(e.y)
+        return [_edge(x1, y1, x2, y1), _edge(x2, y1, x2, y2),
+                _edge(x2, y2, x1, y2), _edge(x1, y2, x1, y1)]
+    if kind == pcbnew.SHAPE_T_POLY:
+        try:
+            chain = shape.GetPolyShape().COutline(0)
+            pts = [(pcbnew.ToMM(chain.CPoint(i).x), pcbnew.ToMM(chain.CPoint(i).y))
+                   for i in range(chain.PointCount())]
+        except Exception:
+            return []
+        if len(pts) < 2:
+            return []
+        return [_edge(*pts[i], *pts[(i + 1) % len(pts)]) for i in range(len(pts))]
+    return []
+
+
 def _collect_obstacles(board) -> dict[str, list]:
     """Per-side (F/B) mm boxes silk text must not touch.
 
     Courtyards + pads (through-hole pads block both sides) + every existing
-    silk item (leaf group boxes/labels, refdes that stayed on silk).
+    silk item. Outline SHAPES (group boxes) contribute their stroked edges
+    only, so text can use the free space inside them; text items block
+    their full bbox.
     """
     obstacles: dict[str, list] = {"F": [], "B": []}
 
@@ -78,6 +122,13 @@ def _collect_obstacles(board) -> dict[str, list]:
         box = _mm_box(bb)
         if box[2] > box[0] and box[3] > box[1]:
             obstacles[side].append(box)
+
+    def _add_silk_item(side: str, item) -> None:
+        stroke_boxes = _shape_stroke_boxes(item)
+        if stroke_boxes:
+            obstacles[side].extend(stroke_boxes)
+        else:
+            _add(side, item.GetBoundingBox())
 
     for fp in board.Footprints():
         side = "B" if fp.GetLayer() == pcbnew.B_Cu else "F"
@@ -106,16 +157,16 @@ def _collect_obstacles(board) -> dict[str, list]:
             except Exception:
                 continue
             if layer == pcbnew.F_SilkS:
-                _add("F", item.GetBoundingBox())
+                _add_silk_item("F", item)
             elif layer == pcbnew.B_SilkS:
-                _add("B", item.GetBoundingBox())
+                _add_silk_item("B", item)
 
     for d in board.GetDrawings():
         layer = d.GetLayer()
         if layer == pcbnew.F_SilkS:
-            _add("F", d.GetBoundingBox())
+            _add_silk_item("F", d)
         elif layer == pcbnew.B_SilkS:
-            _add("B", d.GetBoundingBox())
+            _add_silk_item("B", d)
 
     return obstacles
 
@@ -175,59 +226,90 @@ class _Placer:
             "layer": "F.SilkS" if side == "F" else "B.SilkS",
         })
 
-    # -- legend (edge-anchored block, front silk) ---------------------------
+    # -- legend (edge-anchored block) ----------------------------------------
     def place_legend(self, lines: list[dict], gap_mm: float) -> bool:
         """Stack of text lines placed as one block along the bottom (then
-        top) edge strip, centered candidates first. Returns True if placed."""
+        top) edge strip, centered candidates first. Degrades: shrink ladder
+        -> re-wrap long lines -> BACK silk (mirrored). Attribution must not
+        crowd out functional labels, so the caller places it LAST and this
+        block takes whatever honest space remains. Returns True if placed."""
         if not lines:
             return False
+        for use_lines in (lines, self._wrap_lines(lines)):
+            for scale in (1.0, 0.85, 0.7):
+                for side in ("F", "B"):
+                    if self._try_legend_block(use_lines, gap_mm, scale, side):
+                        return True
+        return False
+
+    def _wrap_lines(self, lines: list[dict]) -> list[dict]:
+        """Split any line wider than ~60% of the board at the most central
+        space, so long attribution lines can fit narrow boards."""
+        board_w = self.board_box[2] - self.board_box[0]
+        out: list[dict] = []
+        for ln in lines:
+            text = ln["text"]
+            # Rough stroke-font width estimate: ~0.95 * height per char.
+            est_w = len(text) * float(ln["height_mm"]) * 0.95
+            if est_w > board_w * 0.6 and " " in text.strip():
+                mid = len(text) // 2
+                spaces = [i for i, c in enumerate(text) if c == " "]
+                cut = min(spaces, key=lambda i: abs(i - mid))
+                out.append({"text": text[:cut].rstrip(),
+                            "height_mm": ln["height_mm"]})
+                out.append({"text": text[cut + 1:].lstrip(),
+                            "height_mm": ln["height_mm"]})
+            else:
+                out.append(dict(ln))
+        return out
+
+    def _try_legend_block(self, lines: list[dict], gap_mm: float,
+                          scale: float, side: str) -> bool:
         left, top, right, bottom = self.board_box
-        for scale in (1.0, 0.85, 0.7):
-            texts = []
-            for ln in lines:
-                h = max(0.8, round(float(ln["height_mm"]) * scale, 2))
-                texts.append(
-                    (_make_text(self.board, ln["text"], h, pcbnew.F_SilkS, False), h)
-                )
-            metrics = [self._measure(t) for t, _ in texts]
-            block_w = max(m[0] for m in metrics)
-            block_h = sum(m[1] for m in metrics) + gap_mm * (len(metrics) - 1)
+        layer = pcbnew.F_SilkS if side == "F" else pcbnew.B_SilkS
+        mirrored = side == "B"
+        texts = []
+        for ln in lines:
+            h = max(0.8, round(float(ln["height_mm"]) * scale, 2))
+            texts.append(
+                (_make_text(self.board, ln["text"], h, layer, mirrored), h)
+            )
+        metrics = [self._measure(t) for t, _ in texts]
+        block_w = max(m[0] for m in metrics)
+        block_h = sum(m[1] for m in metrics) + gap_mm * (len(metrics) - 1)
 
-            xs: list[float] = []
-            x0 = left + self.edge_margin
-            x1 = right - self.edge_margin - block_w
-            if x1 >= x0:
-                n_steps = int((x1 - x0) / 2.0)
-                xs = sorted(
-                    (x0 + i * 2.0 for i in range(n_steps + 1)),
-                    key=lambda x: abs(x + block_w / 2 - (left + right) / 2),
-                )
-            candidates = [
-                (x, bottom - self.edge_margin - block_h) for x in xs
-            ] + [(x, top + self.edge_margin) for x in xs]
+        xs: list[float] = []
+        x0 = left + self.edge_margin
+        x1 = right - self.edge_margin - block_w
+        if x1 >= x0:
+            n_steps = int((x1 - x0) / 1.0)
+            xs = sorted(
+                (x0 + i * 1.0 for i in range(n_steps + 1)),
+                key=lambda x: abs(x + block_w / 2 - (left + right) / 2),
+            )
+        candidates = [
+            (x, bottom - self.edge_margin - block_h) for x in xs
+        ] + [(x, top + self.edge_margin) for x in xs]
 
-            for tx, ty in candidates:
-                block_box = (tx, ty, tx + block_w, ty + block_h)
-                line_boxes = []
-                y = ty
-                fits = True
-                for (w, h, _ox, _oy) in metrics:
-                    lb = (tx, y, tx + w, y + h)
-                    if not self._spot_ok("F", lb):
-                        fits = False
-                        break
-                    line_boxes.append(lb)
-                    y += h + gap_mm
-                if not fits or not bbox_inside_poly(
-                    block_box, self.poly, self.edge_margin
-                ):
-                    continue
-                y = ty
-                for i, (txt, h) in enumerate(texts):
-                    w, lh, ox, oy = metrics[i]
-                    self._commit(txt, "F", tx, y, ox, oy, f"legend:{i}", h)
-                    y += lh + gap_mm
-                return True
+        for tx, ty in candidates:
+            block_box = (tx, ty, tx + block_w, ty + block_h)
+            y = ty
+            fits = True
+            for (w, h, _ox, _oy) in metrics:
+                if not self._spot_ok(side, (tx, y, tx + w, y + h)):
+                    fits = False
+                    break
+                y += h + gap_mm
+            if not fits or not bbox_inside_poly(
+                block_box, self.poly, self.edge_margin
+            ):
+                continue
+            y = ty
+            for i, (txt, h) in enumerate(texts):
+                w, lh, ox, oy = metrics[i]
+                self._commit(txt, side, tx, y, ox, oy, f"legend:{i}", h)
+                y += lh + gap_mm
+            return True
         return False
 
     # -- anchored / free labels ---------------------------------------------
@@ -276,8 +358,8 @@ class _Placer:
         preferred side first, else a sweep of the free board area."""
         if fp is None:
             left, top, right, bottom = self.board_box
-            for ty in _steps(top + self.edge_margin, bottom - self.edge_margin - h, 2.0):
-                for tx in _steps(left + self.edge_margin, right - self.edge_margin - w, 2.0):
+            for ty in _steps(top + self.edge_margin, bottom - self.edge_margin - h, 1.0):
+                for tx in _steps(left + self.edge_margin, right - self.edge_margin - w, 1.0):
                     yield (tx, ty)
             return
 
@@ -333,20 +415,28 @@ def main(argv: list[str]) -> int:
     board = pcbnew.LoadBoard(payload["pcb_path"])
     placer = _Placer(board, payload)
 
+    # Functional labels FIRST (largest first within a priority tier — the
+    # DIP table is the hardest rectangle to pack and the most valuable),
+    # then the legend, which has its own degrade path down to back silk.
+    def _size_key(lb: dict) -> float:
+        lines = str(lb.get("text", "")).split("\n")
+        return -(len(lines) * max((len(ln) for ln in lines), default=0))
+
+    labels = sorted(
+        payload.get("labels") or [],
+        key=lambda lb: (int(lb.get("priority", 2)), _size_key(lb),
+                        str(lb.get("id", ""))),
+    )
+    for label in labels:
+        placer.place_label(label)
+
     legend = payload.get("legend") or {}
     lines = legend.get("lines") or []
     if lines:
         if not placer.place_legend(lines, float(legend.get("gap_mm", 0.3))):
             placer.dropped.append(
-                {"id": "legend", "reason": "no clear edge strip for the legend"}
+                {"id": "legend", "reason": "no clear silk strip on either side"}
             )
-
-    labels = sorted(
-        payload.get("labels") or [],
-        key=lambda lb: (int(lb.get("priority", 2)), str(lb.get("id", ""))),
-    )
-    for label in labels:
-        placer.place_label(label)
 
     with open(payload["result_path"], "w") as f:
         json.dump({"placed": placer.placed, "dropped": placer.dropped}, f, indent=1)
