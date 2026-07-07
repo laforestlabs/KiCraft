@@ -337,9 +337,6 @@ def _route_parent_board(
         except Exception as exc:
             print(f"warning: power strand repair failed: {exc}", file=sys.stderr)
 
-    # Import all copper from the routed board (child + new parent traces)
-    copper = import_routed_copper(str(routed_pcb))
-
     # Root parent has no interface anchors -- skip anchor validation.
     # Anchor completeness is a leaf-level gate, not a parent-level gate.
     validation = validate_routed_board(
@@ -350,12 +347,30 @@ def _route_parent_board(
         required_anchor_names=[],
     )
 
+    # C1 signal unconnected repair: freerouting sometimes walls a signal net
+    # off (no_clear_path) and never rip-up-recovers. Attempt a constrained
+    # local bend/via repair (guarded copper only), then accept-or-revert on a
+    # full re-DRC: unconnected must strictly drop and shorts must not rise,
+    # else the board is byte-restored and the honest verdict below stands.
+    # Design: docs/plans/unconnected-signal-repair-c1-design.md.
+    unconnected = int((validation.get("drc") or {}).get("unconnected", 0) or 0)
+    if unconnected > 0 and cfg.get("signal_unconnected_repair_enabled", True):
+        validation = _attempt_signal_unconnected_repair(
+            routed_pcb, cfg, validation
+        )
+        unconnected = int(
+            (validation.get("drc") or {}).get("unconnected", 0) or 0
+        )
+
+    # Import all copper from the routed board (child + new parent traces +
+    # any repair ties; must run AFTER the repair so its copper is captured).
+    copper = import_routed_copper(str(routed_pcb))
+
     # A parent must close every net. Unlike a leaf -- whose interface ports are
     # legitimately open, so validate_routed_board waives unconnected -- unrouted
     # nets on the parent mean an unusable board (the final build verify requires
     # 0 unconnected). Reject here so the search keeps trying other rounds for a
     # fully-routed parent instead of promoting one the verify gate would fail.
-    unconnected = int((validation.get("drc") or {}).get("unconnected", 0) or 0)
     if unconnected > 0:
         validation["accepted"] = False
         reasons = validation.setdefault("rejection_reasons", [])
@@ -370,3 +385,86 @@ def _route_parent_board(
         "validation": validation,
         "freerouting_stats": freerouting_stats,
     }
+
+
+def _attempt_signal_unconnected_repair(
+    routed_pcb, cfg: dict, validation: dict
+) -> dict:
+    """Run the C1 repair in a pcbnew subprocess; keep it only if re-DRC improves.
+
+    Accept iff unconnected strictly decreased AND shorts did not increase;
+    anything else (including a crashed subprocess) restores the pre-repair
+    board byte-for-byte and returns the original validation unchanged.
+    """
+    import shutil
+
+    from kicraft.autoplacer.freerouting_runner import (
+        _run_pcbnew_script,
+        validate_routed_board,
+    )
+
+    drc = validation.get("drc") or {}
+    unconnected_before = int(drc.get("unconnected", 0) or 0)
+    shorts_before = int(drc.get("shorts", 0) or 0)
+    backup = Path(str(routed_pcb) + ".pre_signal_repair")
+    shutil.copy2(routed_pcb, backup)
+    try:
+        _sig_cfg = json.dumps({
+            k: cfg[k]
+            for k in (
+                "gnd_zone_net",
+                "power_plane_nets",
+                "signal_repair_max_mm",
+                "signal_repair_max_targets",
+                "signal_repair_dogleg_offsets_mm",
+                "freerouting_min_clearance_mm",
+                "freerouting_fine_pitch_track_mm",
+                "via_size_mm",
+                "via_drill_mm",
+            )
+            if k in cfg
+        })
+        _run_pcbnew_script(
+            "import json\n"
+            "from kicraft.autoplacer.brain.unconnected_repair import "
+            "repair_unconnected_signals\n"
+            f"cfg = json.loads({_sig_cfg!r})\n"
+            f"s = repair_unconnected_signals({str(routed_pcb)!r}, cfg)\n"
+            "print('signal unconnected repair:', len(s['nets']), 'net(s) --',\n"
+            "      s['stranded'], 'stranded,', s['tied'], 'tied,',\n"
+            "      len(s['skipped']), 'skipped,', s['unresolved'], 'unresolved')\n"
+        )
+        revalidation = validate_routed_board(
+            str(routed_pcb),
+            cfg=cfg,
+            expected_anchor_names=[],
+            actual_anchor_names=[],
+            required_anchor_names=[],
+        )
+        re_drc = revalidation.get("drc") or {}
+        unconnected_after = int(re_drc.get("unconnected", 0) or 0)
+        shorts_after = int(re_drc.get("shorts", 0) or 0)
+        if (unconnected_after < unconnected_before
+                and shorts_after <= shorts_before):
+            print(
+                f"  signal unconnected repair KEPT: unconnected "
+                f"{unconnected_before} -> {unconnected_after}, shorts "
+                f"{shorts_before} -> {shorts_after}"
+            )
+            backup.unlink(missing_ok=True)
+            return revalidation
+        print(
+            f"  signal unconnected repair reverted (unconnected "
+            f"{unconnected_before} -> {unconnected_after}, shorts "
+            f"{shorts_before} -> {shorts_after}); board restored"
+        )
+        shutil.copy2(backup, routed_pcb)
+        backup.unlink(missing_ok=True)
+        return validation
+    except Exception as exc:  # noqa: BLE001 -- a repair may never fail a board
+        print(f"warning: signal unconnected repair failed: {exc}",
+              file=sys.stderr)
+        if backup.exists():
+            shutil.copy2(backup, routed_pcb)
+            backup.unlink(missing_ok=True)
+        return validation
