@@ -297,8 +297,8 @@ def _settings():
 def sent(monkeypatch):
     calls = []
     monkeypatch.setattr(notify, "send_email",
-                        lambda settings, to, subject, body:
-                        calls.append((to, subject, body)) or True)
+                        lambda settings, to, subject, body, html_body=None:
+                        calls.append((to, subject, body, html_body)) or True)
     # Each test starts with a clean activity map.
     monkeypatch.setattr(notify, "_last_seen", {})
     return calls
@@ -309,10 +309,13 @@ def test_notify_sends_when_user_away(store, sent):
     ok = notify.notify_run_event(store, _settings(), user_id=u.id, project_id=7,
                                  status="ok", brief="a tiny 555 blinker")
     assert ok and len(sent) == 1
-    to, subject, body = sent[0]
+    to, subject, body, html_body = sent[0]
     assert to == "away@example.com"
     assert "ready" in subject and "555" in subject
     assert "https://kicraft.io/?project=7" in body
+    # The notification carries branded HTML with a clickable CTA to the project.
+    assert html_body and 'href="https://kicraft.io/?project=7"' in html_body
+    assert "Download your board" in html_body
 
 
 def test_notify_question_subject(store, sent):
