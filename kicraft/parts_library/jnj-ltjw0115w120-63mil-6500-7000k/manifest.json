@@ -1,10 +1,10 @@
 {
-  "content_hash": "sha256:85bc37c2df0e9060e804409f7cbaaa8efec4c895f099f05c3381cc6613b89f53",
+  "content_hash": "sha256:8188de715ac4294d7885fba676cea2f783c1bf4a256e32f5827f2bf3f08767b7",
   "datasheet_url": "https://www.lcsc.com/datasheet/C19185884.pdf",
-  "description": "1 A high-power white LED, 3535 SMD (SMD3535-3P), 2.8-3.6 V, 6000-7000 K — the power-LED class for LED-driver briefs (constant-current drivers, torches); NOT an 0805 indicator.",
+  "description": "1 A high-power white LED, 3535 SMD (SMD3535-3P), 2.8-3.6 V, 6000-7000 K \u2014 the power-LED class for LED-driver briefs (constant-current drivers, torches); NOT an 0805 indicator.",
   "footprint_name": "LED-SMD_3P-L3.5-W3.5-RD-C",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "reviewed",
   "mpn": "JNJ-LTJW0115W120/63MIL/6500-7000K",
   "name": "jnj-ltjw0115w120-63mil-6500-7000k",
   "provenance": {
