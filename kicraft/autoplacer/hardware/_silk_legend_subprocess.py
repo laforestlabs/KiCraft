@@ -379,24 +379,36 @@ class _Placer:
 
         cx = (court[0] + court[2]) / 2
         cy = (court[1] + court[3]) / 2
-        for gap in (0.4, 1.0, 2.0, 3.5):
+        left, top, right, bottom = self.board_box
+        m = self.edge_margin
+
+        def _clamped(tx, ty):
+            # Overhang connectors put their courtyard bbox partly OFF the
+            # board, pushing every bbox-relative alignment off with it.
+            # Slide the candidate back inside; the side semantics survive
+            # (a below-the-connector label stays below, shifted along the
+            # edge) and _spot_ok still rejects anything that truly clashes.
+            return (min(max(tx, left + m), right - m - w),
+                    min(max(ty, top + m), bottom - m - h))
+
+        for gap in (0.4, 1.0, 2.0, 3.5, 5.0, 7.0):
             for side_name in order:
                 if side_name == "right":
                     tx = court[2] + gap
                     for ty in (cy - h / 2, court[1], court[3] - h):
-                        yield (tx, ty)
+                        yield _clamped(tx, ty)
                 elif side_name == "left":
                     tx = court[0] - gap - w
                     for ty in (cy - h / 2, court[1], court[3] - h):
-                        yield (tx, ty)
+                        yield _clamped(tx, ty)
                 elif side_name == "below":
                     ty = court[3] + gap
                     for tx in (cx - w / 2, court[0], court[2] - w):
-                        yield (tx, ty)
+                        yield _clamped(tx, ty)
                 else:  # above
                     ty = court[1] - gap - h
                     for tx in (cx - w / 2, court[0], court[2] - w):
-                        yield (tx, ty)
+                        yield _clamped(tx, ty)
 
 
 def _steps(lo: float, hi: float, step: float):
