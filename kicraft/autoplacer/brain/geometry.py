@@ -84,6 +84,12 @@ def rotate_component_in_place(comp: Component, delta_deg: float) -> None:
         comp.body_center = _rot(comp.body_center)
     for pad in comp.pads:
         pad.pos = _rot(pad.pos)
+        if pad.size_mm is not None:
+            # size_mm is a WORLD-axis-aligned AABB (types.Pad contract), so
+            # it must be re-rotated with the pad, like _rotate_size on the
+            # artifact path.
+            w, h = bbox_after_rotation(pad.size_mm.x, pad.size_mm.y, delta)
+            pad.size_mm = Point(w, h)
     comp.rotation = (comp.rotation + delta) % 360.0
     if round(delta) % 180 == 90:
         comp.width_mm, comp.height_mm = comp.height_mm, comp.width_mm

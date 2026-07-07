@@ -274,6 +274,55 @@ def _extract_clearance_footprint_refs(
     )
 
 
+def _classify_clearance_violations(
+    report_text: str,
+    ignorable_refs: set[str] | None = None,
+) -> dict[str, int]:
+    """Classify each [clearance]/[hole_clearance] block as footprint-internal
+    (waivable) or genuine, PER VIOLATION.
+
+    A violation is waivable only when every item line in its block names a
+    footprint via "of <REF>" and all named refs are one single footprint
+    (pad spacing inherent to a dense footprint, e.g. USB-C), or -- explicit
+    per-board escape hatch -- every named ref is in ``ignorable_refs``. A
+    violation with any ref-less item (a Track/zone item) involves routed
+    copper and is never waivable. The old aggregate-refs approach let
+    ref-less track-to-track violations ride along with a single
+    footprint-internal one (and double-counted the footprint's mentions).
+
+    Returns ``{"waived": n, "genuine": m}``.
+    """
+    ignorable = ignorable_refs or set()
+    ref_pattern = re.compile(r"\bof\s+(\S+)")
+    waived = 0
+    genuine = 0
+    item_refs: list[set[str]] | None = None  # per-item refs of the open block
+
+    def _close_block() -> None:
+        nonlocal waived, genuine, item_refs
+        if item_refs is None:
+            return
+        every_item_named = bool(item_refs) and all(item_refs)
+        refs: set[str] = set().union(*item_refs) if item_refs else set()
+        if every_item_named and (len(refs) == 1 or refs <= ignorable):
+            waived += 1
+        else:
+            genuine += 1
+        item_refs = None
+
+    for line in report_text.splitlines():
+        header = re.match(r"\[([^\]]+)\]", line)
+        if header:
+            _close_block()
+            if header.group(1) in ("clearance", "hole_clearance"):
+                item_refs = []
+            continue
+        if item_refs is not None and line.startswith("    ") and line.strip():
+            item_refs.append(set(ref_pattern.findall(line)))
+    _close_block()
+    return {"waived": waived, "genuine": genuine}
+
+
 def clear_traces(
     kicad_pcb_path: str,
     preserve_thermal_vias: bool = True,
@@ -1548,29 +1597,22 @@ def validate_routed_board(
     # to the footprint and should not block acceptance.
     clearance_count = drc.get("clearance", 0)
     if clearance_count > 0:
-        # Determine if clearance violations are footprint-internal by
-        # scanning the full DRC report text for "of <REF>" references.
-        # If all clearance violations reference pads from the same single
-        # footprint, they are inherent to that footprint's pad spacing
-        # (e.g. dense USB-C connectors) and not a routing problem.
+        # Classify each clearance violation individually: waive only the
+        # blocks whose every item names the same single footprint (pad
+        # spacing inherent to a dense footprint, e.g. USB-C). Any block
+        # naming routed copper (a ref-less Track/zone item) or spanning
+        # two footprints is a genuine routing fault and fails the gate.
         report_text = str(drc.get("report_text", ""))
-        _clearance_ref_counts = _extract_clearance_footprint_refs(report_text)
-        _clearance_refs = set(_clearance_ref_counts)
-        drc["clearance_footprint_refs"] = sorted(_clearance_refs)
-
-        if len(_clearance_refs) <= 1 and _clearance_refs:
-            # All clearance violations are within a single footprint
-            validation["footprint_internal_clearance_count"] = clearance_count
-        elif _clearance_ref_counts:
-            dominant_ref, dominant_count = _clearance_ref_counts.most_common(1)[0]
-            ignorable_refs = set(cfg.get("ignorable_footprint_refs", [])) if cfg else set()
-            if dominant_count >= clearance_count or dominant_ref in ignorable_refs:
-                validation["footprint_internal_clearance_count"] = clearance_count
-            else:
-                validation["obviously_illegal_routed_geometry"] = True
-        elif cfg and clearance_count <= 10 and cfg.get("ignorable_footprint_refs"):
-            validation["footprint_internal_clearance_count"] = clearance_count
-        else:
+        drc["clearance_footprint_refs"] = sorted(
+            set(_extract_clearance_footprint_refs(report_text))
+        )
+        ignorable_refs = (
+            set(cfg.get("ignorable_footprint_refs", [])) if cfg else set()
+        )
+        verdict = _classify_clearance_violations(report_text, ignorable_refs)
+        if verdict["waived"]:
+            validation["footprint_internal_clearance_count"] = verdict["waived"]
+        if verdict["genuine"]:
             validation["obviously_illegal_routed_geometry"] = True
     if drc.get("copper_edge_clearance", 0) > 0:
         # Edge-mount connector PADS no longer get a blanket copper_edge waiver.

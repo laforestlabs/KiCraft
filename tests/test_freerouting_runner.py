@@ -84,6 +84,78 @@ def test_validate_routed_board_marks_single_footprint_clearance_as_internal(
     assert validation["drc"]["clearance_footprint_refs"] == ["J1"]
 
 
+def test_validate_routed_board_rejects_trackless_ride_along_clearance(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # One genuinely footprint-internal violation must NOT waive ref-less
+    # track-to-track violations that ride along in the same report (the
+    # old aggregate-refs waiver let a broken board pass the gate).
+    monkeypatch.setattr(
+        freerouting_runner,
+        "count_board_tracks",
+        lambda _path: {"traces": 0, "vias": 0, "total_length_mm": 0.0},
+    )
+    monkeypatch.setattr(
+        freerouting_runner,
+        "_run_kicad_cli_drc",
+        lambda _path, timeout_s=30: {
+            "report_text": """
+[clearance]: Clearance violation
+    @(6.1300 mm, 7.6000 mm): PTH pad A1 [GND] of J1
+    @(6.1300 mm, 6.7500 mm): PTH pad A4 [VBUS] of J1
+[clearance]: Clearance violation
+    @(9.0000 mm, 4.0000 mm): Track [VSEL0] on F.Cu
+    @(9.1000 mm, 4.1000 mm): Track [GND] on F.Cu
+""",
+            "violations": [
+                {"type": "clearance", "description": "[clearance]: Clearance violation"},
+                {"type": "clearance", "description": "[clearance]: Clearance violation"},
+            ],
+            "clearance": 2,
+            "copper_edge_clearance": 0,
+            "shorts": 0,
+            "timed_out": False,
+            "missing_cli": False,
+        },
+    )
+
+    board_path = tmp_path / "fake_board.kicad_pcb"
+    board_path.write_text("stub", encoding="utf-8")
+
+    validation = freerouting_runner.validate_routed_board(str(board_path))
+
+    assert validation["obviously_illegal_routed_geometry"] is True
+    assert validation["footprint_internal_clearance_count"] == 1
+
+
+def test_classify_clearance_violations_per_block():
+    report = """
+[clearance]: Clearance violation
+    @(1.0 mm, 1.0 mm): Pad 1 [GND] of C1
+    @(1.1 mm, 1.1 mm): Pad 2 [VBUS] of C1
+[clearance]: Clearance violation
+    @(2.0 mm, 2.0 mm): Pad 1 [GND] of C1
+    @(2.1 mm, 2.1 mm): Pad 3 [SIG] of R5
+[hole_clearance]: Hole clearance violation
+    @(3.0 mm, 3.0 mm): Track [SIG] on F.Cu
+    @(3.1 mm, 3.1 mm): PTH pad 2 [SIG] of J1
+[silk_overlap]: Silkscreen overlap
+    @(4.0 mm, 4.0 mm): Reference field of R1
+"""
+    # C1-internal waived; C1-vs-R5 (two footprints) genuine; track-vs-pad
+    # (ref-less item) genuine; silk block ignored entirely.
+    verdict = freerouting_runner._classify_clearance_violations(report)
+    assert verdict == {"waived": 1, "genuine": 2}
+
+    # The ignorable escape hatch waives fully-named multi-footprint blocks
+    # but never blocks containing ref-less (routed copper) items.
+    verdict = freerouting_runner._classify_clearance_violations(
+        report, ignorable_refs={"C1", "R5", "J1"}
+    )
+    assert verdict == {"waived": 2, "genuine": 1}
+
+
 _EDGE_CONN_DRC = {
     "report_text": """
 [copper_edge_clearance]: Board edge clearance violation
