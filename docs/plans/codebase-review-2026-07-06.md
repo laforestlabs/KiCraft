@@ -129,8 +129,15 @@
     branch `self-eval-2026-07-07-fixes`) — see the item note.
   Validation: full placement/compose/edge suite green (123 passed, 4 skipped); new
   regression tests for the B12 ride-along hole, B27 pad-AABB rotation, and the B24 flip
-  composition (pcbnew-agreement, opt-in). Replay verdicts recorded below in this entry's
-  addendum once measured.
+  composition (pcbnew-agreement, opt-in). Replay verdicts (isolated worktree replays,
+  quality=good, seed 0; single-replay caveat — run-to-run noise crosses grade buckets):
+  - **i2c565** (I2C_GPIO_EXPANDER; prior build failed `connector_stranded:J1@-6.59mm(left)`
+    — the exact B9 signature): stranding GONE, unconnected 2→0, util 16.0→41.9%. New
+    verdict rc7 `courtyards_overlap` ×2 — both are unlocked passives (C1, C2) against the
+    pinned TB1, the documented pre-existing parent-compose "connector-pinned residual"
+    family, NOT connector-vs-connector (which would implicate the B26 pitch change).
+  - **servo566** (PCA9685_SERVO_DRIVER): unconnected 15→8, reasons=[] — the known
+    walled-off routing class (deferred C1 family), no new failure modes.
 
 ## 1. Bug fixes
 
