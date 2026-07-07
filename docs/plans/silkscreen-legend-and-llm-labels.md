@@ -1,6 +1,22 @@
 # Silkscreen legend + LLM-authored functional labels
 
-**Status: planned 2026-07-07 (motivated by KC-7A3VEX). Not started.**
+**Status: Phases 0-3 IMPLEMENTED 2026-07-07 (branch `silkscreen-legend`).**
+Verified end-to-end on a cold KC-7A3VEX replay: `silk legend: placed=5
+dropped=0`, verify gate 0 shorts / 0 unconnected AFTER the silk pass, fab
+exported. Implementation notes vs. the plan below:
+
+- Legend places LAST (functional labels beat attribution for space), wraps
+  long lines, and falls back to BACK silk (mirrored) on dense boards.
+- Silk shapes (leaf group boxes) are stroke obstacles, not solid bboxes —
+  labels may use the space inside a group box.
+- Anchored candidates clamp into the outline (edge-overhang connectors put
+  their courtyard bbox off-board); priority-1 labels sweep the whole board
+  before dropping.
+- Authoring uses `review_max_tokens` — reasoning models truncate to EMPTY
+  text under a small cap (finish=length).
+- Phase 4 DEFERRED: stage-tab silk card, user editing, scoring/self-eval
+  rubric line. Surfacing today = build_log lines + artifacts.silk_placed /
+  silk_dropped + SilkPlan.dropped_at_lint.
 
 ## Problem
 
