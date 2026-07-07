@@ -78,7 +78,41 @@ def _load_footprint(
     from kicraft.parts_library.footprint_courtyard import repair_malformed_courtyard
 
     repair_malformed_courtyard(fp)
+    _normalize_text_heights(pcbnew_mod, fp)
     return fp
+
+
+def _normalize_text_heights(pcbnew_mod, fp) -> None:
+    """Bump SILK-layer footprint text below the board's min_text_height up to it.
+
+    Curated (easyeda2kicad-converted) footprints can carry sub-0.8 mm silk
+    text, and every generated board's constraint is
+    DEFAULT_RULES['min_text_height'] (0.8 mm) -- KiCad's silk text-height DRC
+    then warns on every instance. Silk layers only: the constraint doesn't
+    police Fab text, and silk_refdes deliberately parks unfittable refdes
+    there. Same single-seam rationale as the courtyard repair above.
+    """
+    from .kicad_pro import DEFAULT_RULES
+
+    silk = {pcbnew_mod.F_SilkS, pcbnew_mod.B_SilkS}
+    min_h = pcbnew_mod.FromMM(DEFAULT_RULES["min_text_height"])
+    min_t = pcbnew_mod.FromMM(DEFAULT_RULES["min_text_thickness"])
+    texts = [fp.Reference(), fp.Value()]
+    texts += [it for it in fp.GraphicalItems()
+              if it.GetClass() in ("PCB_TEXT", "FP_TEXT", "PCB_FIELD")]
+    for t in texts:
+        if t.GetLayer() not in silk:
+            continue
+        size = t.GetTextSize()
+        h = min(size.x, size.y)
+        if 0 < h < min_h:
+            scale = min_h / h
+            t.SetTextSize(pcbnew_mod.VECTOR2I(
+                max(int(size.x * scale), min_h), max(int(size.y * scale), min_h)
+            ))
+            t.SetTextThickness(
+                max(int(t.GetTextThickness() * scale), min_t)
+            )
 
 
 def write_empty_pcb(

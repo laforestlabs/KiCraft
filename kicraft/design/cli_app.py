@@ -598,8 +598,24 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
             hit = jlcparts.lookup(cid)
             # Bundle footprints are drawn for their manifest's own part;
             # the identity heuristics read stock naming conventions only.
-            fp_is_bundle = (_lib_prefix(part.footprint or "")
-                            in manifest_by_name)
+            fp_lib = _lib_prefix(part.footprint or "")
+            fp_is_bundle = fp_lib in manifest_by_name
+            if fp_is_bundle:
+                # Bundle-pin equality (KC-9EZE3S appendix): an explicit pin on
+                # a curated bundle that differs from the bundle's own C# is
+                # quiet part/footprint drift — the footprint was drawn for the
+                # manifest's part, but the fab BOM will order the pinned one.
+                # Warning, not offender: an intentional substitute (same
+                # package, better stock) is legitimate.
+                man_cid = str((manifest_by_name[fp_lib].sourcing or {})
+                              .get("lcsc") or "").strip().upper()
+                if man_cid and man_cid != cid.strip().upper():
+                    warnings.append(
+                        f"{part.ref} ({label}): sourcing_note pins LCSC {cid} "
+                        f"but its footprint's bundle '{fp_lib}' was drawn for "
+                        f"LCSC {man_cid} — verify the pinned part matches the "
+                        f"footprint's land pattern"
+                    )
             conflict = (None if (hit is None or fp_is_bundle)
                         else _lcsc_identity_conflict(part, hit))
             if hit is None:
