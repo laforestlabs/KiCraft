@@ -4,6 +4,7 @@ from .drc_check import DRCCheck
 from .connectivity_check import ConnectivityCheck
 from .placement_check import PlacementCheck
 from .geometry_check import GeometryCheck
+from .silk_check import SilkCheck
 from .visual_check import VisualCheck
 
 ALL_CHECKS = [
@@ -12,5 +13,6 @@ ALL_CHECKS = [
     ConnectivityCheck(),
     PlacementCheck(),
     GeometryCheck(),
+    SilkCheck(),
     VisualCheck(),
 ]

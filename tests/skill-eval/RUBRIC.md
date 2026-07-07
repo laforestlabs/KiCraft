@@ -1,6 +1,6 @@
 # KiCraft skill-eval rubric
 
-> **Rubric v1 — `sha256:df90130898218fba9dd75e19af5f6703b641c14607303c4e7bcbfc9948a6e5e9`**
+> **Rubric v2 — `sha256:4ad2c2ceacb88417b4fee89e39f8554eaee94c58f920d6f4c31c5f50707718c8`**
 >
 > Human-readable mirror of [`rubric.yaml`](../../kicraft/eval/rubric.yaml), which is the canonical
 > source of truth. If the two ever disagree, **`rubric.yaml` wins.** Regenerate the
@@ -15,27 +15,27 @@ the rubric changes, the hash changes, and old scores move to a separate cohort.
 
 ## Scoring model
 
-- **10 dimensions**, each scored on an anchored **0–4 level**.
+- **11 dimensions**, each scored on an anchored **0–4 level**.
 - Two classes: **Class C** (deterministic, scored by `bin/score_run.py` from
   machine signals — the reproducible baseline) and **Class J** (judgment, scored
   by the observer agent reading the transcript + artifacts against the stage
   specs and sound EE practice — the "gotcha" layer).
-- Weights sum to **100** (50 C / 50 J), so a flawless run scores 100:
+- Weights sum to **100** (46 C / 54 J), so a flawless run scores 100:
 
   `weighted = Σ (weight_i × level_i / 4)`
 
 - **Hard-fail gates** then cap the result: `final = min(weighted, lowest triggered cap)`.
 - The final score maps to a **grade + ship verdict**.
 
-## Class C — deterministic (50 pts, scored by `score_run.py`)
+## Class C — deterministic (46 pts, scored by `score_run.py`)
 
 | Dimension | Wt | What it measures | Signal source |
 |---|---|---|---|
 | `pipeline_completion` | 12 | How far it got, did it land | state.json slots, `synthesis_check.status` |
 | `computing_error_cleanliness` | 16 | ERC errors, failed checks, crashes | `*_erc.rpt`, `synthesis_check.failed_checks`, transcript errors |
-| `convergence_efficiency` | 8 | Clean convergence vs thrash | re-commits / aborts / retries (history + transcript) |
+| `convergence_efficiency` | 6 | Clean convergence vs thrash | re-commits / aborts / retries (history + transcript) |
 | `latency` | 6 | Wall-clock start→synthesized | transcript timestamps (fallback: history → `checked_at`) |
-| `interaction_friction` | 8 | Questions + permission prompts vs expectation | transcript, `settings.local.json`, scenario band |
+| `interaction_friction` | 6 | Questions + permission prompts vs expectation | transcript, `settings.local.json`, scenario band |
 
 **Anchor highlights** (full text in `rubric.yaml`):
 
@@ -49,7 +49,7 @@ the rubric changes, the hash changes, and old scores move to a separate cohort.
   a clear one, or skipping a needed interview, is bad. Permission prompts above
   the documented allowlist floor are always friction.
 
-## Class J — judgment (50 pts, scored by the observer)
+## Class J — judgment (54 pts, scored by the observer)
 
 | Dimension | Wt | What it measures |
 |---|---|---|
@@ -58,6 +58,7 @@ the rubric changes, the hash changes, and old scores move to a separate cohort.
 | `electrical_soundness` | 16 | **The gotcha dimension** — grounding/ground-loops, decoupling, MCU programming path, protection, strap resistors, thermal, rail sizing |
 | `part_selection_quality` | 8 | Right part, right source, sane footprint/symbol, ratings fit |
 | `failure_honesty` | 6 | Surfaced problems vs "looks healthy, isn't"; stopped cleanly on hard failure |
+| `board_self_description` | 4 | Board self-describes in silkscreen — a legend (name/rev/maker) + ≥1 functional label on a functional board (`state.silk_plan`, `artifacts.silk_placed/silk_dropped`) |
 
 `electrical_soundness` carries the heaviest single weight on purpose: a schematic
 can be ERC-clean (high Class-C) and still be a bad circuit. This is where the
@@ -99,4 +100,8 @@ gates are set when grading the relevant dimension.
 
 ### Changelog
 
+- **v2** (`4ad2c2ce…`) — added `board_self_description` (Class J, wt 4): does the
+  fabricated board carry a silkscreen legend (name/rev/maker) + a functional label?
+  Funded by trimming the two process-friction axes (`convergence_efficiency` 8→6,
+  `interaction_friction` 8→6) so weights still sum to 100. Now 11 dimensions (46 C / 54 J).
 - **v1** (`df901308…`) — initial rubric. 10 dimensions (50 C / 50 J), 5 gates, 5 bands.
