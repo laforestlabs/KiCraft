@@ -58,13 +58,22 @@ def test_slot_count_env(monkeypatch):
     assert slot_count() >= 1
 
 
-def test_resolve_build_slots_default_is_host_aware_and_capped(monkeypatch):
+def test_resolve_build_slots_default_sizes_from_cores(monkeypatch):
     monkeypatch.delenv("KICRAFT_BUILD_SLOTS", raising=False)
     cores = host_cpu_count()
     # None -> max(1, cores//6), never exceeding cores (never a fixed 2 on 2 cores).
     resolved = resolve_build_slots(None)
     assert 1 <= resolved <= cores
-    assert resolved == max(1, min(slot_count(), cores))
+    assert resolved == max(1, cores // 6)
+
+
+def test_resolve_build_slots_default_ignores_host_gate_override(monkeypatch):
+    # The KICRAFT_BUILD_SLOTS host-gate override (slot_count()) must NOT inflate
+    # the harness's CPU-safe default -- an operator's gate=2 on a 2-core host is
+    # exactly what caused the 2026-07-08 rc=-9 cluster.
+    monkeypatch.setenv("KICRAFT_BUILD_SLOTS", "999")
+    assert slot_count() == 999                       # host gate honors the override
+    assert resolve_build_slots(None) == max(1, host_cpu_count() // 6)  # default does not
 
 
 def test_resolve_build_slots_rejects_over_subscription():
