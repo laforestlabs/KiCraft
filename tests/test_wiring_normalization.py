@@ -28,6 +28,7 @@ from kicraft.design.synthesis.validation import (
     check_net_coverage,
     check_no_dangling_signal_nets,
     reconcile_inter_sheet_nets,
+    split_cross_sheet_connections,
 )
 
 SWITCH_SYM = "evq-p7a01p:EVQP7A01P"  # real 4-pad symbol: pins 1, 2, 1', 2'
@@ -302,3 +303,72 @@ def test_reconcile_kc_wffxzu_autoreset_end_to_end() -> None:
     assert {"EN", "IO0", "GND"} <= names and "DTR" not in names and "RTS" not in names
     assert check_inter_sheet_nets_realized(arch, bom).ok
     assert check_no_dangling_signal_nets(arch, bom).ok
+
+
+# ---------- split_cross_sheet_connections (connector-on-header dangle) ----------
+
+
+def test_split_realizes_connection_on_each_endpoint_sheet() -> None:
+    """The run_01/run_30 shape: a connection tagged one sheet but with endpoints
+    whose parts live on TWO sheets (a connector parked on a HEADER sheet, wired
+    from the functional sheet's list). Split into one per-sheet connection so the
+    connector sheet draws a stub for its pin; reconcile then sees the crossing."""
+    arch, bom = _two_sheets(inter=[_gnd()], conns=[
+        # INPUT lists J1 (on USB) and U2 (on MCU) but is tagged MCU only.
+        NetConnection(net_name="INPUT", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U1", pin="1"),
+                                 PinEndpoint(ref="U2", pin="1")]),
+    ])
+    changes = split_cross_sheet_connections(bom)
+    assert changes and "INPUT" in changes[0]
+    by_sheet = {(c.net_name, c.sheet): c for c in bom.connections}
+    assert ("INPUT", "USB") in by_sheet and ("INPUT", "MCU") in by_sheet
+    assert by_sheet[("INPUT", "USB")].endpoints == [PinEndpoint(ref="U1", pin="1")]
+    assert by_sheet[("INPUT", "MCU")].endpoints == [PinEndpoint(ref="U2", pin="1")]
+    # reconcile now sees INPUT realized on 2 sheets -> promotes it.
+    reconcile_inter_sheet_nets(arch, bom)
+    assert "INPUT" in {n.name for n in arch.inter_sheet_nets}
+    assert check_no_dangling_signal_nets(arch, bom).ok
+
+
+def test_split_retags_single_sheet_mismatch() -> None:
+    """All endpoints live on ONE sheet, but the connection is tagged a different
+    one (a mis-tagged connector net). Retag it to where its pins actually are so
+    route_sheet stops dropping every endpoint as unplaced-on-this-sheet."""
+    arch, bom = _two_sheets(inter=[_gnd()], conns=[
+        NetConnection(net_name="ANT", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U1", pin="1"),
+                                 PinEndpoint(ref="U1", pin="2")]),
+    ])
+    changes = split_cross_sheet_connections(bom)
+    assert changes == ["ANT retagged MCU->USB"]
+    assert [c.sheet for c in bom.connections] == ["USB"]
+
+
+def test_split_is_noop_on_correctly_tagged_design() -> None:
+    """Every endpoint already on the connection's own sheet -> untouched (same
+    connection objects, no changes reported)."""
+    arch, bom = _two_sheets(inter=[_gnd()], conns=[
+        NetConnection(net_name="SIG", sheet="USB",
+                      endpoints=[PinEndpoint(ref="U1", pin="1")]),
+        NetConnection(net_name="SIG", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U2", pin="1")]),
+    ])
+    before = list(bom.connections)
+    assert split_cross_sheet_connections(bom) == []
+    assert bom.connections is before or bom.connections == before
+
+
+def test_split_groups_power_net_per_sheet_for_symbol_stamping() -> None:
+    """A ground listing pins on both sheets is split so EACH sheet stamps its own
+    GND symbols; reconcile still leaves the power net alone (it joins globally)."""
+    arch, bom = _two_sheets(inter=[_gnd()], conns=[
+        NetConnection(net_name="GND", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U1", pin="2"),
+                                 PinEndpoint(ref="U2", pin="2")]),
+    ])
+    split_cross_sheet_connections(bom)
+    sheets = sorted(c.sheet for c in bom.connections if c.net_name == "GND")
+    assert sheets == ["MCU", "USB"]
+    changes = reconcile_inter_sheet_nets(arch, bom)
+    assert all("GND" not in c for c in changes)  # power stays verbatim

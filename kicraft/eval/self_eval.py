@@ -57,7 +57,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from kicraft.build_slots import ACQUIRED_MARKER
+from kicraft.build_slots import ACQUIRED_MARKER, resolve_build_slots
 from kicraft.proc_tree import kill_tree
 from kicraft.server.session import read_state, record_answers, remaining_stages, run_session
 from kicraft.tuning.benchmark import BENCHMARK_PROMPTS as BRIEFS
@@ -716,10 +716,13 @@ def main(argv=None) -> int:
                          "sweet spot on a 2-core box; 1 forces the strictly sequential "
                          "baseline). Spend ceilings can overshoot by up to N in-flight "
                          "calls; per-brief semantics are otherwise unchanged.")
-    ap.add_argument("--build-slots", type=int, default=2,
-                    help="max concurrent build subprocesses under --parallel (each route "
-                         "is a single-threaded JVM; keep <= CPU cores so --build-timeout "
-                         "stays honest)")
+    ap.add_argument("--build-slots", type=int, default=None,
+                    help="max concurrent build subprocesses under --parallel. Default "
+                         "is host-aware (build_slots.resolve_build_slots: max(1, "
+                         "cpus//6), capped at the core count) -- each build saturates "
+                         "the CPU, so a value > cores over-subscribes and trips "
+                         "--build-timeout (the 2026-07-08 rc=-9 kills). An explicit "
+                         "value > cores is rejected at launch, not silently run.")
     ap.add_argument("--resume", default=None, metavar="BATCH_DIR",
                     help="finish an existing batch dir: reuse completed briefs from its "
                          "summary.json, wipe + re-run only errored/missing ones. Combine "
@@ -735,6 +738,15 @@ def main(argv=None) -> int:
                     help="deprecated no-op: the shaped-outline group is part of the "
                          "default corpus now (kept so older invocations still run)")
     args = ap.parse_args(argv)
+
+    # Resolve --build-slots to a host-aware, clamped value BEFORE any work: a
+    # contended config (build_slots > cores) trips the build watchdog, so reject
+    # it loudly at launch instead of running a doomed 5-hour batch.
+    try:
+        build_slots = resolve_build_slots(args.build_slots)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
 
     corpus = list(BRIEFS)  # the shaped-outline group is included by default now
     if args.shaped_only:
@@ -793,7 +805,7 @@ def main(argv=None) -> int:
         "rubric_version": None,
         "repeats": repeats,
         "parallel": parallel,
-        "build_slots": max(1, args.build_slots),
+        "build_slots": build_slots,
         "full_events": not args.lean_events,
     }
     if resume_dir:
@@ -857,7 +869,7 @@ def main(argv=None) -> int:
                 by_run[_run_key(rec["slug"], rec.get("repeat"))] = rec
                 _checkpoint()
     else:
-        gate = threading.BoundedSemaphore(max(1, args.build_slots))
+        gate = threading.BoundedSemaphore(build_slots)
         print_lock = threading.Lock()
 
         def _worker(idx: int, entry: dict, rep: int | None) -> dict:
