@@ -6,7 +6,9 @@ it types through ``EXAMPLE_PROMPTS`` as passive inspiration.
 (The "Surprise me" button no longer draws from this list — it now streams the
 vetted self-eval corpus, ``kicraft.tuning.benchmark.BENCHMARK_PROMPTS``, in order
 and actually *runs* each brief, so repeated clicks produce a continuous feed of
-known-good designs. See ``web.index``'s ``surprise`` handler.)
+known-good designs — including the non-rectangular shaped boards (circle, hexagon,
+star, snowman, …) now folded into that corpus. See ``web.index``'s ``surprise``
+handler.)
 
 The list is deliberately ambitious-but-proven: every entry is shaped like a design
 the web pipeline completes well (ESP32-S3 sensor boards, USB-C power, LED drivers,

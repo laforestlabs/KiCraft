@@ -2,9 +2,10 @@
 
 This is the regression harness behind the ``/self-eval`` command (and the
 ``kicraft-eval-batch`` console script). For each brief in
-``kicraft.tuning.benchmark.BENCHMARK_PROMPTS`` (the diverse 28-brief corpus that
+``kicraft.tuning.benchmark.BENCHMARK_PROMPTS`` (the shared brief corpus that
 spans the placement/routing stress archetypes — connector density, fine-pitch
-escape, RF keepouts, power/thermal, THT/SMT mix, hierarchy depth) it reproduces,
+escape, RF keepouts, power/thermal, THT/SMT mix, hierarchy depth, and the
+shaped-outline group) it reproduces,
 headlessly, exactly what the web app does for a real user and then scores the
 result with the existing ``kicraft.eval`` rubric:
 
@@ -723,20 +724,23 @@ def main(argv=None) -> int:
                     help="finish an existing batch dir: reuse completed briefs from its "
                          "summary.json, wipe + re-run only errored/missing ones. Combine "
                          "with --only/--limit to restrict the considered set.")
-    ap.add_argument("--include-shaped", action="store_true",
-                    help="also run the non-rectangular outline category "
-                         "(SHAPED_OUTLINE_PROMPTS); each board's Edge.Cuts is graded "
-                         "against the requested shape (deterministic, reported as "
-                         "outline_check alongside the rubric score)")
+    ap.add_argument("--no-shaped", action="store_true",
+                    help="exclude the shaped-outline group (archetype "
+                         "'shaped_outline') — run only the rectangular briefs")
     ap.add_argument("--shaped-only", action="store_true",
-                    help="run ONLY the non-rectangular outline category")
+                    help="run ONLY the shaped-outline group; each board's Edge.Cuts "
+                         "is graded against its requested shape (deterministic, "
+                         "reported as outline_check alongside the rubric score)")
+    ap.add_argument("--include-shaped", action="store_true",
+                    help="deprecated no-op: the shaped-outline group is part of the "
+                         "default corpus now (kept so older invocations still run)")
     args = ap.parse_args(argv)
 
-    corpus = list(BRIEFS)
+    corpus = list(BRIEFS)  # the shaped-outline group is included by default now
     if args.shaped_only:
         corpus = list(SHAPED_OUTLINE_PROMPTS)
-    elif args.include_shaped:
-        corpus = corpus + list(SHAPED_OUTLINE_PROMPTS)
+    elif args.no_shaped:
+        corpus = [e for e in BRIEFS if not e.get("outline_shape")]
     selected = _select(corpus, args.limit, args.only)
     if not selected:
         print("no briefs selected (check --limit / --only)", file=sys.stderr)

@@ -1,18 +1,24 @@
-"""Diverse benchmark brief set for tuning-corpus synthesis (Phase 0).
+"""The shared KiCraft brief corpus — self-eval + tuning-corpus synthesis.
 
-The existing ``kicraft.server.examples.EXAMPLE_PROMPTS`` is curated for *function*
-variety but is topologically narrow (mostly ESP32-S3 / USB-C sensor boards), so a
-default tuned on it would overfit those layouts. This set instead maximizes the
-**placement/routing** stress dimensions that the tuner actually cares about:
-part count, connector density + edge constraints, fine-pitch IC escape, RF
-keepouts, power/thermal planes, through-hole vs SMT mix, and hierarchy depth.
+``BENCHMARK_PROMPTS`` is the one growing corpus three consumers walk: the
+self-eval regression loop (``kicraft.eval.self_eval``), the admin self-eval
+runner (``kicraft.server.routes_admin``), and the landing-page "Surprise me"
+button (``kicraft.server.web``). It maximizes the **placement/routing** stress
+dimensions we care about — part count, connector density + edge constraints,
+fine-pitch IC escape, RF keepouts, power/thermal planes, through-hole vs SMT
+mix, hierarchy depth — and, as of the shaped-group fold-in, non-rectangular
+board outlines (``archetype == "shaped_outline"``, graded by outline_check).
 
-Every brief is still "ambitious-but-proven" — shaped like a design the pipeline
-completes — so Phase 0 synthesis ends in a finished board, not a stalled run.
+The corpus is meant to GROW over time as new use cases surface: add an entry to
+the matching archetype section (or open a new archetype in ``ARCHETYPE_TRAITS``).
+Every brief stays "ambitious-but-proven" — shaped like a design the pipeline
+completes — so a run ends in a finished board, not a stall.
 
-Synthesis is LLM-costed and should run ONCE on the cloud box; freeze the results
-with ``kicraft.tuning.corpus.freeze_corpus`` (CLI: ``corpus-freeze``) so the tuner
-re-runs place+route on them at $0. See the package README for the Phase 0 flow.
+The place/route tuner also synthesizes its Phase-0 frozen corpus from this list
+(``kicraft.tuning.corpus.freeze_corpus`` / CLI ``corpus-freeze``, re-run at $0);
+that synthesis is LLM-costed and runs ONCE on the cloud box. Folding the shaped
+group in disturbs that frozen set, which is fine for now — the tuning
+experiment is paused.
 """
 from __future__ import annotations
 
@@ -102,19 +108,17 @@ BENCHMARK_PROMPTS: list[dict[str, str]] = [
      "brief": "A stepper motor controller using an A4988 driver, microstep-select DIP switches, a motor connector, and a 12 V screw terminal."},
     {"slug": "audio-jack-buffer", "archetype": "connector_dense_io",
      "brief": "An audio breakout: four 3.5 mm jacks along the edge into an op-amp unity-gain buffer, no microcontroller."},
-]
 
-
-# Non-rectangular outline category for the self-eval. Kept SEPARATE from
-# BENCHMARK_PROMPTS so the place/route tuner corpus is undisturbed. Each entry
-# adds an ``outline_shape`` the deterministic outline check
-# (kicraft.eval.outline_check) grades the built board against. Briefs are
-# decorative / low-interconnect on purpose -- the regime shaped boards suit (a
-# pinched silhouette can't carry a dense bus through its necks). Coverage:
-# circle without an edge connector, rounded-rect WITH a USB-C edge port (the
-# flat-run path), a chamfered badge, a hexagon (polygon), a star, and a snowman
-# (compound / multi-blob).
-SHAPED_OUTLINE_PROMPTS: list[dict[str, str]] = [
+    # --- shaped / non-rectangular outline ----------------------------------
+    # Folded in as a first-class group (archetype ``shaped_outline``) so the
+    # self-eval corpus, the admin runner, and the web "Surprise me" button all
+    # cover shapes. Each carries an ``outline_shape`` the deterministic outline
+    # check (kicraft.eval.outline_check) grades the built board against. Briefs
+    # are decorative / low-interconnect on purpose -- the regime shaped boards
+    # suit (a pinched silhouette can't carry a dense bus through its necks).
+    # Coverage: circle without an edge connector, rounded-rect WITH a USB-C edge
+    # port (the flat-run path), a chamfered badge, a hexagon (polygon), a star,
+    # and a snowman (compound / multi-blob).
     {"slug": "round-led-ring", "archetype": "shaped_outline", "outline_shape": "circle",
      "brief": "A round 60 mm LED ring board: twelve WS2812B addressable LEDs evenly spaced in a circle, driven by an ATtiny412, powered from a 2-pin JST-PH header. No edge connectors."},
     {"slug": "rounded-c3-devboard", "archetype": "shaped_outline", "outline_shape": "rounded_rect",
@@ -127,6 +131,17 @@ SHAPED_OUTLINE_PROMPTS: list[dict[str, str]] = [
      "brief": "A star-shaped holiday ornament: five warm-white LEDs at the points driven by an ATtiny402, powered by a CR2032 coin cell, with a hang hole at the top."},
     {"slug": "snowman-ornament", "archetype": "shaped_outline", "outline_shape": "snowman",
      "brief": "A snowman-shaped LED ornament in three stacked sections (base, body, head) with warm-white LEDs in each, driven by an ATtiny402 from a CR2032 coin cell."},
+]
+
+
+# The shaped-outline group now lives INSIDE BENCHMARK_PROMPTS above (archetype
+# ``shaped_outline``). ``SHAPED_OUTLINE_PROMPTS`` remains as a derived view of
+# that group -- every entry carries an ``outline_shape`` the deterministic
+# outline check (kicraft.eval.outline_check) grades the built board against.
+# (The place/route tuner shares this corpus; disturbing its frozen set is fine
+# for now -- the tuning experiment is paused.)
+SHAPED_OUTLINE_PROMPTS: list[dict[str, str]] = [
+    e for e in BENCHMARK_PROMPTS if e.get("outline_shape")
 ]
 
 
