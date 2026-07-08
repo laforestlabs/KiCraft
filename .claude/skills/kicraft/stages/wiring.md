@@ -34,6 +34,14 @@ Net coverage (enforced by stage-commit):
 - Use `no_connect_pins` for pins the design intentionally leaves floating (NC pads, unused GPIOs).
 - No pin may be silently omitted. The `9.11 net coverage` check in stage-commit will reject the slot otherwise.
 
+**BOM shortfall — repair it, never ask the user.** If the only thing stopping you from wiring every pin is that the BOM is missing a supporting passive the IC genuinely needs — a decoupling/bypass cap for a dedicated `DEC*`/`VDD*`/`AVDD`/bypass supply pin, a mandatory pull-up, a crystal load cap — you MUST NOT resolve it by leaving the pin in `no_connect_pins` (electrically wrong) and you MUST NOT hand the user a "which pins should I decouple?" question. KiCraft solves its own problems: emit exactly one blocking question **tagged for automatic BOM repair**, whose text is a precise instruction listing what to add:
+
+```json
+{"questions": [{"text": "The nRF52840 (U1) needs a decoupling cap on each of DEC1-DEC6 and DECUSB; the BOM has only 4x 100nF (C7-C10). Add three more 100nF 0402/0603 caps for the remaining DEC pins and a 4.7uF cap for DECUSB, on the PROCESSOR sheet, clustered with U1.", "blocking": true, "reconcile_target": "bom"}]}
+```
+
+The pipeline re-drives the BOM stage with that instruction, then re-runs wiring — the deficit is fixed and the user is never asked. Only use an **untagged** question (no `reconcile_target`) for a genuine design-intent choice the user alone can make (e.g. a shared programming pin, per §21 option 3). A tagged repair question is not a fallback for laziness: name the exact parts.
+
 Constraints (enforced by Pydantic + stage-commit):
 
 - Every endpoint `ref` must exist in `bom.parts`.

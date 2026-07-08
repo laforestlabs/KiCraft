@@ -373,16 +373,19 @@ def test_mpn_walk_skips_retail_dry_variant_to_next_in_stock(tmp_path, monkeypatc
 
 
 def test_mpn_walk_exhausted_is_an_offender_enumerating_tries(tmp_path, monkeypatch):
+    # SS34F clears the JLC floor but is retail-dry; SS34 (C8678) is below the
+    # 100-unit JLC floor — so neither variant is orderable and the walk is
+    # exhausted into an offender.
     _install(monkeypatch,
              _FakeCatalog(by_mpn={"SS34": [
                  {"lcsc": "C407539", "model": "SS34F", "stock": 900_000},
-                 {"lcsc": "C8678", "model": "SS34", "stock": 100}]}),
+                 {"lcsc": "C8678", "model": "SS34", "stock": 50}]}),
              _FakeRetail(by_lcsc={"C407539": {"stock": 0, "min_buy": 1}}))
     p = _part()
     bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
     assert len(bad) == 1 and "no orderable variant" in bad[0]
     assert "SS34F" in bad[0] and "retail stock 0" in bad[0]
-    assert "SS34 (C8678) JLC stock 100" in bad[0]
+    assert "SS34 (C8678) JLC stock 50" in bad[0]
     assert p.sourcing_note is None
 
 

@@ -440,6 +440,23 @@ def _erc_offenders(ws: Path) -> list[str]:
     return []
 
 
+def _bom_reconcile_instruction(questions: list[dict]) -> str:
+    """Turn wiring's reconcile_target="bom" deficit note(s) into a BOM-stage
+    instruction that adds the missing parts. Each question's text is already a
+    precise "add N of X for pins Y" statement (per the wiring spec)."""
+    lines = [str(q.get("text", "")).strip()
+             for q in questions if str(q.get("text", "")).strip()]
+    body = "\n- ".join(lines)
+    return (
+        "The wiring stage could not finish because the BOM is missing supporting "
+        "parts its ICs require. Add the parts described below: give each a fresh, "
+        "unique ref, the correct value and footprint, the same sheet as the IC it "
+        "serves, and list it in that IC's ic_groups entry. Then re-emit the FULL "
+        "BOM. Do NOT ask the user and do NOT drop any part already present — just "
+        "provision what's missing:\n- " + body
+    )
+
+
 def _synth_check_failures(ws: Path | None) -> list[str]:
     """Failing synthesis-check lines (check name + each offender) from the build's
     synthesis_check.json, so a FAILED run shows WHAT broke -- e.g. the 9.12 ERC
@@ -1929,6 +1946,33 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
                           core_defaults=core_defaults)
         if res.get("guard"):
             state["spend"] = _project_spend_usd(state.get("project_id"))
+
+        # BOM self-repair: wiring parked because the BOM lacks supporting parts
+        # an IC needs (e.g. too few decoupling caps). That is KiCraft's own
+        # problem to solve, not a question for the user — the wiring stage tags
+        # such a park with reconcile_target="bom". Re-drive bom+wiring ONCE with
+        # the concrete shortfall so the parts get added and wiring re-checks,
+        # then adopt that outcome. Flag-gated (not a loop) so it can never run
+        # away on cost; if it still can't resolve, the user is asked as a last
+        # resort. Mirrors the ERC-recovery re-drive further below.
+        if (res.get("status") == "awaiting_input"
+                and res.get("last_stage") == "wiring"
+                and not state.get("bom_reconciled")):
+            deficits = [q for q in (res.get("questions") or [])
+                        if q.get("reconcile_target") == "bom"]
+            if deficits:
+                state["bom_reconciled"] = True
+                progress({"kind": "build_log",
+                          "text": "[bom-reconcile] wiring flagged a BOM parts "
+                                  "shortfall; re-driving bom+wiring once to add "
+                                  "the missing parts (not asking the user)"})
+                rr = run_session(ws, state.get("brief", ""), ["bom", "wiring"],
+                                 instruction=_bom_reconcile_instruction(deficits),
+                                 progress=progress, run_id=run_id,
+                                 core_defaults=core_defaults)
+                if rr.get("guard"):
+                    state["spend"] = _project_spend_usd(state.get("project_id"))
+                res = rr
 
         if res["status"] == "awaiting_input":
             # Park: the run is saved as awaiting_input and the question surfaces in

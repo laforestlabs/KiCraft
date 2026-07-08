@@ -175,11 +175,14 @@ def _stage_extra(stage: str) -> str:
             "pins); lookup_footprint (verify a footprint exists + pad count); lookup_lcsc_id "
             "(MPN/keyword -> LCSC C-number); add_part_from_lcsc (fetch a real symbol+footprint "
             "bundle into the project).\n"
-            "- STOCK IS A HARD GATE: never specify an out-of-stock part. A pick must be in "
-            "stock BOTH for JLCPCB assembly ('stock' in lookup_lcsc_id output) AND at the "
-            "lcsc.com retail storefront ('retail_stock'); the commit gate bounces a pick that "
-            "fails either. Generic passives always have in-stock equivalents — never fight "
-            "for a specific dry C#.\n"
+            "- STOCK IS A HARD GATE: never specify a low-stock part. A pick must clear at "
+            "least 100 units of JLCPCB-assembly stock ('stock' in lookup_lcsc_id output / the "
+            "`stock` column in list_parts) AND be orderable at the lcsc.com retail storefront "
+            "('retail_stock'); the commit gate bounces a pick that fails either, forcing a "
+            "costly re-draft. The selection tools already enforce this: lookup_lcsc_id vetoes a "
+            "below-floor match and hands back a stock-sorted candidate list, and a list_parts "
+            "bundle flagged `⚠<100` is below the floor — do NOT adopt it. Generic passives "
+            "always have in-stock equivalents; never fight for a specific dry C#.\n"
             "- A SOURCING C# MUST MATCH THE FOOTPRINT: an 'LCSC C#' in sourcing_note must be "
             "the exact part the symbol/footprint were drawn for — never a merely-equivalent "
             "part (the commit gate bounces e.g. a chip resistor pinned to a trimmer footprint, "
@@ -212,6 +215,13 @@ def _stage_extra(stage: str) -> str:
             "sockets) are NOT generic: use a curated bundle, or resolve the real part with "
             "lookup_lcsc_id + add_part_from_lcsc — never a stock footprint drawn for a "
             "different manufacturer's connector.\n"
+            "- DECOUPLING COMPLETENESS: give every IC the decoupling its datasheet shows — one "
+            "bypass cap (usually 100nF) per DEDICATED supply/decoupling pin (an nRF52840's "
+            "DEC1-DEC6 + DECUSB, an STM32's several VDD/VDDA pins, etc.), PLUS the bulk cap(s) "
+            "and any special-purpose cap (DC-DC/VDDH, USB, crystal load) it calls out. Do NOT "
+            "ship a token one or two caps for a chip with many supply pins, and cluster them "
+            "with the IC in ic_groups: the wiring stage cannot add parts, so an under-provisioned "
+            "IC stalls the design and forces a costly re-drive.\n"
             "- ICs, sensors, MCUs, regulators, or ANY part where a specific MPN matters: do NOT "
             "pick a stock symbol/footprint. Resolve the real part: lookup_lcsc_id then "
             "add_part_from_lcsc, then list_parts to read the exact '<name>:<sym>' / '<name>:<fp>' "
@@ -259,7 +269,17 @@ def _stage_extra(stage: str) -> str:
             "- Use exact pin NUMBERS from extras.symbol_pinouts (never pin names).\n"
             "- Put genuinely-unused pins (USB-C SBU1/SBU2, shield, spare CC) in no_connect_pins.\n"
             "- net_name should match an architecture power_net or inter_sheet_net verbatim "
-            "where applicable; connection.sheet must equal a bom part's sheet.")
+            "where applicable; connection.sheet must equal a bom part's sheet.\n"
+            "- BOM SHORTFALL = SELF-REPAIR, NOT A USER QUESTION: if the ONLY thing preventing "
+            "full net coverage is that the BOM lacks a supporting passive an IC requires (a "
+            "decoupling/bypass cap for a dedicated DEC/VDD/AVDD/bypass pin, a mandatory pull-up, "
+            "a crystal load cap), do NOT no-connect that pin and do NOT ask the user to choose. "
+            "Emit ONE blocking question tagged for automatic BOM repair — the pipeline re-runs "
+            "the BOM stage to add the parts, then re-runs wiring; the user is never asked:\n"
+            '    {"questions": [{"text": "<exactly what to add: how many parts, what value, '
+            'which IC pins each serves>", "blocking": true, "reconcile_target": "bom"}]}\n'
+            "Make the text a precise BOM instruction, not a choice. Reserve untagged questions "
+            "(no reconcile_target) for genuine design-intent ambiguity the user alone can settle.")
     return ""
 
 
@@ -678,6 +698,10 @@ def _normalize_questions(raw_list, stage: str) -> list[dict]:
     out = []
     for q in raw_list:
         if isinstance(q, dict) and str(q.get("text", "")).strip():
+            # reconcile_target marks a deficit the pipeline repairs itself (re-drive
+            # the named stage) rather than a question for the user. Whitelisted so
+            # the model can't route a park to an arbitrary/looping target.
+            target = q.get("reconcile_target")
             out.append({
                 "text": str(q["text"]).strip()[:500],
                 "stage": stage,
@@ -685,6 +709,7 @@ def _normalize_questions(raw_list, stage: str) -> list[dict]:
                 "material": bool(q.get("material", True)),
                 "options": [str(o)[:200] for o in (q.get("options") or [])][:6],
                 "answer": None,
+                "reconcile_target": (target if target in ("bom",) else None),
             })
     return out[:5]
 
@@ -791,6 +816,23 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
     tools = BOM_TOOLS if stage == "bom" else None
     executor = _bom_executor(workspace) if stage == "bom" else None
 
+    # Retries rebuild the conversation from this pristine base instead of
+    # appending to it. chat_with_tools mutates the list it's handed (it appends
+    # every tool-call turn + tool result), so a naive append-feedback-and-loop
+    # re-sends the WHOLE accumulated transcript on every later attempt — BOM
+    # snowballed to ~830K input tokens for ~28K output (30:1) this way. A retry
+    # only needs the task, the model's last slot, and the correction: resolved
+    # parts persist in the mpn cache + parts library and the executor memo
+    # dedupes any re-issued lookup, so the dropped transcript is free to rebuild.
+    base_messages = list(messages)
+
+    def _lean_retry(assistant_text: str | None, user_msg: str) -> list[dict]:
+        msgs = list(base_messages)
+        if assistant_text:
+            msgs.append({"role": "assistant", "content": assistant_text})
+        msgs.append({"role": "user", "content": user_msg})
+        return msgs
+
     total_cost = 0.0
     last: dict = {}
     cur_max_tokens = max_tokens
@@ -813,7 +855,6 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
             raw, rounds = (res["text"] or res.get("reasoning") or ""), None
             finish = res.get("finish_reason")
             total_cost += res["cost_usd"]
-            messages.append({"role": "assistant", "content": raw})
 
         try:
             obj = _extract_json(raw)
@@ -825,13 +866,13 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
                 # JSON. A plain "try again" just truncates at the same spot, burning
                 # another full-context call; give it more room for the next attempt.
                 cur_max_tokens = min(cur_max_tokens * 2, 32768)
-                messages.append({"role": "user", "content":
-                                 "Your reply was cut off at the output token limit, so the "
-                                 "JSON was truncated and invalid. The limit has been raised; "
-                                 "output ONLY the slot JSON and keep it compact."})
+                messages = _lean_retry(None,
+                                       "Your reply was cut off at the output token limit, so the "
+                                       "JSON was truncated and invalid. The limit has been raised; "
+                                       "output ONLY the slot JSON and keep it compact.")
             else:
-                messages.append({"role": "user", "content":
-                                 "That was not a single valid JSON object. Output ONLY the slot JSON."})
+                messages = _lean_retry(None,
+                                       "That was not a single valid JSON object. Output ONLY the slot JSON.")
             continue
 
         # A clarifying-question payload parks the stage (no slot this turn). No slot
@@ -846,10 +887,10 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
                     progress({"kind": "question", "stage": stage, "questions": qs})
                 return {"stage": stage, "commit_ok": False, "needs_input": True,
                         "questions": qs, "cost_usd": total_cost, "attempts": attempt + 1}
-            messages.append({"role": "user", "content":
-                             "Do not ask more questions. Apply sensible defaults (record each "
-                             "in assumptions, ending '(defaulted)') and output ONLY the slot "
-                             "JSON now."})
+            messages = _lean_retry(None,
+                                   "Do not ask more questions. Apply sensible defaults (record each "
+                                   "in assumptions, ending '(defaulted)') and output ONLY the slot "
+                                   "JSON now.")
             continue
 
         project_stem = obj.pop("project_stem", None)
@@ -875,7 +916,11 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         if progress:
             progress({"kind": "retry", "stage": stage, "errors": out.get("errors"),
                       "offenders": out.get("offenders")})
-        messages.append({"role": "user", "content": _retry_feedback(out)})
+        # Echo the FULL slot the model just emitted (raw) so the preserving-patch
+        # instruction in _retry_feedback can change only the flagged parts; the
+        # slot is bounded by max_tokens and is far smaller than the tool transcript
+        # this replaces.
+        messages = _lean_retry(raw, _retry_feedback(out))
 
     _wall = round(time.monotonic() - t0, 3)
     _cpu = round(_child_cpu_s() - cpu0, 3)

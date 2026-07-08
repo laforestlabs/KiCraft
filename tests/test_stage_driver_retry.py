@@ -82,6 +82,47 @@ def test_normalize_questions_shapes_and_drops_junk():
     assert q["options"] == ["LiPo", "18650"] and q["answer"] is None
 
 
+def test_normalize_questions_carries_and_whitelists_reconcile_target():
+    # A "bom" target is preserved (the pipeline can self-repair it); an unknown
+    # target is dropped to None so a park can't route to an arbitrary/looping
+    # stage, and an untagged question stays a plain user question.
+    qs = _normalize_questions(
+        [{"text": "Add 3 more 100nF for U1 DEC pins", "blocking": True,
+          "reconcile_target": "bom"},
+         {"text": "Active-high or active-low button?", "blocking": True},
+         {"text": "route to nowhere", "blocking": True, "reconcile_target": "wiring"}],
+        "wiring")
+    assert [q["reconcile_target"] for q in qs] == ["bom", None, None]
+    # the normalized dicts still validate as Question (schema-safe for state.json)
+    from kicraft.design.models import Question
+    for q in qs:
+        Question.model_validate(q)
+
+
+def test_wiring_prompt_tells_model_to_self_repair_a_bom_shortfall():
+    sysmsg = build_system("wiring")
+    # wiring must be told to tag a BOM parts shortfall for automatic repair
+    # instead of asking the user.
+    assert "reconcile_target" in sysmsg
+    assert '"bom"' in sysmsg
+
+
+def test_bom_prompt_demands_decoupling_completeness():
+    sysmsg = build_system("bom")
+    assert "DECOUPLING COMPLETENESS" in sysmsg
+    assert "per DEDICATED supply/decoupling pin" in sysmsg
+
+
+def test_bom_reconcile_instruction_lists_the_missing_parts():
+    from kicraft.server.web import _bom_reconcile_instruction
+    instr = _bom_reconcile_instruction(
+        [{"text": "Add three 100nF caps for U1 DEC3-DEC5", "reconcile_target": "bom"},
+         {"text": "", "reconcile_target": "bom"}])   # blank text is skipped
+    assert "Add three 100nF caps for U1 DEC3-DEC5" in instr
+    assert "Do NOT ask the user" in instr
+    assert instr.count("\n- ") == 1   # only the one non-blank deficit line
+
+
 def test_attach_questions_writes_open_questions(tmp_path):
     sp = tmp_path / ".kicraft" / "state.json"  # not yet created (a first-stage question)
     qs = _normalize_questions([{"text": "Q1", "blocking": True}], "intent")

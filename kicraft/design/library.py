@@ -211,7 +211,8 @@ def search_library_parts(
     return [entry[4] for entry in scored[:limit]]
 
 
-def _format_available_parts_block(loaded_parts: list) -> str | None:
+def _format_available_parts_block(loaded_parts: list,
+                                  stock_floor: int | None = None) -> str | None:
     """Render the "Available parts" block the BOM stage sees.
 
     ``None`` if the library is empty (the BOM stage falls back to
@@ -219,9 +220,30 @@ def _format_available_parts_block(loaded_parts: list) -> str | None:
     enough context for the LLM to pick a part by tag, MPN, or
     sourcing vendor and to know which symbol/footprint id to use in
     the BOM (``<name>:<symbol_name>`` and ``<name>:<footprint_name>``).
+
+    When ``stock_floor`` is given and the offline JLC catalog is available,
+    a ``stock`` column shows each bundle's JLCPCB-assembly stock and flags
+    the ones below the floor — the §9.26 commit gate rejects a below-floor
+    bundle, so surfacing it here lets the model skip it up front instead of
+    adopting it and burning a whole retry attempt when the commit bounces.
     """
     if not loaded_parts:
         return None
+    # JLC-assembly stock per bundle (offline lookup by its LCSC C#), so the
+    # model can avoid picking one the sourcing gate will later reject. Only
+    # when a floor is supplied and the catalog is present; otherwise the column
+    # is omitted entirely (no stale/absent-catalog noise in the table).
+    show_stock = False
+    stock_by_name: dict[str, int | None] = {}
+    if stock_floor is not None:
+        from kicraft.parts_library import jlcparts
+        if jlcparts.available():
+            show_stock = True
+            for part in loaded_parts:
+                cid = str((part.manifest.sourcing or {}).get("lcsc") or "").strip()
+                hit = jlcparts.lookup(cid) if cid else None
+                stock_by_name[part.manifest.name] = (
+                    (hit.get("stock") or 0) if hit else None)
     lines: list[str] = ["## Available parts\n"]
     lines.append(
         "These are pre-curated symbol+footprint bundles outside the stock "
@@ -235,10 +257,23 @@ def _format_available_parts_block(loaded_parts: list) -> str | None:
         "are human-vetted; `prototype` was auto-fetched and not yet reviewed "
         "(usable, but verify it before relying on it).\n"
     )
-    lines.append(
-        "| name | mpn | sourcing | tags | symbol | footprint | tier | badge |"
-    )
-    lines.append("|---|---|---|---|---|---|---|---|")
+    if show_stock:
+        lines.append(
+            f"The `stock` column is JLCPCB-assembly stock from the offline "
+            f"catalog. A bundle flagged `⚠<{stock_floor}` is below the sourcing "
+            f"floor and WILL be rejected at commit — prefer a well-stocked "
+            f"bundle, or resolve an in-stock alternative with lookup_lcsc_id + "
+            f"add_part_from_lcsc.\n"
+        )
+        lines.append(
+            "| name | mpn | sourcing | stock | tags | symbol | footprint | tier | badge |"
+        )
+        lines.append("|---|---|---|---|---|---|---|---|---|")
+    else:
+        lines.append(
+            "| name | mpn | sourcing | tags | symbol | footprint | tier | badge |"
+        )
+        lines.append("|---|---|---|---|---|---|---|---|")
     for part in loaded_parts:
         m = part.manifest
         sourcing = (
@@ -247,11 +282,25 @@ def _format_available_parts_block(loaded_parts: list) -> str | None:
             else "—"
         )
         tags = ", ".join(m.tags) if m.tags else "—"
-        lines.append(
-            f"| `{m.name}` | {m.mpn} | {sourcing} | {tags} | "
-            f"`{m.name}:{m.symbol_name}` | "
-            f"`{m.name}:{m.footprint_name}` | {part.tier.value} | {m.maturity} |"
-        )
+        if show_stock:
+            st = stock_by_name.get(m.name)
+            if st is None:
+                stock_cell = "—"
+            elif stock_floor and st < stock_floor:
+                stock_cell = f"{st:,} ⚠<{stock_floor}"
+            else:
+                stock_cell = f"{st:,}"
+            lines.append(
+                f"| `{m.name}` | {m.mpn} | {sourcing} | {stock_cell} | {tags} | "
+                f"`{m.name}:{m.symbol_name}` | "
+                f"`{m.name}:{m.footprint_name}` | {part.tier.value} | {m.maturity} |"
+            )
+        else:
+            lines.append(
+                f"| `{m.name}` | {m.mpn} | {sourcing} | {tags} | "
+                f"`{m.name}:{m.symbol_name}` | "
+                f"`{m.name}:{m.footprint_name}` | {part.tier.value} | {m.maturity} |"
+            )
     # Watch-out notes for parts that have them — easy to miss in the table.
     # Capped per part: full notes across a 50+ bundle library are tens of KB
     # and this block rides the BOM prompt through every tool round; the part

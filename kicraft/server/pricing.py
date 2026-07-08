@@ -109,10 +109,11 @@ def _price_key(p: dict) -> str | None:
 
 
 # Rank keyword/MPN picks away from the churn-prone bottom of the catalog: a
-# sub-floor Extended row is routinely delisted or drained weeks after the dump
+# near-dry Extended row is routinely delisted or drained weeks after the dump
 # is built (KC-V8YWN8's R2 pick 404'd on live LCSC three weeks in). Same env
-# knob as the §9.26 BOM gate so both floors move together.
-_KW_STOCK_FLOOR = 500
+# knob and value as the §9.26 BOM gate (cli_app._BOM_STOCK_FLOOR) so both
+# floors move together.
+_KW_STOCK_FLOOR = 100
 
 
 def _stock_floor() -> int:
