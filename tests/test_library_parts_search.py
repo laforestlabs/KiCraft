@@ -131,3 +131,47 @@ def test_list_parts_query_miss_says_so(capsys, monkeypatch):
     assert _cmd_list_parts(_ns(query="zzqq_nope_xyzzy")) == 0
     out = capsys.readouterr().out
     assert "no library parts match" in out
+
+
+# ---------- stock column (below-floor bundle visibility) ----------
+
+
+def _synthetic_part(name, cid):
+    from types import SimpleNamespace
+    m = SimpleNamespace(name=name, mpn=name.upper(), sourcing={"lcsc": cid},
+                        tags=[], symbol_name="SYM", footprint_name="FP",
+                        maturity="prototype", watch_out_for=None)
+    return SimpleNamespace(manifest=m, tier=SimpleNamespace(value="home"))
+
+
+def test_parts_block_adds_stock_column_and_flags_below_floor(monkeypatch):
+    # The model picks bundles from this table; a below-floor bundle it can't
+    # SEE is adopted then bounced by §9.26 a commit later (the dominant BOM
+    # retry). With a floor + the offline catalog, the stock column flags it.
+    from kicraft.design import library
+    from kicraft.parts_library import jlcparts
+    parts = [_synthetic_part("lo-part", "C11"),
+             _synthetic_part("hi-part", "C22"),
+             _synthetic_part("unknown-part", "C33")]
+    stock = {"C11": 12, "C22": 500_000}  # C33 absent -> not in the catalog
+    monkeypatch.setattr(jlcparts, "available", lambda: True)
+    monkeypatch.setattr(jlcparts, "lookup",
+                        lambda cid: ({"stock": stock[cid]} if cid in stock else None))
+
+    block = library._format_available_parts_block(parts, stock_floor=100)
+    assert "| name | mpn | sourcing | stock | tags |" in block  # column added
+    assert "12 ⚠<100" in block          # below floor -> flagged
+    assert "500,000" in block and "500,000 ⚠" not in block  # above floor -> plain
+    assert "unknown-part" in block      # not-in-catalog row still rendered (stock —)
+
+
+def test_parts_block_omits_stock_column_without_a_floor(monkeypatch):
+    # Back-compat: no floor supplied -> the original 8-column table, no catalog
+    # lookups (callers that don't care about stock pay nothing).
+    from kicraft.design import library
+    from kicraft.parts_library import jlcparts
+    monkeypatch.setattr(jlcparts, "available",
+                        lambda: (_ for _ in ()).throw(AssertionError("no lookup expected")))
+    block = library._format_available_parts_block(
+        [_synthetic_part("p", "C11")], stock_floor=None)
+    assert "| name | mpn | sourcing | tags |" in block and "| stock |" not in block

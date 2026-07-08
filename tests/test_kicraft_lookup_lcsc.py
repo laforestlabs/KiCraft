@@ -261,6 +261,30 @@ def test_lookup_jlcparts_retail_dry_winner_surfaces_candidates(
     assert mpn_cache.get("VL53L1CXV0FY/1") is None  # dry winner never cached
 
 
+def test_lookup_jlcparts_below_floor_winner_surfaces_stock_sorted_candidates(
+        capsys, monkeypatch, tmp_path):
+    # A catalog winner below the JLC-assembly stock floor must NOT resolve even
+    # when it is plentiful at retail: the §9.26 commit gate rejects a below-floor
+    # pick, so the model gets a stock-sorted candidate list now instead of
+    # adopting it and burning a whole retry attempt when the commit bounces.
+    # Two exact rows, both below the 100-unit floor: _pick_lcsc takes the
+    # higher-stock one (C3, 90), still under the floor -> vetoed.
+    _mk_catalog(tmp_path, monkeypatch, [
+        (2, "SS34", "SMA", "MFR-A", "Extended", 60, "1-:0.01", "schottky"),
+        (3, "SS34", "SMA", "MFR-B", "Extended", 90, "1-:0.01", "schottky"),
+    ])
+    _fake_retail(monkeypatch)  # everything plentiful at retail (floor check is JLC)
+    rc, payload = _run(capsys, "lookup-lcsc-id", "SS34")
+    assert rc == 4 and payload["ok"] is False
+    # the winning C3 (stock 90) is below the 100 floor -> vetoed, not resolved
+    assert "90" in payload["hint"] and "100" in payload["hint"]
+    assert "floor" in payload["hint"].lower() and "add_part_from_lcsc" in payload["hint"]
+    # candidates sorted best-JLC-stock-first so the model's next pick is the best available
+    assert [c["lcsc"] for c in payload["candidates"]] == ["C3", "C2"]
+    from kicraft.parts_library import mpn_cache
+    assert mpn_cache.get("SS34") is None  # below-floor winner never cached
+
+
 def test_lookup_payloads_carry_retail_stock(capsys, monkeypatch, tmp_path):
     _fake_retail(monkeypatch, {"C7386355": {"stock": 4321, "min_buy": 5}})
     rc, payload = _run(capsys, "lookup-lcsc-id", "C7386355")

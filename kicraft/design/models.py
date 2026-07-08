@@ -88,6 +88,14 @@ class Question(BaseModel):
     options: suggested answers the UI may offer as buttons. The UI always also
     offers a freeform text answer, so options are never exhaustive.
     answer: the user's response once given (None while still open).
+
+    reconcile_target: when set (only "bom" today), this is NOT a question for
+    the user — it is a stage-internal deficit the pipeline can discharge itself
+    by re-driving the named stage. The wiring stage sets it to "bom" when the
+    only thing blocking full net coverage is that the BOM lacks supporting
+    passives an IC requires (e.g. too few decoupling caps); the driver then
+    re-runs the BOM stage to provision the parts and re-runs wiring, instead of
+    stalling on a clarifying question KiCraft can answer for itself.
     """
 
     text: str
@@ -97,6 +105,7 @@ class Question(BaseModel):
     default_applied: str | None = None
     options: list[str] = Field(default_factory=list)
     answer: str | None = None
+    reconcile_target: str | None = None
 
 
 class ChatMsg(BaseModel):

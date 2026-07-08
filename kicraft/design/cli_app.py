@@ -370,11 +370,12 @@ def _unresolved_lcsc(bom, project_root: Path) -> list[str]:
 # A C-number smuggled in prose ("LCSC C8678", "use C9864") is an explicit pin;
 # fab_export.extract_lcsc_pin is the ONE definition (also the fab BOM readback),
 # and it excludes package-size tokens like C0603 that are not part numbers.
-# Reject parts the offline snapshot already shows draining: a popular part
-# with a few hundred units in the (weeks-old) dump is routinely dry by the
-# time anyone orders. Overridable per-host via KICRAFT_BOM_STOCK_FLOOR (0
-# disables the floor; realness is still enforced).
-_BOM_STOCK_FLOOR = 500
+# Reject parts the offline snapshot already shows nearly dry: a listing with
+# only a handful of units in the (weeks-old) dump is routinely delisted by the
+# time anyone orders. 100 matches the retail floor (lcsc_retail._RETAIL_FLOOR)
+# so JLC-assembly and storefront thresholds agree. Overridable per-host via
+# KICRAFT_BOM_STOCK_FLOOR (0 disables the floor; realness is still enforced).
+_BOM_STOCK_FLOOR = 100
 # How many candidates per MPN/keyword get a live lcsc.com retail check before
 # the walk gives up (each miss is one storefront hit; TTL-cached after that).
 # The kw cap is deeper: generic-passive searches carry more near-miss rows
@@ -385,6 +386,18 @@ _RETAIL_WALK_CAP_KW = 8
 # The daily refresh timer plus one day of slack; an older dump means the
 # JLC-side stock verdicts below are guesses, so say so.
 _DUMP_AGE_WARN_DAYS = 8
+
+
+def _bom_stock_floor() -> int:
+    """JLC-assembly stock floor for BOM picks, env-overridable (0 disables the
+    floor). The §9.26 commit gate AND the part-selection tools (lookup_lcsc_id)
+    read this same value, so a part the model is allowed to pick is a part the
+    gate will accept — no adopt-then-reject retry."""
+    try:
+        return int(os.environ.get("KICRAFT_BOM_STOCK_FLOOR", "")
+                   or _BOM_STOCK_FLOOR)
+    except ValueError:
+        return _BOM_STOCK_FLOOR
 
 
 def _is_single_passive_footprint(fp: str) -> bool:
@@ -550,11 +563,7 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
     """
     if not jlcparts.available():
         return [], []  # can't verify — don't block
-    try:
-        floor = int(os.environ.get("KICRAFT_BOM_STOCK_FLOOR", "")
-                    or _BOM_STOCK_FLOOR)
-    except ValueError:
-        floor = _BOM_STOCK_FLOOR
+    floor = _bom_stock_floor()
     warnings: list[str] = []
     age = jlcparts.dump_age_days()
     if age is not None and age > _DUMP_AGE_WARN_DAYS:
@@ -1211,7 +1220,7 @@ def _cmd_list_parts(args: argparse.Namespace) -> int:
     else:
         active, _broken = _load_library_parts(Path.cwd())
         _log_query("list_parts", outcome="listed", n_active=len(active))
-    block = _format_available_parts_block(active)
+    block = _format_available_parts_block(active, stock_floor=_bom_stock_floor())
     if block is None:
         print("(no parts available in the library)")
         return 0
@@ -1418,31 +1427,49 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
                       "price", "description")
             best = _pick_lcsc(mpn, results)
             if best and best.get("lcsc"):
-                # Veto a winner that is dry at the lcsc.com retail storefront
-                # (JLC stock alone isn't orderable — KC-4AZ7PE): surface the
-                # candidate list so the model picks an in-stock part now
-                # instead of being bounced by §9.26 a commit later. Outages
-                # fail open (same convention as the gate).
-                veto_dry = False
-                if lcsc_retail.enabled():
+                # Veto a winner the §9.26 commit gate would reject anyway, so
+                # the model picks a passing part NOW instead of adopting this
+                # one and being bounced a commit later (the dominant BOM-retry
+                # cost). Two disqualifiers, in the gate's own order: below the
+                # JLC-assembly stock floor (offline, always checkable here), or
+                # dry at the lcsc.com retail storefront (JLC stock alone isn't
+                # orderable — KC-4AZ7PE). Retail outages fail open (same
+                # convention as the gate); the floor read honors the 0-disable.
+                floor = _bom_stock_floor()
+                best_stock = best.get("stock") or 0
+                veto_reason = None
+                if floor and best_stock < floor:
+                    veto_reason = (f"exact match {best['lcsc']} has only "
+                                   f"{best_stock} in stock for JLCPCB assembly "
+                                   f"(< {floor} floor)")
+                elif lcsc_retail.enabled():
                     try:
                         ok_retail, _info = lcsc_retail.in_stock(
                             best["lcsc"], picky=False)
-                        veto_dry = not ok_retail
+                        if not ok_retail:
+                            veto_reason = (f"exact match {best['lcsc']} is out "
+                                           f"of stock at the lcsc.com retail "
+                                           f"storefront")
                     except lcsc_retail.RetailUnavailable:
-                        veto_dry = False
-                if veto_dry:
+                        pass
+                if veto_reason:
                     _log_query("lookup_lcsc_id", outcome="miss", query=mpn,
-                               lcsc=best["lcsc"], error="retail-out-of-stock")
+                               lcsc=best["lcsc"], error="below-stock-floor")
+                    # Sort the candidate list best-JLC-stock-first so the
+                    # model's next pick clears the floor on the first try.
+                    ranked = sorted(results,
+                                    key=lambda r: (r.get("stock") or 0),
+                                    reverse=True)
                     print(json.dumps(
                         {"ok": False, "mpn": mpn,
                          "candidates": [{k: r.get(k) for k in fields}
-                                        for r in results],
-                         "hint": f"exact match {best['lcsc']} is out of stock "
-                                 f"at the lcsc.com retail storefront; pick an "
-                                 f"in-stock candidate (a part must be in stock "
-                                 f"both for JLCPCB assembly and at retail) or "
-                                 f"choose a different part"},
+                                        for r in ranked],
+                         "hint": f"{veto_reason}; a pick must clear {floor} "
+                                 f"JLCPCB-assembly stock AND be orderable at "
+                                 f"retail. Candidates are sorted by stock — "
+                                 f"pick the best-stocked one that fits and pass "
+                                 f"it to add_part_from_lcsc, or choose a "
+                                 f"different part."},
                         indent=2,
                     ))
                     return 4
@@ -2735,7 +2762,8 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
             parts = [p for p in parts if p.manifest.name in _core_names]
         except Exception:  # noqa: BLE001
             pass  # catalog unavailable — don't filter
-        extras["parts_block"] = _format_available_parts_block(parts)
+        extras["parts_block"] = _format_available_parts_block(
+            parts, stock_floor=_bom_stock_floor())
 
     elif stage == "wiring":
         if state.bom is None:

@@ -21,6 +21,14 @@ Slot shape (`BOM`):
   - `side` (OPTIONAL) — `"front"` (default) or `"back"`. Set `"back"` for any part the intent places on the back of the board (e.g. "a header on the **back side**", a back-mounted connector or battery clip). General to any part; the part is flipped onto B.Cu at placement time. A back-side *internal* connector (a power/data pin header that does NOT mate through an enclosure wall) gets `side: "back"` and **no** `component_zones` edge — see the `component_zones` rule below.
   - `source_leaf` — set only if a leaf installer added this part; leave null otherwise.
 
+**Decoupling completeness — provision every cap the datasheet shows, not a token one or two.** An IC's power integrity is your job here, not the wiring stage's (wiring can only connect parts, it cannot add them — an under-provisioned IC stalls the whole design). For every IC, give it the decoupling its datasheet's reference schematic specifies:
+
+- One bypass cap (usually 100nF) **per dedicated supply/decoupling pin**. A chip that exposes several `DEC*` / `VDD*` / `VDDA` / `AVDD` / bypass pins needs one cap each — e.g. an nRF52840 has DEC1–DEC6 + DECUSB (so ~6× 100nF + a 4.7µF on DECUSB, per its datasheet), an STM32 has a 100nF on every VDD/VDDA pair. Do not ship two caps for a chip that has six supply pins.
+- Plus the bulk/reservoir cap(s) the datasheet calls out (often a 1–10µF near the main rail), and any special-purpose cap (VDDH/DC-DC, USB, PLL loop, crystal load caps).
+- Cluster every one of these with the IC in `ic_groups[<ic_ref>]` so placement keeps them adjacent.
+
+When in doubt, err toward the datasheet's typical-application count. Sizing decoupling correctly here is cheaper than a re-drive later.
+
 Additional top-level fields (still inside the BOM slot):
 
 - `ic_groups`: dict mapping an IC's `ref` to the list of supporting passives that should physically cluster with it (decoupling caps, feedback resistors, inductors). **This is the single most impactful input to placement quality. Spend time on it.**
