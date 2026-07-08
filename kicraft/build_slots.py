@@ -55,29 +55,44 @@ def host_cpu_count() -> int:
     return os.cpu_count() or 1
 
 
+def default_build_slots() -> int:
+    """CPU-safe concurrent-build count from the ACTUAL core count: each build
+    fans out to up to 6 leaf solvers, so ``max(1, cpus//6)`` keeps
+    ``slots * 6 ~ cores``.
+
+    Deliberately NOT ``slot_count()``: that layers the ``KICRAFT_BUILD_SLOTS``
+    host-gate override on top of the sizing, and an operator who set the gate to
+    2 on a 2-core host (which is what produced the self-eval 2026-07-08 rc=-9
+    cluster) would otherwise pull the harness default straight back to the
+    over-subscribed value. The host-gate flock still bounds total host
+    concurrency on top of this; this is only the harness's own CPU-safe sizing.
+    """
+    return max(1, host_cpu_count() // 6)
+
+
 def resolve_build_slots(requested: int | None) -> int:
     """Concurrent-build count for a fan-out harness (self-eval, loadtest),
     clamped so it can never over-subscribe the host.
 
-    ``requested is None`` -> the host-aware default ``slot_count()`` capped at
-    the core count (``max(1, cpus//6)``, since each build fans out to up to 6
-    leaf solvers). An explicit value is honored but must be ``<= cores``: a
-    single concurrent build already saturates the CPU, so ``build_slots > cores``
-    guarantees the thrash that turned genuinely-slow leaf solves into 2400s
-    watchdog kills (the self-eval 2026-07-08 rc=-9 cluster ran ``--build-slots 2``
-    on a 2-core host). Raises ``ValueError`` rather than silently clamping, so a
-    contended config fails loudly at launch instead of shipping.
+    ``requested is None`` -> :func:`default_build_slots` (``max(1, cpus//6)``
+    from the real core count). An explicit value is honored but must be
+    ``<= cores``: a single concurrent build already saturates the CPU, so
+    ``build_slots > cores`` guarantees the thrash that turned genuinely-slow
+    leaf solves into 2400s watchdog kills (the self-eval 2026-07-08 rc=-9
+    cluster ran ``--build-slots 2`` on a 2-core host). Raises ``ValueError``
+    rather than silently clamping, so a contended config fails loudly at launch
+    instead of shipping.
     """
     cores = host_cpu_count()
     if requested is None:
-        return max(1, min(slot_count(), cores))
+        return default_build_slots()
     slots = max(1, int(requested))
     if slots > cores:
         raise ValueError(
             f"build_slots={slots} exceeds host core count {cores}: each "
             f"concurrent build saturates the CPU, so this over-subscribes and "
             f"trips the build timeout. Use build_slots <= {cores} "
-            f"(host-aware default is {max(1, min(slot_count(), cores))})."
+            f"(host-aware default is {default_build_slots()})."
         )
     return slots
 
