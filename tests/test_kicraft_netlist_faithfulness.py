@@ -75,8 +75,25 @@ def test_compare_flags_cross_net_merge(bmp280_state) -> None:
              (b.endpoints[0].ref, str(b.endpoints[0].pin))}
     if a.net_name == b.net_name:
         pytest.skip("fixture's first two connections share a name")
-    merges, _lost = _compare_netlist_to_bom([fused], bom)
+    merges, _splits, _lost = _compare_netlist_to_bom([fused], bom)
     assert merges and a.net_name in merges[0] and b.net_name in merges[0]
+
+
+def test_compare_flags_cohesion_split(bmp280_state) -> None:
+    """The cohesion branch, unit-level: one BOM net whose wired pins land in TWO
+    extracted nets (a dropped stub leaving a pin on its own singleton auto-net)
+    -> reported as a split. This is the pin_not_connected + label_dangling class
+    §9.11 could not see (it only checks bom.connections, already correct)."""
+    bom = bmp280_state.bom
+    multi = next(c for c in bom.connections if len(c.endpoints) >= 3)
+    eps = [(e.ref, str(e.pin)) for e in multi.endpoints]
+    # The emitter joined all but the last pin; the last sits on its own net.
+    joined = set(eps[:-1])
+    orphan = {eps[-1]}
+    merges, splits, lost = _compare_netlist_to_bom([joined, orphan], bom)
+    assert splits and multi.net_name in splits[0]
+    orphan_pin = f"{eps[-1][0]}.{eps[-1][1]}"
+    assert orphan_pin not in lost  # the orphan pin IS present, just split off
 
 
 @needs_kicad

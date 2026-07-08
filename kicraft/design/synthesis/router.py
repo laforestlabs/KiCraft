@@ -752,8 +752,14 @@ def _route_power(
                 flag_spot = (corner[0], corner[1], 0 if is_gnd else 180)
             else:
                 flag_spot = (sym_xy[0], sym_xy[1], 90)
-    # One PWR_FLAG per undriven rail marks it as driven for ERC.
-    if net_name in flag_nets and flag_spot is not None:
+    # One PWR_FLAG per undriven rail marks it as driven for ERC. Guard against
+    # a net realized by MORE THAN ONE connection on this sheet (e.g. a ground
+    # split into per-sheet halves, or two same-net connections the wiring stage
+    # emitted separately): a second PWR_FLAG on the same global net shorts ERC
+    # with "Power output and Power output are connected". flagged_nets is the
+    # per-sheet ledger route_sheet threads through every _route_power call.
+    already_flagged = flagged_nets is not None and net_name in flagged_nets
+    if net_name in flag_nets and flag_spot is not None and not already_flagged:
         routed.power_symbols.append(PowerSymbol(
             lib_id="power:PWR_FLAG", x_mm=flag_spot[0], y_mm=flag_spot[1],
             angle_deg=flag_spot[2]))

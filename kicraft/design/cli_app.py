@@ -19,6 +19,7 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import json
 import os
@@ -98,6 +99,7 @@ from .synthesis.validation import (
     check_single_net_per_pin,
     check_two_terminal_self_short,
     reconcile_inter_sheet_nets,
+    split_cross_sheet_connections,
 )
 from kicraft.parts_library import Maturity
 from kicraft.parts_library import mpn_cache
@@ -2882,6 +2884,10 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     # the emitter both see the repaired netlist:
     #   * bridge internally-shorted duplicate pads (KiCad "N'") onto their net,
     #     so §9.11 stops flagging a pad the package already ties together;
+    #   * split a connection whose endpoints live on several sheets into one
+    #     per-sheet connection, so the connector-holding sheet actually draws a
+    #     stub per pin (run_01 BNC J1, run_30 GPIO header J2) and reconcile can
+    #     see the true crossing instead of a lone single-sheet tag;
     #   * reconcile inter_sheet_nets to the crossings wiring actually realized,
     #     so the stage is never blamed for an inter-sheet contract it cannot edit
     #     (KC-WFFXZ3 DTR/RTS-into-ESP32; the proto-shield PROTO AREA orphans).
@@ -2889,6 +2895,9 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     if stage == "wiring" and state.bom is not None and state.bom.connections:
         wiring_normalizations += [
             f"bridge {b}" for b in bridge_duplicate_pins(state.bom)
+        ]
+        wiring_normalizations += [
+            f"split {c}" for c in split_cross_sheet_connections(state.bom)
         ]
         if state.architecture is not None:
             wiring_normalizations += [
@@ -4508,6 +4517,16 @@ def _cmd_manual_route(args: argparse.Namespace) -> int:
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
+    """Run the build, teeing all stdout/stderr to ``<state_dir>/build.log``
+    (line-buffered) so a watchdog SIGKILL still leaves the partial place/route
+    log on disk — the missing evidence on every rc=-9 self-eval run. Skipped
+    when the caller already captures the log (the web build worker sets
+    KICRAFT_BUILD_LOG=external, since it writes the same file itself)."""
+    with _tee_build_log(Path(args.state).parent / "build.log"):
+        return _cmd_build_impl(args)
+
+
+def _cmd_build_impl(args: argparse.Namespace) -> int:
     state_path = Path(args.state)
     out_dir = Path(args.out_dir)
     try:
@@ -5015,6 +5034,73 @@ def _hoist_positionals(parser: argparse.ArgumentParser, argv: list[str]) -> list
             positionals.append(tok)
             i += 1
     return [argv[0], *positionals, *options]
+
+
+class _TeeStream:
+    """Mirror every write to a second (log) file, flushing per write.
+
+    Wraps the real stdout/stderr so build progress reaches the caller's pipe
+    unchanged AND lands in the on-disk build.log line-by-line. A failing log
+    write (disk full, closed fd) never breaks the primary stream.
+    """
+
+    def __init__(self, primary, logf) -> None:
+        self._primary = primary
+        self._logf = logf
+
+    def write(self, s: str) -> int:
+        n = self._primary.write(s)
+        try:
+            self._logf.write(s)
+            self._logf.flush()
+        except (OSError, ValueError):
+            pass
+        return n
+
+    def flush(self) -> None:
+        self._primary.flush()
+        try:
+            self._logf.flush()
+        except (OSError, ValueError):
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._primary, name)
+
+
+@contextlib.contextmanager
+def _tee_build_log(log_path: Path):
+    """Tee stdout+stderr into ``log_path`` (line-buffered) for the duration.
+
+    The build's whole place/route pipeline runs in THIS process (autoexperiment
+    is called in-process; the leaf/compose subprocesses' output is captured and
+    re-printed here), so a stdout tee captures every ``[build]``/``[solve]``/
+    ``[abort]`` line. Flushed per line so a watchdog SIGKILL at the timeout wall
+    still leaves the partial log on disk (the empty-``build.log`` rc=-9 runs of
+    the self-eval batches). No-op when ``KICRAFT_BUILD_LOG=external`` — the web
+    build worker captures the child's stdout into the SAME file itself, so a
+    second writer here would interleave/corrupt it.
+    """
+    if os.environ.get("KICRAFT_BUILD_LOG") == "external":
+        yield
+        return
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        logf = log_path.open("w", encoding="utf-8", buffering=1)
+    except OSError:
+        yield  # can't open the log (read-only dir, etc.) -- run without it
+        return
+    old_out, old_err = sys.stdout, sys.stderr
+    sys.stdout = _TeeStream(old_out, logf)  # type: ignore[assignment]
+    sys.stderr = _TeeStream(old_err, logf)  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        sys.stdout, sys.stderr = old_out, old_err
+        try:
+            logf.close()
+        except OSError:
+            pass
 
 
 def _line_buffer_stdio() -> None:

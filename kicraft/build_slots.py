@@ -49,6 +49,39 @@ def slot_count() -> int:
     return max(1, (os.cpu_count() or 1) // 6)
 
 
+def host_cpu_count() -> int:
+    """Usable host cores for concurrency sizing (the repo-wide `os.cpu_count()`
+    idiom, floored at 1)."""
+    return os.cpu_count() or 1
+
+
+def resolve_build_slots(requested: int | None) -> int:
+    """Concurrent-build count for a fan-out harness (self-eval, loadtest),
+    clamped so it can never over-subscribe the host.
+
+    ``requested is None`` -> the host-aware default ``slot_count()`` capped at
+    the core count (``max(1, cpus//6)``, since each build fans out to up to 6
+    leaf solvers). An explicit value is honored but must be ``<= cores``: a
+    single concurrent build already saturates the CPU, so ``build_slots > cores``
+    guarantees the thrash that turned genuinely-slow leaf solves into 2400s
+    watchdog kills (the self-eval 2026-07-08 rc=-9 cluster ran ``--build-slots 2``
+    on a 2-core host). Raises ``ValueError`` rather than silently clamping, so a
+    contended config fails loudly at launch instead of shipping.
+    """
+    cores = host_cpu_count()
+    if requested is None:
+        return max(1, min(slot_count(), cores))
+    slots = max(1, int(requested))
+    if slots > cores:
+        raise ValueError(
+            f"build_slots={slots} exceeds host core count {cores}: each "
+            f"concurrent build saturates the CPU, so this over-subscribes and "
+            f"trips the build timeout. Use build_slots <= {cores} "
+            f"(host-aware default is {max(1, min(slot_count(), cores))})."
+        )
+    return slots
+
+
 def slots_dir() -> Path:
     """Lockfile directory; must be shared by every process on the host (NOT /tmp,
     which systemd PrivateTmp namespaces per service)."""

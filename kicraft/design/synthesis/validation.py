@@ -717,6 +717,69 @@ def _reconciled_endpoints(sheets: set[str], declared) -> list[SheetPin]:
     ]
 
 
+def split_cross_sheet_connections(bom) -> list[str]:
+    """Realize every connection on the sheet(s) its endpoints actually live on.
+
+    A ``NetConnection`` carries a single ``sheet`` tag, but the wiring stage
+    routinely lists endpoints whose parts are assigned (``BomPart.sheet``) to
+    *other* sheets — a connector parked on a dedicated HEADER sheet but wired
+    from the functional sheet's connection list (run_01's BNC ``J1``; run_30's
+    2×10 GPIO header ``J2``). Two downstream failures follow, and they were the
+    batch's #1 fab-blocker by breadth (`kicraft-erc-emitter-drops-label-stubs`):
+
+      * ``route_sheet`` filters connections by ``c.sheet == sheet_name``, so the
+        connector-holding sheet sees *zero* connections and draws no stub for
+        any connector pin → every pin is ``pin_not_connected`` and its net's
+        label ``label_dangling``. On the tagged sheet the foreign endpoints are
+        silently dropped (their part isn't placed there).
+      * :func:`reconcile_inter_sheet_nets` reads only ``c.sheet``, so a net that
+        genuinely crosses sheets but sits in one single-sheet-tagged connection
+        is never promoted to ``inter_sheet_nets`` — no hier label / sheet pin
+        bridges the two sides even after the pins are drawn.
+
+    Regroup each connection's endpoints by their part's sheet. A connection all
+    on one sheet == its tag is untouched. Otherwise it is re-emitted as one
+    per-sheet ``NetConnection`` (same ``net_name``): the connector sheet now
+    draws a stub per pin, reconcile then sees the net on ≥2 sheets and promotes
+    the signal ones (power/ground join globally through per-sheet power symbols,
+    which reconcile leaves alone). Endpoints whose ref is unknown, or whose part
+    sheet isn't a real sheet, stay on the original tag. §9.13 re-unifies the
+    same-named halves (by name), so this never reads as a net merge. Mutates
+    ``bom.connections`` in place; returns the changes made, for logging.
+    """
+    part_sheet = {p.ref: p.sheet for p in bom.parts}
+    known_sheets = set(part_sheet.values())
+    new_connections: list[NetConnection] = []
+    changes: list[str] = []
+    mutated = False
+    for c in bom.connections:
+        by_sheet: dict[str, list[PinEndpoint]] = defaultdict(list)
+        for ep in c.endpoints:
+            s = part_sheet.get(ep.ref, c.sheet)
+            if s not in known_sheets:
+                s = c.sheet
+            by_sheet[s].append(ep)
+        if len(by_sheet) == 1 and c.sheet in by_sheet:
+            new_connections.append(c)
+            continue
+        mutated = True
+        for s in sorted(by_sheet):
+            new_connections.append(
+                NetConnection(net_name=c.net_name, endpoints=by_sheet[s], sheet=s)
+            )
+        if len(by_sheet) > 1:
+            changes.append(
+                f"{c.net_name} {sorted(by_sheet)} (was tagged {c.sheet})"
+            )
+        else:
+            changes.append(
+                f"{c.net_name} retagged {c.sheet}->{next(iter(by_sheet))}"
+            )
+    if mutated:
+        bom.connections = new_connections
+    return changes
+
+
 def reconcile_inter_sheet_nets(architecture, bom) -> list[str]:
     """Align ``architecture.inter_sheet_nets`` with the crossings the wiring
     stage actually realized, so the wiring stage is never handed a cross-sheet
@@ -1593,16 +1656,18 @@ def _extract_netlist_groups(netlist_text: str) -> list[set[tuple[str, str]]]:
 
 def _compare_netlist_to_bom(
     extracted: list[set[tuple[str, str]]], bom
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str]]:
     """Compare extracted (ref, pin) net groups against ``bom.connections``.
 
-    Returns ``(merges, lost)``: human-readable merge descriptions for
+    Returns ``(merges, splits, lost)``: human-readable merge descriptions for
     extracted nets containing pins of bom nets that share neither a name
-    nor an endpoint, and ``ref.pin`` strings for wired pins absent from
-    every extracted net. Same-named connections are expected to unify
-    (local labels per sheet, power symbols / hier labels across sheets),
+    nor an endpoint; split descriptions for one bom net whose wired pins
+    scatter across >1 extracted net; and ``ref.pin`` strings for wired pins
+    absent from every extracted net. Same-named connections are expected to
+    unify (local labels per sheet, power symbols / hier labels across sheets),
     as are connections sharing an endpoint — anything beyond that landing
-    in one extracted net is a merge the design never asked for.
+    in one extracted net is a merge the design never asked for, and anything
+    less (a bom net in several extracted nets) is a stub the emitter dropped.
     """
     bom_refs = {p.ref for p in bom.parts}
     ep_group: dict[tuple[str, str], str] = {}
@@ -1638,7 +1703,11 @@ def _compare_netlist_to_bom(
     wired = set(ep_group)
     seen: set[tuple[str, str]] = set()
     merges: list[str] = []
-    for net_pins in extracted:
+    # Which extracted-net indices each bom net (union-find root) lands in, and
+    # the known pins seen for that root — for the cohesion (split) check below.
+    group_indices: dict[str, set[int]] = defaultdict(set)
+    group_pins: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    for idx, net_pins in enumerate(extracted):
         known = {e for e in net_pins if e in wired and e[0] in bom_refs}
         seen |= known
         nets_here = {find(ep_group[e]) for e in known}
@@ -1646,9 +1715,29 @@ def _compare_netlist_to_bom(
             names = sorted({g.split("//", 1)[1] for g in nets_here})
             sample = sorted(f"{r}.{p}" for r, p in known)[:6]
             merges.append(f"nets {names} merged at pins {sample}")
+        for e in known:
+            root = find(ep_group[e])
+            group_indices[root].add(idx)
+            group_pins[root].add(e)
+
+    # Cohesion: a bom net whose wired pins scatter across >1 extracted net was
+    # not fully joined by the emitter. A dropped stub (a connector pin on a
+    # sheet with no realized connection, an undeclared cross-sheet net) leaves
+    # the pin on its own singleton auto-net -- present, so not "lost", and one
+    # bom net, so not a "merge" -- yet electrically orphaned (pin_not_connected
+    # + label_dangling). This is the class §9.11/§9.13's older checks could not
+    # see; it is caught structurally here against the KiCad-extracted netlist.
+    splits: list[str] = []
+    for root, idxs in group_indices.items():
+        if len(idxs) > 1:
+            name = root.split("//", 1)[1]
+            sample = sorted(f"{r}.{p}" for r, p in group_pins[root])[:8]
+            splits.append(
+                f"net {name!r} split across {len(idxs)} nets at pins {sample}"
+            )
 
     lost = sorted(f"{r}.{p}" for (r, p) in wired - seen if r in bom_refs)
-    return merges, lost
+    return merges, sorted(splits), lost
 
 
 def check_netlist_faithfulness(
@@ -1666,9 +1755,14 @@ def check_netlist_faithfulness(
       net with no shared endpoint to justify it. Seen when a slid label
       landed on a foreign stub (ISP_MISO≡ISP_MOSI): two labels on one wire
       is legal KiCad, so ERC stays quiet while MISO is shorted to MOSI.
-
-    Cohesion (one BOM net split across several extracted nets) is the
-    router's §9.9/§9.12 territory and not re-checked here.
+    - **cohesion splits** — one BOM net whose wired pins scatter across
+      several extracted nets: the emitter drew no stub for a pin (a connector
+      pin on a sheet with no realized connection, an undeclared cross-sheet
+      net), leaving it on its own singleton auto-net. This is the
+      pin_not_connected + label_dangling class that slipped past §9.11 (which
+      only checks bom.connections, already correct) — a model cannot fake it,
+      since it is measured against the KiCad-extracted netlist of what was
+      actually emitted.
     """
     root_sch = project_dir / f"{project_stem}.kicad_sch"
     if not root_sch.is_file():
@@ -1704,13 +1798,18 @@ def check_netlist_faithfulness(
     finally:
         out_path.unlink(missing_ok=True)
 
-    merges, lost = _compare_netlist_to_bom(extracted, bom)
-    offenders = merges + [f"pin missing from netlist: {e}" for e in lost]
+    merges, splits, lost = _compare_netlist_to_bom(extracted, bom)
+    offenders = (
+        merges
+        + splits
+        + [f"pin missing from netlist: {e}" for e in lost]
+    )
     if offenders:
         return CheckResult(
             name="9.13 netlist faithfulness", ok=False,
             message=(
                 f"{len(merges)} unexpected net merge(s), "
+                f"{len(splits)} dropped-stub split(s), "
                 f"{len(lost)} wired pin(s) lost"
             ),
             offenders=offenders[:20],

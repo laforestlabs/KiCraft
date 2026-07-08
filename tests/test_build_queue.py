@@ -17,7 +17,14 @@ import time
 import pytest
 
 import kicraft.build_slots as build_slots
-from kicraft.build_slots import ACQUIRED_MARKER, WAITING_MARKER, build_slot, slot_count
+from kicraft.build_slots import (
+    ACQUIRED_MARKER,
+    WAITING_MARKER,
+    build_slot,
+    host_cpu_count,
+    resolve_build_slots,
+    slot_count,
+)
 from kicraft.server.accounts import AccountStore
 from kicraft.server.build_worker import BuildWorker
 from kicraft.server import notify
@@ -49,6 +56,24 @@ def test_slot_count_env(monkeypatch):
     assert slot_count() == max(1, (os.cpu_count() or 1) // 6)
     monkeypatch.delenv("KICRAFT_BUILD_SLOTS")
     assert slot_count() >= 1
+
+
+def test_resolve_build_slots_default_is_host_aware_and_capped(monkeypatch):
+    monkeypatch.delenv("KICRAFT_BUILD_SLOTS", raising=False)
+    cores = host_cpu_count()
+    # None -> max(1, cores//6), never exceeding cores (never a fixed 2 on 2 cores).
+    resolved = resolve_build_slots(None)
+    assert 1 <= resolved <= cores
+    assert resolved == max(1, min(slot_count(), cores))
+
+
+def test_resolve_build_slots_rejects_over_subscription():
+    cores = host_cpu_count()
+    # An explicit value <= cores is honored; > cores fails loudly (no silent clamp).
+    assert resolve_build_slots(1) == 1
+    assert resolve_build_slots(cores) == cores
+    with pytest.raises(ValueError, match="exceeds host core count"):
+        resolve_build_slots(cores + 1)
 
 
 def test_slot_disabled_yields_none(monkeypatch):

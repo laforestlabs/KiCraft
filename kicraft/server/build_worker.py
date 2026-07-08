@@ -35,7 +35,7 @@ import time
 import traceback
 from pathlib import Path
 
-from kicraft.build_slots import ACQUIRED_MARKER, slot_count
+from kicraft.build_slots import ACQUIRED_MARKER, host_cpu_count, slot_count
 from kicraft.proc_tree import kill_tree
 
 from .accounts import AccountStore, BuildJob
@@ -86,7 +86,12 @@ class BuildWorker:
         )
         self.timeout_s = timeout_s
         self.poll_s = poll_s
-        self.max_jobs = max_jobs if max_jobs is not None else max(1, slot_count())
+        # Never run more concurrent builds than the host has cores: each build
+        # saturates the CPU, so over-subscription trips the build watchdog. The
+        # slot_count() default is already <= cores; this also caps an explicit
+        # oversized max_jobs (build_slots <= cores invariant, self-eval 2026-07-08).
+        requested = max_jobs if max_jobs is not None else max(1, slot_count())
+        self.max_jobs = max(1, min(requested, host_cpu_count()))
         self.stop = threading.Event()
         self._lock = threading.Lock()
         self._procs: dict[int, subprocess.Popen] = {}  # job id -> live build
@@ -181,8 +186,13 @@ class BuildWorker:
             return
         _log(f"job {job.id}: {kind} in {ws}")
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        # The worker itself captures the child's stdout into build.log below, so
+        # tell `kicraft build` NOT to open the same file (a second writer would
+        # interleave/corrupt it); its own line-buffered tee is for the callers
+        # that DON'T capture (self-eval, offline CLI).
         env = {**os.environ, "PYTHONUNBUFFERED": "1",
-               "KICRAFT_CALLER": os.environ.get("KICRAFT_CALLER", "web")}
+               "KICRAFT_CALLER": os.environ.get("KICRAFT_CALLER", "web"),
+               "KICRAFT_BUILD_LOG": "external"}
         cmd = list(cmd_base)
         if kind == "build":
             quality = self.store.build_quality_for_user(job.user_id)

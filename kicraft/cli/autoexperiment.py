@@ -169,6 +169,65 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
         f.write(json.dumps(payload) + "\n")
 
 
+# A leaf solve that already exhausted its full internal ladder (12 rounds x 4
+# canvas fills) and gave up with a STRUCTURAL reason -- the router threw, or the
+# placement could not be made DRC-legal before routing -- will not be rescued by
+# re-running the outer round with mutated placement params. Distinguished from a
+# quality miss (a routed board that failed a DRC/opens gate), which CAN improve
+# across rounds and is left to keep retrying.
+_STRUCTURAL_UNROUTABLE_REASONS = frozenset({
+    "routing_exception", "leaf_pre_stamp_legality_repair",
+})
+_LEAF_UNROUTABLE_RE = re.compile(
+    r"No accepted routed leaf artifact produced for (\S+) after .*?: "
+    r"([a-z_,]+)\s*$"
+)
+# Exit code for an early-abort on a structurally unroutable leaf. Any non-zero
+# leaf-phase rc is forwarded by cli_app._run_layout and mapped to a route
+# failure (rc6) by _layout_route_fab; distinct from argparse's 2.
+_RC_LEAF_UNROUTABLE = 3
+
+
+def _structural_unroutable_leaves(solve_stderr: str) -> dict[str, list[str]]:
+    """Leaves the solve gave up on for a STRUCTURAL reason, {leaf_path: reasons}.
+
+    Parses solve_subcircuits' terminal "No accepted routed leaf artifact
+    produced for <path> after N round(s) across M canvas attempt(s) (...):
+    <reasons>" lines and keeps only those whose reason set intersects
+    :data:`_STRUCTURAL_UNROUTABLE_REASONS`.
+    """
+    out: dict[str, list[str]] = {}
+    for line in solve_stderr.splitlines():
+        m = _LEAF_UNROUTABLE_RE.search(line)
+        if not m:
+            continue
+        reasons = [r for r in m.group(2).split(",") if r]
+        if any(r in _STRUCTURAL_UNROUTABLE_REASONS for r in reasons):
+            out[m.group(1)] = reasons
+    return out
+
+
+def _update_unroutable_streak(
+    streak: dict[str, int],
+    struct_fail: dict[str, list[str]],
+    abort_rounds: int,
+) -> str | None:
+    """Fold this round's structural leaf failures into the per-leaf streak and
+    return the leaf that has now failed ``>= abort_rounds`` consecutive rounds
+    (or ``None``). A leaf that did NOT fail structurally this round resets to 0
+    (it recovered). ``abort_rounds <= 0`` disables the early-abort.
+    """
+    for leaf in list(streak):
+        if leaf not in struct_fail:
+            streak[leaf] = 0
+    for leaf in struct_fail:
+        streak[leaf] = streak.get(leaf, 0) + 1
+    if abort_rounds <= 0:
+        return None
+    blown = sorted(p for p, n in streak.items() if n >= abort_rounds)
+    return blown[0] if blown else None
+
+
 def _run_command(
     cmd: list[str],
     *,
@@ -2089,6 +2148,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=3,
         help="Leaf solve rounds per experiment round (default 3; 3 rounds x 3 leaf-rounds = 9 leaf attempts)",
     )
+    parser.add_argument(
+        "--unroutable-abort-rounds",
+        type=int,
+        default=1,
+        help=(
+            "Abort the search after a leaf fails STRUCTURALLY (router throw or "
+            "unrepairable illegal placement) this many consecutive rounds "
+            "(default 1). Each round already exhausts the leaf's full internal "
+            "ladder (12 rounds x 4 canvas fills), so retrying a structurally "
+            "unroutable leaf only marches the build into the watchdog wall "
+            "(rc=-9, no board, no log); aborting surfaces a fast route failure "
+            "naming the leaf. 0 disables (retry to --rounds)."
+        ),
+    )
 
     parser.add_argument(
         "--status-file",
@@ -2303,6 +2376,10 @@ def main(argv: list[str] | None = None) -> int:
         composition_status="startup",
         copper_accounting={},
     )
+
+    # Per-leaf consecutive structurally-unroutable round count, for early-abort.
+    unroutable_streak: dict[str, int] = {}
+    abort_rounds = args.unroutable_abort_rounds
 
     for round_num in range(1, args.rounds + 1):
         if _check_stop_request(work_dir):
@@ -2539,6 +2616,25 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[round {round_num}] solve_subcircuits rc={solve_rc}:")
                 for line in failure_lines[-20:] or solve_stderr.splitlines()[-5:]:
                     print(f"  [solve] {line}")
+
+            # Early-abort on a structurally unroutable leaf: the outer search
+            # only mutates placement params, which cannot fix a router throw or
+            # an unrepairable illegal placement, and each retried round re-runs
+            # the leaf's whole internal ladder -- the exact spiral that turned a
+            # fast, diagnosable leaf failure into a 2400s watchdog kill (rc=-9,
+            # empty build.log). Surface it as a route failure NAMING the leaf.
+            struct_fail = _structural_unroutable_leaves(solve_stderr)
+            blown_leaf = _update_unroutable_streak(
+                unroutable_streak, struct_fail, abort_rounds)
+            if blown_leaf is not None:
+                print(
+                    f"[abort] leaf {blown_leaf} is structurally unroutable "
+                    f"({','.join(struct_fail[blown_leaf])}) after "
+                    f"{unroutable_streak[blown_leaf]} round(s) -- stopping the "
+                    f"search instead of retrying to the build watchdog wall. "
+                    f"Reported as a route failure with the evidence above."
+                )
+                return _RC_LEAF_UNROUTABLE
 
         solve_payload = _extract_solve_json_payload(solve_stdout)
         leaf_timing_summary = _extract_leaf_timing_summary(solve_payload)

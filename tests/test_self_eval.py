@@ -296,7 +296,10 @@ def test_main_parallel_overlaps_briefs_and_orders_records(tmp_path, monkeypatch)
     summ = json.loads((tmp_path / "summary.json").read_text())
     assert [r["index"] for r in summ["runs"]] == [1, 2, 3]   # index order, not finish order
     assert state["max"] >= 2                                 # briefs genuinely overlapped
-    assert summ["parallel"] == 3 and summ["build_slots"] == 2
+    # build_slots defaults host-aware (max(1, cores//6), capped at cores) so it
+    # can never over-subscribe -- never a fixed 2 that thrashes a 2-core box.
+    from kicraft.build_slots import host_cpu_count
+    assert summ["parallel"] == 3 and 1 <= summ["build_slots"] <= host_cpu_count()
     assert isinstance(summ["wall_s"], (int, float))
 
 
@@ -330,7 +333,8 @@ def test_main_defaults_to_parallel(tmp_path, monkeypatch):
                         lambda client, idx, entry, out_dir, **kw: _fake_rec(idx, entry, out_dir))
     assert se.main(["--no-judge", "--out", str(tmp_path)]) == 0
     summ = json.loads((tmp_path / "summary.json").read_text())
-    assert summ["parallel"] == 3 and summ["build_slots"] == 2
+    from kicraft.build_slots import host_cpu_count
+    assert summ["parallel"] == 3 and 1 <= summ["build_slots"] <= host_cpu_count()
     assert [r["index"] for r in summ["runs"]] == [1, 2, 3]
 
 
