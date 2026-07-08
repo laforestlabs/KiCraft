@@ -371,6 +371,25 @@ def test_benchmark_set_well_formed():
     assert len(B.BENCHMARK_PROMPTS) >= 24
 
 
+def test_shaped_group_folded_into_corpus():
+    """The shaped-outline group lives INSIDE BENCHMARK_PROMPTS, so the self-eval,
+    the admin runner, and the web "Surprise me" button (all of which walk
+    ``briefs()`` / the corpus) cover shapes. ``SHAPED_OUTLINE_PROMPTS`` is a
+    derived view of exactly that group."""
+    from kicraft.tuning import benchmark as B
+
+    shaped = [e for e in B.BENCHMARK_PROMPTS if e.get("outline_shape")]
+    assert len(shaped) == 6, "expected the six shaped-outline briefs in the corpus"
+    assert all(e["archetype"] == "shaped_outline" for e in shaped)
+    assert all(e["outline_shape"].strip() for e in shaped)  # outline_check keys on this
+    assert "shaped_outline" in B.coverage()  # the group is a first-class archetype
+    # SHAPED_OUTLINE_PROMPTS is exactly that group (derived view), and briefs()
+    # — what the button and self-eval stream — now spans the whole corpus.
+    assert [e["slug"] for e in B.SHAPED_OUTLINE_PROMPTS] == [e["slug"] for e in shaped]
+    assert {e["brief"] for e in shaped}.issubset(set(B.briefs())), \
+        "shaped briefs must be streamed by briefs() too"
+
+
 def test_report_data_load_run(tmp_path):
     """report_data turns a run dir (sqlite + checkpoint) into chart series."""
     import json

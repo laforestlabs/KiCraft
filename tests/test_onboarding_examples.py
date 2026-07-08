@@ -2,7 +2,8 @@
 
 ``EXAMPLE_PROMPTS`` drives the animated placeholder. The "Surprise me" button no
 longer draws from this list — it streams the vetted self-eval corpus
-(``kicraft.tuning.benchmark``) in order, so those briefs are guarded here too.
+(``kicraft.tuning.benchmark``) in order, including the shaped-outline group, so
+those briefs are guarded here too.
 """
 from __future__ import annotations
 
