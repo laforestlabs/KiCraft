@@ -15,6 +15,44 @@ from kicraft.autoplacer.brain.subcircuit_extractor import ExtractedSubcircuitBoa
 from kicraft.autoplacer.brain.types import Point, SolveRoundResult
 
 
+def is_anchorless_passive_array(components: Any) -> bool:
+    """A leaf that is mostly 2-terminal passives with NO IC/regulator anchor -- a
+    resistor ladder / filter network / termination array whose ICs live on other
+    sheets. These pack tight into crisp rows and route with little escape room, so
+    they take a tight placement clearance; a passive-heavy leaf that DOES own an IC
+    (an MCU + its decoupling caps) is excluded, because tightening there chokes the
+    chip's escape routing.
+
+    This is the same population the anchor-less passive grouping targets, and it is
+    the single predicate both the content-canvas sizing and the solve clearance key
+    off, so the two can't disagree (the mismatch sized a tight canvas the solve then
+    couldn't pack -- laddering out to the loose seed-bbox envelope and scattering
+    the array to ~7% fill)."""
+    comps = list(components.values() if isinstance(components, dict) else components)
+    total = max(1, len(comps))
+    passive = sum(1 for c in comps if getattr(c, "kind", "") == "passive")
+    ic = sum(1 for c in comps if getattr(c, "kind", "") in ("ic", "regulator"))
+    return ic == 0 and passive / total >= 0.6
+
+
+def leaf_placement_clearance_mm(
+    base_cfg: dict[str, Any], components: Any, board_area: float | None = None
+) -> float:
+    """The leaf's placement clearance under one policy (used for BOTH canvas sizing
+    and the solve). An anchor-less passive array packs tight; a dense leaf tightens
+    with its density (needs ``board_area``); everything else keeps the comfortable
+    default."""
+    if is_anchorless_passive_array(components):
+        return float(base_cfg.get("leaf_passive_clearance_mm", 1.0))
+    if board_area:
+        comps = components.values() if isinstance(components, dict) else components
+        comp_area = sum(c.width_mm * c.height_mm for c in comps)
+        density = comp_area / max(board_area, 1.0)
+        if density > 0.3:
+            return max(0.5, 3.0 * (1.0 - density))
+    return float(base_cfg.get("placement_clearance_mm", 2.84))
+
+
 def local_solver_config(
     base_cfg: dict[str, Any], extraction: ExtractedSubcircuitBoard
 ) -> dict[str, Any]:
@@ -104,12 +142,6 @@ def local_solver_config(
     )
     density = total_component_area / max(board_area, 1.0)
 
-    # Dense leaves benefit from tighter packing and stronger ordering.
-    if density > 0.3:
-        adaptive_clearance = max(0.5, 3.0 * (1.0 - density))
-    else:
-        adaptive_clearance = float(base_cfg.get("placement_clearance_mm", 3.0))
-
     passive_count = sum(
         1 for c in extraction.local_state.components.values() if c.kind == "passive"
     )
@@ -124,7 +156,16 @@ def local_solver_config(
     component_count = max(1, len(extraction.local_state.components))
     passive_ratio = passive_count / component_count
 
-    cfg["placement_clearance_mm"] = max(0.5, adaptive_clearance)
+    # Placement clearance under one shared policy (leaf_placement_clearance_mm /
+    # is_anchorless_passive_array) -- the SAME decision the content-canvas sizing
+    # makes, so a tight-canvas passive array isn't then solved at a loose clearance
+    # (that mismatch scattered the array to ~7% fill).
+    cfg["placement_clearance_mm"] = max(
+        0.5,
+        leaf_placement_clearance_mm(
+            base_cfg, extraction.local_state.components, board_area
+        ),
+    )
     cfg["edge_margin_mm"] = max(
         0.5,
         min(2.0, float(base_cfg.get("edge_margin_mm", 2.0))),

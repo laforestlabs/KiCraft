@@ -131,6 +131,7 @@ from kicraft.autoplacer.brain.subcircuit_render_diagnostics import (
 )
 from kicraft.autoplacer.brain.leaf_size_reduction import (
     attempt_leaf_size_reduction,
+    leaf_placement_clearance_mm,
     local_solver_config,
 )
 from kicraft.autoplacer.brain.leaf_geometry import (
@@ -742,8 +743,11 @@ def _solve_leaf_subcircuit(
             width_mm, height_mm = derive_content_canvas(
                 extraction.local_state.components,
                 fill_target=fill,
-                placement_clearance_mm=float(
-                    cfg.get("placement_clearance_mm", 2.84)
+                # Same clearance policy the solve uses (leaf_placement_clearance_mm),
+                # so an anchor-less passive array gets a canvas sized for its tight
+                # clearance instead of a loose one it then can't pack into.
+                placement_clearance_mm=leaf_placement_clearance_mm(
+                    cfg, extraction.local_state.components
                 ),
                 component_zones=cfg.get("component_zones") or {},
             )

@@ -17,6 +17,10 @@ from __future__ import annotations
 
 import pytest
 
+from kicraft.autoplacer.brain.leaf_size_reduction import (
+    is_anchorless_passive_array,
+    leaf_placement_clearance_mm,
+)
 from kicraft.autoplacer.brain.placement_utils import board_utilization_metrics
 from kicraft.autoplacer.brain.subcircuit_extractor import (
     derive_content_canvas,
@@ -47,6 +51,65 @@ def _comp(ref: str, x: float, y: float, w: float = 2.0, h: float = 1.0) -> Compo
         width_mm=w,
         height_mm=h,
     )
+
+
+def _kc(ref: str, kind: str, w: float = 2.0, h: float = 1.0) -> Component:
+    return Component(
+        ref=ref, value="x", pos=Point(0.0, 0.0), rotation=0.0,
+        layer=Layer.FRONT, width_mm=w, height_mm=h, kind=kind,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Leaf placement-clearance policy (shared by canvas sizing and the solve)
+# ---------------------------------------------------------------------------
+
+
+class TestLeafPlacementClearance:
+    def test_anchorless_passive_array_packs_tight(self):
+        comps = {f"R{i}": _kc(f"R{i}", "passive") for i in range(10)}
+        assert is_anchorless_passive_array(comps) is True
+        assert leaf_placement_clearance_mm({}, comps) == pytest.approx(1.0)
+
+    def test_ic_owning_leaf_keeps_room(self):
+        # MCU + 9 decoupling caps: passive-heavy but owns an IC -> NOT tightened
+        # (a tight clearance would choke the chip's escape routing).
+        comps = {f"C{i}": _kc(f"C{i}", "passive") for i in range(9)}
+        comps["U1"] = _kc("U1", "ic", 6.0, 6.0)
+        assert is_anchorless_passive_array(comps) is False
+        assert leaf_placement_clearance_mm({}, comps) == pytest.approx(2.84)
+
+    def test_regulator_also_excludes(self):
+        comps = {f"R{i}": _kc(f"R{i}", "passive") for i in range(6)}
+        comps["U1"] = _kc("U1", "regulator", 5.0, 5.0)
+        assert is_anchorless_passive_array(comps) is False
+
+    def test_connector_does_not_exclude(self):
+        # a passive array with only an edge connector (no IC) still packs tight
+        comps = {f"R{i}": _kc(f"R{i}", "passive") for i in range(6)}
+        comps["J1"] = _kc("J1", "connector", 5.0, 5.0)
+        assert is_anchorless_passive_array(comps) is True
+
+    def test_below_passive_ratio_is_not_an_array(self):
+        comps = {
+            "R1": _kc("R1", "passive"),
+            "J1": _kc("J1", "connector"),
+            "J2": _kc("J2", "connector"),
+        }
+        assert is_anchorless_passive_array(comps) is False
+
+    def test_passive_clearance_is_configurable(self):
+        comps = {f"R{i}": _kc(f"R{i}", "passive") for i in range(5)}
+        assert leaf_placement_clearance_mm(
+            {"leaf_passive_clearance_mm": 0.8}, comps
+        ) == pytest.approx(0.8)
+
+    def test_dense_non_array_reduces_with_density(self):
+        comps = {f"C{i}": _kc(f"C{i}", "passive", 2.0, 1.0) for i in range(4)}
+        comps["U1"] = _kc("U1", "ic", 6.0, 6.0)
+        comp_area = 4 * 2.0 * 1.0 + 6.0 * 6.0  # 44
+        board_area = comp_area / 0.5  # density 0.5 -> clearance 3*(1-0.5)=1.5
+        assert leaf_placement_clearance_mm({}, comps, board_area) == pytest.approx(1.5)
 
 
 # ---------------------------------------------------------------------------
