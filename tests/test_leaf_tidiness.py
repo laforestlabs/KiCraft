@@ -57,9 +57,45 @@ class TestGrouping:
         assert len(groups) == 1
         assert set(groups[0]) == {"C1", "C2", "C3"}
 
-    def test_no_group_without_anchor(self):
+    def test_anchorless_array_groups_by_signal_net(self):
+        # No IC/connector anchor: two passives sharing a low-fanout signal net
+        # still form an "array" group (an R-2R ladder whose IC is on another
+        # sheet) -- the case the old anchor-only grouping dropped.
         parts = [_passive("R1", 0, 0, nets=("A",)), _passive("R2", 2, 0, nets=("A",))]
+        groups = functional_passive_groups(parts)
+        assert len(groups) == 1
+        assert set(groups[0]) == {"R1", "R2"}
+
+    def test_anchorless_ladder_chains_into_one_group(self):
+        # Ladder topology: each rung shares a node net with the next. The whole
+        # chain must land in a single connected-component group.
+        parts = [
+            _passive("R1", 0, 0, nets=("IN", "N1")),
+            _passive("R2", 2, 0, nets=("N1", "N2")),
+            _passive("R3", 4, 0, nets=("N2", "N3")),
+            _passive("R4", 6, 0, nets=("N3", "OUT")),
+        ]
+        groups = functional_passive_groups(parts)
+        assert len(groups) == 1
+        assert set(groups[0]) == {"R1", "R2", "R3", "R4"}
+
+    def test_high_fanout_bus_does_not_merge_arrays(self):
+        # Six passives sharing only a high-fanout rail (GND) must NOT collapse
+        # into one group -- a rail isn't a "belongs-together" signal.
+        parts = [_passive(f"R{i}", i * 2, 0, nets=("GND",)) for i in range(6)]
         assert functional_passive_groups(parts) == []
+
+    def test_long_ladder_splits_into_rows(self):
+        # A 9-rung chain (each rung shares a node net with the next) exceeds the
+        # per-row cap and must split into contiguous sub-rows (6 + 3), each a
+        # crisp row rather than one impossible 9-wide group.
+        nets = [(f"N{i}", f"N{i+1}") for i in range(9)]
+        parts = [_passive(f"R{i+1}", i * 2, 0, nets=nets[i]) for i in range(9)]
+        groups = functional_passive_groups(parts)
+        assert len(groups) == 2
+        assert sorted(len(g) for g in groups) == [3, 6]
+        # every resistor lands in exactly one row; rows are contiguous chain slices
+        assert {r for g in groups for r in g} == {f"R{i+1}" for i in range(9)}
 
     def test_unconnected_passive_left_out(self):
         parts = [

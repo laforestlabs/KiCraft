@@ -153,6 +153,100 @@ def parts_from_layout(layout: dict[str, Any]) -> list[PlacedPart]:
 # Functional grouping — passives assigned to their strongest anchor.
 # --------------------------------------------------------------------------- #
 
+# A net with more members than this is treated as a bus/rail (GND, VCC, a shared
+# enable). Linking through it would merge every array into one blob, so anchor-less
+# clustering ignores high-fanout nets and connects passives only through the
+# low-fanout signal nets that actually chain a ladder/array together.
+_CLUSTER_MAX_NET_FANOUT = 4
+
+# Largest anchor-less array kept as a single "row". A bigger component (a long
+# R-2R ladder) is split into chain-ordered sub-rows of this size so each can be
+# made a crisp row -- one 15-wide group scores as an impossible single row (SA
+# gets orientation but the "row" stays a 2-D scatter). Chain order keeps
+# electrically adjacent parts in the same row, which also helps routing.
+_ARRAY_ROW_MAX = 6
+
+
+def _signal_adjacency(
+    refs: set[str], net_to_refs: dict[str, set[str]]
+) -> dict[str, set[str]]:
+    """Neighbor map over ``refs``: two are adjacent when they share a net whose
+    total fanout is <= ``_CLUSTER_MAX_NET_FANOUT`` (ladder nodes chain, rails
+    don't)."""
+    adj: dict[str, set[str]] = {r: set() for r in refs}
+    for net_refs in net_to_refs.values():
+        if len(net_refs) > _CLUSTER_MAX_NET_FANOUT:
+            continue
+        local = sorted(net_refs & refs)
+        for i, a in enumerate(local):
+            for b in local[i + 1:]:
+                adj[a].add(b)
+                adj[b].add(a)
+    return adj
+
+
+def _order_chain(comp: list[str], adj: dict[str, set[str]]) -> list[str]:
+    """DFS pre-order of one connected component, started at a chain endpoint
+    (a degree-1 node if any, else the smallest ref). For a ladder/path this is
+    the linear chain order, so chunking it yields contiguous rows. Deterministic
+    (lowest-ref neighbor first)."""
+    comp_set = set(comp)
+    deg = {r: len(adj[r] & comp_set) for r in comp}
+    endpoints = sorted(r for r in comp if deg[r] == 1)
+    start = endpoints[0] if endpoints else min(comp)
+    order: list[str] = []
+    seen: set[str] = set()
+    stack = [start]
+    while stack:
+        x = stack.pop()
+        if x in seen:
+            continue
+        seen.add(x)
+        order.append(x)
+        for y in sorted(adj[x] & comp_set, reverse=True):
+            if y not in seen:
+                stack.append(y)
+    order.extend(r for r in sorted(comp) if r not in seen)  # any stragglers
+    return order
+
+
+def _cluster_by_signal_nets(
+    refs: list[str], net_to_refs: dict[str, set[str]]
+) -> list[list[str]]:
+    """Anchor-less passive rows: connected components of ``refs`` linked by shared
+    low-fanout nets, each chain-ordered and split into sub-rows of at most
+    ``_ARRAY_ROW_MAX`` (a trailing singleton folds back into the previous row so no
+    row has fewer than 2). Deterministic; returned sorted by first member."""
+    members = set(refs)
+    if len(members) < 2:
+        return []
+    adj = _signal_adjacency(members, net_to_refs)
+
+    rows: list[list[str]] = []
+    seen: set[str] = set()
+    for r in sorted(members):
+        if r in seen:
+            continue
+        stack, comp = [r], []
+        seen.add(r)
+        while stack:
+            x = stack.pop()
+            comp.append(x)
+            for y in sorted(adj[x], reverse=True):
+                if y not in seen:
+                    seen.add(y)
+                    stack.append(y)
+        if len(comp) < 2:
+            continue
+        chain = _order_chain(comp, adj)
+        for i in range(0, len(chain), _ARRAY_ROW_MAX):
+            chunk = chain[i:i + _ARRAY_ROW_MAX]
+            if len(chunk) == 1 and rows:
+                rows[-1] = rows[-1] + chunk  # fold trailing singleton back
+            else:
+                rows.append(chunk)
+    return sorted((r for r in rows if len(r) >= 2), key=lambda c: c[0])
+
 
 def assign_passive_groups(parts: Iterable[PlacedPart]) -> list[PassiveGroup]:
     """Group unlocked passives by the anchor (IC/regulator/connector) they most
@@ -160,9 +254,12 @@ def assign_passive_groups(parts: Iterable[PlacedPart]) -> list[PassiveGroup]:
     >= 2 passives — the "functional row" unit (e.g. U1's decoupling caps).
 
     Assignment key per (passive, anchor): (shared-net count, connection weight,
-    anchor net-degree, anchor area), tie-broken by ref for determinism. A
-    passive with no net in common with any anchor is left ungrouped. Groups are
-    returned sorted by anchor ref so the order is stable.
+    anchor net-degree, anchor area), tie-broken by ref for determinism. Passives
+    that no anchor owns (an anchor-less resistor ladder / DAC network whose ICs
+    sit on other sheets) are then clustered among themselves into connected
+    components via shared low-fanout signal nets -- one group per array
+    (``anchor_ref`` = ``"array:<first-ref>"``). Groups are returned sorted by
+    anchor ref so the order is stable.
 
     This is the single grouping definition shared by the tidiness metric and the
     Stage-3 structured-layout packer, so the two never disagree about what a
@@ -191,12 +288,15 @@ def assign_passive_groups(parts: Iterable[PlacedPart]) -> list[PassiveGroup]:
                 adjacency.setdefault(b, {})[a] = adjacency.get(b, {}).get(a, 0) + weight
 
     nets_by_ref = {p.ref: set(p.nets) for p in parts}
-    anchors = [p.ref for p in parts if p.kind in _ANCHOR_KINDS and p.kind != "passive"]
+    anchors = [p.ref for p in parts if p.kind in _ANCHOR_KINDS]
     passives = [p.ref for p in parts if p.kind == "passive" and not p.locked]
-    if not anchors or len(passives) < 2:
+    if len(passives) < 2:
         return []
 
+    # (1) Anchor-owned rows: each unlocked passive joins the anchor (IC/regulator/
+    #     connector) it connects most strongly to -- e.g. a chip's decoupling caps.
     anchor_to_passives: dict[str, list[str]] = {}
+    assigned: set[str] = set()
     for pref in sorted(passives):
         p_nets = nets_by_ref.get(pref, set())
         best_anchor = None
@@ -212,12 +312,28 @@ def assign_passive_groups(parts: Iterable[PlacedPart]) -> list[PassiveGroup]:
             best_key[0] > 0 or best_key[1] > 0
         ):
             anchor_to_passives.setdefault(best_anchor, []).append(pref)
+            assigned.add(pref)
 
-    return [
+    groups = [
         PassiveGroup(anchor_ref=aref, passive_refs=tuple(refs))
         for aref, refs in sorted(anchor_to_passives.items())
         if len(refs) >= 2
     ]
+
+    # (2) Anchor-less arrays: passives no anchor owns (a resistor ladder, DAC
+    #     network, or termination array whose ICs live on OTHER sheets) still form
+    #     a "belongs-together" unit. Cluster them into connected components linked
+    #     by shared low-fanout *signal* nets, so soft tidiness aligns them too.
+    #     Without this the most regular-grid-like leaves -- exactly the ones an
+    #     orderly layout helps most, e.g. an R-2R ladder -- produced zero groups
+    #     and were left untidied.
+    leftover = [pref for pref in passives if pref not in assigned]
+    for cluster in _cluster_by_signal_nets(leftover, net_to_refs):
+        groups.append(
+            PassiveGroup(anchor_ref=f"array:{cluster[0]}", passive_refs=tuple(cluster))
+        )
+
+    return sorted(groups, key=lambda g: g.anchor_ref)
 
 
 def functional_passive_groups(parts: Iterable[PlacedPart]) -> list[list[str]]:
