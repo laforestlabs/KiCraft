@@ -141,6 +141,29 @@ def serve_project_render(token: str, subpath: str):
     )
 
 
+@app.get("/tidiness-ab/{token}/{subpath:path}")
+def serve_tidiness_ab(token: str, subpath: str):
+    """Serve a self-contained A/B gallery HTML from a tokened dir (admin viewer).
+
+    The soft-tidiness A/B harness (``scripts/soft_tidiness_ab.py``) emits a single
+    self-contained ``index.html`` with every leaf render inlined as SVG, browsed in
+    an <iframe> on ``/admin/tidiness-ab``. Same token-gated containment as the render
+    endpoints, restricted to ``.html`` so a leaked token can't pull other files out
+    of the dir. ``no-store`` so a re-run gallery is always re-fetched."""
+    base = _resolve_project_token(token)
+    if base is None:
+        return PlainTextResponse("not found", status_code=404)
+    target = (base / subpath).resolve()
+    if (not target.is_relative_to(base.resolve())
+            or target.suffix != ".html" or not target.is_file()):
+        return PlainTextResponse("not found", status_code=404)
+    return FileResponse(
+        str(target),
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.get("/project/{token}/board/{subpath:path}")
 def serve_project_board(token: str, subpath: str):
     """Serve a .kicad_pcb from any subdirectory of a tokened project dir.
