@@ -1,7 +1,14 @@
 # Placement streamline — handoff (2026-07-09)
 
-**Start here.** Deep design + decision detail is in
-[`placement-pipeline-streamline.md`](./placement-pipeline-streamline.md); this is the resume map.
+> **⚠️ SUPERSEDED (2026-07-09) →
+> [`placement-reconsider-connectivity-first-handoff.md`](./placement-reconsider-connectivity-first-handoff.md).**
+> Visual inspection of the shipped soft-tidiness layouts showed the tidiness is cosmetic and
+> often electrically wrong (decoupling caps 6–20 mm from the pins they bridge). The direction
+> below (soft-tidiness scorer term + tune/delete) is now **history**; the current plan is a
+> discrete anchor-relative placement grid with SA doing assignment. **Start at the new doc.**
+
+**(History)** Deep design + decision detail is in
+[`placement-pipeline-streamline.md`](./placement-pipeline-streamline.md); this was the resume map.
 
 ## TL;DR — where we landed
 
