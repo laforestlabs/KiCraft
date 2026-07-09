@@ -1,0 +1,174 @@
+"""Tests for the discrete anchor-relative grid + SA-as-assignment.
+
+Synthetic Components (no pcbnew). Cover: slot generation legality (no slot
+overlaps an anchor courtyard or the board edge), courtyard-legal pitch,
+over-provision bound, anchor-less lane build, deterministic greedy init that
+lands a decap in a pin-adjacent slot, and a deterministic assignment-SA smoke.
+"""
+
+from __future__ import annotations
+
+import random
+
+from kicraft.autoplacer.brain.leaf_grid_assignment import (
+    _overlaps_rect,
+    assign_initial,
+    build_anchor_grid,
+    grid_assignment_sa,
+    resnap_to_grid,
+)
+from kicraft.autoplacer.brain.placement_scorer import PlacementScorer
+from kicraft.autoplacer.brain.types import (
+    BoardState,
+    Component,
+    Layer,
+    Pad,
+    Point,
+)
+
+BOARD = (Point(0.0, 0.0), Point(60.0, 60.0))
+
+
+def _pad(owner, pad_id, x, y, net):
+    return Pad(ref=owner, pad_id=pad_id, pos=Point(x, y), net=net, layer=Layer.FRONT)
+
+
+def _ic(ref, x, y, pads):
+    return Component(
+        ref=ref, value="", pos=Point(x, y), rotation=0.0, layer=Layer.FRONT,
+        width_mm=6.0, height_mm=6.0, kind="ic", pads=pads, body_center=Point(x, y),
+    )
+
+
+def _cap(ref, x, y, pads, rot=0.0):
+    return Component(
+        ref=ref, value="", pos=Point(x, y), rotation=rot, layer=Layer.FRONT,
+        width_mm=2.0, height_mm=1.0, kind="passive", pads=pads, body_center=Point(x, y),
+    )
+
+
+def _ic_4pads(ref="U1", cx=30.0, cy=30.0):
+    # pads on all four courtyard edges (IC is 6x6 centered at cx,cy).
+    return _ic(ref, cx, cy, [
+        _pad(ref, "1", cx, cy - 3.0, "+3V3"),  # N edge
+        _pad(ref, "2", cx + 3.0, cy, "GND"),   # E edge
+        _pad(ref, "3", cx, cy + 3.0, "SIG"),   # S edge
+        _pad(ref, "4", cx - 3.0, cy, "GND"),   # W edge
+    ])
+
+
+def _decap(ref, x, y, na="+3V3", nb="GND", rot=0.0):
+    return _cap(ref, x, y, [_pad(ref, "1", x, y - 0.9, na), _pad(ref, "2", x, y + 0.9, nb)], rot)
+
+
+def test_slots_generated_and_legal():
+    u1 = _ic_4pads()
+    comps = {u1.ref: u1, "C1": _decap("C1", 40.0, 30.0)}
+    grid = build_anchor_grid(comps, board_outline=BOARD, pitch_gap_mm=1.0, grid_snap=0.5)
+    assert grid.slots, "expected pin-adjacent slots around the anchor"
+    half = 2.0 / 2.0  # max passive long extent / 2
+    a_tl = Point(30.0 - 3.0, 30.0 - 3.0)
+    a_br = Point(30.0 + 3.0, 30.0 + 3.0)
+    for slot in grid.slots:
+        # inside the board (with the half-extent margin)
+        assert half <= slot.pos.x <= 60.0 - half
+        assert half <= slot.pos.y <= 60.0 - half
+        # never overlapping the anchor courtyard
+        assert not _overlaps_rect(slot.pos, half, a_tl, a_br)
+
+
+def test_no_two_slots_overlap():
+    # Any two slots are >= the passive courtyard extent apart, so simultaneous
+    # occupancy is overlap-free (a courtyard-DRC guarantee, by construction).
+    u1 = _ic_4pads()
+    grid = build_anchor_grid({u1.ref: u1, "C1": _decap("C1", 40, 30)},
+                             board_outline=BOARD, pitch_gap_mm=1.0, rings=3, lateral=2)
+    extent = 2.0  # max passive long side
+    for i, a in enumerate(grid.slots):
+        for b in grid.slots[i + 1:]:
+            assert (abs(a.pos.x - b.pos.x) >= extent - 1e-6
+                    or abs(a.pos.y - b.pos.y) >= extent - 1e-6)
+
+
+def test_slots_carry_adjacent_pin_nets():
+    u1 = _ic_4pads()
+    grid = build_anchor_grid({u1.ref: u1, "C1": _decap("C1", 40, 30)},
+                             board_outline=BOARD, pitch_gap_mm=1.0)
+    all_nets = set().union(*(s.nets for s in grid.slots))
+    assert {"+3V3", "GND", "SIG"} & all_nets  # slots know the pins they sit by
+
+
+def test_overprovision_bounded():
+    u1 = _ic_4pads()
+    grid = build_anchor_grid({u1.ref: u1, "C1": _decap("C1", 40, 30)},
+                             board_outline=BOARD, pitch_gap_mm=1.0,
+                             rings=4, lateral=3, max_slots=20)
+    assert len(grid.slots) <= 20
+
+
+def test_anchorless_array_builds_a_lane():
+    # An R-2R-style ladder: no IC anchor, rungs chained by low-fanout nets.
+    comps = {
+        "R1": _cap("R1", 20, 30, [_pad("R1", "1", 19, 30, "IN"), _pad("R1", "2", 21, 30, "N1")]),
+        "R2": _cap("R2", 24, 30, [_pad("R2", "1", 23, 30, "N1"), _pad("R2", "2", 25, 30, "N2")]),
+        "R3": _cap("R3", 28, 30, [_pad("R3", "1", 27, 30, "N2"), _pad("R3", "2", 29, 30, "OUT")]),
+    }
+    grid = build_anchor_grid(comps, board_outline=BOARD, pitch_gap_mm=1.0)
+    assert grid.slots
+    assert all(s.side == "lane" for s in grid.slots)
+    assert len(grid.slots) >= 3  # over-provisioned lane
+
+
+def test_greedy_init_lands_decap_next_to_its_pin():
+    u1 = _ic_4pads()
+    # decap starts far away; greedy init should snap it to a +3V3/GND slot.
+    comps = {u1.ref: u1, "C1": _decap("C1", 55.0, 55.0)}
+    grid = build_anchor_grid(comps, board_outline=BOARD, pitch_gap_mm=1.0)
+    assign_initial(comps, grid)
+    assert "C1" in grid.occupied_by_ref
+    sid = grid.occupied_by_ref["C1"]
+    slot = grid.slots[sid]
+    assert {"+3V3", "GND"} & slot.nets  # matched by a power/ground pin
+    # and it physically moved next to the chip (well inside the board center)
+    assert abs(comps["C1"].body_center.x - 30.0) < 12.0
+    assert abs(comps["C1"].body_center.y - 30.0) < 12.0
+
+
+def _state(comps):
+    return BoardState(components=dict(comps), board_outline=BOARD)
+
+
+def test_assignment_sa_is_deterministic_and_grid_aligned():
+    cfg = {"psw_pin_locality": 1.0, "psw_tidiness": 0.0}
+
+    def _run():
+        u1 = _ic_4pads()
+        comps = {u1.ref: u1, "C1": _decap("C1", 52, 52), "C2": _decap("C2", 8, 8, "GND", "SIG")}
+        state = _state(comps)
+        grid = build_anchor_grid(comps, board_outline=BOARD, pitch_gap_mm=1.0)
+        best = grid_assignment_sa(
+            comps, grid, state, PlacementScorer(state, cfg),
+            rng=random.Random(0), max_iters=120,
+        )
+        return best, grid
+
+    (b1, g1), (b2, g2) = _run(), _run()
+    # deterministic: same seed -> identical placement
+    assert b1["C1"].body_center.x == b2["C1"].body_center.x
+    assert b1["C1"].body_center.y == b2["C1"].body_center.y
+    # each passive ended on one of its grid slots (tidy by construction)
+    assert "C1" in g1.occupied_by_ref and "C2" in g1.occupied_by_ref
+    sid = g1.occupied_by_ref["C1"]
+    assert (b1["C1"].body_center.x, b1["C1"].body_center.y) == (
+        g1.slots[sid].pos.x, g1.slots[sid].pos.y)
+
+
+def test_resnap_is_idempotent():
+    u1 = _ic_4pads()
+    comps = {u1.ref: u1, "C1": _decap("C1", 52, 52)}
+    state = _state(comps)
+    grid = build_anchor_grid(comps, board_outline=BOARD, pitch_gap_mm=1.0)
+    grid_assignment_sa(comps, grid, state, PlacementScorer(state, {"psw_pin_locality": 1.0}),
+                       rng=random.Random(0), max_iters=60)
+    # already on-grid -> nothing to snap
+    assert resnap_to_grid(comps, grid) == 0

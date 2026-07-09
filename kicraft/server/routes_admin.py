@@ -591,9 +591,13 @@ def _tidiness_ab_summary(d: Path) -> str:
         return ""
     reg = 0
     for r in data:
-        unc = r.get("unconnected") if isinstance(r, dict) else None
-        if (isinstance(unc, dict) and unc.get("classic") is not None
-                and unc.get("soft") is not None and unc["soft"] > unc["classic"]):
+        if not isinstance(r, dict):
+            continue
+        unc = r.get("unconnected")
+        # Variant pair is [baseline, candidate]; older runs are classic/soft.
+        base, cand = (r.get("variants") or ["classic", "soft"])[:2]
+        if (isinstance(unc, dict) and unc.get(base) is not None
+                and unc.get(cand) is not None and unc[cand] > unc[base]):
             reg += 1
     tail = f" · {reg} routing-regressed" if reg else ""
     return f"{len(data)} designs{tail}"

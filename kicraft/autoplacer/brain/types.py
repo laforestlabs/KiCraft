@@ -383,6 +383,12 @@ DEFAULT_PLACEMENT_WEIGHTS: dict[str, float] = {
     "tidiness": 0.0,  # SOFT tidiness term (orientation consensus + row alignment).
     # 0 by default so scoring is byte-identical until a config opts in via
     # psw_tidiness; leaf configs set a real weight (local_solver_config).
+    "pin_locality": 0.0,  # do passives hug the anchor pins they connect to?
+    # 0 by default (byte-identical until a config opts in via psw_pin_locality);
+    # the connectivity-first leaf path sets a real weight. This is the objective
+    # the discrete-grid assignment optimizes -- a decap next to its IC power/GND
+    # pins, not floating tidily 6-20 mm away. Unlike net_distance (which excludes
+    # GND from the wirelength MST), this term DOES pull toward the IC's GND pin.
     "block_opposite_side": 0.0,  # parent-side: reward stacking
     # blocker-compatible (front-only x back-only) block pairs
     # so SMT leaves migrate onto large back-side THT footprints.
@@ -445,6 +451,9 @@ class PlacementScore:
     # the SA co-optimizes with routing (weight 0 by default): on sparse leaves it
     # pulls layouts tidy for free; on dense leaves the routing terms dominate and
     # tidiness yields gracefully -- so crisp tidiness never regresses routability.
+    pin_locality: float = 100.0  # passives hug the anchor pins they connect to;
+    # 100 = every decap ~0 mm from its IC power/GND pins, 100 when nothing scorable.
+    # Weight 0 by default; the connectivity-first leaf path drives it.
 
     def compute_total(self, weights: Optional[dict[str, float]] = None) -> float:
         w = weights or DEFAULT_PLACEMENT_WEIGHTS

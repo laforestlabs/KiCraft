@@ -29,11 +29,20 @@ measures both live ``Component`` objects (during solve) and frozen
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
 # Anchor kinds a passive can be grouped under (a passive's "functional home").
 _ANCHOR_KINDS = ("ic", "regulator", "connector")
+
+# Nets that are POURED (a copper plane), not routed point-to-point. A passive
+# pad on one of these reaches the plane through a via wherever it lands, so
+# pin-locality treats it as via-reachable (distance 0) rather than pulling the
+# pad toward the nearest plane *pad*. The scorer overrides this from the live
+# pour config (GND + any poured power rail); this default matches the metric's
+# standalone use over a frozen ``solved_layout.json``.
+DEFAULT_PLANE_NETS = frozenset({"GND", "/GND"})
 
 
 @dataclass(slots=True)
@@ -49,6 +58,10 @@ class PlacedPart:
     w: float  # world-AABB width at current rotation (mm)
     h: float  # world-AABB height at current rotation (mm)
     nets: tuple[str, ...]  # distinct nets this part connects, via its pads
+    # Per-pad geometry the *pin-locality* metric needs: each entry is
+    # (pad_x, pad_y, net) in world mm. Defaulted so the tidiness metrics and
+    # their synthetic tests -- which only need ``nets`` -- construct unchanged.
+    pads: tuple[tuple[float, float, str], ...] = ()
 
 
 @dataclass(slots=True)
@@ -91,6 +104,36 @@ class LeafTidiness:
         }
 
 
+@dataclass(slots=True)
+class LeafPinLocality:
+    """Per-leaf *pin-locality*: do passives hug the anchor pins they connect to?
+
+    The metric the placement redesign optimizes for (and is judged on). A
+    decoupling cap exists to sit ~1-2 mm from its IC's power/ground pins; the
+    shipped soft-tidiness layouts put them 6-20 mm away (tidy rows, wrong
+    place). ``None`` where undefined (no anchors, no scorable passives).
+    """
+
+    n_passives: int
+    n_scored: int
+    pin_locality_pct: Optional[float]  # 0-100, higher = passives hug their pins
+    mean_worst_pad_dist_mm: Optional[float]  # honest mm, mean over passives
+    worst_pad_dist_mm: Optional[float]  # max over passives (surfaces outliers)
+    orientation_span_pct: Optional[float]  # pad-axis aligned to pin-axis, 0-100
+    label: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "n_passives": self.n_passives,
+            "n_scored": self.n_scored,
+            "pin_locality_pct": _round(self.pin_locality_pct),
+            "mean_worst_pad_dist_mm": _round(self.mean_worst_pad_dist_mm, 3),
+            "worst_pad_dist_mm": _round(self.worst_pad_dist_mm, 3),
+            "orientation_span_pct": _round(self.orientation_span_pct),
+            "label": self.label,
+        }
+
+
 def _round(v: Optional[float], ndigits: int = 1) -> Optional[float]:
     return None if v is None else round(v, ndigits)
 
@@ -106,6 +149,11 @@ def parts_from_components(components: dict[str, Any]) -> list[PlacedPart]:
     for ref, c in components.items():
         center = c.body_center if getattr(c, "body_center", None) is not None else c.pos
         nets = tuple(sorted({p.net for p in getattr(c, "pads", []) if p.net}))
+        pads = tuple(
+            (float(p.pos.x), float(p.pos.y), str(p.net))
+            for p in getattr(c, "pads", [])
+            if p.net
+        )
         parts.append(
             PlacedPart(
                 ref=str(ref),
@@ -117,6 +165,7 @@ def parts_from_components(components: dict[str, Any]) -> list[PlacedPart]:
                 w=float(getattr(c, "width_mm", 0.0) or 0.0),
                 h=float(getattr(c, "height_mm", 0.0) or 0.0),
                 nets=nets,
+                pads=pads,
             )
         )
     return parts
@@ -133,6 +182,15 @@ def parts_from_layout(layout: dict[str, Any]) -> list[PlacedPart]:
         nets = tuple(
             sorted({p.get("net") for p in c.get("pads", []) or [] if p.get("net")})
         )
+        pads = tuple(
+            (
+                float((p.get("pos") or {}).get("x", 0.0)),
+                float((p.get("pos") or {}).get("y", 0.0)),
+                str(p.get("net")),
+            )
+            for p in c.get("pads", []) or []
+            if p.get("net")
+        )
         parts.append(
             PlacedPart(
                 ref=str(c.get("ref", "")),
@@ -144,6 +202,7 @@ def parts_from_layout(layout: dict[str, Any]) -> list[PlacedPart]:
                 w=float(c.get("width_mm", 0.0) or 0.0),
                 h=float(c.get("height_mm", 0.0) or 0.0),
                 nets=nets,
+                pads=pads,
             )
         )
     return parts
@@ -466,10 +525,202 @@ def aggregate(metrics: Iterable[LeafTidiness]) -> dict[str, Any]:
     }
 
 
+# --------------------------------------------------------------------------- #
+# Pin-locality — do passives hug the anchor pins they connect to?
+#
+# The objective the placement redesign optimizes for. The math here is the
+# SINGLE source of truth: `leaf_pin_locality` (below, over the PlacedPart view /
+# frozen layouts) and `PlacementScorer._score_pin_locality` (over live Component
+# objects during solve) both call `pin_locality_for_passive`, so the reported
+# metric and the optimized score never drift.
+# --------------------------------------------------------------------------- #
+
+
+def _nearest_anchor_pad(
+    net: str, px: float, py: float, anchor_pads_by_net: dict[str, list[tuple[float, float]]]
+) -> tuple[Optional[float], Optional[tuple[float, float]]]:
+    """(distance, point) of the nearest anchor pad on ``net`` to (px,py), or
+    (None, None) if no anchor has a pad on that net."""
+    cand = anchor_pads_by_net.get(net)
+    if not cand:
+        return None, None
+    best_d: Optional[float] = None
+    best_pt: Optional[tuple[float, float]] = None
+    for ax, ay in cand:
+        d = math.hypot(ax - px, ay - py)
+        if best_d is None or d < best_d:
+            best_d, best_pt = d, (ax, ay)
+    return best_d, best_pt
+
+
+def _nearest_anchor_body(
+    center: tuple[float, float],
+    nets: set[str] | frozenset[str],
+    anchor_bodies: list[tuple[float, float, frozenset[str]]],
+) -> Optional[tuple[float, float]]:
+    """Body-center of the nearest anchor sharing any of ``nets`` (fallback pull
+    for a passive with no reachable same-net anchor *pad*), or None."""
+    cx, cy = center
+    best_d: Optional[float] = None
+    best_pt: Optional[tuple[float, float]] = None
+    for bx, by, bnets in anchor_bodies:
+        if not (bnets & nets):
+            continue
+        d = math.hypot(bx - cx, by - cy)
+        if best_d is None or d < best_d:
+            best_d, best_pt = d, (bx, by)
+    return best_pt
+
+
+def pin_locality_for_passive(
+    pads: list[tuple[float, float, str]],
+    center: tuple[float, float],
+    anchor_pads_by_net: dict[str, list[tuple[float, float]]],
+    anchor_bodies: list[tuple[float, float, frozenset[str]]],
+    *,
+    plane_nets: frozenset[str] = DEFAULT_PLANE_NETS,
+    dist_ref_mm: float = 2.0,
+    orient_weight: float = 0.3,
+) -> Optional[tuple[float, float, float]]:
+    """Pin-locality of ONE passive. Returns ``(score, d_worst_mm, orient_score)``
+    (all in [0,100] except ``d_worst_mm``) or ``None`` when it can't be scored.
+
+    * ``d_worst_mm`` — the *worst* pad's distance to its nearest same-net anchor
+      pad. A plane pad (poured net) is via-reachable → contributes 0, so it never
+      dominates the max: the pull comes entirely from the signal/power-point pad
+      that must hug a real pin. If the passive has NO reachable non-plane pad,
+      fall back to the nearest anchor body sharing any of its nets (keeps an
+      all-plane decap from floating); unscored if not even that exists.
+    * ``score`` — ``(1-w)·100·exp(-d_worst/ref) + w·orient`` (the smooth reward
+      shape the tidiness align term uses), ``w=orient_weight``.
+    * ``orient_score`` — for a 2-pad part, |cos| of the angle between its pad-axis
+      and the axis joining its two target pins (100 = pads straddle the pin pair).
+    """
+    pad_infos: list[tuple[str, float, float, Optional[float], Optional[tuple[float, float]]]] = []
+    has_real = False
+    for px, py, net in pads:
+        d, pt = _nearest_anchor_pad(net, px, py, anchor_pads_by_net)
+        if net in plane_nets:
+            pad_infos.append((net, px, py, 0.0, pt))  # via-reachable distance, real pin for orientation
+        else:
+            if d is not None:
+                has_real = True
+            pad_infos.append((net, px, py, d, pt))
+
+    if has_real:
+        defined = [d for (_n, _x, _y, d, _pt) in pad_infos if d is not None]
+        d_worst = max(defined) if defined else 0.0
+    else:
+        pass_nets = {n for (n, _x, _y, _d, _pt) in pad_infos}
+        near_body = _nearest_anchor_body(center, pass_nets, anchor_bodies)
+        if near_body is None:
+            return None
+        d_worst = math.hypot(near_body[0] - center[0], near_body[1] - center[1])
+
+    dist_score = 100.0 * math.exp(-d_worst / max(dist_ref_mm, 1e-6))
+
+    # orientation-to-span: reward the 2-pad body rotated so its pad-axis lines up
+    # with the axis joining its two target pins.
+    orient_score = 100.0
+    if len(pad_infos) == 2:
+        (n0, x0, y0, _d0, t0), (n1, x1, y1, _d1, t1) = pad_infos
+        tgt0 = t0 if t0 is not None else _nearest_anchor_body(center, {n0}, anchor_bodies)
+        tgt1 = t1 if t1 is not None else _nearest_anchor_body(center, {n1}, anchor_bodies)
+        if tgt0 is not None and tgt1 is not None:
+            vx, vy = (x1 - x0), (y1 - y0)
+            ux, uy = (tgt1[0] - tgt0[0]), (tgt1[1] - tgt0[1])
+            vlen, ulen = math.hypot(vx, vy), math.hypot(ux, uy)
+            if vlen > 1e-9 and ulen > 1e-9:
+                orient_score = 100.0 * min(1.0, abs((vx * ux + vy * uy) / (vlen * ulen)))
+
+    score = (1.0 - orient_weight) * dist_score + orient_weight * orient_score
+    return (score, d_worst, orient_score)
+
+
+def build_anchor_pad_index(
+    parts: Iterable[PlacedPart],
+) -> tuple[dict[str, list[tuple[float, float]]], list[tuple[float, float, frozenset[str]]]]:
+    """(anchor_pads_by_net, anchor_bodies) over the anchor parts in ``parts``."""
+    anchor_pads_by_net: dict[str, list[tuple[float, float]]] = {}
+    anchor_bodies: list[tuple[float, float, frozenset[str]]] = []
+    for p in parts:
+        if p.kind not in _ANCHOR_KINDS:
+            continue
+        for px, py, net in p.pads:
+            anchor_pads_by_net.setdefault(net, []).append((px, py))
+        anchor_bodies.append((p.cx, p.cy, frozenset(n for (_x, _y, n) in p.pads)))
+    return anchor_pads_by_net, anchor_bodies
+
+
+def leaf_pin_locality(
+    parts: Iterable[PlacedPart],
+    *,
+    plane_nets: frozenset[str] = DEFAULT_PLANE_NETS,
+    dist_ref_mm: float = 2.0,
+    orient_weight: float = 0.3,
+    label: str = "",
+) -> LeafPinLocality:
+    """Compute pin-locality for one placed leaf (needs per-pad ``pads`` on the
+    :class:`PlacedPart` views — build them with the adapters, not by hand)."""
+    parts = list(parts)
+    anchor_pads_by_net, anchor_bodies = build_anchor_pad_index(parts)
+    passives = [p for p in parts if p.kind == "passive" and not p.locked]
+
+    scores: list[float] = []
+    worsts: list[float] = []
+    orients: list[float] = []
+    for p in passives:
+        res = pin_locality_for_passive(
+            list(p.pads), (p.cx, p.cy), anchor_pads_by_net, anchor_bodies,
+            plane_nets=plane_nets, dist_ref_mm=dist_ref_mm, orient_weight=orient_weight,
+        )
+        if res is None:
+            continue
+        s, dw, orient = res
+        scores.append(s)
+        worsts.append(dw)
+        orients.append(orient)
+
+    n_scored = len(scores)
+    return LeafPinLocality(
+        n_passives=len(passives),
+        n_scored=n_scored,
+        pin_locality_pct=(sum(scores) / n_scored) if n_scored else None,
+        mean_worst_pad_dist_mm=(sum(worsts) / n_scored) if n_scored else None,
+        worst_pad_dist_mm=(max(worsts)) if n_scored else None,
+        orientation_span_pct=(sum(orients) / n_scored) if n_scored else None,
+        label=label,
+    )
+
+
+def aggregate_pin_locality(metrics: Iterable[LeafPinLocality]) -> dict[str, Any]:
+    """Corpus-level means over per-leaf pin-locality, skipping ``None`` values."""
+    metrics = list(metrics)
+
+    def _mean(vals: list[float]) -> Optional[float]:
+        return sum(vals) / len(vals) if vals else None
+
+    pl = [m.pin_locality_pct for m in metrics if m.pin_locality_pct is not None]
+    mw = [m.mean_worst_pad_dist_mm for m in metrics if m.mean_worst_pad_dist_mm is not None]
+    ww = [m.worst_pad_dist_mm for m in metrics if m.worst_pad_dist_mm is not None]
+    osp = [m.orientation_span_pct for m in metrics if m.orientation_span_pct is not None]
+
+    return {
+        "n_leaves": len(metrics),
+        "n_leaves_scored": sum(1 for m in metrics if m.n_scored > 0),
+        "pin_locality_pct": _round(_mean(pl)),
+        "mean_worst_pad_dist_mm": _round(_mean(mw), 3),
+        "worst_pad_dist_mm": _round(_mean(ww), 3),
+        "orientation_span_pct": _round(_mean(osp)),
+    }
+
+
 __all__ = [
     "PlacedPart",
     "PassiveGroup",
     "LeafTidiness",
+    "LeafPinLocality",
+    "DEFAULT_PLANE_NETS",
     "parts_from_components",
     "parts_from_layout",
     "assign_passive_groups",
@@ -477,4 +728,8 @@ __all__ = [
     "orientation_axis",
     "leaf_tidiness",
     "aggregate",
+    "pin_locality_for_passive",
+    "build_anchor_pad_index",
+    "leaf_pin_locality",
+    "aggregate_pin_locality",
 ]

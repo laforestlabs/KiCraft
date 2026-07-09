@@ -66,6 +66,7 @@ class PlacementScorer:
         s.block_opposite_side = self._score_block_opposite_side()
         s.bbox_packing = self._score_bbox_packing(total_component_area)
         s.tidiness = self._score_tidiness()
+        s.pin_locality = self._score_pin_locality()
 
         # Board aspect ratio scoring
         board_w = self.state.board_width
@@ -139,6 +140,106 @@ class PlacementScorer:
             total_w += len(members)
 
         return total / total_w if total_w else 100.0
+
+    def _pin_locality_plane_nets(self) -> frozenset:
+        """Poured nets (via-reachable) for pin-locality: GND + any config-poured
+        power rail. Cached — the pour set is fixed for a solve."""
+        cached = getattr(self, "_pin_locality_plane_nets_cache", None)
+        if cached is not None:
+            return cached
+        explicit = self.cfg.get("pin_locality_plane_nets")
+        if explicit:
+            nets = frozenset(str(n) for n in explicit)
+        else:
+            from kicraft.autoplacer.brain.leaf_tidiness import DEFAULT_PLANE_NETS
+
+            acc = set(DEFAULT_PLANE_NETS)
+            gnd = self.cfg.get("gnd_zone_net")
+            if gnd:
+                acc.add(str(gnd))
+            if self.cfg.get("power_plane_enabled"):
+                for pn in self.cfg.get("power_plane_nets") or []:
+                    acc.add(str(pn))
+            nets = frozenset(acc)
+        self._pin_locality_plane_nets_cache = nets
+        return nets
+
+    def _score_pin_locality(self) -> float:
+        """Do passives hug the anchor pins they connect to? 100 = every decap
+        ~0 mm from its IC power/GND pins; 100 (neutral) when nothing is scorable.
+
+        The objective the connectivity-first placement optimizes: unlike
+        ``net_distance`` (a GND-excluded wirelength MST that leaves a decap free
+        to float anywhere on a big rail), this pulls each 2-pad passive against
+        the specific pin pair it bridges -- including the IC's GND pin (a poured
+        GND pad is via-reachable so it never *drags*, but the orientation term
+        still rotates the body to straddle it). Shares the single-source
+        ``pin_locality_for_passive`` kernel with the metric so score == picture.
+
+        Grouping/membership is position-independent (memoized); pad GEOMETRY is
+        read live each call so it stays correct while anchors move under SA (a
+        coordinate cache would go stale). Skips (neutral) when unweighted, so
+        default and parent scoring pay nothing.
+        """
+        if float(self.cfg.get("psw_pin_locality", 0.0)) <= 0.0:
+            return 100.0
+
+        from kicraft.autoplacer.brain.leaf_tidiness import (
+            _ANCHOR_KINDS,
+            pin_locality_for_passive,
+        )
+
+        comps = self.state.components
+        idx = getattr(self, "_pin_locality_index", None)
+        if idx is None:
+            anchor_refs = [r for r, c in comps.items() if (c.kind or "") in _ANCHOR_KINDS]
+            passive_refs = [
+                r for r, c in comps.items()
+                if (c.kind or "") == "passive" and not c.locked
+            ]
+            idx = (anchor_refs, passive_refs)
+            self._pin_locality_index = idx
+        anchor_refs, passive_refs = idx
+        if not anchor_refs or not passive_refs:
+            return 100.0
+
+        plane_nets = self._pin_locality_plane_nets()
+        dist_ref_mm = float(self.cfg.get("pin_locality_dist_ref_mm", 2.0))
+        orient_weight = float(self.cfg.get("pin_locality_orient_weight", 0.3))
+
+        anchor_pads_by_net: dict[str, list[tuple[float, float]]] = {}
+        anchor_bodies: list[tuple[float, float, frozenset]] = []
+        for r in anchor_refs:
+            c = comps.get(r)
+            if c is None:
+                continue
+            nets: set[str] = set()
+            for p in c.pads:
+                if not p.net:
+                    continue
+                anchor_pads_by_net.setdefault(p.net, []).append((p.pos.x, p.pos.y))
+                nets.add(p.net)
+            bc = c.body_center if c.body_center is not None else c.pos
+            anchor_bodies.append((bc.x, bc.y, frozenset(nets)))
+
+        total = 0.0
+        n = 0
+        for r in passive_refs:
+            c = comps.get(r)
+            if c is None:
+                continue
+            pads = [(p.pos.x, p.pos.y, p.net) for p in c.pads if p.net]
+            bc = c.body_center if c.body_center is not None else c.pos
+            res = pin_locality_for_passive(
+                pads, (bc.x, bc.y), anchor_pads_by_net, anchor_bodies,
+                plane_nets=plane_nets, dist_ref_mm=dist_ref_mm,
+                orient_weight=orient_weight,
+            )
+            if res is None:
+                continue
+            total += res[0]
+            n += 1
+        return total / n if n else 100.0
 
     def _score_net_distance(
         self, mst_cache=None, total_component_area: float | None = None

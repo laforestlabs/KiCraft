@@ -32,7 +32,11 @@ import tempfile
 import time
 
 from kicraft.autoplacer.brain.leaf_layout_svg import render_leaf_svg
-from kicraft.autoplacer.brain.leaf_tidiness import leaf_tidiness, parts_from_components
+from kicraft.autoplacer.brain.leaf_tidiness import (
+    leaf_pin_locality,
+    leaf_tidiness,
+    parts_from_components,
+)
 from kicraft.autoplacer.brain.subcircuit_instances import _component_from_dict
 from kicraft.autoplacer.brain.types import Point
 
@@ -47,6 +51,18 @@ DESIGNS = [
 ]
 START = "===SOLVE_SUBCIRCUITS_JSON_START==="
 END = "===SOLVE_SUBCIRCUITS_JSON_END==="
+
+# Each variant is a cfg-patch written into the staged project's *_autoplacer.json
+# before solving. Run compares exactly two (``--variants=baseline,candidate``):
+#   classic  hard-off legacy SA           soft     the shipped soft-tidiness term
+#   pinloc   pin-locality term on cont.SA  grid    discrete grid + SA-as-assignment
+VARIANTS = {
+    "classic": {"leaf_psw_tidiness": 0.0, "leaf_group_rigid": False,
+                "leaf_structured_local_layout": False, "leaf_grid_assignment": False},
+    "soft": {},  # pipeline defaults (psw_tidiness=0.15)
+    "pinloc": {"leaf_psw_pin_locality": 0.25},
+    "grid": {"leaf_grid_assignment": True},
+}
 
 
 def _components(layout):
@@ -73,14 +89,13 @@ def _stage(run_dir, stem, variant, scratch):
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
     shutil.rmtree(os.path.join(dst, ".experiments"), ignore_errors=True)
-    if variant == "classic":
+    patch = VARIANTS.get(variant, {})
+    if patch:
         cfgs = [f for f in os.listdir(dst) if f.endswith("_autoplacer.json")]
         if cfgs:
             p = os.path.join(dst, cfgs[0])
             cfg = json.load(open(p))
-            cfg["leaf_psw_tidiness"] = 0.0
-            cfg["leaf_group_rigid"] = False
-            cfg["leaf_structured_local_layout"] = False
+            cfg.update(patch)
             json.dump(cfg, open(p, "w"), indent=2)
     return dst
 
@@ -151,6 +166,7 @@ def main() -> int:
     out_dir = _default_out_dir()
     designs = DESIGNS
     seeds = [0]
+    variants = ("classic", "soft")  # baseline, candidate
     for a in sys.argv[1:]:
         if a.startswith("--out="):
             out_dir = a.split("=", 1)[1]
@@ -159,33 +175,43 @@ def main() -> int:
             designs = [d for d in DESIGNS if d[1] in want]
         elif a.startswith("--seeds="):
             seeds = [int(x) for x in a.split("=", 1)[1].split(",")]
+        elif a.startswith("--variants="):
+            names = a.split("=", 1)[1].split(",")
+            assert len(names) == 2 and all(n in VARIANTS for n in names), (
+                f"--variants needs exactly two of {sorted(VARIANTS)}")
+            variants = tuple(names)
+    base, cand = variants
     # Scratch (heavy: staged project copies + .experiments) lives in a tempdir, NOT
     # under out_dir, so the discoverable gallery dir stays just index.html/summary.json.
     scratch = tempfile.mkdtemp(prefix="soft_ab_work_")
 
     results = []
     for run_dir, stem in designs:
-        print(f"[{stem}] staging + solving classic/soft ...", flush=True)
-        unc = {"classic": [], "soft": []}
+        print(f"[{stem}] staging + solving {base}/{cand} ...", flush=True)
+        unc = {v: [] for v in variants}
         projs = {}
-        for variant in ("classic", "soft"):
+        for variant in variants:
             projs[variant] = _stage(run_dir, stem, variant, scratch)
             for seed in seeds:
                 if seed != seeds[0]:
                     shutil.rmtree(os.path.join(projs[variant], ".experiments"),
                                   ignore_errors=True)
                 unc[variant].append(_solve(projs[variant], stem, seed))
-        lay = {v: _leaf_layouts(projs[v]) for v in ("classic", "soft")}
+        lay = {v: _leaf_layouts(projs[v]) for v in variants}
         leaves = []
-        for sheet in sorted(set(lay["classic"]) & set(lay["soft"])):
+        for sheet in sorted(set(lay[base]) & set(lay[cand])):
             row = {"sheet": sheet}
-            for v in ("classic", "soft"):
+            for v in variants:
                 comps = lay[v][sheet]
-                m = leaf_tidiness(parts_from_components(comps))
+                parts = parts_from_components(comps)
+                m = leaf_tidiness(parts)
+                pl = leaf_pin_locality(parts)
                 row[v] = {
                     "orient": m.orientation_consensus_grouped_pct,
                     "resid": m.alignment_residual_mm,
                     "fill": m.packing_fill_pct,
+                    "pinloc": pl.pin_locality_pct,
+                    "pin_mm": pl.mean_worst_pad_dist_mm,
                     "n_groups": m.n_groups,
                     "svg": render_leaf_svg(comps, _board_bound(comps),
                                            title=f"{stem} / {sheet} [{v}]"),
@@ -193,15 +219,16 @@ def main() -> int:
             leaves.append(row)
         results.append({
             "design": stem,
-            "unconnected": {v: _med(unc[v]) for v in ("classic", "soft")},
+            "variants": list(variants),  # [baseline, candidate] -- for the admin summary
+            "unconnected": {v: _med(unc[v]) for v in variants},
             "unconnected_seeds": unc,
             "leaves": leaves,
         })
         print(f"[{stem}] {len(leaves)} comparable leaves; "
-              f"unc classic={_med(unc['classic'])} soft={_med(unc['soft'])}", flush=True)
+              f"unc {base}={_med(unc[base])} {cand}={_med(unc[cand])}", flush=True)
 
     os.makedirs(out_dir, exist_ok=True)
-    _write_html(results, os.path.join(out_dir, "index.html"), designs, seeds)
+    _write_html(results, os.path.join(out_dir, "index.html"), variants, seeds)
     json.dump(
         [{k: v for k, v in r.items() if k != "leaves"} for r in results],
         open(os.path.join(out_dir, "summary.json"), "w"), indent=2,
@@ -219,20 +246,21 @@ def _fmt(v, s=""):
     return "—" if v is None else f"{v:.1f}{s}"
 
 
-def _delta_cell(classic, soft, higher_better=True, suffix=""):
-    if classic is None or soft is None:
-        return f"<td>{_fmt(classic, suffix)}</td><td>{_fmt(soft, suffix)}</td><td>—</td>"
-    d = soft - classic
+def _delta_cell(base, cand, higher_better=True, suffix=""):
+    if base is None or cand is None:
+        return f"<td>{_fmt(base, suffix)}</td><td>{_fmt(cand, suffix)}</td><td>—</td>"
+    d = cand - base
     good = (d >= 0) if higher_better else (d <= 0)
     color = "#0ca30c" if (abs(d) < 0.05 or good) else "#d03b3b"
     sign = "+" if d >= 0 else ""
-    return (f"<td>{_fmt(classic, suffix)}</td><td>{_fmt(soft, suffix)}</td>"
+    return (f"<td>{_fmt(base, suffix)}</td><td>{_fmt(cand, suffix)}</td>"
             f"<td style='color:{color};font-weight:600'>{sign}{d:.1f}</td>")
 
 
-def _write_html(results, path, designs, seeds):
+def _write_html(results, path, variants, seeds):
+    base, cand = variants
     parts = [
-        "<!doctype html><meta charset='utf-8'><title>Soft-tidiness A/B</title>",
+        "<!doctype html><meta charset='utf-8'><title>Placement A/B</title>",
         "<style>",
         "body{font-family:system-ui,-apple-system,sans-serif;background:#f9f9f7;",
         "color:#0b0b0b;margin:24px;max-width:1200px}h1{font-size:22px}",
@@ -244,29 +272,35 @@ def _write_html(results, path, designs, seeds):
         ".pair figure{margin:0}.pair figcaption{font-size:11px;color:#898781;margin-bottom:4px}",
         "section{margin:16px 0;padding:16px;background:#fff;border:1px solid rgba(11,11,11,.1);border-radius:8px}",
         "</style>",
-        "<h1>Soft-tidiness A/B — classic SA vs soft-tidiness</h1>",
+        f"<h1>Placement A/B — {base} vs {cand}</h1>",
         f"<p class='sub'>{len(results)} designs, seeds {seeds}. "
-        "Tidiness &amp; renders are deterministic per seed; unconnected is "
-        "indicative (rigorous routing verdict = N-of-3 median sweep).</p>",
+        "Tidiness, pin-locality &amp; renders are deterministic per seed; unconnected "
+        "is indicative (rigorous routing verdict = N-of-3 median sweep). "
+        "<b>pin mm</b> = mean distance from each passive's worst pad to its nearest "
+        "same-net IC pin (lower is better; the real objective).</p>",
     ]
 
     # Summary table.
     parts.append("<h2>Summary (per design)</h2><table><tr>"
-                 "<th>design</th><th>leaves</th>"
-                 "<th>orient cl.</th><th>orient soft</th><th>Δ</th>"
-                 "<th>resid cl.</th><th>resid soft</th><th>Δ</th>"
-                 "<th>unc cl.</th><th>unc soft</th></tr>")
+                 f"<th>design</th><th>leaves</th>"
+                 f"<th>orient {base}</th><th>orient {cand}</th><th>Δ</th>"
+                 f"<th>resid {base}</th><th>resid {cand}</th><th>Δ</th>"
+                 f"<th>pin mm {base}</th><th>pin mm {cand}</th><th>Δ</th>"
+                 f"<th>unc {base}</th><th>unc {cand}</th></tr>")
     for r in results:
-        oc = _mean([lf["classic"]["orient"] for lf in r["leaves"]])
-        os_ = _mean([lf["soft"]["orient"] for lf in r["leaves"]])
-        rc = _mean([lf["classic"]["resid"] for lf in r["leaves"]])
-        rs = _mean([lf["soft"]["resid"] for lf in r["leaves"]])
+        oc = _mean([lf[base]["orient"] for lf in r["leaves"]])
+        ox = _mean([lf[cand]["orient"] for lf in r["leaves"]])
+        rc = _mean([lf[base]["resid"] for lf in r["leaves"]])
+        rx = _mean([lf[cand]["resid"] for lf in r["leaves"]])
+        pc = _mean([lf[base]["pin_mm"] for lf in r["leaves"]])
+        px = _mean([lf[cand]["pin_mm"] for lf in r["leaves"]])
         parts.append(
             f"<tr><td>{r['design']}</td><td>{len(r['leaves'])}</td>"
-            + _delta_cell(oc, os_, higher_better=True, suffix="%")
-            + _delta_cell(rc, rs, higher_better=False)
-            + f"<td>{_fmt(r['unconnected']['classic'])}</td>"
-            f"<td>{_fmt(r['unconnected']['soft'])}</td></tr>"
+            + _delta_cell(oc, ox, higher_better=True, suffix="%")
+            + _delta_cell(rc, rx, higher_better=False)
+            + _delta_cell(pc, px, higher_better=False)
+            + f"<td>{_fmt(r['unconnected'][base])}</td>"
+            f"<td>{_fmt(r['unconnected'][cand])}</td></tr>"
         )
     parts.append("</table>")
 
@@ -276,17 +310,20 @@ def _write_html(results, path, designs, seeds):
             continue
         parts.append(f"<h2>{r['design']}</h2>")
         for lf in r["leaves"]:
-            c, s = lf["classic"], lf["soft"]
+            c, s = lf[base], lf[cand]
             parts.append(
                 f"<section><table><tr><th>{lf['sheet']}</th>"
-                "<th>orient</th><th>resid mm</th><th>fill %</th></tr>"
-                f"<tr><td>classic</td><td>{_fmt(c['orient'])}</td>"
-                f"<td>{_fmt(c['resid'])}</td><td>{_fmt(c['fill'])}</td></tr>"
-                f"<tr><td>soft</td><td>{_fmt(s['orient'])}</td>"
-                f"<td>{_fmt(s['resid'])}</td><td>{_fmt(s['fill'])}</td></tr></table>"
+                "<th>orient</th><th>resid mm</th><th>fill %</th>"
+                "<th>pin mm</th><th>pin loc %</th></tr>"
+                f"<tr><td>{base}</td><td>{_fmt(c['orient'])}</td>"
+                f"<td>{_fmt(c['resid'])}</td><td>{_fmt(c['fill'])}</td>"
+                f"<td>{_fmt(c['pin_mm'])}</td><td>{_fmt(c['pinloc'])}</td></tr>"
+                f"<tr><td>{cand}</td><td>{_fmt(s['orient'])}</td>"
+                f"<td>{_fmt(s['resid'])}</td><td>{_fmt(s['fill'])}</td>"
+                f"<td>{_fmt(s['pin_mm'])}</td><td>{_fmt(s['pinloc'])}</td></tr></table>"
                 "<div class='pair'>"
-                f"<figure><figcaption>classic</figcaption>{c['svg']}</figure>"
-                f"<figure><figcaption>soft-tidiness</figcaption>{s['svg']}</figure>"
+                f"<figure><figcaption>{base}</figcaption>{c['svg']}</figure>"
+                f"<figure><figcaption>{cand}</figcaption>{s['svg']}</figure>"
                 "</div></section>"
             )
     open(path, "w").write("".join(parts))

@@ -112,6 +112,10 @@ class PlacementSolver:
         self.rng = random.Random(seed)
         # Rigid tidy groups active this solve (group-as-unit mode); empty = off.
         self._active_rigid_groups: list = []
+        # Discrete anchor-relative grid active this solve (SA-as-assignment);
+        # None = off. Set in solve() when leaf_grid_assignment is enabled.
+        self._grid_assignment_active: bool = False
+        self._grid = None
         self.k_attract = max(0.001, min(1.0, self.cfg.get("force_attract_k", 0.08)))
         self.k_repel = max(1.0, min(5000.0, self.cfg.get("force_repel_k", 40.0)))
         self.cooling = max(0.5, min(0.999, self.cfg.get("cooling_factor", 0.97)))
@@ -417,9 +421,57 @@ class PlacementSolver:
             )
             self._active_rigid_groups = rigid
 
+        # Discrete anchor-relative grid (connectivity-first): with the anchors
+        # placed, derive pin-adjacent slots from their pad geometry so SA becomes
+        # *assignment* (which passive -> which slot) rather than continuous
+        # positioning -- tidy, legal, and pin-local by construction. Leaf-only,
+        # default OFF; A/B'd against soft-tidiness before becoming a default.
+        self._grid_assignment_active = False
+        self._grid = None
+        if self.cfg.get("leaf_grid_assignment", False):
+            from kicraft.autoplacer.brain.leaf_compaction import (
+                _resolved_keepout_rects,
+            )
+            from kicraft.autoplacer.brain.leaf_grid_assignment import build_anchor_grid
+
+            keepouts = [
+                (tl, br)
+                for tl, br, _owner in _resolved_keepout_rects(
+                    self.state.keepout_rects, best_comps
+                )
+            ]
+            grid = build_anchor_grid(
+                best_comps,
+                board_outline=self.state.board_outline,
+                pitch_gap_mm=float(
+                    self.cfg.get("leaf_grid_pitch_gap_mm", self.clearance)
+                ),
+                rings=int(self.cfg.get("leaf_grid_rings", 2)),
+                lateral=int(self.cfg.get("leaf_grid_lateral", 1)),
+                overprovision=float(self.cfg.get("leaf_grid_overprovision", 10.0)),
+                max_slots=int(self.cfg.get("leaf_grid_max_slots", 400)),
+                orientation_policy=str(
+                    self.cfg.get("leaf_grid_orientation_policy", "auto")
+                ),
+                grid_snap=self.grid_snap,
+                keepout_rects=keepouts,
+                pad_inset_mm=float(self.cfg.get("pad_inset_margin_mm", 0.3)),
+            )
+            if grid.slots:
+                self._grid = grid
+                self._grid_assignment_active = True
+
         with _timed_phase(phase_t, "solve_sa_refine_ms", capture_comps=lambda: best_comps):
             # SA refinement: escape local minima after FD convergence
-            if self._active_rigid_groups:
+            if self._grid_assignment_active:
+                work_state.components = best_comps
+                best_comps = self._grid_assignment_sa(
+                    {r: copy.deepcopy(c) for r, c in best_comps.items()},
+                    self._grid,
+                    work_state,
+                    scorer,
+                )
+            elif self._active_rigid_groups:
                 work_state.components = best_comps
                 best_comps = self._group_rigid_sa(
                     {r: copy.deepcopy(c) for r, c in best_comps.items()},
@@ -462,7 +514,7 @@ class PlacementSolver:
             # under group-rigid mode: it swaps individual parts, which would tear
             # a rigid group apart (the group is the atom now).
             comps = best_comps
-            if enable_swap and not self._active_rigid_groups:
+            if enable_swap and not self._active_rigid_groups and not self._grid_assignment_active:
                 self._seen_force_states.clear()
                 work_state.components = comps
                 best_cross = count_crossings(work_state)
@@ -531,6 +583,7 @@ class PlacementSolver:
                 orderedness > 0.01
                 and not self.cfg.get("leaf_structured_local_layout", False)
                 and not self._active_rigid_groups
+                and not self._grid_assignment_active
             ):
                 self._apply_orderedness(best_comps, orderedness)
                 # Re-snap aligned pairs after orderedness
@@ -660,7 +713,7 @@ class PlacementSolver:
             # the parent/compose path never sets the flag. Runs before Step
             # 16 so the courtyard pass still has the last word, and re-snaps
             # aligned pairs it may have skewed.
-            if self.cfg.get("leaf_compaction_pass", False):
+            if self.cfg.get("leaf_compaction_pass", False) and not self._grid_assignment_active:
                 from kicraft.autoplacer.brain.leaf_compaction import (
                     compact_toward_centroid,
                 )
@@ -693,7 +746,7 @@ class PlacementSolver:
             # so it never introduces a courtyard overlap or off-board part.
             # Superseded by group-rigid mode (the groups are already tidy).
             if self.cfg.get("leaf_structured_local_layout", False) and not (
-                self._active_rigid_groups
+                self._active_rigid_groups or self._grid_assignment_active
             ):
                 from kicraft.autoplacer.brain.leaf_structured_layout import (
                     apply_structured_local_layout,
@@ -766,6 +819,16 @@ class PlacementSolver:
             from kicraft.autoplacer.brain.leaf_group_rigid import sync_rigid_groups
 
             sync_rigid_groups(best_comps, self._active_rigid_groups)
+            self._clamp_pads_to_board(best_comps)
+
+        # Grid-assignment: the legality tail moves individual parts, which can
+        # nudge a gridded passive off its (legal-by-construction) slot. Re-snap
+        # every occupant back to its slot as the genuine last step, so the tidy,
+        # pin-local structure the assignment found is what ships.
+        if self._grid_assignment_active and self._grid is not None:
+            from kicraft.autoplacer.brain.leaf_grid_assignment import resnap_to_grid
+
+            resnap_to_grid(best_comps, self._grid)
             self._clamp_pads_to_board(best_comps)
 
         # Final score
@@ -2526,6 +2589,28 @@ class PlacementSolver:
             print(f"  SA refine: no improvement after {iters_run}/{max_iters} iterations")
 
         return best_comps
+
+    def _grid_assignment_sa(self, comps: dict, grid, work_state, scorer) -> dict:
+        """SA-as-assignment over the discrete anchor-relative grid: search which
+        passive occupies which pin-adjacent slot (and its rotation), scored by
+        the same PlacementScorer (pin-locality + routing). Thin wrapper over the
+        pure ``leaf_grid_assignment.grid_assignment_sa`` so the geometry stays out
+        of the solver; passes the solver's deterministic RNG."""
+        from kicraft.autoplacer.brain.leaf_grid_assignment import grid_assignment_sa
+
+        return grid_assignment_sa(
+            comps,
+            grid,
+            work_state,
+            scorer,
+            rng=self.rng,
+            max_iters=int(self.cfg.get("sa_refine_iterations", 300)),
+            init_temp=float(self.cfg.get("sa_refine_initial_temp", 5.0)),
+            cooling_rate=float(self.cfg.get("sa_refine_cooling_rate", 0.995)),
+            swap_prob=float(self.cfg.get("grid_assignment_swap_prob", 0.4)),
+            move_prob=float(self.cfg.get("grid_assignment_move_prob", 0.4)),
+            no_improve_break=int(self.cfg.get("sa_refine_no_improve_break", 150)),
+        )
 
     def _group_rigid_sa(
         self,

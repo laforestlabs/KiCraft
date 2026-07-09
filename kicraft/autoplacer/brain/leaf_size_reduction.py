@@ -292,6 +292,48 @@ def local_solver_config(
     cfg["tidiness_residual_ref_mm"] = float(
         base_cfg.get("tidiness_residual_ref_mm", 3.0)
     )
+    # Pin-locality: pull each 2-pad passive against the specific anchor pin pair
+    # it bridges (a decap ~1-2 mm from its IC power/GND pins, not floating tidily
+    # 6-20 mm away). Weight 0 by DEFAULT so leaves stay byte-identical until an
+    # A/B opts in via leaf_psw_pin_locality; it co-tunes with the discrete grid
+    # (leaf_grid_assignment), where it becomes the primary objective. Plane nets
+    # (via-reachable) auto-derive in the scorer from gnd_zone_net/power_plane_*.
+    cfg["psw_pin_locality"] = float(base_cfg.get("leaf_psw_pin_locality", 0.0))
+    cfg["pin_locality_dist_ref_mm"] = float(
+        base_cfg.get("pin_locality_dist_ref_mm", 2.0)
+    )
+    cfg["pin_locality_orient_weight"] = float(
+        base_cfg.get("pin_locality_orient_weight", 0.3)
+    )
+    # Discrete anchor-relative grid + SA-as-assignment (connectivity-first). When
+    # ON, passives are restricted to pin-adjacent slots derived from the placed
+    # anchors' pads, so tidiness/legality/packing are structural and the
+    # assignment optimizes pin-locality directly. Default OFF (A/B vs soft
+    # tidiness first). Over-provisioned but bounded (decision (d)); slot
+    # orientation configurable (decision (c)).
+    cfg["leaf_grid_assignment"] = bool(base_cfg.get("leaf_grid_assignment", False))
+    cfg["leaf_grid_rings"] = int(base_cfg.get("leaf_grid_rings", 2))
+    cfg["leaf_grid_lateral"] = int(base_cfg.get("leaf_grid_lateral", 1))
+    cfg["leaf_grid_overprovision"] = float(base_cfg.get("leaf_grid_overprovision", 10.0))
+    cfg["leaf_grid_max_slots"] = int(base_cfg.get("leaf_grid_max_slots", 400))
+    cfg["leaf_grid_orientation_policy"] = str(
+        base_cfg.get("leaf_grid_orientation_policy", "auto")
+    )
+    # Slot pitch gap defaults to the leaf placement clearance already computed
+    # above, so slots are courtyard-legal by construction.
+    cfg["leaf_grid_pitch_gap_mm"] = float(
+        base_cfg.get("leaf_grid_pitch_gap_mm", cfg.get("placement_clearance_mm", 2.84))
+    )
+    if cfg["leaf_grid_assignment"]:
+        # The grid makes tidiness structural, so the soft tidiness term and the
+        # continuous hard-tidiness paths are redundant and would fight the grid;
+        # pin-locality becomes the primary passive objective.
+        cfg["psw_pin_locality"] = float(base_cfg.get("leaf_psw_pin_locality", 0.25))
+        cfg["psw_tidiness"] = 0.0
+        cfg["leaf_group_rigid"] = False
+        cfg["leaf_structured_local_layout"] = False
+        cfg["leaf_passive_ordering_enabled"] = False
+        cfg["orderedness"] = 0.0
     cfg["leaf_structured_pitch_gap_mm"] = float(
         base_cfg.get("leaf_structured_pitch_gap_mm", 0.6)
     )
