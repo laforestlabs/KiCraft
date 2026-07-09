@@ -54,13 +54,10 @@ END = "===SOLVE_SUBCIRCUITS_JSON_END==="
 
 # Each variant is a cfg-patch written into the staged project's *_autoplacer.json
 # before solving. Run compares exactly two (``--variants=baseline,candidate``):
-#   classic  hard-off legacy SA           soft     the shipped soft-tidiness term
-#   pinloc   pin-locality term on cont.SA  grid    discrete grid + SA-as-assignment
+#   classic  grid OFF -> plain continuous SA (the legacy leaf path)
+#   grid     the default: discrete anchor-relative grid + SA-as-assignment
 VARIANTS = {
-    "classic": {"leaf_psw_tidiness": 0.0, "leaf_group_rigid": False,
-                "leaf_structured_local_layout": False, "leaf_grid_assignment": False},
-    "soft": {},  # pipeline defaults (psw_tidiness=0.15)
-    "pinloc": {"leaf_psw_pin_locality": 0.25},
+    "classic": {"leaf_grid_assignment": False},
     "grid": {"leaf_grid_assignment": True},
 }
 
@@ -166,7 +163,7 @@ def main() -> int:
     out_dir = _default_out_dir()
     designs = DESIGNS
     seeds = [0]
-    variants = ("classic", "soft")  # baseline, candidate
+    variants = ("classic", "grid")  # baseline, candidate
     for a in sys.argv[1:]:
         if a.startswith("--out="):
             out_dir = a.split("=", 1)[1]

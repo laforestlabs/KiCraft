@@ -15,7 +15,7 @@ rotation). Every candidate state is grid-aligned and pre-spaced, so:
   next to its IC power/ground pins, so pin-locality (the real objective) is what
   the assignment optimizes.
 
-Two operations, mirroring :mod:`leaf_group_rigid`:
+Two operations:
 
 * :func:`build_anchor_grid` — over-provision pin-adjacent slots around every
   placed anchor (plus a straight lane per anchor-less passive array), pre-spaced
@@ -77,7 +77,7 @@ class Grid:
 
 
 # --------------------------------------------------------------------------- #
-# Small geometry helpers (self-contained; mirror leaf_group_rigid).
+# Small geometry helpers (self-contained).
 # --------------------------------------------------------------------------- #
 
 
@@ -95,8 +95,7 @@ def _dist(a: Point, b: Point) -> float:
 
 def _place_component(comp: Component, target_bc: Point, target_rot: float) -> None:
     """Rotate ``comp`` to ``target_rot`` then translate its body_center to
-    ``target_bc`` (pads kept in sync). Mutates in place -- same primitive as
-    ``leaf_group_rigid._place``."""
+    ``target_bc`` (pads kept in sync). Mutates in place."""
     drot = (target_rot - comp.rotation) % 360.0
     if 1e-6 < drot < 360.0 - 1e-6:
         rotate_component_in_place(comp, drot)

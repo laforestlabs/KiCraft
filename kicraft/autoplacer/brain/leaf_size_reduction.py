@@ -240,78 +240,27 @@ def local_solver_config(
     if base_cfg.get("leaf_min_route_rounds") is not None:
         cfg["leaf_min_route_rounds"] = int(base_cfg["leaf_min_route_rounds"])
 
-    # Encourage more structured passive rows around IC-heavy leaves.
-    cfg["leaf_passive_ordering_enabled"] = bool(
-        base_cfg.get("leaf_passive_ordering_enabled", passive_count >= 4)
-    )
-    cfg["leaf_passive_ordering_axis_bias"] = str(
-        base_cfg.get(
-            "leaf_passive_ordering_axis_bias",
-            "horizontal" if connector_count <= 1 and ic_like_count >= 1 else "auto",
-        )
-    )
-    cfg["leaf_passive_ordering_net_bias"] = bool(
-        base_cfg.get("leaf_passive_ordering_net_bias", True)
-    )
-    cfg["leaf_passive_ordering_strength"] = float(
-        base_cfg.get("leaf_passive_ordering_strength", 0.35)
-    )
-    cfg["leaf_passive_ordering_max_displacement_mm"] = float(
-        base_cfg.get("leaf_passive_ordering_max_displacement_mm", 2.5)
-    )
-    cfg["leaf_passive_ordering_min_anchor_clearance_mm"] = float(
-        base_cfg.get("leaf_passive_ordering_min_anchor_clearance_mm", 1.0)
-    )
-
-    # Stage-3 structured local layout (placement-streamline plan, Phase 1). Runs
-    # late in solve() (after compaction, before the final courtyard pass) and
-    # lays each anchor's passive group as a tidy row/column at a courtyard-legal
-    # pitch with uniform orientation. When on it fully owns passive tidiness, so
-    # the legacy blends (in-solver orderedness Step 8.5 + post-solve
-    # apply_leaf_passive_ordering) are disabled to avoid double-ordering.
-    # Group-as-unit placement (streamline redesign): freeze each functional
-    # group into a rigid, internally-tidy unit and let SA move anchors + free
-    # parts only — tidy by construction, routability optimized within the tidy
-    # space. Supersedes the packer-as-post-pass (which fought routing on dense
-    # leaves), so that is disabled when group-rigid is on.
-    # Both DEFAULT OFF: the routing-parity sweep showed hard-imposed tidiness
-    # (rigid groups AND the packer post-pass) regresses dense-leaf routing
-    # (RP2040 43-net MCU: classic 23 unconnected vs group-rigid 27). The
-    # generalizable fix is soft tidiness co-optimized in the scorer, not a hard
-    # constraint. Kept behind flags for A/B until soft-scoring is validated.
-    cfg["leaf_group_rigid"] = bool(base_cfg.get("leaf_group_rigid", False))
-    cfg["leaf_structured_local_layout"] = bool(
-        base_cfg.get("leaf_structured_local_layout", False)
-    )
-    # Soft tidiness: a placement-score term the SA co-optimizes with routing
-    # (orientation consensus + row alignment of each functional passive group).
-    # Subordinate to the routing terms (net_distance 0.20 + crossover 0.17) so it
-    # pulls sparse leaves crisp for free but yields on dense leaves -- the
-    # generalizable answer to tidy-vs-route, with no hard constraint or gate.
-    cfg["psw_tidiness"] = float(base_cfg.get("leaf_psw_tidiness", 0.15))
-    cfg["tidiness_residual_ref_mm"] = float(
-        base_cfg.get("tidiness_residual_ref_mm", 3.0)
-    )
     # Pin-locality: pull each 2-pad passive against the specific anchor pin pair
     # it bridges (a decap ~1-2 mm from its IC power/GND pins, not floating tidily
-    # 6-20 mm away). Weight 0 by DEFAULT so leaves stay byte-identical until an
-    # A/B opts in via leaf_psw_pin_locality; it co-tunes with the discrete grid
-    # (leaf_grid_assignment), where it becomes the primary objective. Plane nets
-    # (via-reachable) auto-derive in the scorer from gnd_zone_net/power_plane_*.
-    cfg["psw_pin_locality"] = float(base_cfg.get("leaf_psw_pin_locality", 0.0))
+    # 6-20 mm away). The discrete grid (below) makes this the primary passive
+    # objective. Plane nets (via-reachable) auto-derive in the scorer from
+    # gnd_zone_net/power_plane_*.
     cfg["pin_locality_dist_ref_mm"] = float(
         base_cfg.get("pin_locality_dist_ref_mm", 2.0)
     )
     cfg["pin_locality_orient_weight"] = float(
         base_cfg.get("pin_locality_orient_weight", 0.3)
     )
-    # Discrete anchor-relative grid + SA-as-assignment (connectivity-first). When
-    # ON, passives are restricted to pin-adjacent slots derived from the placed
-    # anchors' pads, so tidiness/legality/packing are structural and the
-    # assignment optimizes pin-locality directly. Default OFF (A/B vs soft
-    # tidiness first). Over-provisioned but bounded (decision (d)); slot
-    # orientation configurable (decision (c)).
-    cfg["leaf_grid_assignment"] = bool(base_cfg.get("leaf_grid_assignment", False))
+    # Discrete anchor-relative grid + SA-as-assignment (connectivity-first) is now
+    # the leaf placement path: passives are restricted to pin-adjacent slots
+    # derived from the placed anchors' pads, so tidiness/legality/packing are
+    # structural and the assignment optimizes pin-locality directly. This
+    # SUPERSEDES and replaces the continuous fake-tidiness stack (soft-tidiness
+    # score term, orderedness Step 8.5, the structured packer, group-rigid, and
+    # post-solve passive-ordering) -- all removed from the leaf path. Falls back
+    # to plain SA when a leaf has no gridable passives. Over-provisioned but
+    # bounded (decision (d)); slot orientation configurable (decision (c)).
+    cfg["leaf_grid_assignment"] = bool(base_cfg.get("leaf_grid_assignment", True))
     cfg["leaf_grid_rings"] = int(base_cfg.get("leaf_grid_rings", 2))
     cfg["leaf_grid_lateral"] = int(base_cfg.get("leaf_grid_lateral", 1))
     cfg["leaf_grid_overprovision"] = float(base_cfg.get("leaf_grid_overprovision", 10.0))
@@ -325,25 +274,14 @@ def local_solver_config(
         base_cfg.get("leaf_grid_pitch_gap_mm", cfg.get("placement_clearance_mm", 2.84))
     )
     if cfg["leaf_grid_assignment"]:
-        # The grid makes tidiness structural, so the soft tidiness term and the
-        # continuous hard-tidiness paths are redundant and would fight the grid;
-        # pin-locality becomes the primary passive objective.
+        # Pin-locality is the primary passive objective; the shared orderedness
+        # pass (Step 8.5, kept for the parent path) is skipped for gridded leaves
+        # since the grid already makes rows structural and it would fight the
+        # assignment.
         cfg["psw_pin_locality"] = float(base_cfg.get("leaf_psw_pin_locality", 0.25))
-        cfg["psw_tidiness"] = 0.0
-        cfg["leaf_group_rigid"] = False
-        cfg["leaf_structured_local_layout"] = False
-        cfg["leaf_passive_ordering_enabled"] = False
         cfg["orderedness"] = 0.0
-    cfg["leaf_structured_pitch_gap_mm"] = float(
-        base_cfg.get("leaf_structured_pitch_gap_mm", 0.6)
-    )
-    # Routability guard: skip a tidy row that would grow the group's signal-net
-    # wirelength by more than this fraction (dense-leaf routing regression).
-    cfg["leaf_structured_max_hpwl_increase"] = float(
-        base_cfg.get("leaf_structured_max_hpwl_increase", 0.15)
-    )
-    if cfg["leaf_structured_local_layout"]:
-        cfg["leaf_passive_ordering_enabled"] = False
+    else:
+        cfg["psw_pin_locality"] = float(base_cfg.get("leaf_psw_pin_locality", 0.0))
 
     return cfg
 

@@ -16,11 +16,9 @@ placed leaf's components alone (positions, rotations, and pad nets):
 * **packing fill %** — total component courtyard area / area of the bounding box
   enclosing the placement. Higher = tighter packing, less wasted board.
 
-The grouping here (``functional_passive_groups``) is an independent, dependency-
-light reimplementation of the same anchor-assignment idea used by
-``leaf_passive_ordering.build_leaf_passive_topology_groups``. Phase 1 (Stage 1
-of the plan) unifies the two into one canonical ``assign_passive_groups``; until
-then this stays self-contained so the metric never perturbs the live solve path.
+The grouping here (``assign_passive_groups`` / ``functional_passive_groups``) is
+the single canonical anchor-assignment definition, shared by the metric, the
+pin-locality kernel, and the discrete grid's anchor-less lane builder.
 
 Everything operates on a lightweight :class:`PlacedPart` view so the same code
 measures both live ``Component`` objects (during solve) and frozen

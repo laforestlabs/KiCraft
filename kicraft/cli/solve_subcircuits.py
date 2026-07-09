@@ -138,9 +138,6 @@ from kicraft.autoplacer.brain.leaf_geometry import (
     repair_leaf_placement_legality,
     score_local_components,
 )
-from kicraft.autoplacer.brain.leaf_passive_ordering import (
-    apply_leaf_passive_ordering,
-)
 from kicraft.autoplacer.brain.placement_utils import board_utilization_metrics
 from kicraft.autoplacer.brain.subcircuit_extractor import (
     ExtractedSubcircuitBoard,
@@ -433,12 +430,6 @@ def _local_solver_config(
     base_cfg: dict[str, Any], extraction: ExtractedSubcircuitBoard
 ) -> dict[str, Any]:
     return local_solver_config(base_cfg, extraction)
-def _apply_leaf_passive_ordering(
-    extraction: ExtractedSubcircuitBoard,
-    solved_components: dict[str, Component],
-    cfg: dict[str, Any],
-) -> dict[str, Component]:
-    return apply_leaf_passive_ordering(extraction, solved_components, cfg)
 
 
 def _attempt_leaf_size_reduction(
@@ -499,12 +490,6 @@ def _solve_one_round(
     solved_components = solver.solve()
     round_timing["placement_solve_s"] = round(
         max(0.0, time.monotonic() - placement_start), 3
-    )
-
-    passive_ordering_start = time.monotonic()
-    solved_components = _apply_leaf_passive_ordering(extraction, solved_components, cfg)
-    round_timing["passive_ordering_s"] = round(
-        max(0.0, time.monotonic() - passive_ordering_start), 3
     )
 
     ordering_legality_start = time.monotonic()

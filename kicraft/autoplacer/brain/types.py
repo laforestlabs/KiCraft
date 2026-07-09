@@ -380,9 +380,6 @@ DEFAULT_PLACEMENT_WEIGHTS: dict[str, float] = {
     # nothing else in the score function was pulling leaves
     # together, so SA had no signal to compact. 0.15 is on par
     # with smt_opposite_tht so compactness competes with stacking.
-    "tidiness": 0.0,  # SOFT tidiness term (orientation consensus + row alignment).
-    # 0 by default so scoring is byte-identical until a config opts in via
-    # psw_tidiness; leaf configs set a real weight (local_solver_config).
     "pin_locality": 0.0,  # do passives hug the anchor pins they connect to?
     # 0 by default (byte-identical until a config opts in via psw_pin_locality);
     # the connectivity-first leaf path sets a real weight. This is the objective
@@ -446,11 +443,6 @@ class PlacementScore:
     # compatible pair fully overlaps; 0 = none overlap. Stays at 0 for
     # leaf placement (no synthetic blocks present).
     bbox_packing: float = 100.0  # tight packing vs placed bbox; 100 when <2 comps
-    tidiness: float = 100.0  # passives in a group share orientation + a straight
-    # axis; 100 = crisp rows, 100 when no passive groups. A SOFT objective term
-    # the SA co-optimizes with routing (weight 0 by default): on sparse leaves it
-    # pulls layouts tidy for free; on dense leaves the routing terms dominate and
-    # tidiness yields gracefully -- so crisp tidiness never regresses routability.
     pin_locality: float = 100.0  # passives hug the anchor pins they connect to;
     # 100 = every decap ~0 mm from its IC power/GND pins, 100 when nothing scorable.
     # Weight 0 by default; the connectivity-first leaf path drives it.

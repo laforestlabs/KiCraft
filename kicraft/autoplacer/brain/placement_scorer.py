@@ -65,7 +65,6 @@ class PlacementScorer:
         s.topology_structure = self._score_topology_structure()
         s.block_opposite_side = self._score_block_opposite_side()
         s.bbox_packing = self._score_bbox_packing(total_component_area)
-        s.tidiness = self._score_tidiness()
         s.pin_locality = self._score_pin_locality()
 
         # Board aspect ratio scoring
@@ -78,68 +77,6 @@ class PlacementScorer:
 
         s.compute_total(weights=placement_weights_from_config(self.cfg))
         return s
-
-    def _score_tidiness(self) -> float:
-        """Soft tidiness: passives in a functional group sharing one orientation
-        and sitting on a straight axis. 100 = crisp rows; 100 when no passive
-        groups (neutral). This is the streamline's generalizable answer to
-        "tidy vs route": as a weighted objective term the SA co-optimizes, it
-        pulls sparse leaves crisp for free while yielding on dense leaves where
-        the routing terms dominate -- so it never regresses routability the way a
-        hard tidiness constraint/post-pass did.
-
-        Grouping is net-based (position-independent), so it's computed once and
-        memoized; only the per-position geometry is recomputed each call. Skips
-        entirely (returns neutral) when the term is unweighted, so default and
-        parent scoring pay nothing.
-        """
-        if float(self.cfg.get("psw_tidiness", 0.0)) <= 0.0:
-            return 100.0
-
-        from kicraft.autoplacer.brain.leaf_tidiness import (
-            assign_passive_groups,
-            orientation_axis,
-            parts_from_components,
-        )
-
-        comps = self.state.components
-        groups = getattr(self, "_tidiness_groups", None)
-        if groups is None:
-            groups = assign_passive_groups(parts_from_components(comps))
-            self._tidiness_groups = groups
-        if not groups:
-            return 100.0
-
-        ref_mm = max(0.5, float(self.cfg.get("tidiness_residual_ref_mm", 3.0)))
-        total_w = 0.0
-        total = 0.0
-        for g in groups:
-            members = [comps[r] for r in g.passive_refs if r in comps]
-            if len(members) < 2:
-                continue
-            hh = sum(1 for m in members if orientation_axis(m.rotation) == "H")
-            orient = 100.0 * max(hh, len(members) - hh) / len(members)
-
-            cs = [(m.body_center if m.body_center is not None else m.pos) for m in members]
-            xs = [p.x for p in cs]
-            ys = [p.y for p in cs]
-            if (max(xs) - min(xs)) >= (max(ys) - min(ys)):
-                mean = sum(ys) / len(ys)
-                resid = sum(abs(p.y - mean) for p in cs) / len(cs)
-            else:
-                mean = sum(xs) / len(xs)
-                resid = sum(abs(p.x - mean) for p in cs) / len(cs)
-            # Smooth reward (100 at 0mm, ~37 at ref, ~13 at 2*ref) -- unlike a
-            # linear clamp it keeps a gradient at every residual, so SA can
-            # always sense a pull toward a straighter row instead of going flat
-            # above ref_mm (which left alignment un-optimized while orientation,
-            # which always had a gradient, was the only thing SA improved).
-            align = 100.0 * math.exp(-resid / ref_mm)
-
-            total += (0.5 * orient + 0.5 * align) * len(members)
-            total_w += len(members)
-
-        return total / total_w if total_w else 100.0
 
     def _pin_locality_plane_nets(self) -> frozenset:
         """Poured nets (via-reachable) for pin-locality: GND + any config-poured
