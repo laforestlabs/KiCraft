@@ -380,6 +380,9 @@ DEFAULT_PLACEMENT_WEIGHTS: dict[str, float] = {
     # nothing else in the score function was pulling leaves
     # together, so SA had no signal to compact. 0.15 is on par
     # with smt_opposite_tht so compactness competes with stacking.
+    "tidiness": 0.0,  # SOFT tidiness term (orientation consensus + row alignment).
+    # 0 by default so scoring is byte-identical until a config opts in via
+    # psw_tidiness; leaf configs set a real weight (local_solver_config).
     "block_opposite_side": 0.0,  # parent-side: reward stacking
     # blocker-compatible (front-only x back-only) block pairs
     # so SMT leaves migrate onto large back-side THT footprints.
@@ -437,6 +440,11 @@ class PlacementScore:
     # compatible pair fully overlaps; 0 = none overlap. Stays at 0 for
     # leaf placement (no synthetic blocks present).
     bbox_packing: float = 100.0  # tight packing vs placed bbox; 100 when <2 comps
+    tidiness: float = 100.0  # passives in a group share orientation + a straight
+    # axis; 100 = crisp rows, 100 when no passive groups. A SOFT objective term
+    # the SA co-optimizes with routing (weight 0 by default): on sparse leaves it
+    # pulls layouts tidy for free; on dense leaves the routing terms dominate and
+    # tidiness yields gracefully -- so crisp tidiness never regresses routability.
 
     def compute_total(self, weights: Optional[dict[str, float]] = None) -> float:
         w = weights or DEFAULT_PLACEMENT_WEIGHTS

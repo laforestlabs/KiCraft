@@ -222,6 +222,46 @@ def local_solver_config(
         base_cfg.get("leaf_passive_ordering_min_anchor_clearance_mm", 1.0)
     )
 
+    # Stage-3 structured local layout (placement-streamline plan, Phase 1). Runs
+    # late in solve() (after compaction, before the final courtyard pass) and
+    # lays each anchor's passive group as a tidy row/column at a courtyard-legal
+    # pitch with uniform orientation. When on it fully owns passive tidiness, so
+    # the legacy blends (in-solver orderedness Step 8.5 + post-solve
+    # apply_leaf_passive_ordering) are disabled to avoid double-ordering.
+    # Group-as-unit placement (streamline redesign): freeze each functional
+    # group into a rigid, internally-tidy unit and let SA move anchors + free
+    # parts only — tidy by construction, routability optimized within the tidy
+    # space. Supersedes the packer-as-post-pass (which fought routing on dense
+    # leaves), so that is disabled when group-rigid is on.
+    # Both DEFAULT OFF: the routing-parity sweep showed hard-imposed tidiness
+    # (rigid groups AND the packer post-pass) regresses dense-leaf routing
+    # (RP2040 43-net MCU: classic 23 unconnected vs group-rigid 27). The
+    # generalizable fix is soft tidiness co-optimized in the scorer, not a hard
+    # constraint. Kept behind flags for A/B until soft-scoring is validated.
+    cfg["leaf_group_rigid"] = bool(base_cfg.get("leaf_group_rigid", False))
+    cfg["leaf_structured_local_layout"] = bool(
+        base_cfg.get("leaf_structured_local_layout", False)
+    )
+    # Soft tidiness: a placement-score term the SA co-optimizes with routing
+    # (orientation consensus + row alignment of each functional passive group).
+    # Subordinate to the routing terms (net_distance 0.20 + crossover 0.17) so it
+    # pulls sparse leaves crisp for free but yields on dense leaves -- the
+    # generalizable answer to tidy-vs-route, with no hard constraint or gate.
+    cfg["psw_tidiness"] = float(base_cfg.get("leaf_psw_tidiness", 0.15))
+    cfg["tidiness_residual_ref_mm"] = float(
+        base_cfg.get("tidiness_residual_ref_mm", 3.0)
+    )
+    cfg["leaf_structured_pitch_gap_mm"] = float(
+        base_cfg.get("leaf_structured_pitch_gap_mm", 0.6)
+    )
+    # Routability guard: skip a tidy row that would grow the group's signal-net
+    # wirelength by more than this fraction (dense-leaf routing regression).
+    cfg["leaf_structured_max_hpwl_increase"] = float(
+        base_cfg.get("leaf_structured_max_hpwl_increase", 0.15)
+    )
+    if cfg["leaf_structured_local_layout"]:
+        cfg["leaf_passive_ordering_enabled"] = False
+
     return cfg
 
 

@@ -110,6 +110,8 @@ class PlacementSolver:
         self.cfg = config or {}
         self.seed = seed
         self.rng = random.Random(seed)
+        # Rigid tidy groups active this solve (group-as-unit mode); empty = off.
+        self._active_rigid_groups: list = []
         self.k_attract = max(0.001, min(1.0, self.cfg.get("force_attract_k", 0.08)))
         self.k_repel = max(1.0, min(5000.0, self.cfg.get("force_repel_k", 40.0)))
         self.cooling = max(0.5, min(0.999, self.cfg.get("cooling_factor", 0.97)))
@@ -397,9 +399,41 @@ class PlacementSolver:
         # the SA phase that consumes best_comps as its input.
         _record_placed_extent(phase_t, "solve_force_loop", best_comps)
 
+        # Group-as-unit mode (placement-streamline redesign): freeze each
+        # functional group into a rigid, internally-tidy unit and let SA move
+        # ANCHORS + free parts only. Every state is tidy by construction, so the
+        # tidy/re-snap passes downstream are unnecessary and the individual-part
+        # SA (which would scatter passives and fight routing) is not used. Leaf-
+        # only; the parent path never sets the flag. Falls back to the classic
+        # SA when the leaf has no passive groups to freeze.
+        self._active_rigid_groups = []
+        if self.cfg.get("leaf_group_rigid", False):
+            from kicraft.autoplacer.brain.leaf_group_rigid import build_rigid_groups
+
+            rigid = build_rigid_groups(
+                best_comps,
+                pitch_gap_mm=float(self.cfg.get("leaf_structured_pitch_gap_mm", 0.6)),
+                grid_mm=self.grid_snap,
+            )
+            self._active_rigid_groups = rigid
+
         with _timed_phase(phase_t, "solve_sa_refine_ms", capture_comps=lambda: best_comps):
             # SA refinement: escape local minima after FD convergence
-            if self.cfg.get("sa_refine_enabled", True):
+            if self._active_rigid_groups:
+                work_state.components = best_comps
+                best_comps = self._group_rigid_sa(
+                    {r: copy.deepcopy(c) for r, c in best_comps.items()},
+                    self._active_rigid_groups,
+                    work_state,
+                    scorer,
+                    max_iters=int(self.cfg.get("sa_refine_iterations", 300)),
+                    init_temp=float(self.cfg.get("sa_refine_initial_temp", 5.0)),
+                    cooling_rate=float(self.cfg.get("sa_refine_cooling_rate", 0.995)),
+                    move_radius=float(self.cfg.get("sa_refine_move_radius_mm", 2.0)),
+                    swap_prob=float(self.cfg.get("sa_refine_swap_probability", 0.3)),
+                    rotation_prob=float(self.cfg.get("sa_refine_rotation_probability", 0.2)),
+                )
+            elif self.cfg.get("sa_refine_enabled", True):
                 self._seen_force_states.clear()
                 work_state.components = best_comps
                 best_comps = self._sa_refine(
@@ -424,9 +458,11 @@ class PlacementSolver:
                 apply_alignment_repair(best_comps, alignment_groups)
 
         with _timed_phase(phase_t, "solve_swap_opt_ms", capture_comps=lambda: best_comps):
-            # Step 7: Swap optimization — directly minimize crossovers
+            # Step 7: Swap optimization — directly minimize crossovers. Disabled
+            # under group-rigid mode: it swaps individual parts, which would tear
+            # a rigid group apart (the group is the atom now).
             comps = best_comps
-            if enable_swap:
+            if enable_swap and not self._active_rigid_groups:
                 self._seen_force_states.clear()
                 work_state.components = comps
                 best_cross = count_crossings(work_state)
@@ -487,9 +523,15 @@ class PlacementSolver:
             self._re_snap_aligned_pairs(best_comps)
 
         with _timed_phase(phase_t, "solve_orderedness_ms", capture_comps=lambda: best_comps):
-            # Step 8.5: Orderedness — align passives into neat rows/columns
+            # Step 8.5: Orderedness — align passives into neat rows/columns.
+            # Superseded by the Stage-3 structured packer (Step 15.7) when that
+            # is enabled; the two must not both run or they double-order.
             orderedness = self.cfg.get("orderedness", 0.0)
-            if orderedness > 0.01:
+            if (
+                orderedness > 0.01
+                and not self.cfg.get("leaf_structured_local_layout", False)
+                and not self._active_rigid_groups
+            ):
                 self._apply_orderedness(best_comps, orderedness)
                 # Re-snap aligned pairs after orderedness
                 self._re_snap_aligned_pairs(best_comps)
@@ -640,6 +682,60 @@ class PlacementSolver:
                     self._re_snap_aligned_pairs(best_comps)
                     self._clamp_pads_to_board(best_comps)
 
+        with _timed_phase(phase_t, "solve_structured_layout_ms", capture_comps=lambda: best_comps):
+            # Step 15.7: Structured local layout (placement-streamline Stage 3).
+            # Leaf-only. Lays each anchor's passive group as a tidy row/column at
+            # a courtyard-legal pitch with uniform orientation. Runs AFTER
+            # compaction (so the clearance passes can't blow the rows apart) and
+            # BEFORE Step 16 (so the final courtyard pass -- which finds nothing
+            # to do on already-legal rows -- still has the last word). Atomic +
+            # best-effort: commits a whole row only if every member places legally,
+            # so it never introduces a courtyard overlap or off-board part.
+            # Superseded by group-rigid mode (the groups are already tidy).
+            if self.cfg.get("leaf_structured_local_layout", False) and not (
+                self._active_rigid_groups
+            ):
+                from kicraft.autoplacer.brain.leaf_structured_layout import (
+                    apply_structured_local_layout,
+                )
+                from kicraft.autoplacer.brain.leaf_compaction import (
+                    _keep_in_rects,
+                    _resolved_keepout_rects,
+                )
+
+                structured_rects = [
+                    (tl, br)
+                    for tl, br, _owner in _resolved_keepout_rects(
+                        self.state.keepout_rects, best_comps
+                    )
+                ] + [
+                    (tl, br)
+                    for tl, br, _owner in _keep_in_rects(
+                        self.cfg.get("parent_keep_in_rects", []), best_comps
+                    )
+                ]
+                structured = apply_structured_local_layout(
+                    best_comps,
+                    board_outline=self.state.board_outline,
+                    pitch_gap_mm=float(
+                        self.cfg.get("leaf_structured_pitch_gap_mm", 0.6)
+                    ),
+                    grid_mm=self.grid_snap,
+                    pad_inset_mm=float(self.cfg.get("pad_inset_margin_mm", 0.3)),
+                    max_hpwl_increase=float(
+                        self.cfg.get("leaf_structured_max_hpwl_increase", 0.15)
+                    ),
+                    keepout_rects=structured_rects,
+                )
+                if structured.get("members_aligned"):
+                    print(
+                        f"  Structured layout: {structured['groups_placed']} row(s), "
+                        f"{structured['members_aligned']} passive(s) aligned "
+                        f"({structured['members_rotated']} rotated), "
+                        f"{structured['groups_skipped']} group(s) left as-is"
+                    )
+                    self._clamp_pads_to_board(best_comps)
+
         with _timed_phase(phase_t, "solve_courtyard_ms", capture_comps=lambda: best_comps):
             # Step 16: Final courtyard-separation legalization -- the GENUINE
             # last geometry step. Steps 13-15 (pinned restore, board clamp,
@@ -659,6 +755,18 @@ class PlacementSolver:
                         "locked/pinned parts could not be legalized (left for the "
                         "minor-overlap gate tolerance)"
                     )
+
+        # Group-rigid: the legalize/clamp tail moves individual parts, which
+        # scatters the rigid rows (orientation survives, positions drift). Re-
+        # impose the rigid layout as the genuine last step so the tidy structure
+        # the group-SA found is what ships. (A group-AWARE legalizer that moves
+        # whole groups is the proper fix and collapses the tail -- next phase;
+        # this re-sync is the bridge until then.)
+        if self._active_rigid_groups:
+            from kicraft.autoplacer.brain.leaf_group_rigid import sync_rigid_groups
+
+            sync_rigid_groups(best_comps, self._active_rigid_groups)
+            self._clamp_pads_to_board(best_comps)
 
         # Final score
         work_state.components = best_comps
@@ -2417,6 +2525,120 @@ class PlacementSolver:
         else:
             print(f"  SA refine: no improvement after {iters_run}/{max_iters} iterations")
 
+        return best_comps
+
+    def _group_rigid_sa(
+        self,
+        comps: dict,
+        rigid: list,
+        work_state,
+        scorer,
+        *,
+        max_iters: int = 300,
+        init_temp: float = 5.0,
+        cooling_rate: float = 0.995,
+        move_radius: float = 2.0,
+        swap_prob: float = 0.3,
+        rotation_prob: float = 0.2,
+    ) -> dict:
+        """Group-as-unit SA: the free variables are ANCHORS + free parts, never
+        the grouped passives. Grouped passives are rigid children that follow
+        their anchor via ``sync_rigid_groups`` — so every state scored is already
+        tidy, and SA optimizes routability *within* the tidy space (no post-pass,
+        no tidy-vs-route conflict). Mirrors ``_sa_refine`` (Metropolis, adaptive
+        break) but each move mutates a movable, re-syncs the groups, then scores;
+        a rejected move restores the movable and re-syncs.
+        """
+        import copy
+        import math
+
+        from kicraft.autoplacer.brain.leaf_group_rigid import (
+            group_child_refs,
+            sync_rigid_groups,
+        )
+
+        rng = self.rng
+        children = group_child_refs(rigid)
+        movable = [r for r, c in comps.items() if not c.locked and r not in children]
+        sync_rigid_groups(comps, rigid)
+        work_state.components = comps
+        current = scorer.score().total
+        best = current
+        best_comps = {r: copy.deepcopy(c) for r, c in comps.items()}
+        if not movable:
+            return best_comps
+
+        tl, br = work_state.board_outline
+
+        def _translate(comp, dx, dy):
+            old = Point(comp.pos.x, comp.pos.y)
+            comp.pos = Point(comp.pos.x + dx, comp.pos.y + dy)
+            _update_pad_positions(comp, old, comp.rotation)
+
+        temp = init_temp
+        no_improve = int(self.cfg.get("sa_refine_no_improve_break", 150))
+        floor = init_temp * 0.001
+        since = 0
+        accepted = improved = 0
+        iters_run = 0
+        for it in range(max_iters):
+            iters_run = it + 1
+            roll = rng.random()
+            if roll < swap_prob and len(movable) >= 2:
+                a, b = rng.sample(movable, 2)
+                affected = [a, b]
+                snap = {r: copy.deepcopy(comps[r]) for r in affected}
+                pa = Point(comps[a].pos.x, comps[a].pos.y)
+                pb = Point(comps[b].pos.x, comps[b].pos.y)
+                _translate(comps[a], pb.x - pa.x, pb.y - pa.y)
+                _translate(comps[b], pa.x - pb.x, pa.y - pb.y)
+            elif roll < swap_prob + rotation_prob:
+                r = rng.choice(movable)
+                affected = [r]
+                snap = {r: copy.deepcopy(comps[r])}
+                comp = comps[r]
+                new_rot = (comp.rotation + rng.choice([90.0, 180.0, 270.0])) % 360.0
+                rotate_component_in_place(comp, new_rot - comp.rotation)
+            else:
+                r = rng.choice(movable)
+                affected = [r]
+                snap = {r: copy.deepcopy(comps[r])}
+                comp = comps[r]
+                dx = rng.gauss(0, move_radius * 0.5)
+                dy = rng.gauss(0, move_radius * 0.5)
+                nx = max(tl.x, min(br.x, comp.pos.x + dx))
+                ny = max(tl.y, min(br.y, comp.pos.y + dy))
+                _translate(comp, nx - comp.pos.x, ny - comp.pos.y)
+
+            sync_rigid_groups(comps, rigid)
+            work_state.components = comps
+            new_score = scorer.score().total
+            delta = new_score - current
+            if delta > 0 or rng.random() < math.exp(delta / max(temp, 0.001)):
+                current = new_score
+                accepted += 1
+                if new_score > best:
+                    best = new_score
+                    best_comps = {r: copy.deepcopy(c) for r, c in comps.items()}
+                    improved += 1
+                    since = 0
+                else:
+                    since += 1
+            else:
+                for r in affected:
+                    comps[r] = snap[r]
+                sync_rigid_groups(comps, rigid)
+                since += 1
+
+            temp *= cooling_rate
+            if since >= no_improve or temp < floor:
+                break
+
+        print(
+            f"  Group-rigid SA: {improved} improvements, {accepted} accepted of "
+            f"{iters_run}/{max_iters} ({len(rigid)} rigid group(s), "
+            f"{len(movable)} movable) best {best:.1f} vs {current:.1f}"
+        )
         return best_comps
 
     def _accumulate_attraction(
