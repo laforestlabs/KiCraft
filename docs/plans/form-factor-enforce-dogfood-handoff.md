@@ -1,5 +1,16 @@
 # Handoff — turn on the standard-form-factor feature + rerun the Arduino shield brief end-to-end
 
+> **STATUS: DONE (2026-07-10).** Both halves are validated end-to-end via a no-LLM replay of
+> KC-99A9M8's committed state (reconcile → `build`, `KICRAFT_FORM_FACTOR_ENFORCE=1`): the shield
+> comes out **ERC clean (0 errors)**, **CONFORMANT 32/32 header pins at outline 68.58×53.34**, and
+> **DRC 0 shorts / 0 unconnected**, fab package exported — where the original free-placed brief
+> *failed* the build. Phase 1 (electrical ERC) needed real fixes the unit tests couldn't see
+> (design-aware rail binding, emptied-sheet pruning); Phase 2 (mechanical) landed (scaffold rotation
+> + real refs + exact-lock-survives-solver); PR3 (promote conformance gate) is wired and passing.
+> See `docs/plans/standard-form-factor-templates.md` "PR2b Half 2 / PR3" for the full breakdown. The
+> replay harness didn't need the real LLM ($0) — `build` re-emits the schematic + ERC deterministically
+> from `state.bom`, so the whole pipeline was validated for free against a frozen shield state.
+
 **Goal for this session:** flip the standard-form-factor feature ON, run the Arduino-Uno
 prototyping-shield brief from scratch (synthesis → build), and read the honest result. The
 electrical "replace & rewire" half is built and gated; this session validates it on a **real build**

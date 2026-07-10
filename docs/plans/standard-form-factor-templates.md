@@ -135,18 +135,41 @@ function to the standard nets). Datum source = **transcribed from an open-source
   Validated on KC-99A9M8's real committed state: 13 parts → 7 (regulator + 2 caps + 4 standard
   headers), state re-validates. 20 unit tests; 240 pass with the gate off.
 
-- **PR2b Half 2 mechanical — place the real headers at fixed positions [REMAINING; needs a real
-  build].** The one open coupling: the reconcile puts the headers on a normal sheet → they become
-  a **leaf** (placed as a unit), but the compose Half 1 fork *injects synthetic* connectors — so
-  turning both on would duplicate refs. Compose must instead **place the real header parts** at the
-  template positions. Cleanest candidate: make the header sheet a fixed-layout leaf pinned at the
-  parent origin (the leaf's 4 headers forced to template coords), OR make the headers parent-local
-  (component_zones extraction) and reuse Half 1's lock. Both need pipeline investigation +
-  **ERC/DRC validation on a real dogfood run** (`KICRAFT_FORM_FACTOR_ENFORCE=1` + a shield brief).
-  Until then the env-on state gives a correct shield *schematic/BOM* with a free-placed layout.
-- **PR3 gate — enforcement.** Promote-time: when a standard was requested, run `check_conformance`
-  (done — `conformance.py`) on the promoted board and fail/downgrade if non-conformant. Report-only
-  until the mechanical half lands (else it fails every still-free-placed shield).
+- **PR2b Half 2 mechanical — place the real headers at fixed positions [DONE, validated on a real
+  build].** Resolved the leaf-vs-scaffold coupling: compose now (a) resolves the scaffold up front,
+  (b) drops the leaf made entirely of the standard-header refs, (c) pops those refs out of
+  `parent_local` before the loose-connector wrap, and (d) injects ONE locked copy per header at the
+  template pos+rotation — the stamp then moves the real seed footprint (matched by ref) there, so no
+  duplicate and no synthetic footprint. Three coordinated pieces made it work end-to-end:
+  - **scaffold rotation** (`compose_scaffold._stamp_rotation_deg`): a KiCad vertical single-row
+    header advances +Y at rot 0, but the Arduino edge headers advance +X (`axis="x"`), so the stamp
+    rotation is **90°**. Without it pin-1 lands right but the row runs off the wrong axis.
+  - **real refs** (`autoplacer.py` emits `form_factor_standard.header_refs` role→BOM ref; the
+    scaffold uses them): the reconcile recycles/renumbers J-refs, so the scaffold must lock the SAME
+    refs the schematic carries, not a guessed `J1..`.
+  - **exact-lock survives the solver** (`placement_solver._pin_edge_components`): a component that
+    arrives `locked=True` is exact-placed — record its pinned target but never edge-repin/re-orient
+    it (the nearest-edge fallback was clobbering the scaffold rotation).
+  - **reconcile also prunes emptied sheets** (`reconcile._prune_emptied_sheets`): consolidating the
+    headers onto one host sheet leaves the old connector sheets empty → a degenerate leaf that aborts
+    the build; drop them (and their inter-sheet nets) from the architecture.
+  Validated by a no-LLM replay of KC-99A9M8's committed state (reconcile → `build`): **CONFORMANT
+  32/32 pins, outline 68.58×53.34, DRC 0 shorts / 0 unconnected, fab package exported.** The original
+  brief *failed* the build (structurally unroutable free headers); the feature makes it buildable.
+- **PR2b Half 2 electrical — ERC hardening [DONE, validated].** The real build surfaced ERC/synthesis
+  findings the unit tests could not: the binding was rewritten to be **design-aware**
+  (`synthesis.standard_form_factor_bom_delta` + `reconcile`): a header pin binds to a rail the design
+  ALREADY carries (alias-normalized: `+5V`≡`5V`, `+3V3`≡`3V3`), else it is no-connect — including the
+  reserved/NC pin and every unused digital/analog/AREF/RESET/IOREF/VIN pin. This fixed all four
+  findings at the source (net-merge + double-power-output on `+3V3`/`3V3`, dangling AREF/RESET/IOREF
+  labels, uncovered NC pin): the emitted schematic is now **ERC clean (0 errors), §9.13 netlist
+  faithful**.
+- **PR3 gate — enforcement [DONE].** `_check_form_factor_conformance` runs `check_conformance` on the
+  promoted board at the verify gate: when enforcement placed the board a non-conformant result **fails
+  fab** (the board can't mate); with enforcement off it is an advisory only (the board is free-placed
+  by design). Also fixed a bug in the conformance reader itself: `board_local_pads` did not apply the
+  footprint rotation to pad offsets, so a correctly-rotated (conformant) header read as
+  non-conformant.
 
 ## Open questions (for PR2b)
 - **Header ↔ role/pin binding.** How does the design's I/O map onto D0..D13/A0..A5/power — does the
