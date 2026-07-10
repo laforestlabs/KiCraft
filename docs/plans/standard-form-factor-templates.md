@@ -115,21 +115,29 @@ function to the standard nets). Datum source = **transcribed from an open-source
   wired into the investigate §8.5 audit. On KC-99A9M8's board: `NON-CONFORMANT 4/32, outline
   121.9×45.2 != 68.58×53.34`. Read-only; reports, does not place.
 
-- **PR2b — ENFORCEMENT [remaining; load-bearing].** Two coupled halves:
-  1. **Compose injection.** From a `validated` template + the `form_factor_standard` cfg block,
-     build locked connector + mounting-hole `Component`s at the fixed positions and pin the parent
-     outline to the template rect. Natural seam: the manual-layout path
-     (`compose_subcircuits.py:1335`, honors exact placements + `OutlineSpec`) — a template
-     auto-generates that fixed scaffold. `_validate_parent_geometry` already fails loud if placed
-     parts overflow the fixed outline. Gate on `template.validated` + a config flag.
-  2. **Synthesis rewire.** The LLM's free-placed headers are dropped; the design's I/O is bound to
-     the standard header nets (D0..D13/A0..A5/power). This is a wiring-stage contract keyed off the
-     template and must keep ERC happy (the schematic emitter draws the standard headers). This is
-     the deep half — it changes the schematic and interacts with ERC; best validated on a real
-     dogfood build.
+- **PR2b Half 1 — compose enforcement [DONE, committed].** `compose_scaffold.py` (`build_scaffold`
+  locked connector Components + fixed outline; `resolve_scaffold` gate) + a thin gated fork in
+  `_compose_artifacts`: pins the parent placement canvas + final outline to the template rect and
+  injects the locked connectors, so the solver auto-places everything around them and
+  `_validate_parent_geometry` rejects a design that doesn't fit. Gated on `cfg.form_factor_enforce`
+  + a validated `form_factor_standard`; dormant otherwise (existing compose tests unchanged). The
+  synthesis data layer (`scaffold.py`: `standard_header_parts` / `standard_placements` /
+  `canonical_power_bindings`) is also done + tested.
+
+- **PR2b Half 2 — synthesis rewire [REMAINING; the deep, ERC-interacting half].** A deterministic
+  reconcile (keyed off `intent.form_factor.standard`, at a stage-commit like the wiring
+  normalizers) that: (1) emits the standard headers as real `BomPart`s on an INTERFACE sheet
+  (`standard_header_parts` → `BomPart`), with refs allocated after existing J's; (2) binds each
+  header pin to its canonical net — power/ground merge into the design's existing rails by name
+  (+5V/+3V3/GND), signal pins (D0..D13/A0..A5) break out as new nets — via `NetConnection`
+  endpoints; (3) drops the LLM's redundant free headers; (4) sets `placement.form_factor_enforce`
+  so Half 1 activates. The schematic **emitter** must draw the headers and **ERC** must stay clean
+  (power pins need the right drive/PWR_FLAG treatment) — so this half must be validated on a real
+  dogfood build, not just unit tests. This is the linchpin: until it lands, Half 1 stays dormant
+  (turning the flag on without real header parts would inject phantom connectors).
 - **PR3 gate — enforcement.** Promote-time: when a standard was requested, run `check_conformance`
-  on the promoted board and fail/downgrade if non-conformant (report-only until PR2b lands, else it
-  fails every still-free-placed shield).
+  (done — `conformance.py`) on the promoted board and fail/downgrade if non-conformant. Report-only
+  until Half 2 lands (else it fails every still-free-placed shield).
 
 ## Open questions (for PR2b)
 - **Header ↔ role/pin binding.** How does the design's I/O map onto D0..D13/A0..A5/power — does the
