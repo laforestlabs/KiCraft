@@ -148,6 +148,24 @@ DEFAULT_CONFIG = {
     # flush, instead of another block edging past it and stranding the connector
     # inboard (KC-S8PC37 J1). Outboard-only, so it can't create overlaps.
     "connector_edge_block_extremity": True,
+    # Connector-bank orientation (pcb-area-compaction-plan Phase 6). A row of
+    # short single-row pin headers on an edge (16x 1x3 servo headers, an LED /
+    # sensor breakout bank) defaults to pins-PARALLEL-to-edge, which strings the
+    # board out along the edge (16x1x3 -> ~200mm) AND interleaves each header's
+    # signal/power pads on the shared-GND line, fragmenting the GND pour
+    # (KC-8A3US3). When enabled, such headers are turned so their pin axis is
+    # PERPENDICULAR to the edge: the row packs by body-width (~3x shorter edge)
+    # and every same-index pad (all the GNDs) lines up into one uninterrupted
+    # strip the pour can follow. Mouthed connectors (USB/barrel), 2-pin screw
+    # terminals, multi-row (2xN) and long single headers are left untouched.
+    "connector_perp_orientation": True,
+    # Max pad-row span (mm, pad-center to pad-center) a header may have and
+    # still be turned perpendicular. Above this a lone header would stab too
+    # deep into the board, so it keeps the along-edge orientation. 15mm ~ 1x6.
+    "connector_perp_max_len_mm": 15.0,
+    # Max off-axis pad spread (mm) still considered a single row; above this the
+    # connector is multi-row (2xN IDC) and is left along the edge.
+    "connector_perp_row_tol_mm": 1.2,
     # Mounting hole geometry. ``count`` is the target number of holes;
     # actual count is whatever the source PCB project ships. ``screw``
     # is a free-form reference (e.g. "M2.5", "M3", "#4-40") used to

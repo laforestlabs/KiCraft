@@ -2,7 +2,8 @@
 
 **Status:** Phases 0–4 IMPLEMENTED 2026-07-02 (same day as the investigation); Phase 5
 (parent packing) deferred pending fleet re-baseline, CMA-ES retune (Phase 2 item 4) still
-to be launched. Implementation summary at the bottom of this file.
+to be launched; **Phase 6 (connector-bank orientation) IMPLEMENTED 2026-07-10** (KC-8A3US3
+servo-driver investigation). Implementation summary at the bottom of this file.
 **Owner:** next implementing agent. Read the whole causal chain before touching anything —
 every mechanism below was verified against run `~/.kicraft/projects/1/554` (KC-4W7KNW) and a
 30-board fleet scan; file:line references are to `main @ d0d34e4`.
@@ -200,6 +201,67 @@ already pack leaf blocks. After the fleet re-baseline, if multi-leaf parents sti
 (`subcircuit_composer.py:2300+`, `_derive_board_outline`) — separate plan; do not start
 here.
 
+### Phase 6 — connector-bank orientation (pin axis perpendicular to edge)
+
+**Problem.** A board with a *row of identical short connectors along an edge* — the canonical
+case being KC-8A3US3 ("16-channel PCA9685 servo driver: sixteen 3-pin servo headers along
+the board edge"), but also LED strips, sensor breakouts, terminal fan-outs — is laid out with
+each `PinHeader_1x03_Vertical` oriented **pins PARALLEL to the edge** (rot 90). Two costs
+compound:
+
+1. **Board sprawl.** Each 1x3 header occupies its *long* side (~7.6 mm) along the edge, so the
+   row packs at ~12 mm pitch → a **197 × 30 mm, aspect-6.5** board for 16 channels (12.4 %
+   utilization). This is the RC1/§0 pathology again, but created by *orientation*, not canvas.
+2. **GND-pour fragmentation → not fab-ready.** Pins-parallel puts all three pads of every
+   header (signal, V+, **GND**) on ONE line at the same Y. The GND pads are then every third
+   pad, *interleaved* with the signal/V+ pads and their traces, which guillotine the B.Cu GND
+   pour into islands. KC-8A3US3 shipped rc7 `unconnected=2` on GND (J3.3/J8.3/J13.3 stranded);
+   the post-route strand repair could not bridge them (`no_clear_path`, `vias=0` — the deferred
+   walled-off C1 class, memory `kicraft-gnd-plane-strand-walled-off-breadth`). Breadth: GND is
+   the #1 live rc7 fab-blocker — 36 designs / 92 `unconnected` of 330 runs, latest 2026-07-10.
+
+**The fix (placement-time, attacks both costs at their source).** Turn each such header so its
+**pin axis is PERPENDICULAR to the edge** (pins point INTO the board). Then:
+
+- The row packs by the header's *narrow* side (~2.5 mm) → ~3× shorter edge, much smaller board.
+- Each header's three pads stack across the board width at one X, so **every same-index pad
+  lines up**: all 16 GND pads fall on ONE contiguous strip with nothing interleaved → the pour
+  runs unbroken along the edge and the GND stranding never forms. This is the placement-side
+  cure for the class that post-route repair (C1) cannot close.
+
+**Where.** `placement_solver.py:_best_rotation_for_edge` chooses the connector rotation. It
+already special-cases mouthed connectors (USB/barrel, via `opening_direction`) and otherwise
+drives the *long axis parallel to the edge* by an aspect-ratio heuristic. Add
+`_connector_wants_perp_axis(comp, cfg)`: for an eligible **short single-row pin header** it
+inverts the target so the long (pin) axis goes *perpendicular*. Framed as an XOR
+(`long_horizontal = (edge in top/bottom) != perp`) so the default (non-bank) branch stays
+**byte-identical to the legacy code** — zero regression surface for every other part.
+Fires at the **leaf solve** of each single-connector "SERVO HEADER N" leaf (the row here is
+composed from 16 separate leaves); the parent places each leaf block rigidly, so the leaf's
+baked perpendicular rotation propagates. Also fires when all headers share ONE leaf (group
+visible at leaf solve) — the rule is topology-agnostic because it is per-connector shape-based.
+
+**Eligibility gate (narrow, to avoid regressing other connectors):**
+`kind == "connector"` AND `opening_direction is None` (mouthed connectors already handled) AND
+single row of `≥ 3` collinear pads (excludes 2-pin screw terminals, whose wire cages want to
+face off-board, and 2xN IDC) AND pad-row span `≤ connector_perp_max_len_mm` (a lone 1x20 GPIO
+would stab ~48 mm into the board, so it keeps the along-edge orientation).
+
+**Config** (`autoplacer/config.py`): `connector_perp_orientation` (bool, default **True**),
+`connector_perp_max_len_mm` (default 15.0 mm ≈ 1x6), `connector_perp_row_tol_mm` (default
+1.2 mm, single-row discriminator).
+
+**Verification.** Unit: `tests/test_connector_perp_orientation.py` (perp on bottom/left,
+legacy path byte-identical when disabled/`cfg=None`, 2-pin/long/multi-row/non-connector/mouthed
+all left alone). Replay A/B on KC-8A3US3: expect the board to shrink dramatically and GND
+`unconnected 2 → 0` (rc7 → rc0). Spot-check a few connector-bearing boards (USB-C edge, a lone
+GPIO header) do not regress — mouthed and long/2-pin connectors must be untouched.
+
+**Follow-on (not done here):** optionally choose the 0-vs-180 flip so the GND (or shared
+power) pad faces the edge, putting per-header signal pins innermost (toward the driver IC) so
+signal traces never cross the shared GND strip. Consistent orientation already gives a
+contiguous GND line; the flip only decides *which* line, so it is a secondary routing polish.
+
 ## 3. Verification protocol (every phase)
 
 1. **Unit:** new tests per changed module (canvas derivation, scorer normalization
@@ -226,6 +288,7 @@ here.
 | 3 | post-SA squeeze pass + re-crop | 1-2 d | legality bugs → reuse composer primitives, heavy tests |
 | 4 | warning-level area acceptance | 0.5 d | none (warnings only) |
 | 5 | parent packing (conditional) | separate plan | — |
+| 6 | connector-bank perpendicular orientation | 0.5 d | mis-orienting non-header connectors → narrow eligibility gate + legacy-identical default branch |
 
 Do 0 → 1 → verify → 2 → verify → 3 → 4. Phase 1 alone should collapse the worst of the
 fleet (every ~200 mm-wide board is RC1 bleed-through).
@@ -292,3 +355,33 @@ explicitly Phase 5. Tests: `test_content_canvas.py`, `test_leaf_compaction.py`,
 the copied production `<stem>.kicad_pcb` untouched — measuring it "as the arm's board"
 silently compares against production. Check the arm's rc (and `[build] 3/5 promoted`)
 before measuring.
+
+### Phase 6 record (2026-07-10) — connector-bank perpendicular orientation
+
+Implemented in one pass, config-gated (`connector_perp_orientation`, default **on**):
+- `placement_solver._connector_wants_perp_axis(comp, cfg)` — eligibility (connector,
+  no opening_direction, ≥3 collinear single-row pads, pad-row span ≤
+  `connector_perp_max_len_mm` 15 mm, off-axis spread ≤ `connector_perp_row_tol_mm` 1.2 mm).
+- `placement_solver._best_rotation_for_edge(comp, edge, cfg=None)` — gained the `cfg` arg;
+  for an eligible header inverts the long-axis target to PERPENDICULAR via an XOR
+  (`long_horizontal = (edge in top/bottom) != perp`) so the **default branch is
+  byte-identical to legacy** (cfg=None → legacy). Caller `_orient_for_edge` passes `self.cfg`.
+- Config keys added to `DEFAULT_CONFIG`. Tests: `tests/test_connector_perp_orientation.py`
+  (8 cases: perp on bottom/left, legacy when off/None, 2-pin/long/multi-row/non-connector/
+  mouthed all left alone). 165 placement/connector/compose/edge tests still green.
+
+**Targeted A/B (replay --quality good, seed 0):**
+
+| board | before (pins ∥ edge) | after (pins ⊥ edge) |
+|---|---|---|
+| 595 KC-8A3US3 (16× 1×3 servo bank) | **rc7, 197×30 mm, GND unconnected=2** (3 GND islands) | **rc0 fab-ready, 118×38 mm, aspect 6.5→3.06, GND 1 cluster, unconnected=0** |
+| 558 KC-8M6DNA (lone 1×3 header) | rc0, 29 % util, aspect 1.09 | rc0 (regression check: lone header flips perpendicular, still ships) |
+
+All 16 servo headers turned to rot=180: every header's GND pad lands on ONE line
+(y=117.3, one contiguous pour cluster) with signal/V+ on inner lines — the placement-side
+cure for the walled-off GND-strand class (`kicraft-gnd-plane-strand-walled-off-breadth`,
+the #1 live rc7 blocker) that post-route repair (C1) cannot close. Blast radius (20 recent
+boards): 28/97 connectors reorient, all short 3+ pin single-row headers; USB/barrel/screw/
+2-pin/long/multi-row untouched. **Not yet done:** full corpus replay A/B + self-eval
+re-baseline (the formal Phase-6 gate); the 0-vs-180 GND-toward-edge flip (landed correctly
+here by luck of consistent orientation, not yet enforced).

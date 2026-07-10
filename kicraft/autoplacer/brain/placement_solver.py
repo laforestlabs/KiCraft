@@ -785,7 +785,46 @@ class PlacementSolver:
         return cross_score * 0.5 + access_score * 0.3 + dist_score * 0.2
 
     @staticmethod
-    def _best_rotation_for_edge(comp: Component, edge: str) -> float:
+    def _connector_wants_perp_axis(comp: Component, cfg: dict | None) -> bool:
+        """True when a linear single-row pin header should sit with its pin
+        (long) axis PERPENDICULAR to its assigned edge, instead of the default
+        long-axis-parallel-to-edge.
+
+        A bank of short headers laid pins-parallel strings the board out along
+        the edge (16x 1x3 -> ~200mm) and interleaves each header's signal/power
+        pads ON the shared-net line, fragmenting the GND pour (KC-8A3US3).
+        Turning each header so its pins point INTO the board packs the row by
+        body-width (~3x shorter edge) and lines every same-index pad (all the
+        GNDs) into one uninterrupted strip. See pcb-area-compaction-plan Phase 6.
+
+        Scope is deliberately narrow so mouthed connectors (USB/barrel: handled
+        by the opening_direction branch), 2-pin screw terminals (want the wire
+        cage facing off-board), multi-row (2xN IDC) and long single headers
+        (a lone 1x20 GPIO would stab deep into the board) are all left alone.
+        """
+        if not cfg or not cfg.get("connector_perp_orientation", True):
+            return False
+        if comp.kind != "connector" or comp.opening_direction is not None:
+            return False
+        pads = comp.pads or []
+        if len(pads) < 3:
+            return False  # 2-pin terminals/headers: leave along the edge
+        xs = [p.pos.x for p in pads]
+        ys = [p.pos.y for p in pads]
+        spread_x, spread_y = max(xs) - min(xs), max(ys) - min(ys)
+        major, minor = max(spread_x, spread_y), min(spread_x, spread_y)
+        if major < 2.0:
+            return False
+        if minor > cfg.get("connector_perp_row_tol_mm", 1.2):
+            return False  # multi-row (2xN) -> keep along the edge
+        if major > cfg.get("connector_perp_max_len_mm", 15.0):
+            return False  # long header -> would stab too deep; keep parallel
+        return True
+
+    @staticmethod
+    def _best_rotation_for_edge(
+        comp: Component, edge: str, cfg: dict | None = None
+    ) -> float:
         """Find the rotation (0/90/180/270) that orients a connector flush
         against the named edge with its opening facing outward.
 
@@ -793,8 +832,10 @@ class PlacementSolver:
         1. If the component has a known opening_direction (detected from
            body-extension-beyond-pads in local coords), compute the exact
            rotation that points the opening outward from the given edge.
-        2. Otherwise fall back to aspect-ratio heuristics (long axis
-           parallel to the edge).
+        2. Otherwise fall back to aspect-ratio heuristics. The long axis is
+           driven PARALLEL to the edge by default, but a short single-row pin
+           header (see ``_connector_wants_perp_axis``) is driven PERPENDICULAR
+           so a connector bank packs tight and its shared-net pads line up.
         """
         if comp.opening_direction is not None:
             # Direct computation: we need the opening (local-frame angle)
@@ -805,19 +846,24 @@ class PlacementSolver:
             return rot
 
         # -- Fallback: no detectable opening direction --
-        # Orient the long axis parallel to the edge.
         if not comp.pads:
             return comp.rotation
 
+        # Which way should the LONG (pin) axis point? Default = parallel to the
+        # edge; a bankable single-row header inverts to perpendicular. Framed as
+        # an XOR so the default branch stays byte-identical to the legacy code.
+        perp = PlacementSolver._connector_wants_perp_axis(comp, cfg)
+        long_horizontal = (edge in ("top", "bottom")) != perp
+
         w, h = comp.width_mm, comp.height_mm
-        if edge in ("left", "right"):
-            # Want height >= width (long axis vertical, parallel to edge).
-            if w > h * 1.1:
+        if long_horizontal:
+            # Want width >= height (long axis horizontal).
+            if h > w * 1.1:
                 return (comp.rotation + 90) % 360
             return comp.rotation
         else:
-            # top/bottom: want width >= height (long axis horizontal).
-            if h > w * 1.1:
+            # Want height >= width (long axis vertical).
+            if w > h * 1.1:
                 return (comp.rotation + 90) % 360
             return comp.rotation
 
@@ -1087,7 +1133,7 @@ class PlacementSolver:
             if "rotation" in zone_cfg:
                 new_rot = zone_cfg["rotation"]
             else:
-                new_rot = self._best_rotation_for_edge(comp, edge)
+                new_rot = self._best_rotation_for_edge(comp, edge, self.cfg)
             old_rot = comp.rotation
             if abs((new_rot - old_rot) % 360.0) < 0.001:
                 return
