@@ -125,7 +125,7 @@ PY
 
 Read off: which stage failed, the ERC errors (×100 coords), and the LAYOUT line. **Route yourself:** ERC errors / rc≤5 → **§2**. `LAYOUT … routed board EXISTS` or `NO routed parent board` → **§3**. A `stage = FAIL` the journal shows as *"parked: awaiting a clarifying answer"* is the pipeline **waiting on the user**, not a crash.
 
-**Then — regardless of the build rc, and even for a fab-ready (rc0) board — run the design-quality audits §6 (part-library provenance), §7 (BOM realness), and §8 (wheel-spin).** They surface a different, orthogonal class of defect (wrong/missing library, hallucinated or mis-chosen part, an LLM stage going in circles) that the ERC/DRC gates do **not** catch. Every candidate finding — from any section — must then pass §9 (dedup + replay) before it may appear in the §10 report.
+**Then — regardless of the build rc, and even for a fab-ready (rc0) board — run the design-quality audits §6 (part-library provenance), §7 (BOM realness), §8 (wheel-spin), and §8.5 (intent adherence — does the board match the brief?).** They surface a different, orthogonal class of defect (wrong/missing library, hallucinated or mis-chosen part, an LLM stage going in circles, or a board that is internally clean but **not what the user asked for** — the mechanical-form-factor case ERC/DRC can never see) that the ERC/DRC gates do **not** catch. Every candidate finding — from any section — must then pass §9 (dedup + replay) before it may appear in the §10 report.
 
 ## 2. Schematic deep-dive (ERC) — when the build died at/before the ERC gate
 
@@ -564,6 +564,89 @@ PY
 
 **Read it:** `high_attempts`/`recurring_error` = the stage kept failing commit-validation on the **same** error and re-prompting to exhaustion (the classic wiring whack-a-mole — e.g. an unwinnable inter-sheet contract from architecture; see the `wiring-unwinnable-intersheet-contract` memory). `bom_rounds_maxed`/`tool_loop` = BOM thrashed the part-lookup tools without converging (drives cost — see `pipeline-cost-bom-retries`). A high reasoning-char count with `recurring_error` is the strongest "stuck" signal; line-level `reasoning_repeat` is a weaker supplement (long stages aren't usually literally line-duplicated). **Many designs hitting the same stuck stage + same recurring error = a systematic prompt/validation-contract bug** (fix the stage spec or add an upstream reconcile/normalizer so the model is never handed an unwinnable task), not a per-design hiccup.
 
+## 8.5. Design-quality audit D — intent adherence (does the board match the BRIEF?)
+
+**The most important audit, and the one the ERC/DRC/BOM gates cannot do.** A board can be
+0-shorts/0-unconnected **fab-ready and still not be what the user asked for.** The other audits
+check that the board is *internally* well-formed; this one checks it against the *brief*. The
+sharpest recurring case is **mechanical form-factor intent**: a brief that names a standard
+("Arduino Uno shield", "Raspberry Pi HAT", "Feather", "Pi Zero", "mikroBUS", "M.2", or explicit
+"NN×NN mm" dimensions / "stacking headers" / "fits enclosure X") is stating a **hard mechanical
+contract** — a fixed board outline, fixed connector positions, often a fixed mounting-hole pattern.
+The pipeline today has **no field to carry any of that** (`IntentSlot.form_factor` is shape-only;
+the outline is always grown from the placed-part bbox — see `docs/plans/standard-form-factor-templates.md`),
+so it **silently free-places** and produces a mechanically non-conformant board. That is invisible
+to ERC and DRC. KC-99A9M8 ("Arduino-Uno-format prototyping shield") is the canonical case: the
+headers were free-placed (and the free column even overflowed the leaf canvas → build failure).
+
+Scan the brief for constraint signals the pipeline provably cannot honor, and confirm nothing
+downstream represents them. Reuse `<PY>` / `<RUN>`:
+
+```bash
+"<PY>" - "<RUN>" <<'PY'
+import json, re, sys
+from pathlib import Path
+run = Path(sys.argv[1])
+sf = run / ".kicraft" / "state.json"
+if not sf.is_file(): sf = next(run.rglob("state.json"), None)
+st = json.loads(sf.read_text())
+brief = (st.get("intent", {}) or {}).get("brief") or st.get("brief") or ""
+if not brief:
+    bf = run / "brief.txt"
+    brief = bf.read_text() if bf.is_file() else ""
+low = brief.lower()
+
+# Mechanical-standard / fixed-dimension signals in the brief.
+STANDARDS = ["arduino", "uno shield", "mega shield", " shield", "raspberry pi", "rpi ", " hat",
+             "feather", "featherwing", "pi zero", "mikrobus", "m.2", "pmod", "eurocard", "din rail",
+             "qwiic form", "stemma"]
+MECH = ["stacking", "stackable", "form factor", "form-factor", "mounting hole", "standoff",
+        "fits ", "enclosure", "faceplate", "front panel", "board outline", "keep within",
+        "must be exactly", "footprint of a"]
+DIM = re.findall(r'\b\d{1,3}\s?(?:\.\d+)?\s?(?:x|×|by)\s?\d{1,3}\s?(?:\.\d+)?\s?mm\b', low)
+hit_std = sorted({s.strip() for s in STANDARDS if s in low})
+hit_mech = sorted({s.strip() for s in MECH if s in low})
+
+# What did the pipeline actually capture / honor?
+ff = ((st.get("intent", {}) or {}).get("form_factor")) or st.get("form_factor") or {}
+ff_shape = (ff or {}).get("shape") if isinstance(ff, dict) else None
+ff_standard = (ff or {}).get("standard") if isinstance(ff, dict) else None  # not a field today
+# Promoted/parent board outline (real mm), if built.
+outline = None
+for pcb in list(run.rglob("*_routed.kicad_pcb")) + list((run/"generated").glob("*/*.kicad_pcb")):
+    try:
+        t = pcb.read_text()
+    except Exception:
+        continue
+    xs = [float(a) for a in re.findall(r'\(gr_line[^)]*\(start ([\-0-9.]+)', t)]
+    ys = [float(b) for b in re.findall(r'\(gr_line[^)]*\(start [\-0-9.]+ ([\-0-9.]+)', t)]
+    if xs and ys:
+        outline = (round(max(xs)-min(xs),1), round(max(ys)-min(ys),1)); break
+
+print(f"brief: {brief[:160]!r}")
+print(f"mechanical-standard signals : {hit_std or '-'}")
+print(f"mechanical-constraint signals: {hit_mech or '-'}")
+print(f"explicit dimensions in brief : {DIM or '-'}")
+print(f"captured form_factor.shape   : {ff_shape!r}   .standard: {ff_standard!r} (note: no 'standard' field exists today)")
+print(f"delivered board outline (mm) : {outline}")
+gap = (hit_std or hit_mech or DIM) and not ff_standard
+print("\nINTENT-ADHERENCE VERDICT:",
+      "GAP -- brief states a mechanical/form-factor constraint the pipeline has no field to honor;"
+      " board was free-placed/free-sized (mechanically non-conformant, invisible to ERC/DRC)."
+      if gap else
+      "no unmet mechanical-constraint signal detected (still sanity-check interfaces/part-count vs brief by eye).")
+PY
+```
+
+**Read it:** a `GAP` verdict means the brief asked for a fixed mechanical form the pipeline cannot
+represent — a **systematic prompt/data-model gap**, not a per-design miss, because *every* such
+brief hits it. Owning fix: `docs/plans/standard-form-factor-templates.md` (a form-factor registry +
+fixed-outline compose branch + a mechanical-conformance promote gate). Beyond the mechanical case,
+also eyeball the delivered BOM/architecture against the brief's **named interfaces and part
+intent** (did an "STM32 CAN node" actually get a CAN transceiver? did "four mounting holes" appear?)
+— a missing/again-and-again-wrong interface across designs is a synthesis prompt/contract gap, not
+a one-off. Report an intent-adherence gap even when the build is fab-ready (rc0).
+
 ## 9. Gate every candidate finding — is it NEW, LIVE, and REPRODUCIBLE?
 
 Findings from §2–§8 are *candidates*. Three cheap checks stand between a candidate and the report. Skipping them is how an investigation re-reports a bug fixed last week against stale runs, or proposes a band-aid for a known walled-off cluster.
@@ -605,7 +688,7 @@ GAP <n>: <one-line name>                [code | footprint-library | gate-hole | 
   prior-art: NEW | REGRESSION of <commit/memory> | KNOWN-DEFERRED <plan/memory> (+N runs since)
 ```
 
-After the gap list: a one-paragraph per-run verdict (failing stage, the specific failure, right coords — ERC ×100, DRC real-mm) and the §6–§8 audit findings **even when the build passed**. Pure per-design model output (a one-off wrong wire or part pick) goes in the appendix, not the gap list — *unless* the same model mistake recurs across designs, which makes it a prompt/validation-contract gap: the fix is the stage spec or an upstream reconcile-normalizer, and it belongs in the ranked list.
+After the gap list: a one-paragraph per-run verdict (failing stage, the specific failure, right coords — ERC ×100, DRC real-mm) and the §6–§8.5 audit findings **even when the build passed**. Pure per-design model output (a one-off wrong wire or part pick) goes in the appendix, not the gap list — *unless* the same model mistake recurs across designs, which makes it a prompt/validation-contract gap: the fix is the stage spec or an upstream reconcile-normalizer, and it belongs in the ranked list.
 
 **Root-cause lookup tables** — symptom → owning module; use these to fill each gap's `source:` field.
 
@@ -633,7 +716,7 @@ After the gap list: a one-paragraph per-run verdict (failing stage, the specific
 | leaf `leaf_pre_stamp_legality_repair` / `illegal_unrepaired_leaf_placement` | placement couldn't be legalized (overlap / keepout) before routing | code | `placement_solver` legalize + keepouts (e.g. antenna keepout) |
 | `geometry: components_outside_outline > 0` | placement put parts outside the board outline | code | compose placement clamp / board-outline sizing |
 
-**Design-quality audit findings** — from §6/§7/§8 (orthogonal to ERC/DRC; report even on a fab-ready board):
+**Design-quality audit findings** — from §6/§7/§8/§8.5 (orthogonal to ERC/DRC; report even on a fab-ready board):
 
 | Audit finding | Meaning | Bug class | Where to look / generalizable fix |
 |---|---|---|---|
@@ -644,5 +727,7 @@ After the gap list: a one-paragraph per-run verdict (failing stage, the specific
 | §7 Pass B `MPN-MISMATCH` / unrelated `cat desc` | the model chose a real but **wrong** part vs its intended role/`value` | model output | the BOM stage's part choice for that ref — per-design unless it recurs |
 | §8 `high_attempts`/`recurring_error` on a stage | stage looped commit-validation on the same error to exhaustion (whack-a-mole) | code (prompt/validation contract) if many designs | fix the stage spec / add an upstream reconcile-normalizer (`wiring-unwinnable-intersheet-contract`, `reconcile-stage-plan`) |
 | §8 `bom_rounds_maxed`/`tool_loop` | BOM thrashed the part-lookup tools without converging | code/model (cost driver) | BOM tool-loop convergence; candidate suggestions on a miss (`pipeline-cost-bom-retries`) |
+| §8.5 intent-adherence `GAP` (mechanical form factor) | brief named a standard form factor / fixed dims / stacking headers the pipeline has no field to honor; board free-placed & free-sized (mechanically non-conformant, invisible to ERC/DRC) | code (data-model + gate hole) | `docs/plans/standard-form-factor-templates.md` — form-factor registry + fixed-outline compose branch + mechanical-conformance promote gate; `intent.form_factor` is shape-only today |
+| §8.5 missing/wrong interface vs brief | delivered BOM/architecture lacks an interface the brief named (no CAN transceiver on a "CAN node", no mounting holes on "four holes") | model output; prompt/contract gap if it recurs | the owning synthesis stage's spec; add an intent-coverage check at architecture/BOM commit |
 
 **Rule of thumb:** the failure's **breadth across designs (§2a for ERC, §4 for PCB, and a recurring §6/§8 finding) is the verdict — but only live, reproducible breadth counts (§9).** Many designs → a synthesis/layout **code** bug, a **footprint-library** bug, or a **gate hole** whose single fix generalizes (name it in a GAP block). One design → that design's **model** output (appendix), unless the same mistake recurs across designs — then it's a prompt/contract gap and belongs in the ranked list. Quote the offending ref + real-mm DRC coord (or ×100 ERC pos) so the next agent can open the board/schematic straight to the spot.
