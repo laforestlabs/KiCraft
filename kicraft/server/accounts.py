@@ -294,6 +294,24 @@ class SupportReport:
     diagnostics: dict
 
 
+@dataclass
+class SupportInvestigation:
+    """One run of the /kicraft-investigate skill against a support report,
+    driven headlessly (see kicraft.server.investigate_runner). `report_md` is
+    the captured Markdown deliverable; `status` mirrors a build job's lifecycle
+    (queued -> running -> done|failed) so the admin page can show it live."""
+    id: int
+    report_id: int | None
+    board_code: str | None
+    status: str  # queued | running | done | failed
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    rc: int | None = None
+    report_md: str | None = None
+    log_path: str | None = None
+
+
 def build_fts_document(brief: str | None, state: dict | None) -> dict:
     """Flatten a project's brief + design state into the four search fields the
     FTS index stores (brief / goal / parts / blocks).
@@ -498,6 +516,28 @@ class AccountStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_support_reports_status "
                 "ON support_reports(status, id)"
+            )
+            # Headless /kicraft-investigate runs against a support report (see
+            # SupportInvestigation / investigate_runner). Kept in the DB so the
+            # admin support page can render the cached Markdown deliverable and
+            # show a run's live status without re-driving the skill.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS support_investigations ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "report_id INTEGER,"
+                "board_code TEXT,"
+                "status TEXT NOT NULL DEFAULT 'queued',"
+                "created_at TEXT NOT NULL,"
+                "started_at TEXT,"
+                "finished_at TEXT,"
+                "rc INTEGER,"
+                "report_md TEXT,"
+                "log_path TEXT,"
+                "FOREIGN KEY(report_id) REFERENCES support_reports(id))"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_support_investigations_report "
+                "ON support_investigations(report_id, id)"
             )
             # FIFO queue of deterministic builds (see BuildJob). Shared by the web
             # app and the standalone build worker, so it lives here with the rest
@@ -1346,6 +1386,86 @@ class AccountStore:
         with self._conn() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [self._row_to_support_report(r) for r in rows]
+
+    def get_support_report(self, report_id: int) -> SupportReport | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM support_reports WHERE id=?",
+                               (report_id,)).fetchone()
+        return self._row_to_support_report(row) if row else None
+
+    # ---- support investigations (headless /kicraft-investigate) ------------
+
+    @staticmethod
+    def _row_to_investigation(row: sqlite3.Row) -> SupportInvestigation:
+        return SupportInvestigation(
+            id=row["id"], report_id=row["report_id"],
+            board_code=row["board_code"], status=row["status"],
+            created_at=row["created_at"], started_at=row["started_at"],
+            finished_at=row["finished_at"], rc=row["rc"],
+            report_md=row["report_md"], log_path=row["log_path"])
+
+    def create_investigation(self, *, report_id: int | None,
+                             board_code: str | None = None,
+                             log_path: str | None = None) -> int:
+        """Queue an investigation row and return its id (status='queued')."""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO support_investigations (report_id, board_code, "
+                "status, created_at, log_path) VALUES (?, ?, 'queued', ?, ?)",
+                (report_id, board_code, _utcnow_iso(), log_path))
+            return int(cur.lastrowid)
+
+    def start_investigation(self, inv_id: int) -> bool:
+        """queued -> running (status-guarded, so a duplicate runner no-ops)."""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE support_investigations SET status='running', started_at=? "
+                "WHERE id=? AND status='queued'", (_utcnow_iso(), inv_id))
+            return cur.rowcount == 1
+
+    def finish_investigation(self, inv_id: int, *, rc: int | None,
+                             report_md: str | None,
+                             status: str = "done") -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE support_investigations SET status=?, rc=?, report_md=?, "
+                "finished_at=? WHERE id=?",
+                (status, rc, report_md, _utcnow_iso(), inv_id))
+
+    def get_investigation(self, inv_id: int) -> SupportInvestigation | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM support_investigations WHERE id=?",
+                               (inv_id,)).fetchone()
+        return self._row_to_investigation(row) if row else None
+
+    def active_investigation_exists(self, report_id: int) -> bool:
+        """True if an investigation for this report is queued or running (the
+        de-dup guard, so a double click or a manual+auto race files one run)."""
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT 1 FROM support_investigations WHERE report_id=? AND "
+                "status IN ('queued','running') LIMIT 1", (report_id,)
+            ).fetchone() is not None
+
+    def latest_investigation(self, report_id: int) -> SupportInvestigation | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM support_investigations WHERE report_id=? "
+                "ORDER BY id DESC LIMIT 1", (report_id,)).fetchone()
+        return self._row_to_investigation(row) if row else None
+
+    def latest_investigations_by_report(self) -> dict[int, SupportInvestigation]:
+        """Newest investigation per report_id, in one query (the support page
+        maps every listed report to its latest run without N round-trips)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM support_investigations ORDER BY id DESC").fetchall()
+        out: dict[int, SupportInvestigation] = {}
+        for r in rows:
+            rid = r["report_id"]
+            if rid is not None and rid not in out:
+                out[rid] = self._row_to_investigation(r)
+        return out
 
     # ---- public browser: visibility, metrics, likes, clone ----------------
 

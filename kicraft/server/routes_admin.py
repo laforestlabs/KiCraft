@@ -297,6 +297,9 @@ def _admin_header(active: str) -> None:
             ui.button("Security", icon="security",
                       on_click=lambda: ui.navigate.to("/admin/security")) \
                 .props("flat dense no-caps color=white").classes("text-xs")
+            ui.button("Support", icon="support_agent",
+                      on_click=lambda: ui.navigate.to("/admin/support")) \
+                .props("flat dense no-caps color=white").classes("text-xs")
             ui.button("Back to workspace", icon="arrow_back",
                       on_click=lambda: ui.navigate.to("/")) \
                 .props("flat dense no-caps color=white").classes("text-xs")
@@ -689,6 +692,289 @@ def admin_tidiness_ab_view_page(run: str = ""):
             'var(--kc-border);border-radius:8px;background:#fff"></iframe>',
             sanitize=False) \
             .classes("w-full")
+
+
+# --------------------------------------------------------------------------- #
+# Admin: support -- failed boards, user-reported highlighting, headless
+# /kicraft-investigate. Every failed run auto-files a support_reports row; the
+# ones a user actually reported (Support button, or feedback on a failure) are
+# highlighted. Investigations run via kicraft.server.investigate_runner.
+# --------------------------------------------------------------------------- #
+def _is_user_reported(r) -> bool:
+    """A report a human actually filed: the manual Support button (kind='user')
+    or freeform feedback typed into the failure dialog (a message attached to an
+    otherwise silent auto-filed row)."""
+    return r.kind == "user" or bool((r.message or "").strip())
+
+
+@ui.page("/admin/support")
+def admin_support_page():
+    """Admin: triage failed boards. Lists every support report newest-first,
+    highlights the user-reported ones, and runs /kicraft-investigate headlessly
+    (on-demand, or auto on new user reports per the page toggle)."""
+    user, redirect = _require_admin()
+    if redirect is not None:
+        return redirect
+    ui.dark_mode().enable()
+    ui.query("body").style("background:var(--kc-bg)")
+    _admin_header("support")
+
+    store = _store()
+
+    def guard() -> bool:
+        """Defense in depth: never trust the page-load gate for a mutation."""
+        if not is_admin(_current_user()):
+            ui.notify("Admin access required.", color="warning")
+            return False
+        return True
+
+    detail_dialog = ui.dialog()
+    report_dialog = ui.dialog()
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
+        ui.label("Support").classes("text-2xl font-bold text-white")
+        ui.label("Every failed board files a report automatically; the ones a "
+                 "user actually reported are highlighted. Run the investigate "
+                 "skill on any report for a ranked pipeline-gap analysis.") \
+            .classes("text-sm").style("color:#94a3b8")
+
+        with ui.row().classes("items-center gap-3"):
+            auto = ui.switch(
+                "Auto-investigate new user reports",
+                value=(store.get_setting("support.auto_investigate", "1") == "1"))
+
+            def on_toggle(e) -> None:
+                if not guard():
+                    auto.value = (store.get_setting(
+                        "support.auto_investigate", "1") == "1")
+                    return
+                store.set_setting("support.auto_investigate",
+                                  "1" if e.value else "0")
+                ui.notify("Auto-investigate " + ("on" if e.value else "off"),
+                          color="positive")
+            auto.on_value_change(on_toggle)
+            ui.label("A user report launches a headless /kicraft-investigate "
+                     "run — each is a real Claude Code session.") \
+                .classes("text-xs").style("color:#64748b")
+
+        ui.separator().style("background:var(--kc-border);margin-top:4px")
+
+        state = {"filter": "all"}   # all | user | new | reviewed
+        cards_box = ui.row().classes("w-full flex-wrap gap-3")
+        filter_box = ui.row().classes("items-center gap-2")
+        list_box = ui.column().classes("w-full gap-0")
+
+        # ---- dialogs ----------------------------------------------------------
+        def show_details(r) -> None:
+            d = r.diagnostics or {}
+            detail_dialog.clear()
+            with detail_dialog, ui.card().classes("w-[820px] max-w-[96vw] gap-2") \
+                    .style("background:var(--kc-surface);"
+                           "border:1px solid var(--kc-border-strong)"):
+                title = f"Report #{r.id}" + (f" · {r.board_code}"
+                                             if r.board_code else "")
+                ui.label(title).classes("text-lg font-bold text-white")
+                ui.label(f"{r.kind} · {r.status} · {r.created_at[:19]}") \
+                    .classes("text-xs").style("color:#94a3b8")
+                if r.message:
+                    ui.label("User message").classes("text-xs") \
+                        .style("color:#64748b")
+                    ui.label(r.message).classes("text-sm whitespace-pre-wrap") \
+                        .style("color:#e2e8f0")
+                if d.get("brief"):
+                    ui.label("Brief").classes("text-xs").style("color:#64748b")
+                    ui.label(str(d["brief"])) \
+                        .classes("text-sm whitespace-pre-wrap") \
+                        .style("color:#cbd5e1;max-height:120px;overflow:auto")
+                facts = [f"{k}: {d[k]}" for k in
+                         ("run_status", "stages_done", "spend_usd", "app_version")
+                         if d.get(k) is not None]
+                if facts:
+                    ui.label(" · ".join(facts)).classes("text-xs font-mono") \
+                        .style("color:#94a3b8")
+
+                def block(label: str, items) -> None:
+                    if not items:
+                        return
+                    with ui.expansion(f"{label} ({len(items)})") \
+                            .classes("w-full").style("background:var(--kc-bg);"
+                                                     "border:1px solid var(--kc-border)"):
+                        ui.label("\n".join(str(x) for x in items)) \
+                            .classes("text-xs font-mono whitespace-pre-wrap") \
+                            .style("color:#94a3b8;max-height:260px;overflow:auto")
+                block("Build log tail", d.get("build_log_tail") or [])
+                block("ERC errors", d.get("erc_errors") or [])
+                block("Failed checks", d.get("failed_checks") or [])
+                with ui.row().classes("justify-end w-full"):
+                    ui.button("Close", on_click=detail_dialog.close) \
+                        .props("flat color=white")
+            detail_dialog.open()
+
+        def show_report(inv) -> None:
+            report_dialog.clear()
+            with report_dialog, ui.card().classes("w-[900px] max-w-[97vw] gap-2") \
+                    .style("background:var(--kc-surface);"
+                           "border:1px solid var(--kc-border-strong)"):
+                head = f"Investigation #{inv.id} · {inv.status}"
+                if inv.rc is not None:
+                    head += f" · rc={inv.rc}"
+                ui.label(head).classes("text-lg font-bold text-white")
+                if inv.report_md:
+                    with ui.element("div").classes("w-full") \
+                            .style("max-height:70vh;overflow:auto"):
+                        ui.markdown(inv.report_md)
+                else:
+                    ui.label("No report captured yet.").classes("text-sm") \
+                        .style("color:#94a3b8")
+                with ui.row().classes("justify-end w-full"):
+                    ui.button("Close", on_click=report_dialog.close) \
+                        .props("flat color=white")
+            report_dialog.open()
+
+        # ---- mutations --------------------------------------------------------
+        def do_investigate(r) -> None:
+            if not guard():
+                return
+            from . import investigate_runner
+            log_dir = store.projects_dir.parent / "support_investigations"
+            inv_id = investigate_runner.enqueue_investigation(
+                store, r, log_dir=log_dir)
+            if inv_id is None:
+                ui.notify("Nothing locatable to investigate, or one is already "
+                          "running for this report.", color="warning")
+            else:
+                ui.notify(f"Investigation #{inv_id} started.", color="positive")
+            render()
+
+        def mark_reviewed(r) -> None:
+            if not guard():
+                return
+            store.set_support_report_status(r.id, "reviewed")
+            ui.notify(f"Report #{r.id} marked reviewed.", color="positive")
+            render()
+
+        # ---- render -----------------------------------------------------------
+        def stat(label: str, value: int) -> None:
+            with ui.card().classes("gap-0 items-start").style(
+                    "background:var(--kc-surface);border:1px solid var(--kc-border);"
+                    "min-width:150px"):
+                ui.label(str(value)).classes("text-2xl font-bold") \
+                    .style("color:#e2e8f0")
+                ui.label(label).classes("text-xs").style("color:#94a3b8")
+
+        def filter_chip(key: str, label: str) -> None:
+            active = state["filter"] == key
+            btn = ui.button(label, on_click=lambda _e=None, k=key: set_filter(k)) \
+                .props("dense no-caps " + ("unelevated" if active else "flat")) \
+                .classes("text-xs")
+            btn.style("color:#0b1220;background:#60a5fa" if active
+                      else "color:#94a3b8")
+
+        def set_filter(key: str) -> None:
+            state["filter"] = key
+            render()
+
+        def render_row(r, inv) -> None:
+            user_reported = _is_user_reported(r)
+            base = ("w-full items-center gap-2 text-xs")
+            style = "border-top:1px solid var(--kc-border);padding:6px 4px"
+            if user_reported:
+                style += ";border-left:3px solid #fbbf24;background:rgba(251,191,36,0.06)"
+            with ui.row().classes(base).style(style):
+                ui.label(str(r.id)).style("width:44px;color:#64748b")
+                ui.label(r.created_at[:19]).classes("font-mono") \
+                    .style("width:140px;color:#94a3b8")
+                ui.label(r.board_code or "—").classes("font-mono") \
+                    .style("width:92px;color:#e2e8f0")
+                reporter = "—"
+                if r.user_id:
+                    u = store.get_user(r.user_id)
+                    reporter = (u.email if u else f"#{r.user_id}")
+                ui.label(reporter).style("width:170px;color:#cbd5e1;"
+                                         "overflow:hidden;text-overflow:ellipsis")
+                if user_reported:
+                    ui.label("user").classes("font-bold").style(
+                        "width:56px;color:#fbbf24")
+                else:
+                    ui.label(r.kind).style("width:56px;color:#64748b")
+                ui.label(r.status).style(
+                    "width:64px;color:" + ("#4ade80" if r.status == "reviewed"
+                                           else "#60a5fa"))
+                ui.label((r.message or "").replace("\n", " ")[:70] or "—") \
+                    .classes("flex-1").style("color:#94a3b8;overflow:hidden;"
+                                             "text-overflow:ellipsis")
+                # investigation status + actions
+                if inv and inv.status in ("queued", "running"):
+                    ui.spinner(size="sm").style("color:#fbbf24")
+                    ui.label("investigating…").style("color:#fbbf24")
+                else:
+                    lbl = "Re-investigate" if inv else "Investigate"
+                    ui.button(lbl, icon="biotech",
+                              on_click=lambda _e=None, rr=r: do_investigate(rr)) \
+                        .props("flat dense no-caps color=white").classes("text-xs")
+                if inv and inv.status == "failed":
+                    ui.icon("error").style("color:#f87171")
+                if inv and inv.report_md:
+                    ui.button("Report", icon="description",
+                              on_click=lambda _e=None, ii=inv: show_report(ii)) \
+                        .props("flat dense no-caps color=white").classes("text-xs")
+                ui.button("Details", icon="info",
+                          on_click=lambda _e=None, rr=r: show_details(rr)) \
+                    .props("flat dense no-caps color=white").classes("text-xs")
+                if r.status != "reviewed":
+                    ui.button("Reviewed", icon="done",
+                              on_click=lambda _e=None, rr=r: mark_reviewed(rr)) \
+                        .props("flat dense no-caps color=white").classes("text-xs")
+
+        def render() -> None:
+            reports = store.list_support_reports(status=None, limit=300)
+            inv_by = store.latest_investigations_by_report()
+            cards_box.clear()
+            with cards_box:
+                stat("Failed boards", len(reports))
+                stat("User-reported", sum(1 for r in reports
+                                          if _is_user_reported(r)))
+                stat("Untriaged", sum(1 for r in reports if r.status == "new"))
+                stat("Investigated", sum(1 for r in reports if r.id in inv_by))
+            filter_box.clear()
+            with filter_box:
+                filter_chip("all", "All")
+                filter_chip("user", "User-reported")
+                filter_chip("new", "Untriaged")
+                filter_chip("reviewed", "Reviewed")
+
+            f = state["filter"]
+
+            def keep(r) -> bool:
+                if f == "user":
+                    return _is_user_reported(r)
+                if f == "new":
+                    return r.status == "new"
+                if f == "reviewed":
+                    return r.status == "reviewed"
+                return True
+            rows = [r for r in reports if keep(r)]
+            list_box.clear()
+            with list_box:
+                if not rows:
+                    ui.label("No reports match this filter.") \
+                        .classes("text-xs").style("color:#64748b;padding:8px 4px")
+                    return
+                with ui.row().classes("w-full items-center gap-2 text-xs") \
+                        .style("padding:4px 4px;color:#64748b"):
+                    ui.label("id").style("width:44px")
+                    ui.label("created").style("width:140px")
+                    ui.label("board").style("width:92px")
+                    ui.label("reporter").style("width:170px")
+                    ui.label("kind").style("width:56px")
+                    ui.label("status").style("width:64px")
+                    ui.label("message").classes("flex-1")
+                    ui.label("actions")
+                for r in rows:
+                    render_row(r, inv_by.get(r.id))
+
+        ui.timer(10.0, render)   # flip running investigations to done live
+        render()
 
 
 # --------------------------------------------------------------------------- #

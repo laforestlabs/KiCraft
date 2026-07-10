@@ -176,3 +176,120 @@ async def test_failed_run_auto_opens_dialog_and_attaches_feedback(harness):
     assert reports[0].id == rid
     assert reports[0].kind == "error_auto"
     assert reports[0].message == "I only changed the LED color"
+
+
+# ---- admin support page: investigations + highlighting ----------------------
+
+from kicraft.server import investigate_runner as ir  # noqa: E402
+from kicraft.server.accounts import SupportReport  # noqa: E402
+from kicraft.server.routes_admin import _is_user_reported  # noqa: E402
+
+
+def _user_report(store, *, board_code="KC-ABC234", message="it broke",
+                 project_id=None):
+    user = store.create_user("rep@example.com", "hunter2hunter2")
+    return store.create_support_report(
+        user_id=user.id, project_id=project_id, board_code=board_code,
+        kind="user", message=message)
+
+
+def _mk_report(kind, message):
+    return SupportReport(id=1, created_at="", user_id=None, project_id=None,
+                         board_code=None, kind=kind, status="new",
+                         message=message, diagnostics={})
+
+
+def test_is_user_reported_highlight_rule():
+    assert _is_user_reported(_mk_report("user", None)) is True
+    assert _is_user_reported(_mk_report("error_auto", "I changed the LED")) is True
+    assert _is_user_reported(_mk_report("error_auto", "   ")) is False
+    assert _is_user_reported(_mk_report("error_auto", None)) is False
+
+
+def test_auto_investigate_setting_defaults_on(store):
+    assert store.get_setting("support.auto_investigate", "1") == "1"
+    store.set_setting("support.auto_investigate", "0")
+    assert store.get_setting("support.auto_investigate", "1") == "0"
+
+
+def test_investigation_lifecycle(store):
+    rid = _user_report(store)
+    inv = store.create_investigation(report_id=rid, board_code="KC-ABC234")
+    assert store.get_investigation(inv).status == "queued"
+    assert store.active_investigation_exists(rid) is True
+
+    assert store.start_investigation(inv) is True
+    assert store.start_investigation(inv) is False   # guarded: already running
+    assert store.active_investigation_exists(rid) is True  # running still active
+
+    store.finish_investigation(inv, rc=0, report_md="# report", status="done")
+    got = store.latest_investigation(rid)
+    assert got.status == "done" and got.rc == 0 and got.report_md == "# report"
+    assert store.active_investigation_exists(rid) is False  # terminal
+    assert store.latest_investigations_by_report()[rid].id == inv
+
+
+def test_enqueue_dedups_and_needs_a_locatable_target(store, tmp_path):
+    calls = []
+    rec = lambda s, inv_id, target: calls.append((inv_id, target))  # noqa: E731
+
+    rid = _user_report(store, board_code="KC-DEF345")
+    rep = store.get_support_report(rid)
+    assert ir._resolve_target(store, rep) == "KC-DEF345"
+
+    inv_id = ir.enqueue_investigation(store, rep, log_dir=tmp_path / "logs",
+                                      runner=rec)
+    assert inv_id is not None
+    # A row is queued now, so a second enqueue (double click / manual+auto) no-ops
+    assert ir.enqueue_investigation(store, rep, runner=rec) is None
+
+    # A report with neither a board code nor a locatable project is un-investigable
+    rid2 = store.create_support_report(kind="user", message="no board")
+    rep2 = store.get_support_report(rid2)
+    assert ir._resolve_target(store, rep2) is None
+    assert ir.enqueue_investigation(store, rep2, runner=rec) is None
+
+
+def test_run_investigation_stores_report_and_status(store, monkeypatch):
+    rid = _user_report(store, board_code="KC-GHI456")
+    monkeypatch.setattr(ir, "_run_claude",
+                        lambda s, i, t: (0, "# Investigation\nlooks fine"))
+    inv = store.create_investigation(report_id=rid, board_code="KC-GHI456")
+    ir.run_investigation(store, inv, "KC-GHI456")
+    got = store.get_investigation(inv)
+    assert got.status == "done" and got.rc == 0
+    assert "Investigation" in got.report_md
+
+    monkeypatch.setattr(ir, "_run_claude", lambda s, i, t: (2, "route failed"))
+    inv2 = store.create_investigation(report_id=rid, board_code="KC-GHI456")
+    ir.run_investigation(store, inv2, "KC-GHI456")
+    assert store.get_investigation(inv2).status == "failed"
+
+    def boom(*_a):
+        raise RuntimeError("subprocess exploded")
+    monkeypatch.setattr(ir, "_run_claude", boom)
+    inv3 = store.create_investigation(report_id=rid, board_code="KC-GHI456")
+    ir.run_investigation(store, inv3, "KC-GHI456")  # crash must finalize the row
+    assert store.get_investigation(inv3).status == "failed"
+
+
+def test_run_claude_reports_missing_binary(store, monkeypatch):
+    monkeypatch.setattr(ir, "_claude_bin", lambda: None)
+    rid = _user_report(store, board_code="KC-JKL567")
+    inv = store.create_investigation(report_id=rid, board_code="KC-JKL567")
+    rc, out = ir._run_claude(store, inv, "KC-JKL567")
+    assert rc is None and "claude" in out.lower()
+
+
+def test_auto_investigate_respects_toggle(swapped_store, monkeypatch):
+    calls = []
+    monkeypatch.setattr(ir, "enqueue_investigation",
+                        lambda store, report, **kw: calls.append(report.id))
+    rid = _user_report(swapped_store, board_code="KC-MNO678")
+
+    web._auto_investigate_if_enabled(rid)          # default: on
+    assert calls == [rid]
+
+    swapped_store.set_setting("support.auto_investigate", "0")
+    web._auto_investigate_if_enabled(rid)          # off: no new enqueue
+    assert calls == [rid]
