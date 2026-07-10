@@ -142,6 +142,65 @@ def tight_leaf_geometry_bounds(
     }
 
 
+def grow_leaf_outline_to_contain_placement(
+    extraction: ExtractedSubcircuitBoard,
+    solved_components: dict[str, Component],
+    cfg: dict[str, Any],
+) -> bool:
+    """Grow (never shrink) the leaf outline so every component's physical
+    extent plus an edge margin falls inside it. Returns True if the outline
+    was enlarged, False if the placement already fit.
+
+    A placement that is internally legal (no overlapping copper) but whose pads
+    spill past the content-sized canvas is a *canvas-too-small* problem, not a
+    bad placement -- e.g. a column of stacked THT headers taller than the
+    roughly-square content canvas (``derive_content_canvas`` sizes by summed
+    component area, so a placement that the connectivity-first solver spreads
+    into a tall column overflows it; see KC-99A9M8, an Arduino-shield header
+    sheet). Growing the outline to bound the placement lets the leaf route
+    instead of failing the whole build for it.
+
+    The outline is mutated in place (components are NOT moved): the routed leaf
+    is re-based to (0,0) in ``solve_subcircuits.round_to_layout`` and compose
+    re-reads the outline from the on-disk routed board, so a grown (even
+    negative-origin) outline flows through correctly.
+    """
+    bounds = tight_leaf_geometry_bounds(extraction, solved_components, {})
+    # Board-edge margin: keep copper clear of the Edge.Cuts. Comfortably exceeds
+    # the legality out-of-board inset (``pad_inset_margin_mm``, ~0.3 mm) that
+    # flagged the pads, and ``tight_leaf_geometry_bounds`` already measures the
+    # pad-copper/courtyard extent (beyond the pad centre the check tests), so a
+    # grown outline re-checks clean.
+    margin = max(2.0, float(cfg.get("leaf_reframe_edge_margin_mm", 2.0)))
+    cur_tl, cur_br = extraction.local_state.board_outline
+    new_tl = Point(
+        min(cur_tl.x, bounds["min_x"] - margin),
+        min(cur_tl.y, bounds["min_y"] - margin),
+    )
+    new_br = Point(
+        max(cur_br.x, bounds["max_x"] + margin),
+        max(cur_br.y, bounds["max_y"] + margin),
+    )
+    if (
+        new_tl.x == cur_tl.x
+        and new_tl.y == cur_tl.y
+        and new_br.x == cur_br.x
+        and new_br.y == cur_br.y
+    ):
+        return False
+    extraction.local_state.board_outline = (new_tl, new_br)
+    if extraction.envelope is not None:
+        extraction.envelope.top_left = new_tl
+        extraction.envelope.bottom_right = new_br
+        extraction.envelope.width_mm = new_br.x - new_tl.x
+        extraction.envelope.height_mm = new_br.y - new_tl.y
+    extraction.notes = list(extraction.notes) + [
+        "reframed_outline_to_placement="
+        f"{new_br.x - new_tl.x:.1f}x{new_br.y - new_tl.y:.1f}mm"
+    ]
+    return True
+
+
 # ------------------------------------------------------------------
 # Reduced extraction builder
 # ------------------------------------------------------------------

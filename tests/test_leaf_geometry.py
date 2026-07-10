@@ -12,7 +12,11 @@ from __future__ import annotations
 
 import pytest
 
-from kicraft.autoplacer.brain.leaf_geometry import tight_leaf_geometry_bounds
+from kicraft.autoplacer.brain.leaf_geometry import (
+    grow_leaf_outline_to_contain_placement,
+    repair_leaf_placement_legality,
+    tight_leaf_geometry_bounds,
+)
 from kicraft.autoplacer.brain.subcircuit_extractor import (
     ExtractedSubcircuitBoard,
     NetPartition,
@@ -218,3 +222,83 @@ class TestTightBoundsPhysicalExtent:
         assert bounds["max_x"] == pytest.approx(11.5)
         # Pad copper extends past courtyard.left (9.2) to 8.5
         assert bounds["min_x"] == pytest.approx(8.5)
+
+
+def _make_stacked_header(ref: str, cx: float, cy: float) -> Component:
+    """A 1x08-style THT header: 8 pads in a ~17.5 mm vertical line, locked.
+
+    Modeled on the Arduino-shield header sheet in KC-99A9M8: identical headers
+    the connectivity-first solver stacks into a column taller than the content
+    canvas.
+    """
+    pads = [
+        _make_pad(ref, str(i + 1), cx, cy - 8.75 + i * 2.5, f"{ref}_N{i}",
+                  size_mm=Point(1.5, 1.5))
+        for i in range(8)
+    ]
+    return Component(
+        ref=ref,
+        value="Conn_01x08",
+        pos=Point(cx, cy),
+        rotation=0.0,
+        layer=Layer.FRONT,
+        width_mm=2.5,
+        height_mm=19.0,
+        pads=pads,
+        locked=True,
+        kind="connector",
+    )
+
+
+class TestReframeOutlineToPlacement:
+    """A legal-but-oversized placement (no overlaps, pads spill off one edge)
+    is recovered by growing the leaf outline to contain it, instead of failing
+    the whole build. Reproduces KC-99A9M8's canvas-overflow failure mode."""
+
+    def _stacked_over_canvas(self) -> tuple[ExtractedSubcircuitBoard, dict]:
+        # Canvas 50x50; three headers stacked at 30 mm pitch span y ~6..84,
+        # so two spill past the bottom edge -- but nothing overlaps (30 mm
+        # apart, each ~19 mm tall).
+        components = {
+            "J1": _make_stacked_header("J1", 25.0, 15.0),
+            "J2": _make_stacked_header("J2", 25.0, 45.0),
+            "J3": _make_stacked_header("J3", 25.0, 75.0),
+        }
+        extraction = _make_extraction(components)
+        return extraction, components
+
+    def test_bounds_exceed_canvas_with_no_overlap(self):
+        extraction, components = self._stacked_over_canvas()
+        _, repair = repair_leaf_placement_legality(extraction, components, {})
+        diag = repair.get("diagnostics", {})
+        assert repair.get("resolved") is False
+        assert diag.get("overlap_count", 0) == 0        # pure canvas overflow
+        assert diag.get("pad_outside_count", 0) > 0
+
+    def test_grow_enlarges_outline_to_contain_placement(self):
+        extraction, components = self._stacked_over_canvas()
+        grew = grow_leaf_outline_to_contain_placement(extraction, components, {})
+        assert grew is True
+        tl, br = extraction.local_state.board_outline
+        # Bottom header's lowest pad sits near y=83.75; the grown outline must
+        # clear it (plus the >=2 mm edge margin).
+        assert br.y >= 85.0
+        # Grow never shrinks the axes that already fit.
+        assert tl.x <= 0.0 and tl.y <= 0.0
+
+    def test_reframe_then_relegalize_resolves(self):
+        extraction, components = self._stacked_over_canvas()
+        _, repair = repair_leaf_placement_legality(extraction, components, {})
+        assert repair.get("resolved") is False
+        assert grow_leaf_outline_to_contain_placement(extraction, components, {})
+        _, repair2 = repair_leaf_placement_legality(extraction, components, {})
+        assert repair2.get("resolved") is True
+        assert repair2.get("diagnostics", {}).get("pad_outside_count", 0) == 0
+
+    def test_no_grow_when_placement_already_fits(self):
+        # A single header well inside the canvas: nothing to reframe.
+        components = {"J1": _make_stacked_header("J1", 25.0, 25.0)}
+        extraction = _make_extraction(components)
+        before = extraction.local_state.board_outline
+        assert grow_leaf_outline_to_contain_placement(extraction, components, {}) is False
+        assert extraction.local_state.board_outline == before

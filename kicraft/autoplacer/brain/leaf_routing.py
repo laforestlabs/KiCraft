@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from kicraft.autoplacer.brain.array_placement import leaf_is_fully_array
-from kicraft.autoplacer.brain.leaf_geometry import repair_leaf_placement_legality
+from kicraft.autoplacer.brain.leaf_geometry import (
+    grow_leaf_outline_to_contain_placement,
+    repair_leaf_placement_legality,
+)
 from kicraft.autoplacer.brain.subcircuit_artifacts import resolve_artifact_paths
 from kicraft.autoplacer.brain.subcircuit_extractor import ExtractedSubcircuitBoard
 from kicraft.autoplacer.brain.subcircuit_render_diagnostics import (
@@ -292,6 +295,35 @@ def route_local_subcircuit(
     route_timing["legality_repair_s"] = round(
         max(0.0, time.monotonic() - legality_start), 3
     )
+
+    # Reframe recovery: a placement that is internally legal (no overlapping
+    # copper) but whose pads spill past the content-sized canvas is a
+    # canvas-too-small problem, not a bad placement -- e.g. a column of stacked
+    # THT headers taller than the roughly-square content canvas (KC-99A9M8, an
+    # Arduino-shield header sheet). Grow the leaf outline to bound the placement
+    # and re-legalize rather than failing the whole build over it. Only kicks in
+    # for a *pure* canvas overflow (zero overlaps, pads outside only): a real
+    # overlap still fails, unchanged.
+    if not legality_repair.get("resolved", False):
+        _diag = legality_repair.get("diagnostics", {}) or {}
+        _pure_canvas_overflow = (
+            int(_diag.get("overlap_count", 0) or 0) == 0
+            and int(_diag.get("pad_outside_count", 0) or 0) > 0
+        )
+        if _pure_canvas_overflow and grow_leaf_outline_to_contain_placement(
+            extraction, repaired_components, cfg
+        ):
+            repaired_components, legality_repair = repair_leaf_placement_legality(
+                extraction, solved_components, cfg
+            )
+            if legality_repair.get("resolved", False):
+                print(
+                    "  Leaf canvas reframed to contain a legal-but-oversized "
+                    "placement -> outline "
+                    f"{extraction.local_state.board_width:.1f}x"
+                    f"{extraction.local_state.board_height:.1f}mm "
+                    f"(was overflowing by {_diag.get('pad_outside_count')} pad(s))"
+                )
 
     source_pcb = Path(cfg.get("subcircuit_route_source_pcb", cfg.get("pcb_path", "")))
     if not source_pcb.exists():
