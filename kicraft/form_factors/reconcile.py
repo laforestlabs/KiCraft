@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import os
 
+from kicraft.design.models import is_power_or_ground_name
+
 from . import get_template
 from .synthesis import standard_form_factor_bom_delta
 
@@ -128,20 +130,61 @@ def reconcile_standard_form_factor(state) -> list[str]:
             f"{sorted(drop_refs)} (pruned {pruned} endpoint(s))"
         )
 
-    # 4. Add the standard headers as real parts + power binding + signal NC.
+    # 4. Add the standard headers as real parts, binding each pin onto a rail
+    #    the design ALREADY carries (else no-connect). The design's rails are its
+    #    power/ground nets remaining after the drop above (global by name, so the
+    #    header binds cross-sheet safely by re-using the design's own net name --
+    #    which is what stops KiCad merging a duplicate +3V3/3V3 rail and colliding
+    #    the regulator's driver with the emitter's PWR_FLAG).
+    design_rails = frozenset(
+        c.net_name
+        for c in bom.connections
+        if c.endpoints and is_power_or_ground_name(c.net_name)
+    )
     existing = {p.ref for p in bom.parts}
-    parts, power_conns, signal_ncs = standard_form_factor_bom_delta(
-        template, existing, sheet=host_sheet
+    parts, rail_conns, noconnects = standard_form_factor_bom_delta(
+        template, existing, sheet=host_sheet, design_rails=design_rails
     )
     bom.parts.extend(parts)
-    bom.connections.extend(power_conns)
-    bom.no_connect_pins.extend(signal_ncs)
+    bom.connections.extend(rail_conns)
+    bom.no_connect_pins.extend(noconnects)
+    bound_nets = sorted({c.net_name for c in rail_conns})
     notes.append(
         f"added {len(parts)} {template.key} header(s) on sheet {host_sheet!r}: "
-        f"{[p.ref for p in parts]}; bound {len(power_conns)} power net(s); "
-        f"{len(signal_ncs)} signal pin(s) no-connect"
+        f"{[p.ref for p in parts]}; bound pins to {bound_nets or 'no'} rail(s); "
+        f"{len(noconnects)} pin(s) no-connect"
     )
+
+    # 5. Consolidating the headers onto one host sheet can leave the sheets that
+    #    held only LLM connectors with no parts at all. An empty sheet is a
+    #    degenerate leaf -- the placement engine aborts on a leaf subcircuit "with
+    #    no matching components". Drop those emptied sheets from the architecture
+    #    (and any inter-sheet net that referenced them) so the hierarchy the
+    #    schematic + compose see matches the rewired BOM.
+    notes += _prune_emptied_sheets(state, bom)
     return notes
+
+
+def _prune_emptied_sheets(state, bom) -> list[str]:
+    """Remove architecture sheets left with no BOM parts by the rewire, and any
+    inter-sheet net endpoint that pointed at them. Returns human notes."""
+    arch = getattr(state, "architecture", None)
+    if arch is None or not getattr(arch, "sheets", None):
+        return []
+    used = {p.sheet for p in bom.parts}
+    keep = [s for s in arch.sheets if s.name in used]
+    dropped = {s.name for s in arch.sheets if s.name not in used}
+    if not dropped:
+        return []
+    arch.sheets = keep
+    if getattr(arch, "inter_sheet_nets", None):
+        surviving = []
+        for isn in arch.inter_sheet_nets:
+            isn.endpoints = [ep for ep in isn.endpoints if ep.sheet not in dropped]
+            if len(isn.endpoints) >= 2:  # still spans >=2 sheets -> keep
+                surviving.append(isn)
+        arch.inter_sheet_nets = surviving
+    return [f"pruned emptied sheet(s) {sorted(dropped)}"]
 
 
 __all__ = ["enforce_enabled", "reconcile_standard_form_factor"]

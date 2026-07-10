@@ -7,7 +7,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from kicraft.design.models import BOM, BomPart, FormFactor, NetConnection, PinEndpoint
+from kicraft.design.models import (
+    BOM,
+    Architecture,
+    BomPart,
+    FormFactor,
+    InterSheetNet,
+    NetConnection,
+    PinEndpoint,
+    Sheet,
+    SheetPin,
+)
 from kicraft.form_factors.reconcile import enforce_enabled, reconcile_standard_form_factor
 
 
@@ -37,9 +47,11 @@ def _shield_bom():
     return BOM(parts=parts, connections=conns)
 
 
-def _state(bom, standard="arduino_uno_shield"):
+def _state(bom, standard="arduino_uno_shield", architecture=None):
     ff = FormFactor(shape="rect", standard=standard) if standard else None
-    return SimpleNamespace(intent=SimpleNamespace(form_factor=ff), bom=bom)
+    return SimpleNamespace(
+        intent=SimpleNamespace(form_factor=ff), bom=bom, architecture=architecture
+    )
 
 
 class TestReconcile:
@@ -67,10 +79,16 @@ class TestReconcile:
         part_refs = {p.ref for p in bom.parts}
         assert all(ep.ref in part_refs for c in bom.connections for ep in c.endpoints)
 
-    def test_signal_pins_marked_no_connect(self):
+    def test_unbound_pins_marked_no_connect(self):
         bom = _shield_bom()
         reconcile_standard_form_factor(_state(bom))
-        assert len(bom.no_connect_pins) == 22  # D0..D13 + A0..A5 + SCL + SDA
+        # The design carries only +5V and GND, so those header pins bind
+        # (1 +5V + 3 GND = 4) and every other pin -- 3V3/VIN/IOREF/RESET/AREF,
+        # all D/A/SCL/SDA, and the reserved power pin -- is no-connect (32-4=28).
+        assert len(bom.no_connect_pins) == 28
+        # A rail the design does NOT carry must not appear as a dangling net.
+        nets = {c.net_name for c in bom.connections}
+        assert "VIN" not in nets and "+3V3" not in nets and "AREF" not in nets
 
     def test_result_is_a_valid_bom(self):
         bom = _shield_bom()
@@ -99,6 +117,64 @@ class TestReconcile:
     def test_noop_for_unknown_standard(self):
         bom = _shield_bom()
         assert reconcile_standard_form_factor(_state(bom, standard="nope")) == []
+
+
+class TestEmptiedSheetPruning:
+    """Consolidating the headers onto one host sheet empties any sheet that held
+    only LLM connectors -- an empty sheet is a degenerate leaf that aborts the
+    build, so the reconcile drops it from the architecture."""
+
+    def _multi_sheet(self):
+        # J1 on HOST HEADER (becomes the host sheet), J2/J3 on SPARE HEADER (both
+        # dropped -> that sheet ends up empty), U1 on REGULATOR (keeps it alive).
+        parts = [
+            BomPart(ref="J1", value="PinHeader_1x08", symbol="Connector_Generic:Conn_01x08",
+                    footprint="Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical", sheet="HOST HEADER"),
+            BomPart(ref="J2", value="PinHeader_1x08", symbol="Connector_Generic:Conn_01x08",
+                    footprint="Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical", sheet="SPARE HEADER"),
+            BomPart(ref="J3", value="PinHeader_1x08", symbol="Connector_Generic:Conn_01x08",
+                    footprint="Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical", sheet="SPARE HEADER"),
+            BomPart(ref="U1", value="ME6211", symbol="me6211c33:ME6211C33M5G-N",
+                    footprint="me6211c33:SOT-23-5", sheet="REGULATOR"),
+        ]
+        conns = [
+            NetConnection(net_name="GND", sheet="REGULATOR",
+                          endpoints=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="J1", pin="4")]),
+        ]
+        bom = BOM(parts=parts, connections=conns)
+        arch = Architecture(
+            sheets=[Sheet(name=n, stem=n.replace(" ", "_"), function=n)
+                    for n in ("HOST HEADER", "SPARE HEADER", "REGULATOR")],
+            power_nets=["GND"],
+            inter_sheet_nets=[
+                InterSheetNet(name="GND", endpoints=[
+                    SheetPin(sheet="SPARE HEADER", direction="bidirectional"),
+                    SheetPin(sheet="REGULATOR", direction="bidirectional"),
+                ]),
+            ],
+        )
+        return bom, arch
+
+    def test_empty_sheet_dropped_from_architecture(self):
+        bom, arch = self._multi_sheet()
+        reconcile_standard_form_factor(_state(bom, architecture=arch))
+        names = {s.name for s in arch.sheets}
+        assert "SPARE HEADER" not in names             # emptied -> pruned
+        assert {"HOST HEADER", "REGULATOR"} <= names    # host + regulator survive
+
+    def test_inter_sheet_net_referencing_dropped_sheet_repaired(self):
+        bom, arch = self._multi_sheet()
+        reconcile_standard_form_factor(_state(bom, architecture=arch))
+        # The GND inter-sheet net spanned SPARE HEADER<->REGULATOR; the spare sheet
+        # is gone so it drops to one endpoint (no longer inter-sheet) and is
+        # removed rather than left referencing a deleted sheet.
+        for isn in arch.inter_sheet_nets:
+            assert all(ep.sheet != "SPARE HEADER" for ep in isn.endpoints)
+
+    def test_no_architecture_is_tolerated(self):
+        bom = _shield_bom()
+        # SimpleNamespace state with architecture=None must not raise.
+        reconcile_standard_form_factor(_state(bom, architecture=None))
 
 
 class TestEnforceGate:
