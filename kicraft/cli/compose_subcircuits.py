@@ -1284,6 +1284,23 @@ def _compose_artifacts(
     # Parent-local components (mounting holes etc.) join the same solver
     # state. They keep their loaded positions; _snap_parent_local applies
     # the exact constraint-target snap after solve.
+    # Standard form-factor enforcement (replace & rewire, compose half): a
+    # validated standard pins the parent to the standard's exact outline and
+    # locks its connectors at their fixed board positions, so the solver
+    # auto-places every leaf/local around them. Gated -- resolve_scaffold returns
+    # None unless cfg both enables enforcement AND carries a validated standard --
+    # so this is a no-op for every other board and while the synthesis half is
+    # off; a supplied manual layout stays authoritative. The synthesis half emits
+    # these same connectors as real BOM parts with matching refs.
+    from kicraft.form_factors.compose_scaffold import (
+        resolve_scaffold as _resolve_ff_scaffold,
+    )
+
+    _ff_scaffold = _resolve_ff_scaffold(cfg) if manual_layout is None else None
+    if _ff_scaffold is not None:
+        for _ref, _comp in _ff_scaffold.components.items():
+            parent_local[_ref] = _comp
+
     for ref, comp in parent_local.items():
         synthetic_comps[ref] = comp
 
@@ -1294,6 +1311,9 @@ def _compose_artifacts(
         area_overhead=seed_area_overhead,
         aspect_target=seed_aspect_target,
     )
+    if _ff_scaffold is not None:
+        # Place inside the standard frame, not a content-derived one.
+        seed_w, seed_h = _ff_scaffold.width_mm, _ff_scaffold.height_mm
 
     parent_subcircuit = parent_definition or _synthetic_parent_definition(loaded_artifacts)
     interconnect_nets = infer_interconnect_nets_pre_placement(
@@ -1555,11 +1575,19 @@ def _compose_artifacts(
         placed_bbox_list = [
             placed_child_bboxes[index] for index in sorted(placed_child_bboxes)
         ]
-        exact_outline = _compute_final_outline(
-            placed_bbox_list, all_constraints, child_anchor_positions, spacing_mm,
-            edge_constrained_refs={
-                c.ref for c in all_constraints if c.target in ("edge", "corner")
-            },
+        if _ff_scaffold is not None:
+            # Standard form factor: the outline IS the standard rect, not grown
+            # from content. _repair_parent_outline is verify-only (won't grow it)
+            # and _validate_parent_geometry then enforces exact containment
+            # fail-loud -- a design that doesn't fit the standard is rejected,
+            # not silently up-sized.
+            exact_outline = _ff_scaffold.outline
+        else:
+            exact_outline = _compute_final_outline(
+                placed_bbox_list, all_constraints, child_anchor_positions, spacing_mm,
+                edge_constrained_refs={
+                    c.ref for c in all_constraints if c.target in ("edge", "corner")
+                },
             edge_zoned_outline_sides=frozenset(
                 side
                 for c in all_constraints
