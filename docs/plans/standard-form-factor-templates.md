@@ -124,20 +124,29 @@ function to the standard nets). Datum source = **transcribed from an open-source
   synthesis data layer (`scaffold.py`: `standard_header_parts` / `standard_placements` /
   `canonical_power_bindings`) is also done + tested.
 
-- **PR2b Half 2 — synthesis rewire [REMAINING; the deep, ERC-interacting half].** A deterministic
-  reconcile (keyed off `intent.form_factor.standard`, at a stage-commit like the wiring
-  normalizers) that: (1) emits the standard headers as real `BomPart`s on an INTERFACE sheet
-  (`standard_header_parts` → `BomPart`), with refs allocated after existing J's; (2) binds each
-  header pin to its canonical net — power/ground merge into the design's existing rails by name
-  (+5V/+3V3/GND), signal pins (D0..D13/A0..A5) break out as new nets — via `NetConnection`
-  endpoints; (3) drops the LLM's redundant free headers; (4) sets `placement.form_factor_enforce`
-  so Half 1 activates. The schematic **emitter** must draw the headers and **ERC** must stay clean
-  (power pins need the right drive/PWR_FLAG treatment) — so this half must be validated on a real
-  dogfood build, not just unit tests. This is the linchpin: until it lands, Half 1 stays dormant
-  (turning the flag on without real header parts would inject phantom connectors).
+- **PR2b Half 2 electrical — replace & rewire reconcile [DONE, committed `e6ca872`].**
+  `reconcile.py::reconcile_standard_form_factor`, wired at the wiring stage-commit next to the
+  wiring normalizers, **env-gated by `KICRAFT_FORM_FACTOR_ENFORCE` (default OFF)**: replaces the
+  LLM's 2.54 mm stacking connectors with the standard's headers as real `BomPart`s (recycling the
+  freed J-refs), prunes every reference to the dropped parts (connections / no-connects /
+  component_zones / thermal_refs / signal_flow_order / ic_groups / arrays), binds the header
+  power/ground pins by net name, and marks signal pins (D0..D13/A0..A5/SCL/SDA) no-connect (they
+  mate with the host below). `standard_form_factor_bom_delta` returns the signal no-connects too.
+  Validated on KC-99A9M8's real committed state: 13 parts → 7 (regulator + 2 caps + 4 standard
+  headers), state re-validates. 20 unit tests; 240 pass with the gate off.
+
+- **PR2b Half 2 mechanical — place the real headers at fixed positions [REMAINING; needs a real
+  build].** The one open coupling: the reconcile puts the headers on a normal sheet → they become
+  a **leaf** (placed as a unit), but the compose Half 1 fork *injects synthetic* connectors — so
+  turning both on would duplicate refs. Compose must instead **place the real header parts** at the
+  template positions. Cleanest candidate: make the header sheet a fixed-layout leaf pinned at the
+  parent origin (the leaf's 4 headers forced to template coords), OR make the headers parent-local
+  (component_zones extraction) and reuse Half 1's lock. Both need pipeline investigation +
+  **ERC/DRC validation on a real dogfood run** (`KICRAFT_FORM_FACTOR_ENFORCE=1` + a shield brief).
+  Until then the env-on state gives a correct shield *schematic/BOM* with a free-placed layout.
 - **PR3 gate — enforcement.** Promote-time: when a standard was requested, run `check_conformance`
   (done — `conformance.py`) on the promoted board and fail/downgrade if non-conformant. Report-only
-  until Half 2 lands (else it fails every still-free-placed shield).
+  until the mechanical half lands (else it fails every still-free-placed shield).
 
 ## Open questions (for PR2b)
 - **Header ↔ role/pin binding.** How does the design's I/O map onto D0..D13/A0..A5/power — does the
