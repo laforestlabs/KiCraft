@@ -146,6 +146,12 @@ class FormFactor(BaseModel):
     chamfer_mm: float | None = None  # chamfered_rect
     size_mm: float | None = None  # headline dimension the brief stated (advisory)
     note: str | None = None  # the phrase that triggered the classification
+    # A named standard mechanical form factor (e.g. "arduino_uno_shield") the
+    # brief requested -- a HARD outline + fixed-connector-position contract,
+    # unlike the advisory ``shape``/``size_mm``. Resolved via
+    # ``kicraft.form_factors``; None means no standard was requested. PR2 honors
+    # it in placement/compose; until then it only surfaces the intent.
+    standard: str | None = None
 
     @field_validator("shape")
     @classmethod

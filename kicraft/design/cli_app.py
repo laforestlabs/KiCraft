@@ -2905,7 +2905,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             detected = extract_form_factor("\n".join(s for s in sources if s))
             if detected is not None:
                 state.intent.form_factor = detected
-                form_factor_capture = detected.shape
+                form_factor_capture = detected.standard or detected.shape
 
     # Wiring netlist normalization (deterministic; a no-op on an already-correct
     # netlist). Runs before validation + persistence, so the committed state and

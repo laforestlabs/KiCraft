@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 
 from kicraft.design.models import FormFactor
+from kicraft.form_factors import match_standard
 
 # Strong shape patterns: (compiled regex, canonical shape). Order matters only
 # in that the FIRST match wins, so list the more specific shapes first.
@@ -118,16 +119,31 @@ def _extract_size_mm(text: str) -> float | None:
 
 
 def extract_form_factor(text: str) -> FormFactor | None:
-    """Deterministically classify a board outline shape from free text.
+    """Deterministically classify a board form factor from free text.
 
-    Returns ``None`` when the text does not unambiguously request a
-    non-rectangular shape (the common case), leaving the default rectangular
-    path untouched. The returned :class:`FormFactor` carries the canonical
-    ``shape`` token, an advisory ``size_mm`` when the brief states a headline
-    dimension, and the matched ``note`` phrase for provenance.
+    Two levels, in precedence order:
+
+    1. A **named standard** mechanical form factor ("Arduino Uno shield", a
+       future HAT/Feather) -- a HARD outline + fixed-connector contract. Matched
+       via :mod:`kicraft.form_factors`; the returned :class:`FormFactor` carries
+       ``standard`` (the registry key) plus the template's rectangular bounding
+       shape so the default rect path still has a size to work with.
+    2. A **shape** ("round 50 mm coaster", hex, rounded corners) -- an advisory
+       outline shape only.
+
+    Returns ``None`` when the text requests neither (the common case), leaving
+    the default rectangular path untouched.
     """
     if not text or not text.strip():
         return None
+    template = match_standard(text)
+    if template is not None:
+        return FormFactor(
+            shape="rect",
+            standard=template.key,
+            size_mm=max(template.board_width_mm, template.board_height_mm),
+            note=template.display_name,
+        )
     shape, phrase = _classify(text)
     if shape is None or shape == "rect":
         return None
