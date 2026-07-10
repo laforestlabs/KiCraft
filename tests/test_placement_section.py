@@ -220,9 +220,9 @@ def test_write_autoplacer_emits_standard_form_factor_block(tmp_path):
 
 
 def test_write_autoplacer_enforce_flag_and_header_refs(tmp_path, monkeypatch):
-    # With enforcement ON, the emit turns on the compose fork (form_factor_enforce)
-    # and maps each connector role to the reconcile's actual BOM ref so the
-    # scaffold locks the SAME parts. OFF (default) emits neither.
+    # With enforcement ON (the default), the emit turns on the compose fork
+    # (form_factor_enforce) and maps each connector role to the reconcile's actual
+    # BOM ref so the scaffold locks the SAME parts. The kill switch emits neither.
     shield_bom = BOM(parts=[
         BomPart(ref="U1", value="LDO", sheet="REG",
                 symbol="Device:R", footprint="Resistor_SMD:R_0402_1005Metric"),
@@ -237,7 +237,7 @@ def test_write_autoplacer_enforce_flag_and_header_refs(tmp_path, monkeypatch):
     ])
     ff = FormFactor(shape="rect", standard="arduino_uno_shield")
 
-    monkeypatch.delenv("KICRAFT_FORM_FACTOR_ENFORCE", raising=False)
+    monkeypatch.setenv("KICRAFT_FORM_FACTOR_ENFORCE", "0")  # kill switch
     off = json.loads(write_autoplacer_json(
         tmp_path, "OFF", _arch(), shield_bom, form_factor=ff).read_text())
     assert "form_factor_enforce" not in off

@@ -178,15 +178,19 @@ class TestEmptiedSheetPruning:
 
 
 class TestEnforceGate:
-    def test_default_off(self, monkeypatch):
+    def test_default_on(self, monkeypatch):
+        # The feature ships ON by default; unset (or empty) env => enabled.
         monkeypatch.delenv("KICRAFT_FORM_FACTOR_ENFORCE", raising=False)
-        assert enforce_enabled() is False
+        assert enforce_enabled() is True
+        monkeypatch.setenv("KICRAFT_FORM_FACTOR_ENFORCE", "")
+        assert enforce_enabled() is True
 
-    @pytest.mark.parametrize("val", ["1", "true", "yes", "on", "ON"])
+    @pytest.mark.parametrize("val", ["1", "true", "yes", "on", "ON", "anything"])
     def test_on_values(self, monkeypatch, val):
         monkeypatch.setenv("KICRAFT_FORM_FACTOR_ENFORCE", val)
         assert enforce_enabled() is True
 
-    def test_off_value(self, monkeypatch):
-        monkeypatch.setenv("KICRAFT_FORM_FACTOR_ENFORCE", "0")
+    @pytest.mark.parametrize("val", ["0", "false", "no", "off", "OFF"])
+    def test_kill_switch_values(self, monkeypatch, val):
+        monkeypatch.setenv("KICRAFT_FORM_FACTOR_ENFORCE", val)
         assert enforce_enabled() is False

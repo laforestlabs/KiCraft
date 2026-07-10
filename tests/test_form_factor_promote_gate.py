@@ -77,8 +77,8 @@ def test_nonconformant_fails_gate_when_enforced(tmp_path, monkeypatch):
     assert res["enforced"] is True and res["conformant"] is False
 
 
-def test_nonconformant_is_advisory_when_enforcement_off(tmp_path, monkeypatch):
-    monkeypatch.delenv("KICRAFT_FORM_FACTOR_ENFORCE", raising=False)
+def test_nonconformant_is_advisory_when_kill_switch_set(tmp_path, monkeypatch):
+    monkeypatch.setenv("KICRAFT_FORM_FACTOR_ENFORCE", "0")  # kill switch
     res = cli_app._check_form_factor_conformance(
         _state("arduino_uno_shield"), _free_pcb(tmp_path)
     )

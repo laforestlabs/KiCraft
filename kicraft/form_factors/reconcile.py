@@ -32,13 +32,20 @@ _STANDARD_MARKER = "standard form factor:"
 
 
 def enforce_enabled() -> bool:
-    """Whether standard-form-factor enforcement is turned on (env master switch)."""
-    return os.environ.get("KICRAFT_FORM_FACTOR_ENFORCE", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    """Whether standard-form-factor enforcement is on.
+
+    Default ON: a brief that names a validated standard (e.g. Arduino shield) gets
+    the replace & rewire reconcile + fixed outline + locked connectors. The
+    ``KICRAFT_FORM_FACTOR_ENFORCE`` env var is retained as a production KILL
+    SWITCH -- set it to ``0`` / ``false`` / ``no`` / ``off`` to disable the
+    feature without a redeploy (e.g. if a fresh-synthesis shield ever misbehaves).
+    Only ever engages when :func:`match_standard` matched a *validated* template,
+    so non-shield boards are unaffected regardless of this flag.
+    """
+    val = os.environ.get("KICRAFT_FORM_FACTOR_ENFORCE")
+    if val is None or val.strip() == "":
+        return True
+    return val.strip().lower() not in ("0", "false", "no", "off")
 
 
 def _is_stacking_header(part) -> bool:
