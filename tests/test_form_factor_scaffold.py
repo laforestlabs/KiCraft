@@ -75,6 +75,23 @@ class TestComposeScaffold:
         # NC pin -> empty net
         assert s.components["J3"].pads[0].net == ""
 
+    def test_axis_x_headers_rotated_90_for_kicad_vertical_footprint(self):
+        # A KiCad single-row vertical header advances +Y at rot 0; the Arduino
+        # edge headers advance +X (axis="x"), so the stamp rotation is 90 deg so
+        # the real footprint's pads land on the template pin coordinates.
+        s = build_scaffold(_t())
+        assert all(c.rotation == 90.0 for c in s.components.values())
+
+    def test_real_refs_are_used_when_supplied(self):
+        # The synthesis half's actual BOM refs (role -> ref) must be honored so
+        # compose locks the SAME parts the schematic emitted.
+        role_to_ref = {"digital_high": "J7", "digital_low": "J8",
+                       "power": "J9", "analog": "J10"}
+        s = build_scaffold(_t(), role_to_ref=role_to_ref)
+        assert set(s.components) == {"J7", "J8", "J9", "J10"}
+        # digital_high is the 10-pin header
+        assert len(s.components["J7"].pads) == 10
+
     def test_outline_is_the_standard_rect(self):
         s = build_scaffold(_t())
         tl, br = s.outline
@@ -98,6 +115,16 @@ class TestComposeScaffold:
              "form_factor_standard": {"key": "arduino_uno_shield", "validated": True}}
         )
         assert s is not None and set(s.components) == {"J1", "J2", "J3", "J4"}
+
+    def test_gate_honors_header_refs_from_cfg(self):
+        s = resolve_scaffold(
+            {"form_factor_enforce": True,
+             "form_factor_standard": {
+                 "key": "arduino_uno_shield", "validated": True,
+                 "header_refs": {"digital_high": "J3", "digital_low": "J4",
+                                 "power": "J5", "analog": "J6"}}}
+        )
+        assert s is not None and set(s.components) == {"J3", "J4", "J5", "J6"}
 
     def test_gate_unknown_key(self):
         assert resolve_scaffold(

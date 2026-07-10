@@ -219,6 +219,38 @@ def test_write_autoplacer_emits_standard_form_factor_block(tmp_path):
     assert len(ffs["mounting_holes"]) == 4
 
 
+def test_write_autoplacer_enforce_flag_and_header_refs(tmp_path, monkeypatch):
+    # With enforcement ON, the emit turns on the compose fork (form_factor_enforce)
+    # and maps each connector role to the reconcile's actual BOM ref so the
+    # scaffold locks the SAME parts. OFF (default) emits neither.
+    shield_bom = BOM(parts=[
+        BomPart(ref="U1", value="LDO", sheet="REG",
+                symbol="Device:R", footprint="Resistor_SMD:R_0402_1005Metric"),
+        BomPart(ref="J1", value="Arduino Uno R3 shield digital_high", sheet="HDR",
+                symbol="Connector_Generic:Conn_01x10",
+                footprint="Connector_PinSocket_2.54mm:PinSocket_1x10_P2.54mm_Vertical",
+                sourcing_note="standard form factor: arduino_uno_shield digital_high"),
+        BomPart(ref="J2", value="Arduino Uno R3 shield power", sheet="HDR",
+                symbol="Connector_Generic:Conn_01x08",
+                footprint="Connector_PinSocket_2.54mm:PinSocket_1x08_P2.54mm_Vertical",
+                sourcing_note="standard form factor: arduino_uno_shield power"),
+    ])
+    ff = FormFactor(shape="rect", standard="arduino_uno_shield")
+
+    monkeypatch.delenv("KICRAFT_FORM_FACTOR_ENFORCE", raising=False)
+    off = json.loads(write_autoplacer_json(
+        tmp_path, "OFF", _arch(), shield_bom, form_factor=ff).read_text())
+    assert "form_factor_enforce" not in off
+    assert "header_refs" not in off["form_factor_standard"]
+
+    monkeypatch.setenv("KICRAFT_FORM_FACTOR_ENFORCE", "1")
+    on = json.loads(write_autoplacer_json(
+        tmp_path, "ON", _arch(), shield_bom, form_factor=ff).read_text())
+    assert on["form_factor_enforce"] is True
+    assert on["form_factor_standard"]["header_refs"] == {
+        "digital_high": "J1", "power": "J2"}
+
+
 def test_write_autoplacer_no_standard_block_without_a_standard(tmp_path):
     out = write_autoplacer_json(
         tmp_path, "PLAIN", _arch(), _bom(),

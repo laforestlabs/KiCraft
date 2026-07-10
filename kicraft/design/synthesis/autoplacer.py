@@ -229,16 +229,37 @@ def write_autoplacer_json(
 
     # Named standard form factor (Arduino shield, ...): surface the template's
     # fixed geometry (outline + connector positions + holes) so the compose
-    # pipeline can honor it. Informational-only here -- consumers gate on the
-    # embedded ``validated`` flag before laying a board out on the datum, so
-    # emitting it changes no build behavior on its own (PR1/PR2 interlock).
+    # pipeline can honor it. Consumers gate on the embedded ``validated`` flag
+    # before laying a board out on the datum. ``form_factor_enforce`` is the
+    # master switch that turns the compose placement fork ON -- it is the SAME
+    # env gate (``KICRAFT_FORM_FACTOR_ENFORCE``) that drives the synthesis-side
+    # replace & rewire reconcile, so both halves activate together: with it off,
+    # emitting the template block alone changes no build behavior.
     standard_key = getattr(form_factor, "standard", None) if form_factor else None
     if standard_key:
         from kicraft.form_factors import get_template
+        from kicraft.form_factors.reconcile import enforce_enabled
 
         template = get_template(standard_key)
         if template is not None:
-            body["form_factor_standard"] = template.to_autoplacer_dict()
+            ff_block = template.to_autoplacer_dict()
+            if enforce_enabled():
+                body["form_factor_enforce"] = True
+                # Map each template connector role to the actual BOM ref the
+                # reconcile emitted (sourcing_note "standard form factor: <key>
+                # <role>") so the compose scaffold locks the SAME parts the
+                # schematic carries rather than guessing J1.. (refs get recycled/
+                # renumbered). Only meaningful under enforcement -- the reconcile
+                # that creates these parts runs on the same env gate.
+                marker = f"standard form factor: {template.key} "
+                header_refs = {
+                    (p.sourcing_note or "")[len(marker):].strip(): p.ref
+                    for p in bom.parts
+                    if (p.sourcing_note or "").startswith(marker)
+                }
+                if header_refs:
+                    ff_block["header_refs"] = header_refs
+            body["form_factor_standard"] = ff_block
 
     out.write_text(json.dumps(body, indent=2) + "\n")
     return out

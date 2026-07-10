@@ -1107,6 +1107,14 @@ class PlacementSolver:
         # --- Collect edge-pinned connectors by edge for grouped placement ---
         edge_groups: dict[str, list[str]] = {}  # edge -> [ref, ...]
         for ref, comp in comps.items():
+            if comp.locked:
+                # Already exact-placed on entry (the form-factor scaffold's fixed
+                # connectors arrive pos+rotation frozen at their standard board
+                # coordinates). Honor that verbatim -- never edge-repin or
+                # re-orient it -- but record its target so the overlap/keepout
+                # passes restore it if a neighbour nudges it.
+                self._pinned_targets[ref] = Point(comp.pos.x, comp.pos.y)
+                continue
             zone_cfg = zones.get(ref, {})
             if "edge" in zone_cfg:
                 edge = zone_cfg["edge"]

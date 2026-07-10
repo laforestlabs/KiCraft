@@ -44,13 +44,41 @@ class FormFactorScaffold:
         return (Point(0.0, 0.0), Point(self.width_mm, self.height_mm))
 
 
-def build_scaffold(template: FormFactorTemplate, *, ref_start: int = 1) -> FormFactorScaffold:
+def _stamp_rotation_deg(conn) -> float:
+    """Footprint rotation that makes the KiCad single-row header stamp with its
+    pins along the template's pin axis.
+
+    A KiCad ``PinHeader/PinSocket_1xNN_..._Vertical`` footprint at rotation 0 has
+    its pins advancing +Y (top-left frame). The template states each header's pin
+    axis in the BOARD frame: ``axis="x"`` (Arduino's horizontal edge headers)
+    needs a +90 deg turn to send the pins +X; ``axis="y"`` is already aligned.
+    The stamp positions the real seed footprint by ref at this rotation, so its
+    pads land on the template pin coordinates. Any extra per-connector turn the
+    datum specifies is added on top.
+    """
+    base = 90.0 if conn.axis == "x" else 0.0
+    return (base + conn.rotation_deg) % 360.0
+
+
+def build_scaffold(
+    template: FormFactorTemplate,
+    *,
+    ref_start: int = 1,
+    role_to_ref: dict[str, str] | None = None,
+) -> FormFactorScaffold:
     """Locked connector components at the template's fixed positions.
 
     Board-local top-left frame (the template's frame == compose's outline/stamp
-    frame). Refs are ``J{ref_start..}`` in the template's connector order; a real
-    build's synthesis half assigns matching refs so these are the same parts as
-    the BOM's. ``NC`` pins get an empty net.
+    frame). ``pos`` is the connector's pin-1 centre and ``rotation`` orients the
+    real footprint so its pads land on the template pins (see
+    :func:`_stamp_rotation_deg`); the pads carried here are already in board
+    coordinates for the solver's net/keepout reasoning. ``NC`` pins get an empty
+    net.
+
+    Refs: when ``role_to_ref`` is given (the synthesis half's actual BOM refs,
+    keyed by connector role) those refs are used so the scaffold locks the SAME
+    parts the schematic emitted; otherwise refs default to ``J{ref_start..}`` in
+    connector order.
     """
     comps: dict[str, Component] = {}
     ref_n = ref_start
@@ -61,7 +89,7 @@ def build_scaffold(template: FormFactorTemplate, *, ref_start: int = 1) -> FormF
         half = _PAD_MM / 2.0 + _PAD_MARGIN_MM
         width_mm = (max(xs) - min(xs)) + 2 * half
         height_mm = (max(ys) - min(ys)) + 2 * half
-        ref = f"J{ref_n}"
+        ref = (role_to_ref or {}).get(conn.role) or f"J{ref_n}"
         pads = [
             Pad(
                 ref=ref,
@@ -77,7 +105,7 @@ def build_scaffold(template: FormFactorTemplate, *, ref_start: int = 1) -> FormF
             ref=ref,
             value=f"{template.display_name} {conn.role}",
             pos=Point(conn.x_mm, conn.y_mm),
-            rotation=conn.rotation_deg,
+            rotation=_stamp_rotation_deg(conn),
             layer=Layer.FRONT,
             width_mm=width_mm,
             height_mm=height_mm,
@@ -95,6 +123,10 @@ def resolve_scaffold(cfg: dict, *, ref_start: int = 1) -> FormFactorScaffold | N
     block (or a resolvable validated template key). Otherwise ``None`` -- the
     compose fork is a no-op, so nothing changes for non-shield boards or until
     the enforcement flag is turned on together with the synthesis half.
+
+    The scaffold's refs come from the cfg's ``form_factor_standard.header_refs``
+    (role -> BOM ref, emitted by the synthesis half) so compose locks the exact
+    parts the reconcile added; absent that, refs default to ``J{ref_start..}``.
     """
     if not cfg.get("form_factor_enforce"):
         return None
@@ -105,7 +137,8 @@ def resolve_scaffold(cfg: dict, *, ref_start: int = 1) -> FormFactorScaffold | N
     template = get_template(key)
     if template is None or not template.validated:
         return None
-    return build_scaffold(template, ref_start=ref_start)
+    role_to_ref = ffs.get("header_refs") if isinstance(ffs, dict) else None
+    return build_scaffold(template, ref_start=ref_start, role_to_ref=role_to_ref)
 
 
 __all__ = ["FormFactorScaffold", "build_scaffold", "resolve_scaffold"]

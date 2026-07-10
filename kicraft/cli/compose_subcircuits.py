@@ -1211,6 +1211,18 @@ def _compose_artifacts(
     cfg = dict(user_cfg)
     component_zones: dict[str, Any] = cfg.get("component_zones", {})
     parent_local: dict[str, Component] = {}
+    # Standard form-factor scaffold (replace & rewire, compose half). Resolved up
+    # front so its connector refs are known before extraction: the standard
+    # headers are placed parent-local at their fixed template positions (injected
+    # locked, below), so they must NOT also arrive via a leaf or the loose-
+    # connector wrap (either would duplicate the ref and collide at compose).
+    # None -> dormant for every other board and while enforcement is off.
+    from kicraft.form_factors.compose_scaffold import (
+        resolve_scaffold as _resolve_ff_scaffold,
+    )
+
+    _ff_scaffold = _resolve_ff_scaffold(cfg) if manual_layout is None else None
+    _ff_refs: set[str] = set(_ff_scaffold.components) if _ff_scaffold is not None else set()
 
     if pcb_path:
         # No try/except here: a project-config parse error or a
@@ -1225,6 +1237,22 @@ def _compose_artifacts(
             project_cfg = load_project_config(str(cfg_file))
             cfg = {**project_cfg, **user_cfg}
             component_zones = cfg.get("component_zones", {})
+            # Re-resolve against the merged project cfg (the scaffold gate reads
+            # form_factor_enforce / form_factor_standard, which live there).
+            _ff_scaffold = _resolve_ff_scaffold(cfg) if manual_layout is None else None
+            _ff_refs = set(_ff_scaffold.components) if _ff_scaffold is not None else set()
+        # Drop a leaf made ENTIRELY of the standard headers -- the scaffold owns
+        # their placement. (The reconcile consolidates the headers onto one
+        # sheet, so this leaf is exactly them.)
+        if _ff_refs:
+            loaded_artifacts = [
+                art
+                for art in loaded_artifacts
+                if not (
+                    set(art.layout.components)
+                    and set(art.layout.components) <= _ff_refs
+                )
+            ]
         parent_local = extract_parent_local_components(
             str(pcb_path),
             loaded_artifacts,
@@ -1232,6 +1260,12 @@ def _compose_artifacts(
                 component_zones, loaded_artifacts
             ),
         )
+        # The real header footprints (loose on the seed PCB now their leaf is
+        # gone) drop out of parent_local before the wrap; the scaffold re-adds a
+        # single locked copy per ref below, so the stamp moves the seed footprint
+        # to the fixed position with no duplicate.
+        for _r in _ff_refs:
+            parent_local.pop(_r, None)
         # Lever 2.1: loose parent-level connectors flow through the leaf path
         # (edge-pinned as the board extremity), not the parent-local snap.
         loaded_artifacts, parent_local = _wrap_loose_parent_components_as_leaves(
@@ -1285,18 +1319,12 @@ def _compose_artifacts(
     # state. They keep their loaded positions; _snap_parent_local applies
     # the exact constraint-target snap after solve.
     # Standard form-factor enforcement (replace & rewire, compose half): a
-    # validated standard pins the parent to the standard's exact outline and
-    # locks its connectors at their fixed board positions, so the solver
-    # auto-places every leaf/local around them. Gated -- resolve_scaffold returns
-    # None unless cfg both enables enforcement AND carries a validated standard --
-    # so this is a no-op for every other board and while the synthesis half is
-    # off; a supplied manual layout stays authoritative. The synthesis half emits
-    # these same connectors as real BOM parts with matching refs.
-    from kicraft.form_factors.compose_scaffold import (
-        resolve_scaffold as _resolve_ff_scaffold,
-    )
-
-    _ff_scaffold = _resolve_ff_scaffold(cfg) if manual_layout is None else None
+    # validated standard pins the parent to the standard's exact outline (below)
+    # and locks its connectors at their fixed board positions, so the solver
+    # auto-places every leaf/local around them. The scaffold was resolved up
+    # front (its refs drove the leaf/parent-local exclusion above); here we add
+    # the single locked copy per header ref. The stamp then moves the real seed
+    # footprint (matched by ref) to this fixed pos + rotation.
     if _ff_scaffold is not None:
         for _ref, _comp in _ff_scaffold.components.items():
             parent_local[_ref] = _comp
