@@ -627,21 +627,41 @@ print(f"brief: {brief[:160]!r}")
 print(f"mechanical-standard signals : {hit_std or '-'}")
 print(f"mechanical-constraint signals: {hit_mech or '-'}")
 print(f"explicit dimensions in brief : {DIM or '-'}")
-print(f"captured form_factor.shape   : {ff_shape!r}   .standard: {ff_standard!r} (note: no 'standard' field exists today)")
+print(f"captured form_factor.shape   : {ff_shape!r}   .standard: {ff_standard!r}")
 print(f"delivered board outline (mm) : {outline}")
-gap = (hit_std or hit_mech or DIM) and not ff_standard
+
+# When a standard was captured (or a known one is named) and a board exists, run
+# the mechanical-conformance check: geometry, not net names -- is each standard
+# header pad where the standard fixes it, and is the board the standard's size?
+from kicraft.form_factors import match_standard, get_template
+from kicraft.form_factors.conformance import board_local_pads, check_conformance
+template = get_template(ff_standard) or match_standard(brief)
+if template is not None:
+    pcb = next((p for p in list(run.rglob("parent_routed.kicad_pcb"))
+                + list(run.rglob("*_routed.kicad_pcb"))
+                + list((run/"generated").glob("*/*.kicad_pcb"))), None)
+    if pcb is not None:
+        pads, wh = board_local_pads(str(pcb))
+        rep = check_conformance(template, pads, wh)
+        print(f"conformance ({template.display_name}): {rep.summary()}")
+
+gap = (hit_std or hit_mech or DIM) and (ff_standard is None or (template is not None and pcb is not None and not rep.conformant))
 print("\nINTENT-ADHERENCE VERDICT:",
-      "GAP -- brief states a mechanical/form-factor constraint the pipeline has no field to honor;"
-      " board was free-placed/free-sized (mechanically non-conformant, invisible to ERC/DRC)."
+      "GAP -- the brief states a mechanical/form-factor constraint the board does NOT satisfy"
+      " (free-placed / free-sized / non-conformant to the named standard; invisible to ERC/DRC)."
       if gap else
       "no unmet mechanical-constraint signal detected (still sanity-check interfaces/part-count vs brief by eye).")
 PY
 ```
 
-**Read it:** a `GAP` verdict means the brief asked for a fixed mechanical form the pipeline cannot
-represent — a **systematic prompt/data-model gap**, not a per-design miss, because *every* such
-brief hits it. Owning fix: `docs/plans/standard-form-factor-templates.md` (a form-factor registry +
-fixed-outline compose branch + a mechanical-conformance promote gate). Beyond the mechanical case,
+**Read it:** a `GAP` verdict means the brief asked for a fixed mechanical form the board does not
+satisfy. Two flavors: (a) `.standard` is None → the pipeline did not even capture the form factor
+(detection gap — should be rare now that `kicraft.form_factors` matches named standards); (b) a
+standard WAS captured but the delivered board is `NON-CONFORMANT` (e.g. `4/32 standard header pins
+present, outline 121.9x45.2 != 68.58x53.34`) → placement did not honor it. This is a **systematic
+data-model/enforcement gap**, not a per-design miss, because *every* such brief hits it. Owning fix:
+`docs/plans/standard-form-factor-templates.md` (form-factor registry [done] + fixed-outline compose
+branch + a mechanical-conformance promote gate). Beyond the mechanical case,
 also eyeball the delivered BOM/architecture against the brief's **named interfaces and part
 intent** (did an "STM32 CAN node" actually get a CAN transceiver? did "four mounting holes" appear?)
 — a missing/again-and-again-wrong interface across designs is a synthesis prompt/contract gap, not
