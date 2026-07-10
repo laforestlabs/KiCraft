@@ -7,6 +7,35 @@ import pytest
 from kicraft.autoplacer import freerouting_runner
 
 
+def test_run_kicad_cli_drc_counts_tracks_crossing_as_short(monkeypatch, tmp_path):
+    """WS7: a tracks_crossing (two DIFFERENT-net tracks physically crossing) is
+    a genuine short and must gate fab acceptance -- rounded-c3-devboard shipped
+    past shorts=0 with a real GND-over-TXD0 crossing before this."""
+    report = (
+        "[tracks_crossing]: Tracks crossing @(167.41 mm, 98.84 mm): "
+        "[Net 1](GND) [Net 2](TXD0)\n"
+    )
+
+    class _FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(cmd, *args, **kwargs):
+        # kicad-cli writes the DRC report to the path following -o; emulate that
+        # so the real parse path (including the new tracks_crossing branch) runs.
+        out_path = cmd[cmd.index("-o") + 1]
+        with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write(report)
+        return _FakeResult()
+
+    monkeypatch.setattr(freerouting_runner.subprocess, "run", _fake_run)
+
+    counts = freerouting_runner._run_kicad_cli_drc(str(tmp_path / "board.kicad_pcb"))
+    assert counts["tracks_crossing"] == 1
+    assert counts["shorts"] == 1
+
+
 def test_extract_clearance_footprint_refs_counts_refs_within_clearance_blocks():
     report = """
 [clearance]: Clearance violation

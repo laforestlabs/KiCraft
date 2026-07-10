@@ -200,4 +200,15 @@ class ParentCompositionState:
             },
             "entries": [entry.to_dict() for entry in self.entries],
             "copper_manifest": self.copper_manifest.to_dict() if self.copper_manifest else None,
+            # Outline provenance (WS9): so a shaped board's true outline is
+            # recorded, not silently reported as "rect" downstream. requested_shape
+            # is the brief intent; manual_outline/fitted_polygon is what actually
+            # got stamped (parametric spec / general polygon ring).
+            "requested_shape": dict(self.requested_shape) if self.requested_shape else None,
+            "manual_outline": dict(self.manual_outline) if self.manual_outline else None,
+            "fitted_polygon": (
+                [[float(x), float(y)] for x, y in self.fitted_polygon]
+                if self.fitted_polygon
+                else None
+            ),
         }

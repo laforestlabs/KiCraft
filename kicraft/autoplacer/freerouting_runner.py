@@ -1428,6 +1428,7 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
         "clearance": 0,
         "copper_edge_clearance": 0,
         "courtyard": 0,
+        "tracks_crossing": 0,
         "solder_mask_bridge": 0,
         "annular_width": 0,
         "padstack": 0,
@@ -1510,6 +1511,14 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
                     counts["shorts"] += 1
             elif vtype == "copper_edge_clearance":
                 counts["copper_edge_clearance"] += 1
+            elif vtype == "tracks_crossing":
+                # Two tracks on DIFFERENT nets physically crossing is a genuine
+                # short -- foreign copper touching, flagged by KiCad at error
+                # severity. Count it toward shorts or a board with a real
+                # different-net crossing (e.g. a straight pad-to-pad GND link
+                # laid across a signal track) ships past the shorts=0 fab gate (WS7).
+                counts["tracks_crossing"] += 1
+                counts["shorts"] += 1
             elif vtype == "courtyards_overlap":
                 counts["courtyard"] += 1
             elif vtype == "solder_mask_bridge":

@@ -20,6 +20,99 @@ from kicraft.eval import self_eval as se
 
 
 # --------------------------------------------------------------------------- #
+# WS6: BOM-reconcile re-drive shared by the web app and the eval driver
+# --------------------------------------------------------------------------- #
+def test_maybe_bom_reconcile_redrives_on_deficit(monkeypatch):
+    from kicraft.server import session
+
+    calls = []
+
+    def fake_run_session(ws, brief, stages, **kw):
+        calls.append((list(stages), kw.get("instruction")))
+        return {"status": "ok", "results": [{"cost_usd": 0.01}],
+                "questions": None, "last_stage": "wiring"}
+
+    monkeypatch.setattr(session, "run_session", fake_run_session)
+    park = {"status": "awaiting_input", "last_stage": "wiring",
+            "questions": [{"text": "add a 2nd 1uF cap for U1", "reconcile_target": "bom",
+                           "blocking": True}]}
+    res, reconciled = session.maybe_bom_reconcile("/ws", "brief", park)
+    assert reconciled is True
+    assert res["status"] == "ok"
+    assert calls and calls[0][0] == ["bom", "wiring"]
+    assert "missing supporting parts" in calls[0][1]
+
+
+def test_maybe_bom_reconcile_noop_without_reconcile_target(monkeypatch):
+    from kicraft.server import session
+
+    def boom(*a, **k):
+        raise AssertionError("run_session must not be re-driven for a plain park")
+
+    monkeypatch.setattr(session, "run_session", boom)
+    park = {"status": "awaiting_input", "last_stage": "wiring",
+            "questions": [{"text": "which LED color?", "blocking": True}]}
+    res, reconciled = session.maybe_bom_reconcile("/ws", "brief", park)
+    assert reconciled is False
+    assert res is park
+
+
+def test_maybe_bom_reconcile_only_runs_once(monkeypatch):
+    from kicraft.server import session
+
+    def boom(*a, **k):
+        raise AssertionError("reconcile must be a single pass")
+
+    monkeypatch.setattr(session, "run_session", boom)
+    park = {"status": "awaiting_input", "last_stage": "wiring",
+            "questions": [{"text": "add cap", "reconcile_target": "bom", "blocking": True}]}
+    res, reconciled = session.maybe_bom_reconcile(
+        "/ws", "brief", park, already_reconciled=True)
+    assert reconciled is True  # stays reconciled, no second pass
+    assert res is park
+
+
+# --------------------------------------------------------------------------- #
+# WS9: outline check must gate on build outcome (not grade the seed stub)
+# --------------------------------------------------------------------------- #
+def test_outline_check_none_for_rectangular_brief(tmp_path):
+    assert se._outline_check({}, tmp_path, build_rc=0) is None
+
+
+def test_outline_check_reports_no_built_parent_when_leaf_phase_died(tmp_path, monkeypatch):
+    # rc=6 (route/infra abort) leaves only the rectangular seed stub; grading it
+    # faked a "hexagon came out rectangular" failure. It must report a distinct
+    # 'no built parent' with pass=None instead.
+    called = {"eval": False}
+    monkeypatch.setattr(
+        se, "evaluate_outline_shape",
+        lambda *a, **k: called.__setitem__("eval", True) or {"level": 0, "pass": False},
+    )
+    oc = se._outline_check({"outline_shape": "hexagon"}, tmp_path, build_rc=6)
+    assert oc == {
+        "pass": None,
+        "level": None,
+        "expected_shape": "hexagon",
+        "reason": "no built parent (build rc=6)",
+    }
+    assert not called["eval"]  # never even tried to classify the stub
+
+
+def test_outline_check_classifies_promoted_parent(tmp_path, monkeypatch):
+    # rc=7 (routed parent present, DRC failed) DID stamp the shape -> classify it.
+    board = tmp_path / "generated" / "PROJ"
+    board.mkdir(parents=True)
+    (board / "PROJ.kicad_pcb").write_text("(kicad_pcb)")
+    monkeypatch.setattr(
+        se, "evaluate_outline_shape",
+        lambda b, exp: {"level": 4, "detected_family": exp, "expected_shape": exp},
+    )
+    oc = se._outline_check({"outline_shape": "hexagon"}, tmp_path, build_rc=7)
+    assert oc["pass"] is True
+    assert oc["level"] == 4
+
+
+# --------------------------------------------------------------------------- #
 # auto-answer + event writer
 # --------------------------------------------------------------------------- #
 def test_auto_answers_picks_first_suggested_option():

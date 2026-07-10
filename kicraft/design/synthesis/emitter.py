@@ -191,6 +191,28 @@ def ensure_leaf_stems_distinct(project_stem: str, sheets: list[Sheet]) -> None:
 
 # ---------- root schematic ----------
 
+# Vertical pitch between adjacent sheet pins on the root canvas. One KiCad grid
+# step: keeps every pin (and its stub/label) on-grid and, crucially, guarantees
+# no two pins share a Y (a sub-grid step silently merges nets -- WS11).
+_SHEET_PIN_PITCH_MM = 1.27
+
+
+def _sheet_signal_pin_count(sheet_inst: _SheetInstance) -> int:
+    """Number of non-power signal sheet pins (mirrors the filter in
+    :func:`_emit_sheet_block`)."""
+    return sum(
+        1
+        for (net, _ep) in sheet_inst.inter_sheet_endpoints
+        if not is_power_or_ground_name(net.name)
+    )
+
+
+def _sheet_required_height(sheet_inst: _SheetInstance, base_height: float) -> float:
+    """Sheet-box height tall enough to give every signal pin its own 1.27 mm
+    slot. Grows past ``base_height`` only for pin-dense sheets (>~23 pins)."""
+    n_pins = _sheet_signal_pin_count(sheet_inst)
+    return max(base_height, _SHEET_PIN_PITCH_MM * (n_pins + 1))
+
 
 def _emit_sheet_block(
     sheet_inst: _SheetInstance,
@@ -219,11 +241,17 @@ def _emit_sheet_block(
         if not is_power_or_ground_name(net.name)
     ]
     n_pins = len(signal_endpoints)
+    # Spread pins evenly, but never tighter than one grid step. The old
+    # height/(n_pins+1) step fell BELOW 1.27 mm for a pin-dense sheet (24 pins on
+    # a 30.48 mm sheet -> 1.22 mm), so adjacent pins snapped to the SAME grid Y
+    # and their nets merged silently -- caught only by the netlist-faithfulness
+    # diff (WS11). The caller grows `height` (_sheet_required_height) so a dense
+    # sheet still fits every pin at the 1.27 mm floor; a sparse sheet keeps its
+    # previous even spread byte-for-byte.
+    step = max(_SHEET_PIN_PITCH_MM, height / (n_pins + 1)) if n_pins else 0.0
     for i, (net, ep) in enumerate(signal_endpoints):
-        # Spread pins evenly along the right edge.
-        step = height / (n_pins + 1) if n_pins else 0
         # Snap to the 1.27 mm grid so the pin (and its root stub) is on-grid.
-        pin_y = round((y + step * (i + 1)) / 1.27) * 1.27
+        pin_y = round((y + step * (i + 1)) / _SHEET_PIN_PITCH_MM) * _SHEET_PIN_PITCH_MM
         pin_records.append((net.name, x + width, pin_y))
         pin_lines.append(
             f'\t\t(pin "{_q(net.name)}" {ep.direction}\n'
@@ -260,6 +288,15 @@ def _emit_sheet_block(
         f"\t\t)\n"
         f"\t)"
     )
+    # Loud failure beats a silent net merge: every sheet pin must have a distinct
+    # position (WS11). With the fixed-pitch layout above this holds by
+    # construction; the assert guards against any future regression here.
+    positions = [(px, py) for (_net, px, py) in pin_records]
+    if len(set(positions)) != len(positions):
+        raise ValueError(
+            f"sheet {sheet.name!r}: coincident sheet-pin positions "
+            f"{sorted(positions)} would silently merge distinct nets"
+        )
     return block, pin_records
 
 
@@ -294,7 +331,12 @@ def _emit_root(
     n_sheets = max(1, len(sheet_insts))
     content_w = n_sheets * sheet_width + (n_sheets - 1) * sheet_gap
     content_w += sheet_gap * 0.5 + 12.7  # right-side pin stubs + labels
-    content_h = sheet_height
+    # A pin-dense sheet grows taller than the 24-pin base so no two pins collide;
+    # size the page against the tallest sheet (WS11).
+    sheet_heights = {
+        si.sheet.name: _sheet_required_height(si, sheet_height) for si in sheet_insts
+    }
+    content_h = max(sheet_heights.values(), default=sheet_height)
     if content_w <= 297.0 - 2 * 25.4 and content_h <= 210.0 - 2 * 25.4:
         paper, page_w, page_h = "A4", 297.0, 210.0
     else:
@@ -308,7 +350,7 @@ def _emit_root(
         x = start_x + i * (sheet_width + sheet_gap)
         y = start_y
         block, recs = _emit_sheet_block(
-            si, x, y, sheet_width, sheet_height, project_stem
+            si, x, y, sheet_width, sheet_heights[si.sheet.name], project_stem
         )
         rows.append(block)
         pin_records.extend(recs)

@@ -200,16 +200,26 @@ def build_anchor_grid(
     base = half + min(max(0.0, pitch_gap_mm), 0.6)
 
     anchors = [c for c in placed_comps.values() if (c.kind or "") in _ANCHOR_KINDS]
-    anchor_rects = [
-        (Point(_bc(a).x - a.width_mm / 2, _bc(a).y - a.height_mm / 2),
-         Point(_bc(a).x + a.width_mm / 2, _bc(a).y + a.height_mm / 2))
-        for a in anchors
+
+    # A slot is illegal if it overlaps ANY fixed part the grid will not move --
+    # not just the pin-anchor ICs/regulators/connectors. Inductors, LEDs, diodes,
+    # crystals, locked parts and array members are all rigid obstacles here; culling
+    # only _ANCHOR_KINDS let a passive slot land on top of e.g. an inductor or LED,
+    # producing exactly the 'R1:L1' / 'LED1:C2' courtyard overlaps that are
+    # unrepairable downstream (WS1). Obstacles = every placed component that is not
+    # a gridable passive (those move via the slots and are kept apart by `sep`).
+    gridable_refs = {c.ref for c in passives}
+    obstacle_rects = [
+        (Point(_bc(c).x - c.width_mm / 2, _bc(c).y - c.height_mm / 2),
+         Point(_bc(c).x + c.width_mm / 2, _bc(c).y + c.height_mm / 2))
+        for c in placed_comps.values()
+        if c.ref not in gridable_refs
     ]
 
     def _legal(pos: Point) -> bool:
         if not _inside(pos, half, tl, br, pad_inset_mm):
             return False
-        for rtl, rbr in anchor_rects:
+        for rtl, rbr in obstacle_rects:
             if _overlaps_rect(pos, half, rtl, rbr):
                 return False
         for rtl, rbr in keepout_rects:
@@ -417,10 +427,21 @@ def grid_assignment_sa(
     no_improve_break: int = 150,
 ) -> dict[str, Component]:
     """Metropolis search over slot occupancy. Returns the best components; on
-    return ``grid`` is restored to the best assignment (for a final re-snap)."""
+    return ``grid`` is restored to the best assignment (for a final re-snap).
+
+    Accept-if-better: the returned placement is never scored worse than the
+    input. The connectivity-first grid can *degrade* a decent force-loop
+    placement (buck-3a replay: 65.8 -> 43.4 with +18 crossovers); when the best
+    assignment does not beat the input, the input is kept verbatim and the grid
+    bookkeeping is neutralized so the caller's re-snap becomes a no-op."""
+    # Snapshot + score the INPUT placement before assign_initial re-grids everyone.
+    input_comps = {r: copy.deepcopy(c) for r, c in comps.items()}
+    work_state.components = input_comps
+    input_score = scorer.score().total
+
     assign_initial(comps, grid)
     if not grid.occupied_by_ref:
-        return {r: copy.deepcopy(c) for r, c in comps.items()}
+        return input_comps
 
     work_state.components = comps
     current = scorer.score().total
@@ -481,6 +502,17 @@ def grid_assignment_sa(
         temp *= cooling_rate
         if since_improve >= no_improve_break or temp < temp_floor:
             break
+
+    # Accept-if-better guard: if the best grid assignment did not beat the input
+    # placement, discard it and keep the input. Neutralize the grid so the
+    # caller's resnap_to_grid finds no occupants and leaves the input untouched.
+    if best <= input_score:
+        for slot in grid.slots:
+            slot.occupant = None
+        grid.free = set(range(len(grid.slots)))
+        grid.occupied_by_ref = {}
+        grid.rotation_by_ref = {}
+        return input_comps
 
     # Restore grid bookkeeping to the best assignment so a downstream re-snap
     # (after the legality tail) can pin any drifted passive back to its slot.

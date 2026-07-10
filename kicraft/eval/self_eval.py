@@ -59,7 +59,13 @@ from pathlib import Path
 
 from kicraft.build_slots import ACQUIRED_MARKER, resolve_build_slots
 from kicraft.proc_tree import kill_tree
-from kicraft.server.session import read_state, record_answers, remaining_stages, run_session
+from kicraft.server.session import (
+    maybe_bom_reconcile,
+    read_state,
+    record_answers,
+    remaining_stages,
+    run_session,
+)
 from kicraft.tuning.benchmark import BENCHMARK_PROMPTS as BRIEFS
 from kicraft.tuning.benchmark import SHAPED_OUTLINE_PROMPTS
 
@@ -75,12 +81,33 @@ def _find_parent_board(rundir: Path) -> Path | None:
     return cands[0] if cands else None
 
 
-def _outline_check(entry: dict, rundir: Path) -> dict | None:
+# Build outcomes that leave a PROMOTED ROUTED parent at
+# ``generated/<stem>/<stem>.kicad_pcb``: rc=0 (fab-ready) and rc=7 (not
+# fab-ready, DRC) both composed + routed + promoted a parent, so the shape was
+# stamped. Every other outcome -- rc=6 (route/infra abort), rc<=5 (synthesis
+# death), None -- leaves only the rectangular synthesis SEED STUB on that path.
+_PROMOTED_PARENT_RCS = frozenset({0, 7})
+
+
+def _outline_check(entry: dict, rundir: Path, build_rc: int | None) -> dict | None:
     """Deterministic outline-shape grade for a shaped brief (entries carrying
-    ``outline_shape``); ``None`` for ordinary rectangular briefs."""
+    ``outline_shape``); ``None`` for ordinary rectangular briefs.
+
+    Gated on build outcome: only a promoted routed parent carries the stamped
+    shape. A build that died in the leaf phase leaves the rectangular seed stub
+    (kicad_pcb_stub._draw_board_outline) at the same path; grading THAT reported
+    a leaf-phase death as a wrong-shape failure (WS9). Report ``pass=None`` with
+    a distinct reason instead, so it never counts as a shape miss."""
     expected = entry.get("outline_shape")
     if not expected:
         return None
+    if build_rc not in _PROMOTED_PARENT_RCS:
+        return {
+            "pass": None,
+            "level": None,
+            "expected_shape": expected,
+            "reason": f"no built parent (build rc={build_rc})",
+        }
     board = _find_parent_board(rundir)
     res = evaluate_outline_shape(board, expected) if board else {
         "level": 0, "partial": False, "detected_family": None,
@@ -232,6 +259,15 @@ def run_design(client, brief: str, rundir: Path, progress, *,
     cost = 0.0
     n_questions = 0
     pending = None
+    bom_reconciled = False
+
+    def _add_cost(r_dict: dict) -> None:
+        nonlocal cost
+        for r in r_dict.get("results") or []:
+            c = r.get("cost_usd")
+            if isinstance(c, (int, float)):
+                cost += c
+
     for round_no in range(max_park_rounds):
         rem = remaining_stages(read_state(rundir))
         if not rem:
@@ -239,16 +275,49 @@ def run_design(client, brief: str, rundir: Path, progress, *,
                     "rounds": round_no, "error": None}
         res = run_session(rundir, brief, rem, answers=pending, client=client,
                           progress=progress, run_id=run_id)
-        for r in res.get("results") or []:
-            c = r.get("cost_usd")
-            if isinstance(c, (int, float)):
-                cost += c
+        _add_cost(res)
         status = res.get("status")
         if status == "ok":
             return {"status": "ok", "cost_usd": cost, "questions": n_questions,
                     "rounds": round_no + 1, "error": None}
         if status == "awaiting_input":
+            # A reconcile_target="bom" park is the pipeline's note-to-self, NOT a
+            # user question: wiring cannot add the parts it needs, so plain-
+            # answering it loops until the retry budget burns out (all 5
+            # synthesis deaths in the 07-10 batch). Re-drive bom+wiring once with
+            # the concrete shortfall instead -- the same repair the web app runs
+            # (WS6). Never plain-answer a reconcile park.
+            prev = bom_reconciled
+            res, bom_reconciled = maybe_bom_reconcile(
+                rundir, brief, res, progress=progress, run_id=run_id,
+                client=client, already_reconciled=bom_reconciled)
+            if bom_reconciled and not prev:
+                _add_cost(res)  # count the reconcile pass once
+                status = res.get("status")
+                if status == "ok":
+                    return {"status": "ok", "cost_usd": cost,
+                            "questions": n_questions, "rounds": round_no + 1,
+                            "error": None}
             qs = res.get("questions") or []
+            if status == "awaiting_input" and any(
+                q.get("reconcile_target") == "bom" for q in qs
+            ):
+                # A BOM deficit that survived the one reconcile pass cannot be
+                # resolved by answering (wiring still can't add parts). Stop
+                # honestly instead of looping the retry budget away.
+                unresolved = "; ".join(
+                    str(q.get("text", "")) for q in qs
+                )[:400]
+                return {"status": "failed", "cost_usd": cost,
+                        "questions": n_questions, "rounds": round_no + 1,
+                        "error": f"unresolved BOM deficit after reconcile: {unresolved}"}
+            if status != "awaiting_input":
+                # Reconcile turned the park into a hard failure -- report it.
+                last = (res.get("results") or [{}])[-1]
+                err = last.get("error") or last.get("commit") or "stage failed to commit"
+                return {"status": "failed", "cost_usd": cost,
+                        "questions": n_questions, "rounds": round_no + 1,
+                        "error": str(err)[:500]}
             n_questions += len(qs)
             pending = _auto_answers(qs)
             record_answers(rundir, res.get("last_stage"), pending)
@@ -269,13 +338,19 @@ def run_build(rundir: Path, progress, *, timeout_s: int = 2400) -> int:
     time spent queued for a host-wide build slot is never billed against the build.
     Returns the build exit code (negative if killed)."""
     progress({"kind": "build_start"})
+    # Export a self-limit budget UNDER the watchdog (WS2): the pipeline finalizes
+    # a best-so-far board before this SIGKILL fires, so a pathological run yields a
+    # graded rc=6/7 partial instead of the empty rc=-9 the watchdog leaves. 90% of
+    # the watchdog leaves headroom to finalize + export.
+    build_env = _build_env()
+    build_env.setdefault("KICRAFT_BUILD_MAX_WALL_S", f"{max(60.0, timeout_s * 0.9):.0f}")
     # start_new_session + kill_tree (NOT proc.kill): the build fans out to leaf
     # solvers and FreeRouting JVMs, and the JVM detaches into its own session
     # (freerouting_runner), so killing only the direct child stranded orphan
     # JVMs burning cores for days (self-eval-2026-07-07 FIX 1).
     proc = subprocess.Popen(_BUILD_CMD, cwd=str(rundir), text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            env=_build_env(), start_new_session=True)
+                            env=build_env, start_new_session=True)
     timer = threading.Timer(timeout_s, kill_tree, args=(proc.pid,))
     timer.start()
     try:
@@ -373,7 +448,7 @@ def evaluate_one(client, idx: int, entry: dict, out_dir: Path, *,
         # alongside the rubric score, not folded into the 100-pt scale -- the
         # rubric's finalize rejects N/A dimensions, and it would only apply to
         # this category anyway.
-        oc = _outline_check(entry, rundir)
+        oc = _outline_check(entry, rundir, build_rc)
         if oc is not None:
             rec["outline_check"] = oc
     except Exception as e:  # noqa: BLE001 - record and keep the batch going
@@ -499,15 +574,24 @@ def _outline_stats(records) -> dict | None:
     shaped = [r for r in records if r.get("outline_check")]
     if not shaped:
         return None
+    # Only briefs that BUILT a promoted parent are graded on shape; ones that
+    # failed upstream (pass=None) are counted separately, never as a shape miss
+    # (WS9 -- grading the seed stub used to fake a hexagon/snowman "came out
+    # rectangular" failure).
+    graded = [r for r in shaped if r["outline_check"].get("pass") is not None]
+    no_parent = [r for r in shaped if r["outline_check"].get("pass") is None]
     return {
         "n": len(shaped),
-        "pass": sum(1 for r in shaped if r["outline_check"].get("pass")),
+        "graded": len(graded),
+        "pass": sum(1 for r in graded if r["outline_check"].get("pass")),
+        "no_built_parent": len(no_parent),
         "by_brief": {
             r.get("slug"): {
                 "expected": r["outline_check"].get("expected_shape"),
                 "detected": r["outline_check"].get("detected_family"),
                 "level": r["outline_check"].get("level"),
                 "pass": r["outline_check"].get("pass"),
+                "reason": r["outline_check"].get("reason"),
                 "build_rc": r.get("build_rc"),
             }
             for r in shaped

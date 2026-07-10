@@ -669,7 +669,18 @@ def _stage_max_tokens(stage: str, default: int) -> int:
     return max(default, _STAGE_MIN_TOKENS.get(stage, 0))
 
 
-def _retry_feedback(out: dict) -> str:
+def _committed_bom_refs(state_path) -> list[str]:
+    """Refs the committed BOM already contains -- the only refs wiring may use."""
+    try:
+        sj = json.loads(Path(state_path).read_text(encoding="utf-8"))
+        parts = (sj.get("bom") or {}).get("parts") or []
+        return sorted(str(p.get("ref")) for p in parts if isinstance(p, dict) and p.get("ref"))
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return []
+
+
+def _retry_feedback(out: dict, *, stage: str | None = None,
+                    valid_refs: list[str] | None = None) -> str:
     """Self-correction message fed back to the model after a rejected commit.
 
     Names the exact errors and offending pins, then instructs a *preserving patch*
@@ -689,6 +700,18 @@ def _retry_feedback(out: dict) -> str:
             "Use COMPACT single-line JSON per part (omit null fields) so the output fits the "
             "token budget — verbose pretty-printed JSON truncates and fails. "
             "Output ONLY the slot JSON.")
+    # Unknown-ref in wiring means the model tried to wire a part the BOM lacks --
+    # it cannot add parts, so retrying with an invented ref just re-fails. Point
+    # it at the real refs and the reconcile escape hatch so it stops thrashing and
+    # escalates the deficit instead of burning the retry budget (WS6).
+    if stage == "wiring" and "unknown ref" in json.dumps(out.get("errors") or ""):
+        msg += (" NOTE: the wiring stage can ONLY connect refs the BOM already contains -- it "
+                "CANNOT add parts. Do not invent a ref. If a part you need is genuinely missing "
+                "from the BOM, do NOT wire a made-up ref: instead PARK with a single blocking "
+                "question whose \"reconcile_target\" is \"bom\", naming the missing part and the "
+                "IC pins it serves; the pipeline will add it and re-run wiring.")
+        if valid_refs:
+            msg += f" The only refs you may reference are: {valid_refs}."
     return msg
 
 
@@ -881,7 +904,13 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         qpayload = obj.get("questions") if isinstance(obj, dict) else None
         if isinstance(qpayload, list) and qpayload:
             qs = _normalize_questions(qpayload, stage)
-            if any(q["blocking"] for q in qs) and not answers:
+            # A reconcile_target park is the pipeline's ESCALATION (a BOM shortfall
+            # wiring can't fix), not a user question. Surface it even after answers
+            # were applied, so the shared bom-reconcile re-drive can add the parts
+            # -- otherwise the "do not ask more questions" retry below burns the
+            # stage's whole budget on a park it can never satisfy (WS6).
+            is_reconcile_park = any(q.get("reconcile_target") for q in qs)
+            if any(q["blocking"] for q in qs) and (not answers or is_reconcile_park):
                 _attach_questions(state_path, stage, qs)
                 if progress:
                     progress({"kind": "question", "stage": stage, "questions": qs})
@@ -919,8 +948,10 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         # Echo the FULL slot the model just emitted (raw) so the preserving-patch
         # instruction in _retry_feedback can change only the flagged parts; the
         # slot is bounded by max_tokens and is far smaller than the tool transcript
-        # this replaces.
-        messages = _lean_retry(raw, _retry_feedback(out))
+        # this replaces. For wiring, pass the committed BOM refs so an unknown-ref
+        # rejection can name the real refs + the reconcile escape hatch (WS6).
+        _valid_refs = _committed_bom_refs(state_path) if stage == "wiring" else None
+        messages = _lean_retry(raw, _retry_feedback(out, stage=stage, valid_refs=_valid_refs))
 
     _wall = round(time.monotonic() - t0, 3)
     _cpu = round(_child_cpu_s() - cpu0, 3)

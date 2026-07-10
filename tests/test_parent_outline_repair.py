@@ -56,6 +56,11 @@ def _state(board_state, edge_refs=(), manual_outline=None, connector_sides=()):
         edge_zoned_outline_sides=frozenset(connector_sides),
         geometry_validation=None,
         manual_outline=manual_outline,
+        # Match the real ParentCompositionState dataclass so the shape-aware
+        # geometry validation (fitted_polygon path) and outline_shape provenance
+        # (requested_shape) don't AttributeError on the stub.
+        fitted_polygon=None,
+        requested_shape=None,
     )
 
 

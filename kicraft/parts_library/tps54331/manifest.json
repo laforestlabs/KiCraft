@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:44e21901e15a1383d514ba41e1de70166329d35ba684262ff36f9d7f7c6c5ee0",
+  "content_hash": "sha256:94112f1c6f60446dab601b4b2e2249e895d91101641f25bdb0682d7fa7076cad",
   "datasheet_url": "https://lcsc.com/product-detail/DC-DC-Converters_TI_TPS54331DDAR_TPS54331DDAR_C90761.html",
   "description": "TI TPS54331 \u2014 3A step-down buck converter, 3.5-28V input, adjustable output down to 0.8V. SOIC-8 package with thermal pad. 570kHz switching. ECO-mode for light-load efficiency.",
   "footprint_name": "SOIC-8_L4.9-W3.9-P1.27-LS6.0-BL-EP",

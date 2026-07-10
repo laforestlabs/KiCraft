@@ -590,6 +590,33 @@ def _largest_safe_slide(
     return sign * lo
 
 
+def _collision_aware_corner_snap(
+    solved: dict[str, Component], ref: str, dx: float, dy: float
+) -> bool:
+    """Slide ``ref`` toward a corner/edge target by ``(dx, dy)``, one axis at a
+    time, stopping each axis at the largest offset that keeps clearance.
+
+    A raw corner snap slides a parent-local mounting hole onto the exact cluster
+    corner -- which is precisely where a corner leaf's header pads sit -- stamping
+    the hole's PTH pad on top of leaf copper at 0.0 mm (the encoder-oled-panel
+    ``candidate-search ... shorts=10..16`` abort). Reusing ``_largest_safe_slide``
+    lands the hole as close to the corner as clearance allows and no closer (WS4).
+    Returns True if any movement was applied.
+    """
+    moved = False
+    if abs(dx) > 1e-3:
+        safe_dx = _largest_safe_slide(solved, ref, False, dx)
+        if abs(safe_dx) > 1e-3:
+            _apply_slide(solved[ref], free_axis_y=False, delta=safe_dx)
+            moved = True
+    if abs(dy) > 1e-3:
+        safe_dy = _largest_safe_slide(solved, ref, True, dy)
+        if abs(safe_dy) > 1e-3:
+            _apply_slide(solved[ref], free_axis_y=True, delta=safe_dy)
+            moved = True
+    return moved
+
+
 def _cluster_bbox(
     solved: dict[str, Component], exclude_refs: set[str]
 ) -> tuple[Point, Point] | None:
@@ -720,11 +747,7 @@ def _slide_constrained_to_cluster(
             target_y = c_min.y if "top" in corner_value else c_max.y
             dx = target_x - cur_anchor_x
             dy = target_y - cur_anchor_y
-            if abs(dx) > 1e-3:
-                _apply_slide(comp, free_axis_y=False, delta=dx)
-            if abs(dy) > 1e-3:
-                _apply_slide(comp, free_axis_y=True, delta=dy)
-            if abs(dx) > 1e-3 or abs(dy) > 1e-3:
+            if _collision_aware_corner_snap(solved, ref, dx, dy):
                 snapped_corners += 1
 
     if slides_applied or snapped_corners:
@@ -1093,11 +1116,12 @@ def _snap_parent_local(
         dy = target_y - anchor_y
         if abs(dx) < 1e-6 and abs(dy) < 1e-6:
             continue
-        comp.pos = Point(comp.pos.x + dx, comp.pos.y + dy)
-        if comp.body_center is not None:
-            comp.body_center = Point(comp.body_center.x + dx, comp.body_center.y + dy)
-        for pad in comp.pads:
-            pad.pos = Point(pad.pos.x + dx, pad.pos.y + dy)
+        # Collision-aware snap: what reaches _snap_parent_local is board-level
+        # structure (mounting holes / fiducials -- connectors are wrapped as
+        # leaves upstream), so snapping the anchor to the exact corner/edge must
+        # not stamp the hole onto a leaf's pads. Slide as far to the target as
+        # clearance allows (WS4); a fully-clear target still lands exactly on it.
+        _collision_aware_corner_snap(comps, c.ref, dx, dy)
 
 
 def _synthetic_parent_definition(loaded_artifacts) -> SubCircuitDefinition:

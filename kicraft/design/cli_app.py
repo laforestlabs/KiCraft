@@ -2932,8 +2932,9 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                 f"inter_sheet {c}"
                 for c in reconcile_inter_sheet_nets(state.architecture, state.bom)
             ]
-        # Standard form-factor "replace & rewire" (env-gated by
-        # KICRAFT_FORM_FACTOR_ENFORCE, default OFF): when the brief named a
+        # Standard form-factor "replace & rewire" (default ON;
+        # KICRAFT_FORM_FACTOR_ENFORCE is a kill switch -- set 0/false/off to
+        # disable without a redeploy): when the brief named a
         # validated standard (e.g. Arduino shield), replace the LLM's generic
         # stacking connectors with the standard's headers as real BOM parts, bind
         # their power/ground pins, and mark signal pins no-connect -- so the
@@ -3576,16 +3577,40 @@ def _run_layout(quality: str, root_sch: Path, pcb: Path,
               "(solve-hierarchy) engine; this quality always routes.",
               file=sys.stderr)
     common = [str(pcb), "--schematic", str(root_sch), *seed_args]
+
+    # WS2 wall budgets: a build under a harness watchdog (self-eval) exports
+    # KICRAFT_BUILD_MAX_WALL_S so the search self-limits and finalizes a
+    # best-so-far board instead of being SIGKILLed with zero artifacts. Split
+    # across the two phases (leaves dominate) and derive a per-leaf deadline so
+    # one pathological leaf can't consume the whole leaf phase in a single round.
+    try:
+        _build_budget_s = float(os.environ.get("KICRAFT_BUILD_MAX_WALL_S", "0") or 0.0)
+    except ValueError:
+        _build_budget_s = 0.0
+    leaf_wall_args: list[str] = []
+    parent_wall_args: list[str] = []
+    if _build_budget_s > 0:
+        _leaf_budget = _build_budget_s * 0.65
+        _parent_budget = _build_budget_s * 0.30
+        leaf_wall_args = ["--max-wall-s", f"{_leaf_budget:.0f}"]
+        parent_wall_args = ["--max-wall-s", f"{_parent_budget:.0f}"]
+        # No single leaf may eat more than ~a third of the leaf phase (so >=3
+        # leaves get a shot); the floor keeps a normal-speed leaf effectively
+        # uncapped. Env-passed so it reaches the solve_subcircuits subprocess.
+        os.environ.setdefault(
+            "KICRAFT_LEAF_SOLVE_MAX_WALL_S", f"{max(180.0, _leaf_budget / 3.0):.0f}"
+        )
+
     print(f"[build]   leaf phase: {preset['leaf_rounds']}x{preset['leaf_attempts']} "
           f"designs/leaf + auto-pin best ...")
     leaf_rc = _autoexperiment_main(common + [
         "--leaves-only", "--rounds", str(preset["leaf_rounds"]),
-        "--leaf-rounds", str(preset["leaf_attempts"])])
+        "--leaf-rounds", str(preset["leaf_attempts"]), *leaf_wall_args])
     if leaf_rc != 0:
         return leaf_rc
     print(f"[build]   parent phase: {preset['parent_rounds']} round(s) from pinned leaves ...")
     return _autoexperiment_main(common + [
-        "--parents-only", "--rounds", str(preset["parent_rounds"])])
+        "--parents-only", "--rounds", str(preset["parent_rounds"]), *parent_wall_args])
 
 
 def _find_routed_parent(project_dir: Path) -> Path | None:

@@ -75,6 +75,7 @@ from .session import (
     commit_slot,
     derive_stage_statuses,
     downstream_stages,
+    maybe_bom_reconcile,
     null_downstream,
     read_state,
     record_answers,
@@ -440,21 +441,9 @@ def _erc_offenders(ws: Path) -> list[str]:
     return []
 
 
-def _bom_reconcile_instruction(questions: list[dict]) -> str:
-    """Turn wiring's reconcile_target="bom" deficit note(s) into a BOM-stage
-    instruction that adds the missing parts. Each question's text is already a
-    precise "add N of X for pins Y" statement (per the wiring spec)."""
-    lines = [str(q.get("text", "")).strip()
-             for q in questions if str(q.get("text", "")).strip()]
-    body = "\n- ".join(lines)
-    return (
-        "The wiring stage could not finish because the BOM is missing supporting "
-        "parts its ICs require. Add the parts described below: give each a fresh, "
-        "unique ref, the correct value and footprint, the same sheet as the IC it "
-        "serves, and list it in that IC's ic_groups entry. Then re-emit the FULL "
-        "BOM. Do NOT ask the user and do NOT drop any part already present — just "
-        "provision what's missing:\n- " + body
-    )
+# Single source of truth lives in kicraft.server.session (shared with the
+# self-eval driver, WS6); kept re-exported here for back-compat callers/tests.
+from .session import bom_reconcile_instruction as _bom_reconcile_instruction  # noqa: E402
 
 
 def _synth_check_failures(ws: Path | None) -> list[str]:
@@ -1447,6 +1436,32 @@ def _file_failure_report(state: dict) -> None:
         pass
 
 
+def _investigation_log_dir() -> Path:
+    """Where headless /kicraft-investigate runs tee their stdout: a sibling of
+    the projects dir (not per-project, since a report may have no project)."""
+    return _store().projects_dir.parent / "support_investigations"
+
+
+def _auto_investigate_if_enabled(report_id: int) -> None:
+    """Kick off a headless /kicraft-investigate run for a report a *user* filed
+    (the manual Support button or feedback attached to a failed run), gated by
+    the admin toggle. Not called for the silent per-failure auto-file, which
+    would investigate every failed build. Best-effort: triage must never break
+    the support dialog."""
+    try:
+        store = _store()
+        if store.get_setting("support.auto_investigate", "1") != "1":
+            return
+        report = store.get_support_report(report_id)
+        if report is None:
+            return
+        from . import investigate_runner
+        investigate_runner.enqueue_investigation(
+            store, report, log_dir=_investigation_log_dir())
+    except Exception:
+        pass
+
+
 def _project_dir(state: dict) -> Path | None:
     """The durable project directory (projects_dir/<uid>/<pid>/) -- the ONE place a
     project lives AND builds (build-in-place: no scratch workspace, no copytree).
@@ -1954,25 +1969,16 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
         # the concrete shortfall so the parts get added and wiring re-checks,
         # then adopt that outcome. Flag-gated (not a loop) so it can never run
         # away on cost; if it still can't resolve, the user is asked as a last
-        # resort. Mirrors the ERC-recovery re-drive further below.
-        if (res.get("status") == "awaiting_input"
-                and res.get("last_stage") == "wiring"
-                and not state.get("bom_reconciled")):
-            deficits = [q for q in (res.get("questions") or [])
-                        if q.get("reconcile_target") == "bom"]
-            if deficits:
-                state["bom_reconciled"] = True
-                progress({"kind": "build_log",
-                          "text": "[bom-reconcile] wiring flagged a BOM parts "
-                                  "shortfall; re-driving bom+wiring once to add "
-                                  "the missing parts (not asking the user)"})
-                rr = run_session(ws, state.get("brief", ""), ["bom", "wiring"],
-                                 instruction=_bom_reconcile_instruction(deficits),
-                                 progress=progress, run_id=run_id,
-                                 core_defaults=core_defaults)
-                if rr.get("guard"):
-                    state["spend"] = _project_spend_usd(state.get("project_id"))
-                res = rr
+        # resort. Shared with the self-eval driver (kicraft.server.session).
+        res, reconciled = maybe_bom_reconcile(
+            ws, state.get("brief", ""), res, progress=progress, run_id=run_id,
+            core_defaults=core_defaults,
+            already_reconciled=bool(state.get("bom_reconciled")),
+        )
+        if reconciled:
+            state["bom_reconciled"] = True
+            if res.get("guard"):
+                state["spend"] = _project_spend_usd(state.get("project_id"))
 
         if res["status"] == "awaiting_input":
             # Park: the run is saved as awaiting_input and the question surfaces in
@@ -4669,6 +4675,12 @@ def index(prompt: str = "", project: str = ""):
                         ui.notify("Could not record the report. Please try "
                                   "again.", color="negative")
                         return
+                    # A user just engaged (manual report, or feedback on a
+                    # failure) -- auto-investigate if the admin toggle is on. The
+                    # bare per-failure auto-file (auto=True, no message) is left
+                    # alone so we don't investigate every failed build.
+                    if rid is not None and (not auto or msg):
+                        _auto_investigate_if_enabled(rid)
                     support_dialog.close()
                     ref = code or f"report #{rid}"
                     ui.notify(f"Thanks, that's logged. Your reference is {ref}.",

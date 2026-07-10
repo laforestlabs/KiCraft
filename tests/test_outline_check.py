@@ -113,22 +113,25 @@ def test_find_parent_board_skips_leaves(tmp_path):
 def test_outline_check_passes_on_matching_build(tmp_path):
     from kicraft.eval.self_eval import _outline_check
 
+    # build_rc=0 (fab-ready) -> a promoted parent exists, so the shape is graded.
     oc = _outline_check({"slug": "h", "outline_shape": "hexagon"},
-                        _make_run(tmp_path, "hexagon"))
+                        _make_run(tmp_path, "hexagon"), build_rc=0)
     assert oc["pass"] is True and oc["level"] == 4
 
 
 def test_outline_check_none_for_rectangular_brief(tmp_path):
     from kicraft.eval.self_eval import _outline_check
 
-    assert _outline_check({"slug": "rc", "archetype": "single_passive"}, tmp_path) is None
+    assert _outline_check(
+        {"slug": "rc", "archetype": "single_passive"}, tmp_path, build_rc=0
+    ) is None
 
 
 def test_outline_stats_aggregates(tmp_path):
     from kicraft.eval.self_eval import _outline_check, _outline_stats
 
     oc = _outline_check({"slug": "h", "outline_shape": "hexagon"},
-                        _make_run(tmp_path, "hexagon"))
+                        _make_run(tmp_path, "hexagon"), build_rc=0)
     stats = _outline_stats([{"slug": "h", "outline_check": oc, "build_rc": 0},
                             {"slug": "plain"}])
     assert stats["n"] == 1 and stats["pass"] == 1

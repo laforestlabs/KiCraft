@@ -16,7 +16,9 @@ import os
 import sys
 from pathlib import Path
 
-from kicraft.cli.autoexperiment import (
+from kicraft.cli.autoexperiment import (  # noqa: F401 (re-exported below)
+    _quality_rejected_leaves,
+    _update_quality_streak,
     _RC_LEAF_UNROUTABLE,
     _structural_unroutable_leaves,
     _update_unroutable_streak,
@@ -99,6 +101,42 @@ def test_abort_rc_is_nonzero_and_distinct_from_argparse():
     # Non-zero so cli_app._run_layout forwards it and _layout_route_fab maps it
     # to a route failure (rc6); != 2 (argparse bad-args).
     assert _RC_LEAF_UNROUTABLE not in (0, 2)
+
+
+# --------------------------------------------------------------------------- #
+# WS2: quality-rejection streak (finalize best-so-far, not abort)
+# --------------------------------------------------------------------------- #
+def test_quality_parser_keeps_only_non_structural_rejections():
+    # The quality parser is the complement of the structural one: a routed-but-
+    # rejected leaf, NOT a router throw / illegal placement.
+    assert _quality_rejected_leaves(_QUALITY_MISS) == {
+        "/q": ["leaf_routed_artifact_validation"]
+    }
+    assert _quality_rejected_leaves(_ROUTING_EXCEPTION) == {}  # structural excluded
+    combined = _ROUTING_EXCEPTION + "\n" + _QUALITY_MISS
+    assert set(_quality_rejected_leaves(combined)) == {"/q"}
+
+
+def test_quality_streak_stops_after_two_unchanged_rounds():
+    streak: dict[str, dict] = {}
+    fail = {"/q": ["leaf_routed_artifact_validation"]}
+    assert _update_quality_streak(streak, fail, 2) is None    # round 1
+    assert _update_quality_streak(streak, fail, 2) == "/q"    # round 2 -> stuck
+
+
+def test_quality_streak_resets_when_signature_changes():
+    streak: dict[str, dict] = {}
+    assert _update_quality_streak(streak, {"/q": ["a"]}, 2) is None
+    # A DIFFERENT rejection means it's still moving -> reset, don't stop.
+    assert _update_quality_streak(streak, {"/q": ["b"]}, 2) is None
+    assert streak["/q"]["n"] == 1
+
+
+def test_quality_streak_disabled_never_stops():
+    streak: dict[str, dict] = {}
+    fail = {"/q": ["leaf_routed_artifact_validation"]}
+    for _ in range(10):
+        assert _update_quality_streak(streak, fail, 0) is None
 
 
 def test_tee_build_log_writes_flushed_lines(tmp_path):

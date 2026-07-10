@@ -76,6 +76,22 @@ def _leaf_artifact_dir(experiments_dir: Path, leaf_key: str) -> Path:
     return Path(experiments_dir) / "subcircuits" / leaf_key
 
 
+def _files_content_equal(src: Path, dst: Path) -> bool:
+    """True iff *src* and *dst* have identical bytes.
+
+    Uses size as a fast reject, then compares content so a same-size,
+    different-content pair (e.g. a translated leaf board) is not mistaken
+    for "already current". Any OSError is treated as "not equal" so the
+    caller re-copies rather than trusting a file it couldn't read.
+    """
+    try:
+        if src.stat().st_size != dst.stat().st_size:
+            return False
+        return src.read_bytes() == dst.read_bytes()
+    except OSError:
+        return False
+
+
 def _normalize_snapshot_id(snapshot_id: str | int) -> str:
     """Normalize a snapshot id to its on-disk string form.
 
@@ -406,15 +422,20 @@ def ensure_applied(experiments_dir: Path) -> dict[str, str]:
         if not snapshot:
             statuses[leaf_key] = "snapshot-missing"
             continue
-        # Skip the copy if every round_*_ snapshot file already
-        # matches its canonical counterpart by SIZE. Round snapshots are
-        # immutable so size match implies content match in practice.
-        # (mtime comparison can't be used because pin_leaf uses
-        # shutil.copy which sets dst mtime to NOW.)
+        # Skip the copy only if every round_*_ snapshot file already
+        # matches its canonical counterpart by CONTENT. Size alone is NOT a
+        # safe proxy: a same-size-but-different-content canonical -- e.g. a
+        # leaf board whose components were translated (a pure coordinate edit
+        # leaves the file byte-size unchanged) -- would pass a size check and
+        # ``ensure_applied`` would leave the desynced board in place, so the
+        # composer would consume geometry acceptance DRC never validated (WS3).
+        # Content-comparing ~100 KB leaf boards for a handful of leaves is
+        # negligible; correctness wins. (mtime can't be used because pin_leaf
+        # uses shutil.copy, which sets dst mtime to NOW.)
         all_files = _round_all_snapshot_files(leaf_dir, snapshot_id)
         all_current = True
         for src, dst in all_files.items():
-            if not dst.exists() or src.stat().st_size != dst.stat().st_size:
+            if not dst.exists() or not _files_content_equal(src, dst):
                 all_current = False
                 break
         if all_current:

@@ -50,11 +50,22 @@ def enforce_enabled() -> bool:
 
 def _is_stacking_header(part) -> bool:
     """A 2.54 mm pin-header/socket connector -- the shield interface class the
-    standard replaces. Deliberately narrow: a USB/other connector (different
-    footprint) on a functional shield is left alone."""
-    fp = getattr(part, "footprint", "") or ""
-    is_header = ("PinHeader_" in fp) or ("PinSocket_" in fp)
-    return is_header and "P2.54mm" in fp
+    standard replaces. Deliberately narrow on the connector FAMILY (a USB/other
+    connector on a functional shield is left alone), but robust to naming: it must
+    match both KiCad-stock footprints (``PinHeader_...P2.54mm``) AND the vendored
+    library naming (``pin-header-female-2-54-1x40:HDR-TH_40P-P2.54-V-F``). Keying
+    only on the stock ``PinHeader_``/``P2.54mm`` substrings missed the vendored
+    header, so its ref was never dropped -- the scaffold then added a duplicate
+    ref that collided a leaf against its parent-local twin at compose (WS5)."""
+    fp = (getattr(part, "footprint", "") or "").lower()
+    is_header = any(
+        tok in fp
+        for tok in ("pinheader", "pinsocket", "pin-header", "pin-socket", "hdr")
+    )
+    # 2.54 mm pitch: "p2.54mm" (stock), "p2.54"/"2.54" (generic), "2-54"/"2_54"
+    # (vendored library slug where dots are hyphenated/underscored).
+    is_254 = any(tok in fp for tok in ("2.54", "2-54", "2_54"))
+    return is_header and is_254
 
 
 def _already_standard(part) -> bool:
@@ -161,6 +172,25 @@ def reconcile_standard_form_factor(state) -> list[str]:
         f"{[p.ref for p in parts]}; bound pins to {bound_nets or 'no'} rail(s); "
         f"{len(noconnects)} pin(s) no-connect"
     )
+
+    # Loud, not latent: every original stacking header must have been dropped in
+    # step 3. If one survived (a footprint naming ``_is_stacking_header`` failed to
+    # recognize), the scaffold's headers now coexist with the LLM's -- the exact
+    # setup that collides a leaf ref against its parent-local scaffold twin at
+    # compose. Fail HERE, naming the offending part+footprint, instead of surfacing
+    # a cryptic "Parent-local component ref 'J4' collides with a child" later (WS5).
+    survivors = [
+        (p.ref, getattr(p, "footprint", ""))
+        for p in bom.parts
+        if _is_stacking_header(p) and not _already_standard(p)
+    ]
+    if survivors:
+        raise ValueError(
+            "form-factor reconcile left un-replaced stacking header(s) alongside "
+            f"the standard's scaffold: {survivors}. _is_stacking_header did not "
+            "recognize the footprint -- broaden its detection so this ref is dropped "
+            "(it would otherwise collide with a scaffold-added ref at compose)."
+        )
 
     # 5. Consolidating the headers onto one host sheet can leave the sheets that
     #    held only LLM connectors with no parts at all. An empty sheet is a

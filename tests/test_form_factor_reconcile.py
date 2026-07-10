@@ -18,7 +18,11 @@ from kicraft.design.models import (
     Sheet,
     SheetPin,
 )
-from kicraft.form_factors.reconcile import enforce_enabled, reconcile_standard_form_factor
+from kicraft.form_factors.reconcile import (
+    _is_stacking_header,
+    enforce_enabled,
+    reconcile_standard_form_factor,
+)
 
 
 def _shield_bom():
@@ -68,6 +72,52 @@ class TestReconcile:
         assert all("standard form factor" in (p.sourcing_note or "") for p in headers)
         # No leftover LLM (unmarked) stacking header.
         assert not [p for p in headers if not (p.sourcing_note or "")]
+
+    def test_detects_vendored_named_stacking_header(self):
+        # WS5: the vendored library naming must be recognized -- keying only on the
+        # KiCad-stock ``PinHeader_``/``P2.54mm`` substrings missed it.
+        vendored = BomPart(
+            ref="J1", value="Header 1x40", symbol="Connector_Generic:Conn_01x40",
+            footprint="pin-header-female-2-54-1x40:HDR-TH_40P-P2.54-V-F", sheet="INTERFACE",
+        )
+        stock = BomPart(
+            ref="J2", value="PinHeader_1x08", symbol="Connector_Generic:Conn_01x08",
+            footprint="Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical", sheet="INTERFACE",
+        )
+        usb = BomPart(
+            ref="J3", value="USB-C", symbol="usb:USB_C", footprint="usb:USB_C_Receptacle",
+            sheet="INTERFACE",
+        )
+        assert _is_stacking_header(vendored)
+        assert _is_stacking_header(stock)
+        assert not _is_stacking_header(usb)  # a functional connector is left alone
+
+    def test_replaces_vendored_named_stacking_headers(self):
+        # proto-shield (Arduino Uno): the LLM headers use the vendored footprint,
+        # so before the fix they were never dropped and the scaffold's J4 ref
+        # collided with a leaf's parent-local twin at compose (WS5).
+        parts = [
+            BomPart(ref="U1", value="ATMEGA328", symbol="mcu:ATMEGA328",
+                    footprint="mcu:TQFP-32", sheet="MCU"),
+            BomPart(ref="J1", value="Header 1x40", symbol="Connector_Generic:Conn_01x40",
+                    footprint="pin-header-female-2-54-1x40:HDR-TH_40P-P2.54-V-F", sheet="INTERFACE"),
+            BomPart(ref="J3", value="Header 1x40", symbol="Connector_Generic:Conn_01x40",
+                    footprint="pin-header-female-2-54-1x40:HDR-TH_40P-P2.54-V-F", sheet="INTERFACE"),
+        ]
+        conns = [
+            NetConnection(net_name="+5V", sheet="MCU",
+                          endpoints=[PinEndpoint(ref="U1", pin="1"), PinEndpoint(ref="J1", pin="1")]),
+            NetConnection(net_name="GND", sheet="MCU",
+                          endpoints=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="J1", pin="4")]),
+        ]
+        bom = BOM(parts=parts, connections=conns)
+        # Must NOT raise the loud-survivor ValueError -- the headers are dropped.
+        notes = reconcile_standard_form_factor(_state(bom))
+        assert notes
+        # Every remaining connector-class part is a standard-marked scaffold header.
+        headers = [p for p in bom.parts if p.symbol.startswith("Connector_Generic:Conn_")]
+        assert headers
+        assert all("standard form factor" in (p.sourcing_note or "") for p in headers)
 
     def test_power_rebinds_and_dangling_signal_net_dropped(self):
         bom = _shield_bom()

@@ -196,6 +196,93 @@ def _as_float(v: Any) -> float | None:
         return None
 
 
+# A circumscribed shape may legitimately be a good deal larger than the
+# rectangular content it wraps: a circle/hexagon is ~2x, and an inherently
+# low-fill shape (snowman, triangle) reaches ~12x its content area even on a
+# reasonable 2:1 content. But a low-circularity shape around an ELONGATED content
+# explodes the board (star-ornament shipped fab-ready at 592x563 mm, ~63x the
+# content area). Cap the fitted-area / content-area ratio ABOVE the legit worst
+# case (snowman ~12x) so real shapes still fit, but reject egregious explosions
+# (WS8). Paired with the size_mm check, which needs no such headroom.
+_MAX_SHAPE_AREA_RATIO = 15.0
+# Slack allowed when honoring a brief-requested size_mm before calling the fit
+# oversized.
+_SHAPE_SIZE_TOL = 0.05
+
+
+def _ring_area(points: list[tuple[float, float]]) -> float:
+    """Shoelace area of a closed ring given as (x, y) pairs (no repeated last)."""
+    n = len(points)
+    if n < 3:
+        return 0.0
+    s = 0.0
+    for i in range(n):
+        x1, y1 = points[i]
+        x2, y2 = points[(i + 1) % n]
+        s += x1 * y2 - x2 * y1
+    return abs(s) / 2.0
+
+
+def _requested_size_pair(size_mm: Any) -> tuple[float, float] | None:
+    """Normalize a requested ``size_mm`` (scalar diameter/side, ``[w, h]``, or
+    ``{"w":..,"h":..}``) to a ``(w, h)`` target, or None if unspecified/unparsable."""
+    if size_mm is None:
+        return None
+    if isinstance(size_mm, (int, float)):
+        v = float(size_mm)
+        return (v, v) if v > 0 else None
+    if isinstance(size_mm, dict):
+        w = _as_float(size_mm.get("w") or size_mm.get("width_mm") or size_mm.get("x"))
+        h = _as_float(size_mm.get("h") or size_mm.get("height_mm") or size_mm.get("y"))
+        if w and h:
+            return (w, h)
+        return None
+    if isinstance(size_mm, (list, tuple)) and len(size_mm) >= 2:
+        w, h = _as_float(size_mm[0]), _as_float(size_mm[1])
+        if w and h:
+            return (w, h)
+    return None
+
+
+def _shape_fit_guard(
+    shape: str,
+    req: dict[str, Any],
+    content_area: float,
+    fitted_w: float,
+    fitted_h: float,
+    fitted_area: float,
+) -> dict[str, Any] | None:
+    """Return a loud rejection dict if the circumscribed shape explodes the
+    board, else None. Consumes the brief's ``size_mm`` (previously ignored) and
+    caps material overshoot so a pathological shape can no longer ship a
+    massively oversized 'fab-ready' board (WS8)."""
+    reasons: list[str] = []
+    target = _requested_size_pair(req.get("size_mm"))
+    if target is not None:
+        tw, th = target
+        slack = 1.0 + _SHAPE_SIZE_TOL
+        if fitted_w > tw * slack or fitted_h > th * slack:
+            reasons.append(
+                f"circumscribed {fitted_w:.1f}x{fitted_h:.1f} mm exceeds requested "
+                f"size_mm {tw:.1f}x{th:.1f} mm"
+            )
+    ratio = fitted_area / max(content_area, 1e-6)
+    if ratio > _MAX_SHAPE_AREA_RATIO:
+        reasons.append(
+            f"fitted area {fitted_area:.0f} mm^2 is {ratio:.1f}x the "
+            f"{content_area:.0f} mm^2 content (cap {_MAX_SHAPE_AREA_RATIO:.0f}x)"
+        )
+    if reasons:
+        return {
+            "fitted": False,
+            "reason": "shape fit rejected: " + "; ".join(reasons),
+            "rejected_shape": shape,
+            "kept_outline": "rect",
+            "fitted_size_mm": [round(fitted_w, 2), round(fitted_h, 2)],
+        }
+    return None
+
+
 def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
     """Circumscribe the brief-requested outline shape around the (already
     grown) rectangular content AABB, then hand it to the stamp/validate/pour
@@ -232,6 +319,7 @@ def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
     if not outline or len(outline) < 2:
         return {"fitted": False, "reason": "no outline"}
     tl, br = outline
+    content_area = max((br.x - tl.x) * (br.y - tl.y), 1e-6)
 
     # Parametric convex shapes: exact OutlineSpec path (circle wins here over the
     # polygon path -- simpler, JS-mirror-compatible).
@@ -245,6 +333,14 @@ def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
             corner_radius_mm=_as_float(req.get("corner_radius_mm")),
             chamfer_mm=_as_float(req.get("chamfer_mm")),
         )
+        # Guard BEFORE committing the outline: an oversized fit is rejected so the
+        # sane rectangular AABB (already on board_state) ships instead (WS8).
+        fitted_area = _ring_area([(p.x, p.y) for p in spec.polyline()])
+        guard = _shape_fit_guard(
+            shape, req, content_area, spec.width_mm, spec.height_mm, fitted_area
+        )
+        if guard is not None:
+            return guard
         composition.board_state.board_outline = spec.aabb()
         state.manual_outline = spec.to_dict()
         return {
@@ -261,6 +357,12 @@ def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
     if shape in KNOWN_SHAPES:
         poly = circumscribe_polygon(shape, tl, br)
         (minx, miny), (maxx, maxy) = poly.aabb()
+        fitted_area = _ring_area(poly.points())
+        guard = _shape_fit_guard(
+            shape, req, content_area, maxx - minx, maxy - miny, fitted_area
+        )
+        if guard is not None:
+            return guard
         composition.board_state.board_outline = (Point(minx, miny), Point(maxx, maxy))
         state.fitted_polygon = [[float(x), float(y)] for x, y in poly.points()]
         return {
@@ -448,10 +550,17 @@ def _validate_parent_geometry(
             "width_mm": max(0.0, br.x - tl.x),
             "height_mm": max(0.0, br.y - tl.y),
         },
+        # True outline shape, from whichever channel carried it: manual/parametric
+        # spec, or the named/compound polygon path (fitted_polygon). Reading only
+        # manual_outline logged a hexagon/star board as "rect" (WS9).
         "outline_shape": (
-            state.manual_outline.get("shape", "rect")
+            str(state.manual_outline.get("shape", "rect"))
             if state.manual_outline is not None
-            else "rect"
+            else (
+                str(state.requested_shape.get("shape", "polygon"))
+                if state.fitted_polygon and state.requested_shape
+                else ("polygon" if state.fitted_polygon else "rect")
+            )
         ),
         "outside_component_count": len(outside_components),
         "outside_components": outside_components[:50],

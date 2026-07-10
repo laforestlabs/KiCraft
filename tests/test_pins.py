@@ -163,6 +163,28 @@ def test_ensure_applied_restores_canonical_after_overwrite(tmp_path):
     assert statuses[LEAF_KEY] == "already-current"
 
 
+def test_ensure_applied_restores_same_size_different_content(tmp_path):
+    """WS3: a canonical file that was rewritten to DIFFERENT content of the
+    SAME byte size (e.g. a leaf board whose components were translated -- a
+    pure coordinate edit does not change file size) must still be restored.
+    A size-only "already-current" check would leave the desynced board in
+    place and the composer would consume geometry acceptance never validated."""
+    leaf_dir = _seed_round_snapshot(tmp_path, LEAF_KEY, 9, "pinned-state")
+    pins.pin_leaf(tmp_path, LEAF_KEY, 9)
+
+    canonical = leaf_dir / "leaf_routed.kicad_pcb"
+    pinned_bytes = canonical.read_bytes()
+    # Overwrite canonical with different content of identical length.
+    tampered = bytes((b + 1) % 256 for b in pinned_bytes)
+    assert len(tampered) == len(pinned_bytes)
+    assert tampered != pinned_bytes
+    canonical.write_bytes(tampered)
+
+    statuses = pins.ensure_applied(tmp_path)
+    assert statuses[LEAF_KEY] == "applied"
+    assert canonical.read_bytes() == pinned_bytes
+
+
 def test_ensure_applied_reports_missing_snapshot(tmp_path):
     """If the pinned round's snapshot was deleted, ensure_applied must not
     silently break -- it reports snapshot-missing so the caller can surface it."""

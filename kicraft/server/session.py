@@ -254,3 +254,66 @@ def run_session(ws, brief: str, stages, answers=None, instruction=None,
             "state_path": state_path,
             "questions": (last.get("questions") if last else None),
             "last_stage": (last.get("stage") if last else None)}
+
+
+# --------------------------------------------------------------------------- #
+# BOM self-repair (shared by the web app and the self-eval driver)
+# --------------------------------------------------------------------------- #
+BOM_RECONCILE_TARGET = "bom"
+
+
+def bom_reconcile_instruction(questions) -> str:
+    """Turn wiring's ``reconcile_target="bom"`` deficit note(s) into a BOM-stage
+    instruction that adds the missing parts. Each question's text is already a
+    precise "add N of X for pins Y" statement (per the wiring spec)."""
+    lines = [str(q.get("text", "")).strip()
+             for q in questions if str(q.get("text", "")).strip()]
+    body = "\n- ".join(lines)
+    return (
+        "The wiring stage could not finish because the BOM is missing supporting "
+        "parts its ICs require. Add the parts described below: give each a fresh, "
+        "unique ref, the correct value and footprint, the same sheet as the IC it "
+        "serves, and list it in that IC's ic_groups entry. Then re-emit the FULL "
+        "BOM. Do NOT ask the user and do NOT drop any part already present -- just "
+        "provision what's missing:\n- " + body
+    )
+
+
+def bom_reconcile_deficits(res: dict) -> list[dict]:
+    """The ``reconcile_target="bom"`` deficit questions from a wiring park, or []."""
+    if res.get("status") != "awaiting_input" or res.get("last_stage") != "wiring":
+        return []
+    return [
+        q for q in (res.get("questions") or [])
+        if q.get("reconcile_target") == BOM_RECONCILE_TARGET
+    ]
+
+
+def maybe_bom_reconcile(
+    ws, brief, res, *, progress=None, run_id=None, core_defaults=None,
+    client=None, already_reconciled: bool = False,
+) -> tuple[dict, bool]:
+    """Re-drive ``[bom, wiring]`` ONCE when wiring parked on a BOM parts shortfall.
+
+    Wiring tags a deficit park with ``reconcile_target="bom"``: it needs parts the
+    BOM lacks, which wiring itself cannot add. Plain-answering that park loops
+    forever (all 5 synthesis deaths in the 07-10 batch were this), so re-run
+    bom+wiring with the concrete shortfall instead. Flag-gated to a single pass so
+    it can never run away on cost. Returns ``(new_or_original_res, reconciled)``.
+    Shared by ``server/web.py`` and ``kicraft/eval/self_eval.py`` (WS6)."""
+    if already_reconciled:
+        return res, already_reconciled
+    deficits = bom_reconcile_deficits(res)
+    if not deficits:
+        return res, already_reconciled
+    if progress is not None:
+        progress({"kind": "build_log",
+                  "text": "[bom-reconcile] wiring flagged a BOM parts shortfall; "
+                          "re-driving bom+wiring once to add the missing parts "
+                          "(not asking the user)"})
+    rr = run_session(
+        ws, brief, ["bom", "wiring"],
+        instruction=bom_reconcile_instruction(deficits),
+        progress=progress, run_id=run_id, core_defaults=core_defaults, client=client,
+    )
+    return rr, True

@@ -171,6 +171,13 @@ from kicraft.autoplacer.hardware.adapter import KiCadAdapter, StampSubprocessErr
 from kicraft.autoplacer.freerouting_runner import FreeroutingUnavailableError
 
 
+# Minimum outline-origin offset (mm) that counts as a genuine A4 page-centering when
+# re-basing a routed leaf back to its own origin in `round_to_layout`. Real centering
+# shifts content by tens of mm; anything smaller is sub-grid Edge.Cuts rounding noise
+# that must NOT move components off the positions acceptance DRC validated (WS3).
+_LEAF_REBASE_MIN_MM = 0.5
+
+
 @dataclass(slots=True)
 class SolvedLeafSubcircuit:
     """Solved local placement result for one leaf subcircuit."""
@@ -244,8 +251,17 @@ class SolvedLeafSubcircuit:
             # exact inverse of the centering: a no-op for a leaf already at (0,0) (so
             # existing solved_layout.json / composes are byte-for-byte unchanged), and
             # an exact un-center for a page-centered leaf.
+            #
+            # Only re-base for a GENUINE page-centering. A4 centering always shifts the
+            # content box by tens of mm; an Edge.Cuts outline that merely rounds a hair
+            # past origin (e.g. -0.025 mm from line-width / grid snapping) is NOT a
+            # centering, and re-basing on it would move every component off the exact
+            # positions acceptance DRC validated on this routed board -- desyncing the
+            # promoted leaf from the board that passed the gate (WS3). The 1e-6 guard
+            # was too tight and fired on that sub-grid noise; _LEAF_REBASE_MIN_MM keeps
+            # the leaf's routed geometry verbatim unless it is really page-centered.
             _otl, _ = routed_state.board_outline
-            if abs(_otl.x) > 1e-6 or abs(_otl.y) > 1e-6:
+            if abs(_otl.x) > _LEAF_REBASE_MIN_MM or abs(_otl.y) > _LEAF_REBASE_MIN_MM:
                 from kicraft.autoplacer.brain.leaf_geometry import (
                     copy_components_with_translation,
                     copy_traces_with_translation,
@@ -827,6 +843,20 @@ def _solve_leaf_subcircuit(
     failed_round_count = 0
     acceptance_cfg = acceptance_config_from_dict(cfg)
 
+    # Per-leaf wall deadline: a pathological leaf can burn the WHOLE build inside
+    # its own ladder (12 rounds x 4 canvases, each up to a FreeRouting timeout),
+    # so the outer autoexperiment never reaches a round boundary and the harness
+    # watchdog SIGKILLs with zero artifacts. When the deadline trips, stop the
+    # ladder and keep the best-so-far routed board; if nothing routed, the
+    # terminal "No accepted routed leaf" carries `leaf_solve_deadline` so the
+    # outer structural-abort fires (WS2).
+    leaf_solve_max_wall_s = float(
+        cfg.get("leaf_solve_max_wall_s")
+        or os.environ.get("KICRAFT_LEAF_SOLVE_MAX_WALL_S")
+        or 0.0
+    )
+    _deadline_hit = False
+
     canvas_attempts_run: list[str] = []
     for attempt_index, canvas_fill in enumerate(canvas_fills):
         extraction_start = time.monotonic()
@@ -857,6 +887,18 @@ def _solve_leaf_subcircuit(
             )
 
         for local_round_index in range(effective_rounds):
+            if leaf_solve_max_wall_s > 0 and (
+                time.monotonic() - leaf_total_start
+            ) > leaf_solve_max_wall_s:
+                _deadline_hit = True
+                failure_reasons.append("leaf_solve_deadline")
+                print(
+                    f"  leaf-solve deadline: {node.definition.id.instance_path} "
+                    f"exceeded {leaf_solve_max_wall_s:.0f}s wall after "
+                    f"{len(round_results)} round(s); stopping ladder "
+                    f"(keeps best-so-far)"
+                )
+                break
             round_index = base_offset + len(round_results)
             seed = rng.randint(0, 2**31 - 1)
             round_cfg = dict(local_cfg)
@@ -980,8 +1022,10 @@ def _solve_leaf_subcircuit(
         # Grow-on-failure ladder: an accepted round at this canvas ends the
         # search; otherwise the next (looser) canvas gets its own full set of
         # rounds. Single-entry canvas plans (seed-bbox mode, array leaves)
-        # run exactly one pass -- the historical behavior.
-        if best is not None:
+        # run exactly one pass -- the historical behavior. The per-leaf deadline
+        # (WS2) also ends the ladder, so a slow leaf can't march the whole build
+        # into the watchdog by grinding through every remaining canvas.
+        if best is not None or _deadline_hit:
             break
 
     if best is None and best_routed is not None:

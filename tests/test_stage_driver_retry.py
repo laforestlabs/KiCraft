@@ -123,6 +123,25 @@ def test_bom_reconcile_instruction_lists_the_missing_parts():
     assert instr.count("\n- ") == 1   # only the one non-blank deficit line
 
 
+def test_retry_feedback_unknown_ref_in_wiring_points_at_reconcile(tmp_path):
+    # WS6: an unknown-ref rejection in wiring must tell the model it cannot add
+    # parts and to park with reconcile_target=bom, and list the real refs -- so it
+    # stops inventing refs and burning its retry budget.
+    from kicraft.server.stage_driver import _retry_feedback
+    out = {"errors": ["NetConnection 'PWR' references unknown ref 'Q99'"]}
+    msg = _retry_feedback(out, stage="wiring", valid_refs=["C1", "U1"])
+    assert "CANNOT add parts" in msg
+    assert 'reconcile_target' in msg and '"bom"' in msg
+    assert "C1" in msg and "U1" in msg
+
+
+def test_retry_feedback_no_reconcile_note_for_non_wiring_stage():
+    from kicraft.server.stage_driver import _retry_feedback
+    out = {"errors": ["some symbol not found"]}
+    msg = _retry_feedback(out, stage="bom")
+    assert "reconcile_target" not in msg
+
+
 def test_attach_questions_writes_open_questions(tmp_path):
     sp = tmp_path / ".kicraft" / "state.json"  # not yet created (a first-stage question)
     qs = _normalize_questions([{"text": "Q1", "blocking": True}], "intent")

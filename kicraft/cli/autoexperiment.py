@@ -177,6 +177,10 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
 # across rounds and is left to keep retrying.
 _STRUCTURAL_UNROUTABLE_REASONS = frozenset({
     "routing_exception", "leaf_pre_stamp_legality_repair",
+    # A leaf that blew its per-leaf wall deadline (WS2) with nothing routed will
+    # not be rescued by a mutated outer round either -- treat it as structural so
+    # the early-abort surfaces it fast instead of re-solving into the watchdog.
+    "leaf_solve_deadline",
 })
 _LEAF_UNROUTABLE_RE = re.compile(
     r"No accepted routed leaf artifact produced for (\S+) after .*?: "
@@ -225,6 +229,52 @@ def _update_unroutable_streak(
     if abort_rounds <= 0:
         return None
     blown = sorted(p for p, n in streak.items() if n >= abort_rounds)
+    return blown[0] if blown else None
+
+
+def _quality_rejected_leaves(solve_stderr: str) -> dict[str, list[str]]:
+    """Leaves that failed this round for a NON-structural (quality) reason --
+    routed but rejected (illegal_routed_geometry, routed_drc_rejection,
+    unconnected>0). ``{leaf_path: sorted_reasons}``. Distinct from structural
+    failures (router throw / illegal placement), which abort separately; these
+    CAN improve across rounds, so they only stop after a non-improving streak.
+    """
+    out: dict[str, list[str]] = {}
+    for line in solve_stderr.splitlines():
+        m = _LEAF_UNROUTABLE_RE.search(line)
+        if not m:
+            continue
+        reasons = sorted(r for r in m.group(2).split(",") if r)
+        if reasons and not any(r in _STRUCTURAL_UNROUTABLE_REASONS for r in reasons):
+            out[m.group(1)] = reasons
+    return out
+
+
+def _update_quality_streak(
+    streak: dict[str, dict[str, Any]],
+    quality_fail: dict[str, list[str]],
+    abort_rounds: int,
+) -> str | None:
+    """Fold this round's quality rejections into a per-leaf streak keyed by the
+    rejection SIGNATURE. A leaf whose SAME rejection persists ``>= abort_rounds``
+    consecutive rounds is stuck -- placement-param mutation is not helping it, so
+    it is returned so the search can finalize best-so-far instead of re-solving it
+    into the watchdog (WS2). A leaf that recovers or changes signature resets.
+    ``abort_rounds <= 0`` disables.
+    """
+    for leaf in list(streak):
+        if leaf not in quality_fail:
+            del streak[leaf]
+    for leaf, reasons in quality_fail.items():
+        sig = ",".join(reasons)
+        prev = streak.get(leaf)
+        if prev is not None and prev.get("sig") == sig:
+            prev["n"] += 1
+        else:
+            streak[leaf] = {"sig": sig, "n": 1}
+    if abort_rounds <= 0:
+        return None
+    blown = sorted(p for p, s in streak.items() if s.get("n", 0) >= abort_rounds)
     return blown[0] if blown else None
 
 
@@ -2164,6 +2214,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--max-wall-s",
+        type=float,
+        default=0.0,
+        help=(
+            "Soft wall-clock budget (seconds) for the whole outer search. Before "
+            "launching a round, if the elapsed time plus the running estimate of a "
+            "round's duration would exceed this budget, finalize the best-so-far "
+            "board instead of starting a round that can't finish. Prevents the "
+            "harness watchdog from SIGKILLing the build with ZERO artifacts (worse "
+            "than an honest rc=6/7 partial). 0 disables (run to --rounds)."
+        ),
+    )
+    parser.add_argument(
         "--status-file",
         default="run_status.json",
         help="Status JSON filename inside .experiments/",
@@ -2380,11 +2443,36 @@ def main(argv: list[str] | None = None) -> int:
     # Per-leaf consecutive structurally-unroutable round count, for early-abort.
     unroutable_streak: dict[str, int] = {}
     abort_rounds = args.unroutable_abort_rounds
+    # Per-leaf consecutive quality-rejection streak (unchanged rejection
+    # signature), so a leaf that keeps producing the same routed-but-rejected
+    # board stops being re-solved after this many rounds (WS2).
+    quality_streak: dict[str, dict[str, Any]] = {}
+    quality_abort_rounds = int(getattr(args, "quality_abort_rounds", 2) or 0)
+    # Consecutive rounds the PARENT route hit its FreeRouting timeout cap; a
+    # placement-param mutation does not rescue a 600 s router timeout (WS2).
+    parent_capout_streak = 0
+    # Wall-budget bookkeeping: an EMA of round wall-durations lets us skip
+    # launching a round that would blow the harness watchdog (WS2).
+    max_wall_s = float(getattr(args, "max_wall_s", 0.0) or 0.0)
+    ema_round_s: float | None = None
 
     for round_num in range(1, args.rounds + 1):
         if _check_stop_request(work_dir):
             break
 
+        # Wall budget: don't start a round the budget can't absorb -- finalize the
+        # best-so-far board instead of marching into a SIGKILL with zero artifacts.
+        if max_wall_s > 0 and ema_round_s is not None:
+            elapsed = time.monotonic() - start_ts
+            if elapsed + ema_round_s > max_wall_s:
+                print(
+                    f"[wall-budget] elapsed {elapsed:.0f}s + est. next round "
+                    f"{ema_round_s:.0f}s > budget {max_wall_s:.0f}s; finalizing "
+                    f"best-so-far after {round_num - 1} round(s)"
+                )
+                break
+
+        _round_mono_start = time.monotonic()
         round_seed = rng.randint(0, 2**31 - 1)
         round_mutated: dict[str, int | float] = {}
         round_dir = hierarchy_dir / f"round_{round_num:04d}"
@@ -2636,6 +2724,25 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return _RC_LEAF_UNROUTABLE
 
+            # Quality-rejection streak: a leaf that keeps producing the SAME
+            # routed-but-rejected result (unconnected>0, DRC reject) round after
+            # round is not being helped by placement mutation. Stop re-solving and
+            # finalize best-so-far (a graded partial) rather than burning the rest
+            # of the search on it -- unlike the structural abort, its best-effort
+            # board is kept, so this `break`s to the finalize path (WS2).
+            quality_fail = _quality_rejected_leaves(solve_stderr)
+            stuck_leaf = _update_quality_streak(
+                quality_streak, quality_fail, quality_abort_rounds)
+            if stuck_leaf is not None:
+                print(
+                    f"[quality-stop] leaf {stuck_leaf} produced the same rejection "
+                    f"({quality_streak[stuck_leaf]['sig']}) for "
+                    f"{quality_streak[stuck_leaf]['n']} consecutive round(s) -- "
+                    f"placement mutation is not improving it; finalizing "
+                    f"best-so-far instead of re-solving into the watchdog."
+                )
+                break
+
         solve_payload = _extract_solve_json_payload(solve_stdout)
         leaf_timing_summary = _extract_leaf_timing_summary(solve_payload)
 
@@ -2819,6 +2926,27 @@ def main(argv: list[str] | None = None) -> int:
             parent_routed_validation = _extract_parent_routed_validation(
                 parent_output_json
             )
+
+            # Parent cap-out early stop: a parent route that ran up to its
+            # FreeRouting timeout cap and still didn't complete won't be rescued by
+            # mutating placement params -- the router needs more time than the cap
+            # allows. After 2 consecutive capped-out rounds, finalize best-so-far
+            # instead of retrying into the watchdog (WS2).
+            _route_cap_s = float(
+                round_candidate_config.get("parent_freerouting_timeout_cap_s", 600)
+            )
+            if (not parent_routed) and parent_route_elapsed_s >= 0.9 * _route_cap_s:
+                parent_capout_streak += 1
+            else:
+                parent_capout_streak = 0
+            if parent_capout_streak >= 2:
+                print(
+                    f"[parent-capout] parent route ran to its ~{_route_cap_s:.0f}s "
+                    f"FreeRouting timeout cap for {parent_capout_streak} consecutive "
+                    f"round(s) without completing -- placement mutation cannot rescue "
+                    f"a router timeout; finalizing best-so-far."
+                )
+                break
             _write_live_status(
                 status_json_path,
                 status_txt_path,
@@ -3153,6 +3281,10 @@ def main(argv: list[str] | None = None) -> int:
             f"parent_route={'ok' if parent_routed else 'fail'} "
             f"[{'KEPT' if round_result.kept else 'discard'}]"
         )
+
+        # Fold this round's wall-duration into the EMA the wall-budget gate reads.
+        _round_dur = max(0.0, time.monotonic() - _round_mono_start)
+        ema_round_s = _round_dur if ema_round_s is None else 0.5 * ema_round_s + 0.5 * _round_dur
 
     phase = "done"
     if _check_stop_request(work_dir):

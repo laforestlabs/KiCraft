@@ -140,7 +140,17 @@ def _stamp_parent_board(
     # path; no-op for manual layouts and rectangular boards). Sets
     # state.manual_outline so the polyline stamp + shape-aware geometry
     # validation below consume the true shape.
-    _fit_requested_shape(state)
+    _shape_fit = _fit_requested_shape(state)
+    if _shape_fit.get("rejected_shape"):
+        # An oversized fit is refused at the source so a 592x563 mm 'fab-ready'
+        # star can never ship; the board keeps its sane rectangular AABB. Make
+        # the refusal loud in the build log (WS8).
+        print(
+            f"warning: {_shape_fit.get('reason')} -- keeping rectangular outline "
+            f"(requested shape {_shape_fit['rejected_shape']!r} not applied; "
+            f"would have been {_shape_fit.get('fitted_size_mm')} mm)",
+            file=sys.stderr,
+        )
 
     # Compute the board outline from the composition
     outline = board_state.board_outline

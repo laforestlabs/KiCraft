@@ -163,6 +163,56 @@ def test_assignment_sa_is_deterministic_and_grid_aligned():
         g1.slots[sid].pos.x, g1.slots[sid].pos.y)
 
 
+def test_slots_avoid_non_anchor_fixed_parts():
+    # A non-anchor fixed part (e.g. an inductor) must be an obstacle so a passive
+    # slot never lands on top of it. Culling only _ANCHOR_KINDS let a slot overlap
+    # an inductor/LED/diode, producing the unrepairable 'R1:L1' / 'LED1:C2'
+    # courtyard overlaps (WS1).
+    u1 = _ic_4pads()
+    l1 = Component(
+        ref="L1", value="", pos=Point(38.0, 30.0), rotation=0.0, layer=Layer.FRONT,
+        width_mm=6.0, height_mm=6.0, kind="inductor", pads=[], body_center=Point(38.0, 30.0),
+    )
+    comps = {u1.ref: u1, "L1": l1, "C1": _decap("C1", 45.0, 45.0)}
+    grid = build_anchor_grid(comps, board_outline=BOARD, pitch_gap_mm=1.0, rings=3, lateral=2)
+    half = 2.0 / 2.0
+    l_tl = Point(38.0 - 3.0, 30.0 - 3.0)
+    l_br = Point(38.0 + 3.0, 30.0 + 3.0)
+    for slot in grid.slots:
+        assert not _overlaps_rect(slot.pos, half, l_tl, l_br), (
+            f"slot {slot.pos} overlaps the fixed inductor L1 courtyard"
+        )
+
+
+def test_assignment_sa_keeps_input_when_grid_is_not_better():
+    # Accept-if-better: when no grid assignment beats the input placement, the
+    # input is returned verbatim and the grid is neutralized (buck-3a regression:
+    # the search degraded 65.8 -> 43.4 and shipped the worse placement).
+    from types import SimpleNamespace
+
+    class _FlatScorer:
+        """Every placement scores identically, so gridding can never beat input."""
+
+        def score(self):
+            return SimpleNamespace(total=0.0)
+
+    u1 = _ic_4pads()
+    comps = {u1.ref: u1, "C1": _decap("C1", 52.0, 52.0)}
+    state = _state(comps)
+    grid = build_anchor_grid(comps, board_outline=BOARD, pitch_gap_mm=1.0)
+    assert grid.slots  # slots exist, so the guard (not the empty-grid path) fires
+
+    best = grid_assignment_sa(
+        comps, grid, state, _FlatScorer(), rng=random.Random(0), max_iters=60,
+    )
+    # Input kept verbatim (C1 not moved onto a slot) ...
+    assert best["C1"].body_center.x == 52.0
+    assert best["C1"].body_center.y == 52.0
+    # ... and the grid is neutralized so resnap_to_grid is a no-op.
+    assert grid.occupied_by_ref == {}
+    assert resnap_to_grid(best, grid) == 0
+
+
 def test_resnap_is_idempotent():
     u1 = _ic_4pads()
     comps = {u1.ref: u1, "C1": _decap("C1", 52, 52)}
