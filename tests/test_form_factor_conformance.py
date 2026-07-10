@@ -74,3 +74,28 @@ def test_board_local_pads_normalizes_and_reads(tmp_path):
     assert wh == (10.0, 10.0)
     # Pad at world (105,205); Edge min corner (100,200) -> local (5,5).
     assert pads == [(5.0, 5.0)]
+
+
+def test_board_local_pads_applies_footprint_rotation(tmp_path):
+    # A header laid horizontally along an edge is stamped rotated 90 deg: its pad
+    # locals advance +Y but the WORLD pads must advance +X. The reader must apply
+    # the footprint rotation or a conformant board reads as non-conformant.
+    pcb = tmp_path / "r.kicad_pcb"
+    pcb.write_text(
+        """(kicad_pcb
+  (gr_line (start 0 0) (end 20 0) (layer "Edge.Cuts"))
+  (gr_line (start 0 0) (end 0 20) (layer "Edge.Cuts"))
+  (gr_line (start 20 0) (end 20 20) (layer "Edge.Cuts"))
+  (gr_line (start 0 20) (end 20 20) (layer "Edge.Cuts"))
+  (footprint "h" (at 5 5 90)
+    (pad "1" thru_hole circle (at 0 0 90) (size 1 1))
+    (pad "2" thru_hole circle (at 0 2.54 90) (size 1 1))
+  )
+)
+"""
+    )
+    pads, _wh = board_local_pads(str(pcb))
+    # pad1 at origin (5,5); pad2 local (0,2.54) rotated CW 90 -> (+2.54,0) world
+    # (7.54,5). Without applying rotation it would wrongly read (5,7.54).
+    assert (5.0, 5.0) in pads
+    assert any(abs(px - 7.54) < 1e-6 and abs(py - 5.0) < 1e-6 for px, py in pads)

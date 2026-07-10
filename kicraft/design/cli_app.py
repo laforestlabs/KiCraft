@@ -3687,6 +3687,43 @@ def _connector_stranded_refs(pcb: Path) -> list[str]:
         return []
 
 
+def _check_form_factor_conformance(state, pcb: Path) -> dict | None:
+    """Mechanical-conformance verdict for a promoted board against a requested
+    standard form factor. Returns ``{conformant, enforced, summary}`` or ``None``
+    when no validated standard was requested (nothing to check).
+
+    A brief naming a standard ("Arduino Uno shield") is a HARD outline + fixed-
+    connector contract: a non-conformant board cannot physically mate. When
+    enforcement is on (the placement fork ran) a miss is a real gate failure;
+    with it off the board is free-placed by design, so the caller reports it as
+    an advisory rather than failing an intentionally-free board. Best-effort:
+    any read/parse trouble returns None (never breaks the tail on a diagnostic).
+    """
+    try:
+        intent = getattr(state, "intent", None)
+        ff = getattr(intent, "form_factor", None) if intent is not None else None
+        key = getattr(ff, "standard", None) if ff is not None else None
+        from kicraft.form_factors import get_template
+        from kicraft.form_factors.conformance import (
+            board_local_pads,
+            check_conformance,
+        )
+        from kicraft.form_factors.reconcile import enforce_enabled
+
+        template = get_template(key)
+        if template is None or not template.validated:
+            return None
+        pads, wh = board_local_pads(str(pcb))
+        res = check_conformance(template, pads, wh)
+        return {
+            "conformant": res.conformant,
+            "enforced": enforce_enabled(),
+            "summary": res.summary(),
+        }
+    except Exception:
+        return None
+
+
 def _verify_routed_board(pcb: Path) -> dict:
     """Acceptance gate: no shorts, no unconnected (connector-shield items waived),
     no physical-assembly blocker (courtyard overlap / antenna keep-out intrusion),
@@ -4327,6 +4364,25 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     gate = _verify_routed_board(pcb)
     expected_refs = {p.ref for p in (state.bom.parts if state and state.bom else [])}
     missing_refs = _missing_component_refs(expected_refs, gate["tracks"].get("footprint_refs"))
+    # 4a'. Standard form-factor conformance. A validated standard is a hard
+    #      mechanical contract: when enforcement placed the board, a non-conformant
+    #      result fails the gate (the board can't mate); with enforcement off the
+    #      board is free-placed by design, so it is reported as an advisory only.
+    ff_conf = _check_form_factor_conformance(state, pcb)
+    if ff_conf is not None:
+        gate["form_factor"] = ff_conf["summary"]
+        if not ff_conf["conformant"]:
+            if ff_conf["enforced"]:
+                gate["fab_acceptable"] = False
+                gate.setdefault("reasons", []).append(
+                    f"form-factor non-conformant ({ff_conf['summary']})"
+                )
+            else:
+                gate.setdefault("warnings", []).append(
+                    f"form-factor advisory (enforcement off): {ff_conf['summary']}"
+                )
+        else:
+            print(f"[build]     form-factor: {ff_conf['summary']}")
     # Area-waste visibility (PCB area-compaction plan, Phase 0): utilization /
     # aspect metrics on the promoted board ride the verify line and the gate
     # record. Diagnostic only -- never a promote/fab gate input.

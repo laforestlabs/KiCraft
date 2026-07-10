@@ -99,6 +99,19 @@ def check_conformance(
     )
 
 
+def _rotate_cw(x: float, y: float, deg: float) -> tuple[float, float]:
+    """Rotate a footprint-local point by ``deg`` in KiCad's convention (the same
+    ``x·cos+y·sin, -x·sin+y·cos`` the placer/stamp use, so this reader agrees with
+    how the board was actually built)."""
+    if deg % 360 == 0.0:
+        return x, y
+    import math
+
+    r = math.radians(deg)
+    c, s = math.cos(r), math.sin(r)
+    return x * c + y * s, -x * s + y * c
+
+
 def board_local_pads(pcb_path: str) -> tuple[list[tuple[float, float]], tuple[float, float] | None]:
     """Read a .kicad_pcb and return (pad centres, (width, height)) in the board's
     top-left-local frame (every pad shifted so the Edge.Cuts min corner is 0,0).
@@ -126,14 +139,19 @@ def board_local_pads(pcb_path: str) -> tuple[list[tuple[float, float]], tuple[fl
             edge_y += [float(m.group(2)), float(m.group(4))]
 
     pads: list[tuple[float, float]] = []
-    # Footprint origin (at x y) then each pad's local (at px py); world = origin + local.
+    # Footprint at (ox oy [rot]) then each pad's local (at px py); the footprint
+    # rotation MUST be applied to the pad offset (a header laid horizontally along
+    # a board edge is stamped rotated, so its pads only reach the standard's pin
+    # positions after the turn). world = origin + rotate_kicad_cw(local, rot).
     for blk in re.split(r"\n\s*\(footprint ", txt)[1:]:
-        mo = re.search(r"\(at ([\-0-9.]+) ([\-0-9.]+)", blk)
+        mo = re.search(r"\(at ([\-0-9.]+) ([\-0-9.]+)(?: ([\-0-9.]+))?\)", blk)
         if not mo:
             continue
         ox, oy = float(mo.group(1)), float(mo.group(2))
+        frot = float(mo.group(3)) if mo.group(3) else 0.0
         for pm in re.finditer(r"\(pad\s+\S+\s+\S+\s+\S+\s*\(at ([\-0-9.]+) ([\-0-9.]+)", blk):
-            pads.append((ox + float(pm.group(1)), oy + float(pm.group(2))))
+            rx, ry = _rotate_cw(float(pm.group(1)), float(pm.group(2)), frot)
+            pads.append((ox + rx, oy + ry))
 
     if edge_x and edge_y:
         min_x, min_y = min(edge_x), min(edge_y)
