@@ -200,6 +200,45 @@ def test_write_autoplacer_omits_board_outline_for_rect(tmp_path):
     assert "board_outline" not in json.loads(out_rect.read_text())
 
 
+def test_write_autoplacer_emits_standard_form_factor_block(tmp_path):
+    # A named standard form factor surfaces the template geometry so compose can
+    # honor it. Informational (carries `validated`); does not touch board_outline.
+    out = write_autoplacer_json(
+        tmp_path, "SHIELD", _arch(), _bom(),
+        form_factor=FormFactor(shape="rect", standard="arduino_uno_shield",
+                               size_mm=68.58),
+    )
+    cfg = json.loads(out.read_text())
+    ffs = cfg.get("form_factor_standard")
+    assert ffs is not None
+    assert ffs["key"] == "arduino_uno_shield"
+    assert ffs["validated"] is False  # dormant until the datum is DXF-verified
+    assert ffs["board_width_mm"] == 68.58 and ffs["board_height_mm"] == 53.34
+    assert {c["role"] for c in ffs["fixed_connectors"]} == {
+        "digital_high", "digital_low", "power", "analog"}
+    assert len(ffs["mounting_holes"]) == 4
+
+
+def test_write_autoplacer_no_standard_block_without_a_standard(tmp_path):
+    out = write_autoplacer_json(
+        tmp_path, "PLAIN", _arch(), _bom(),
+        form_factor=FormFactor(shape="circle", size_mm=50.0),
+    )
+    assert "form_factor_standard" not in json.loads(out.read_text())
+
+
+def test_standard_block_survives_project_config_load(tmp_path):
+    from kicraft.autoplacer.config import load_project_config
+
+    out = write_autoplacer_json(
+        tmp_path, "SHIELD", _arch(), _bom(),
+        form_factor=FormFactor(shape="rect", standard="arduino_uno_shield"),
+    )
+    cfg = load_project_config(str(out))
+    assert isinstance(cfg.get("form_factor_standard"), dict)
+    assert cfg["form_factor_standard"]["key"] == "arduino_uno_shield"
+
+
 def test_board_outline_survives_project_config_load(tmp_path):
     # Contract the compose pipeline depends on: the emitted board_outline block
     # is NOT whitelisted away by the project-config loader -- it reaches `cfg`

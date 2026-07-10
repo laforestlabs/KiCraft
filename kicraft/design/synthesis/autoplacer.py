@@ -227,5 +227,18 @@ def write_autoplacer_json(
             outline["size_mm"] = float(form_factor.size_mm)
         body["board_outline"] = outline
 
+    # Named standard form factor (Arduino shield, ...): surface the template's
+    # fixed geometry (outline + connector positions + holes) so the compose
+    # pipeline can honor it. Informational-only here -- consumers gate on the
+    # embedded ``validated`` flag before laying a board out on the datum, so
+    # emitting it changes no build behavior on its own (PR1/PR2 interlock).
+    standard_key = getattr(form_factor, "standard", None) if form_factor else None
+    if standard_key:
+        from kicraft.form_factors import get_template
+
+        template = get_template(standard_key)
+        if template is not None:
+            body["form_factor_standard"] = template.to_autoplacer_dict()
+
     out.write_text(json.dumps(body, indent=2) + "\n")
     return out

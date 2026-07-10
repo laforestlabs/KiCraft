@@ -89,6 +89,43 @@ class FormFactorTemplate:
         """Every canonical net the standard's headers expose (D0.., A0.., rails)."""
         return {net for c in self.fixed_connectors for net in c.net_by_pin}
 
+    def to_autoplacer_dict(self) -> dict:
+        """Serialize the template geometry for ``<stem>_autoplacer.json``.
+
+        A self-contained, JSON-safe record the compose pipeline can consume:
+        board size, every fixed connector (role/footprint/pin-1/axis/pitch/pin
+        nets), and the mounting holes. Carries ``validated`` so a consumer gates
+        itself on the datum (PR2's placement path must refuse an unvalidated
+        template). Pure data -- emitting it changes no build behavior by itself.
+        """
+        return {
+            "key": self.key,
+            "display_name": self.display_name,
+            "validated": self.validated,
+            "board_width_mm": self.board_width_mm,
+            "board_height_mm": self.board_height_mm,
+            "outline_note": self.outline_note,
+            "provenance": self.provenance,
+            "fixed_connectors": [
+                {
+                    "role": c.role,
+                    "pins": c.pins,
+                    "footprint": c.footprint,
+                    "x_mm": c.x_mm,
+                    "y_mm": c.y_mm,
+                    "axis": c.axis,
+                    "rotation_deg": c.rotation_deg,
+                    "pitch_mm": c.pitch_mm,
+                    "nets": list(c.net_by_pin),
+                }
+                for c in self.fixed_connectors
+            ],
+            "mounting_holes": [
+                {"x_mm": h.x_mm, "y_mm": h.y_mm, "diameter_mm": h.diameter_mm}
+                for h in self.mounting_holes
+            ],
+        }
+
 
 # ---------------------------------------------------------------------------
 # Templates
