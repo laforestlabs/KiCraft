@@ -212,7 +212,7 @@ def test_write_autoplacer_emits_standard_form_factor_block(tmp_path):
     ffs = cfg.get("form_factor_standard")
     assert ffs is not None
     assert ffs["key"] == "arduino_uno_shield"
-    assert ffs["validated"] is False  # dormant until the datum is DXF-verified
+    assert ffs["validated"] is True  # datum sourced from the Alarm-Siren library
     assert ffs["board_width_mm"] == 68.58 and ffs["board_height_mm"] == 53.34
     assert {c["role"] for c in ffs["fixed_connectors"]} == {
         "digital_high", "digital_low", "power", "analog"}

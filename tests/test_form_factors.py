@@ -118,10 +118,20 @@ class TestArduinoShieldGolden:
     def test_mounting_holes_present(self):
         assert len(self.t.mounting_holes) == 4
 
-    def test_unverified_datum_gated(self):
-        # Absolute datum is provisional until cross-checked against the DXF;
-        # PR2's placement path keys off this flag.
-        assert self.t.validated is False
+    def test_datum_validated(self):
+        # Datum transcribed from the Alarm-Siren KiCad Arduino library, so the
+        # placement path may lay a board out on it.
+        assert self.t.validated is True
+
+    def test_pin1_coordinates_match_authoritative_datum(self):
+        by_role = {c.role: c for c in self.t.fixed_connectors}
+        # Pin-1 centres, top-left frame (y = footprint_y + 53.34).
+        assert (by_role["digital_high"].x_mm, by_role["digital_high"].y_mm) == pytest.approx((18.796, 2.54))
+        assert (by_role["digital_low"].x_mm, by_role["digital_low"].y_mm) == pytest.approx((45.72, 2.54))
+        assert (by_role["power"].x_mm, by_role["power"].y_mm) == pytest.approx((27.94, 50.8))
+        assert (by_role["analog"].x_mm, by_role["analog"].y_mm) == pytest.approx((50.8, 50.8))
+        # The authoritative D8 pad sits at x=41.656 (last pin of digital_high).
+        assert by_role["digital_high"].pin_positions()[-1][1] == pytest.approx(41.656)
 
     def test_connector_pin_count_consistency_enforced(self):
         with pytest.raises(ValueError):

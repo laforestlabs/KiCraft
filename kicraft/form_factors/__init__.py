@@ -13,16 +13,18 @@ alias. It changes nothing downstream on its own -- the intent stage records the
 matched key in ``FormFactor.standard`` so state.json surfaces it. PR2 emits the
 fixed outline + pre-locked connectors into placement; PR3 gates conformance.
 
-**Coordinate frame.** Board-local, origin at the bottom-left corner, X to the
-right, Y up (millimetres). A connector's ``x_mm``/``y_mm`` is its pin-1 centre;
-pins advance along ``axis`` at ``pitch_mm``.
+**Coordinate frame.** Board-local, KiCad-native: origin at the board's TOP-LEFT
+corner, +X right, +Y down (millimetres), so the board spans (0,0)..(width,
+height). A connector's ``x_mm``/``y_mm`` is its pin-1 centre; pins advance along
+``axis`` at ``pitch_mm``. This matches how compose stamps footprints and states
+its ``board_outline`` (tl, br), so no frame conversion is needed downstream.
 
 **``validated``.** A template's *structure* (pin counts, roles, pitch, the
-inter-header offset, board size, pin semantics) is authored from the published
-spec and is correct. The *absolute datum* (where pin 1 sits relative to the
-board corner) still needs a cross-check against the official mechanical drawing;
-until then ``validated`` is False and PR2's placement path must refuse to lay a
-board out on it (a deliberate interlock so unverified geometry never ships).
+inter-header offset, board size, pin semantics) plus the *absolute datum* are
+sourced from a real mechanical reference (see each template's ``provenance``).
+``validated=True`` means the datum was transcribed from published geometry and
+PR2's placement path may lay a board out on it; ``validated=False`` keeps a
+template dormant (the placement path must refuse it) until its datum is sourced.
 """
 
 from __future__ import annotations
@@ -131,14 +133,16 @@ class FormFactorTemplate:
 # Templates
 # ---------------------------------------------------------------------------
 
-# Arduino Uno R3 shield. Board 68.58 x 53.34 mm (2.7" x 2.1"). Four 2.54 mm
-# headers; the two digital headers are deliberately offset so the D7<->D8 gap is
-# 0.16" (4.064 mm), not 0.1" -- the reason generic protoshields carry that quirk.
-# Frame: origin bottom-left, USB/barrel-jack on the LEFT edge, Y up.
-#   top edge (Y=50.8):  [SCL SDA AREF GND D13 D12 D11 D10 D9 D8] .. gap .. [D7 D6 D5 D4 D3 D2 D1 D0]
-#   bottom edge (Y=2.54): [IOREF RESET +3V3 +5V GND GND VIN NC]  ..  [A0 A1 A2 A3 A4 A5]
-# Pin ROLES/COUNTS/pitch/offset are from the R3 spec; the absolute datum is
-# provisional pending the official DXF -> validated=False.
+# Arduino Uno R3 shield. Board 68.58 x 53.34 mm (2.7" x 2.1"). Four single-row
+# 2.54 mm headers; the two digital headers are deliberately offset so the D7<->D8
+# gap is 0.16" (4.064 mm), not 0.1" -- the reason generic protoshields carry that
+# quirk. Frame: origin TOP-LEFT, +X right, +Y down (KiCad-native).
+#   top edge (y=2.54):    [SCL SDA AREF GND D13 D12 D11 D10 D9 D8] .gap. [D7 D6 D5 D4 D3 D2 D1 D0]
+#   bottom edge (y=50.8): [NC IOREF RESET +3V3 +5V GND GND VIN]     ..  [A0 A1 A2 A3 A4 A5]
+# Datum transcribed from the Alarm-Siren KiCad Arduino library's
+# Arduino_Uno_R3_Shield.kicad_mod (which explicitly handles the 0.16" offset),
+# converted to the top-left frame (y = footprint_y + 53.34). validated=True.
+# The 2x3 ICSP header and the top-right board notch are not modeled yet.
 _ARDUINO_UNO_SHIELD = FormFactorTemplate(
     key="arduino_uno_shield",
     display_name="Arduino Uno R3 shield",
@@ -159,8 +163,8 @@ _ARDUINO_UNO_SHIELD = FormFactorTemplate(
             role="digital_high",
             pins=10,
             footprint="Connector_PinSocket_2.54mm:PinSocket_1x10_P2.54mm_Vertical",
-            x_mm=17.526,
-            y_mm=50.8,
+            x_mm=18.796,
+            y_mm=2.54,
             axis="x",
             net_by_pin=("SCL", "SDA", "AREF", "GND", "D13", "D12", "D11", "D10", "D9", "D8"),
         ),
@@ -168,8 +172,8 @@ _ARDUINO_UNO_SHIELD = FormFactorTemplate(
             role="digital_low",
             pins=8,
             footprint="Connector_PinSocket_2.54mm:PinSocket_1x08_P2.54mm_Vertical",
-            x_mm=44.45,
-            y_mm=50.8,
+            x_mm=45.72,
+            y_mm=2.54,
             axis="x",
             net_by_pin=("D7", "D6", "D5", "D4", "D3", "D2", "D1", "D0"),
         ),
@@ -177,33 +181,39 @@ _ARDUINO_UNO_SHIELD = FormFactorTemplate(
             role="power",
             pins=8,
             footprint="Connector_PinSocket_2.54mm:PinSocket_1x08_P2.54mm_Vertical",
-            x_mm=15.24,
-            y_mm=2.54,
+            # Pin 1 (leftmost, nearest RESET) is the reserved/NC position; the 7
+            # named pins land on the library's authoritative coordinates
+            # (IOREF@30.48 .. VIN@45.72).
+            x_mm=27.94,
+            y_mm=50.8,
             axis="x",
-            net_by_pin=("IOREF", "RESET", "+3V3", "+5V", "GND", "GND", "VIN", "NC"),
+            net_by_pin=("NC", "IOREF", "RESET", "+3V3", "+5V", "GND", "GND", "VIN"),
         ),
         FixedConnector(
             role="analog",
             pins=6,
             footprint="Connector_PinSocket_2.54mm:PinSocket_1x06_P2.54mm_Vertical",
-            x_mm=41.91,
-            y_mm=2.54,
+            x_mm=50.8,
+            y_mm=50.8,
             axis="x",
             net_by_pin=("A0", "A1", "A2", "A3", "A4", "A5"),
         ),
     ),
     mounting_holes=(
-        MountingHole(15.24, 50.8),
-        MountingHole(66.04, 35.56),
-        MountingHole(66.04, 7.62),
-        MountingHole(13.97, 2.54),
+        MountingHole(13.97, 50.8),
+        MountingHole(15.24, 2.54),
+        MountingHole(66.04, 45.72),
+        MountingHole(66.04, 17.78),
     ),
     outline_note=(
-        "68.58 x 53.34 mm bounding rect; the R3 outline also has a small "
-        "top-right corner notch not modeled here yet."
+        "68.58 x 53.34 mm bounding rect. The 2x3 ICSP header (~x63.6-66.2, "
+        "y23-28) and the small top-right board notch are not modeled yet."
     ),
-    provenance="Arduino Uno R3 spec (2.7x2.1in, 2.54mm headers, 0.16in D7-D8 offset)",
-    validated=False,
+    provenance=(
+        "Alarm-Siren/arduino-kicad-library Arduino_Uno_R3_Shield.kicad_mod "
+        "(handles the 0.16in D7-D8 offset); top-left frame, y=fp_y+53.34"
+    ),
+    validated=True,
 )
 
 
