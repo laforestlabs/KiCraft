@@ -95,18 +95,48 @@ This is what makes the constraint *real* rather than advisory — see the invest
 intent-adherence audit (below), which is the diagnostic counterpart.
 
 ## Scope / sequencing
-- **PR1 (data + detection, no placement change):** registry module + Arduino Uno shield entry +
-  `extract_form_factor` alias detection + a golden test asserting the outline/positions. Surfaces
-  the standard in state.json; changes nothing downstream yet. Low risk.
-- **PR2 (honor it):** emit fixed outline + pre-locked connectors/holes; compose fixed-outline
-  branch; pin-semantics binding in wiring. This is the load-bearing change — do it behind a config
-  flag and validate on the KC-99A9M8 brief + a HAT brief.
-- **PR3 (gate):** mechanical-conformance promote gate + investigate-skill audit wired to it.
 
-## Open questions
-- How do templated header **pin semantics** bind to the synthesized design's nets (the LLM must
-  target D0..D13/A0..A5/power, not invent header pinouts)? Likely a wiring-stage contract keyed
-  off the template.
-- Do we vendor the exact shield **footprints + outline** as a leaf-library part
-  (`leaf_library/`), so PR1 can reuse the manual-mode `OutlineSpec` path directly?
-- Multiple stacked form factors (a shield that is *also* a specific size) — precedence rules.
+**Decisions taken** (2026-07-10): connector model = **replace & rewire** (the template's headers
+ARE the board's I/O; inject them pre-locked, drop the LLM's free headers, wire the design's
+function to the standard nets). Datum source = **transcribed from an open-source KiCad library**
+(Alarm-Siren/arduino-kicad-library) — the Arduino Uno R3 shield datum is now `validated=True`.
+
+- **PR1 — data + detection [DONE, committed].** `kicraft/form_factors/` registry
+  (`FormFactorTemplate`/`FixedConnector`/`MountingHole`), Arduino Uno R3 shield template,
+  `match_standard` alias matching, `FormFactor.standard` field, `extract_form_factor` detection at
+  intent-commit. Golden tests. Surfaces the standard in state.json; no downstream behavior change.
+- **datum validation [DONE, committed].** Authoritative coordinates from the KiCad library
+  (KiCad-native top-left frame), `validated=True`. The famous 0.16″ D7–D8 offset is exact.
+- **PR2a — emission [DONE, committed].** `to_autoplacer_dict()` + a `form_factor_standard` block
+  in `<stem>_autoplacer.json` (outline + fixed connectors + holes). Informational; consumers gate
+  on `validated`. Survives the project-config loader.
+- **PR3 foundation — conformance check [DONE, committed].** `conformance.py`:
+  `check_conformance` (geometry, not net names) + `board_local_pads` (pcbnew-free board reader) +
+  wired into the investigate §8.5 audit. On KC-99A9M8's board: `NON-CONFORMANT 4/32, outline
+  121.9×45.2 != 68.58×53.34`. Read-only; reports, does not place.
+
+- **PR2b — ENFORCEMENT [remaining; load-bearing].** Two coupled halves:
+  1. **Compose injection.** From a `validated` template + the `form_factor_standard` cfg block,
+     build locked connector + mounting-hole `Component`s at the fixed positions and pin the parent
+     outline to the template rect. Natural seam: the manual-layout path
+     (`compose_subcircuits.py:1335`, honors exact placements + `OutlineSpec`) — a template
+     auto-generates that fixed scaffold. `_validate_parent_geometry` already fails loud if placed
+     parts overflow the fixed outline. Gate on `template.validated` + a config flag.
+  2. **Synthesis rewire.** The LLM's free-placed headers are dropped; the design's I/O is bound to
+     the standard header nets (D0..D13/A0..A5/power). This is a wiring-stage contract keyed off the
+     template and must keep ERC happy (the schematic emitter draws the standard headers). This is
+     the deep half — it changes the schematic and interacts with ERC; best validated on a real
+     dogfood build.
+- **PR3 gate — enforcement.** Promote-time: when a standard was requested, run `check_conformance`
+  on the promoted board and fail/downgrade if non-conformant (report-only until PR2b lands, else it
+  fails every still-free-placed shield).
+
+## Open questions (for PR2b)
+- **Header ↔ role/pin binding.** How does the design's I/O map onto D0..D13/A0..A5/power — does the
+  LLM target canonical nets at the wiring stage (keyed off the template), or a post-hoc mapper?
+  This is the crux of the rewire half.
+- **Footprint reuse.** Vendor the exact shield footprints/outline as a `leaf_library/` part so the
+  injection reuses the manual-mode `OutlineSpec` path directly?
+- **ICSP + board notch.** The 2×3 ICSP header and the top-right corner notch aren't modeled yet
+  (noted in the template) — add as keepout/outline refinements.
+- **Multiple stacked form factors** (a shield that is also a specific size) — precedence rules.
