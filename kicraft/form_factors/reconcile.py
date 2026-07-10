@@ -1,0 +1,147 @@
+"""Deterministic "replace & rewire" reconcile at the wiring stage-commit.
+
+When a brief named a validated standard form factor (e.g. Arduino shield), this
+replaces the LLM's generic stacking connectors with the standard's headers as
+REAL BOM parts, binds their power/ground pins to the design rails by net name,
+and marks the signal pins no-connect (they mate with the host board below, so
+they carry no on-board net). The result is a schematic/BOM/netlist whose edge
+interface is exactly the standard's -- the electrical half of replace & rewire.
+
+Env-gated by ``KICRAFT_FORM_FACTOR_ENFORCE`` (see :func:`enforce_enabled`) so it
+can never touch a normal build; it only runs when explicitly turned on for a
+shield dogfood run. ERC-correctness of the emitted schematic needs validation on
+a real build (a lone standard header, power-pin drive treatment) -- unit tests
+cover the BOM transformation, not ERC.
+
+Mechanical placement of these real headers at their fixed board positions is the
+compose half (``compose_scaffold`` + the ``_compose_artifacts`` fork); wiring
+that to consume these real parts (rather than inject synthetic ones) is the
+remaining integration step, tracked in the plan.
+"""
+
+from __future__ import annotations
+
+import os
+
+from . import get_template
+from .synthesis import standard_form_factor_bom_delta
+
+_STANDARD_MARKER = "standard form factor:"
+
+
+def enforce_enabled() -> bool:
+    """Whether standard-form-factor enforcement is turned on (env master switch)."""
+    return os.environ.get("KICRAFT_FORM_FACTOR_ENFORCE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _is_stacking_header(part) -> bool:
+    """A 2.54 mm pin-header/socket connector -- the shield interface class the
+    standard replaces. Deliberately narrow: a USB/other connector (different
+    footprint) on a functional shield is left alone."""
+    fp = getattr(part, "footprint", "") or ""
+    is_header = ("PinHeader_" in fp) or ("PinSocket_" in fp)
+    return is_header and "P2.54mm" in fp
+
+
+def _already_standard(part) -> bool:
+    return _STANDARD_MARKER in (getattr(part, "sourcing_note", "") or "")
+
+
+def reconcile_standard_form_factor(state) -> list[str]:
+    """Rewire ``state.bom`` to the standard's headers. Returns human notes.
+
+    No-op (returns ``[]``) unless a validated standard was captured and the BOM
+    exists. Idempotent: previously-added standard headers are not re-dropped.
+    """
+    intent = getattr(state, "intent", None)
+    ff = getattr(intent, "form_factor", None) if intent is not None else None
+    template = get_template(getattr(ff, "standard", None) if ff is not None else None)
+    if template is None or not template.validated:
+        return []
+    bom = getattr(state, "bom", None)
+    if bom is None or not getattr(bom, "parts", None):
+        return []
+
+    # Idempotent: a BOM that already carries the standard headers is done. A
+    # re-commit must not stack a second set.
+    if any(_already_standard(p) for p in bom.parts):
+        return []
+
+    notes: list[str] = []
+
+    # 1. LLM stacking connectors to replace (never the standard's own headers).
+    drop_refs = {
+        p.ref for p in bom.parts if _is_stacking_header(p) and not _already_standard(p)
+    }
+    # 2. Host sheet: reuse a dropped connector's sheet, else the first part's.
+    host_sheet = None
+    if drop_refs:
+        host_sheet = next(p.sheet for p in bom.parts if p.ref in drop_refs)
+    elif bom.parts:
+        host_sheet = bom.parts[0].sheet
+    if host_sheet is None:
+        return []
+
+    # 3. Remove dropped parts + prune every reference to them (connections,
+    #    no-connects, and the ref-bearing BOM index fields the model validates).
+    if drop_refs:
+        bom.parts = [p for p in bom.parts if p.ref not in drop_refs]
+        pruned = 0
+        kept_conns = []
+        for c in bom.connections:
+            eps = [ep for ep in c.endpoints if ep.ref not in drop_refs]
+            pruned += len(c.endpoints) - len(eps)
+            if len(eps) >= 1:
+                c.endpoints = eps
+                kept_conns.append(c)
+            # a connection left with no endpoints is dropped entirely
+        bom.connections = kept_conns
+        bom.no_connect_pins = [
+            ep for ep in bom.no_connect_pins if ep.ref not in drop_refs
+        ]
+        # Ref-index fields (BOM validators reject a stale ref in any of these).
+        bom.component_zones = {
+            r: z for r, z in bom.component_zones.items() if r not in drop_refs
+        }
+        bom.thermal_refs = [r for r in bom.thermal_refs if r not in drop_refs]
+        bom.signal_flow_order = [
+            r for r in bom.signal_flow_order if r not in drop_refs
+        ]
+        bom.ic_groups = {
+            ic: [m for m in members if m not in drop_refs]
+            for ic, members in bom.ic_groups.items()
+            if ic not in drop_refs
+        }
+        kept_arrays = []
+        for spec in bom.arrays:
+            spec.refs = [r for r in spec.refs if r not in drop_refs]
+            if spec.refs:
+                kept_arrays.append(spec)
+        bom.arrays = kept_arrays
+        notes.append(
+            f"replaced {len(drop_refs)} LLM stacking connector(s) "
+            f"{sorted(drop_refs)} (pruned {pruned} endpoint(s))"
+        )
+
+    # 4. Add the standard headers as real parts + power binding + signal NC.
+    existing = {p.ref for p in bom.parts}
+    parts, power_conns, signal_ncs = standard_form_factor_bom_delta(
+        template, existing, sheet=host_sheet
+    )
+    bom.parts.extend(parts)
+    bom.connections.extend(power_conns)
+    bom.no_connect_pins.extend(signal_ncs)
+    notes.append(
+        f"added {len(parts)} {template.key} header(s) on sheet {host_sheet!r}: "
+        f"{[p.ref for p in parts]}; bound {len(power_conns)} power net(s); "
+        f"{len(signal_ncs)} signal pin(s) no-connect"
+    )
+    return notes
+
+
+__all__ = ["enforce_enabled", "reconcile_standard_form_factor"]

@@ -40,14 +40,16 @@ def standard_form_factor_bom_delta(
     existing_refs: set[str],
     *,
     sheet: str = "INTERFACE",
-) -> tuple[list[BomPart], list[NetConnection]]:
-    """(new BomParts, canonical power/ground NetConnections) for a template.
+) -> tuple[list[BomPart], list[NetConnection], list[PinEndpoint]]:
+    """(new BomParts, canonical power NetConnections, signal-pin no-connects).
 
-    Refs are allocated after the highest existing ``J<n>``. Parts are the four
-    single-row headers with the template footprints. Connections cover ONLY the
-    canonical rails (:data:`~kicraft.form_factors.scaffold.CANONICAL_RAILS`) --
-    signal pins are left for the wiring stage. A rail that lands on several pins
-    (e.g. the two GND pins) collects them all into one net.
+    Refs are allocated after the highest existing ``J<n>``. Parts are the single-
+    row headers with the template footprints. Power connections cover ONLY the
+    canonical rails (:data:`~kicraft.form_factors.scaffold.CANONICAL_RAILS`); a
+    rail on several pins (e.g. the two GND pins) collects them into one net. The
+    remaining **signal** pins (D0..D13/A0..A5) are returned as no-connect
+    endpoints -- on a shield they mate with the host board below, so they carry
+    no on-board net and would otherwise trip ERC ``pin_not_connected``.
     """
     parts_data = standard_header_parts(
         template, ref_start=_next_j_index(existing_refs), sheet=sheet
@@ -65,18 +67,22 @@ def standard_form_factor_bom_delta(
     ]
 
     rail_endpoints: dict[str, list[PinEndpoint]] = {}
+    signal_noconnects: list[PinEndpoint] = []
     for p in parts_data:
         for pin in p["pins"]:
             net = pin["net"]
+            if net is None:
+                continue  # NC / reserved pin: neither bound nor no-connect-marked
+            ep = PinEndpoint(ref=p["ref"], pin=pin["pin"])
             if net in CANONICAL_RAILS:
-                rail_endpoints.setdefault(net, []).append(
-                    PinEndpoint(ref=p["ref"], pin=pin["pin"])
-                )
+                rail_endpoints.setdefault(net, []).append(ep)
+            else:
+                signal_noconnects.append(ep)  # D0..D13 / A0..A5
     connections = [
         NetConnection(net_name=net, endpoints=eps, sheet=sheet)
         for net, eps in sorted(rail_endpoints.items())
     ]
-    return parts, connections
+    return parts, connections, signal_noconnects
 
 
 __all__ = ["standard_form_factor_bom_delta"]

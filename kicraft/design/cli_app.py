@@ -2932,6 +2932,23 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                 f"inter_sheet {c}"
                 for c in reconcile_inter_sheet_nets(state.architecture, state.bom)
             ]
+        # Standard form-factor "replace & rewire" (env-gated by
+        # KICRAFT_FORM_FACTOR_ENFORCE, default OFF): when the brief named a
+        # validated standard (e.g. Arduino shield), replace the LLM's generic
+        # stacking connectors with the standard's headers as real BOM parts, bind
+        # their power/ground pins, and mark signal pins no-connect -- so the
+        # committed schematic/BOM/netlist carries the standard's edge interface.
+        # Gated so it can never touch a normal build; ERC-correctness of the
+        # emitted schematic needs validation on a real dogfood run.
+        from kicraft.form_factors.reconcile import (
+            enforce_enabled as _ff_enforce_enabled,
+            reconcile_standard_form_factor as _ff_reconcile,
+        )
+
+        if _ff_enforce_enabled():
+            wiring_normalizations += [
+                f"form_factor {n}" for n in _ff_reconcile(state)
+            ]
 
     new_questions: list[Question] = []
     if args.questions_file:
