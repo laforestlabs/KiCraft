@@ -52,6 +52,19 @@ def test_structural_parser_flags_router_throw_and_illegal_placement():
     }
 
 
+def test_deadline_expiry_is_not_structural():
+    # N1: a leaf that blew its wall deadline is SLOW, not structurally
+    # unroutable -- classifying it structural aborted builds that were
+    # fab-ready in baseline (run_01 rc-lowpass-bnc). A deadline-only terminal
+    # line must not trigger the early-abort.
+    line = (
+        "No accepted routed leaf artifact produced for /1eac9743 after "
+        "4 round(s) across 2 canvas attempt(s) (0.25, seed-bbox): "
+        "leaf_solve_deadline"
+    )
+    assert _structural_unroutable_leaves(line) == {}
+
+
 def test_structural_parser_ignores_recoverable_quality_miss():
     # A routed board that failed a DRC/opens gate CAN improve across rounds, so
     # it must NOT trip the early-abort -- only the structural reasons do.

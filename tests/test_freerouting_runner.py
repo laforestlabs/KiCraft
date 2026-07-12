@@ -388,3 +388,55 @@ def test_run_pcbnew_script_gives_up_after_six_failed_load_board(
         freerouting_runner._run_pcbnew_script("print('ok')")
 
     assert len(calls) == 6
+
+
+# ---------------------------------------------------------------------------
+# DSN non-ANSI sanitization (FreeRouting 1.9.0 hangs forever on non-ANSI
+# input -- run_01 rc-lowpass-bnc: 'Ω' in resistor values stalled every round)
+# ---------------------------------------------------------------------------
+
+_DSN_WITH_OMEGA = """(pcb board
+  (placement
+    (component R_0402 (place R1 62400 -30000 front 90 (PN 10kΩ)))
+    (component BNC (place J2 65540 -14262 front 90 (PN "BNC 50Ω")))
+    (component C_0402 (place C1 50000 -20000 front 0 (PN 10nF)))
+    (component POT (place RV1 46795 -22740 front -90 (PN 100kµF)))
+  )
+  (network (net VOUT (pins R1-2 C1-1)))
+)
+"""
+
+
+def test_sanitize_dsn_pn_transliterates_non_ansi(tmp_path):
+    p = tmp_path / "board.dsn"
+    p.write_text(_DSN_WITH_OMEGA, encoding="utf-8")
+    n = freerouting_runner._sanitize_dsn_part_numbers(str(p))
+    assert n == 3
+    text = p.read_text(encoding="utf-8")
+    assert "(PN 10kOhm)" in text                # GREEK CAPITAL OMEGA
+    assert '(PN "BNC 50Ohm")' in text           # OHM SIGN, quoted PN
+    assert "(PN 100kuF)" in text                # MICRO SIGN
+    assert "(PN 10nF)" in text                  # untouched ASCII PN
+    assert not any(ord(c) >= 128 for c in text)
+
+
+def test_sanitize_dsn_pn_noop_on_clean_input(tmp_path):
+    p = tmp_path / "board.dsn"
+    clean = _DSN_WITH_OMEGA.replace("Ω", "R").replace(
+        "Ω", "R").replace("µ", "u")
+    p.write_text(clean, encoding="utf-8")
+    before = p.stat().st_mtime_ns
+    assert freerouting_runner._sanitize_dsn_part_numbers(str(p)) == 0
+    assert p.stat().st_mtime_ns == before  # not rewritten
+
+
+def test_sanitize_dsn_warns_on_non_ansi_net_name(tmp_path, capsys):
+    # A non-ASCII NET name round-trips through the SES and cannot be
+    # rewritten here -- it must be surfaced loudly, not silently mangled.
+    p = tmp_path / "board.dsn"
+    p.write_text(
+        "(pcb (network (net VOUT_50Ω (pins R1-2))))\n", encoding="utf-8"
+    )
+    assert freerouting_runner._sanitize_dsn_part_numbers(str(p)) == 0
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "non-ANSI" in out

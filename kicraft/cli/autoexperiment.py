@@ -177,10 +177,12 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
 # across rounds and is left to keep retrying.
 _STRUCTURAL_UNROUTABLE_REASONS = frozenset({
     "routing_exception", "leaf_pre_stamp_legality_repair",
-    # A leaf that blew its per-leaf wall deadline (WS2) with nothing routed will
-    # not be rescued by a mutated outer round either -- treat it as structural so
-    # the early-abort surfaces it fast instead of re-solving into the watchdog.
-    "leaf_solve_deadline",
+    # NOT here: "leaf_solve_deadline". A deadline expiry means the leaf was
+    # merely SLOW, never that it is structurally unroutable -- the ladder jumps
+    # to the reserved seed-bbox fallback on deadline (N1) and a later outer
+    # round with mutated params may still accept the leaf. Classifying it
+    # structural aborted whole builds that were fab-ready in baseline
+    # (run_01 rc-lowpass-bnc, self-eval 2026-07-11 plan N1).
 })
 _LEAF_UNROUTABLE_RE = re.compile(
     r"No accepted routed leaf artifact produced for (\S+) after .*?: "

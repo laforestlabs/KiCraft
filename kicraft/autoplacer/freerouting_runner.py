@@ -611,12 +611,84 @@ def export_dsn(
         "        _info['net_class'][_nm] = str(_net.GetNetClassName())\n"
         f"open({netclass_json!r}, 'w').write(json.dumps(_info))\n"
     )
+    _sanitize_dsn_part_numbers(dsn_path)
     _patch_dsn_clearance(
         dsn_path,
         target_clearance_um=target_clearance_um,
         target_width_um=target_width_um,
     )
     _inject_netclass_clearances(dsn_path)
+
+
+# FreeRouting 1.9.0's DSN parser stalls FOREVER on non-ANSI characters: it
+# logs "Non-ansi character 'Ω' found at position ..." and then hangs until the
+# runner's timeout kills it (rc=-1, no SES) -- so every canvas rung burns
+# 2 x freerouting_timeout_s and the leaf dies with routing_exception
+# (run_01 rc-lowpass-bnc: a 4-part leaf whose R values carried 'Ω').
+# The PN (part-number) strings are cosmetic for routing and do NOT round-trip
+# through the SES, so they are safe to transliterate at this boundary.
+# Component and net names DO round-trip; a non-ASCII character there is
+# surfaced loudly below instead of silently rewritten.
+_DSN_TRANSLITERATE = {
+    "Ω": "Ohm",  # Ω GREEK CAPITAL OMEGA
+    "Ω": "Ohm",  # Ω OHM SIGN
+    "µ": "u",    # µ MICRO SIGN
+    "μ": "u",    # μ GREEK SMALL MU
+    "°": "deg",  # ° DEGREE SIGN
+    "±": "+-",   # ± PLUS-MINUS SIGN
+    "×": "x",    # × MULTIPLICATION SIGN
+}
+_DSN_PN_RE = re.compile(r'\(PN\s+("(?:[^"\\]|\\.)*"|[^\s)]+)\)')
+
+
+def _ansi_safe(s: str) -> str:
+    return "".join(
+        ch if ord(ch) < 128 else _DSN_TRANSLITERATE.get(ch, "_") for ch in s
+    )
+
+
+def _sanitize_dsn_part_numbers(dsn_path: str) -> int:
+    """Transliterate non-ASCII characters out of the DSN's PN fields.
+
+    Returns the number of PN fields rewritten. Any non-ASCII character left
+    OUTSIDE a PN field (a component or net name, which must round-trip through
+    the SES) is reported with a loud warning naming the offending line, so a
+    FreeRouting stall has a visible cause instead of a mystery timeout.
+    """
+    text = Path(dsn_path).read_text(encoding="utf-8")
+
+    rewritten = 0
+
+    def _fix_pn(m: re.Match) -> str:
+        nonlocal rewritten
+        pn = m.group(1)
+        safe = _ansi_safe(pn)
+        if safe != pn:
+            rewritten += 1
+        return f"(PN {safe})"
+
+    sanitized = _DSN_PN_RE.sub(_fix_pn, text)
+    if rewritten:
+        print(
+            f"  DSN sanitize: transliterated non-ANSI chars in {rewritten} "
+            f"PN field(s) (FreeRouting 1.9.0 hangs on non-ANSI input)"
+        )
+        Path(dsn_path).write_text(sanitized, encoding="utf-8")
+
+    residual = [
+        line.strip()[:80]
+        for line in sanitized.splitlines()
+        if any(ord(ch) >= 128 for ch in line)
+    ]
+    if residual:
+        print(
+            f"  WARNING: DSN still contains non-ANSI characters outside PN "
+            f"fields ({len(residual)} line(s), e.g. {residual[0]!r}) -- "
+            f"FreeRouting 1.9.0 is likely to hang on this input; the "
+            f"offending component/net names round-trip through the SES and "
+            f"cannot be rewritten here. Rename them upstream."
+        )
+    return rewritten
 
 
 def _patch_dsn_clearance(

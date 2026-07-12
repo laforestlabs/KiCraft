@@ -52,6 +52,18 @@ tree with `.experiments/`.
 
 ### N1 (P0) — `leaf_solve_deadline` bypasses the "can't-regress" seed-bbox fallback
 
+> **DONE 2026-07-12 — and the evidence line hid a second, deeper root cause.** Both halves
+> landed: `leaf_solve_deadline` removed from `_STRUCTURAL_UNROUTABLE_REASONS`, and the ladder
+> now JUMPS to the terminal seed-bbox rung on deadline (25% budget reserve via
+> `leaf_solve_seed_bbox_reserve_frac`, first fallback round guaranteed even over budget).
+> Replay then exposed why the leaf never routed at ALL: **FreeRouting 1.9.0 deadlocks on the
+> 'Ω' character in DSN PN fields** (run_01's `10kΩ`/`BNC 50Ω` values; proven by A/B on the
+> identical DSN — Ω removed → routes in seconds, rc=0). Fixed at the DSN boundary:
+> `_sanitize_dsn_part_numbers` in `export_dsn` transliterates non-ASCII in PN fields (cosmetic,
+> not SES round-tripped) + loud warning for residual non-ASCII in names. Re-replay of run_01:
+> 2/2 leaves, parent routed, **0 shorts / 0 unconnected**. Fleet note: 15/34 batch runs carry
+> non-ASCII values but almost all are 'µ', which FR tolerates — Ω was unique to run_01.
+
 **Evidence:** run_01_rc-lowpass-bnc (baseline fab-ready → rc6). `events.jsonl`:
 `No accepted routed leaf artifact … after 4 round(s) across 2 canvas attempt(s) (0.25, 0.22):
 leaf_solve_deadline,routing_exception` → `[abort] leaf … is structurally unroutable`.

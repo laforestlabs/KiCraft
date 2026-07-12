@@ -846,19 +846,33 @@ def _solve_leaf_subcircuit(
     # Per-leaf wall deadline: a pathological leaf can burn the WHOLE build inside
     # its own ladder (12 rounds x 4 canvases, each up to a FreeRouting timeout),
     # so the outer autoexperiment never reaches a round boundary and the harness
-    # watchdog SIGKILLs with zero artifacts. When the deadline trips, stop the
-    # ladder and keep the best-so-far routed board; if nothing routed, the
-    # terminal "No accepted routed leaf" carries `leaf_solve_deadline` so the
-    # outer structural-abort fires (WS2).
+    # watchdog SIGKILLs with zero artifacts. When the deadline trips on a
+    # compaction rung, the ladder JUMPS straight to the terminal seed-bbox
+    # attempt (N1) -- the pure historical solve that makes "fab-ready rate can't
+    # regress" hold by construction -- instead of abandoning the leaf. A slice
+    # of the budget is reserved for that rung, and it always gets >= 1 round
+    # even when a compaction round overshot the whole budget (rounds are not
+    # interruptible). A deadline expiry is a slowness signal, never a
+    # structural-unroutable one (see autoexperiment._STRUCTURAL_UNROUTABLE_REASONS).
     leaf_solve_max_wall_s = float(
         cfg.get("leaf_solve_max_wall_s")
         or os.environ.get("KICRAFT_LEAF_SOLVE_MAX_WALL_S")
         or 0.0
     )
+    _seed_bbox_reserve_frac = float(
+        cfg.get("leaf_solve_seed_bbox_reserve_frac", 0.25)
+    )
+    _compaction_deadline_s = leaf_solve_max_wall_s * (
+        1.0 - max(0.0, min(0.9, _seed_bbox_reserve_frac))
+    )
     _deadline_hit = False
 
     canvas_attempts_run: list[str] = []
     for attempt_index, canvas_fill in enumerate(canvas_fills):
+        if _deadline_hit and canvas_fill is not None:
+            # Deadline tripped on an earlier rung: skip the remaining
+            # compaction rungs and go straight to the seed-bbox fallback.
+            continue
         extraction_start = time.monotonic()
         extraction = _build_extraction(canvas_fill)
         extraction_elapsed_s = round(max(0.0, time.monotonic() - extraction_start), 3)
@@ -887,9 +901,33 @@ def _solve_leaf_subcircuit(
             )
 
         for local_round_index in range(effective_rounds):
-            if leaf_solve_max_wall_s > 0 and (
-                time.monotonic() - leaf_total_start
-            ) > leaf_solve_max_wall_s:
+            _elapsed_s = time.monotonic() - leaf_total_start
+            if (
+                leaf_solve_max_wall_s > 0
+                and canvas_fill is not None
+                and _elapsed_s > _compaction_deadline_s
+            ):
+                # Compaction rung ran into the reserved seed-bbox slice: jump
+                # the ladder to the terminal fallback instead of grinding on.
+                _deadline_hit = True
+                failure_reasons.append("leaf_solve_deadline")
+                print(
+                    f"  leaf-solve deadline: {node.definition.id.instance_path} "
+                    f"exceeded {_compaction_deadline_s:.0f}s of "
+                    f"{leaf_solve_max_wall_s:.0f}s wall after "
+                    f"{len(round_results)} round(s); jumping to the seed-bbox "
+                    f"fallback (reserved {_seed_bbox_reserve_frac:.0%})"
+                )
+                break
+            if (
+                leaf_solve_max_wall_s > 0
+                and canvas_fill is None
+                and local_round_index > 0
+                and _elapsed_s > leaf_solve_max_wall_s
+            ):
+                # The seed-bbox rung is guaranteed its first round (the
+                # can't-regress fallback must RUN, even over budget); further
+                # rounds stop once the full wall budget is spent.
                 _deadline_hit = True
                 failure_reasons.append("leaf_solve_deadline")
                 print(
@@ -1022,10 +1060,11 @@ def _solve_leaf_subcircuit(
         # Grow-on-failure ladder: an accepted round at this canvas ends the
         # search; otherwise the next (looser) canvas gets its own full set of
         # rounds. Single-entry canvas plans (seed-bbox mode, array leaves)
-        # run exactly one pass -- the historical behavior. The per-leaf deadline
-        # (WS2) also ends the ladder, so a slow leaf can't march the whole build
-        # into the watchdog by grinding through every remaining canvas.
-        if best is not None or _deadline_hit:
+        # run exactly one pass -- the historical behavior. A deadline on a
+        # compaction rung does NOT end the ladder here: the loop skips ahead
+        # to the seed-bbox fallback (N1); a deadline on the fallback itself
+        # ends it (keeps best-so-far).
+        if best is not None or (_deadline_hit and canvas_fill is None):
             break
 
     if best is None and best_routed is not None:

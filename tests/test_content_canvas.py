@@ -508,3 +508,92 @@ class TestCanvasLadder:
         }
         with pytest.raises(RuntimeError, match="canvas attempt"):
             _run_ladder(monkeypatch, cfg, lambda i, e: False)
+
+
+class _FakeClock:
+    """Stand-in for the ``time`` module: monotonic() returns a hand-advanced
+    value, so the per-leaf wall deadline can be driven deterministically."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def monotonic(self):
+        return self.t
+
+
+def _run_ladder_with_clock(monkeypatch, cfg, accept_plan, rounds, round_cost_s):
+    """_run_ladder variant where every fake solve round advances a fake clock
+    by ``round_cost_s`` seconds. Returns (solved, calls, clock)."""
+    from kicraft.cli import solve_subcircuits as ss
+
+    clock = _FakeClock()
+    monkeypatch.setattr(ss, "time", clock)
+
+    orig_plan = accept_plan
+
+    def ticking_plan(idx, extraction):
+        clock.t += round_cost_s
+        return orig_plan(idx, extraction)
+
+    solved, calls = _run_ladder(monkeypatch, cfg, ticking_plan, rounds=rounds)
+    return solved, calls, clock
+
+
+class TestLeafSolveDeadline:
+    """N1: the per-leaf wall deadline must JUMP the ladder to the terminal
+    seed-bbox fallback (the can't-regress historical solve), never bypass it."""
+
+    _CFG = {
+        "leaf_canvas_mode": "content",
+        "leaf_canvas_fill_target": 0.28,
+        "leaf_canvas_fill_ladder": [0.22, 0.17],
+        "subcircuit_margin_mm": 10.0,
+        "leaf_solve_max_wall_s": 100.0,  # reserve 25% -> compaction gets 75s
+    }
+
+    def test_deadline_mid_ladder_jumps_to_seed_bbox(self, monkeypatch):
+        # 40s/round, reject every compaction round, accept at seed-bbox.
+        # t=0 round ok, t=40 round ok, t=80 > 75 -> jump (skip 0.22/0.17).
+        solved, calls, _ = _run_ladder_with_clock(
+            monkeypatch, dict(self._CFG),
+            lambda i, e: e.local_state.board_width > 100.0,
+            rounds=5, round_cost_s=40.0,
+        )
+        assert solved.scheduling_metadata["canvas_attempts"] == [
+            "0.28", "seed-bbox",
+        ], "intermediate compaction rungs skipped, fallback NOT bypassed"
+        assert len(calls) == 3  # 2 compaction rounds + 1 seed-bbox round
+        assert calls[-1][1] > 100.0  # last round solved on the seed envelope
+
+    def test_budget_overshoot_still_runs_one_seed_bbox_round(self, monkeypatch):
+        # A single 200s compaction round overshoots the WHOLE 100s budget;
+        # the fallback is guaranteed its first round anyway.
+        solved, calls, _ = _run_ladder_with_clock(
+            monkeypatch, dict(self._CFG),
+            lambda i, e: e.local_state.board_width > 100.0,
+            rounds=5, round_cost_s=200.0,
+        )
+        assert solved.scheduling_metadata["canvas_attempts"] == [
+            "0.28", "seed-bbox",
+        ]
+        assert len(calls) == 2  # 1 compaction round + the guaranteed fallback
+
+    def test_deadline_on_seed_bbox_rung_stops_after_first_round(self, monkeypatch):
+        # Deadline expires ON the fallback: first round is guaranteed, further
+        # rounds stop; the terminal error carries leaf_solve_deadline.
+        cfg = {
+            "leaf_canvas_mode": "seed-bbox",
+            "subcircuit_margin_mm": 10.0,
+            "leaf_solve_max_wall_s": 100.0,
+        }
+        from kicraft.cli import solve_subcircuits as ss
+
+        clock = _FakeClock()
+        monkeypatch.setattr(ss, "time", clock)
+
+        def plan(idx, extraction):
+            clock.t += 200.0
+            return False
+
+        with pytest.raises(RuntimeError, match="leaf_solve_deadline"):
+            _run_ladder(monkeypatch, cfg, plan, rounds=5)
