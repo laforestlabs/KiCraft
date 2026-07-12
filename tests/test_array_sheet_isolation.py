@@ -15,9 +15,11 @@ from kicraft.design.models import (
     Architecture,
     ArraySpec,
     BomPart,
+    InterSheetNet,
     NetConnection,
     PinEndpoint,
     Sheet,
+    SheetPin,
 )
 from kicraft.design.synthesis.array_decaps import isolate_array_sheets
 from kicraft.design.synthesis.validation import (
@@ -147,6 +149,104 @@ def test_pure_array_sheet_is_a_noop():
     assert isolate_array_sheets(bom, arch) == []
     assert {s.name for s in arch.sheets} == {ARRAY_SHEET}
     assert arch.inter_sheet_nets == []
+
+
+def test_ring_member_series_resistors_stay_with_their_leds():
+    # star-ornament (run_33, self-eval 20260710T211406Z): five LED sheets, each
+    # holding a ring member D plus its series current-limit R; the MCU drives
+    # Rx.1 over a CTRL net the wiring stage already declared inter-sheet. The R
+    # is a member companion (2-pin, shares the LED's signal net) -- relocating
+    # it to a SUPPORT sheet split CTRL/ANODE across sheets and left the CTRL
+    # declaration stale (30 ERC errors). Nothing must move.
+    sheets = [Sheet(name="POWER AND MCU", stem="POWER_AND_MCU", function="mcu")]
+    parts = [BomPart(ref="U1", value="ATtiny402", sheet="POWER AND MCU",
+                     symbol="MCU_Microchip_ATtiny:ATtiny402-SSN",
+                     footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm")]
+    conns: list[NetConnection] = []
+    isn: list[InterSheetNet] = []
+    for i in (1, 2, 3):
+        sh = f"LED {i}"
+        sheets.append(Sheet(name=sh, stem=f"LED_{i}", function="led"))
+        parts += [
+            BomPart(ref=f"D{i}", value="LED", sheet=sh, symbol="Device:LED",
+                    footprint="LED_SMD:LED_0603_1608Metric"),
+            BomPart(ref=f"R{i}", value="220R", sheet=sh, symbol="Device:R",
+                    footprint="Resistor_SMD:R_0402_1005Metric"),
+        ]
+        conns += [
+            NetConnection(net_name=f"LED_{i}_CTRL", sheet="POWER AND MCU",
+                          endpoints=[PinEndpoint(ref="U1", pin=str(i))]),
+            NetConnection(net_name=f"LED_{i}_CTRL", sheet=sh,
+                          endpoints=[PinEndpoint(ref=f"R{i}", pin="1")]),
+            NetConnection(net_name=f"LED_{i}_ANODE", sheet=sh, endpoints=[
+                PinEndpoint(ref=f"R{i}", pin="2"),
+                PinEndpoint(ref=f"D{i}", pin="1")]),
+            NetConnection(net_name="GND", sheet=sh,
+                          endpoints=[PinEndpoint(ref=f"D{i}", pin="2")]),
+        ]
+        isn.append(InterSheetNet(name=f"LED_{i}_CTRL", endpoints=[
+            SheetPin(sheet="POWER AND MCU", direction="output"),
+            SheetPin(sheet=sh, direction="input")]))
+    bom = BOM(parts=parts, connections=conns,
+              arrays=[ArraySpec(refs=["D1", "D2", "D3"], pattern="ring")])
+    arch = Architecture(sheets=sheets, power_nets=["GND"], inter_sheet_nets=isn)
+    before = [n.model_dump() for n in arch.inter_sheet_nets]
+
+    assert isolate_array_sheets(bom, arch) == []
+    assert {p.sheet for p in bom.parts if p.ref.startswith("R")} == \
+        {"LED 1", "LED 2", "LED 3"}, "series resistors stay beside their LEDs"
+    assert len(arch.sheets) == 4, "no SUPPORT sheet appears"
+    assert [n.model_dump() for n in arch.inter_sheet_nets] == before
+    assert check_inter_sheet_nets_realized(arch, bom).ok, "§9.14 must hold"
+    assert check_no_dangling_signal_nets(arch, bom).ok, "§9.15 must hold"
+
+
+def _bom_arch_with_declared_nets():
+    # The KC-WXN3SN fixture plus an MCU sheet and two nets the wiring stage
+    # already declared inter-sheet through the array sheet: CTRL (MCU -> J1
+    # only) and DATA (MCU -> J1.3 + D1.1, i.e. still touching a member).
+    bom, arch = _bom_array_with_header(), _arch()
+    arch.sheets.append(Sheet(name="MCU", stem="MCU", function="mcu"))
+    bom.parts.append(BomPart(ref="U1", value="MCU", sheet="MCU",
+                             symbol="Device:R",
+                             footprint="Resistor_SMD:R_0402_1005Metric"))
+    bom.connections += [
+        NetConnection(net_name="CTRL", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U1", pin="1")]),
+        NetConnection(net_name="CTRL", sheet=ARRAY_SHEET,
+                      endpoints=[PinEndpoint(ref="J1", pin="4")]),
+        NetConnection(net_name="DATA", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U1", pin="2")]),
+    ]
+    arch.inter_sheet_nets += [
+        InterSheetNet(name="CTRL", endpoints=[
+            SheetPin(sheet="MCU", direction="output"),
+            SheetPin(sheet=ARRAY_SHEET, direction="input")]),
+        InterSheetNet(name="DATA", endpoints=[
+            SheetPin(sheet="MCU", direction="output"),
+            SheetPin(sheet=ARRAY_SHEET, direction="input")]),
+    ]
+    return bom, arch
+
+
+def test_stale_declarations_reconciled_when_part_moves():
+    # Moving J1 re-homes the array-side endpoints of nets that were ALREADY
+    # declared inter-sheet at wiring time. The declarations must follow the
+    # part, else the emitter draws a sheet pin on the array sheet with nothing
+    # inside it (hier_label_mismatch) and a dangling label on the new sheet.
+    bom, arch = _bom_arch_with_declared_nets()
+    assert isolate_array_sheets(bom, arch) == ["J1"]
+    isn = {n.name: {e.sheet: e.direction for e in n.endpoints}
+           for n in arch.inter_sheet_nets}
+    # CTRL's array-side endpoint was ONLY J1 -> 1-for-1 sheet swap, the moved
+    # endpoint inherits the removed sheet's direction.
+    assert isn["CTRL"] == {"MCU": "output", "HEADER": "input"}
+    # DATA still touches the array (D1.1) AND now the header -> grows to three
+    # sheets; kept sheets keep their directions, the new one joins bidirectional.
+    assert isn["DATA"] == {"MCU": "output", ARRAY_SHEET: "input",
+                           "HEADER": "bidirectional"}
+    assert check_inter_sheet_nets_realized(arch, bom).ok, "§9.14 must hold"
+    assert check_no_dangling_signal_nets(arch, bom).ok, "§9.15 must hold"
 
 
 def test_no_arrays_is_a_noop():

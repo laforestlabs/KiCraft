@@ -517,3 +517,132 @@ def test_place_array_leaves_rejects_two_arrays_on_same_origin() -> None:
             comps, arrays,
             {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0},
         )
+
+
+# --------------------------------------------------------------------------- #
+# Ring pattern (GAP 2: "12 LEDs evenly spaced in a circle")
+# --------------------------------------------------------------------------- #
+
+import math as _math
+
+from kicraft.autoplacer.brain.array_placement import leaf_is_fully_array
+
+
+def _ring_comps(n: int) -> tuple[dict[str, Component], list[str]]:
+    comps = _grid(n)  # daisy-chained WS2812-style LEDs
+    return comps, [f"D{i}" for i in range(1, n + 1)]
+
+
+def _center_of(comps, refs):
+    cx = sum(comps[r].pos.x for r in refs) / len(refs)
+    cy = sum(comps[r].pos.y for r in refs) / len(refs)
+    return cx, cy
+
+
+def test_ring_geometry_even_spacing_lock_and_fully_handled() -> None:
+    comps, refs = _ring_comps(12)
+    placed, fully = place_array_leaves(
+        comps, [{"refs": refs, "pattern": "ring"}],
+        {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0,
+         "array_orient_chain": False},
+    )
+    assert placed == set(refs)
+    assert fully is True
+    assert all(comps[r].locked and comps[r].array_member for r in refs)
+    cx, cy = _center_of(comps, refs)
+    radii = [_math.hypot(comps[r].pos.x - cx, comps[r].pos.y - cy) for r in refs]
+    # Equal radius (a circle, not a blob): spread < 1% of the mean.
+    assert max(radii) - min(radii) < 0.01 * (sum(radii) / len(radii))
+    # Even angular spacing: every consecutive pair subtends 360/12 = 30 deg.
+    angles = [
+        _math.degrees(_math.atan2(comps[r].pos.y - cy, comps[r].pos.x - cx))
+        for r in refs
+    ]
+    steps = [(angles[(i + 1) % 12] - angles[i]) % 360.0 for i in range(12)]
+    assert all(abs(s - 30.0) < 0.5 for s in steps)
+    # Positive quadrant (leaf outline grows from the origin into +x/+y).
+    for r in refs:
+        c = comps[r]
+        assert c.pos.x - c.width_mm / 2 >= 0.0
+        assert c.pos.y - c.height_mm / 2 >= 0.0
+
+
+def test_ring_explicit_radius_honored() -> None:
+    comps, refs = _ring_comps(12)
+    place_array_leaves(
+        comps, [{"refs": refs, "pattern": "ring", "radius_mm": 24.0}],
+        {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0,
+         "array_orient_chain": False},
+    )
+    cx, cy = _center_of(comps, refs)
+    for r in refs:
+        assert _math.hypot(comps[r].pos.x - cx, comps[r].pos.y - cy) == pytest.approx(24.0, abs=0.05)
+
+
+def test_ring_radius_floored_to_member_clearance() -> None:
+    # A radius too tight for the members is raised to the tightest legal one
+    # (chord >= member diagonal + gap), never overlapped.
+    comps, refs = _ring_comps(12)
+    place_array_leaves(
+        comps, [{"refs": refs, "pattern": "ring", "radius_mm": 0.5}],
+        {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0,
+         "array_orient_chain": False},
+    )
+    cx, cy = _center_of(comps, refs)
+    r0 = _math.hypot(comps[refs[0]].pos.x - cx, comps[refs[0]].pos.y - cy)
+    diag = _math.hypot(1.3, 1.3)
+    min_r = (diag + 0.5) / (2.0 * _math.sin(_math.pi / 12))
+    assert r0 == pytest.approx(min_r, rel=0.01)
+
+
+def test_ring_orientation_points_dout_along_chain() -> None:
+    comps, refs = _ring_comps(12)
+    place_array_leaves(
+        comps, [{"refs": refs, "pattern": "ring", "radius_mm": 10.0}], {}
+    )
+
+    def dout_pad(ref):
+        net = f"{ref}_DOUT"
+        return next(p for p in comps[ref].pads if p.net == net)
+
+    for i in range(11):  # last member keeps the pattern; chain hops are 0..10
+        c, nxt = comps[refs[i]], comps[refs[i + 1]]
+        d = (nxt.pos.x - c.pos.x, nxt.pos.y - c.pos.y)
+        p = dout_pad(refs[i])
+        v = (p.pos.x - c.pos.x, p.pos.y - c.pos.y)
+        dot = d[0] * v[0] + d[1] * v[1]
+        assert dot > 0.0, f"{refs[i]} DOUT points away from {refs[i + 1]}"
+
+
+def test_ring_companion_decaps_placed_radially_inside() -> None:
+    comps, refs = _ring_comps(6)
+    for i in range(1, 7):
+        comps[f"C{i}"] = Component(
+            ref=f"C{i}", value="100nF", pos=Point(0.0, 0.0), rotation=0.0,
+            layer=Layer.FRONT, width_mm=1.0, height_mm=0.5,
+            pads=[
+                Pad(ref=f"C{i}", pad_id="1", pos=Point(-0.4, 0.0), net="+5V", layer=Layer.FRONT),
+                Pad(ref=f"C{i}", pad_id="2", pos=Point(+0.4, 0.0), net="GND", layer=Layer.FRONT),
+            ],
+        )
+    placed, fully = place_array_leaves(
+        comps, [{"refs": refs, "pattern": "ring", "radius_mm": 10.0}],
+        {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0},
+    )
+    assert fully is True
+    assert placed == set(refs) | {f"C{i}" for i in range(1, 7)}
+    cx, cy = _center_of(comps, refs)
+    r_led = _math.hypot(comps[refs[0]].pos.x - cx, comps[refs[0]].pos.y - cy)
+    for i in range(1, 7):
+        c = comps[f"C{i}"]
+        r_cap = _math.hypot(c.pos.x - cx, c.pos.y - cy)
+        assert r_cap < r_led, f"C{i} not inside the ring (r={r_cap:.2f} vs {r_led:.2f})"
+        assert c.locked and c.array_member
+
+
+def test_ring_counts_for_leaf_is_fully_array() -> None:
+    comps, refs = _ring_comps(6)
+    assert leaf_is_fully_array(comps, [{"refs": refs, "pattern": "ring"}]) is True
+    # Partial ring (member on another leaf) is not claimed.
+    del comps["D6"]
+    assert leaf_is_fully_array(comps, [{"refs": refs, "pattern": "ring"}]) is False

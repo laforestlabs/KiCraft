@@ -141,6 +141,7 @@ def _stamp_parent_board(
     # state.manual_outline so the polyline stamp + shape-aware geometry
     # validation below consume the true shape.
     _shape_fit = _fit_requested_shape(state)
+    state.shape_fit = _shape_fit
     if _shape_fit.get("rejected_shape"):
         # An oversized fit is refused at the source so a 592x563 mm 'fab-ready'
         # star can never ship; the board keeps its sane rectangular AABB. Make

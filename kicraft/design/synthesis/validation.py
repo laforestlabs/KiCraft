@@ -1360,6 +1360,15 @@ _GENERIC_MCU_RE = re.compile(
 )
 _BOOT0_PIN_RE = re.compile(r"^(IO0|GPIO0|BOOT0?)$", re.I)
 _SWD_PIN_RE = re.compile(r"SWCLK|SWDIO|^SWD$|^TCK$|^TMS$|^TDI$|^TDO$|JTAG", re.I)
+_UPDI_PIN_RE = re.compile(r"UPDI", re.I)
+# A part whose symbol/value/sourcing_note names a programming interface --
+# the physical access point a programmer clips or plugs onto.
+_PROG_ACCESS_PART_RE = re.compile(
+    r"updi|swd|swdio|jtag|icsp|\bisp\b|debug|prog|tag-?connect|tc2030"
+    r"|test[ _-]?(point|pad)",
+    re.I,
+)
+_USB_PART_RE = re.compile(r"usb", re.I)
 
 
 def _ref_prefix(ref: str) -> str:
@@ -1441,6 +1450,115 @@ def check_mcu_programming_path(bom) -> CheckResult:
             "every MCU has a first-flash path"
             if not bad
             else f"{len(bad)} MCU(s) have no guaranteed programming path"
+        ),
+        offenders=bad,
+    )
+
+
+def _is_mcu_part(part) -> bool:
+    ident = f"{part.symbol} {part.value}"
+    return bool(
+        _ESP_FAMILY_RE.search(ident)
+        or _RP2040_FAMILY_RE.search(ident)
+        or _GENERIC_MCU_RE.search(ident)
+    )
+
+
+def _programming_access_parts(bom) -> list:
+    """Parts a programmer can physically reach: any TP test pad, or a
+    connector-class part (J/P/CN, plus H which some designs use for pin
+    headers -- keyword-gated, so H mounting holes never match) whose identity
+    names a programming interface or USB (native-USB flash / UART-bridge
+    designs)."""
+    out = []
+    for p in bom.parts:
+        pref = _ref_prefix(p.ref)
+        if pref == "TP":
+            out.append(p)
+            continue
+        if pref not in ("J", "P", "CN", "H"):
+            continue
+        ident = f"{p.symbol} {p.value} {p.sourcing_note or ''}"
+        if _PROG_ACCESS_PART_RE.search(ident) or _USB_PART_RE.search(ident):
+            out.append(p)
+    return out
+
+
+def check_mcu_programming_access(bom) -> CheckResult:
+    """§9.29 (hard) -- an MCU board must be physically programmable.
+
+    Two layers, matching what is statically decidable at each stage:
+
+    * **Part presence** (works at BOM commit, before wiring): a BOM containing
+      an MCU must also contain a programming-ACCESS part -- a programming
+      header (UPDI/SWD/JTAG/ICSP, named as such), TP test pads, or a USB
+      connector (native-USB or UART-bridge designs). KC-HN59RJ shipped an
+      ATtiny412 whose UPDI had a pullup but no header or pad: electrically
+      fine, physically unprogrammable -- and "pre-programmed" as a silent
+      default is not an accepted answer; test pads cost nothing and satisfy
+      even a "no connectors" brief.
+    * **UPDI reachability** (runs once ``connections`` exist, at wiring
+      commit): a UPDI-programmed MCU's UPDI pin must share a net with one of
+      those access parts. Wired-to-a-pullup-only is the observed failure
+      mode; conservative for other families (SWD heuristics stay §9.21).
+    """
+    mcus = [p for p in bom.parts if _is_mcu_part(p)]
+    if not mcus:
+        return CheckResult(
+            name="9.29 MCU programming access", ok=True, message="no MCU in BOM"
+        )
+    access = _programming_access_parts(bom)
+    if not access:
+        return CheckResult(
+            name="9.29 MCU programming access",
+            ok=False,
+            message=(
+                "the BOM has an MCU but NO programming-access part; add a "
+                "programming header for the MCU's interface (3-pin UPDI header "
+                "for ATtiny/AVR 0/1-series, 2x5 or 1x4 SWD header for "
+                "STM32/nRF/RP2040 -- name the interface in the part's value) "
+                "or, when the brief forbids connectors, TP test-pad parts on "
+                "the programming pins; a USB connector also satisfies this for "
+                "native-USB or UART-bridge designs"
+            ),
+            offenders=[f"{p.ref} ({p.symbol} {p.value})" for p in mcus],
+        )
+    bad: list[str] = []
+    if bom.connections:
+        from collections import defaultdict as _dd
+
+        access_refs = {p.ref for p in access}
+        info, _ = _pin_info_by_ref(bom)
+        nets = _nets_by_ref(bom)
+        refs_on_net: dict[str, set[str]] = _dd(set)
+        for c in bom.connections:
+            for ep in c.endpoints:
+                refs_on_net[c.net_name].add(ep.ref)
+        for part in mcus:
+            pins = info.get(part.ref, {})
+            updi = [n for n, p in pins.items() if _UPDI_PIN_RE.search(p["name"])]
+            if not updi:
+                continue  # not a UPDI part (or pinout unresolvable) -- skip
+            wired = nets.get(part.ref, {})
+            reachable = any(
+                wired.get(n) and (refs_on_net.get(wired[n], set()) & access_refs)
+                for n in updi
+            )
+            if not reachable:
+                bad.append(
+                    f"{part.ref} ({part.symbol} {part.value}): UPDI pin "
+                    f"{'/'.join(updi)} does not reach any programming-access "
+                    f"part ({', '.join(sorted(access_refs))}); wire the UPDI "
+                    "net to a header pin or test pad (keeping the existing "
+                    "pullup is fine)"
+                )
+    return CheckResult(
+        name="9.29 MCU programming access",
+        ok=not bad,
+        message=(
+            "every MCU has a physical programming path"
+            if not bad
+            else f"{len(bad)} MCU(s) whose programming pin reaches no access part"
         ),
         offenders=bad,
     )
@@ -1857,6 +1975,7 @@ def collect_validations(
         results.append(check_rf_feed_isolation(bom))
         results.append(check_single_net_per_pin(bom))
         results.append(check_family_wiring_contracts(bom))
+        results.append(check_mcu_programming_access(bom))
         results.append(check_connectivity(project_dir, project_stem))
         results.append(check_erc(project_dir, project_stem))
         results.append(check_netlist_faithfulness(project_dir, project_stem, bom))

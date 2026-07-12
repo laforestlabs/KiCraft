@@ -305,6 +305,7 @@ def _seed_outline_dimensions(
     *,
     area_overhead: float = 2.5,
     aspect_target: float = 1.0,
+    seed_cap: tuple[float, float] | None = None,
 ) -> tuple[float, float]:
     """Estimate (width, height) for the seed board outline the unified
     placer runs in.
@@ -328,6 +329,14 @@ def _seed_outline_dimensions(
     floors below (max widths/heights, sum*0.6, edge spans) still apply,
     so an aggressive aspect cannot collapse the seed below what the
     children actually need.
+
+    ``seed_cap`` (from ``inscribed_rect_bound``) bounds the aspect-driven
+    base to the largest content rect the brief-requested outline shape can
+    contain at its requested ``size_mm`` — the placement-side half of the
+    shape contract, so the solver packs INTO the shape instead of having
+    the shape rejected around a sprawled rectangle at stamp time. Advisory:
+    the solvability floors below still win, and a placement that genuinely
+    cannot fit fails loudly at the stamp-time guard, never silently.
     """
     if not loaded_artifacts:
         return (max(20.0, spacing_mm * 4),) * 2
@@ -347,6 +356,9 @@ def _seed_outline_dimensions(
     aspect = max(0.1, aspect_target)
     base_w = math.sqrt(target_area * aspect) + spacing_mm * 2.0
     base_h = math.sqrt(target_area / aspect) + spacing_mm * 2.0
+    if seed_cap is not None:
+        base_w = min(base_w, seed_cap[0])
+        base_h = min(base_h, seed_cap[1])
     sum_w = sum(widths) + spacing_mm * (n + 1)
     sum_h = sum(heights) + spacing_mm * (n + 1)
     # Floors: max single child + spacing, sum*0.6 fallback, and the
@@ -1356,12 +1368,24 @@ def _compose_artifacts(
     for ref, comp in parent_local.items():
         synthetic_comps[ref] = comp
 
+    # Brief-requested outline shape (autoplacer.json ``board_outline``) with a
+    # size target bounds the seed to its largest inscribable content rect, so
+    # placement happens INSIDE the requested ⌀/size instead of the shape being
+    # circumscribe-rejected around a sprawled rectangle at stamp time.
+    _shape_seed_cap = None
+    if manual_layout is None and _ff_scaffold is None:
+        _board_outline_req = cfg.get("board_outline")
+        if isinstance(_board_outline_req, dict):
+            _shape_seed_cap = inscribed_rect_bound(
+                _board_outline_req, max(0.1, seed_aspect_target)
+            )
     seed_w, seed_h = _seed_outline_dimensions(
         loaded_artifacts,
         derived,
         spacing_mm,
         area_overhead=seed_area_overhead,
         aspect_target=seed_aspect_target,
+        seed_cap=_shape_seed_cap,
     )
     if _ff_scaffold is not None:
         # Place inside the standard frame, not a content-derived one.
@@ -2268,7 +2292,9 @@ def _compact_routed_validation(validation: dict[str, Any]) -> dict[str, Any]:
 from kicraft.cli._compose_validate import (  # noqa: E402
     _render_parent_board_views,
     _repair_parent_outline,
+    _requested_size_pair,
     _validate_parent_geometry,
+    inscribed_rect_bound,
 )
 
 
@@ -2324,6 +2350,9 @@ class CandidateRecord:
     outside_component_count: int = 0
     outside_pad_count: int = 0
     phase_timings: dict[str, float] = field(default_factory=dict)
+    # True when no outline shape was requested OR the requested shape
+    # committed at stamp time for this candidate (see state.shape_fit).
+    shape_fitted: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2344,6 +2373,7 @@ class CandidateRecord:
             "outside_component_count": self.outside_component_count,
             "outside_pad_count": self.outside_pad_count,
             "phase_timings": dict(self.phase_timings),
+            "shape_fitted": self.shape_fitted,
         }
 
 
@@ -2448,6 +2478,22 @@ def _search_best_layout(
     cand_payloads: list[list[dict[str, Any]]] = []
     cand_pcb_paths: list[Path] = []
 
+    # Brief-requested outline shape: center the aspect sweep on the shape's
+    # own aspect (a circle wants square-ish content; a 60x40 rounded_rect
+    # wants ~1.5) instead of burning candidates on elongated packs whose
+    # circumscribed shape can never pass the stamp-time size guard.
+    _shape_target_aspect: float | None = None
+    if manual_layout is None:
+        _bo_req = base_cfg.get("board_outline")
+        if (
+            isinstance(_bo_req, dict)
+            and str(_bo_req.get("shape", "rect")).strip().lower() not in ("", "rect")
+        ):
+            _size_pair = _requested_size_pair(_bo_req.get("size_mm"))
+            _shape_target_aspect = (
+                _size_pair[0] / _size_pair[1] if _size_pair else 1.0
+            )
+
     t_search_start = time.perf_counter()
     for i in range(k):
         elapsed_ms = (time.perf_counter() - t_search_start) * 1000.0
@@ -2469,7 +2515,13 @@ def _search_best_layout(
         # area_overhead stays fixed -- it is config-tunable per round
         # via parent_seed_area_overhead so users can dial overall seed
         # tightness without forking the per-candidate aspect sweep.
-        if k > 1:
+        if _shape_target_aspect is not None:
+            # Shaped board: sweep +/-25% around the shape's target aspect.
+            if k > 1:
+                seed_aspect_i = _shape_target_aspect * (0.75 + (i / (k - 1)) * 0.5)
+            else:
+                seed_aspect_i = _shape_target_aspect
+        elif k > 1:
             seed_aspect_i = 0.6 + (i / (k - 1)) * 1.1
         else:
             seed_aspect_i = 1.0
@@ -2594,6 +2646,22 @@ def _search_best_layout(
                     f"{outline_w_mm:.1f}x{outline_h_mm:.1f}mm is {sprawl:.1f}x "
                     f"its summed courtyard area; score -{sprawl_penalty:.1f}"
                 )
+        # Requested-shape fit for THIS candidate (set by _fit_requested_shape
+        # inside _stamp_parent_board). A candidate whose placement the shape
+        # could not wrap at the requested size loses to any that fit: the
+        # penalty separates ties, and winner selection below hard-prefers
+        # fitted candidates. No shape requested (or no stamping) => True.
+        if state.requested_shape is None or pcb_path is None:
+            shape_fitted = True
+        else:
+            shape_fitted = bool((state.shape_fit or {}).get("fitted"))
+        if not shape_fitted:
+            composite -= 30.0
+            print(
+                f"[candidate-search] cand={i} requested shape "
+                f"{str(state.requested_shape.get('shape'))!r} did not fit: "
+                f"{(state.shape_fit or {}).get('reason')}; score -30.0"
+            )
         # state.geometry_validation is populated inside _stamp_parent_board
         # via _validate_parent_geometry. When pcb_path is None the stamp
         # path is skipped, leaving geometry_validation = {} -- treat that
@@ -2649,6 +2717,7 @@ def _search_best_layout(
             outside_component_count=outside_component_count,
             outside_pad_count=outside_pad_count,
             phase_timings=dict(state.phase_timings),
+            shape_fitted=shape_fitted,
         )
         candidates.append(rec)
         cand_states.append(state)
@@ -2722,7 +2791,11 @@ def _search_best_layout(
             f"Per-candidate phase timings written to "
             f"{search_dir / '_rejected_candidates.json'}."
         )
-    winner_rec = max(accepted_recs, key=lambda c: c.score)
+    # Lexicographic winner: a candidate whose requested outline shape actually
+    # committed beats any that fell back to rect, regardless of score — a
+    # slightly worse-packed circle IS the deliverable; a well-packed rectangle
+    # on a "round 60 mm" brief is not.
+    winner_rec = max(accepted_recs, key=lambda c: (c.shape_fitted, c.score))
 
     winner_idx = candidates.index(winner_rec)
     winner_state = cand_states[winner_idx]
@@ -2734,6 +2807,7 @@ def _search_best_layout(
         "tried": len(candidates),
         "accepted": len(accepted_recs),
         "rejected_drc": len(candidates) - len(accepted_recs),
+        "shape_fitted": sum(1 for c in candidates if c.shape_fitted),
         "best_index": winner_idx,
         "best_seed": winner_rec.seed,
         "total_search_ms": total_search_ms,

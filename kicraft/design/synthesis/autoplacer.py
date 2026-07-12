@@ -176,16 +176,23 @@ def write_autoplacer_json(
     # programmatically (serpentine) instead of running force/SA over them.
     # autoplacer.json is the project config, so this key merges straight into
     # the solver cfg (see autoplacer/config.discover_project_config).
-    arrays = [
-        {
+    arrays = []
+    for spec in bom.arrays:
+        entry: dict[str, Any] = {
             "refs": list(spec.refs),
-            "rows": spec.rows,
-            "cols": spec.cols,
+            "pattern": spec.pattern,
             "pitch_mm": spec.pitch_mm,
             "serpentine": spec.serpentine,
         }
-        for spec in bom.arrays
-    ]
+        if spec.pattern == "ring":
+            # rows/cols intentionally absent: consumers key ring handling off
+            # "pattern" and int(spec.get("rows", 0)) must not see None.
+            entry["radius_mm"] = spec.radius_mm
+            entry["start_angle_deg"] = spec.start_angle_deg
+        else:
+            entry["rows"] = spec.rows
+            entry["cols"] = spec.cols
+        arrays.append(entry)
     if arrays:
         body["arrays"] = arrays
 

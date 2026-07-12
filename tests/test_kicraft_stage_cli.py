@@ -119,6 +119,15 @@ def _valid_bom() -> dict:
                 "footprint": "Capacitor_SMD:C_0402_1005Metric",
                 "sheet": "LDO",
             },
+            {
+                # §9.29 programming access: an MCU BOM must carry a programming
+                # path part (this ESP32 flashes over USB) or BOM commit rejects.
+                "ref": "J3",
+                "value": "USB-C receptacle",
+                "symbol": "Device:R",  # cheap stand-in, same as U1 above
+                "footprint": "Resistor_SMD:R_0402_1005Metric",
+                "sheet": "MCU",
+            },
         ],
         "ic_groups": {},
         "group_labels": {},
@@ -388,7 +397,12 @@ def test_stage_commit_wiring_preserves_bom_other_fields(tmp_path, capsys):
                     "sheet": "LDO",
                 },
             ],
-            "no_connect_pins": [],
+            # J3 (the §9.29 USB programming-access part) is a 2-pin stand-in;
+            # net coverage (§9.11) requires every pin accounted for.
+            "no_connect_pins": [
+                {"ref": "J3", "pin": "1"},
+                {"ref": "J3", "pin": "2"},
+            ],
         },
     )
     rc, payload = _run(
@@ -406,8 +420,8 @@ def test_stage_commit_wiring_preserves_bom_other_fields(tmp_path, capsys):
     # Wiring fields populated...
     assert len(written["bom"]["connections"]) == 4
     # ...and the rest of the BOM is intact
-    assert len(written["bom"]["parts"]) == 2
-    assert {p["ref"] for p in written["bom"]["parts"]} == {"U1", "C1"}
+    assert len(written["bom"]["parts"]) == 3
+    assert {p["ref"] for p in written["bom"]["parts"]} == {"U1", "C1", "J3"}
 
 
 def test_stage_commit_wiring_without_bom_errors(tmp_path, capsys):

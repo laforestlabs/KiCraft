@@ -465,41 +465,87 @@ class NetConnection(BaseModel):
 
 
 class ArraySpec(BaseModel):
-    """A regular matrix/array of repeated components (e.g. an LED matrix).
+    """A regular repeated-component pattern (LED matrix, LED ring, ...).
 
-    Carries the grid shape from design intent through synthesis into the
-    autoplacer, which lays the members out programmatically as a serpentine
-    grid instead of running the force/simulated-annealing solver over them
-    (which does not converge at array scale).
+    Carries the pattern from design intent through synthesis into the
+    autoplacer, which lays the members out programmatically instead of running
+    the force/simulated-annealing solver over them (which does not converge at
+    array scale).
 
     ``refs`` are listed in data-chain / logical order; the placer fills the
-    grid in that order (serpentine when set), so consecutive members are
-    physical neighbours and the daisy-chain routes stay short.
+    pattern in that order, so consecutive members are physical neighbours and
+    the daisy-chain routes stay short.
+
+    Two patterns:
+
+    - ``grid`` (default): ``rows`` x ``cols`` serpentine matrix. ``rows`` and
+      ``cols`` are REQUIRED and ``rows*cols`` must equal ``len(refs)``.
+    - ``ring``: members evenly spaced on a circle ("12 LEDs in a ring").
+      ``rows``/``cols`` must be omitted. ``radius_mm`` sets the placement
+      circle's radius; leave null to derive the tightest legal radius from the
+      member size. ``start_angle_deg`` rotates where the chain starts
+      (0 = +x axis, clockwise-positive like KiCad).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     refs: list[str]
-    rows: int = Field(gt=0)
-    cols: int = Field(gt=0)
+    pattern: Literal["grid", "ring"] = "grid"
+    rows: int | None = Field(default=None, gt=0)
+    cols: int | None = Field(default=None, gt=0)
     pitch_mm: float | None = Field(
         default=None,
         description=(
-            "Centre-to-centre grid spacing in millimetres. SET THIS whenever the "
-            "design specifies an array pitch (e.g. a brief asking for 'LEDs at 3mm "
-            "pitch' -> 3.0). Leave null ONLY when no pitch is given, to derive one "
-            "from the footprint courtyard plus a default gap."
+            "Centre-to-centre member spacing in millimetres (grid pitch, or the "
+            "chord between ring neighbours). SET THIS whenever the design "
+            "specifies a pitch (e.g. a brief asking for 'LEDs at 3mm pitch' -> "
+            "3.0). Leave null ONLY when no pitch is given, to derive one from "
+            "the footprint courtyard plus a default gap."
         ),
     )
     serpentine: bool = True
+    radius_mm: float | None = Field(
+        default=None,
+        description=(
+            "ring only: radius of the placement circle in millimetres. SET THIS "
+            "when the brief fixes the ring/board size (a '60 mm ring board' "
+            "wants the LEDs near the edge -> radius ~24). Leave null to derive "
+            "the tightest legal radius from member size."
+        ),
+    )
+    start_angle_deg: float = Field(
+        default=0.0,
+        description="ring only: angle of the first chain member (deg, 0 = +x).",
+    )
 
     @model_validator(mode="after")
     def _shape_matches(self):
-        if self.rows * self.cols != len(self.refs):
-            raise ValueError(
-                f"ArraySpec rows*cols ({self.rows}x{self.cols}="
-                f"{self.rows * self.cols}) != len(refs) ({len(self.refs)})"
-            )
+        if self.pattern == "ring":
+            if self.rows is not None or self.cols is not None:
+                raise ValueError(
+                    "ArraySpec pattern='ring' takes no rows/cols (members are "
+                    "evenly spaced on a circle); remove them"
+                )
+            if len(self.refs) < 3:
+                raise ValueError(
+                    f"ArraySpec pattern='ring' needs >= 3 refs, got {len(self.refs)}"
+                )
+            if self.radius_mm is not None and self.radius_mm <= 0:
+                raise ValueError(
+                    f"ArraySpec radius_mm must be > 0, got {self.radius_mm}"
+                )
+        else:
+            if self.rows is None or self.cols is None:
+                raise ValueError("ArraySpec pattern='grid' requires rows and cols")
+            if self.rows * self.cols != len(self.refs):
+                raise ValueError(
+                    f"ArraySpec rows*cols ({self.rows}x{self.cols}="
+                    f"{self.rows * self.cols}) != len(refs) ({len(self.refs)})"
+                )
+            if self.radius_mm is not None:
+                raise ValueError(
+                    "ArraySpec radius_mm applies only to pattern='ring'"
+                )
         if len(self.refs) != len(set(self.refs)):
             dupes = sorted({r for r in self.refs if self.refs.count(r) > 1})
             raise ValueError(f"ArraySpec has duplicate refs: {dupes}")

@@ -87,14 +87,20 @@ def _scrub_refs(bom: BOM, dropped: set[str]) -> None:
     bom.group_labels = {k: v for k, v in bom.group_labels.items() if k not in dropped}
 
 
-def _decap_membership(bom: BOM) -> dict[str, bool]:
-    """ref -> True when it is a decoupling cap (2-pin, every net power/ground)."""
+def _nets_pins_by_ref(bom: BOM) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """(ref -> net names, ref -> pins) over every connection endpoint."""
     nets_by_ref: dict[str, set[str]] = {}
     pins_by_ref: dict[str, set[str]] = {}
     for c in bom.connections:
         for ep in c.endpoints:
             nets_by_ref.setdefault(ep.ref, set()).add(c.net_name)
             pins_by_ref.setdefault(ep.ref, set()).add(ep.pin)
+    return nets_by_ref, pins_by_ref
+
+
+def _decap_membership(bom: BOM) -> dict[str, bool]:
+    """ref -> True when it is a decoupling cap (2-pin, every net power/ground)."""
+    nets_by_ref, pins_by_ref = _nets_pins_by_ref(bom)
     out: dict[str, bool] = {}
     for p in bom.parts:
         nets = nets_by_ref.get(p.ref, set())
@@ -174,12 +180,7 @@ def normalize_array_decaps(
         return []
 
     sheet_by_ref = {p.ref: p.sheet for p in bom.parts}
-    nets_by_ref: dict[str, set[str]] = {}
-    pins_by_ref: dict[str, set[str]] = {}
-    for c in bom.connections:
-        for ep in c.endpoints:
-            nets_by_ref.setdefault(ep.ref, set()).add(c.net_name)
-            pins_by_ref.setdefault(ep.ref, set()).add(ep.pin)
+    nets_by_ref, pins_by_ref = _nets_pins_by_ref(bom)
 
     def _is_decap(ref: str) -> bool:
         # A 2-pin part whose every net is power/ground -- a bypass cap, not a
@@ -281,16 +282,55 @@ def _declare_cross_sheet_signal_nets(bom: BOM, architecture: Architecture) -> No
 
     Power/ground nets join across sheets via global power symbols (the emitter
     skips them for sheet pins -- see ``emitter._emit_sheet_block``), so they are
-    exempt, matching §9.14/§9.15 and the wiring stage's own output. Existing
-    declarations are left untouched. Every declared endpoint sheet has a
-    same-named connection (re-split above), so §9.14 coverage holds.
+    exempt, matching §9.14/§9.15 and the wiring stage's own output. Every
+    declared endpoint sheet has a same-named connection (re-split above), so
+    §9.14 coverage holds.
+
+    A PRE-EXISTING declaration (from the wiring stage) is reconciled first:
+    moving a part re-homed some of its net's endpoints, so the declaration may
+    now name a sheet with no connection (sheet pin with nothing inside it ->
+    KiCad ERC hier_label_mismatch) while the part's new sheet carries the
+    connection but no declaration (label_dangling) -- the star-ornament 30-ERC
+    failure. Each stale declaration is rewritten to the net's ACTUAL sheets: a
+    kept sheet keeps its direction, a 1-for-1 sheet swap (the moved part)
+    inherits the removed sheet's direction, any other new sheet joins
+    bidirectional. A net left spanning <2 sheets is no longer inter-sheet and
+    its declaration is dropped.
     """
     valid = {s.name for s in architecture.sheets}
-    declared = {n.name for n in architecture.inter_sheet_nets}
     sheets_by_net: dict[str, set[str]] = {}
     for c in bom.connections:
         if c.sheet in valid:
             sheets_by_net.setdefault(c.net_name, set()).add(c.sheet)
+
+    kept: list[InterSheetNet] = []
+    for net in architecture.inter_sheet_nets:
+        actual = sheets_by_net.get(net.name, set())
+        declared_sheets = {e.sheet for e in net.endpoints}
+        if (
+            is_power_or_ground_name(net.name)  # joins via power symbols, no pins
+            or not actual  # no connections at all -- not ours to judge (§9.14's)
+            or declared_sheets == actual
+        ):
+            kept.append(net)
+            continue
+        if len(actual) < 2:
+            continue  # net collapsed onto one sheet; a declaration would dangle
+        dir_by_sheet = {e.sheet: e.direction for e in net.endpoints}
+        removed, added = declared_sheets - actual, actual - declared_sheets
+        inherit = (
+            dir_by_sheet[next(iter(removed))]
+            if len(removed) == 1 and len(added) == 1
+            else "bidirectional"
+        )
+        net.endpoints = [
+            SheetPin(sheet=s, direction=dir_by_sheet.get(s, inherit))
+            for s in sorted(actual)
+        ]
+        kept.append(net)
+    architecture.inter_sheet_nets = kept
+
+    declared = {n.name for n in architecture.inter_sheet_nets}
     for net_name in sorted(sheets_by_net):
         sheets = sheets_by_net[net_name]
         if net_name in declared or is_power_or_ground_name(net_name) or len(sheets) < 2:
@@ -323,13 +363,23 @@ def isolate_array_sheets(bom: BOM, architecture: Architecture) -> list[str]:
     are declared inter-sheet so the schematic still wires them. LOUD + recorded in
     ``bom.assumptions``. Mutates ``bom`` and ``architecture`` in place; returns the
     moved refs (``[]`` when no array sheet carried a stray part).
+
+    A companion is a decap (2-pin, every net power/ground) OR a member's
+    series/parallel 2-pin part -- one sharing a SIGNAL net with a member on the
+    same sheet (a per-LED current-limit resistor). Relocating the latter strands
+    it a leaf away from the very member it is in series with (star-ornament:
+    R1..R5 each moved to a SUPPORT sheet, splitting five LED nets across sheets
+    for nothing). The leaf placer handles kept 2-pin passives fine: they either
+    ride the array's companion/strip path or the leaf falls to the normal solver.
     """
     if not bom.arrays:
         return []
     is_decap = _decap_membership(bom)
     parts_by_ref = {p.ref: p for p in bom.parts}
+    nets_by_ref, pins_by_ref = _nets_pins_by_ref(bom)
 
-    # Per array sheet, the refs allowed to stay: array members + companion decaps.
+    # Per array sheet, the refs allowed to stay: array members, companion decaps,
+    # and each member's series/parallel 2-pin companions.
     allowed_by_sheet: dict[str, set[str]] = {}
     for spec in bom.arrays:
         for r in spec.refs:
@@ -337,8 +387,23 @@ def isolate_array_sheets(bom: BOM, architecture: Architecture) -> list[str]:
             if p is not None:
                 allowed_by_sheet.setdefault(p.sheet, set()).add(r)
     for sh in list(allowed_by_sheet):
+        member_signal_nets = {
+            n
+            for r in allowed_by_sheet[sh]
+            for n in nets_by_ref.get(r, set())
+            if not is_power_or_ground_name(n)
+        }
         allowed_by_sheet[sh].update(
-            p.ref for p in bom.parts if p.sheet == sh and is_decap.get(p.ref, False)
+            p.ref
+            for p in bom.parts
+            if p.sheet == sh
+            and (
+                is_decap.get(p.ref, False)
+                or (
+                    len(pins_by_ref.get(p.ref, set())) == 2
+                    and bool(nets_by_ref.get(p.ref, set()) & member_signal_nets)
+                )
+            )
         )
 
     taken_names = {s.name for s in architecture.sheets}

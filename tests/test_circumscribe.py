@@ -161,3 +161,82 @@ def test_fit_skips_unsupported_named_shape():
     assert "not supported" in res["reason"]
     assert st.manual_outline is None
     assert st.fitted_polygon is None
+
+
+# --------------------------------------------------------------------------- #
+# Shape-aware placement (GAP 1a): inscribed_rect_bound + size_mm-as-target
+# --------------------------------------------------------------------------- #
+
+from kicraft.cli._compose_validate import (  # noqa: E402
+    _SHAPE_SIZE_TOL,
+    inscribed_rect_bound,
+)
+
+
+def test_inscribed_rect_bound_circle_matches_analytic():
+    # Largest w x h rect (aspect a) whose circumscribed circle lands AT the
+    # ⌀60 target: hypot(w, h) == 60 (up to the circumscribe margin). The
+    # guard's 5% slack is deliberately NOT consumed by the aim — it stays
+    # available to absorb packing overshoot past the seed.
+    for aspect in (1.0, 1.39, 0.7):
+        w, h = inscribed_rect_bound({"shape": "circle", "size_mm": 60.0}, aspect)
+        assert w / h == pytest.approx(aspect, rel=1e-3)
+        diag = (w**2 + h**2) ** 0.5
+        assert diag == pytest.approx(60.0, abs=1.5)
+        assert diag < 60.0 * (1.0 + _SHAPE_SIZE_TOL) - 1.0  # slack left over
+
+
+def test_inscribed_rect_bound_none_without_shape_or_size():
+    assert inscribed_rect_bound(None, 1.0) is None
+    assert inscribed_rect_bound({"shape": "rect", "size_mm": 60.0}, 1.0) is None
+    assert inscribed_rect_bound({"shape": "circle"}, 1.0) is None
+    assert inscribed_rect_bound({"shape": "gear", "size_mm": 60.0}, 1.0) is None
+
+
+def test_inscribed_rect_bound_roundtrips_through_fit():
+    # The bound is DEFINED by the stamp-time guard: content at the bound must
+    # circumscribe-fit; content 15% past it must be rejected. This is the
+    # placement<->stamp contract that makes GAP 1a coherent end-to-end.
+    req = {"shape": "circle", "size_mm": 60.0}
+    w, h = inscribed_rect_bound(req, 1.0)
+    st = _state(req, outline=(Point(0.0, 0.0), Point(w - 0.1, h - 0.1)))
+    assert _fit_requested_shape(st)["fitted"] is True
+    st = _state(req, outline=(Point(0.0, 0.0), Point(w * 1.15, h * 1.15)))
+    res = _fit_requested_shape(st)
+    assert res["fitted"] is False
+    assert "exceeds requested size_mm" in res["reason"]
+
+
+def test_fit_grows_parametric_shape_to_requested_size():
+    # "round 60 mm" with small content must deliver ⌀60, not the minimal
+    # circumscribed ⌀~23 — size_mm is a target, not only a cap.
+    st = _state({"shape": "circle", "size_mm": 60.0}, outline=(Point(0.0, 0.0), Point(20.0, 10.0)))
+    res = _fit_requested_shape(st)
+    assert res["fitted"] is True
+    spec = OutlineSpec.from_dict(st.manual_outline)
+    assert spec.width_mm == pytest.approx(60.0)
+    assert spec.height_mm == pytest.approx(60.0)
+    # Content still inside, and centered on it.
+    assert spec.contains_rect(0.0, 0.0, 20.0, 10.0, tol=0.0)
+
+
+def test_fit_does_not_shrink_below_content_within_tolerance():
+    # Content whose circumscribed circle lands in the (target, target*1.05]
+    # slack band keeps its (larger) fitted size — grow-only, never shrink.
+    st = _state({"shape": "circle", "size_mm": 44.0}, outline=(Point(0.0, 0.0), Point(40.0, 20.0)))
+    res = _fit_requested_shape(st)
+    assert res["fitted"] is True
+    spec = OutlineSpec.from_dict(st.manual_outline)
+    assert spec.width_mm >= (40.0**2 + 20.0**2) ** 0.5  # >= content diagonal
+    assert spec.contains_rect(0.0, 0.0, 40.0, 20.0, tol=0.0)
+
+
+def test_fit_grows_named_polygon_to_requested_size():
+    st = _state({"shape": "hexagon", "size_mm": 60.0}, outline=(Point(0.0, 0.0), Point(15.0, 12.0)))
+    st.fitted_polygon = None
+    res = _fit_requested_shape(st)
+    assert res["fitted"] is True, res
+    w, h = res["size_mm"]
+    # Uniform scale: the limiting axis reaches the target, neither exceeds it.
+    assert max(w, h) == pytest.approx(60.0, abs=0.1)
+    assert w <= 60.0 + 0.1 and h <= 60.0 + 0.1

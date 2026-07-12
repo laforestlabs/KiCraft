@@ -1037,3 +1037,115 @@ def test_cap_polarity_skips_unrecognized_names() -> None:
     # not guessed (no false positive).
     bom = BOM(parts=[_cap("C6", "vendored:FilmBox", "vendored:film_5mm")])
     assert check_capacitor_polarity_consistency(bom).ok
+
+
+# --------------------------------------------------------------------------- #
+# §9.29 MCU programming access (hard gate): part presence + UPDI reachability
+# --------------------------------------------------------------------------- #
+# KC-HN59RJ shipped an ATtiny412 whose UPDI net had a pullup but no header or
+# test pad -- electrically clean, physically unprogrammable. pid 592 shipped an
+# STM32 with no programming part at all. The §9.21 advisory covers neither
+# (UPDI-blind, and non-blocking); §9.29 makes both deterministic and hard.
+
+from kicraft.design.synthesis.validation import check_mcu_programming_access
+
+
+def _jpart(ref, value, symbol="Connector:Conn_01x03", sheet="MCU"):
+    return BomPart(ref=ref, value=value, symbol=symbol,
+                   footprint="Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
+                   sheet=sheet)
+
+
+ATTINY = "attiny412:ATTINY412-SSNR"
+ATTINY_PINS = {ATTINY: [
+    ("1", "VDD", "power_in"), ("8", "GND", "power_in"),
+    ("6", "UPDI/PA0", "bidirectional"), ("4", "PA6", "bidirectional"),
+]}
+
+
+def test_prog_access_ok_without_mcu() -> None:
+    bom = BOM(parts=[_bpart("J1", "jst:JST"), ], connections=[])
+    assert check_mcu_programming_access(bom).ok
+
+
+def test_prog_access_fails_mcu_with_no_access_part() -> None:
+    # The KC-HN59RJ BOM shape: MCU + power JST only. Must fail at BOM commit
+    # (no connections yet) with the MCU as offender and actionable text.
+    bom = BOM(parts=[
+        _bpart("U1", ATTINY),
+        _jpart("J1", "JST-PH 2-pin SMD", symbol="jst-ph-2p:S2B-PH-SM4-TB"),
+    ], connections=[])
+    res = check_mcu_programming_access(bom)
+    assert not res.ok
+    assert res.offenders and "U1" in res.offenders[0]
+    assert "UPDI" in res.message and "test" in res.message.lower()
+
+
+def test_prog_access_part_presence_satisfied_by_updi_header() -> None:
+    bom = BOM(parts=[_bpart("U1", ATTINY), _jpart("J2", "UPDI header 1x03")],
+              connections=[])
+    assert check_mcu_programming_access(bom).ok
+
+
+def test_prog_access_part_presence_satisfied_by_test_pads() -> None:
+    tp = BomPart(ref="TP1", value="UPDI pad", symbol="Connector:TestPoint",
+                 footprint="TestPoint:TestPoint_Pad_D1.5mm", sheet="MCU")
+    bom = BOM(parts=[_bpart("U1", ATTINY), tp], connections=[])
+    assert check_mcu_programming_access(bom).ok
+
+
+def test_prog_access_part_presence_satisfied_by_usb_connector() -> None:
+    usb = BomPart(ref="J1", value="USB-C receptacle", symbol="usbc:TYPE-C-16P",
+                  footprint="usbc:HRO-TYPE-C-16P", sheet="POWER")
+    bom = BOM(parts=[_bpart("U1", "esp32-s3-mini-1:ESP32-S3-MINI-1"), usb],
+              connections=[])
+    assert check_mcu_programming_access(bom).ok
+
+
+def test_prog_access_updi_wired_to_pullup_only_fails(monkeypatch) -> None:
+    # The exact observed failure: UPDI net exists (pullup R1) but never reaches
+    # the header -- wiring commit must reject with a wire-it instruction.
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(ATTINY_PINS))
+    bom = BOM(parts=[
+        _bpart("U1", ATTINY),
+        _bpart("R1", "Device:R"),
+        _jpart("J2", "UPDI header 1x03"),
+    ], connections=[
+        NetConnection(net_name="UPDI_PULLUP", sheet="MCU", endpoints=[
+            PinEndpoint(ref="U1", pin="6"), PinEndpoint(ref="R1", pin="2")]),
+        NetConnection(net_name="+5V", sheet="MCU", endpoints=[
+            PinEndpoint(ref="U1", pin="1"), PinEndpoint(ref="R1", pin="1")]),
+    ])
+    res = check_mcu_programming_access(bom)
+    assert not res.ok
+    assert "UPDI" in res.offenders[0] and "J2" in res.offenders[0]
+
+
+def test_prog_access_updi_reaching_header_passes(monkeypatch) -> None:
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(ATTINY_PINS))
+    bom = BOM(parts=[
+        _bpart("U1", ATTINY),
+        _bpart("R1", "Device:R"),
+        _jpart("J2", "UPDI header 1x03"),
+    ], connections=[
+        NetConnection(net_name="UPDI", sheet="MCU", endpoints=[
+            PinEndpoint(ref="U1", pin="6"), PinEndpoint(ref="R1", pin="2"),
+            PinEndpoint(ref="J2", pin="1")]),
+    ])
+    assert check_mcu_programming_access(bom).ok
+
+
+def test_prog_access_non_updi_mcu_not_judged_at_wiring(monkeypatch) -> None:
+    # A part whose pinout exposes no UPDI pin (or is unresolvable) is skipped
+    # by the reachability half -- SWD-family judgment stays with §9.21.
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(
+        {"Fake:STM32F103": [("1", "PA13", "bidirectional")]}))
+    bom = BOM(parts=[
+        _bpart("U1", "Fake:STM32F103"),
+        _jpart("J2", "SWD debug header"),
+    ], connections=[
+        NetConnection(net_name="X", sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U1", pin="1"),
+                                 PinEndpoint(ref="J2", pin="2")]),
+    ])
+    assert check_mcu_programming_access(bom).ok

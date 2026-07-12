@@ -1,17 +1,20 @@
-"""Programmatic grid placement for matrix/array leaves.
+"""Programmatic pattern placement for matrix/array leaves.
 
 Some leaves are regular arrays of identical components — e.g. a 10x20
-addressable-LED matrix. Throwing 200 identical, daisy-chained parts at the
-force-directed + simulated-annealing solver in :mod:`placement_solver` does not
-converge: the sibling-grouping pass and the power-net cliques explode into a
-near-complete graph, and the per-iteration crossover scorer becomes the
-bottleneck. Such leaves carry an explicit array hint from synthesis
-(``autoplacer.json`` -> solver ``cfg["arrays"]``, a list of
-``{refs, rows, cols, pitch_mm, serpentine}`` dicts). We lay their members out
-deterministically as a serpentine grid and skip the optimizer entirely.
+addressable-LED matrix or a 12-LED ring. Throwing 200 identical, daisy-chained
+parts at the force-directed + simulated-annealing solver in
+:mod:`placement_solver` does not converge: the sibling-grouping pass and the
+power-net cliques explode into a near-complete graph, and the per-iteration
+crossover scorer becomes the bottleneck. Such leaves carry an explicit array
+hint from synthesis (``autoplacer.json`` -> solver ``cfg["arrays"]``, a list of
+``{refs, pattern, rows, cols, pitch_mm, serpentine, radius_mm,
+start_angle_deg}`` dicts). We lay their members out deterministically — a
+serpentine grid (``pattern: "grid"``, the default) or an evenly-spaced circle
+(``pattern: "ring"``) — and skip the optimizer entirely.
 
-Members are listed in data-chain order, so a serpentine (boustrophedon) fill
-keeps consecutive members physically adjacent — the DOUT->DIN routes stay short.
+Members are listed in data-chain order, so the fill order (boustrophedon for
+grids, circular for rings) keeps consecutive members physically adjacent — the
+DOUT->DIN routes stay short.
 """
 from __future__ import annotations
 
@@ -103,6 +106,61 @@ def _orient_array_grid(
             rotate_component_in_place(comp, delta)
 
 
+def _orient_ring(
+    comps: dict[str, Component], refs: list[str], cfg: dict
+) -> None:
+    """Rotate every ring member so its DOUT points along the chain direction
+    (the chord toward the next member).
+
+    Unlike the grid's deliberate ≤2-rotation uniformity, a ring's canonical
+    construction IS one rotation per member — every real LED-ring board turns
+    each LED with the circle, which keeps every DOUT->DIN hop an identical
+    short chord and the assembly pattern rotationally repeating. Uses the same
+    intrinsic-DOUT recovery as :func:`_orient_array_grid`; off via the same
+    ``array_orient_chain=False``.
+    """
+    if not cfg.get("array_orient_chain", True):
+        return
+    from kicraft.design.models import is_power_or_ground_name
+
+    def _shared_data_pad(a: Component, b: Component):
+        b_nets = {p.net for p in b.pads if p.net and not is_power_or_ground_name(p.net)}
+        for p in a.pads:
+            if p.net and p.net in b_nets:
+                return p
+        return None
+
+    n = len(refs)
+    rep = rep_pad = None
+    for i in range(n - 1):
+        p = _shared_data_pad(comps[refs[i]], comps[refs[i + 1]])
+        if p is not None:
+            rep, rep_pad = comps[refs[i]], p
+            break
+    if rep_pad is None:
+        return
+    cur = Point(rep_pad.pos.x - rep.pos.x, rep_pad.pos.y - rep.pos.y)
+    intrinsic = rotate_vector(cur, -rep.rotation)  # DOUT offset at abs rotation 0
+    phi_intrinsic = math.degrees(math.atan2(intrinsic.y, intrinsic.x))
+
+    for i, ref in enumerate(refs):
+        comp = comps[ref]
+        nxt = comps[refs[(i + 1) % n]] if i < n - 1 else comps[refs[i - 1]]
+        if i < n - 1:
+            d = Point(nxt.pos.x - comp.pos.x, nxt.pos.y - comp.pos.y)
+        else:
+            # Last member: keep the rotational pattern going (direction FROM
+            # the previous member), since its DOUT leaves the chain.
+            d = Point(comp.pos.x - nxt.pos.x, comp.pos.y - nxt.pos.y)
+        phi_d = math.degrees(math.atan2(d.y, d.x))
+        # rotate_vector is KiCad-CW: rotating by R moves a vector's math-angle
+        # by -R, so the R that points DOUT (at phi_intrinsic) along phi_d is:
+        target = (phi_intrinsic - phi_d) % 360.0
+        delta = (target - comp.rotation) % 360.0
+        if delta > 1e-6:
+            rotate_component_in_place(comp, delta)
+
+
 def _move(comp: Component, x: float, y: float) -> None:
     """Move a component's body center to (x, y), carrying its pads along.
 
@@ -124,6 +182,28 @@ def _pitch(members: list[Component], spec: dict, gap: float) -> tuple[float, flo
     return px, py
 
 
+def _present_member_refs(
+    spec: dict, comps: dict[str, Component]
+) -> list[str] | None:
+    """Validated member refs of a FULLY-present array spec, else None.
+
+    The single spec-shape predicate shared by placement, companion detection
+    and the fully-array test, mirroring the ArraySpec model validator:
+    ``grid`` needs ``rows*cols == len(refs)``; ``ring`` needs >= 3 refs.
+    A spec whose members live on a different leaf returns None (partial
+    arrays are never placed here).
+    """
+    refs = list(spec.get("refs", []))
+    if not refs or not all(r in comps for r in refs):
+        return None
+    pattern = str(spec.get("pattern", "grid") or "grid").lower()
+    if pattern == "ring":
+        return refs if len(refs) >= 3 else None
+    rows = int(spec.get("rows", 0) or 0)
+    cols = int(spec.get("cols", 0) or 0)
+    return refs if rows > 0 and cols > 0 and rows * cols == len(refs) else None
+
+
 def array_companion_refs(
     comps: dict[str, Component], arrays: list[dict]
 ) -> list[str]:
@@ -142,11 +222,8 @@ def array_companion_refs(
     """
     present_array_refs: set[str] = set()
     for spec in arrays or []:
-        refs = list(spec.get("refs", []))
-        rows = int(spec.get("rows", 0))
-        cols = int(spec.get("cols", 0))
-        if (refs and rows > 0 and cols > 0 and rows * cols == len(refs)
-                and all(r in comps for r in refs)):
+        refs = _present_member_refs(spec, comps)
+        if refs:
             present_array_refs.update(refs)
     if not present_array_refs:
         return []
@@ -173,11 +250,8 @@ def leaf_is_fully_array(comps: dict[str, Component], arrays: list[dict]) -> bool
     """
     covered: set[str] = set()
     for spec in arrays or []:
-        refs = list(spec.get("refs", []))
-        rows = int(spec.get("rows", 0))
-        cols = int(spec.get("cols", 0))
-        if (refs and rows > 0 and cols > 0 and rows * cols == len(refs)
-                and all(r in comps for r in refs)):
+        refs = _present_member_refs(spec, comps)
+        if refs:
             covered.update(refs)
     if not covered:
         return False
@@ -256,14 +330,58 @@ def place_array_leaves(
     grids: list[dict] = []  # per-array geometry for adaptive decap colocation
 
     for spec in arrays or []:
-        refs = list(spec.get("refs", []))
-        rows = int(spec.get("rows", 0))
-        cols = int(spec.get("cols", 0))
-        if not refs or rows <= 0 or cols <= 0 or rows * cols != len(refs):
-            continue
-        if not all(r in comps for r in refs):
-            continue  # array belongs to a different leaf
+        refs = _present_member_refs(spec, comps)
+        if refs is None:
+            continue  # malformed spec, or array belongs to a different leaf
         members = [comps[r] for r in refs]
+        pattern = str(spec.get("pattern", "grid") or "grid").lower()
+
+        if pattern == "ring":
+            # Evenly-spaced circle in chain order. The chord between
+            # neighbours must clear the member DIAGONAL (members get a
+            # per-member tangent rotation, so their worst-case extent along
+            # the ring is the diagonal, not one axis).
+            n = len(refs)
+            diag = max(math.hypot(c.width_mm, c.height_mm) for c in members)
+            chord = float(spec.get("pitch_mm") or 0.0) or (diag + gap)
+            min_r = chord / (2.0 * math.sin(math.pi / n))
+            r_ring = max(float(spec.get("radius_mm") or 0.0), min_r)
+            start = float(spec.get("start_angle_deg") or 0.0)
+            half = diag / 2.0
+            cx = cy = r_ring + half + gap  # positive quadrant, like the grid
+            angles = [math.radians(start + 360.0 * i / n) for i in range(n)]
+            for idx, ref in enumerate(refs):
+                comp = comps[ref]
+                _move(
+                    comp,
+                    cx + r_ring * math.cos(angles[idx]),
+                    cy + r_ring * math.sin(angles[idx]),
+                )
+                comp.locked = True
+                comp.array_member = True
+                placed.add(ref)
+            _orient_ring(comps, refs, cfg)
+            b = (cx - r_ring - half, cy - r_ring - half,
+                 cx + r_ring + half, cy + r_ring + half)
+            grid_bbox = b if grid_bbox is None else (
+                min(grid_bbox[0], b[0]),
+                min(grid_bbox[1], b[1]),
+                max(grid_bbox[2], b[2]),
+                max(grid_bbox[3], b[3]),
+            )
+            grids.append({
+                "refs": refs, "pattern": "ring",
+                "px": chord, "py": chord, "rows": 1, "cols": 0,
+                "led_w": max(c.width_mm for c in members),
+                "led_h": max(c.height_mm for c in members),
+                "led_diag": diag,
+                "center": Point(cx, cy), "radius": r_ring, "angles": angles,
+                "centers": [Point(comps[r].pos.x, comps[r].pos.y) for r in refs],
+            })
+            continue
+
+        rows = int(spec.get("rows", 0) or 0)
+        cols = int(spec.get("cols", 0) or 0)
         serpentine = bool(spec.get("serpentine", True))
         px, py = _pitch(members, spec, gap)
         x0, y0 = px, py  # keep coords positive; board-size search fits the leaf
@@ -291,7 +409,8 @@ def place_array_leaves(
             max(grid_bbox[3], b[3]),
         )
         grids.append({
-            "refs": refs, "px": px, "py": py, "rows": rows, "cols": cols,
+            "refs": refs, "pattern": "grid",
+            "px": px, "py": py, "rows": rows, "cols": cols,
             "led_w": max(c.width_mm for c in members),
             "led_h": max(c.height_mm for c in members),
             # member centre per chain index, read AFTER placement (serpentine
@@ -405,10 +524,46 @@ def _place_companion_decaps(
     comp_gap = float(cfg.get("array_companion_gap_mm", 0.3))
     min_x, min_y, max_x, max_y = grid_bbox
 
+    grid = grids[0] if len(grids) == 1 else None
+
+    # RING -- radially inward: drop decap *k* just inside the ring at the same
+    # angle as the member it serves, rotated with it. The ring interior is
+    # otherwise empty, the cap hugs its LED's power pads, and the bbox never
+    # grows. Falls through to the perimeter fallback when the inner circle is
+    # too tight to hold them single-file.
+    if (
+        grid is not None
+        and grid.get("pattern") == "ring"
+        and len(refs) <= len(grid["refs"])
+    ):
+        n = len(grid["refs"])
+        cap_w = max(comps[r].width_mm for r in refs)
+        cap_h = max(comps[r].height_mm for r in refs)
+        cap_diag = math.hypot(cap_w, cap_h)
+        r_in = grid["radius"] - grid["led_diag"] / 2.0 - cap_diag / 2.0 - comp_gap
+        chord_in = 2.0 * r_in * math.sin(math.pi / n) if r_in > 0 else 0.0
+        if r_in > cap_diag / 2.0 and chord_in >= cap_diag + comp_gap:
+            c0 = grid["center"]
+            for k, r in enumerate(refs):
+                a = grid["angles"][k]
+                member = comps[grid["refs"][k]]
+                delta = (member.rotation - comps[r].rotation) % 360.0
+                if delta > 1e-6:
+                    rotate_component_in_place(comps[r], delta)
+                _move(
+                    comps[r],
+                    c0.x + r_in * math.cos(a),
+                    c0.y + r_in * math.sin(a),
+                )
+            print(
+                f"  Array decaps: {len(refs)} placed radially inside the ring "
+                f"(r_in={r_in:.2f} of r={grid['radius']:.2f})"
+            )
+            return grid_bbox
+
     # Beside-each-LED is only well-defined for a single 2-D grid (cols > 1, so the
     # in-row hops run horizontally and the vertical channel is free for caps) with
     # no more decaps than members.
-    grid = grids[0] if len(grids) == 1 else None
     if grid is not None and grid["cols"] > 1 and len(refs) <= len(grid["refs"]):
         py, led_h = grid["py"], grid["led_h"]
         cap_h = max(comps[r].height_mm for r in refs)

@@ -283,6 +283,89 @@ def _shape_fit_guard(
     return None
 
 
+def _circumscribe_dims(
+    shape: str, req: dict[str, Any], w: float, h: float
+) -> tuple[float, float] | None:
+    """Fitted ``(width, height)`` of the requested shape circumscribed around
+    a ``w x h`` content rect, mirroring ``_fit_requested_shape``'s two
+    branches exactly. None for a shape neither branch supports."""
+    tl, br = Point(0.0, 0.0), Point(max(w, 1e-3), max(h, 1e-3))
+    from kicraft.layout_editor.outline import SHAPES, circumscribe
+
+    if shape in SHAPES:
+        spec = circumscribe(
+            shape,
+            tl,
+            br,
+            corner_radius_mm=_as_float(req.get("corner_radius_mm")),
+            chamfer_mm=_as_float(req.get("chamfer_mm")),
+        )
+        return spec.width_mm, spec.height_mm
+
+    from kicraft.shapes import KNOWN_SHAPES
+    from kicraft.shapes import circumscribe as circumscribe_polygon
+
+    if shape in KNOWN_SHAPES:
+        poly = circumscribe_polygon(shape, tl, br)
+        (minx, miny), (maxx, maxy) = poly.aabb()
+        return maxx - minx, maxy - miny
+    return None
+
+
+def inscribed_rect_bound(
+    req: dict[str, Any] | None, aspect: float
+) -> tuple[float, float] | None:
+    """Largest ``(w, h)`` content rectangle at ``aspect`` (= w/h) whose
+    circumscribed requested shape lands AT the ``size_mm`` target per axis.
+
+    This is the placement-side half of the shape contract: seed the parent
+    solver with (at most) this rectangle and the post-placement circumscribe
+    in ``_fit_requested_shape`` clears the size half of ``_shape_fit_guard``
+    by construction — the same circumscribe decides both. The bound aims at
+    the exact target (NOT ``target * (1 + _SHAPE_SIZE_TOL)``): the guard's
+    slack must stay available to absorb packing overshoot past the seed —
+    aiming at the ceiling spends it up front (KC-HN59RJ's replay candidates
+    missed the cap by 0.5-1.9 mm for exactly that reason). Only the SIZE half
+    of the guard is mirrored here: its area-ratio cap is non-monotone in
+    content size (a sliver inside a low-fill star trips it), which would
+    break the search and matters only when no size target exists. None when
+    no non-rect shape with a ``size_mm`` target is requested, or the shape
+    has no generator.
+    """
+    if not req:
+        return None
+    shape = str(req.get("shape", "rect")).strip().lower()
+    if shape in ("", "rect"):
+        return None
+    target = _requested_size_pair(req.get("size_mm"))
+    if target is None:
+        return None
+    tw, th = target
+    slack = 1.0
+    a = max(0.1, float(aspect))
+
+    def _fits(s: float) -> bool:
+        dims = _circumscribe_dims(shape, req, a * s, s)
+        if dims is None:
+            return False
+        fw, fh = dims
+        return fw <= tw * slack and fh <= th * slack
+
+    hi = max(tw, th) * 1.5
+    lo = 0.0
+    if not _fits(min(tw, th) * 0.05):
+        # Even a sliver of content overshoots (unsupported shape name or a
+        # degenerate size request) — no usable bound.
+        return None
+    for _ in range(40):
+        mid = (lo + hi) / 2.0
+        if _fits(mid):
+            lo = mid
+        else:
+            hi = mid
+    return (a * lo, lo)
+
+
 def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
     """Circumscribe the brief-requested outline shape around the (already
     grown) rectangular content AABB, then hand it to the stamp/validate/pour
@@ -323,7 +406,7 @@ def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
 
     # Parametric convex shapes: exact OutlineSpec path (circle wins here over the
     # polygon path -- simpler, JS-mirror-compatible).
-    from kicraft.layout_editor.outline import SHAPES, circumscribe
+    from kicraft.layout_editor.outline import SHAPES, OutlineSpec, circumscribe
 
     if shape in SHAPES:
         spec = circumscribe(
@@ -341,6 +424,27 @@ def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
         )
         if guard is not None:
             return guard
+        # A brief-requested size_mm is a target, not just a cap: once the
+        # content fits, deliver the shape AT that size ("round 60 mm" must not
+        # ship a ⌀45 board). Grow only — a fitted axis already inside the
+        # guard's 5% slack above target is kept, never shrunk below content.
+        target = _requested_size_pair(req.get("size_mm"))
+        if target is not None:
+            tw, th = target
+            new_w = max(spec.width_mm, tw)
+            new_h = max(spec.height_mm, th)
+            if shape == "circle":
+                new_w = new_h = max(new_w, new_h)
+            if new_w > spec.width_mm + 1e-9 or new_h > spec.height_mm + 1e-9:
+                ccx = (spec.min_pt.x + spec.max_pt.x) / 2.0
+                ccy = (spec.min_pt.y + spec.max_pt.y) / 2.0
+                spec = OutlineSpec(
+                    shape=shape,
+                    min_pt=Point(ccx - new_w / 2.0, ccy - new_h / 2.0),
+                    max_pt=Point(ccx + new_w / 2.0, ccy + new_h / 2.0),
+                    corner_radius_mm=spec.corner_radius_mm,
+                    chamfer_mm=spec.chamfer_mm,
+                )
         composition.board_state.board_outline = spec.aabb()
         state.manual_outline = spec.to_dict()
         return {
@@ -363,8 +467,25 @@ def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
         )
         if guard is not None:
             return guard
+        points = [(float(x), float(y)) for x, y in poly.points()]
+        # size_mm is a target, not just a cap (same rule as the parametric
+        # branch): grow the polygon uniformly about its center up to the
+        # requested size. Uniform only — a named shape keeps its proportions.
+        target = _requested_size_pair(req.get("size_mm"))
+        if target is not None:
+            f = min(target[0] / max(maxx - minx, 1e-6), target[1] / max(maxy - miny, 1e-6))
+            if f > 1.0 + 1e-9:
+                pcx = (minx + maxx) / 2.0
+                pcy = (miny + maxy) / 2.0
+                points = [
+                    (pcx + (x - pcx) * f, pcy + (y - pcy) * f) for x, y in points
+                ]
+                minx = pcx - (pcx - minx) * f
+                maxx = pcx + (maxx - pcx) * f
+                miny = pcy - (pcy - miny) * f
+                maxy = pcy + (maxy - pcy) * f
         composition.board_state.board_outline = (Point(minx, miny), Point(maxx, maxy))
-        state.fitted_polygon = [[float(x), float(y)] for x, y in poly.points()]
+        state.fitted_polygon = [[x, y] for x, y in points]
         return {
             "fitted": True,
             "shape": shape,

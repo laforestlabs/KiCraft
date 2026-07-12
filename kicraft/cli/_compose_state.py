@@ -135,6 +135,11 @@ class ParentCompositionState:
     # points straight to Edge.Cuts and the geometry validator checks containment
     # via shapely. None for rectangular / parametric / manual boards.
     fitted_polygon: list[list[float]] | None = None
+    # Outcome dict of _fit_requested_shape for THIS composition (fitted /
+    # rejected + reason + size), set at stamp time. The candidate search reads
+    # it to prefer placements whose requested shape actually committed; the
+    # round JSON persists it so a rejected fit is diagnosable per candidate.
+    shape_fit: dict[str, Any] | None = None
     # Stock mounting-hole footprints to load onto the stamped board for
     # user holes without a backing H-ref (manual mode). Entries:
     # {ref, x, y, lib_dir, fp_name, screw}; coordinates in the same
@@ -211,4 +216,5 @@ class ParentCompositionState:
                 if self.fitted_polygon
                 else None
             ),
+            "shape_fit": dict(self.shape_fit) if self.shape_fit else None,
         }

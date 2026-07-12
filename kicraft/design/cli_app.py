@@ -89,6 +89,7 @@ from .synthesis.validation import (
     check_named_part_substitutions,
     check_family_wiring_contracts,
     check_inter_sheet_nets_realized,
+    check_mcu_programming_access,
     check_mcu_programming_path,
     check_net_coverage,
     check_no_dangling_signal_nets,
@@ -1057,6 +1058,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             check_rf_feed_isolation(state.bom),
             check_single_net_per_pin(state.bom),
             check_family_wiring_contracts(state.bom),
+            check_mcu_programming_access(state.bom),
         ]
         if state.architecture is not None:
             checks.append(
@@ -3163,6 +3165,11 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             check_rf_feed_isolation(state.bom),
             check_single_net_per_pin(state.bom),
             check_family_wiring_contracts(state.bom),
+            # §9.29 reachability half: with connections present, a UPDI MCU's
+            # programming pin must reach an access part (header/test pad). The
+            # BOM-commit gate above guaranteed such a part exists, so this is
+            # always winnable by adding one connection -- never a whack-a-mole.
+            check_mcu_programming_access(state.bom),
         ]
         if state.architecture is not None:
             # Architecture declared these inter-sheet nets; the wiring stage
@@ -3236,7 +3243,13 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             ):
                 bom_normalizations = list(state.bom.assumptions[n_assumptions:])
         identity_checks = [check_capacitor_polarity_consistency(state.bom),
-                           check_sheet_connector_edge_conflicts(state.bom)]
+                           check_sheet_connector_edge_conflicts(state.bom),
+                           # §9.29 part-presence half: an MCU BOM must carry a
+                           # programming-access part (header / test pads / USB).
+                           # connections are empty at BOM commit, so only the
+                           # part check runs here; UPDI reachability gates the
+                           # wiring commit below.
+                           check_mcu_programming_access(state.bom)]
         if state.architecture is not None:
             identity_checks.append(
                 check_sheets_have_parts(state.architecture, state.bom)
@@ -3745,6 +3758,116 @@ def _check_form_factor_conformance(state, pcb: Path) -> dict | None:
             "enforced": enforce_enabled(),
             "summary": res.summary(),
         }
+    except Exception:
+        return None
+
+
+def _edge_cuts_census(pcb_text: str) -> dict:
+    """Edge.Cuts primitive count + extents from raw .kicad_pcb text.
+
+    The parent stamper rebuilds Edge.Cuts as loose ``gr_*`` drawings: a rect
+    board is exactly 4 ``gr_line`` segments; every non-rect shape is stamped
+    as a closed polyline of many segments. pcbnew-free (regex over chunks
+    split at ``(gr_`` boundaries) so the verify tail never needs a KiCad
+    import to render a verdict.
+    """
+    import re as _re
+
+    segs = 0
+    xs: list[float] = []
+    ys: list[float] = []
+    for chunk in _re.split(r"(?=\(gr_)", pcb_text):
+        if not chunk.startswith(("(gr_line", "(gr_arc", "(gr_circle", "(gr_poly", "(gr_curve")):
+            continue
+        if '(layer "Edge.Cuts")' not in chunk[:600]:
+            continue
+        segs += 1
+        for mx, my in _re.findall(
+            r"\((?:start|end|mid|center|xy) ([\-0-9.]+) ([\-0-9.]+)\)", chunk[:600]
+        ):
+            xs.append(float(mx))
+            ys.append(float(my))
+    w = (max(xs) - min(xs)) if xs else 0.0
+    h = (max(ys) - min(ys)) if ys else 0.0
+    return {"edge_primitives": segs, "width_mm": w, "height_mm": h}
+
+
+def _check_outline_shape_conformance(state, pcb: Path) -> dict | None:
+    """Outline-shape conformance verdict for a promoted board against the
+    brief-requested ``intent.form_factor`` (shape + optional ``size_mm``).
+
+    The mechanical twin of ``_check_form_factor_conformance`` for shape-only
+    briefs ("round 60 mm LED ring"): the intent stage captures the shape, the
+    compose pipeline places into it (seed cap + candidate preference) and
+    circumscribes it — and THIS check makes a miss loud at the fab gate
+    instead of a rectangle silently shipping as fab-ready (KC-HN59RJ).
+
+    Returns ``{conformant, enforced, summary}`` or None when nothing to check
+    (rect/absent shape, or a validated standard — PR3 owns those). A shape the
+    pipeline has no generator for reports ``enforced=False`` (advisory): the
+    board is honest-but-rect by construction, and failing it would yield no
+    board at all. Best-effort: parse trouble returns None.
+    """
+    try:
+        intent = getattr(state, "intent", None)
+        ff = getattr(intent, "form_factor", None) if intent is not None else None
+        if ff is None:
+            return None
+        shape = str(getattr(ff, "shape", "rect") or "rect").strip().lower()
+        if shape in ("", "rect"):
+            return None
+        standard = getattr(ff, "standard", None)
+        if standard:
+            from kicraft.form_factors import get_template
+
+            template = get_template(standard)
+            if template is not None and template.validated:
+                return None  # PR3 conformance gate owns standard boards
+
+        from kicraft.layout_editor.outline import SHAPES
+        from kicraft.shapes import KNOWN_SHAPES
+
+        supported = shape in SHAPES or shape in KNOWN_SHAPES
+        census = _edge_cuts_census(pcb.read_text())
+        w, h = census["width_mm"], census["height_mm"]
+        non_rect_stamped = census["edge_primitives"] > 4
+
+        size_ok = True
+        size_note = ""
+        size_mm = getattr(ff, "size_mm", None)
+        if size_mm is not None and w > 0 and h > 0:
+            from kicraft.cli._compose_validate import (
+                _SHAPE_SIZE_TOL,
+                _requested_size_pair,
+            )
+
+            target = _requested_size_pair(size_mm)
+            if target is not None:
+                tw, th = target
+                if isinstance(size_mm, (int, float)):
+                    # Scalar request ("60 mm"): the limiting dimension must hit
+                    # it; a named shape's intrinsic aspect may keep the other
+                    # axis below (hexagon height < width).
+                    size_ok = (
+                        abs(max(w, h) - max(tw, th)) <= max(tw, th) * _SHAPE_SIZE_TOL
+                        and min(w, h) <= max(tw, th) * (1.0 + _SHAPE_SIZE_TOL)
+                    )
+                else:
+                    size_ok = (
+                        abs(w - tw) <= tw * _SHAPE_SIZE_TOL
+                        and abs(h - th) <= th * _SHAPE_SIZE_TOL
+                    )
+                size_note = f" vs requested {tw:.0f}x{th:.0f}mm"
+
+        conformant = non_rect_stamped and size_ok
+        summary = (
+            f"requested {shape!r}"
+            f"{' ⌀' + format(getattr(ff, 'size_mm', None), '.0f') + 'mm' if isinstance(size_mm, (int, float)) else ''}"
+            f": delivered {census['edge_primitives']} Edge.Cuts primitive(s), "
+            f"{w:.1f}x{h:.1f}mm{size_note} -> "
+            f"{'CONFORMANT' if conformant else ('RECT FALLBACK' if not non_rect_stamped else 'SIZE MISMATCH')}"
+        )
+        return {"conformant": conformant, "enforced": supported, "summary": summary}
     except Exception:
         return None
 
@@ -4408,6 +4531,27 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
                 )
         else:
             print(f"[build]     form-factor: {ff_conf['summary']}")
+    # 4a''. Outline-shape conformance (shape-only briefs, e.g. "round 60 mm"):
+    #       the delivered Edge.Cuts must BE the requested shape at the
+    #       requested size. A rect fallback was previously silent (the board
+    #       shipped "fab-ready" and the user found it by eye — KC-HN59RJ);
+    #       now it fails the gate for any shape the pipeline supports, and is
+    #       an advisory for shapes with no generator.
+    shape_conf = _check_outline_shape_conformance(state, pcb)
+    if shape_conf is not None:
+        gate["outline_shape"] = shape_conf["summary"]
+        if not shape_conf["conformant"]:
+            if shape_conf["enforced"]:
+                gate["fab_acceptable"] = False
+                gate.setdefault("reasons", []).append(
+                    f"outline-shape non-conformant ({shape_conf['summary']})"
+                )
+            else:
+                gate.setdefault("warnings", []).append(
+                    f"outline-shape advisory (unsupported shape): {shape_conf['summary']}"
+                )
+        else:
+            print(f"[build]     outline-shape: {shape_conf['summary']}")
     # Area-waste visibility (PCB area-compaction plan, Phase 0): utilization /
     # aspect metrics on the promoted board ride the verify line and the gate
     # record. Diagnostic only -- never a promote/fab gate input.

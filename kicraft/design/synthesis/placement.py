@@ -31,6 +31,7 @@ to the free row, so the sheet is always emittable and ERC-clean.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from ..models import BOM, BomPart, Sheet, is_power_or_ground_name
@@ -82,8 +83,17 @@ def _place_array_grid(
 ) -> tuple[float, float]:
     """Lay an array's members on a serpentine ``rows`` x ``cols`` grid (the same
     data-chain order the PCB grid uses, so the schematic shape matches the
-    board). Returns ``(width, bottom)`` of the grid block."""
-    cols = max(1, int(spec.cols))
+    board). A ``ring`` array has no rows/cols — the SCHEMATIC still reads best
+    as a near-square serpentine matrix (a circle of symbols wastes sheet and
+    tangles the chain wires), so one is synthesized; only the PCB is circular.
+    Returns ``(width, bottom)`` of the grid block."""
+    n = len(spec.refs)
+    if getattr(spec, "pattern", "grid") == "ring" or spec.cols is None:
+        cols = max(1, math.ceil(math.sqrt(n)))
+        rows = max(1, -(-n // cols))
+    else:
+        cols = max(1, int(spec.cols))
+        rows = max(1, int(spec.rows))
     serpentine = bool(getattr(spec, "serpentine", True))
     for i, ref in enumerate(spec.refs):
         row, col = divmod(i, cols)
@@ -95,7 +105,6 @@ def _place_array_grid(
             y_mm=_snap(top_y + row * ARRAY_ROW_PITCH_MM),
             rotation_deg=0, mirror=None, role="array_member",
         )
-    rows = max(1, int(spec.rows))
     return cols * ARRAY_COL_PITCH_MM, _snap(top_y + rows * ARRAY_ROW_PITCH_MM)
 
 

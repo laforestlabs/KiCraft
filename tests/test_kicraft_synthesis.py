@@ -172,8 +172,25 @@ def test_autoplacer_json_includes_arrays(tmp_path) -> None:
     out = write_autoplacer_json(tmp_path, "DEMO", arch, bom)
     data = json.loads(out.read_text())
     assert data["arrays"] == [
-        {"refs": ["D1", "D2", "D3", "D4"], "rows": 2, "cols": 2,
-         "pitch_mm": 3.0, "serpentine": True}
+        {"refs": ["D1", "D2", "D3", "D4"], "pattern": "grid",
+         "pitch_mm": 3.0, "serpentine": True, "rows": 2, "cols": 2}
+    ]
+
+
+def test_autoplacer_json_emits_ring_array(tmp_path) -> None:
+    from kicraft.design.synthesis.autoplacer import write_autoplacer_json
+
+    arch, bom = _led_array_arch_bom()
+    bom.arrays = [ArraySpec(refs=["D1", "D2", "D3", "D4"], pattern="ring",
+                            radius_mm=24.0)]
+    out = write_autoplacer_json(tmp_path, "DEMO", arch, bom)
+    data = json.loads(out.read_text())
+    # No rows/cols keys: consumers key ring handling off "pattern" and
+    # int(spec.get("rows", 0)) must never see None.
+    assert data["arrays"] == [
+        {"refs": ["D1", "D2", "D3", "D4"], "pattern": "ring",
+         "pitch_mm": None, "serpentine": True,
+         "radius_mm": 24.0, "start_angle_deg": 0.0}
     ]
 
 
