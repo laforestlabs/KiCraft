@@ -1,6 +1,24 @@
 # Shaped-compose leaf nesting — implementation plan
 
-**Status:** planned (design verified against code + run artifacts, 2026-07-13, HEAD `3b21eaa`).
+**Status:** PR-N1..N4 LANDED 2026-07-13 (`a546274`, `56f48b3`, `2567701`, `21389c4`), each
+unit-tested and parity/behavior-verified. **The e2e genre flip is blocked by a FIFTH blocker
+discovered during PR-N4 verification** (see below): the ring leaf's own internal routing
+crosses its interior — two ~35 mm chords straight through the annulus middle (probed on the
+real 1/601 leaf artifact: remaining band ≈ 22×9 mm, MCU needs 23×16) — so the real leaf has no
+nestable hole, `interior_free_rects` is honestly empty, and the demotion wave correctly
+declines to fire. PR-N3 is visibly working (circumscribed 82.9 → 70.3 on 1/601).
+
+**Blocker 5 (OPEN, owns the genre now): ring-leaf interior discipline at LEAF routing time.**
+FreeRouting freely routes chords through the annulus centre during the leaf solve — nothing
+makes the interior precious. DSN keepouts CANNOT protect it (FreeRouting 1.9.0 ignores
+keepouts/boundary for wires — the known gotcha). Candidate designs, in fix-at-source order:
+(a) **deterministic ring pre-routing** — the ring placement is deterministic (ArraySpec), so
+the DATA chain (neighbor-to-neighbor chords) and power distribution (arcs along the ring /
+radial stubs to the interior companions) can be stamped as locked pre-routes before
+FreeRouting, leaving it only cleanup; (b) a REAL obstacle (netless pad/footprint or locked
+copper) parked in the interior during the leaf route and removed after — physical-obstacle
+encoding of "keep clear", the only language FR respects (array-leaf-purity precedent).
+(a) is the principled fix; scope it against `array_placement.py` + `leaf_routing.py`.
 **Goal:** a brief that requests a shaped outline with a hollow leaf (⌀60 LED ring, etc.) composes
 with the companion leaf NESTED in the hollow, so the requested shape actually fits. Anchor
 cases: projects `1/601` (KC-9G4YPT) and `1/600` (KC-CV4NE3) — 2 leaves, LED RING annulus
