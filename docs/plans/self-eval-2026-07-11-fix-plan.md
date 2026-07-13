@@ -90,6 +90,27 @@ the seed-bbox rung.
 
 ### N2 (P0) — Wall-budget starvation drops the heaviest (MCU) leaf → rc7 + stranded connectors
 
+> **DONE 2026-07-12 — the evidence again decomposed differently than framed.** Reproduction on
+> current code showed run_09's MCU leaf was NOT budget/speed-bound (rounds ~50–120 s, not 500 s
+> — 500 s was the per-leaf deadline being consumed by MANY rejected rounds). Every round died
+> for geometry, in two modes: (1) tight-canvas rounds fail placement legality (force loop
+> converges U2 into locked J2 etc. — residual, see below); (2) seed-bbox rounds routed but were
+> deterministically DRC-rejected by OUR OWN breakout stub: `_foreign_pad_margins` path margins
+> bounded the segment CENTERLINE with bare pair clearance, omitting the track half-width, so a
+> diagonal radial stub stamped copper 0.095 mm from the neighboring LQFP pad vs the 0.153 rule,
+> every round (also the mechanism behind KC-UXASHQ-style diagonal grazes). Fixes:
+> **(a) LANDED** — `_foreign_pad_margins` path margins are now edge-guarded (`pair + half_width`
+> — the via-obstacle derivation always assumed this); with N1's ladder jump the seed-bbox rung
+> now accepts (leaf best_score 62.99, routed). This was the fix that actually pins run_09's MCU
+> leaf. **(b) N2a RECAST, not landed** — the rescue round was implemented and then pulled in
+> review: it added a seventh inline policy (3 mutables + an env clamp) to `main()`'s round loop.
+> The working implementation + tests are preserved in `docs/plans/patches/n2a-wall-rescue.patch`;
+> it re-lands as a small policy inside the `RoundScheduler` refactor
+> (`docs/plans/autoexperiment-round-scheduler.md`, step 3). **Residual (tracked, not blocking):**
+> tight-canvas legality thrash (assignment/force loop vs locked parts) still rejects the
+> compaction rungs on dense MCU leaves — the connectivity-first tuning TODO in the handoff doc;
+> and the +3V3 strand-repair skip (`U2.9:no_clear_path`) is N5/GND-strand territory.
+
 **Evidence:** run_09_stm32-min (regression; `leafs=1/2`, LQFP-48 leaf never pinned, `+3V3`
 unconnected, SW1/SW2 stranded 1.21 mm off the bottom edge) and run_10_rp2040-min (`leafs=3/4`,
 11 unconnected incl. GND + QSPI/USB bus, J2 stranded off right edge). Both logs show

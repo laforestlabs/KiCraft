@@ -165,9 +165,11 @@ def test_radial_escape_falls_back_to_axis_direction(tmp_path):
     # Connector-row shape: the radial direction (footprint centre -> pad,
     # here (0.6, 0.8)) is hemmed in by a neighbour sitting just off the ray
     # (the USB-C CC2 signature). The stub must fall back to an axis direction
-    # instead of being skipped. The strict (pair-clearance) margin round also
-    # rejects +x -- it would pass only 0.147 mm from N0, inside the 0.153
-    # clearance -- so the first STRICTLY clear axis is -x, at full length.
+    # instead of being skipped. With edge-guarded margins (pair clearance +
+    # track half-width, the run_09 fix) N0 hugs the source pad so closely
+    # that NO direction clears the strict round; the relaxed
+    # (collision-only, same-footprint) round then admits +x at full length
+    # -- the documented hemmed-pad tradeoff, a stub beats no stub.
     path = str(tmp_path / "b.kicad_pcb")
     _board(
         path,
@@ -190,8 +192,8 @@ def test_radial_escape_falls_back_to_axis_direction(tmp_path):
         if isinstance(t, pcbnew.PCB_TRACK) and not isinstance(t, pcbnew.PCB_VIA)
     )
     end = (pcbnew.ToMM(seg.GetEnd().x), pcbnew.ToMM(seg.GetEnd().y))
-    # The -x axis escape at the requested length, not the diagonal radial one.
-    assert end == (pytest.approx(6.5), pytest.approx(10.0)), end
+    # An axis escape at the requested length, not the diagonal radial one.
+    assert end == (pytest.approx(9.5), pytest.approx(10.0)), end
 
 
 def test_perimeter_tie_routes_around_bbox(tmp_path):
@@ -594,10 +596,13 @@ def _single_track_end_x(path):
 
 
 def test_radial_tip_extends_past_power_netclass_keepout(tmp_path):
-    # With the Power netclass resolved, a 0.6 mm escape's tip would sit inside
-    # the VBUS pad's 0.3 mm pair-clearance keep-out -- a tip FreeRouting cannot
-    # attach to, which abandons the net (the rc7 CC2 signature). The stub must
-    # extend until its tip is legal (x >= ~8.64), not stamp the illegal tip.
+    # With the Power netclass resolved, the VBUS pad's 0.3 mm pair clearance
+    # guards the whole stub, run AND tip (margins are edge-guarded: pair +
+    # track half-width -- the run_09 fix). The +x escape alongside the VBUS
+    # pad would leave only 0.27 mm of copper gap (a real DRC violation the
+    # pre-fix margins stamped while "extending the tip past the keepout"),
+    # so the escape must take the fully-clear -y direction at the requested
+    # length instead.
     #
     # NewBoard() registers its (netclass-less) project with pcbnew's settings
     # manager, and a later LoadBoard of the same path reuses that stale project
@@ -619,7 +624,18 @@ def test_radial_tip_extends_past_power_netclass_keepout(tmp_path):
 
     res = add_breakout_stubs(path, [BreakoutSpec(ref="J1", pad="B5", length_mm=0.6)])
     assert res["stubs"] == 1
-    assert _single_track_end_x(path) > 8.62
+    board = pcbnew.LoadBoard(path)
+    seg = next(
+        t
+        for t in board.GetTracks()
+        if isinstance(t, pcbnew.PCB_TRACK) and not isinstance(t, pcbnew.PCB_VIA)
+    )
+    end = (pcbnew.ToMM(seg.GetEnd().x), pcbnew.ToMM(seg.GetEnd().y))
+    assert end == (pytest.approx(8.0), pytest.approx(9.4)), end
+    # Regression guard: no stamped copper edge inside the 0.3 mm keep-out of
+    # the VBUS pad (shape spans x 7.5-8.5 / y 10.35-10.95; the stub runs
+    # y <= 10.0, so its closest copper edge is >= 0.35 - half-width away).
+    assert pcbnew.ToMM(seg.GetStart().y) <= 10.0 and end[1] < 10.0
 
 
 def test_radial_tip_stays_at_requested_length_without_netclasses(tmp_path):
@@ -769,12 +785,15 @@ def test_foreign_pad_margins_strict_same_fp(tmp_path):
     # Relaxed: collision-only (half_width + 0.05) vs the sibling pad.
     assert relaxed[0][1] == pcbnew.FromMM(0.0765 + 0.05)
     # Strict: the full pair clearance (the larger of the two pads' resolved
-    # clearances) -- the verify DRC does not waive a stub grazing a
-    # same-footprint pad.
+    # clearances) held from the copper EDGE -- the margin bounds the segment
+    # centerline, so the track half-width is added on top (bare `pair` let a
+    # stub stamp copper pair - half_width from a sibling pad, the run_09 U2
+    # deterministic DRC rejection). The verify DRC does not waive a stub
+    # grazing a same-footprint pad.
     pair = max(0.153,
                _own_clearance_mm(pads["B5"], pcbnew.F_Cu, 0.153),
                _own_clearance_mm(pads["B6"], pcbnew.F_Cu, 0.153))
-    assert strict[0][1] == pcbnew.FromMM(pair) and pair > 0.153
+    assert strict[0][1] == pcbnew.FromMM(pair + 0.0765) and pair > 0.153
 
 
 def test_tip_via_near_same_net_via_is_skipped_or_blocked(tmp_path):

@@ -191,7 +191,19 @@ def _foreign_pad_margins(
     for pad in _foreign_pads(board, src_pad.GetNetCode(), exclude=src_pad):
         pair = max(floor_mm, src_cl, _own_clearance_mm(pad, layer_id, floor_mm))
         same_fp = src_ref and _pad_ref(pad) == src_ref
-        path_mm = collide_mm if (same_fp and not strict_same_fp) else pair
+        # Path margins bound the segment CENTERLINE, so the pair clearance
+        # must be held from the copper EDGE: pair + half_width. Bare `pair`
+        # let a diagonal radial escape pass the strict check while stamping
+        # copper only pair - half_width from a sibling pad (run_09: the U2
+        # LQFP USB_DP stub at 0.095 mm vs the 0.153 mm rule -- every routed
+        # round deterministically rejected). The via-obstacle derivation at
+        # the stamp site (`m + via_r - half_width`) has always assumed the
+        # half-width is included here.
+        path_mm = (
+            collide_mm
+            if (same_fp and not strict_same_fp)
+            else pair + half_width_mm
+        )
         path.append((pad, int(pcbnew.FromMM(path_mm))))
         tip.append((pad, int(pcbnew.FromMM(pair + half_width_mm))))
     return path, tip
