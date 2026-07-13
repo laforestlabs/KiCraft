@@ -569,6 +569,7 @@ def export_dsn(
     *,
     target_clearance_um: int | None = None,
     target_width_um: int | None = None,
+    clearance_guard_um: int = 0,
 ) -> None:
     """Export Specctra DSN from a KiCad PCB file using pcbnew API.
 
@@ -580,6 +581,9 @@ def export_dsn(
 
     ``target_clearance_um`` / ``target_width_um`` (micrometres) override the
     routing rule for fine-pitch boards -- see :func:`_patch_dsn_clearance`.
+    ``clearance_guard_um`` is added on top of every clearance in the finished
+    DSN so FreeRouting holds a margin above the board's DRC rule -- see
+    :func:`_apply_dsn_clearance_guard`.
     """
     lock_script = ""
     if lock_existing_traces:
@@ -618,6 +622,7 @@ def export_dsn(
         target_width_um=target_width_um,
     )
     _inject_netclass_clearances(dsn_path)
+    _apply_dsn_clearance_guard(dsn_path, clearance_guard_um)
 
 
 # FreeRouting 1.9.0's DSN parser stalls FOREVER on non-ANSI characters: it
@@ -858,6 +863,43 @@ def _inject_netclass_clearances(dsn_path: str) -> None:
             f.write(content)
     except Exception as exc:  # noqa: BLE001 -- never break routing over this
         print(f"  warning: netclass clearance injection skipped: {exc}")
+
+
+def _apply_dsn_clearance_guard(dsn_path: str, guard_um: int) -> None:
+    """Raise every DSN clearance token by ``guard_um`` micrometres.
+
+    FreeRouting routes wires at exactly the DSN clearance measured against its
+    own polygonal approximation of pad shapes, which differs from KiCad's exact
+    geometry by up to ~1 µm on rotated pads -- so a wire at exactly the rule
+    can measure just under it in KiCad DRC and fail the acceptance gate
+    (KC-9G4YPT: 0.1520-0.1522 mm measured vs the 0.1530 mm rule, every round).
+    Adding the guard here -- and ONLY here, inside the DSN -- makes FreeRouting
+    keep ``rule + guard`` while the board's own netclass/min_clearance rules
+    stay at ``rule``, so DRC still verifies the real requirement and the guard
+    cannot mask a genuine violation.
+
+    Runs LAST in :func:`export_dsn`, after :func:`_patch_dsn_clearance` and
+    :func:`_inject_netclass_clearances`, so fine-pitch-lowered and injected
+    per-netclass rules are guarded too. Rewrites both token forms, bare
+    ``(clearance N)`` and typed ``(clearance N (type T))``; widths untouched.
+    """
+    if guard_um <= 0:
+        return
+    guard = int(guard_um)
+    with open(dsn_path) as f:
+        content = f.read()
+    content = re.sub(
+        r"\(clearance\s+(\d+)\)",
+        lambda m: f"(clearance {int(m.group(1)) + guard})",
+        content,
+    )
+    content = re.sub(
+        r"\(clearance\s+(\d+)\s+\(type\s+(\w+)\)\)",
+        lambda m: f"(clearance {int(m.group(1)) + guard} (type {m.group(2)}))",
+        content,
+    )
+    with open(dsn_path, "w") as f:
+        f.write(content)
 
 
 def _strip_nets_from_dsn(dsn_path: str, skip_nets: "list[str] | None") -> None:
@@ -1308,6 +1350,9 @@ def route_with_freerouting(
                 lock_existing_traces=preserve_existing_copper,
                 target_clearance_um=target_clearance_um,
                 target_width_um=target_width_um,
+                clearance_guard_um=int(
+                    config.get("freerouting_clearance_guard_um", 5) or 0
+                ),
             )
             # Keep designated nets (e.g. GND on a parent) off the autorouter:
             # remove them from the DSN so FreeRouting routes neither a dense

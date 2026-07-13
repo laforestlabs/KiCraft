@@ -10,6 +10,7 @@ waived.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 
 import pytest
@@ -77,6 +78,88 @@ def test_patch_noop_when_target_not_below_global(tmp_path):
     out = open(dsn).read()
     assert "(clearance 200)" in out
     assert "(width 200)" in out  # width is only lowered on the fine-pitch path
+
+
+def test_clearance_guard_raises_every_clearance_token(tmp_path):
+    # KC-9G4YPT: FreeRouting's pad-shape approximation is ~1 µm off KiCad's
+    # exact geometry, so routing at exactly the rule yields sub-rule DRC
+    # measurements. The guard raises what FR routes to; widths stay put.
+    dsn = _write_dsn(tmp_path)
+    fr._apply_dsn_clearance_guard(dsn, 5)
+    out = open(dsn).read()
+    assert out.count("(clearance 205)") == 2  # structure rule + class rule
+    assert "(clearance 55 (type smd_smd))" in out
+    assert out.count("(width 200)") == 2  # widths untouched
+
+
+def test_clearance_guard_noop_when_zero(tmp_path):
+    dsn = _write_dsn(tmp_path)
+    fr._apply_dsn_clearance_guard(dsn, 0)
+    assert open(dsn).read() == _DSN
+
+
+def test_clearance_guard_runs_last_over_fine_pitch_and_netclass_rules(tmp_path):
+    # Full DSN rewrite chain as export_dsn runs it: fine-pitch lowering, then
+    # netclass re-injection, then the guard. Every clearance the router will
+    # obey -- lowered global, preserved typed, injected per-class -- must gain
+    # exactly +5, or the zero-margin hole reopens for that rule class (e.g. a
+    # Power-class GND wire, exactly the KC-9G4YPT violation).
+    dsn = os.path.join(tmp_path, "board.dsn")
+    with open(dsn, "w") as f:
+        f.write(
+            """(pcb board
+  (structure
+    (rule
+      (width 200)
+      (clearance 200)
+      (clearance 50 (type smd_smd))
+    )
+  )
+  (network
+    (class kicad_default GND SIG
+      (circuit (use_via "Via[0-1]_600:300_um"))
+      (rule
+        (width 200)
+        (clearance 200)
+      )
+    )
+  )
+)
+"""
+        )
+    import json
+
+    # SIG carries no netclass mapping so it stays in the DSN-default class at
+    # the fine-pitch-lowered clearance (a mapped class re-raises to its board
+    # netclass value -- _inject_netclass_clearances' documented semantics).
+    with open(dsn + ".netclasses.json", "w") as f:
+        json.dump(
+            {
+                "classes": {"Power": 300},
+                "net_class": {"GND": "Power"},
+            },
+            f,
+        )
+
+    fr._patch_dsn_clearance(dsn, target_clearance_um=153, target_width_um=153)
+    fr._inject_netclass_clearances(dsn)
+    fr._apply_dsn_clearance_guard(dsn, 5)
+    out = open(dsn).read()
+
+    # Structure rule + Default-class rule: lowered 200 -> 153, guarded -> 158.
+    assert out.count("(clearance 158)") == 2
+    # Injected Power class: max(153, 300) = 300, guarded -> 305.
+    assert "(clearance 305)" in out
+    # Typed clearance kept below target by the fine-pitch path, still guarded.
+    assert "(clearance 55 (type smd_smd))" in out
+    # Widths: lowered to 153 by the fine-pitch path, NOT touched by the guard.
+    assert "(width 153)" in out
+    assert "(width 158)" not in out and "(width 305)" not in out
+    # No unguarded clearance token survives anywhere.
+    assert not [
+        m for m in re.findall(r"\(clearance\s+(\d+)", out)
+        if int(m) in (153, 200, 300, 50)
+    ]
 
 
 def test_resolve_rule_honors_explicit_override(monkeypatch):

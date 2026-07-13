@@ -352,6 +352,15 @@ DEFAULT_CONFIG = {
     # USB-C. 0.153 mm rounds to 153 µm in the DSN (>= 6 mil). USB-C pads tighter
     # than this need a LOCAL clearance exception, not a global sub-floor drop.
     "freerouting_min_clearance_mm": 0.153,
+    # FreeRouting's internal geometry (polygonal pad approximations, integer
+    # DSN units) differs from KiCad's exact shapes by up to ~1 µm, so a wire FR
+    # places exactly at the clearance rule can measure just UNDER it in KiCad
+    # DRC (observed 0.1520-0.1522 vs 0.1530 on rotated pads;
+    # KC-9G4YPT/KC-CV4NE3/KC-HE2Q5T). Route with this guard ABOVE the DRC rule
+    # (applied to every clearance token in the DSN, after all other rewrites);
+    # the board keeps verifying at the real rule, so the guard can never mask a
+    # genuine violation. 5 µm = 5x the observed worst skew, 3.3% of the rule.
+    "freerouting_clearance_guard_um": 5,
     # Fine-pitch escape track width. It is written to the DSN as integer microns
     # (int(round(mm*1000))), and KiCad's track-width DRC floor is
     # min_track_width = 0.1524 mm (6 mil, the OSH Park 2-layer minimum). 0.15 mm
