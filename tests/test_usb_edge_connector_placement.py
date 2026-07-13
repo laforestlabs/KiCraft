@@ -66,6 +66,27 @@ def test_angles_close_wraps():
 # --- Layer A: real footprint geometry ------------------------------------
 
 
+def test_detect_opening_direction_real_bnc_elbow():
+    """KC-MUSEUD regression: the BNC elbow jack's BODY extends +y over the
+    board while its mating barrel points -y past the pads -- the opposite of
+    the USB-C shell-overhang pattern below, so the body-overhang heuristic
+    read its mouth 180 deg wrong and the placer pointed the barrel INBOARD
+    on every board using the part. The footprint now carries the
+    authoritative 'Board Edge' Dwgs.User marker (detection rule 1); this
+    pins the detected direction to the mating side."""
+    pcbnew = pytest.importorskip("pcbnew")
+    from kicraft.autoplacer.hardware.adapter import detect_opening_direction
+
+    lib = "kicraft/parts_library/bnc-pcb-jack/bnc-pcb-jack.pretty"
+    fp = pcbnew.FootprintLoad(lib, "ANT-TH_KH-BNC50-3511")
+    assert fp is not None
+    assert detect_opening_direction(fp) == 270.0
+    # Local direction is invariant to the footprint's board orientation.
+    for rot in (90.0, 180.0, 270.0):
+        fp.SetOrientationDegrees(rot)
+        assert detect_opening_direction(fp) == 270.0
+
+
 def test_detect_opening_direction_real_usb_c():
     pcbnew = pytest.importorskip("pcbnew")
     from kicraft.autoplacer.hardware.adapter import detect_opening_direction
