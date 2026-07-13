@@ -34,7 +34,7 @@ import copy
 import importlib
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -197,6 +197,15 @@ class LeafBlockerSet:
     # mouthless connectors keep the courtyard-extremity anchor. Consumed (after
     # ``edge_reference_points``) in ``_compute_local_anchor_offset``.
     connector_pad_edge_anchors: dict[str, Point] = field(default_factory=dict)
+    # Interior HOLES of the leaf's occupied geometry (leaf-local coords):
+    # per hole, the largest inscribed axis-aligned rect of empty FR4 fully
+    # enclosed by occupied copper/courtyards (an LED-ring annulus interior).
+    # Empty space reachable from the outline boundary is NOT a hole. A
+    # smaller leaf whose occupied bbox fits inside one of these rects (minus
+    # nest_margin_mm) may legally share footprint with this leaf -- the
+    # nesting allowance in ``can_overlap_sparse``; see
+    # docs/plans/shaped-compose-leaf-nesting.md.
+    interior_free_rects: tuple[tuple[Point, Point], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1978,6 +1987,201 @@ def _extract_blockers_from_pcb(
     )
 
 
+# Mirrors DEFAULT_CONFIG["nest_margin_mm"] for callers that have no cfg in
+# scope (the pairwise overlap check); the solver's nest-proposal pass reads
+# the config value and passes it through explicitly.
+_NEST_MARGIN_FALLBACK_MM = 1.5
+_NEST_GRID_MM = 1.0
+# ~630x630 mm at 1 mm cells -- a degenerate outline bails out with no holes
+# rather than burning memory (interior nesting is meaningless at that scale).
+_NEST_GRID_MAX_CELLS = 400_000
+
+
+def _blocker_occupied_rects(bs: LeafBlockerSet) -> list[tuple[Point, Point]]:
+    """Every rect claiming physical/copper space, in the leaf's local frame."""
+    rects = list(
+        bs.front_pads + bs.back_pads + bs.front_tht_pads + bs.back_tht_pads
+        + bs.tht_drills + bs.front_traces + bs.back_traces
+    )
+    rects.extend(bs.component_rects[k] for k in sorted(bs.component_rects))
+    return rects
+
+
+def compute_interior_free_rects(
+    blocker_set: LeafBlockerSet,
+    *,
+    min_side_mm: float,
+    grid_mm: float = _NEST_GRID_MM,
+) -> tuple[tuple[Point, Point], ...]:
+    """Largest inscribed empty rect per fully-ENCLOSED interior hole.
+
+    Deterministic occupancy grid over ``leaf_outline``: cells touched by any
+    occupied rect are blocked, then the occupied mask is morphologically
+    CLOSED by ``min_side_mm / 2`` -- a discrete ring (LED annulus) is not a
+    solid wall, and its inter-member gaps would otherwise leak the boundary
+    flood-fill into the interior; a corridor narrower than the minimum
+    nestable hole side cannot host a nest anyway, so sealing it is exact for
+    this purpose. Empty cells of the CLOSED mask reachable from the outline
+    boundary are OUTSIDE space (open bays stay open: their mouths are wider
+    than the closing radius); each remaining empty region is an interior
+    hole and contributes its largest inscribed axis-aligned rectangle, kept
+    only when both sides reach ``min_side_mm``. The closing band around real
+    copper is excluded from the hole, so a reported rect keeps that standoff
+    from the ring members on top of ``nest_margin_mm``. Derived from
+    geometry, NOT from a ring ArraySpec, so interior companions (ring decaps
+    sit INSIDE the annulus) shrink the hole naturally. Output sorted by area
+    desc, then position, for cross-run stability.
+    """
+    lo, hi = blocker_set.leaf_outline
+    width, height = hi.x - lo.x, hi.y - lo.y
+    if width <= 0.0 or height <= 0.0:
+        return ()
+    nx = max(1, int(math.ceil(width / grid_mm)))
+    ny = max(1, int(math.ceil(height / grid_mm)))
+    if nx * ny > _NEST_GRID_MAX_CELLS:
+        return ()
+    cell_w, cell_h = width / nx, height / ny
+
+    occupied = [[False] * nx for _ in range(ny)]
+    for rmin, rmax in _blocker_occupied_rects(blocker_set):
+        x0 = max(0, int((rmin.x - lo.x) / cell_w))
+        x1 = min(nx - 1, int(math.ceil((rmax.x - lo.x) / cell_w)) - 1)
+        y0 = max(0, int((rmin.y - lo.y) / cell_h))
+        y1 = min(ny - 1, int(math.ceil((rmax.y - lo.y) / cell_h)) - 1)
+        for gy in range(y0, y1 + 1):
+            row = occupied[gy]
+            for gx in range(x0, x1 + 1):
+                row[gx] = True
+
+    # Chebyshev dilation by the closing radius (separable: rows then cols).
+    k = max(1, int(math.ceil((min_side_mm / 2.0) / min(cell_w, cell_h))))
+
+    def _dilate_rows(mask):
+        out = [[False] * nx for _ in range(ny)]
+        for gy in range(ny):
+            src, dst = mask[gy], out[gy]
+            for gx in range(nx):
+                if src[gx]:
+                    for ax in range(max(0, gx - k), min(nx, gx + k + 1)):
+                        dst[ax] = True
+        return out
+
+    def _dilate_cols(mask):
+        out = [row[:] for row in mask]
+        for gx in range(nx):
+            for gy in range(ny):
+                if mask[gy][gx]:
+                    for ay in range(max(0, gy - k), min(ny, gy + k + 1)):
+                        out[ay][gx] = True
+        return out
+
+    closed = _dilate_cols(_dilate_rows(occupied))
+
+    # Flood-fill the OUTSIDE space of the CLOSED mask from the boundary.
+    outside = [[False] * nx for _ in range(ny)]
+    stack = [
+        (gx, gy)
+        for gy in range(ny)
+        for gx in range(nx)
+        if (gy in (0, ny - 1) or gx in (0, nx - 1)) and not closed[gy][gx]
+    ]
+    for gx, gy in stack:
+        outside[gy][gx] = True
+    while stack:
+        gx, gy = stack.pop()
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            ax, ay = gx + dx, gy + dy
+            if (0 <= ax < nx and 0 <= ay < ny
+                    and not closed[ay][ax] and not outside[ay][ax]):
+                outside[ay][ax] = True
+                stack.append((ax, ay))
+
+    # Label each interior hole (empty in the CLOSED mask -- i.e. clear of
+    # copper AND its closing band -- and not outside) and take its largest
+    # inscribed rectangle via the classic histogram-stack scan per hole.
+    comp = [[-1] * nx for _ in range(ny)]
+    n_comp = 0
+    for gy in range(ny):
+        for gx in range(nx):
+            if closed[gy][gx] or outside[gy][gx] or comp[gy][gx] >= 0:
+                continue
+            fill = [(gx, gy)]
+            comp[gy][gx] = n_comp
+            while fill:
+                cx, cy = fill.pop()
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    ax, ay = cx + dx, cy + dy
+                    if (0 <= ax < nx and 0 <= ay < ny and comp[ay][ax] < 0
+                            and not closed[ay][ax] and not outside[ay][ax]):
+                        comp[ay][ax] = n_comp
+                        fill.append((ax, ay))
+            n_comp += 1
+
+    results: list[tuple[float, tuple[Point, Point]]] = []
+    for c in range(n_comp):
+        heights = [0] * nx
+        best = (0.0, 0, 0, 0, 0)  # area, x0, y0, x1, y1 (cell coords, incl.)
+        for gy in range(ny):
+            for gx in range(nx):
+                heights[gx] = heights[gx] + 1 if comp[gy][gx] == c else 0
+            st: list[int] = []
+            for gx in range(nx + 1):
+                cur = heights[gx] if gx < nx else 0
+                while st and heights[st[-1]] >= cur:
+                    top = st.pop()
+                    hgt = heights[top]
+                    left = st[-1] + 1 if st else 0
+                    area = float(hgt * (gx - left))
+                    if area > best[0]:
+                        best = (area, left, gy - hgt + 1, gx - 1, gy)
+                if gx < nx:
+                    st.append(gx)
+        area, x0, y0, x1, y1 = best
+        if area <= 0.0:
+            continue
+        rect = (
+            Point(lo.x + x0 * cell_w, lo.y + y0 * cell_h),
+            Point(lo.x + (x1 + 1) * cell_w, lo.y + (y1 + 1) * cell_h),
+        )
+        side_x, side_y = rect[1].x - rect[0].x, rect[1].y - rect[0].y
+        if side_x >= min_side_mm and side_y >= min_side_mm:
+            results.append((side_x * side_y, rect))
+    results.sort(key=lambda item: (-item[0], item[1][0].x, item[1][0].y))
+    return tuple(rect for _, rect in results)
+
+
+def _guest_nests_in_host(
+    host: LeafBlockerSet,
+    host_origin: Point,
+    host_rotation: float,
+    guest: LeafBlockerSet,
+    guest_origin: Point,
+    guest_rotation: float,
+    margin_mm: float,
+) -> bool:
+    """True iff the guest's occupied bbox (world frame) sits entirely inside
+    one of the host's interior holes, deflated by ``margin_mm``. Host must be
+    at a cardinal rotation (hole rects transform exactly); anything else is
+    conservatively not nested."""
+    if not host.interior_free_rects:
+        return False
+    m = abs(host_rotation) % 90.0
+    if not (m < 0.01 or m > 89.99):
+        return False
+    guest_rects = _blocker_occupied_rects(guest) or [guest.leaf_outline]
+    world = [_transform_rect(r, guest_origin, guest_rotation) for r in guest_rects]
+    gx0 = min(r[0].x for r in world)
+    gy0 = min(r[0].y for r in world)
+    gx1 = max(r[1].x for r in world)
+    gy1 = max(r[1].y for r in world)
+    for hole in host.interior_free_rects:
+        hmin, hmax = _transform_rect(hole, host_origin, host_rotation)
+        if (gx0 >= hmin.x + margin_mm and gx1 <= hmax.x - margin_mm
+                and gy0 >= hmin.y + margin_mm and gy1 <= hmax.y - margin_mm):
+            return True
+    return False
+
+
 def extract_leaf_blocker_set(
     artifact: LoadedSubcircuitArtifact,
     *,
@@ -2007,13 +2211,19 @@ def extract_leaf_blocker_set(
         pad_margin_mm=pad_margin_mm,
         drill_margin_mm=drill_margin_mm,
     )
-    if blocker_set is not None:
-        return blocker_set
-    return _extract_blockers_from_layout(
-        artifact,
-        pad_margin_mm=pad_margin_mm,
-        drill_margin_mm=drill_margin_mm,
+    if blocker_set is None:
+        blocker_set = _extract_blockers_from_layout(
+            artifact,
+            pad_margin_mm=pad_margin_mm,
+            drill_margin_mm=drill_margin_mm,
+        )
+    holes = compute_interior_free_rects(
+        blocker_set,
+        min_side_mm=float((cfg or {}).get("nest_min_hole_side_mm", 8.0)),
     )
+    if holes:
+        blocker_set = replace(blocker_set, interior_free_rects=holes)
+    return blocker_set
 
 
 def dominant_blocker_side(blocker_set: LeafBlockerSet) -> Literal["front", "back", "dual", "none"]:
@@ -2052,6 +2262,7 @@ def can_overlap_sparse(
     *,
     force_back_only_a: bool = False,
     force_back_only_b: bool = False,
+    nest_margin_mm: float | None = None,
 ) -> bool:
     # RC2 -- the principled rule, checked FIRST. A leaf "commits" a copper
     # layer when it has MEANINGFUL same-side copper: real SMT pads or routed
@@ -2079,7 +2290,29 @@ def can_overlap_sparse(
         + sum(_rect_area(r) for r in blocker_b.back_traces)
     ) > 0.0 or force_back_only_b
     if (front_a and front_b) or (back_a and back_b):
-        return False
+        # Nesting allowance: FULL containment inside a genuinely enclosed
+        # interior hole of the other leaf has no seam -- the stamped-plane
+        # seam short this veto exists for requires committed copper to meet
+        # at a shared boundary, and a hole's boundary is held at
+        # nest_margin_mm on top of the extraction inflation. Partial
+        # overlaps still hard-fail; the per-rect checks below run on nested
+        # pairs too (belt over suspenders). See
+        # docs/plans/shaped-compose-leaf-nesting.md.
+        if not (
+            _guest_nests_in_host(
+                blocker_a, origin_a, rotation_a,
+                blocker_b, origin_b, rotation_b,
+                nest_margin_mm if nest_margin_mm is not None
+                else _NEST_MARGIN_FALLBACK_MM,
+            )
+            or _guest_nests_in_host(
+                blocker_b, origin_b, rotation_b,
+                blocker_a, origin_a, rotation_a,
+                nest_margin_mm if nest_margin_mm is not None
+                else _NEST_MARGIN_FALLBACK_MM,
+            )
+        ):
+            return False
 
     # OPPOSITE-LAYER (stacking) pair only past this point -- e.g. an SMT-front
     # leaf over a back-side THT battery holder. The remaining conflicts are

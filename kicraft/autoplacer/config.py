@@ -369,6 +369,15 @@ DEFAULT_CONFIG = {
     # rounds to 153 µm (>= floor, fab-legal) while staying narrower than the
     # 0.2 mm default so it still escapes dense pad fields.
     "freerouting_fine_pitch_track_mm": 0.153,
+    # Leaf nesting (shaped compose): a leaf whose occupied copper leaves a
+    # large interior hole (an LED-ring annulus) may host a smaller leaf fully
+    # INSIDE that hole -- see docs/plans/shaped-compose-leaf-nesting.md. The
+    # margin is held between the guest's occupied bbox and the hole's edge on
+    # top of the per-rect inflation already applied at blocker extraction;
+    # holes with an inscribed rect smaller than the minimum side are not
+    # worth proposing into.
+    "nest_margin_mm": 1.5,
+    "nest_min_hole_side_mm": 8.0,
     # Leaf acceptance: a leaf must route all of its *signal* nets. Power/ground
     # nets are excluded automatically (they close on the post-route pour, not on
     # leaf routing). Set to None to disable (historical lenient behaviour). This
