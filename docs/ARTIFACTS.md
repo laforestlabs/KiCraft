@@ -24,6 +24,8 @@ measure it as if it were the engine's output.
 ├── <stem>.kicad_pcb            # PROMOTED copy of the best board this run reached
 ├── <stem>.provenance.json      # which run promoted it, from what source, md5, fresh?
 ├── <stem>.kicad_sch / .kicad_pro / .kicad_prl
+├── .experiments/pre_promote_seed.kicad_pcb   # full-component seed saved before the
+│                               # promote clobbers <stem>.kicad_pcb; replay restores it (rc6)
 └── .experiments/subcircuits/
     └── <slug>/                 # one dir per leaf or parent subcircuit
         ├── metadata.json       # parent: carries run_id + generated_at (routed compose only)

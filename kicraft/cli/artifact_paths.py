@@ -265,6 +265,18 @@ def provenance_path(pcb: Path) -> Path:
     return pcb.with_suffix(".provenance.json")
 
 
+def pre_promote_seed_path(project_dir: Path | str) -> Path:
+    """``.experiments/pre_promote_seed.kicad_pcb`` -- the full-component seed
+    board snapshotted just before a promote overwrites ``<stem>.kicad_pcb``.
+
+    An rc6 build deliberately promotes the best PARTIAL board as the project
+    preview (no-fallback-previews), which destroys the only board ``replay``
+    can re-solve leaves from. The build tail writes this snapshot at promote
+    time; ``replay`` restores it when provenance says the board on disk is a
+    partial (KC-9G4YPT GAP 2)."""
+    return Path(project_dir) / ".experiments" / "pre_promote_seed.kicad_pcb"
+
+
 def file_md5(path: Path) -> str | None:
     """Content fingerprint of a board, for provenance + the ``kicraft artifacts``
     query. md5 here is an identity fingerprint, not security-sensitive."""

@@ -191,6 +191,77 @@ def test_rc6_preview_shows_stale_partial_flagged_not_fresh(tmp_path):
     assert prov["fresh"] is False, "a non-fresh partial must be flagged, not hidden"
 
 
+# --- KC-9G4YPT GAP 2: pre-promote seed snapshot + replay restore ---------------
+
+def test_rc6_promote_snapshots_seed_and_replay_restore_recovers_it(tmp_path):
+    """The rc6 partial promote deliberately clobbers <stem>.kicad_pcb (the
+    preview must show what the build reached) -- but it must snapshot the
+    full-component seed first, and the replay-side restore must bring the seed
+    back and drop the now-inaccurate provenance. Without this, every rc6 run
+    is unreplayable (leaf extraction: "no matching components")."""
+    t0 = time.time()
+    _set_run("NOW", t0)
+    stem = "BOARD"
+    pcb = _touch(tmp_path / f"{stem}.kicad_pcb", "(kicad_pcb FULL-SEED)\n")
+    sub = _sub(tmp_path)
+    placed = _touch(sub / ap.PARENT_PLACED, "(kicad_pcb PARTIAL)\n")
+    _set_mtime(placed, t0 + 10)  # fresh partial, no routed parent -> rc6
+
+    rc = cli_app._promote_verify_fab(
+        None, tmp_path / "state.json", [], stem, tmp_path, pcb,
+    )
+
+    assert rc == 6
+    assert pcb.read_text() == "(kicad_pcb PARTIAL)\n"  # preview promote intact
+    snap = ap.pre_promote_seed_path(tmp_path)
+    assert snap.is_file() and snap.read_text() == "(kicad_pcb FULL-SEED)\n"
+
+    cli_app._restore_pre_promote_seed(tmp_path, pcb)
+
+    assert pcb.read_text() == "(kicad_pcb FULL-SEED)\n"
+    assert ap.read_provenance(pcb) is None, "stale partial provenance must go"
+
+
+def test_replay_restore_errors_when_snapshot_missing(tmp_path):
+    """Pre-fix rc6 runs have partial provenance but no snapshot: the restore
+    must fail with the honest remedy, not let replay die later with the
+    misleading 'no matching components' from inside leaf extraction."""
+    t0 = time.time()
+    _set_run("NOW", t0)
+    pcb = _touch(tmp_path / "BOARD.kicad_pcb", "(kicad_pcb PARTIAL)\n")
+    src = _touch(_sub(tmp_path) / ap.PARENT_PLACED, "(kicad_pcb PARTIAL)\n")
+    ap.write_promote_provenance(
+        pcb, run_id="NOW", run_started_at=t0,
+        source_board=src, source_kind="partial", fresh=True,
+    )
+
+    with pytest.raises(cli_app._ReplayInputError, match="predates seed snapshotting"):
+        cli_app._restore_pre_promote_seed(tmp_path, pcb)
+    assert pcb.read_text() == "(kicad_pcb PARTIAL)\n"  # untouched on error
+
+
+def test_replay_restore_noop_for_routed_and_unprovenanced_boards(tmp_path):
+    """rc0/rc7 (routed promote) and plain boards with no provenance replay
+    as-is -- the restore must not touch them even when a snapshot exists."""
+    t0 = time.time()
+    _set_run("NOW", t0)
+    _touch(ap.pre_promote_seed_path(tmp_path), "(kicad_pcb OLD-SEED)\n")
+
+    routed_pcb = _touch(tmp_path / "BOARD.kicad_pcb", "(kicad_pcb ROUTED)\n")
+    src = _touch(_sub(tmp_path) / ap.PARENT_ROUTED, "(kicad_pcb ROUTED)\n")
+    ap.write_promote_provenance(
+        routed_pcb, run_id="NOW", run_started_at=t0,
+        source_board=src, source_kind="routed", fresh=True,
+    )
+    cli_app._restore_pre_promote_seed(tmp_path, routed_pcb)
+    assert routed_pcb.read_text() == "(kicad_pcb ROUTED)\n"
+    assert ap.read_provenance(routed_pcb) is not None
+
+    ap.provenance_path(routed_pcb).unlink()  # now: no provenance at all
+    cli_app._restore_pre_promote_seed(tmp_path, routed_pcb)
+    assert routed_pcb.read_text() == "(kicad_pcb ROUTED)\n"
+
+
 def test_rc6_preview_marks_fresh_partial_fresh(tmp_path):
     """A partial board from this run is shown with fresh=True (the normal rc6
     case: placed+composed but the parent never routed)."""

@@ -4417,6 +4417,23 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     #    preview: it misrepresents a build that actually placed (and usually
     #    routed) the design as one that never started.
     run_id, run_started_at = artifact_paths.ensure_run_context()
+    # Snapshot the board being replaced BEFORE any promote overwrites it. The
+    # rc6 path below promotes a PARTIAL board over <stem>.kicad_pcb (deliberate
+    # -- the preview must show what the build reached), which would otherwise
+    # destroy the only full-component seed `replay` can re-solve leaves from
+    # (KC-9G4YPT GAP 2: every rc6 run was unreplayable). Unconditional: one
+    # board copy is cheap and keeps the promote single-path.
+    if pcb.is_file():
+        _seed_snap = artifact_paths.pre_promote_seed_path(project_dir)
+        try:
+            _seed_snap.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(pcb, _seed_snap)
+        except OSError as _snap_err:
+            print(
+                f"[build]     warning: pre-promote seed snapshot failed "
+                f"({_snap_err}); an rc6 result will not be replayable",
+                file=sys.stderr,
+            )
     routed = _find_routed_parent(project_dir)
     # A routed board from a PREVIOUS run is not this run's output: treat it as
     # "no fresh routed parent" (rc6) and fall through to the inspection preview
@@ -5097,6 +5114,40 @@ def _resolve_synthesized_workspace(args: argparse.Namespace):
     return state, state_path, artifacts, stem, project_dir, root_sch, pcb
 
 
+def _restore_pre_promote_seed(project_dir: Path, pcb: Path) -> None:
+    """Undo an rc6 promote before replaying the workspace.
+
+    When promote provenance says ``<stem>.kicad_pcb`` is a promoted PARTIAL
+    board (the rc6 inspection preview), the full-component seed it replaced is
+    what leaf extraction must re-solve from -- replaying the partial dies with
+    the misleading "Leaf subcircuit ... has no matching components in the full
+    board state" (KC-9G4YPT GAP 2). Restore the snapshot written by
+    ``_promote_verify_fab`` and drop the now-inaccurate provenance record; a
+    missing snapshot (runs predating snapshotting) raises ``_ReplayInputError``
+    with the honest remedy instead.
+    """
+    prov = artifact_paths.read_provenance(pcb)
+    if not prov or prov.get("source_kind") != "partial":
+        return
+    snap = artifact_paths.pre_promote_seed_path(project_dir)
+    if snap.is_file():
+        shutil.copy(snap, pcb)
+        artifact_paths.provenance_path(pcb).unlink(missing_ok=True)
+        print(
+            f"[replay] {pcb.name} was an rc6 partial-board promote; restored "
+            f"the pre-promote seed snapshot so leaf extraction sees the full "
+            f"component set"
+        )
+        return
+    raise _ReplayInputError(
+        f"{pcb.name} is a promoted PARTIAL board (rc6 promote, run "
+        f"{prov.get('run_id')}) and no pre-promote seed snapshot exists -- "
+        "this run predates seed snapshotting. Re-build it from "
+        ".kicraft/state.json (`cli_app build`) instead of replaying the "
+        "workspace."
+    )
+
+
 def _cmd_replay(args: argparse.Namespace) -> int:
     """Re-run ONLY place + route on an already-synthesized workspace -- `build`
     minus its synthesize step. No LLM / synthesis stage runs, so a placement code
@@ -5116,6 +5167,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     try:
         (state, state_path, artifacts, stem,
          project_dir, root_sch, pcb) = _resolve_synthesized_workspace(args)
+        _restore_pre_promote_seed(project_dir, pcb)
     except _ReplayInputError as e:
         print(f"error: {e}", file=sys.stderr)
         return 3
