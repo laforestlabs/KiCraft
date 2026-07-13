@@ -48,6 +48,14 @@ from kicraft.autoplacer.config import (
     load_project_config,
     normalize_bounds,
 )
+from kicraft.cli._round_scheduler import (  # noqa: F401 (streaks re-exported for tests)
+    Finalize,
+    RoundPlan,
+    RoundScheduler,
+    _RC_LEAF_UNROUTABLE,
+    _update_quality_streak,
+    _update_unroutable_streak,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 # Repo root: this file is <repo>/kicraft/cli/autoexperiment.py, so the repo is
@@ -188,12 +196,6 @@ _LEAF_UNROUTABLE_RE = re.compile(
     r"No accepted routed leaf artifact produced for (\S+) after .*?: "
     r"([a-z_,]+)\s*$"
 )
-# Exit code for an early-abort on a structurally unroutable leaf. Any non-zero
-# leaf-phase rc is forwarded by cli_app._run_layout and mapped to a route
-# failure (rc6) by _layout_route_fab; distinct from argparse's 2.
-_RC_LEAF_UNROUTABLE = 3
-
-
 def _structural_unroutable_leaves(solve_stderr: str) -> dict[str, list[str]]:
     """Leaves the solve gave up on for a STRUCTURAL reason, {leaf_path: reasons}.
 
@@ -211,27 +213,6 @@ def _structural_unroutable_leaves(solve_stderr: str) -> dict[str, list[str]]:
         if any(r in _STRUCTURAL_UNROUTABLE_REASONS for r in reasons):
             out[m.group(1)] = reasons
     return out
-
-
-def _update_unroutable_streak(
-    streak: dict[str, int],
-    struct_fail: dict[str, list[str]],
-    abort_rounds: int,
-) -> str | None:
-    """Fold this round's structural leaf failures into the per-leaf streak and
-    return the leaf that has now failed ``>= abort_rounds`` consecutive rounds
-    (or ``None``). A leaf that did NOT fail structurally this round resets to 0
-    (it recovered). ``abort_rounds <= 0`` disables the early-abort.
-    """
-    for leaf in list(streak):
-        if leaf not in struct_fail:
-            streak[leaf] = 0
-    for leaf in struct_fail:
-        streak[leaf] = streak.get(leaf, 0) + 1
-    if abort_rounds <= 0:
-        return None
-    blown = sorted(p for p, n in streak.items() if n >= abort_rounds)
-    return blown[0] if blown else None
 
 
 def _quality_rejected_leaves(solve_stderr: str) -> dict[str, list[str]]:
@@ -252,39 +233,12 @@ def _quality_rejected_leaves(solve_stderr: str) -> dict[str, list[str]]:
     return out
 
 
-def _update_quality_streak(
-    streak: dict[str, dict[str, Any]],
-    quality_fail: dict[str, list[str]],
-    abort_rounds: int,
-) -> str | None:
-    """Fold this round's quality rejections into a per-leaf streak keyed by the
-    rejection SIGNATURE. A leaf whose SAME rejection persists ``>= abort_rounds``
-    consecutive rounds is stuck -- placement-param mutation is not helping it, so
-    it is returned so the search can finalize best-so-far instead of re-solving it
-    into the watchdog (WS2). A leaf that recovers or changes signature resets.
-    ``abort_rounds <= 0`` disables.
-    """
-    for leaf in list(streak):
-        if leaf not in quality_fail:
-            del streak[leaf]
-    for leaf, reasons in quality_fail.items():
-        sig = ",".join(reasons)
-        prev = streak.get(leaf)
-        if prev is not None and prev.get("sig") == sig:
-            prev["n"] += 1
-        else:
-            streak[leaf] = {"sig": sig, "n": 1}
-    if abort_rounds <= 0:
-        return None
-    blown = sorted(p for p, s in streak.items() if s.get("n", 0) >= abort_rounds)
-    return blown[0] if blown else None
-
-
 def _run_command(
     cmd: list[str],
     *,
     cwd: Path,
     timeout_s: int | None = None,
+    env: dict[str, str] | None = None,
 ) -> tuple[int, str, str]:
     proc = subprocess.run(
         cmd,
@@ -292,6 +246,7 @@ def _run_command(
         text=True,
         capture_output=True,
         timeout=timeout_s,
+        env=env,
     )
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -344,6 +299,37 @@ def _accepted_leaf_artifacts(project_dir: Path) -> list[dict[str, Any]]:
                 }
             )
     return accepted
+
+
+def _unpinned_leaf_selectors(
+    rounds_dir: Path, round_num: int, project_dir: Path
+) -> list[str]:
+    """Instance paths of leaves with NO accepted artifact on disk (N2a).
+
+    The full leaf set comes from the previous round's payload (every round
+    records ``all_leaf_artifacts``); acceptance is judged from DISK via
+    :func:`_accepted_leaf_artifacts`, so a leaf accepted in ANY earlier round
+    counts as pinned even if its latest re-solve was rejected.
+    """
+    prev = rounds_dir / f"round_{round_num - 1:04d}.json"
+    try:
+        payload = _load_json(prev)
+    except Exception:
+        return []
+    leaves = payload.get("all_leaf_artifacts") if isinstance(payload, dict) else None
+    if not isinstance(leaves, list):
+        return []
+    accepted_paths = {
+        str(a.get("instance_path") or "")
+        for a in _accepted_leaf_artifacts(project_dir)
+    }
+    out = {
+        str(leaf.get("instance_path") or "")
+        for leaf in leaves
+        if isinstance(leaf, dict) and str(leaf.get("instance_path") or "")
+        and str(leaf.get("instance_path") or "") not in accepted_paths
+    }
+    return sorted(out)
 
 
 def _board_only_leaf_dirs(project_dir: Path) -> list[Path]:
@@ -2344,8 +2330,6 @@ def main(argv: list[str] | None = None) -> int:
     print()
 
     start_ts = time.monotonic()
-    best_score = -1.0
-    kept_count = 0
     best_round: HierarchyRound | None = None
     resolved_config_path = args.config
     if not resolved_config_path:
@@ -2442,37 +2426,34 @@ def main(argv: list[str] | None = None) -> int:
         copper_accounting={},
     )
 
-    # Per-leaf consecutive structurally-unroutable round count, for early-abort.
-    unroutable_streak: dict[str, int] = {}
-    abort_rounds = args.unroutable_abort_rounds
-    # Per-leaf consecutive quality-rejection streak (unchanged rejection
-    # signature), so a leaf that keeps producing the same routed-but-rejected
-    # board stops being re-solved after this many rounds (WS2).
-    quality_streak: dict[str, dict[str, Any]] = {}
-    quality_abort_rounds = int(getattr(args, "quality_abort_rounds", 2) or 0)
-    # Consecutive rounds the PARENT route hit its FreeRouting timeout cap; a
-    # placement-param mutation does not rescue a 600 s router timeout (WS2).
-    parent_capout_streak = 0
-    # Wall-budget bookkeeping: an EMA of round wall-durations lets us skip
-    # launching a round that would blow the harness watchdog (WS2).
-    max_wall_s = float(getattr(args, "max_wall_s", 0.0) or 0.0)
-    ema_round_s: float | None = None
+    # Every WHETHER-to-run-another-round policy -- stop, round count, wall
+    # budget (+ the one-shot rescue round for unpinned leaves), streak aborts,
+    # parent cap-out, keep/best -- lives in the scheduler; the loop body below
+    # is mechanism only. See docs/plans/autoexperiment-round-scheduler.md.
+    scheduler = RoundScheduler(
+        rounds=args.rounds,
+        max_wall_s=float(getattr(args, "max_wall_s", 0.0) or 0.0),
+        unroutable_abort_rounds=args.unroutable_abort_rounds,
+        quality_abort_rounds=int(getattr(args, "quality_abort_rounds", 2) or 0),
+        rescue_enabled=not (args.only or args.parents_only),
+        unpinned_leaves=lambda rn: _unpinned_leaf_selectors(
+            rounds_dir, rn, project_dir
+        ),
+    )
 
-    for round_num in range(1, args.rounds + 1):
-        if _check_stop_request(work_dir):
+    while True:
+        decision = scheduler.plan_next(
+            elapsed_s=time.monotonic() - start_ts,
+            stop_requested=_check_stop_request(work_dir),
+        )
+        if isinstance(decision, Finalize):
+            if decision.announce:
+                print(decision.reason)
             break
-
-        # Wall budget: don't start a round the budget can't absorb -- finalize the
-        # best-so-far board instead of marching into a SIGKILL with zero artifacts.
-        if max_wall_s > 0 and ema_round_s is not None:
-            elapsed = time.monotonic() - start_ts
-            if elapsed + ema_round_s > max_wall_s:
-                print(
-                    f"[wall-budget] elapsed {elapsed:.0f}s + est. next round "
-                    f"{ema_round_s:.0f}s > budget {max_wall_s:.0f}s; finalizing "
-                    f"best-so-far after {round_num - 1} round(s)"
-                )
-                break
+        plan = decision
+        round_num = plan.round_num
+        if plan.note:
+            print(plan.note)
 
         _round_mono_start = time.monotonic()
         round_seed = rng.randint(0, 2**31 - 1)
@@ -2567,8 +2548,8 @@ def main(argv: list[str] | None = None) -> int:
             phase="running",
             rounds_total=args.rounds,
             round_num=round_num,
-            best_score=max(best_score, 0.0),
-            kept_count=kept_count,
+            best_score=max(scheduler.best_score, 0.0),
+            kept_count=scheduler.kept_count,
             latest_score=None,
             latest_marker=f"round {round_num} started",
             start_ts=start_ts,
@@ -2593,7 +2574,7 @@ def main(argv: list[str] | None = None) -> int:
                     rounds=args.leaf_rounds,
                     seed=round_seed,
                     config=current_round_config,
-                    only=args.only,
+                    only=list(plan.only) or args.only,
                     workers=effective_workers,
                     fast_smoke=args.fast_smoke,
                     leaf_order=[],
@@ -2631,7 +2612,7 @@ def main(argv: list[str] | None = None) -> int:
             rounds=args.leaf_rounds,
             seed=round_seed,
             config=current_round_config,
-            only=args.only,
+            only=list(plan.only) or args.only,
             workers=effective_workers,
             fast_smoke=args.fast_smoke,
             leaf_order=previous_leaf_order,
@@ -2644,8 +2625,8 @@ def main(argv: list[str] | None = None) -> int:
             phase="running",
             rounds_total=args.rounds,
             round_num=round_num,
-            best_score=max(best_score, 0.0),
-            kept_count=kept_count,
+            best_score=max(scheduler.best_score, 0.0),
+            kept_count=scheduler.kept_count,
             latest_score=None,
             latest_marker=f"round {round_num} leaf solve launched",
             start_ts=start_ts,
@@ -2680,10 +2661,20 @@ def main(argv: list[str] | None = None) -> int:
                 f"using existing leaf artifacts on disk"
             )
         else:
+            solve_env: dict[str, str] | None = None
+            if plan.leaf_deadline_s is not None:
+                # Rescue round: clamp the solve's per-leaf deadline to its
+                # budget slice -- the inherited KICRAFT_LEAF_SOLVE_MAX_WALL_S
+                # was sized for a full round and may exceed what is left.
+                solve_env = dict(os.environ)
+                solve_env["KICRAFT_LEAF_SOLVE_MAX_WALL_S"] = (
+                    f"{plan.leaf_deadline_s:.0f}"
+                )
             solve_start_ts = _timing_now()
             solve_rc, solve_stdout, solve_stderr = _run_command(
                 solve_cmd,
                 cwd=project_dir,
+                env=solve_env,
             )
             solve_elapsed_s = _record_timing(
                 round_timing_breakdown,
@@ -2707,42 +2698,19 @@ def main(argv: list[str] | None = None) -> int:
                 for line in failure_lines[-20:] or solve_stderr.splitlines()[-5:]:
                     print(f"  [solve] {line}")
 
-            # Early-abort on a structurally unroutable leaf: the outer search
-            # only mutates placement params, which cannot fix a router throw or
-            # an unrepairable illegal placement, and each retried round re-runs
-            # the leaf's whole internal ladder -- the exact spiral that turned a
-            # fast, diagnosable leaf failure into a 2400s watchdog kill (rc=-9,
-            # empty build.log). Surface it as a route failure NAMING the leaf.
-            struct_fail = _structural_unroutable_leaves(solve_stderr)
-            blown_leaf = _update_unroutable_streak(
-                unroutable_streak, struct_fail, abort_rounds)
-            if blown_leaf is not None:
-                print(
-                    f"[abort] leaf {blown_leaf} is structurally unroutable "
-                    f"({','.join(struct_fail[blown_leaf])}) after "
-                    f"{unroutable_streak[blown_leaf]} round(s) -- stopping the "
-                    f"search instead of retrying to the build watchdog wall. "
-                    f"Reported as a route failure with the evidence above."
-                )
-                return _RC_LEAF_UNROUTABLE
-
-            # Quality-rejection streak: a leaf that keeps producing the SAME
-            # routed-but-rejected result (unconnected>0, DRC reject) round after
-            # round is not being helped by placement mutation. Stop re-solving and
-            # finalize best-so-far (a graded partial) rather than burning the rest
-            # of the search on it -- unlike the structural abort, its best-effort
-            # board is kept, so this `break`s to the finalize path (WS2).
-            quality_fail = _quality_rejected_leaves(solve_stderr)
-            stuck_leaf = _update_quality_streak(
-                quality_streak, quality_fail, quality_abort_rounds)
-            if stuck_leaf is not None:
-                print(
-                    f"[quality-stop] leaf {stuck_leaf} produced the same rejection "
-                    f"({quality_streak[stuck_leaf]['sig']}) for "
-                    f"{quality_streak[stuck_leaf]['n']} consecutive round(s) -- "
-                    f"placement mutation is not improving it; finalizing "
-                    f"best-so-far instead of re-solving into the watchdog."
-                )
+            # Streak policies over the solve outcome: a structural router
+            # throw / illegal placement aborts with an exit code (placement
+            # mutation cannot fix it -- the spiral that used to run to the
+            # 2400s watchdog); a repeated identical quality rejection breaks
+            # to the finalize path with its best-effort board kept (WS2).
+            solve_verdict = scheduler.observe_solve(
+                struct_fail=_structural_unroutable_leaves(solve_stderr),
+                quality_fail=_quality_rejected_leaves(solve_stderr),
+            )
+            if solve_verdict is not None:
+                print(solve_verdict.reason)
+                if solve_verdict.rc_hint is not None:
+                    return solve_verdict.rc_hint
                 break
 
         solve_payload = _extract_solve_json_payload(solve_stdout)
@@ -2814,8 +2782,8 @@ def main(argv: list[str] | None = None) -> int:
                 phase="running",
                 rounds_total=args.rounds,
                 round_num=round_num,
-                best_score=max(best_score, 0.0),
-                kept_count=kept_count,
+                best_score=max(scheduler.best_score, 0.0),
+                kept_count=scheduler.kept_count,
                 latest_score=None,
                 latest_marker=f"round {round_num} parent composed",
                 start_ts=start_ts,
@@ -2870,8 +2838,8 @@ def main(argv: list[str] | None = None) -> int:
                 phase="running",
                 rounds_total=args.rounds,
                 round_num=round_num,
-                best_score=max(best_score, 0.0),
-                kept_count=kept_count,
+                best_score=max(scheduler.best_score, 0.0),
+                kept_count=scheduler.kept_count,
                 latest_score=None,
                 latest_marker=f"round {round_num} parent routing launched",
                 start_ts=start_ts,
@@ -2929,25 +2897,20 @@ def main(argv: list[str] | None = None) -> int:
                 parent_output_json
             )
 
-            # Parent cap-out early stop: a parent route that ran up to its
-            # FreeRouting timeout cap and still didn't complete won't be rescued by
-            # mutating placement params -- the router needs more time than the cap
-            # allows. After 2 consecutive capped-out rounds, finalize best-so-far
-            # instead of retrying into the watchdog (WS2).
-            _route_cap_s = float(
-                round_candidate_config.get("parent_freerouting_timeout_cap_s", 600)
+            # Parent cap-out early stop: consecutive rounds at the FreeRouting
+            # timeout cap finalize best-so-far -- placement mutation cannot
+            # rescue a router timeout (WS2).
+            capout_verdict = scheduler.observe_parent(
+                routed=parent_routed,
+                elapsed_s=parent_route_elapsed_s,
+                cap_s=float(
+                    round_candidate_config.get(
+                        "parent_freerouting_timeout_cap_s", 600
+                    )
+                ),
             )
-            if (not parent_routed) and parent_route_elapsed_s >= 0.9 * _route_cap_s:
-                parent_capout_streak += 1
-            else:
-                parent_capout_streak = 0
-            if parent_capout_streak >= 2:
-                print(
-                    f"[parent-capout] parent route ran to its ~{_route_cap_s:.0f}s "
-                    f"FreeRouting timeout cap for {parent_capout_streak} consecutive "
-                    f"round(s) without completing -- placement mutation cannot rescue "
-                    f"a router timeout; finalizing best-so-far."
-                )
+            if capout_verdict is not None:
+                print(capout_verdict.reason)
                 break
             _write_live_status(
                 status_json_path,
@@ -2955,8 +2918,8 @@ def main(argv: list[str] | None = None) -> int:
                 phase="running",
                 rounds_total=args.rounds,
                 round_num=round_num,
-                best_score=max(best_score, 0.0),
-                kept_count=kept_count,
+                best_score=max(scheduler.best_score, 0.0),
+                kept_count=scheduler.kept_count,
                 latest_score=None,
                 latest_marker=f"round {round_num} parent routing complete",
                 start_ts=start_ts,
@@ -3075,23 +3038,19 @@ def main(argv: list[str] | None = None) -> int:
         duration_s = round(time.monotonic() - t0, 2)
         round_timing_breakdown["round_total"] = round(duration_s, 3)
 
-        improvement_vs_best = (
-            score if best_score < 0.0 else round(score - best_score, 3)
-        )
-        keep_threshold = 0.5
-        # A round can only be promoted to "best" if both the leaf solve
-        # subprocess (skipped in --parents-only mode) and the parent
-        # compose subprocess (skipped in --leaves-only mode) succeeded.
-        # Without this gate, a failed first round (best_score < 0.0)
-        # always becomes the new best, polluting subsequent
-        # improvement_vs_best comparisons; a non-first round whose
-        # subprocess crashed but whose stale-cache score happens to
-        # exceed the threshold can also be wrongly promoted.
+        # Keep/best is scheduler policy; capture the improvement BEFORE
+        # observing so it is measured against the previous best. The
+        # subprocess gate stays here -- only the mechanism knows which
+        # subprocesses this round actually ran (--parents-only skips the
+        # solve, --leaves-only skips the compose); without it a crashed
+        # round whose stale-cache score clears the threshold would be
+        # wrongly promoted to best.
+        improvement_vs_best = scheduler.improvement_vs_best(score)
         subprocesses_ok = (args.parents_only or solve_rc == 0) and (
             args.leaves_only or parent_route_rc == 0
         )
-        is_meaningful_improvement = subprocesses_ok and (
-            best_score < 0.0 or improvement_vs_best >= keep_threshold
+        is_meaningful_improvement = scheduler.observe_round_end(
+            score=score, subprocesses_ok=subprocesses_ok
         )
 
         long_pole_leafs = leaf_timing_summary.get("long_pole_leafs", [])
@@ -3150,7 +3109,7 @@ def main(argv: list[str] | None = None) -> int:
             score_breakdown=score_breakdown,
             score_notes=score_notes
             + [
-                f"keep_threshold={keep_threshold:.2f}",
+                f"keep_threshold={scheduler.keep_threshold:.2f}",
                 f"meaningful_improvement={is_meaningful_improvement}",
                 f"leaf_timing_total_s={float(leaf_timing_summary.get('total_leaf_time_s', 0.0) or 0.0):.3f}",
                 f"leaf_timing_avg_s={float(leaf_timing_summary.get('avg_leaf_time_s', 0.0) or 0.0):.3f}",
@@ -3167,8 +3126,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         if round_result.kept:
-            best_score = score
-            kept_count += 1
+            # (scheduler already folded score into best_score/kept_count)
             best_round = round_result
             _best_config = dict(round_candidate_config)
 
@@ -3249,8 +3207,8 @@ def main(argv: list[str] | None = None) -> int:
             phase="running",
             rounds_total=args.rounds,
             round_num=round_num,
-            best_score=max(best_score, score),
-            kept_count=kept_count,
+            best_score=max(scheduler.best_score, score),
+            kept_count=scheduler.kept_count,
             latest_score=score,
             latest_marker=f"round {round_num} {'kept' if round_result.kept else 'discarded'}",
             start_ts=start_ts,
@@ -3285,8 +3243,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         # Fold this round's wall-duration into the EMA the wall-budget gate reads.
-        _round_dur = max(0.0, time.monotonic() - _round_mono_start)
-        ema_round_s = _round_dur if ema_round_s is None else 0.5 * ema_round_s + 0.5 * _round_dur
+        scheduler.observe_duration(max(0.0, time.monotonic() - _round_mono_start))
 
     phase = "done"
     if _check_stop_request(work_dir):
@@ -3298,8 +3255,8 @@ def main(argv: list[str] | None = None) -> int:
         "status": phase,
         "master_seed": master_seed,
         "rounds_requested": args.rounds,
-        "best_score": max(best_score, 0.0),
-        "kept_count": kept_count,
+        "best_score": max(scheduler.best_score, 0.0),
+        "kept_count": scheduler.kept_count,
         "best_round": asdict(best_round) if best_round else None,
         "started_at": start_iso,
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -3317,9 +3274,9 @@ def main(argv: list[str] | None = None) -> int:
         phase=phase,
         rounds_total=args.rounds,
         round_num=best_round.round_num if best_round else 0,
-        best_score=max(best_score, 0.0),
-        kept_count=kept_count,
-        latest_score=max(best_score, 0.0) if best_round else None,
+        best_score=max(scheduler.best_score, 0.0),
+        kept_count=scheduler.kept_count,
+        latest_score=max(scheduler.best_score, 0.0) if best_round else None,
         latest_marker="run complete",
         start_ts=start_ts,
         current_stage="complete",
@@ -3362,7 +3319,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print()
     print("=== Hierarchical Autoexperiment Complete ===")
-    print(f"Best score: {max(best_score, 0.0):.2f}")
+    print(f"Best score: {max(scheduler.best_score, 0.0):.2f}")
     if best_round:
         print(f"Best round: {best_round.round_num}")
         print(

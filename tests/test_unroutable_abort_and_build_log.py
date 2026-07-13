@@ -18,6 +18,7 @@ from pathlib import Path
 
 from kicraft.cli.autoexperiment import (  # noqa: F401 (re-exported below)
     _quality_rejected_leaves,
+    _unpinned_leaf_selectors,
     _update_quality_streak,
     _RC_LEAF_UNROUTABLE,
     _structural_unroutable_leaves,
@@ -50,6 +51,42 @@ def test_structural_parser_flags_router_throw_and_illegal_placement():
     assert _structural_unroutable_leaves(_LEGALITY_REPAIR) == {
         "/abc": ["leaf_pre_stamp_legality_repair", "routing_exception"]
     }
+
+
+def _write_json(path: Path, payload) -> None:
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_unpinned_leaf_selectors_disk_acceptance_wins(tmp_path):
+    # N2a: the wall-budget rescue targets leaves with no accepted artifact ON
+    # DISK. A leaf accepted in ANY earlier round (disk truth) is pinned even
+    # if the latest round's payload shows accepted=false for it.
+    project = tmp_path
+    rounds_dir = tmp_path / "rounds"
+    _write_json(rounds_dir / "round_0002.json", {
+        "all_leaf_artifacts": [
+            {"instance_path": "/mcu-leaf", "accepted": False},
+            {"instance_path": "/power-leaf", "accepted": False},
+        ],
+    })
+    # POWER leaf: accepted artifact on disk. MCU leaf: none.
+    d = project / ".experiments" / "subcircuits" / "power__abc"
+    _write_json(d / "metadata.json", {"sheet_name": "POWER"})
+    _write_json(d / "solved_layout.json", {
+        "instance_path": "/power-leaf",
+        "validation": {"accepted": True},
+        "traces": [], "vias": [],
+    })
+
+    assert _unpinned_leaf_selectors(rounds_dir, 3, project) == ["/mcu-leaf"]
+
+
+def test_unpinned_leaf_selectors_no_prior_round(tmp_path):
+    # Round 1 has no prior payload -> no rescue set (nothing to enumerate).
+    assert _unpinned_leaf_selectors(tmp_path / "rounds", 1, tmp_path) == []
 
 
 def test_deadline_expiry_is_not_structural():

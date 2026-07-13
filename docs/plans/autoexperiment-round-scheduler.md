@@ -1,6 +1,20 @@
 # Autoexperiment round loop → `RoundScheduler` refactor
 
-**Status:** planned (this doc is the design). Written 2026-07-13 against `484620e`.
+**Status:** policies extracted 2026-07-13 — `kicraft/cli/_round_scheduler.py` now owns all
+seven policies (stop, round count, wall-budget EMA, rescue, both streaks, cap-out, keep/best),
+unit-tested in `tests/test_round_scheduler.py`; `main()` holds zero policy mutables and zero
+scheduling `if`s. **Deliberate reordering vs the original steps below:** the policy extraction
+(old step 2+3) landed FIRST because it is six small verifiable edits, while the mechanical
+`_run_round` body-move (old step 1) is an ~830-line transformation with thin integration
+coverage — it remains OPEN as the final legibility step, together with step 4 (explicit
+deadline flag; the rescue still uses the `KICRAFT_LEAF_SOLVE_MAX_WALL_S` env channel, which
+is at least the pre-existing WS2 deadline mechanism, scoped to one subprocess invocation).
+The N2a rescue patch was absorbed and deleted. Parity: verified by re-building KC-9G4YPT
+(1/601) before/after — identical round/phase/verdict sequence (3 leaves-only rounds
+KEPT/discard/discard at leafs=2/2, auto-pin 2/2, 3 parents-only rounds, rc6 at the known
+compose-nesting wall); only RNG-derived lines differ (master seed is drawn fresh per build,
+so mutate draws and pin-round choices differ run to run — pre-existing behavior, not the
+refactor).
 **Goal:** stop accreting `if`-plus-mutable-flag special cases in `main()`'s round loop.
 Every scheduling decision moves into one small, unit-testable object; the loop body
 becomes pure mechanism. Net effect: code REMOVED from `main()`, not added beside it.
@@ -29,8 +43,8 @@ Current policy inventory (each one is state threaded through the loop body):
 
 The N2a rescue round was implemented, reviewed, and pulled back out precisely because
 it was the seventh special case: three more mutables plus an env-var clamp woven into
-the budget gate. The working implementation (with its tests) is preserved verbatim in
-`docs/plans/patches/n2a-wall-rescue.patch`; it becomes a ~15-line scheduler policy here.
+the budget gate. It was re-landed as `RoundScheduler._rescue_plan` (the interim patch
+file that preserved it, `docs/plans/patches/n2a-wall-rescue.patch`, is absorbed and gone).
 
 None of these policies is unit-tested today as a policy — they are only exercised by
 integration tests that run real subprocesses, so a budget-arithmetic bug costs a
@@ -118,33 +132,38 @@ an explicit `--max-wall-s` flag on the `solve_subcircuits` command line in
 `_build_solve_cmd` (adding the flag to solve_subcircuits if it only reads the env
 today, keeping the env as fallback). Explicit beats ambient.
 
-## Migration steps (each lands green on its own)
+## Migration steps (reordered in practice — policies landed first, see Status)
 
-1. **Extract `_run_round(plan, ctx)`** — mechanical move of the loop body into a
-   function returning `RoundOutcome`. `ctx` is one dataclass holding the loop's
-   read-only locals (paths, args, status writers). No behavior change; existing
-   integration tests are the check. *This is the only risky step — do it as a pure
-   move, no edits, so the diff reviews as indentation.*
-2. **Introduce `RoundScheduler`** with the existing policies only (round count,
-   stop, wall-budget EMA, the three streaks, keep/best promotion feeding
-   `_best_config`). Delete the corresponding loop-scoped mutables from `main()`.
-   Add unit tests driving the scheduler with synthetic `RoundOutcome`s — budget
-   exhaustion, streak aborts, EMA math — no subprocesses, milliseconds each.
-3. **Port the N2a rescue policy** from `docs/plans/patches/n2a-wall-rescue.patch`
-   (logic + its two `_unpinned_leaf_selectors` tests, which move nearly verbatim —
-   the selector helper itself stays in autoexperiment.py or moves to the scheduler
-   module). Delete the patch file in the same commit.
-4. **Explicit deadline flag** replacing the env clamp (see above). Small, separate.
+1. **DONE — Introduce `RoundScheduler`** with the existing policies (round count,
+   stop, wall-budget EMA, the three streaks, keep/best verdict). The loop-scoped
+   mutables are gone from `main()`; unit tests drive the scheduler with synthetic
+   outcomes — no subprocesses, milliseconds each. The scheduler API grew two
+   mid-round observation points beyond the sketch above (`observe_solve`,
+   `observe_parent`) because the streak aborts must fire BEFORE the parent
+   compose runs — an end-of-round-only `observe()` would waste a compose per
+   aborted round.
+2. **DONE — N2a rescue policy** (`RoundScheduler._rescue_plan` + the
+   `_unpinned_leaf_selectors` disk probe injected as a callable); patch absorbed.
+3. **OPEN — Extract `_run_round(plan, ctx)`** — mechanical move of the loop body
+   into a function returning an outcome struct. No behavior change; do it as a
+   pure move so the diff reviews as indentation. This is what shrinks the driver
+   loop to ~15 lines.
+4. **OPEN — Explicit deadline flag** replacing the env clamp (see above).
 
 ## Acceptance criteria
 
-- `main()` contains **zero** scheduling `if`s and zero loop-scoped policy mutables;
-  the driver loop is ≤ ~15 lines.
-- Every policy has a unit test that runs without subprocesses.
-- Behavior parity: `kicraft replay` of a frozen run (e.g. the 20260710 batch's
-  run_09) produces an identical round sequence and verdict before/after step 2.
+- `main()` contains **zero** scheduling `if`s and zero loop-scoped policy
+  mutables — **met**; the ≤ ~15-line driver loop lands with step 3.
+- Every policy has a unit test that runs without subprocesses — **met**
+  (`tests/test_round_scheduler.py`).
+- Behavior parity on a frozen input — **met** via a full `cli_app build` re-run
+  of KC-9G4YPT (1/601) before/after: identical round/phase/verdict sequence;
+  RNG-derived lines (mutate draws, pin-round choice) differ because build draws
+  a fresh master seed each run — pre-existing. (Note: `replay --quality=fast`
+  does NOT exercise this loop — it drives solve/compose directly — so parity
+  must be checked with a full build.)
 - `docs/plans/patches/n2a-wall-rescue.patch` is gone (absorbed), and the rescue
-  fires on a synthetic budget-starved outcome in the unit suite.
+  fires on a synthetic budget-starved outcome in the unit suite — **met**.
 
 ## Non-goals
 
