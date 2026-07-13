@@ -2,23 +2,18 @@
 
 **Status:** PR-N1..N4 LANDED 2026-07-13 (`a546274`, `56f48b3`, `2567701`, `21389c4`), each
 unit-tested and parity/behavior-verified. **The e2e genre flip is blocked by a FIFTH blocker
-discovered during PR-N4 verification** (see below): the ring leaf's own internal routing
-crosses its interior — two ~35 mm chords straight through the annulus middle (probed on the
-real 1/601 leaf artifact: remaining band ≈ 22×9 mm, MCU needs 23×16) — so the real leaf has no
-nestable hole, `interior_free_rects` is honestly empty, and the demotion wave correctly
-declines to fire. PR-N3 is visibly working (circumscribed 82.9 → 70.3 on 1/601).
+discovered during PR-N4 verification**: the real ring leaf has no nestable hole
+(12.9×16.0 vs the 24.4×22.0 the guest needs), so the demotion wave correctly declines to
+fire. PR-N3 is visibly working (circumscribed 82.9 → 70.3 on 1/601). **PR-N5 is scoped and
+drafted (2026-07-13, measured decomposition — see the PR-N5 section at the bottom); it is
+the next implementation step.**
 
-**Blocker 5 (OPEN, owns the genre now): ring-leaf interior discipline at LEAF routing time.**
-FreeRouting freely routes chords through the annulus centre during the leaf solve — nothing
-makes the interior precious. DSN keepouts CANNOT protect it (FreeRouting 1.9.0 ignores
-keepouts/boundary for wires — the known gotcha). Candidate designs, in fix-at-source order:
-(a) **deterministic ring pre-routing** — the ring placement is deterministic (ArraySpec), so
-the DATA chain (neighbor-to-neighbor chords) and power distribution (arcs along the ring /
-radial stubs to the interior companions) can be stamped as locked pre-routes before
-FreeRouting, leaving it only cleanup; (b) a REAL obstacle (netless pad/footprint or locked
-copper) parked in the interior during the leaf route and removed after — physical-obstacle
-encoding of "keep clear", the only language FR respects (array-leaf-purity precedent).
-(a) is the principled fix; scope it against `array_placement.py` + `leaf_routing.py`.
+**Blocker 5 (OPEN, owns the genre now): ring-leaf interior discipline.** Scoped 2026-07-13
+by probing the accepted 1/601 leaf artifact — the original "two ~35 mm chords" theory was
+only part of the story; the measured decomposition is FOUR independent contributors (see
+the PR-N5 section at the bottom for the full design). DSN keepouts still CANNOT protect the
+interior (FreeRouting 1.9.0 ignores keepouts/boundary for wires — the known gotcha), so the
+physical legs speak the only language FR respects: locked pre-routed copper.
 **Goal:** a brief that requests a shaped outline with a hollow leaf (⌀60 LED ring, etc.) composes
 with the companion leaf NESTED in the hollow, so the requested shape actually fits. Anchor
 cases: projects `1/601` (KC-9G4YPT) and `1/600` (KC-CV4NE3) — 2 leaves, LED RING annulus
@@ -132,3 +127,114 @@ Verify ($0, headline): 1/601 + 1/600 → wave-2 nests MCU, shape fitted ~[60,60]
   candidate (cost, not corruption); all copper sits ≥2.5 mm inside the circle.
 - 475 mm star genre may or may not benefit (PR-N3 polygon branch + nesting); re-measure after
   landing, promise nothing.
+
+## PR-N5 — ring interior discipline (blocker 5; flips the genre)
+
+### Measured root cause (1/601 accepted ring leaf, probed 2026-07-13)
+
+Today's hole is **12.9×16.0 mm**; the MCU guest needs **24.4×22.0** (21.4×19.0 occupied —
+essentially its whole 21.5×19.3 outline, nothing to reclaim on the guest side — plus 2×1.5
+`nest_margin_mm`). Four independent contributors, each measured by recomputing
+`compute_interior_free_rects` on the real blocker set with that contributor removed:
+
+1. **Trace-AABB bloat (representation).** `_trace_blocker_rects`
+   (`subcircuit_composer.py:1635`) makes ONE axis-aligned bbox per segment; a 45° chord in
+   the annulus band becomes a fat 8.9×8.9 square whose corner reaches r=12.8 while the real
+   copper stays at r≥20. Twelve rotated-LED hops tile these squares over the interior.
+2. **Real interior +5V routing.** FreeRouting feeds the interior decaps with arcs dipping to
+   r=15.2–18.0. (Zero DATA nets cross — the chain chords are already band-disciplined; the
+   original "35 mm data chords" theory was wrong.)
+3. **Interior decaps by design.** `_place_companion_decaps` ring branch
+   (`array_placement.py:529-562`) drops C3/C4 radially INWARD at r≈17.8 — its comment "the
+   ring interior is otherwise empty" is exactly the premise nesting invalidates.
+4. **Closing-band standoff (hole rule).** The hole excludes `nest_min_hole_side_mm/2` = 4 mm
+   around ALL copper — a gap-sealing artifact doing double duty as clearance. Electrically
+   ~0.5 mm pad-margin + ~1 mm standoff is already generous vs the 0.2 mm rule.
+
+No subset suffices (measured): tight traces alone → 14.9×16.0; + interior routing cleared →
+14.9×16.0; + decaps out → 17.9×14.0; + decoupled standoff 1.5 → 23.9×20.0 (still short);
+**all four at standoff 1.0 / margin 1.0 → ~25.9×22.0 vs needed 23.4×21.0 — fits with real
+slack.** Every leg is load-bearing.
+
+The ring's pad geometry makes the physical legs deterministic and rotationally symmetric
+(`_orient_ring` rotates every member with the circle): on 1/601, **+5V pads all at r=21.1
+(inner corner), DATA at r=23.4–24.9 (mid-band), GND all at r=26.9 (outer corner)**. A +5V
+bus is 12 identical ~10.9 mm pad-to-pad chords whose sagitta dips only to r=20.4. Leaf zones
+are NOT stamped into the parent (`_stamp_subcircuit_subprocess.py` payload carries only
+components/traces/vias/silk), so the stamped +5V *tracks* are the distribution that matters
+at parent scope; GND is owned by the parent pour.
+
+### Legs (one PR, two commits: representation first, physical second)
+
+**N5-r1 — tight trace rects for the hole computation only.** In `extract_leaf_blocker_set`
+(`subcircuit_composer.py:2185`), compute the holes from a copy of the blocker set whose
+trace rects are subdivided into ≤`_NEST_GRID_MM` pieces (each piece's bbox still a copper
+superset). The published blocker set keeps today's conservative one-rect-per-segment AABBs,
+so `can_overlap_sparse`, repulsion, escape and validation are untouched — zero seam-regression
+surface.
+
+**N5-r2 — decouple sealing from standoff in `compute_interior_free_rects`
+(`subcircuit_composer.py:2010`).** Keep the morphological close at `min_side_mm/2` for
+TOPOLOGY (outside/interior labeling — inter-member gaps stay sealed, open bays stay open),
+but exclude from the hole only a dilation by new cfg `nest_hole_standoff_mm` (default 1.0)
+around occupied cells. Drop `nest_margin_mm` 1.5 → 1.0 (`config.py:379`). Effective real
+copper-to-copper spacing stays ≥ ~3 mm (0.5 pad-margin each side + 1.0 + 1.0). Update the
+N1 tests that pin the closing-band-excluded semantics — deliberate rule change.
+
+**N5-p1 — ring decaps into the band, not the interior.** Rework the ring branch of
+`_place_companion_decaps` (`array_placement.py:529`): place decap *k* at the gap-midpoint
+angle between members k and k+1, tangentially oriented at the +5V-pad radius (≈21 on 1/601),
++5V pad toward the bus, GND pad tied by a `via_at_end` stub to the B.Cu pour. Existing
+perimeter fallback stays as the too-tight escape hatch. This is canonical ring construction
+(a real LED-ring board keeps the middle clear — often physically cut out), not a nesting
+hack; it applies to every ring. Kill switch `array_ring_band_decaps` (default on).
+
+**N5-p2 — deterministic +5V ring bus (`array_router.py`).** New `array_ring_power_specs`:
+for every fully-present `pattern=="ring"` array, emit `BreakoutSpec` ties chaining the
+members' +5V pads around the circle (member→member chord, or member→decap→member where a
+band decap occupies the gap) — a CLOSED loop, so one or two guard-dropped ties cannot
+disconnect the bus. Compose into `_breakout_specs` in `leaf_routing.py` (:638-652) as a
+SEPARATE list from `_arr_specs` so the array stamp gate (:683-711) keeps measuring in-row
+DATA hops only. The existing `add_breakout_stubs` foreign-pad/copper guards + the
+no-silent-handoff log stay the honesty layer. Kill switch `array_ring_power_bus` (default
+on). GND ties are NOT stamped initially — LED GND pads sit on the outer corner (r=26.9)
+where FR's shortest paths never enter the interior, and the pours own GND; if replay still
+shows interior GND dips, extend the same generator with outer-arc GND ties (one-line
+decision point, recorded in the verify notes).
+
+### Contingency (only if replay still shows interior crossings)
+
+**N5-e — temporary REAL obstacle:** netless dual-layer pad footprint parked at the ring
+centre during the leaf route, removed after `import_routed_copper`, before acceptance
+(array-leaf-purity precedent). Not in the initial PR — pre-routing should leave FR nothing
+to cross with; add only on measured evidence.
+
+### Predicted outcome
+
++5V bus innermost copper ≈ r 20.4 → interior free disc r ≈ 18.9 → hole ≈ 24×26+ vs needed
+23.4×21.0. Then the already-landed machinery takes over: N1 containment allows the pair, N2
+Step 8.8 nests the MCU, N4 wave-2 demotes the contradicting `J1 {edge: bottom}` pin, N3
+occupied-geometry fit measures ~⌀55 vs requested ⌀60 → CONFORMANT.
+
+### Tests
+
+- `tests/test_leaf_interior_nesting.py`: hole-with-standoff semantics (annulus fixture hole
+  GROWS vs closing-band rule; corridor sealing still holds; seam regression stays pinned);
+  subdivided-trace tightness (diagonal chord no longer eats the hole; straight segment
+  identical).
+- `array_router` ring-bus test (style of the daisy-chain tests): 12-member ring fixture →
+  12 closed-loop +5V ties, chain order deterministic, decap-in-gap reroutes through it;
+  power specs excluded from the stamp-gate stats.
+- `array_placement` band-decap test: gap-midpoint placement, rotation-with-ring, perimeter
+  fallback when the gap is too tight.
+
+### Verify ($0, headline = the genre flip)
+
+1. Rebuild 1/601 + 1/600 from state.json, twice each (route noise): ring leaf accepted with
+   interior probe showing hole ≥ 23.4×21.0 and no track with true min-distance < ~19 from
+   ring centre; N2 nests the MCU, N4 demotes J1, shape fitted ~[60,60], parent routed,
+   `outline-shape CONFORMANT`, 0 shorts / 0 unconnected, no connector_stranded.
+2. Regression: replay the KC-HN59RJ ring project (run_33 — band decaps + bus change hit it;
+   must stay ERC 0 / DRC 0/0) and one green rectangular project (no array path touched).
+3. Probe scripts from scoping live in the session scratchpad; re-derive from this section's
+   numbers if needed (they are one-file pcbnew/composer probes).
