@@ -173,6 +173,7 @@ def circumscribe(
     max_pt,
     *,
     margin_mm: float = 0.5,
+    content_rects=None,
     **params,
 ) -> PolygonOutline:
     """Smallest named polygon that fully contains the content rectangle
@@ -182,6 +183,12 @@ def circumscribe(
     ``min_pt`` / ``max_pt`` are anything with ``.x`` / ``.y`` (e.g. autoplacer
     ``Point``). The placed circuit stays put; the shape grows around it so
     nothing lands outside ``Edge.Cuts``.
+
+    ``content_rects`` (``(min_pt, max_pt)`` pairs): the TRUE occupied
+    geometry. When given, the polygon must cover every rect (inflated by
+    ``margin_mm``) instead of the single AABB, so a hollow composition gets a
+    shape sized to its occupied extent, not the AABB's diagonal
+    (shaped-compose-leaf-nesting PR-N3). Centering stays on the AABB.
     """
     unit = build_unit_polygon(name, **params)
     cx = (min_pt.x + max_pt.x) / 2.0
@@ -190,12 +197,24 @@ def circumscribe(
     hh = (max_pt.y - min_pt.y) / 2.0
     target = box(cx - hw - margin_mm, cy - hh - margin_mm,
                  cx + hw + margin_mm, cy + hh + margin_mm)
+    if content_rects is not None and not content_rects:
+        content_rects = None  # empty = no signal; fall back to the AABB
+    content_boxes = None
+    if content_rects is not None:
+        content_boxes = [
+            box(min(a.x, b.x) - margin_mm, min(a.y, b.y) - margin_mm,
+                max(a.x, b.x) + margin_mm, max(a.y, b.y) + margin_mm)
+            for a, b in content_rects
+        ]
 
     def _placed(scale: float) -> Polygon:
         return _translate(_scale(unit, scale, scale, origin=(0.0, 0.0)), cx, cy)
 
     def _ok(scale: float) -> bool:
-        return bool(_placed(scale).covers(target))
+        placed = _placed(scale)
+        if content_boxes is not None:
+            return all(placed.covers(b) for b in content_boxes)
+        return bool(placed.covers(target))
 
     hi = max(hw, hh, 1.0) * 2.0 + 2.0 * margin_mm
     guard = 0

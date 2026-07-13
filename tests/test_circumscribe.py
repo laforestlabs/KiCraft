@@ -107,6 +107,87 @@ def test_fit_noop_when_no_requested_shape():
     assert st.manual_outline is None
 
 
+# --------------------------------------------------------------------------- #
+# PR-N3: occupied-geometry fit (shaped-compose-leaf-nesting)
+# --------------------------------------------------------------------------- #
+
+def _ring_rects(cx=28.5, cy=28.5, r=24.0, n=12, half=2.5):
+    import math
+
+    rects = []
+    for k in range(n):
+        ang = 2.0 * math.pi * k / n
+        x, y = cx + r * math.cos(ang), cy + r * math.sin(ang)
+        rects.append((Point(x - half, y - half), Point(x + half, y + half)))
+    return rects
+
+
+def test_circumscribe_content_rects_fits_occupied_not_aabb_diagonal():
+    # A 57x57 AABB whose occupied geometry is an annulus of 12 pads at r=24:
+    # AABB mode must pay the diagonal (⌀ >= ~80); occupied mode fits ~⌀55.
+    rects = _ring_rects()
+    aabb = circumscribe("circle", Point(0, 0), Point(57, 57))
+    occ = circumscribe(
+        "circle", Point(0, 0), Point(57, 57), content_rects=rects
+    )
+    assert aabb.width_mm >= 79.0
+    assert 52.0 <= occ.width_mm <= 58.0, occ.width_mm
+    # Every occupied rect is inside the tighter fit.
+    for r0, r1 in rects:
+        assert occ.contains_rect(r0.x, r0.y, r1.x, r1.y, tol=0.0)
+
+
+def test_circumscribe_content_rects_solid_matches_aabb():
+    # Content rects that reach the AABB corners: identical fit to AABB mode.
+    rects = [(Point(0, 0), Point(40, 20))]
+    a = circumscribe("circle", Point(0, 0), Point(40, 20))
+    b = circumscribe("circle", Point(0, 0), Point(40, 20), content_rects=rects)
+    assert abs(a.width_mm - b.width_mm) < 0.1
+
+
+def test_circumscribe_empty_content_rects_falls_back_to_aabb():
+    a = circumscribe("circle", Point(0, 0), Point(40, 20))
+    b = circumscribe("circle", Point(0, 0), Point(40, 20), content_rects=[])
+    assert abs(a.width_mm - b.width_mm) < 1e-9
+
+
+def test_polygon_circumscribe_content_rects_shrinks():
+    from kicraft.shapes import circumscribe as circumscribe_polygon
+
+    rects = _ring_rects()
+    aabb_poly = circumscribe_polygon("hexagon", Point(0, 0), Point(57, 57))
+    occ_poly = circumscribe_polygon(
+        "hexagon", Point(0, 0), Point(57, 57), content_rects=rects
+    )
+    (ax0, _), (ax1, _) = aabb_poly.aabb()
+    (ox0, _), (ox1, _) = occ_poly.aabb()
+    assert (ox1 - ox0) < (ax1 - ax0) - 5.0
+    for r0, r1 in rects:
+        assert occ_poly.contains_rect(r0.x, r0.y, r1.x, r1.y, tol=0.0)
+
+
+def test_fit_uses_occupied_geometry_when_components_present():
+    # Hollow composition: component physical bboxes form the annulus; the
+    # fitted circle must be sized to the occupied extent (grown to the 60mm
+    # target), NOT the AABB diagonal (~80.4 -> guard rejection at cap).
+    comps = {}
+    for i, (r0, r1) in enumerate(_ring_rects()):
+        rect = (r0, r1)
+        comps[f"D{i+1}"] = SimpleNamespace(physical_bbox=lambda rect=rect: rect)
+    board_state = SimpleNamespace(
+        board_outline=(Point(0.0, 0.0), Point(57.0, 57.0)),
+        components=comps, traces=[], vias=[],
+    )
+    st = SimpleNamespace(
+        manual_outline=None,
+        requested_shape={"shape": "circle", "size_mm": 60.0},
+        composition=SimpleNamespace(board_state=board_state),
+    )
+    result = _fit_requested_shape(st)
+    assert result["fitted"] is True, result
+    assert result["size_mm"] == [60.0, 60.0]
+
+
 def test_fit_noop_when_manual_outline_authoritative():
     st = _state({"shape": "circle"}, manual_outline={"shape": "rect"})
     res = _fit_requested_shape(st)

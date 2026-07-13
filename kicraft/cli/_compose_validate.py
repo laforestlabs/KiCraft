@@ -366,6 +366,39 @@ def inscribed_rect_bound(
     return (a * lo, lo)
 
 
+def _occupied_content_rects(board_state) -> list[tuple[Point, Point]]:
+    """The composition's TRUE occupied geometry: per-component physical
+    bboxes (courtyard ∪ pads) plus trace and via copper rects.
+
+    The content AABB is a gross over-ask for hollow compositions -- a
+    nested LED-ring annulus forces a circle of the AABB's DIAGONAL (⌀80.4
+    observed on the ⌀60-ring genre) when its occupied extent fits ⌀55.
+    Feeding these rects to ``circumscribe`` sizes the requested shape to
+    what is actually there (shaped-compose-leaf-nesting PR-N3). Silkscreen
+    is deliberately excluded: the geometry validator gates copper and
+    courtyards, and silk near a shaped edge is cosmetic.
+    """
+    rects: list[tuple[Point, Point]] = []
+    for comp in (getattr(board_state, "components", None) or {}).values():
+        try:
+            rects.append(comp.physical_bbox())
+        except Exception:
+            rects.append(comp.bbox())
+    for t in getattr(board_state, "traces", None) or []:
+        half = float(getattr(t, "width_mm", 0.3) or 0.3) / 2.0
+        rects.append((
+            Point(min(t.start.x, t.end.x) - half, min(t.start.y, t.end.y) - half),
+            Point(max(t.start.x, t.end.x) + half, max(t.start.y, t.end.y) + half),
+        ))
+    for v in getattr(board_state, "vias", None) or []:
+        half = float(getattr(v, "size_mm", 0.6) or 0.6) / 2.0
+        rects.append((
+            Point(v.pos.x - half, v.pos.y - half),
+            Point(v.pos.x + half, v.pos.y + half),
+        ))
+    return rects
+
+
 def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
     """Circumscribe the brief-requested outline shape around the (already
     grown) rectangular content AABB, then hand it to the stamp/validate/pour
@@ -408,6 +441,10 @@ def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
     # polygon path -- simpler, JS-mirror-compatible).
     from kicraft.layout_editor.outline import SHAPES, OutlineSpec, circumscribe
 
+    # Fit around the TRUE occupied geometry, not the AABB (PR-N3): a hollow
+    # composition (nested ring) must not pay for its AABB's empty diagonal.
+    occupied = _occupied_content_rects(composition.board_state)
+
     if shape in SHAPES:
         spec = circumscribe(
             shape,
@@ -415,6 +452,7 @@ def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
             br,
             corner_radius_mm=_as_float(req.get("corner_radius_mm")),
             chamfer_mm=_as_float(req.get("chamfer_mm")),
+            content_rects=occupied,
         )
         # Guard BEFORE committing the outline: an oversized fit is rejected so the
         # sane rectangular AABB (already on board_state) ships instead (WS8).
@@ -459,7 +497,7 @@ def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
     from kicraft.shapes import circumscribe as circumscribe_polygon
 
     if shape in KNOWN_SHAPES:
-        poly = circumscribe_polygon(shape, tl, br)
+        poly = circumscribe_polygon(shape, tl, br, content_rects=occupied)
         (minx, miny), (maxx, maxy) = poly.aabb()
         fitted_area = _ring_area(poly.points())
         guard = _shape_fit_guard(

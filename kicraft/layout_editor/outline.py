@@ -314,6 +314,7 @@ def circumscribe(
     corner_radius_mm: float | None = None,
     chamfer_mm: float | None = None,
     margin_mm: float = 0.5,
+    content_rects: "list[tuple[Point, Point]] | None" = None,
 ) -> "OutlineSpec":
     """Smallest ``OutlineSpec`` of ``shape`` that fully contains the rectangle
     ``(min_pt, max_pt)``, centered on it.
@@ -327,7 +328,16 @@ def circumscribe(
     absolute mm: a supplied value is honored, else a modest content-proportional
     default is used; both stay fixed while the box grows. ``circle`` keeps a
     square bounding box.
+
+    ``content_rects``: the TRUE occupied geometry (per-component/trace/via
+    rects). When given, the fit must contain every rect rather than the
+    single AABB -- a hollow composition (nested LED-ring annulus) then gets
+    a shape sized to its occupied extent instead of the AABB's diagonal
+    (⌀55 vs ⌀80 on the ⌀60-ring genre; shaped-compose-leaf-nesting PR-N3).
+    The shape stays centered on the AABB either way.
     """
+    if content_rects is not None and not content_rects:
+        content_rects = None  # empty = no signal; fall back to the AABB
     if shape not in SHAPES:
         raise ValueError(f"circumscribe supports {SHAPES}, got {shape!r}")
     cx = (min_pt.x + max_pt.x) / 2.0
@@ -354,6 +364,11 @@ def circumscribe(
         return OutlineSpec(shape=shape, min_pt=mn, max_pt=mx, **kwargs)
 
     def _ok(spec: OutlineSpec) -> bool:
+        if content_rects is not None:
+            return all(
+                spec.contains_rect(r0.x, r0.y, r1.x, r1.y, tol=0.0)
+                for r0, r1 in content_rects
+            )
         return spec.contains_rect(min_pt.x, min_pt.y, max_pt.x, max_pt.y, tol=0.0)
 
     # Grow an upper bound until it contains, then bisect for the smallest scale.
@@ -362,7 +377,9 @@ def circumscribe(
     while not _ok(_make(hi)) and guard < 64:
         hi *= 1.3
         guard += 1
-    lo = hi / 1.3 if hi > 1.0 else 1.0
+    # AABB mode never shrinks below the content box (scale 1.0 is exact);
+    # occupied-geometry mode may fit a hollow composition well below it.
+    lo = hi / 1.3 if hi > 1.0 else (0.0 if content_rects is not None else 1.0)
     for _ in range(48):
         mid = (lo + hi) / 2.0
         if _ok(_make(mid)):
