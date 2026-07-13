@@ -39,7 +39,19 @@ def test_manual_route_registered_and_gates_missing_layout(tmp_path, capsys):
 
 
 @pytest.fixture
-def project(tmp_path):
+def project(tmp_path, monkeypatch):
+    # Pin the run identity BEFORE the fixture writes boards: run context is
+    # created lazily inside the promote tail, so without this the freshness
+    # gate stamps run_started_at AFTER the fixture's file mtimes and calls
+    # them stale -- the tests then only passed when an EARLIER test in the
+    # same pytest process had already stamped the env (order dependence,
+    # visible under any -k filter that runs these tests near-alone).
+    import time as _time
+
+    from kicraft.cli import artifact_paths as ap
+
+    monkeypatch.setenv(ap.ENV_RUN_ID, "TESTRUN")
+    monkeypatch.setenv(ap.ENV_RUN_STARTED_AT, repr(_time.time() - 100.0))
     pd = tmp_path / "WIDGET"
     pd.mkdir()
     # The previous board is ROUTED ("(segment" marker) -- the restore-worthy case.

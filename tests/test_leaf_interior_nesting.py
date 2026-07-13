@@ -282,6 +282,82 @@ def test_nest_survives_overlap_and_courtyard_passes():
     )
 
 
+# --------------------------------------------------------------------------- #
+# PR-N4: edge-pin demotion candidates + stranded-gate consistency
+# --------------------------------------------------------------------------- #
+
+def _fake_artifact(name, refs):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        layout=SimpleNamespace(components={r: object() for r in refs}),
+        sheet_name=name,
+    )
+
+
+def test_edge_demotion_candidates_finds_nestable_pinned_leaf(monkeypatch):
+    from kicraft.autoplacer.brain import subcircuit_composer as sc
+    from kicraft.cli.compose_subcircuits import _edge_demotion_candidates
+
+    ring_art = _fake_artifact("LED RING", ["D1", "D2"])
+    mcu_art = _fake_artifact("MCU", ["U1", "J1"])
+    ring_bs = _annulus_blocker_set(holes=_holes_for(_annulus_blocker_set()))
+    mcu_bs = _small_front_leaf()
+    monkeypatch.setattr(
+        sc, "extract_leaf_blocker_set",
+        lambda art, cfg=None: ring_bs if art is ring_art else mcu_bs,
+    )
+
+    cfg = {"component_zones": {"J1": {"edge": "bottom"}}, "nest_margin_mm": 1.5}
+    assert _edge_demotion_candidates([ring_art, mcu_art], cfg) == ["J1"]
+
+    # No holes anywhere -> nothing to demote into.
+    monkeypatch.setattr(
+        sc, "extract_leaf_blocker_set",
+        lambda art, cfg=None: _annulus_blocker_set() if art is ring_art else mcu_bs,
+    )
+    assert _edge_demotion_candidates([ring_art, mcu_art], cfg) == []
+
+    # Pin on a ref whose leaf is TOO BIG for the hole -> not demoted.
+    big_bs = _small_front_leaf(w=40.0, h=40.0)
+    monkeypatch.setattr(
+        sc, "extract_leaf_blocker_set",
+        lambda art, cfg=None: ring_bs if art is ring_art else big_bs,
+    )
+    assert _edge_demotion_candidates([ring_art, mcu_art], cfg) == []
+
+    # No zones -> empty, and never touches geometry.
+    assert _edge_demotion_candidates([ring_art, mcu_art], {}) == []
+
+
+def test_stranded_gate_skips_demoted_refs(tmp_path, monkeypatch):
+    import json as _json
+
+    from kicraft.autoplacer.brain import connector_edge_gap as ceg
+    from kicraft.design.cli_app import _connector_stranded_refs
+
+    pcb = tmp_path / "BOARD.kicad_pcb"
+    pcb.write_text("(kicad_pcb)\n")
+    (tmp_path / "BOARD_autoplacer.json").write_text(
+        _json.dumps({"component_zones": {"J1": {"edge": "bottom"}}})
+    )
+
+    from types import SimpleNamespace
+    fake_gap = SimpleNamespace(ref="J1", gap_mm=-5.0, edge="bottom")
+    monkeypatch.setattr(ceg, "connector_edge_gaps", lambda *a, **k: [fake_gap])
+
+    # Without the demotion record the inboard connector is flagged.
+    assert _connector_stranded_refs(pcb) == [
+        "connector_stranded:J1@-5.00mm(bottom)"
+    ]
+
+    # With the record (winner came from the demoted wave) it is skipped.
+    d = tmp_path / ".experiments" / "subcircuits" / "parent__x"
+    d.mkdir(parents=True)
+    (d / "edge_pins_demoted.json").write_text(_json.dumps({"refs": ["J1"]}))
+    assert _connector_stranded_refs(pcb) == []
+
+
 def test_nest_pass_oversized_guest_left_alone():
     host_bs = _annulus_blocker_set(holes=_holes_for(_annulus_blocker_set()))
     big_bs = _small_front_leaf(w=40.0, h=40.0)

@@ -3712,6 +3712,26 @@ def _connector_stranded_refs(pcb: Path) -> list[str]:
         if zone_files:
             payload = json.loads(Path(zone_files[0]).read_text(encoding="utf-8"))
             zones = payload.get("component_zones", payload.get("zones", {})) or {}
+        # Compose may have DEMOTED an edge pin so the leaf could nest inside
+        # another leaf's interior (a shaped brief the pin contradicted --
+        # shaped-compose-leaf-nesting PR-N4). The shipped board deliberately
+        # has that connector inboard; judging it against the overridden zone
+        # would flag the intended layout as stranded. The demotion record is
+        # artifact-scoped and written only when the winner came from the
+        # demoted wave.
+        for sidecar in sorted(glob.glob(str(
+            pcb.parent / ".experiments" / "subcircuits" / "*"
+            / "edge_pins_demoted.json"
+        ))):
+            try:
+                demoted = json.loads(Path(sidecar).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            for ref in demoted.get("refs") or []:
+                if zones.pop(str(ref), None) is not None:
+                    print(f"[build]     connector-stranded gate: skipping "
+                          f"{ref} (edge pin demoted at compose for the "
+                          f"requested outline shape)")
         if not zones:
             return []
         tol = float(DEFAULT_CONFIG.get("connector_edge_inboard_tol_mm", 1.0))
