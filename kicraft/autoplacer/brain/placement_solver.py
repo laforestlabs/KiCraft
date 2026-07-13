@@ -87,6 +87,7 @@ from .placement_utils import (
     _pad_half_extents,
     _swap_pad_positions,
     _update_pad_positions,
+    _world_artifact_origin,
 )
 from .types import (
     BoardState,
@@ -566,6 +567,14 @@ class PlacementSolver:
             # neighbor whose bbox can accommodate it.
             if self.cfg.get("opposite_side_stacking_pass", True):
                 self._stack_compatible_blocks(best_comps)
+
+        with _timed_phase(phase_t, "solve_nest_blocks_ms", capture_comps=lambda: best_comps):
+            # Step 8.8: Interior-hole nesting pass -- shaped parents only.
+            # A hollow leaf (LED-ring annulus) can host a small companion
+            # leaf INSIDE its enclosed empty centre; without this a ⌀60
+            # ring + MCU pack side-by-side and the requested circle can
+            # never fit (docs/plans/shaped-compose-leaf-nesting.md).
+            self._nest_blocks_in_interior_holes(best_comps)
 
         with _timed_phase(phase_t, "solve_resolve_overlaps_ms", capture_comps=lambda: best_comps):
             # Step 9: Final exhaustive overlap resolution — guarantee no courtyard
@@ -2739,6 +2748,92 @@ class PlacementSolver:
                     cand.block_stacked_anchor = anc_ref
                     cursor_y += cand.height_mm + spacing
 
+    def _nest_blocks_in_interior_holes(self, comps: dict[str, Component]) -> None:
+        """Step 8.8: nest small subcircuit blocks inside another block's
+        ENCLOSED interior hole (an LED-ring annulus centre) so a requested
+        shaped outline can actually fit -- the K=4 candidate search then
+        scores the collapsed bbox and shape fit for free. See
+        docs/plans/shaped-compose-leaf-nesting.md (PR-N2).
+
+        Fires only for shaped parents by default (``leaf_nesting: "auto"``:
+        a non-rect ``board_outline`` shape was requested); ``"on"`` forces,
+        ``"off"`` disables (kill switch). Strict edge/corner-zoned guests
+        are never nested (their pin wins until PR-N4's demotion wave).
+
+        The landing is verified with the position-dependent production
+        predicate (``_blocker_pair_compatible`` -> the containment allowance
+        in ``can_overlap_sparse``), and the PAIR IS LOCKED on success: every
+        later pass moves only unlocked comps, so a nest cannot drift into
+        the partial overlap the same-side veto exists to prevent.
+        """
+        mode = str(self.cfg.get("leaf_nesting", "auto") or "auto").lower()
+        if mode in ("off", "false", "0", "none"):
+            return
+        if mode == "auto":
+            outline = self.cfg.get("board_outline")
+            shape = (str(outline.get("shape", "")).lower()
+                     if isinstance(outline, dict) else "")
+            if shape in ("", "rect", "rectangle"):
+                return
+        from .subcircuit_composer import _transform_rect
+
+        zones = self.cfg.get("component_zones", {}) or {}
+        hosts: list[tuple[str, Component]] = []
+        guests: list[tuple[str, Component]] = []
+        for ref in sorted(comps):
+            comp = comps[ref]
+            if comp.kind != "subcircuit" or comp.block_blocker_set is None:
+                continue
+            holes = getattr(comp.block_blocker_set, "interior_free_rects", ())
+            if holes:
+                hosts.append((ref, comp))
+            elif not comp.locked:
+                zone = zones.get(ref) or {}
+                if "edge" in zone or "corner" in zone:
+                    continue
+                guests.append((ref, comp))
+        if not hosts or not guests:
+            return
+
+        def _largest_hole_area(comp: Component) -> float:
+            return max(
+                (h[1].x - h[0].x) * (h[1].y - h[0].y)
+                for h in comp.block_blocker_set.interior_free_rects
+            )
+
+        hosts.sort(key=lambda rc: (-_largest_hole_area(rc[1]), rc[0]))
+        guests.sort(key=lambda rc: (-rc[1].area, rc[0]))
+
+        for host_ref, host in hosts:
+            m = abs(host.rotation) % 90.0
+            if not (m < 0.01 or m > 89.99):
+                continue  # hole rects only transform exactly at cardinals
+            origin = _world_artifact_origin(host)
+            for hole in host.block_blocker_set.interior_free_rects:
+                hole_world = _transform_rect(hole, origin, host.rotation)
+                cx = (hole_world[0].x + hole_world[1].x) / 2.0
+                cy = (hole_world[0].y + hole_world[1].y) / 2.0
+                for guest_ref, guest in guests:
+                    if guest is host or guest.locked:
+                        continue
+                    old_pos = Point(guest.pos.x, guest.pos.y)
+                    guest.pos = Point(cx, cy)
+                    _update_pad_positions(guest, old_pos, guest.rotation)
+                    if _blocker_pair_compatible(host, guest):
+                        guest.block_nested_anchor = host_ref
+                        guest.locked = True
+                        host.locked = True
+                        print(
+                            f"  [nest] block {guest_ref} nested inside "
+                            f"{host_ref}'s interior hole at ({cx:.1f}, {cy:.1f})"
+                            f" -- pair locked"
+                        )
+                        break  # one guest per hole
+                    # Doesn't fit this hole at its current rotation: revert.
+                    reverted = Point(guest.pos.x, guest.pos.y)
+                    guest.pos = old_pos
+                    _update_pad_positions(guest, reverted, guest.rotation)
+
     def _accumulate_opposite_side_attraction(
         self,
         comps: dict[str, Component],
@@ -3297,6 +3392,13 @@ class PlacementSolver:
                         continue
                     if b.locked and getattr(a, "block_stacked_anchor", None) == refs[j]:
                         continue
+                    # Intentional nest (Step 8.8): same source-of-truth rule
+                    # as the stack gate above. Both partners are locked at
+                    # nest time so this is defensive parity, not a live path.
+                    if getattr(b, "block_nested_anchor", None) == refs[i]:
+                        continue
+                    if getattr(a, "block_nested_anchor", None) == refs[j]:
+                        continue
 
                     # Array-grid members are intentionally placed on a fixed
                     # grid and are self-legal by construction; never escape one
@@ -3444,6 +3546,16 @@ class PlacementSolver:
                     if _blocker_pair_compatible(a, b) and _back_courtyard(
                         a
                     ) != _back_courtyard(b):
+                        continue
+                    # Intentional nest (Step 8.8): the BLOCK bboxes overlap
+                    # by design, but the guest sits inside the host's
+                    # enclosed interior hole, so the real per-footprint
+                    # courtyards do not touch (the containment allowance in
+                    # can_overlap_sparse guarantees standoff). KiCad's
+                    # courtyard DRC on the stamped board stays the
+                    # authoritative measurement.
+                    if (getattr(a, "block_nested_anchor", None) == refs[j]
+                            or getattr(b, "block_nested_anchor", None) == refs[i]):
                         continue
                     if getattr(a, "array_member", False) and getattr(
                         b, "array_member", False

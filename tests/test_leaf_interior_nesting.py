@@ -179,3 +179,125 @@ def test_guest_bigger_than_hole_is_forbidden():
         host, Point(20.0, 20.0), 0.0,
         guest, Point(20.0 + 28.5 - 20.0, 20.0 + 28.5 - 20.0), 0.0,
     ) is False
+
+
+# --------------------------------------------------------------------------- #
+# PR-N2: the solver nest-proposal pass (Step 8.8)
+# --------------------------------------------------------------------------- #
+
+from kicraft.autoplacer.brain.placement_solver import PlacementSolver  # noqa: E402
+from kicraft.autoplacer.brain.types import BoardState, Component, Layer  # noqa: E402
+
+
+def _block(ref, *, pos, width, height, blocker_set, locked=False, rotation=0.0):
+    comp = Component(
+        ref=ref, value=ref, pos=Point(pos.x, pos.y), rotation=rotation,
+        layer=Layer.FRONT, width_mm=width, height_mm=height,
+        kind="subcircuit", locked=locked, body_center=Point(pos.x, pos.y),
+    )
+    comp.block_blocker_set = blocker_set
+    comp.block_artifact_origin_offset = Point(width / 2.0, height / 2.0)
+    return comp
+
+
+def _nest_fixture(*, zones=None, cfg_extra=None):
+    host_bs = _annulus_blocker_set(holes=_holes_for(_annulus_blocker_set()))
+    guest_bs = _small_front_leaf()
+    host = _block("BLK_RING", pos=Point(60.0, 60.0), width=57.0, height=57.0,
+                  blocker_set=host_bs)
+    guest = _block("BLK_MCU", pos=Point(150.0, 60.0), width=16.0, height=14.0,
+                   blocker_set=guest_bs)
+    comps = {host.ref: host, guest.ref: guest}
+    state = BoardState(
+        components=comps, nets={}, traces=[], vias=[], silkscreen=[],
+        board_outline=(Point(0.0, 0.0), Point(200.0, 200.0)),
+    )
+    cfg = {
+        "leaf_nesting": "auto",
+        "board_outline": {"shape": "circle", "size_mm": 60.0},
+        "component_zones": zones or {},
+    }
+    cfg.update(cfg_extra or {})
+    return PlacementSolver(state, config=cfg, seed=0), comps, host, guest
+
+
+def _guest_inside_host_bbox(guest, host):
+    g_tl, g_br = guest.bbox()
+    h_tl, h_br = host.bbox()
+    return (g_tl.x >= h_tl.x and g_tl.y >= h_tl.y
+            and g_br.x <= h_br.x and g_br.y <= h_br.y)
+
+
+def test_nest_pass_nests_guest_into_annulus_hole():
+    solver, comps, host, guest = _nest_fixture()
+    solver._nest_blocks_in_interior_holes(comps)
+    assert guest.block_nested_anchor == "BLK_RING"
+    assert guest.locked and host.locked
+    assert _guest_inside_host_bbox(guest, host)
+    # Landed near the hole centre (host centre for a symmetric annulus).
+    assert abs(guest.pos.x - 60.0) < 4.0 and abs(guest.pos.y - 60.0) < 4.0
+
+
+def test_nest_pass_skips_strict_edge_zoned_guest():
+    solver, comps, host, guest = _nest_fixture(
+        zones={"BLK_MCU": {"edge": "bottom"}}
+    )
+    solver._nest_blocks_in_interior_holes(comps)
+    assert guest.block_nested_anchor is None
+    assert not guest.locked and not host.locked
+    assert guest.pos.x == 150.0  # untouched
+
+
+def test_nest_pass_auto_gate_needs_shaped_outline():
+    solver, comps, host, guest = _nest_fixture(
+        cfg_extra={"board_outline": None}
+    )
+    solver._nest_blocks_in_interior_holes(comps)
+    assert guest.block_nested_anchor is None and guest.pos.x == 150.0
+
+
+def test_nest_pass_off_switch():
+    solver, comps, host, guest = _nest_fixture(
+        cfg_extra={"leaf_nesting": "off"}
+    )
+    solver._nest_blocks_in_interior_holes(comps)
+    assert guest.block_nested_anchor is None and guest.pos.x == 150.0
+
+
+def test_nest_survives_overlap_and_courtyard_passes():
+    solver, comps, host, guest = _nest_fixture()
+    solver._nest_blocks_in_interior_holes(comps)
+    assert guest.block_nested_anchor == "BLK_RING"
+    nested_pos = Point(guest.pos.x, guest.pos.y)
+
+    solver._resolve_overlaps(comps)
+    unresolved = solver._resolve_courtyard_overlaps(comps)
+
+    assert (guest.pos.x, guest.pos.y) == (nested_pos.x, nested_pos.y), (
+        "later passes must not drift a locked nested guest"
+    )
+    assert _guest_inside_host_bbox(guest, host)
+    assert unresolved == 0, (
+        "a nested pair must not be reported as an unresolved courtyard overlap"
+    )
+
+
+def test_nest_pass_oversized_guest_left_alone():
+    host_bs = _annulus_blocker_set(holes=_holes_for(_annulus_blocker_set()))
+    big_bs = _small_front_leaf(w=40.0, h=40.0)
+    host = _block("BLK_RING", pos=Point(60.0, 60.0), width=57.0, height=57.0,
+                  blocker_set=host_bs)
+    guest = _block("BLK_BIG", pos=Point(150.0, 60.0), width=40.0, height=40.0,
+                   blocker_set=big_bs)
+    comps = {host.ref: host, guest.ref: guest}
+    state = BoardState(
+        components=comps, nets={}, traces=[], vias=[], silkscreen=[],
+        board_outline=(Point(0.0, 0.0), Point(200.0, 200.0)),
+    )
+    solver = PlacementSolver(state, config={
+        "leaf_nesting": "auto",
+        "board_outline": {"shape": "circle", "size_mm": 60.0},
+    }, seed=0)
+    solver._nest_blocks_in_interior_holes(comps)
+    assert guest.block_nested_anchor is None
+    assert guest.pos.x == 150.0 and not guest.locked and not host.locked

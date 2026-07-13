@@ -185,6 +185,16 @@ class Component:
     # whole stacking pass. Cleared on un-stacking (e.g. when the
     # candidate is moved by SA outside its anchor's bbox by intent).
     block_stacked_anchor: str | None = None
+    # Reference of the host block whose ENCLOSED interior hole this block
+    # was deliberately nested into by ``_nest_blocks_in_interior_holes``
+    # (shaped compose -- docs/plans/shaped-compose-leaf-nesting.md). Both
+    # partners are locked at nest time, so later passes cannot drift the
+    # pair into the partial overlap the same-side veto exists to prevent;
+    # the field additionally exempts the pair from the courtyard-overlap
+    # separation pass (block bboxes overlap by design; the real
+    # per-footprint courtyards do not -- that is what the containment
+    # allowance in ``can_overlap_sparse`` guarantees).
+    block_nested_anchor: str | None = None
     allowed_rotations: list[float] | None = None
     # Per-rotation bbox dimensions for synthetic leaf blocks. Keyed by
     # rotation degrees (0/90/180/270). For 90° and 270° the width/height
