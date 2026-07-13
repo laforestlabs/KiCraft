@@ -62,3 +62,43 @@ def test_candidate_paths_escape_prefix():
     paths = _candidate_paths((0.0, 0.0), (10.0, 5.0), esc)
     assert all(p[0] == esc for p in paths)
     assert all(p[-1] == (10.0, 5.0) for p in paths)
+
+
+def test_wrapper_inline_script_matches_repair_return_contract(
+    tmp_path, monkeypatch, capsys
+):
+    """Execute the wrapper's REAL inline pcbnew script against the repair's
+    documented return contract. A key the repair doesn't return raises
+    KeyError AFTER the repair has mutated the board, and the wrapper's
+    except-restore then silently byte-reverts it -- which turned the whole
+    pass into a no-op on all 9 rc7 boards of the 20260710 self-eval batch
+    (the caller printed s['nets']/s['stranded']/s['unresolved'] against a
+    {edges, tied, skipped} contract)."""
+    from kicraft.autoplacer import freerouting_runner as fr
+    from kicraft.autoplacer.brain import unconnected_repair as ur
+    from kicraft.cli import _compose_route as cr
+
+    pcb = tmp_path / "parent_routed.kicad_pcb"
+    pcb.write_text("(kicad_pcb repaired)\n", encoding="utf-8")
+
+    calls: dict[str, bool] = {}
+
+    def fake_repair(path, cfg):
+        calls["repair"] = True
+        return {"edges": 1, "tied": 1, "skipped": []}  # the real contract
+
+    monkeypatch.setattr(ur, "repair_unconnected_signals", fake_repair)
+    # Run the inline script in-process so a contract mismatch raises here.
+    monkeypatch.setattr(fr, "_run_pcbnew_script", lambda script: exec(script, {}))
+    improved = {"drc": {"unconnected": 0, "shorts": 0}}
+    monkeypatch.setattr(fr, "validate_routed_board", lambda *a, **k: improved)
+
+    out = cr._attempt_signal_unconnected_repair(
+        pcb, {}, {"drc": {"unconnected": 1, "shorts": 0}}
+    )
+
+    assert calls.get("repair"), "inline script never invoked the repair"
+    # KEPT (returned the improved revalidation), not silently reverted.
+    assert out == improved
+    assert "signal unconnected repair:" in capsys.readouterr().out
+    assert not (tmp_path / "parent_routed.kicad_pcb.pre_signal_repair").exists()

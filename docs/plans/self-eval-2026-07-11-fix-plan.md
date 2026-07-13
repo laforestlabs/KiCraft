@@ -195,6 +195,23 @@ shaped-outline group (runs 29–34 slugs) to de-contaminate their results.
 
 ### N5 (P1) — Parent airwire repair pass (deferred C1 v2, now the single biggest fab-ready lever)
 
+> **PREMISE CORRECTED 2026-07-13 (evidence sweep + fix):** the pass this section proposes
+> **already existed** — `kicraft/autoplacer/brain/unconnected_repair.py` (C1, commit `633613e`),
+> wired default-on into the compose tail (`_compose_route.py` `_attempt_signal_unconnected_repair`)
+> — but its caller's subprocess print read `s['nets']/s['stranded']/s['unresolved']` against a
+> `{edges, tied, skipped}` return contract, so it crashed with `KeyError: 'nets'` AFTER stamping
+> copper and the accept-or-revert wrapper byte-reverted it: **a silent no-op on all 9 rc7 boards
+> of this batch** (grep: 26 occurrences across the round JSONs). Contract FIXED + regression test
+> that executes the real inline script (`tests/test_unconnected_repair.py`). Live since the fix:
+> run_02 replay now rc0 fab-ready (routed clean); run_23 replay shows the pass firing honestly
+> (`unconnected 2 -> 2 ... board restored` — geometry couldn't close the CAN pair that seed).
+> **Remaining N5 = measure, then improve the pass's geometry, not build a new pass.** Scope
+> caveats from the sweep: GND/poured-power nets are excluded by design (`_pour_nets`) — run_26
+> `GND` and run_09 `+3V3` belong to the strand-repair family (a), run_10/run_06 to N2/N9, so the
+> signal pass caps at ~4–5 of 9 even at 100% close-rate; and co-occurring
+> `illegal_routed_geometry`/`connector_stranded` reasons keep run_09/23/27 gated regardless.
+> Honest measurement = the owed paid self-eval re-run (replay seeds don't reproduce batch boards).
+
 **Evidence:** all 9 rc7 runs have **zero shorts** and 1–4 open nets (run_10: 11, but that's N2).
 7/9 are within 4 airwires of fab-ready: run_02 `LADDER_OUT`, run_15 `VIN`, run_17 `CC1,CC2`,
 run_23 `CAN_TX,CAN_RX` (reached `routed_dirty` in rounds 1–2!), run_27

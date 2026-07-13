@@ -430,9 +430,14 @@ def _attempt_signal_unconnected_repair(
             "repair_unconnected_signals\n"
             f"cfg = json.loads({_sig_cfg!r})\n"
             f"s = repair_unconnected_signals({str(routed_pcb)!r}, cfg)\n"
-            "print('signal unconnected repair:', len(s['nets']), 'net(s) --',\n"
-            "      s['stranded'], 'stranded,', s['tied'], 'tied,',\n"
-            "      len(s['skipped']), 'skipped,', s['unresolved'], 'unresolved')\n"
+            # NB: keys must match repair_unconnected_signals' return contract
+            # {edges, tied, skipped} EXACTLY -- a KeyError here crashes the
+            # subprocess AFTER the repair mutated the board, so the except
+            # below silently byte-reverts it: the pass ran as a no-op on
+            # every rc7 board of the 20260710 batch (N5 evidence sweep).
+            "print('signal unconnected repair:', s['edges'], 'edge(s) --',\n"
+            "      s['tied'], 'tied,', len(s['skipped']), 'skipped'\n"
+            "      + (': ' + '; '.join(s['skipped']) if s['skipped'] else ''))\n"
         )
         revalidation = validate_routed_board(
             str(routed_pcb),
