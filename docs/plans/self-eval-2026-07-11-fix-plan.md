@@ -137,6 +137,15 @@ partial board, not a separate placement bug — confirm this while there).
 
 ### N3 (P0) — One-shot BOM-reconcile cap makes any deficit chain ≥2 unwinnable
 
+> **DONE 2026-07-13, committed `4d87b74`.** As prescribed: `already_reconciled` bool →
+> `reconcile_passes` counter budgeted at `BOM_RECONCILE_MAX_PASSES = 3`, with the no-change
+> cutoff (committed BOM part-count + ref-set compared before/after each pass; unreadable state
+> fails open so a transient read problem can't cut a genuine chain). Both callers (web drive
+> loop `web.py`, self-eval driver) now loop while the counter advances. Fresh evidence beyond
+> the original: batch 20260713 run_10 (rp2040) died exactly here — parked on an RP2040
+> VREG_VOUT-cap deficit after its single pass was spent, then graded D/unprogrammable_mcu.
+> Unit tests: chain-of-3 advances, no-change pass exhausts budget, cap stops re-driving.
+
 **Evidence:** all four design-failed runs (13 nrf52-beacon, 18 dual-rail-supply, 21 proto-shield,
 22 esp32-dual-motor) recorded `unresolved BOM deficit after reconcile: …`. In runs 13 and 22 the
 single reconcile pass **succeeded** (parts really added — verified in state.json) and wiring then
