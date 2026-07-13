@@ -60,6 +60,7 @@ from pathlib import Path
 from kicraft.build_slots import ACQUIRED_MARKER, resolve_build_slots
 from kicraft.proc_tree import kill_tree
 from kicraft.server.session import (
+    bom_reconcile_deficits,
     maybe_bom_reconcile,
     read_state,
     record_answers,
@@ -259,7 +260,7 @@ def run_design(client, brief: str, rundir: Path, progress, *,
     cost = 0.0
     n_questions = 0
     pending = None
-    bom_reconciled = False
+    bom_passes = 0
 
     def _add_cost(r_dict: dict) -> None:
         nonlocal cost
@@ -284,25 +285,30 @@ def run_design(client, brief: str, rundir: Path, progress, *,
             # A reconcile_target="bom" park is the pipeline's note-to-self, NOT a
             # user question: wiring cannot add the parts it needs, so plain-
             # answering it loops until the retry budget burns out (all 5
-            # synthesis deaths in the 07-10 batch). Re-drive bom+wiring once with
-            # the concrete shortfall instead -- the same repair the web app runs
-            # (WS6). Never plain-answer a reconcile park.
-            prev = bom_reconciled
-            res, bom_reconciled = maybe_bom_reconcile(
-                rundir, brief, res, progress=progress, run_id=run_id,
-                client=client, already_reconciled=bom_reconciled)
-            if bom_reconciled and not prev:
-                _add_cost(res)  # count the reconcile pass once
-                status = res.get("status")
-                if status == "ok":
-                    return {"status": "ok", "cost_usd": cost,
-                            "questions": n_questions, "rounds": round_no + 1,
-                            "error": None}
+            # synthesis deaths in the 07-10 batch). Re-drive bom+wiring with the
+            # concrete shortfall instead -- the same repair the web app runs
+            # (WS6). Deficit CHAINS are real (each pass can surface the next
+            # genuine shortfall -- fix-plan N3), so keep reconciling while the
+            # pass budget advances. Never plain-answer a reconcile park.
+            while (res.get("status") == "awaiting_input"
+                   and bom_reconcile_deficits(res)):
+                prev = bom_passes
+                res, bom_passes = maybe_bom_reconcile(
+                    rundir, brief, res, progress=progress, run_id=run_id,
+                    client=client, reconcile_passes=bom_passes)
+                if bom_passes == prev:
+                    break  # budget exhausted; fail honestly below
+                _add_cost(res)  # count each reconcile pass
+            status = res.get("status")
+            if status == "ok":
+                return {"status": "ok", "cost_usd": cost,
+                        "questions": n_questions, "rounds": round_no + 1,
+                        "error": None}
             qs = res.get("questions") or []
             if status == "awaiting_input" and any(
                 q.get("reconcile_target") == "bom" for q in qs
             ):
-                # A BOM deficit that survived the one reconcile pass cannot be
+                # A BOM deficit that survived the reconcile budget cannot be
                 # resolved by answering (wiring still can't add parts). Stop
                 # honestly instead of looping the retry budget away.
                 unresolved = "; ".join(
@@ -310,7 +316,8 @@ def run_design(client, brief: str, rundir: Path, progress, *,
                 )[:400]
                 return {"status": "failed", "cost_usd": cost,
                         "questions": n_questions, "rounds": round_no + 1,
-                        "error": f"unresolved BOM deficit after reconcile: {unresolved}"}
+                        "error": f"unresolved BOM deficit after "
+                                 f"{bom_passes} reconcile pass(es): {unresolved}"}
             if status != "awaiting_input":
                 # Reconcile turned the park into a hard failure -- report it.
                 last = (res.get("results") or [{}])[-1]

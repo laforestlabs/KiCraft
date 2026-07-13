@@ -22,22 +22,37 @@ from kicraft.eval import self_eval as se
 # --------------------------------------------------------------------------- #
 # WS6: BOM-reconcile re-drive shared by the web app and the eval driver
 # --------------------------------------------------------------------------- #
-def test_maybe_bom_reconcile_redrives_on_deficit(monkeypatch):
+_DEFICIT_PARK = {
+    "status": "awaiting_input", "last_stage": "wiring",
+    "questions": [{"text": "add a 2nd 1uF cap for U1",
+                   "reconcile_target": "bom", "blocking": True}],
+}
+
+
+def _ws_with_bom(tmp_path, refs):
+    """A workspace whose committed state.json carries a BOM with *refs*."""
+    p = tmp_path / ".kicraft"
+    p.mkdir(parents=True, exist_ok=True)
+    (p / "state.json").write_text(json.dumps(
+        {"bom": {"parts": [{"ref": r} for r in refs]}}), encoding="utf-8")
+    return tmp_path
+
+
+def test_maybe_bom_reconcile_redrives_on_deficit(monkeypatch, tmp_path):
     from kicraft.server import session
 
+    ws = _ws_with_bom(tmp_path, ["U1", "C1"])
     calls = []
 
-    def fake_run_session(ws, brief, stages, **kw):
+    def fake_run_session(w, brief, stages, **kw):
         calls.append((list(stages), kw.get("instruction")))
+        _ws_with_bom(tmp_path, ["U1", "C1", "C2"])  # the pass adds a part
         return {"status": "ok", "results": [{"cost_usd": 0.01}],
                 "questions": None, "last_stage": "wiring"}
 
     monkeypatch.setattr(session, "run_session", fake_run_session)
-    park = {"status": "awaiting_input", "last_stage": "wiring",
-            "questions": [{"text": "add a 2nd 1uF cap for U1", "reconcile_target": "bom",
-                           "blocking": True}]}
-    res, reconciled = session.maybe_bom_reconcile("/ws", "brief", park)
-    assert reconciled is True
+    res, passes = session.maybe_bom_reconcile(ws, "brief", dict(_DEFICIT_PARK))
+    assert passes == 1
     assert res["status"] == "ok"
     assert calls and calls[0][0] == ["bom", "wiring"]
     assert "missing supporting parts" in calls[0][1]
@@ -52,24 +67,66 @@ def test_maybe_bom_reconcile_noop_without_reconcile_target(monkeypatch):
     monkeypatch.setattr(session, "run_session", boom)
     park = {"status": "awaiting_input", "last_stage": "wiring",
             "questions": [{"text": "which LED color?", "blocking": True}]}
-    res, reconciled = session.maybe_bom_reconcile("/ws", "brief", park)
-    assert reconciled is False
+    res, passes = session.maybe_bom_reconcile("/ws", "brief", park)
+    assert passes == 0
     assert res is park
 
 
-def test_maybe_bom_reconcile_only_runs_once(monkeypatch):
+def test_maybe_bom_reconcile_budget_cap_stops_redriving(monkeypatch):
     from kicraft.server import session
 
     def boom(*a, **k):
-        raise AssertionError("reconcile must be a single pass")
+        raise AssertionError("budget exhausted: reconcile must not re-drive")
 
     monkeypatch.setattr(session, "run_session", boom)
-    park = {"status": "awaiting_input", "last_stage": "wiring",
-            "questions": [{"text": "add cap", "reconcile_target": "bom", "blocking": True}]}
-    res, reconciled = session.maybe_bom_reconcile(
-        "/ws", "brief", park, already_reconciled=True)
-    assert reconciled is True  # stays reconciled, no second pass
-    assert res is park
+    res, passes = session.maybe_bom_reconcile(
+        "/ws", "brief", dict(_DEFICIT_PARK),
+        reconcile_passes=session.BOM_RECONCILE_MAX_PASSES)
+    assert passes == session.BOM_RECONCILE_MAX_PASSES
+    assert res == _DEFICIT_PARK
+
+
+def test_maybe_bom_reconcile_chain_counts_passes(monkeypatch, tmp_path):
+    # N3: a deficit CHAIN (each pass genuinely adds parts) advances the
+    # counter one pass at a time up to the budget -- the old single-shot
+    # guard made every chain >= 2 unwinnable by construction.
+    from kicraft.server import session
+
+    ws = _ws_with_bom(tmp_path, ["U1"])
+    n = [0]
+
+    def fake_run_session(w, brief, stages, **kw):
+        n[0] += 1
+        _ws_with_bom(tmp_path, ["U1"] + [f"C{i}" for i in range(n[0])])
+        return dict(_DEFICIT_PARK)  # wiring parks again on the NEXT deficit
+
+    monkeypatch.setattr(session, "run_session", fake_run_session)
+    passes = 0
+    res = dict(_DEFICIT_PARK)
+    for expected in (1, 2, 3):
+        res, passes = session.maybe_bom_reconcile(
+            ws, "brief", res, reconcile_passes=passes)
+        assert passes == expected
+    # Budget now exhausted: a 4th call must not re-drive.
+    res2, passes = session.maybe_bom_reconcile(
+        ws, "brief", res, reconcile_passes=passes)
+    assert passes == session.BOM_RECONCILE_MAX_PASSES and res2 is res
+    assert n[0] == 3
+
+
+def test_maybe_bom_reconcile_nochange_pass_exhausts_budget(monkeypatch, tmp_path):
+    # A pass that changes nothing in the committed BOM is a stuck loop, not a
+    # chain: the budget is spent immediately (run_21-style single no-op stop).
+    from kicraft.server import session
+
+    ws = _ws_with_bom(tmp_path, ["U1", "C1"])
+
+    def fake_run_session(w, brief, stages, **kw):
+        return dict(_DEFICIT_PARK)  # parks again, BOM untouched
+
+    monkeypatch.setattr(session, "run_session", fake_run_session)
+    res, passes = session.maybe_bom_reconcile(ws, "brief", dict(_DEFICIT_PARK))
+    assert passes == session.BOM_RECONCILE_MAX_PASSES
 
 
 # --------------------------------------------------------------------------- #

@@ -72,6 +72,7 @@ from .parts_catalog import (
 )
 from .samples import SAMPLES_DIR, available_samples, featured_sample
 from .session import (
+    bom_reconcile_deficits,
     commit_slot,
     derive_stage_statuses,
     downstream_stages,
@@ -1965,18 +1966,25 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
         # BOM self-repair: wiring parked because the BOM lacks supporting parts
         # an IC needs (e.g. too few decoupling caps). That is KiCraft's own
         # problem to solve, not a question for the user — the wiring stage tags
-        # such a park with reconcile_target="bom". Re-drive bom+wiring ONCE with
-        # the concrete shortfall so the parts get added and wiring re-checks,
-        # then adopt that outcome. Flag-gated (not a loop) so it can never run
-        # away on cost; if it still can't resolve, the user is asked as a last
-        # resort. Shared with the self-eval driver (kicraft.server.session).
-        res, reconciled = maybe_bom_reconcile(
-            ws, state.get("brief", ""), res, progress=progress, run_id=run_id,
-            core_defaults=core_defaults,
-            already_reconciled=bool(state.get("bom_reconciled")),
-        )
-        if reconciled:
-            state["bom_reconciled"] = True
+        # such a park with reconcile_target="bom". Re-drive bom+wiring with the
+        # concrete shortfall so the parts get added and wiring re-checks, then
+        # adopt that outcome. Budgeted (BOM_RECONCILE_MAX_PASSES, with a
+        # no-change cutoff) so it can never run away on cost while real deficit
+        # CHAINS still resolve (fix-plan N3); if it still can't resolve, the
+        # user is asked as a last resort. Shared with the self-eval driver
+        # (kicraft.server.session).
+        _bom_passes = int(state.get("bom_reconcile_passes") or 0)
+        while (res.get("status") == "awaiting_input"
+               and bom_reconcile_deficits(res)):
+            _prev = _bom_passes
+            res, _bom_passes = maybe_bom_reconcile(
+                ws, state.get("brief", ""), res, progress=progress,
+                run_id=run_id, core_defaults=core_defaults,
+                reconcile_passes=_bom_passes,
+            )
+            if _bom_passes == _prev:
+                break  # budget exhausted -> the park surfaces to the user
+            state["bom_reconcile_passes"] = _bom_passes
             if res.get("guard"):
                 state["spend"] = _project_spend_usd(state.get("project_id"))
 

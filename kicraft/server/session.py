@@ -260,6 +260,13 @@ def run_session(ws, brief: str, stages, answers=None, instruction=None,
 # BOM self-repair (shared by the web app and the self-eval driver)
 # --------------------------------------------------------------------------- #
 BOM_RECONCILE_TARGET = "bom"
+# Total re-drive budget per project. Real deficit CHAINS exist -- a reconcile
+# pass adds parts and wiring then finds the next GENUINE deficit (07-10 batch
+# runs 13/22: nRF52840 DCCH cap, DRV8833 charge-pump cap; 07-13 batch run_10:
+# an RP2040 VREG_VOUT cap) -- so a single-shot guard made every chain >= 2
+# unwinnable by construction (fix-plan N3). Three links covers every chain
+# observed; a stuck loop is cut earlier by the no-change check below.
+BOM_RECONCILE_MAX_PASSES = 3
 
 
 def bom_reconcile_instruction(questions) -> str:
@@ -289,31 +296,61 @@ def bom_reconcile_deficits(res: dict) -> list[dict]:
     ]
 
 
+def _bom_signature(ws) -> tuple[int, frozenset] | None:
+    """Identity of the committed BOM (part count + ref set), for detecting a
+    reconcile pass that changed nothing. ``None`` when the state is unreadable
+    -- the caller then treats the pass as a change (fail open: a transient
+    read problem must not cut a genuine deficit chain short)."""
+    try:
+        state = json.loads(_state_path(Path(ws)).read_text(encoding="utf-8"))
+        parts = (state.get("bom") or {}).get("parts") or []
+        refs = frozenset(str(p.get("ref")) for p in parts if isinstance(p, dict))
+        return (len(parts), refs)
+    except Exception:
+        return None
+
+
 def maybe_bom_reconcile(
     ws, brief, res, *, progress=None, run_id=None, core_defaults=None,
-    client=None, already_reconciled: bool = False,
-) -> tuple[dict, bool]:
-    """Re-drive ``[bom, wiring]`` ONCE when wiring parked on a BOM parts shortfall.
+    client=None, reconcile_passes: int = 0,
+) -> tuple[dict, int]:
+    """Re-drive ``[bom, wiring]`` once when wiring parked on a BOM parts shortfall.
 
     Wiring tags a deficit park with ``reconcile_target="bom"``: it needs parts the
     BOM lacks, which wiring itself cannot add. Plain-answering that park loops
     forever (all 5 synthesis deaths in the 07-10 batch were this), so re-run
-    bom+wiring with the concrete shortfall instead. Flag-gated to a single pass so
-    it can never run away on cost. Returns ``(new_or_original_res, reconciled)``.
-    Shared by ``server/web.py`` and ``kicraft/eval/self_eval.py`` (WS6)."""
-    if already_reconciled:
-        return res, already_reconciled
+    bom+wiring with the concrete shortfall instead.
+
+    Budgeted at ``BOM_RECONCILE_MAX_PASSES`` total passes (callers loop while the
+    pass count advances -- deficit chains are real, see the constant's comment),
+    and a pass that changes NOTHING in the committed BOM exhausts the budget
+    immediately: that is a stuck loop, not a chain. Returns
+    ``(new_or_original_res, total_passes)``. Shared by ``server/web.py`` and
+    ``kicraft/eval/self_eval.py`` (WS6)."""
+    if reconcile_passes >= BOM_RECONCILE_MAX_PASSES:
+        return res, reconcile_passes
     deficits = bom_reconcile_deficits(res)
     if not deficits:
-        return res, already_reconciled
+        return res, reconcile_passes
     if progress is not None:
         progress({"kind": "build_log",
-                  "text": "[bom-reconcile] wiring flagged a BOM parts shortfall; "
-                          "re-driving bom+wiring once to add the missing parts "
+                  "text": f"[bom-reconcile] wiring flagged a BOM parts shortfall; "
+                          f"re-driving bom+wiring (pass {reconcile_passes + 1}/"
+                          f"{BOM_RECONCILE_MAX_PASSES}) to add the missing parts "
                           "(not asking the user)"})
+    before = _bom_signature(ws)
     rr = run_session(
         ws, brief, ["bom", "wiring"],
         instruction=bom_reconcile_instruction(deficits),
         progress=progress, run_id=run_id, core_defaults=core_defaults, client=client,
     )
-    return rr, True
+    passes = reconcile_passes + 1
+    after = _bom_signature(ws)
+    if before is not None and after is not None and after == before:
+        if progress is not None:
+            progress({"kind": "build_log",
+                      "text": "[bom-reconcile] the pass changed nothing in the "
+                              "committed BOM -- stopping reconcile (stuck loop, "
+                              "not a deficit chain)"})
+        passes = BOM_RECONCILE_MAX_PASSES
+    return rr, passes
