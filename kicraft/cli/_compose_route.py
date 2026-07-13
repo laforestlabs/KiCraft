@@ -431,14 +431,34 @@ def _attempt_signal_unconnected_repair(
             f"cfg = json.loads({_sig_cfg!r})\n"
             f"s = repair_unconnected_signals({str(routed_pcb)!r}, cfg)\n"
             # NB: keys must match repair_unconnected_signals' return contract
-            # {edges, tied, skipped} EXACTLY -- a KeyError here crashes the
-            # subprocess AFTER the repair mutated the board, so the except
-            # below silently byte-reverts it: the pass ran as a no-op on
-            # every rc7 board of the 20260710 batch (N5 evidence sweep).
+            # {edges, tied, skipped, pruned} EXACTLY -- a KeyError here
+            # crashes the subprocess AFTER the repair mutated the board, so
+            # the except below silently byte-reverts it: the pass ran as a
+            # no-op on every rc7 board of the 20260710 batch (N5 sweep).
             "print('signal unconnected repair:', s['edges'], 'edge(s) --',\n"
-            "      s['tied'], 'tied,', len(s['skipped']), 'skipped'\n"
+            "      s['tied'], 'tied,', len(s['skipped']), 'skipped,',\n"
+            "      s['pruned'], 'pruned'\n"
             "      + (': ' + '; '.join(s['skipped']) if s['skipped'] else ''))\n"
+            # The subprocess's stdout is not echoed into the compose log, so
+            # persist the summary for the parent to surface -- the per-edge
+            # skip REASONS are what the next repair-geometry iteration needs
+            # (the 20260713 batch had to re-run repairs offline to get them).
+            f"open({str(routed_pcb) + '.signal_repair.json'!r}, 'w')"
+            ".write(json.dumps(s))\n"
         )
+        sidecar = Path(str(routed_pcb) + ".signal_repair.json")
+        try:
+            s = json.loads(sidecar.read_text(encoding="utf-8"))
+            print(
+                f"  signal unconnected repair: {s.get('edges')} edge(s) -- "
+                f"{s.get('tied')} tied, {len(s.get('skipped') or [])} skipped, "
+                f"{s.get('pruned')} pruned"
+                + (": " + "; ".join(s["skipped"]) if s.get("skipped") else "")
+            )
+        except Exception:
+            pass
+        finally:
+            sidecar.unlink(missing_ok=True)
         revalidation = validate_routed_board(
             str(routed_pcb),
             cfg=cfg,

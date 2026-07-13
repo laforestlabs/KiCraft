@@ -159,6 +159,114 @@ def _candidate_paths(
     return paths
 
 
+def _seg_seg_dist_mm(
+    a1: tuple[float, float], a2: tuple[float, float],
+    b1: tuple[float, float], b2: tuple[float, float],
+) -> float:
+    """Minimum distance between two 2D segments."""
+
+    def _seg_pt(p1, p2, q):
+        vx, vy = p2[0] - p1[0], p2[1] - p1[1]
+        wx, wy = q[0] - p1[0], q[1] - p1[1]
+        vv = vx * vx + vy * vy
+        t = 0.0 if vv <= 1e-12 else max(0.0, min(1.0, (wx * vx + wy * vy) / vv))
+        return math.hypot(q[0] - (p1[0] + t * vx), q[1] - (p1[1] + t * vy))
+
+    d1x, d1y = a2[0] - a1[0], a2[1] - a1[1]
+    d2x, d2y = b2[0] - b1[0], b2[1] - b1[1]
+    denom = d1x * d2y - d1y * d2x
+    if abs(denom) > 1e-12:
+        t = ((b1[0] - a1[0]) * d2y - (b1[1] - a1[1]) * d2x) / denom
+        u = ((b1[0] - a1[0]) * d1y - (b1[1] - a1[1]) * d1x) / denom
+        if 0.0 <= t <= 1.0 and 0.0 <= u <= 1.0:
+            return 0.0  # proper crossing
+    return min(
+        _seg_pt(a1, a2, b1), _seg_pt(a1, a2, b2),
+        _seg_pt(b1, b2, a1), _seg_pt(b1, b2, a2),
+    )
+
+
+# An obstacle is (layer, net, x1, y1, x2, y2, halfwidth_mm): tracks/vias as
+# fat segments (via = zero-length), pads as fat segments across their bbox's
+# long axis (coarser than the true shape -- deliberately; the authoritative
+# guards inside add_breakout_stubs re-check every survivor exactly).
+_Obstacle = tuple[str, str, float, float, float, float, float]
+
+
+def _copper_obstacles(board: "pcbnew.BOARD") -> list[_Obstacle]:
+    out: list[_Obstacle] = []
+    for t in board.GetTracks():
+        net = t.GetNetname()
+        if isinstance(t, pcbnew.PCB_VIA):
+            p = t.GetPosition()
+            x, y = pcbnew.ToMM(p.x), pcbnew.ToMM(p.y)
+            r = pcbnew.ToMM(t.GetWidth()) / 2.0
+            out.append(("*", net, x, y, x, y, r))  # vias span layers
+            continue
+        s, e = t.GetStart(), t.GetEnd()
+        out.append((
+            t.GetLayerName(), net,
+            pcbnew.ToMM(s.x), pcbnew.ToMM(s.y),
+            pcbnew.ToMM(e.x), pcbnew.ToMM(e.y),
+            pcbnew.ToMM(t.GetWidth()) / 2.0,
+        ))
+    for fp in board.GetFootprints():
+        for pad in fp.Pads():
+            net = pad.GetNetname()
+            bb = pad.GetBoundingBox()
+            x1, y1 = pcbnew.ToMM(bb.GetLeft()), pcbnew.ToMM(bb.GetTop())
+            x2, y2 = pcbnew.ToMM(bb.GetRight()), pcbnew.ToMM(bb.GetBottom())
+            w, h = x2 - x1, y2 - y1
+            cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+            # Fat segment along the bbox's long axis, halfwidth = short/2.
+            if w >= h:
+                seg = (x1 + h / 2.0, cy, x2 - h / 2.0, cy, h / 2.0)
+            else:
+                seg = (cx, y1 + w / 2.0, cx, y2 - w / 2.0, w / 2.0)
+            on_f = pad.IsOnLayer(pcbnew.F_Cu)
+            on_b = pad.IsOnLayer(pcbnew.B_Cu)
+            layer = "*" if (on_f and on_b) else ("F.Cu" if on_f else "B.Cu")
+            out.append((layer, net, *seg))
+    return out
+
+
+# Obstacle hits within this radius of either edge endpoint are ignored: the
+# stub must APPROACH copper at both ends (its own pad's neighbors, the
+# target's surroundings), and breakout_stubs owns the exact rules there.
+_ENDPOINT_CARVEOUT_MM = 2.0
+
+
+def _path_clear(
+    obstacles: list[_Obstacle],
+    chain: list[tuple[float, float]],
+    *,
+    layer: str,
+    net: str,
+    margin_mm: float,
+    src: tuple[float, float],
+    tgt: tuple[float, float],
+) -> bool:
+    """Coarse in-memory screen: does the candidate chain obviously collide
+    with foreign copper? False = certainly-colliding, skip the expensive
+    stamping attempt; True = plausible (the stamping guards re-check exactly).
+    """
+    for a1, a2 in zip(chain, chain[1:]):
+        for olayer, onet, x1, y1, x2, y2, half in obstacles:
+            if onet == net or (olayer != "*" and olayer != layer):
+                continue
+            d = _seg_seg_dist_mm(a1, a2, (x1, y1), (x2, y2))
+            if d >= half + margin_mm:
+                continue
+            # Hit -- forgive it if it sits inside an endpoint carve-out.
+            ocx, ocy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+            if (math.hypot(ocx - src[0], ocy - src[1]) <= _ENDPOINT_CARVEOUT_MM
+                    or math.hypot(ocx - tgt[0], ocy - tgt[1])
+                    <= _ENDPOINT_CARVEOUT_MM):
+                continue
+            return False
+    return True
+
+
 def _pour_nets(board: "pcbnew.BOARD", cfg: dict[str, Any]) -> set[str]:
     """Nets owned by the pour repairs (GND + power planes), never touched here."""
     skip = {str(cfg.get("gnd_zone_net", "GND"))}
@@ -177,7 +285,7 @@ def repair_unconnected_signals(
 ) -> dict[str, Any]:
     """Close every unconnected signal DRC edge that a guarded tie can reach.
 
-    Returns ``{edges, tied, skipped}``. Mutates the board file only by adding
+    Returns ``{edges, tied, skipped, pruned}``. Mutates the board file only by adding
     guarded copper (and refilling zones so the pours close around it); an
     edge none of the candidate paths can close legally is reported in
     ``skipped`` and left exactly as found. The caller owns accept-or-revert.
@@ -190,7 +298,7 @@ def repair_unconnected_signals(
     escapes = tuple(
         float(e) for e in cfg.get("signal_repair_escape_mm", _DEFAULT_ESCAPE_MM)
     )
-    summary: dict[str, Any] = {"edges": 0, "tied": 0, "skipped": []}
+    summary: dict[str, Any] = {"edges": 0, "tied": 0, "skipped": [], "pruned": 0}
 
     from kicraft.autoplacer.freerouting_runner import _run_kicad_cli_drc
 
@@ -201,6 +309,17 @@ def repair_unconnected_signals(
 
     board = pcbnew.LoadBoard(pcb_path)
     pour = _pour_nets(board, cfg)
+    # In-memory copper map for the candidate pre-filter: without it the
+    # attempt budget dies inside the first escape direction's path family
+    # (each stamping attempt reloads the board), which the 20260713 batch
+    # measured as attempt_budget on 10 of 12 skipped edges while NONE were
+    # actually unroutable. Screening costs microseconds per candidate, so
+    # the budget is spent only on paths that don't obviously cross copper.
+    obstacles = _copper_obstacles(board)
+    pre_margin_mm = (
+        float(cfg.get("freerouting_min_clearance_mm", 0.153))
+        + float(cfg.get("freerouting_fine_pitch_track_mm", 0.153)) / 2.0
+    )
     edges = [e for e in edges if e[0].net not in pour]
     # Smallest gap first: cheap wins land before congested ones consume
     # stamped-copper budget (each stamped tie is an obstacle for the next).
@@ -218,6 +337,7 @@ def repair_unconnected_signals(
             continue
         tied = False
         attempts = 0
+        pruned = 0
         # Try both directions: the anchor must be a pad, and the more open
         # side often stamps where the walled side cannot.
         for src, tgt in ((a, b), (b, a)):
@@ -235,6 +355,14 @@ def repair_unconnected_signals(
                         for path in _candidate_paths(src.xy, tgt.xy, esc):
                             if attempts >= max_attempts:
                                 break
+                            if not _path_clear(
+                                obstacles, [src.xy] + path,
+                                layer=layer, net=src.net,
+                                margin_mm=pre_margin_mm,
+                                src=src.xy, tgt=tgt.xy,
+                            ):
+                                pruned += 1
+                                continue
                             attempts += 1
                             res = add_breakout_stubs(
                                 pcb_path,
@@ -257,9 +385,15 @@ def repair_unconnected_signals(
                     break
             if tied:
                 break
+        summary["pruned"] += pruned
         if not tied:
-            reason = ("attempt_budget" if attempts >= max_attempts
-                      else "no_pad_anchor" if not attempts
+            # no_pad_anchor: nothing to even try (both endpoints anchorless).
+            # attempt_budget: ran out of STAMPING budget on plausible paths.
+            # no_clear_path: every candidate was screened out or rejected by
+            # the stamping guards -- with the pre-filter this again means
+            # "geometry says blocked", not "gave up early".
+            reason = ("no_pad_anchor" if not attempts and not pruned
+                      else "attempt_budget" if attempts >= max_attempts
                       else "no_clear_path")
             summary["skipped"].append(f"{label}:{reason}")
 
