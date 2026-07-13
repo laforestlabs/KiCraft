@@ -1,0 +1,224 @@
+diff --git a/kicraft/cli/autoexperiment.py b/kicraft/cli/autoexperiment.py
+index 78da683..2cb0c1e 100644
+--- a/kicraft/cli/autoexperiment.py
++++ b/kicraft/cli/autoexperiment.py
+@@ -285,6 +285,7 @@ def _run_command(
+     *,
+     cwd: Path,
+     timeout_s: int | None = None,
++    env: dict[str, str] | None = None,
+ ) -> tuple[int, str, str]:
+     proc = subprocess.run(
+         cmd,
+@@ -292,6 +293,7 @@ def _run_command(
+         text=True,
+         capture_output=True,
+         timeout=timeout_s,
++        env=env,
+     )
+     return proc.returncode, proc.stdout, proc.stderr
+ 
+@@ -346,6 +348,43 @@ def _accepted_leaf_artifacts(project_dir: Path) -> list[dict[str, Any]]:
+     return accepted
+ 
+ 
++def _unpinned_leaf_selectors(
++    rounds_dir: Path, round_num: int, project_dir: Path
++) -> list[str]:
++    """Instance paths of leaves with NO accepted artifact on disk (N2a).
++
++    The full leaf set comes from the previous round's payload (every round
++    records ``all_leaf_artifacts``); acceptance is judged from DISK via
++    :func:`_accepted_leaf_artifacts`, so a leaf accepted in ANY earlier round
++    counts as pinned even if its latest re-solve was rejected.
++    """
++    prev = rounds_dir / f"round_{round_num - 1:04d}.json"
++    try:
++        payload = _load_json(prev)
++    except Exception:
++        return []
++    leaves = payload.get("all_leaf_artifacts") if isinstance(payload, dict) else None
++    if not isinstance(leaves, list):
++        return []
++    accepted_paths = {
++        str(a.get("instance_path") or "")
++        for a in _accepted_leaf_artifacts(project_dir)
++    }
++    out = {
++        str(leaf.get("instance_path") or "")
++        for leaf in leaves
++        if isinstance(leaf, dict) and str(leaf.get("instance_path") or "")
++        and str(leaf.get("instance_path") or "") not in accepted_paths
++    }
++    return sorted(out)
++
++
++# Below this remaining wall budget there is no point in a rescue round -- the
++# leaf solve needs a meaningful slice (>= the ~60s seed-bbox floor) plus the
++# parent compose/route tail.
++_WALL_RESCUE_MIN_S = 120.0
++
++
+ def _board_only_leaf_dirs(project_dir: Path) -> list[Path]:
+     """Leaf dirs that routed round boards but never serialized a result.
+ 
+@@ -2457,6 +2496,14 @@ def main(argv: list[str] | None = None) -> int:
+     # launching a round that would blow the harness watchdog (WS2).
+     max_wall_s = float(getattr(args, "max_wall_s", 0.0) or 0.0)
+     ema_round_s: float | None = None
++    # N2a: when the budget can't absorb another FULL round but some leaf has
++    # ZERO accepted artifacts, the remaining budget goes to ONE rescue round
++    # restricted to those leaves (pinned leaves are reused from disk) instead
++    # of finalizing with an unpinned leaf while budget sits unspent
++    # (run_09: 410s left on the table, MCU leaf never pinned -> rc7).
++    wall_rescue_only: list[str] = []
++    wall_rescue_leaf_s = 0.0
++    wall_rescue_attempted = False
+ 
+     for round_num in range(1, args.rounds + 1):
+         if _check_stop_request(work_dir):
+@@ -2467,12 +2514,40 @@ def main(argv: list[str] | None = None) -> int:
+         if max_wall_s > 0 and ema_round_s is not None:
+             elapsed = time.monotonic() - start_ts
+             if elapsed + ema_round_s > max_wall_s:
+-                print(
+-                    f"[wall-budget] elapsed {elapsed:.0f}s + est. next round "
+-                    f"{ema_round_s:.0f}s > budget {max_wall_s:.0f}s; finalizing "
+-                    f"best-so-far after {round_num - 1} round(s)"
+-                )
+-                break
++                remaining = max_wall_s - elapsed
++                unpinned: list[str] = []
++                if (
++                    not wall_rescue_attempted
++                    and not args.only
++                    and not args.parents_only
++                    and remaining >= _WALL_RESCUE_MIN_S
++                ):
++                    unpinned = _unpinned_leaf_selectors(
++                        rounds_dir, round_num, project_dir
++                    )
++                if unpinned:
++                    wall_rescue_attempted = True
++                    wall_rescue_only = unpinned
++                    # Leaf slice of the rescue: leave headroom for the parent
++                    # compose/route tail; the solve-side seed-bbox reserve (N1)
++                    # guarantees the fallback rung inside this slice.
++                    wall_rescue_leaf_s = max(60.0, remaining * 0.6)
++                    print(
++                        f"[wall-budget] elapsed {elapsed:.0f}s + est. next round "
++                        f"{ema_round_s:.0f}s > budget {max_wall_s:.0f}s; "
++                        f"{len(unpinned)} leaf(s) still have no accepted "
++                        f"artifact -- spending the remaining {remaining:.0f}s on "
++                        f"a rescue round for {', '.join(unpinned)} "
++                        f"(leaf slice {wall_rescue_leaf_s:.0f}s) instead of "
++                        f"re-solving pinned leaves"
++                    )
++                else:
++                    print(
++                        f"[wall-budget] elapsed {elapsed:.0f}s + est. next round "
++                        f"{ema_round_s:.0f}s > budget {max_wall_s:.0f}s; finalizing "
++                        f"best-so-far after {round_num - 1} round(s)"
++                    )
++                    break
+ 
+         _round_mono_start = time.monotonic()
+         round_seed = rng.randint(0, 2**31 - 1)
+@@ -2593,7 +2668,7 @@ def main(argv: list[str] | None = None) -> int:
+                     rounds=args.leaf_rounds,
+                     seed=round_seed,
+                     config=current_round_config,
+-                    only=args.only,
++                    only=wall_rescue_only or args.only,
+                     workers=effective_workers,
+                     fast_smoke=args.fast_smoke,
+                     leaf_order=[],
+@@ -2631,7 +2706,7 @@ def main(argv: list[str] | None = None) -> int:
+             rounds=args.leaf_rounds,
+             seed=round_seed,
+             config=current_round_config,
+-            only=args.only,
++            only=wall_rescue_only or args.only,
+             workers=effective_workers,
+             fast_smoke=args.fast_smoke,
+             leaf_order=previous_leaf_order,
+@@ -2680,11 +2755,24 @@ def main(argv: list[str] | None = None) -> int:
+                 f"using existing leaf artifacts on disk"
+             )
+         else:
++            solve_env: dict[str, str] | None = None
++            if wall_rescue_only:
++                # Clamp the rescue solve's per-leaf deadline to its budget
++                # slice -- the inherited KICRAFT_LEAF_SOLVE_MAX_WALL_S was
++                # sized for a full round and may exceed what is left.
++                solve_env = dict(os.environ)
++                solve_env["KICRAFT_LEAF_SOLVE_MAX_WALL_S"] = (
++                    f"{wall_rescue_leaf_s:.0f}"
++                )
+             solve_start_ts = _timing_now()
+             solve_rc, solve_stdout, solve_stderr = _run_command(
+                 solve_cmd,
+                 cwd=project_dir,
++                env=solve_env,
+             )
++            # The rescue restriction is one round only; any further rounds
++            # (the rescue may have finished under budget) solve normally.
++            wall_rescue_only = []
+             solve_elapsed_s = _record_timing(
+                 round_timing_breakdown,
+                 "solve_subcircuits_total",
+diff --git a/tests/test_unroutable_abort_and_build_log.py b/tests/test_unroutable_abort_and_build_log.py
+index ffb5857..744e380 100644
+--- a/tests/test_unroutable_abort_and_build_log.py
++++ b/tests/test_unroutable_abort_and_build_log.py
+@@ -18,6 +18,7 @@ from pathlib import Path
+ 
+ from kicraft.cli.autoexperiment import (  # noqa: F401 (re-exported below)
+     _quality_rejected_leaves,
++    _unpinned_leaf_selectors,
+     _update_quality_streak,
+     _RC_LEAF_UNROUTABLE,
+     _structural_unroutable_leaves,
+@@ -52,6 +53,42 @@ def test_structural_parser_flags_router_throw_and_illegal_placement():
+     }
+ 
+ 
++def _write_json(path: Path, payload) -> None:
++    import json
++
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(json.dumps(payload), encoding="utf-8")
++
++
++def test_unpinned_leaf_selectors_disk_acceptance_wins(tmp_path):
++    # N2a: the wall-budget rescue targets leaves with no accepted artifact ON
++    # DISK. A leaf accepted in ANY earlier round (disk truth) is pinned even
++    # if the latest round's payload shows accepted=false for it.
++    project = tmp_path
++    rounds_dir = tmp_path / "rounds"
++    _write_json(rounds_dir / "round_0002.json", {
++        "all_leaf_artifacts": [
++            {"instance_path": "/mcu-leaf", "accepted": False},
++            {"instance_path": "/power-leaf", "accepted": False},
++        ],
++    })
++    # POWER leaf: accepted artifact on disk. MCU leaf: none.
++    d = project / ".experiments" / "subcircuits" / "power__abc"
++    _write_json(d / "metadata.json", {"sheet_name": "POWER"})
++    _write_json(d / "solved_layout.json", {
++        "instance_path": "/power-leaf",
++        "validation": {"accepted": True},
++        "traces": [], "vias": [],
++    })
++
++    assert _unpinned_leaf_selectors(rounds_dir, 3, project) == ["/mcu-leaf"]
++
++
++def test_unpinned_leaf_selectors_no_prior_round(tmp_path):
++    # Round 1 has no prior payload -> no rescue set (nothing to enumerate).
++    assert _unpinned_leaf_selectors(tmp_path / "rounds", 1, tmp_path) == []
++
++
+ def test_deadline_expiry_is_not_structural():
+     # N1: a leaf that blew its wall deadline is SLOW, not structurally
+     # unroutable -- classifying it structural aborted builds that were
