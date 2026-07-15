@@ -489,6 +489,50 @@ def test_diag_chord_no_longer_eats_the_hole():
     assert area(coarse[0]) < area(tight[0]) <= area(plain[0])
 
 
+def test_nest_pass_centers_occupied_bbox_not_content_pos():
+    # PR-N5 landing fix: ``pos`` is the CONTENT centre, but containment
+    # tests the OCCUPIED bbox, whose centre can sit off by a couple of mm
+    # (traces/pads inflate asymmetrically). At tight hole slack the naive
+    # pos-centred landing fails even though the guest fits -- the pass must
+    # re-land with the occupied bbox centred (the real 1/601 guest has
+    # ~0.3 mm of slack per side).
+    guest_bs = LeafBlockerSet(
+        front_pads=(_rect(1, 5, 15, 13),),  # occupied centre (8, 9)...
+        back_pads=(),
+        tht_drills=(),
+        leaf_outline=_rect(0, 0, 16, 14),   # ...content centre (8, 7)
+        component_rects={"U1": _rect(1, 5, 15, 13)},
+    )
+    # A hole with 0.2 mm slack per side around occupied + 2x1.0 margin,
+    # parked in the annulus' clear interior (leaf-local coords).
+    tight_hole = _rect(20.0, 22.0, 20.0 + 14.0 + 2.0 + 0.4, 22.0 + 8.0 + 2.0 + 0.4)
+    host_bs = _annulus_blocker_set(holes=(tight_hole,))
+    host = _block("BLK_RING", pos=Point(60.0, 60.0), width=57.0, height=57.0,
+                  blocker_set=host_bs)
+    guest = _block("BLK_MCU", pos=Point(150.0, 60.0), width=16.0, height=14.0,
+                   blocker_set=guest_bs)
+    comps = {host.ref: host, guest.ref: guest}
+    state = BoardState(
+        components=comps, nets={}, traces=[], vias=[], silkscreen=[],
+        board_outline=(Point(0.0, 0.0), Point(200.0, 200.0)),
+    )
+    solver = PlacementSolver(state, config={
+        "leaf_nesting": "auto",
+        "board_outline": {"shape": "circle", "size_mm": 60.0},
+    }, seed=0)
+    solver._nest_blocks_in_interior_holes(comps)
+    assert guest.block_nested_anchor == "BLK_RING", (
+        "occupied-bbox-centred re-landing must rescue a tight-slack fit"
+    )
+    # The landing centred the OCCUPIED bbox (not pos) in the hole: hole
+    # world centre = host origin (60-28.5=31.5 each axis) + hole centre.
+    hole_cx = 31.5 + (tight_hole[0].x + tight_hole[1].x) / 2.0
+    hole_cy = 31.5 + (tight_hole[0].y + tight_hole[1].y) / 2.0
+    # guest occupied centre in world = pos + (occupied centre - content centre)
+    assert abs((guest.pos.x + 0.0) - hole_cx) < 0.01
+    assert abs((guest.pos.y + 2.0) - hole_cy) < 0.01
+
+
 def test_nest_pass_oversized_guest_left_alone():
     host_bs = _annulus_blocker_set(holes=_holes_for(_annulus_blocker_set()))
     big_bs = _small_front_leaf(w=40.0, h=40.0)

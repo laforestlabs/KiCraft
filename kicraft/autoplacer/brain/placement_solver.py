@@ -2775,7 +2775,7 @@ class PlacementSolver:
                      if isinstance(outline, dict) else "")
             if shape in ("", "rect", "rectangle"):
                 return
-        from .subcircuit_composer import _transform_rect
+        from .subcircuit_composer import _blocker_occupied_rects, _transform_rect
 
         zones = self.cfg.get("component_zones", {}) or {}
         hosts: list[tuple[str, Component]] = []
@@ -2819,13 +2819,42 @@ class PlacementSolver:
                     old_pos = Point(guest.pos.x, guest.pos.y)
                     guest.pos = Point(cx, cy)
                     _update_pad_positions(guest, old_pos, guest.rotation)
+                    if not _blocker_pair_compatible(host, guest):
+                        # ``pos`` is the CONTENT centre, but the containment
+                        # predicate tests the OCCUPIED bbox (content plus
+                        # trace/pad inflation), whose centre can sit a few
+                        # tenths off -- fatal exactly when the hole slack is
+                        # tight (the real 1/601 guest has ~0.3 mm per side).
+                        # Re-land with the occupied bbox centred in the hole
+                        # and let the same production predicate decide.
+                        g_origin = _world_artifact_origin(guest)
+                        g_rects = [
+                            _transform_rect(r, g_origin, guest.rotation)
+                            for r in _blocker_occupied_rects(
+                                guest.block_blocker_set
+                            )
+                        ]
+                        if g_rects:
+                            obb_cx = (min(r[0].x for r in g_rects)
+                                      + max(r[1].x for r in g_rects)) / 2.0
+                            obb_cy = (min(r[0].y for r in g_rects)
+                                      + max(r[1].y for r in g_rects)) / 2.0
+                            before = Point(guest.pos.x, guest.pos.y)
+                            guest.pos = Point(
+                                guest.pos.x + (cx - obb_cx),
+                                guest.pos.y + (cy - obb_cy),
+                            )
+                            _update_pad_positions(
+                                guest, before, guest.rotation
+                            )
                     if _blocker_pair_compatible(host, guest):
                         guest.block_nested_anchor = host_ref
                         guest.locked = True
                         host.locked = True
                         print(
                             f"  [nest] block {guest_ref} nested inside "
-                            f"{host_ref}'s interior hole at ({cx:.1f}, {cy:.1f})"
+                            f"{host_ref}'s interior hole at "
+                            f"({guest.pos.x:.1f}, {guest.pos.y:.1f})"
                             f" -- pair locked"
                         )
                         break  # one guest per hole
