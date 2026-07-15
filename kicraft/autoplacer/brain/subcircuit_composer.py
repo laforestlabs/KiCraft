@@ -1990,7 +1990,12 @@ def _extract_blockers_from_pcb(
 # Mirrors DEFAULT_CONFIG["nest_margin_mm"] for callers that have no cfg in
 # scope (the pairwise overlap check); the solver's nest-proposal pass reads
 # the config value and passes it through explicitly.
-_NEST_MARGIN_FALLBACK_MM = 1.5
+_NEST_MARGIN_FALLBACK_MM = 1.0
+# Mirrors DEFAULT_CONFIG["nest_hole_standoff_mm"]: how far a reported hole
+# stays back from real copper (on top of the extraction inflation and
+# nest_margin_mm) -- decoupled from the min_side_mm/2 closing radius, which
+# is a TOPOLOGY tool (sealing inter-member gaps), not a clearance rule.
+_NEST_HOLE_STANDOFF_FALLBACK_MM = 1.0
 _NEST_GRID_MM = 1.0
 # ~630x630 mm at 1 mm cells -- a degenerate outline bails out with no holes
 # rather than burning memory (interior nesting is meaningless at that scale).
@@ -2007,30 +2012,83 @@ def _blocker_occupied_rects(bs: LeafBlockerSet) -> list[tuple[Point, Point]]:
     return rects
 
 
+def _subdivided_trace_rects(
+    traces: list[TraceSegment],
+    *,
+    margin_mm: float,
+    piece_mm: float = _NEST_GRID_MM,
+) -> tuple[list[tuple[Point, Point]], list[tuple[Point, Point]]]:
+    """Trace bboxes subdivided into <= ``piece_mm`` pieces (still a copper
+    superset), for the interior-hole computation ONLY.
+
+    One AABB per whole segment (``_trace_blocker_rects``) turns a 45-degree
+    chord in a ring's band into a fat LxL square whose corner reaches deep
+    into the interior while the real copper stays in the band -- a dozen
+    rotated-LED hops tile those squares over the hole. Each sub-piece's bbox
+    (inflated by the trace half-width + ``margin_mm``) covers the copper
+    stadium around that piece, so the union stays a superset of the real
+    copper but hugs the diagonal instead of squaring it. The PUBLISHED
+    blocker set keeps the conservative one-rect-per-segment AABBs -- overlap
+    checks, repulsion, escape and validation are untouched.
+    """
+    front_rects: list[tuple[Point, Point]] = []
+    back_rects: list[tuple[Point, Point]] = []
+    for trace in traces:
+        dx = trace.end.x - trace.start.x
+        dy = trace.end.y - trace.start.y
+        n = max(1, int(math.ceil(math.hypot(dx, dy) / piece_mm)))
+        half_w = max(0.05, trace.width_mm / 2.0) + margin_mm
+        target = front_rects if trace.layer == 0 else back_rects
+        for i in range(n):
+            x0 = trace.start.x + dx * (i / n)
+            y0 = trace.start.y + dy * (i / n)
+            x1 = trace.start.x + dx * ((i + 1) / n)
+            y1 = trace.start.y + dy * ((i + 1) / n)
+            target.append((
+                Point(min(x0, x1) - half_w, min(y0, y1) - half_w),
+                Point(max(x0, x1) + half_w, max(y0, y1) + half_w),
+            ))
+    return front_rects, back_rects
+
+
 def compute_interior_free_rects(
     blocker_set: LeafBlockerSet,
     *,
     min_side_mm: float,
     grid_mm: float = _NEST_GRID_MM,
+    standoff_mm: float = _NEST_HOLE_STANDOFF_FALLBACK_MM,
 ) -> tuple[tuple[Point, Point], ...]:
     """Largest inscribed empty rect per fully-ENCLOSED interior hole.
 
-    Deterministic occupancy grid over ``leaf_outline``: cells touched by any
-    occupied rect are blocked, then the occupied mask is morphologically
-    CLOSED by ``min_side_mm / 2`` -- a discrete ring (LED annulus) is not a
-    solid wall, and its inter-member gaps would otherwise leak the boundary
-    flood-fill into the interior; a corridor narrower than the minimum
-    nestable hole side cannot host a nest anyway, so sealing it is exact for
-    this purpose. Empty cells of the CLOSED mask reachable from the outline
-    boundary are OUTSIDE space (open bays stay open: their mouths are wider
-    than the closing radius); each remaining empty region is an interior
-    hole and contributes its largest inscribed axis-aligned rectangle, kept
-    only when both sides reach ``min_side_mm``. The closing band around real
-    copper is excluded from the hole, so a reported rect keeps that standoff
-    from the ring members on top of ``nest_margin_mm``. Derived from
-    geometry, NOT from a ring ArraySpec, so interior companions (ring decaps
-    sit INSIDE the annulus) shrink the hole naturally. Output sorted by area
-    desc, then position, for cross-run stability.
+    Deterministic occupancy grid over ``leaf_outline``. Two masks with two
+    distinct jobs:
+
+    - TOPOLOGY -- where can a ``min_side_mm`` square travel in from the
+      outline boundary? Dilating the occupied mask by ``min_side_mm / 2``
+      and flood-filling its complement from the boundary gives exactly the
+      positions such a square's CENTRE can reach (a corridor narrower than
+      the minimum nestable hole side blocks it -- a discrete ring's
+      inter-member gaps seal; an open bay's wide mouth stays open); dilating
+      that reachable set back by the same radius gives everything the
+      square SWEEPS. Cells beyond the sweep are enclosed interior. (A real
+      morphological closing is the wrong tool here: it fails to seal a
+      ring's diagonal gaps, where the structuring element nestles into the
+      gap mouth from outside and erosion destroys the thin bridge.)
+    - CLEARANCE -- the hole additionally excludes only a ``standoff_mm``
+      dilation around occupied cells, NOT the whole ``min_side_mm / 2``
+      band. Sealing and standoff used to be the same dilation, which
+      double-charged the hole ~4 mm of standoff around every member --
+      electrically ~0.5 mm pad-margin inflation plus this standoff plus
+      ``nest_margin_mm`` is already generous vs the copper clearance rule.
+
+    Each enclosed empty region contributes its largest inscribed
+    axis-aligned rectangle, kept only when both sides reach ``min_side_mm``
+    (this also drops the unswept slivers that can appear between copper and
+    the outline boundary -- they are outside, just unreachable by the
+    square). Derived from geometry, NOT from a ring ArraySpec, so interior
+    companions (ring decaps that sit INSIDE the annulus) shrink the hole
+    naturally. Output sorted by area desc, then position, for cross-run
+    stability.
     """
     lo, hi = blocker_set.leaf_outline
     width, height = hi.x - lo.x, hi.y - lo.y
@@ -2053,31 +2111,30 @@ def compute_interior_free_rects(
             for gx in range(x0, x1 + 1):
                 row[gx] = True
 
-    # Chebyshev dilation by the closing radius (separable: rows then cols).
-    k = max(1, int(math.ceil((min_side_mm / 2.0) / min(cell_w, cell_h))))
-
-    def _dilate_rows(mask):
-        out = [[False] * nx for _ in range(ny)]
+    def _dilated(mask, k):
+        # Chebyshev dilation by k cells (separable: rows then cols).
+        rows = [[False] * nx for _ in range(ny)]
         for gy in range(ny):
-            src, dst = mask[gy], out[gy]
+            src, dst = mask[gy], rows[gy]
             for gx in range(nx):
                 if src[gx]:
                     for ax in range(max(0, gx - k), min(nx, gx + k + 1)):
                         dst[ax] = True
-        return out
-
-    def _dilate_cols(mask):
-        out = [row[:] for row in mask]
+        out = [row[:] for row in rows]
         for gx in range(nx):
             for gy in range(ny):
-                if mask[gy][gx]:
+                if rows[gy][gx]:
                     for ay in range(max(0, gy - k), min(ny, gy + k + 1)):
                         out[ay][gx] = True
         return out
 
-    closed = _dilate_cols(_dilate_rows(occupied))
+    k_close = max(1, int(math.ceil((min_side_mm / 2.0) / min(cell_w, cell_h))))
+    closed = _dilated(occupied, k_close)
+    k_standoff = max(1, int(math.ceil(standoff_mm / min(cell_w, cell_h)))) if standoff_mm > 0.0 else 0
+    standoff = _dilated(occupied, k_standoff) if k_standoff else occupied
 
-    # Flood-fill the OUTSIDE space of the CLOSED mask from the boundary.
+    # Flood-fill the min_side-square CENTRE positions reachable from the
+    # boundary (the empty cells of the dilated mask).
     outside = [[False] * nx for _ in range(ny)]
     stack = [
         (gx, gy)
@@ -2095,15 +2152,21 @@ def compute_interior_free_rects(
                     and not closed[ay][ax] and not outside[ay][ax]):
                 outside[ay][ax] = True
                 stack.append((ax, ay))
+    # Everything the boundary-reachable square SWEEPS is outside space.
+    swept = _dilated(outside, k_close)
 
-    # Label each interior hole (empty in the CLOSED mask -- i.e. clear of
-    # copper AND its closing band -- and not outside) and take its largest
-    # inscribed rectangle via the classic histogram-stack scan per hole.
+    # Label each interior hole (beyond the sweep, clear of the copper
+    # standoff band) and take its largest inscribed rectangle via the
+    # classic histogram-stack scan per hole.
+    blocked = [
+        [swept[gy][gx] or standoff[gy][gx] for gx in range(nx)]
+        for gy in range(ny)
+    ]
     comp = [[-1] * nx for _ in range(ny)]
     n_comp = 0
     for gy in range(ny):
         for gx in range(nx):
-            if closed[gy][gx] or outside[gy][gx] or comp[gy][gx] >= 0:
+            if blocked[gy][gx] or comp[gy][gx] >= 0:
                 continue
             fill = [(gx, gy)]
             comp[gy][gx] = n_comp
@@ -2112,7 +2175,7 @@ def compute_interior_free_rects(
                 for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                     ax, ay = cx + dx, cy + dy
                     if (0 <= ax < nx and 0 <= ay < ny and comp[ay][ax] < 0
-                            and not closed[ay][ax] and not outside[ay][ax]):
+                            and not blocked[ay][ax]):
                         comp[ay][ax] = n_comp
                         fill.append((ax, ay))
             n_comp += 1
@@ -2217,9 +2280,25 @@ def extract_leaf_blocker_set(
             pad_margin_mm=pad_margin_mm,
             drill_margin_mm=drill_margin_mm,
         )
+    # Hole computation reads a TIGHT variant of the blocker set: trace rects
+    # subdivided so a diagonal chord no longer squares out over the interior
+    # (still a copper superset). The published blocker set keeps the
+    # conservative one-rect-per-segment AABBs for every other consumer.
+    tight_front, tight_back = _subdivided_trace_rects(
+        artifact.layout.traces, margin_mm=pad_margin_mm
+    )
     holes = compute_interior_free_rects(
-        blocker_set,
+        replace(
+            blocker_set,
+            front_traces=tuple(tight_front),
+            back_traces=tuple(tight_back),
+        ),
         min_side_mm=float((cfg or {}).get("nest_min_hole_side_mm", 8.0)),
+        standoff_mm=float(
+            (cfg or {}).get(
+                "nest_hole_standoff_mm", _NEST_HOLE_STANDOFF_FALLBACK_MM
+            )
+        ),
     )
     if holes:
         blocker_set = replace(blocker_set, interior_free_rects=holes)

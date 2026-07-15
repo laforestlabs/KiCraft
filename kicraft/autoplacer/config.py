@@ -375,9 +375,14 @@ DEFAULT_CONFIG = {
     # margin is held between the guest's occupied bbox and the hole's edge on
     # top of the per-rect inflation already applied at blocker extraction;
     # holes with an inscribed rect smaller than the minimum side are not
-    # worth proposing into.
-    "nest_margin_mm": 1.5,
+    # worth proposing into. The hole itself stays nest_hole_standoff_mm back
+    # from real copper (decoupled from the min_side/2 gap-sealing radius,
+    # which is topology, not clearance): effective copper-to-copper spacing
+    # for a nested pair is ~0.5 pad-margin each side + standoff + margin,
+    # generous vs the 0.2 mm clearance rule.
+    "nest_margin_mm": 1.0,
     "nest_min_hole_side_mm": 8.0,
+    "nest_hole_standoff_mm": 1.0,
     # Leaf acceptance: a leaf must route all of its *signal* nets. Power/ground
     # nets are excluded automatically (they close on the post-route pour, not on
     # leaf routing). Set to None to disable (historical lenient behaviour). This
