@@ -1,12 +1,28 @@
 # Shaped-compose leaf nesting — implementation plan
 
-**Status:** PR-N1..N4 LANDED 2026-07-13 (`a546274`, `56f48b3`, `2567701`, `21389c4`), each
-unit-tested and parity/behavior-verified. **The e2e genre flip is blocked by a FIFTH blocker
-discovered during PR-N4 verification**: the real ring leaf has no nestable hole
-(12.9×16.0 vs the 24.4×22.0 the guest needs), so the demotion wave correctly declines to
-fire. PR-N3 is visibly working (circumscribed 82.9 → 70.3 on 1/601). **PR-N5 is scoped and
-drafted (2026-07-13, measured decomposition — see the PR-N5 section at the bottom); it is
-the next implementation step.**
+**Status:** PR-N1..N4 LANDED 2026-07-13 (`a546274`, `56f48b3`, `2567701`, `21389c4`).
+**PR-N5 LANDED 2026-07-15** in three commits — r1+r2 `6069d22`, p1+p2 `7b7b52d`, plus a
+fifth leg r3 `b78851e` discovered during verification (non-cardinal member courtyard AABBs
+were eating the hole the same way trace AABBs did; exact rotated-body rasterization +
+0.5 mm hole grid). **Ring interior discipline is measured DONE** on a rebuilt 1/601:
+innermost copper r=20.1 (was 14.9), hole 12.9×16.0 → **23.96×23.87** (the predicted ~24),
+band decaps + closed-loop +5V bus stamp clean, KC-HN59RJ ring regression replay stays
+DRC 0/0. **The genre flip did NOT fire yet: the gate moved to the GUEST.** The
+post-connectivity-default MCU leaf solves to 21.72×22.39 occupied (~30% utilization; it was
+21.4×19.0 when this plan was measured), needing 23.7×24.4 vs the 23.96×23.87 hole —
+**0.5 mm short in y**. The compose log now prints this near-miss explicitly
+(`nest-demotion fit check failed ... short 0.00/0.52 mm`). Owning follow-up: leaf
+grid-assignment tuning (the known placement-streamline open item) and/or a leaf re-solve
+after edge-pin demotion (J1 is pinned to the guest leaf's own bottom edge by the very zone
+the parent wave demotes). NOT further margin cuts — the remaining stack (0.5 extraction +
+1.0 margin + 1.0 standoff) is the honest floor.
+
+Implementation corrections vs the draft below, for the record: (a) the r2 "morphological
+close" is actually a reachability sweep — a true closing fails to seal a ring's DIAGONAL
+gaps (the structuring element nestles into the gap mouth from outside and erosion destroys
+the bridge); dilate, flood the centre positions, dilate the reachable set back. (b) p1
+decaps are RADIAL (power pad inward on the chord sagitta), not tangential — a tangential
+cap puts its GND pad in the bus chord's path and the foreign-pad guard drops the tie.
 
 **Blocker 5 (OPEN, owns the genre now): ring-leaf interior discipline.** Scoped 2026-07-13
 by probing the accepted 1/601 leaf artifact — the original "two ~35 mm chords" theory was
