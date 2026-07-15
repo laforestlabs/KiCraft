@@ -23,6 +23,7 @@ specs and stamps them in the existing pass -- no new board write path.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pcbnew
@@ -31,9 +32,14 @@ from kicraft.autoplacer.brain.breakout_stubs import (
     BreakoutSpec,
     _board_inner_box_mm,
 )
-from kicraft.design.models import is_power_or_ground_name
+from kicraft.design.models import GND_NET_PATTERNS, is_power_or_ground_name
 
 _FAR = 1 << 30
+
+
+def _is_ground_name(name: str) -> bool:
+    stripped = (name or "").lstrip("/")
+    return any(pat.search(stripped) for pat in GND_NET_PATTERNS)
 
 
 def _array_member_order(
@@ -227,3 +233,157 @@ def array_daisy_chain_specs(
         )
     ties.sort(key=lambda item: item[0])
     return [spec for _, spec in ties]
+
+
+def array_ring_power_specs(
+    board: "pcbnew.BOARD",
+    cfg: dict[str, Any] | None = None,
+) -> list[BreakoutSpec]:
+    """A deterministic CLOSED-LOOP power bus for every fully-present ring array.
+
+    A ring's canonical power distribution is a bus at the members' power-pad
+    radius: n identical short chords, member pad to member pad -- detouring
+    through a band decap's power pad when one sits in the gap (see
+    ``array_placement._place_ring_band_decaps``, which parks it exactly on the
+    chord's sagitta radius) -- CLOSED, so one or two guard-dropped ties cannot
+    disconnect the bus. Stamping it makes power deterministic and leaves
+    FreeRouting no reason to dip INTO the ring interior, which shaped-compose
+    nesting needs clear (docs/plans/shaped-compose-leaf-nesting.md, PR-N5).
+    Each gap decap's GND pad also gets a short tangential stub with a via down
+    to the B.Cu pour. Member GND ties are deliberately NOT stamped: LED GND
+    pads sit on the ring's outer corner, where FreeRouting's shortest paths
+    never enter the interior, and the pours own GND.
+
+    Returned SEPARATELY from the daisy-chain data ties so the array stamp
+    gate keeps measuring in-row DATA hops only; the ``add_breakout_stubs``
+    foreign-pad / copper guards stay the honesty layer (a tie they drop is
+    handed to FreeRouting, loudly, via the leaf_routing skipped log).
+    """
+    cfg = cfg or {}
+    if not cfg.get("array_ring_power_bus", True):
+        return []
+    arrays = cfg.get("arrays") or []
+    fp_by_ref = {fp.GetReferenceAsString(): fp for fp in board.GetFootprints()}
+    width = float(cfg.get("power_width_mm", 0.5))
+    layer = cfg.get("array_data_layer", "F.Cu")
+    stub_mm = float(cfg.get("array_ring_gnd_stub_mm", 1.0))
+
+    def _mm_xy(pos) -> tuple[float, float]:
+        return (pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y))
+
+    specs: list[BreakoutSpec] = []
+    used_decaps: set[str] = set()
+    for arr in arrays:
+        if str(arr.get("pattern", "grid") or "grid").lower() != "ring":
+            continue
+        refs = list(arr.get("refs", []))
+        if len(refs) < 3 or not all(r in fp_by_ref for r in refs):
+            continue
+
+        # The shared rail: a non-ground power net present on EVERY member.
+        rails: set[str] | None = None
+        for r in refs:
+            nets = {
+                p.GetNetname() for p in fp_by_ref[r].Pads()
+                if p.GetNetCode()
+                and is_power_or_ground_name(p.GetNetname())
+                and not _is_ground_name(p.GetNetname())
+            }
+            rails = nets if rails is None else (rails & nets)
+        if not rails:
+            print(
+                f"  ring-power: no common rail across {refs[0]}..{refs[-1]} "
+                "-- bus skipped"
+            )
+            continue
+        bus = sorted(rails)[0]
+        if len(rails) > 1:
+            print(
+                f"  ring-power: several common rails {sorted(rails)}; "
+                f"stamping {bus}"
+            )
+
+        bus_pads = {
+            r: sorted(
+                (p for p in fp_by_ref[r].Pads() if p.GetNetname() == bus),
+                key=lambda p: p.GetNumber(),
+            )[0]
+            for r in refs
+        }
+        centers = {r: _mm_xy(fp_by_ref[r].GetPosition()) for r in refs}
+        cx = sum(x for x, _ in centers.values()) / len(refs)
+        cy = sum(y for _, y in centers.values()) / len(refs)
+        r_mean = sum(
+            math.hypot(x - cx, y - cy) for x, y in centers.values()
+        ) / len(refs)
+
+        def _ang(x: float, y: float) -> float:
+            return math.degrees(math.atan2(y - cy, x - cx)) % 360.0
+
+        # Band decaps (2 pads: this rail + ground, inside the band's radial
+        # window) available for member->decap->member detours.
+        gap_decaps: list[tuple[str, Any, Any, float]] = []
+        for ref, fp in sorted(fp_by_ref.items()):
+            if ref in refs:
+                continue
+            pads = list(fp.Pads())
+            if len(pads) != 2:
+                continue
+            d_bus = [p for p in pads if p.GetNetname() == bus]
+            d_gnd = [
+                p for p in pads
+                if p.GetNetCode() and _is_ground_name(p.GetNetname())
+            ]
+            if len(d_bus) != 1 or len(d_gnd) != 1:
+                continue
+            fx, fy = _mm_xy(fp.GetPosition())
+            if not (0.5 * r_mean <= math.hypot(fx - cx, fy - cy) <= 1.5 * r_mean):
+                continue
+            gap_decaps.append((ref, d_bus[0], d_gnd[0], _ang(fx, fy)))
+
+        n = len(refs)
+        for k in range(n):
+            ref_a, ref_b = refs[k], refs[(k + 1) % n]
+            pad_a, pad_b = bus_pads[ref_a], bus_pads[ref_b]
+            src = _mm_xy(pad_a.GetPosition())
+            tgt = _mm_xy(pad_b.GetPosition())
+            a_a = _ang(*centers[ref_a])
+            step = (_ang(*centers[ref_b]) - a_a) % 360.0
+            mid = (a_a + step / 2.0) % 360.0
+            in_gap = sorted(
+                (
+                    d for d in gap_decaps
+                    if d[0] not in used_decaps
+                    and 0.0 < (d[3] - a_a) % 360.0 < step
+                ),
+                key=lambda d: (abs((d[3] - mid + 180.0) % 360.0 - 180.0), d[0]),
+            )
+            if in_gap:
+                dref, d_bus, d_gnd, d_ang = in_gap[0]
+                used_decaps.add(dref)
+                dxy = _mm_xy(d_bus.GetPosition())
+                specs.append(BreakoutSpec(
+                    ref=ref_a, pad=pad_a.GetNumber(), waypoints=[dxy],
+                    width_mm=width, layer=layer, near_xy=src,
+                ))
+                specs.append(BreakoutSpec(
+                    ref=dref, pad=d_bus.GetNumber(), waypoints=[tgt],
+                    width_mm=width, layer=layer, near_xy=dxy,
+                ))
+                # GND: a short tangential stub + via down to the pour, so the
+                # decap's ground never pulls FreeRouting into the interior.
+                gxy = _mm_xy(d_gnd.GetPosition())
+                t = math.radians(d_ang + 90.0)
+                specs.append(BreakoutSpec(
+                    ref=dref, pad=d_gnd.GetNumber(),
+                    waypoints=[(gxy[0] + stub_mm * math.cos(t),
+                                gxy[1] + stub_mm * math.sin(t))],
+                    width_mm=width, layer=layer, near_xy=gxy,
+                    via_at_end=True,
+                ))
+            else:
+                specs.append(BreakoutSpec(
+                    ref=ref_a, pad=pad_a.GetNumber(), waypoints=[tgt],
+                    width_mm=width, layer=layer, near_xy=src,
+                ))
+    return specs

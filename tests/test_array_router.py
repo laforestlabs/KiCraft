@@ -263,3 +263,188 @@ def test_obstructed_channel_collapses_stamp_rate(tmp_path):
     blocked_skips = add_breakout_stubs(blocked, specs2, cfg=cfg).get("skipped", [])
     assert len(blocked_skips) > len(clean_skips), "the foreign pads block the data ties"
     assert array_stamp_gate_tripped(specs2, blocked_skips, gate_cfg)
+
+
+# --------------------------------------------------------------------------- #
+# PR-N5 p2: the deterministic closed-loop ring power bus
+# --------------------------------------------------------------------------- #
+
+import math as _math  # noqa: E402
+
+from kicraft.autoplacer.brain.array_router import (  # noqa: E402
+    array_ring_power_specs,
+)
+
+
+def _ring_board(path, n=12, *, radius=24.0, centre=28.5, outline=57.0,
+                decap_gaps=()):
+    """A ring of chained LEDs + optional band decaps at given gap indices.
+
+    Members D1..Dn sit evenly on the circle (unrotated -- the router reads
+    pad positions, not rotations). A decap Ck for gap index g sits at the
+    gap-midpoint angle at the bus radius, one pad on +5V, one on GND.
+    """
+    board = pcbnew.NewBoard(path)
+    netnames = {"+5V", "GND"} | {f"DATA{i}" for i in range(n - 1)}
+    for name in netnames:
+        board.Add(pcbnew.NETINFO_ITEM(board, name))
+
+    def net(name):
+        return board.GetNetInfo().GetNetItem(name)
+
+    corners = [(0, 0), (outline, 0), (outline, outline), (0, outline), (0, 0)]
+    for (x1, y1), (x2, y2) in zip(corners, corners[1:]):
+        seg = pcbnew.PCB_SHAPE(board)
+        seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        seg.SetStart(pcbnew.VECTOR2I(_mm(x1), _mm(y1)))
+        seg.SetEnd(pcbnew.VECTOR2I(_mm(x2), _mm(y2)))
+        seg.SetLayer(pcbnew.Edge_Cuts)
+        board.Add(seg)
+
+    def _pad(fp, num, netname, x, y, size=0.3):
+        pad = pcbnew.PAD(fp)
+        pad.SetSize(pcbnew.VECTOR2I(_mm(size), _mm(size)))
+        pad.SetPosition(pcbnew.VECTOR2I(_mm(x), _mm(y)))
+        pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        pad.SetLayerSet(pcbnew.PAD.SMDMask())
+        pad.SetNumber(num)
+        if netname:
+            pad.SetNet(net(netname))
+        fp.Add(pad)
+
+    # Rotationally-repeating pinout, like a real _orient_ring'd WS2812 ring:
+    # VDD on the INNER edge (the bus radius), GND outer, DOUT/DIN tangential
+    # (radial offset, tangential offset) per role.
+    polar_pads = {"1": ("VDD", -0.8, 0.0), "2": ("DOUT", 0.0, 0.4),
+                  "3": ("GND", 0.8, 0.0), "4": ("DIN", 0.0, -0.4)}
+    for idx in range(n):
+        ang = 2.0 * _math.pi * idx / n
+        ur, ut = (_math.cos(ang), _math.sin(ang)), (-_math.sin(ang), _math.cos(ang))
+        cx = centre + radius * ur[0]
+        cy = centre + radius * ur[1]
+        fp = pcbnew.FOOTPRINT(board)
+        fp.SetReference(f"D{idx + 1}")
+        fp.SetPosition(pcbnew.VECTOR2I(_mm(cx), _mm(cy)))
+        board.Add(fp)
+        for num, (role, dr, dt) in polar_pads.items():
+            netname = {"VDD": "+5V", "GND": "GND"}.get(role)
+            if role == "DOUT" and idx < n - 1:
+                netname = f"DATA{idx}"
+            elif role == "DOUT":
+                netname = None
+            elif role == "DIN":
+                netname = f"DATA{idx - 1}" if idx > 0 else None
+            _pad(fp, num, netname,
+                 cx + dr * ur[0] + dt * ut[0],
+                 cy + dr * ur[1] + dt * ut[1])
+
+    r_tap = radius * _math.cos(_math.pi / n)
+    for j, g in enumerate(decap_gaps):
+        a_mid = 2.0 * _math.pi * (g + 0.5) / n
+        cx = centre + r_tap * _math.cos(a_mid)
+        cy = centre + r_tap * _math.sin(a_mid)
+        fp = pcbnew.FOOTPRINT(board)
+        fp.SetReference(f"C{j + 1}")
+        fp.SetPosition(pcbnew.VECTOR2I(_mm(cx), _mm(cy)))
+        board.Add(fp)
+        # pad axis radial: power pad inward, GND pad outward
+        ux, uy = _math.cos(a_mid), _math.sin(a_mid)
+        _pad(fp, "1", "+5V", cx - 0.4 * ux, cy - 0.4 * uy)
+        _pad(fp, "2", "GND", cx + 0.4 * ux, cy + 0.4 * uy)
+    board.Save(path)
+    return path
+
+
+def _ring_cfg(n=12):
+    return {"arrays": [{"refs": [f"D{i}" for i in range(1, n + 1)],
+                        "pattern": "ring", "radius_mm": 24.0}]}
+
+
+def test_ring_power_bus_is_a_closed_deterministic_loop(tmp_path):
+    path = _ring_board(str(tmp_path / "ring.kicad_pcb"))
+    specs = array_ring_power_specs(pcbnew.LoadBoard(path), _ring_cfg())
+    assert len(specs) == 12, "one tie per gap, closed loop"
+    assert [s.ref for s in specs] == [f"D{i}" for i in range(1, 13)]
+    # The last tie closes the loop: D12 -> D1's +5V pad.
+    board = pcbnew.LoadBoard(path)
+    d1 = next(fp for fp in board.GetFootprints()
+              if fp.GetReferenceAsString() == "D1")
+    p = next(p for p in d1.Pads() if p.GetNetname() == "+5V")
+    tx, ty = specs[-1].waypoints[-1]
+    assert abs(tx - pcbnew.ToMM(p.GetPosition().x)) < 1e-6
+    assert abs(ty - pcbnew.ToMM(p.GetPosition().y)) < 1e-6
+    # Deterministic across runs.
+    again = array_ring_power_specs(pcbnew.LoadBoard(path), _ring_cfg())
+    assert [(s.ref, s.pad, s.waypoints) for s in specs] == [
+        (s.ref, s.pad, s.waypoints) for s in again
+    ]
+
+
+def test_ring_power_bus_detours_through_gap_decap(tmp_path):
+    path = _ring_board(str(tmp_path / "ringc.kicad_pcb"), decap_gaps=(0, 5))
+    specs = array_ring_power_specs(pcbnew.LoadBoard(path), _ring_cfg())
+    # 10 plain gaps + 2 * (two bus segments + one GND via stub) = 16.
+    assert len(specs) == 16
+    by_ref = {}
+    for s in specs:
+        by_ref.setdefault(s.ref, []).append(s)
+    # Gap 0: D1 ties to C1's power pad, C1 ties onward to D2.
+    c1_specs = by_ref["C1"]
+    assert {s.pad for s in c1_specs} == {"1", "2"}
+    bus_leg = next(s for s in c1_specs if s.pad == "1")
+    gnd_leg = next(s for s in c1_specs if s.pad == "2")
+    assert not bus_leg.via_at_end and gnd_leg.via_at_end
+    board = pcbnew.LoadBoard(path)
+    fps = {fp.GetReferenceAsString(): fp for fp in board.GetFootprints()}
+    c1_pwr = next(p for p in fps["C1"].Pads() if p.GetNumber() == "1")
+    d1_tie = by_ref["D1"][0]
+    assert abs(d1_tie.waypoints[-1][0] - pcbnew.ToMM(c1_pwr.GetPosition().x)) < 1e-6
+    d2_pwr = next(p for p in fps["D2"].Pads() if p.GetNetname() == "+5V")
+    assert abs(bus_leg.waypoints[-1][0] - pcbnew.ToMM(d2_pwr.GetPosition().x)) < 1e-6
+    # The GND stub stays short (a via drop, not a route).
+    gx, gy = gnd_leg.waypoints[-1]
+    c1_gnd = next(p for p in fps["C1"].Pads() if p.GetNumber() == "2")
+    dist = _math.hypot(gx - pcbnew.ToMM(c1_gnd.GetPosition().x),
+                       gy - pcbnew.ToMM(c1_gnd.GetPosition().y))
+    assert dist < 1.5
+
+
+def test_ring_power_bus_kill_switch_and_grid_noop(tmp_path):
+    path = _ring_board(str(tmp_path / "ringoff.kicad_pcb"))
+    cfg = _ring_cfg()
+    cfg["array_ring_power_bus"] = False
+    assert array_ring_power_specs(pcbnew.LoadBoard(path), cfg) == []
+    # A grid array never gets a ring bus.
+    gpath = _grid_board(str(tmp_path / "grid.kicad_pcb"),
+                        [("D1", 4.0, 4.0), ("D2", 7.0, 4.0),
+                         ("D3", 7.0, 7.0), ("D4", 4.0, 7.0)])
+    gcfg = {"arrays": [{"refs": ["D1", "D2", "D3", "D4"], "rows": 2,
+                        "cols": 2, "serpentine": True}]}
+    assert array_ring_power_specs(pcbnew.LoadBoard(gpath), gcfg) == []
+
+
+def test_ring_power_keys_disjoint_from_data_ties(tmp_path):
+    # The stamp gate counts _arr_specs (data) only; the wiring keeps the two
+    # lists separate, and their ref.pad keys must never collide -- power ties
+    # source from VDD/GND pads, data ties from DOUT pads.
+    path = _ring_board(str(tmp_path / "ringk.kicad_pcb"), decap_gaps=(3,))
+    cfg = _ring_cfg()
+    data = array_daisy_chain_specs(pcbnew.LoadBoard(path), cfg)
+    power = array_ring_power_specs(pcbnew.LoadBoard(path), cfg)
+    assert data and power
+    data_keys = {f"{s.ref}.{s.pad}" for s in data}
+    power_keys = {f"{s.ref}.{s.pad}" for s in power}
+    assert not (data_keys & power_keys)
+
+
+def test_ring_power_bus_stamps_clean_on_open_board(tmp_path):
+    # End-to-end through the real stamping guards: on an uncluttered ring
+    # every bus tie must stamp (no skips) and the decap via lands.
+    path = _ring_board(str(tmp_path / "ringstamp.kicad_pcb"), decap_gaps=(0,))
+    cfg = _ring_cfg()
+    specs = array_ring_power_specs(pcbnew.LoadBoard(path), cfg)
+    out = add_breakout_stubs(path, specs, cfg=cfg)
+    keys = {f"{s.ref}.{s.pad}" for s in specs}
+    skipped = [s for s in out.get("skipped", []) if s.split(":", 1)[0] in keys]
+    assert skipped == [], f"bus ties dropped by the stamp guards: {skipped}"
+    assert out["vias"] >= 1, "the decap GND via must be stamped"

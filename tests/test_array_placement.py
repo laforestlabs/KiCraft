@@ -614,9 +614,9 @@ def test_ring_orientation_points_dout_along_chain() -> None:
         assert dot > 0.0, f"{refs[i]} DOUT points away from {refs[i + 1]}"
 
 
-def test_ring_companion_decaps_placed_radially_inside() -> None:
-    comps, refs = _ring_comps(6)
-    for i in range(1, 7):
+def _ring_with_decaps(n: int):
+    comps, refs = _ring_comps(n)
+    for i in range(1, n + 1):
         comps[f"C{i}"] = Component(
             ref=f"C{i}", value="100nF", pos=Point(0.0, 0.0), rotation=0.0,
             layer=Layer.FRONT, width_mm=1.0, height_mm=0.5,
@@ -625,19 +625,93 @@ def test_ring_companion_decaps_placed_radially_inside() -> None:
                 Pad(ref=f"C{i}", pad_id="2", pos=Point(+0.4, 0.0), net="GND", layer=Layer.FRONT),
             ],
         )
+    return comps, refs
+
+
+def test_ring_companion_decaps_placed_in_band_at_gap_midpoints() -> None:
+    # PR-N5 p1: ring companions belong in the BAND (the gap between adjacent
+    # members), pad axis radial with the power pad inward on the +5V bus
+    # chord -- NOT parked in the interior, which nesting needs clear.
+    n = 6
+    comps, refs = _ring_with_decaps(n)
     placed, fully = place_array_leaves(
         comps, [{"refs": refs, "pattern": "ring", "radius_mm": 10.0}],
         {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0},
     )
     assert fully is True
-    assert placed == set(refs) | {f"C{i}" for i in range(1, 7)}
+    assert placed == set(refs) | {f"C{i}" for i in range(1, n + 1)}
+    cx, cy = _center_of(comps, refs)
+
+    def ang(x, y):
+        return _math.degrees(_math.atan2(y - cy, x - cx)) % 360.0
+
+    r_pwr = sum(
+        _math.hypot(p.pos.x - cx, p.pos.y - cy)
+        for r in refs for p in comps[r].pads if p.net == "+5V"
+    ) / n
+    r_tap = r_pwr * _math.cos(_math.pi / n)
+    for i in range(1, n + 1):
+        c = comps[f"C{i}"]
+        assert c.locked and c.array_member
+        # Gap midpoint: halfway (in angle) between member i and member i+1.
+        a_members = ang(comps[refs[i - 1]].pos.x, comps[refs[i - 1]].pos.y)
+        a_next = ang(comps[refs[i % n]].pos.x, comps[refs[i % n]].pos.y)
+        a_mid_expect = (a_members + ((a_next - a_members) % 360.0) / 2.0) % 360.0
+        a_cap = ang(c.pos.x, c.pos.y)
+        assert abs((a_cap - a_mid_expect + 180.0) % 360.0 - 180.0) < 2.0
+        # Radial pad axis: power pad inward, ON the bus-chord sagitta radius.
+        p_pwr = next(p for p in c.pads if p.net == "+5V")
+        p_gnd = next(p for p in c.pads if p.net == "GND")
+        r_p = _math.hypot(p_pwr.pos.x - cx, p_pwr.pos.y - cy)
+        r_g = _math.hypot(p_gnd.pos.x - cx, p_gnd.pos.y - cy)
+        assert r_g - r_p > 0.6, f"C{i} pad axis not radial power-inward"
+        assert abs(r_p - r_tap) < 0.4, f"C{i} power pad off the bus chord"
+
+
+def test_ring_band_decaps_fall_back_to_perimeter_when_gap_too_tight() -> None:
+    # A minimum-radius ring leaves no room in the gaps -- the caps must fall
+    # back to the perimeter ring (outside the members), never overlap.
+    n = 6
+    comps, refs = _ring_with_decaps(n)
+    placed, fully = place_array_leaves(
+        comps, [{"refs": refs, "pattern": "ring", "radius_mm": 0.5}],
+        {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0},
+    )
+    assert fully is True
+    assert {f"C{i}" for i in range(1, n + 1)} <= placed
     cx, cy = _center_of(comps, refs)
     r_led = _math.hypot(comps[refs[0]].pos.x - cx, comps[refs[0]].pos.y - cy)
-    for i in range(1, 7):
+    for i in range(1, n + 1):
         c = comps[f"C{i}"]
         r_cap = _math.hypot(c.pos.x - cx, c.pos.y - cy)
-        assert r_cap < r_led, f"C{i} not inside the ring (r={r_cap:.2f} vs {r_led:.2f})"
-        assert c.locked and c.array_member
+        assert r_cap > r_led, f"C{i} should be on the perimeter, not the band"
+
+
+def test_ring_band_decaps_legacy_switch_restores_interior_placement() -> None:
+    n = 6
+    comps, refs = _ring_with_decaps(n)
+    placed, fully = place_array_leaves(
+        comps, [{"refs": refs, "pattern": "ring", "radius_mm": 10.0}],
+        {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0,
+         "array_ring_band_decaps": False},
+    )
+    assert fully is True
+    cx, cy = _center_of(comps, refs)
+
+    def ang(x, y):
+        return _math.degrees(_math.atan2(y - cy, x - cx)) % 360.0
+
+    # Legacy: decap k sits at the SAME angle as the member it serves, inside.
+    for i in range(1, n + 1):
+        c = comps[f"C{i}"]
+        a_cap = ang(c.pos.x, c.pos.y)
+        a_member = ang(comps[refs[i - 1]].pos.x, comps[refs[i - 1]].pos.y)
+        assert abs((a_cap - a_member + 180.0) % 360.0 - 180.0) < 2.0
+        r_cap = _math.hypot(c.pos.x - cx, c.pos.y - cy)
+        r_led = _math.hypot(
+            comps[refs[i - 1]].pos.x - cx, comps[refs[i - 1]].pos.y - cy
+        )
+        assert r_cap < r_led
 
 
 def test_ring_counts_for_leaf_is_fully_array() -> None:

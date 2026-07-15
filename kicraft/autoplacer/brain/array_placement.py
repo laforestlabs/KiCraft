@@ -526,40 +526,50 @@ def _place_companion_decaps(
 
     grid = grids[0] if len(grids) == 1 else None
 
-    # RING -- radially inward: drop decap *k* just inside the ring at the same
-    # angle as the member it serves, rotated with it. The ring interior is
-    # otherwise empty, the cap hugs its LED's power pads, and the bbox never
-    # grows. Falls through to the perimeter fallback when the inner circle is
-    # too tight to hold them single-file.
+    # RING -- into the BAND: decap *k* sits at the gap-midpoint angle between
+    # members k and k+1, pad axis radial with its power pad ON the +5V bus
+    # chord (see array_router.array_ring_power_specs), GND pad outward. This
+    # is canonical ring construction -- a real LED-ring board keeps the middle
+    # clear (often physically cut out) -- and it is what keeps the interior
+    # hole nestable (docs/plans/shaped-compose-leaf-nesting.md, PR-N5). Falls
+    # back to the single-file perimeter ring when a gap is too tight. The
+    # legacy radially-inward placement stays behind
+    # ``array_ring_band_decaps: False`` (it deliberately parks companions in
+    # the interior, which nesting invalidates).
     if (
         grid is not None
         and grid.get("pattern") == "ring"
         and len(refs) <= len(grid["refs"])
     ):
-        n = len(grid["refs"])
-        cap_w = max(comps[r].width_mm for r in refs)
-        cap_h = max(comps[r].height_mm for r in refs)
-        cap_diag = math.hypot(cap_w, cap_h)
-        r_in = grid["radius"] - grid["led_diag"] / 2.0 - cap_diag / 2.0 - comp_gap
-        chord_in = 2.0 * r_in * math.sin(math.pi / n) if r_in > 0 else 0.0
-        if r_in > cap_diag / 2.0 and chord_in >= cap_diag + comp_gap:
-            c0 = grid["center"]
-            for k, r in enumerate(refs):
-                a = grid["angles"][k]
-                member = comps[grid["refs"][k]]
-                delta = (member.rotation - comps[r].rotation) % 360.0
-                if delta > 1e-6:
-                    rotate_component_in_place(comps[r], delta)
-                _move(
-                    comps[r],
-                    c0.x + r_in * math.cos(a),
-                    c0.y + r_in * math.sin(a),
+        if cfg.get("array_ring_band_decaps", True):
+            if _place_ring_band_decaps(comps, refs, grid, comp_gap):
+                return grid_bbox
+            # too tight / nets unidentifiable -> perimeter fallback below
+        else:
+            n = len(grid["refs"])
+            cap_w = max(comps[r].width_mm for r in refs)
+            cap_h = max(comps[r].height_mm for r in refs)
+            cap_diag = math.hypot(cap_w, cap_h)
+            r_in = grid["radius"] - grid["led_diag"] / 2.0 - cap_diag / 2.0 - comp_gap
+            chord_in = 2.0 * r_in * math.sin(math.pi / n) if r_in > 0 else 0.0
+            if r_in > cap_diag / 2.0 and chord_in >= cap_diag + comp_gap:
+                c0 = grid["center"]
+                for k, r in enumerate(refs):
+                    a = grid["angles"][k]
+                    member = comps[grid["refs"][k]]
+                    delta = (member.rotation - comps[r].rotation) % 360.0
+                    if delta > 1e-6:
+                        rotate_component_in_place(comps[r], delta)
+                    _move(
+                        comps[r],
+                        c0.x + r_in * math.cos(a),
+                        c0.y + r_in * math.sin(a),
+                    )
+                print(
+                    f"  Array decaps: {len(refs)} placed radially inside the ring "
+                    f"(r_in={r_in:.2f} of r={grid['radius']:.2f})"
                 )
-            print(
-                f"  Array decaps: {len(refs)} placed radially inside the ring "
-                f"(r_in={r_in:.2f} of r={grid['radius']:.2f})"
-            )
-            return grid_bbox
+                return grid_bbox
 
     # Beside-each-LED is only well-defined for a single 2-D grid (cols > 1, so the
     # in-row hops run horizontally and the vertical channel is free for caps) with
@@ -654,6 +664,116 @@ def _place_companion_decaps(
             "-- caps may abut; the array is space-constrained at this pitch"
         )
     return (bx0, by0, bx1, by1)
+
+
+def _is_ground_net(net: str | None) -> bool:
+    """Ground-ness by the shared synthesis patterns (GND/AGND/DGND/_GND)."""
+    from kicraft.design.models import GND_NET_PATTERNS
+
+    stripped = (net or "").lstrip("/")
+    return any(pat.search(stripped) for pat in GND_NET_PATTERNS)
+
+
+def _rotated_aabb(w: float, h: float, rot_deg: float) -> tuple[float, float]:
+    """AABB dims of a w x h body at rotation rot_deg."""
+    t = math.radians(rot_deg % 360.0)
+    return (
+        abs(w * math.cos(t)) + abs(h * math.sin(t)),
+        abs(w * math.sin(t)) + abs(h * math.cos(t)),
+    )
+
+
+def _place_ring_band_decaps(
+    comps: dict[str, Component],
+    refs: list[str],
+    grid: dict,
+    comp_gap: float,
+) -> bool:
+    """Place ring companions in the BAND: decap *k* at the gap-midpoint angle
+    between members k and k+1, pad axis RADIAL with the power pad inward at
+    the +5V bus-chord sagitta radius (where the member-to-member power chord
+    passes), GND pad outward toward the pour side.
+
+    The whole plan is computed and feasibility-checked (rotated-AABB
+    clearance against both adjacent members, and the cap must stay inside
+    the ring bbox) BEFORE anything moves; any failure returns False with
+    ``comps`` untouched so the caller can fall back to the perimeter ring.
+    """
+    members = grid["refs"]
+    n = len(members)
+    c0 = grid["center"]
+    angles = grid["angles"]
+    bbox_radius = grid["radius"] + grid["led_diag"] / 2.0
+
+    plan: list[tuple[str, float, float, float]] = []
+    tap_radii: list[float] = []
+    for k, ref in enumerate(refs):
+        cap = comps[ref]
+        pwr = [p for p in cap.pads if p.net and not _is_ground_net(p.net)]
+        gnd = [p for p in cap.pads if p.net and _is_ground_net(p.net)]
+        if len(pwr) != 1 or len(gnd) != 1:
+            return False  # not a rail+ground pair we can orient
+        # Bus radius = where the members' pads on THIS decap's rail sit; the
+        # chord between adjacent pads dips to its sagitta radius at the gap
+        # midpoint -- put the cap's power pad exactly there so the stamped
+        # bus (array_ring_power_specs) runs member pad -> cap pad -> member
+        # pad in two straight, foreign-pad-free segments.
+        radii = [
+            math.hypot(p.pos.x - c0.x, p.pos.y - c0.y)
+            for m in members
+            for p in comps[m].pads
+            if p.net == pwr[0].net
+        ]
+        if not radii:
+            return False  # members don't carry this rail -- not a ring decap
+        r_tap = (sum(radii) / len(radii)) * math.cos(math.pi / n)
+        a_mid = angles[k] + math.pi / n
+
+        # Absolute rotation pointing the gnd->pwr pad axis INWARD (toward
+        # the ring centre). rotate_vector is KiCad-CW: rotating by R moves a
+        # vector's math-angle by -R (same recovery as _orient_ring).
+        axis = rotate_vector(
+            Point(pwr[0].pos.x - gnd[0].pos.x, pwr[0].pos.y - gnd[0].pos.y),
+            -cap.rotation,
+        )
+        phi_axis = math.degrees(math.atan2(axis.y, axis.x))
+        target_rot = (phi_axis - (math.degrees(a_mid) + 180.0)) % 360.0
+
+        # Body centre sits outward of the power pad by the pad's offset.
+        p_off = rotate_vector(
+            Point(pwr[0].pos.x - cap.pos.x, pwr[0].pos.y - cap.pos.y),
+            -cap.rotation,
+        )
+        r_center = r_tap + math.hypot(p_off.x, p_off.y)
+        cx = c0.x + r_center * math.cos(a_mid)
+        cy = c0.y + r_center * math.sin(a_mid)
+
+        cap_w, cap_h = _rotated_aabb(cap.width_mm, cap.height_mm, target_rot)
+        if r_center + math.hypot(cap_w, cap_h) / 2.0 > bbox_radius:
+            return False  # cap would poke past the ring bbox
+        for m in (members[k], members[(k + 1) % n]):
+            mc = comps[m]
+            mw, mh = _rotated_aabb(mc.width_mm, mc.height_mm, mc.rotation)
+            if (
+                abs(cx - mc.pos.x) < (cap_w + mw) / 2.0 + comp_gap
+                and abs(cy - mc.pos.y) < (cap_h + mh) / 2.0 + comp_gap
+            ):
+                return False  # gap too tight at this pitch
+        plan.append((ref, target_rot, cx, cy))
+        tap_radii.append(r_tap)
+
+    for ref, target_rot, cx, cy in plan:
+        cap = comps[ref]
+        delta = (target_rot - cap.rotation) % 360.0
+        if delta > 1e-6:
+            rotate_component_in_place(cap, delta)
+        _move(cap, cx, cy)
+    print(
+        f"  Array decaps: {len(plan)} placed in the ring band at gap "
+        f"midpoints (power-pad tap r={min(tap_radii):.2f} "
+        f"of r={grid['radius']:.2f}; interior stays clear)"
+    )
+    return True
 
 
 def _place_strip(

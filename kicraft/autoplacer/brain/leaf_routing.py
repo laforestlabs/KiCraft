@@ -650,6 +650,27 @@ def route_local_subcircuit(
                 _breakout_specs = _breakout_specs + _arr_specs
         except Exception as exc:  # never fail the leaf on a finishing helper
             print(f"  WARNING: array daisy-chain spec gen failed: {exc}")
+    # Ring +5V bus (default on): for a ring array, deterministically stamp a
+    # CLOSED loop of member->member (or member->decap->member) power ties at
+    # the pad radius, plus a via stub tying each band decap's GND into the
+    # B.Cu pour -- FreeRouting then has no reason to dip into the ring
+    # interior, which shaped-compose nesting needs clear (PR-N5). Kept as a
+    # SEPARATE list from _arr_specs: the array stamp gate measures in-row
+    # DATA hops only.
+    _ring_pwr_specs: list = []
+    if cfg.get("array_ring_power_bus", True) and cfg.get("arrays"):
+        try:
+            import pcbnew
+
+            from kicraft.autoplacer.brain.array_router import array_ring_power_specs
+
+            _rp_board = pcbnew.LoadBoard(str(pre_route_board))
+            _ring_pwr_specs = array_ring_power_specs(_rp_board, cfg)
+            del _rp_board
+            if _ring_pwr_specs:
+                _breakout_specs = _breakout_specs + _ring_pwr_specs
+        except Exception as exc:  # never fail the leaf on a finishing helper
+            print(f"  WARNING: ring power-bus spec gen failed: {exc}")
     if _breakout_specs:
         try:
             from kicraft.autoplacer.brain.breakout_stubs import add_breakout_stubs
@@ -676,6 +697,20 @@ def route_local_subcircuit(
                     print(
                         f"  array-router: {len(_arr_stamp_skipped)}/{len(_arr_specs)} "
                         f"data tie(s) left to FreeRouting: {', '.join(_arr_stamp_skipped)}"
+                    )
+            # Same no-silent-handoff rule for the ring power bus (its ties
+            # are excluded from the stamp gate, so this log is the only
+            # place a dropped bus segment surfaces).
+            if _ring_pwr_specs:
+                _rp_keys = {f"{s.ref}.{s.pad}" for s in _ring_pwr_specs}
+                _rp_skipped = [
+                    s for s in _bo.get("skipped", [])
+                    if s.split(":", 1)[0] in _rp_keys
+                ]
+                if _rp_skipped:
+                    print(
+                        f"  ring-power: {len(_rp_skipped)}/{len(_ring_pwr_specs)} "
+                        f"bus tie(s) left to FreeRouting: {', '.join(_rp_skipped)}"
                     )
         except Exception as exc:  # finishing step must never fail the leaf
             print(f"  WARNING: breakout stub step failed: {exc}")
