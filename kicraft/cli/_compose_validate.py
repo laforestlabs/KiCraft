@@ -7,6 +7,7 @@ compose internal. Re-exported from ``compose_subcircuits`` so the external API
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -367,29 +368,56 @@ def inscribed_rect_bound(
 
 
 def _occupied_content_rects(board_state) -> list[tuple[Point, Point]]:
-    """The composition's TRUE occupied geometry: per-component physical
-    bboxes (courtyard ∪ pads) plus trace and via copper rects.
+    """The composition's TRUE occupied geometry: exact rotated component
+    bodies, per-pad copper bboxes, and subdivided trace/via copper rects.
 
     The content AABB is a gross over-ask for hollow compositions -- a
     nested LED-ring annulus forces a circle of the AABB's DIAGONAL (⌀80.4
     observed on the ⌀60-ring genre) when its occupied extent fits ⌀55.
-    Feeding these rects to ``circumscribe`` sizes the requested shape to
-    what is actually there (shaped-compose-leaf-nesting PR-N3). Silkscreen
-    is deliberately excluded: the geometry validator gates copper and
-    courtyards, and silk near a shaped edge is cosmetic.
+    Bodies and traces must be TIGHT, not per-item AABBs: a 45-degree ring
+    LED's courtyard AABB corner reaches ~1.5 mm past the real body, and a
+    dozen rotated members tile that bloat around the rim -- the measured
+    1/601 fit read ⌀63.1 for content whose true extent fits ⌀58 (the same
+    representation lie the interior-hole computation fixes with
+    ``_exact_body_cell_rects`` / ``_subdivided_trace_rects``). Feeding
+    tight rects to ``circumscribe`` sizes the requested shape to what is
+    actually there (shaped-compose-leaf-nesting PR-N3/N5); the downstream
+    honesty gates are exact anyway (analytic shape containment + real
+    KiCad DRC). Silkscreen is deliberately excluded: the geometry
+    validator gates copper and courtyards, and silk near a shaped edge is
+    cosmetic.
     """
+    from kicraft.autoplacer.brain.subcircuit_composer import (
+        _exact_body_cell_rects,
+    )
+
+    components = getattr(board_state, "components", None) or {}
     rects: list[tuple[Point, Point]] = []
-    for comp in (getattr(board_state, "components", None) or {}).values():
+    for ref in sorted(components):
+        comp = components[ref]
         try:
-            rects.append(comp.physical_bbox())
-        except Exception:
-            rects.append(comp.bbox())
+            rects.extend(_exact_body_cell_rects({ref: comp}))
+        except Exception:  # minimal stand-ins: coarse physical bbox
+            try:
+                rects.append(comp.physical_bbox())
+            except Exception:
+                rects.append(comp.bbox())
+        for pad in getattr(comp, "pads", None) or []:
+            try:
+                rects.append(pad.bbox())
+            except Exception:
+                pass
     for t in getattr(board_state, "traces", None) or []:
         half = float(getattr(t, "width_mm", 0.3) or 0.3) / 2.0
-        rects.append((
-            Point(min(t.start.x, t.end.x) - half, min(t.start.y, t.end.y) - half),
-            Point(max(t.start.x, t.end.x) + half, max(t.start.y, t.end.y) + half),
-        ))
+        dx, dy = t.end.x - t.start.x, t.end.y - t.start.y
+        n = max(1, int(math.ceil(math.hypot(dx, dy) / 2.0)))
+        for i in range(n):
+            x0, y0 = t.start.x + dx * (i / n), t.start.y + dy * (i / n)
+            x1, y1 = t.start.x + dx * ((i + 1) / n), t.start.y + dy * ((i + 1) / n)
+            rects.append((
+                Point(min(x0, x1) - half, min(y0, y1) - half),
+                Point(max(x0, x1) + half, max(y0, y1) + half),
+            ))
     for v in getattr(board_state, "vias", None) or []:
         half = float(getattr(v, "size_mm", 0.6) or 0.6) / 2.0
         rects.append((

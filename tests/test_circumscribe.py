@@ -321,3 +321,35 @@ def test_fit_grows_named_polygon_to_requested_size():
     # Uniform scale: the limiting axis reaches the target, neither exceeds it.
     assert max(w, h) == pytest.approx(60.0, abs=0.1)
     assert w <= 60.0 + 0.1 and h <= 60.0 + 0.1
+
+
+def test_fit_rotated_members_do_not_inflate_the_circle():
+    # PR-N5 r4: a rotated ring member's courtyard AABB corner reaches ~1.5mm
+    # past its true body; 12 of them read as ⌀63 for content whose true
+    # extent fits ⌀58 (measured on 1/601). The fit must rasterize EXACT
+    # rotated bodies, so the requested ⌀60 circle still fits.
+    import math as _m
+
+    from kicraft.autoplacer.brain.types import Component, Layer
+
+    comps = {}
+    for k in range(12):
+        ang = 2.0 * _m.pi * k / 12.0
+        x, y = 28.5 + 24.0 * _m.cos(ang), 28.5 + 24.0 * _m.sin(ang)
+        comps[f"D{k+1}"] = Component(
+            ref=f"D{k+1}", value="LED", pos=Point(x, y),
+            rotation=(_m.degrees(ang) + 45.0) % 360.0,  # worst-case diagonal
+            layer=Layer.FRONT, width_mm=5.0, height_mm=5.0,
+        )
+    board_state = SimpleNamespace(
+        board_outline=(Point(0.0, 0.0), Point(57.0, 57.0)),
+        components=comps, traces=[], vias=[],
+    )
+    st = SimpleNamespace(
+        manual_outline=None,
+        requested_shape={"shape": "circle", "size_mm": 60.0},
+        composition=SimpleNamespace(board_state=board_state),
+    )
+    result = _fit_requested_shape(st)
+    assert result["fitted"] is True, result
+    assert result["size_mm"] == [60.0, 60.0]
