@@ -4,18 +4,36 @@
 **PR-N5 LANDED 2026-07-15** in three commits — r1+r2 `6069d22`, p1+p2 `7b7b52d`, plus a
 fifth leg r3 `b78851e` discovered during verification (non-cardinal member courtyard AABBs
 were eating the hole the same way trace AABBs did; exact rotated-body rasterization +
-0.5 mm hole grid). **Ring interior discipline is measured DONE** on a rebuilt 1/601:
-innermost copper r=20.1 (was 14.9), hole 12.9×16.0 → **23.96×23.87** (the predicted ~24),
-band decaps + closed-loop +5V bus stamp clean, KC-HN59RJ ring regression replay stays
-DRC 0/0. **The genre flip did NOT fire yet: the gate moved to the GUEST.** The
-post-connectivity-default MCU leaf solves to 21.72×22.39 occupied (~30% utilization; it was
-21.4×19.0 when this plan was measured), needing 23.7×24.4 vs the 23.96×23.87 hole —
-**0.5 mm short in y**. The compose log now prints this near-miss explicitly
-(`nest-demotion fit check failed ... short 0.00/0.52 mm`). Owning follow-up: leaf
-grid-assignment tuning (the known placement-streamline open item) and/or a leaf re-solve
-after edge-pin demotion (J1 is pinned to the guest leaf's own bottom edge by the very zone
-the parent wave demotes). NOT further margin cuts — the remaining stack (0.5 extraction +
-1.0 margin + 1.0 standoff) is the honest floor.
+0.5 mm hole grid). Verification surfaced two more N5-class fixes, both landed: the nest LANDING centres the
+guest's occupied bbox, not its content pos (`2c8084f` — fatal at tight slack), and the
+shape-fit content measures exact rotated bodies + subdivided traces (`ed2cb3e` — the fourth
+consumer of the rotated-AABB lie; the fit read ⌀63.1 for content that truly fits ⌀58).
+
+**Ring interior discipline is measured DONE** on a rebuilt 1/601: innermost copper r=20.1
+(was 14.9), hole 12.9×16.0 → **23.96×23.87** (the predicted ~24), band decaps +
+closed-loop +5V bus stamp clean. **THE GENRE FLIP IS DEMONSTRATED END-TO-END
+(2026-07-15):** a zone-stripped 1/601 rebuild (equivalent to a live post-N4 run — synthesis
+no longer emits the contradicting `J1 {edge: bottom}` zone) produced **rc0: MCU leaf nested
+inside the ring, routed 0 shorts / 0 unconnected, circular Edge.Cuts ⌀61.0 delivered vs
+⌀60 requested → outline-shape CONFORMANT, independent kicad-cli DRC 0/0, fab package
+exported** (scratchpad replay_601z5). Regressions: KC-HN59RJ ring replay DRC 0/0; 1/606
+rectangular rc0 fab.
+
+**Remaining flakiness, with its owner:** the guest MCU leaf's solved size varies
+20.5–23.8 mm across otherwise-identical rebuilds (~30% utilization; the fit boundary is
+~21.9), so the flip fires on the rounds whose leaf lands tight — 2 of 5 zone-stripped
+rebuilds nested, 1 reached rc0. Owning follow-up: leaf grid-assignment tuning (the known
+placement-streamline open item) and/or a guest-leaf re-solve after edge-pin demotion. NOT
+further margin cuts — the remaining stack (0.5 extraction + 1.0 margin + 1.0 standoff) is
+the honest floor. The compose log prints every near-miss explicitly
+(`nest-demotion fit check failed ... short 0.00/0.52 mm`). Frozen pre-N4 replays (stock
+1/601 state.json) still carry the contradicting zone in `bom.component_zones`, which also
+pins J1 inside the guest leaf's own solve and inflates it. Separate NEW finding: 1/600
+decomposes into THREE leaves and its 13×13 POWER leaf cannot fit inside ⌀60 once the hole
+is taken (one guest per hole; 18.2+12.7 > 24.4 rules out co-nesting) — its nest+route
+works (0 shorts / 0 unconnected with the MCU inside the ring), so the ⌀60 request is
+honestly unsatisfiable at that decomposition; owner = synthesis sheet-merge for small
+power sheets on shaped briefs.
 
 Implementation corrections vs the draft below, for the record: (a) the r2 "morphological
 close" is actually a reachability sweep — a true closing fails to seal a ring's DIAGONAL
