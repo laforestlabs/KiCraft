@@ -2443,7 +2443,7 @@ def _edge_demotion_candidates(
     )
     if not pinned or len(loaded_artifacts) < 2:
         return []
-    margin = float((cfg or {}).get("nest_margin_mm", 1.5))
+    margin = float((cfg or {}).get("nest_margin_mm", 1.0))
 
     blockers = []
     for art in loaded_artifacts:
@@ -2459,6 +2459,7 @@ def _edge_demotion_candidates(
         return []
 
     out: list[str] = []
+    near_misses: list[str] = []
     for ref in pinned:
         owner = next(
             ((art, bs) for art, bs in blockers
@@ -2471,13 +2472,32 @@ def _edge_demotion_candidates(
         rects = _blocker_occupied_rects(bs) or [bs.leaf_outline]
         guest_w = max(r[1].x for r in rects) - min(r[0].x for r in rects)
         guest_h = max(r[1].y for r in rects) - min(r[0].y for r in rects)
-        if any(
-            hole_art is not art
-            and guest_w + 2.0 * margin <= hole_w
-            and guest_h + 2.0 * margin <= hole_h
-            for hole_art, hole_w, hole_h in holes
-        ):
+        best: tuple[float, str] | None = None
+        for hole_art, hole_w, hole_h in holes:
+            if hole_art is art:
+                continue
+            dx = hole_w - (guest_w + 2.0 * margin)
+            dy = hole_h - (guest_h + 2.0 * margin)
+            deficit = -min(dx, dy)
+            if best is None or deficit < best[0]:
+                best = (deficit, (
+                    f"{ref}: guest {guest_w:.1f}x{guest_h:.1f} + 2x{margin:.1f}"
+                    f" margin vs hole {hole_w:.1f}x{hole_h:.1f}"
+                    f" -> short {max(0.0, -dx):.2f}/{max(0.0, -dy):.2f} mm"
+                ))
+        if best is None:
+            continue
+        if best[0] <= 0.0:
             out.append(ref)
+        else:
+            near_misses.append(best[1])
+    if near_misses:
+        # No-silent-miss rule: a 0.5 mm shortfall must read as "missed by
+        # 0.5 mm" in the compose log, not as an unexplained rect fallback.
+        print(
+            "[candidate-search] nest-demotion fit check failed for "
+            "pinned leaf/leaves: " + "; ".join(near_misses)
+        )
     return out
 
 

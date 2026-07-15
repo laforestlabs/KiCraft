@@ -1996,9 +1996,15 @@ _NEST_MARGIN_FALLBACK_MM = 1.0
 # nest_margin_mm) -- decoupled from the min_side_mm/2 closing radius, which
 # is a TOPOLOGY tool (sealing inter-member gaps), not a clearance rule.
 _NEST_HOLE_STANDOFF_FALLBACK_MM = 1.0
-_NEST_GRID_MM = 1.0
-# ~630x630 mm at 1 mm cells -- a degenerate outline bails out with no holes
-# rather than burning memory (interior nesting is meaningless at that scale).
+# 0.5 mm cells: the inscribed-rect scan works on whole cells, so cell size
+# is a direct quantization loss on every hole side -- at 1.0 mm the real
+# 1/601 ring hole lost ~1 mm per axis, exactly the scale the nest fit is
+# decided at. compute_interior_free_rects coarsens adaptively when a huge
+# leaf would blow the cell budget.
+_NEST_GRID_MM = 0.5
+# ~315x315 mm at 0.5 mm cells before adaptive coarsening (doubling the cell
+# until it fits, up to 4 mm); a still-too-large outline bails out with no
+# holes rather than burning memory (nesting is meaningless at that scale).
 _NEST_GRID_MAX_CELLS = 400_000
 
 
@@ -2051,6 +2057,50 @@ def _subdivided_trace_rects(
     return front_rects, back_rects
 
 
+def _exact_body_cell_rects(
+    components: dict[str, Component],
+    *,
+    piece_mm: float = _NEST_GRID_MM * 2.0,
+) -> list[tuple[Point, Point]]:
+    """Tight cell decomposition of each component's ROTATED body rectangle,
+    for the interior-hole computation ONLY (world AABBs of <= ``piece_mm``
+    local sub-rects, so the union hugs the true rotated body).
+
+    The published ``component_rects`` keep the axis-aligned bbox of the
+    rotated courtyard: a 45-degree 5x5 ring LED grows to 7.1x7.1 and its
+    bbox corner reaches ~1.5 mm past the real body toward the ring
+    interior -- 8 non-cardinal members tile that bloat over the hole (the
+    same lie ``_subdivided_trace_rects`` fixes for traces). Pads are NOT
+    covered here; they are already separate blocker rects.
+    """
+    rects: list[tuple[Point, Point]] = []
+    for ref in sorted(components):
+        comp = components[ref]
+        w = max(0.1, float(comp.width_mm))
+        h = max(0.1, float(comp.height_mm))
+        centre = comp.body_center if comp.body_center is not None else comp.pos
+        theta = math.radians(comp.rotation % 360.0)
+        cos_t, sin_t = math.cos(theta), math.sin(theta)
+        n_w = max(1, int(math.ceil(w / piece_mm)))
+        n_h = max(1, int(math.ceil(h / piece_mm)))
+        for i in range(n_w):
+            lx0 = -w / 2.0 + w * i / n_w
+            lx1 = -w / 2.0 + w * (i + 1) / n_w
+            for j in range(n_h):
+                ly0 = -h / 2.0 + h * j / n_h
+                ly1 = -h / 2.0 + h * (j + 1) / n_h
+                xs: list[float] = []
+                ys: list[float] = []
+                for lx, ly in ((lx0, ly0), (lx0, ly1), (lx1, ly0), (lx1, ly1)):
+                    # KiCad-CW local->world, matching geometry.rotate_vector.
+                    xs.append(centre.x + lx * cos_t + ly * sin_t)
+                    ys.append(centre.y - lx * sin_t + ly * cos_t)
+                rects.append((
+                    Point(min(xs), min(ys)), Point(max(xs), max(ys)),
+                ))
+    return rects
+
+
 def compute_interior_free_rects(
     blocker_set: LeafBlockerSet,
     *,
@@ -2096,6 +2146,10 @@ def compute_interior_free_rects(
         return ()
     nx = max(1, int(math.ceil(width / grid_mm)))
     ny = max(1, int(math.ceil(height / grid_mm)))
+    while nx * ny > _NEST_GRID_MAX_CELLS and grid_mm < 4.0:
+        grid_mm *= 2.0  # coarsen for huge leaves instead of giving up
+        nx = max(1, int(math.ceil(width / grid_mm)))
+        ny = max(1, int(math.ceil(height / grid_mm)))
     if nx * ny > _NEST_GRID_MAX_CELLS:
         return ()
     cell_w, cell_h = width / nx, height / ny
@@ -2281,17 +2335,24 @@ def extract_leaf_blocker_set(
             drill_margin_mm=drill_margin_mm,
         )
     # Hole computation reads a TIGHT variant of the blocker set: trace rects
-    # subdivided so a diagonal chord no longer squares out over the interior
-    # (still a copper superset). The published blocker set keeps the
-    # conservative one-rect-per-segment AABBs for every other consumer.
+    # subdivided so a diagonal chord no longer squares out over the interior,
+    # and component bodies rasterized as their EXACT rotated rectangles (a
+    # non-cardinal ring member's courtyard AABB otherwise reaches ~1.5 mm
+    # past the real body into the hole). Both stay copper supersets. The
+    # published blocker set keeps the conservative AABBs for every other
+    # consumer. The body cells ride in front_traces purely as occupied
+    # rects -- compute_interior_free_rects flattens all rect fields anyway,
+    # and component_rects (one rect per ref) cannot hold a decomposition.
     tight_front, tight_back = _subdivided_trace_rects(
         artifact.layout.traces, margin_mm=pad_margin_mm
     )
+    body_cells = _exact_body_cell_rects(artifact.layout.components)
     holes = compute_interior_free_rects(
         replace(
             blocker_set,
-            front_traces=tuple(tight_front),
+            front_traces=tuple(tight_front) + tuple(body_cells),
             back_traces=tuple(tight_back),
+            component_rects={},
         ),
         min_side_mm=float((cfg or {}).get("nest_min_hole_side_mm", 8.0)),
         standoff_mm=float(
