@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:43cd5d3fac695a1f663c36be0607297017e030363e589d38843ad8047ee3846d",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C2682774.pdf",
+  "description": "YXC(\u626c\u5174\u6676\u632f) X32258MSB4SI",
+  "footprint_name": "CRYSTAL-SMD_4P-L3.2-W2.5-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "X32258MSB4SI",
+  "name": "crystal-8mhz-3225",
+  "provenance": {
+    "added_at": "2026-07-16T19:58:17Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2682774"
+  },
+  "symbol_name": "X32258MSB4SI",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

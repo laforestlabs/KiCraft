@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:add743bbb66cc4e1a2c6b7cd1a29f9945dffb5a33692337e31ed8fa282a5c07e",
+  "datasheet_url": "https://lcsc.com/product-detail/ST-Microelectronics_STMicroelectronics_STM32F103C8T6_STM32F103C8T6_C8734.html",
+  "description": "ARM Cortex-M3 32-bit MCU, 64 KB Flash, 20 KB Internal RAM, 37 IOs, 48-pin LQFP, -40 to 85 degC, Tray",
+  "footprint_name": "LQFP-48_L7.0-W7.0-P0.50-LS9.0-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "STM32F103C8T6",
+  "name": "stm32f103c8t6",
+  "provenance": {
+    "added_at": "2026-07-16T19:58:02Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C8734"
+  },
+  "symbol_name": "STM32F103C8T6",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}
