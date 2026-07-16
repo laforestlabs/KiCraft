@@ -231,10 +231,15 @@ synthesis re-run (~$0.05) after the symbol fix.
 
 ### S5 (P1) — DSN clearance guard margin: 5µm is too tight for the tail
 
-> **DONE 2026-07-16:** `freerouting_clearance_guard_um` 5 → 10 in
-> `autoplacer/config.py` + the `freerouting_runner.py` fallback literal;
-> guard tests green. (Replay of run_13 checks the clearance pair is gone;
-> its unconnected=5 is S1 and will keep it rc7.)
+> **DONE 2026-07-16 — in two parts.** (1) `freerouting_clearance_guard_um`
+> 5 → 10 (`autoplacer/config.py` + runner fallback). (2) The run_13 replay
+> then showed the surviving 1µm near-misses are OUR **breakout stubs**
+> (0.25mm tracks vs U1's rotated aQFN pads, 0.1520 vs 0.1530) — copper
+> stamped before DSN export, unreachable by the router guard. The stub
+> margins are enforced by sampled `HitTest(margin)` checks with the same
+> class of geometry-model skew, so `_foreign_pad_margins` now holds the pair
+> clearance +10µm above the rule too (breakout_stubs.py; test updated).
+> run_13 stays rc7 on its S1 unconnected either way.
 
 run_13 nrf52-beacon: 1× clearance violation, **0.1521 vs 0.1530mm rule = 5.9µm under**,
 pad P2 of U1 (rotated aQFN) vs track. The KC-9G4YPT guard (`_apply_dsn_clearance_guard`,

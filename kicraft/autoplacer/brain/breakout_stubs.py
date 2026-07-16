@@ -189,7 +189,13 @@ def _foreign_pad_margins(
     path: list = []
     tip: list = []
     for pad in _foreign_pads(board, src_pad.GetNetCode(), exclude=src_pad):
-        pair = max(floor_mm, src_cl, _own_clearance_mm(pad, layer_id, floor_mm))
+        # +10 µm guard above the rule: the clearance here is enforced by
+        # sampled HitTest(margin) checks whose geometry model can land a hair
+        # under KiCad DRC's exact measurement on rotated pads (run_13 nRF52
+        # aQFN: stubs at 0.1520 vs the 0.1530 rule, 1 µm short). Same
+        # reasoning as freerouting_clearance_guard_um: the board still
+        # verifies at the true rule, so the guard can never mask a violation.
+        pair = 0.01 + max(floor_mm, src_cl, _own_clearance_mm(pad, layer_id, floor_mm))
         same_fp = src_ref and _pad_ref(pad) == src_ref
         # Path margins bound the segment CENTERLINE, so the pair clearance
         # must be held from the copper EDGE: pair + half_width. Bare `pair`

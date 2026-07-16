@@ -788,12 +788,13 @@ def test_foreign_pad_margins_strict_same_fp(tmp_path):
     # clearances) held from the copper EDGE -- the margin bounds the segment
     # centerline, so the track half-width is added on top (bare `pair` let a
     # stub stamp copper pair - half_width from a sibling pad, the run_09 U2
-    # deterministic DRC rejection). The verify DRC does not waive a stub
+    # deterministic DRC rejection), plus the 10 µm sampled-check guard (the
+    # run_13 aQFN 1 µm near-miss). The verify DRC does not waive a stub
     # grazing a same-footprint pad.
-    pair = max(0.153,
-               _own_clearance_mm(pads["B5"], pcbnew.F_Cu, 0.153),
-               _own_clearance_mm(pads["B6"], pcbnew.F_Cu, 0.153))
-    assert strict[0][1] == pcbnew.FromMM(pair + 0.0765) and pair > 0.153
+    pair = 0.01 + max(0.153,
+                      _own_clearance_mm(pads["B5"], pcbnew.F_Cu, 0.153),
+                      _own_clearance_mm(pads["B6"], pcbnew.F_Cu, 0.153))
+    assert strict[0][1] == pcbnew.FromMM(pair + 0.0765) and pair > 0.163
 
 
 def test_tip_via_near_same_net_via_is_skipped_or_blocked(tmp_path):
