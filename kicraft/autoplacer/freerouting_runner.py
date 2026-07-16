@@ -1204,6 +1204,7 @@ def import_ses(kicad_pcb_path: str, ses_path: str, output_path: str) -> None:
     )
 
 
+
 def _resolve_fine_pitch_rule(
     kicad_pcb_path: str, config: dict[str, Any]
 ) -> tuple[int | None, int | None]:
@@ -1351,7 +1352,7 @@ def route_with_freerouting(
                 target_clearance_um=target_clearance_um,
                 target_width_um=target_width_um,
                 clearance_guard_um=int(
-                    config.get("freerouting_clearance_guard_um", 5) or 0
+                    config.get("freerouting_clearance_guard_um", 10) or 0
                 ),
             )
             # Keep designated nets (e.g. GND on a parent) off the autorouter:

@@ -359,8 +359,10 @@ DEFAULT_CONFIG = {
     # KC-9G4YPT/KC-CV4NE3/KC-HE2Q5T). Route with this guard ABOVE the DRC rule
     # (applied to every clearance token in the DSN, after all other rewrites);
     # the board keeps verifying at the real rule, so the guard can never mask a
-    # genuine violation. 5 µm = 5x the observed worst skew, 3.3% of the rule.
-    "freerouting_clearance_guard_um": 5,
+    # genuine violation. Was 5 µm, but batch 20260716T011056Z run_13 measured a
+    # 5.9 µm skew on a rotated aQFN pad (0.1521 vs 0.1530) -- just past it.
+    # 10 µm covers the observed tail with margin, still 6.5% of the rule.
+    "freerouting_clearance_guard_um": 10,
     # Fine-pitch escape track width. It is written to the DSN as integer microns
     # (int(round(mm*1000))), and KiCad's track-width DRC floor is
     # min_track_width = 0.1524 mm (6 mil, the OSH Park 2-layer minimum). 0.15 mm
