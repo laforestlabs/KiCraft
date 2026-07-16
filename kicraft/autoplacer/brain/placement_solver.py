@@ -3551,6 +3551,54 @@ class PlacementSolver:
                 return _try_x() or _try_y()
             return _try_y() or _try_x()
 
+        def _slide_locked_pair(ref_a: str, a: Component, ref_b: str, b: Component) -> bool:
+            """Separate two LOCKED parts by sliding one ALONG their shared edge.
+
+            Edge-pinned connectors are locked to keep their mouth flush with
+            the board edge -- but that only fixes the coordinate PERPENDICULAR
+            to the edge; sliding along the edge preserves flushness. Two
+            same-edge locked connectors whose courtyards overlap (batch
+            20260716T011056Z run_26: servo headers J5/J7 at 3.40 mm pitch vs
+            3.63 mm courtyards -- pure-THT leaves are copper-transparent to
+            ``can_overlap_sparse``, so nothing upstream held them apart) are
+            therefore separable here without breaking either pin. Mounting
+            holes stay untouchable (their position is the user's spec, not an
+            edge pin). Returns True when a part moved."""
+            if a.kind == "mounting_hole" or b.kind == "mounting_hole":
+                return False
+            a_tl, a_br = _effective_bbox(a, half_gap)
+            b_tl, b_br = _effective_bbox(b, half_gap)
+            ox, oy = _bbox_overlap_xy(a_tl, a_br, b_tl, b_br)
+            if ox <= 0 or oy <= 0:
+                return False
+            # Same-edge pairs separate mainly along the edge axis = the axis
+            # of larger centre separation; the perpendicular (pinned) axis is
+            # never touched, so flush contact survives.
+            slide_x = abs(a.pos.x - b.pos.x) >= abs(a.pos.y - b.pos.y)
+            need = (ox if slide_x else oy) + 0.02
+            for mover, other in ((b, a), (a, b)):
+                old = Point(mover.pos.x, mover.pos.y)
+                hw, hh = _pad_half_extents(mover)
+                if slide_x:
+                    sign = 1.0 if mover.pos.x >= other.pos.x else -1.0
+                    nx = max(tl.x + hw + 1.0, min(br.x - hw - 1.0, mover.pos.x + sign * need))
+                    if abs(nx - old.x) <= 1e-3:
+                        continue
+                    mover.pos.x = nx
+                else:
+                    sign = 1.0 if mover.pos.y >= other.pos.y else -1.0
+                    ny = max(tl.y + hh + 1.0, min(br.y - hh - 1.0, mover.pos.y + sign * need))
+                    if abs(ny - old.y) <= 1e-3:
+                        continue
+                    mover.pos.y = ny
+                _update_pad_positions(mover, old, mover.rotation)
+                mover_ref = ref_b if mover is b else ref_a
+                pinned = getattr(self, "_pinned_targets", None)
+                if pinned is not None and mover_ref in pinned:
+                    pinned[mover_ref] = Point(mover.pos.x, mover.pos.y)
+                return True
+            return False
+
         unresolved = 0
         for _ in range(200):
             moved = False
@@ -3591,10 +3639,14 @@ class PlacementSolver:
                     ):
                         continue
                     if a.locked and b.locked:
-                        # Cannot move either without disturbing a pinned
-                        # position; surface it and let the (minor) gate
-                        # tolerance handle a fraction-of-a-mm residual.
-                        unresolved += 1
+                        # Edge pins fix only the perpendicular coordinate:
+                        # slide one part ALONG the shared edge (flushness
+                        # survives). Only mounting holes are truly immovable.
+                        if _slide_locked_pair(refs[i], a, refs[j], b):
+                            a_tl, a_br = _effective_bbox(a, half_gap)
+                            moved = True
+                        else:
+                            unresolved += 1
                         continue
                     if a.locked:
                         if _push_clear(b, a_tl, a_br):

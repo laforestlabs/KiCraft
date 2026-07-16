@@ -63,19 +63,39 @@ def test_locked_partner_never_moves():
     assert not _courtyards_overlap(comps["J1"], comps["R1"])
 
 
-def test_both_locked_is_reported_unresolved():
-    # Two pinned parts overlapping -- the pass cannot move either; it reports
-    # the residual so the (minor) gate tolerance can take over.
+def test_both_locked_same_edge_slides_apart_along_edge():
+    # Two edge-pinned (locked) connectors on the same edge whose courtyards
+    # overlap (run_26: servo headers at 3.40mm pitch vs 3.63mm courtyards).
+    # The pin fixes only the perpendicular coordinate, so the pass slides one
+    # ALONG the edge: same y (flushness preserved), separated in x.
     comps = {
         "J1": _comp("J1", 10.0, 10.0, locked=True),
         "J2": _comp("J2", 10.5, 10.0, locked=True),
     }
     s = _solver(comps)
+    assert _courtyards_overlap(comps["J1"], comps["J2"])  # precondition
+
+    unresolved = s._resolve_courtyard_overlaps(comps)
+
+    assert unresolved == 0
+    assert not _courtyards_overlap(comps["J1"], comps["J2"])
+    assert comps["J1"].pos.y == 10.0 and comps["J2"].pos.y == 10.0  # edge kept
+
+
+def test_both_locked_mounting_holes_stay_untouched():
+    # Mounting holes are the user's spec, not an edge pin: never slid.
+    comps = {
+        "H1": _comp("H1", 10.0, 10.0, locked=True),
+        "H2": _comp("H2", 10.5, 10.0, locked=True),
+    }
+    for c in comps.values():
+        c.kind = "mounting_hole"
+    s = _solver(comps)
 
     unresolved = s._resolve_courtyard_overlaps(comps)
 
     assert unresolved == 1
-    assert comps["J1"].pos.x == 10.0 and comps["J2"].pos.x == 10.5  # both untouched
+    assert comps["H1"].pos.x == 10.0 and comps["H2"].pos.x == 10.5  # both untouched
 
 
 def test_non_overlapping_parts_untouched():
