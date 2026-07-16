@@ -910,7 +910,7 @@ def _compute_final_outline(
     # branches above already placed the edge at the mouth + overhang, and a
     # bbox-level floor there would wrongly enclose the overhanging barrel body
     # (the block bbox includes the barrel tip). Pad/trace/via containment on
-    # those sides is finalized by the verify-only _repair_parent_outline.
+    # those sides is finalized by the mutating _repair_parent_outline.
     # ``edge_constrained_refs`` is accepted for the future pad-level path but
     # unused at the bbox level (no pad data here).
     _ = edge_constrained_refs
@@ -1653,10 +1653,10 @@ def _compose_artifacts(
         ]
         if _ff_scaffold is not None:
             # Standard form factor: the outline IS the standard rect, not grown
-            # from content. _repair_parent_outline is verify-only (won't grow it)
-            # and _validate_parent_geometry then enforces exact containment
-            # fail-loud -- a design that doesn't fit the standard is rejected,
-            # not silently up-sized.
+            # from content. _repair_parent_outline early-returns on it
+            # (state.outline_authoritative) and _validate_parent_geometry then
+            # enforces exact containment fail-loud -- a design that doesn't fit
+            # the standard is rejected, not silently up-sized.
             exact_outline = _ff_scaffold.outline
         else:
             exact_outline = _compute_final_outline(
@@ -2043,6 +2043,9 @@ def _compose_artifacts(
         manual_outline=(
             manual_layout.outline.to_dict() if manual_layout is not None else None
         ),
+        # A standard form-factor scaffold's rect IS the spec: never grow it
+        # (a design that doesn't fit the standard is rejected, not up-sized).
+        outline_authoritative=(_ff_scaffold is not None),
         # Brief-captured outline shape (autoplacer.json ``board_outline``), only
         # when no manual layout supplies an authoritative outline. Resolved to
         # Edge.Cuts geometry by the compose pipeline (Phase 3).
@@ -3302,22 +3305,12 @@ def main(argv: list[str] | None = None) -> int:
                 pad_edge_clearance_mm=float(
                     cfg.get("connector_edge_pad_clearance_mm", 0.2)
                 ),
-                verify_only=True,
             )
             if outline_repair.get("repaired"):
                 print(
                     "parent_outline_repaired: "
                     f"{outline_repair['old_size_mm']} -> {outline_repair['new_size_mm']} mm "
                     "(grown to enclose placed geometry)"
-                )
-            if outline_repair.get("would_repair"):
-                # Verify-only breadcrumb (Phase 3A): the bbox-level containment
-                # clamp in _compute_final_outline missed geometry the repair
-                # would have grown to cover. Not mutated; logged for diagnosis.
-                print(
-                    "parent_outline_would_repair: "
-                    f"{outline_repair['old_size_mm']} -> {outline_repair['new_size_mm']} mm "
-                    f"(delta {outline_repair['would_change_mm']}); not grown (verify-only)"
                 )
             geometry_validation = _validate_parent_geometry(state)
             geometry_accepted = bool(geometry_validation.get("accepted", False))

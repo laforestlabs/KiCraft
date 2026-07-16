@@ -121,6 +121,11 @@ class ParentCompositionState:
     # the AABB), and the stamper writes the shape's polyline to
     # Edge.Cuts for non-rect shapes.
     manual_outline: dict[str, Any] | None = None
+    # True when the outline is authoritative for a reason OTHER than a manual
+    # layout (today: a standard form-factor scaffold, whose rect IS the spec).
+    # Same contract as manual_outline: the outline-repair grow is skipped and
+    # violations fail loudly via geometry validation instead of an up-size.
+    outline_authoritative: bool = False
     # Non-rectangular outline shape requested from the brief (captured at the
     # intent stage as ``intent.form_factor``, emitted into autoplacer.json as the
     # ``board_outline`` block). Distinct from ``manual_outline``: this carries

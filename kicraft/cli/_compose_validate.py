@@ -67,6 +67,10 @@ def _repair_parent_outline(
         # in the editor; geometry validation right after this fails
         # loudly instead, and the editor surfaces the violations.
         return {"repaired": False, "reason": "manual outline is authoritative"}
+    if getattr(state, "outline_authoritative", False):
+        # Standard form-factor scaffold: the rect IS the spec. Same contract
+        # as manual — never up-size; geometry validation fails loudly instead.
+        return {"repaired": False, "reason": "outline is authoritative (form factor)"}
     outline = composition.board_state.board_outline
     if not outline or len(outline) < 2:
         return {"repaired": False, "reason": "no outline"}

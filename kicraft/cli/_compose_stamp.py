@@ -134,7 +134,14 @@ def _stamp_parent_board(
     # only) makes geometry valid for every candidate, so the search judges
     # placements on quality (overlap/packing/net-distance) rather than on
     # overflowing a too-small outline, and FreeRouting gets a valid board.
-    _repair_parent_outline(state, verify_only=True)
+    # MUTATING again since batch 20260716T011056Z: the Phase-3A verify-only
+    # experiment assumed _compute_final_outline's bbox-level clamp covered all
+    # geometry, but the clamp sees only child bboxes (no pads/traces/parent-
+    # local bodies) and skips connector-zoned sides entirely -- stamped leaf
+    # tracks ended at 0.0mm from Edge.Cuts and EVERY candidate was rejected
+    # for six straight rounds (run_15 buck-3a rc6, run_22). Authoritative
+    # outlines (manual / form-factor) are still never grown (early return).
+    _repair_parent_outline(state)
 
     # Circumscribe a brief-requested non-rect shape around the grown AABB (auto
     # path; no-op for manual layouts and rectangular boards). Sets
