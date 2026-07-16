@@ -303,6 +303,53 @@ def test_worker_timeout_kills_silent_build(store, tmp_path, monkeypatch):
     assert "killed" in (ws / ".kicraft" / "build.log").read_text()
 
 
+_PRINT_WALL_CMD = [sys.executable, "-c",
+                   "import os; print('WALL=' + os.environ.get("
+                   "'KICRAFT_BUILD_MAX_WALL_S', 'MISSING'))"]
+
+
+def test_worker_exports_wall_budget(store, tmp_path, monkeypatch):
+    # Web builds must self-limit below the watchdog (KC-Y3V9XU: without this
+    # the 30m SIGKILL discards accepted leaves with zero artifacts).
+    monkeypatch.setenv("KICRAFT_BUILD_SLOTS", "0")
+    monkeypatch.delenv("KICRAFT_BUILD_MAX_WALL_S", raising=False)
+    ws = _ws(tmp_path)
+    store.enqueue_build(workspace=str(ws))
+    w = BuildWorker(store, build_cmd=_PRINT_WALL_CMD,
+                    timeout_s=1000.0, poll_s=0.05)
+    w.run_once()
+    _drain(w)
+    assert "WALL=900" in (ws / ".kicraft" / "build.log").read_text()
+
+
+def test_worker_wall_budget_operator_override_wins(store, tmp_path, monkeypatch):
+    monkeypatch.setenv("KICRAFT_BUILD_SLOTS", "0")
+    monkeypatch.setenv("KICRAFT_BUILD_MAX_WALL_S", "123")
+    ws = _ws(tmp_path)
+    store.enqueue_build(workspace=str(ws))
+    w = BuildWorker(store, build_cmd=_PRINT_WALL_CMD,
+                    timeout_s=1000.0, poll_s=0.05)
+    w.run_once()
+    _drain(w)
+    assert "WALL=123" in (ws / ".kicraft" / "build.log").read_text()
+
+
+def test_local_fallback_exports_wall_budget(store, tmp_path, monkeypatch):
+    from kicraft.server import web as webmod
+
+    monkeypatch.delenv("KICRAFT_BUILD_MAX_WALL_S", raising=False)
+    ws = _ws(tmp_path)
+    j = store.enqueue_build(workspace=str(ws))
+    monkeypatch.setattr(webmod, "_store", lambda: store)
+    monkeypatch.setitem(webmod.JOB_KIND_COMMANDS, "build", _PRINT_WALL_CMD)
+    events = []
+    rc = webmod._execute_claimed_job_local(ws, {}, j, events.append)
+    assert rc == 0
+    logs = " ".join(e.get("text", "") for e in events
+                    if e.get("kind") == "build_log")
+    assert "WALL=1620" in logs  # 0.9 x the fallback's 1800s watchdog
+
+
 def test_worker_shutdown_requeues(store, tmp_path, monkeypatch):
     monkeypatch.setenv("KICRAFT_BUILD_SLOTS", "0")
     ws = _ws(tmp_path)

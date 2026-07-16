@@ -193,6 +193,11 @@ class BuildWorker:
         env = {**os.environ, "PYTHONUNBUFFERED": "1",
                "KICRAFT_CALLER": os.environ.get("KICRAFT_CALLER", "web"),
                "KICRAFT_BUILD_LOG": "external"}
+        # The build self-limits at 90% of this worker's watchdog so the layout
+        # search finalizes a best-so-far board instead of being SIGKILLed
+        # mid-round with zero artifacts (same 0.9 factor as self_eval's
+        # export); setdefault so an operator env override wins.
+        env.setdefault("KICRAFT_BUILD_MAX_WALL_S", f"{self.timeout_s * 0.9:.0f}")
         cmd = list(cmd_base)
         if kind == "build":
             quality = self.store.build_quality_for_user(job.user_id)

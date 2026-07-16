@@ -1745,19 +1745,27 @@ def _execute_claimed_job_local(ws: Path, state: dict, job_id: int, progress,
     kept as the fallback for deploys without the worker unit. The 30m wall
     clock restarts at the slot-acquired marker so time spent queued for a host
     build slot is not billed against the job."""
+    timeout_s = 1800.0
     cmd = list(JOB_KIND_COMMANDS[kind])
     if kind == "build":
         quality = _store().build_quality_for_user(state.get("user_id"))
         if quality:  # tier override (free tier -> draft); None = default
             cmd += ["--quality", quality]
+    # The build self-limits at 90% of the watchdog so the layout search
+    # finalizes a best-so-far board instead of being SIGKILLed mid-round with
+    # zero artifacts (mirrors the standalone worker); setdefault so an
+    # operator env override wins.
+    env = {**os.environ}
+    env.setdefault("KICRAFT_BUILD_MAX_WALL_S", f"{timeout_s * 0.9:.0f}")
     proc = subprocess.Popen(
         cmd, cwd=str(ws), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, errors="replace", bufsize=1, start_new_session=True)
+        text=True, errors="replace", bufsize=1, start_new_session=True,
+        env=env)
     # Watchdog thread, mirroring the standalone worker: the deadline must fire
     # even when the build goes silent (a hung FreeRouting prints nothing, so a
     # per-line check blocks in readline forever and the job stays 'running'
     # until the web process restarts).
-    wd = {"deadline": time.monotonic() + 1800, "killed": False}
+    wd = {"deadline": time.monotonic() + timeout_s, "killed": False}
 
     def _watchdog() -> None:
         while proc.poll() is None:
@@ -1772,7 +1780,7 @@ def _execute_claimed_job_local(ws: Path, state: dict, job_id: int, progress,
         text = line.rstrip()
         progress({"kind": "build_log", "text": text[:500]})
         if ACQUIRED_MARKER in text:
-            wd["deadline"] = time.monotonic() + 1800
+            wd["deadline"] = time.monotonic() + timeout_s
     rc = proc.wait()
     if wd["killed"]:
         progress({"kind": "build_log", "text": "[build exceeded 30m, killed]"})
