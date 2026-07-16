@@ -75,9 +75,22 @@ def _load_footprint(
     # (non-closing / self-intersecting) courtyard here so all downstream
     # geometry -- which reads the courtyard as the part's physical extent --
     # sees the real part size instead of a degenerate sliver.
-    from kicraft.parts_library.footprint_courtyard import repair_malformed_courtyard
+    from kicraft.parts_library.footprint_courtyard import (
+        normalize_pth_pads_for_fab,
+        repair_malformed_courtyard,
+    )
 
     repair_malformed_courtyard(fp)
+    # Same single-seam rationale: fetched footprints ship PTH pads below the
+    # board's fab floors (sub-min thermal-via drills, zero-annular shell legs)
+    # that fail DRC outright; already-cached bundles heal here on load.
+    pth_changes = normalize_pth_pads_for_fab(fp)
+    if pth_changes:
+        print(
+            f"footprint {library}:{name}: normalized {len(pth_changes)} PTH "
+            f"pad(s) to fab floors ({'; '.join(pth_changes[:4])}"
+            f"{'; ...' if len(pth_changes) > 4 else ''})"
+        )
     _normalize_text_heights(pcbnew_mod, fp)
     return fp
 

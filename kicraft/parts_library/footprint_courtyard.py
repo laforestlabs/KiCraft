@@ -213,6 +213,71 @@ def repair_malformed_courtyard(
     return True
 
 
+# Fab floors for PTH pads on generated boards. min hole matches KiCad's
+# default board min_through_hole (0.30 mm, what every generated project's DRC
+# enforces); the annular target sits just above the 0.127 mm rule
+# (kicad_pro.DEFAULT_RULES["min_via_annular_width"]) for int-nm rounding
+# headroom -- same trap as the 0.153 clearance note there.
+FAB_MIN_HOLE_MM = 0.30
+FAB_MIN_ANNULAR_MM = 0.13
+
+
+def normalize_pth_pads_for_fab(
+    footprint: Any,
+    *,
+    min_hole_mm: float = FAB_MIN_HOLE_MM,
+    min_annular_mm: float = FAB_MIN_ANNULAR_MM,
+) -> list[str]:
+    """Bring every PTH pad up to the board's fab floors: drill >= min hole,
+    annular ring >= min annular. Returns a change description per pad touched
+    (empty = footprint already conformant).
+
+    Fetched (easyeda2kicad-converted) footprints ship two recurring defects
+    that fail generated-board DRC outright (batch 20260716T011056Z):
+
+    - thermal vias baked in as no-net PTH pads with sub-min drills
+      (esp32-s3-wroom-1 module: 12x 0.25 mm < the 0.30 mm board min hole ->
+      ``drill_out_of_range`` x12, run_22);
+    - mechanical shell legs with drill == pad size, i.e. ZERO annular ring
+      (usb-c-24p receptacle: 0.8/0.8 -> ``annular_width``/``padstack`` x16,
+      run_06).
+
+    Both floors are grow-only and function-preserving: a bigger thermal-via
+    drill still conducts heat, and a shell leg gains a real solderable ring.
+    KiCad DRC still validates the result, so this can never mask a genuine
+    problem. NPTH pads are untouched (bare holes are a different rule).
+    """
+    import pcbnew
+
+    eps = pcbnew.FromMM(1e-3)  # 1 µm: ignore int-nm rounding noise
+    changes: list[str] = []
+    for pad in footprint.Pads():
+        if pad.GetAttribute() != pcbnew.PAD_ATTRIB_PTH:
+            continue
+        drill = pad.GetDrillSize()
+        min_hole = pcbnew.FromMM(min_hole_mm)
+        new_dx, new_dy = max(drill.x, min_hole), max(drill.y, min_hole)
+        if new_dx - drill.x > eps or new_dy - drill.y > eps:
+            pad.SetDrillSize(pcbnew.VECTOR2I(new_dx, new_dy))
+            changes.append(
+                f"pad {pad.GetNumber() or '(mech)'}: drill "
+                f"{pcbnew.ToMM(drill.x):.2f} -> {pcbnew.ToMM(new_dx):.2f} mm"
+            )
+        size = pad.GetSize()
+        ring = pcbnew.FromMM(min_annular_mm)
+        need_x, need_y = new_dx + 2 * ring, new_dy + 2 * ring
+        if need_x - size.x > eps or need_y - size.y > eps:
+            pad.SetSize(pcbnew.VECTOR2I(max(size.x, need_x), max(size.y, need_y)))
+            changes.append(
+                f"pad {pad.GetNumber() or '(mech)'}: size "
+                f"{pcbnew.ToMM(size.x):.2f}x{pcbnew.ToMM(size.y):.2f} -> "
+                f"{pcbnew.ToMM(max(size.x, need_x)):.2f}x"
+                f"{pcbnew.ToMM(max(size.y, need_y)):.2f} mm "
+                f"(annular >= {min_annular_mm} mm)"
+            )
+    return changes
+
+
 def courtyard_pad_clearance_mm(footprint: Any) -> float | None:
     """Smallest gap (mm) from any pad edge to the courtyard boundary, over all
     courtyard layers. Negative = a pad pokes outside the courtyard. None if the

@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:620692f22ae0562f7137c353a432d95971e64e995b194a47c5df07814dbea0ff",
+  "content_hash": "sha256:877a5010cc44e0536a145792d455af651cef27bd07fc2d6ac5a5619d24ff0bc1",
   "datasheet_url": "https://www.lcsc.com/datasheet/C5248080.pdf",
   "description": "0.96 inch I2C OLED display module, 128x64, SSD1315 controller, SMT \u2014 the display class for OLED panel briefs (I2C, 3.3 V).",
   "footprint_name": "OLED-TH_L27.8-W27.2-P2.54_C9900033791",

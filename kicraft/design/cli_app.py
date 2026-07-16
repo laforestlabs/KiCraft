@@ -91,6 +91,7 @@ from .synthesis.validation import (
     check_inter_sheet_nets_realized,
     check_mcu_programming_access,
     check_mcu_programming_path,
+    check_multi_unit_symbols,
     check_net_coverage,
     check_no_dangling_signal_nets,
     check_pin_existence,
@@ -1048,6 +1049,16 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             for o in cp.offenders[:20]:
                 print(f"  - {o}", file=sys.stderr)
             return 3
+        # §9.30 -- parts-only: a multi-unit symbol's unit-2+ pins are
+        # unreachable (emitter instantiates unit 1 only), so the pick must be
+        # rejected HERE with directive feedback; discovered at the wiring
+        # stage it becomes an unanswerable park loop instead (run_28).
+        mu = check_multi_unit_symbols(state.bom)
+        if not mu.ok:
+            print(f"{mu.name}: {mu.message}", file=sys.stderr)
+            for o in mu.offenders[:20]:
+                print(f"  - {o}", file=sys.stderr)
+            return 3
 
     if state.bom is not None and state.bom.connections:
         checks = [
@@ -1823,6 +1834,7 @@ def _ensure_vendored_courtyard_clearance(
 
         from kicraft.parts_library.footprint_courtyard import (
             ensure_courtyard_clears_pads,
+            normalize_pth_pads_for_fab,
             repair_malformed_courtyard,
         )
     except ImportError:
@@ -1833,7 +1845,14 @@ def _ensure_vendored_courtyard_clearance(
             return
         repaired = repair_malformed_courtyard(fp)
         grew = ensure_courtyard_clears_pads(fp, min_clearance_mm=min_clearance_mm)
-        if repaired or grew:
+        pth_changes = normalize_pth_pads_for_fab(fp)
+        if pth_changes:
+            print(
+                f"add-part: normalized {footprint_name} PTH pad(s) to fab "
+                f"floors: {'; '.join(pth_changes[:6])}",
+                file=sys.stderr,
+            )
+        if repaired or grew or pth_changes:
             pcbnew.PCB_IO_KICAD_SEXPR().FootprintSave(str(pretty_dir), fp)
             if repaired:
                 print(
@@ -2446,6 +2465,27 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+
+        # (6) Every PTH pad must meet the generated boards' fab floors
+        # (drill >= 0.30 mm min hole, annular >= min ring). Sub-floor pads
+        # fail board DRC outright (drill_out_of_range / annular_width --
+        # batch 20260716T011056Z run_22/run_06). The stamp seam normalizes
+        # them in memory, so this check keeps the LIBRARY file honest too.
+        if loaded_fp is not None:
+            from kicraft.parts_library.footprint_courtyard import (
+                normalize_pth_pads_for_fab,
+            )
+
+            pth_needed = normalize_pth_pads_for_fab(loaded_fp)
+            if pth_needed:
+                for line in pth_needed[:10]:
+                    print(f"PTH pad below fab floor: {line}", file=sys.stderr)
+                print(
+                    "  fix by re-vendoring (`add-part` now normalizes PTH "
+                    "pads) or hand-editing, then rerun with --update-hash",
+                    file=sys.stderr,
+                )
+                return 2
 
     actual = compute_content_hash(part_dir)
     if actual != manifest.content_hash:

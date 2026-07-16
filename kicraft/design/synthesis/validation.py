@@ -1484,6 +1484,60 @@ def _programming_access_parts(bom) -> list:
     return out
 
 
+def check_multi_unit_symbols(bom) -> CheckResult:
+    """§9.30 (hard, parts-only) -- no part whose symbol needs units beyond 1.
+
+    The pipeline instantiates ONE symbol unit per part (`_emit_symbol_instance`
+    hardcodes unit 1), so any functional pin living on unit 2+ of a multi-unit
+    symbol is unreachable by the wiring stage: §9.10 rejects it as nonexistent,
+    the model re-asks about the "missing" pins, and the run dies parking the
+    same unanswerable question (batch 20260716T011056Z run_28: TL072 dual
+    op-amp, unit-B pins 5/6/7 -- five identical parks, build never ran).
+
+    Rejecting the PICK at BOM commit turns that death loop into one normal
+    BOM retry with directive feedback: choose a part whose symbol puts every
+    pin on unit 1 (single-section devices -- e.g. one op-amp per package like
+    TL071/OPA344 -- or a monolithic symbol variant). Remove this check when
+    the emitter learns to instantiate all units (lookup_pins(all_units=True)
+    already exposes them).
+    """
+    from .symbol_pinout import SymbolNotFoundError, lookup_pins
+
+    bad: list[str] = []
+    for p in bom.parts:
+        try:
+            info_all = lookup_pins(p.symbol, all_units=True)
+        except (SymbolNotFoundError, ValueError):
+            continue  # §9.10 owns missing/broken symbols
+        if int(info_all.get("unit_count") or 1) <= 1:
+            continue
+        unit1 = {
+            pin["number"] for pin in info_all["pins"] if int(pin.get("unit", 1)) == 1
+        }
+        beyond = sorted(
+            {pin["number"] for pin in info_all["pins"]} - unit1,
+            key=lambda n: (len(n), n),
+        )
+        if beyond:
+            bad.append(
+                f"{p.ref} ({p.symbol}): pins {', '.join(beyond)} live on unit 2+ "
+                "of a multi-unit symbol; the schematic emitter instantiates "
+                "unit 1 only, so those pins can never be wired. Pick a "
+                "single-section part instead (e.g. one op-amp per package: "
+                "TL071/OPA344 class) or a variant whose symbol is monolithic."
+            )
+    return CheckResult(
+        name="9.30 multi-unit symbol unsupported",
+        ok=not bad,
+        message=(
+            "every part's symbol is fully wireable as unit 1"
+            if not bad
+            else "part(s) need symbol units the emitter cannot instantiate"
+        ),
+        offenders=bad,
+    )
+
+
 def check_mcu_programming_access(bom) -> CheckResult:
     """§9.29 (hard) -- an MCU board must be physically programmable.
 

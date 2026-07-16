@@ -1,7 +1,7 @@
 {
-  "content_hash": "sha256:167bbdb4e9671a3b12abe6be747d0c73b046ed57c87eb0e7de6a80fda326c5a8",
+  "content_hash": "sha256:1eba8eecaee7430b91b47d0357c6e7b95b55d1af3d84385efd8ce3a56fd9b760",
   "datasheet_url": "https://www.lcsc.com/datasheet/C27636198.pdf",
-  "description": "MEMS MSM261D — PDM output MEMS microphone, -26dBFS sensitivity, 65dB SNR, I2S-compatible digital output. 3.5×2.7mm package. Bottom-port.",
+  "description": "MEMS MSM261D \u2014 PDM output MEMS microphone, -26dBFS sensitivity, 65dB SNR, I2S-compatible digital output. 3.5\u00d72.7mm package. Bottom-port.",
   "footprint_name": "MIC-SMD_5P_L3.5-W2.7-P0.82_SPH0641LU4H-1",
   "kicad_version_min": "9.0.0",
   "maturity": "production",
