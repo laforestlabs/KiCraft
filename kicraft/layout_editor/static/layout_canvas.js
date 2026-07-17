@@ -258,15 +258,109 @@ window.kicraftInitLayoutCanvas = function(cfg) {
 
   const leafByPath = Object.fromEntries(cfg.leaves.map(l => [l.instance_path, l]));
 
+  // Camera: zoom factor + explicit center. cx/cy null = auto-fit (track
+  // the outline, the historical behavior). NOT part of the undo history
+  // -- moving the camera is not a document edit.
+  const view = { zoom: 1.0, cx: null, cy: null };
+  const ZOOM_MIN = 0.4;
+  const ZOOM_MAX = 16.0;
+
   function viewBox() {
     const out = state.board_outline;
     const w = out.max.x - out.min.x;
     const h = out.max.y - out.min.y;
-    const vbW = Math.max(w + 2 * PADDING_X_MM, 30);
-    const vbH = Math.max(h + 2 * PADDING_Y_MM, 30);
-    const vbX = out.min.x - PADDING_X_MM;
-    const vbY = out.min.y - PADDING_Y_MM;
-    return { vbX, vbY, vbW, vbH };
+    const fitW = Math.max(w + 2 * PADDING_X_MM, 30);
+    const fitH = Math.max(h + 2 * PADDING_Y_MM, 30);
+    const fitCx = out.min.x - PADDING_X_MM + fitW / 2;
+    const fitCy = out.min.y - PADDING_Y_MM + fitH / 2;
+    const cx = view.cx === null ? fitCx : view.cx;
+    const cy = view.cy === null ? fitCy : view.cy;
+    const vbW = fitW / view.zoom;
+    const vbH = fitH / view.zoom;
+    return { vbX: cx - vbW / 2, vbY: cy - vbH / 2, vbW, vbH };
+  }
+
+  function fitView() {
+    view.zoom = 1.0;
+    view.cx = null;
+    view.cy = null;
+    render();
+  }
+
+  // --- Undo / redo ---------------------------------------------------------
+  // Snapshots cover the DOCUMENT (placements, outline, shape, holes) --
+  // not the camera, not view options, not selection. Rapid same-kind
+  // mutations (arrow-key nudges) coalesce into one step via the tag.
+  const history = [];
+  const future = [];
+  const HISTORY_MAX = 100;
+  let lastPushTag = null;
+  let lastPushAt = 0;
+
+  function snapshotData() {
+    return {
+      placements: deepCopy(state.placements),
+      board_outline: deepCopy(state.board_outline),
+      outline_shape: deepCopy(state.outline_shape),
+      mounting_holes: deepCopy(state.mounting_holes),
+    };
+  }
+
+  function restoreData(snap) {
+    state.placements = deepCopy(snap.placements);
+    state.board_outline = deepCopy(snap.board_outline);
+    state.outline_shape = deepCopy(snap.outline_shape);
+    state.mounting_holes = deepCopy(snap.mounting_holes);
+    state.drc_markers = [];
+    if (state.selected
+        && !state.placements.some(p => p.instance_path === state.selected)) {
+      state.selected = null;
+    }
+    emitOutlineChanged();
+    render();
+    emitSelectionChanged();
+  }
+
+  function pushHistory(tag) {
+    const now = Date.now();
+    if (tag && tag === lastPushTag && now - lastPushAt < 800) {
+      lastPushAt = now;
+      return;
+    }
+    lastPushTag = tag || null;
+    lastPushAt = now;
+    history.push(snapshotData());
+    if (history.length > HISTORY_MAX) history.shift();
+    future.length = 0;
+  }
+
+  function undo() {
+    if (!history.length) return;
+    future.push(snapshotData());
+    restoreData(history.pop());
+    lastPushTag = null;
+  }
+
+  function redo() {
+    if (!future.length) return;
+    history.push(snapshotData());
+    restoreData(future.pop());
+    lastPushTag = null;
+  }
+
+  // Run a canvas-API mutation and record it as ONE undo step -- but only
+  // if it actually changed the document (the panels re-push identical
+  // state at mount time; that must not pollute the history).
+  function applyWithHistory(mutator) {
+    const before = snapshotData();
+    mutator();
+    if (JSON.stringify(before) !== JSON.stringify(snapshotData())) {
+      history.push(before);
+      if (history.length > HISTORY_MAX) history.shift();
+      future.length = 0;
+      lastPushTag = null;
+    }
+    render();
   }
 
   function setSelected(ip) {
@@ -282,6 +376,7 @@ window.kicraftInitLayoutCanvas = function(cfg) {
     }
     updateCoordsLabel();
     render();
+    emitSelectionChanged();
   }
 
   function updateCoordsLabel() {
@@ -314,6 +409,31 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       width: Math.round((out.max.x - out.min.x) * 100) / 100,
       height: Math.round((out.max.y - out.min.y) * 100) / 100,
     });
+  }
+
+  // Selection sync to the host (numeric x/y/rot editing panel): the
+  // VISUAL CENTER + rotation of the selected leaf, or instance_path
+  // null on deselect. Center-based (not origin) because "where is this
+  // block" is what the user thinks in.
+  function emitSelectionChanged() {
+    if (typeof window.emitEvent !== 'function') return;
+    let payload = { canvas_id: cfg.canvas_id, instance_path: null };
+    if (state.selected) {
+      const p = state.placements.find(x => x.instance_path === state.selected);
+      const leaf = leafByPath[state.selected];
+      if (p && leaf) {
+        const c = leafCenter(p, leaf);
+        payload = {
+          canvas_id: cfg.canvas_id,
+          instance_path: state.selected,
+          sheet_name: leaf.sheet_name,
+          cx: Math.round(c.x * 100) / 100,
+          cy: Math.round(c.y * 100) / 100,
+          rotation: Math.round((p.rotation || 0) * 10) / 10,
+        };
+      }
+    }
+    window.emitEvent('kicraft-ml-selected', payload);
   }
 
   function snapAngle(deg, shiftHeld) {
@@ -741,6 +861,11 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       // canvas visual matches the stamped output.
       g.setAttribute('transform',
         'translate(' + p.origin.x + ',' + p.origin.y + ') rotate(' + (-(p.rotation || 0)) + ')');
+      // Native hover tooltip naming the block (the baked-in silk name
+      // can be small or rotated off-view at low zoom).
+      const leafTitle = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      leafTitle.textContent = leaf.sheet_name;
+      g.appendChild(leafTitle);
 
       // PNG is rasterized from kicad-cli's SVG export with no trim or
       // chrome, so its pixel aspect already matches its mm aspect
@@ -951,6 +1076,8 @@ window.kicraftInitLayoutCanvas = function(cfg) {
         const p = state.placements.find(x => x.instance_path === ip);
         if (p) {
           const leaf = leafByPath[ip];
+          pushHistory();
+          state.drc_markers = [];
           // Negate to invert input mapping: a CW step (intuitive) is
           // stored as a negative rotation, which the SVG transform's
           // own rotate(-(p.rotation)) re-flips back into a CW visual,
@@ -964,15 +1091,120 @@ window.kicraftInitLayoutCanvas = function(cfg) {
     });
     document.addEventListener('keydown', (e) => {
       if (!isCurrent()) return;  // stale IIFE from a prior refresh
+      // Never hijack typing: the editor page carries numeric inputs
+      // (outline W/H, selected-block x/y/rot, hole insets).
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA'
+                || t.isContentEditable)) {
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        if (e.shiftKey) redo(); else undo();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) {
+        e.preventDefault();
+        redo();
+        return;
+      }
+      if (e.key === 'f' || e.key === 'F') {
+        fitView();
+        return;
+      }
       if (!state.selected) return;
       if (e.key === 'r' || e.key === 'R') {
         const p = state.placements.find(x => x.instance_path === state.selected);
         if (p) {
           const leaf = leafByPath[state.selected];
+          pushHistory();
           setRotationKeepCenter(p, leaf, snapAngle((p.rotation || 0) - SNAP_DEG, false));
+          state.drc_markers = [];
           render();
+          emitSelectionChanged();
+        }
+        return;
+      }
+      const NUDGE = { ArrowLeft: [-1, 0], ArrowRight: [1, 0],
+                      ArrowUp: [0, -1], ArrowDown: [0, 1] };
+      if (e.key in NUDGE) {
+        const p = state.placements.find(x => x.instance_path === state.selected);
+        if (p) {
+          e.preventDefault();  // the page must not scroll under a nudge
+          const step = e.shiftKey ? 1.0 : 0.1;
+          pushHistory('nudge');
+          p.origin.x += NUDGE[e.key][0] * step;
+          p.origin.y += NUDGE[e.key][1] * step;
+          state.drc_markers = [];
+          render();
+          emitSelectionChanged();
         }
       }
+    });
+
+    // Wheel zoom around the cursor. passive:false so preventDefault can
+    // stop the page from scrolling while zooming the canvas.
+    svg.addEventListener('wheel', (e) => {
+      if (!isCurrent()) return;
+      e.preventDefault();
+      const before = svgToWorld(svg, e);
+      const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+      const nz = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, view.zoom * factor));
+      if (nz === view.zoom) return;
+      const vbNow = viewBox();
+      const cxNow = vbNow.vbX + vbNow.vbW / 2;
+      const cyNow = vbNow.vbY + vbNow.vbH / 2;
+      // Keep the world point under the cursor fixed while the halfspan
+      // scales by zoom_old/zoom_new.
+      const scale = view.zoom / nz;
+      view.cx = before.x - (before.x - cxNow) * scale;
+      view.cy = before.y - (before.y - cyNow) * scale;
+      view.zoom = nz;
+      render();
+    }, { passive: false });
+
+    // Drag empty canvas (or middle-button anywhere) to pan; a no-move
+    // left click on empty space deselects; double-click empty space
+    // re-fits. Leaf and edge-handle gestures keep their own handlers --
+    // they are skipped here via the closest() guard.
+    svg.addEventListener('mousedown', (e) => {
+      if (!isCurrent()) return;
+      if (e.button !== 0 && e.button !== 1) return;  // right button = context menu
+      const onItem = e.target.closest
+        && (e.target.closest('.ml-leaf') || e.target.closest('.ml-edge'));
+      if (onItem && e.button !== 1) return;
+      e.preventDefault();
+      const ctm = svg.getScreenCTM();
+      if (!ctm) return;
+      const inv = ctm.inverse();
+      const mmPerPxX = inv.a;
+      const mmPerPxY = inv.d;
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const vb0 = viewBox();
+      const c0 = { x: vb0.vbX + vb0.vbW / 2, y: vb0.vbY + vb0.vbH / 2 };
+      let moved = false;
+      const move = (ev) => {
+        if (Math.abs(ev.clientX - startX) + Math.abs(ev.clientY - startY) > 3) {
+          moved = true;
+        }
+        view.cx = c0.x - (ev.clientX - startX) * mmPerPxX;
+        view.cy = c0.y - (ev.clientY - startY) * mmPerPxY;
+        render();
+      };
+      const up = () => {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        if (!moved && e.button === 0) setSelected(null);
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    });
+    svg.addEventListener('dblclick', (e) => {
+      if (!isCurrent()) return;
+      const onItem = e.target.closest
+        && (e.target.closest('.ml-leaf') || e.target.closest('.ml-edge'));
+      if (!onItem) fitView();
     });
   }
 
@@ -983,7 +1215,9 @@ window.kicraftInitLayoutCanvas = function(cfg) {
     const leaf = leafByPath[ip];
     const start = svgToWorld(svg, evt);
     const orig = { x: p.origin.x, y: p.origin.y };
+    let pushed = false;  // one undo step per drag, taken on first movement
     const move = (e) => {
+      if (!pushed) { pushHistory(); pushed = true; }
       // Markers describe the LAST stamped arrangement; moving anything
       // invalidates them.
       state.drc_markers = [];
@@ -1016,6 +1250,7 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       state.snap_constraints.x = null;
       state.snap_constraints.y = null;
       render();
+      emitSelectionChanged();
       document.removeEventListener('mousemove', move);
       document.removeEventListener('mouseup', up);
     };
@@ -1036,7 +1271,10 @@ window.kicraftInitLayoutCanvas = function(cfg) {
     const startW = svgToWorld(svg, evt);
     const startAngle = Math.atan2(startW.y - center.y, startW.x - center.x) * 180 / Math.PI;
     const baseRot = p.rotation || 0;
+    let pushed = false;  // one undo step per rotate gesture
     const move = (e) => {
+      if (!pushed) { pushHistory(); pushed = true; }
+      state.drc_markers = [];
       const cur = svgToWorld(svg, e);
       const ang = Math.atan2(cur.y - center.y, cur.x - center.x) * 180 / Math.PI;
       // Negate the drag delta so a visual-CW mouse motion produces a
@@ -1050,6 +1288,7 @@ window.kicraftInitLayoutCanvas = function(cfg) {
     const up = (e) => {
       setRotationKeepCenter(p, leaf, snapAngle(p.rotation, e.shiftKey));
       render();
+      emitSelectionChanged();
       document.removeEventListener('mousemove', move);
       document.removeEventListener('mouseup', up);
     };
@@ -1077,7 +1316,10 @@ window.kicraftInitLayoutCanvas = function(cfg) {
         const startClientY = e.clientY;
         const orig = deepCopy(state.board_outline);
         const minSize = 10;
+        let pushed = false;  // one undo step per edge drag
         const move = (ev) => {
+          if (!pushed) { pushHistory(); pushed = true; }
+          state.drc_markers = [];
           const dx = (ev.clientX - startClientX) * mmPerPxX;
           const dy = (ev.clientY - startClientY) * mmPerPxY;
           const out = state.board_outline;
@@ -1156,8 +1398,39 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       };
     },
     reset: function() {
-      state = makeState();
-      render();
+      applyWithHistory(() => {
+        const fresh = makeState();
+        state.placements = fresh.placements;
+        state.board_outline = fresh.board_outline;
+        state.outline_shape = fresh.outline_shape;
+        state.mounting_holes = fresh.mounting_holes;
+        state.drc_markers = [];
+        state.selected = null;
+      });
+      emitOutlineChanged();
+      emitSelectionChanged();
+    },
+    fitView: fitView,
+    undo: undo,
+    redo: redo,
+    setPlacementCenter: function(ip, cxMm, cyMm, rotDeg) {
+      // Numeric-entry placement: position the leaf's VISUAL CENTER at
+      // (cxMm, cyMm) with rotation rotDeg -- the inverse of leafCenter,
+      // so the readout and the input speak the same coordinates.
+      const p = state.placements.find(x => x.instance_path === ip);
+      const leaf = leafByPath[ip];
+      if (!p || !leaf) return;
+      applyWithHistory(() => {
+        const rot = typeof rotDeg === 'number' ? rotDeg : (p.rotation || 0);
+        const r = rot * Math.PI / 180;
+        const c = Math.cos(r), s = Math.sin(r);
+        const sc = leafCenterLocal(leaf);
+        p.origin.x = cxMm - (c * sc.x + s * sc.y);
+        p.origin.y = cyMm - (-s * sc.x + c * sc.y);
+        p.rotation = rot;
+        state.drc_markers = [];
+      });
+      emitSelectionChanged();
     },
     getOutlineSize: function() {
       const out = state.board_outline;
@@ -1167,36 +1440,38 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       };
     },
     setOutlineSize: function(width, height) {
-      const out = state.board_outline;
-      const w = Math.max(10, Number(width) || 0);
-      const h = Math.max(10, Number(height) || 0);
-      // Anchor at the existing min corner so leaves don't get
-      // shoved when the user only adjusted width or only height.
-      out.max.x = out.min.x + w;
-      out.max.y = out.min.y + h;
-      enforceShapeConstraints(null);
+      applyWithHistory(() => {
+        const out = state.board_outline;
+        const w = Math.max(10, Number(width) || 0);
+        const h = Math.max(10, Number(height) || 0);
+        // Anchor at the existing min corner so leaves don't get
+        // shoved when the user only adjusted width or only height.
+        out.max.x = out.min.x + w;
+        out.max.y = out.min.y + h;
+        enforceShapeConstraints(null);
+      });
       // The constraint may have overridden the requested size (circle
       // squares the AABB); reflect the authoritative result back so
       // the inputs match what the canvas actually holds. The Python
       // handler only writes values that differ, so this cannot loop.
       emitOutlineChanged();
-      render();
     },
     setOutlineShape: function(spec) {
       // Merge {shape, corner_radius_mm, chamfer_mm}. Switching to
       // circle squares the AABB on the current width.
       if (!spec || typeof spec !== 'object') return;
-      const cur = state.outline_shape;
-      if (typeof spec.shape === 'string') cur.shape = spec.shape;
-      if (typeof spec.corner_radius_mm === 'number') {
-        cur.corner_radius_mm = Math.max(0, spec.corner_radius_mm);
-      }
-      if (typeof spec.chamfer_mm === 'number') {
-        cur.chamfer_mm = Math.max(0, spec.chamfer_mm);
-      }
-      enforceShapeConstraints(null);
+      applyWithHistory(() => {
+        const cur = state.outline_shape;
+        if (typeof spec.shape === 'string') cur.shape = spec.shape;
+        if (typeof spec.corner_radius_mm === 'number') {
+          cur.corner_radius_mm = Math.max(0, spec.corner_radius_mm);
+        }
+        if (typeof spec.chamfer_mm === 'number') {
+          cur.chamfer_mm = Math.max(0, spec.chamfer_mm);
+        }
+        enforceShapeConstraints(null);
+      });
       emitOutlineChanged();
-      render();
     },
     getOutlineShape: function() {
       return deepCopy(state.outline_shape);
@@ -1208,24 +1483,25 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       // hole it replaces (matched by index). Defaulting a pos-less hole
       // to the outline min corner used to teleport every unpinned hole
       // to the board's top-left, which Save then persisted.
-      const prevByIndex = {};
-      for (const h of state.mounting_holes) prevByIndex[h.index] = h;
-      const out = state.board_outline;
-      state.mounting_holes = (holes || []).map((h, i) => {
-        const idx = typeof h.index === 'number' ? h.index : i;
-        const prev = prevByIndex[idx];
-        return {
-          index: idx,
-          corner: h.corner || null,
-          inset_mm: Number(h.inset_mm) || 5.0,
-          screw: typeof h.screw === 'string' && h.screw ? h.screw : 'M3',
-          pos: h.pos ? { x: Number(h.pos.x) || 0, y: Number(h.pos.y) || 0 }
-               : (prev ? prev.pos
-                       : { x: (out.min.x + out.max.x) / 2,
-                           y: (out.min.y + out.max.y) / 2 }),
-        };
+      applyWithHistory(() => {
+        const prevByIndex = {};
+        for (const h of state.mounting_holes) prevByIndex[h.index] = h;
+        const out = state.board_outline;
+        state.mounting_holes = (holes || []).map((h, i) => {
+          const idx = typeof h.index === 'number' ? h.index : i;
+          const prev = prevByIndex[idx];
+          return {
+            index: idx,
+            corner: h.corner || null,
+            inset_mm: Number(h.inset_mm) || 5.0,
+            screw: typeof h.screw === 'string' && h.screw ? h.screw : 'M3',
+            pos: h.pos ? { x: Number(h.pos.x) || 0, y: Number(h.pos.y) || 0 }
+                 : (prev ? prev.pos
+                         : { x: (out.min.x + out.max.x) / 2,
+                             y: (out.min.y + out.max.y) / 2 }),
+          };
+        });
       });
-      render();
     },
     getMountingHoles: function() {
       recomputeMountingHoles();

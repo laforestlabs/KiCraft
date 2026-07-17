@@ -277,6 +277,68 @@ def _build_hole_row(i: int, hole: dict, on_change) -> None:
         inset.on_value_change(_on_inset)
 
 
+def selected_block_controls(canvas_id: str) -> None:
+    """Numeric placement editing for the selected leaf: visual-center
+    X/Y (mm) + rotation, hidden until a block is selected. The canvas
+    emits ``kicraft-ml-selected`` on every selection/placement change;
+    values apply on blur/Enter via ``setPlacementCenter`` (same center
+    semantics as the readout, one undo step per apply)."""
+    row = ui.row().classes("items-center gap-2 mt-1")
+    row.set_visibility(False)
+    current: dict[str, Any] = {"ip": None}
+
+    with row:
+        ui.label("Selected block").classes("text-xs text-gray-400")
+        name_label = ui.label("").classes("text-xs font-medium") \
+            .style("color:#e2e8f0")
+        x_input = ui.number("Center X (mm)", step=0.1, format="%.2f") \
+            .classes("w-32").props("dense")
+        y_input = ui.number("Center Y (mm)", step=0.1, format="%.2f") \
+            .classes("w-32").props("dense")
+        rot_input = ui.number("Rotation (°)", step=90, format="%.1f") \
+            .classes("w-28").props("dense")
+
+    def _apply() -> None:
+        ip = current["ip"]
+        if not ip:
+            return
+        try:
+            cx = float(x_input.value)
+            cy = float(y_input.value)
+            rot = float(rot_input.value or 0.0)
+        except (TypeError, ValueError):
+            return
+        _canvas_call(
+            canvas_id, "setPlacementCenter",
+            f"{json.dumps(ip)}, {cx}, {cy}, {rot}",
+        )
+
+    for inp in (x_input, y_input, rot_input):
+        inp.on("blur", lambda _e: _apply())
+        inp.on("keydown.enter", lambda _e: _apply())
+
+    def _on_selected(e: Any) -> None:
+        data = e.args if isinstance(e.args, dict) else {}
+        if data.get("canvas_id") != canvas_id:
+            return
+        ip = data.get("instance_path")
+        try:
+            if not ip:
+                current["ip"] = None
+                row.set_visibility(False)
+                return
+            current["ip"] = str(ip)
+            name_label.set_text(str(data.get("sheet_name") or ip))
+            x_input.set_value(data.get("cx"))
+            y_input.set_value(data.get("cy"))
+            rot_input.set_value(data.get("rotation"))
+            row.set_visibility(True)
+        except Exception:  # noqa: BLE001 - the row may be mid-teardown
+            pass
+
+    ui.on("kicraft-ml-selected", _on_selected)
+
+
 def view_options_panel(canvas_id: str) -> None:
     """Collapsible View options: grid toggle, snap toggle, snap spacing.
 
@@ -349,6 +411,15 @@ def view_options_panel(canvas_id: str) -> None:
                     format="%.2f",
                     on_change=_on_spacing_change,
                 ).classes("w-32")
+            with ui.row().classes("items-center gap-3"):
+                ui.button(
+                    "Fit view", icon="fit_screen",
+                    on_click=lambda: _canvas_call(canvas_id, "fitView"),
+                ).props("dense outline")
+                ui.label(
+                    "scroll = zoom · drag empty space = pan · "
+                    "double-click empty space = fit · F = fit"
+                ).classes("text-xs text-gray-500")
 
     # Push the initial values once the canvas JS has had a chance to
     # mount -- the panel renders before the controller registers

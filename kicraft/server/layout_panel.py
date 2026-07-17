@@ -41,6 +41,7 @@ from kicraft.layout_editor.nicegui_panels import (
     compose_result_panel,
     mounting_hole_panel,
     outline_controls,
+    selected_block_controls,
     view_options_panel,
 )
 from kicraft.server.kicanvas import KiCanvasSource, KiCanvasView
@@ -167,7 +168,8 @@ class LayoutEditorPanel:
                       on_click=self.on_exit).props("flat dense")
             ui.label("Manual layout").classes("text-sm font-medium") \
                 .style("color:#e2e8f0")
-            ui.label("drag · R / right-click rotate · edge handles resize") \
+            ui.label("drag · R rotate · arrows nudge (Shift = 1 mm) · "
+                     "wheel zoom · Ctrl+Z undo") \
                 .classes("text-xs").style("color:#64748b")
             # Live readouts the canvas controller writes into by DOM id
             # (updateCoordsLabel in layout_canvas.js): selected leaf's
@@ -328,6 +330,7 @@ class LayoutEditorPanel:
                 {"violations": route_markers}), once=True)
 
         outline_controls(self.canvas_id, initial)
+        selected_block_controls(self.canvas_id)
         mounting_hole_panel(self.canvas_id, initial.get("mounting_holes") or [])
         view_options_panel(self.canvas_id)
 
