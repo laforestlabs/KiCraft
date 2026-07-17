@@ -4101,6 +4101,20 @@ def _verify_routed_board(pcb: Path) -> dict:
         "reasons": reasons,
         "warnings": warnings,
         "tracks": v.get("track_summary", {}) or {},
+        # Positioned diagnosis for the manual-layout editor's failure
+        # overlay (board-frame mm; parsed from the DRC report blocks).
+        "unconnected_nets": list(drc.get("unconnected_nets", []) or [])[:40],
+        "violations": [
+            {
+                "type": x.get("type"),
+                "x_mm": x.get("x_mm"),
+                "y_mm": x.get("y_mm"),
+                "net1": x.get("net1"),
+                "net2": x.get("net2"),
+                "description": str(x.get("description", ""))[:200],
+            }
+            for x in (drc.get("violations") or [])[:120]
+        ],
     }
 
 
@@ -4503,7 +4517,8 @@ def _surface_review_findings(state, state_path: Path, findings: list[dict]) -> N
 def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
                         project_dir: Path, pcb: Path,
                         *, done_label: str = "BUILD COMPLETE",
-                        do_fab: bool = True) -> int:
+                        do_fab: bool = True,
+                        verify_summary_out: dict | None = None) -> int:
     """Steps 3-5 of the build tail: promote the routed parent to the
     project's main PCB, gate it (no shorts, no unconnected), and export
     the fab package. Shared by `build` and `manual-route`.
@@ -4638,6 +4653,20 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     gate = _verify_routed_board(pcb)
     expected_refs = {p.ref for p in (state.bom.parts if state and state.bom else [])}
     missing_refs = _missing_component_refs(expected_refs, gate["tracks"].get("footprint_refs"))
+    if verify_summary_out is not None:
+        # Caller wants the gate diagnosis regardless of exit path (the
+        # manual-route flow persists it so the editor can overlay the
+        # failure on the canvas when the user comes back).
+        verify_summary_out.update(
+            shorts=gate.get("shorts", 0),
+            unconnected=gate.get("unconnected", 0),
+            courtyard=gate.get("courtyard", 0),
+            keepout=gate.get("keepout", 0),
+            reasons=list(gate.get("reasons", []) or []),
+            unconnected_nets=list(gate.get("unconnected_nets", []) or []),
+            violations=list(gate.get("violations", []) or []),
+            missing_refs=list(missing_refs or []),
+        )
     # 4a'. Standard form-factor conformance. A validated standard is a hard
     #      mechanical contract: when enforcement placed the board, a non-conformant
     #      result fails the gate (the board can't mate); with enforcement off the
@@ -4906,10 +4935,45 @@ def _cmd_manual_route(args: argparse.Namespace) -> int:
         rc = subprocess.run(cmd, cwd=str(project_dir)).returncode
         if rc != 0:
             print(f"error: manual compose/route exited {rc}", file=sys.stderr)
+            _write_manual_route_result(project_dir, rc=6, stage="route")
             return 6
-        return _promote_verify_fab(state, state_path, artifacts, stem,
-                                   project_dir, pcb,
-                                   done_label="MANUAL ROUTE COMPLETE")
+        verify_summary: dict = {}
+        rc = _promote_verify_fab(state, state_path, artifacts, stem,
+                                 project_dir, pcb,
+                                 done_label="MANUAL ROUTE COMPLETE",
+                                 verify_summary_out=verify_summary)
+        _write_manual_route_result(
+            project_dir, rc=rc,
+            stage="ok" if rc == 0 else "verify",
+            verify=verify_summary or None,
+        )
+        return rc
+
+
+def _write_manual_route_result(project_dir: Path, *, rc: int, stage: str,
+                               verify: dict | None = None) -> None:
+    """Persist the manual-route outcome where the layout editor reads it
+    (.experiments/manual/last_route_result.json), so a failed attempt
+    reopens the editor WITH its diagnosis instead of dead-ending in the
+    generic failed-build view. Best-effort: never breaks the build tail.
+    """
+    from datetime import datetime, timezone
+
+    payload = {
+        "rc": int(rc),
+        # 'route' = FreeRouting/compose failed; 'verify' = routed but the
+        # fab gate rejected it; 'ok' = fab-ready.
+        "stage": stage,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "verify": verify,
+    }
+    out = project_dir / ".experiments" / "manual" / "last_route_result.json"
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError as exc:
+        print(f"warning: could not persist manual-route result: {exc}",
+              file=sys.stderr)
 
 
 def _cmd_build(args: argparse.Namespace) -> int:

@@ -28,6 +28,8 @@ from kicraft.layout_editor import (
     build_canvas_init_script,
     discover_leaves,
     load_initial_layout,
+    load_last_route_result,
+    log_manual_event,
     run_manual_compose,
     save_manual_layout_json,
 )
@@ -154,6 +156,7 @@ class LayoutEditorPanel:
             ui.notify("Save the layout first.", color="warning")
             return
         if self.on_route is not None:
+            log_manual_event(self.experiments_dir, "route_enqueued")
             self.on_route()
 
     # -- UI -----------------------------------------------------------------
@@ -220,6 +223,11 @@ class LayoutEditorPanel:
             missing = await run.io_bound(
                 discover_missing_leaves, self.experiments_dir
             )
+            last_route = await run.io_bound(
+                load_last_route_result, self.experiments_dir
+            )
+            log_manual_event(self.experiments_dir, "editor_opened",
+                             leaves=len(leaves), missing=len(missing))
         except Exception as exc:  # noqa: BLE001 - surface, don't vanish
             if self._body.is_deleted:
                 return
@@ -232,9 +240,10 @@ class LayoutEditorPanel:
             return
         self._body.clear()
         with self._body:
-            self._render_body(leaves, initial, ratsnest, missing)
+            self._render_body(leaves, initial, ratsnest, missing, last_route)
 
-    def _render_body(self, leaves, initial, ratsnest=None, missing=None) -> None:
+    def _render_body(self, leaves, initial, ratsnest=None, missing=None,
+                     last_route=None) -> None:
         if not leaves:
             ui.label(
                 "No solved leaves found for this project; run a build first."
@@ -257,6 +266,53 @@ class LayoutEditorPanel:
                     "design) so every block has a routed board."
                 ).classes("text-xs").style("color:#fcd34d")
 
+        # Round trip from a failed manual-route job: say WHY it failed and
+        # (below, once the canvas has mounted) mark the failure locations,
+        # instead of leaving the diagnosis in the generic failed-build view.
+        route_markers: list = []
+        if last_route and last_route.get("rc") != 0:
+            v = last_route.get("verify") or {}
+            with ui.card().classes("w-full p-2 mb-1").style(
+                    "border:1px solid #b91c1c;background:#450a0a"):
+                if last_route.get("stage") == "route":
+                    ui.label(
+                        "Last routing attempt failed: FreeRouting could not "
+                        "route this arrangement. Give the connections more "
+                        "room -- spread blocks apart along their net lines, "
+                        "or grow the board outline."
+                    ).classes("text-xs").style("color:#fca5a5")
+                else:
+                    bits = []
+                    if v.get("shorts"):
+                        bits.append(f"{v['shorts']} short(s)")
+                    if v.get("unconnected"):
+                        bits.append(f"{v['unconnected']} unconnected item(s)")
+                    if v.get("courtyard"):
+                        bits.append(f"{v['courtyard']} courtyard overlap(s)")
+                    if v.get("keepout"):
+                        bits.append(f"{v['keepout']} keep-out intrusion(s)")
+                    detail = ", ".join(bits) \
+                        or ", ".join(str(r) for r in v.get("reasons", [])) \
+                        or f"rc={last_route.get('rc')}"
+                    ui.label(
+                        f"Last routing attempt failed verification: {detail}."
+                    ).classes("text-xs").style("color:#fca5a5")
+                    nets = v.get("unconnected_nets") or []
+                    if nets:
+                        shown = ", ".join(nets[:12])
+                        more = "…" if len(nets) > 12 else ""
+                        ui.label(f"Unconnected nets: {shown}{more}") \
+                            .classes("text-xs").style("color:#fca5a5")
+                route_markers = [
+                    x for x in (v.get("violations") or [])
+                    if x.get("type") in _MARKER_TYPES
+                ]
+                if route_markers:
+                    ui.label(
+                        "The failure locations are marked on the canvas "
+                        "(hover a red pin for details)."
+                    ).classes("text-xs").style("color:#fca5a5")
+
         ui.html(build_canvas_html(leaves, initial, self.canvas_id),
                 sanitize=False).classes("w-full")
         ui.run_javascript(build_canvas_init_script(
@@ -264,6 +320,12 @@ class LayoutEditorPanel:
             asset_url=f"{DEFAULT_ASSET_MOUNT}/layout_canvas.js",
             ratsnest=ratsnest,
         ))
+        if route_markers:
+            # The controller registers asynchronously (asset load); defer
+            # the push. The timer lives in the editor body, so leaving the
+            # editor cancels it instead of pushing at a dead canvas.
+            ui.timer(0.8, lambda: self._push_drc_markers(
+                {"violations": route_markers}), once=True)
 
         outline_controls(self.canvas_id, initial)
         mounting_hole_panel(self.canvas_id, initial.get("mounting_holes") or [])
@@ -344,6 +406,7 @@ class LayoutEditorPanel:
             )
             if self._route_btn is not None:
                 self._route_btn.enable()
+            log_manual_event(self.experiments_dir, "layout_saved")
             self._set_status("saved; stamping + running DRC…")
         except Exception as exc:  # noqa: BLE001
             self._set_status(f"save failed: {exc}")
@@ -378,7 +441,14 @@ class LayoutEditorPanel:
             self._save_btn.props(remove="loading")
 
         compose_result_panel(self._drc_card, result)
-        self._push_drc_markers(result.get("stamp_drc") or {})
+        _drc = result.get("stamp_drc") or {}
+        log_manual_event(
+            self.experiments_dir, "stamp_result",
+            rc=result.get("rc"),
+            shorts=_drc.get("shorts"),
+            clearance=_drc.get("clearance"),
+        )
+        self._push_drc_markers(_drc)
         if result.get("rc") == 0:
             self._set_status("stamp ok; preview below reflects your layout")
             self._show_preview()

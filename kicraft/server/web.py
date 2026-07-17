@@ -54,6 +54,7 @@ from .layout_panel import (
     leaf_artifacts_exist,
     user_may_edit_layout,
 )
+from ..layout_editor import manual_layout_status
 from .rules_panel import PlacementRulesPanel
 from .mailer import send_reset_email, send_verification_email
 from ..parts_library import Tier
@@ -5398,6 +5399,13 @@ def index(prompt: str = "", project: str = ""):
                                       "Pro/Max feature.")
                     ui.link("Upgrade", "/pricing").classes("text-xs") \
                         .style("color:#38bdf8")
+            # Manual-layout state chip: saved / last route outcome, so the
+            # manual flow stays visible after leaving the editor.
+            if state.get("project_dir"):
+                chip = manual_layout_status(Path(state["project_dir"]))
+                if chip:
+                    ui.label(chip).classes("text-xs mt-1") \
+                        .style("color:#94a3b8")
 
         def _live_sig():
             # Includes the running flag so a run parking on a question (it stays

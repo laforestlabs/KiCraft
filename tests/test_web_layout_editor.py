@@ -201,6 +201,33 @@ async def test_missing_leaf_banner_disables_save(harness):
     assert not save.enabled
 
 
+async def test_failed_route_attempt_shows_diagnosis_card(harness):
+    """A persisted last_route_result.json with a verify failure must
+    surface its diagnosis (counts + unconnected nets) when the editor
+    reopens -- the round trip out of the generic failed-build view."""
+    u, web, store, acct = harness
+    store.set_tier(EMAIL, "pro")
+    pid = _persisted_project_with_board(store, acct.id)
+    base = store.projects_dir / str(acct.id) / str(pid)
+    manual = (base / "generated" / "USB_BMP280_READER" / ".experiments"
+              / "manual")
+    manual.mkdir(parents=True)
+    (manual / "last_route_result.json").write_text(json.dumps({
+        "rc": 7, "stage": "verify", "finished_at": "2026-07-17T00:00:00+00:00",
+        "verify": {"shorts": 0, "unconnected": 2,
+                   "unconnected_nets": ["SDA", "SCL"], "violations": []},
+    }), encoding="utf-8")
+
+    await _login(u)
+    await u.should_see("Edit layout")
+
+    from nicegui import ui
+    u.find("Edit layout", kind=ui.button).click()
+    await u.should_see("Manual layout")
+    await u.should_see("failed verification", retries=30)
+    await u.should_see("SDA, SCL", retries=10)
+
+
 async def test_free_user_sees_upgrade_gate(harness):
     u, web, store, acct = harness
     _persisted_project_with_board(store, acct.id)

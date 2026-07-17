@@ -141,6 +141,59 @@ def save_manual_layout_json(
 
 
 
+def load_last_route_result(experiments_dir: Path) -> dict[str, Any] | None:
+    """The persisted outcome of the most recent manual-route job
+    (written by cli_app._write_manual_route_result), or None."""
+    p = experiments_dir / "manual" / "last_route_result.json"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def log_manual_event(experiments_dir: Path, event: str, **fields: Any) -> None:
+    """Append one usage event to ``.experiments/manual/usage.jsonl``.
+
+    The manual-layout success-rate story ("how many saved layouts reach
+    fab?") is unmeasurable without this. Best-effort append; never
+    raises into UI or build code.
+    """
+    from datetime import datetime, timezone
+
+    rec = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event": event,
+        **fields,
+    }
+    p = experiments_dir / "manual" / "usage.jsonl"
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+
+
+def manual_layout_status(project_dir: Path) -> str | None:
+    """One-line manual-layout state for the place/route tab: saved /
+    last route outcome. None when the project has no saved manual
+    layout (nothing to report)."""
+    exp = project_dir / ".experiments"
+    if not (exp / "manual" / "manual_layout.json").is_file():
+        return None
+    parts = ["Manual layout saved"]
+    last = load_last_route_result(exp)
+    if last:
+        if last.get("rc") == 0:
+            parts.append("last manual route: fab-ready")
+        elif last.get("stage") == "route":
+            parts.append("last manual route: routing failed")
+        else:
+            parts.append("last manual route: failed verification")
+    return " · ".join(parts)
+
+
 async def run_manual_compose(
     *,
     project_root: Path,

@@ -30,6 +30,9 @@ from kicraft.layout_editor.model import (
 from kicraft.layout_editor.render import render_leaf_canvas
 from kicraft.layout_editor.runner import (
     load_initial_layout,
+    load_last_route_result,
+    log_manual_event,
+    manual_layout_status,
     run_manual_compose,
     save_manual_layout_json,
 )
@@ -47,7 +50,10 @@ __all__ = [
     "discover_leaves",
     "experiments_mount_url_for",
     "load_initial_layout",
+    "load_last_route_result",
     "load_manual_layout",
+    "log_manual_event",
+    "manual_layout_status",
     "prerender_leaf_canvases",
     "render_leaf_canvas",
     "run_manual_compose",
