@@ -139,6 +139,11 @@ def test_materialize_sibling_writes_remapped_artifacts(tmp_path: Path):
         '(footprint "x" (property "Reference" "U1"))\n'
         '(footprint "y" (property "Reference" "R1"))\n'
     )
+    (rep_dir / "leaf_routed.kicad_pcb").write_text(
+        '(footprint "x" (property "Reference" "U1"))\n'
+        '(footprint "y" (property "Reference" "R1"))\n'
+        '(segment (net "OPTO_LED1"))\n'
+    )
     rep_metadata = {
         "instance_path": "/o1",
         "sheet_name": "OPTO_CH1",
@@ -177,6 +182,13 @@ def test_materialize_sibling_writes_remapped_artifacts(tmp_path: Path):
     sib_pcb = (sib_dir / "layout.kicad_pcb").read_text()
     assert '"U2"' in sib_pcb and '"R2"' in sib_pcb
     assert '"U1"' not in sib_pcb and '"R1"' not in sib_pcb
+    # leaf_routed.kicad_pcb ref-remapped: the manual layout editor's leaf
+    # discovery / canvas render / Edge.Cuts AABB all key on this file, so a
+    # sibling without it disappears from the editor (and a saved layout then
+    # fails compose's missing-placements check).
+    sib_routed = (sib_dir / "leaf_routed.kicad_pcb").read_text()
+    assert '"U2"' in sib_routed and '"R2"' in sib_routed
+    assert '"U1"' not in sib_routed and '"R1"' not in sib_routed
     # required-by-compose files all present
     assert (sib_dir / "metadata.json").exists()
     assert (sib_dir / "debug.json").exists()
@@ -202,6 +214,9 @@ def test_finalize_refreshes_sibling_from_pinned_representative(tmp_path: Path):
     (rep_dir / "solved_layout.json").write_text(json.dumps(rep_solved))
     (rep_dir / "metadata.json").write_text(
         json.dumps({"instance_path": "/o1", "artifact_paths": {"mini_pcb": ""}})
+    )
+    (rep_dir / "leaf_routed.kicad_pcb").write_text(
+        '(footprint "x" (property "Reference" "U1"))\n'
     )
 
     stale_sib = {
@@ -238,3 +253,8 @@ def test_finalize_refreshes_sibling_from_pinned_representative(tmp_path: Path):
     assert refreshed["components"]["U2"]["pads"][0]["net"] == "IN2"
     assert refreshed["traces"][0]["net"] == "IN2"
     assert refreshed["instance_path"] == "/o2"
+    # The editor-facing routed board is (re)derived from the rep's pinned
+    # board with the sibling's refs -- a sibling missing this file is
+    # invisible to the manual layout editor.
+    sib_routed = (sib_dir / "leaf_routed.kicad_pcb").read_text()
+    assert '"U2"' in sib_routed and '"U1"' not in sib_routed

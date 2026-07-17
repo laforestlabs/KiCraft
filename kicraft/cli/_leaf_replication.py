@@ -209,16 +209,33 @@ def materialize_sibling(
     # The composer reads the mini_pcb ONLY for blocker geometry keyed by refdes
     # (pad rects, connector edge anchors) -- so the sibling's must carry the
     # sibling's refs; net names are irrelevant there and left as-is.
+    from kicraft.leaf_library.sexpr_edit import renumber_pcb_text
+
     sib_mini_pcb = str(sib_dir / "layout.kicad_pcb")
     rep_mini_pcb = rep_paths.get("mini_pcb", "")
     if rep_mini_pcb and Path(rep_mini_pcb).exists():
-        from kicraft.leaf_library.sexpr_edit import renumber_pcb_text
-
         rep_pcb_text = Path(rep_mini_pcb).read_text(encoding="utf-8")
         sib_pcb_text, _counts = renumber_pcb_text(rep_pcb_text, ref_map)
         Path(sib_mini_pcb).write_text(sib_pcb_text, encoding="utf-8")
     else:
         sib_mini_pcb = ""
+
+    # --- leaf_routed.kicad_pcb: ref-only remap of the rep's routed board. The
+    # manual layout editor keys on this file (discover_leaves skips dirs
+    # without it, the canvas PNG renders from it, parse_edge_cuts_aabb reads
+    # its Edge.Cuts) and the rescue banner checks its existence -- without it
+    # repeated-channel boards lose their siblings in the editor. Like the
+    # mini_pcb, nothing electrical is read from it (the composer stamps from
+    # solved_layout.json), so net names inside stay the representative's.
+    rep_artifact_dir = rep_paths.get("artifact_dir", "")
+    rep_leaf_routed = Path(rep_artifact_dir) / "leaf_routed.kicad_pcb"
+    if rep_artifact_dir and rep_leaf_routed.is_file():
+        routed_text, _counts = renumber_pcb_text(
+            rep_leaf_routed.read_text(encoding="utf-8"), ref_map
+        )
+        (sib_dir / "leaf_routed.kicad_pcb").write_text(
+            routed_text, encoding="utf-8"
+        )
 
     # --- metadata.json: sibling identity + paths + the maps (so the post-pin
     # finalize can re-materialize from the representative's PINNED round). ---
@@ -263,6 +280,7 @@ def finalize_leaf_replication(project_dir: str | Path) -> int:
     import logging
 
     from kicraft.autoplacer.brain.subcircuit_artifacts import artifact_root_dir
+    from kicraft.leaf_library.sexpr_edit import renumber_pcb_text
 
     log = logging.getLogger(__name__)
     root = artifact_root_dir(project_dir)
@@ -317,12 +335,23 @@ def finalize_leaf_replication(project_dir: str | Path) -> int:
                 rep_meta = json.loads(rep_meta_path.read_text(encoding="utf-8"))
                 rep_mini = rep_meta.get("artifact_paths", {}).get("mini_pcb", "")
                 if rep_mini and Path(rep_mini).exists():
-                    from kicraft.leaf_library.sexpr_edit import renumber_pcb_text
-
                     text, _c = renumber_pcb_text(
                         Path(rep_mini).read_text(encoding="utf-8"), ref_map
                     )
                     Path(sib_mini).write_text(text, encoding="utf-8")
+
+            # Re-derive the sibling's leaf_routed.kicad_pcb (the editor-facing
+            # artifact: leaf discovery, canvas render, Edge.Cuts AABB) from the
+            # rep's now-pinned routed board. Ref-only remap, same contract as
+            # the mini_pcb above.
+            rep_routed = rep_dir / "leaf_routed.kicad_pcb"
+            if rep_routed.is_file():
+                text, _c = renumber_pcb_text(
+                    rep_routed.read_text(encoding="utf-8"), ref_map
+                )
+                (sib_dir / "leaf_routed.kicad_pcb").write_text(
+                    text, encoding="utf-8"
+                )
             refreshed += 1
         except Exception as exc:  # pragma: no cover - defensive
             log.warning(
