@@ -298,6 +298,70 @@ def _resolve_parent_local_allowlist(component_zones: dict[str, Any], loaded_arti
     }
 
 
+def _edge_bank_geometry(
+    derived: DerivedAttachmentConstraints,
+    widths: dict[int, float],
+    heights: dict[int, float],
+    spacing_mm: float,
+) -> dict[str, Any]:
+    """Per-edge bank extents for parent seed sizing.
+
+    Children pinned to the LEFT/RIGHT edges stack VERTICALLY along that
+    edge: the bank consumes *height* (Σ member heights + inter/end gaps) and
+    its *depth* into the board is the widest single member.  TOP/BOTTOM banks
+    are the transpose.  Opposing banks (left vs right, top vs bottom) sit on
+    OPPOSITE sides with interior room between them, so their depths ADD across
+    the board while their stack extents are independent (``max``, not ``sum``).
+
+    This replaces the old floor that summed *every* edge child's width into a
+    single horizontal row regardless of which edge pinned it -- the arithmetic
+    that inflated a ~100 mm board's seed to 218 mm when 9 of 10 leaves were
+    edge-pinned (KC-AXHQTP, RC-P1 in the compactness plan).
+
+    ``widths``/``heights`` are per-child-index dims (a dict so the same helper
+    serves the un-rotated seed estimate and the rotation-aware post-solve
+    re-fit); indices absent from them are skipped.
+    """
+    sides: dict[str, list[int]] = {"left": [], "right": [], "top": [], "bottom": []}
+    corners: list[int] = []
+    for spec in derived.child_specs.values():
+        if not spec.constraints:
+            continue
+        primary = next((c for c in spec.constraints if c.strict), spec.constraints[0])
+        idx = spec.child_index
+        if idx not in widths or idx not in heights:
+            continue
+        if primary.target == "edge" and primary.value in sides:
+            sides[primary.value].append(idx)
+        elif primary.target == "corner":
+            corners.append(idx)
+
+    def _stack(idxs: list[int], dims: dict[int, float]) -> float:
+        # members laid end to end along the edge + inter/end gaps
+        if not idxs:
+            return 0.0
+        return sum(dims[i] for i in idxs) + spacing_mm * (len(idxs) + 1)
+
+    def _depth(idxs: list[int], dims: dict[int, float]) -> float:
+        # how far the bank reaches into the board = widest single member
+        return max((dims[i] for i in idxs), default=0.0)
+
+    return {
+        "lr_present": bool(sides["left"] or sides["right"]),
+        "lr_stack_h": max(
+            _stack(sides["left"], heights), _stack(sides["right"], heights)
+        ),
+        "lr_depth_w": _depth(sides["left"], widths) + _depth(sides["right"], widths),
+        "tb_present": bool(sides["top"] or sides["bottom"]),
+        "tb_stack_w": max(
+            _stack(sides["top"], widths), _stack(sides["bottom"], widths)
+        ),
+        "tb_depth_h": _depth(sides["top"], heights) + _depth(sides["bottom"], heights),
+        "corner_w": _depth(corners, widths),
+        "corner_h": _depth(corners, heights),
+    }
+
+
 def _seed_outline_dimensions(
     loaded_artifacts,
     derived: DerivedAttachmentConstraints,
@@ -326,9 +390,9 @@ def _seed_outline_dimensions(
     ``aspect_target`` (default 1.0 = square) is the seed's width/height
     ratio.  Setting <1.0 produces a tall seed (favours vertical
     layouts), >1.0 a wide seed (favours horizontal-strip layouts).  The
-    floors below (max widths/heights, sum*0.6, edge spans) still apply,
-    so an aggressive aspect cannot collapse the seed below what the
-    children actually need.
+    floors below (max single child + spacing, and the per-edge bank spans
+    from :func:`_edge_bank_geometry`) still apply, so an aggressive aspect
+    cannot collapse the seed below what the children actually need.
 
     ``seed_cap`` (from ``inscribed_rect_bound``) bounds the aspect-driven
     base to the largest content rect the brief-requested outline shape can
@@ -343,7 +407,6 @@ def _seed_outline_dimensions(
 
     # Use the content bbox of each artifact (not the leaf-PCB outline) so
     # the seed reflects the placer's actual space need.
-    n = len(loaded_artifacts)
     widths: list[float] = []
     heights: list[float] = []
     for art in loaded_artifacts:
@@ -359,37 +422,109 @@ def _seed_outline_dimensions(
     if seed_cap is not None:
         base_w = min(base_w, seed_cap[0])
         base_h = min(base_h, seed_cap[1])
-    sum_w = sum(widths) + spacing_mm * (n + 1)
-    sum_h = sum(heights) + spacing_mm * (n + 1)
-    # Floors: max single child + spacing, sum*0.6 fallback, and the
-    # aspect-driven base.  The floors keep the seed solvable even when
-    # aspect_target is aggressive (e.g. 0.3 = very wide and short).
-    seed_w = max(base_w, sum_w * 0.6, max(widths) + spacing_mm * 4)
-    seed_h = max(base_h, sum_h * 0.6, max(heights) + spacing_mm * 4)
+    # Solvability floor: the single biggest child must fit with spacing. The
+    # old ``sum*0.6`` fallback was DROPPED -- it summed every child's width
+    # into one row on the same axis-blind arithmetic that RC-P1 fixes below.
+    seed_w = max(base_w, max(widths) + spacing_mm * 4)
+    seed_h = max(base_h, max(heights) + spacing_mm * 4)
 
-    horizontal_widths: list[float] = []
-    vertical_heights: list[float] = []
-    for spec in derived.child_specs.values():
-        if not spec.constraints:
-            continue
-        primary = next((c for c in spec.constraints if c.strict), spec.constraints[0])
-        idx = spec.child_index
-        if primary.target == "edge":
-            if primary.value in ("left", "right"):
-                horizontal_widths.append(widths[idx])
-            elif primary.value in ("top", "bottom"):
-                vertical_heights.append(heights[idx])
-        elif primary.target == "corner":
-            horizontal_widths.append(widths[idx])
-            vertical_heights.append(heights[idx])
-
-    if horizontal_widths:
-        span = sum(horizontal_widths) + spacing_mm * (len(horizontal_widths) + 1)
-        seed_w = max(seed_w, span)
-    if vertical_heights:
-        span = sum(vertical_heights) + spacing_mm * (len(vertical_heights) + 1)
-        seed_h = max(seed_h, span)
+    # Per-edge constraint floors (RC-P1): keep the seed wide/tall enough for
+    # each BANK of edge-pinned children without the old single-row sum that
+    # collapsed opposing banks into one horizontal strip. Left/right banks
+    # define height (their members stack vertically) and add their depths to
+    # the width; top/bottom banks are the transpose; corners contribute their
+    # own extent to both axes.
+    banks = _edge_bank_geometry(
+        derived, dict(enumerate(widths)), dict(enumerate(heights)), spacing_mm
+    )
+    if banks["lr_present"]:
+        seed_h = max(seed_h, banks["lr_stack_h"])
+        seed_w = max(seed_w, banks["lr_depth_w"] + spacing_mm * 3)
+    if banks["tb_present"]:
+        seed_w = max(seed_w, banks["tb_stack_w"])
+        seed_h = max(seed_h, banks["tb_depth_h"] + spacing_mm * 3)
+    if banks["corner_w"] > 0.0 or banks["corner_h"] > 0.0:
+        seed_w = max(seed_w, banks["corner_w"] + spacing_mm * 2)
+        seed_h = max(seed_h, banks["corner_h"] + spacing_mm * 2)
     return seed_w, seed_h
+
+
+def _refit_seed_from_placement(
+    placed_child_bboxes: dict[int, tuple[Point, Point]],
+    derived: DerivedAttachmentConstraints,
+    spacing_mm: float,
+    seed_wh: tuple[float, float],
+) -> tuple[float, float] | None:
+    """Right-size the seed from a completed (pass-1) placement (Fix 2).
+
+    The pass-1 seed is an area-basis *estimate* (``√(Σ child area · overhead)``)
+    that deliberately over-provisions so the solver has room. On a board whose
+    children are mostly edge-pinned leaves that leaves a big empty interior:
+    the banks pin flush to the oversized seed edges and never re-fit (RC-P2).
+    After the solve the true content need is measurable -- the interior
+    (non-edge) blocks' union extent packed between the per-edge banks -- so we
+    derive a tighter seed to re-solve on.
+
+    Returns the tighter ``(w, h)``, or ``None`` when pass 1 was already tight
+    (< 10 % slack on BOTH axes) so the caller skips the re-solve. A re-fit only
+    ever tightens: the result is clamped to never exceed ``seed_wh``.
+    """
+    seed_w, seed_h = seed_wh
+    if seed_w <= 0.0 or seed_h <= 0.0 or not placed_child_bboxes:
+        return None
+
+    # Placed (rotation-aware) child dims, keyed by child index.
+    widths: dict[int, float] = {}
+    heights: dict[int, float] = {}
+    for idx, (tl, br) in placed_child_bboxes.items():
+        widths[idx] = max(0.0, br.x - tl.x)
+        heights[idx] = max(0.0, br.y - tl.y)
+    if not widths:
+        return None
+    banks = _edge_bank_geometry(derived, widths, heights, spacing_mm)
+
+    # Interior = child blocks NOT pinned to an edge/corner. They floated inside
+    # the seed; their pass-1 union bbox is the room they need between opposing
+    # banks. Keyed off the constraints (robust to the unlock_all_footprints
+    # path where the edge blocks are not flagged ``locked``).
+    edge_pinned = {
+        spec.child_index
+        for spec in derived.child_specs.values()
+        if spec.constraints
+        and any(c.target in ("edge", "corner") for c in spec.constraints)
+    }
+    interior_boxes = [
+        placed_child_bboxes[i] for i in placed_child_bboxes if i not in edge_pinned
+    ]
+    if interior_boxes:
+        int_w = max(b[1].x for b in interior_boxes) - min(b[0].x for b in interior_boxes)
+        int_h = max(b[1].y for b in interior_boxes) - min(b[0].y for b in interior_boxes)
+    else:
+        int_w = int_h = 0.0
+
+    floor_w = max(widths.values()) + spacing_mm * 4
+    floor_h = max(heights.values()) + spacing_mm * 4
+    need_w = max(
+        banks["lr_depth_w"] + int_w + spacing_mm * 3,  # L-bank | interior | R-bank
+        banks["tb_stack_w"],
+        int_w + spacing_mm * 2,
+        banks["corner_w"] + spacing_mm * 2,
+        floor_w,
+    )
+    need_h = max(
+        banks["lr_stack_h"],
+        banks["tb_depth_h"] + int_h + spacing_mm * 3,  # T-bank / interior / B-bank
+        int_h + spacing_mm * 2,
+        banks["corner_h"] + spacing_mm * 2,
+        floor_h,
+    )
+    # A re-fit only tightens; never grow past the pass-1 seed.
+    need_w = min(need_w, seed_w)
+    need_h = min(need_h, seed_h)
+    # Worth a re-solve only when it removes meaningful slack (>10% on an axis).
+    if need_w > seed_w * 0.9 and need_h > seed_h * 0.9:
+        return None
+    return (need_w, need_h)
 
 
 def _post_solve_geometry(
@@ -1223,6 +1358,7 @@ def _compose_artifacts(
     seed: int = 0,
     seed_area_overhead: float = 2.5,
     seed_aspect_target: float = 1.0,
+    seed_size_override: tuple[float, float] | None = None,
     manual_layout: ManualLayout | None = None,
 ) -> tuple[ParentCompositionState, list[dict[str, Any]]]:
     """Compose loaded artifacts into a parent composition snapshot.
@@ -1387,6 +1523,12 @@ def _compose_artifacts(
         aspect_target=seed_aspect_target,
         seed_cap=_shape_seed_cap,
     )
+    # Fix 2 (parent-compose compactness): the candidate search's pass-2 re-fit
+    # passes a right-sized seed measured from THIS placement's pass 1, replacing
+    # the area-basis estimate above. Only ever supplied for auto rect/parametric
+    # boards (a shaped/ff/manual seed is authoritative, never an estimate).
+    if seed_size_override is not None:
+        seed_w, seed_h = seed_size_override
     if _ff_scaffold is not None:
         # Place inside the standard frame, not a content-derived one.
         seed_w, seed_h = _ff_scaffold.width_mm, _ff_scaffold.height_mm
@@ -1427,6 +1569,10 @@ def _compose_artifacts(
     # a backing H-ref; populated by the manual branch, executed by the
     # stamp subprocess. Empty in auto mode.
     synthesized_footprints: list[dict[str, Any]] = []
+    # Fix 2: a right-sized seed measured from THIS placement, when pass 1
+    # over-provisioned the interior. Set only on the auto (solver) path for
+    # rect/parametric boards; stays None for manual/ff/shaped/override runs.
+    _refit_seed: tuple[float, float] | None = None
     if manual_layout is not None:
         # Manual mode: user-supplied placements + outline. Skip the solver
         # and the auto outline-fit pass entirely. Validation, stamping and
@@ -1647,6 +1793,19 @@ def _compose_artifacts(
         child_anchor_positions = _resolve_constraint_anchor_positions(
             derived, placements_dict, loaded_artifacts, transformed_by_index, parent_local_solved
         )
+
+        # Fix 2: measure a right-sized seed from this (pass-1) placement so the
+        # candidate search can re-solve tighter. Only for the auto rect/parametric
+        # path -- an override IS a re-fit already, and shaped/ff seeds are
+        # authoritative (their own fit logic owns sizing).
+        if (
+            seed_size_override is None
+            and _ff_scaffold is None
+            and _shape_seed_cap is None
+        ):
+            _refit_seed = _refit_seed_from_placement(
+                placed_child_bboxes, derived, spacing_mm, (seed_w, seed_h)
+            )
 
         placed_bbox_list = [
             placed_child_bboxes[index] for index in sorted(placed_child_bboxes)
@@ -2055,6 +2214,7 @@ def _compose_artifacts(
             else None
         ),
         synthesized_footprints=list(synthesized_footprints),
+        refit_seed=_refit_seed,
     )
     state.phase_timings.update(solver_phase_timings)
     return state, transformed_payloads
@@ -2626,211 +2786,235 @@ def _search_best_layout(
             else:
                 seed_aspect_i = 1.0
             seed_overhead_i = float(wave_cfg.get("parent_seed_area_overhead", 2.5))
-            t_solve = time.perf_counter()
-            state, payloads = _compose_artifacts(
-                loaded_artifacts,
-                spacing_mm=spacing_mm,
-                rotation_step_deg=rotation_step_deg,
-                parent_definition=parent_definition,
-                pcb_path=pcb_path,
-                cfg=wave_cfg,
-                seed=seed_i,
-                seed_area_overhead=seed_overhead_i,
-                seed_aspect_target=seed_aspect_i,
-                manual_layout=manual_layout,
-            )
-            place_solve_ms = (time.perf_counter() - t_solve) * 1000.0
-            state.phase_timings["place_solve_ms"] = place_solve_ms
-
-            if pcb_path is None:
-                # No source PCB → no stamping, no DRC. Search degrades to
-                # placement-quality ranking (composite score only); shorts
-                # is unknowable so all candidates are treated as
-                # accepted=True. This keeps a single search code path
-                # for the rare interactive `compose-subcircuits --output`
-                # case without --pcb.
-                stamp_ms = 0.0
-                stamp_drc_ms = 0.0
-                shorts = 0
-                stamped = Path("")
-            else:
-                cand_pcb = search_dir / f"{_cand_prefix}_{i:02d}.kicad_pcb"
-                t_stamp = time.perf_counter()
-                stamped = _stamp_parent_board(
-                    state, pcb_path, project_dir, wave_cfg,
-                    output_pcb_path=cand_pcb,
+            # Fix 2 (parent-compose compactness): pass 1 solves on the area-basis
+            # seed; if the solved placement reveals it over-provisioned the
+            # interior, a pass-2 re-solve on the measured right-sized seed enters
+            # as an ADDITIONAL, tighter candidate. Both compete on stamp+DRC
+            # score, so pass 1 stays in the pool as the route-congestion fallback.
+            # The worklist grows in place: the ("r", refit_seed) entry is appended
+            # once, after pass 1 measures it. Kill switch:
+            # candidate_search.parent_refit = false.
+            _passes: list[tuple[str, tuple[float, float] | None]] = [("", None)]
+            _pass_idx = 0
+            while _pass_idx < len(_passes):
+                _pass_suffix, _seed_override = _passes[_pass_idx]
+                _pass_idx += 1
+                t_solve = time.perf_counter()
+                state, payloads = _compose_artifacts(
+                    loaded_artifacts,
+                    spacing_mm=spacing_mm,
+                    rotation_step_deg=rotation_step_deg,
+                    parent_definition=parent_definition,
+                    pcb_path=pcb_path,
+                    cfg=wave_cfg,
+                    seed=seed_i,
+                    seed_area_overhead=seed_overhead_i,
+                    seed_aspect_target=seed_aspect_i,
+                    seed_size_override=_seed_override,
+                    manual_layout=manual_layout,
                 )
-                stamp_ms = (time.perf_counter() - t_stamp) * 1000.0
-                state.phase_timings["stamp_ms"] = stamp_ms
+                place_solve_ms = (time.perf_counter() - t_solve) * 1000.0
+                state.phase_timings["place_solve_ms"] = place_solve_ms
 
-                t_drc = time.perf_counter()
-                drc = _run_kicad_cli_drc(str(stamped), timeout_s=30) or {}
-                stamp_drc_ms = (time.perf_counter() - t_drc) * 1000.0
-                state.phase_timings["stamp_drc_ms"] = stamp_drc_ms
-                state.stamp_drc = dict(drc)
-                shorts = int(drc.get("shorts", 0) or 0)
-
-            board_state = state.composition.board_state if state.composition else None
-            if board_state is None:
-                raise RuntimeError(
-                    f"candidate-search cand={i} seed={seed_i}: composition has no "
-                    "board_state; cannot compute composite score"
-                )
-            scorer = PlacementScorer(board_state, base_parent_placement)
-            opp_side = float(scorer._score_block_opposite_side())
-            overlap = float(scorer._score_courtyard_overlap())
-            ratsnest_mm = float(total_ratsnest_length(board_state))
-            net_dist = _net_dist_score(ratsnest_mm)
-            # Compactness penalty: candidates with sprawling placements grow
-            # the parent outline (sometimes 200+ mm tall) and break geometry
-            # validation. The previous composite saturated to 4.37 across
-            # most candidates (opp_side=0, overlap=12.5, net_dist=0),
-            # leaving K=4 selection essentially random. Add a direct bbox
-            # term so smaller boards beat bigger ones when the rest is
-            # tied. Uses _score_bbox_packing (0..100, higher = denser).
-            bbox_packing = float(scorer._score_bbox_packing())
-            composite = (
-                0.30 * opp_side
-                + 0.25 * overlap
-                + 0.15 * net_dist
-                + 0.30 * bbox_packing
-            )
-
-            # Diagnostic capture: unlocked-component cluster AABB (the
-            # spread the solver actually controls) and the auto-grown
-            # outline are NOT the same. Locked components (corner-pinned
-            # mounting holes, edge-pinned connectors) sit at fixed
-            # template positions and would constant-pad the cluster
-            # measurement -- including them here would compare the
-            # outline cap against a frame the solver can't shrink, so a
-            # template board larger than the cap would always fail
-            # regardless of how compact the unlocked placement was.
-            # Mirrors _record_placed_extent so this measurement is
-            # apples-to-apples with the per-phase solve_*_placed_*_mm
-            # extents persisted alongside.
-            comps = [
-                c for c in board_state.components.values() if not c.locked
-            ]
-            if comps:
-                phys = [c.physical_bbox() for c in comps]
-                placed_w_mm = max(b[1].x for b in phys) - min(b[0].x for b in phys)
-                placed_h_mm = max(b[1].y for b in phys) - min(b[0].y for b in phys)
-            else:
-                placed_w_mm = 0.0
-                placed_h_mm = 0.0
-            outline_tl, outline_br = board_state.board_outline
-            outline_w_mm = max(0.0, outline_br.x - outline_tl.x)
-            outline_h_mm = max(0.0, outline_br.y - outline_tl.y)
-            # Outline-sprawl gate: an outline whose area dwarfs the copper it holds
-            # means a phantom edge anchor or runaway auto-grow baked bare FR4 into
-            # the board. The denominator is the SUMMED component courtyard area, NOT
-            # the area their spread SPANS: when tight leaf clusters are flung apart
-            # across the board the span ~= the whole outline (ratio ~1) and the
-            # penalty never fires -- the exact 215x222mm-for-9%-packing sprawl we
-            # want to catch (KC-8AG6FU). Summed area makes a board of small parts in
-            # a big outline read its true low packing. Penalize so a compact
-            # candidate always beats a sprawled one when the other terms tie.
-            sprawl = 0.0
-            all_phys = [c.physical_bbox() for c in board_state.components.values()]
-            if all_phys and outline_w_mm > 0.0 and outline_h_mm > 0.0:
-                summed_courtyard_area = sum(
-                    (b[1].x - b[0].x) * (b[1].y - b[0].y) for b in all_phys
-                )
-                sprawl, sprawl_penalty = _sprawl_penalty(
-                    outline_w_mm * outline_h_mm, summed_courtyard_area
-                )
-                if sprawl_penalty > 0.0:
-                    composite -= sprawl_penalty
-                    print(
-                        f"[candidate-search] cand={i} outline "
-                        f"{outline_w_mm:.1f}x{outline_h_mm:.1f}mm is {sprawl:.1f}x "
-                        f"its summed courtyard area; score -{sprawl_penalty:.1f}"
+                if pcb_path is None:
+                    # No source PCB → no stamping, no DRC. Search degrades to
+                    # placement-quality ranking (composite score only); shorts
+                    # is unknowable so all candidates are treated as
+                    # accepted=True. This keeps a single search code path
+                    # for the rare interactive `compose-subcircuits --output`
+                    # case without --pcb.
+                    stamp_ms = 0.0
+                    stamp_drc_ms = 0.0
+                    shorts = 0
+                    stamped = Path("")
+                else:
+                    cand_pcb = search_dir / f"{_cand_prefix}_{i:02d}{_pass_suffix}.kicad_pcb"
+                    t_stamp = time.perf_counter()
+                    stamped = _stamp_parent_board(
+                        state, pcb_path, project_dir, wave_cfg,
+                        output_pcb_path=cand_pcb,
                     )
-            # Requested-shape fit for THIS candidate (set by _fit_requested_shape
-            # inside _stamp_parent_board). A candidate whose placement the shape
-            # could not wrap at the requested size loses to any that fit: the
-            # penalty separates ties, and winner selection below hard-prefers
-            # fitted candidates. No shape requested (or no stamping) => True.
-            if state.requested_shape is None or pcb_path is None:
-                shape_fitted = True
-            else:
-                shape_fitted = bool((state.shape_fit or {}).get("fitted"))
-            if not shape_fitted:
-                composite -= 30.0
-                print(
-                    f"[candidate-search] cand={i} requested shape "
-                    f"{str(state.requested_shape.get('shape'))!r} did not fit: "
-                    f"{(state.shape_fit or {}).get('reason')}; score -30.0"
+                    stamp_ms = (time.perf_counter() - t_stamp) * 1000.0
+                    state.phase_timings["stamp_ms"] = stamp_ms
+
+                    t_drc = time.perf_counter()
+                    drc = _run_kicad_cli_drc(str(stamped), timeout_s=30) or {}
+                    stamp_drc_ms = (time.perf_counter() - t_drc) * 1000.0
+                    state.phase_timings["stamp_drc_ms"] = stamp_drc_ms
+                    state.stamp_drc = dict(drc)
+                    shorts = int(drc.get("shorts", 0) or 0)
+
+                board_state = state.composition.board_state if state.composition else None
+                if board_state is None:
+                    raise RuntimeError(
+                        f"candidate-search cand={i}{_pass_suffix} seed={seed_i}: "
+                        "composition has no board_state; cannot compute composite score"
+                    )
+                scorer = PlacementScorer(board_state, base_parent_placement)
+                opp_side = float(scorer._score_block_opposite_side())
+                overlap = float(scorer._score_courtyard_overlap())
+                ratsnest_mm = float(total_ratsnest_length(board_state))
+                net_dist = _net_dist_score(ratsnest_mm)
+                # Compactness penalty: candidates with sprawling placements grow
+                # the parent outline (sometimes 200+ mm tall) and break geometry
+                # validation. The previous composite saturated to 4.37 across
+                # most candidates (opp_side=0, overlap=12.5, net_dist=0),
+                # leaving K=4 selection essentially random. Add a direct bbox
+                # term so smaller boards beat bigger ones when the rest is
+                # tied. Uses _score_bbox_packing (0..100, higher = denser).
+                bbox_packing = float(scorer._score_bbox_packing())
+                composite = (
+                    0.30 * opp_side
+                    + 0.25 * overlap
+                    + 0.15 * net_dist
+                    + 0.30 * bbox_packing
                 )
-            # state.geometry_validation is populated inside _stamp_parent_board
-            # via _validate_parent_geometry. When pcb_path is None the stamp
-            # path is skipped, leaving geometry_validation = {} -- treat that
-            # as accepted=True (no stamping happened, so nothing to reject).
-            gv = state.geometry_validation or {}
-            geometry_accepted = bool(gv.get("accepted", True))
-            outside_component_count = int(gv.get("outside_component_count", 0) or 0)
-            outside_pad_count = int(gv.get("outside_pad_count", 0) or 0)
 
-            # Hard gate: shorts==0 only. Stamped electrical shorts are an
-            # objective truth (DRC counts them), so a candidate with shorts
-            # cannot win regardless of its routing prospects. Geometry
-            # violations (components/pads outside the auto-grown outline)
-            # are RECORDED on the CandidateRecord (geometry_accepted,
-            # outside_component_count, outside_pad_count) but no longer
-            # short-circuit the picker -- they're a guess at unfabricability
-            # that prevents FreeRouting from running and starves the search
-            # of real signal. Let routing run; a layout that violates
-            # geometry will produce a routed PNG showing exactly where the
-            # problem is, which is more actionable than "round aborted".
-            #
-            # Manual mode bypass: the user explicitly chose this placement.
-            # stamp_drc is informational (surfaced in the GUI), not a gate;
-            # auto-rejecting on shorts would force the user to redo the
-            # whole drag-route cycle when often a single track tweak in the
-            # routed result is enough.
-            if manual_layout is not None:
-                accepted = True
-            else:
-                accepted = shorts == 0
+                # Diagnostic capture: unlocked-component cluster AABB (the
+                # spread the solver actually controls) and the auto-grown
+                # outline are NOT the same. Locked components (corner-pinned
+                # mounting holes, edge-pinned connectors) sit at fixed
+                # template positions and would constant-pad the cluster
+                # measurement -- including them here would compare the
+                # outline cap against a frame the solver can't shrink, so a
+                # template board larger than the cap would always fail
+                # regardless of how compact the unlocked placement was.
+                # Mirrors _record_placed_extent so this measurement is
+                # apples-to-apples with the per-phase solve_*_placed_*_mm
+                # extents persisted alongside.
+                comps = [
+                    c for c in board_state.components.values() if not c.locked
+                ]
+                if comps:
+                    phys = [c.physical_bbox() for c in comps]
+                    placed_w_mm = max(b[1].x for b in phys) - min(b[0].x for b in phys)
+                    placed_h_mm = max(b[1].y for b in phys) - min(b[0].y for b in phys)
+                else:
+                    placed_w_mm = 0.0
+                    placed_h_mm = 0.0
+                outline_tl, outline_br = board_state.board_outline
+                outline_w_mm = max(0.0, outline_br.x - outline_tl.x)
+                outline_h_mm = max(0.0, outline_br.y - outline_tl.y)
+                # Outline-sprawl gate: an outline whose area dwarfs the copper it holds
+                # means a phantom edge anchor or runaway auto-grow baked bare FR4 into
+                # the board. The denominator is the SUMMED component courtyard area, NOT
+                # the area their spread SPANS: when tight leaf clusters are flung apart
+                # across the board the span ~= the whole outline (ratio ~1) and the
+                # penalty never fires -- the exact 215x222mm-for-9%-packing sprawl we
+                # want to catch (KC-8AG6FU). Summed area makes a board of small parts in
+                # a big outline read its true low packing. Penalize so a compact
+                # candidate always beats a sprawled one when the other terms tie.
+                sprawl = 0.0
+                all_phys = [c.physical_bbox() for c in board_state.components.values()]
+                if all_phys and outline_w_mm > 0.0 and outline_h_mm > 0.0:
+                    summed_courtyard_area = sum(
+                        (b[1].x - b[0].x) * (b[1].y - b[0].y) for b in all_phys
+                    )
+                    sprawl, sprawl_penalty = _sprawl_penalty(
+                        outline_w_mm * outline_h_mm, summed_courtyard_area
+                    )
+                    if sprawl_penalty > 0.0:
+                        composite -= sprawl_penalty
+                        print(
+                            f"[candidate-search] cand={i}{_pass_suffix} outline "
+                            f"{outline_w_mm:.1f}x{outline_h_mm:.1f}mm is {sprawl:.1f}x "
+                            f"its summed courtyard area; score -{sprawl_penalty:.1f}"
+                        )
+                # Requested-shape fit for THIS candidate (set by _fit_requested_shape
+                # inside _stamp_parent_board). A candidate whose placement the shape
+                # could not wrap at the requested size loses to any that fit: the
+                # penalty separates ties, and winner selection below hard-prefers
+                # fitted candidates. No shape requested (or no stamping) => True.
+                if state.requested_shape is None or pcb_path is None:
+                    shape_fitted = True
+                else:
+                    shape_fitted = bool((state.shape_fit or {}).get("fitted"))
+                if not shape_fitted:
+                    composite -= 30.0
+                    print(
+                        f"[candidate-search] cand={i}{_pass_suffix} requested shape "
+                        f"{str(state.requested_shape.get('shape'))!r} did not fit: "
+                        f"{(state.shape_fit or {}).get('reason')}; score -30.0"
+                    )
+                # state.geometry_validation is populated inside _stamp_parent_board
+                # via _validate_parent_geometry. When pcb_path is None the stamp
+                # path is skipped, leaving geometry_validation = {} -- treat that
+                # as accepted=True (no stamping happened, so nothing to reject).
+                gv = state.geometry_validation or {}
+                geometry_accepted = bool(gv.get("accepted", True))
+                outside_component_count = int(gv.get("outside_component_count", 0) or 0)
+                outside_pad_count = int(gv.get("outside_pad_count", 0) or 0)
 
-            rec = CandidateRecord(
-                seed=seed_i,
-                shorts=shorts,
-                score=composite,
-                place_solve_ms=place_solve_ms,
-                stamp_ms=stamp_ms,
-                stamp_drc_ms=stamp_drc_ms,
-                accepted=accepted,
-                pcb_path=str(stamped),
-                bbox_h_mm=placed_h_mm,
-                bbox_w_mm=placed_w_mm,
-                outline_h_mm=outline_h_mm,
-                outline_w_mm=outline_w_mm,
-                breakdown={
-                    "opp_side": opp_side,
-                    "overlap": overlap,
-                    "net_dist": net_dist,
-                    "bbox_packing": bbox_packing,
-                    "sprawl": sprawl,
-                },
-                geometry_accepted=geometry_accepted,
-                outside_component_count=outside_component_count,
-                outside_pad_count=outside_pad_count,
-                phase_timings=dict(state.phase_timings),
-                shape_fitted=shape_fitted,
-            )
-            candidates.append(rec)
-            cand_states.append(state)
-            cand_payloads.append(payloads)
-            cand_pcb_paths.append(stamped)
-            print(
-                f"[candidate-search] cand={i} seed={seed_i} "
-                f"aspect={seed_aspect_i:.2f} "
-                f"shorts={shorts} score={composite:.1f} "
-                f"bh={placed_h_mm:.1f}mm bw={placed_w_mm:.1f}mm "
-                f"oh={outline_h_mm:.1f}mm geom_ok={geometry_accepted} "
-                f"place={place_solve_ms / 1000:.1f}s drc={stamp_drc_ms / 1000:.1f}s"
-            )
+                # Hard gate: shorts==0 only. Stamped electrical shorts are an
+                # objective truth (DRC counts them), so a candidate with shorts
+                # cannot win regardless of its routing prospects. Geometry
+                # violations (components/pads outside the auto-grown outline)
+                # are RECORDED on the CandidateRecord (geometry_accepted,
+                # outside_component_count, outside_pad_count) but no longer
+                # short-circuit the picker -- they're a guess at unfabricability
+                # that prevents FreeRouting from running and starves the search
+                # of real signal. Let routing run; a layout that violates
+                # geometry will produce a routed PNG showing exactly where the
+                # problem is, which is more actionable than "round aborted".
+                #
+                # Manual mode bypass: the user explicitly chose this placement.
+                # stamp_drc is informational (surfaced in the GUI), not a gate;
+                # auto-rejecting on shorts would force the user to redo the
+                # whole drag-route cycle when often a single track tweak in the
+                # routed result is enough.
+                if manual_layout is not None:
+                    accepted = True
+                else:
+                    accepted = shorts == 0
+
+                rec = CandidateRecord(
+                    seed=seed_i,
+                    shorts=shorts,
+                    score=composite,
+                    place_solve_ms=place_solve_ms,
+                    stamp_ms=stamp_ms,
+                    stamp_drc_ms=stamp_drc_ms,
+                    accepted=accepted,
+                    pcb_path=str(stamped),
+                    bbox_h_mm=placed_h_mm,
+                    bbox_w_mm=placed_w_mm,
+                    outline_h_mm=outline_h_mm,
+                    outline_w_mm=outline_w_mm,
+                    breakdown={
+                        "opp_side": opp_side,
+                        "overlap": overlap,
+                        "net_dist": net_dist,
+                        "bbox_packing": bbox_packing,
+                        "sprawl": sprawl,
+                    },
+                    geometry_accepted=geometry_accepted,
+                    outside_component_count=outside_component_count,
+                    outside_pad_count=outside_pad_count,
+                    phase_timings=dict(state.phase_timings),
+                    shape_fitted=shape_fitted,
+                )
+                candidates.append(rec)
+                cand_states.append(state)
+                cand_payloads.append(payloads)
+                cand_pcb_paths.append(stamped)
+                print(
+                    f"[candidate-search] cand={i}{_pass_suffix} seed={seed_i} "
+                    f"aspect={seed_aspect_i:.2f} "
+                    f"shorts={shorts} score={composite:.1f} "
+                    f"bh={placed_h_mm:.1f}mm bw={placed_w_mm:.1f}mm "
+                    f"oh={outline_h_mm:.1f}mm geom_ok={geometry_accepted} "
+                    f"place={place_solve_ms / 1000:.1f}s drc={stamp_drc_ms / 1000:.1f}s"
+                )
+
+                # Queue the pass-2 re-fit exactly once, when pass 1 (no override)
+                # measured meaningful interior slack. state.refit_seed is None on
+                # shaped/ff/manual/override runs, so those never re-fit.
+                if (
+                    _seed_override is None
+                    and state.refit_seed is not None
+                    and bool(_search_cfg.get("parent_refit", True))
+                ):
+                    _passes.append(("r", state.refit_seed))
 
         if wave_no == 1:
             wave1_count = len(candidates)

@@ -201,6 +201,11 @@ already pack leaf blocks. After the fleet re-baseline, if multi-leaf parents sti
 (`subcircuit_composer.py:2300+`, `_derive_board_outline`) — separate plan; do not start
 here.
 
+**TRIGGERED 2026-07-16** (KC-AXHQTP: 5.3× waste, 11 % util). Root cause turned out to be
+upstream of the sprawl penalty: the seed edge-span floor in `_seed_outline_dimensions` sums
+opposing edges' child widths into one row, and edge-pinned blocks stay locked to the seed
+edges with no post-solve re-fit. Owning plan: `docs/plans/parent-compose-compactness-plan.md`.
+
 ### Phase 6 — connector-bank orientation (pin axis perpendicular to edge)
 
 **Problem.** A board with a *row of identical short connectors along an edge* — the canonical

@@ -160,6 +160,12 @@ class ParentCompositionState:
     # Keys: k, tried, accepted, rejected_drc, best_index, best_seed,
     # total_search_ms, candidates (list of per-trial dicts).
     candidate_search: dict[str, Any] = field(default_factory=dict)
+    # Fix 2 (parent-compose compactness): a right-sized (w, h) seed measured
+    # from THIS pass-1 placement when the area-basis seed over-provisioned the
+    # interior. The candidate search re-solves on it as an additional, tighter
+    # candidate; pass 1 stays in the pool as the route-congestion fallback.
+    # None when already tight / shaped / manual / form-factor / an override run.
+    refit_seed: tuple[float, float] | None = None
 
     @property
     def width_mm(self) -> float:
