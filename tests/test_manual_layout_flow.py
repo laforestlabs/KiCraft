@@ -59,3 +59,29 @@ def test_log_manual_event_appends_jsonl(tmp_path: Path):
     first = json.loads(lines[0])
     assert first["event"] == "editor_opened" and first["leaves"] == 9
     assert first["ts"]
+
+
+def test_load_parent_local_components(tmp_path: Path):
+    from kicraft.layout_editor.runner import load_parent_local_components
+
+    exp = tmp_path / ".experiments"
+    snap_dir = exp / "hierarchical_autoexperiment" / "round_0001"
+    snap_dir.mkdir(parents=True)
+    (snap_dir / "parent_pipeline.json").write_text(json.dumps({
+        "state": {
+            "parent_local": [
+                {"ref": "H1", "x": 5.0, "y": 5.0, "width_mm": 6.4,
+                 "height_mm": 6.4, "rotation": 0.0, "kind": "mounting_hole"},
+                {"ref": "bogus", "x": "not-a-number"},
+            ],
+        },
+    }), encoding="utf-8")
+
+    got = load_parent_local_components(exp)
+    assert len(got) == 1
+    assert got[0]["ref"] == "H1" and got[0]["kind"] == "mounting_hole"
+
+    # Old-schema snapshot (no parent_local key) -> empty, no crash.
+    (snap_dir / "parent_pipeline.json").write_text(
+        json.dumps({"state": {"entries": []}}), encoding="utf-8")
+    assert load_parent_local_components(exp) == []

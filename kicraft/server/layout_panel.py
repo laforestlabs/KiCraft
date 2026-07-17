@@ -29,6 +29,7 @@ from kicraft.layout_editor import (
     discover_leaves,
     load_initial_layout,
     load_last_route_result,
+    load_parent_local_components,
     log_manual_event,
     run_manual_compose,
     save_manual_layout_json,
@@ -228,6 +229,9 @@ class LayoutEditorPanel:
             last_route = await run.io_bound(
                 load_last_route_result, self.experiments_dir
             )
+            parent_components = await run.io_bound(
+                load_parent_local_components, self.experiments_dir
+            )
             log_manual_event(self.experiments_dir, "editor_opened",
                              leaves=len(leaves), missing=len(missing))
         except Exception as exc:  # noqa: BLE001 - surface, don't vanish
@@ -242,10 +246,11 @@ class LayoutEditorPanel:
             return
         self._body.clear()
         with self._body:
-            self._render_body(leaves, initial, ratsnest, missing, last_route)
+            self._render_body(leaves, initial, ratsnest, missing, last_route,
+                              parent_components)
 
     def _render_body(self, leaves, initial, ratsnest=None, missing=None,
-                     last_route=None) -> None:
+                     last_route=None, parent_components=None) -> None:
         if not leaves:
             ui.label(
                 "No solved leaves found for this project; run a build first."
@@ -321,6 +326,7 @@ class LayoutEditorPanel:
             leaves, initial, self.canvas_id,
             asset_url=f"{DEFAULT_ASSET_MOUNT}/layout_canvas.js",
             ratsnest=ratsnest,
+            parent_components=parent_components,
         ))
         if route_markers:
             # The controller registers asynchronously (asset load); defer

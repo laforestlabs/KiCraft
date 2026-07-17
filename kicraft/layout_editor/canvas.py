@@ -57,6 +57,7 @@ def _build_canvas_config(
     canvas_id: str,
     asset_url: str,
     ratsnest: list | None = None,
+    parent_components: list | None = None,
 ) -> dict[str, Any]:
     leaf_payload = [
         {
@@ -102,6 +103,12 @@ def _build_canvas_config(
         # in each leaf's canvas-local frame. The controller transforms
         # them by the live placements and draws connection lines.
         "ratsnest": ratsnest or [],
+        # Parent-local components (H-ref mounting holes, loose parent
+        # parts) the stamper places regardless of the manual layout --
+        # rendered read-only so the canvas matches the stamped board.
+        # Distinct from state.parent_local (the per-ref position
+        # OVERRIDES passthrough in the manual layout itself).
+        "parent_components": parent_components or [],
     }
 
 
@@ -125,6 +132,7 @@ def build_canvas_init_script(
     *,
     asset_url: str | None = None,
     ratsnest: list | None = None,
+    parent_components: list | None = None,
 ) -> str:
     """Return JS source that bootstraps the canvas controller.
 
@@ -135,7 +143,9 @@ def build_canvas_init_script(
     """
     if asset_url is None:
         asset_url = default_asset_url()
-    config = _build_canvas_config(leaves, initial, canvas_id, asset_url, ratsnest)
+    config = _build_canvas_config(
+        leaves, initial, canvas_id, asset_url, ratsnest, parent_components
+    )
     config_json = json.dumps(config)
     return _BOOTSTRAP_TEMPLATE.format(config_json=config_json)
 
@@ -306,6 +316,23 @@ _CANVAS_HTML_TEMPLATE = """
     stroke: #38bdf8;
     stroke-width: 0.32;
     stroke-opacity: 0.95;
+  }
+  /* Parent-local components (H-ref mounting holes, loose parent-level
+     parts): the stamper places these regardless of the manual layout,
+     so they render read-only -- fixed obstacles to arrange around. */
+  .ml-parent-comp rect {
+    fill: rgba(148, 163, 184, 0.15);
+    stroke: #94a3b8;
+    stroke-width: 0.2;
+    stroke-dasharray: 0.6 0.4;
+    pointer-events: none;
+  }
+  .ml-parent-comp text {
+    fill: #94a3b8;
+    font: 600 1.6px sans-serif;
+    text-anchor: middle;
+    dominant-baseline: middle;
+    pointer-events: none;
   }
   /* DRC violation markers from the last stamp; hover for the report
      line. Cleared on any drag (they describe the stamped positions). */

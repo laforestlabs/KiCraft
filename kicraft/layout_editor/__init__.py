@@ -31,6 +31,7 @@ from kicraft.layout_editor.render import render_leaf_canvas
 from kicraft.layout_editor.runner import (
     load_initial_layout,
     load_last_route_result,
+    load_parent_local_components,
     log_manual_event,
     manual_layout_status,
     run_manual_compose,
@@ -52,6 +53,7 @@ __all__ = [
     "load_initial_layout",
     "load_last_route_result",
     "load_manual_layout",
+    "load_parent_local_components",
     "log_manual_event",
     "manual_layout_status",
     "prerender_leaf_canvases",

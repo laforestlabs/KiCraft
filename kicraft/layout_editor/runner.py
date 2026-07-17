@@ -141,6 +141,49 @@ def save_manual_layout_json(
 
 
 
+def load_parent_local_components(experiments_dir: Path) -> list[dict[str, Any]]:
+    """Parent-local components (H-ref mounting holes, loose parent-level
+    parts) from the freshest compose snapshot, parent-board frame,
+    ``{ref, x, y, width_mm, height_mm, rotation, kind}`` (x/y = geometry
+    center). The stamper places these on the board regardless of the
+    manual layout, so the canvas must show them or the stamped result
+    won't match what the user arranged around. Empty when no snapshot
+    (or an old-schema one) is on disk."""
+    candidates = list(experiments_dir.glob("**/round_*/parent_pipeline.json"))
+    candidates += list(experiments_dir.glob("**/parent_composition_routed.json"))
+    manual_dir = experiments_dir / "manual"
+    if manual_dir.is_dir():
+        candidates += [
+            p for p in manual_dir.glob("manual_*.json")
+            if p.name != "manual_layout.json"
+        ]
+    if not candidates:
+        return []
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    try:
+        data = json.loads(latest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    state = data.get("state") or data
+    out = []
+    for entry in state.get("parent_local") or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            out.append({
+                "ref": str(entry.get("ref", "")),
+                "x": float(entry["x"]),
+                "y": float(entry["y"]),
+                "width_mm": float(entry.get("width_mm", 0.0)),
+                "height_mm": float(entry.get("height_mm", 0.0)),
+                "rotation": float(entry.get("rotation", 0.0)),
+                "kind": str(entry.get("kind", "") or ""),
+            })
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
 def load_last_route_result(experiments_dir: Path) -> dict[str, Any] | None:
     """The persisted outcome of the most recent manual-route job
     (written by cli_app._write_manual_route_result), or None."""

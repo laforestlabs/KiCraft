@@ -150,6 +150,11 @@ class ParentCompositionState:
     # {ref, x, y, lib_dir, fp_name, screw}; coordinates in the same
     # frame as components (A4-shifted alongside them at stamp time).
     synthesized_footprints: list[dict[str, Any]] = field(default_factory=list)
+    # Compact parent-local component list for snapshot consumers (the
+    # manual layout editor renders them read-only so the stamped board
+    # matches what the canvas showed): {ref, x, y, width_mm, height_mm,
+    # rotation, kind}, parent-board frame, x/y = geometry center.
+    parent_local: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock per phase of a parent compose+route round. Keys (when
     # populated): place_solve_ms, stamp_ms, stamp_drc_ms, freerouting_ms,
     # candidate_search_ms, plus solve_*_ms sub-phases from the solver.
@@ -215,6 +220,7 @@ class ParentCompositionState:
                 "height_mm": self.height_mm,
             },
             "entries": [entry.to_dict() for entry in self.entries],
+            "parent_local": list(self.parent_local),
             "copper_manifest": self.copper_manifest.to_dict() if self.copper_manifest else None,
             # Outline provenance (WS9): so a shaped board's true outline is
             # recorded, not silently reported as "rect" downstream. requested_shape

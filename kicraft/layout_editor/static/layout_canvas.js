@@ -799,6 +799,33 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       svg.appendChild(label);
     }
 
+    // Parent-local components (read-only): drawn under the leaves --
+    // they are fixed obstacles the stamper will place regardless of
+    // this layout. Dashed gray body rect + ref label.
+    for (const pc of (cfg.parent_components || [])) {
+      const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      g.setAttribute('class', 'ml-parent-comp');
+      g.setAttribute('transform',
+        'translate(' + pc.x + ',' + pc.y + ') rotate(' + (-(pc.rotation || 0)) + ')');
+      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      const w = Math.max(0.5, pc.width_mm || 0);
+      const h = Math.max(0.5, pc.height_mm || 0);
+      rect.setAttribute('x', -w / 2);
+      rect.setAttribute('y', -h / 2);
+      rect.setAttribute('width', w);
+      rect.setAttribute('height', h);
+      g.appendChild(rect);
+      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      label.textContent = pc.ref;
+      g.appendChild(label);
+      const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      title.textContent = pc.ref
+        + (pc.kind ? ' (' + pc.kind + ')' : '')
+        + ' — placed by the board stamper; not editable here';
+      g.appendChild(title);
+      svg.appendChild(g);
+    }
+
     // Leaves
     const out = state.board_outline;
     const overlapping = computeOverlaps();

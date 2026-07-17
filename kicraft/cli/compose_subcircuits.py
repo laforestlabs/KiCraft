@@ -2210,6 +2210,18 @@ def _compose_artifacts(
         copper_manifest=copper_manifest,
         composition=composition,
         parent_local_keep_in_rects=list(parent_local_keep_in_rects),
+        parent_local=[
+            {
+                "ref": ref,
+                "x": (comp.body_center or comp.pos).x,
+                "y": (comp.body_center or comp.pos).y,
+                "width_mm": float(comp.width_mm),
+                "height_mm": float(comp.height_mm),
+                "rotation": float(comp.rotation or 0.0),
+                "kind": getattr(comp, "kind", "") or "",
+            }
+            for ref, comp in sorted(parent_local_solved.items())
+        ],
         edge_constrained_refs=frozenset(
             c.ref for c in all_constraints if c.target in ("edge", "corner")
         ),
