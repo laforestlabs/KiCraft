@@ -56,6 +56,7 @@ def _build_canvas_config(
     initial: dict[str, Any],
     canvas_id: str,
     asset_url: str,
+    ratsnest: list | None = None,
 ) -> dict[str, Any]:
     leaf_payload = [
         {
@@ -97,6 +98,10 @@ def _build_canvas_config(
         "canvas_w_px": CANVAS_WIDTH_PX,
         "canvas_h_px": CANVAS_HEIGHT_PX,
         "asset_url": asset_url,
+        # Cross-leaf net links (kicraft.layout_editor.ratsnest); anchors
+        # in each leaf's canvas-local frame. The controller transforms
+        # them by the live placements and draws connection lines.
+        "ratsnest": ratsnest or [],
     }
 
 
@@ -119,6 +124,7 @@ def build_canvas_init_script(
     canvas_id: str,
     *,
     asset_url: str | None = None,
+    ratsnest: list | None = None,
 ) -> str:
     """Return JS source that bootstraps the canvas controller.
 
@@ -129,7 +135,7 @@ def build_canvas_init_script(
     """
     if asset_url is None:
         asset_url = default_asset_url()
-    config = _build_canvas_config(leaves, initial, canvas_id, asset_url)
+    config = _build_canvas_config(leaves, initial, canvas_id, asset_url, ratsnest)
     config_json = json.dumps(config)
     return _BOOTSTRAP_TEMPLATE.format(config_json=config_json)
 
@@ -285,6 +291,21 @@ _CANVAS_HTML_TEMPLATE = """
     stroke-width: 0.35;
     stroke-opacity: 0.95;
     pointer-events: none;
+  }
+  /* Ratsnest: dashed cross-leaf net lines (MST per net), updated live
+     during drag. Nets touching the selected leaf highlight so "what
+     does this block talk to" is one click away. */
+  .ml-ratsnest-line {
+    stroke: #94a3b8;
+    stroke-width: 0.18;
+    stroke-opacity: 0.55;
+    stroke-dasharray: 0.9 0.5;
+    pointer-events: none;
+  }
+  .ml-ratsnest-line.hot {
+    stroke: #38bdf8;
+    stroke-width: 0.32;
+    stroke-opacity: 0.95;
   }
 </style>
 <div id="__CANVAS_ID__-host" class="ml-canvas-host">

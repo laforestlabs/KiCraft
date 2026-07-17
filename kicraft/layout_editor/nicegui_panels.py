@@ -290,6 +290,7 @@ def view_options_panel(canvas_id: str) -> None:
         "show_grid": True,
         "snap_enabled": True,
         "snap_spacing_mm": 0.0,
+        "show_ratsnest": True,
     }
 
     def _push() -> None:
@@ -297,6 +298,10 @@ def view_options_panel(canvas_id: str) -> None:
 
     def _on_grid_change(e: Any) -> None:
         options["show_grid"] = bool(e.value)
+        _push()
+
+    def _on_ratsnest_change(e: Any) -> None:
+        options["show_ratsnest"] = bool(e.value)
         _push()
 
     def _on_snap_change(e: Any) -> None:
@@ -320,6 +325,15 @@ def view_options_panel(canvas_id: str) -> None:
                 "Show grid",
                 value=options["show_grid"],
                 on_change=_on_grid_change,
+            )
+            ui.switch(
+                "Show connections (ratsnest)",
+                value=options["show_ratsnest"],
+                on_change=_on_ratsnest_change,
+            ).tooltip(
+                "Dashed lines join circuit blocks that share a net -- "
+                "keep connected blocks close so routing has short paths. "
+                "GND is plane-connected and not drawn."
             )
             with ui.row().classes("items-center gap-3"):
                 ui.switch(

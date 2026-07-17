@@ -33,6 +33,7 @@ from kicraft.layout_editor import (
 )
 from kicraft.layout_editor.canvas import DEFAULT_ASSET_MOUNT
 from kicraft.layout_editor.leaves import LeafUrlFor
+from kicraft.layout_editor.ratsnest import build_ratsnest
 from kicraft.layout_editor.nicegui_panels import (
     compose_result_panel,
     mounting_hole_panel,
@@ -204,6 +205,7 @@ class LayoutEditorPanel:
             initial = await run.io_bound(
                 load_initial_layout, self.experiments_dir, leaves
             )
+            ratsnest = await run.io_bound(build_ratsnest, leaves)
         except Exception as exc:  # noqa: BLE001 - surface, don't vanish
             if self._body.is_deleted:
                 return
@@ -216,9 +218,9 @@ class LayoutEditorPanel:
             return
         self._body.clear()
         with self._body:
-            self._render_body(leaves, initial)
+            self._render_body(leaves, initial, ratsnest)
 
-    def _render_body(self, leaves, initial) -> None:
+    def _render_body(self, leaves, initial, ratsnest=None) -> None:
         if not leaves:
             ui.label(
                 "No solved leaves found for this project; run a build first."
@@ -230,6 +232,7 @@ class LayoutEditorPanel:
         ui.run_javascript(build_canvas_init_script(
             leaves, initial, self.canvas_id,
             asset_url=f"{DEFAULT_ASSET_MOUNT}/layout_canvas.js",
+            ratsnest=ratsnest,
         ))
 
         outline_controls(self.canvas_id, initial)

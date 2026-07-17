@@ -200,11 +200,14 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       snap_constraints: { x: null, y: null },
       // View options -- mutated by setViewOptions() from the Python
       // panel. Defaults match the historical canvas behavior (grid on,
-      // edge-snap on, 0 mm gap between snapped leaves).
+      // edge-snap on, 0 mm gap between snapped leaves); the ratsnest
+      // (cross-leaf net lines) defaults on because it is the main
+      // placement-quality signal the canvas offers.
       view_options: {
         show_grid: true,
         snap_enabled: true,
         snap_spacing_mm: 0.0,
+        show_ratsnest: true,
       },
     };
   }
@@ -407,6 +410,80 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       }
     }
     return overlapping;
+  }
+
+  // Minimum spanning tree over a net's anchor points (Prim; nets have
+  // a handful of anchors, so O(n^2) is fine). Returns index pairs.
+  // Classic ratsnest topology: every anchor connected, no cycles, and
+  // total line length minimal -- the shortest "work remaining" picture.
+  function mstEdges(pts) {
+    const n = pts.length;
+    if (n < 2) return [];
+    const d2 = (a, b) => (a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y);
+    const inTree = new Array(n).fill(false);
+    const dist = new Array(n).fill(Infinity);
+    const from = new Array(n).fill(0);
+    const edges = [];
+    inTree[0] = true;
+    for (let i = 1; i < n; i++) dist[i] = d2(pts[0], pts[i]);
+    for (let k = 1; k < n; k++) {
+      let best = -1;
+      for (let i = 0; i < n; i++) {
+        if (!inTree[i] && (best < 0 || dist[i] < dist[best])) best = i;
+      }
+      if (best < 0) break;
+      inTree[best] = true;
+      edges.push([from[best], best]);
+      for (let i = 0; i < n; i++) {
+        if (inTree[i]) continue;
+        const d = d2(pts[best], pts[i]);
+        if (d < dist[i]) { dist[i] = d; from[i] = best; }
+      }
+    }
+    return edges;
+  }
+
+  // Ratsnest overlay: for each cross-leaf net, transform its anchors by
+  // the owning leaf's live placement (same CW convention as
+  // leafBboxParent) and draw the net's MST as dashed lines. Nets that
+  // touch the selected leaf draw highlighted so "what does this block
+  // talk to" is one click away.
+  function renderRatsnest(svg) {
+    if (!state.view_options.show_ratsnest) return;
+    const nets = cfg.ratsnest || [];
+    if (!nets.length) return;
+    const placementByPath = Object.fromEntries(
+      state.placements.map(p => [p.instance_path, p])
+    );
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('class', 'ml-ratsnest');
+    for (const net of nets) {
+      const pts = [];
+      for (const a of net.anchors || []) {
+        const p = placementByPath[a.instance_path];
+        if (!p) continue;
+        const r = (p.rotation || 0) * Math.PI / 180;
+        const c = Math.cos(r), s = Math.sin(r);
+        pts.push({
+          x: p.origin.x + c * a.x + s * a.y,
+          y: p.origin.y - s * a.x + c * a.y,
+          ip: a.instance_path,
+        });
+      }
+      if (pts.length < 2) continue;
+      const hot = state.selected && pts.some(pt => pt.ip === state.selected);
+      for (const [i, j] of mstEdges(pts)) {
+        const ln = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        ln.setAttribute('class', 'ml-ratsnest-line' + (hot ? ' hot' : ''));
+        ln.setAttribute('x1', pts[i].x); ln.setAttribute('y1', pts[i].y);
+        ln.setAttribute('x2', pts[j].x); ln.setAttribute('y2', pts[j].y);
+        const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+        title.textContent = net.net;
+        ln.appendChild(title);
+        g.appendChild(ln);
+      }
+    }
+    svg.appendChild(g);
   }
 
   // Walk every other leaf's silk bbox + the board outline edges and
@@ -737,6 +814,11 @@ window.kicraftInitLayoutCanvas = function(cfg) {
 
       svg.appendChild(g);
     }
+
+    // Ratsnest under the snap highlights but over the leaves, so the
+    // connection lines read against the boards without hiding the
+    // active snap constraint.
+    renderRatsnest(svg);
 
     // Snap-edge highlights: draw the constrained edges of the dragged
     // leaf AND the leaf (or outline) it's snapping against, drawn on
@@ -1145,6 +1227,9 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       }
       if (typeof opts.snap_spacing_mm === 'number') {
         state.view_options.snap_spacing_mm = Math.max(0, opts.snap_spacing_mm);
+      }
+      if (typeof opts.show_ratsnest === 'boolean') {
+        state.view_options.show_ratsnest = opts.show_ratsnest;
       }
       render();
     },
