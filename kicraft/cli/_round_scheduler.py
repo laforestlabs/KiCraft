@@ -40,12 +40,19 @@ class RoundPlan:
     """One round the scheduler wants run. ``only``/``leaf_deadline_s`` are
     set on a wall-budget rescue round (solve restricted to unpinned leaves,
     deadline clamped to the budget slice); empty/None means the caller's own
-    ``--only`` and configured deadline apply."""
+    ``--only`` and configured deadline apply. ``parent_refit`` False forces
+    ``candidate_search.parent_refit=false`` for this round's compose (the
+    re-fit backoff below); None leaves the configured default in place."""
 
     round_num: int
     only: tuple[str, ...] = ()
     leaf_deadline_s: float | None = None
     note: str = ""  # non-empty -> print verbatim (the rescue announcement)
+    parent_refit: bool | None = None
+    # >1.0 scales parent_seed_area_overhead for this round's compose: the
+    # congestion-growth valve below trades compactness back for routability
+    # after rounds whose ROUTED parent was rejected for unconnected nets.
+    seed_overhead_scale: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -144,6 +151,20 @@ class RoundScheduler:
     )
     _capout_streak: int = field(default=0, init=False)
     _rescue_attempted: bool = field(default=False, init=False)
+    # Re-fit backoff (self-eval 2026-07-17 T3): once a round's ROUTED parent is
+    # rejected with a re-fit candidate as the winner, the re-fit traded fab
+    # success for compactness on this design -- later rounds force
+    # candidate_search.parent_refit=false so the pass-1 (roomier) candidates
+    # compete unopposed. Latches for the rest of the search: the re-fit is
+    # deterministic per seed family, so re-enabling it just repeats the loss.
+    _refit_backoff: bool = field(default=False, init=False)
+    _refit_backoff_announced: bool = field(default=False, init=False)
+    # Congestion-growth valve (self-eval 2026-07-17 T3 follow-up): each round
+    # whose routed parent is rejected for UNCONNECTED nets grows the next
+    # round's seed-overhead by 30% (capped at 2x) -- an unroutable-because-
+    # cramped placement needs room, which is exactly what rounds are for.
+    # Healthy runs never increment, so compactness is untouched there.
+    _congestion_rounds: int = field(default=0, init=False)
 
     # -- loop top -----------------------------------------------------------
 
@@ -169,9 +190,26 @@ class RoundScheduler:
                     f"finalizing best-so-far after {self._next_round - 1} "
                     f"round(s)"
                 )
-        plan = RoundPlan(round_num=self._next_round)
+        note = ""
+        if self._refit_backoff and not self._refit_backoff_announced:
+            self._refit_backoff_announced = True
+            note = (
+                f"[refit-backoff] round {self._next_round} onward runs with "
+                "candidate_search.parent_refit=false: an earlier round's "
+                "routed parent was rejected with the re-fit candidate as "
+                "winner (compactness traded away fab success on this design)"
+            )
+        plan = RoundPlan(
+            round_num=self._next_round,
+            parent_refit=False if self._refit_backoff else None,
+            seed_overhead_scale=self.seed_overhead_scale(),
+            note=note,
+        )
         self._next_round += 1
         return plan
+
+    def seed_overhead_scale(self) -> float:
+        return min(2.0, 1.0 + 0.3 * self._congestion_rounds)
 
     def _rescue_plan(
         self, elapsed_s: float, remaining_s: float
@@ -195,6 +233,12 @@ class RoundScheduler:
             round_num=self._next_round,
             only=tuple(unpinned),
             leaf_deadline_s=leaf_s,
+            # The re-fit backoff and congestion growth apply to EVERY later
+            # round, the rescue round included -- it is the run's last shot at
+            # a routable parent, exactly where replaying a known-losing
+            # configuration hurts most.
+            parent_refit=False if self._refit_backoff else None,
+            seed_overhead_scale=self.seed_overhead_scale(),
             note=(
                 f"[wall-budget] elapsed {elapsed_s:.0f}s + est. next round "
                 f"{self.ema_round_s:.0f}s > budget {self.max_wall_s:.0f}s; "
@@ -246,12 +290,28 @@ class RoundScheduler:
     # -- after the parent route -----------------------------------------------
 
     def observe_parent(
-        self, *, routed: bool, elapsed_s: float, cap_s: float
+        self,
+        *,
+        routed: bool,
+        elapsed_s: float,
+        cap_s: float,
+        rejected_refit_winner: bool = False,
+        rejected_unconnected: bool = False,
     ) -> Finalize | None:
         """Parent cap-out early stop: a parent route that ran up to its
         FreeRouting timeout cap and still didn't complete won't be rescued by
         mutating placement params. After ``parent_capout_rounds`` consecutive
-        capped-out rounds, finalize best-so-far (WS2)."""
+        capped-out rounds, finalize best-so-far (WS2).
+
+        ``rejected_refit_winner`` True (this round's routed parent was rejected
+        by validation AND its candidate-search winner was the pass-2 re-fit)
+        latches the re-fit backoff: every later round runs with
+        ``candidate_search.parent_refit=false`` so the pass-1 candidates -- the
+        designed congestion fallback -- actually get to compete."""
+        if rejected_refit_winner:
+            self._refit_backoff = True
+        if rejected_unconnected:
+            self._congestion_rounds += 1
         if (not routed) and elapsed_s >= 0.9 * cap_s:
             self._capout_streak += 1
         else:

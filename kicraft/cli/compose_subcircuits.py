@@ -449,6 +449,14 @@ def _seed_outline_dimensions(
     return seed_w, seed_h
 
 
+# Absolute floor for copper-to-board-edge breathing room. KiCad's default
+# board-setup edge clearance is 0.2 mm; anything the outline math emits below
+# this margin ships a guaranteed copper_edge_clearance DRC error (self-eval
+# 2026-07-17 batch: run_02/09/11 rejected at 0.0-0.18 mm actual). +0.1 mm
+# guard over the constraint, same philosophy as the DSN 10 um guards.
+_COPPER_EDGE_MARGIN_MM = 0.3
+
+
 def _refit_seed_from_placement(
     placed_child_bboxes: dict[int, tuple[Point, Point]],
     derived: DerivedAttachmentConstraints,
@@ -502,23 +510,33 @@ def _refit_seed_from_placement(
     else:
         int_w = int_h = 0.0
 
-    floor_w = max(widths.values()) + spacing_mm * 4
-    floor_h = max(heights.values()) + spacing_mm * 4
+    # Per-axis padding floored at the copper-edge margin: at tiny configured
+    # spacing the seed must still leave DRC-clearable room between child copper
+    # (the bboxes include trace copper) and the board edge on both sides.
+    pad2 = max(spacing_mm * 2, _COPPER_EDGE_MARGIN_MM * 2)
+    pad3 = max(spacing_mm * 3, _COPPER_EDGE_MARGIN_MM * 3)
+    pad4 = max(spacing_mm * 4, _COPPER_EDGE_MARGIN_MM * 4)
+    floor_w = max(widths.values()) + pad4
+    floor_h = max(heights.values()) + pad4
     need_w = max(
-        banks["lr_depth_w"] + int_w + spacing_mm * 3,  # L-bank | interior | R-bank
+        banks["lr_depth_w"] + int_w + pad3,  # L-bank | interior | R-bank
         banks["tb_stack_w"],
-        int_w + spacing_mm * 2,
-        banks["corner_w"] + spacing_mm * 2,
+        int_w + pad2,
+        banks["corner_w"] + pad2,
         floor_w,
     )
     need_h = max(
         banks["lr_stack_h"],
-        banks["tb_depth_h"] + int_h + spacing_mm * 3,  # T-bank / interior / B-bank
-        int_h + spacing_mm * 2,
-        banks["corner_h"] + spacing_mm * 2,
+        banks["tb_depth_h"] + int_h + pad3,  # T-bank / interior / B-bank
+        int_h + pad2,
+        banks["corner_h"] + pad2,
         floor_h,
     )
-    # A re-fit only tightens; never grow past the pass-1 seed.
+    # A re-fit only tightens; never grow past the pass-1 seed. When a floor
+    # exceeds the pass-1 seed on an axis, that axis clamps back to the seed
+    # (no tightening there -- never below the copper-margin floors) while the
+    # OTHER axis may still legitimately shrink (single-axis sprawl is the
+    # common KC-AXHQTP shape).
     need_w = min(need_w, seed_w)
     need_h = min(need_h, seed_h)
     # Worth a re-solve only when it removes meaningful slack (>10% on an axis).
@@ -921,18 +939,24 @@ def _compute_final_outline(
     if not placed_bboxes:
         return (Point(0.0, 0.0), Point(0.0, 0.0))
 
+    # Margin floored at the copper-edge minimum: placed bboxes include trace
+    # copper (see _compute_layout_bbox), so any outline side closer than
+    # _COPPER_EDGE_MARGIN_MM to a bbox is a guaranteed copper_edge_clearance
+    # DRC error at stamp time.
+    margin_mm = max(spacing_mm, _COPPER_EDGE_MARGIN_MM)
+
     if not constraints:
-        geom_min_x = min(b[0].x for b in placed_bboxes) - spacing_mm
-        geom_min_y = min(b[0].y for b in placed_bboxes) - spacing_mm
-        geom_max_x = max(b[1].x for b in placed_bboxes) + spacing_mm
-        geom_max_y = max(b[1].y for b in placed_bboxes) + spacing_mm
+        geom_min_x = min(b[0].x for b in placed_bboxes) - margin_mm
+        geom_min_y = min(b[0].y for b in placed_bboxes) - margin_mm
+        geom_max_x = max(b[1].x for b in placed_bboxes) + margin_mm
+        geom_max_y = max(b[1].y for b in placed_bboxes) + margin_mm
         return (Point(geom_min_x, geom_min_y), Point(geom_max_x, geom_max_y))
 
     constraint_outline = constraint_aware_outline(
         placed_bboxes=placed_bboxes,
         attachment_constraints=constraints,
         constrained_ref_world_anchors=anchor_positions,
-        margin_mm=spacing_mm,
+        margin_mm=margin_mm,
     )
     # On a side constrained by an EDGE constraint (e.g. J1 edge=left)
     # the outline must STOP at the constraint anchor target -- expanding
@@ -1004,12 +1028,12 @@ def _compute_final_outline(
                     f"[outline] {side} edge anchor {c_val:.2f}mm is "
                     f"{abs(c_val - g_val):.1f}mm from placed geometry edge "
                     f"{g_val:.2f}mm (> {anchor_slack_mm:.1f}mm slack); "
-                    "ignoring anchor, using geometry + spacing"
+                    "ignoring anchor, using geometry + margin"
                 )
-                return g_val - spacing_mm
+                return g_val - margin_mm
             return c_val
         if corner_constrained_sides[side]:
-            return min(c_val, g_val - spacing_mm)
+            return min(c_val, g_val - margin_mm)
         return min(c_val, g_val)
 
     def _resolve_max(side: str, c_val: float, g_val: float) -> float:
@@ -1024,12 +1048,12 @@ def _compute_final_outline(
                     f"[outline] {side} edge anchor {c_val:.2f}mm is "
                     f"{abs(c_val - g_val):.1f}mm from placed geometry edge "
                     f"{g_val:.2f}mm (> {anchor_slack_mm:.1f}mm slack); "
-                    "ignoring anchor, using geometry + spacing"
+                    "ignoring anchor, using geometry + margin"
                 )
-                return g_val + spacing_mm
+                return g_val + margin_mm
             return c_val
         if corner_constrained_sides[side]:
-            return max(c_val, g_val + spacing_mm)
+            return max(c_val, g_val + margin_mm)
         return max(c_val, g_val)
 
     out_min_x = _resolve_min("left", constraint_outline[0].x, geom_min_x)
@@ -1071,13 +1095,13 @@ def _compute_final_outline(
     )
     _ = pad_edge_clearance_mm  # reserved for the pad-level containment path
     if "left" not in conn_sides:
-        out_min_x = min(out_min_x, geom_min_x - spacing_mm)
+        out_min_x = min(out_min_x, geom_min_x - margin_mm)
     if "top" not in conn_sides:
-        out_min_y = min(out_min_y, geom_min_y - spacing_mm)
+        out_min_y = min(out_min_y, geom_min_y - margin_mm)
     if "right" not in conn_sides:
-        out_max_x = max(out_max_x, geom_max_x + spacing_mm)
+        out_max_x = max(out_max_x, geom_max_x + margin_mm)
     if "bottom" not in conn_sides:
-        out_max_y = max(out_max_y, geom_max_y + spacing_mm)
+        out_max_y = max(out_max_y, geom_max_y + margin_mm)
     return (Point(out_min_x, out_min_y), Point(out_max_x, out_max_y))
 
 
@@ -2516,6 +2540,14 @@ class CandidateRecord:
     # True when no outline shape was requested OR the requested shape
     # committed at stamp time for this candidate (see state.shape_fit).
     shape_fitted: bool = True
+    # Stamp-time copper-to-board-edge DRC error count. A candidate with a
+    # nonzero count ships a guaranteed fab-gate failure, so winner selection
+    # hard-prefers clean candidates (self-eval 2026-07-17 T2).
+    stamp_edge_clearance: int = 0
+    # True when this candidate came from the pass-2 re-fit ("r" pass) rather
+    # than the pass-1 area-basis seed. Surfaced as candidate_search.winner_refit
+    # so the round scheduler can back off the re-fit after a routed rejection.
+    refit: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2537,6 +2569,8 @@ class CandidateRecord:
             "outside_pad_count": self.outside_pad_count,
             "phase_timings": dict(self.phase_timings),
             "shape_fitted": self.shape_fitted,
+            "stamp_edge_clearance": self.stamp_edge_clearance,
+            "refit": self.refit,
         }
 
 
@@ -2551,6 +2585,16 @@ class SearchResult:
     winner_pcb_path: Path
     candidates: list[CandidateRecord]
     total_search_ms: float
+
+
+def _winner_key(c: "CandidateRecord") -> tuple:
+    """Lexicographic winner ordering, in one place so every selection site
+    (initial pick, strand-screen re-picks) agrees: a shape-fitted candidate
+    beats any rect fallback (the circle IS the deliverable), then a
+    stamp-edge-clean candidate beats one whose stamped board already violates
+    copper-to-edge clearance (a guaranteed fab-gate failure the packing score
+    otherwise PREFERS -- self-eval 2026-07-17 runs 02/09/11), then score."""
+    return (c.shape_fitted, c.stamp_edge_clearance == 0, c.score)
 
 
 def _net_dist_score(ratsnest_mm: float, scale_mm: float = 1000.0) -> float:
@@ -2826,6 +2870,7 @@ def _search_best_layout(
                     stamp_ms = 0.0
                     stamp_drc_ms = 0.0
                     shorts = 0
+                    stamp_edge_clr = 0
                     stamped = Path("")
                 else:
                     cand_pcb = search_dir / f"{_cand_prefix}_{i:02d}{_pass_suffix}.kicad_pcb"
@@ -2843,6 +2888,7 @@ def _search_best_layout(
                     state.phase_timings["stamp_drc_ms"] = stamp_drc_ms
                     state.stamp_drc = dict(drc)
                     shorts = int(drc.get("shorts", 0) or 0)
+                    stamp_edge_clr = int(drc.get("copper_edge_clearance", 0) or 0)
 
                 board_state = state.composition.board_state if state.composition else None
                 if board_state is None:
@@ -2976,6 +3022,8 @@ def _search_best_layout(
                     stamp_drc_ms=stamp_drc_ms,
                     accepted=accepted,
                     pcb_path=str(stamped),
+                    stamp_edge_clearance=stamp_edge_clr,
+                    refit=_pass_suffix == "r",
                     bbox_h_mm=placed_h_mm,
                     bbox_w_mm=placed_w_mm,
                     outline_h_mm=outline_h_mm,
@@ -3104,11 +3152,70 @@ def _search_best_layout(
             f"Per-candidate phase timings written to "
             f"{search_dir / '_rejected_candidates.json'}."
         )
-    # Lexicographic winner: a candidate whose requested outline shape actually
-    # committed beats any that fell back to rect, regardless of score — a
-    # slightly worse-packed circle IS the deliverable; a well-packed rectangle
-    # on a "round 60 mm" brief is not.
-    winner_rec = max(accepted_recs, key=lambda c: (c.shape_fitted, c.score))
+    edge_clean_count = sum(
+        1 for c in accepted_recs if c.stamp_edge_clearance == 0
+    )
+    if not edge_clean_count:
+        print(
+            "[candidate-search] WARNING: every accepted candidate has stamp "
+            "copper_edge_clearance violations -- the routed board will fail "
+            "the fab gate; picking best-of-bad for inspection "
+            "(see docs/plans/self-eval-2026-07-17-fix-plan.md T1/T2)"
+        )
+    winner_rec = max(accepted_recs, key=_winner_key)
+
+    # Winner strand screen (self-eval 2026-07-17 T3): connector stranding is a
+    # STAMP-time property, so a would-be winner whose edge connector sits
+    # inboard is knowable before FreeRouting burns minutes routing a board the
+    # validation must reject (the re-fit re-solve strands connectors this way;
+    # runs 14/30 + the run_02 repro). Demote and re-pick, bounded by the pool;
+    # if EVERY candidate strands, keep the original best (the round fails
+    # downstream exactly as before -- never invent a new failure mode). Checks
+    # run only on would-be winners: one pcbnew load each, not K.
+    if (
+        manual_layout is None
+        and pcb_path is not None
+        and not edge_pins_demoted  # demoted-wave zones are stale by design
+        and bool(_search_cfg.get("winner_strand_screen", True))
+        and base_cfg.get("enforce_connector_edge_gap", True)
+    ):
+        try:
+            from kicraft.autoplacer.brain.connector_edge_gap import (
+                connector_edge_gaps,
+            )
+            _zones = base_cfg.get("component_zones", {}) or {}
+            _tol = float(base_cfg.get("connector_edge_inboard_tol_mm", 1.0))
+            _original_winner = winner_rec
+            _screen_pool = list(accepted_recs)
+            while _screen_pool:
+                _gaps = connector_edge_gaps(
+                    str(winner_rec.pcb_path), _zones, inboard_tol_mm=_tol
+                )
+                _stranded = [g for g in _gaps if g.gap_mm < -_tol]
+                if not _stranded:
+                    break
+                print(
+                    f"[candidate-search] winner (seed={winner_rec.seed}"
+                    f"{'r' if winner_rec.refit else ''}) strands "
+                    + ", ".join(f"{g.ref}@{g.gap_mm:.2f}mm({g.edge})"
+                                for g in _stranded)
+                    + " at stamp time; demoting and re-picking"
+                )
+                _screen_pool.remove(winner_rec)
+                if not _screen_pool:
+                    print(
+                        "[candidate-search] every candidate strands a "
+                        "connector; keeping the original best (round will "
+                        "fail the edge-gap gate downstream)"
+                    )
+                    winner_rec = _original_winner
+                    break
+                winner_rec = max(_screen_pool, key=_winner_key)
+        except Exception as _screen_exc:  # noqa: BLE001 - screen, not a gate
+            print(
+                f"warning: winner strand screen skipped: {_screen_exc}",
+                file=sys.stderr,
+            )
 
     winner_idx = candidates.index(winner_rec)
     winner_state = cand_states[winner_idx]
@@ -3124,6 +3231,9 @@ def _search_best_layout(
         "shape_fitted": sum(1 for c in candidates if c.shape_fitted),
         "best_index": winner_idx,
         "best_seed": winner_rec.seed,
+        "winner_refit": winner_rec.refit,
+        "winner_stamp_edge_clearance": winner_rec.stamp_edge_clearance,
+        "edge_clean_count": edge_clean_count,
         "total_search_ms": total_search_ms,
         "edge_pins_demoted": edge_pins_demoted,
         "winner_from_demoted_wave": winner_from_demoted_wave,

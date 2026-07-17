@@ -1340,6 +1340,43 @@ def _extract_parent_routed_validation(
     return validation
 
 
+def _parent_rejected_refit_winner(parent_output_json: Path) -> bool:
+    """True when this round's routed parent was REJECTED by validation and the
+    candidate-search winner was the pass-2 re-fit candidate -- the signal that
+    the re-fit traded fab success for compactness on this design, feeding the
+    scheduler's re-fit backoff (self-eval 2026-07-17 T3)."""
+    try:
+        payload = _load_json(parent_output_json)
+    except Exception:
+        return False
+    state = payload.get("state", {})
+    if not isinstance(state, dict):
+        return False
+    validation = state.get("routed_validation")
+    search = state.get("candidate_search")
+    if not isinstance(validation, dict) or not isinstance(search, dict):
+        return False
+    return validation.get("accepted") is False and bool(search.get("winner_refit"))
+
+
+def _parent_rejected_unconnected(parent_output_json: Path) -> bool:
+    """True when this round's routed parent was rejected with unconnected
+    nets -- the congestion signal that feeds the scheduler's seed-overhead
+    growth valve (a cramped placement needs room, not another identical try)."""
+    try:
+        payload = _load_json(parent_output_json)
+    except Exception:
+        return False
+    state = payload.get("state", {})
+    if not isinstance(state, dict):
+        return False
+    validation = state.get("routed_validation")
+    if not isinstance(validation, dict) or validation.get("accepted") is not False:
+        return False
+    drc = validation.get("drc")
+    return isinstance(drc, dict) and (drc.get("unconnected") or 0) > 0
+
+
 def _discover_latest_parent_artifact_dir(project_dir: Path) -> Path | None:
     root = project_dir / ".experiments" / "subcircuits"
     if not root.exists():
@@ -2518,6 +2555,32 @@ def main(argv: list[str] | None = None) -> int:
         round_candidate_config.update(round_mutated)
         enforce_param_constraints(round_candidate_config)
 
+        # Scheduler re-fit backoff (self-eval 2026-07-17 T3): after a round
+        # whose routed parent was rejected with the re-fit candidate as
+        # winner, force the compose to run pass-1 candidates only.
+        if plan.parent_refit is False:
+            _pp = dict(round_candidate_config.get("parent_placement") or {})
+            _cs = dict(_pp.get("candidate_search") or {})
+            _cs["parent_refit"] = False
+            _pp["candidate_search"] = _cs
+            round_candidate_config["parent_placement"] = _pp
+        # Congestion-growth valve: rounds rejected for unconnected nets grow
+        # the seed so the router gets room (compactness is worthless unrouted).
+        if plan.seed_overhead_scale > 1.0:
+            _base_overhead = float(
+                round_candidate_config.get("parent_seed_area_overhead", 2.5)
+            )
+            round_candidate_config["parent_seed_area_overhead"] = (
+                _base_overhead * plan.seed_overhead_scale
+            )
+            print(
+                f"[congestion-growth] round {round_num}: "
+                f"parent_seed_area_overhead {_base_overhead:.2f} -> "
+                f"{round_candidate_config['parent_seed_area_overhead']:.2f} "
+                f"(x{plan.seed_overhead_scale:.1f} after rejected-unconnected "
+                f"round(s))"
+            )
+
         # Also enforce the feasibility floor on the base (non-mutated) config
         # so a too-small seed value isn't silently carried over when the
         # parameter isn't selected for mutation this round.
@@ -2907,6 +2970,12 @@ def main(argv: list[str] | None = None) -> int:
                     round_candidate_config.get(
                         "parent_freerouting_timeout_cap_s", 600
                     )
+                ),
+                rejected_refit_winner=_parent_rejected_refit_winner(
+                    parent_output_json
+                ),
+                rejected_unconnected=_parent_rejected_unconnected(
+                    parent_output_json
                 ),
             )
             if capout_verdict is not None:

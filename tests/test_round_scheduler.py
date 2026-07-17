@@ -177,3 +177,51 @@ def test_drain_round_helper_matches_loop_order():
     assert _drain_round(s, score=5.0, ok=True, dur=40.0) is True
     d = s.plan_next(elapsed_s=20, stop_requested=False)
     assert isinstance(d, Finalize) and "[wall-budget]" in d.reason
+
+
+def test_refit_backoff_latches_flags_rounds_and_announces_once():
+    # self-eval 2026-07-17 T3: a routed parent rejected with the re-fit
+    # candidate as winner latches parent_refit=False for every later round.
+    s = RoundScheduler(rounds=4)
+    p1 = s.plan_next(elapsed_s=0, stop_requested=False)
+    assert isinstance(p1, RoundPlan) and p1.parent_refit is None and p1.note == ""
+    # Round 1's parent: routed but validation-rejected with a refit winner.
+    assert s.observe_parent(
+        routed=True, elapsed_s=10.0, cap_s=600.0, rejected_refit_winner=True
+    ) is None
+    p2 = s.plan_next(elapsed_s=0, stop_requested=False)
+    assert isinstance(p2, RoundPlan) and p2.parent_refit is False
+    assert "[refit-backoff]" in p2.note
+    # The announcement prints once; the restriction persists.
+    p3 = s.plan_next(elapsed_s=0, stop_requested=False)
+    assert isinstance(p3, RoundPlan) and p3.parent_refit is False and p3.note == ""
+
+
+def test_refit_backoff_not_latched_by_ordinary_failures():
+    s = RoundScheduler(rounds=3)
+    s.plan_next(elapsed_s=0, stop_requested=False)
+    # Rejected parent WITHOUT a refit winner (pass-1 lost on its own merits),
+    # and a clean round: neither may trigger the backoff.
+    assert s.observe_parent(
+        routed=False, elapsed_s=10.0, cap_s=600.0, rejected_refit_winner=False
+    ) is None
+    p = s.plan_next(elapsed_s=0, stop_requested=False)
+    assert isinstance(p, RoundPlan) and p.parent_refit is None and p.note == ""
+
+
+def test_congestion_growth_scales_seed_overhead_capped():
+    s = RoundScheduler(rounds=8)
+    p = s.plan_next(elapsed_s=0, stop_requested=False)
+    assert p.seed_overhead_scale == 1.0
+    s.observe_parent(routed=True, elapsed_s=10, cap_s=600,
+                     rejected_unconnected=True)
+    assert s.plan_next(elapsed_s=0, stop_requested=False).seed_overhead_scale == 1.3
+    for _ in range(5):
+        s.observe_parent(routed=True, elapsed_s=10, cap_s=600,
+                         rejected_unconnected=True)
+    # 6 congested rounds -> 1 + 1.8 capped at 2.0.
+    assert s.plan_next(elapsed_s=0, stop_requested=False).seed_overhead_scale == 2.0
+    # A cap-out or clean round does not increment.
+    s2 = RoundScheduler(rounds=3)
+    s2.observe_parent(routed=False, elapsed_s=590, cap_s=600)
+    assert s2.plan_next(elapsed_s=0, stop_requested=False).seed_overhead_scale == 1.0

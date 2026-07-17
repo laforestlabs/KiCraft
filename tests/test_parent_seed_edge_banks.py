@@ -172,3 +172,77 @@ def test_refit_returns_none_when_already_tight():
     placed = {0: _box(0, 0, 30, 30), 1: _box(32, 0, 62, 30)}
     derived = _derived([])
     assert cs._refit_seed_from_placement(placed, derived, 2.0, (66.0, 34.0)) is None
+
+
+# --- self-eval 2026-07-17 T1: copper-edge margin floors ---------------------
+
+
+def test_refit_clamps_crushed_axis_to_seed_but_still_tightens_the_other():
+    # The widest child (36) + spacing*4 (8) = 44 exceeds the 40 mm pass-1
+    # seed width: that axis clamps back to the seed (never a tighter-than-
+    # floor width), while the height axis -- with real slack -- still shrinks
+    # (single-axis sprawl is the common KC-AXHQTP shape).
+    placed = {0: _box(0, 0, 36, 20), 1: _box(0, 22, 10, 30)}
+    derived = _derived([])
+    refit = cs._refit_seed_from_placement(placed, derived, 2.0, (40.0, 60.0))
+    assert refit is not None
+    rw, rh = refit
+    assert rw == pytest.approx(40.0)   # crushed axis: no tightening past seed
+    assert rh == pytest.approx(36.0)   # interior 30 + spacing*3 (bank term)
+    assert rh < 60.0 * 0.9             # meaningful slack removed
+
+
+def test_refit_floors_respect_copper_margin_at_tiny_spacing():
+    # spacing 0.05 mm would leave 0.1/0.2 mm pads -- below KiCad's 0.2 mm
+    # copper-to-edge constraint. The pads must floor at the 0.3 mm margin.
+    placed = {0: _box(0, 0, 30.0, 30.0)}
+    derived = _derived([])
+    refit = cs._refit_seed_from_placement(placed, derived, 0.05, (100.0, 100.0))
+    assert refit is not None
+    rw, rh = refit
+    # floor = widest child + 4 * _COPPER_EDGE_MARGIN_MM (not 4 * 0.05).
+    assert rw == pytest.approx(30.0 + 4 * cs._COPPER_EDGE_MARGIN_MM)
+    assert rh == pytest.approx(30.0 + 4 * cs._COPPER_EDGE_MARGIN_MM)
+
+
+def test_final_outline_unconstrained_margin_floors_at_copper_margin():
+    # Placed bboxes include trace copper: an outline closer than the copper
+    # margin is a guaranteed stamp-time copper_edge_clearance error.
+    placed = [_box(10.0, 10.0, 50.0, 40.0)]
+    tl, br = cs._compute_final_outline(placed, [], {}, 0.05)
+    m = cs._COPPER_EDGE_MARGIN_MM
+    assert tl.x == pytest.approx(10.0 - m)
+    assert tl.y == pytest.approx(10.0 - m)
+    assert br.x == pytest.approx(50.0 + m)
+    assert br.y == pytest.approx(40.0 + m)
+
+
+# --- self-eval 2026-07-17 T2: stamp-edge-clean winner pool ------------------
+
+
+def _rec(score, edge_clr, refit=False):
+    return cs.CandidateRecord(
+        seed=1, shorts=0, score=score, place_solve_ms=0.0, stamp_ms=0.0,
+        stamp_drc_ms=0.0, accepted=True, pcb_path="x",
+        stamp_edge_clearance=edge_clr, refit=refit,
+    )
+
+
+def test_winner_key_prefers_edge_clean_over_higher_score():
+    clean_low = _rec(10.0, 0)
+    dirty_high = _rec(99.0, 3, refit=True)
+    assert max([clean_low, dirty_high], key=cs._winner_key) is clean_low
+
+
+def test_winner_key_shape_fit_still_outranks_edge_cleanliness():
+    # A shape-fitted candidate is the deliverable even when its stamp has an
+    # edge violation; a clean rect fallback must not displace it.
+    fitted_dirty = _rec(10.0, 2)
+    clean_rect = _rec(99.0, 0)
+    clean_rect.shape_fitted = False
+    assert max([fitted_dirty, clean_rect], key=cs._winner_key) is fitted_dirty
+
+
+def test_winner_key_score_breaks_ties_among_equally_clean():
+    a, b = _rec(10.0, 0), _rec(20.0, 0)
+    assert max([a, b], key=cs._winner_key) is b
