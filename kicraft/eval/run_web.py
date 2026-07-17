@@ -56,6 +56,43 @@ def build_run_digest(project_dir, m, *, budget: int = 16000) -> str:
                      + json.dumps(trimmed, indent=2, default=str)[:budget])
 
     synth, erc, tr, gen = m["synth"], m["erc"], m["transcript"], m["generated"]
+    # Silk-legend evidence rides as a deterministic line: the state dump above
+    # is budget-truncated and ``artifacts`` (serialized last) is routinely cut,
+    # which zeroed board_self_description on 21/34 runs of the 2026-07-17
+    # batch for "no evidence" the state actually held (fix-plan T6).
+    silk_line = ""
+    if isinstance(state, dict) and isinstance(state.get("artifacts"), dict):
+        arts = state["artifacts"]
+        placed = arts.get("silk_placed")
+        dropped = arts.get("silk_dropped")
+        if placed is not None or dropped is not None:
+            silk_line = (
+                f"\n  silk legend: placed={placed or []} dropped={dropped or []}"
+            )
+    # Regulator feedback math, computed (not judged): the judge model
+    # hallucinated a TPS5430 Vref of 0.8 V (real: 1.221 V) and failed a
+    # correct 3.3 V design in the 2026-07-17 batch. Handing it the
+    # deterministic number pre-empts the guess (fix-plan T8).
+    reg_line = ""
+    try:
+        from kicraft.design.synthesis.validation import regulator_vout_facts
+        bom = state.get("bom") if isinstance(state, dict) else None
+        if isinstance(bom, dict):
+            facts = regulator_vout_facts(
+                bom.get("parts") or [], bom.get("connections") or []
+            )
+            if facts:
+                reg_line = "\n  regulator feedback (computed, authoritative): " + "; ".join(
+                    f"{f['ref']} {f['mpn']} Vref={f['vref']}V divider "
+                    f"{f['r_top_ref']}/{f['r_bot_ref']} -> Vout={f['vout']}V "
+                    f"on net {f['rail_net']!r}"
+                    + ("" if f["ok"] is None
+                       else (" (matches rail)" if f["ok"]
+                             else f" (MISMATCH vs {f['rail_v']}V rail)"))
+                    for f in facts
+                )
+    except Exception:
+        reg_line = ""
     parts.append(
         "PIPELINE RESULT (deterministic facts):\n"
         f"  synthesized: {gen['synthesized']} (pcb={gen['pcb']} sch={gen['sch']})\n"
@@ -63,6 +100,8 @@ def build_run_digest(project_dir, m, *, budget: int = 16000) -> str:
         f"  ERC: {erc.get('errors')} error(s) / {erc.get('warnings')} warning(s)\n"
         f"  run-trace: {tr.get('failed_commits')} error-driven re-commit(s), "
         f"{tr.get('ask_questions')} clarifying question(s), crashes={tr.get('crashes')}"
+        + silk_line
+        + reg_line
     )
     return "\n\n".join(parts)
 
