@@ -1111,6 +1111,250 @@ def check_power_pin_polarity(bom) -> CheckResult:
     )
 
 
+# ---------- §9.31 repeated-block coverage ----------
+
+# Prefixes where an electrically-inert duplicate is essentially never
+# intentional: connectors and human-interface parts. IC prefixes (U) are
+# excluded on purpose -- an unused half of a dual op-amp is a legitimate spare.
+_COVERAGE_REF_PREFIXES = frozenset({"J", "SW", "K", "LED", "D", "RV", "BT"})
+
+
+def check_repeated_block_coverage(bom) -> CheckResult:
+    """§9.31 — every instance of a repeated connector/HMI part must be wired.
+
+    A brief that asks for N identical channels gets N identical parts; when
+    only one is wired and the rest have every pin NC, the board silently ships
+    with (N-1) dead channels (the four-jack audio buffer shipped fab-ready
+    with 3 of 4 jacks electrically inert, batch 2026-07-17 run_28). ERC and
+    §9.9 cannot see it: the NC declarations make the sheet "clean". Flag any
+    part that (a) shares symbol+value+footprint with a WIRED sibling, and
+    (b) itself has zero wired pins.
+    """
+    nets = _nets_by_ref(bom)
+    groups: dict[tuple, list] = defaultdict(list)
+    for part in bom.parts:
+        if _ref_prefix(part.ref) not in _COVERAGE_REF_PREFIXES:
+            continue
+        groups[(part.symbol, part.value, part.footprint)].append(part)
+    bad: list[str] = []
+    for key, members in sorted(groups.items(), key=lambda kv: str(kv[0])):
+        if len(members) < 2:
+            continue
+        wired = [p for p in members if len(nets.get(p.ref, {})) >= 2]
+        if not wired:
+            continue  # the whole group is unwired -> §9.9/§9.11 territory
+        for p in members:
+            if not nets.get(p.ref):
+                bad.append(
+                    f"{p.ref} ({p.symbol} {p.value or ''}): no pin is wired "
+                    f"while identical sibling(s) "
+                    f"{', '.join(w.ref for w in wired)} are -- a declared "
+                    f"channel is electrically inert (wire it or remove it "
+                    f"from the BOM; declaring its pins NC hides, not fixes, "
+                    f"the missing channel)"
+                )
+    return CheckResult(
+        name="9.31 repeated-block coverage",
+        ok=not bad,
+        message=(
+            "every repeated connector/HMI instance is wired"
+            if not bad
+            else f"{len(bad)} repeated part(s) electrically inert"
+        ),
+        offenders=bad,
+    )
+
+
+# ---------- §9.32 regulator feedback divider ----------
+
+# Feedback reference voltages for common adjustable regulators, keyed by MPN
+# prefix (longest match wins). Only families we are SURE of are listed -- a
+# missing entry means "not checked", never a guess. (The judge model
+# hallucinated 0.8 V for the TPS5430's 1.221 V reference and wrongly failed a
+# correct 3.3 V design in the 2026-07-17 batch -- this table is the antidote.)
+_REGULATOR_VREF: dict[str, float] = {
+    "TPS5430": 1.221,
+    "TPS54331": 0.8,
+    "TPS54231": 0.8,
+    "TPS54160": 0.8,
+    "TPS562": 0.768,
+    "LM2596": 1.23,
+    "LM2576": 1.23,
+    "LM2675": 1.21,
+    "MP1584": 0.8,
+    "MP2315": 0.811,
+    "XL4015": 1.25,
+    "MT3608": 0.6,
+}
+
+_GND_NET_NAMES = frozenset({"GND", "AGND", "PGND", "DGND", "0V", "GNDA"})
+
+_R_VALUE_RE = re.compile(
+    r"^(\d+(?:\.\d+)?)\s*([kKmMrR]?)(?:\s*(?:Ω|ohm|Ohm|OHM))?\s*$"
+)
+_R_INFIX_RE = re.compile(r"^(\d+)([kKmMrR])(\d+)$")  # 4k7 style
+# '3V3' / '1V25' (digits around V) or '3.3V' / '12V' / '+5V' (decimal + V).
+_NET_VOLTAGE_RE = re.compile(
+    r"(?:^|[^0-9.])(\d{1,2})V(\d{1,2})?(?:$|[^0-9])"
+    r"|(?:^|[^0-9])(\d{1,2}(?:\.\d{1,2})?)V(?:$|[^0-9])"
+)
+
+# EIA/KiCad convention: lowercase m is milli (a 100m current-sense shunt),
+# uppercase M is mega. Milli-ohm parts can never form a sane feedback divider,
+# but mis-reading one as 10^8 ohms picks WRONG dividers.
+_R_SCALE = {"k": 1e3, "K": 1e3, "m": 1e-3, "M": 1e6, "r": 1.0, "R": 1.0,
+            "": 1.0}
+
+
+def _resistance_ohms(value: str) -> float | None:
+    s = (value or "").strip()
+    m = _R_INFIX_RE.match(s)
+    if m:
+        whole, mult, frac = m.groups()
+        base = float(f"{whole}.{frac}")
+    else:
+        m2 = _R_VALUE_RE.match(s)
+        if not m2:
+            return None
+        base = float(m2.group(1))
+        mult = m2.group(2)
+    ohms = base * _R_SCALE[mult]
+    return ohms if ohms > 0 else None
+
+
+def _net_voltage(net_name: str) -> float | None:
+    """Parse a rail voltage out of a net name ('3V3', '1V25', '+5V',
+    'VOUT_12.5V'). Returns None rather than a wrong number on anything
+    ambiguous."""
+    m = _NET_VOLTAGE_RE.search((net_name or "").upper())
+    if not m:
+        return None
+    if m.group(1) is not None:
+        whole, frac = m.group(1), m.group(2)
+        return float(f"{whole}.{frac}") if frac else float(whole)
+    return float(m.group(3))
+
+
+def regulator_vout_facts(parts: list[dict], connections: list[dict]) -> list[dict]:
+    """Deterministic Vout computation for known adjustable regulators.
+
+    Dict-based so both the §9.32 gate and the eval digest can call it (the
+    latter reads raw state.json). For each part whose MPN matches
+    ``_REGULATOR_VREF``, locate the classic divider -- a mid net joining one
+    regulator pin, resistor A (other pin on a non-ground rail net) and
+    resistor B (other pin on ground) -- and compute
+    ``vout = vref * (1 + Ra/Rb)``. Returns one fact dict per UNAMBIGUOUS
+    divider found: {ref, mpn, vref, r_top_ref, r_top, r_bot_ref, r_bot,
+    vout, rail_net, rail_v, ok}; ok is None when the rail net names no
+    parseable target voltage. Ambiguous or unrecognized topologies produce
+    no fact (never a guess).
+    """
+    nets: dict[str, dict[str, str]] = defaultdict(dict)
+    for c in connections:
+        for ep in c.get("endpoints") or []:
+            nets[str(ep.get("ref"))][str(ep.get("pin"))] = str(
+                c.get("net_name"))
+    r_ohms = {
+        str(p.get("ref")): _resistance_ohms(str(p.get("value") or ""))
+        for p in parts if str(p.get("ref", "")).startswith("R")
+    }
+    facts: list[dict] = []
+    for p in parts:
+        mpn = str(p.get("mpn") or p.get("value") or "").upper()
+        vref = next(
+            (v for prefix, v in sorted(_REGULATOR_VREF.items(),
+                                       key=lambda kv: -len(kv[0]))
+             if mpn.startswith(prefix)),
+            None,
+        )
+        if vref is None:
+            continue
+        ref = str(p.get("ref"))
+        reg_nets = set(nets.get(ref, {}).values())
+        candidates: list[dict] = []
+        for mid in sorted(reg_nets):
+            if mid.upper() in _GND_NET_NAMES:
+                continue
+            # Resistors with one pin on the mid net.
+            on_mid = [
+                r for r, pins in nets.items()
+                if r in r_ohms and mid in pins.values()
+            ]
+            for r_top in on_mid:
+                for r_bot in on_mid:
+                    if r_top == r_bot:
+                        continue
+                    if r_ohms.get(r_top) is None or r_ohms.get(r_bot) is None:
+                        continue
+                    top_other = [n for pin, n in nets[r_top].items()
+                                 if n != mid]
+                    bot_other = [n for pin, n in nets[r_bot].items()
+                                 if n != mid]
+                    if len(top_other) != 1 or len(bot_other) != 1:
+                        continue
+                    if bot_other[0].upper() not in _GND_NET_NAMES:
+                        continue
+                    if top_other[0].upper() in _GND_NET_NAMES:
+                        continue
+                    rail = top_other[0]
+                    vout = vref * (1.0 + r_ohms[r_top] / r_ohms[r_bot])
+                    candidates.append({
+                        "ref": ref, "mpn": str(p.get("mpn") or ""),
+                        "vref": vref,
+                        "r_top_ref": r_top, "r_top": r_ohms[r_top],
+                        "r_bot_ref": r_bot, "r_bot": r_ohms[r_bot],
+                        "vout": round(vout, 3),
+                        "rail_net": rail,
+                        "rail_v": _net_voltage(rail),
+                    })
+        if len(candidates) != 1:
+            continue  # none found, or ambiguous -- never guess
+        fact = candidates[0]
+        fact["ok"] = (
+            None if fact["rail_v"] is None
+            else abs(fact["vout"] - fact["rail_v"]) <= 0.10 * fact["rail_v"]
+        )
+        facts.append(fact)
+    return facts
+
+
+def check_regulator_feedback_vout(bom) -> CheckResult:
+    """§9.32 — an adjustable regulator's feedback divider must produce the
+    rail its output net names. Deterministic: known Vref x the wired divider.
+    Only flags an UNAMBIGUOUS divider whose computed Vout misses a parseable
+    rail-net voltage by >10% -- everything uncertain passes silently."""
+    parts = [
+        {"ref": p.ref, "mpn": getattr(p, "mpn", None), "value": p.value}
+        for p in bom.parts
+    ]
+    connections = [
+        {"net_name": c.net_name,
+         "endpoints": [{"ref": ep.ref, "pin": ep.pin} for ep in c.endpoints]}
+        for c in bom.connections
+    ]
+    facts = regulator_vout_facts(parts, connections)
+    bad = [
+        f"{f['ref']} ({f['mpn']}, Vref {f['vref']}V): divider "
+        f"{f['r_top_ref']}/{f['r_bot_ref']} = "
+        f"{f['r_top']:.0f}/{f['r_bot']:.0f} ohm gives "
+        f"Vout {f['vout']}V but the output net {f['rail_net']!r} names "
+        f"{f['rail_v']}V -- fix the divider (R_top ~= "
+        f"{f['r_bot'] * (f['rail_v'] / f['vref'] - 1.0):.0f} ohm for "
+        f"{f['rail_v']}V)"
+        for f in facts if f["ok"] is False
+    ]
+    return CheckResult(
+        name="9.32 regulator feedback divider",
+        ok=not bad,
+        message=(
+            "feedback dividers match their named rails"
+            if not bad
+            else f"{len(bad)} regulator divider(s) produce the wrong voltage"
+        ),
+        offenders=bad,
+    )
+
+
 def check_two_terminal_self_short(bom) -> CheckResult:
     """§9.17 -- a two-terminal part with both pins on one net is shorted out.
 
@@ -2026,6 +2270,8 @@ def collect_validations(
         results.append(check_net_coverage(bom))
         results.append(check_power_pin_polarity(bom))
         results.append(check_two_terminal_self_short(bom))
+        results.append(check_repeated_block_coverage(bom))
+        results.append(check_regulator_feedback_vout(bom))
         results.append(check_rf_feed_isolation(bom))
         results.append(check_single_net_per_pin(bom))
         results.append(check_family_wiring_contracts(bom))
