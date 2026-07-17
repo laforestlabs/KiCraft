@@ -184,7 +184,13 @@ _CANVAS_HTML_TEMPLATE = """
     user-select: none;
     overflow: hidden;
   }
-  .ml-canvas-host svg { width: 100%; height: 100%; display: block; }
+  /* touch-action: none lets pointer events drive drags on touch
+     screens -- without it the browser claims the gesture for page
+     scrolling and cancels the pointer stream mid-drag. */
+  .ml-canvas-host svg {
+    width: 100%; height: 100%; display: block;
+    touch-action: none;
+  }
   .ml-leaf { cursor: grab; }
   .ml-leaf.dragging { cursor: grabbing; }
   .ml-leaf .ml-leaf-hit {

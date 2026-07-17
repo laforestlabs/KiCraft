@@ -1076,7 +1076,7 @@ window.kicraftInitLayoutCanvas = function(cfg) {
   function bindLeafEvents(svg) {
     svg.querySelectorAll('.ml-leaf').forEach(g => {
       const ip = g.getAttribute('data-instance-path');
-      g.addEventListener('mousedown', (e) => {
+      g.addEventListener('pointerdown', (e) => {
         if (e.target && e.target.getAttribute('data-role') === 'rotate') {
           startRotate(svg, ip, e);
         } else {
@@ -1194,7 +1194,7 @@ window.kicraftInitLayoutCanvas = function(cfg) {
     // left click on empty space deselects; double-click empty space
     // re-fits. Leaf and edge-handle gestures keep their own handlers --
     // they are skipped here via the closest() guard.
-    svg.addEventListener('mousedown', (e) => {
+    svg.addEventListener('pointerdown', (e) => {
       if (!isCurrent()) return;
       if (e.button !== 0 && e.button !== 1) return;  // right button = context menu
       const onItem = e.target.closest
@@ -1220,12 +1220,14 @@ window.kicraftInitLayoutCanvas = function(cfg) {
         render();
       };
       const up = () => {
-        document.removeEventListener('mousemove', move);
-        document.removeEventListener('mouseup', up);
+        document.removeEventListener('pointermove', move);
+        document.removeEventListener('pointerup', up);
+      document.removeEventListener('pointercancel', up);
         if (!moved && e.button === 0) setSelected(null);
       };
-      document.addEventListener('mousemove', move);
-      document.addEventListener('mouseup', up);
+      document.addEventListener('pointermove', move);
+      document.addEventListener('pointerup', up);
+      document.addEventListener('pointercancel', up);
     });
     svg.addEventListener('dblclick', (e) => {
       if (!isCurrent()) return;
@@ -1278,11 +1280,13 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       state.snap_constraints.y = null;
       render();
       emitSelectionChanged();
-      document.removeEventListener('mousemove', move);
-      document.removeEventListener('mouseup', up);
+      document.removeEventListener('pointermove', move);
+      document.removeEventListener('pointerup', up);
+      document.removeEventListener('pointercancel', up);
     };
-    document.addEventListener('mousemove', move);
-    document.addEventListener('mouseup', up);
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', up);
+      document.addEventListener('pointercancel', up);
   }
 
   function startRotate(svg, ip, evt) {
@@ -1316,17 +1320,19 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       setRotationKeepCenter(p, leaf, snapAngle(p.rotation, e.shiftKey));
       render();
       emitSelectionChanged();
-      document.removeEventListener('mousemove', move);
-      document.removeEventListener('mouseup', up);
+      document.removeEventListener('pointermove', move);
+      document.removeEventListener('pointerup', up);
+      document.removeEventListener('pointercancel', up);
     };
-    document.addEventListener('mousemove', move);
-    document.addEventListener('mouseup', up);
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', up);
+      document.addEventListener('pointercancel', up);
   }
 
   function bindEdgeEvents(svg) {
     svg.querySelectorAll('.ml-edge').forEach(el => {
       const side = el.getAttribute('data-edge');
-      el.addEventListener('mousedown', (e) => {
+      el.addEventListener('pointerdown', (e) => {
         // Capture the screen-to-viewBox scale ONCE at mousedown.
         // Edge drags grow/shrink the outline, which changes the
         // viewBox, which shifts the live CTM. If we reused
@@ -1364,11 +1370,13 @@ window.kicraftInitLayoutCanvas = function(cfg) {
         };
         const up = () => {
           emitOutlineChanged();
-          document.removeEventListener('mousemove', move);
-          document.removeEventListener('mouseup', up);
+          document.removeEventListener('pointermove', move);
+          document.removeEventListener('pointerup', up);
+      document.removeEventListener('pointercancel', up);
         };
-        document.addEventListener('mousemove', move);
-        document.addEventListener('mouseup', up);
+        document.addEventListener('pointermove', move);
+        document.addEventListener('pointerup', up);
+      document.addEventListener('pointercancel', up);
         e.preventDefault();
       });
     });
