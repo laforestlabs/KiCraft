@@ -597,6 +597,53 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                    lcsc_retail.retail_floor() if picky else 1)
         return ("ok" if info["stock"] >= need else "dry"), info
 
+    def _alternates_note(part, cid: str, floor: int) -> str:
+        """In-stock alternates for a retail-dry pick, embedded in the gate
+        message so the retry starts from concrete candidates instead of a
+        cold lookup_lcsc_id search (self-eval 2026-07-17 T7: run_20 burned
+        ~4x median LLM cost failing to find an OLED alternative unaided).
+        Searches by the part's value/package keyword, then by the dead pick's
+        own catalog description; each candidate is retail-verified before
+        being suggested. Best-effort: empty string when nothing qualifies."""
+        try:
+            seen = {cid}
+            # Chip passives additionally need a value match -- the substring
+            # search happily returns 510k rows for a '10k' query (the same
+            # trap the tier-4 keyword walk filters below).
+            _single = _is_single_passive_footprint(part.footprint or "")
+            _vtok = (part.value or "").strip().split()[0] if part.value else ""
+            def _usable(c) -> bool:
+                return (str(c.get("lcsc")) not in seen
+                        and (c.get("stock") or 0) >= floor
+                        and not is_multi_element_array(c)
+                        and (not _single or not _vtok
+                             or chip_value_matches(_vtok, c)))
+            kw = jlcparts.bom_keyword(part.value or "", part.footprint or "")
+            cands = [c for c in jlcparts.search(kw, limit=10)
+                     if _usable(c)] if kw else []
+            if not cands:
+                hit = jlcparts.lookup(cid) or {}
+                probe = " ".join((hit.get("description") or "").split()[:4])
+                if probe:
+                    cands = [c for c in jlcparts.search(probe, limit=10)
+                             if _usable(c)]
+            good = []
+            for c in cands[:6]:
+                verdict, _ = _retail_verdict(str(c.get("lcsc")), picky=False)
+                if verdict in ("ok", "off", "unverified"):
+                    good.append(c)
+                if len(good) >= 3:
+                    break
+            if not good:
+                return ""
+            return ("; in-stock alternates to consider (verify with "
+                    "lookup_lcsc_id): " + ", ".join(
+                        f"{c.get('lcsc')} "
+                        f"({(c.get('model') or c.get('description') or '?')[:40]}, "
+                        f"stock {c.get('stock')})" for c in good))
+        except Exception:
+            return ""
+
     active, _broken = _load_library_parts(project_root)
     manifest_by_name = {p.manifest.name: p.manifest for p in active}
     bad: list[str] = []
@@ -663,6 +710,7 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                         f"retail storefront (min buy {info['min_buy']}) — a "
                         f"pick must be in stock at BOTH; find an alternative "
                         f"with lookup_lcsc_id"
+                        + _alternates_note(part, cid, floor)
                     )
                 elif verdict == "unverified":
                     unverified.append(f"{part.ref} ({cid})")
@@ -692,6 +740,7 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                         f"{info['min_buy']}); fetch an in-stock alternative "
                         f"with lookup_lcsc_id + add_part_from_lcsc and point "
                         f"this part at the new bundle"
+                        + _alternates_note(part, cid, floor)
                     )
                 elif verdict == "unverified":
                     unverified.append(f"{part.ref} ({cid})")
@@ -4869,6 +4918,12 @@ def _cmd_build(args: argparse.Namespace) -> int:
     log on disk — the missing evidence on every rc=-9 self-eval run. Skipped
     when the caller already captures the log (the web build worker sets
     KICRAFT_BUILD_LOG=external, since it writes the same file itself)."""
+    # Same determinism pin as `replay`: without it every build rolls a fresh
+    # per-process hash salt, and boards whose outline margins sit near a DRC
+    # boundary flip pass/fail per run (self-eval 2026-07-17 T5 — batch
+    # failures were unreproducible under pinned replay for exactly this
+    # reason). Pinning here covers the web worker and self-eval too.
+    _pin_deterministic_placement_env()
     with _tee_build_log(Path(args.state).parent / "build.log"):
         return _cmd_build_impl(args)
 
