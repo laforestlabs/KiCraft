@@ -106,6 +106,29 @@ def outline_controls(canvas_id: str, initial: dict[str, Any]) -> None:
     width_input.on("keydown.enter", lambda _e: _push_size())
     height_input.on("keydown.enter", lambda _e: _push_size())
 
+    def _on_canvas_outline(e: Any) -> None:
+        """Mirror canvas-side outline changes (edge-handle drags, circle
+        squaring) back into the W/H inputs so the numbers on screen never
+        go stale. Only writes values that actually differ -- that is what
+        breaks the input->canvas->event->input cycle."""
+        data = e.args if isinstance(e.args, dict) else {}
+        if data.get("canvas_id") != canvas_id:
+            return
+        try:
+            w = float(data["width"])
+            h = float(data["height"])
+        except (KeyError, TypeError, ValueError):
+            return
+        try:
+            if abs(float(width_input.value or 0) - w) > 0.005:
+                width_input.set_value(round(w, 2))
+            if abs(float(height_input.value or 0) - h) > 0.005:
+                height_input.set_value(round(h, 2))
+        except (TypeError, ValueError):
+            pass
+
+    ui.on("kicraft-ml-outline", _on_canvas_outline)
+
     def _push_shape() -> None:
         shape = str(shape_select.value or "rect")
         try:

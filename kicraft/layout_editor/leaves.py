@@ -162,6 +162,30 @@ def _canvas_render_for(
     return (url_for(out_png), extent)
 
 
+def prerender_leaf_canvases(experiments_dir: Path) -> int:
+    """Render (or cache-hit) the canvas PNG for every solved leaf.
+
+    Called from the build tail in the worker process, where blocking on
+    kicad-cli is free, so the web editor's ``discover_leaves`` opens
+    against a warm cache instead of rasterizing inside the UI event
+    loop. Returns the number of leaves with a usable render.
+    """
+    sub_root = experiments_dir / "subcircuits"
+    if not sub_root.is_dir():
+        return 0
+    n = 0
+    for leaf_dir in sorted(sub_root.iterdir()):
+        if not leaf_dir.is_dir():
+            continue
+        pcb = leaf_dir / "leaf_routed.kicad_pcb"
+        if not pcb.is_file():
+            continue
+        out_png = leaf_dir / "renders" / "leaf_canvas.png"
+        if render_leaf_canvas(pcb, out_png) is not None:
+            n += 1
+    return n
+
+
 def discover_leaves(
     experiments_dir: Path, *, url_for: LeafUrlFor | None = None
 ) -> list[LeafInfo]:

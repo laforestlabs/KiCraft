@@ -292,6 +292,22 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       + ', rot=' + (p.rotation || 0).toFixed(0) + '°';
   }
 
+  // Mirror outline size back to the host's W/H inputs (NiceGUI global
+  // custom event; the Python side listens via ui.on). Fired on user
+  // gestures that change the outline OUTSIDE the inputs themselves --
+  // edge-handle drags and shape constraints (circle squaring) -- so the
+  // numbers on screen never go stale. No-op when the host page doesn't
+  // define emitEvent (e.g. a bare test harness).
+  function emitOutlineChanged() {
+    if (typeof window.emitEvent !== 'function') return;
+    const out = state.board_outline;
+    window.emitEvent('kicraft-ml-outline', {
+      canvas_id: cfg.canvas_id,
+      width: Math.round((out.max.x - out.min.x) * 100) / 100,
+      height: Math.round((out.max.y - out.min.y) * 100) / 100,
+    });
+  }
+
   function snapAngle(deg, shiftHeld) {
     if (shiftHeld) return deg;
     const m = ((deg % 360) + 360) % 360;
@@ -968,6 +984,7 @@ window.kicraftInitLayoutCanvas = function(cfg) {
           render();
         };
         const up = () => {
+          emitOutlineChanged();
           document.removeEventListener('mousemove', move);
           document.removeEventListener('mouseup', up);
         };
@@ -1048,6 +1065,11 @@ window.kicraftInitLayoutCanvas = function(cfg) {
       out.max.x = out.min.x + w;
       out.max.y = out.min.y + h;
       enforceShapeConstraints(null);
+      // The constraint may have overridden the requested size (circle
+      // squares the AABB); reflect the authoritative result back so
+      // the inputs match what the canvas actually holds. The Python
+      // handler only writes values that differ, so this cannot loop.
+      emitOutlineChanged();
       render();
     },
     setOutlineShape: function(spec) {
@@ -1063,6 +1085,7 @@ window.kicraftInitLayoutCanvas = function(cfg) {
         cur.chamfer_mm = Math.max(0, spec.chamfer_mm);
       }
       enforceShapeConstraints(null);
+      emitOutlineChanged();
       render();
     },
     getOutlineShape: function() {

@@ -21,7 +21,7 @@ import json
 import shutil
 from pathlib import Path
 
-from nicegui import ui
+from nicegui import background_tasks, run, ui
 
 from kicraft.layout_editor import (
     build_canvas_html,
@@ -126,6 +126,7 @@ class LayoutEditorPanel:
         # project (the queue/state plumbing lives with the page).
         self.on_route = on_route
         self.canvas_id = "web-layout-canvas"
+        self._body = None
         self._preview_view: KiCanvasView | None = None
         self._preview_slot = None
         self._status = None
@@ -146,12 +147,6 @@ class LayoutEditorPanel:
     # -- UI -----------------------------------------------------------------
 
     def render(self) -> None:
-        leaves = discover_leaves(
-            self.experiments_dir,
-            url_for=_project_render_url_for(self.project_dir, self.token),
-        )
-        initial = load_initial_layout(self.experiments_dir, leaves)
-
         with ui.row().classes("w-full items-center gap-3"):
             ui.button("Back to board", icon="arrow_back",
                       on_click=self.on_exit).props("flat dense")
@@ -159,9 +154,71 @@ class LayoutEditorPanel:
                 .style("color:#e2e8f0")
             ui.label("drag · R / right-click rotate · edge handles resize") \
                 .classes("text-xs").style("color:#64748b")
+            # Live readouts the canvas controller writes into by DOM id
+            # (updateCoordsLabel in layout_canvas.js): selected leaf's
+            # sheet name, its x/y/rot, and the live outline W x H.
+            ui.html(
+                f'<span class="text-xs" style="color:#64748b">Selected: '
+                f'<span id="{self.canvas_id}-selected" '
+                f'style="color:#e2e8f0">none</span> '
+                f'<span id="{self.canvas_id}-coords" '
+                f'style="color:#94a3b8">--</span></span>',
+                sanitize=False,
+            )
+            ui.html(
+                f'<span class="text-xs" style="color:#64748b">Board: '
+                f'<span id="{self.canvas_id}-outline" '
+                f'style="color:#e2e8f0"></span></span>',
+                sanitize=False,
+            )
             self._status = ui.label("").classes("text-xs ml-auto") \
                 .style("color:#94a3b8")
 
+        # Leaf discovery renders a PNG per leaf (kicad-cli subprocess when
+        # the build-tail pre-render didn't already warm the cache), so it
+        # must NOT run on the UI event loop -- a cold open would stall
+        # every session on the host. Build a shell synchronously, then
+        # fill it from a background task that does the heavy work in the
+        # executor. A background task (NOT an awaited continuation of the
+        # caller): the host opens this panel from a ui.timer that lives
+        # inside the very slot it clears, so an await in the caller's
+        # task gets CANCELLED by that clear -- and nicegui's run.io_bound
+        # swallows the CancelledError, silently dropping the body.
+        self._body = ui.column().classes("w-full")
+        with self._body:
+            with ui.row().classes("items-center gap-2 mt-2"):
+                ui.spinner(size="sm")
+                ui.label("Preparing circuit blocks…").classes("text-xs") \
+                    .style("color:#94a3b8")
+        background_tasks.create(
+            self._populate_body(),
+            name=f"layout-editor-populate-{self.canvas_id}",
+        )
+
+    async def _populate_body(self) -> None:
+        try:
+            url_for = _project_render_url_for(self.project_dir, self.token)
+            leaves = await run.io_bound(
+                discover_leaves, self.experiments_dir, url_for=url_for
+            )
+            initial = await run.io_bound(
+                load_initial_layout, self.experiments_dir, leaves
+            )
+        except Exception as exc:  # noqa: BLE001 - surface, don't vanish
+            if self._body.is_deleted:
+                return
+            self._body.clear()
+            with self._body:
+                ui.label(f"Failed to load circuit blocks: {exc}") \
+                    .classes("text-sm text-red-300")
+            return
+        if self._body.is_deleted:  # the user left the editor meanwhile
+            return
+        self._body.clear()
+        with self._body:
+            self._render_body(leaves, initial)
+
+    def _render_body(self, leaves, initial) -> None:
         if not leaves:
             ui.label(
                 "No solved leaves found for this project; run a build first."
@@ -234,7 +291,8 @@ class LayoutEditorPanel:
             return
 
         try:
-            leaves = discover_leaves(
+            leaves = await run.io_bound(
+                discover_leaves,
                 self.experiments_dir,
                 url_for=_project_render_url_for(self.project_dir, self.token),
             )

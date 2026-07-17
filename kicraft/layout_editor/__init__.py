@@ -16,6 +16,7 @@ from kicraft.layout_editor.leaves import (
     LeafInfo,
     discover_leaves,
     experiments_mount_url_for,
+    prerender_leaf_canvases,
 )
 from kicraft.layout_editor.model import (
     MOUNTING_HOLE_CORNERS,
@@ -47,6 +48,7 @@ __all__ = [
     "experiments_mount_url_for",
     "load_initial_layout",
     "load_manual_layout",
+    "prerender_leaf_canvases",
     "render_leaf_canvas",
     "run_manual_compose",
     "save_manual_layout",

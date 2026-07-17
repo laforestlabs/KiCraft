@@ -5039,6 +5039,21 @@ def _layout_route_fab(args, state, state_path, artifacts, results,
     print(f"[build] 2/5 {action} (quality={args.quality}, seed={seed_label}) "
           "-- may take minutes ...")
     rc = _run_layout(args.quality, root_sch, pcb, seed=seed, route=route)
+
+    # Pre-render the manual-layout canvas PNG for every solved leaf while
+    # we're in the worker process (blocking on kicad-cli is free here), so
+    # the web editor opens against a warm cache instead of rasterizing in
+    # the UI event loop. Best-effort on success AND failure: the rc6
+    # rescue path (parent failed, leaves routed) is exactly where the
+    # editor gets offered.
+    try:
+        from kicraft.layout_editor import prerender_leaf_canvases
+        n_prerendered = prerender_leaf_canvases(project_dir / ".experiments")
+        if n_prerendered:
+            print(f"[build]     pre-rendered {n_prerendered} leaf canvas preview(s)")
+    except Exception as e:  # noqa: BLE001 - never fail the build over previews
+        print(f"warning: leaf canvas pre-render failed: {e}", file=sys.stderr)
+
     if rc != 0:
         print(f"error: layout/route engine exited {rc}", file=sys.stderr)
         return 6

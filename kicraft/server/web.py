@@ -5249,6 +5249,12 @@ def index(prompt: str = "", project: str = ""):
                 slot = tabs.view_slot("place_route")
                 slot.clear()  # deletes the entry button (deferred, see above)
                 with slot:
+                    # render() builds its shell synchronously and fills it
+                    # from a background task (leaf discovery + PNG rendering
+                    # run in the executor, never on the UI event loop). It
+                    # must stay synchronous HERE: this timer element lives in
+                    # the slot cleared above, so the clear cancels this very
+                    # task the moment it awaits.
                     panel.render()
 
             ui.timer(0.05, _do_open, once=True)
