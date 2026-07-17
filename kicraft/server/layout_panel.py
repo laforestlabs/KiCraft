@@ -31,6 +31,7 @@ from kicraft.layout_editor import (
     run_manual_compose,
     save_manual_layout_json,
 )
+from kicraft.layout_editor.leaves import discover_missing_leaves
 from kicraft.layout_editor.canvas import DEFAULT_ASSET_MOUNT
 from kicraft.layout_editor.leaves import LeafUrlFor
 from kicraft.layout_editor.ratsnest import build_ratsnest
@@ -51,6 +52,15 @@ _STAMP_SEMAPHORE = asyncio.Semaphore(2)
 _STAMP_TIMEOUT_S = 180.0
 
 EDITOR_TIERS = ("pro", "max")
+
+# Stamp-DRC violation types worth a canvas marker: the ones the fab
+# gate cares about. Silkscreen/mask cosmetics would bury the signal
+# (a repeated-channel board can carry dozens of silk_overlap warnings).
+_MARKER_TYPES = frozenset({
+    "shorting_items", "clearance", "hole_clearance",
+    "copper_edge_clearance", "courtyards_overlap",
+    "items_not_allowed", "tracks_crossing", "unconnected_items",
+})
 
 
 def user_may_edit_layout(user) -> bool:
@@ -128,6 +138,7 @@ class LayoutEditorPanel:
         self.on_route = on_route
         self.canvas_id = "web-layout-canvas"
         self._body = None
+        self._missing_leaves: list[str] = []
         self._preview_view: KiCanvasView | None = None
         self._preview_slot = None
         self._status = None
@@ -206,6 +217,9 @@ class LayoutEditorPanel:
                 load_initial_layout, self.experiments_dir, leaves
             )
             ratsnest = await run.io_bound(build_ratsnest, leaves)
+            missing = await run.io_bound(
+                discover_missing_leaves, self.experiments_dir
+            )
         except Exception as exc:  # noqa: BLE001 - surface, don't vanish
             if self._body.is_deleted:
                 return
@@ -218,14 +232,30 @@ class LayoutEditorPanel:
             return
         self._body.clear()
         with self._body:
-            self._render_body(leaves, initial, ratsnest)
+            self._render_body(leaves, initial, ratsnest, missing)
 
-    def _render_body(self, leaves, initial, ratsnest=None) -> None:
+    def _render_body(self, leaves, initial, ratsnest=None, missing=None) -> None:
         if not leaves:
             ui.label(
                 "No solved leaves found for this project; run a build first."
             ).classes("text-sm text-amber-300")
             return
+
+        # Honesty gate: the manual composer refuses a layout that does
+        # not place EVERY expected leaf, so when some blocks have no
+        # routed artifact, say which and block Save -- nothing the user
+        # does on the canvas can fix a missing block.
+        self._missing_leaves = list(missing or [])
+        if self._missing_leaves:
+            with ui.card().classes("w-full p-2 mb-1").style(
+                    "border:1px solid #b45309;background:#451a03"):
+                ui.label(
+                    f"{len(leaves)} of {len(leaves) + len(self._missing_leaves)} "
+                    "circuit blocks are available. Missing (their routing "
+                    "failed): " + ", ".join(sorted(self._missing_leaves))
+                    + ". Saving is disabled -- re-run the build (or fix the "
+                    "design) so every block has a routed board."
+                ).classes("text-xs").style("color:#fcd34d")
 
         ui.html(build_canvas_html(leaves, initial, self.canvas_id),
                 sanitize=False).classes("w-full")
@@ -244,12 +274,18 @@ class LayoutEditorPanel:
                 "Save & stamp preview", icon="save", color="primary",
                 on_click=self._on_save,
             )
+            if self._missing_leaves:
+                self._save_btn.disable()
+                self._save_btn.tooltip(
+                    "Some circuit blocks have no routed board; the "
+                    "composer cannot stamp a partial layout."
+                )
             if self.on_route is not None:
                 self._route_btn = ui.button(
                     "Route this layout", icon="bolt", color="secondary",
                     on_click=self._on_route_clicked,
                 )
-                if not self.saved_layout_path().is_file():
+                if self._missing_leaves or not self.saved_layout_path().is_file():
                     self._route_btn.disable()
                 self._route_btn.tooltip(
                     "Routes the saved layout with FreeRouting through the "
@@ -277,6 +313,10 @@ class LayoutEditorPanel:
         if self.is_run_active():
             ui.notify("A build is running for this project; wait for it "
                       "to finish before editing the layout.", color="warning")
+            return
+        if self._missing_leaves:
+            ui.notify("Some circuit blocks have no routed board; saving "
+                      "is disabled.", color="warning")
             return
 
         self._save_btn.props("loading")
@@ -338,6 +378,7 @@ class LayoutEditorPanel:
             self._save_btn.props(remove="loading")
 
         compose_result_panel(self._drc_card, result)
+        self._push_drc_markers(result.get("stamp_drc") or {})
         if result.get("rc") == 0:
             self._set_status("stamp ok; preview below reflects your layout")
             self._show_preview()
@@ -345,6 +386,27 @@ class LayoutEditorPanel:
             self._set_status(
                 f"stamp returned rc={result.get('rc')}; review the DRC "
                 "counts and log below"
+            )
+
+    def _push_drc_markers(self, stamp_drc: dict) -> None:
+        """Draw the stamp's gate-relevant DRC violations as markers at
+        their board positions -- 'fix the thing under the red pin'
+        instead of reading a report tail. Cosmetic types (silk overlap
+        etc.) are filtered; the canvas clears markers on the next drag
+        since they describe the just-stamped arrangement."""
+        markers = [
+            v for v in stamp_drc.get("violations") or []
+            if v.get("type") in _MARKER_TYPES
+        ]
+        ui.run_javascript(
+            f"window.manualLayoutCanvases['{self.canvas_id}'] && "
+            f"window.manualLayoutCanvases['{self.canvas_id}']"
+            f".setDrcMarkers({json.dumps(markers)})"
+        )
+        if markers:
+            self._set_status(
+                f"{len(markers)} DRC violation(s) marked on the canvas -- "
+                "hover a red pin for details"
             )
 
     def _show_preview(self) -> None:

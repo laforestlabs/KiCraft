@@ -172,6 +172,35 @@ async def test_pro_user_opens_layout_editor(harness):
     await u.should_see("Edit layout", retries=30)
 
 
+async def test_missing_leaf_banner_disables_save(harness):
+    """A leaf dir with metadata but no routed board must surface the
+    honesty banner and disable Save -- the composer refuses partial
+    layouts, so letting the user save would die in a raw
+    missing-placements error at stamp time."""
+    u, web, store, acct = harness
+    store.set_tier(EMAIL, "pro")
+    pid = _persisted_project_with_board(store, acct.id)
+    base = store.projects_dir / str(acct.id) / str(pid)
+    broken = (base / "generated" / "USB_BMP280_READER" / ".experiments"
+              / "subcircuits" / "leaf__broken")
+    broken.mkdir(parents=True)
+    (broken / "metadata.json").write_text(json.dumps({
+        "instance_path": "/broken",
+        "sheet_name": "BROKEN SHEET",
+        "local_board_outline": {"width_mm": 15.0, "height_mm": 10.0},
+    }), encoding="utf-8")
+
+    await _login(u)
+    await u.should_see("Edit layout")
+
+    from nicegui import ui
+    u.find("Edit layout", kind=ui.button).click()
+    await u.should_see("Manual layout")
+    await u.should_see("BROKEN SHEET", retries=30)
+    save = u.find("Save & stamp preview", kind=ui.button).elements.pop()
+    assert not save.enabled
+
+
 async def test_free_user_sees_upgrade_gate(harness):
     u, web, store, acct = harness
     _persisted_project_with_board(store, acct.id)

@@ -36,6 +36,44 @@ def test_run_kicad_cli_drc_counts_tracks_crossing_as_short(monkeypatch, tmp_path
     assert counts["shorts"] == 1
 
 
+def test_run_kicad_cli_drc_positions_from_continuation_lines(monkeypatch, tmp_path):
+    """Real KiCad reports are block-oriented: the [type] header carries the
+    rule text while indented continuation lines carry @(x mm, y mm) item
+    positions and [Net N](NAME) refs. The parser must complete each
+    violation from its block -- positions were always None before, which
+    left the manual-layout canvas with no markers to draw."""
+    report = (
+        "[shorting_items]: Items shorting two nets (nets SIG1 and SIG2)\n"
+        "    Rule: board setup constraints clearance; error\n"
+        "    @(120.5000 mm, 80.2500 mm): Track [Net 3](SIG1) on F.Cu\n"
+        "    @(121.0000 mm, 80.5000 mm): Track [Net 4](SIG2) on F.Cu\n"
+        "[courtyards_overlap]: Courtyards overlap\n"
+        "    ; error\n"
+        "    @(137.4412 mm, 134.0921 mm): Footprint K1 courtyard\n"
+    )
+
+    class _FakeResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_path = cmd[cmd.index("-o") + 1]
+        with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write(report)
+        return _FakeResult()
+
+    monkeypatch.setattr(freerouting_runner.subprocess, "run", _fake_run)
+
+    counts = freerouting_runner._run_kicad_cli_drc(str(tmp_path / "board.kicad_pcb"))
+    short, courtyard = counts["violations"]
+    # First continuation position wins (the primary offending item).
+    assert (short["x_mm"], short["y_mm"]) == (120.5, 80.25)
+    assert (short["net1"], short["net2"]) == ("SIG1", "SIG2")
+    assert (courtyard["x_mm"], courtyard["y_mm"]) == (137.4412, 134.0921)
+    assert counts["courtyard"] == 1
+
+
 def test_extract_clearance_footprint_refs_counts_refs_within_clearance_blocks():
     report = """
 [clearance]: Clearance violation

@@ -184,6 +184,11 @@ window.kicraftInitLayoutCanvas = function(cfg) {
         || { shape: 'rect', corner_radius_mm: 0.0, chamfer_mm: 0.0 }
       ),
       mounting_holes: deepCopy(cfg.initial.mounting_holes || []),
+      // Last stamp's positioned DRC violations (board-frame mm), pushed
+      // by the host via setDrcMarkers() after each Save & stamp. They
+      // describe the LAST stamped arrangement, so any drag clears them
+      // rather than leaving markers floating over a changed layout.
+      drc_markers: [],
       // Opaque passthrough: per-component parent-local overrides (edge
       // connectors pinned by hand or by the removed offline GUI). The
       // canvas neither renders nor edits them, but getState() must echo
@@ -820,6 +825,26 @@ window.kicraftInitLayoutCanvas = function(cfg) {
     // active snap constraint.
     renderRatsnest(svg);
 
+    // DRC markers from the last stamp: a ring + dot at each violation's
+    // board position, with the violation text as a hover tooltip. Drawn
+    // on top of everything so a violation is never hidden under a leaf.
+    for (const m of state.drc_markers) {
+      const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      g.setAttribute('class', 'ml-drc-marker');
+      const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      ring.setAttribute('cx', m.x_mm); ring.setAttribute('cy', m.y_mm);
+      ring.setAttribute('r', 1.3);
+      ring.setAttribute('class', 'ml-drc-ring');
+      const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      dot.setAttribute('cx', m.x_mm); dot.setAttribute('cy', m.y_mm);
+      dot.setAttribute('r', 0.35);
+      dot.setAttribute('class', 'ml-drc-dot');
+      const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      title.textContent = (m.type || 'violation') + ': ' + (m.description || '');
+      g.appendChild(ring); g.appendChild(dot); g.appendChild(title);
+      svg.appendChild(g);
+    }
+
     // Snap-edge highlights: draw the constrained edges of the dragged
     // leaf AND the leaf (or outline) it's snapping against, drawn on
     // top of every leaf so the constraint is obvious without lighting
@@ -959,6 +984,9 @@ window.kicraftInitLayoutCanvas = function(cfg) {
     const start = svgToWorld(svg, evt);
     const orig = { x: p.origin.x, y: p.origin.y };
     const move = (e) => {
+      // Markers describe the LAST stamped arrangement; moving anything
+      // invalidates them.
+      state.drc_markers = [];
       const cur = svgToWorld(svg, e);
       p.origin.x = orig.x + (cur.x - start.x);
       p.origin.y = orig.y + (cur.y - start.y);
@@ -1211,6 +1239,15 @@ window.kicraftInitLayoutCanvas = function(cfg) {
           y: Math.round(h.pos.y * 1000) / 1000,
         },
       }));
+    },
+    setDrcMarkers: function(markers) {
+      // Replace the marker set (board-frame mm). Pushed by the host
+      // after each stamp; entries without a position are dropped here
+      // so render() can trust x_mm/y_mm.
+      state.drc_markers = (markers || []).filter(
+        m => m && typeof m.x_mm === 'number' && typeof m.y_mm === 'number'
+      );
+      render();
     },
     setViewOptions: function(opts) {
       // Merge into state.view_options so callers only need to pass

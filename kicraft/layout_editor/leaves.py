@@ -162,6 +162,43 @@ def _canvas_render_for(
     return (url_for(out_png), extent)
 
 
+def discover_missing_leaves(experiments_dir: Path) -> list[str]:
+    """Sheet names of leaves the editor CANNOT place: artifact dirs that
+    carry leaf metadata (an instance_path + a positive board outline)
+    but no routed board. The manual composer refuses a layout that
+    doesn't place every expected leaf, so the editor should say which
+    blocks are missing and block Save instead of letting the stamp die
+    in a raw missing-placements error. The parent's own compose dir has
+    no instance_path in its metadata and is not counted.
+    """
+    sub_root = experiments_dir / "subcircuits"
+    if not sub_root.is_dir():
+        return []
+    missing: list[str] = []
+    for leaf_dir in sorted(sub_root.iterdir()):
+        if not leaf_dir.is_dir():
+            continue
+        meta_path = leaf_dir / "metadata.json"
+        if not meta_path.exists() or (leaf_dir / "leaf_routed.kicad_pcb").exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not meta.get("instance_path"):
+            continue
+        outline = meta.get("local_board_outline") or {}
+        try:
+            w = float(outline.get("width_mm", 0.0))
+            h = float(outline.get("height_mm", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if w <= 0 or h <= 0:
+            continue
+        missing.append(str(meta.get("sheet_name", leaf_dir.name)))
+    return missing
+
+
 def prerender_leaf_canvases(experiments_dir: Path) -> int:
     """Render (or cache-hit) the canvas PNG for every solved leaf.
 

@@ -1585,9 +1585,29 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
         counts["report_text"] = report
         counts["unconnected_nets"] = _parse_unconnected_nets(report)
 
+        current: dict[str, Any] | None = None
         for line in report.splitlines():
             m = re.match(r"^\[(\w+)\]:", line)
             if not m:
+                # KiCad reports are block-oriented: the [type] header line
+                # carries the rule text, while the indented continuation
+                # lines carry the item positions and [Net N](NAME) refs.
+                # Complete the current violation from them -- FIRST position
+                # (the primary offending item) and first two distinct nets.
+                if current is not None and line[:1] in (" ", "\t"):
+                    if current["x_mm"] is None:
+                        loc_m = re.search(
+                            r"@\(([\d.\-]+)\s*mm\s*,\s*([\d.\-]+)\s*mm\)",
+                            line,
+                        )
+                        if loc_m:
+                            current["x_mm"] = float(loc_m.group(1))
+                            current["y_mm"] = float(loc_m.group(2))
+                    for net in re.findall(r"\[Net\s+\d+\]\(([^)]+)\)", line):
+                        if current["net1"] is None:
+                            current["net1"] = net
+                        elif current["net2"] is None and net != current["net1"]:
+                            current["net2"] = net
                 continue
             vtype = m.group(1)
             counts["total"] += 1
@@ -1603,16 +1623,15 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
             net1 = net_matches[0] if len(net_matches) > 0 else None
             net2 = net_matches[1] if len(net_matches) > 1 else None
 
-            counts["violations"].append(
-                {
-                    "type": vtype,
-                    "description": line.strip(),
-                    "x_mm": x_mm,
-                    "y_mm": y_mm,
-                    "net1": net1,
-                    "net2": net2,
-                }
-            )
+            current = {
+                "type": vtype,
+                "description": line.strip(),
+                "x_mm": x_mm,
+                "y_mm": y_mm,
+                "net1": net1,
+                "net2": net2,
+            }
+            counts["violations"].append(current)
 
             if vtype == "shorting_items":
                 counts["shorts"] += 1

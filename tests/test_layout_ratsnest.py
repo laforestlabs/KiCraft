@@ -94,3 +94,30 @@ def test_edge_fallback_when_metadata_outline_missing(tmp_path: Path):
 
     anchors = {an["instance_path"]: an for an in nets[0]["anchors"]}
     assert anchors["/a"]["x"] == 11.0 and anchors["/a"]["y"] == 21.0
+
+
+def test_discover_missing_leaves(tmp_path: Path):
+    from kicraft.layout_editor.leaves import discover_missing_leaves
+
+    sub = tmp_path / "subcircuits"
+    # A routed leaf: not missing.
+    ok = sub / "leaf_ok"
+    ok.mkdir(parents=True)
+    (ok / "metadata.json").write_text(json.dumps({
+        "instance_path": "/ok", "sheet_name": "OK",
+        "local_board_outline": {"width_mm": 10.0, "height_mm": 10.0},
+    }))
+    (ok / "leaf_routed.kicad_pcb").write_text("(kicad_pcb)")
+    # Metadata but no routed board: missing.
+    broken = sub / "leaf_broken"
+    broken.mkdir()
+    (broken / "metadata.json").write_text(json.dumps({
+        "instance_path": "/broken", "sheet_name": "BROKEN",
+        "local_board_outline": {"width_mm": 10.0, "height_mm": 10.0},
+    }))
+    # The parent's own compose dir has no instance_path: never counted.
+    parent = sub / "subcircuit__deadbeef"
+    parent.mkdir()
+    (parent / "metadata.json").write_text(json.dumps({"notes": []}))
+
+    assert discover_missing_leaves(tmp_path) == ["BROKEN"]

@@ -3697,6 +3697,20 @@ def main(argv: list[str] | None = None) -> int:
                     "copper_edge_clearance": int(_stamp_drc.get("copper_edge_clearance", 0)),
                     "courtyard": int(_stamp_drc.get("courtyard", 0)),
                     "report_excerpt": (str(_stamp_drc.get("report_text", ""))[:2000]),
+                    # Positioned violations for the manual-layout canvas
+                    # markers (type + board-frame mm position + nets);
+                    # capped so the snapshot JSON stays small.
+                    "violations": [
+                        {
+                            "type": v.get("type"),
+                            "x_mm": v.get("x_mm"),
+                            "y_mm": v.get("y_mm"),
+                            "net1": v.get("net1"),
+                            "net2": v.get("net2"),
+                            "description": str(v.get("description", ""))[:200],
+                        }
+                        for v in (_stamp_drc.get("violations") or [])[:120]
+                    ],
                 }
                 if stamp_shorts > 0:
                     print(

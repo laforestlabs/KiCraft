@@ -307,6 +307,15 @@ _CANVAS_HTML_TEMPLATE = """
     stroke-width: 0.32;
     stroke-opacity: 0.95;
   }
+  /* DRC violation markers from the last stamp; hover for the report
+     line. Cleared on any drag (they describe the stamped positions). */
+  .ml-drc-marker { pointer-events: auto; cursor: help; }
+  .ml-drc-ring {
+    fill: rgba(239, 68, 68, 0.15);
+    stroke: #ef4444;
+    stroke-width: 0.3;
+  }
+  .ml-drc-dot { fill: #ef4444; }
 </style>
 <div id="__CANVAS_ID__-host" class="ml-canvas-host">
   <svg id="__CANVAS_ID__" xmlns="http://www.w3.org/2000/svg"></svg>
