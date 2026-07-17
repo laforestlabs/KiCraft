@@ -14,6 +14,7 @@ reports status "ok".
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from kicraft.fsutil import atomic_write_text
@@ -296,6 +297,210 @@ def bom_reconcile_deficits(res: dict) -> list[dict]:
     ]
 
 
+# A wiring deficit note names the passive it needs in a stereotyped form:
+# "requires a 1uF capacitor to GND", "Add two 10k resistors (0402/0603)",
+# "needs a 0.1uF capacitor between BOOT (pin1) and PH (pin8)". The value +
+# kind pair is enough to provision the PART deterministically -- wiring only
+# parks because the part doesn't exist; connecting it is wiring's own job on
+# the re-drive (self-eval 2026-07-17 T4: 3 of 34 briefs died with the model
+# never applying exactly this add across 3 LLM passes).
+_PASSIVE_ASK_RE = re.compile(
+    r"(?:\b(a|an|one|two|three|four|\d+)\s+)?"
+    r"(\d+(?:\.\d+)?\s?(?:[pnumµ]F|[kM](?:Ω|ohm)?\b|Ω|ohm\b|R\b))"
+    r"[^.;,]*?\b(capacitor|resistor|inductor)s?\b",
+    re.IGNORECASE,
+)
+_QTY_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4}
+_SHEET_RE = re.compile(r"on the ([A-Z][A-Z0-9 _/-]*?) sheet\b")
+_KIND_PREFIX = {"capacitor": "C", "resistor": "R", "inductor": "L"}
+_KIND_SYMBOL = {"capacitor": "Device:C", "resistor": "Device:R",
+                "inductor": "Device:L"}
+_KIND_FOOTPRINT = {
+    "capacitor": "Capacitor_SMD:C_0603_1608Metric",
+    "resistor": "Resistor_SMD:R_0603_1608Metric",
+    "inductor": "Inductor_SMD:L_0603_1608Metric",
+}
+
+
+def _norm_value(v: str) -> str:
+    """Loose value identity: '0.1µF' == '0.1uF', '10kΩ' == '10k'."""
+    s = (v or "").strip().lower().replace("µ", "u").replace("Ω", "")
+    s = s.replace("ohm", "").replace(" ", "")
+    return s
+
+
+def parse_passive_deficits(texts: list[str]) -> list[dict]:
+    """Extract fully-specified passive asks from deficit prose. Returns
+    ``[{kind, value, qty, sheet}]``; anything the regex can't read with
+    confidence is simply absent (the caller falls back to the LLM pass)."""
+    asks: list[dict] = []
+    for text in texts:
+        t = str(text or "")
+        # "on the X sheet" pins the sheet; "on the X and Y sheets" is
+        # ambiguous per-part -- leave None (donor/default sheet applies).
+        m_sheet = _SHEET_RE.search(t)
+        sheet = (
+            m_sheet.group(1).strip()
+            if m_sheet and " sheets" not in t
+            else None
+        )
+        for m in _PASSIVE_ASK_RE.finditer(t):
+            qty_tok = (m.group(1) or "a").lower()
+            qty = _QTY_WORDS.get(qty_tok)
+            if qty is None:
+                try:
+                    qty = max(1, min(8, int(qty_tok)))
+                except ValueError:
+                    qty = 1
+            asks.append({
+                "kind": m.group(3).lower(),
+                "value": m.group(2).strip(),
+                "qty": qty,
+                "sheet": sheet,
+            })
+    return asks
+
+
+def _next_ref(parts: list[dict], prefix: str) -> str:
+    used = set()
+    for p in parts:
+        r = str(p.get("ref") or "")
+        if r.startswith(prefix) and r[len(prefix):].isdigit():
+            used.add(int(r[len(prefix):]))
+    n = 1
+    while n in used:
+        n += 1
+    return f"{prefix}{n}"
+
+
+def _catalog_passive(kind: str, value: str) -> dict | None:
+    """Offline-catalog pick for a jellybean passive: in-stock, single-element,
+    value-matched, Basic-preferred. None when the catalog can't answer."""
+    try:
+        from kicraft.parts_library import jlcparts
+        if not jlcparts.available():
+            return None
+        fp = _KIND_FOOTPRINT[kind]
+        kw = jlcparts.bom_keyword(value, fp)
+        if not kw:
+            return None
+        cands = jlcparts.search(kw) or []
+        if not cands:
+            relaxed = jlcparts.relax_keyword(kw)
+            cands = jlcparts.search(relaxed) if relaxed else []
+        ok = [
+            c for c in cands
+            if (c.get("stock") or 0) > 0
+            and not jlcparts.is_multi_element_array(c)
+            and jlcparts.chip_value_matches(value, c)
+        ]
+        ok.sort(key=lambda c: (c.get("type") != "Basic", -(c.get("stock") or 0)))
+        return ok[0] if ok else None
+    except Exception:
+        return None
+
+
+def apply_deterministic_bom_adds(ws, deficits: list[dict]) -> list[str]:
+    """Provision parseable passive deficits directly into ``state.bom.parts``.
+
+    For each ask, clone a same-value donor part already in the BOM (same real
+    LCSC sourcing, proven orderable) or fall back to an offline-catalog pick.
+    Returns the added refs ([] = nothing applied; caller uses the LLM pass).
+    Parts are ADDED only -- nothing existing is touched -- and wiring is
+    re-driven by the caller to connect them (ic_groups membership follows from
+    wiring's own commit, as with any model-added part)."""
+    asks = parse_passive_deficits(
+        [str(q.get("text", "")) for q in deficits]
+    )
+    if not asks:
+        return []
+    try:
+        state_path = _state_path(Path(ws))
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    bom = state.get("bom") or {}
+    parts = bom.get("parts")
+    if not isinstance(parts, list) or not parts:
+        return []
+
+    # Ungrouped same-value parts = an earlier deterministic pass already
+    # provisioned this ask and wiring STILL parks on it -- stop re-adding
+    # (that's a stuck loop for the LLM path to report, not a parts shortfall).
+    grouped: set[str] = set()
+    for members in (bom.get("ic_groups") or {}).values():
+        if isinstance(members, list):
+            grouped.update(str(r) for r in members)
+
+    # A sheet name scraped from prose is only usable if it actually exists --
+    # the emitter hard-fails on unknown sheets, and a bad sheet baked into
+    # state.bom.parts is unfixable by the wiring re-drive.
+    known_sheets = {
+        str(p.get("sheet") or "").strip().upper(): str(p.get("sheet"))
+        for p in parts if p.get("sheet")
+    }
+
+    added: list[str] = []
+    for ask in asks:
+        ask_sheet = known_sheets.get(
+            str(ask["sheet"] or "").strip().upper()
+        )
+        want = _norm_value(ask["value"])
+        prefix = _KIND_PREFIX[ask["kind"]]
+        same_value = [
+            p for p in parts
+            if str(p.get("ref", "")).startswith(prefix)
+            and _norm_value(str(p.get("value", ""))) == want
+        ]
+        ungrouped = [p for p in same_value
+                     if str(p.get("ref")) not in grouped]
+        if len(ungrouped) >= ask["qty"]:
+            continue
+        donor = next(
+            (p for p in same_value if p.get("sourcing_note") or p.get("mpn")),
+            None,
+        )
+        pick = None if donor is not None else _catalog_passive(
+            ask["kind"], ask["value"]
+        )
+        if donor is None and pick is None:
+            continue
+        for _ in range(ask["qty"] - len(ungrouped)):
+            ref = _next_ref(parts, prefix)
+            if donor is not None:
+                entry = dict(donor)
+                entry["ref"] = ref
+                if ask_sheet:
+                    entry["sheet"] = ask_sheet
+            else:
+                entry = {
+                    "ref": ref,
+                    "value": ask["value"].replace("µ", "u"),
+                    "symbol": _KIND_SYMBOL[ask["kind"]],
+                    "footprint": _KIND_FOOTPRINT[ask["kind"]],
+                    "sheet": ask_sheet or str(parts[0].get("sheet") or ""),
+                    "mpn": pick.get("model"),
+                    "datasheet": None,
+                    "sourcing_note": f"LCSC {pick.get('lcsc')}",
+                    "side": None,
+                    "source_leaf": None,
+                }
+            parts.append(entry)
+            added.append(ref)
+    if not added:
+        return []
+    try:
+        # Atomic like every other state.json commit: three processes read this
+        # file as their IPC contract, and a mid-write kill must never leave it
+        # truncated.
+        atomic_write_text(
+            state_path, json.dumps(state, indent=2) + "\n"
+        )
+    except Exception:
+        return []
+    return added
+
+
 def _bom_signature(ws) -> tuple[int, frozenset] | None:
     """Identity of the committed BOM (part count + ref set), for detecting a
     reconcile pass that changed nothing. ``None`` when the state is unreadable
@@ -332,6 +537,33 @@ def maybe_bom_reconcile(
     deficits = bom_reconcile_deficits(res)
     if not deficits:
         return res, reconcile_passes
+    # Deterministic first (self-eval 2026-07-17 T4): a fully-specified passive
+    # ask needs no model round-trip to provision -- clone a same-value donor
+    # already in the BOM (or an offline-catalog pick) and re-drive WIRING only.
+    # Anything unparsed falls through to the LLM bom+wiring pass, which also
+    # remains the stuck-loop reporter.
+    added = apply_deterministic_bom_adds(ws, deficits)
+    if added:
+        if progress is not None:
+            progress({"kind": "build_log",
+                      "text": f"[bom-reconcile] deterministically provisioned "
+                              f"{', '.join(added)} from the wiring deficit note "
+                              f"(pass {reconcile_passes + 1}/"
+                              f"{BOM_RECONCILE_MAX_PASSES}); re-driving wiring "
+                              "to connect them (no model BOM pass)"})
+        rr = run_session(
+            ws, brief, ["wiring"],
+            instruction=(
+                "The missing supporting parts from your deficit note were "
+                f"added to the BOM as {', '.join(added)} (same value/footprint "
+                "sourcing as specified). Re-emit the FULL wiring, connecting "
+                "each of them exactly as your note described. Do NOT ask the "
+                "user and do NOT park on the same deficit again."
+            ),
+            progress=progress, run_id=run_id, core_defaults=core_defaults,
+            client=client,
+        )
+        return rr, reconcile_passes + 1
     if progress is not None:
         progress({"kind": "build_log",
                   "text": f"[bom-reconcile] wiring flagged a BOM parts shortfall; "
