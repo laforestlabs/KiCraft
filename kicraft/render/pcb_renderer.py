@@ -155,12 +155,48 @@ def _svg_export(
     return True
 
 
+def _magick_available() -> bool:
+    return shutil.which("magick") is not None
+
+
+def _cairosvg_module():
+    """Import cairosvg lazily; None when the package (or libcairo) is
+    absent. Import errors surface as OSError from cairocffi when the
+    shared library is missing, so catch broadly."""
+    try:
+        import cairosvg
+        return cairosvg
+    except Exception:
+        return None
+
+
+def _rasterizer_available() -> bool:
+    return _magick_available() or _cairosvg_module() is not None
+
+
+def _rasterize_svg_cairo(svg_path: Path, out_png: Path, *, dpi: int) -> bool:
+    """cairosvg fallback for hosts without ImageMagick 7. The rewritten
+    SVG root carries mm width/height, which cairosvg converts at ``dpi``
+    exactly like magick's ``-density`` -- same pixel dimensions, RGBA
+    with transparent background."""
+    cairosvg = _cairosvg_module()
+    if cairosvg is None:
+        return False
+    try:
+        cairosvg.svg2png(url=str(svg_path), write_to=str(out_png), dpi=dpi)
+    except Exception:
+        return False
+    return out_png.is_file()
+
+
 def _rasterize_single(
     svg_path: Path,
     out_png: Path,
     *,
     dpi: int,
 ) -> bool:
+    if not _magick_available():
+        return _rasterize_svg_cairo(svg_path, out_png, dpi=dpi)
     cmd = [
         "magick",
         "-background", "none",
@@ -173,6 +209,57 @@ def _rasterize_single(
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         return False
     return out_png.is_file()
+
+
+def _rasterize_composite_cairo(
+    svg_front: Path,
+    svg_back: Path,
+    out_png: Path,
+    *,
+    dpi: int,
+    back_opacity: float,
+) -> bool:
+    """cairosvg + Pillow fallback for the two-layer composite: rasterize
+    both Edge.Cuts-clipped SVGs at the same dpi, dim the back layer's
+    alpha, merge front on top. Mirrors the magick incantation below."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return False
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        front_png = Path(f.name)
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        back_png = Path(f.name)
+    try:
+        if not _rasterize_svg_cairo(svg_front, front_png, dpi=dpi):
+            return False
+        if not _rasterize_svg_cairo(svg_back, back_png, dpi=dpi):
+            return False
+        try:
+            front = Image.open(front_png).convert("RGBA")
+            back = Image.open(back_png).convert("RGBA")
+        except OSError:
+            return False
+        # Same viewBox + dpi should give identical sizes; guard against
+        # off-by-one rounding anyway.
+        if back.size != front.size:
+            back = back.resize(front.size)
+        alpha = back.getchannel("A").point(
+            lambda v: int(v * back_opacity)
+        )
+        back.putalpha(alpha)
+        merged = Image.alpha_composite(back, front)
+        try:
+            merged.save(out_png, "PNG")
+        except OSError:
+            return False
+        return out_png.is_file()
+    finally:
+        for p in (front_png, back_png):
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
 
 def _rasterize_composite(
@@ -188,6 +275,10 @@ def _rasterize_composite(
     obscure front detail. Same magick incantation as the legacy
     render_pcb.py pipeline -- the input SVGs are now Edge.Cuts-clipped
     so the resulting composite is clipped too."""
+    if not _magick_available():
+        return _rasterize_composite_cairo(
+            svg_front, svg_back, out_png, dpi=dpi, back_opacity=back_opacity
+        )
     cmd = [
         "magick",
         "-background", "none",
@@ -314,6 +405,8 @@ def _apply_monitor_style(
     try:
         if not _build_substrate_masked_png(raw_png, masked_png, style.board_background):
             return False
+        if not _magick_available():
+            return _style_post_pillow(masked_png, out_png, style)
         cmd = [
             "magick", str(masked_png),
             "-resize", f"{style.max_px}x{style.max_px}>",
@@ -332,6 +425,37 @@ def _apply_monitor_style(
             masked_png.unlink()
         except OSError:
             pass
+
+
+def _style_post_pillow(masked_png: Path, out_png: Path, style: MonitorStyle) -> bool:
+    """Pillow fallback for the magick resize + brightness/contrast +
+    modulate step. ImageEnhance factors approximate (not bit-match) the
+    magick operators -- fine for previews; hosts with magick installed
+    keep the exact historical output. Enhancement runs on RGB with the
+    alpha channel carried through untouched, since PIL's Contrast/Color
+    operators misbehave on RGBA input."""
+    try:
+        from PIL import Image, ImageEnhance
+    except ImportError:
+        return False
+    try:
+        im = Image.open(masked_png).convert("RGBA")
+    except OSError:
+        return False
+    if max(im.size) > style.max_px:
+        im.thumbnail((style.max_px, style.max_px), Image.LANCZOS)
+    alpha = im.getchannel("A")
+    rgb = im.convert("RGB")
+    rgb = ImageEnhance.Brightness(rgb).enhance(style.brightness)
+    rgb = ImageEnhance.Contrast(rgb).enhance(style.contrast)
+    rgb = ImageEnhance.Color(rgb).enhance(style.saturation)
+    out = rgb.convert("RGBA")
+    out.putalpha(alpha)
+    try:
+        out.save(out_png, "PNG")
+    except OSError:
+        return False
+    return out_png.is_file()
 
 
 def _has_both_copper(layers: str) -> bool:
@@ -358,12 +482,13 @@ def render_pcb(
     and bumps contrast/saturation -- the pixel rectangle is still the
     Edge.Cuts AABB and the extent still describes it in mm.
 
-    Returns ``None`` when ``kicad-cli`` or ``magick`` are missing, the
-    PCB has no Edge.Cuts geometry, or any subprocess fails.
+    Returns ``None`` when ``kicad-cli`` is missing, no rasterizer is
+    available (neither ``magick`` nor the cairosvg package), the PCB
+    has no Edge.Cuts geometry, or any subprocess fails.
     """
     if not pcb_path.is_file():
         return None
-    if shutil.which("kicad-cli") is None or shutil.which("magick") is None:
+    if shutil.which("kicad-cli") is None or not _rasterizer_available():
         return None
 
     ec = parse_edge_cuts_aabb(pcb_path)

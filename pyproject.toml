@@ -34,6 +34,12 @@ server = [
     "requests>=2.31",
     "nicegui>=1.4",
     "stripe>=7",
+    # PCB-to-PNG previews (kicraft/render/pcb_renderer.py): cairosvg is the
+    # SVG rasterizer fallback when ImageMagick 7 (`magick`) is not installed
+    # on the host; Pillow does the compositing/styling the fallback needs
+    # (and _build_substrate_masked_png already imported it implicitly).
+    "cairosvg>=2.7",
+    "Pillow>=10.0",
 ]
 # Load / stress testing harness. psutil is the fast path for host/process metrics
 # (metrics.py falls back to /proc when it is absent, so this extra is optional).
