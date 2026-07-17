@@ -3312,6 +3312,17 @@ def main(argv: list[str] | None = None) -> int:
         print()
         print("=== Auto-pinning best round of each leaf ===")
         _auto_pin_best_leaves(project_dir)
+        # Refresh replicated siblings from their representative's now-PINNED
+        # geometry, so identical leaves ship byte-identical (not whatever round
+        # last wrote them). See docs/plans/identical-leaf-reuse-plan.md.
+        from kicraft.cli._leaf_replication import finalize_leaf_replication
+
+        _refreshed = finalize_leaf_replication(project_dir)
+        if _refreshed:
+            print(
+                f"    refreshed {_refreshed} replicated sibling leaf(s) from "
+                f"their pinned representatives"
+            )
     else:
         # Parent rounds ran: make the canonical parent artifact hold the
         # SELECTED round's board, not the last-written one.

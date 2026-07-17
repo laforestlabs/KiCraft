@@ -169,6 +169,7 @@ from kicraft.autoplacer.brain.types import (
 from kicraft.autoplacer.config import DEFAULT_CONFIG, load_project_config
 from kicraft.autoplacer.hardware.adapter import KiCadAdapter, StampSubprocessError
 from kicraft.autoplacer.freerouting_runner import FreeroutingUnavailableError
+from kicraft.cli._leaf_replication import materialize_sibling, plan_leaf_replication
 
 
 # Minimum outline-origin offset (mm) that counts as a genuine A4 page-centering when
@@ -1791,6 +1792,23 @@ def main(argv: list[str] | None = None) -> int:
             print("error: no matching leaf subcircuits found", file=sys.stderr)
             return 1
 
+        # Identical-leaf reuse (docs/plans/identical-leaf-reuse-plan.md): group
+        # structurally-identical leaves (repeated channels) so the search runs
+        # ONCE per class; each sibling reuses the representative's geometry
+        # verbatim (its own refs/nets). Only representatives are solved below;
+        # siblings are materialized from the representative's artifacts after
+        # persistence. Kill switch: cfg['leaf_replication'].
+        leaf_groups = plan_leaf_replication(leaves, board_state, cfg)
+        representatives = [group.representative for group in leaf_groups]
+        _sibling_total = sum(len(group.members) for group in leaf_groups)
+        if _sibling_total:
+            _class_count = sum(1 for group in leaf_groups if group.members)
+            print(
+                f"[leaf-replication] {_sibling_total} identical leaf(s) across "
+                f"{_class_count} class(es) reuse a representative; solving "
+                f"{len(representatives)} of {len(leaves)} leaves"
+            )
+
         solved_results: list[SolvedLeafSubcircuit] = []
         persisted: list[dict[str, Any]] = []
         failed_by_path: dict[str, dict[str, Any]] = {}
@@ -1800,13 +1818,13 @@ def main(argv: list[str] | None = None) -> int:
         if requested_workers > 0:
             worker_count = max(1, requested_workers)
         else:
-            worker_count = min(len(leaves), max(1, available_cpus - 1))
+            worker_count = min(len(representatives), max(1, available_cpus - 1))
         rounds = max(1, args.rounds)
 
         experiment_round = int(getattr(args, "experiment_round", 0) or 0)
 
-        if worker_count == 1 or len(leaves) <= 1:
-            for index, node in enumerate(leaves):
+        if worker_count == 1 or len(representatives) <= 1:
+            for index, node in enumerate(representatives):
                 try:
                     solved = _solve_leaf_subcircuit(
                         node=node,
@@ -1841,7 +1859,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.route,
                     experiment_round,
                 )
-                for index, node in enumerate(leaves)
+                for index, node in enumerate(representatives)
             ]
             solved_by_path: dict[str, SolvedLeafSubcircuit] = {}
             infrastructure_failure: Exception | None = None
@@ -1885,7 +1903,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
             if infrastructure_failure is not None:
-                for index, node in enumerate(leaves):
+                for index, node in enumerate(representatives):
                     if node.id.instance_path in solved_by_path:
                         continue
                     try:
@@ -1910,9 +1928,48 @@ def main(argv: list[str] | None = None) -> int:
 
             solved_results = [
                 solved_by_path[node.id.instance_path]
-                for node in leaves
+                for node in representatives
                 if node.id.instance_path in solved_by_path
             ]
+
+        # Replication fallback: if a class's representative failed to solve, its
+        # siblings have no geometry to reuse -- solve them independently this
+        # invocation (identical circuits usually fail identically, but a fresh
+        # seed may differ, and this preserves today's partial-round resilience).
+        _solved_ips = {solved.instance_path for solved in solved_results}
+        _fallback_nodes = [
+            member
+            for group in leaf_groups
+            if group.members
+            and group.representative.id.instance_path not in _solved_ips
+            for (member, _rm, _nm) in group.members
+        ]
+        for offset, node in enumerate(_fallback_nodes):
+            try:
+                solved_results.append(
+                    _solve_leaf_subcircuit(
+                        node=node,
+                        full_state=board_state,
+                        cfg=cfg,
+                        rounds=rounds,
+                        base_seed=args.seed + (len(representatives) + offset) * 1009,
+                        route=args.route,
+                        experiment_round=experiment_round,
+                    )
+                )
+            except Exception as exc:
+                failed_by_path[node.id.instance_path] = {
+                    "sheet_name": node.id.sheet_name,
+                    "instance_path": node.id.instance_path,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "recovery_mode": "independent_solve_after_representative_failure",
+                }
+                print(
+                    f"warning: replication fallback solve failed for "
+                    f"{node.id.instance_path}: {exc}",
+                    file=sys.stderr,
+                )
 
         # Persist every leaf that completed, even when the round as a whole
         # will be reported as failed. The Monitor tab needs per-leaf data to
@@ -1932,6 +1989,52 @@ def main(argv: list[str] | None = None) -> int:
                     f"warning: leaf persist failed for {solved.instance_path}: {exc}",
                     file=sys.stderr,
                 )
+
+        # Materialize each identical sibling from its representative's persisted
+        # geometry (refs/nets remapped, layout verbatim). Only reps whose class
+        # solved+persisted here get replicated; a failed rep's members were
+        # solved independently in the fallback above (so they're not members of
+        # any group we reach here with a live rep).
+        import dataclasses as _dataclasses
+
+        _rep_meta_by_ip = {
+            str(meta.get("instance_path", "")): meta for meta in persisted
+        }
+        _rep_solved_by_ip = {solved.instance_path: solved for solved in solved_results}
+        for group in leaf_groups:
+            if not group.members:
+                continue
+            rep_ip = group.representative.id.instance_path
+            rep_meta = _rep_meta_by_ip.get(rep_ip)
+            rep_solved = _rep_solved_by_ip.get(rep_ip)
+            if rep_meta is None or rep_solved is None:
+                continue  # representative failed -> members handled by fallback
+            for sib_node, ref_map, net_map in group.members:
+                try:
+                    sib_meta = materialize_sibling(
+                        rep_meta, sib_node, ref_map, net_map
+                    )
+                    persisted.append(sib_meta)
+                    solved_results.append(
+                        _dataclasses.replace(rep_solved, node=sib_node)
+                    )
+                    print(
+                        f"  [leaf-replication] {sib_node.id.sheet_name} reuses "
+                        f"{group.representative.id.sheet_name} geometry "
+                        f"({len(ref_map)} refs remapped)"
+                    )
+                except Exception as exc:
+                    failed_by_path[sib_node.id.instance_path] = {
+                        "sheet_name": sib_node.id.sheet_name,
+                        "instance_path": sib_node.id.instance_path,
+                        "error": f"replication failed: {exc}",
+                        "error_type": type(exc).__name__,
+                    }
+                    print(
+                        f"warning: leaf replication failed for "
+                        f"{sib_node.id.instance_path}: {exc}",
+                        file=sys.stderr,
+                    )
 
     except Exception as exc:
         print(f"error: failed to solve subcircuits: {exc}", file=sys.stderr)
