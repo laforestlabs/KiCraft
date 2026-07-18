@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:367dc8f485edb0302aaf3f7ea2bb427a06c183313dacc5c3f8ee7e35539f4977",
+  "datasheet_url": "https://lcsc.com/product-detail/Terminal-Blocks_WJ126V-5-0-3P_C8401.html",
+  "description": "WJ126V-5.0-3P",
+  "footprint_name": "CONN-TH_3P-P5.00_WJ126V-5.0-3P",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "WJ126V-5.0-03P-14-00A",
+  "name": "screw-terminal-5mm-3p",
+  "provenance": {
+    "added_at": "2026-07-03T23:19:21Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C8401"
+  },
+  "symbol_name": "WJ126V-5.0-3P",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": "90-deg wire-entry terminal: opening faces +Y at rot 0 (PCB Edge marker on Dwgs.User is authoritative; body overhang is too symmetric for heuristics)"
+}

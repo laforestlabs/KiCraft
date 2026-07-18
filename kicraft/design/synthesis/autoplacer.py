@@ -35,6 +35,15 @@ _EDGE_CONNECTOR_FOOTPRINT_PATTERNS = (
     "*type-c*",
     "*barreljack*",
     "*barrel_jack*",
+    "*dc-in-th*",  # vendored easyeda barrel jacks, e.g. DC-IN-TH_DC005-5.5-2.1
+    # Screw terminals: 90-degree wire-entry blocks that MUST face a board
+    # edge (KC-YJ7Q69 shipped with the wire mouths parallel to the edge; the
+    # facing gate only covers ZONED refs, so the zone must never depend on
+    # the BOM stage remembering to set one).
+    "*screw-terminal*",
+    "*wj126v*",
+    "*terminal_block*",
+    "*terminalblock*",
 )
 
 

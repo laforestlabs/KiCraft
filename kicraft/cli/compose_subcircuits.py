@@ -2005,6 +2005,7 @@ def _compose_artifacts(
     # multi-connector leaf or an undetected regression -- surface it loudly
     # rather than silently shipping a board whose USB port faces inward.
     misoriented_connectors: list[str] = []
+    unverifiable_connectors: list[str] = []
     for c in all_constraints:
         if c.target != "edge" or c.source != "child_artifact" or c.child_index is None:
             continue
@@ -2012,7 +2013,13 @@ def _compose_artifacts(
         if transformed is None:
             continue
         comp = transformed.transformed_components.get(c.ref)
-        if comp is None or comp.opening_direction is None:
+        if comp is None:
+            continue
+        if comp.opening_direction is None:
+            # No detectable mouth: nothing to verify against. This used to be
+            # a silent `continue`, which is how the KC-YJ7Q69 screw terminals
+            # (markerless footprint) shipped facing along the board edge.
+            unverifiable_connectors.append(c.ref)
             continue
         board_opening = opening_board_angle(comp.opening_direction, comp.rotation)
         want = edge_outward_angle(comp.layer, c.value)
@@ -2025,6 +2032,14 @@ def _compose_artifacts(
             "leaf rotation candidates were not over-constrained and that the "
             "connector's opening_direction was detected correctly.",
             ", ".join(sorted(misoriented_connectors)),
+        )
+    if unverifiable_connectors:
+        logger.warning(
+            "Edge connector(s) %s have no detectable opening direction -- "
+            "orientation was NEITHER placed deliberately NOR verifiable here. "
+            "Add a 'PCB Edge' Dwgs.User marker to the footprint (the fab gate "
+            "will flag these as connector-mouth-unverifiable).",
+            ", ".join(sorted(set(unverifiable_connectors))),
         )
 
     same_side_overlap_conflicts: list[tuple[str, str]] = []

@@ -122,3 +122,75 @@ def connector_edge_gaps(
 def stranded(gaps: list[EdgeGap]) -> list[EdgeGap]:
     """The subset that fails the acceptance gate (stranded or absurd overhang)."""
     return [g for g in gaps if not g.ok]
+
+
+@dataclass(frozen=True)
+class FacingVerdict:
+    ref: str
+    edge: str
+    status: str  # "ok" | "misoriented" | "unknown_mouth"
+    opening_board_deg: float | None  # board-space mouth angle; None = undetectable
+    outward_deg: float  # board-space outward angle of the assigned edge
+
+
+def connector_facings(
+    board_path: str,
+    component_zones: dict[str, Any] | None,
+    *,
+    tol_deg: float = 5.0,
+    min_directional_depth_mm: float = 3.0,
+) -> list[FacingVerdict]:
+    """Does each edge-zoned connector's wire-entry mouth face OFF-board?
+
+    The positional gate above is rotation-invariant: a 90-degree screw terminal
+    can sit bbox-flush against its zoned edge with the wire mouth pointing
+    parallel to (or into) the board -- electrically clean, physically unusable
+    (KC-YJ7Q69). This companion metric compares the mouth's board-space angle
+    (``detect_opening_direction`` expressed in board coords) against the zoned
+    edge's outward normal:
+
+        ok            -> mouth points off-board (within ``tol_deg``)
+        misoriented   -> mouth detectable and NOT pointing off-board
+        unknown_mouth -> TH connector with a deep (directional) body but no
+                         detectable opening: nothing to verify against. Fix the
+                         footprint (add a "PCB Edge" Dwgs.User marker) -- these
+                         parts are exactly one silent inversion away from
+                         shipping misoriented.
+
+    Shallow-bodied undetectable parts (bare pin-header strips, vertical
+    receptacles) are omitted: they have no meaningful mouth to verify.
+    """
+    import pcbnew
+
+    from kicraft.autoplacer.hardware.adapter import detect_opening_direction
+
+    from .types import Layer, angles_close, edge_outward_angle, opening_board_angle
+
+    board = pcbnew.LoadBoard(str(board_path))
+    fps = {fp.GetReference(): fp for fp in board.GetFootprints()}
+    out: list[FacingVerdict] = []
+    for ref, zone in (component_zones or {}).items():
+        edge = (zone or {}).get("edge")
+        if edge not in _SIDES:
+            continue
+        fp = fps.get(ref)
+        if fp is None:
+            continue
+        layer = Layer.BACK if fp.GetLayer() == pcbnew.B_Cu else Layer.FRONT
+        outward = edge_outward_angle(layer, edge)
+        opening_local = detect_opening_direction(fp)
+        if opening_local is None:
+            has_hole = any(p.HasHole() for p in fp.Pads())
+            bb = _mouth_bbox(fp, pcbnew)
+            depth = min(
+                pcbnew.ToMM(bb.GetWidth()), pcbnew.ToMM(bb.GetHeight())
+            )
+            if has_hole and depth > min_directional_depth_mm:
+                out.append(FacingVerdict(ref, edge, "unknown_mouth", None, outward))
+            continue
+        opening_board = opening_board_angle(
+            opening_local, fp.GetOrientationDegrees()
+        )
+        status = "ok" if angles_close(opening_board, outward, tol_deg) else "misoriented"
+        out.append(FacingVerdict(ref, edge, status, opening_board, outward))
+    return out

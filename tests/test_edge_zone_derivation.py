@@ -27,6 +27,29 @@ def test_barrel_jack_gets_edge_zone():
     assert out == {"J3": {"edge": DEFAULT_EDGE_CONNECTOR_ZONE}}
 
 
+def test_screw_terminal_gets_edge_zone():
+    # KC-YJ7Q69: the facing gate only covers zoned refs, so a screw terminal
+    # must never depend on the BOM stage remembering to zone it.
+    out = _edge_connector_zone_injections(
+        [
+            ("J2", "screw-terminal-5mm-3p:CONN-TH_3P-P5.00_WJ126V-5.0-3P"),
+            ("J4", "TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-2_1x02_P5.00mm_Horizontal"),
+        ],
+        {},
+    )
+    assert out == {
+        "J2": {"edge": DEFAULT_EDGE_CONNECTOR_ZONE},
+        "J4": {"edge": DEFAULT_EDGE_CONNECTOR_ZONE},
+    }
+
+
+def test_vendored_dc_barrel_jack_gets_edge_zone():
+    out = _edge_connector_zone_injections(
+        [("J1", "dc-barrel-jack-5-5-2-1:DC-IN-TH_DC005-5.5-2.1")], {}
+    )
+    assert out == {"J1": {"edge": DEFAULT_EDGE_CONNECTOR_ZONE}}
+
+
 def test_already_zoned_connector_is_left_untouched():
     out = _edge_connector_zone_injections(
         [("J1", "USB-C_SMD-TYPE-C-31-M-12")],

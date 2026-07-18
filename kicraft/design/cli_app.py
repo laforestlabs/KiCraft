@@ -2536,6 +2536,40 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
                 )
                 return 2
 
+        # (7) Deep-bodied TH connector with NO detectable opening direction:
+        # the placer cannot orient it toward the board edge and the fab gate
+        # cannot verify it -- it ships at whatever rotation the solver happens
+        # to pick (KC-YJ7Q69: 3P screw terminal facing along the edge;
+        # KC-MUSEUD: BNC elbow 180 degrees wrong). Warning, not a failure:
+        # vertical/top-entry parts (banana jacks, vertical JST) legitimately
+        # have no mouth. For any side-entry (90-degree) connector, add an
+        # authoritative marker on the wire-entry side.
+        if loaded_fp is not None:
+            from kicraft.autoplacer.hardware.adapter import (
+                detect_opening_direction,
+            )
+
+            _has_hole = any(p.HasHole() for p in loaded_fp.Pads())
+            _bb = loaded_fp.GetBoundingBox(False, False)
+            _depth = min(_pcbnew.ToMM(_bb.GetWidth()), _pcbnew.ToMM(_bb.GetHeight()))
+            if (
+                _has_hole
+                and _depth > 3.0
+                and detect_opening_direction(loaded_fp) is None
+            ):
+                print(
+                    f"WARNING {manifest.name}: deep-bodied TH footprint "
+                    f"'{manifest.footprint_name}' has no detectable opening "
+                    f"direction. If this is a side-entry (90-degree) connector "
+                    f"(screw terminal, barrel/BNC jack, right-angle header), "
+                    f"add an fp_text 'PCB Edge' on Dwgs.User at the wire-entry "
+                    f"face, then rerun with --update-hash -- otherwise the "
+                    f"placer cannot aim it at the board edge and the fab gate "
+                    f"cannot verify it. Vertical/top-entry parts can ignore "
+                    f"this.",
+                    file=sys.stderr,
+                )
+
     actual = compute_content_hash(part_dir)
     if actual != manifest.content_hash:
         if args.update_hash:
@@ -3778,6 +3812,41 @@ def _degenerate_hierarchy_error(root_sch: Path) -> str | None:
     return None
 
 
+def _effective_connector_zones(pcb: Path) -> dict:
+    """The project's edge zones minus compose-time demotions.
+
+    Compose may have DEMOTED an edge pin so the leaf could nest inside
+    another leaf's interior (a shaped brief the pin contradicted --
+    shaped-compose-leaf-nesting PR-N4). The shipped board deliberately
+    has that connector inboard; judging it against the overridden zone
+    would flag the intended layout as stranded. The demotion record is
+    artifact-scoped and written only when the winner came from the
+    demoted wave.
+    """
+    import glob
+    import json
+
+    zone_files = sorted(glob.glob(str(pcb.parent / "*_autoplacer.json")))
+    zones: dict = {}
+    if zone_files:
+        payload = json.loads(Path(zone_files[0]).read_text(encoding="utf-8"))
+        zones = payload.get("component_zones", payload.get("zones", {})) or {}
+    for sidecar in sorted(glob.glob(str(
+        pcb.parent / ".experiments" / "subcircuits" / "*"
+        / "edge_pins_demoted.json"
+    ))):
+        try:
+            demoted = json.loads(Path(sidecar).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for ref in demoted.get("refs") or []:
+            if zones.pop(str(ref), None) is not None:
+                print(f"[build]     connector-edge gate: skipping "
+                      f"{ref} (edge pin demoted at compose for the "
+                      f"requested outline shape)")
+    return zones
+
+
 def _connector_stranded_refs(pcb: Path) -> list[str]:
     """Edge-zoned connectors stranded inboard of their board edge.
 
@@ -3790,37 +3859,10 @@ def _connector_stranded_refs(pcb: Path) -> list[str]:
     this never invents a failure for boards the gate cannot evaluate.
     """
     try:
-        import glob
-        import json
-
         from kicraft.autoplacer.brain.connector_edge_gap import connector_edge_gaps
         from kicraft.autoplacer.config import DEFAULT_CONFIG
 
-        zone_files = sorted(glob.glob(str(pcb.parent / "*_autoplacer.json")))
-        zones: dict = {}
-        if zone_files:
-            payload = json.loads(Path(zone_files[0]).read_text(encoding="utf-8"))
-            zones = payload.get("component_zones", payload.get("zones", {})) or {}
-        # Compose may have DEMOTED an edge pin so the leaf could nest inside
-        # another leaf's interior (a shaped brief the pin contradicted --
-        # shaped-compose-leaf-nesting PR-N4). The shipped board deliberately
-        # has that connector inboard; judging it against the overridden zone
-        # would flag the intended layout as stranded. The demotion record is
-        # artifact-scoped and written only when the winner came from the
-        # demoted wave.
-        for sidecar in sorted(glob.glob(str(
-            pcb.parent / ".experiments" / "subcircuits" / "*"
-            / "edge_pins_demoted.json"
-        ))):
-            try:
-                demoted = json.loads(Path(sidecar).read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            for ref in demoted.get("refs") or []:
-                if zones.pop(str(ref), None) is not None:
-                    print(f"[build]     connector-stranded gate: skipping "
-                          f"{ref} (edge pin demoted at compose for the "
-                          f"requested outline shape)")
+        zones = _effective_connector_zones(pcb)
         if not zones:
             return []
         tol = float(DEFAULT_CONFIG.get("connector_edge_inboard_tol_mm", 1.0))
@@ -3832,6 +3874,43 @@ def _connector_stranded_refs(pcb: Path) -> list[str]:
         ]
     except Exception:
         return []
+
+
+def _connector_misoriented(pcb: Path) -> tuple[list[str], list[str]]:
+    """Edge-zoned connectors whose wire-entry mouth does not face off-board.
+
+    ``(blocking, warnings)``: *blocking* = mouth direction is KNOWN and points
+    the wrong way (a 90-degree screw terminal facing along/into the board is
+    physically unusable -- KC-YJ7Q69 shipped fab_ready this way); *warnings* =
+    deep-bodied TH connectors whose mouth cannot be detected (footprint lacks a
+    "PCB Edge" Dwgs.User marker), i.e. the gate cannot verify them. Returns
+    ([], []) when nothing is zoned or on any error, mirroring the stranded gate.
+    """
+    try:
+        from kicraft.autoplacer.brain.connector_edge_gap import connector_facings
+
+        zones = _effective_connector_zones(pcb)
+        if not zones:
+            return [], []
+        blocking: list[str] = []
+        warnings: list[str] = []
+        for v in connector_facings(str(pcb), zones):
+            if v.status == "misoriented":
+                blocking.append(
+                    f"connector_misoriented:{v.ref}(mouth "
+                    f"{v.opening_board_deg:.0f}deg vs {v.edge} outward "
+                    f"{v.outward_deg:.0f}deg)"
+                )
+            elif v.status == "unknown_mouth":
+                warnings.append(
+                    f"connector mouth unverifiable {v.ref}@{v.edge} -- "
+                    "TH connector with a directional body but no detectable "
+                    "opening; add a 'PCB Edge' Dwgs.User marker to its "
+                    "footprint so orientation can be placed and verified"
+                )
+        return blocking, warnings
+    except Exception:
+        return [], []
 
 
 def _check_form_factor_conformance(state, pcb: Path) -> dict | None:
@@ -4707,6 +4786,25 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
                 )
         else:
             print(f"[build]     outline-shape: {shape_conf['summary']}")
+    # 4a'''. Edge-connector facing. The stranded check above is positional and
+    #        rotation-blind: a 90-degree screw terminal can sit bbox-flush on
+    #        its zoned edge with the wire mouth parallel to (or into) the board
+    #        -- electrically clean, physically unusable (KC-YJ7Q69 shipped
+    #        fab_ready this way). A KNOWN mouth pointing the wrong way fails
+    #        the gate; an unverifiable mouth (no marker on the footprint) is a
+    #        loud warning so the part gets a marker instead of a silent pass.
+    mis_facing, mouth_warnings = _connector_misoriented(pcb)
+    if mis_facing:
+        gate["fab_acceptable"] = False
+        for reason in mis_facing:
+            if reason not in gate.setdefault("reasons", []):
+                gate["reasons"].append(reason)
+        print(f"[build]     connector-facing: {len(mis_facing)} misoriented "
+              f"({'; '.join(mis_facing)})")
+    if mouth_warnings:
+        gate.setdefault("warnings", []).extend(mouth_warnings)
+        for w in mouth_warnings:
+            print(f"[build]     connector-facing warning: {w}")
     # Area-waste visibility (PCB area-compaction plan, Phase 0): utilization /
     # aspect metrics on the promoted board ride the verify line and the gate
     # record. Diagnostic only -- never a promote/fab gate input.

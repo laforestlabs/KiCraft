@@ -828,6 +828,13 @@ class PlacementSolver:
             return False  # multi-row (2xN) -> keep along the edge
         if major > cfg.get("connector_perp_max_len_mm", 15.0):
             return False  # long header -> would stab too deep; keep parallel
+        # A bare header strip is ~2.5mm deep; anything with real body depth
+        # across the pad row (screw terminals ~8mm) has a wire-entry face and
+        # must keep its long axis along the edge (KC-YJ7Q69: 3P screw terminal
+        # classified as a header bank -> mouth left parallel to the edge).
+        body_depth = min(comp.width_mm, comp.height_mm)
+        if body_depth > cfg.get("connector_perp_max_body_depth_mm", 3.0):
+            return False
         return True
 
     @staticmethod
