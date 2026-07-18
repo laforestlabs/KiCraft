@@ -342,10 +342,21 @@ def _collect_net_clusters(
                           "pts": _pts_around(x, y, r), "xy": (x, y), "r": r})
         else:
             a, b2 = t.GetStart(), t.GetEnd()
+            ax, ay = pcbnew.ToMM(a.x), pcbnew.ToMM(a.y)
+            bx, by = pcbnew.ToMM(b2.x), pcbnew.ToMM(b2.y)
+            # Sample ALONG the segment, not just its endpoints: a fill island
+            # abutting a track mid-run (an edge-spine rail beside the pour)
+            # unions through an interior point that endpoint-only probing
+            # misses, splitting one electrical cluster into phantoms.
+            length = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
+            n_samples = max(1, min(24, int(length / 1.0)))
+            pts = [
+                (ax + (bx - ax) * k / n_samples, ay + (by - ay) * k / n_samples)
+                for k in range(n_samples + 1)
+            ]
             nodes.append({"kind": "trk", "layers": {t.GetLayer()},
-                          "pts": [(pcbnew.ToMM(a.x), pcbnew.ToMM(a.y)),
-                                  (pcbnew.ToMM(b2.x), pcbnew.ToMM(b2.y))],
-                          "xy": (pcbnew.ToMM((a.x + b2.x) / 2), pcbnew.ToMM((a.y + b2.y) / 2))})
+                          "pts": pts,
+                          "xy": ((ax + bx) / 2, (ay + by) / 2)})
     islands: list[dict] = []
     for z in board.Zones():
         if z.GetNetname() != net_name or z.GetIsRuleArea():
@@ -945,6 +956,195 @@ def add_gnd_pour_and_thermal_vias(
     return summary
 
 
+def stamp_gnd_edge_spine(
+    pcb_path: str,
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Tie the GND pads of connectors banked along one board edge with a
+    locked same-net bus track in the pads-to-edge corridor.
+
+    A row of edge connectors is the canonical GND-strand shape (KC-YXQ4EC:
+    sixteen 1x3 servo headers -> 13 disconnected B.Cu pour islands): every
+    header's signal/power fan-out fences the pour between neighbours, so each
+    GND pad sits on its own strip and no straight tie back to the main plane
+    clears the fences. The one corridor guaranteed free of that fencing is
+    OUTBOARD of the pads -- nothing routes between a connector row and the
+    board edge it faces. This pass draws a spine there: one jog per GND pad
+    out to the corridor, chained pad-to-pad along the edge. Links are
+    stamped through :func:`add_breakout_stubs`, inheriting its foreign-copper,
+    outline and hole guards -- a blocked link is skipped and the chain
+    resumes past it as separate sub-chains (the board is never made worse).
+
+    Only edges with >= 2 zoned connectors carrying PTH GND pads get a spine,
+    and the caller only invokes this when the GND net is actually fragmented.
+    Returns ``{stubs, edges: {edge: {...}}}``.
+    """
+    cfg = cfg or {}
+    summary: dict[str, Any] = {"stubs": 0, "edges": {}}
+    zones = cfg.get("component_zones") or {}
+    gnd_name = cfg.get("gnd_zone_net", "GND")
+    if not zones or not gnd_name:
+        return summary
+
+    board = pcbnew.LoadBoard(pcb_path)
+    gnd_net = board.GetNetInfo().GetNetItem(gnd_name)
+    if not gnd_net or gnd_net.GetNetCode() == 0:
+        return summary
+    gnd_code = gnd_net.GetNetCode()
+
+    box = board.GetBoardEdgesBoundingBox()
+    if box.GetWidth() <= 0 or box.GetHeight() <= 0:
+        return summary
+    edge_line = {
+        "left": pcbnew.ToMM(box.GetLeft()),
+        "right": pcbnew.ToMM(box.GetRight()),
+        "top": pcbnew.ToMM(box.GetTop()),
+        "bottom": pcbnew.ToMM(box.GetBottom()),
+    }
+    outward = {"left": -1.0, "right": 1.0, "top": -1.0, "bottom": 1.0}
+    try:
+        ecl = max(
+            pcbnew.ToMM(board.GetDesignSettings().m_CopperEdgeClearance), 0.05
+        )
+    except AttributeError:
+        ecl = 0.3
+    floor_mm = float(cfg.get("freerouting_min_clearance_mm", 0.153))
+    max_inset = float(cfg.get("gnd_edge_spine_max_inset_mm", 8.0))
+
+    from kicraft.autoplacer.brain.breakout_stubs import (
+        BreakoutSpec,
+        add_breakout_stubs,
+        _own_clearance_mm,
+    )
+
+    fps = {fp.GetReference(): fp for fp in board.GetFootprints()}
+    # edge -> [(ref, pad_number, x_mm, y_mm, pad_outer_radius_mm)]
+    groups: dict[str, list[tuple[str, str, float, float, float]]] = {}
+    # edge -> the largest pair clearance the stamping guard will hold against
+    # any pad of the banked connectors (netclass-aware; the guard adds 10 um).
+    group_cl: dict[str, float] = {}
+    for ref, zone in zones.items():
+        edge = (zone or {}).get("edge")
+        if edge not in edge_line:
+            continue
+        fp = fps.get(ref)
+        if fp is None:
+            continue
+        for p in fp.Pads():
+            cl = _own_clearance_mm(p, pcbnew.F_Cu, floor_mm)
+            group_cl[edge] = max(group_cl.get(edge, floor_mm), cl)
+            if p.GetNetCode() != gnd_code:
+                continue
+            if p.GetAttribute() != pcbnew.PAD_ATTRIB_PTH:
+                continue  # the spine relies on a pad reachable on either layer
+            pos = p.GetPosition()
+            try:
+                sz = p.GetSize()
+            except TypeError:
+                sz = p.GetSize(pcbnew.F_Cu)
+            groups.setdefault(edge, []).append((
+                ref, p.GetNumber(),
+                pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y),
+                max(pcbnew.ToMM(sz.x), pcbnew.ToMM(sz.y)) / 2.0,
+            ))
+
+    del board
+
+    for edge, pads in groups.items():
+        if len({ref for ref, *_ in pads}) < 2:
+            continue  # a lone connector has nothing to chain to
+        vertical = edge in ("left", "right")
+        sign = outward[edge]
+        line = edge_line[edge]
+        # Drop pads implausibly far inboard (shaped outline / stale zone).
+        pads = [
+            p for p in pads
+            if abs(line - (p[2] if vertical else p[3])) <= max_inset
+        ]
+        if len({ref for ref, *_ in pads}) < 2:
+            summary["edges"][edge] = {"skipped": "pads_not_near_edge"}
+            continue
+        pads.sort(key=(lambda p: p[3]) if vertical else (lambda p: p[2]))
+        # Corridor: the rail must hold the stamping guard's pair clearance
+        # (largest netclass clearance among the bank's pads, +10 um guard)
+        # from the outermost pad copper, AND keep the copper edge inside the
+        # board's copper-to-edge clearance. Centre the rail in that band --
+        # hugging either bound leaves the sampled HitTest guard a hair away
+        # from rejecting every chained segment.
+        outermost = max(
+            (p[2] if vertical else p[3]) * sign + p[4] for p in pads
+        )
+        pair = 0.01 + max(floor_mm, group_cl.get(edge, floor_mm))
+        width = float(cfg.get("gnd_edge_spine_width_mm", 0.25))
+        spine_c = None
+        for w in (width, floor_mm):
+            band_min = outermost + pair + w / 2.0
+            band_max = line * sign - ecl - w / 2.0
+            if band_min <= band_max:
+                spine_c = ((band_min + band_max) / 2.0) * sign
+                width = w
+                break
+        if spine_c is None:
+            summary["edges"][edge] = {"skipped": "no_corridor"}
+            continue
+        # Chain PAD-TO-PAD, one spec per link: pad_k -> its jog -> along the
+        # corridor -> previous pad's jog -> previous pad CENTRE. Each link
+        # lives on ONE copper layer but consecutive links may differ -- the
+        # PTH barrels bridge them. That weave is what makes the corridor
+        # usable at all: FreeRouting typically runs a power daisy-chain
+        # through the same corridor, alternating layers stretch by stretch
+        # (this board's 5V rail), so each GND link simply takes whichever
+        # layer its own stretch leaves free. A link that fits neither layer
+        # is skipped; the next link ties back across the gap to the last
+        # landed pad and the guards get the longer rail to judge.
+        stubs = 0
+        skipped: list[str] = []
+        last: tuple[str, str, float, float] | None = None
+        for ref, num, px, py, _r in pads:
+            if last is None:
+                last = (ref, num, px, py)  # chain origin: nothing to tie yet
+                continue
+            _lref, _lnum, lx, ly = last
+            jog = (spine_c, py) if vertical else (px, spine_c)
+            last_jog = (spine_c, ly) if vertical else (lx, spine_c)
+            landed = False
+            reasons: list[str] = []
+            for layer in ("F.Cu", "B.Cu"):
+                res = add_breakout_stubs(
+                    pcb_path,
+                    [BreakoutSpec(ref=ref, pad=num,
+                                  waypoints=[jog, last_jog, (lx, ly)],
+                                  layer=layer, width_mm=width,
+                                  near_xy=(px, py))],
+                    cfg=cfg,
+                )
+                if res.get("stubs", 0):
+                    stubs += 1
+                    landed = True
+                    break
+                reasons = res.get("skipped") or []
+            # Advance the anchor even on failure: a link that crosses the
+            # power rail's F<->B transition is blocked on BOTH layers, and
+            # keeping the anchor there would re-attempt that same blocked
+            # stretch for every later pad. Skipping forward splits the spine
+            # into sub-chains around the transition; each still merges its
+            # own islands and the via/track mop-up joins the few seams.
+            last = (ref, num, px, py)
+            if not landed:
+                skipped.extend(reasons or [f"{ref}.{num}"])
+        summary["stubs"] += stubs
+        summary["edges"][edge] = {
+            "pads": len(pads), "stubs": stubs, "skipped": skipped,
+        }
+
+    if summary["stubs"]:
+        board = pcbnew.LoadBoard(pcb_path)
+        pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+        board.Save(pcb_path)
+        del board
+    return summary
+
+
 def repair_parent_gnd_islands(
     pcb_path: str,
     cfg: dict[str, Any] | None = None,
@@ -988,6 +1188,20 @@ def repair_parent_gnd_islands(
     }
     if not gnd_name:
         return summary
+
+    # Edge-spine pre-pass: connectors banked along one edge strand exactly
+    # there (each header's GND pad on its own pour strip between the
+    # neighbours' signal fans -- KC-YXQ4EC: 13 islands along a 16-header
+    # edge), and neither via-stitch nor straight ties can cross the fans.
+    # The spine merges the whole bank through the outboard corridor first;
+    # the loop below then only has the leftovers to close. Fragmentation-
+    # gated so an already-whole plane never grows copper.
+    if cfg.get("gnd_edge_spine_enabled", True) and cfg.get("component_zones"):
+        pre_board = pcbnew.LoadBoard(pcb_path)
+        pre_clusters, _ = _collect_net_clusters(pre_board, gnd_name)
+        del pre_board
+        if len(pre_clusters) > 1:
+            summary["edge_spine"] = stamp_gnd_edge_spine(pcb_path, cfg)
 
     # Reuse the via collision guard from add_gnd_pour_and_thermal_vias.
     from kicraft.autoplacer.brain.breakout_stubs import _own_clearance_mm

@@ -138,7 +138,7 @@ def connector_facings(
     component_zones: dict[str, Any] | None,
     *,
     tol_deg: float = 5.0,
-    min_directional_depth_mm: float = 3.0,
+    min_directional_depth_mm: float = 4.0,
 ) -> list[FacingVerdict]:
     """Does each edge-zoned connector's wire-entry mouth face OFF-board?
 
@@ -158,7 +158,11 @@ def connector_facings(
                          shipping misoriented.
 
     Shallow-bodied undetectable parts (bare pin-header strips, vertical
-    receptacles) are omitted: they have no meaningful mouth to verify.
+    receptacles) are omitted: they have no meaningful mouth to verify. The
+    depth cut runs on ``_mouth_bbox`` (courtyard + pad copper), which measures
+    a bare 2.54mm strip at 3.63mm and a 2P screw terminal at 7.89mm -- the
+    default sits between them (a body-calibrated 3.0 read every vertical
+    strip as directional, spamming 17 unverifiable warnings per servo board).
     """
     import pcbnew
 

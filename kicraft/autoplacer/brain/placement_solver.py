@@ -828,12 +828,15 @@ class PlacementSolver:
             return False  # multi-row (2xN) -> keep along the edge
         if major > cfg.get("connector_perp_max_len_mm", 15.0):
             return False  # long header -> would stab too deep; keep parallel
-        # A bare header strip is ~2.5mm deep; anything with real body depth
-        # across the pad row (screw terminals ~8mm) has a wire-entry face and
-        # must keep its long axis along the edge (KC-YJ7Q69: 3P screw terminal
-        # classified as a header bank -> mouth left parallel to the edge).
+        # width_mm/height_mm are the COURTYARD bbox: a bare 2.54mm header strip
+        # measures 3.63mm here (2.64mm fab body + courtyard margin), a 2P screw
+        # terminal 7.89mm. The cut must sit between those measured values -- a
+        # body-depth-calibrated 3.0 read every real strip as deep, silently
+        # disabling this whole heuristic for its target genre (KC-YXQ4EC:
+        # 16x 1x3 strung out 193mm, GND pour fragmented). Screw terminals and
+        # wire-entry blocks stay excluded (KC-YJ7Q69).
         body_depth = min(comp.width_mm, comp.height_mm)
-        if body_depth > cfg.get("connector_perp_max_body_depth_mm", 3.0):
+        if body_depth > cfg.get("connector_perp_max_body_depth_mm", 4.0):
             return False
         return True
 

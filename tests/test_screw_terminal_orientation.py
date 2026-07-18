@@ -71,20 +71,33 @@ def test_3p_screw_terminal_long_axis_parallel_to_right_edge():
     assert PlacementSolver._best_rotation_for_edge(term, "right", CFG_ON) == 90.0
 
 
-def test_shallow_header_bank_still_perpendicular():
-    # The KC-8A3US3 bank fix must survive: a bare 1x3 header strip
-    # (body ~2.5mm deep) still turns pins-into-the-board.
+def _header_strip(width_mm: float) -> Component:
     pads = [
         Pad(ref="J1", pad_id=str(i + 1), pos=Point(0.0, i * 2.54), net="X",
             layer=Layer.FRONT)
         for i in range(3)
     ]
-    hdr = Component(
+    return Component(
         ref="J1", value="Conn_1x03", pos=Point(0.0, 0.0), rotation=0.0,
-        layer=Layer.FRONT, width_mm=2.5, height_mm=7.62, kind="connector",
+        layer=Layer.FRONT, width_mm=width_mm, height_mm=8.71, kind="connector",
         pads=pads,
     )
-    assert PlacementSolver._connector_wants_perp_axis(hdr, CFG_ON)
+
+
+def test_shallow_header_bank_still_perpendicular():
+    # The KC-8A3US3 bank fix must survive: a bare 1x3 header strip
+    # (body ~2.5mm deep) still turns pins-into-the-board.
+    assert PlacementSolver._connector_wants_perp_axis(_header_strip(2.5), CFG_ON)
+
+
+def test_real_courtyard_header_strip_perpendicular():
+    # Component width/height are the COURTYARD bbox, and a real
+    # PinHeader_1x03_P2.54mm_Vertical loads at 3.63 x 8.71 mm -- NOT the
+    # ~2.5 mm bare body the original threshold assumed. The 3.0 mm cut read
+    # every real strip as deep-bodied, silently disabling perp packing for
+    # its target genre (KC-YXQ4EC: 16x 1x3 strung out 193 mm, GND pour
+    # fragmented into 13 islands).
+    assert PlacementSolver._connector_wants_perp_axis(_header_strip(3.63), CFG_ON)
 
 
 # --- Layer 1: the vendored footprint ------------------------------------
@@ -154,6 +167,34 @@ def test_facing_accepts_mouth_outward(tmp_path):
     pcb = _make_board(tmp_path, rotation=90.0, strip_marker=False)
     (v,) = connector_facings(str(pcb), ZONES)
     assert v.status == "ok"
+
+
+def test_facing_omits_bare_vertical_header_strip(tmp_path):
+    # A vertical 1xN pin-header strip mates from above -- it has no mouth to
+    # verify, and the docstring promises it is OMITTED. Its mouth bbox
+    # (courtyard + pads) measures 3.63 mm, so the old 3.0 mm cut fired the
+    # unverifiable warning on every edge-zoned strip (17 per servo board).
+    from kicraft.autoplacer.brain.connector_edge_gap import connector_facings
+
+    lib = Path("/usr/share/kicad/footprints/Connector_PinHeader_2.54mm.pretty")
+    if not lib.is_dir():
+        pytest.skip("stock KiCad footprints not installed")
+    fp = pcbnew_mod = pytest.importorskip("pcbnew")
+    fp = pcbnew_mod.FootprintLoad(str(lib), "PinHeader_1x03_P2.54mm_Vertical")
+    assert fp is not None
+    board = pcbnew_mod.CreateEmptyBoard()
+    fp.SetReference("J9")
+    fp.SetPosition(pcbnew_mod.VECTOR2I(pcbnew_mod.FromMM(168), pcbnew_mod.FromMM(100)))
+    board.Add(fp)
+    rect = pcbnew_mod.PCB_SHAPE(board)
+    rect.SetShape(pcbnew_mod.SHAPE_T_RECT)
+    rect.SetStart(pcbnew_mod.VECTOR2I(pcbnew_mod.FromMM(130), pcbnew_mod.FromMM(90)))
+    rect.SetEnd(pcbnew_mod.VECTOR2I(pcbnew_mod.FromMM(170), pcbnew_mod.FromMM(110)))
+    rect.SetLayer(pcbnew_mod.Edge_Cuts)
+    board.Add(rect)
+    out = tmp_path / "strip.kicad_pcb"
+    pcbnew_mod.SaveBoard(str(out), board)
+    assert connector_facings(str(out), {"J9": {"edge": "right"}}) == []
 
 
 def test_facing_surfaces_undetectable_mouth(tmp_path):

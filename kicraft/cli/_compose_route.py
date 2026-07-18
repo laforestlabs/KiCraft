@@ -283,6 +283,10 @@ def _route_parent_board(
                     "gnd_strand_repair_enabled",
                     "gnd_strand_repair_max_mm",
                     "gnd_parent_repair_max_iter",
+                    "gnd_edge_spine_enabled",
+                    "gnd_edge_spine_width_mm",
+                    "gnd_edge_spine_max_inset_mm",
+                    "component_zones",
                     "freerouting_min_clearance_mm",
                     "freerouting_fine_pitch_track_mm",
                     "via_drill_mm",
@@ -298,6 +302,7 @@ def _route_parent_board(
                 f"s = repair_parent_gnd_islands({str(routed_pcb)!r}, cfg)\n"
                 "print('parent gnd island repair:', s['stranded'], 'stranded,',\n"
                 "      s['tied_pads'], 'tied,', s['vias'], 'vias,',\n"
+                "      s.get('edge_spine', {}).get('stubs', 0), 'spine stubs,',\n"
                 "      s['unresolved'], 'unresolved, iterations:', s['iterations'])\n"
             )
         except Exception as exc:
