@@ -15,6 +15,7 @@ from kicraft.server.stagetabs import (
     _cell_html,
     _close_json,
     _loose_pretty,
+    _parse_draft,
     _table_html,
     demo_events,
 )
@@ -64,6 +65,59 @@ def test_loose_pretty_never_raises():
 def test_close_json_balanced_returns_none():
     # Nothing open -> caller keeps the raw text instead of re-deriving valid JSON.
     assert _close_json('{"a": 1}') is None
+
+
+# ------------------------------------------------- live-draft structured preview
+
+def test_parse_draft_returns_object_for_partial_stream():
+    obj = _parse_draft('{"parts": [{"ref": "U1", "value": "TP40')
+    assert obj == {"parts": [{"ref": "U1", "value": "TP40"}]}
+    assert _parse_draft("no json here") is None
+
+
+def test_draft_sections_bom_renders_table_mid_stream():
+    """The BOM draft renders as the real Parts table (same columns as the
+    committed view) while the JSON is still streaming, not as raw text."""
+    from kicraft.server.web import _draft_sections
+
+    obj = _parse_draft(
+        '{"parts": [{"ref": "U1", "value": "TP4056", "symbol": "tp4056:TP4056_C725790",'
+        ' "footprint": "tp4056:ESOP-8", "sheet": "MAIN"}, {"ref": "J1", "value": "USB')
+    secs = _draft_sections("bom", obj, prices={})
+    tables = [s for s in secs if s.get("type") == "table"]
+    assert tables and tables[0]["columns"][:2] == ["ref", "value"]
+    assert [r[0] for r in tables[0]["rows"]] == ["U1", "J1"]  # half-streamed row included
+
+
+def test_draft_sections_wiring_maps_into_bom_slot():
+    # The wiring slot commits into state.json's "bom" key; the draft wrapper must
+    # place the parsed buffer there for _inspector_spec to see the connections.
+    from kicraft.server.web import _draft_sections
+
+    obj = {"connections": [{"net_name": "VBUS", "sheet": "MAIN",
+                            "endpoints": [{"ref": "J1", "pin": "A4"}]}]}
+    secs = _draft_sections("wiring", obj)
+    assert any(s.get("title") == "Connections" for s in secs)
+
+
+def test_draft_sections_drops_graph_sections():
+    # Rebuilding an echart every flush tick is heavy + flickery, so the draft
+    # keeps only the cheap section types.
+    from kicraft.server.web import _draft_sections
+
+    obj = {"blocks": [{"name": "CHARGER", "category": "power", "purpose": "charge"}],
+           "connections": [{"from_block": "A", "to_block": "B", "signal_type": "power"}]}
+    secs = _draft_sections("functional_spec", obj)
+    assert secs and all(s.get("type") != "graph" for s in secs)
+
+
+def test_draft_sections_unshapeable_returns_empty():
+    # [] tells the panel to fall back to the pretty-JSON text draft.
+    from kicraft.server.web import _draft_sections
+
+    assert _draft_sections("bom", ["not", "a", "dict"]) == []
+    assert _draft_sections("synthesize", {"a": 1}) == []  # build stage: no draft
+    assert _draft_sections("bom", {"parts": []}) == []    # nothing to show yet
 
 
 # --------------------------------------------------- inspector tables (kc-table)

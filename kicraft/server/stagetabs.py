@@ -114,13 +114,17 @@ class StagePanel:
     """
 
     def __init__(self, key: str, label: str, icon: str, accent: str,
-                 show_cost: bool = False) -> None:
+                 show_cost: bool = False, draft_spec=None) -> None:
         self.key = key
         self.label = label
         self.accent = accent
         # Per-stage LLM cost is admin-only telemetry; regular users never see a
         # dollar figure for a design round (the spend is still tracked server-side).
         self._show_cost = show_cost
+        # Page-supplied `(stage_key, parsed_draft) -> sections` builder: lets the
+        # live draft render through the same structured sections as the committed
+        # view (the BOM table fills in row by row instead of showing raw JSON).
+        self._draft_spec = draft_spec
         self._active_run: _Run | None = None
         self._open_run: _Run | None = None
         self._build_log: _Run | None = None
@@ -484,16 +488,30 @@ class StagePanel:
 
     def _render_draft(self) -> None:
         """Show the slot JSON the model is currently writing as a live, uncommitted
-        preview in the Project-state window (pretty-printed when it parses, else the
-        raw streaming text). Replaced by the validated view once the stage commits."""
-        pretty = _loose_pretty(self._draft_buf)
-        body = pretty if pretty is not None else self._draft_buf
+        preview in the Project-state window. When the partial buffer parses (whole,
+        or after closing its unbalanced brackets/strings) and the page supplied a
+        draft-spec builder, render it through the same structured sections as the
+        committed view — so e.g. the BOM table fills in row by row while streaming.
+        Otherwise fall back to pretty-printed (or raw) text. Replaced by the
+        validated view once the stage commits."""
+        obj = _parse_draft(self._draft_buf)
+        secs: list[dict] = []
+        if obj is not None and self._draft_spec is not None:
+            try:
+                secs = self._draft_spec(self.key, obj) or []
+            except Exception:
+                secs = []  # partial data the builder can't shape yet: text fallback
         self._insp.clear()
         with self._insp:
             ui.label(f"● writing {self.key} slot…  ·  {len(self._draft_buf):,} chars") \
                 .classes("text-xs font-semibold").style(f"color:{self.accent}")
-            ui.label(body).classes(
-                "text-xs font-mono whitespace-pre-wrap").style(f"color:{_DIM}")
+            if secs:
+                for sec in secs:
+                    _render_section(sec, self.accent)
+            else:
+                body = json.dumps(obj, indent=2) if obj is not None else self._draft_buf
+                ui.label(body).classes(
+                    "text-xs font-mono whitespace-pre-wrap").style(f"color:{_DIM}")
 
 def _render_section(sec: dict, accent: str) -> None:
     title = sec.get("title", "")
@@ -635,11 +653,11 @@ def _table_html(cols: list, rows: list, foot: list | None = None) -> str:
             f"<tbody>{body}</tbody>{tfoot}</table>")
 
 
-def _loose_pretty(buf: str) -> str | None:
-    """Best-effort pretty-print of a partial slot-JSON draft (the model's streaming
-    content). Returns indented JSON when the buffer parses, whole or after closing
-    its unbalanced brackets/strings; else None so the caller shows the raw text.
-    Never raises."""
+def _parse_draft(buf: str):
+    """Best-effort parse of a partial slot-JSON draft (the model's streaming
+    content). Returns the parsed object when the buffer parses, whole or after
+    closing its unbalanced brackets/strings; else None so the caller shows the
+    raw text. Never raises."""
     if not buf:
         return None
     try:
@@ -653,15 +671,21 @@ def _loose_pretty(buf: str) -> str | None:
             return None
         s = s[i:]
         try:
-            return json.dumps(json.loads(s), indent=2)
+            return json.loads(s)
         except (json.JSONDecodeError, ValueError):
             pass
         repaired = _close_json(s)
         if repaired is None:
             return None
-        return json.dumps(json.loads(repaired), indent=2)
+        return json.loads(repaired)
     except Exception:
         return None
+
+
+def _loose_pretty(buf: str) -> str | None:
+    """Indented-JSON text of a partial draft (see _parse_draft), or None."""
+    obj = _parse_draft(buf)
+    return None if obj is None else json.dumps(obj, indent=2)
 
 
 def _close_json(s: str) -> str | None:
@@ -706,7 +730,7 @@ class StageTabs:
     tab (then it stays put until they click back to the live one).
     """
 
-    def __init__(self, show_cost: bool = False) -> None:
+    def __init__(self, show_cost: bool = False, draft_spec=None) -> None:
         _follow_head()
         self.show_cost = show_cost
         self.panels: dict[str, StagePanel] = {}
@@ -728,7 +752,7 @@ class StageTabs:
             for key, label, icon, accent in PHASES:
                 with ui.tab_panel(key).classes("p-0"):
                     self.panels[key] = StagePanel(key, label, icon, accent,
-                                                  show_cost)
+                                                  show_cost, draft_spec)
 
     # ---- tab status / follow ------------------------------------------------
     def _set_tab_status(self, key: str, status: str) -> None:

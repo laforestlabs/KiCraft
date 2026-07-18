@@ -1378,6 +1378,33 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
     return []
 
 
+# The LLM stages' streaming content draft is the slot JSON being written; map each
+# stage to the state.json key its slot commits under so the draft can be shaped by
+# the same _inspector_spec as the committed view (wiring commits into the bom slot).
+_DRAFT_SLOT_KEY = {"intent": "intent", "functional_spec": "functional_spec",
+                   "architecture": "architecture", "bom": "bom", "wiring": "bom"}
+
+
+def _draft_sections(stage: str, parsed, *, prices: dict | None = None) -> list[dict]:
+    """Live project-state sections for a partially streamed slot draft.
+
+    `parsed` is the model's in-flight content buffer, bracket-repaired and parsed
+    (stagetabs._parse_draft). Wrapping it in a synthetic state.json and reusing
+    _inspector_spec renders the draft with the committed view's exact layout, so
+    e.g. the BOM table fills in row by row instead of showing raw JSON. Graph
+    sections are dropped: rebuilding an echart every flush tick is heavy and
+    flickery for a preview. [] (builder can't shape the partial data yet) falls
+    back to the pretty-JSON text draft."""
+    slot = _DRAFT_SLOT_KEY.get(stage)
+    if slot is None or not isinstance(parsed, dict):
+        return []
+    sj: dict = {slot: parsed}
+    if stage == "intent":
+        sj["project_stem"] = parsed.get("project_stem", "")
+    secs = _inspector_spec(stage, sj, {}, None, [], prices=prices)
+    return [s for s in secs if s.get("type") != "graph"]
+
+
 def _collect_support_diagnostics(state: dict) -> dict:
     """Snapshot a run's troubleshooting context for a support report: what was
     asked, how far the run got, and the concrete failure evidence (build-log
@@ -4713,7 +4740,7 @@ def index(prompt: str = "", project: str = ""):
         # Per-stage tabs: each phase gets its own tab with a project-state inspector
         # (left) over the LLM thinking + activity/log windows (right). The native
         # KiCad schematic/board (KiCanvas) and the download land in the build tabs.
-        tabs = StageTabs(show_cost=is_admin(user))
+        tabs = StageTabs(show_cost=is_admin(user), draft_spec=_draft_sections)
 
         # A KiCanvas view built while its tab is hidden sizes its WebGL canvas to zero
         # and never repaints; re-fit it the first time the user reveals that tab. The
@@ -5771,7 +5798,8 @@ if os.environ.get("KICRAFT_WEB_DEMO"):
         with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1600px"):
             ui.label("Replaying a canned design to preview the per-stage tabs.") \
                 .classes("text-sm").style("color:#94a3b8")
-            tabs = StageTabs()
+            tabs = StageTabs(draft_spec=lambda stg, obj: _draft_sections(
+                stg, obj, prices=_DEMO_PRICES))
             d = {"events": demo_events(), "i": 0, "build_lines": []}
 
             def step():
