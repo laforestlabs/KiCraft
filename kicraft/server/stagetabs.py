@@ -3,16 +3,23 @@
 The web app streams one event per token/tool/stage from the agent loop (see
 ``stage_driver``/``client``). The old ``FeedView`` rendered them all into one
 long scrolling column. ``StageTabs`` instead gives every pipeline phase its own
-tab, and inside each tab lays out three windows (the user-chosen
-inspector-left / stream-right arrangement):
+tab, and inside each tab lays out three windows:
 
-  * PROJECT STATE (left) - the structured data this stage committed (the parts
+  * PROJECT STATE - the structured data this stage committed (the parts
     list, the nets, the sheets, ...), rebuilt from ``state.json`` for inspection,
     plus the native KiCad view / download for the build phases.
-  * THINKING (top-right) - the model's reasoning stream for the stage, in
+  * THINKING - the model's reasoning stream for the stage, in
     collapsible runs that auto-fold as the stage moves on.
-  * ACTIVITY / LOG (bottom-right) - tool calls, tool results, retries, and (for
+  * ACTIVITY / LOG - tool calls, tool results, retries, and (for
     the build phases) the build-log lines.
+
+The arrangement depends on the phase. The LLM design stages have no KiCad view
+and lead with the reasoning stream, so they keep the inspector-left /
+stream-right split with Thinking as the large pane. The build phases render the
+native KiCad artifact (the schematic on Synthesize, the board on Place/Route)
+as their project state, and that artifact is what the user came to inspect: it
+gets the full width at nearly the viewport height, with Thinking and
+Activity/log demoted to a short side-by-side band underneath.
 
 The caller drives it from the page's 0.2s timer exactly like before:
 ``push(event)`` per new event, then ``flush()`` once. The committed slot data is
@@ -103,7 +110,9 @@ class _Run:
 
 
 class StagePanel:
-    """One phase's tab body: inspector (left) over thinking + activity (right).
+    """One phase's tab body: the inspector plus the thinking + activity streams
+    (LLM stages: inspector left, streams right; build stages: full-width
+    artifact on top, streams underneath — see the module docstring).
 
     Built once into the surrounding ``ui.tab_panel`` context. Streaming events are
     fed via ``push``; ``flush`` coalesces the growing text blocks; ``set_inspector``
@@ -138,52 +147,68 @@ class StagePanel:
                     .style(f"color:{accent}")
                 self._status_slot = ui.row().classes("items-center gap-2")
 
-            # Fill the viewport under the tab row: the windows used to be a short
-            # 62vh band with a large empty area below. min-height keeps them usable
-            # on short screens.
-            #
-            # The column split depends on the phase. The build phases (synthesize /
-            # place_route / fab) render the native KiCad view (KiCanvas) as their
-            # project state, and that view is the artifact the user wants to inspect,
-            # so the inspector column takes most of the width there. The LLM stages
-            # have no view and lead with the reasoning stream, so they keep Thinking
-            # as the larger pane.
-            left_w, left_min = ("72%", "440px") if self.key in _BUILD_STAGES \
-                else ("42%", "300px")
-            with ui.row().classes("w-full no-wrap gap-3 kc-stage-body").style(
-                    "height:calc(100vh - 320px);min-height:540px"):
-                # LEFT: project-state inspector (+ view slot for KiCanvas/download).
-                with ui.column().classes("gap-1 kc-stage-left").style(
-                        f"width:{left_w};min-width:{left_min};height:100%"):
-                    ui.label("Project state").classes(
-                        "text-xs font-bold uppercase tracking-wide").style(f"color:{_DIM}")
-                    insp = ui.scroll_area().classes("w-full rounded kc-stage-insp").style(
-                        "flex:1;min-height:0;background:var(--kc-surface);border:1px solid var(--kc-border)")
-                    with insp:
-                        self.view_slot = ui.column().classes("w-full p-2 gap-2")
-                        self._insp = ui.column().classes("w-full p-2 gap-3")
+            # The three windows, arranged per phase (see the module docstring).
+            # Thinking / Activity are plain overflow containers (not
+            # ui.scroll_area) so native scroll events fire only on real position
+            # changes; tail-follow to the bottom is handled client-side by
+            # kc_follow.js (.kc-follow).
+            def _inspector() -> None:
+                ui.label("Project state").classes(
+                    "text-xs font-bold uppercase tracking-wide").style(f"color:{_DIM}")
+                insp = ui.scroll_area().classes("w-full rounded kc-stage-insp").style(
+                    "flex:1;min-height:0;background:var(--kc-surface);border:1px solid var(--kc-border)")
+                with insp:
+                    self.view_slot = ui.column().classes("w-full p-2 gap-2")
+                    self._insp = ui.column().classes("w-full p-2 gap-3")
 
-                # RIGHT: thinking (top, the star of the show) over activity/log.
-                # Plain overflow containers (not ui.scroll_area) so native scroll
-                # events fire only on real position changes; tail-follow to the
-                # bottom is handled client-side by kc_follow.js (.kc-follow).
-                with ui.column().classes("gap-1 kc-stage-right").style(
-                        "flex:1;min-width:0;height:100%"):
-                    ui.label("Thinking").classes(
-                        "text-xs font-bold uppercase tracking-wide").style(f"color:{_DIM}")
-                    with ui.element("div").classes(
-                            "w-full rounded kc-follow kc-stage-think").style(
-                            "height:58%;overflow-y:auto;"
-                            "background:var(--kc-surface);border:1px solid var(--kc-border)"):
-                        self._think = ui.column().classes("w-full p-2 gap-0")
+            def _thinking(box_style: str) -> None:
+                ui.label("Thinking").classes(
+                    "text-xs font-bold uppercase tracking-wide").style(f"color:{_DIM}")
+                with ui.element("div").classes(
+                        "w-full rounded kc-follow kc-stage-think").style(
+                        f"{box_style};overflow-y:auto;"
+                        "background:var(--kc-surface);border:1px solid var(--kc-border)"):
+                    self._think = ui.column().classes("w-full p-2 gap-0")
 
-                    ui.label("Activity / log").classes(
-                        "text-xs font-bold uppercase tracking-wide mt-1").style(f"color:{_DIM}")
-                    with ui.element("div").classes(
-                            "w-full rounded kc-follow kc-stage-act").style(
-                            "flex:1;min-height:0;overflow-y:auto;"
-                            "background:var(--kc-surface);border:1px solid var(--kc-border)"):
-                        self._act = ui.column().classes("w-full p-2 gap-1")
+            def _activity() -> None:
+                ui.label("Activity / log").classes(
+                    "text-xs font-bold uppercase tracking-wide mt-1").style(f"color:{_DIM}")
+                with ui.element("div").classes(
+                        "w-full rounded kc-follow kc-stage-act").style(
+                        "flex:1;min-height:0;overflow-y:auto;"
+                        "background:var(--kc-surface);border:1px solid var(--kc-border)"):
+                    self._act = ui.column().classes("w-full p-2 gap-1")
+
+            if self.key in _BUILD_STAGES:
+                # Build phase: the KiCad artifact (schematic / board) on top at
+                # full width and nearly the viewport height — it is the thing
+                # the user came to inspect — with Thinking + Activity in a
+                # short side-by-side band underneath.
+                with ui.column().classes("w-full gap-2 kc-stage-body"):
+                    with ui.column().classes("w-full gap-1 kc-stage-left").style(
+                            "height:calc(100vh - 170px);min-height:620px"):
+                        _inspector()
+                    with ui.row().classes("w-full no-wrap gap-3 kc-stage-under") \
+                            .style("height:280px"):
+                        with ui.column().classes("gap-1 kc-stage-right").style(
+                                "flex:1;min-width:0;height:100%"):
+                            _thinking("flex:1;min-height:0")
+                        with ui.column().classes("gap-1 kc-stage-right").style(
+                                "flex:1;min-width:0;height:100%"):
+                            _activity()
+            else:
+                # LLM stage: inspector left, Thinking (the star of the show)
+                # over Activity right. Fill the viewport under the tab row;
+                # min-height keeps the band usable on short screens.
+                with ui.row().classes("w-full no-wrap gap-3 kc-stage-body").style(
+                        "height:calc(100vh - 320px);min-height:540px"):
+                    with ui.column().classes("gap-1 kc-stage-left").style(
+                            "width:42%;min-width:300px;height:100%"):
+                        _inspector()
+                    with ui.column().classes("gap-1 kc-stage-right").style(
+                            "flex:1;min-width:0;height:100%"):
+                        _thinking("height:58%")
+                        _activity()
 
         self.clear()
 

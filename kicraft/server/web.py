@@ -146,11 +146,13 @@ from . import theme as _theme  # noqa: E402
 _theme.install()
 
 # Sizing for the in-tab KiCanvas on the build stages (the schematic on Synthesize
-# and the routed board on Place/Route). Both should nearly fill the (widened)
-# inspector column so the artifact is large enough to visually inspect; the offset
-# leaves room for the label + sheet selector above, and the floor keeps it usable
-# on short screens. One constant so the two views never drift apart.
-_BUILD_VIEW_STYLE = "height:calc(100vh - 380px);min-height:460px"
+# and the routed board on Place/Route). The build tabs give the artifact the full
+# width and nearly the viewport height (stagetabs puts Thinking/Activity below
+# it), so the view should fill almost the whole screen; the offset leaves room
+# for the header, tab row, and the labels + sheet selector above the view, and
+# the floor keeps it usable on short screens. One constant so the two views
+# never drift apart.
+_BUILD_VIEW_STYLE = "height:calc(100vh - 250px);min-height:540px"
 
 # Shown in the reset email; derived from the token TTL so the two never drift.
 _RESET_TTL_MINUTES = _RESET_TTL_SECONDS // 60
@@ -647,10 +649,9 @@ def _render_synth_view(
     default_idx = _primary_sheet_index(srcs, project_dir)
     ui.label("Schematic").classes("text-xs font-medium").style("color:#94a3b8")
     selector = ui.row().classes("w-full flex-wrap gap-1")
-    # Fill (nearly) the whole inspector column so the schematic is large enough to
-    # read; the offset leaves room for the labels + sheet selector above it, and
-    # the floor keeps it usable on short screens. The structured sheet/synthesis
-    # data scrolls below. Shared with the Place/Route board view (_BUILD_VIEW_STYLE).
+    # Fill (nearly) the whole screen so the schematic is large enough to read;
+    # the structured sheet/synthesis data scrolls below. Shared with the
+    # Place/Route board view (_BUILD_VIEW_STYLE).
     view = KiCanvasView(
         [KiCanvasSource(srcs[default_idx][0], srcs[default_idx][1])],
         height="", style=_BUILD_VIEW_STYLE)
@@ -746,8 +747,10 @@ def _render_leaf_gallery(prog: list[dict], run_status: dict) -> None:
     parent_src = run_status.get("_live_parent_source")
 
     if leaf_src or parent_src:
+        # Nearly the full artifact band (see _BUILD_VIEW_STYLE), minus room for
+        # the leaf-thumbnail row + progress bar to stay visible below.
         with ui.row().classes("w-full gap-2").style(
-                "height:calc(100vh - 500px);min-height:320px"):
+                "height:calc(100vh - 380px);min-height:380px"):
             with ui.column().classes("flex-1 min-w-0 h-full gap-1"):
                 ui.label("Current leaf").classes("text-xs font-medium").style("color:#60a5fa")
                 if leaf_src:
@@ -4737,9 +4740,11 @@ def index(prompt: str = "", project: str = ""):
                         .props("color=primary")
             support_dialog.open()
 
-        # Per-stage tabs: each phase gets its own tab with a project-state inspector
-        # (left) over the LLM thinking + activity/log windows (right). The native
-        # KiCad schematic/board (KiCanvas) and the download land in the build tabs.
+        # Per-stage tabs: each phase gets its own tab with a project-state
+        # inspector plus the LLM thinking + activity/log windows (LLM stages:
+        # inspector left / streams right; build stages: full-width artifact on
+        # top, streams below — see stagetabs). The native KiCad schematic/board
+        # (KiCanvas) and the download land in the build tabs.
         tabs = StageTabs(show_cost=is_admin(user), draft_spec=_draft_sections)
 
         # A KiCanvas view built while its tab is hidden sizes its WebGL canvas to zero

@@ -19,9 +19,15 @@
     flex: 1 1 100% !important;
     height: auto !important;
   }
+  /* Build stages put Thinking + Activity side-by-side in a fixed-height band
+   * under the artifact; stack that band's columns full-width too. */
+  .kc-stage-under {
+    flex-wrap: wrap !important;
+    height: auto !important;
+  }
   /* scroll_area is flex:1 inside a now-auto-height column -> would collapse */
   .kc-stage-insp  { height: 45vh !important; flex: none !important; }
-  .kc-stage-think { height: 38vh !important; }
+  .kc-stage-think { height: 38vh !important; flex: none !important; }
   .kc-stage-act   { height: 30vh !important; flex: none !important; }
 }
 
