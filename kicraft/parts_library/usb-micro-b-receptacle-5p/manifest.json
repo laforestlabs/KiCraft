@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:065eed8304006d35a2a20df368e20eb38256f700262f8c628a963fe4e611e57c",
+  "content_hash": "sha256:132a3513e4b2cddcf0cdef9cf95e04fc6789b8026f006ef52717ff055b43be8e",
   "datasheet_url": "https://lcsc.com/product-detail/Micro-USB-Connectors_micro-5PFour-feet-full-of-sticks-without-holes0-2Half-gold-tin-High-temperature_C40945.html",
   "description": "USB micro-B receptacle, 5-pin SMD with through-hole shield tabs. Standard USB 2.0 device-side connector for embedded boards. 5-pin includes ID pin for OTG host/device detection.",
   "footprint_name": "MICRO-USB-SMD_5P_C40945",

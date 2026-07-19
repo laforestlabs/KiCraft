@@ -23,6 +23,22 @@ from typing import Any
 
 _SIDES = ("left", "right", "top", "bottom")
 
+# Ref-designator classes that get zoned to an edge for USER ACCESS, not for an
+# off-board mating mouth. A coin-cell holder (BT*) wants to sit NEAR its edge
+# for cell swaps, but nothing plugs into it from off the board: neither the
+# flush (stranded) nor the mouth-facing gate describes a real fab defect for
+# it, and its cell-insertion opening legitimately points anywhere (self-eval
+# 2026-07-19 run_31: a fab-clean badge was rejected on BT1 "misoriented").
+# The edge zone itself stays -- placement still biases the part edgeward.
+_ACCESS_ONLY_REF_PREFIXES = frozenset({"BT"})
+
+
+def _access_only_ref(ref: str) -> bool:
+    """True for refs whose edge zone is an accessibility hint, not a mating
+    contract (see ``_ACCESS_ONLY_REF_PREFIXES``)."""
+    prefix = ref.rstrip("0123456789")
+    return prefix.upper() in _ACCESS_ONLY_REF_PREFIXES
+
 
 @dataclass(frozen=True)
 class EdgeGap:
@@ -105,6 +121,8 @@ def connector_edge_gaps(
         edge = (zone or {}).get("edge")
         if edge not in _SIDES:
             continue
+        if _access_only_ref(ref):
+            continue
         fp = fps.get(ref)
         if fp is None:
             continue
@@ -176,6 +194,8 @@ def connector_facings(
     for ref, zone in (component_zones or {}).items():
         edge = (zone or {}).get("edge")
         if edge not in _SIDES:
+            continue
+        if _access_only_ref(ref):
             continue
         fp = fps.get(ref)
         if fp is None:

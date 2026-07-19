@@ -121,12 +121,14 @@ def test_detect_opening_direction_real_3p_screw_terminal():
 # --- Layer 3: the fab-gate facing verdict --------------------------------
 
 
-def _make_board(tmp_path: Path, *, rotation: float, strip_marker: bool) -> Path:
+def _make_board(
+    tmp_path: Path, *, rotation: float, strip_marker: bool, ref: str = "J2"
+) -> Path:
     pcbnew = pytest.importorskip("pcbnew")
     board = pcbnew.CreateEmptyBoard()
     fp = pcbnew.FootprintLoad(str(LIB_3P / f"{LIB_3P.name}.pretty"), FP_3P)
     assert fp is not None
-    fp.SetReference("J2")
+    fp.SetReference(ref)
     if strip_marker:
         for item in list(fp.GraphicalItems()):
             try:
@@ -167,6 +169,24 @@ def test_facing_accepts_mouth_outward(tmp_path):
     pcb = _make_board(tmp_path, rotation=90.0, strip_marker=False)
     (v,) = connector_facings(str(pcb), ZONES)
     assert v.status == "ok"
+
+
+def test_facing_skips_battery_holder_refs(tmp_path):
+    """A BT* part's edge zone is an ACCESS hint, not a mating contract: a
+    coin-cell holder mid-board with its cell-insertion opening pointing
+    anywhere is a fine board (self-eval 2026-07-19 run_31 was rejected fab-
+    ready on exactly this). Same geometry as the misoriented case above --
+    only the ref class changes the verdict."""
+    from kicraft.autoplacer.brain.connector_edge_gap import (
+        connector_edge_gaps,
+        connector_facings,
+    )
+
+    pcb = _make_board(tmp_path, rotation=0.0, strip_marker=False, ref="BT1")
+    zones = {"BT1": {"edge": "right"}}
+    assert connector_facings(str(pcb), zones) == []
+    # The flush (stranded) gate skips access-only refs the same way.
+    assert connector_edge_gaps(str(pcb), zones) == []
 
 
 def test_facing_omits_bare_vertical_header_strip(tmp_path):

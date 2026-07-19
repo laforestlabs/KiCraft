@@ -1106,11 +1106,26 @@ class PlacementSolver:
                         return tl.x + connector_inset - rotated_x
                     else:
                         return br.x - connector_inset - rotated_x
+            # width_mm describes the BODY bbox, which is centered on
+            # body_center -- NOT on pos (the footprint origin, which for a
+            # body-behind-mouth connector sits at the pads). Flushing
+            # pos +/- hw against the edge leaves the physical body inboard
+            # by the body offset: run_01's BNC (offset 13.3mm) pinned
+            # "flush" with its mouth 13mm inside the canvas, and the packer
+            # legitimately filled the phantom gap with a trimmer -- which
+            # then stranded the mouth behind a sibling at compose (self-eval
+            # 2026-07-19). Same mechanism at 1-2mm scale for screw
+            # terminals / JST (the KC-YXQ4EC inset-mouth family).
             hw = comp.width_mm / 2
+            off_x = (
+                comp.body_center.x - comp.pos.x
+                if comp.body_center is not None
+                else 0.0
+            )
             if edge == "left":
-                return tl.x + connector_inset + hw
+                return tl.x + connector_inset + hw - off_x
             else:  # right
-                return br.x - connector_inset - hw
+                return br.x - connector_inset - hw - off_x
 
         def _connector_edge_y(comp: Component, edge: str) -> float:
             """Compute Y position so connector body edge is flush with the
@@ -1130,11 +1145,17 @@ class PlacementSolver:
                         return tl.y + connector_inset - rotated_y
                     else:
                         return br.y - connector_inset - rotated_y
+            # Body-offset compensation: see _connector_edge_x.
             hh = comp.height_mm / 2
+            off_y = (
+                comp.body_center.y - comp.pos.y
+                if comp.body_center is not None
+                else 0.0
+            )
             if edge == "top":
-                return tl.y + connector_inset + hh
+                return tl.y + connector_inset + hh - off_y
             else:  # bottom
-                return br.y - connector_inset - hh
+                return br.y - connector_inset - hh - off_y
 
         def _orient_for_edge(comp: Component, edge: str):
             """Rotate the connector to face the edge, keeping extents honest.

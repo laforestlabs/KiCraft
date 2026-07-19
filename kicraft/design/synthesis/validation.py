@@ -1782,6 +1782,58 @@ def check_multi_unit_symbols(bom) -> CheckResult:
     )
 
 
+# Button/part identities for the family strap rules. Matched against
+# "symbol value sourcing_note" like _PROG_ACCESS_PART_RE.
+_BOOT_BUTTON_RE = re.compile(r"boot|io0\b|gpio0\b|io9\b|download|flash.?mode", re.I)
+_RESET_BUTTON_RE = re.compile(r"reset|\brst\b|\ben\b|enable|\brun\b", re.I)
+_USB_UART_BRIDGE_RE = re.compile(
+    r"cp210\d|ch340|ch910\d|ft232|ftdi|pl2303|usb.?(?:to.?)?(?:uart|serial)|"
+    r"uart.?bridge",
+    re.I,
+)
+
+
+def _family_strap_gaps(bom, mcus, access) -> list[str]:
+    """Bootloader-strap families need more than "a USB connector exists".
+
+    Returns one offender string per MCU whose family requirement is unmet;
+    families outside the two rules (and unrecognizable parts) are never
+    judged. Part-presence only -- runs at BOM commit, where the model can
+    still ADD the missing button/header (wiring-level strap analysis stays
+    §9.21's job).
+    """
+    def _ident(p) -> str:
+        return f"{p.symbol} {p.value} {getattr(p, 'sourcing_note', None) or ''}"
+
+    buttons = [p for p in bom.parts if _ref_prefix(p.ref) in ("SW", "S")]
+    tps = [p for p in bom.parts if _ref_prefix(p.ref) == "TP"]
+    swd_access = [p for p in access if _PROG_ACCESS_PART_RE.search(_ident(p))]
+    bridge = any(_USB_UART_BRIDGE_RE.search(_ident(p)) for p in bom.parts)
+    gaps: list[str] = []
+    for part in mcus:
+        ident = f"{part.symbol} {part.value}".strip()
+        if _RP2040_FAMILY_RE.search(ident):
+            if not (swd_access or buttons or len(tps) >= 2):
+                gaps.append(
+                    f"{part.ref} ({ident}): RP2040 cannot re-enter its USB "
+                    "bootloader without holding BOOTSEL at reset -- add a "
+                    "BOOTSEL button/jumper (SW ref), an SWD header (name "
+                    "'SWD' in its value), or TP pads on SWD/BOOTSEL"
+                )
+        elif _ESP_FAMILY_RE.search(ident):
+            has_boot = any(_BOOT_BUTTON_RE.search(_ident(p)) for p in buttons)
+            has_reset = any(_RESET_BUTTON_RE.search(_ident(p)) for p in buttons)
+            if not (bridge or (has_boot and has_reset) or len(tps) >= 2):
+                gaps.append(
+                    f"{part.ref} ({ident}): entering ESP32 download mode "
+                    "needs the BOOT strap plus a reset -- add BOOT and "
+                    "EN/RESET buttons (SW refs, named so), or a USB-UART "
+                    "bridge with DTR/RTS auto-reset, or TP pads on the "
+                    "straps"
+                )
+    return gaps
+
+
 def check_mcu_programming_access(bom) -> CheckResult:
     """§9.29 (hard) -- an MCU board must be physically programmable.
 
@@ -1799,6 +1851,18 @@ def check_mcu_programming_access(bom) -> CheckResult:
       commit): a UPDI-programmed MCU's UPDI pin must share a net with one of
       those access parts. Wired-to-a-pullup-only is the observed failure
       mode; conservative for other families (SWD heuristics stay §9.21).
+
+    **Family strap/reset requirements** (part presence, BOM commit): "has a
+    USB connector" is NOT a sufficient programming story for bootloader-strap
+    families -- self-eval 2026-07-19 gated two boards at cap 50 on exactly
+    this:
+
+    * RP2040 (run_10): entering the ROM USB bootloader after first flash
+      needs BOOTSEL held at reset -- without a BOOTSEL button/jumper or an
+      SWD access part the board is one bad firmware away from a brick.
+    * ESP32 family (run_30): entering download mode needs the BOOT strap +
+      a reset, so the BOM must carry BOOT+EN/RESET buttons, or a USB-UART
+      bridge (DTR/RTS auto-reset), or strap test pads.
     """
     mcus = [p for p in bom.parts if _is_mcu_part(p)]
     if not mcus:
@@ -1822,6 +1886,7 @@ def check_mcu_programming_access(bom) -> CheckResult:
             offenders=[f"{p.ref} ({p.symbol} {p.value})" for p in mcus],
         )
     bad: list[str] = []
+    bad.extend(_family_strap_gaps(bom, mcus, access))
     if bom.connections:
         from collections import defaultdict as _dd
 
@@ -1856,7 +1921,8 @@ def check_mcu_programming_access(bom) -> CheckResult:
         message=(
             "every MCU has a physical programming path"
             if not bad
-            else f"{len(bad)} MCU(s) whose programming pin reaches no access part"
+            else f"{len(bad)} MCU(s) missing a workable programming/recovery "
+                 f"path (strap buttons, debug access, or reachability)"
         ),
         offenders=bad,
     )

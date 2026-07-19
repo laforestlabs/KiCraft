@@ -1094,12 +1094,23 @@ def test_prog_access_part_presence_satisfied_by_test_pads() -> None:
     assert check_mcu_programming_access(bom).ok
 
 
-def test_prog_access_part_presence_satisfied_by_usb_connector() -> None:
+def test_prog_access_part_presence_usb_alone_insufficient_for_esp32() -> None:
+    # Family strap rule (self-eval 2026-07-19 run_30): a bare USB connector is
+    # not a workable ESP32 download-mode story -- entering the bootloader
+    # needs BOOT+EN buttons, strap test pads, or a USB-UART bridge whose
+    # DTR/RTS auto-reset drives the straps. The bridge variant passes.
     usb = BomPart(ref="J1", value="USB-C receptacle", symbol="usbc:TYPE-C-16P",
                   footprint="usbc:HRO-TYPE-C-16P", sheet="POWER")
-    bom = BOM(parts=[_bpart("U1", "esp32-s3-mini-1:ESP32-S3-MINI-1"), usb],
-              connections=[])
-    assert check_mcu_programming_access(bom).ok
+    mcu = _bpart("U1", "esp32-s3-mini-1:ESP32-S3-MINI-1")
+    res = check_mcu_programming_access(BOM(parts=[mcu, usb], connections=[]))
+    assert not res.ok
+    assert "download mode" in res.offenders[0]
+    bridge = BomPart(ref="U2", value="CH340C USB-UART bridge",
+                     symbol="Device:R",
+                     footprint="Resistor_SMD:R_0402_1005Metric", sheet="POWER")
+    assert check_mcu_programming_access(
+        BOM(parts=[mcu, usb, bridge], connections=[])
+    ).ok
 
 
 def test_prog_access_updi_wired_to_pullup_only_fails(monkeypatch) -> None:

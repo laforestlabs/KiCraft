@@ -36,6 +36,7 @@ import logging
 import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Literal
 
 from . import geometry
@@ -542,10 +543,17 @@ def _filter_rotations_for_connector_opening(
        Without this a switch with no detectable mouth places by packing score
        and a sibling ends up nearer the edge, stranding the zoned part inboard.
 
-    If no rotation satisfies every edge constraint -- e.g. two parts pinned to
-    opposite edges of one rigid leaf, or a part that is never its leaf's
-    extremity -- the candidate set is left untouched and a warning is logged so
-    the post-compose gate (connector_edge_gap) flags the survivor.
+    If no rotation satisfies every edge constraint, degrade in order:
+
+    * **Mouth-only fallback**: keep the rotations where every DETECTABLE mouth
+      still faces outward, extremity unsatisfied. A leaf whose internal layout
+      put a sibling outboard of its zoned connector (self-eval 2026-07-19
+      run_01: RV1 packed past the BNC J2's mouth) can never satisfy both; the
+      old all-candidates give-up then let the packing score pick a rotation
+      with the mouth 180 degrees INWARD -- strictly worse than stranding: the
+      port is unmateable at any outline.
+    * Otherwise the candidate set is left untouched and a warning is logged so
+      the post-compose gate (connector_edge_gap) flags the survivor.
     """
     edge_constraints = [c for c in spec.constraints if c.target == "edge"]
     if not edge_constraints:
@@ -553,11 +561,13 @@ def _filter_rotations_for_connector_opening(
 
     has_constraint = False
     kept: list[float] = []
+    mouth_kept: list[float] = []
     for rot in spec.rotation_candidates:
         model = spec.models.get(rot)
         if model is None:
             continue
         ok = True
+        mouth_ok = True
         for c in edge_constraints:
             comp = model.transformed.transformed_components.get(c.ref)
             if comp is None:
@@ -570,14 +580,16 @@ def _filter_rotations_for_connector_opening(
                 want = edge_outward_angle(comp.layer, c.value)
                 if not angles_close(board_opening, want):
                     ok = False
+                    mouth_ok = False
                     break
             if not _edge_zoned_is_leaf_extremity(
                 model.transformed, c.ref, c.value
             ):
                 ok = False
-                break
         if ok:
             kept.append(rot)
+        if mouth_ok:
+            mouth_kept.append(rot)
 
     if not has_constraint:
         return
@@ -589,6 +601,17 @@ def _filter_rotations_for_connector_opening(
         # inward for a better packing score, so the allowed set must shrink too.
         spec.rotation_candidates = kept
         spec.all_rotation_candidates = kept
+    elif mouth_kept and len(mouth_kept) < len(spec.rotation_candidates):
+        spec.rotation_candidates = mouth_kept
+        spec.all_rotation_candidates = mouth_kept
+        logger.warning(
+            "Leaf %s: no rotation places every edge-zoned part outward AND at "
+            "its leaf extremity; narrowing to the %d mouth-correct rotation(s) "
+            "(the zoned part may strand inboard of siblings, but the port "
+            "stays mateable)",
+            spec.instance_path,
+            len(mouth_kept),
+        )
     else:
         logger.warning(
             "Leaf %s: no rotation places every edge-zoned part outward AND at "
@@ -1537,6 +1560,28 @@ def _rects_intersect(a: tuple[Point, Point], b: tuple[Point, Point]) -> bool:
     return not _bbox_disjoint(a, b)
 
 
+def _rects_world_envelope(
+    rects: Sequence[tuple[Point, Point]],
+    origin: Point,
+    rotation_deg: float,
+) -> tuple[Point, Point] | None:
+    """World-frame AABB containing every transformed rect, or None when empty.
+
+    Transforms the aggregate LOCAL bbox once instead of every member rect;
+    the result contains the union of the individually-transformed rects, so
+    a disjoint pair of envelopes proves no member pair can intersect.
+    """
+    if not rects:
+        return None
+    min_x = min(r[0].x for r in rects)
+    min_y = min(r[0].y for r in rects)
+    max_x = max(r[1].x for r in rects)
+    max_y = max(r[1].y for r in rects)
+    return _transform_rect(
+        (Point(min_x, min_y), Point(max_x, max_y)), origin, rotation_deg
+    )
+
+
 def _any_rect_overlap(
     rects_a: tuple[tuple[Point, Point], ...],
     origin_a: Point,
@@ -1545,11 +1590,24 @@ def _any_rect_overlap(
     origin_b: Point,
     rotation_b: float,
 ) -> bool:
+    if not rects_a or not rects_b:
+        return False
+    # Envelope prefilter + hoisted B transforms: the naive form re-transformed
+    # every rect_b once per rect_a (O(|A|x|B|) 4-corner transforms), which the
+    # parent scorer then multiplied by C(n,2) pairs per SA move -- the 18-leaf
+    # servo board's compose round outlived the build watchdog on exactly this
+    # (self-eval 2026-07-19 run_26, 99.5% of py-spy samples).
+    env_a = _rects_world_envelope(rects_a, origin_a, rotation_a)
+    env_b = _rects_world_envelope(rects_b, origin_b, rotation_b)
+    if _bbox_disjoint(env_a, env_b):
+        return False
+    world_b = [_transform_rect(r, origin_b, rotation_b) for r in rects_b]
     for rect_a in rects_a:
         world_a = _transform_rect(rect_a, origin_a, rotation_a)
-        for rect_b in rects_b:
-            world_b = _transform_rect(rect_b, origin_b, rotation_b)
-            if _rects_intersect(world_a, world_b):
+        if _bbox_disjoint(world_a, env_b):
+            continue
+        for world_rect_b in world_b:
+            if _rects_intersect(world_a, world_rect_b):
                 return True
     return False
 
@@ -2429,6 +2487,20 @@ def can_overlap_sparse(
         sum(_rect_area(r) for r in blocker_b.back_pads)
         + sum(_rect_area(r) for r in blocker_b.back_traces)
     ) > 0.0 or force_back_only_b
+    # World envelopes of everything each leaf occupies. Disjoint envelopes
+    # prove (a) no per-rect copper conflict below can fire and (b) no nesting
+    # (a genuinely enclosed hole is surrounded by copper, so it lies inside
+    # its owner's envelope) -- letting far-apart pairs skip the O(rects^2)
+    # scans entirely. The parent scorer probes ALL C(n,2) pairs per SA move,
+    # so without this the 18-leaf servo compose outlived the build watchdog
+    # (self-eval 2026-07-19 run_26).
+    env_a = _rects_world_envelope(
+        _blocker_occupied_rects(blocker_a), origin_a, rotation_a
+    )
+    env_b = _rects_world_envelope(
+        _blocker_occupied_rects(blocker_b), origin_b, rotation_b
+    )
+    envelopes_disjoint = _bbox_disjoint(env_a, env_b)
     if (front_a and front_b) or (back_a and back_b):
         # Nesting allowance: FULL containment inside a genuinely enclosed
         # interior hole of the other leaf has no seam -- the stamped-plane
@@ -2438,6 +2510,8 @@ def can_overlap_sparse(
         # overlaps still hard-fail; the per-rect checks below run on nested
         # pairs too (belt over suspenders). See
         # docs/plans/shaped-compose-leaf-nesting.md.
+        if (env_a is not None and env_b is not None and envelopes_disjoint):
+            return False
         if not (
             _guest_nests_in_host(
                 blocker_a, origin_a, rotation_a,
@@ -2453,6 +2527,10 @@ def can_overlap_sparse(
             )
         ):
             return False
+    elif envelopes_disjoint:
+        # Opposite-layer pair with no occupied geometry anywhere near each
+        # other: every per-rect check below is vacuously clear.
+        return True
 
     # OPPOSITE-LAYER (stacking) pair only past this point -- e.g. an SMT-front
     # leaf over a back-side THT battery holder. The remaining conflicts are

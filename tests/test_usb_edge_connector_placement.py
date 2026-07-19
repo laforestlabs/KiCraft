@@ -295,6 +295,56 @@ def test_filter_keeps_only_rotations_with_zoned_part_at_extremity():
     assert spec.all_rotation_candidates == [90.0, 180.0]
 
 
+def test_filter_falls_back_to_mouth_correct_rotations(caplog):
+    """When NO rotation satisfies mouth+extremity together, the filter must
+    prefer the mouth-correct rotation(s) over giving up: the old all-candidates
+    give-up let packing pick a rotation with the mouth 180deg INWARD -- an
+    unmateable port at any outline (self-eval 2026-07-19 run_01: RV1 packed
+    outboard of the BNC, so extremity was unsatisfiable at every rotation)."""
+    constraint = AttachmentConstraint(
+        ref="J1", target="edge", value="bottom", inward_keep_in_mm=0.0,
+        outward_overhang_mm=0.5, source="child_artifact", child_index=0,
+    )
+    candidates = [0.0, 90.0, 180.0, 270.0]
+
+    def _conn(rot):
+        return Component(
+            ref="J1", value="BNC", pos=Point(0.0, 0.0), rotation=rot,
+            layer=Layer.FRONT, width_mm=9.0, height_mm=3.0, kind="connector",
+            pads=[], opening_direction=90.0,
+        )
+
+    def _sibling():
+        # Always OUTBOARD of J1 on the bottom side -> extremity never holds.
+        return Component(
+            ref="R1", value="R1", pos=Point(0.0, 30.0), rotation=0.0,
+            layer=Layer.FRONT, width_mm=2.0, height_mm=2.0, kind="other",
+            pads=[],
+        )
+
+    models = {
+        rot: SimpleNamespace(
+            transformed=SimpleNamespace(
+                transformed_components={"J1": _conn(rot), "R1": _sibling()}
+            )
+        )
+        for rot in candidates
+    }
+    spec = SimpleNamespace(
+        constraints=[constraint],
+        rotation_candidates=list(candidates),
+        all_rotation_candidates=list(candidates),
+        models=models,
+        instance_path="/leaf",
+    )
+    with caplog.at_level(logging.WARNING):
+        _filter_rotations_for_connector_opening(spec, _LOGGER)
+    # opening 90 at comp rotation 0 -> board 90 == bottom outward: only 0.0.
+    assert spec.rotation_candidates == [0.0]
+    assert spec.all_rotation_candidates == [0.0]
+    assert any("mouth-correct" in r.message for r in caplog.records)
+
+
 # --- Layer C: overhang math ----------------------------------------------
 
 

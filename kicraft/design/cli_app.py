@@ -96,6 +96,8 @@ from .synthesis.validation import (
     check_no_dangling_signal_nets,
     check_pin_existence,
     check_power_pin_polarity,
+    check_regulator_feedback_vout,
+    check_repeated_block_coverage,
     check_rf_feed_isolation,
     check_sheets_have_parts,
     check_single_net_per_pin,
@@ -247,6 +249,15 @@ def _unresolved_symbols(bom) -> list[str]:
                        + _candidate_hint(_symbol_candidates(sym)))
             continue
         if not info.get("pins"):
+            # A RESOLVED zero-pin symbol from the Mechanical library is a
+            # deliberate pin-less part (MountingHole, Fiducial, logos) --
+            # nothing to wire, nothing to reject. Demanding a pin inventory
+            # here burned wiring/BOM retries on every board that carried a
+            # mounting hole (self-eval 2026-07-19 run_20: the same H1 offender
+            # recurred across 4 of its 7 BOM retries). The check's real target
+            # -- hallucinated names -- never resolves at all.
+            if (sym or "").partition(":")[0] == "Mechanical":
+                continue
             bad.append(f"{part.ref}: symbol {sym!r} resolved but exposes no pins")
     return bad
 
@@ -1119,6 +1130,13 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             check_single_net_per_pin(state.bom),
             check_family_wiring_contracts(state.bom),
             check_mcu_programming_access(state.bom),
+            # §9.31/§9.32 previously first fired in the BUILD-time
+            # collect_validations -- after the wiring stage's retry budget was
+            # gone, so a fixable miss (3 of 4 jacks inert, self-eval 2026-07-19
+            # run_28) died as rc=5 instead of a retry with offenders. Running
+            # them here keeps the build-time pass as the safety net.
+            check_repeated_block_coverage(state.bom),
+            check_regulator_feedback_vout(state.bom),
         ]
         if state.architecture is not None:
             checks.append(
@@ -1728,6 +1746,39 @@ def _sanitize_kicad_name(name: str) -> str:
     return _KICAD_NAME_ILLEGAL_RE.sub("", name or "")
 
 
+# Reference-designator classes whose symbol pins must be PASSIVE (KLC-style):
+# connectors, switches, relays, terminal blocks, battery holders. easyeda2kicad
+# routinely emits their pins typed 'input' (or 'unspecified'); a net carrying
+# only such pins then fails ERC "Input pin not driven by any Output pins" --
+# self-eval 2026-07-19 run_27: the vendored DIP switch's straps produced 3 ERC
+# errors on an electrically-fine schematic. Signal-direction types are
+# meaningless on electromechanical parts, so retyping them is a pure fix; the
+# power_* / no_connect / free types are left alone (they carry deliberate ERC
+# semantics a normalizer must not invent or destroy).
+_PASSIVE_PIN_REF_PREFIXES = frozenset(
+    {"J", "P", "X", "CN", "K", "S", "SW", "BT", "TB"}
+)
+_MISTYPED_EMECH_PIN_RE = re.compile(r"\(pin (?:input|unspecified)(\s)")
+
+
+def _symbol_reference_prefix(sym_text: str) -> str | None:
+    """The letter prefix of the symbol's Reference property ('SW3' -> 'SW')."""
+    m = re.search(r'\(property\s+"Reference"\s+"([A-Za-z]+)', sym_text)
+    return m.group(1).upper() if m else None
+
+
+def _normalize_emech_pin_types(sym_text: str) -> tuple[str, int]:
+    """Retype input/unspecified pins to passive on electromechanical symbols.
+
+    Applies only when the symbol's reference prefix marks a connector /
+    switch / relay / battery class (``_PASSIVE_PIN_REF_PREFIXES``); returns
+    ``(text, n_retyped)``.
+    """
+    if _symbol_reference_prefix(sym_text) not in _PASSIVE_PIN_REF_PREFIXES:
+        return sym_text, 0
+    return _MISTYPED_EMECH_PIN_RE.subn(r"(pin passive\1", sym_text)
+
+
 def _sanitize_footprint_text(fp_text: str, raw_name: str) -> tuple[str, str]:
     """Return (sanitized_name, fp_text) with the in-file ``(footprint "...")``
     header rewritten to match, so the on-disk name stays consistent with the
@@ -2209,8 +2260,17 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
     raw_symbol_name = _scan_symbol_name(sym_text) or ee_symbol.info.name
     symbol_name = _sanitize_kicad_name(raw_symbol_name)
     if symbol_name != raw_symbol_name:
-        sym_path.write_text(
-            _normalize_symbol_text(sym_text, raw_symbol_name, symbol_name)
+        sym_text = _normalize_symbol_text(sym_text, raw_symbol_name, symbol_name)
+        sym_path.write_text(sym_text)
+    # Electromechanical parts (connector/switch/relay/battery prefixes) must
+    # carry PASSIVE pins; the EasyEDA export types them 'input', which makes
+    # every strap/jack net an ERC error downstream.
+    sym_text, retyped = _normalize_emech_pin_types(sym_text)
+    if retyped:
+        sym_path.write_text(sym_text)
+        print(
+            f"normalized {retyped} mistyped pin(s) to passive "
+            f"(electromechanical symbol, ERC-safe)"
         )
 
     # 3D model: fetched by default so the bundle renders with a body in the
@@ -2278,7 +2338,23 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
     _ensure_vendored_courtyard_clearance(pretty_dir, footprint_name)
 
     # Compose the manifest, then compute content_hash and rewrite once.
-    sourcing: dict[str, str] = {"lcsc": lcsc_id}
+    # The fetched id goes into ``sourcing.lcsc`` ONLY when the offline catalog
+    # can verify it. EasyEDA serves parts under ids the jlcparts dump does not
+    # carry (e.g. C99xxxxxxx preferred-extended rows); writing such an id as a
+    # claim makes ``_unresolved_lcsc`` reject every BOM that uses the bundle,
+    # with no move the model can make to fix it (self-eval 2026-07-19 run_20:
+    # a freshly-fetched OLED looped fetch->reject to retry exhaustion). The
+    # symbol/footprint stay fully usable; §9.26 still owns orderability of
+    # whatever the BOM actually pins.
+    sourcing: dict[str, str] = {}
+    if jlcparts.available() and not jlcparts.lcsc_exists(lcsc_id):
+        print(
+            f"note: {lcsc_id} is not in the offline parts catalog -- bundling "
+            f"the symbol/footprint without a sourcing.lcsc claim (pick an "
+            f"orderable C# in the BOM's sourcing_note instead)"
+        )
+    else:
+        sourcing["lcsc"] = lcsc_id
     try:
         sourcing.update(_parse_sourcing_args(args.sourcing or []))
     except ValueError as exc:
@@ -2569,6 +2645,22 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
                     f"this.",
                     file=sys.stderr,
                 )
+
+    # (8) Electromechanical symbol with signal-typed pins: a connector /
+    # switch / relay / battery symbol whose pins are 'input'/'unspecified'
+    # turns every net it straps into an ERC "Input pin not driven" error
+    # (self-eval 2026-07-19 run_27, vendored DIP switch). add-part now
+    # normalizes on fetch; this lint keeps hand-supplied bundles honest.
+    _fixed_sym, _mistyped = _normalize_emech_pin_types(sym_text)
+    if _mistyped:
+        print(
+            f"WARNING {manifest.name}: {_mistyped} pin(s) on this "
+            f"electromechanical symbol are typed input/unspecified -- they "
+            f"must be passive or every strap net fails ERC. Retype them "
+            f"(add-part now does this on fetch), then rerun with "
+            f"--update-hash.",
+            file=sys.stderr,
+        )
 
     actual = compute_content_hash(part_dir)
     if actual != manifest.content_hash:
@@ -3293,6 +3385,13 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             # BOM-commit gate above guaranteed such a part exists, so this is
             # always winnable by adding one connection -- never a whack-a-mole.
             check_mcu_programming_access(state.bom),
+            # §9.31/§9.32 at COMMIT time (not only in the build-time
+            # collect_validations): the model must see "J3/J4/J5 are inert
+            # duplicates" / "divider gives 8.2V not 5V" while it still has
+            # retries -- discovered at build 1/5 it is an unrecoverable rc=5
+            # (self-eval 2026-07-19 run_28).
+            check_repeated_block_coverage(state.bom),
+            check_regulator_feedback_vout(state.bom),
         ]
         if state.architecture is not None:
             # Architecture declared these inter-sheet nets; the wiring stage

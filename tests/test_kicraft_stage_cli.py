@@ -128,6 +128,16 @@ def _valid_bom() -> dict:
                 "footprint": "Resistor_SMD:R_0402_1005Metric",
                 "sheet": "MCU",
             },
+            {
+                # §9.29 family strap rule: an ESP32 needs BOOT+RESET buttons
+                # OR a USB-UART bridge (DTR/RTS auto-reset) -- USB alone is
+                # not a workable download-mode story.
+                "ref": "U2",
+                "value": "CH340C USB-UART bridge",
+                "symbol": "Device:R",  # cheap stand-in, same as U1 above
+                "footprint": "Resistor_SMD:R_0402_1005Metric",
+                "sheet": "MCU",
+            },
         ],
         "ic_groups": {},
         "group_labels": {},
@@ -402,6 +412,8 @@ def test_stage_commit_wiring_preserves_bom_other_fields(tmp_path, capsys):
             "no_connect_pins": [
                 {"ref": "J3", "pin": "1"},
                 {"ref": "J3", "pin": "2"},
+                {"ref": "U2", "pin": "1"},
+                {"ref": "U2", "pin": "2"},
             ],
         },
     )
@@ -420,8 +432,129 @@ def test_stage_commit_wiring_preserves_bom_other_fields(tmp_path, capsys):
     # Wiring fields populated...
     assert len(written["bom"]["connections"]) == 4
     # ...and the rest of the BOM is intact
-    assert len(written["bom"]["parts"]) == 3
-    assert {p["ref"] for p in written["bom"]["parts"]} == {"U1", "C1", "J3"}
+    assert len(written["bom"]["parts"]) == 4
+    assert {p["ref"] for p in written["bom"]["parts"]} == {"U1", "C1", "J3", "U2"}
+
+
+def test_stage_commit_bom_accepts_pinless_mechanical_symbol(tmp_path, capsys):
+    """A RESOLVED zero-pin Mechanical symbol (MountingHole) is a deliberate
+    pin-less part, not a hallucination -- rejecting it burned BOM retries on
+    every board carrying a mounting hole (self-eval 2026-07-19 run_20)."""
+    state_path = tmp_path / "state.json"
+    bom = _valid_bom()
+    bom["parts"].append(
+        {
+            "ref": "H1",
+            "value": "M2.5 mounting hole",
+            "symbol": "Mechanical:MountingHole",
+            "footprint": "MountingHole:MountingHole_2.7mm_M2.5",
+            "sheet": "MCU",
+        }
+    )
+    for stage, data in [
+        ("intent", _valid_intent()),
+        ("functional_spec", _valid_functional_spec()),
+        ("architecture", _valid_architecture()),
+        ("bom", bom),
+    ]:
+        slot = _write_slot(tmp_path, stage, data)
+        argv = [
+            "stage-commit",
+            stage,
+            "--slot-file",
+            str(slot),
+            "--no-archive",
+            str(state_path),
+        ]
+        if stage == "intent":
+            argv += ["--project-stem", "ESP32_TEST"]
+        rc, payload = _run(capsys, *argv)
+        assert rc == 0, (stage, payload)
+    written = json.loads(state_path.read_text())
+    assert {p["ref"] for p in written["bom"]["parts"]} >= {"U1", "C1", "J3", "H1"}
+
+
+def test_stage_commit_wiring_rejects_inert_duplicate_connector(tmp_path, capsys):
+    """§9.31 must fire AT WIRING COMMIT (with the model's retry budget live),
+    not only in the build-time collect_validations: self-eval 2026-07-19
+    run_28 committed a 4-jack breakout with 3 jacks all-NC and died as an
+    unrecoverable rc=5 at build 1/5 instead of a retry with offenders."""
+    state_path = tmp_path / "state.json"
+    bom = _valid_bom()
+    for ref in ("J4", "J5"):
+        bom["parts"].append(
+            {
+                "ref": ref,
+                "value": "3.5mm TRS jack",
+                "symbol": "Device:R",  # 2-pin stand-in, same as U1 above
+                "footprint": "Resistor_SMD:R_0402_1005Metric",
+                "sheet": "MCU",
+            }
+        )
+    for stage, data in [
+        ("intent", _valid_intent()),
+        ("functional_spec", _valid_functional_spec()),
+        ("architecture", _valid_architecture()),
+        ("bom", bom),
+    ]:
+        slot = _write_slot(tmp_path, stage, data)
+        argv = [
+            "stage-commit",
+            stage,
+            "--slot-file",
+            str(slot),
+            "--no-archive",
+            str(state_path),
+        ]
+        if stage == "intent":
+            argv += ["--project-stem", "ESP32_TEST"]
+        rc, payload = _run(capsys, *argv)
+        assert rc == 0, (stage, payload)
+
+    # J4 fully wired; its byte-identical sibling J5 is declared all-NC -- a
+    # silently dead channel. Every other pin is accounted for, so §9.31 is
+    # the only check that can fire.
+    wiring_slot = _write_slot(
+        tmp_path,
+        "wiring",
+        {
+            "connections": [
+                {"net_name": "+3V3",
+                 "endpoints": [{"ref": "U1", "pin": "1"}], "sheet": "MCU"},
+                {"net_name": "GND",
+                 "endpoints": [{"ref": "U1", "pin": "2"}], "sheet": "MCU"},
+                {"net_name": "+3V3",
+                 "endpoints": [{"ref": "C1", "pin": "1"}], "sheet": "LDO"},
+                {"net_name": "GND",
+                 "endpoints": [{"ref": "C1", "pin": "2"}], "sheet": "LDO"},
+                {"net_name": "+3V3",
+                 "endpoints": [{"ref": "J4", "pin": "1"}], "sheet": "MCU"},
+                {"net_name": "GND",
+                 "endpoints": [{"ref": "J4", "pin": "2"}], "sheet": "MCU"},
+            ],
+            "no_connect_pins": [
+                {"ref": "J3", "pin": "1"},
+                {"ref": "J3", "pin": "2"},
+                {"ref": "U2", "pin": "1"},
+                {"ref": "U2", "pin": "2"},
+                {"ref": "J5", "pin": "1"},
+                {"ref": "J5", "pin": "2"},
+            ],
+        },
+    )
+    rc, payload = _run(
+        capsys,
+        "stage-commit",
+        "wiring",
+        "--slot-file",
+        str(wiring_slot),
+        "--no-archive",
+        str(state_path),
+    )
+    assert rc == 3, payload
+    assert payload["ok"] is False
+    assert any("9.31" in e for e in payload["errors"]), payload["errors"]
+    assert any("J5" in o for o in payload.get("offenders", [])), payload
 
 
 def test_stage_commit_wiring_without_bom_errors(tmp_path, capsys):
