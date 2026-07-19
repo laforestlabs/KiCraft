@@ -333,3 +333,75 @@ class TestKeepDiscardUsesComposerQuality:
             leaf_accepted=6, leaf_total=6, parent_routed=True, parent_output_json=path_high
         )
         assert score_high - score_low >= 0.5  # crosses keep threshold
+
+
+class TestPromotedButRejectedParent:
+    """A compose that exits 0 with validation accepted=False (promoted
+    strand/courtyard board) must NOT score as functional (2026-07-19 §2.2)."""
+
+    def _rejected_validation(self, reasons: list[str]) -> dict:
+        return {
+            "accepted": False,
+            "rejection_reasons": reasons,
+            "drc": {"shorts": 0, "unconnected": 0, "total": 3},
+            "track_summary": {"traces": 120},
+        }
+
+    def test_rejected_parent_scores_routed_dirty(self, tmp_path: Path):
+        pipeline = _write_parent_pipeline(tmp_path, score_total=85.0)
+        score, breakdown, notes, tier = _score_round(
+            leaf_accepted=3,
+            leaf_total=3,
+            parent_routed=True,
+            parent_output_json=pipeline,
+            parent_routed_validation=self._rejected_validation(
+                ["courtyards_overlap"]
+            ),
+        )
+        assert tier == "routed_dirty"
+        assert score <= 70.0
+        assert "rejected=courtyards_overlap" in notes
+
+    def test_rejected_parent_loses_to_accepted_round(self, tmp_path: Path):
+        pipeline = _write_parent_pipeline(tmp_path, score_total=85.0)
+        rejected_score, _, _, _ = _score_round(
+            leaf_accepted=3,
+            leaf_total=3,
+            parent_routed=True,
+            parent_output_json=pipeline,
+            parent_routed_validation=self._rejected_validation(
+                ["connector_stranded:J2@-1.37mm(right)"]
+            ),
+        )
+        accepted_score, _, _, tier = _score_round(
+            leaf_accepted=3,
+            leaf_total=3,
+            parent_routed=True,
+            parent_output_json=pipeline,
+            parent_routed_validation={"accepted": True, "drc": {}},
+        )
+        assert tier == "functional"
+        assert accepted_score > rejected_score
+
+    def test_accepted_parent_still_functional(self, tmp_path: Path):
+        pipeline = _write_parent_pipeline(tmp_path, score_total=72.0)
+        score, _, notes, tier = _score_round(
+            leaf_accepted=2,
+            leaf_total=2,
+            parent_routed=True,
+            parent_output_json=pipeline,
+            parent_routed_validation={"accepted": True, "drc": {}},
+        )
+        assert tier == "functional"
+        assert score == 72.0
+
+    def test_no_validation_stays_functional(self, tmp_path: Path):
+        # Back-compat: callers that never pass validation keep old behavior.
+        pipeline = _write_parent_pipeline(tmp_path, score_total=60.0)
+        _, _, _, tier = _score_round(
+            leaf_accepted=2,
+            leaf_total=2,
+            parent_routed=True,
+            parent_output_json=pipeline,
+        )
+        assert tier == "functional"

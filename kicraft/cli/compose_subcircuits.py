@@ -2527,17 +2527,24 @@ def _promotable_strand_only(
     """Whether a *rejected* routed parent should still be promoted as a routed
     but NOT-fab-ready board.
 
-    True only when the board's sole defect is connector stranding -- every
-    rejection reason is a recorded ``connector_stranded:*`` finding -- AND the
-    board is electrically complete (no shorts, no unconnected nets). Such a
-    board is fully routed and usable for inspection; failing it outright as
-    ``rc=6 "no routed parent"`` (with no artifact) misrepresents a placement
-    defect as an infra failure. Boards with any *other* defect (illegal routed
-    geometry, unconnected nets, shorts) stay hard-rejected.
+    True only when the board's defects are placement-quality findings --
+    connector stranding (``connector_stranded:*``) and/or courtyard overlap
+    (``courtyards_overlap``) -- AND the board is electrically complete (no
+    shorts, no unconnected nets). Such a board is fully routed and usable for
+    inspection; failing it outright as ``rc=6 "no routed parent"`` (with no
+    artifact) misrepresents a placement defect as an infra failure. Round
+    scoring grades these promoted-but-rejected boards as routed_dirty (not
+    "functional"), so an accepted round always outranks them. Boards with any
+    *other* defect (illegal routed geometry, unconnected nets, shorts) stay
+    hard-rejected.
     """
-    if not connector_strand_reasons:
+    promotable = set(connector_strand_reasons) | {
+        "courtyards_overlap",
+        "courtyard_unmeasured",
+    }
+    if not reasons:
         return False
-    if any(reason not in connector_strand_reasons for reason in reasons):
+    if any(reason not in promotable for reason in reasons):
         return False
     drc = drc or {}
     return not drc.get("shorts") and not drc.get("unconnected")
@@ -2571,6 +2578,14 @@ class CandidateRecord:
     # nonzero count ships a guaranteed fab-gate failure, so winner selection
     # hard-prefers clean candidates (self-eval 2026-07-17 T2).
     stamp_edge_clearance: int = 0
+    # Stamp-time courtyard-overlap DRC error count -- same guaranteed
+    # fab-gate failure, same hard preference in winner selection
+    # (2026-07-19 review; replay-confirmed on live 623/628).
+    stamp_courtyard: int = 0
+    # True when the stamp DRC could not deliver a trustworthy verdict
+    # (timeout, or kicad-cli exited nonzero without reporting violations).
+    # Such a candidate's shorts==0 is vacuous, so it must not pass the gate.
+    stamp_drc_unreliable: bool = False
     # True when this candidate came from the pass-2 re-fit ("r" pass) rather
     # than the pass-1 area-basis seed. Surfaced as candidate_search.winner_refit
     # so the round scheduler can back off the re-fit after a routed rejection.
@@ -2597,6 +2612,8 @@ class CandidateRecord:
             "phase_timings": dict(self.phase_timings),
             "shape_fitted": self.shape_fitted,
             "stamp_edge_clearance": self.stamp_edge_clearance,
+            "stamp_courtyard": self.stamp_courtyard,
+            "stamp_drc_unreliable": self.stamp_drc_unreliable,
             "refit": self.refit,
         }
 
@@ -2620,8 +2637,16 @@ def _winner_key(c: "CandidateRecord") -> tuple:
     beats any rect fallback (the circle IS the deliverable), then a
     stamp-edge-clean candidate beats one whose stamped board already violates
     copper-to-edge clearance (a guaranteed fab-gate failure the packing score
-    otherwise PREFERS -- self-eval 2026-07-17 runs 02/09/11), then score."""
-    return (c.shape_fitted, c.stamp_edge_clearance == 0, c.score)
+    otherwise PREFERS -- self-eval 2026-07-17 runs 02/09/11), then a
+    courtyard-clean candidate beats one with stamped courtyard overlaps (the
+    same class of guaranteed fab-gate failure -- 2026-07-19 review,
+    replay-confirmed on live 623/628), then score."""
+    return (
+        c.shape_fitted,
+        c.stamp_edge_clearance == 0,
+        c.stamp_courtyard == 0,
+        c.score,
+    )
 
 
 def _net_dist_score(ratsnest_mm: float, scale_mm: float = 1000.0) -> float:
@@ -2898,6 +2923,8 @@ def _search_best_layout(
                     stamp_drc_ms = 0.0
                     shorts = 0
                     stamp_edge_clr = 0
+                    stamp_courtyard = 0
+                    stamp_drc_unreliable = False
                     stamped = Path("")
                 else:
                     cand_pcb = search_dir / f"{_cand_prefix}_{i:02d}{_pass_suffix}.kicad_pcb"
@@ -2916,6 +2943,25 @@ def _search_best_layout(
                     state.stamp_drc = dict(drc)
                     shorts = int(drc.get("shorts", 0) or 0)
                     stamp_edge_clr = int(drc.get("copper_edge_clearance", 0) or 0)
+                    stamp_courtyard = int(drc.get("courtyard", 0) or 0)
+                    # A timed-out DRC (or a kicad-cli crash that reported no
+                    # violations) makes every zero above vacuous -- such a
+                    # candidate must not read as "clean" and win. missing_cli
+                    # is tolerated here (every candidate is equally blind, so
+                    # ranking still works; validate_routed_board rejects the
+                    # final board with drc_unavailable regardless).
+                    stamp_drc_unreliable = bool(drc.get("timed_out")) or (
+                        bool(drc.get("ran"))
+                        and int(drc.get("returncode", 0) or 0) != 0
+                        and not drc.get("violations")
+                    )
+                    if stamp_drc_unreliable:
+                        print(
+                            f"[candidate-search] cand={i}{_pass_suffix} stamp DRC "
+                            f"unreliable (timed_out={bool(drc.get('timed_out'))} "
+                            f"rc={drc.get('returncode')}) -- candidate cannot be "
+                            "accepted on a vacuous shorts=0"
+                        )
 
                 board_state = state.composition.board_state if state.composition else None
                 if board_state is None:
@@ -3009,6 +3055,19 @@ def _search_best_layout(
                         f"{str(state.requested_shape.get('shape'))!r} did not fit: "
                         f"{(state.shape_fit or {}).get('reason')}; score -30.0"
                     )
+                # Stamped courtyard overlaps are objective DRC truth (same
+                # authority as the shorts gate) and a guaranteed terminal-verify
+                # failure. Penalize (not hard-gate -- see the routing-signal
+                # rationale below) so a conflict-free candidate always outranks
+                # one the fab gate would reject (2026-07-19 review).
+                if stamp_courtyard > 0:
+                    courtyard_penalty = min(30.0, 15.0 * stamp_courtyard)
+                    composite -= courtyard_penalty
+                    print(
+                        f"[candidate-search] cand={i}{_pass_suffix} stamped board "
+                        f"has {stamp_courtyard} courtyard overlap(s); "
+                        f"score -{courtyard_penalty:.1f}"
+                    )
                 # state.geometry_validation is populated inside _stamp_parent_board
                 # via _validate_parent_geometry. When pcb_path is None the stamp
                 # path is skipped, leaving geometry_validation = {} -- treat that
@@ -3038,7 +3097,7 @@ def _search_best_layout(
                 if manual_layout is not None:
                     accepted = True
                 else:
-                    accepted = shorts == 0
+                    accepted = shorts == 0 and not stamp_drc_unreliable
 
                 rec = CandidateRecord(
                     seed=seed_i,
@@ -3050,6 +3109,8 @@ def _search_best_layout(
                     accepted=accepted,
                     pcb_path=str(stamped),
                     stamp_edge_clearance=stamp_edge_clr,
+                    stamp_courtyard=stamp_courtyard,
+                    stamp_drc_unreliable=stamp_drc_unreliable,
                     refit=_pass_suffix == "r",
                     bbox_h_mm=placed_h_mm,
                     bbox_w_mm=placed_w_mm,

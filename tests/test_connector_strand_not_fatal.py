@@ -252,3 +252,36 @@ def test_stranded_refs_swallows_errors(monkeypatch, tmp_path):
     )
     # A pcbnew hiccup must not invent a fab-readiness failure.
     assert cli_app._connector_stranded_refs(tmp_path / "board.kicad_pcb") == []
+
+
+# --- courtyard defects join stranding as promotable (2026-07-19 review §2.1)
+
+
+def test_promote_courtyard_only_clean():
+    # Sole defect is a gross courtyard overlap on an electrically complete
+    # board -> promote for inspection (NOT fab-ready), never rc=6.
+    assert _promotable_strand_only(
+        ["courtyards_overlap"], [], {"shorts": 0, "unconnected": 0}
+    )
+
+
+def test_promote_courtyard_unmeasured_only():
+    assert _promotable_strand_only(["courtyard_unmeasured"], [], {})
+
+
+def test_promote_courtyard_plus_strand():
+    reasons = ["courtyards_overlap", *STRAND]
+    assert _promotable_strand_only(reasons, STRAND, {"shorts": 0})
+
+
+def test_reject_courtyard_with_unconnected():
+    reasons = ["courtyards_overlap", "unconnected_nets"]
+    assert not _promotable_strand_only(reasons, [], {"unconnected": 2})
+
+
+def test_reject_courtyard_with_shorts_in_drc():
+    assert not _promotable_strand_only(["courtyards_overlap"], [], {"shorts": 1})
+
+
+def test_empty_reasons_never_promote():
+    assert not _promotable_strand_only([], [], {})

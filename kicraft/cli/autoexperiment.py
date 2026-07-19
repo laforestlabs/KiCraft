@@ -677,6 +677,45 @@ def _read_stamp_drc(parent_output_json: Path) -> tuple[int, int]:
         return (0, 0)
 
 
+def _routed_dirty_score(
+    parent_output_json: Path,
+    rdrc: dict[str, Any],
+    routed_traces: int,
+) -> tuple[float, dict[str, float], list[str]]:
+    """Score an electrically-complete but not-accepted parent (~25-70).
+
+    Shared by both routed_dirty entry points: a compose that exited non-zero
+    on soft DRC, and a compose that exited 0 but whose validation says
+    ``accepted: False`` (promoted-for-inspection strand/courtyard boards).
+    Banded above not_routed (20) and below any accepted composer score, graded
+    by remaining DRC so the search descends toward a clean board.
+    """
+    composer_score, composer_breakdown = _read_composer_quality_score(
+        parent_output_json
+    )
+    drc_total = int(rdrc.get("total", 0) or 0)
+    drc_penalty = min(15.0, drc_total * 0.2)
+    score = round(
+        min(70.0, max(25.0, 40.0 + 0.20 * composer_score - drc_penalty)), 3
+    )
+    breakdown = {
+        "routed_dirty_base": 40.0,
+        "composer_component": round(0.20 * composer_score, 3),
+        "drc_penalty": -drc_penalty,
+        "drc_total": drc_total,
+    }
+    breakdown.update(composer_breakdown)
+    notes = [
+        "tier=routed_dirty",
+        f"routed_traces={routed_traces}",
+        "shorts=0",
+        "unconnected=0",
+        f"drc_total={drc_total}",
+        f"composer_score={composer_score:.3f}",
+    ]
+    return score, breakdown, notes
+
+
 def _score_round(
     *,
     leaf_accepted: int,
@@ -731,29 +770,9 @@ def _score_round(
         routed_shorts = int(rdrc.get("shorts", 0) or 0)
         routed_unconnected = int(rdrc.get("unconnected", 0) or 0)
         if routed_traces > 0 and routed_shorts == 0 and routed_unconnected == 0:
-            composer_score, composer_breakdown = _read_composer_quality_score(
-                parent_output_json
+            score, breakdown, notes = _routed_dirty_score(
+                parent_output_json, rdrc, routed_traces
             )
-            drc_total = int(rdrc.get("total", 0) or 0)
-            drc_penalty = min(15.0, drc_total * 0.2)
-            score = round(
-                min(70.0, max(25.0, 40.0 + 0.20 * composer_score - drc_penalty)), 3
-            )
-            breakdown = {
-                "routed_dirty_base": 40.0,
-                "composer_component": round(0.20 * composer_score, 3),
-                "drc_penalty": -drc_penalty,
-                "drc_total": drc_total,
-            }
-            breakdown.update(composer_breakdown)
-            notes = [
-                "tier=routed_dirty",
-                f"routed_traces={routed_traces}",
-                "shorts=0",
-                "unconnected=0",
-                f"drc_total={drc_total}",
-                f"composer_score={composer_score:.3f}",
-            ]
             tier = "routed_dirty"
         else:
             stamp_shorts, stamp_clearance = _read_stamp_drc(parent_output_json)
@@ -775,20 +794,40 @@ def _score_round(
             ]
             tier = "not_routed"
     else:
-        composer_score, composer_breakdown = _read_composer_quality_score(
-            parent_output_json
-        )
-        score = round(composer_score, 3)
-        breakdown = dict(composer_breakdown)
-        breakdown["composer_score_total"] = score
-        notes = [
-            "tier=functional",
-            f"leaf_accepted={leaf_accepted}/{leaf_total}",
-            f"composer_score_total={composer_score:.3f}",
-        ]
-        for key, value in sorted(composer_breakdown.items()):
-            notes.append(f"composer_{key}={value:.3f}")
-        tier = "functional"
+        # parent_routed=True means the compose subprocess exited 0 -- which it
+        # also does for a promoted-but-REJECTED parent (stranded connector,
+        # courtyard overlap: compose ships an inspectable board on purpose).
+        # "functional" must mean routed AND accepted (as this docstring always
+        # claimed); a rejected board scored as functional gets kept/pinned and
+        # biases the search toward its own defect (2026-07-19 review,
+        # replay-confirmed: all four triage boards promoted a parent the
+        # terminal verify rejected). Grade those routed_dirty instead so any
+        # genuinely accepted round outranks them.
+        rv = parent_routed_validation or {}
+        rdrc = rv.get("drc", {}) or {}
+        rts = rv.get("track_summary", {}) or {}
+        if rv and rv.get("accepted") is False:
+            score, breakdown, notes = _routed_dirty_score(
+                parent_output_json, rdrc, int(rts.get("traces", 0) or 0)
+            )
+            reasons = rv.get("rejection_reasons", []) or []
+            notes.append(f"rejected={','.join(map(str, reasons)) or 'unknown'}")
+            tier = "routed_dirty"
+        else:
+            composer_score, composer_breakdown = _read_composer_quality_score(
+                parent_output_json
+            )
+            score = round(composer_score, 3)
+            breakdown = dict(composer_breakdown)
+            breakdown["composer_score_total"] = score
+            notes = [
+                "tier=functional",
+                f"leaf_accepted={leaf_accepted}/{leaf_total}",
+                f"composer_score_total={composer_score:.3f}",
+            ]
+            for key, value in sorted(composer_breakdown.items()):
+                notes.append(f"composer_{key}={value:.3f}")
+            tier = "functional"
 
     if timing_breakdown:
         notes.append(_format_timing_breakdown(timing_breakdown))
@@ -2570,15 +2609,24 @@ def main(argv: list[str] | None = None) -> int:
             _base_overhead = float(
                 round_candidate_config.get("parent_seed_area_overhead", 2.5)
             )
-            round_candidate_config["parent_seed_area_overhead"] = (
-                _base_overhead * plan.seed_overhead_scale
+            # Clamp the product to the search-space ceiling: the base may
+            # already sit at the mutated max (3.5), and scaling it up to 7.0
+            # buys an oversized seed the search space deliberately excludes
+            # (2026-07-19 review §2.7).
+            _overhead_cap = float(
+                CONFIG_SEARCH_SPACE.get("parent_seed_area_overhead", {}).get(
+                    "max", 3.5
+                )
+            )
+            round_candidate_config["parent_seed_area_overhead"] = min(
+                _base_overhead * plan.seed_overhead_scale, _overhead_cap
             )
             print(
                 f"[congestion-growth] round {round_num}: "
                 f"parent_seed_area_overhead {_base_overhead:.2f} -> "
                 f"{round_candidate_config['parent_seed_area_overhead']:.2f} "
                 f"(x{plan.seed_overhead_scale:.1f} after rejected-unconnected "
-                f"round(s))"
+                f"round(s), cap {_overhead_cap:.1f})"
             )
 
         # Also enforce the feasibility floor on the base (non-mutated) config

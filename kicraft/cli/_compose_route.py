@@ -382,6 +382,41 @@ def _route_parent_board(
         if "unconnected_nets" not in reasons:
             reasons.append("unconnected_nets")
 
+    # Gross courtyard overlaps are a guaranteed terminal-verify failure, but
+    # validate_routed_board's DRC-derived reasons never included them, so a
+    # parent whose only defect was courtyards_overlap was accepted here and
+    # scored "functional" -- the search converged on boards the fab gate then
+    # rejected (replay-confirmed on live 623/628). Mirror the verify gate's
+    # severity split exactly (_verify_routed_board): a minor clip (below the
+    # warn thresholds) stays a warning there, so it must not reject here
+    # either; a gross overlap -- or one whose magnitude cannot be measured --
+    # rejects like unconnected. Compose main still promotes the board for
+    # inspection via the promotable-defect path.
+    courtyard = int((validation.get("drc") or {}).get("courtyard", 0) or 0)
+    if courtyard > 0:
+        from kicraft.autoplacer.courtyard_overlap import (
+            classify_courtyard_overlaps,
+            measure_courtyard_overlaps,
+        )
+
+        measured = measure_courtyard_overlaps(str(routed_pcb))
+        _, gross = classify_courtyard_overlaps(
+            measured,
+            max_penetration_mm=float(
+                cfg.get("courtyard_overlap_warn_penetration_mm", 0.5)
+            ),
+            max_area_mm2=float(cfg.get("courtyard_overlap_warn_area_mm2", 0.5)),
+        )
+        if gross or not measured:
+            validation["accepted"] = False
+            reasons = validation.setdefault("rejection_reasons", [])
+            reason = (
+                "courtyards_overlap" if measured else "courtyard_unmeasured"
+            )
+            if reason not in reasons:
+                reasons.append(reason)
+            validation["courtyard_overlaps"] = [o.to_dict() for o in measured]
+
     return {
         "failed": False,
         "routed_board_path": str(routed_pcb),

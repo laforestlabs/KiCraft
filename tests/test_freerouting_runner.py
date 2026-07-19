@@ -478,3 +478,75 @@ def test_sanitize_dsn_warns_on_non_ansi_net_name(tmp_path, capsys):
     assert freerouting_runner._sanitize_dsn_part_numbers(str(p)) == 0
     out = capsys.readouterr().out
     assert "WARNING" in out and "non-ANSI" in out
+
+
+def test_validate_routed_board_rejects_on_drc_tool_failure(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # kicad-cli exited nonzero WITHOUT reporting violations: every zero count
+    # is vacuous, so the board must not read as clean (2026-07-19 review §2.3).
+    monkeypatch.setattr(
+        freerouting_runner,
+        "count_board_tracks",
+        lambda _path: {"traces": 10, "vias": 2, "total_length_mm": 100.0},
+    )
+    monkeypatch.setattr(
+        freerouting_runner,
+        "_run_kicad_cli_drc",
+        lambda _path, timeout_s=30: {
+            "report_text": "",
+            "violations": [],
+            "shorts": 0,
+            "unconnected": 0,
+            "clearance": 0,
+            "copper_edge_clearance": 0,
+            "ran": True,
+            "returncode": 3,
+            "timed_out": False,
+            "missing_cli": False,
+        },
+    )
+    board_path = tmp_path / "fake_board.kicad_pcb"
+    board_path.write_text("stub", encoding="utf-8")
+
+    validation = freerouting_runner.validate_routed_board(str(board_path))
+
+    assert validation["accepted"] is False
+    assert "drc_failed" in validation["rejection_reasons"]
+
+
+def test_validate_routed_board_keeps_verdict_on_nonzero_exit_with_violations(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Nonzero exit WITH parsed violations keeps the parsed verdict -- the
+    # per-category gates act on it; no vacuous-clean hole to close.
+    monkeypatch.setattr(
+        freerouting_runner,
+        "count_board_tracks",
+        lambda _path: {"traces": 10, "vias": 2, "total_length_mm": 100.0},
+    )
+    monkeypatch.setattr(
+        freerouting_runner,
+        "_run_kicad_cli_drc",
+        lambda _path, timeout_s=30: {
+            "report_text": "[courtyards_overlap]: x",
+            "violations": [{"type": "courtyards_overlap"}],
+            "shorts": 0,
+            "unconnected": 0,
+            "clearance": 0,
+            "copper_edge_clearance": 0,
+            "courtyard": 1,
+            "ran": True,
+            "returncode": 5,
+            "timed_out": False,
+            "missing_cli": False,
+        },
+    )
+    board_path = tmp_path / "fake_board.kicad_pcb"
+    board_path.write_text("stub", encoding="utf-8")
+
+    validation = freerouting_runner.validate_routed_board(str(board_path))
+
+    assert "drc_failed" not in validation["rejection_reasons"]

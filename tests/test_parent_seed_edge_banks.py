@@ -246,3 +246,34 @@ def test_winner_key_shape_fit_still_outranks_edge_cleanliness():
 def test_winner_key_score_breaks_ties_among_equally_clean():
     a, b = _rec(10.0, 0), _rec(20.0, 0)
     assert max([a, b], key=cs._winner_key) is b
+
+
+# --- 2026-07-19 review §2.4: courtyard-clean winner preference --------------
+
+
+def test_winner_key_prefers_courtyard_clean_over_higher_score():
+    clean_low = _rec(10.0, 0)
+    dirty_high = _rec(99.0, 0)
+    dirty_high.stamp_courtyard = 2
+    assert max([clean_low, dirty_high], key=cs._winner_key) is clean_low
+
+
+def test_winner_key_edge_cleanliness_outranks_courtyard():
+    # Preference order: shape fit, then edge-clean, then courtyard-clean.
+    edge_clean_courtyard_dirty = _rec(10.0, 0)
+    edge_clean_courtyard_dirty.stamp_courtyard = 1
+    edge_dirty_courtyard_clean = _rec(99.0, 3)
+    assert (
+        max(
+            [edge_clean_courtyard_dirty, edge_dirty_courtyard_clean],
+            key=cs._winner_key,
+        )
+        is edge_clean_courtyard_dirty
+    )
+
+
+def test_winner_key_score_breaks_ties_when_courtyard_equal():
+    a, b = _rec(10.0, 0), _rec(20.0, 0)
+    a.stamp_courtyard = 1
+    b.stamp_courtyard = 1
+    assert max([a, b], key=cs._winner_key) is b

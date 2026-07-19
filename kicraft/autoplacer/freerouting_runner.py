@@ -1821,6 +1821,18 @@ def validate_routed_board(
         validation["rejection_reasons"].append("drc_timeout")
     if drc.get("missing_cli"):
         validation["rejection_reasons"].append("drc_unavailable")
+    # kicad-cli is invoked WITHOUT --exit-code-violations, so a nonzero exit
+    # means the tool itself failed (crash, bad invocation, unreadable board).
+    # When it also reported no violations, every zero count above is vacuous
+    # and the board must not read as "clean" (2026-07-19 review §2.3). A
+    # nonzero exit WITH parsed violations keeps the parsed verdict -- the
+    # per-category gates above already act on it.
+    if (
+        drc.get("ran")
+        and int(drc.get("returncode", 0) or 0) != 0
+        and not drc.get("violations")
+    ):
+        validation["rejection_reasons"].append("drc_failed")
 
     expected = sorted(set(expected_anchor_names or []))
     actual = sorted(set(actual_anchor_names or []))
