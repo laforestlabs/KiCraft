@@ -108,12 +108,21 @@ async def harness(tmp_path):
         sim_web._STORE = sim_store
         real_fetch = sim_web._safe_fetch  # no live pricing from test threads
         sim_web._safe_fetch = lambda key: sim_web._FETCH_ERROR
+        # Never let a dialog submit spawn a REAL headless `claude` run: this
+        # exact path launched one phantom investigation (real Anthropic
+        # spend, 30-min watchdog) per suite run from 2026-07-12 to
+        # 2026-07-20. enqueue_investigation also refuses under pytest now;
+        # this records the calls for assertions instead.
+        real_auto = sim_web._auto_investigate_if_enabled
+        auto_calls: list[int] = []
+        sim_web._auto_investigate_if_enabled = auto_calls.append
         acct = sim_store.create_user(EMAIL, PASSWORD)
         sim_store.record_consent(acct.id, LEGAL_VERSION)
         try:
             yield u, sim_web, sim_store, acct
         finally:
             sim_web._safe_fetch = real_fetch
+            sim_web._auto_investigate_if_enabled = real_auto
             sim_web._STORE = None
             sim_web._LIVE_RUNS.clear()
 

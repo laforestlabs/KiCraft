@@ -82,6 +82,13 @@ def enqueue_investigation(store: AccountStore, report: SupportReport, *,
     investigate or a run is already queued/running for this report. ``runner``
     is a test seam standing in for :func:`run_investigation` (so tests never
     invoke ``claude``)."""
+    # Hard gate: never spawn a REAL headless `claude` from inside pytest.
+    # An unstubbed test path spawned one phantom investigation per suite run
+    # (real Anthropic-side spend, 30-min watchdog, orphaned to PID 1 -- 46
+    # phantoms between 2026-07-12 and 2026-07-20). The `runner=` seam stays
+    # the way tests exercise this function.
+    if runner is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        return None
     target = _resolve_target(store, report)
     if target is None:
         return None
