@@ -2491,6 +2491,82 @@ def _cmd_promote_part(args: argparse.Namespace) -> int:
     return 0
 
 
+def _edge_marker_contradiction(loaded_fp) -> str | None:
+    """Check (9) core: an explicit 'Board Edge'/'PCB Edge' marker whose side
+    is contradicted by strong artwork evidence.
+
+    Detection rule 1 makes the marker authoritative, so a marker on the
+    wrong side silently fabs every board with the connector mouth pointing
+    inboard while the fab gate (same marker) agrees with the placer
+    (KC-DVA3UP: the BNC marker was planted from a 3D render whose WRL was
+    itself 180 deg off the 2D artwork, so the render "looked right").
+
+    Contradiction = the body artwork (courtyard + fab) extends far past the
+    pad cluster on the side OPPOSITE the marker: a mouth-length feature
+    (barrel, plug, thread) pointing away from the claimed board edge. Small
+    backward overhangs stay legal -- screw terminals genuinely have their
+    body behind the wire-entry mouth, which is what the marker mechanism
+    exists to express.
+
+    Returns a human-readable defect string, or None when consistent.
+    """
+    import pcbnew
+
+    pad_xs = [pcbnew.ToMM(p.GetPosition().x) for p in loaded_fp.Pads()]
+    pad_ys = [pcbnew.ToMM(p.GetPosition().y) for p in loaded_fp.Pads()]
+    if not pad_xs:
+        return None
+    body_xs, body_ys = [], []
+    for item in loaded_fp.GraphicalItems():
+        if item.GetLayer() not in (pcbnew.F_CrtYd, pcbnew.F_Fab):
+            continue
+        try:
+            body_xs.append(pcbnew.ToMM(item.GetStart().x))
+            body_xs.append(pcbnew.ToMM(item.GetEnd().x))
+            body_ys.append(pcbnew.ToMM(item.GetStart().y))
+            body_ys.append(pcbnew.ToMM(item.GetEnd().y))
+        except Exception:
+            continue
+    marker = None
+    for item in loaded_fp.GraphicalItems():
+        if item.GetLayer() != pcbnew.Dwgs_User:
+            continue
+        try:
+            text = item.GetText()
+        except Exception:
+            continue
+        if text and "edge" in text.lower():
+            marker = item
+            break
+    if marker is None or not body_xs:
+        return None
+    pad_cx = (min(pad_xs) + max(pad_xs)) / 2
+    pad_cy = (min(pad_ys) + max(pad_ys)) / 2
+    tp = marker.GetPosition()
+    off_x = pcbnew.ToMM(tp.x) - pad_cx
+    off_y = pcbnew.ToMM(tp.y) - pad_cy
+    if abs(off_x) > abs(off_y):
+        marker_dir = 0 if off_x > 0 else 180
+    else:
+        marker_dir = 90 if off_y > 0 else 270
+    ext = {
+        0: max(body_xs) - max(pad_xs),
+        180: min(pad_xs) - min(body_xs),
+        90: max(body_ys) - max(pad_ys),
+        270: min(pad_ys) - min(body_ys),
+    }
+    opposite = (marker_dir + 180) % 360
+    if ext[opposite] >= 10.0 and ext[opposite] > ext[marker_dir] + 5.0:
+        return (
+            f"edge marker points {marker_dir} deg from the pad cluster, but "
+            f"the body artwork extends {ext[opposite]:.1f} mm past the pads "
+            f"on the OPPOSITE side (vs {ext[marker_dir]:.1f} mm on the marker "
+            f"side) -- a mouth-length feature pointing away from the claimed "
+            f"board edge"
+        )
+    return None
+
+
 def _cmd_validate_part(args: argparse.Namespace) -> int:
     """Validate a parts-library directory: schema, files, content_hash.
 
@@ -2661,6 +2737,27 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
                     f"this.",
                     file=sys.stderr,
                 )
+
+        # (9) Explicit edge marker contradicted by strong artwork evidence:
+        # rule 1 makes the marker authoritative for placer AND fab gate, so
+        # a wrong-side marker fabs every board with the mouth inboard while
+        # every gate self-consistently agrees (KC-DVA3UP / KC-MUSEUD BNC).
+        # Hard failure: if a genuine part trips this, bring pins-in-holes
+        # render evidence before widening the threshold.
+        if loaded_fp is not None:
+            _contra = _edge_marker_contradiction(loaded_fp)
+            if _contra:
+                print(
+                    f"edge-marker contradiction on "
+                    f"'{manifest.footprint_name}': {_contra}\n"
+                    f"  the marker side is treated as the mating mouth by the "
+                    f"placer and the connector_facings fab gate; verify the "
+                    f"true mouth side against the pads/pins (NOT a 3D render "
+                    f"-- the model itself can be rotated) and move the "
+                    f"marker, then rerun with --update-hash",
+                    file=sys.stderr,
+                )
+                return 2
 
     # (8) Electromechanical symbol with signal-typed pins: a connector /
     # switch / relay / battery symbol whose pins are 'input'/'unspecified'

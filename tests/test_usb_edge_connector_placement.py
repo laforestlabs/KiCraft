@@ -11,6 +11,7 @@ Covers the systematic fix for edge connectors ending up unusable:
 """
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -67,24 +68,75 @@ def test_angles_close_wraps():
 
 
 def test_detect_opening_direction_real_bnc_elbow():
-    """KC-MUSEUD regression: the BNC elbow jack's BODY extends +y over the
-    board while its mating barrel points -y past the pads -- the opposite of
-    the USB-C shell-overhang pattern below, so the body-overhang heuristic
-    read its mouth 180 deg wrong and the placer pointed the barrel INBOARD
-    on every board using the part. The footprint now carries the
-    authoritative 'Board Edge' Dwgs.User marker (detection rule 1); this
-    pins the detected direction to the mating side."""
+    """KC-DVA3UP regression (supersedes the inverted KC-MUSEUD pin of 270):
+    the jack's flange (with all four pins under it) spans local y in
+    [-4.46, +8.34] and the threaded barrel/mouth extends to +y (silk thread
+    hatch + tip circle at y~28, model pins verified against the pad holes).
+    The mating mouth is +y = 90 local. The earlier 270 pin was derived from
+    a 3D render whose WRL was itself 180 deg off the artwork, and made every
+    BNC board fab with the mouth pointing inboard. The 'Board Edge' marker
+    now sits on the true mouth side (0, 9.5)."""
     pcbnew = pytest.importorskip("pcbnew")
     from kicraft.autoplacer.hardware.adapter import detect_opening_direction
 
     lib = "kicraft/parts_library/bnc-pcb-jack/bnc-pcb-jack.pretty"
     fp = pcbnew.FootprintLoad(lib, "ANT-TH_KH-BNC50-3511")
     assert fp is not None
-    assert detect_opening_direction(fp) == 270.0
+    assert detect_opening_direction(fp) == 90.0
     # Local direction is invariant to the footprint's board orientation.
     for rot in (90.0, 180.0, 270.0):
         fp.SetOrientationDegrees(rot)
-        assert detect_opening_direction(fp) == 270.0
+        assert detect_opening_direction(fp) == 90.0
+
+
+def test_bnc_elbow_model_transform_pinned():
+    """The vendored WRL is authored 180 deg (theta-z) off the 2D artwork:
+    with an identity transform the rendered model's pins land ~21 mm from
+    the pad holes and its barrel covers the pads. rotate z=180 plus
+    offset y=-26.5 puts every model pin in its hole (solved numerically
+    against both pin rows). A previous 'cleanup' commit (9f34afb) deleted
+    exactly this rotation and every orientation judgement made from 3D
+    renders afterwards inherited the lie -- do not remove the transform
+    without re-verifying pins-in-holes on a render."""
+    from pathlib import Path
+
+    mod = Path("kicraft/parts_library/bnc-pcb-jack/bnc-pcb-jack.pretty/"
+               "ANT-TH_KH-BNC50-3511.kicad_mod").read_text()
+    assert "(rotate (xyz 0 0 180))" in mod
+    assert "(offset (xyz 0.000 -26.500 0.000))" in mod
+    # The Board Edge marker must stay on the true mouth side (+y).
+    m = re.search(r'\(fp_text user "Board Edge" \(at ([\-0-9.]+) ([\-0-9.]+)\)', mod)
+    assert m is not None
+    assert float(m.group(2)) > 0, "marker moved back to the flange side (-y)"
+
+
+def test_edge_marker_contradiction_lint():
+    """validate-part check (9): a 'Board Edge' marker on the side opposite a
+    mouth-length artwork feature (the exact defect cee173c planted) must be
+    flagged; the fixed BNC and the genuinely body-behind-mouth screw
+    terminals must stay clean."""
+    pcbnew = pytest.importorskip("pcbnew")
+    from kicraft.design.cli_app import _edge_marker_contradiction
+
+    lib = "kicraft/parts_library/bnc-pcb-jack/bnc-pcb-jack.pretty"
+    fp = pcbnew.FootprintLoad(lib, "ANT-TH_KH-BNC50-3511")
+    assert _edge_marker_contradiction(fp) is None
+    # Recreate the wrong-side marker (flange back face) in memory.
+    for item in fp.GraphicalItems():
+        if item.GetLayer() == pcbnew.Dwgs_User and "edge" in item.GetText().lower():
+            item.SetPosition(
+                pcbnew.VECTOR2I(pcbnew.FromMM(0), pcbnew.FromMM(-4.2))
+            )
+    msg = _edge_marker_contradiction(fp)
+    assert msg is not None and "OPPOSITE side" in msg
+
+    for name, foot in [
+        ("screw-terminal-5mm-2p", "CONN-TH_WJ126V-5.0-2P"),
+        ("screw-terminal-5mm-3p", "CONN-TH_3P-P5.00_WJ126V-5.0-3P"),
+    ]:
+        sfp = pcbnew.FootprintLoad(f"kicraft/parts_library/{name}/{name}.pretty", foot)
+        assert sfp is not None
+        assert _edge_marker_contradiction(sfp) is None, name
 
 
 def test_detect_opening_direction_real_usb_c():
