@@ -487,16 +487,39 @@ empty-pad-set path, round-loop acceptance on courtyard/timeout DRC results.
    candidate equally blind, final gate still rejects); 2.4 via the objective stamped-DRC
    courtyard count (score penalty + `_winner_key` hard preference) rather than the envelope
    conflict lists, which `_stamp_parent_board` overwrites in the candidate loop.
-2. **PR-B (leaf/compose geometry)**: 3.1, 3.2, 3.5, 3.6, 3.9 (+3.3 after intent check); replay the
-   same set + one shield brief.
-3. **PR-C (crash/robustness)**: 4.1 (stream retry), 4.2 (§9.27 + PadBindingError), 4.6, 4.7 —
-   small, independent, ship fast.
-4. **PR-D (pin-data seam)**: 4.3 + 4.4 + 6.1 together — one consistent, string-aware, normalized,
-   multi-unit-complete pin view for every consumer; then 4.5 loud drops.
-5. **PR-E (retry eliminations)**: everything in §5 — mostly prompt/data one-liners plus the
-   reconcile fix 5.8; measure by retry counts in the next self-eval batch.
-6. **PR-F (prompt overhaul)**: §7; A/B a few briefs before/after.
-7. **PR-G (eval integrity)**: §8 before the next self-eval batch so the batch grades honestly.
+2. **PR-B (leaf/compose geometry) — SHIPPED `ae08953` 2026-07-20** (3.1, 3.2, 3.5, 3.6, 3.9
+   + 2.6; 3.3 deferred, see §3.3 note). Replay verification: **628 rc7 → rc0 FAB-READY**
+   (courtyard + illegal_routed_geometry cured — the scaffold body_center phantom box was the
+   producer); 623 rc0 held; 639/636 unchanged class. Suite 2787 passed / 8 pre-existing reds.
+3. **PR-C (crash/robustness) — SHIPPED `4e14494` 2026-07-20**: 4.1 (mid-stream SSE retry),
+   4.2 (§9.27 pads-None fix + PadBindingError → SynthesisValidationError), 4.6
+   (unknown-package leave-alone), 4.7 (C1812 LCSC-prefix disambiguation). Suite 2797/8-pre.
+4. **PR-D (pin-data seam) — SHIPPED `cf998ca` 2026-07-20**: 4.3 string-aware _match_block
+   (481 stock symbols un-corrupted, `Conn_*_Row_Letter_Last` verified), 4.4 lookup_pins now
+   applies the IC-level normalization (TPS54331 divergence closed), 6.1 stage-prep wiring +
+   all four §9.x gate sites use all_units=True (TL072 unit-B class), 4.5 router/placement
+   loud drops. Suite 2819/8-pre + F821 clean.
+5. **PR-E (retry eliminations) — SHIPPED `678cd45` 2026-07-20**: 5.1 intent flat-output,
+   5.3/5.4 bom.md fixes, 5.5 offenders_total (8 sites + bounce note), 5.6 search_symbols
+   prose normalization + explicit zero-hit line, 5.7 3rd-repeat steer-only cutoff,
+   5.8 reconcile partial-fulfillment fall-through + 0-ohm parse. 5.2 done as an offline
+   retail-dry filter on bundle rows (fresh cached lcsc.com reading only). **OPEN for the
+   curator: drv8833's sourcing** — C50506 is retail-dry, but C191171 is the DRV8833**C**
+   (700mA/1.735Ω vs 1.5A/360mΩ), NOT a drop-in; needs a human part decision.
+6. **PR-F (prompt overhaul) — SHIPPED `7a8b81d` 2026-07-20**: worked bom/wiring examples
+   (model-validated by test), §9.29/9.31/9.25/9.32 proactive guidance, 6-round budget
+   disclosure, wiring COMPACT OUTPUT, extras dedup, expert-fallback rewrite, judge/review
+   numeric anchoring, sheet-name punctuation. A/B measurement = the next self-eval batch's
+   retry counts. **Also shipped alongside (out-of-plan, found via parallel-session memory):
+   `3da6b95` test-suite live-store isolation** — every full-suite run had been spawning one
+   REAL headless claude investigation + spamming the live accounts.db; conftest autouse
+   guard + PYTEST_CURRENT_TEST spawn gate + harness stub; live-DB junk-row DELETE left to
+   the user (342 error_auto rows for projects 7/9).
+7. **PR-G (eval integrity) — SHIPPED `f9417bc` 2026-07-20** (done before PR-E/F so the next
+   batch grades honestly): 8.1 web (0,2) question band (friction levels NOT comparable to
+   earlier batches — which were a constant anyway), 8.2 quality in the tuning cache PK +
+   drop-migration of pre-quality DBs, 8.3 REF_DRC re-derived vs penalty=100 (comment +
+   pinned relationship test; no objective change), 8.4 judge parser unit tests.
 8. §9/§10 opportunistically behind the above.
 
 Expected effect: §2+§3 target the current dominant failure fingerprint directly (courtyard/
