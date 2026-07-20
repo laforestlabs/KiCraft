@@ -362,7 +362,19 @@ class CappedOpenRouterClient:
                     except Exception as e:  # surface tool errors, don't crash
                         result = f"tool error: {e}"
                     cache[sig] = result
-                if seen[sig] >= 2:
+                if seen[sig] >= 3:
+                    # Hard cutoff: the 2nd repeat already got the notice + full
+                    # payload, and a reflexive re-verifier repeats anyway (live
+                    # board 635: 4 identical lookups, the last right after its
+                    # own "now write the final JSON"). From the 3rd repeat the
+                    # steer REPLACES the payload -- there is nothing new to
+                    # re-read, and each repeat is a paid round trip
+                    # (2026-07-19 review §5.7).
+                    result = (f"NOTE: identical call repeated ({seen[sig]}x); the "
+                              f"result was already provided twice and will not "
+                              f"change. It is withheld this time. Use the answer "
+                              f"you already have and output the final JSON now.")
+                elif seen[sig] >= 2:
                     result = (f"NOTE: identical call repeated ({seen[sig]}x); the cached "
                               f"result is reused and will not change. Stop verifying and "
                               f"output the final JSON now.\n{result}")

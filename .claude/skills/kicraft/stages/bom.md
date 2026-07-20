@@ -5,7 +5,7 @@ Given the `architecture` (available in the `state` field of stage-prep's output)
 **Programming interface.** Reflect the architecture's programming decision:
 
 - **Native-USB MCU** (an ESP32-S3 / C3 / S2 / C6, the default): no bridge part. The MCU's native USB pins connect to the board's USB connector (wiring handles it); nothing extra to add here beyond the MCU itself.
-- **Classic ESP32 with a USB-UART bridge**: include the bridge chosen by the architecture stage (the core-defaults `usb-uart-bridge` row, CH340C / C84681, by default; or the vendored `ch340n` bundle when it is already in the parts block), two small-signal NPN transistors + base resistors for the DTR/RTS auto-reset to EN/IO0, and the bridge's decoupling. Cluster them with the bridge in `ic_groups`.
+- **Classic ESP32 with a USB-UART bridge**: include the bridge chosen by the architecture stage (the core-defaults `usb-uart-bridge` row — the vendored `ch340c` bundle, CH340C / C84681), two small-signal NPN transistors + base resistors for the DTR/RTS auto-reset to EN/IO0, and the bridge's decoupling. Cluster them with the bridge in `ic_groups`.
 
 Either way the wiring stage connects the path, so no programming question reaches it.
 
@@ -99,9 +99,9 @@ This is the case to handle deliberately — never silently substitute an inferio
 
   This writes a bundle to `<project>/.kicraft/parts/<name>/` and the resolver picks it up immediately. Re-run `stage-prep bom` after the fetch so the new part appears in `extras.parts_block`. Record what you did in `assumptions`, ending the line with `(defaulted)` — e.g. `"Auto-added IP2368 from LCSC C2837135 to the project parts library (defaulted)"`.
 
-  If `add-part` fails (network error, LCSC ID unknown, parser failure on the EasyEDA data), fall through to the advanced path below: surface a `material: true` question listing the missing MPN, the attempted LCSC number, and the failure mode. Do not substitute.
+  If `add-part` fails (network error, LCSC ID unknown, parser failure on the EasyEDA data), fall through to the expert path below: surface a `material: true` question listing the missing MPN, the attempted LCSC number, and the failure mode. Do not substitute.
 
-- **`advanced`** — never auto-fetch silently. Surface a `material: true` open question of the form:
+- **`expert`** — never auto-fetch silently. Surface a `material: true` open question of the form:
 
   > MPN `IP2368-BZ` is not in the parts library and not in stock KiCad. Options:
   > 1. fetch from LCSC: `kicraft add-part --from-lcsc C2837135 --into project`

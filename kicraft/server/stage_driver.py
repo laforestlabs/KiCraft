@@ -29,10 +29,22 @@ from pathlib import Path
 
 from kicraft.design import models
 from kicraft.fsutil import atomic_write_text
-from kicraft.parts_library import jlcparts
+from kicraft.parts_library import jlcparts, lcsc_retail
 
 from .client import make_client
 from .pricing import _stock_floor
+
+
+def _bundle_sourcing_lcsc(bundle: str) -> str:
+    """The vendored bundle's pinned sourcing C#, or '' (best-effort, offline)."""
+    try:
+        manifest = (
+            _REPO / "kicraft" / "parts_library" / bundle / "manifest.json"
+        )
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return str((data.get("sourcing") or {}).get("lcsc") or "").strip()
+    except Exception:
+        return ""
 
 # The repo venv has no `kicraft` console script; cli_app.py has a __main__ guard.
 KICRAFT = [sys.executable, "-m", "kicraft.design.cli_app"]
@@ -164,8 +176,16 @@ def _spec_text(stage: str) -> str:
 
 def _stage_extra(stage: str) -> str:
     if stage == "intent":
-        return ('\n- Also include a top-level "project_stem" string (2-3 significant words, '
-                'UPPER_SNAKE_CASE, <=32 chars). It is stripped from the slot and passed '
+        # The flat-output sentence is load-bearing: the CURRENT DESIGN STATE
+        # block shows '"intent": null' as a top-level state key, and 4 of 9
+        # recent boards wrapped the slot under an "intent" key to match it --
+        # a guaranteed "goal: Field required" bounce (2026-07-19 review §5.1).
+        return ('\n- Output the slot\'s fields directly at the JSON top level -- '
+                'do NOT wrap them under an "intent" (or any other) key. '
+                'Also include a top-level "project_stem" string (2-3 significant words, '
+                'UPPER_SNAKE_CASE, <=32 chars) as a SIBLING key in that same flat '
+                'object, e.g. {"project_stem": "LED_RING", "goal": "...", '
+                '"constraints": [...], ...}. It is stripped from the slot and passed '
                 'separately, per the spec.')
     if stage == "bom":
         return (
@@ -300,6 +320,14 @@ def _format_core_defaults_block(rows) -> str | None:
         kept = []
         for r in live:
             cid = (r.get("default_lcsc") or "").strip()
+            if not cid and r.get("bundle"):
+                # Bundle rows carry their C# in the vendored manifest, not in
+                # default_lcsc -- they were invisible to this dry filter, and
+                # the prompt tells the model NOT to re-verify bundle rows, so
+                # a dry bundle default was a guaranteed §9.26 bounce on every
+                # adoption (live board 631, drv8833: 3,299 assembly but 0
+                # lcsc.com retail -- 2026-07-19 review §5.2).
+                cid = _bundle_sourcing_lcsc(str(r.get("bundle")))
             if cid:
                 hit = jlcparts.lookup(cid)
                 # None = pruned out of the catalog (curated C#s are real
@@ -308,6 +336,19 @@ def _format_core_defaults_block(rows) -> str | None:
                 if hit is None or (hit.get("stock") or 0) < floor:
                     dropped.append(
                         f"{r.get('function_key')} ({r.get('default_mpn')})")
+                    continue
+                # Retail: act only on a FRESH cached storefront reading (the
+                # BOM tools populate the cache during normal runs); no
+                # network from the prompt-assembly path.
+                retail = lcsc_retail.cached_stock(cid)
+                if (
+                    lcsc_retail.enabled()
+                    and retail is not None
+                    and retail < lcsc_retail.retail_floor()
+                ):
+                    dropped.append(
+                        f"{r.get('function_key')} ({r.get('default_mpn')}; "
+                        "retail-dry)")
                     continue
             kept.append(r)
         live = kept
@@ -692,6 +733,15 @@ def _retry_feedback(out: dict, *, stage: str | None = None,
     msg = f"stage-commit rejected that with errors: {json.dumps(out.get('errors'))}"
     if out.get("offenders"):
         msg += f"  offenders: {json.dumps(out.get('offenders'))}"
+        shown = len(out.get("offenders") or [])
+        total = int(out.get("offenders_total") or 0)
+        if total > shown:
+            # Without the total, the model fixed the visible slice, got
+            # bounced with a DIFFERENT slice, and burned the retry budget
+            # chasing a moving target (2026-07-19 review §5.5).
+            msg += (f"  NOTE: only {shown} of {total} offenders are shown -- "
+                    "fix ALL instances of this defect class across the whole "
+                    "slot, not just the ones listed.")
     msg += (". Return the COMPLETE corrected slot JSON, preserving every entry that was "
             "already valid and changing ONLY the items listed above. When an offender lists "
             "'real options: ...', replace the bad id with ONE of those exact ids verbatim "

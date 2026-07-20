@@ -306,8 +306,20 @@ def bom_reconcile_deficits(res: dict) -> list[dict]:
 # never applying exactly this add across 3 LLM passes).
 _PASSIVE_ASK_RE = re.compile(
     r"(?:\b(a|an|one|two|three|four|\d+)\s+)?"
-    r"(\d+(?:\.\d+)?\s?(?:[pnumµ]F|[kM](?:Ω|ohm)?\b|Ω|ohm\b|R\b))"
+    r"(\d+(?:\.\d+)?[\s-]?(?:[pnumµ]F|[kM](?:Ω|ohm)?\b|Ω|ohm\b|R\b))"
     r"[^.;,]*?\b(capacitor|resistor|inductor)s?\b",
+    re.IGNORECASE,
+)
+# Part nouns the deterministic passive-add can NEVER provision. When a deficit
+# note asks for one of these alongside parseable passives, "added something"
+# must not read as "added everything": board 639's note asked for a crystal +
+# load caps + a u.FL -- the caps were added, wiring was re-driven with "do NOT
+# park on this again", and the committed board had the load caps wired to a
+# crystal that never existed (2026-07-19 review §5.8).
+_NON_PASSIVE_ASK_RE = re.compile(
+    r"\b(crystal|oscillator|resonator|antenna|u\.?fl|connector|header|jack|"
+    r"socket|receptacle|diode|led\b|transistor|mosfet|regulator|switch|"
+    r"button|fuse|ferrite|choke|varistor|tvs)\b",
     re.IGNORECASE,
 )
 _QTY_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4}
@@ -543,6 +555,24 @@ def maybe_bom_reconcile(
     # Anything unparsed falls through to the LLM bom+wiring pass, which also
     # remains the stuck-loop reporter.
     added = apply_deterministic_bom_adds(ws, deficits)
+    # Partial fulfillment guard: the deterministic pass only provisions
+    # regex-parseable R/C/L asks. If the note ALSO names a part class it can
+    # never add (crystal, connector, ...), the wiring-only re-drive below
+    # would command "do NOT park on this deficit again" while the deficit is
+    # still real -- fall through to the LLM bom+wiring pass instead (the
+    # already-added passives are committed and preserved).
+    _texts = " ".join(str(q.get("text", "")) for q in deficits)
+    _unfulfilled = _NON_PASSIVE_ASK_RE.search(_texts)
+    if added and _unfulfilled:
+        if progress is not None:
+            progress({"kind": "build_log",
+                      "text": f"[bom-reconcile] deterministically provisioned "
+                              f"{', '.join(added)}, but the deficit also asks "
+                              f"for non-passive part(s) "
+                              f"({_unfulfilled.group(0)!r}) the deterministic "
+                              "pass cannot add -- falling through to the LLM "
+                              "bom+wiring pass for the remainder"})
+        added = []
     if added:
         if progress is not None:
             progress({"kind": "build_log",

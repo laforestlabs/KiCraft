@@ -336,8 +336,8 @@ def search_symbols(
     unit / body-style sub-symbols (``<name>_<n>_<m>``) are skipped so only real
     top-level symbols are returned.
     """
-    terms = [t.lower() for t in (query or "").split() if t.strip()]
-    if not terms or not stock_dir.is_dir():
+    term_alts = _symbol_query_terms(query)
+    if not term_alts or not stock_dir.is_dir():
         return []
     matches: list[str] = []
     seen: set[str] = set()
@@ -353,13 +353,56 @@ def search_symbols(
                 continue
             sym_id = f"{libname}:{name}"
             key = sym_id.lower()
-            if sym_id in seen or not all(t in key for t in terms):
+            if sym_id in seen or not all(
+                any(alt in key for alt in alts) for alts in term_alts
+            ):
                 continue
             seen.add(sym_id)
             matches.append(sym_id)
             if len(matches) >= limit:
                 return matches
     return matches
+
+
+# Connector-prose tokens that never appear in stock symbol NAMES (the symbol
+# is Conn_01x03; "pin header 1x03 male" matched nothing and the model then
+# guessed a nonexistent Library:Name -- 2026-07-19 review §5.6). Dropped from
+# the query; when any is dropped, "conn" joins the terms so the search still
+# lands in the connector families.
+_SYMBOL_CONNECTOR_PROSE = frozenset({
+    "pin", "pins", "header", "male", "female", "socket", "plug",
+    "vertical", "horizontal", "right", "angle", "smd", "tht",
+    "through", "hole",
+})
+_COUNT_RE = re.compile(r"^(\d+)x(\d+)$")
+
+
+def _symbol_query_terms(query: str) -> list[tuple[str, ...]]:
+    """Normalize a natural-language query into per-term alternative tuples.
+
+    Each returned tuple is a set of acceptable substrings for one term (a
+    symbol id matches when EVERY tuple has at least one hit). "1x03"-style
+    counts also accept their zero-padded spelling ("01x03"), matching KiCad's
+    naming. Falls back to the raw terms when normalization empties the list.
+    """
+    raw = [t.lower() for t in (query or "").split() if t.strip()]
+    if not raw:
+        return []
+    kept: list[tuple[str, ...]] = []
+    dropped_prose = False
+    for t in raw:
+        if t in _SYMBOL_CONNECTOR_PROSE:
+            dropped_prose = True
+            continue
+        m = _COUNT_RE.match(t)
+        if m:
+            padded = f"{int(m.group(1)):02d}x{int(m.group(2)):02d}"
+            kept.append((t, padded))
+        else:
+            kept.append((t,))
+    if dropped_prose and not any("conn" in alts[0] for alts in kept):
+        kept.append(("conn",))
+    return kept or [(t,) for t in raw]
 
 
 def build_lib_symbols_block(

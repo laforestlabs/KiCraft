@@ -132,3 +132,50 @@ def test_apply_returns_empty_on_unparseable_text(tmp_path):
         ws, [{"text": "the flux capacitor is sad", "reconcile_target": "bom"}]
     )
     assert added == []
+
+
+# --- 2026-07-19 review §5.8: partial fulfillment must not read as full ------
+
+RUN_639 = (
+    "The design requires a 40MHz crystal (X1) with two 18pF load capacitors "
+    "(C8, C9), three additional 100nF decoupling capacitors (C10, C11, C12), "
+    "and an antenna connection via a 0-ohm resistor (R7) and a u.FL "
+    "connector (J3) on the ESP32 C3 sheet."
+)
+
+
+def test_parse_zero_ohm_resistor():
+    asks = session.parse_passive_deficits([RUN_639])
+    rs = [a for a in asks if a["kind"] == "resistor"]
+    assert rs, "the hyphenated 0-ohm ask must parse"
+
+
+def test_non_passive_remainder_detected():
+    assert session._NON_PASSIVE_ASK_RE.search(RUN_639)
+    # crystal AND u.FL AND connector all present; a purely-passive note is clean
+    assert not session._NON_PASSIVE_ASK_RE.search(RUN_22)
+
+
+def test_reconcile_falls_through_on_non_passive_remainder(tmp_path, monkeypatch):
+    # added-something must NOT trigger the wiring-only "do NOT park again"
+    # path when the note also asks for parts the deterministic pass cannot
+    # provision -- the LLM bom+wiring pass owns the remainder.
+    calls = []
+
+    def _fake_run_session(ws, brief, stages, **kw):
+        calls.append(list(stages))
+        return {"ok": True}
+
+    monkeypatch.setattr(session, "run_session", _fake_run_session)
+    monkeypatch.setattr(
+        session, "apply_deterministic_bom_adds", lambda ws, d: ["C10"]
+    )
+    monkeypatch.setattr(
+        session, "bom_reconcile_deficits",
+        lambda res: [{"text": RUN_639}],
+    )
+    session.maybe_bom_reconcile(tmp_path, "brief", {"ok": False})
+    assert calls, "a reconcile pass must run"
+    assert calls[0] != ["wiring"], (
+        "wiring-only re-drive would falsely claim the deficit was fulfilled"
+    )

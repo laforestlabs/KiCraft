@@ -1240,6 +1240,14 @@ def _cmd_search_symbols(args: argparse.Namespace) -> int:
         _print_curated_part_matches(curated)
         if matches:
             print("stock KiCad symbols:")
+        else:
+            # Silence here read as "no stock symbol exists" -- the model then
+            # guessed a Library:Name and bounced at commit (2026-07-19 §5.6).
+            print(
+                f"no stock KiCad symbol matched ALL of {args.query!r} -- "
+                "retry with fewer/simpler keywords (e.g. 'conn 01x03' for a "
+                "3-pin header); never guess a Library:Name"
+            )
     for sym in matches:
         print(sym)
     return 0
@@ -3327,6 +3335,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                             "to find alternatives"
                         ],
                         "offenders": bad[:20],
+                        "offenders_total": len(bad),
                     },
                     indent=2,
                 )
@@ -3352,6 +3361,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                                 "ok": False,
                                 "errors": [f"{check.name}: {check.message}"],
                                 "offenders": check.offenders[:20],
+                                "offenders_total": len(check.offenders),
                             },
                             indent=2,
                         )
@@ -3373,6 +3383,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                         "ok": False,
                         "errors": [f"{cp.name}: {cp.message}"],
                         "offenders": cp.offenders[:20],
+                        "offenders_total": len(cp.offenders),
                     },
                     indent=2,
                 )
@@ -3426,6 +3437,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                         "ok": False,
                         "errors": [f"{c.name}: {c.message}" for c in failing],
                         "offenders": [o for c in failing for o in c.offenders[:20]],
+                        "offenders_total": sum(len(c.offenders) for c in failing),
                     },
                     indent=2,
                 )
@@ -3532,6 +3544,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                         "offenders": [
                             o for _, offs in failures for o in offs[:20]
                         ],
+                        "offenders_total": sum(len(offs) for _, offs in failures),
                     },
                     indent=2,
                 )
@@ -3560,6 +3573,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                             "retail storefront"
                         ],
                         "offenders": bad_mpn[:20],
+                        "offenders_total": len(bad_mpn),
                     },
                     indent=2,
                 )
@@ -3583,6 +3597,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                             "LCSC part with lookup_lcsc_id"
                         ],
                         "offenders": bad_arrays[:20],
+                        "offenders_total": len(bad_arrays),
                     },
                     indent=2,
                 )
@@ -3668,6 +3683,7 @@ def _write_synthesis_check(
                 "ok": r.ok,
                 "message": r.message,
                 "offenders": r.offenders[:20],
+                "offenders_total": len(r.offenders),
             }
             for r in results
         ],

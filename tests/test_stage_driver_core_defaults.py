@@ -232,3 +232,51 @@ def test_run_session_threads_core_defaults(tmp_path):
                       client=client, core_defaults=_catalog_rows())
     assert res["status"] == "failed"  # garbage replies; threading is what we test
     assert "ldo-3v3-500ma" in _user_prompt(client)
+
+
+def test_bundle_row_dropped_when_cached_retail_dry(monkeypatch):
+    # 2026-07-19 review §5.2: bundle rows were invisible to the dry filter
+    # (their C# lives in the vendored manifest) while the prompt tells the
+    # model NOT to re-verify them -- a retail-dry bundle default (drv8833
+    # C50506: 3,299 assembly / 0 retail) was a guaranteed §9.26 bounce.
+    from kicraft.server import stage_driver as sd
+
+    monkeypatch.setattr(sd.jlcparts, "available", lambda: True)
+    monkeypatch.setattr(
+        sd.jlcparts, "lookup", lambda cid: {"stock": 3299}
+    )
+    monkeypatch.setattr(sd, "_bundle_sourcing_lcsc", lambda b: "C50506")
+    monkeypatch.setattr(sd.lcsc_retail, "enabled", lambda: True)
+    monkeypatch.setattr(sd.lcsc_retail, "retail_floor", lambda: 5)
+    monkeypatch.setattr(
+        sd.lcsc_retail,
+        "cached_stock",
+        lambda cid: 0 if cid == "C50506" else None,
+    )
+    rows = [
+        {"function_key": "dc-motor-driver", "default_mpn": "DRV8833PWPR",
+         "bundle": "drv8833", "enabled": True},
+        {"function_key": "usb-uart-bridge", "default_mpn": "CH340C",
+         "default_lcsc": "C84681", "enabled": True},
+    ]
+    out = sd._format_core_defaults_block(rows)
+    assert out is not None
+    table_rows = [ln for ln in out.splitlines() if ln.startswith("|")]
+    assert not any("dc-motor-driver" in ln for ln in table_rows)
+    assert any("usb-uart-bridge" in ln for ln in table_rows)
+    assert "retail-dry" in out  # named in the dropped-rows caveat line
+
+
+def test_bundle_row_kept_without_fresh_retail_reading(monkeypatch):
+    # No fresh cached reading -> no drop (offline path must not guess).
+    from kicraft.server import stage_driver as sd
+
+    monkeypatch.setattr(sd.jlcparts, "available", lambda: True)
+    monkeypatch.setattr(sd.jlcparts, "lookup", lambda cid: {"stock": 3299})
+    monkeypatch.setattr(sd, "_bundle_sourcing_lcsc", lambda b: "C50506")
+    monkeypatch.setattr(sd.lcsc_retail, "enabled", lambda: True)
+    monkeypatch.setattr(sd.lcsc_retail, "cached_stock", lambda cid: None)
+    rows = [{"function_key": "dc-motor-driver", "default_mpn": "DRV8833PWPR",
+             "bundle": "drv8833", "enabled": True}]
+    out = sd._format_core_defaults_block(rows)
+    assert out is not None and "dc-motor-driver" in out

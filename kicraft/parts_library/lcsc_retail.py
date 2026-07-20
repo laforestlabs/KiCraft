@@ -200,6 +200,23 @@ def stock(cid: str) -> dict:
                 float(entry["ts"]), _dt.timezone.utc).isoformat()}
 
 
+def cached_stock(cid: str) -> int | None:
+    """The last FRESH cached retail reading for ``cid``, or None -- never a
+    network hit. Lets offline consumers (the core-defaults prompt filter) act
+    on a recent reading (e.g. drop a retail-dry default before the model
+    adopts it and burns a guaranteed §9.26 bounce -- 2026-07-19 review §5.2)
+    without adding a storefront fetch to the prompt-assembly path."""
+    cid = _norm(cid)
+    with _LOCK:
+        entry = _fresh(_MEM.get(cid)) or _fresh(_load_disk().get(cid))
+    if entry is None:
+        return None
+    try:
+        return int(entry["stock"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def attach_stock(payload: dict, cid: str | None, *, nullable: bool) -> dict:
     """Pin ``retail_stock``/``retail_min_buy`` from the live storefront onto
     ``payload`` -- the ONE wrap of enabled()/stock()/RetailUnavailable shared
