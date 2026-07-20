@@ -52,8 +52,17 @@ def extract_lcsc_pin(text: str) -> str | None:
     """
     for m in _LCSC_RE.finditer(text or ""):
         digits = m.group(0)[1:]
-        if digits.startswith("0") or digits in _PACKAGE_SIZE_CODES:
+        if digits.startswith("0"):
             continue
+        if digits in _PACKAGE_SIZE_CODES:
+            # Ambiguous token: C1812 is BOTH a chip size code and a real,
+            # in-stock LCSC part (3.6pF C0G 0805). An explicit "LCSC" right
+            # before the token disambiguates in favor of a pin
+            # ("LCSC C1812"); bare prose ("package C1812") stays excluded
+            # (2026-07-19 review §4.7).
+            prefix = (text or "")[max(0, m.start() - 16):m.start()].lower()
+            if "lcsc" not in prefix:
+                continue
         return m.group(0)
     return None
 

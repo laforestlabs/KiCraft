@@ -325,7 +325,14 @@ def _symbol_footprint_pin_mismatches(bom, project_root: Path) -> list[str]:
         if fp not in pads_by_fp:
             pads_by_fp[fp] = _footprint_pad_numbers(fp, project_root)
         pads = pads_by_fp[fp]
-        if not pads:
+        # None = footprint unresolvable (belongs to _unresolved_footprints).
+        # An EMPTY set is a real verdict: the footprint resolved with zero
+        # NUMBERED pads (plain NPTH mounting holes -- pad number ""), so ANY
+        # wireable symbol pin is a mismatch. `if not pads` conflated the two
+        # and let Mechanical:MountingHole_Pad + a padless MountingHole:* sail
+        # through §9.27, crashing later in write_empty_pcb with
+        # PadBindingError (live board 627; 2026-07-19 review §4.2).
+        if pads is None:
             continue
         missing = sorted({
             str(pin.get("number"))
@@ -338,7 +345,8 @@ def _symbol_footprint_pin_mismatches(bom, project_root: Path) -> list[str]:
             bad.append(
                 f"{part.ref}: symbol {sym!r} pin number(s) "
                 f"{', '.join(missing)} have no matching pad on footprint "
-                f"{fp!r} (pads: {', '.join(sorted(pads))}); nets wired to "
+                f"{fp!r} (pads: {', '.join(sorted(pads)) or '<none numbered>'}); "
+                "nets wired to "
                 "those pins would become invisible dead copper on the board "
                 "-- pick a symbol whose pin NUMBERS match the footprint's "
                 "pads (a numbered variant or a vendored part), or the "

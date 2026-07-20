@@ -102,7 +102,14 @@ def downsize_array_decap_footprints(bom: BOM) -> list[str]:
             if m is None:  # vendored / non-canonical footprint -> leave it
                 continue
             cur = m.group(1)
-            if _PKG_RANK.get(cur, 99) <= _PKG_RANK[target]:
+            if cur not in _PKG_RANK:
+                # Unknown size code (2010/2512/...): leave it alone. The old
+                # rank-99 default read "unknown" as "larger than anything" and
+                # force-shrunk a deliberately-chosen bigger cap -- inverting
+                # the documented never-enlarge/downsize-only contract
+                # (2026-07-19 review §4.6).
+                continue
+            if _PKG_RANK[cur] <= _PKG_RANK[target]:
                 continue  # already at/below the target -> never enlarge (idempotent)
             part.footprint = target_fp
             changed.append(ref)

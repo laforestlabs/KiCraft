@@ -32,7 +32,7 @@ from .synthesis.emitter import (
     emit_schematic,
     ensure_leaf_stems_distinct,
 )
-from .synthesis.kicad_pcb_stub import write_empty_pcb
+from .synthesis.kicad_pcb_stub import PadBindingError, write_empty_pcb
 from .synthesis.kicad_pro import write_kicad_pro
 from .synthesis.models3d import stage_3d_models
 from .synthesis.validation import (
@@ -256,12 +256,10 @@ def run(
         placement=getattr(state, "placement", None),
         form_factor=state.intent.form_factor if state.intent else None,
     )
-    write_empty_pcb(project_dir, state.project_stem, state.bom)
-    stage_3d_models(project_dir, state.bom)
-
-    # Build the artifact record now — the files exist on disk regardless of
-    # whether the §9 checks pass — so a validation failure can still report
-    # what was written (with status="failed").
+    # Build the artifact record BEFORE the PCB stub — the schematic files
+    # exist on disk regardless of whether the stub or the §9 checks pass —
+    # so any failure below can still report what was written
+    # (with status="failed").
     artifacts = ArtifactPaths(
         project_dir=project_dir,
         project_stem=state.project_stem,
@@ -270,6 +268,25 @@ def run(
         kicad_pro=pro,
         autoplacer_json=ap,
     )
+
+    try:
+        write_empty_pcb(project_dir, state.project_stem, state.bom)
+    except PadBindingError as exc:
+        # A wired endpoint matched no footprint pad (invisible dead copper).
+        # §9.27 rejects the symbol/footprint pairing at BOM commit, but any
+        # residual escape used to propagate as an unhandled ValueError and
+        # crash the whole build with a bare traceback (live board 627).
+        # Surface it as a structured validation failure instead, so the
+        # caller records it and the wiring/BOM stage can be re-driven.
+        failure = CheckResult(
+            name="9.27 pcb-stub pad binding", ok=False, message=str(exc)
+        )
+        raise SynthesisValidationError(
+            [failure],
+            artifacts=artifacts.model_copy(update={"status": "failed"}),
+            results=[failure],
+        ) from exc
+    stage_3d_models(project_dir, state.bom)
 
     results = collect_validations(project_dir, state.project_stem, bom=state.bom)
     if smoke:

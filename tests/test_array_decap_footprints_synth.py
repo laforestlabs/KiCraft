@@ -142,3 +142,13 @@ def test_cap_on_non_array_sheet_untouched() -> None:
     downsize_array_decap_footprints(bom)
     assert _caps(bom)["C99"] == C0805        # untouched (no array on its sheet)
     assert all(_caps(bom)[f"C{i}"] == C0402 for i in range(1, 4))  # array caps still resized
+
+
+def test_unknown_larger_package_left_alone() -> None:
+    # 2026-07-19 review §4.6: a size code OUTSIDE the rank table (2010, 2512)
+    # used to default to rank 99 and get force-shrunk -- inverting the
+    # downsize-only contract. Unknown packages must be left untouched.
+    c2010 = "Capacitor_SMD:C_2010_5025Metric"
+    bom = _build_bom(n_leds=3, cap_fp=c2010, led_fp=LED_LARGE)
+    assert downsize_array_decap_footprints(bom) == []
+    assert all(fp == c2010 for fp in _caps(bom).values())

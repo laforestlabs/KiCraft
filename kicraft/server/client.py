@@ -175,49 +175,67 @@ class CappedOpenRouterClient:
             payload["provider"] = prov
         if self.s.enable_prompt_cache and isinstance(payload.get("messages"), list):
             self._apply_cache_control(payload["messages"])
-        content, reasoning = [], []
-        tool_calls: dict = {}
-        finish = None
-        provider = None
-        usage: dict = {}
-        resp = self._open_stream(payload)
-        with resp:
-            for raw in resp.iter_lines(decode_unicode=True):
-                if not raw or not raw.startswith("data:"):
-                    continue
-                data = raw[5:].strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                if chunk.get("provider"):
-                    provider = chunk["provider"]
-                if chunk.get("usage"):
-                    usage = chunk["usage"]
-                for ch in chunk.get("choices") or []:
-                    if ch.get("finish_reason"):
-                        finish = ch["finish_reason"]
-                    delta = ch.get("delta") or {}
-                    if delta.get("reasoning"):
-                        reasoning.append(delta["reasoning"])
-                        if on_delta:
-                            on_delta({"reasoning": delta["reasoning"]})
-                    if delta.get("content"):
-                        content.append(delta["content"])
-                        if on_delta:
-                            on_delta({"content": delta["content"]})
-                    for tcd in delta.get("tool_calls") or []:
-                        slot = tool_calls.setdefault(tcd.get("index", 0),
-                                                     {"id": None, "name": "", "args": ""})
-                        if tcd.get("id"):
-                            slot["id"] = tcd["id"]
-                        fn = tcd.get("function") or {}
-                        if fn.get("name"):
-                            slot["name"] = fn["name"]
-                        if fn.get("arguments"):
-                            slot["args"] += fn["arguments"]
+        # Mid-stream retry: _open_stream retries transient failures only up to
+        # the 2xx header; a connection dropped DURING iter_lines (e.g.
+        # "Connection broken: InvalidChunkLength" -- live board 625) used to
+        # propagate out and permanently fail the whole design run. Nothing has
+        # been committed at that point, so the safe recovery is to discard the
+        # partial buffers and re-POST the identical payload from scratch. The
+        # only cost is cosmetic: on_delta already streamed the discarded
+        # partials to the UI, so the viewer sees the reasoning restart.
+        max_stream_retries = max(0, int(getattr(self.s, "llm_max_retries", 0)))
+        stream_backoff = float(getattr(self.s, "llm_retry_backoff_s", 1.0))
+        for stream_attempt in range(max_stream_retries + 1):
+            content, reasoning = [], []
+            tool_calls: dict = {}
+            finish = None
+            provider = None
+            usage: dict = {}
+            try:
+                resp = self._open_stream(payload)
+                with resp:
+                    for raw in resp.iter_lines(decode_unicode=True):
+                        if not raw or not raw.startswith("data:"):
+                            continue
+                        data = raw[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        if chunk.get("provider"):
+                            provider = chunk["provider"]
+                        if chunk.get("usage"):
+                            usage = chunk["usage"]
+                        for ch in chunk.get("choices") or []:
+                            if ch.get("finish_reason"):
+                                finish = ch["finish_reason"]
+                            delta = ch.get("delta") or {}
+                            if delta.get("reasoning"):
+                                reasoning.append(delta["reasoning"])
+                                if on_delta:
+                                    on_delta({"reasoning": delta["reasoning"]})
+                            if delta.get("content"):
+                                content.append(delta["content"])
+                                if on_delta:
+                                    on_delta({"content": delta["content"]})
+                            for tcd in delta.get("tool_calls") or []:
+                                slot = tool_calls.setdefault(
+                                    tcd.get("index", 0),
+                                    {"id": None, "name": "", "args": ""})
+                                if tcd.get("id"):
+                                    slot["id"] = tcd["id"]
+                                fn = tcd.get("function") or {}
+                                if fn.get("name"):
+                                    slot["name"] = fn["name"]
+                                if fn.get("arguments"):
+                                    slot["args"] += fn["arguments"]
+                break  # stream completed cleanly
+            except _RETRY_NETWORK_EXC:
+                if stream_attempt >= max_stream_retries:
+                    raise
+                time.sleep(stream_backoff * (2 ** stream_attempt))
 
         msg = {"role": "assistant", "content": "".join(content) or None,
                "reasoning": "".join(reasoning) or None, "finish_reason": finish}

@@ -421,3 +421,58 @@ def test_open_stream_pins_utf8_and_avoids_mojibake(monkeypatch):
     assert "4.7 kΩ" in msg["content"]
     assert "10 °C" in msg["content"]
     assert "Â" not in msg["content"]                   # no double-encoding
+
+
+# ---- _stream: mid-stream disconnect retry (2026-07-19 review §4.1) --------
+
+class _BrokenMidStreamResp(_FakeResp):
+    """Streams a couple of deltas, then dies like board 625's
+    "Connection broken: InvalidChunkLength" ChunkedEncodingError."""
+
+    def iter_lines(self, decode_unicode=True):
+        yield self._lines[0]
+        raise requests.exceptions.ChunkedEncodingError(
+            "Connection broken: InvalidChunkLength(got length b'', 0 bytes read)"
+        )
+
+
+def test_stream_retries_mid_stream_disconnect(monkeypatch):
+    s = Settings(api_key="k", llm_max_retries=2, llm_retry_backoff_s=0.0)
+    guard = _RecordingGuard()
+    c = CappedOpenRouterClient(s, guard=guard)
+    good_chunks = [
+        {"choices": [{"delta": {"content": "hello"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        _usage_chunk(),
+    ]
+    attempts = []
+
+    def _fake_open(payload):
+        attempts.append(1)
+        if len(attempts) == 1:
+            return _BrokenMidStreamResp(
+                [{"choices": [{"delta": {"content": "par"}}]}]
+            )
+        return _FakeResp(good_chunks)
+
+    monkeypatch.setattr(c, "_open_stream", _fake_open)
+    msg, cost = c._stream({"messages": [{"role": "user", "content": "x"}]})
+    assert len(attempts) == 2
+    # The partial "par" from the aborted attempt was discarded, not prepended.
+    assert msg["content"] == "hello"
+    assert msg["finish_reason"] == "stop"
+    assert cost > 0.0
+
+
+def test_stream_gives_up_after_max_retries(monkeypatch):
+    s = Settings(api_key="k", llm_max_retries=1, llm_retry_backoff_s=0.0)
+    c = CappedOpenRouterClient(s, guard=_RecordingGuard())
+    monkeypatch.setattr(
+        c,
+        "_open_stream",
+        lambda payload: _BrokenMidStreamResp(
+            [{"choices": [{"delta": {"content": "par"}}]}]
+        ),
+    )
+    with pytest.raises(requests.exceptions.ChunkedEncodingError):
+        c._stream({"messages": [{"role": "user", "content": "x"}]})

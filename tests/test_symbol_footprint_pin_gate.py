@@ -112,3 +112,41 @@ def test_unresolvable_symbol_or_footprint_is_someone_elses_problem(tmp_path):
 def test_footprint_pad_numbers_reads_stock_kicad_mod(tmp_path):
     pads = _footprint_pad_numbers("Package_TO_SOT_SMD:SOT-23", tmp_path)
     assert pads == {"1", "2", "3"}
+
+
+def test_zero_numbered_pad_footprint_rejects_wireable_pins(tmp_path, monkeypatch):
+    # 2026-07-19 review §4.2 (live board 627): a footprint that RESOLVES with
+    # zero NUMBERED pads (plain NPTH MountingHole -- pad number "") must
+    # reject a symbol with wireable pins (Mechanical:MountingHole_Pad), not
+    # skip the check like an unresolvable footprint.
+    monkeypatch.setattr(cli_app, "lookup_pins", lambda sym, project_root=None: {
+        "pins": [{"number": "1", "electrical_type": "passive"}],
+        "unit_count": 1,
+    })
+    monkeypatch.setattr(
+        cli_app, "_footprint_pad_numbers", lambda fp, root: set()
+    )
+    bad = _symbol_footprint_pin_mismatches(
+        _bom(_part("H1", "Mechanical:MountingHole_Pad",
+                   "MountingHole:MountingHole_3.2mm_M3")),
+        tmp_path,
+    )
+    assert len(bad) == 1
+    assert "H1" in bad[0]
+    assert "none numbered" in bad[0]
+
+
+def test_unresolvable_footprint_still_skips(tmp_path, monkeypatch):
+    # None (unresolvable) stays someone else's problem (_unresolved_footprints).
+    monkeypatch.setattr(cli_app, "lookup_pins", lambda sym, project_root=None: {
+        "pins": [{"number": "1", "electrical_type": "passive"}],
+        "unit_count": 1,
+    })
+    monkeypatch.setattr(
+        cli_app, "_footprint_pad_numbers", lambda fp, root: None
+    )
+    bad = _symbol_footprint_pin_mismatches(
+        _bom(_part("H1", "Mechanical:MountingHole_Pad", "Nope:Missing")),
+        tmp_path,
+    )
+    assert bad == []
