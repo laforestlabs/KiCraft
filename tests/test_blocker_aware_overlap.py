@@ -24,7 +24,10 @@ from kicraft.autoplacer.brain.placement_utils import (
     _blocker_pair_compatible,
     _world_artifact_origin,
 )
-from kicraft.autoplacer.brain.subcircuit_composer import LeafBlockerSet
+from kicraft.autoplacer.brain.subcircuit_composer import (
+    LeafBlockerSet,
+    can_overlap_sparse,
+)
 from kicraft.autoplacer.brain.types import (
     BoardState,
     Component,
@@ -272,3 +275,87 @@ def test_courtyard_score_mixed_pair_uses_bbox_only():
     state = _board_state({"A": a, "B": b})
     scorer = PlacementScorer(state, config={})
     assert scorer._score_courtyard_overlap() < 100.0
+
+
+# --- 2026-07-19 review §3.2: same-side BODY collision in the stacking branch
+
+
+def _tht_leaf_with_front_body(
+    body: tuple[Point, Point], drill: tuple[Point, Point]
+) -> LeafBlockerSet:
+    # A pure-THT leaf: no SMT copper commitment on either side (routes to the
+    # opposite-layer stacking branch), but its plastic body occupies FRONT.
+    return LeafBlockerSet(
+        front_pads=(),
+        back_pads=(),
+        tht_drills=(drill,),
+        leaf_outline=(Point(0, 0), Point(30, 30)),
+        front_tht_pads=(drill,),
+        back_tht_pads=(drill,),
+        component_rects={"BT1": body},
+        component_sides={"BT1": "front"},
+    )
+
+
+def _smt_front_leaf(
+    pad: tuple[Point, Point], body: tuple[Point, Point]
+) -> LeafBlockerSet:
+    return LeafBlockerSet(
+        front_pads=(pad,),
+        back_pads=(),
+        tht_drills=(),
+        leaf_outline=(Point(0, 0), Point(30, 30)),
+        component_rects={"U1": body},
+        component_sides={"U1": "front"},
+    )
+
+
+def test_stacking_rejects_same_side_body_collision():
+    # THT leaf body spans (0,0)-(20,20) on FRONT; drill tucked at a corner.
+    tht = _tht_leaf_with_front_body(
+        body=(Point(0, 0), Point(20, 20)), drill=(Point(1, 1), Point(2, 2))
+    )
+    # SMT-front leaf whose pad+body land INSIDE the THT body but far from the
+    # drill/annular copper: every copper check passes, only bodies collide.
+    smt = _smt_front_leaf(
+        pad=(Point(10, 10), Point(12, 12)), body=(Point(8, 8), Point(14, 14))
+    )
+    assert not can_overlap_sparse(tht, Point(0, 0), 0.0, smt, Point(0, 0), 0.0)
+
+
+def test_stacking_allows_opposite_side_bodies():
+    tht = _tht_leaf_with_front_body(
+        body=(Point(0, 0), Point(20, 20)), drill=(Point(1, 1), Point(2, 2))
+    )
+    # Same geometry but the other leaf's parts mount on BACK: legitimate
+    # stacking (the back-side-header feature) must stay allowed.
+    back = LeafBlockerSet(
+        front_pads=(),
+        back_pads=((Point(10, 10), Point(12, 12)),),
+        tht_drills=(),
+        leaf_outline=(Point(0, 0), Point(30, 30)),
+        component_rects={"J1": (Point(8, 8), Point(14, 14))},
+        component_sides={"J1": "back"},
+    )
+    assert can_overlap_sparse(tht, Point(0, 0), 0.0, back, Point(0, 0), 0.0)
+
+
+def test_stacking_without_side_info_stays_fail_open():
+    # Blocker sets built before component_sides existed carry an empty map --
+    # behavior must match the pre-field code exactly (no body veto).
+    tht = _tht_leaf_with_front_body(
+        body=(Point(0, 0), Point(20, 20)), drill=(Point(1, 1), Point(2, 2))
+    )
+    tht = LeafBlockerSet(
+        front_pads=tht.front_pads,
+        back_pads=tht.back_pads,
+        tht_drills=tht.tht_drills,
+        leaf_outline=tht.leaf_outline,
+        front_tht_pads=tht.front_tht_pads,
+        back_tht_pads=tht.back_tht_pads,
+        component_rects=dict(tht.component_rects),
+    )
+    smt = _smt_front_leaf(
+        pad=(Point(10, 10), Point(12, 12)), body=(Point(8, 8), Point(14, 14))
+    )
+    assert can_overlap_sparse(tht, Point(0, 0), 0.0, smt, Point(0, 0), 0.0)

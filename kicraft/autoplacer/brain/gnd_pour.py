@@ -699,12 +699,15 @@ def add_gnd_pour_and_thermal_vias(
     # generated boards -- a via held only to the 0.153 freerouting floor can
     # pass this guard yet land 0.26 mm from a Default-class track, a hard
     # Power-netclass DRC error (the KC-UXASHQ escape-via signature).
+    # Take the true max across ALL footprints' GND pads: the old early-break
+    # sampled only the first footprint with any GND pad, silently ignoring a
+    # stricter netclass override elsewhere on the board -- reproducing the
+    # exact KC-UXASHQ class this guard exists to prevent (2026-07-19 §3.5).
     gnd_cl_mm = floor_mm
     for _fp in board.GetFootprints():
         gp = next((p for p in _fp.Pads() if p.GetNetCode() == gnd_code), None)
         if gp is not None:
             gnd_cl_mm = max(gnd_cl_mm, _own_clearance_mm(gp, pcbnew.B_Cu, floor_mm))
-            break
 
     via_r_mm = pcbnew.ToMM(via_size) / 2.0
     via_drill_r_mm = pcbnew.ToMM(via_drill) / 2.0

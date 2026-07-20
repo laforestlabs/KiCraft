@@ -109,6 +109,14 @@ def build_scaffold(
             layer=Layer.FRONT,
             width_mm=width_mm,
             height_mm=height_mm,
+            # pos is PIN 1, not the header centre -- without body_center,
+            # Component.bbox() falls back to pos and the solver reasons about
+            # a courtyard box up to ~11mm off the real header (Arduino
+            # digital_high: centre x=30.2 vs pin-1 x=18.8). Every other
+            # locked-obstacle construction site sets this (2026-07-19 §3.9).
+            body_center=Point(
+                (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0
+            ),
             pads=pads,
             locked=True,
             kind="connector",

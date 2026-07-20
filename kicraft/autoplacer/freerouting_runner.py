@@ -511,6 +511,81 @@ def count_board_tracks(kicad_pcb_path: str) -> dict[str, Any]:
     return json.loads(result.stdout.strip())
 
 
+def count_copper_outside_outline(
+    kicad_pcb_path: str, tol_mm: float = 0.05
+) -> dict[str, Any]:
+    """Count track endpoints / via centres lying OUTSIDE the Edge.Cuts outline.
+
+    freerouting 1.9.0 ignores the DSN boundary for wires, so routed copper can
+    escape the board outline entirely -- far enough out that even
+    copper_edge_clearance never fires. The ``malformed_board_geometry``
+    validation flag existed for exactly this class but nothing ever set it
+    (2026-07-19 review §2.6). Uses the KiCad-tessellated outline polygon
+    (SHAPE_POLY_SET), so circles/arcs/rounded rects are exact; points within
+    ``tol_mm`` of the boundary count as inside (float noise guard). Runs in a
+    subprocess like every other pcbnew inspection here. ``ok: False`` means
+    the outline could not be resolved (malformed Edge.Cuts or tooling
+    failure) -- callers must not treat that as "contained".
+    """
+    script = (
+        "import json, pcbnew\n"
+        f"board = pcbnew.LoadBoard({kicad_pcb_path!r})\n"
+        "poly = pcbnew.SHAPE_POLY_SET()\n"
+        "try:\n"
+        "    ok = bool(board.GetBoardPolygonOutlines(poly))\n"
+        "except Exception:\n"
+        "    ok = False\n"
+        "if not ok or poly.OutlineCount() == 0:\n"
+        "    print(json.dumps({'ok': False, 'outside_tracks': -1,"
+        " 'outside_vias': -1, 'examples': []}))\n"
+        "    raise SystemExit(0)\n"
+        f"tol_nm = int({tol_mm} * 1e6)\n"
+        "tol_sq = tol_nm * tol_nm\n"
+        "def outside(x, y):\n"
+        "    p = pcbnew.VECTOR2I(int(x), int(y))\n"
+        "    if poly.Contains(p):\n"
+        "        return False\n"
+        "    try:\n"
+        "        return poly.SquaredDistance(p) > tol_sq\n"
+        "    except Exception:\n"
+        "        return True\n"
+        "ot = ov = 0\n"
+        "examples = []\n"
+        "for t in board.GetTracks():\n"
+        "    if isinstance(t, pcbnew.PCB_VIA):\n"
+        "        pos = t.GetPosition()\n"
+        "        if outside(pos.x, pos.y):\n"
+        "            ov += 1\n"
+        "            if len(examples) < 5:\n"
+        "                examples.append({'kind': 'via',"
+        " 'x_mm': pos.x / 1e6, 'y_mm': pos.y / 1e6,"
+        " 'net': t.GetNetname()})\n"
+        "    else:\n"
+        "        s, e = t.GetStart(), t.GetEnd()\n"
+        "        if outside(s.x, s.y) or outside(e.x, e.y):\n"
+        "            ot += 1\n"
+        "            if len(examples) < 5:\n"
+        "                examples.append({'kind': 'track',"
+        " 'x_mm': s.x / 1e6, 'y_mm': s.y / 1e6,"
+        " 'net': t.GetNetname()})\n"
+        "print(json.dumps({'ok': True, 'outside_tracks': ot,"
+        " 'outside_vias': ov, 'examples': examples}))\n"
+    )
+    fallback = {"ok": False, "outside_tracks": -1, "outside_vias": -1, "examples": []}
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=_kicad_subprocess_env(),
+    )
+    if result.returncode != 0:
+        return fallback
+    try:
+        return json.loads(result.stdout.strip().splitlines()[-1])
+    except Exception:
+        return fallback
+
+
 def min_intra_footprint_pad_gap_mm(kicad_pcb_path: str) -> float | None:
     """Smallest edge-to-edge gap between two *different-net* pads of the same
     footprint, in mm.
@@ -1739,6 +1814,21 @@ def validate_routed_board(
         _fp = -1
     if int(_fp) == 0:
         validation["rejection_reasons"].append("empty_board")
+
+    # Copper containment: routed copper escaping the Edge.Cuts outline
+    # (freerouting ignores the DSN boundary for wires). Sets the previously
+    # dead malformed_board_geometry flag; the reason plumbing below already
+    # rejects on it. An unresolved outline is reported but NOT treated as
+    # escaped copper -- boards whose Edge.Cuts genuinely fails to close are
+    # caught by their own gates.
+    if (cfg or {}).get("outline_containment_check", True):
+        _containment = count_copper_outside_outline(str(board_path))
+        validation["copper_outside_outline"] = _containment
+        if _containment.get("ok") and (
+            int(_containment.get("outside_tracks", 0) or 0) > 0
+            or int(_containment.get("outside_vias", 0) or 0) > 0
+        ):
+            validation["malformed_board_geometry"] = True
 
     drc = _run_kicad_cli_drc(str(board_path), timeout_s=timeout_s)
     validation["drc"] = drc

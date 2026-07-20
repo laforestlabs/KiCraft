@@ -145,7 +145,9 @@ These are the producers of the defects §2 fails to see. Same replay verificatio
   almost always (`compose_subcircuits.py:2069-2079`), so a big plastic body can overlap another
   leaf's geometry with zero rejection. *Fix:* add a `component_rects` pairwise check to the branch.
 
-- **3.3 Trivial leaves (no internal nets) skip DRC entirely** (bug-medium, **check intent first**:
+- **3.3 [DEFERRED from PR-B 2026-07-20]** — collides with the V2 battery-holder exemption
+  deliberately shipped 2026-07-19 and verified clean on run_31; revisit with that context,
+  not as a drive-by. Original finding: **Trivial leaves (no internal nets) skip DRC entirely** (bug-medium, **check intent first**:
   the recent V2 battery-holder gate exemption was deliberate — this finding generalizes it to *all*
   trivial leaves and to KiCad's own courtyard/clearance DRC, which `repair_leaf_placement_legality`
   does not cover). `leaf_routing.py:1327-1526` copies the placed board to `leaf_routed.kicad_pcb`

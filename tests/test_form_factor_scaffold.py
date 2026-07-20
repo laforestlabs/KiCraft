@@ -130,3 +130,26 @@ class TestComposeScaffold:
         assert resolve_scaffold(
             {"form_factor_enforce": True, "form_factor_standard": {"key": "nope", "validated": True}}
         ) is None
+
+
+def test_scaffold_components_carry_true_body_center():
+    # 2026-07-19 review §3.9: pos is PIN 1, not the header centre -- without
+    # body_center, Component.bbox() reasoned about a courtyard box up to
+    # ~11mm off the real Arduino digital_high header.
+    s = build_scaffold(get_template("arduino_uno_shield"))
+    for conn in s.template.fixed_connectors:
+        ref = next(
+            r for r, c in s.components.items() if conn.role in c.value
+        )
+        comp = s.components[ref]
+        pins = conn.pin_positions()
+        cx = (min(x for _n, x, _y in pins) + max(x for _n, x, _y in pins)) / 2
+        cy = (min(y for _n, _x, y in pins) + max(y for _n, _x, y in pins)) / 2
+        assert comp.body_center is not None
+        assert abs(comp.body_center.x - cx) < 1e-9
+        assert abs(comp.body_center.y - cy) < 1e-9
+        # The multi-pin headers are exactly the parts where pos != centre.
+        if len(pins) > 1:
+            assert abs(comp.body_center.x - comp.pos.x) > 0.1 or abs(
+                comp.body_center.y - comp.pos.y
+            ) > 0.1

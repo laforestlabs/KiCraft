@@ -182,6 +182,13 @@ class LeafBlockerSet:
     front_tht_pads: tuple[tuple[Point, Point], ...] = ()
     back_tht_pads: tuple[tuple[Point, Point], ...] = ()
     component_rects: dict[str, tuple[Point, Point]] = field(default_factory=dict)
+    # Mount side ("front"/"back") per component_rects ref. THT bodies are
+    # deliberately invisible to the side-commit classifier (annular shadow),
+    # but the physical body still occupies its mount side -- the stacking
+    # branch of can_overlap_sparse uses this to veto same-side body
+    # collisions (2026-07-19 review §3.2). Empty dict = unknown (fail-open,
+    # matching the pre-field behavior).
+    component_sides: dict[str, str] = field(default_factory=dict)
     # Per-footprint "PCB Edge" reference marker in leaf-local coordinates.
     # When a constrained component carries a marker, its coordinate overrides
     # the pad/courtyard bbox edge on the constrained side so the attached
@@ -1765,6 +1772,10 @@ def _extract_blockers_from_layout(
             ref: _component_local_bbox(component)
             for ref, component in artifact.layout.components.items()
         },
+        component_sides={
+            ref: ("front" if component.layer == 0 else "back")
+            for ref, component in artifact.layout.components.items()
+        },
     )
 
 
@@ -1861,6 +1872,7 @@ def _extract_blockers_from_pcb(
         pcbnew.B_Cu: back_tht_pads,
     }
     component_rects: dict[str, tuple[Point, Point]] = {}
+    component_sides: dict[str, str] = {}
     edge_reference_points: dict[str, Point] = {}
     connector_pad_edge_anchors: dict[str, Point] = {}
 
@@ -1980,6 +1992,9 @@ def _extract_blockers_from_pcb(
 
         ref = footprint.GetReferenceAsString()
         component_rects[ref] = (rect_min, rect_max)
+        component_sides[ref] = (
+            "front" if footprint.GetLayer() == pcbnew.F_Cu else "back"
+        )
         edge_marker = _find_edge_reference(footprint)
         if edge_marker is not None:
             edge_reference_points[ref] = edge_marker
@@ -2034,6 +2049,7 @@ def _extract_blockers_from_pcb(
         component_rects={
             ref: _rebase_rect(rect) for ref, rect in component_rects.items()
         },
+        component_sides=dict(component_sides),
         edge_reference_points={
             ref: Point(point.x - shift_x, point.y - shift_y)
             for ref, point in edge_reference_points.items()
@@ -2533,7 +2549,41 @@ def can_overlap_sparse(
         return True
 
     # OPPOSITE-LAYER (stacking) pair only past this point -- e.g. an SMT-front
-    # leaf over a back-side THT battery holder. The remaining conflicts are
+    # leaf over a back-side THT battery holder.
+    #
+    # Physical body collision on the SAME mount side: THT area is deliberately
+    # invisible to the side-commit test above (annular shadow), so a THT-heavy
+    # leaf reaches this branch "uncommitted" while its plastic body still
+    # occupies its mount side -- and can collide with the other leaf's bodies
+    # there even though every copper check below passes (2026-07-19 review
+    # §3.2). Bodies on OPPOSITE sides still stack freely (the back-side-header
+    # feature). Empty component_sides = unknown geometry, fail-open as before.
+    fronts_a = [
+        r for ref, r in blocker_a.component_rects.items()
+        if blocker_a.component_sides.get(ref) == "front"
+    ]
+    backs_a = [
+        r for ref, r in blocker_a.component_rects.items()
+        if blocker_a.component_sides.get(ref) == "back"
+    ]
+    fronts_b = [
+        r for ref, r in blocker_b.component_rects.items()
+        if blocker_b.component_sides.get(ref) == "front"
+    ]
+    backs_b = [
+        r for ref, r in blocker_b.component_rects.items()
+        if blocker_b.component_sides.get(ref) == "back"
+    ]
+    if _any_rect_overlap(
+        fronts_a, origin_a, rotation_a, fronts_b, origin_b, rotation_b
+    ):
+        return False
+    if _any_rect_overlap(
+        backs_a, origin_a, rotation_a, backs_b, origin_b, rotation_b
+    ):
+        return False
+
+    # The remaining conflicts are
     # through-hole: a TH drill pierces both layers, and a THT annular ring is
     # copper on BOTH layers, so they can still collide with the other leaf's
     # committed side. The per-rect checks below catch exactly those.

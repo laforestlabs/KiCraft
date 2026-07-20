@@ -709,6 +709,7 @@ class PlacementSolver:
                     self._re_snap_aligned_pairs(best_comps)
                     self._clamp_pads_to_board(best_comps)
 
+        _step16_moved: set[str] = set()
         with _timed_phase(phase_t, "solve_courtyard_ms", capture_comps=lambda: best_comps):
             # Step 16: Final courtyard-separation legalization -- the GENUINE
             # last geometry step. Steps 13-15 (pinned restore, board clamp,
@@ -720,8 +721,22 @@ class PlacementSolver:
             # has no same-side courtyard overlap. Only unlocked parts move, so
             # pinned connectors/holes keep the positions Steps 13-15 set.
             if self.cfg.get("resolve_courtyard_overlaps", True):
+                _pre_step16 = {
+                    r: (c.pos.x, c.pos.y, c.rotation)
+                    for r, c in best_comps.items()
+                }
                 unresolved = self._resolve_courtyard_overlaps(best_comps)
                 self._clamp_pads_to_board(best_comps)
+                _step16_moved = {
+                    r
+                    for r, (x, y, rot) in _pre_step16.items()
+                    if (c := best_comps.get(r)) is not None
+                    and (
+                        abs(c.pos.x - x) > 0.01
+                        or abs(c.pos.y - y) > 0.01
+                        or abs((c.rotation - rot) % 360.0) > 0.5
+                    )
+                }
                 if unresolved:
                     print(
                         f"  WARNING: {unresolved} courtyard overlap(s) between two "
@@ -732,11 +747,14 @@ class PlacementSolver:
         # Grid-assignment: the legality tail moves individual parts, which can
         # nudge a gridded passive off its (legal-by-construction) slot. Re-snap
         # every occupant back to its slot as the genuine last step, so the tidy,
-        # pin-local structure the assignment found is what ships.
+        # pin-local structure the assignment found is what ships -- EXCEPT any
+        # occupant Step 16 just moved to clear a courtyard overlap: snapping
+        # those back unconditionally reinstated the overlap Step 16 fixed, and
+        # the leaf shipped it frozen into the parent (2026-07-19 review §3.1).
         if self._grid_assignment_active and self._grid is not None:
             from kicraft.autoplacer.brain.leaf_grid_assignment import resnap_to_grid
 
-            resnap_to_grid(best_comps, self._grid)
+            resnap_to_grid(best_comps, self._grid, exclude=_step16_moved)
             self._clamp_pads_to_board(best_comps)
 
         # Final score
@@ -2530,11 +2548,16 @@ class PlacementSolver:
                 comp = comps[ref]
                 old_pos = Point(comp.pos.x, comp.pos.y)
 
-                # Random displacement within move_radius
+                # Random displacement within move_radius, clamped pad-aware
+                # like every other clamp site in this file -- clamping to the
+                # raw edge let SA accept (and promote into best_comps) a
+                # candidate whose pads/body hang off the board (2026-07-19
+                # review §3.6).
                 dx = rng.gauss(0, move_radius * 0.5)
                 dy = rng.gauss(0, move_radius * 0.5)
-                new_x = max(tl.x, min(br.x, comp.pos.x + dx))
-                new_y = max(tl.y, min(br.y, comp.pos.y + dy))
+                hw, hh = _pad_half_extents(comp)
+                new_x = max(tl.x + hw, min(br.x - hw, comp.pos.x + dx))
+                new_y = max(tl.y + hh, min(br.y - hh, comp.pos.y + dy))
                 comp.pos = Point(new_x, new_y)
                 _update_pad_positions(comp, old_pos, comp.rotation)
 

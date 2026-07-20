@@ -550,3 +550,80 @@ def test_validate_routed_board_keeps_verdict_on_nonzero_exit_with_violations(
     validation = freerouting_runner.validate_routed_board(str(board_path))
 
     assert "drc_failed" not in validation["rejection_reasons"]
+
+
+def test_validate_routed_board_flags_copper_outside_outline(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # 2026-07-19 review §2.6: the malformed_board_geometry flag was dead --
+    # copper escaping Edge.Cuts (freerouting ignores the DSN boundary for
+    # wires) now sets it and rejects the board.
+    monkeypatch.setattr(
+        freerouting_runner,
+        "count_board_tracks",
+        lambda _path: {"traces": 10, "vias": 2, "total_length_mm": 100.0},
+    )
+    monkeypatch.setattr(
+        freerouting_runner,
+        "_run_kicad_cli_drc",
+        lambda _path, timeout_s=30: {
+            "report_text": "", "violations": [], "shorts": 0,
+            "unconnected": 0, "clearance": 0, "copper_edge_clearance": 0,
+            "ran": True, "returncode": 0, "timed_out": False,
+            "missing_cli": False,
+        },
+    )
+    monkeypatch.setattr(
+        freerouting_runner,
+        "count_copper_outside_outline",
+        lambda _path, tol_mm=0.05: {
+            "ok": True, "outside_tracks": 3, "outside_vias": 1,
+            "examples": [{"kind": "track", "x_mm": 99.0, "y_mm": 1.0,
+                          "net": "GND"}],
+        },
+    )
+    board_path = tmp_path / "fake_board.kicad_pcb"
+    board_path.write_text("stub", encoding="utf-8")
+
+    validation = freerouting_runner.validate_routed_board(str(board_path))
+
+    assert validation["malformed_board_geometry"] is True
+    assert validation["accepted"] is False
+    assert "malformed_board_geometry" in validation["rejection_reasons"]
+
+
+def test_validate_routed_board_unresolved_outline_is_not_escaped_copper(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        freerouting_runner,
+        "count_board_tracks",
+        lambda _path: {"traces": 10, "vias": 2, "total_length_mm": 100.0},
+    )
+    monkeypatch.setattr(
+        freerouting_runner,
+        "_run_kicad_cli_drc",
+        lambda _path, timeout_s=30: {
+            "report_text": "", "violations": [], "shorts": 0,
+            "unconnected": 0, "clearance": 0, "copper_edge_clearance": 0,
+            "ran": True, "returncode": 0, "timed_out": False,
+            "missing_cli": False,
+        },
+    )
+    monkeypatch.setattr(
+        freerouting_runner,
+        "count_copper_outside_outline",
+        lambda _path, tol_mm=0.05: {
+            "ok": False, "outside_tracks": -1, "outside_vias": -1,
+            "examples": [],
+        },
+    )
+    board_path = tmp_path / "fake_board.kicad_pcb"
+    board_path.write_text("stub", encoding="utf-8")
+
+    validation = freerouting_runner.validate_routed_board(str(board_path))
+
+    assert validation["malformed_board_geometry"] is False
+    assert "malformed_board_geometry" not in validation["rejection_reasons"]

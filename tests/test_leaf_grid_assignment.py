@@ -222,3 +222,42 @@ def test_resnap_is_idempotent():
                        rng=random.Random(0), max_iters=60)
     # already on-grid -> nothing to snap
     assert resnap_to_grid(comps, grid) == 0
+
+
+def _drift(comp, dx: float) -> None:
+    """Displace a component the way the legality tail does: pos AND
+    body_center move together (resnap compares the body centre)."""
+    comp.pos.x += dx
+    if comp.body_center is not None:
+        comp.body_center.x += dx
+
+
+def test_resnap_snaps_back_a_drifted_occupant():
+    u1 = _ic_4pads()
+    comps = {u1.ref: u1, "C1": _decap("C1", 52, 52)}
+    state = _state(comps)
+    grid = build_anchor_grid(comps, board_outline=BOARD, pitch_gap_mm=1.0)
+    grid_assignment_sa(comps, grid, state, PlacementScorer(state, {"psw_pin_locality": 1.0}),
+                       rng=random.Random(0), max_iters=60)
+    if "C1" not in grid.occupied_by_ref:
+        return  # assignment kept the input; nothing gridded to exercise
+    _drift(comps["C1"], 3.0)
+    assert resnap_to_grid(comps, grid) == 1
+
+
+def test_resnap_exclude_preserves_step16_moves():
+    # 2026-07-19 review §3.1: an occupant the courtyard-legalization pass
+    # (Step 16) moved must NOT be snapped back -- that reinstated the exact
+    # overlap Step 16 had just cleared.
+    u1 = _ic_4pads()
+    comps = {u1.ref: u1, "C1": _decap("C1", 52, 52)}
+    state = _state(comps)
+    grid = build_anchor_grid(comps, board_outline=BOARD, pitch_gap_mm=1.0)
+    grid_assignment_sa(comps, grid, state, PlacementScorer(state, {"psw_pin_locality": 1.0}),
+                       rng=random.Random(0), max_iters=60)
+    if "C1" not in grid.occupied_by_ref:
+        return
+    _drift(comps["C1"], 3.0)
+    moved_x = comps["C1"].pos.x
+    assert resnap_to_grid(comps, grid, exclude={"C1"}) == 0
+    assert comps["C1"].pos.x == moved_x

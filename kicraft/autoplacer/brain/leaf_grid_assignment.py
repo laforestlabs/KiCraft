@@ -529,11 +529,26 @@ def grid_assignment_sa(
     return best_comps
 
 
-def resnap_to_grid(comps: dict[str, Component], grid: Grid, *, tol_mm: float = 0.05) -> int:
+def resnap_to_grid(
+    comps: dict[str, Component],
+    grid: Grid,
+    *,
+    tol_mm: float = 0.05,
+    exclude: set[str] | None = None,
+) -> int:
     """Re-place any gridded passive that the legality tail nudged off its slot.
-    Idempotent; returns how many were snapped back."""
+    Idempotent; returns how many were snapped back.
+
+    ``exclude`` names occupants that must NOT be snapped back -- occupants the
+    final courtyard-separation pass (Step 16) deliberately moved to clear an
+    overlap. Snapping those back to their slot silently reinstated the exact
+    overlap Step 16 had just fixed, which then shipped frozen in the leaf and
+    resurfaced as courtyards_overlap at the parent fab gate (2026-07-19 §3.1).
+    """
     n = 0
     for ref, sid in grid.occupied_by_ref.items():
+        if exclude and ref in exclude:
+            continue
         c = comps.get(ref)
         if c is None:
             continue
