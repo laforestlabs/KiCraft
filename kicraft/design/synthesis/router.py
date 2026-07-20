@@ -25,6 +25,7 @@ sheet is always ERC-clean.
 """
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field, replace
 
 from ..models import (
@@ -211,7 +212,17 @@ def route_sheet(
         if info is None:
             try:
                 info = lookup_pins(parts_by_ref[ref].symbol)
-            except (SymbolNotFoundError, ValueError, KeyError):
+            except (SymbolNotFoundError, ValueError, KeyError) as exc:
+                # Loud, not silent: an unresolvable symbol here silently
+                # dropped whole nets from the schematic (no wire, no label),
+                # surfacing only as a baffling downstream ERC "pin not
+                # connected" (2026-07-19 review §4.5).
+                print(
+                    f"[router] WARNING: cannot resolve pins for {ref} "
+                    f"({getattr(parts_by_ref.get(ref), 'symbol', '?')}): {exc} "
+                    "-- nets touching this part will not be drawn",
+                    file=sys.stderr,
+                )
                 info = {"pins": []}
             pin_info_cache[ref] = info
         return info["pins"]

@@ -32,18 +32,38 @@ class SymbolNotFoundError(LookupError):
 
 
 def _match_block(text: str, start: int) -> str:
-    """Return the parenthesized block beginning at the '(' at `start`."""
+    """Return the parenthesized block beginning at the '(' at `start`.
+
+    String-aware: parens inside quoted values (KiCad Description fields
+    routinely contain unbalanced literal parens, e.g. the whole
+    ``Conn_*_Row_Letter_Last`` family and ~300 STM32H5/H7 descriptions) must
+    not count toward nesting depth -- the naive counter truncated 481 stock
+    symbols mid-property, and ``lookup_pins`` then silently reported ZERO
+    pins for them (2026-07-19 review §4.3). Handles ``\\"`` escapes.
+    """
     if text[start] != "(":
         raise ValueError(f"expected '(' at position {start}, got {text[start]!r}")
     depth = 0
-    for i in range(start, len(text)):
+    in_string = False
+    i = start
+    n = len(text)
+    while i < n:
         c = text[i]
-        if c == "(":
+        if in_string:
+            if c == "\\":
+                i += 2  # skip the escaped character (\" most importantly)
+                continue
+            if c == '"':
+                in_string = False
+        elif c == '"':
+            in_string = True
+        elif c == "(":
             depth += 1
         elif c == ")":
             depth -= 1
             if depth == 0:
                 return text[start : i + 1]
+        i += 1
     raise ValueError("unmatched parenthesis while extracting symbol block")
 
 

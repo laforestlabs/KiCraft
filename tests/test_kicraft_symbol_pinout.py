@@ -145,3 +145,41 @@ def test_all_units_returns_every_section() -> None:
     # no duplicate pin numbers across units (global numbering + DeMorgan dedupe).
     nums = [p["number"] for p in full["pins"]]
     assert len(nums) == len(set(nums))
+
+
+# --- 2026-07-19 review §4.3/§4.4/§6.1: pin-data seam --------------------------
+
+import pytest as _pytest
+from pathlib import Path as _Path
+
+_STOCK = _Path("/usr/share/kicad/symbols")
+_needs_stock = _pytest.mark.skipif(
+    not (_STOCK / "Connector_Generic.kicad_sym").is_file(),
+    reason="stock KiCad libraries not installed",
+)
+
+
+@_needs_stock
+def test_parens_in_description_family_parses():
+    # §4.3: the Conn_*_Row_Letter_Last family carries literal unbalanced
+    # parens in its Description; the naive block matcher truncated all 180 of
+    # them to ZERO pins, indistinguishable from a legit pinless symbol.
+    from kicraft.design.synthesis.symbol_pinout import lookup_pins
+
+    info = lookup_pins("Connector_Generic:Conn_02x01_Row_Letter_Last")
+    assert len(info["pins"]) == 2
+
+
+@_needs_stock
+def test_all_units_surfaces_every_opamp_section():
+    # §6.1: the single-unit default fed §9.11 only unit A of a dual op-amp;
+    # unit B's pins were invisible and its channel shipped dead (board 637).
+    from kicraft.design.synthesis.symbol_pinout import lookup_pins
+
+    single = lookup_pins("Amplifier_Operational:TL072")
+    every = lookup_pins("Amplifier_Operational:TL072", all_units=True)
+    assert single["unit_count"] >= 2
+    nums_single = {p["number"] for p in single["pins"]}
+    nums_all = {p["number"] for p in every["pins"]}
+    assert {"5", "6", "7"} <= nums_all
+    assert not {"5", "6", "7"} <= nums_single

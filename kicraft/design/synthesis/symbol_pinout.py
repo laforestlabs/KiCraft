@@ -21,6 +21,7 @@ from .parts_lookup import (
 from .symbol_library import (
     SymbolNotFoundError,
     _match_block,
+    _normalize_ic_pins,
     _resolve_extends_chain,
 )
 
@@ -80,6 +81,16 @@ def _lookup_cached(
         raise SymbolNotFoundError(str(exc)) from exc
     lib_text = lib_path.read_text()
     resolved = _resolve_extends_chain(lib_text, name)
+    # Same IC-level pin-type view as the embedded schematic symbol:
+    # extract_symbol_block retypes mistyped switch-node / regulator-output
+    # pins (power_in -> power_out) but this reader parsed the RAW text, so
+    # every §9.x gate and the emitter's PWR_FLAG logic saw diverging types --
+    # proven live on a stale vendored TPS54331: PH read power_in here,
+    # power_out in the schematic, producing the exact spurious "Power output
+    # and Power output" ERC short the normalization exists to prevent
+    # (2026-07-19 review §4.4). Ref-dependent passive normalization stays
+    # emit-side (no refdes context here).
+    resolved = _normalize_ic_pins(resolved)
 
     # Find every (symbol "<base>_<unit>_1" ...) sub-block. The "_0_1" sub-symbol
     # (unit 0) is NOT just graphics: KiCad parks pins COMMON to every unit there,

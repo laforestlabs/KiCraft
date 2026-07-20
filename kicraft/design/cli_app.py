@@ -3014,7 +3014,14 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
                 continue
             seen.add(sym)
             try:
-                info = lookup_pins(sym)
+                # all_units: a multi-unit symbol (dual op-amp, quad gate)
+                # must surface EVERY unit's pins to the wiring model and to
+                # §9.11 -- the single-unit default fed them only unit A, so
+                # a TL072's unit-B pins (5,6,7) were invisible, §9.11
+                # validated against the partial list, and the board shipped
+                # with a dead second channel (live board 637; 2026-07-19
+                # review §6.1).
+                info = lookup_pins(sym, all_units=True)
             except (SymbolNotFoundError, ValueError) as e:
                 unresolved.append(f"{sym}: {e}")
                 continue

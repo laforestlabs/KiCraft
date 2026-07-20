@@ -32,6 +32,7 @@ to the free row, so the sheet is always emittable and ERC-clean.
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass, field
 
 from ..models import BOM, BomPart, Sheet, is_power_or_ground_name
@@ -155,7 +156,16 @@ class _Member:
 def _load_pins(part: BomPart) -> _Pins:
     try:
         pins = lookup_pins(part.symbol)["pins"]
-    except (SymbolNotFoundError, ValueError, KeyError):
+    except (SymbolNotFoundError, ValueError, KeyError) as exc:
+        # Loud, not silent: a part placed with unresolvable pins ends up on
+        # the sheet unwired with zero diagnostic pointing at the cause
+        # (2026-07-19 review §4.5).
+        print(
+            f"[placement] WARNING: cannot resolve pins for {part.ref} "
+            f"({part.symbol}): {exc} -- part will place but cannot cluster "
+            "or wire",
+            file=sys.stderr,
+        )
         pins = []
     return _Pins(by_number={p["number"]: p for p in pins}, count=len(pins))
 

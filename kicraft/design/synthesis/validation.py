@@ -510,7 +510,7 @@ def check_pin_existence(bom) -> CheckResult:
         if sym is None:
             return None
         try:
-            info = lookup_pins(sym)
+            info = lookup_pins(sym, all_units=True)
         except (SymbolNotFoundError, ValueError) as exc:
             bad.append(f"{ref} ({sym}): {exc}")
             pins_by_ref_cache[ref] = set()
@@ -591,7 +591,7 @@ def bridge_duplicate_pins(bom) -> list[str]:
     bridged: list[str] = []
     for part in bom.parts:
         try:
-            info = lookup_pins(part.symbol)
+            info = lookup_pins(part.symbol, all_units=True)
         except (SymbolNotFoundError, ValueError):
             continue  # §9.11 reports unresolvable symbols
         groups: dict[str, list[str]] = defaultdict(list)
@@ -638,7 +638,7 @@ def check_net_coverage(bom) -> CheckResult:
 
     for part in bom.parts:
         try:
-            info = lookup_pins(part.symbol)
+            info = lookup_pins(part.symbol, all_units=True)
         except (SymbolNotFoundError, ValueError) as exc:
             bad.append(f"{part.ref} ({part.symbol}): {exc}")
             continue
@@ -1040,7 +1040,7 @@ def _pin_info_by_ref(bom):
     pin_count: dict[str, int] = {}
     for part in bom.parts:
         try:
-            data = lookup_pins(part.symbol)
+            data = lookup_pins(part.symbol, all_units=True)
         except (SymbolNotFoundError, ValueError):
             continue
         info[part.ref] = {
