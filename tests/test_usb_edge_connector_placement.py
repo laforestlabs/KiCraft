@@ -110,6 +110,46 @@ def test_bnc_elbow_model_transform_pinned():
     assert float(m.group(2)) > 0, "marker moved back to the flange side (-y)"
 
 
+def test_barrel_anchor_with_author_marker():
+    """A marker-carrying long-barrel connector must still qualify for the
+    pad/marker edge anchor (barrel_overhang=True downstream) -- the old elif
+    skipped marked footprints entirely, so the outline's anchor-slack clamp
+    rejected the marker anchor and grew the board out to the barrel tip
+    (KC-DVA3UP: mouth buried on-board). With a marker, the barrel test is
+    'courtyard continues >=5mm past the marker line' and the anchor is the
+    marker itself; a marker at the courtyard front (screw terminal) stays
+    non-barrel."""
+    from kicraft.autoplacer.brain.subcircuit_composer import (
+        _connector_barrel_edge_anchor,
+    )
+    from kicraft.autoplacer.brain.types import Point
+
+    # Real BNC local geometry: courtyard y in [-4.46, 31.04], pads y in
+    # [-3.33, 3.33], marker at (0, 9.5) -- barrel continues 21.5mm past it.
+    court_min, court_max = Point(-7.35, -4.46), Point(7.35, 31.04)
+    pad_min, pad_max = Point(-6.35, -3.33), Point(6.35, 3.33)
+    marker = Point(0.0, 9.5)
+    anchor = _connector_barrel_edge_anchor(
+        court_min, court_max, pad_min, pad_max, edge_marker=marker
+    )
+    assert anchor == marker
+
+    # Screw-terminal-like: marker ON the courtyard mouth line -> no overhang
+    # past the declared edge -> not a barrel connector (flush mount).
+    flush_marker = Point(0.0, 31.04)
+    assert (
+        _connector_barrel_edge_anchor(
+            court_min, court_max, pad_min, pad_max, edge_marker=flush_marker
+        )
+        is None
+    )
+
+    # No marker: unchanged pad-face fallback.
+    anchor = _connector_barrel_edge_anchor(court_min, court_max, pad_min, pad_max)
+    assert anchor is not None
+    assert anchor.y == pad_max.y
+
+
 def test_edge_marker_contradiction_lint():
     """validate-part check (9): a 'Board Edge' marker on the side opposite a
     mouth-length artwork feature (the exact defect cee173c planted) must be

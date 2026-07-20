@@ -116,6 +116,58 @@ def _compose_and_measure(tmp_path: Path, fixture: Path = FIXTURE) -> dict[str, E
 @pytest.mark.skipif(
     not (FIXTURE / ".experiments").is_dir(), reason="frozen-leaf fixture missing"
 )
+def _bnc_board_with_edge_at(tmp_path, edge_x_mm: float):
+    """One fixed BNC at (100,100) rot=-90 (mouth left, marker line at
+    board-x 100-9.5=90.5) on a board whose LEFT edge is at ``edge_x_mm``."""
+    pcbnew = pytest.importorskip("pcbnew")
+    board = pcbnew.NewBoard(str(tmp_path / "bnc_gap.kicad_pcb"))
+    fp = pcbnew.FootprintLoad(
+        "kicraft/parts_library/bnc-pcb-jack/bnc-pcb-jack.pretty",
+        "ANT-TH_KH-BNC50-3511",
+    )
+    fp.SetReference("J1")
+    fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(100), pcbnew.FromMM(100)))
+    fp.SetOrientationDegrees(-90)
+    board.Add(fp)
+    pts = [(edge_x_mm, 80), (140, 80), (140, 120), (edge_x_mm, 120), (edge_x_mm, 80)]
+    for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+        seg = pcbnew.PCB_SHAPE(board)
+        seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        seg.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(x1), pcbnew.FromMM(y1)))
+        seg.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(x2), pcbnew.FromMM(y2)))
+        seg.SetLayer(pcbnew.Edge_Cuts)
+        seg.SetWidth(pcbnew.FromMM(0.1))
+        board.Add(seg)
+    path = tmp_path / "bnc_gap.kicad_pcb"
+    board.Save(str(path))
+    return path
+
+
+def test_marker_datum_barrel_overhang_ok(tmp_path):
+    """A marker-carrying barrel connector is measured from its 'Board Edge'
+    marker, not the courtyard tip: with the edge AT the marker line (barrel
+    overhanging ~21mm) the gap is ~0 and the gate passes -- the old
+    courtyard-tip datum read this correct board as 21mm 'absurd overhang'."""
+    path = _bnc_board_with_edge_at(tmp_path, 90.5)
+    gaps = connector_edge_gaps(str(path), {"J1": {"edge": "left"}})
+    assert len(gaps) == 1
+    g = gaps[0]
+    assert abs(g.gap_mm) < 0.6, g
+    assert g.ok, g
+
+
+def test_marker_datum_buried_barrel_stranded(tmp_path):
+    """With the edge out at the barrel TIP (the outline-swallowed-the-barrel
+    failure KC-DVA3UP shipped), the marker sits ~21mm inboard -> stranded.
+    The old courtyard-tip datum called this unusable board flush/ok."""
+    path = _bnc_board_with_edge_at(tmp_path, 69.0)
+    gaps = connector_edge_gaps(str(path), {"J1": {"edge": "left"}})
+    assert len(gaps) == 1
+    g = gaps[0]
+    assert g.gap_mm < -5.0, g
+    assert not g.ok, g
+
+
 def test_edge_connectors_flush_on_fixture(tmp_path):
     pytest.importorskip("pcbnew")
     gaps = _compose_and_measure(tmp_path)

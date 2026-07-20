@@ -1796,15 +1796,24 @@ def _connector_barrel_edge_anchor(
     court_max: Point,
     pad_min: Point,
     pad_max: Point,
+    edge_marker: Point | None = None,
 ) -> Point | None:
-    """Edge-facing pad-face anchor for a long-barrel edge connector, or None.
+    """Edge-facing anchor for a long-barrel edge connector, or None.
 
     ``court_*`` is the courtyard bbox and ``pad_*`` the pad-cluster bbox (both
     same frame). When the courtyard juts past the pads by more than
     ``_CONNECTOR_BARREL_MIN_OVERHANG_MM`` on one *unambiguous* side -- the
-    connector's mating barrel -- return the point on the edge-facing pad face in
-    that direction (the board edge belongs at the pads, the barrel overhangs).
-    Roughly-symmetric or shallow bodies return None (keep courtyard anchor).
+    connector's mating barrel -- return the anchor where the board edge
+    belongs, so the barrel overhangs instead of the outline growing out to
+    swallow it. Roughly-symmetric or shallow bodies return None (keep the
+    courtyard-extremity anchor).
+
+    With an author ``edge_marker`` ('Board Edge' on Dwgs.User), the marker IS
+    the declared board-edge line: qualify as a barrel connector when the
+    courtyard continues >= the threshold PAST the marker on the mouth side
+    (a USB-C shell ends at its marker -- no overhang; a BNC barrel continues
+    ~21mm past it -- KC-DVA3UP), and anchor at the marker itself. Without a
+    marker, fall back to the edge-facing pad face.
     """
     extension = {
         "right": court_max.x - pad_max.x,
@@ -1813,6 +1822,16 @@ def _connector_barrel_edge_anchor(
         "top": pad_min.y - court_min.y,
     }
     side, depth = max(extension.items(), key=lambda kv: kv[1])
+    if edge_marker is not None:
+        marker_depth = {
+            "right": court_max.x - edge_marker.x,
+            "left": edge_marker.x - court_min.x,
+            "bottom": court_max.y - edge_marker.y,
+            "top": edge_marker.y - court_min.y,
+        }[side]
+        if marker_depth < _CONNECTOR_BARREL_MIN_OVERHANG_MM:
+            return None
+        return edge_marker
     if depth < _CONNECTOR_BARREL_MIN_OVERHANG_MM:
         return None
     # Require the barrel direction to clearly dominate the next-deepest side so a
@@ -1998,12 +2017,17 @@ def _extract_blockers_from_pcb(
         edge_marker = _find_edge_reference(footprint)
         if edge_marker is not None:
             edge_reference_points[ref] = edge_marker
-        # Long-barrel edge connector with no explicit author marker: anchor the
-        # board edge to its edge-facing pad face so the protruding barrel
-        # overhangs (KC-Y5WXQ9 BNC) instead of the outline swallowing it.
-        elif ref.startswith("J") and pad_lo is not None:
+        # Long-barrel edge connector: anchor the board edge so the protruding
+        # barrel overhangs (KC-Y5WXQ9 BNC) instead of the outline swallowing
+        # it. WITH an author marker the marker is the declared edge line and
+        # membership here is what flips barrel_overhang=True so the outline's
+        # anchor-slack clamp trusts an edge far inboard of the barrel tip
+        # (KC-DVA3UP: the elif that used to skip marked footprints left
+        # barrel_overhang False, the clamp rejected the marker anchor, and the
+        # outline grew out to the barrel tip -- burying the mouth on-board).
+        if ref.startswith("J") and pad_lo is not None:
             barrel_anchor = _connector_barrel_edge_anchor(
-                court_min, court_max, pad_lo, pad_hi
+                court_min, court_max, pad_lo, pad_hi, edge_marker=edge_marker
             )
             if barrel_anchor is not None:
                 connector_pad_edge_anchors[ref] = barrel_anchor

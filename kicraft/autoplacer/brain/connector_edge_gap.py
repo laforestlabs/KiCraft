@@ -70,6 +70,26 @@ def edge_gap_mm(
     raise ValueError(f"unsupported edge: {edge}")
 
 
+def _edge_marker_point(fp, pcbnew):
+    """Board-coords position of an explicit 'Board Edge'/'PCB Edge' fp_text on
+    Dwgs.User, or None. When present, the marker is the footprint author's
+    declared board-edge line -- the honest gap datum for a long-barrel
+    connector whose body legitimately overhangs far past the edge (BNC barrel
+    ~21mm: measuring the courtyard tip would read a correct board as 'absurd
+    overhang', and measuring flush-to-tip buries the mouth on-board)."""
+    for item in fp.GraphicalItems():
+        try:
+            if item.GetLayer() != pcbnew.Dwgs_User:
+                continue
+            text = item.GetText()
+        except Exception:  # noqa: BLE001 -- non-text items have no GetText
+            continue
+        if text and "edge" in text.lower():
+            pos = item.GetPosition()
+            return (pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y))
+    return None
+
+
 def _mouth_bbox(fp, pcbnew):
     """The part's OUTERMOST physical extent toward a board edge, in board
     coords: the union of its courtyard and its pad copper.
@@ -126,11 +146,19 @@ def connector_edge_gaps(
         fp = fps.get(ref)
         if fp is None:
             continue
-        bb = _mouth_bbox(fp, pcbnew)
-        court = (
-            pcbnew.ToMM(bb.GetLeft()), pcbnew.ToMM(bb.GetTop()),
-            pcbnew.ToMM(bb.GetRight()), pcbnew.ToMM(bb.GetBottom()),
-        )
+        marker = _edge_marker_point(fp, pcbnew)
+        if marker is not None:
+            # Author-declared board-edge line: the marker itself must sit at
+            # the edge (degenerate bbox), regardless of how far the housing
+            # overhangs past it.
+            mx, my = marker
+            court = (mx, my, mx, my)
+        else:
+            bb = _mouth_bbox(fp, pcbnew)
+            court = (
+                pcbnew.ToMM(bb.GetLeft()), pcbnew.ToMM(bb.GetTop()),
+                pcbnew.ToMM(bb.GetRight()), pcbnew.ToMM(bb.GetBottom()),
+            )
         gap = edge_gap_mm(edge, (bx0, by0, bx1, by1), court)
         ok = (gap >= -inboard_tol_mm) and (gap <= max_overhang_mm)
         out.append(EdgeGap(ref, edge, round(gap, 4), ok))
