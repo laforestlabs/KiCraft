@@ -16,6 +16,8 @@ Drafting strategy (per sheet in `architecture.sheets`):
 
 - Produce a `NetConnection` for every `architecture.power_nets` entry (e.g. `GND`, `+3V3`) with at least one endpoint on this sheet's parts.
 - Produce a `NetConnection` for every `architecture.inter_sheet_nets[*]` whose endpoints include this sheet, expanded into the specific pins on this sheet's parts that participate (use the hierarchical label name as `net_name`).
+- **Wire EVERY instance of identical repeated parts.** When the BOM has multiple parts sharing the same symbol+value+footprint (identical connectors/switches/relays/LEDs for parallel channels), each one must be wired to its own channel's signals — marking every pin of an identical sibling `no_connect_pins` while another is fully wired ships a silently dead channel through a passing ERC (§9.31 rejects it at commit; a four-jack audio buffer once shipped with 3 of 4 jacks electrically inert).
+- **Multi-unit symbols: wire (or explicitly NC) every unit.** `extras.symbol_pinouts` lists EVERY unit's pins for a multi-unit part (a dual op-amp's A and B sections, each pin tagged `unit`). An unused section's pins must appear in `no_connect_pins` deliberately (with its inputs tied per the datasheet where required) — never simply omitted.
 - Produce a `NetConnection` for every sheet-local net implied by `architecture.topologies[sheet]` (feedback dividers, sense lines, bypass paths, I2C pull-ups, boot caps, etc.). Give each a short uppercase name like `FB_SENSE` or `SDA_LOCAL`.
 
 **Programming-pin check (when `architecture.mcu_present` is true).** The wiring slot MUST give every MCU a first-time programming path. Provide exactly one of:

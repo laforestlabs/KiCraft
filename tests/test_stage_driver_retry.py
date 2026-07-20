@@ -108,9 +108,11 @@ def test_wiring_prompt_tells_model_to_self_repair_a_bom_shortfall():
 
 
 def test_bom_prompt_demands_decoupling_completeness():
+    # The requirement rides the bom.md spec block (single source; the
+    # _stage_extra restatement was deduped 2026-07-19 review §7.2).
     sysmsg = build_system("bom")
-    assert "DECOUPLING COMPLETENESS" in sysmsg
-    assert "per DEDICATED supply/decoupling pin" in sysmsg
+    assert "Decoupling completeness" in sysmsg
+    assert "per dedicated supply/decoupling pin" in sysmsg
 
 
 def test_bom_reconcile_instruction_lists_the_missing_parts():

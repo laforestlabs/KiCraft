@@ -235,26 +235,10 @@ def _stage_extra(stage: str) -> str:
             "sockets) are NOT generic: use a curated bundle, or resolve the real part with "
             "lookup_lcsc_id + add_part_from_lcsc — never a stock footprint drawn for a "
             "different manufacturer's connector.\n"
-            "- DECOUPLING COMPLETENESS: give every IC the decoupling its datasheet shows — one "
-            "bypass cap (usually 100nF) per DEDICATED supply/decoupling pin (an nRF52840's "
-            "DEC1-DEC6 + DECUSB, an STM32's several VDD/VDDA pins, etc.), PLUS the bulk cap(s) "
-            "and any special-purpose cap (DC-DC/VDDH, USB, crystal load) it calls out. Do NOT "
-            "ship a token one or two caps for a chip with many supply pins, and cluster them "
-            "with the IC in ic_groups: the wiring stage cannot add parts, so an under-provisioned "
-            "IC stalls the design and forces a costly re-drive.\n"
             "- ICs, sensors, MCUs, regulators, or ANY part where a specific MPN matters: do NOT "
             "pick a stock symbol/footprint. Resolve the real part: lookup_lcsc_id then "
             "add_part_from_lcsc, then list_parts to read the exact '<name>:<sym>' / '<name>:<fp>' "
             "strings. Substituting a generic stock part for a specific IC is wrong.\n"
-            "- CORE DEFAULTS: extras.core_defaults_block (when present) lists one curated "
-            "default part per common functional block. When a needed function matches a "
-            "row and no stated constraint disqualifies it, SKIP lookup_lcsc_id / "
-            "search_symbols for that part. Rows with a `bundle` are ALREADY in the parts "
-            "library: read the exact '<name>:<sym>' / '<name>:<fp>' strings from "
-            "extras.parts_block or list_parts (no fetch). Rows with only a C-number: call "
-            "add_part_from_lcsc with that C-number directly (batch several in one turn). "
-            "A matching curated bundle in extras.parts_block still wins over a core "
-            "default.\n"
             "- SEARCH BUDGET: lookup_lcsc_id is one query + at most one retry per part (retry "
             "with the bare part family, no descriptive words). If it still misses — or reports "
             "the backend unreachable — STOP searching for that part: either ask the user for "
@@ -269,10 +253,12 @@ def _stage_extra(stage: str) -> str:
             "add an assumptions entry naming BOTH the asked-for class and the substitute "
             "('brief asked for X; substituted Y because Z'). This applies ONLY to classes the "
             "brief names explicitly, not to ordinary generic passives.\n"
-            "- EFFICIENCY: when you need several independent lookups (e.g. several "
+            "- POLARIZED caps: an electrolytic/tantalum bulk or reservoir cap uses symbol Device:CP with a polarized footprint (a CP_* or Capacitor_Tantalum_* footprint) -- NEVER Device:C / C_* (non-polarized ceramic/film only); the symbol/footprint polarity mismatch is rejected at commit (9.25).\n"
+            "- EFFICIENCY: you have a HARD budget of 6 tool-call rounds this stage. Batch every independent lookup (e.g. several "
             "search_footprints, search_symbols, or lookup_lcsc_id for different parts), "
             "request them TOGETHER in a single turn (emit multiple tool calls at once) "
-            "instead of one per turn. It is faster and far cheaper.\n"
+            "instead of one per turn -- running out of rounds forces an immediate final "
+            "answer with whatever resolved so far.\n"
             "- COMPACT OUTPUT: when the BOM has many parts (e.g. a 200-LED array + decoupling "
             "caps = 400+ parts), use COMPACT single-line JSON per part — no pretty-printing, "
             "no indentation. OMIT null fields (datasheet, mpn, sourcing_note, side, source_leaf "
@@ -299,7 +285,11 @@ def _stage_extra(stage: str) -> str:
             '    {"questions": [{"text": "<exactly what to add: how many parts, what value, '
             'which IC pins each serves>", "blocking": true, "reconcile_target": "bom"}]}\n'
             "Make the text a precise BOM instruction, not a choice. Reserve untagged questions "
-            "(no reconcile_target) for genuine design-intent ambiguity the user alone can settle.")
+            "(no reconcile_target) for genuine design-intent ambiguity the user alone can settle.\n"
+            "- COMPACT OUTPUT: for a board with many repeated parts (an LED array, a channel "
+            "bank), use COMPACT single-line JSON per connection -- no pretty-printing, no "
+            "indentation. The output token budget is finite; verbose JSON truncates and the "
+            "whole draft fails as 'no JSON in reply'.")
     return ""
 
 
@@ -405,6 +395,59 @@ def _schema_for(stage: str) -> str:
     return json.dumps(SLOT_MODEL[stage].model_json_schema())
 
 
+# Hand-written compact example instance per stage. A mid-tier model pattern-
+# matches one worked example far more reliably than it infers nested-optional
+# shape from a raw $defs/anyOf schema dump (2026-07-19 review §7.1); the BOM
+# and wiring stages carry them (the costly, retry-prone stages). Each example
+# is validated against the real Pydantic models in
+# tests/test_stage_driver_prompt_examples.py, so a schema change that breaks
+# an example fails the suite instead of teaching the model a bounce.
+_WORKED_EXAMPLES = {
+    "bom": (
+        '{"parts": ['
+        '{"ref": "U1", "value": "AMS1117-3.3", "symbol": "ams1117-3v3:AMS1117-3.3", '
+        '"footprint": "ams1117-3v3:SOT-223-3_TabPin2", "sheet": "POWER", '
+        '"mpn": "AMS1117-3.3", "sourcing_note": "LCSC C6186"}, '
+        '{"ref": "C1", "value": "10uF", "symbol": "Device:C", '
+        '"footprint": "Capacitor_SMD:C_0603_1608Metric", "sheet": "POWER"}, '
+        '{"ref": "C2", "value": "100nF", "symbol": "Device:C", '
+        '"footprint": "Capacitor_SMD:C_0603_1608Metric", "sheet": "POWER"}, '
+        '{"ref": "J1", "value": "DC barrel jack", '
+        '"symbol": "Connector:Barrel_Jack_Switch", '
+        '"footprint": "Connector_BarrelJack:BarrelJack_Horizontal", '
+        '"sheet": "POWER"}], '
+        '"ic_groups": {"U1": ["C1", "C2"]}, '
+        '"thermal_refs": ["U1"], '
+        '"signal_flow_order": ["U1"], '
+        '"component_zones": {"J1": {"edge": "left"}}, '
+        '"assumptions": ["Input jack on the left edge (defaulted)"]}'
+    ),
+    "wiring": (
+        '{"connections": ['
+        '{"net_name": "VIN", "sheet": "POWER", "endpoints": '
+        '[{"ref": "J1", "pin": "1"}, {"ref": "U1", "pin": "3"}, '
+        '{"ref": "C1", "pin": "1"}]}, '
+        '{"net_name": "+3V3", "sheet": "POWER", "endpoints": '
+        '[{"ref": "U1", "pin": "2"}, {"ref": "C2", "pin": "1"}]}, '
+        '{"net_name": "GND", "sheet": "POWER", "endpoints": '
+        '[{"ref": "J1", "pin": "2"}, {"ref": "U1", "pin": "1"}, '
+        '{"ref": "C1", "pin": "2"}, {"ref": "C2", "pin": "2"}]}], '
+        '"no_connect_pins": [{"ref": "J1", "pin": "3"}]}'
+    ),
+}
+
+
+def _worked_example(stage: str) -> str:
+    example = _WORKED_EXAMPLES.get(stage)
+    if not example:
+        return ""
+    return (
+        "\nWorked example of a VALID slot (a tiny 3.3V-regulator board -- "
+        "match its SHAPE and compact one-line-per-item style, not its "
+        "content):\n" + example + "\n"
+    )
+
+
 def build_system(stage: str) -> str:
     spec = _spec_text(stage)
     schema = _schema_for(stage)
@@ -416,7 +459,8 @@ def build_system(stage: str) -> str:
         "produce the slot JSON and may use the listed tools):\n"
         f"=== SPEC ===\n{spec}\n=== END SPEC ===\n\n"
         "The JSON MUST validate against this Pydantic JSON schema (enums, required fields, and "
-        f"string patterns are strict):\n{schema}\n\n"
+        f"string patterns are strict):\n{schema}\n"
+        f"{_worked_example(stage)}\n"
         "Rules:\n"
         "- Output only the slot JSON object.\n"
         "- Use only allowed enum values; honor every naming pattern and uniqueness/reference "

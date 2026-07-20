@@ -13,7 +13,7 @@ Slot shape (`Architecture`):
 - `comms_protocols`: list (e.g. `["I2C", "USB 2.0 FS"]`).
 - `mcu_present`: bool.
 - `sheets`: one `Sheet` per functional block (typically). Each Sheet has:
-  - `name` — uppercase with spaces, regex `^[A-Z][A-Z0-9 ]*[A-Z0-9]$` (e.g. `"USB INPUT"`, `"BOOST 5V"`).
+  - `name` — uppercase with spaces, regex `^[A-Z][A-Z0-9 ]*[A-Z0-9]$` (e.g. `"USB INPUT"`, `"BOOST 5V"`). NO hyphens or punctuation — `"AUDIO CHANNEL 1-2"` is invalid; use a space (`"AUDIO CHANNEL 1 2"`) or spell it out (`"AUDIO CHANNEL 1 AND 2"`).
   - `stem` — uppercase with underscores, regex `^[A-Z][A-Z0-9_]*$` (e.g. `"USB_INPUT"`, `"BOOST_5V"`). KiCraft uses this as the filename stem.
   - `function` — one-sentence description.
   - `from_library` — `"<name>@<version>"` when reusing a leaf, else null.
@@ -62,6 +62,9 @@ This co-locates or separates blocks, it never drops them (see the reminder above
 
 - **Prefer an MCU variant with native USB (default recommendation).** When the user asked for a family generically ("an ESP32") without pinning a specific part, pick a native-USB variant: an ESP32-S3 / C3 / S2 / C6 module. Default to the smaller vendored `esp32-s3-mini-1` (~15.4x20mm); step up to the larger vendored `esp32-s3-wroom-1` only when the design needs its extra broken-out GPIO. Flash over the module's built-in USB by routing the board's USB data lines straight to the MCU's native USB pins. No bridge chip, fewest parts, simplest board.
 - **USB-UART bridge only for the classic ESP32.** If the design specifically needs the classic ESP32 (ESP32-WROOM-32, which has no native USB), default to an onboard USB-to-UART bridge taken from the core-defaults `usb-uart-bridge` row (the vendored `ch340c` bundle), with DTR/RTS auto-reset to EN/IO0 (so it still flashes over USB with no button dance), sharing the board's USB data lines.
+
+- **RP2040: the BOM must carry a BOOTSEL path.** Re-entering the ROM USB bootloader after first flash needs BOOTSEL held at reset — include a BOOTSEL button/jumper or an SWD access part (2x5 1.27mm or 1x4 header). A USB connector alone is NOT sufficient; without a BOOTSEL path the board is one bad firmware away from a brick (§9.29 rejects it at commit).
+- **ESP32 family (native-USB or bridged): the BOOT strap needs a pull path during reset.** Ship BOOT+EN/RESET buttons, a USB-UART bridge with DTR/RTS auto-reset, or dedicated strap test pads — a bare USB connector is NOT sufficient for download mode (§9.29 rejects it at commit).
 
 Record the choice in `assumptions` ending `(defaulted)` (e.g. `"MCU: ESP32-S3-MINI-1, flashed over native USB, no bridge (defaulted)"` or `"Programming: onboard CH340C USB-UART per core defaults, auto-reset to EN/IO0 (defaulted)"`) and reflect it in `topologies` (plus a sheet if it is its own block). BOM then adds any bridge/auto-reset parts; wiring connects the path.
 

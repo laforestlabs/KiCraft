@@ -99,7 +99,12 @@ _SYSTEM = (
     "honors the stated intent. Do NOT invent connections that are not in the "
     "digest, and do NOT speculate about physical layout/geometry -- you only have "
     "the netlist. Where the digest lacks evidence for a checklist item, treat it "
-    "as NOT done. Report only concrete, defensible findings. Respond with a "
+    "as NOT done. Do NOT compute or assert a specific numeric value (a voltage, "
+    "current, resistance, reference voltage, or temperature) that is not given "
+    "verbatim in the digest -- if a judgment requires a number the digest does "
+    "not supply, say so explicitly in the finding instead of estimating one "
+    "(a judge once failed a correct 3.3V design by guessing a regulator's Vref). "
+    "Report only concrete, defensible findings. Respond with a "
     "single JSON object and no other text."
 )
 

@@ -29,6 +29,8 @@ Slot shape (`BOM`):
 
 When in doubt, err toward the datasheet's typical-application count. Sizing decoupling correctly here is cheaper than a re-drive later.
 
+**Adjustable-regulator feedback dividers are checked numerically.** For an adjustable-output regulator (TPS54xx, LM2596/LM2576, MP15xx/MP23xx, XL4015, ...), size the feedback divider from the chip's datasheet Vref so `Vout = Vref x (1 + Rtop/Rbot)` hits the rail declared in `architecture.rail_voltages` within a few percent — a divider that misses the named rail by >10% is rejected at commit (§9.32).
+
 Additional top-level fields (still inside the BOM slot):
 
 - `ic_groups`: dict mapping an IC's `ref` to the list of supporting passives that should physically cluster with it (decoupling caps, feedback resistors, inductors). **This is the single most impactful input to placement quality. Spend time on it.**
@@ -101,14 +103,11 @@ This is the case to handle deliberately — never silently substitute an inferio
 
   If `add-part` fails (network error, LCSC ID unknown, parser failure on the EasyEDA data), fall through to the expert path below: surface a `material: true` question listing the missing MPN, the attempted LCSC number, and the failure mode. Do not substitute.
 
-- **`expert`** — never auto-fetch silently. Surface a `material: true` open question of the form:
+- **`expert`** — never auto-fetch silently. Surface a `material: true` open question that names the gap and the concrete choices, WITHOUT shell commands (the user answering may have no terminal):
 
-  > MPN `IP2368-BZ` is not in the parts library and not in stock KiCad. Options:
-  > 1. fetch from LCSC: `kicraft add-part --from-lcsc C2837135 --into project`
-  > 2. download .kicad_sym + .kicad_mod from SnapEDA / Ultra Librarian / a silicon-vendor library, then: `kicraft add-part --symbol <path> --footprint <path> --mpn IP2368-BZ --into project`
-  > 3. roll your own under `.kicraft/parts/<slug>/` and run `kicraft validate-part .kicraft/parts/<slug> --update-hash`
-  >
-  > Which do you want to do?
+  > MPN `IP2368-BZ` is not in the parts library and not in stock KiCad. I can fetch it from LCSC as `C2837135` (verified in stock), or substitute the closest stocked equivalent — or paste a different LCSC C-number and I'll use that. Which do you want?
+
+  If the user replies with an LCSC C-number, fetch it with the `add_part_from_lcsc` tool on the next pass and use that bundle's own symbol/footprint ids.
 
   Leave the missing part out of the BOM (or mark its line with a placeholder MPN and `(awaiting parts-library entry)` in `sourcing_note`) so the user has something concrete to react to.
 

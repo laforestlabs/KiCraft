@@ -27,7 +27,11 @@ _SYSTEM = (
     "KiCraft PCB design run against a fixed rubric, using ONLY the evidence in the run "
     "digest provided. ERC-clean is not the same as correct: judge the actual circuit. "
     "Where the digest lacks evidence for a checklist item, treat it as NOT done rather "
-    "than assuming the best. Respond with a single JSON object and no other text."
+    "than assuming the best. Do NOT compute or assert a specific numeric value (a "
+    "voltage, current, resistance, reference voltage, or temperature) that is not given "
+    "verbatim in the digest -- if a judgment requires a number the digest does not "
+    "supply, say so in the evidence instead of estimating one. "
+    "Respond with a single JSON object and no other text."
 )
 
 
