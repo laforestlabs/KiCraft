@@ -160,8 +160,14 @@ def collect_web_metrics(project_dir, *, ledger_path=None, run_id_prefix=None,
         "perm": {"present": False, "count": 0, "excess": 0, "entries": []},
         "transcript": transcript, "latency": latency,
         "token_usage": token_usage,
-        # No scenario on a free-form web brief, so no expected question band; the
-        # judge assesses question quality substantively in Class-J instead.
-        "expected_question_band": None,
+        # Deterministic question band for web/self-eval runs. With None here,
+        # score_friction's q_state stayed permanently "unknown" and (with
+        # excess pinned to 0 above) the function collapsed to a constant
+        # level 3 -- 6% of every grade was dead weight dressed as evaluated
+        # output, and no Class-J dimension actually judges question count
+        # (2026-07-19 review §8.1). The self-eval briefs are curated to be
+        # answerable without clarification, so 0-2 questions is in-band; a
+        # run interrogating a complete brief IS friction worth scoring down.
+        "expected_question_band": (0, 2),
         "run_meta": {}, "scenario": None, "target_mode": "web",
     }

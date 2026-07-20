@@ -534,3 +534,60 @@ def test_orchestrator_loop_checkpoint_report_resume(tmp_path, monkeypatch):
     import json as _json
     gen = _json.loads((out / "checkpoint.json").read_text())["gen"]
     assert gen == 5
+
+
+def test_store_cache_key_includes_quality(tmp_path):
+    # 2026-07-19 review §8.2: quality was absent from the cache key, so a
+    # lookup at one --quality silently served a result computed at another,
+    # poisoning the CMA-ES objective through the shared default tuning.db.
+    s = store.Store(tmp_path / "t.db")
+    h = store.config_hash({"edge_margin_mm": 6.0})
+    fast = EvalResult(h, "b1", 0, "replay", 0, True, 0, 0, 0, 10, 2, 100.0,
+                      88.0, quality="fast")
+    s.record(fast)
+    assert s.lookup(h, "b1", 0, "replay", "fast") == fast
+    assert s.lookup(h, "b1", 0, "replay", "good") is None
+    good = EvalResult(h, "b1", 0, "replay", 7, False, 0, 3, 3, 12, 4, 140.0,
+                      300.0, quality="good")
+    s.record(good)  # must NOT clobber the fast row
+    assert s.lookup(h, "b1", 0, "replay", "fast") == fast
+    assert s.lookup(h, "b1", 0, "replay", "good") == good
+    s.close()
+
+
+def test_store_migration_drops_pre_quality_cache(tmp_path):
+    # A pre-migration DB (no quality column) holds exactly the suspect rows;
+    # opening it must rebuild the evals cache empty rather than serve them.
+    import sqlite3 as _sq
+    db = tmp_path / "t.db"
+    con = _sq.connect(db)
+    con.execute(
+        "CREATE TABLE evals (config_hash TEXT, board TEXT, seed INTEGER,"
+        " mode TEXT, rc INTEGER, PRIMARY KEY (config_hash, board, seed, mode))"
+    )
+    con.execute("INSERT INTO evals VALUES ('h', 'b1', 0, 'replay', 0)")
+    con.commit()
+    con.close()
+    s = store.Store(db)
+    assert s.lookup("h", "b1", 0, "replay", "fast") is None
+    cols = {r["name"] for r in s._db.execute("PRAGMA table_info(evals)")}
+    assert "quality" in cols
+    s.close()
+
+
+def test_ref_drc_calibration_relationship_holds():
+    # 2026-07-19 review §8.3: REF_DRC's comment claimed calibration against
+    # MISSING_BOARD_PENALTY=999 long after the penalty dropped to 100. Pin the
+    # two intents so the next penalty change re-derives the scale instead of
+    # silently landing in an unintended middle ground:
+    #   (a) a typical real board's drc term stays a gentle tie-breaker (<=0.1)
+    #   (b) a missing board costs at least 5x a typical real board on this axis
+    from kicraft.tuning import evaluate as ev
+    from kicraft.tuning import reward as rw
+
+    weight = 0.25
+    typical_real_drc = 12
+    real_cost = weight * typical_real_drc / rw.REF_DRC
+    missing_cost = weight * ev.MISSING_BOARD_PENALTY / rw.REF_DRC
+    assert real_cost <= 0.1
+    assert missing_cost >= 5 * real_cost

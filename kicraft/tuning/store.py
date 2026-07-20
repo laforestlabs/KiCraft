@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS evals (
     board           TEXT NOT NULL,
     seed            INTEGER NOT NULL,
     mode            TEXT NOT NULL,
+    quality         TEXT NOT NULL DEFAULT 'fast',
     rc              INTEGER,
     fab_ready       INTEGER,
     shorts          INTEGER,
@@ -38,7 +39,7 @@ CREATE TABLE IF NOT EXISTS evals (
     board_area_mm2  REAL,
     orderedness     REAL,
     created_at      TEXT DEFAULT (datetime('now')),
-    PRIMARY KEY (config_hash, board, seed, mode)
+    PRIMARY KEY (config_hash, board, seed, mode, quality)
 );
 CREATE TABLE IF NOT EXISTS configs (
     config_hash TEXT PRIMARY KEY,
@@ -65,9 +66,9 @@ CREATE INDEX IF NOT EXISTS idx_gen_run ON generations(run_id, gen);
 """
 
 _EVAL_COLS = (
-    "config_hash", "board", "seed", "mode", "rc", "fab_ready", "shorts",
-    "unconnected", "drc_total", "traces", "vias", "total_length_mm", "wall_s",
-    "error", "board_area_mm2", "orderedness",
+    "config_hash", "board", "seed", "mode", "quality", "rc", "fab_ready",
+    "shorts", "unconnected", "drc_total", "traces", "vias", "total_length_mm",
+    "wall_s", "error", "board_area_mm2", "orderedness",
 )
 
 # Columns added after the original schema shipped. CREATE TABLE IF NOT EXISTS
@@ -111,6 +112,17 @@ class Store:
 
     def _migrate(self) -> None:
         """Add columns introduced after the original schema, idempotently."""
+        # `quality` joined the evals PRIMARY KEY (2026-07-19 review §8.2: the
+        # old key served results computed at a different --quality, silently
+        # poisoning the CMA-ES objective). SQLite cannot alter a PK, and every
+        # pre-migration row is exactly the suspect data -- evals is a cache of
+        # $0-replayable results, so drop and rebuild it.
+        have_evals = {
+            r["name"] for r in self._db.execute("PRAGMA table_info(evals)")
+        }
+        if have_evals and "quality" not in have_evals:
+            self._db.execute("DROP TABLE evals")
+            self._db.executescript(_SCHEMA)
         for table, cols in _MIGRATIONS.items():
             have = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
             for name, decl in cols:
@@ -133,10 +145,18 @@ class Store:
         for r in results:
             self.record(r)
 
-    def lookup(self, cfg_hash: str, board: str, seed: int, mode: str) -> EvalResult | None:
+    def lookup(
+        self,
+        cfg_hash: str,
+        board: str,
+        seed: int,
+        mode: str,
+        quality: str = "fast",
+    ) -> EvalResult | None:
         cur = self._db.execute(
-            "SELECT * FROM evals WHERE config_hash=? AND board=? AND seed=? AND mode=?",
-            (cfg_hash, board, seed, mode),
+            "SELECT * FROM evals WHERE config_hash=? AND board=? AND seed=? "
+            "AND mode=? AND quality=?",
+            (cfg_hash, board, seed, mode, quality),
         )
         row = cur.fetchone()
         return _row_to_result(row) if row else None
@@ -205,4 +225,5 @@ def _row_to_result(row: sqlite3.Row) -> EvalResult:
         error=row["error"] or "",
         board_area_mm2=(row["board_area_mm2"] or 0.0) if "board_area_mm2" in keys else 0.0,
         orderedness=(row["orderedness"] or 0.0) if "orderedness" in keys else 0.0,
+        quality=(row["quality"] or "fast") if "quality" in keys else "fast",
     )

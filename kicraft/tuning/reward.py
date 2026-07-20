@@ -33,10 +33,16 @@ from kicraft.tuning.evaluate import EvalResult
 # boards and must stay a tie-breaker, not a co-equal of fab. Real boards carry
 # ~5-15 residual DRC even when good, so the original ref of 5 made an ordinary
 # board's penalty (0.25·12/5 = 0.6) dwarf a 50-point fab swing — the optimizer
-# was rewarded for NOT routing (empty board => drc 0). Calibrate the scale to
-# the empty-board sentinel (evaluate.MISSING_BOARD_PENALTY = 999): real-board
-# DRC now costs <~0.1 (gentle tie-breaker) while a missing/empty board still
-# costs ~6+ per board (crushing). Keep fab as the dominant axis.
+# was rewarded for NOT routing (empty board => drc 0).
+#
+# Calibration vs the empty-board sentinel (evaluate.MISSING_BOARD_PENALTY,
+# currently 100 — dropped from the original 999 to stop optimizer thrashing):
+# a typical real board costs 0.25·12/40 ≈ 0.075 (gentle tie-breaker) while a
+# missing/empty board costs 0.25·100/40 ≈ 0.63 — decisively worse than any
+# real board (~8x) on this axis, on top of the full fab-axis miss, without
+# the old 999-era ~6-per-board crush that caused thrashing. If
+# MISSING_BOARD_PENALTY changes again, re-derive both numbers here
+# (tests/test_tuning.py pins the relationship).
 REF_DRC = 40.0
 REF_WALL_S = 120.0
 # Area scale (mm^2): the corpus baseline mean board area, so the size axis

@@ -55,7 +55,11 @@ def evaluate_overlay(
     todo: list[tuple[Workspace, int]] = []
     for w in workspaces:
         for s in seeds:
-            cached = store.lookup(cfg_hash, w.name, s, mode) if store else None
+            cached = (
+                store.lookup(cfg_hash, w.name, s, mode, quality)
+                if store
+                else None
+            )
             if cached is not None:
                 results.append(cached)
             else:

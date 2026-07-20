@@ -144,6 +144,10 @@ class EvalResult:
     error: str = ""
     board_area_mm2: float = 0.0  # Edge.Cuts bbox area (effective; size axis, MINIMIZE)
     orderedness: float = 0.0     # mean layout-quality sub-score 0-100 (MAXIMIZE)
+    # Replay quality preset the result was computed at -- part of the cache
+    # identity: different presets route differently, and a lookup that
+    # ignored quality silently served cross-quality results (2026-07-19 §8.2).
+    quality: str = "fast"
 
     def as_row(self) -> dict:
         return asdict(self)
@@ -230,6 +234,7 @@ def evaluate_config(
             error=err,
             # No usable board to measure: crush the size axis, zero the quality axis.
             board_area_mm2=MISSING_BOARD_AREA_MM2, orderedness=0.0,
+            quality=quality,
         )
 
     try:
@@ -321,6 +326,7 @@ def evaluate_config(
         board_area_mm2=_effective_area(
             fab_ready=fab_ready, traces=traces, area_mm2=area_raw),
         orderedness=ordered,
+        quality=quality,
     )
     if cleanup:
         shutil.rmtree(dest, ignore_errors=True)

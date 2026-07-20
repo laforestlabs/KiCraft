@@ -139,14 +139,25 @@ def test_collect_web_metrics_synthesis_broken_gate(tmp_path):
     assert any(g["id"] == "synthesis_broken" for g in gates)
 
 
-def test_friction_is_partial_without_a_scenario_band(tmp_path):
+def test_friction_scores_against_the_web_band(tmp_path):
+    # 2026-07-19 review §8.1: with band=None the axis was a hardcoded 3 for
+    # every run. Web runs now carry a deterministic (0, 2) band (curated
+    # self-eval briefs are answerable without clarification), so the axis is
+    # a real signal: quiet run -> 4, interrogating a complete brief -> down.
     base = _make_project(tmp_path, questions=1)
     m = collect_web_metrics(base)
     dims = score_class_c_dims(m, load_rubric())
-    # no expected_question_band on a free-form brief -> friction scored but partial
-    assert m["expected_question_band"] is None
-    assert dims["interaction_friction"]["partial"] is True
+    assert m["expected_question_band"] == (0, 2)
+    assert dims["interaction_friction"]["partial"] is False
+    assert dims["interaction_friction"]["level"] == 4  # in band, zero excess
     assert m["perm"]["excess"] == 0
+
+
+def test_friction_penalizes_interrogating_a_complete_brief(tmp_path):
+    base = _make_project(tmp_path, questions=7)
+    m = collect_web_metrics(base)
+    dims = score_class_c_dims(m, load_rubric())
+    assert dims["interaction_friction"]["level"] <= 1  # far out of band
 
 
 # --------------------------------------------------------------------------- #
