@@ -1,7 +1,7 @@
 {
-  "content_hash": "sha256:dc0c641201badcb5db79d899e863737616dbc2d43ed0933d5d33a0a743d9e9f0",
+  "content_hash": "sha256:8eae1d5ec07731b36ddb498533a9448a5e834942a41b933ac89635952eb06064",
   "datasheet_url": "https://lcsc.com/product-detail/Audio-OpAmps_DIODES_PAM8302AADCR_PAM8302AADCR_C112137.html",
-  "description": "Diodes PAM8302A — 2.5W mono Class-D audio amplifier, analog input, 2.8-5.5V supply. MSOP-8/SOP-8 package. Filterless, low shutdown current ~0.1µA.",
+  "description": "Diodes PAM8302A \u2014 2.5W mono Class-D audio amplifier, analog input, 2.8-5.5V supply. MSOP-8/SOP-8 package. Filterless, low shutdown current ~0.1\u00b5A.",
   "footprint_name": "SOP-8_L4.9-W3.9-P1.27-LS6.0-BL",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

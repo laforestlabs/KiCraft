@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:2da955180ad1f185f46a15757e713bf9eebafdaab0b2b5b8eecd0460f4cc27d7",
+  "content_hash": "sha256:223dab77a52b879aa23359020a5263dedb433e4434bfcd3fd00747fa2aa74230",
   "datasheet_url": "https://www.lcsc.com/datasheet/C9900003477.pdf",
   "description": "DC-005 style barrel jack, 5.5mm outer / 2.1mm inner diameter, through-hole with 3 contacts (center pin + outer sleeve + switch). Standard DC power input for embedded boards. Built-in normally-closed switch detects plug insertion.",
   "footprint_name": "DC-IN-TH_DC005-5.5-2.1",

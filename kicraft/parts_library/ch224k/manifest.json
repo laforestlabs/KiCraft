@@ -1,7 +1,7 @@
 {
-  "content_hash": "sha256:e188dc4104c411391afe0f5b6293cfb9c2bce499b4f3861ffe907ab8fdfd2235",
+  "content_hash": "sha256:7f7091147d333075eaa9511ff872428afb8a6f651fc1de19ef1cf07be2438953",
   "datasheet_url": "https://www.lcsc.com/datasheet/C970725.pdf",
-  "description": "WCH CH224K — USB PD 3.0 sink controller, negotiates 5V/9V/12V/15V/20V from USB-C PD source. ESSOP-10 package. Single-resistor voltage selection. Ideal for replacing barrel jacks.",
+  "description": "WCH CH224K \u2014 USB PD 3.0 sink controller, negotiates 5V/9V/12V/15V/20V from USB-C PD source. ESSOP-10 package. Single-resistor voltage selection. Ideal for replacing barrel jacks.",
   "footprint_name": "ESSOP-10_L4.9-W3.9-P1.0-LS6.0-TL-EP",
   "kicad_version_min": "9.0.0",
   "maturity": "production",
@@ -26,5 +26,5 @@
     "essop-10"
   ],
   "version": "0.1.0",
-  "watch_out_for": "Only negotiates 5V/9V/12V/20V PD profiles — does NOT support PPS. Requires USB-C PD source; won't work with USB-A-to-C cable on a dumb 5V port. 10µF output cap minimum."
+  "watch_out_for": "Only negotiates 5V/9V/12V/20V PD profiles \u2014 does NOT support PPS. Requires USB-C PD source; won't work with USB-A-to-C cable on a dumb 5V port. 10\u00b5F output cap minimum."
 }

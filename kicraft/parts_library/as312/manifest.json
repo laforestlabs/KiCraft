@@ -1,7 +1,7 @@
 {
-  "content_hash": "sha256:2083f122c71dd6d3639bd75dc399cdfe501f8c5de8010f08b0382bcb51e6f466",
+  "content_hash": "sha256:01b05c982750bb4e09518dc30f94cfed319ac266693fe04c0af4eefb096d0d2e",
   "datasheet_url": "https://lcsc.com/product-detail/Infrared-Sensors_AS312_C90465.html",
-  "description": "AS312 — PIR (passive infrared) motion sensor controller, analog output, ultra-low standby current ~10µA. TO-5 metal can with built-in Fresnel window.",
+  "description": "AS312 \u2014 PIR (passive infrared) motion sensor controller, analog output, ultra-low standby current ~10\u00b5A. TO-5 metal can with built-in Fresnel window.",
   "footprint_name": "SENSORM-TH_3P_AS312",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

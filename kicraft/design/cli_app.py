@@ -2759,6 +2759,37 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
                 )
                 return 2
 
+    # (10) Vendored .wrl and .step must sit in the SAME native frame: the
+    # footprint's single (model ...) transform is applied to both (the fab
+    # STEP export substitutes the same-named .step for the .wrl ref), so a
+    # frame-shifted .step embeds this part's solid detached from the board
+    # in every fab package. easyeda2kicad bakes its placement into the WRL
+    # but stores the STEP raw from LCSC, so freshly fetched bundles are
+    # frequently off (2026-07-21 sweep: 31/93 vendored bundles, up to
+    # 49.5 mm). Genuinely different artwork between the two files passes --
+    # see frame_mismatch's displaced-copy logic.
+    _3d_dir = part_dir / "3d"
+    _wrls = sorted(_3d_dir.glob("*.wrl")) if _3d_dir.is_dir() else []
+    _steps = (
+        sorted(_3d_dir.glob("*.step")) + sorted(_3d_dir.glob("*.stp"))
+        if _3d_dir.is_dir()
+        else []
+    )
+    if _wrls and _steps:
+        from kicraft.parts_library.model_frames import frame_mismatch
+
+        _frame_reason = frame_mismatch(_wrls[0], _steps[0])
+        if _frame_reason:
+            print(
+                f"{manifest.name}: {_frame_reason}\n"
+                f"  the fab STEP export would embed this part detached from "
+                f"the board; re-frame the .step with "
+                f"scripts/restep_model_frames.py (--fit, adjudicate, --apply), "
+                f"then rerun with --update-hash",
+                file=sys.stderr,
+            )
+            return 2
+
     # (8) Electromechanical symbol with signal-typed pins: a connector /
     # switch / relay / battery symbol whose pins are 'input'/'unspecified'
     # turns every net it straps into an ERC "Input pin not driven" error

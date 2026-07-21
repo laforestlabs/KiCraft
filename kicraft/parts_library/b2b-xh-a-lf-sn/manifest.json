@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:ba6f95516f8acabed62e222b6a1895288f085b494a70a6858075aee768189766",
+  "content_hash": "sha256:fcf92d6cb41cc9550c71da8805ccfca5dfb894417b26aecf68e0fa39e2e07c8f",
   "datasheet_url": "https://lcsc.com/product-detail/XH-Connectors_JST_B2B-XH-A-LF-SN_XHsocket-1-2P-pitch2-5mm_C158012.html",
   "description": "JST B2B-XH-A(LF)(SN) \u2014 2-pin XH-series wire-to-board shrouded header, 2.5mm pitch, through-hole, top-entry. The standard connector for 2S LiPo balance leads and generic board power input.",
   "footprint_name": "CONN-TH_B2B-XH-A-LF-SN",

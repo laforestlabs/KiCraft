@@ -1,7 +1,7 @@
 {
-  "content_hash": "sha256:3c9b6fd7ff2a6153a6bb4e617854a6001d2d3d807cd5bcab2caa6a33754edf2b",
+  "content_hash": "sha256:58b1a2f4db323e82a53c600a06cc2859b03629273af1a92de27188a3acdec8d0",
   "datasheet_url": "https://lcsc.com/product-detail/Sensors_STMicroelectronics_VL53L0CXV0DH-1_VL53L0CXV0DH-1_C91199.html",
-  "description": "ST VL53L0X — I2C time-of-flight ranging sensor, up to 2m range, 940nm VCSEL. LGA-12 package. Measures distance regardless of target reflectance. Eye-safe Class 1 laser.",
+  "description": "ST VL53L0X \u2014 I2C time-of-flight ranging sensor, up to 2m range, 940nm VCSEL. LGA-12 package. Measures distance regardless of target reflectance. Eye-safe Class 1 laser.",
   "footprint_name": "OPTO-SMD_12P_VL53L0CXV0DH-1",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

@@ -1,7 +1,7 @@
 {
-  "content_hash": "sha256:b5136156c5930324ab763edbc684964551540203de64d263e4bf3984c2e5977f",
+  "content_hash": "sha256:0405365572ceea5365b5f99e9e6c3b247de55242cbcaaf29b249aa756520e58b",
   "datasheet_url": "https://www.lcsc.com/datasheet/C780769.pdf",
-  "description": "Diodes AP63203 — 3.3V fixed-output synchronous buck converter, 2A, 3.8-32V input. TSOT-26 package. Integrated compensation, spread-spectrum for low EMI.",
+  "description": "Diodes AP63203 \u2014 3.3V fixed-output synchronous buck converter, 2A, 3.8-32V input. TSOT-26 package. Integrated compensation, spread-spectrum for low EMI.",
   "footprint_name": "TSOT-26_L2.9-W1.6-P0.95-LS2.8-BL",
   "kicad_version_min": "9.0.0",
   "maturity": "production",

@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:3456c8a4a7ba6923a5fec8c4eb7d592e8b6db73eef7ba5bda5a46b0335764d5e",
+  "content_hash": "sha256:c013935d3e3ced64e2e621ee07460c56650b2377f48b962687c17129b02ec1c8",
   "datasheet_url": "https://www.lcsc.com/datasheet/C2977777.pdf",
   "description": "WCH CH340N \u2014 USB 2.0 full-speed to UART bridge, SOP-8 package, internal clock (no external crystal needed). 5 V or 3.3 V operation. The simplest possible USB-serial bridge for MCUs without native USB \u2014 drop-in cheaper and smaller than CH340G.",
   "footprint_name": "SOP-8_L4.9-W3.9-P1.27-LS6.0-BL",

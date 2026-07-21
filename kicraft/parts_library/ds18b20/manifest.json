@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:8eb910074d136c38ef3a0b1d4919a929bbd7521da2edfce59127fdb0ee2c9157",
+  "content_hash": "sha256:453a5f1dac0b65c306262c891b40e04220135de84b3b4e2bfb73502411385fde",
   "datasheet_url": "https://lcsc.com/product-detail/Others_Youtai-Semiconductor-Co-Ltd-DS18B20_C376006.html",
   "description": "UMW DS18B20 \u2014 1-Wire digital temperature sensor, -55 to +125\u00b0C range, \u00b10.5\u00b0C accuracy from -10 to +85\u00b0C, 9-12 bit resolution. TO-92 through-hole package. Unique 64-bit serial code \u2014 multiple sensors on one pin.",
   "footprint_name": "TO-92-3_L4.9-W3.7-P1.27-L",

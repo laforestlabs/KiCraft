@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:033f329f4d62682e9ae988c28a5a825c6c5a6567d8ec1d8e1e6b833b956ad7a0",
+  "content_hash": "sha256:0f03c98a651e410e9cfea67aba16d031fcacef7a9fe559edf4f040bb46e1b025",
   "datasheet_url": "https://www.lcsc.com/datasheet/C7437327.pdf",
   "description": "Amass 24.245.2 \u2014 4mm banana socket (female jack), black, straight/long-body, through-hole PCB mount. 33mm body extends well past board edge for enclosure access. Accepts standard 4mm banana plugs. 24A 1kV rated. Four mounting legs + center signal contact.",
   "footprint_name": "ANT-TH_L33.0-W12.0_BLACK",

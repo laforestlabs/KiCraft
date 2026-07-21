@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:c7e5832aeeb353bf074a6be3c57f7a591d72633bfdbd514c412b510922dbe9ad",
+  "content_hash": "sha256:0ffea8325c33b345ed4ee107b6a8fb0aec8fe4717adbdee95605662f60e43167",
   "datasheet_url": "https://www.lcsc.com/datasheet/C2913201.pdf",
   "description": "Espressif ESP32-S3-WROOM-1-N8R8 \u2014 dual-core Xtensa LX7 MCU module (240 MHz) with 2.4 GHz Wi-Fi 802.11 b/g/n, Bluetooth 5 LE, 8 MB flash, 8 MB PSRAM, and on-board PCB antenna. The workhorse Wi-Fi MCU for maker PCBs; native USB on GPIO19/20 means no USB-serial chip required.",
   "footprint_name": "WIRELM-SMD_ESP32-S3-WROOM-1",

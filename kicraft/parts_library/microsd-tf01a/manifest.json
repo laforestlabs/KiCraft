@@ -1,7 +1,7 @@
 {
-  "content_hash": "sha256:642c0e3b85fd11d0525c8ef55f3a48259620613a48555426901a2ae91b7a4842",
+  "content_hash": "sha256:78d085466767ea4cfbe87997857e7c669f7ee8f21a308261cc33cfce8c289fe4",
   "datasheet_url": "https://lcsc.com/product-detail/Card-Sockets_TF-01A_C91145.html",
-  "description": "Hroparts TF-01A — microSD card socket, push-push type, SMD with card-detect switch. Accepts standard microSD/microSDHC cards. 9-pin + 2 shield tabs.",
+  "description": "Hroparts TF-01A \u2014 microSD card socket, push-push type, SMD with card-detect switch. Accepts standard microSD/microSDHC cards. 9-pin + 2 shield tabs.",
   "footprint_name": "TF-SMD_TF-01A",
   "kicad_version_min": "9.0.0",
   "maturity": "reviewed",
