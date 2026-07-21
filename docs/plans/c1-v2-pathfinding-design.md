@@ -68,7 +68,14 @@ New module `kicraft/autoplacer/brain/repair_pathfinder.py`, called from
 - runs 06/13/14/24/27: measure JOINTLY with the N2 geometry-repair pass —
   the rip pass cleans the flags but its re-close currently loses by one
   open on 13/14; a pathfinder tie is exactly what's missing.
+- KC-ZRAUR7 (`~/.kicraft/projects/1/655`, LIVE 2026-07-21, post phases 1–2):
+  USB-C→dual-USB-A splitter, rc7 unc=1; stuck net CHANGED across rounds
+  (ILIM r1–2, VBUS r3), congestion growth hit the 3.5x cap, board 55% empty
+  — the walled-off signature on a live board. Replay expect 1→0.
 - Full-batch: next self-eval target ≥28/34 (plan §measurement discipline).
+
+Session handoff (context, code map, verification recipes):
+`docs/plans/c1-v2-phase3-handoff.md`.
 
 ## Config knobs (proposed)
 
