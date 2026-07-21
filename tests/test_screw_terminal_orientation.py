@@ -251,6 +251,33 @@ def test_fab_gate_warns_on_unverifiable_connector(tmp_path):
     assert len(warnings) == 1 and "J2" in warnings[0]
 
 
+# --- Layer 0: the adapter populates the mouth for edge-zoned refs --------
+
+
+def test_adapter_detects_mouth_for_edge_zoned_switch(tmp_path):
+    """The facings fab gate checks EVERY edge-zoned ref prefix-blind, but the
+    adapter only ran mouth detection for kind == "connector" (J*). An
+    edge-zoned slide switch (SW*, kind "misc") therefore placed by the
+    aspect-ratio coin flip and the gate honestly rejected the bad rolls
+    (self-eval 2026-07-20 run_05: connector_misoriented:SW1). The adapter
+    must detect the mouth for anything zoned to an edge."""
+    pytest.importorskip("pcbnew")
+    from kicraft.autoplacer.hardware.adapter import KiCadAdapter
+
+    pcb = _make_board(tmp_path, rotation=0.0, strip_marker=False, ref="SW1")
+
+    zoned = KiCadAdapter(
+        str(pcb), {"component_zones": {"SW1": {"edge": "top"}}}
+    ).load()
+    assert zoned.components["SW1"].kind == "misc"
+    assert zoned.components["SW1"].opening_direction == 90.0
+
+    # Unzoned, the same part keeps opening_direction None: mid-board misc
+    # parts must not start orienting by body asymmetry.
+    unzoned = KiCadAdapter(str(pcb), {}).load()
+    assert unzoned.components["SW1"].opening_direction is None
+
+
 # --- Layer 4: vendoring lint ---------------------------------------------
 
 

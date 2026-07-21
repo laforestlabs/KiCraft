@@ -469,6 +469,18 @@ class KiCadAdapter:
                 if _layer_override.get(ref) == "back"
                 else _layer_to_enum(fp.GetLayer())
             )
+            # Mouth detection runs for connectors AND for anything the BOM
+            # zoned to an edge: the facings fab gate checks every edge-zoned
+            # ref prefix-blind, so an edge-zoned slide switch (SW1, kind
+            # "misc") whose opening stayed None here was oriented by the
+            # aspect-ratio fallback -- a coin flip the gate then honestly
+            # rejected (self-eval 2026-07-20 run_05 usb-pd-trigger).
+            _zone_edge = (
+                (self.cfg.get("component_zones") or {}).get(ref) or {}
+            ).get("edge")
+            _wants_mouth = kind == "connector" or _zone_edge in (
+                "left", "right", "top", "bottom"
+            )
             comp = Component(
                 ref=ref,
                 value=val,
@@ -483,7 +495,7 @@ class KiCadAdapter:
                 is_through_hole=has_pth,
                 body_center=body_ctr,
                 opening_direction=(
-                    detect_opening_direction(fp) if kind == "connector" else None
+                    detect_opening_direction(fp) if _wants_mouth else None
                 ),
             )
 
