@@ -95,3 +95,35 @@ infra errors, strap gates gone, intent retries eliminated, at flat spend.
 The board is now bottlenecked on exactly one big thing (dense-board routing
 completion) and three small seams (zero-pin symbols, multi-unit emitter,
 switch facings).
+
+## Status 2026-07-21 (implementation wave)
+
+- **N3 SHIPPED**: stage-prep wiring now carries the same zero-pin
+  `Mechanical:*` exemption as BOM commit (§9.11 already passed these
+  vacuously); regression test on `Mechanical:MountingHole`.
+- **N4 SHIPPED**: full multi-unit instantiation — placement expands each
+  functional unit into its own placeable entity (`PlacedPart.unit`), the
+  router resolves each pin against its owning unit's placement, the emitter
+  draws one `(symbol)` block per unit, §9.30 deleted. TL072 dual-buffer
+  golden: ERC clean + §9.13 sees all unit-B pins.
+- **N5 half-SHIPPED**: (a) the adapter now runs mouth detection for ANY
+  edge-zoned ref, prefix-blind like the facings gate — the run_05
+  `connector_misoriented:SW1` class places deliberately now. (b) The
+  14/24 strand insets are NOT the leaf-level perp-mouth family: run_14's
+  edge is set by a FOREIGN leaf's cap poking 0.95 mm past J2's mouth
+  line, run_24's by leaf blocks composing 2.2 mm short of the line a
+  sibling leaf set. Needs a compose-level shared mouth-line constraint —
+  open follow-up.
+- **N2 SHIPPED, premise corrected**: the 5 named boards have ZERO copper
+  outside the outline — their `illegal_routed_geometry` is real
+  `clearance` / `copper_edge_clearance` violations. The shipped pass
+  (`geometry_repair.rip_illegal_copper` + accept-or-revert wrapper) rips
+  DRC-named track/via items AND outline escapes, re-runs the repair
+  machinery, honestly reverts when the re-close loses ground (currently
+  the case on 13/14/27 — the re-close is what N1 phase 3 owns).
+- **N1 phases 1–2 SHIPPED** (track-endpoint anchors, board-diagonal gap
+  cap, free-anchor strict margins, geometry-worse accept gates); phase 3
+  (grid A* + bounded rip-up) designed in
+  `docs/plans/c1-v2-pathfinding-design.md`. run_10 after phases 1–2:
+  every edge genuinely attempts; all 21 remaining are honest
+  `no_clear_path` — the pathfinder is the sole remaining owner.
