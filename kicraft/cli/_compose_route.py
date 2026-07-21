@@ -183,11 +183,54 @@ def _route_parent_board(
     # failure returns a discardable result and the search tries the next round,
     # instead of crashing the compose subprocess and taking the build down.
     used_gnd_skip = False
+    power_first_stats: dict[str, Any] | None = None
     try:
         if gnd_net:
             strip_net_copper(str(stamped_pcb), gnd_net)
             add_gnd_pour_and_thermal_vias(str(stamped_pcb), cfg)
             _stamp_shield_ties(str(stamped_pcb))
+        # Power-first phase 1: freerouting 1.9.0 has no net priority -- each
+        # pass collects incomplete items in board item-list order, so the wide
+        # power nets (fattest corridor needed) are structurally last-in-practice
+        # and end up walled off by earlier thin-net copper (KC-ZRAUR7: VBUS
+        # split across two islands 18 mm apart on a 55%-empty board). Route the
+        # power-class nets ALONE first -- every other net's pins are emptied in
+        # the DSN while its pads and locked wiring stay obstacles -- then let
+        # the main route below run on the result with the power copper locked,
+        # exactly like leaf copper. Any phase-1 failure falls through to
+        # today's single-phase behavior: this step may improve a board, never
+        # fail one.
+        power_nets = [
+            n for n in (cfg.get("power_nets") or []) if n and n != gnd_net
+        ]
+        if cfg.get("parent_power_first", True) and power_nets:
+            import shutil as _shutil
+
+            p1_cfg = dict(route_cfg)
+            p1_cfg["freerouting_clear_zones"] = False
+            p1_cfg["freerouting_route_only_nets"] = power_nets
+            p1_cfg["freerouting_timeout_s"] = min(
+                int(route_cfg.get("freerouting_timeout_s", 60)),
+                int(cfg.get("parent_power_first_timeout_s", 120)),
+            )
+            power_routed = stamped_pcb.parent / "parent_power_routed.kicad_pcb"
+            try:
+                power_first_stats = route_with_freerouting(
+                    kicad_pcb_path=str(stamped_pcb),
+                    output_path=str(power_routed),
+                    jar_path=jar_path,
+                    config=p1_cfg,
+                )
+                # Adopt the power-routed board as the main route's input; the
+                # phase-2 DSN export locks its copper like leaf copper.
+                _shutil.copy2(power_routed, stamped_pcb)
+                power_first_stats["nets"] = power_nets
+                print(f"  parent route: power-first phase routed "
+                      f"{', '.join(power_nets)} first")
+            except Exception as exc:
+                power_first_stats = {"failed": str(exc), "nets": power_nets}
+                print(f"  parent route: power-first phase failed ({exc}); "
+                      f"continuing single-phase", file=sys.stderr)
         # Attempt 1: route with the GND plane present (clear_zones=False). Cap the
         # timeout so a hang (the large-plane failure mode) is detected promptly
         # and we fall back, rather than burning the full component-scaled budget.
@@ -232,8 +275,13 @@ def _route_parent_board(
             "_trace_segments": [],
             "_via_objects": [],
             "validation": {},
-            "freerouting_stats": {},
+            "freerouting_stats": (
+                {"power_first": power_first_stats} if power_first_stats else {}
+            ),
         }
+    if power_first_stats is not None:
+        freerouting_stats = dict(freerouting_stats or {})
+        freerouting_stats["power_first"] = power_first_stats
 
     # GND, post-route. On the skip fallback FreeRouting routed nothing for GND, so
     # rebuild it around the freshly-routed signals: pour the B.Cu plane +
@@ -271,8 +319,13 @@ def _route_parent_board(
     # GND plane -- leaving islands that a second pass would tie. The
     # convergence loop also tries via-stitching for cross-layer overlapping
     # fill islands (B.Cu <-> F.Cu), which the track-only pass cannot bridge.
-    # pcbnew work -> subprocess.
+    # pcbnew work -> subprocess. Each repair persists its summary through a
+    # sidecar the parent re-prints and stores: the subprocess's own stdout is
+    # swallowed by _run_pcbnew_script, which left the 1/655 investigation
+    # unable to tell whether these passes ran at all (KC-ZRAUR7 workstream B).
+    post_route_repairs: dict[str, Any] = {}
     if gnd_net and cfg.get("gnd_strand_repair_enabled", True):
+        sidecar = Path(str(routed_pcb) + ".gnd_island_repair.json")
         try:
             from kicraft.autoplacer.freerouting_runner import _run_pcbnew_script
 
@@ -300,13 +353,20 @@ def _route_parent_board(
                 "from kicraft.autoplacer.brain.gnd_pour import repair_parent_gnd_islands\n"
                 f"cfg = json.loads({_rep_cfg!r})\n"
                 f"s = repair_parent_gnd_islands({str(routed_pcb)!r}, cfg)\n"
-                "print('parent gnd island repair:', s['stranded'], 'stranded,',\n"
-                "      s['tied_pads'], 'tied,', s['vias'], 'vias,',\n"
-                "      s.get('edge_spine', {}).get('stubs', 0), 'spine stubs,',\n"
-                "      s['unresolved'], 'unresolved, iterations:', s['iterations'])\n"
+                f"open({str(sidecar)!r}, 'w').write(json.dumps(s))\n"
             )
+            s = json.loads(sidecar.read_text(encoding="utf-8"))
+            post_route_repairs["gnd_islands"] = s
+            print(f"  parent gnd island repair: {s.get('stranded')} stranded, "
+                  f"{s.get('tied_pads')} tied, {s.get('vias')} vias, "
+                  f"{(s.get('edge_spine') or {}).get('stubs', 0)} spine stubs, "
+                  f"{s.get('unresolved')} unresolved, "
+                  f"iterations: {s.get('iterations')}")
         except Exception as exc:
+            post_route_repairs["gnd_islands"] = {"failed": str(exc)}
             print(f"warning: parent gnd island repair failed: {exc}", file=sys.stderr)
+        finally:
+            sidecar.unlink(missing_ok=True)
 
     # Power strand repair: the power-rail pour fragments exactly like the GND
     # plane (KC-Z57JEZ: +3V3 split into two F.Cu islands around a fine-pitch
@@ -314,6 +374,7 @@ def _route_parent_board(
     # cluster back the same way. pcbnew work -> subprocess.
     if cfg.get("power_plane_enabled", True) and cfg.get(
             "power_strand_repair_enabled", True):
+        sidecar = Path(str(routed_pcb) + ".power_strand_repair.json")
         try:
             from kicraft.autoplacer.freerouting_runner import _run_pcbnew_script
 
@@ -336,11 +397,19 @@ def _route_parent_board(
                 "from kicraft.autoplacer.brain.gnd_pour import repair_stranded_power\n"
                 f"cfg = json.loads({_pwr_cfg!r})\n"
                 f"s = repair_stranded_power({str(routed_pcb)!r}, None, cfg)\n"
-                "print('power strand repair:', s['nets'], '--', s['stranded'],\n"
-                "      'stranded,', s['tied'], 'tied,', len(s['skipped']), 'skipped')\n"
+                f"open({str(sidecar)!r}, 'w').write(json.dumps(s))\n"
             )
+            s = json.loads(sidecar.read_text(encoding="utf-8"))
+            post_route_repairs["power_strand"] = s
+            print(f"  power strand repair: {s.get('nets')} -- "
+                  f"{s.get('stranded')} stranded, {s.get('tied')} tied, "
+                  f"{len(s.get('skipped') or [])} skipped"
+                  + (": " + "; ".join(s["skipped"]) if s.get("skipped") else ""))
         except Exception as exc:
+            post_route_repairs["power_strand"] = {"failed": str(exc)}
             print(f"warning: power strand repair failed: {exc}", file=sys.stderr)
+        finally:
+            sidecar.unlink(missing_ok=True)
 
     # Root parent has no interface anchors -- skip anchor validation.
     # Anchor completeness is a leaf-level gate, not a parent-level gate.
@@ -351,6 +420,16 @@ def _route_parent_board(
         actual_anchor_names=[],
         required_anchor_names=[],
     )
+    # Persist the post-route repair summaries (and the power-first phase
+    # outcome) into the validation dict -> state.routed_validation ->
+    # parent_pipeline.json: their absence must never again be ambiguous
+    # (on 1/655 nothing recorded whether any repair ran; KC-ZRAUR7 B3).
+    validation["post_route_repairs"] = post_route_repairs
+    if power_first_stats is not None:
+        validation["power_first"] = {
+            k: power_first_stats.get(k) for k in ("nets", "failed")
+            if k in power_first_stats
+        }
 
     # Illegal-geometry remediation (self-eval 2026-07-20 N2): freerouting
     # occasionally ships copper the fab gate must reject -- escaped past
@@ -379,12 +458,30 @@ def _route_parent_board(
     # Design: docs/plans/unconnected-signal-repair-c1-design.md.
     unconnected = int((validation.get("drc") or {}).get("unconnected", 0) or 0)
     if unconnected > 0 and cfg.get("signal_unconnected_repair_enabled", True):
+        # Poured POWER nets are normally the strand repair's turf (the signal
+        # repair skips every net with a zone), but a power net the strand
+        # repair just reported unresolved fell between the two systems on
+        # 1/655: the straight-tie-only strand repair skipped no_clear_path
+        # while the rich bend/via repair filtered VBUS out as pour-owned.
+        # Hand exactly those nets to the signal repair -- its accept-or-revert
+        # gate makes trying safe. GND stays excluded (plane machinery owns it).
+        pwr = post_route_repairs.get("power_strand") or {}
+        extra = sorted({
+            str(lbl).split(":", 1)[0]
+            for lbl in (pwr.get("skipped") or [])
+            if ":" in str(lbl)
+        })
+        repair_cfg = {**cfg, "signal_repair_extra_nets": extra} if extra else cfg
         validation = _attempt_signal_unconnected_repair(
-            routed_pcb, cfg, validation
+            routed_pcb, repair_cfg, validation
         )
         unconnected = int(
             (validation.get("drc") or {}).get("unconnected", 0) or 0
         )
+    elif unconnected > 0:
+        validation["signal_unconnected_repair"] = {
+            "ran": False, "reason": "disabled"
+        }
 
     # Import all copper from the routed board (child + new parent traces +
     # any repair ties; must run AFTER the repair so its copper is captured).
@@ -467,12 +564,18 @@ def _attempt_signal_unconnected_repair(
     shorts_before = int(drc.get("shorts", 0) or 0)
     backup = Path(str(routed_pcb) + ".pre_signal_repair")
     shutil.copy2(routed_pcb, backup)
+    # Recorded on WHICHEVER validation dict is returned (kept, reverted, or
+    # crashed): the pass ran invisibly on 1/655 -- its print went to a
+    # swallowed subprocess stdout, its sidecar was unlinked, and neither
+    # return path carried a trace (KC-ZRAUR7 workstream B).
+    record: dict = {"ran": True, "kept": False}
     try:
         _sig_cfg = json.dumps({
             k: cfg[k]
             for k in (
                 "gnd_zone_net",
                 "power_plane_nets",
+                "signal_repair_extra_nets",
                 "signal_repair_max_mm",
                 "signal_repair_max_targets",
                 "signal_repair_dogleg_offsets_mm",
@@ -508,6 +611,7 @@ def _attempt_signal_unconnected_repair(
         sidecar = Path(str(routed_pcb) + ".signal_repair.json")
         try:
             s = json.loads(sidecar.read_text(encoding="utf-8"))
+            record["summary"] = s
             print(
                 f"  signal unconnected repair: {s.get('edges')} edge(s) -- "
                 f"{s.get('tied')} tied, {len(s.get('skipped') or [])} skipped, "
@@ -538,6 +642,8 @@ def _attempt_signal_unconnected_repair(
             or (revalidation.get("obviously_illegal_routed_geometry")
                 and not validation.get("obviously_illegal_routed_geometry"))
         )
+        record["unconnected"] = [unconnected_before, unconnected_after]
+        record["shorts"] = [shorts_before, shorts_after]
         if (unconnected_after < unconnected_before
                 and shorts_after <= shorts_before
                 and not geometry_worse):
@@ -547,6 +653,14 @@ def _attempt_signal_unconnected_repair(
                 f"{shorts_before} -> {shorts_after}"
             )
             backup.unlink(missing_ok=True)
+            record["kept"] = True
+            # The fresh re-validate dict must not drop the earlier
+            # annotations (post_route_repairs, power_first, prior repairs).
+            for key in ("post_route_repairs", "power_first",
+                        "illegal_geometry_repair"):
+                if key in validation:
+                    revalidation[key] = validation[key]
+            revalidation["signal_unconnected_repair"] = record
             return revalidation
         print(
             f"  signal unconnected repair reverted (unconnected "
@@ -557,6 +671,8 @@ def _attempt_signal_unconnected_repair(
         )
         shutil.copy2(backup, routed_pcb)
         backup.unlink(missing_ok=True)
+        record["reverted"] = True
+        validation["signal_unconnected_repair"] = record
         return validation
     except Exception as exc:  # noqa: BLE001 -- a repair may never fail a board
         print(f"warning: signal unconnected repair failed: {exc}",
@@ -564,6 +680,8 @@ def _attempt_signal_unconnected_repair(
         if backup.exists():
             shutil.copy2(backup, routed_pcb)
             backup.unlink(missing_ok=True)
+        record["failed"] = str(exc)
+        validation["signal_unconnected_repair"] = record
         return validation
 
 
@@ -589,6 +707,9 @@ def _attempt_illegal_geometry_repair(
     backup = Path(str(routed_pcb) + ".pre_geometry_repair")
     shutil.copy2(routed_pcb, backup)
     sidecar = Path(str(routed_pcb) + ".geometry_repair.json")
+    # Recorded on whichever validation dict is returned -- see the signal
+    # wrapper's record note (a repair pass must never run traceless again).
+    record: dict = {"ran": True, "kept": False}
     try:
         _geo_cfg = json.dumps({
             k: cfg[k] for k in ("geometry_repair_max_rips",) if k in cfg
@@ -608,6 +729,7 @@ def _attempt_illegal_geometry_repair(
             f"open({str(sidecar)!r}, 'w').write(json.dumps(s))\n"
         )
         s = json.loads(sidecar.read_text(encoding="utf-8"))
+        record["rip"] = s
         ripped = int(s.get("ripped", 0) or 0)
         print(
             f"  illegal geometry rip: {ripped} item(s) ripped, "
@@ -617,6 +739,7 @@ def _attempt_illegal_geometry_repair(
         )
         if ripped == 0:
             backup.unlink(missing_ok=True)
+            validation["illegal_geometry_repair"] = record
             return validation
 
         # Close the opens the rip created: pour nets go back through the
@@ -691,6 +814,8 @@ def _attempt_illegal_geometry_repair(
             revalidation.get("malformed_board_geometry")
             or revalidation.get("obviously_illegal_routed_geometry")
         )
+        record["unconnected"] = [unconnected_before, unconnected_after]
+        record["shorts"] = [shorts_before, shorts_after]
         if (geometry_clean
                 and shorts_after <= shorts_before
                 and unconnected_after <= unconnected_before):
@@ -700,6 +825,11 @@ def _attempt_illegal_geometry_repair(
                 f"shorts {shorts_before} -> {shorts_after}"
             )
             backup.unlink(missing_ok=True)
+            record["kept"] = True
+            for key in ("post_route_repairs", "power_first"):
+                if key in validation:
+                    revalidation[key] = validation[key]
+            revalidation["illegal_geometry_repair"] = record
             return revalidation
         print(
             f"  illegal geometry repair reverted (geometry_clean="
@@ -709,6 +839,8 @@ def _attempt_illegal_geometry_repair(
         )
         shutil.copy2(backup, routed_pcb)
         backup.unlink(missing_ok=True)
+        record["reverted"] = True
+        validation["illegal_geometry_repair"] = record
         return validation
     except Exception as exc:  # noqa: BLE001 -- a repair may never fail a board
         print(f"warning: illegal geometry repair failed: {exc}",
@@ -716,6 +848,8 @@ def _attempt_illegal_geometry_repair(
         if backup.exists():
             shutil.copy2(backup, routed_pcb)
             backup.unlink(missing_ok=True)
+        record["failed"] = str(exc)
+        validation["illegal_geometry_repair"] = record
         return validation
     finally:
         sidecar.unlink(missing_ok=True)

@@ -310,6 +310,17 @@ DEFAULT_CONFIG = {
     "parent_dense_interconnect_threshold": 10,
     "parent_dense_max_passes": 40,
     "parent_dense_timeout_s": 180,
+    # Power-first parent routing: freerouting 1.9.0 routes in board item-list
+    # order with no net priority, so the wide power-class nets -- which need
+    # the fattest clear corridor -- are effectively routed last and end up
+    # walled off by thin-net copper (KC-ZRAUR7: VBUS split in two islands on a
+    # 55%-empty board). When enabled, the parent route runs an extra
+    # freerouting phase FIRST with only the power nets connectable (every
+    # other net's DSN pins emptied; pads/wiring stay obstacles), then the
+    # normal full route locks that power copper like leaf copper. A failed
+    # phase 1 falls through to the single-phase flow. Kill switch below.
+    "parent_power_first": True,
+    "parent_power_first_timeout_s": 120,
     # Parent freerouting timeout scales with component count, mirroring the
     # leaf budget at a lower rate (the parent starts from pre-routed leaf
     # copper, so per-component cost is lower than routing from scratch).

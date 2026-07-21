@@ -1085,6 +1085,78 @@ def _strip_nets_from_dsn(dsn_path: str, skip_nets: "list[str] | None") -> None:
         print(f"  warning: DSN net-skip ({sorted(names)}) skipped: {exc}")
 
 
+def _restrict_dsn_routing_to_nets(
+    dsn_path: str, route_only_nets: "list[str] | None"
+) -> None:
+    """Empty every other net's ``(pins ...)`` so FreeRouting routes ONLY these.
+
+    The power-first parent route (phase 1) must route the power-class nets on
+    a board that already carries every leaf's locked signal copper.
+    :func:`_strip_nets_from_dsn` cannot build that DSN: it deletes a stripped
+    net's *wiring* too, so the leaf signal copper would become invisible and
+    FreeRouting would route power straight through it (a short the SES import
+    then stamps). Instead, keep every net declared, keep ALL wiring and class
+    membership (rules), and empty the ``(pins ...)`` list of every net not in
+    *route_only_nets*: a net with no pins has nothing to connect, so
+    FreeRouting never routes it, yet its pads and existing wires remain
+    obstacles with their real net identity and clearance rules.
+
+    Only the DSN is edited; the board is untouched. Best-effort: any parse
+    failure leaves the DSN unchanged (FreeRouting then routes everything, as
+    today -- slower, never wrong).
+    """
+    if not route_only_nets:
+        return
+    keep = {str(n) for n in route_only_nets}
+
+    def _name(tok: str) -> str:
+        return tok[1:-1] if len(tok) >= 2 and tok[0] == '"' == tok[-1] else tok
+
+    def _end(s: str, start: int) -> int:
+        depth = 0
+        for i in range(start, len(s)):
+            if s[i] == "(":
+                depth += 1
+            elif s[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+        return -1
+
+    try:
+        with open(dsn_path) as f:
+            content = f.read()
+
+        out, i, n = [], 0, len(content)
+        while i < n:
+            if content.startswith("(net", i) and (
+                i + 4 >= n or content[i + 4] in " \t\n"
+            ):
+                end = _end(content, i)
+                if end > 0:
+                    block = content[i:end]
+                    toks = _split_dsn_tokens(block[len("(net"):])
+                    pins_at = block.find("(pins")
+                    if (
+                        toks
+                        and pins_at >= 0
+                        and _name(toks[0]) not in keep
+                    ):
+                        pins_end = _end(block, pins_at)
+                        if pins_end > 0:
+                            block = block[:pins_at] + block[pins_end:]
+                    out.append(block)
+                    i = end
+                    continue
+            out.append(content[i])
+            i += 1
+
+        with open(dsn_path, "w") as f:
+            f.write("".join(out))
+    except Exception as exc:  # noqa: BLE001 -- never break routing over this
+        print(f"  warning: DSN route-only restriction skipped: {exc}")
+
+
 def _propagate_sibling_pro(src_pcb_path: str, dst_pcb_path: str) -> None:
     """Copy ``src``'s sibling ``.kicad_pro`` onto ``dst``'s, when present.
 
@@ -1434,6 +1506,12 @@ def route_with_freerouting(
             # remove them from the DSN so FreeRouting routes neither a dense
             # trace web nor hangs on a filled plane -- they are poured after.
             _strip_nets_from_dsn(dsn_path, config.get("freerouting_skip_nets"))
+            # Power-first phase 1: route ONLY these nets; every other net's
+            # pins are emptied so it is complete-by-definition while its pads
+            # and locked wiring stay obstacles. See _restrict_dsn_routing_to_nets.
+            _restrict_dsn_routing_to_nets(
+                dsn_path, config.get("freerouting_route_only_nets")
+            )
 
             passes = max_passes if attempt == 0 else max(10, max_passes // 2)
             stats = run_freerouting(

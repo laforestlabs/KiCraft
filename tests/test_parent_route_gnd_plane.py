@@ -143,3 +143,35 @@ def test_strip_nets_from_dsn_noop_without_skip(tmp_path):
     p.write_text(_DSN, encoding="utf-8")
     fr._strip_nets_from_dsn(str(p), None)
     assert p.read_text() == _DSN                              # untouched
+
+
+# --- _restrict_dsn_routing_to_nets: the power-first phase-1 DSN edit ---
+
+
+def test_restrict_dsn_routing_empties_other_nets_pins_only(tmp_path):
+    p = tmp_path / "b.dsn"
+    p.write_text(_DSN, encoding="utf-8")
+    fr._restrict_dsn_routing_to_nets(str(p), ["+5V"])
+    out = p.read_text()
+
+    assert out.count("(") == out.count(")")
+    # The routed net keeps its pins; every other net stays DECLARED (its
+    # wiring must remain resolvable) but has nothing left to connect.
+    assert "(pins LED1-2 J1-1)" in out
+    assert "(net GND" in out and "(net DATA" in out
+    assert "LED1-4" not in out and "J1-3" not in out
+    # ALL wiring kept -- this is the difference from _strip_nets_from_dsn:
+    # phase 1 routes power on a board carrying every leaf's locked signal
+    # copper, and stripping that wiring would let the router short through it.
+    assert "(net GND)" in out and "(net DATA)" in out
+    assert "1100 1000 GND" in out
+    # Class membership (rules) intact.
+    cls = out[out.find("(class"):out.find("(circuit")]
+    assert "+5V" in cls and "GND" in cls and "DATA" in cls
+
+
+def test_restrict_dsn_routing_noop_without_list(tmp_path):
+    p = tmp_path / "b.dsn"
+    p.write_text(_DSN, encoding="utf-8")
+    fr._restrict_dsn_routing_to_nets(str(p), None)
+    assert p.read_text() == _DSN                              # untouched

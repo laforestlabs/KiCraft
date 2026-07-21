@@ -1,5 +1,55 @@
 # Power-first routing — research + fix handoff (then: the missing repair pass)
 
+## RESULTS (2026-07-21, session after the handoff — read this first)
+
+**Shipped: A2 (two-phase freerouting), user-selected over A1.** Phase 1
+routes ONLY the power-class nets (power_nets minus GND) by freerouting on
+the stamped parent; phase 2 is today's full route with the phase-1 copper
+locked like leaf copper. Kill switch `parent_power_first` (default on),
+phase-1 budget `parent_power_first_timeout_s` (120 s cap). Phase-1 failure
+of any kind falls through to the single-phase flow.
+
+- **The DSN trick that makes phase 1 safe:** `_strip_nets_from_dsn` deletes
+  a stripped net's WIRING, so stripping signals would let phase-1 power
+  routes short through the invisible leaf copper. Instead
+  `_restrict_dsn_routing_to_nets` (freerouting_runner) keeps every net
+  declared and all wiring locked, and empties the `(pins ...)` of every
+  non-power net — nothing to connect, still an obstacle. Config key:
+  `freerouting_route_only_nets`, applied next to `freerouting_skip_nets`.
+- **A3 answered:** on 1/655 `pour_power_planes` DID pour VBUS and
+  `repair_stranded_power` DID run — the fill left the U2 branch
+  ({R4.1, U2.1, C3.1}) stranded and the straight-line-only strand repair
+  skipped `R4.1:no_clear_path` (all 5 nearest pad-pair ties blocked). Not a
+  gating bug; a capability gap, closed structurally by phase 1.
+- **B answered:** `_attempt_signal_unconnected_repair` DID run. It parsed
+  the VBUS edge from DRC, then filtered it out via `_pour_nets` (every net
+  with a zone is pour-owned) → `edges=0` no-op → revert path returned the
+  ORIGINAL validation. No trace anywhere because (a) `_run_pcbnew_script`
+  swallows subprocess stdout, (b) the sidecar was unlinked, (c) neither
+  wrapper return path annotated validation, and (d)
+  `_compact_routed_validation` (compose_subcircuits) whitelists
+  routed_validation keys, dropping everything else from
+  parent_pipeline.json. Even unfiltered, the rich path family fails this
+  edge honestly: 12 plausible B.Cu paths all die on `via_blocked` at the
+  single pinned via spot (the DRC edge endpoint) — logged for the shelved
+  phase-3 evidence.
+- **B fixes landed:** both repair wrappers now record
+  `signal_unconnected_repair` / `illegal_geometry_repair` (ran/kept/
+  reverted/summary) on whichever validation dict they return; the gnd
+  island + power strand repairs persist sidecar summaries re-printed by the
+  parent and stored as `post_route_repairs`; phase-1 outcome stored as
+  `power_first`; all four keys carried through the compaction whitelist
+  into parent_pipeline.json. Screening fix: a power net the strand repair
+  reports unresolved is re-admitted to the signal repair via
+  `signal_repair_extra_nets` (GND never).
+- **Fixture evidence ($0, frozen 1/655 pre-route board):** control
+  reproduces unc=1 VBUS; two-phase gives unc=0 shorts=0 (+~12 s route).
+  Full replay (seed 0): build verify 0 shorts / 0 unconnected (was rc7).
+- Verification status at write time: replay N-of-3 + run_10 regression in
+  progress — see memory index for final numbers.
+
+
+
 Written 2026-07-21 (session box-investigate), after a back-and-forth on
 KC-ZRAUR7. **Direction decision (user):** KiCraft's core design choice is to
 outsource routing to freerouting — do NOT build our own router. The C1 v2

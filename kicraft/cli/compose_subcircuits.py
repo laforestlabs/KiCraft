@@ -2495,6 +2495,14 @@ def _compact_routed_validation(validation: dict[str, Any]) -> dict[str, Any]:
     for k in (
         "footprint_internal_clearance_count",
         "footprint_internal_copper_edge_count",
+        # Repair/power-first evidence (small summaries): this whitelist is
+        # why 1/655's parent_pipeline.json showed NO trace of any repair
+        # pass -- the wrappers' records were compacted away and the question
+        # "did the repair even run?" was unanswerable (KC-ZRAUR7 B3).
+        "power_first",
+        "post_route_repairs",
+        "signal_unconnected_repair",
+        "illegal_geometry_repair",
     ):
         if k in validation:
             out[k] = validation[k]

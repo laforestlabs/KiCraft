@@ -268,7 +268,15 @@ def _path_clear(
 
 
 def _pour_nets(board: "pcbnew.BOARD", cfg: dict[str, Any]) -> set[str]:
-    """Nets owned by the pour repairs (GND + power planes), never touched here."""
+    """Nets owned by the pour repairs (GND + power planes), never touched here.
+
+    ``signal_repair_extra_nets`` re-admits specific poured nets: a power net
+    the strand repair reported unresolved would otherwise fall between the
+    two systems -- the straight-tie-only strand repair skips no_clear_path
+    while this pass filters the net out as pour-owned (KC-ZRAUR7 VBUS). The
+    caller's accept-or-revert gate makes trying them safe. GND is never
+    re-admitted (the plane machinery owns it).
+    """
     skip = {str(cfg.get("gnd_zone_net", "GND"))}
     for n in cfg.get("power_plane_nets") or []:
         skip.add(str(n))
@@ -276,6 +284,10 @@ def _pour_nets(board: "pcbnew.BOARD", cfg: dict[str, Any]) -> set[str]:
         name = zone.GetNetname()
         if name:
             skip.add(name)
+    gnd = str(cfg.get("gnd_zone_net", "GND"))
+    for n in cfg.get("signal_repair_extra_nets") or []:
+        if str(n) != gnd:
+            skip.discard(str(n))
     return skip
 
 

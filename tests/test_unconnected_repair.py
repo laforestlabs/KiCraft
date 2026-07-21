@@ -302,3 +302,30 @@ def test_wrapper_inline_script_matches_repair_return_contract(
     assert out == improved
     assert "signal unconnected repair:" in capsys.readouterr().out
     assert not (tmp_path / "parent_routed.kicad_pcb.pre_signal_repair").exists()
+
+
+def test_pour_nets_readmits_extra_nets_but_never_gnd():
+    """A poured power net the strand repair could not fix must be repairable
+    here (KC-ZRAUR7: VBUS fell between the straight-tie-only strand repair
+    and this pass's pour-owned filter); GND is never re-admitted."""
+    from kicraft.autoplacer.brain.unconnected_repair import _pour_nets
+
+    class _Zone:
+        def __init__(self, name):
+            self._name = name
+
+        def GetNetname(self):
+            return self._name
+
+    class _Board:
+        def Zones(self):
+            return [_Zone("GND"), _Zone("VBUS")]
+
+    skip = _pour_nets(_Board(), {})
+    assert {"GND", "VBUS"} <= skip                      # default: both owned
+
+    skip = _pour_nets(
+        _Board(), {"signal_repair_extra_nets": ["VBUS", "GND"]}
+    )
+    assert "VBUS" not in skip, "unresolved power net must be repairable here"
+    assert "GND" in skip, "GND stays with the plane machinery, always"
