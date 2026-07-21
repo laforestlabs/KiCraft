@@ -1,0 +1,32 @@
+{
+  "content_hash": "sha256:1e59a862c69d1e9b22eedeac7b87cc93ea88c6dc829d7e128cf91b808909811c",
+  "datasheet_url": "https://lcsc.com/product-detail/USB-Connectors_Korean-Hroparts-Elec-U-A-24SS-W-2_C530629.html",
+  "description": "USB-A female receptacle, USB 2.0, right-angle SMD with TH locating pegs (Hanyoung U-A-24SS-W-2, 1.5A). Edge-mount host port for USB-A power/data briefs; footprint carries an authoritative 'PCB Edge' Dwgs.User marker at the mating face.",
+  "footprint_name": "USB-A-SMD_U-A-24SS-W-2",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "U-A-24SS-W-2",
+  "name": "usb-a-24ss-w-2",
+  "provenance": {
+    "added_at": "2026-07-06T23:15:55Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C530629"
+  },
+  "symbol_name": "U-A-24SS-W-2",
+  "tags": [
+    "usb",
+    "usb-a",
+    "receptacle",
+    "connector",
+    "usb2.0",
+    "smd",
+    "edge-mount"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

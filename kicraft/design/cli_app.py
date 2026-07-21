@@ -2101,6 +2101,7 @@ def _add_part_from_files(args: argparse.Namespace) -> int:
         ),
     )
     _finalize_part_bundle(part_dir, manifest)
+    _warn_undetectable_mouth(part_dir, libname, footprint_name)
 
     print(
         f"OK added {libname}@0.1.0 -> {part_dir}\n"
@@ -2112,6 +2113,48 @@ def _add_part_from_files(args: argparse.Namespace) -> int:
         f"  maturity:  {manifest.maturity}"
     )
     return 0
+
+
+def _mouth_undetectable(loaded_fp, pcbnew) -> bool:
+    """True when a deep-bodied holed footprint exposes no detectable opening
+    direction: the placer cannot aim it at a board edge and the facing fab
+    gate cannot verify it. Core predicate of validate-part check (7), shared
+    with the add-part paths because auto-fetched bundles never pass through
+    validate-part (KC-3WN46Z: a home-tier LCSC USB-A shipped with no marker,
+    leaving the fab gate able only to warn 'unverifiable')."""
+    from kicraft.autoplacer.hardware.adapter import detect_opening_direction
+
+    if not any(p.HasHole() for p in loaded_fp.Pads()):
+        return False
+    bb = loaded_fp.GetBoundingBox(False, False)
+    depth = min(pcbnew.ToMM(bb.GetWidth()), pcbnew.ToMM(bb.GetHeight()))
+    return depth > 3.0 and detect_opening_direction(loaded_fp) is None
+
+
+def _warn_undetectable_mouth(part_dir: Path, libname: str, footprint_name: str) -> None:
+    """Add-part-time mirror of validate-part check (7). Warning only (vertical
+    parts legitimately have no mouth); best-effort when pcbnew is absent."""
+    try:
+        import pcbnew
+    except ImportError:
+        return
+    try:
+        loaded = pcbnew.FootprintLoad(str(part_dir / f"{libname}.pretty"), footprint_name)
+    except Exception:  # noqa: BLE001 -- a lint must never fail the fetch
+        return
+    if loaded is None or not _mouth_undetectable(loaded, pcbnew):
+        return
+    print(
+        f"WARNING {libname}: deep-bodied holed footprint '{footprint_name}' "
+        f"has no detectable opening direction. If this is a side-entry "
+        f"(90-degree) connector (screw terminal, barrel/BNC jack, right-angle "
+        f"header, USB receptacle), add an fp_text 'PCB Edge' on Dwgs.User at "
+        f"the wire-entry face and rerun `validate-part {libname} "
+        f"--update-hash` -- otherwise the placer cannot aim it at the board "
+        f"edge and the fab gate cannot verify it. Vertical/top-entry parts "
+        f"can ignore this.",
+        file=sys.stderr,
+    )
 
 
 def _cmd_add_part(args: argparse.Namespace) -> int:
@@ -2405,6 +2448,7 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
         ),
     )
     _finalize_part_bundle(part_dir, manifest)
+    _warn_undetectable_mouth(part_dir, libname, footprint_name)
     _log_query("add_part_from_lcsc", outcome="fetched", query=lcsc_id, lcsc=lcsc_id,
                library_name=libname, into=args.into, maturity=manifest.maturity)
 
@@ -2701,31 +2745,19 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
         # vertical/top-entry parts (banana jacks, vertical JST) legitimately
         # have no mouth. For any side-entry (90-degree) connector, add an
         # authoritative marker on the wire-entry side.
-        if loaded_fp is not None:
-            from kicraft.autoplacer.hardware.adapter import (
-                detect_opening_direction,
+        if loaded_fp is not None and _mouth_undetectable(loaded_fp, _pcbnew):
+            print(
+                f"WARNING {manifest.name}: deep-bodied holed footprint "
+                f"'{manifest.footprint_name}' has no detectable opening "
+                f"direction. If this is a side-entry (90-degree) connector "
+                f"(screw terminal, barrel/BNC jack, right-angle header, "
+                f"USB receptacle), add an fp_text 'PCB Edge' on Dwgs.User "
+                f"at the wire-entry face, then rerun with --update-hash -- "
+                f"otherwise the placer cannot aim it at the board edge and "
+                f"the fab gate cannot verify it. Vertical/top-entry parts "
+                f"can ignore this.",
+                file=sys.stderr,
             )
-
-            _has_hole = any(p.HasHole() for p in loaded_fp.Pads())
-            _bb = loaded_fp.GetBoundingBox(False, False)
-            _depth = min(_pcbnew.ToMM(_bb.GetWidth()), _pcbnew.ToMM(_bb.GetHeight()))
-            if (
-                _has_hole
-                and _depth > 3.0
-                and detect_opening_direction(loaded_fp) is None
-            ):
-                print(
-                    f"WARNING {manifest.name}: deep-bodied TH footprint "
-                    f"'{manifest.footprint_name}' has no detectable opening "
-                    f"direction. If this is a side-entry (90-degree) connector "
-                    f"(screw terminal, barrel/BNC jack, right-angle header), "
-                    f"add an fp_text 'PCB Edge' on Dwgs.User at the wire-entry "
-                    f"face, then rerun with --update-hash -- otherwise the "
-                    f"placer cannot aim it at the board edge and the fab gate "
-                    f"cannot verify it. Vertical/top-entry parts can ignore "
-                    f"this.",
-                    file=sys.stderr,
-                )
 
         # (9) Explicit edge marker contradicted by strong artwork evidence:
         # rule 1 makes the marker authoritative for placer AND fab gate, so
@@ -4159,7 +4191,7 @@ def _connector_misoriented(pcb: Path) -> tuple[list[str], list[str]]:
             elif v.status == "unknown_mouth":
                 warnings.append(
                     f"connector mouth unverifiable {v.ref}@{v.edge} -- "
-                    "TH connector with a directional body but no detectable "
+                    "holed connector with a directional body but no detectable "
                     "opening; add a 'PCB Edge' Dwgs.User marker to its "
                     "footprint so orientation can be placed and verified"
                 )

@@ -332,6 +332,22 @@ def detect_opening_direction(fp) -> float | None:
         _, second_ext = ranked[1]
         if best_ext >= 1.0 and (best_ext - second_ext) >= 0.5:
             opening_board = best_dir
+        else:
+            # Axis-pair fallback: a wide-shell connector (USB-A class) has
+            # large SYMMETRIC lateral skirts that tie the global runner-up
+            # and mask a decisive fore/aft mouth overhang (KC-3WN46Z: 2.41
+            # vs 1.70 fore/aft lost to 1.95 laterals by 0.04mm). The mouth
+            # question is fore-vs-aft, so compare each direction against its
+            # 180-degree opposite; fire only when exactly one axis is
+            # decisive, keeping genuinely ambiguous bodies undetected.
+            asym = {d: extensions[d] - extensions[(d + 180) % 360]
+                    for d in (0, 90, 180, 270)}
+            x_dir = 0 if asym[0] >= asym[180] else 180
+            y_dir = 90 if asym[90] >= asym[270] else 270
+            x_decisive = asym[x_dir] >= 0.5 and extensions[x_dir] >= 1.0
+            y_decisive = asym[y_dir] >= 0.5 and extensions[y_dir] >= 1.0
+            if x_decisive != y_decisive:
+                opening_board = x_dir if x_decisive else y_dir
 
     # (3) Pad cluster sits off-center inside the body: the pins/tail crowd one
     # end and the mouth is the far side. Catches connectors whose courtyard is

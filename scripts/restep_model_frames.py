@@ -98,6 +98,7 @@ APPLIED_TRANSFORMS: dict[str, tuple[int, tuple[float, float, float]]] = {
     "screw-terminal-5mm-3p": (0, (4.99, 0.00, 0.00)),
     "ss14": (0, (0.00, 0.00, 1.17)),
     "ttp223": (180, (0.00, 0.00, 0.75)),
+    "usb-a-24ss-w-2": (0, (0.00, -6.58, 3.45)),  # exact fit, med 0.000
     "usb-micro-b-receptacle-5p": (0, (-0.51, 0.31, -0.10)),
     "veml7700": (0, (0.00, 0.44, 1.49)),
     "vl53l0x": (0, (0.00, 0.00, 1.02)),
