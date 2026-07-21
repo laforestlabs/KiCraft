@@ -203,15 +203,20 @@ def route_sheet(
 ) -> RoutedSheet:
     """Build the wire / junction / power / label set for one leaf."""
     routed = RoutedSheet()
-    placed_by_ref: dict[str, PlacedPart] = {p.ref: p for p in placed_parts}
-    parts_by_ref = {p.ref: p for p in bom.parts if p.ref in placed_by_ref}
+    # A multi-unit symbol contributes one placement per drawn unit; a pin
+    # resolves against the placement of the unit that owns it.
+    placed_by_unit: dict[tuple[str, int], PlacedPart] = {
+        (p.ref, p.unit): p for p in placed_parts
+    }
+    placed_refs = {p.ref for p in placed_parts}
+    parts_by_ref = {p.ref: p for p in bom.parts if p.ref in placed_refs}
     pin_info_cache: dict[str, dict] = {}
 
     def _pins(ref: str) -> list[dict]:
         info = pin_info_cache.get(ref)
         if info is None:
             try:
-                info = lookup_pins(parts_by_ref[ref].symbol)
+                info = lookup_pins(parts_by_ref[ref].symbol, all_units=True)
             except (SymbolNotFoundError, ValueError, KeyError) as exc:
                 # Loud, not silent: an unresolvable symbol here silently
                 # dropped whole nets from the schematic (no wire, no label),
@@ -233,12 +238,17 @@ def route_sheet(
                 return p
         return None
 
+    def _placed_for(ref: str, pin: dict) -> PlacedPart | None:
+        return placed_by_unit.get((ref, int(pin.get("unit", 1) or 1)))
+
     # Every pin coordinate on the sheet, with the (ref, pin) that owns it — used
     # to keep a direct wire from passing through (and shorting to) a foreign pin.
     all_pins: list[tuple[float, float, str, str]] = []
     for ref in parts_by_ref:
-        placed = placed_by_ref[ref]
         for p in _pins(ref):
+            placed = _placed_for(ref, p)
+            if placed is None:
+                continue
             x, y = pin_abs_position(placed.x_mm, placed.y_mm, placed.rotation_deg, p)
             all_pins.append((x, y, ref, p["number"]))
 
@@ -263,7 +273,7 @@ def route_sheet(
         eps: list[_Endpoint] = []
         for ep in conn.endpoints:
             pin = _get_pin(ep.ref, ep.pin)
-            placed = placed_by_ref.get(ep.ref)
+            placed = _placed_for(ep.ref, pin) if pin is not None else None
             if pin is None or placed is None:
                 continue
             x, y = pin_abs_position(placed.x_mm, placed.y_mm, placed.rotation_deg, pin)
@@ -357,8 +367,8 @@ def route_sheet(
 
     # no_connect markers.
     for ep in bom.no_connect_pins:
-        placed = placed_by_ref.get(ep.ref)
-        pin = _get_pin(ep.ref, ep.pin) if placed else None
+        pin = _get_pin(ep.ref, ep.pin) if ep.ref in parts_by_ref else None
+        placed = _placed_for(ep.ref, pin) if pin is not None else None
         if placed is None or pin is None:
             continue
         x, y = pin_abs_position(placed.x_mm, placed.y_mm, placed.rotation_deg, pin)
@@ -370,11 +380,26 @@ def route_sheet(
     # passive) falls back to a minimum half-extent so labels can't be slid
     # onto a resistor body just because its pins are collinear.
     body_rects: list[tuple[float, float, float, float]] = []
-    for ref in parts_by_ref:
-        pts = [(x, y) for (x, y, r, _pn) in all_pins if r == ref]
+    units_by_ref: dict[str, list[int]] = {}
+    for (r, u) in placed_by_unit:
+        units_by_ref.setdefault(r, []).append(u)
+    ref_units = [
+        (ref, unit)
+        for ref in parts_by_ref
+        for unit in sorted(units_by_ref.get(ref, []))
+    ]
+    for ref, unit in ref_units:
+        unit_pins = [
+            p for p in _pins(ref) if int(p.get("unit", 1) or 1) == unit
+        ]
+        placed = placed_by_unit[(ref, unit)]
+        pts = [
+            pin_abs_position(placed.x_mm, placed.y_mm, placed.rotation_deg, p)
+            for p in unit_pins
+        ]
         if not pts:
             continue
-        pin_lengths = [p.get("length", 2.54) or 2.54 for p in _pins(ref)]
+        pin_lengths = [p.get("length", 2.54) or 2.54 for p in unit_pins]
         shrink = (max(pin_lengths) if pin_lengths else 2.54) + 0.5
         xs2 = [p[0] for p in pts]
         ys2 = [p[1] for p in pts]

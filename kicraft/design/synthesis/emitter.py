@@ -540,8 +540,12 @@ def _emit_symbol_instance(
     field_anchors: tuple[
         tuple[float, float, str], tuple[float, float, str]
     ] | None = None,
+    unit: int = 1,
 ) -> str:
-    """Emit one component `(symbol ...)` instance inside a leaf."""
+    """Emit one component `(symbol ...)` instance inside a leaf. A
+    multi-unit symbol gets one call per drawn unit — same lib_id and
+    reference, distinct unit number/uuid/position — which is exactly how
+    KiCad represents the sections of a dual op-amp."""
     uuid_str = _uuid_seeded(salt, project_stem) if salt else _uuid()
     if field_anchors is None:
         field_anchors = _text_anchors(part, x, y, rotation_deg)
@@ -552,7 +556,7 @@ def _emit_symbol_instance(
         "\t(symbol\n"
         f'\t\t(lib_id "{part.symbol}")\n'
         f"\t\t(at {_fmt(x)} {_fmt(y)} {rotation_deg})\n"
-        "\t\t(unit 1)\n"
+        f"\t\t(unit {unit})\n"
         "\t\t(exclude_from_sim no)\n"
         "\t\t(in_bom yes)\n"
         "\t\t(on_board yes)\n"
@@ -582,7 +586,7 @@ def _emit_symbol_instance(
         f'\t\t\t(project "{project_stem}"\n'
         f'\t\t\t\t(path "/{leaf_uuid}"\n'
         f'\t\t\t\t\t(reference "{part.ref}")\n'
-        "\t\t\t\t\t(unit 1)\n"
+        f"\t\t\t\t\t(unit {unit})\n"
         "\t\t\t\t)\n"
         "\t\t\t)\n"
         "\t\t)\n"
@@ -742,11 +746,22 @@ def _leaf_content_bbox(
     power symbols. Used to pick the page size and center the drawing."""
     xs: list[float] = []
     ys: list[float] = []
-    for part, pp in zip(parts, placed):
+    part_by_ref = {p.ref: p for p in parts}
+    # Iterate the placements (not zip(parts, placed)): a multi-unit symbol
+    # contributes extra unit >= 2 entries beyond one-per-part, and zip would
+    # silently drop them from the bbox — clipping the B section off-page.
+    for pp in placed:
+        part = part_by_ref.get(pp.ref)
+        if part is None:
+            continue
         try:
-            pins = lookup_pins(part.symbol)["pins"]
+            all_unit_pins = lookup_pins(part.symbol, all_units=True)["pins"]
         except (SymbolNotFoundError, ValueError, KeyError):
-            pins = []
+            all_unit_pins = []
+        unit = getattr(pp, "unit", 1)
+        pins = [
+            p for p in all_unit_pins if int(p.get("unit", 1) or 1) == unit
+        ]
         if pins:
             for p in pins:
                 ax, ay = pin_abs_position(pp.x_mm, pp.y_mm, pp.rotation_deg, p)
@@ -926,6 +941,31 @@ def _emit_leaf(
                 field_anchors=anchors,
             )
         )
+
+    # Extra units of multi-unit symbols (a dual op-amp's B section):
+    # place_sheet appends them after the one-per-part entries, tagged with
+    # unit >= 2. Same reference, own position and unit number.
+    if placed is not None:
+        part_by_ref = {p.ref: p for p in sheet_inst.parts}
+        for pp in placed[len(sheet_inst.parts):]:
+            part = part_by_ref.get(pp.ref)
+            if part is None:
+                continue
+            anchors = _text_anchors(
+                part, pp.x_mm, pp.y_mm, pp.rotation_deg, obstacles
+            )
+            ref_spot, val_spot = anchors
+            obstacles.append(_field_rect(part.ref, *ref_spot))
+            obstacles.append(_field_rect(part.value, *val_spot))
+            symbol_blocks.append(
+                _emit_symbol_instance(
+                    part, pp.x_mm, pp.y_mm, sheet_inst.leaf_uuid, project_stem,
+                    rotation_deg=pp.rotation_deg,
+                    salt=f"{sheet_stem}/symbol/{part.ref}/u{pp.unit}",
+                    field_anchors=anchors,
+                    unit=pp.unit,
+                )
+            )
 
     # Stage B emit blocks.
     wire_blocks = [

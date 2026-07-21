@@ -91,7 +91,6 @@ from .synthesis.validation import (
     check_inter_sheet_nets_realized,
     check_mcu_programming_access,
     check_mcu_programming_path,
-    check_multi_unit_symbols,
     check_net_coverage,
     check_no_dangling_signal_nets,
     check_pin_existence,
@@ -1115,16 +1114,6 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         if not cp.ok:
             print(f"{cp.name}: {cp.message}", file=sys.stderr)
             for o in cp.offenders[:20]:
-                print(f"  - {o}", file=sys.stderr)
-            return 3
-        # §9.30 -- parts-only: a multi-unit symbol's unit-2+ pins are
-        # unreachable (emitter instantiates unit 1 only), so the pick must be
-        # rejected HERE with directive feedback; discovered at the wiring
-        # stage it becomes an unanswerable park loop instead (run_28).
-        mu = check_multi_unit_symbols(state.bom)
-        if not mu.ok:
-            print(f"{mu.name}: {mu.message}", file=sys.stderr)
-            for o in mu.offenders[:20]:
                 print(f"  - {o}", file=sys.stderr)
             return 3
 
@@ -3154,6 +3143,14 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
                 unresolved.append(f"{sym}: {e}")
                 continue
             if not info.get("pins"):
+                # Mirror _unresolved_symbols: a RESOLVED zero-pin Mechanical
+                # symbol (MountingHole, Fiducial, logos) has nothing to wire.
+                # BOM commit already accepts these; treating them as fatal
+                # here killed the run before the wiring model started
+                # (rc=4, no retry -- self-eval run_20 encoder-oled-panel,
+                # both 2026-07 batches).
+                if (sym or "").partition(":")[0] == "Mechanical":
+                    continue
                 unresolved.append(f"{sym}: resolved but exposes no pins")
                 continue
             pinouts[sym] = info

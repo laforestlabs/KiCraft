@@ -17,7 +17,10 @@ from kicraft.design.models import (
     Sheet, SheetPin)
 from kicraft.design.synthesis.emitter import emit_schematic
 from kicraft.design.synthesis.symbol_library import DEFAULT_KICAD_SYMBOL_DIR
-from kicraft.design.synthesis.validation import check_erc
+from kicraft.design.synthesis.validation import (
+    check_erc,
+    check_netlist_faithfulness,
+)
 
 pytestmark = pytest.mark.skipif(
     not DEFAULT_KICAD_SYMBOL_DIR.is_dir() or shutil.which("kicad-cli") is None,
@@ -161,6 +164,68 @@ def test_clustered_sheet_is_erc_clean(tmp_path, builder, stem) -> None:
     emit_schematic(tmp_path, stem, arch, bom, title=stem)
     result = check_erc(tmp_path, stem)
     assert result.ok, f"{stem} ERC: {result.message}\n" + "\n".join(result.offenders)
+
+
+def _dual_opamp() -> tuple[Architecture, BOM]:
+    """run_28 audio-jack-buffer shape: a TL072 dual op-amp as two unity-gain
+    buffers. Unit B's pins (5/6/7) and the power unit's (4/8) only reach the
+    netlist if the emitter instantiates EVERY unit, not just unit A."""
+    arch = Architecture(
+        sheets=[Sheet(name="BUFFER", stem="BUFFER", function="opamp buffer")],
+        power_nets=["VCC", "GND"], inter_sheet_nets=[])
+    parts = [
+        BomPart(ref="U1", value="TL072", symbol="Amplifier_Operational:TL072",
+                footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", sheet="BUFFER"),
+        BomPart(ref="J1", value="IN", symbol="Connector_Generic:Conn_01x03",
+                footprint="Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
+                sheet="BUFFER"),
+        BomPart(ref="J2", value="OUT", symbol="Connector_Generic:Conn_01x03",
+                footprint="Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
+                sheet="BUFFER"),
+        BomPart(ref="C1", value="100nF", symbol="Device:C",
+                footprint="Capacitor_SMD:C_0402_1005Metric", sheet="BUFFER"),
+    ]
+    bom = BOM(
+        parts=parts, ic_groups={"U1": ["C1"]},
+        signal_flow_order=["J1", "U1", "J2"],
+        connections=[
+            NetConnection(net_name="IN1", sheet="BUFFER", endpoints=[
+                _P("J1", "1"), _P("U1", "3")]),
+            NetConnection(net_name="IN2", sheet="BUFFER", endpoints=[
+                _P("J1", "2"), _P("U1", "5")]),
+            NetConnection(net_name="OUT1", sheet="BUFFER", endpoints=[
+                _P("U1", "1"), _P("U1", "2"), _P("J2", "1")]),
+            NetConnection(net_name="OUT2", sheet="BUFFER", endpoints=[
+                _P("U1", "7"), _P("U1", "6"), _P("J2", "2")]),
+            NetConnection(net_name="VCC", sheet="BUFFER", endpoints=[
+                _P("U1", "8"), _P("C1", "1")]),
+            NetConnection(net_name="GND", sheet="BUFFER", endpoints=[
+                _P("U1", "4"), _P("C1", "2"), _P("J1", "3"), _P("J2", "3")]),
+        ])
+    return arch, bom
+
+
+def test_multi_unit_opamp_draws_every_unit(tmp_path) -> None:
+    """The emitter must instantiate ALL units of a multi-unit symbol; unit-B
+    pins otherwise never reach the netlist ('pin missing from netlist:
+    U1.5/6/7', self-eval run_28 both 2026-07 batches) and KiCad ERC reports
+    unplaced units + dangling labels."""
+    arch, bom = _dual_opamp()
+    emit_schematic(tmp_path, "BUFDEMO", arch, bom, title="BUFDEMO")
+
+    sch_text = (tmp_path / "BUFFER.kicad_sch").read_text()
+    # Stock TL072 = unit A + unit B + the shared power unit C.
+    for unit in (1, 2, 3):
+        assert f"(unit {unit})" in sch_text, f"unit {unit} not instantiated"
+    assert sch_text.count('(reference "U1")') == 3
+
+    result = check_erc(tmp_path, "BUFDEMO")
+    assert result.ok, f"BUFDEMO ERC: {result.message}\n" + "\n".join(result.offenders)
+
+    faith = check_netlist_faithfulness(tmp_path, "BUFDEMO", bom)
+    assert faith.ok, (
+        f"BUFDEMO §9.13: {faith.message}\n" + "\n".join(faith.offenders)
+    )
 
 
 def test_intermediate_input_bus_is_erc_clean(tmp_path) -> None:

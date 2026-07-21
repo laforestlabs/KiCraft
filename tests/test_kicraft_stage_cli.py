@@ -237,6 +237,56 @@ def test_stage_prep_wiring_batches_pinouts(tmp_path, capsys):
         assert "pins" in info, f"{sym}: expected pin list, got {info!r}"
 
 
+@pytest.mark.skipif(
+    not DEFAULT_KICAD_SYMBOL_DIR.is_dir(),
+    reason="KiCad symbols not installed",
+)
+def test_stage_prep_wiring_accepts_pinless_mechanical_symbol(tmp_path, capsys):
+    """BOM commit accepts Mechanical:MountingHole (zero pins), but stage-prep
+    wiring used to re-derive pinouts independently and die with rc=4 before
+    the wiring model ever ran -- no retry, no park (self-eval run_20
+    encoder-oled-panel, both 2026-07 batches). The zero-pin Mechanical
+    exemption must hold on BOTH paths."""
+    state_path = tmp_path / "state.json"
+    bom = _valid_bom()
+    bom["parts"].append(
+        {
+            "ref": "H1",
+            "value": "M2.5 mounting hole",
+            "symbol": "Mechanical:MountingHole",
+            "footprint": "MountingHole:MountingHole_2.7mm_M2.5",
+            "sheet": "MCU",
+        }
+    )
+    for stage, data in [
+        ("intent", _valid_intent()),
+        ("functional_spec", _valid_functional_spec()),
+        ("architecture", _valid_architecture()),
+        ("bom", bom),
+    ]:
+        slot = _write_slot(tmp_path, stage, data)
+        argv = [
+            "stage-commit",
+            stage,
+            "--slot-file",
+            str(slot),
+            "--no-archive",
+            str(state_path),
+        ]
+        if stage == "intent":
+            argv += ["--project-stem", "ESP32_TEST"]
+        rc, payload = _run(capsys, *argv)
+        assert rc == 0, (stage, payload)
+
+    rc, payload = _run(capsys, "stage-prep", "wiring", str(state_path))
+    assert rc == 0, payload
+    pinouts = payload["extras"]["symbol_pinouts"]
+    # The pin-less symbol is skipped, not offered to the wiring model...
+    assert "Mechanical:MountingHole" not in pinouts
+    # ...and the wireable symbols still batch through.
+    assert set(pinouts.keys()) == {"Device:R", "Device:C"}
+
+
 # ---------- stage-commit ----------
 
 

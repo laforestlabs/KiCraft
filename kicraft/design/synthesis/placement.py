@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import math
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..models import BOM, BomPart, Sheet, is_power_or_ground_name
 from .sch_geometry import (
@@ -117,6 +117,7 @@ class PlacedPart:
     rotation_deg: int   # 0 | 90 | 180 | 270
     mirror: str | None  # None | "x" | "y" (unused in v1, kept for the emitter)
     role: str           # anchor | decoupling | pullup | ... | free
+    unit: int = 1       # symbol unit this placement draws (dual op-amp B = 2)
 
 
 @dataclass(frozen=True)
@@ -153,9 +154,13 @@ class _Member:
     inner_pin: str | None = None
 
 
-def _load_pins(part: BomPart) -> _Pins:
+def _load_units(part: BomPart) -> dict[int, _Pins]:
+    """Pin inventory per functional unit. ``{1: pins}`` for the common
+    single-unit case; a multi-section symbol (dual op-amp, quad gate) gets
+    one entry per unit so each section places — and therefore draws and
+    wires — as its own entity. Unit-0 (shared power) pins ride with unit 1."""
     try:
-        pins = lookup_pins(part.symbol)["pins"]
+        pins = lookup_pins(part.symbol, all_units=True)["pins"]
     except (SymbolNotFoundError, ValueError, KeyError) as exc:
         # Loud, not silent: a part placed with unresolvable pins ends up on
         # the sheet unwired with zero diagnostic pointing at the cause
@@ -167,7 +172,15 @@ def _load_pins(part: BomPart) -> _Pins:
             file=sys.stderr,
         )
         pins = []
-    return _Pins(by_number={p["number"]: p for p in pins}, count=len(pins))
+    by_unit: dict[int, list[dict]] = {}
+    for p in pins:
+        by_unit.setdefault(int(p.get("unit", 1) or 1), []).append(p)
+    if not by_unit:
+        by_unit[1] = []
+    return {
+        u: _Pins(by_number={p["number"]: p for p in ps}, count=len(ps))
+        for u, ps in sorted(by_unit.items())
+    }
 
 
 def _is_gnd(net: str) -> bool:
@@ -181,22 +194,40 @@ def place_sheet(
     bom: BOM,
 ) -> list[PlacedPart]:
     """Place every part on a sheet. Returns one PlacedPart per input part,
-    in the same order as ``sheet_parts``."""
+    in the same order as ``sheet_parts``, followed by one entry per EXTRA
+    unit of any multi-section symbol (``unit`` >= 2, same ``ref``)."""
     if not sheet_parts:
         return []
 
     parts_by_ref = {p.ref: p for p in sheet_parts}
-    pins_by_ref = {p.ref: _load_pins(p) for p in sheet_parts}
 
-    # pin -> net and net -> endpoints, restricted to this sheet's parts.
+    # Multi-unit expansion: each functional unit is its own placeable
+    # entity. Unit 1 keeps the part's own ref (so the single-unit path is
+    # byte-identical); units >= 2 get a synthetic internal ref that is
+    # folded back to (ref, unit) on return.
+    entity_parts: list[tuple[str, BomPart, int]] = []
+    pins_by_ref: dict[str, _Pins] = {}
+    pin_entity: dict[tuple[str, str], str] = {}
+    for p in sheet_parts:
+        for unit, pins in _load_units(p).items():
+            eref = p.ref if unit == 1 else f"{p.ref}#u{unit}"
+            entity_parts.append((eref, p, unit))
+            pins_by_ref[eref] = pins
+            for pn in pins.by_number:
+                pin_entity[(p.ref, pn)] = eref
+
+    # pin -> net and net -> endpoints, restricted to this sheet's parts and
+    # keyed by the entity that owns the pin (a dual op-amp's unit-B pins
+    # belong to the unit-B entity).
     pin_net: dict[tuple[str, str], str] = {}
     net_endpoints: dict[str, list[tuple[str, str]]] = {}
     for conn in bom.connections:
         for ep in conn.endpoints:
             if ep.ref not in parts_by_ref:
                 continue
-            pin_net.setdefault((ep.ref, ep.pin), conn.net_name)
-            net_endpoints.setdefault(conn.net_name, []).append((ep.ref, ep.pin))
+            eref = pin_entity.get((ep.ref, ep.pin), ep.ref)
+            pin_net.setdefault((eref, ep.pin), conn.net_name)
+            net_endpoints.setdefault(conn.net_name, []).append((eref, ep.pin))
 
     # Classify each net as gnd / rail / signal. A rail is recognised by name OR
     # by touching a power pin — so a non-standard rail name (e.g. the CH340G's
@@ -231,15 +262,18 @@ def place_sheet(
     array_member_refs = {r for s in array_specs for r in s.refs}
 
     # Anchors: 3+ pins, or named as an ic_groups leader. Array members are laid
-    # out by the grid, never as anchors.
+    # out by the grid, never as anchors. Extra units (>= 2) are always anchors:
+    # they are sections of an IC, whatever their pin count (a TL072's power
+    # unit has 2), and must not fall into the passive-member machinery.
     anchor_refs = {
-        p.ref for p in sheet_parts
-        if (pins_by_ref[p.ref].count >= 3 or p.ref in bom.ic_groups)
+        eref for (eref, p, unit) in entity_parts
+        if (pins_by_ref[eref].count >= 3 or p.ref in bom.ic_groups or unit > 1)
         and p.ref not in array_member_refs
     }
     anchors: dict[str, _Anchor] = {
-        ref: _Anchor(ref=ref, part=parts_by_ref[ref], pins=pins_by_ref[ref])
-        for ref in anchor_refs
+        eref: _Anchor(ref=eref, part=p, pins=pins_by_ref[eref])
+        for (eref, p, unit) in entity_parts
+        if eref in anchor_refs
     }
 
     placed: dict[str, PlacedPart] = {}
@@ -257,12 +291,12 @@ def place_sheet(
     )
 
     # --- assign each 2-pin passive to an anchor + role ---
-    for part in sheet_parts:
-        if part.ref in anchor_refs or part.ref in array_member_refs:
+    for (eref, part, unit) in entity_parts:
+        if eref in anchor_refs or part.ref in array_member_refs:
             continue
-        pins = pins_by_ref[part.ref]
+        pins = pins_by_ref[eref]
         if pins.count != 2:
-            free_refs.append(part.ref)
+            free_refs.append(eref)
             continue
         member = _assign_member(
             part, pins, anchors, hints_by_ref.get(part.ref),
@@ -270,15 +304,22 @@ def place_sheet(
             net_kind_map,
         )
         if member is None:
-            free_refs.append(part.ref)
+            free_refs.append(eref)
         else:
             anchors[member.anchor_ref].members.append(member)
 
     # --- order + place anchors left to right ---
+    # Extra units sort right after their unit-1 sibling (same flow slot,
+    # unit as the tiebreak) so a dual op-amp's B section sits beside A.
+    entity_meta = {eref: (p.ref, unit) for (eref, p, unit) in entity_parts}
     flow_index = {ref: i for i, ref in enumerate(bom.signal_flow_order)}
     ordered = sorted(
         anchors.values(),
-        key=lambda a: (flow_index.get(a.ref, len(flow_index)), a.ref),
+        key=lambda a: (
+            flow_index.get(entity_meta[a.ref][0], len(flow_index)),
+            entity_meta[a.ref][0],
+            entity_meta[a.ref][1],
+        ),
     )
 
     cluster_bottom = anchor_base_y
@@ -300,7 +341,14 @@ def place_sheet(
         )
         fx += FREE_PITCH_MM
 
-    return [placed[p.ref] for p in sheet_parts]
+    # Unit-1 entries first (one per part, input order — the emitter indexes
+    # these positionally), then the extra units folded back to (ref, unit).
+    result = [placed[p.ref] for p in sheet_parts]
+    for (eref, p, unit) in entity_parts:
+        if unit == 1 or eref not in placed:
+            continue
+        result.append(replace(placed[eref], ref=p.ref, unit=unit))
+    return result
 
 
 def _other_pin(pins: _Pins, pin: str) -> str:
