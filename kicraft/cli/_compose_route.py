@@ -352,6 +352,25 @@ def _route_parent_board(
         required_anchor_names=[],
     )
 
+    # Illegal-geometry remediation (self-eval 2026-07-20 N2): freerouting
+    # occasionally ships copper the fab gate must reject -- escaped past
+    # Edge.Cuts, inside the copper-edge clearance, or in genuine
+    # track-clearance conflict. Rip exactly the offending track/via copper,
+    # re-close the opens with the existing repair machinery, then
+    # accept-or-revert on a full re-validate: the geometry flags must clear
+    # and shorts/unconnected must not rise, else the board is byte-restored
+    # and the honest rejection below stands.
+    if (
+        cfg.get("illegal_geometry_repair_enabled", True)
+        and (
+            validation.get("malformed_board_geometry")
+            or validation.get("obviously_illegal_routed_geometry")
+        )
+    ):
+        validation = _attempt_illegal_geometry_repair(
+            routed_pcb, cfg, validation
+        )
+
     # C1 signal unconnected repair: freerouting sometimes walls a signal net
     # off (no_clear_path) and never rip-up-recovers. Attempt a constrained
     # local bend/via repair (guarded copper only), then accept-or-revert on a
@@ -509,8 +528,19 @@ def _attempt_signal_unconnected_repair(
         re_drc = revalidation.get("drc") or {}
         unconnected_after = int(re_drc.get("unconnected", 0) or 0)
         shorts_after = int(re_drc.get("shorts", 0) or 0)
+        # A tie that closes an open by stamping ILLEGAL copper trades one
+        # fab-gate rejection for another (run_10: the USB_DN tie grazed a
+        # foreign pad at 0.05 mm and this gate accepted it on the
+        # unconnected drop alone) -- the geometry flags must not appear.
+        geometry_worse = (
+            (revalidation.get("malformed_board_geometry")
+             and not validation.get("malformed_board_geometry"))
+            or (revalidation.get("obviously_illegal_routed_geometry")
+                and not validation.get("obviously_illegal_routed_geometry"))
+        )
         if (unconnected_after < unconnected_before
-                and shorts_after <= shorts_before):
+                and shorts_after <= shorts_before
+                and not geometry_worse):
             print(
                 f"  signal unconnected repair KEPT: unconnected "
                 f"{unconnected_before} -> {unconnected_after}, shorts "
@@ -521,7 +551,9 @@ def _attempt_signal_unconnected_repair(
         print(
             f"  signal unconnected repair reverted (unconnected "
             f"{unconnected_before} -> {unconnected_after}, shorts "
-            f"{shorts_before} -> {shorts_after}); board restored"
+            f"{shorts_before} -> {shorts_after}"
+            + (", ties stamped illegal geometry" if geometry_worse else "")
+            + "); board restored"
         )
         shutil.copy2(backup, routed_pcb)
         backup.unlink(missing_ok=True)
@@ -533,3 +565,157 @@ def _attempt_signal_unconnected_repair(
             shutil.copy2(backup, routed_pcb)
             backup.unlink(missing_ok=True)
         return validation
+
+
+def _attempt_illegal_geometry_repair(
+    routed_pcb, cfg: dict, validation: dict
+) -> dict:
+    """Rip DRC-illegal copper, re-close the opens, keep only a clean result.
+
+    Accept iff BOTH geometry flags cleared AND shorts/unconnected did not
+    increase; anything else (including a crashed subprocess) restores the
+    pre-repair board byte-for-byte and returns the original validation.
+    """
+    import shutil
+
+    from kicraft.autoplacer.freerouting_runner import (
+        _run_pcbnew_script,
+        validate_routed_board,
+    )
+
+    drc = validation.get("drc") or {}
+    unconnected_before = int(drc.get("unconnected", 0) or 0)
+    shorts_before = int(drc.get("shorts", 0) or 0)
+    backup = Path(str(routed_pcb) + ".pre_geometry_repair")
+    shutil.copy2(routed_pcb, backup)
+    sidecar = Path(str(routed_pcb) + ".geometry_repair.json")
+    try:
+        _geo_cfg = json.dumps({
+            k: cfg[k] for k in ("geometry_repair_max_rips",) if k in cfg
+        })
+        _run_pcbnew_script(
+            "import json\n"
+            "from kicraft.autoplacer.brain.geometry_repair import "
+            "rip_illegal_copper\n"
+            f"cfg = json.loads({_geo_cfg!r})\n"
+            f"s = rip_illegal_copper({str(routed_pcb)!r}, cfg)\n"
+            # NB: keys must match rip_illegal_copper's return contract
+            # {ripped, over_cap, nets, skipped} EXACTLY (see the signal
+            # wrapper's no-op-on-KeyError incident).
+            "print('illegal geometry rip:', s['ripped'], 'ripped,',\n"
+            "      s['over_cap'], 'over cap,', len(s['skipped']),\n"
+            "      'skipped, nets:', ','.join(s['nets']))\n"
+            f"open({str(sidecar)!r}, 'w').write(json.dumps(s))\n"
+        )
+        s = json.loads(sidecar.read_text(encoding="utf-8"))
+        ripped = int(s.get("ripped", 0) or 0)
+        print(
+            f"  illegal geometry rip: {ripped} item(s) ripped, "
+            f"{s.get('over_cap')} over cap, "
+            f"{len(s.get('skipped') or [])} skipped"
+            + (f", nets: {', '.join(s['nets'])}" if s.get("nets") else "")
+        )
+        if ripped == 0:
+            backup.unlink(missing_ok=True)
+            return validation
+
+        # Close the opens the rip created: pour nets go back through the
+        # island/strand machinery, everything else through the C1 stamper.
+        pour_nets = {str(cfg.get("gnd_zone_net", "GND"))}
+        pour_nets.update(cfg.get("power_plane_nets") or [])
+        if pour_nets & set(s.get("nets") or []):
+            _rep_cfg = json.dumps({
+                k: cfg[k]
+                for k in (
+                    "gnd_zone_net",
+                    "gnd_strand_repair_enabled",
+                    "gnd_strand_repair_max_mm",
+                    "gnd_parent_repair_max_iter",
+                    "gnd_edge_spine_enabled",
+                    "gnd_edge_spine_width_mm",
+                    "gnd_edge_spine_max_inset_mm",
+                    "component_zones",
+                    "freerouting_min_clearance_mm",
+                    "freerouting_fine_pitch_track_mm",
+                    "via_drill_mm",
+                    "via_size_mm",
+                    "hole_to_hole_min_mm",
+                )
+                if k in cfg
+            })
+            _run_pcbnew_script(
+                "import json\n"
+                "from kicraft.autoplacer.brain.gnd_pour import "
+                "repair_parent_gnd_islands\n"
+                f"cfg = json.loads({_rep_cfg!r})\n"
+                f"s = repair_parent_gnd_islands({str(routed_pcb)!r}, cfg)\n"
+                "print('post-rip gnd island repair:', s['stranded'],\n"
+                "      'stranded,', s['tied_pads'], 'tied,', s['vias'],\n"
+                "      'vias,', s['unresolved'], 'unresolved')\n"
+            )
+        _sig_cfg = json.dumps({
+            k: cfg[k]
+            for k in (
+                "gnd_zone_net",
+                "power_plane_nets",
+                "signal_repair_max_mm",
+                "freerouting_min_clearance_mm",
+                "freerouting_fine_pitch_track_mm",
+                "via_size_mm",
+                "via_drill_mm",
+            )
+            if k in cfg
+        })
+        _run_pcbnew_script(
+            "import json\n"
+            "from kicraft.autoplacer.brain.unconnected_repair import "
+            "repair_unconnected_signals\n"
+            f"cfg = json.loads({_sig_cfg!r})\n"
+            f"s = repair_unconnected_signals({str(routed_pcb)!r}, cfg)\n"
+            "print('post-rip signal repair:', s['edges'], 'edge(s) --',\n"
+            "      s['tied'], 'tied,', len(s['skipped']), 'skipped,',\n"
+            "      s['pruned'], 'pruned')\n"
+        )
+
+        revalidation = validate_routed_board(
+            str(routed_pcb),
+            cfg=cfg,
+            expected_anchor_names=[],
+            actual_anchor_names=[],
+            required_anchor_names=[],
+        )
+        re_drc = revalidation.get("drc") or {}
+        unconnected_after = int(re_drc.get("unconnected", 0) or 0)
+        shorts_after = int(re_drc.get("shorts", 0) or 0)
+        geometry_clean = not (
+            revalidation.get("malformed_board_geometry")
+            or revalidation.get("obviously_illegal_routed_geometry")
+        )
+        if (geometry_clean
+                and shorts_after <= shorts_before
+                and unconnected_after <= unconnected_before):
+            print(
+                f"  illegal geometry repair KEPT: geometry clean, "
+                f"unconnected {unconnected_before} -> {unconnected_after}, "
+                f"shorts {shorts_before} -> {shorts_after}"
+            )
+            backup.unlink(missing_ok=True)
+            return revalidation
+        print(
+            f"  illegal geometry repair reverted (geometry_clean="
+            f"{geometry_clean}, unconnected {unconnected_before} -> "
+            f"{unconnected_after}, shorts {shorts_before} -> "
+            f"{shorts_after}); board restored"
+        )
+        shutil.copy2(backup, routed_pcb)
+        backup.unlink(missing_ok=True)
+        return validation
+    except Exception as exc:  # noqa: BLE001 -- a repair may never fail a board
+        print(f"warning: illegal geometry repair failed: {exc}",
+              file=sys.stderr)
+        if backup.exists():
+            shutil.copy2(backup, routed_pcb)
+            backup.unlink(missing_ok=True)
+        return validation
+    finally:
+        sidecar.unlink(missing_ok=True)

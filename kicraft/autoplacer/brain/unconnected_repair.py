@@ -279,6 +279,22 @@ def _pour_nets(board: "pcbnew.BOARD", cfg: dict[str, Any]) -> set[str]:
     return skip
 
 
+def _gap_cap_mm(board: "pcbnew.BOARD", cfg: dict[str, Any]) -> float:
+    """Longest endpoint gap the repair will attempt.
+
+    Default scales to the board diagonal -- a fixed 60 mm read every
+    castellated-header fan-out edge (62-86 mm on run_10's RP2040 board) as
+    gap_over_cap without trying a single candidate. An explicit
+    ``signal_repair_max_mm`` still wins."""
+    cap_cfg = cfg.get("signal_repair_max_mm")
+    if cap_cfg is not None:
+        return float(cap_cfg)
+    bb = board.GetBoardEdgesBoundingBox()
+    return max(_DEFAULT_MAX_TIE_MM, math.hypot(
+        pcbnew.ToMM(bb.GetWidth()), pcbnew.ToMM(bb.GetHeight())
+    ))
+
+
 def repair_unconnected_signals(
     pcb_path: str,
     cfg: dict[str, Any] | None = None,
@@ -291,7 +307,6 @@ def repair_unconnected_signals(
     ``skipped`` and left exactly as found. The caller owns accept-or-revert.
     """
     cfg = cfg or {}
-    max_tie_mm = float(cfg.get("signal_repair_max_mm", _DEFAULT_MAX_TIE_MM))
     max_attempts = int(
         cfg.get("signal_repair_max_attempts", _DEFAULT_MAX_ATTEMPTS)
     )
@@ -308,6 +323,7 @@ def repair_unconnected_signals(
         return summary
 
     board = pcbnew.LoadBoard(pcb_path)
+    max_tie_mm = _gap_cap_mm(board, cfg)
     pour = _pour_nets(board, cfg)
     # In-memory copper map for the candidate pre-filter: without it the
     # attempt budget dies inside the first escape direction's path family
@@ -338,16 +354,25 @@ def repair_unconnected_signals(
         tied = False
         attempts = 0
         pruned = 0
-        # Try both directions: the anchor must be a pad, and the more open
-        # side often stamps where the walled side cannot.
+        # Try both directions -- pad anchors first ((a,b) then (b,a) keeps
+        # the pad side leading when only one side has a pad; a track/via
+        # endpoint anchors as a free coordinate (C1 v2: the pure
+        # track->track edges -- run_10's USB_DN/XIN -- were unreachable
+        # under the pads-only rule and always skipped no_pad_anchor).
         for src, tgt in ((a, b), (b, a)):
-            if src.ref is None or src.pad is None:
-                continue
-            dirs = _escape_dirs(board, src)
+            src_is_pad = src.ref is not None and src.pad is not None
+            if src_is_pad:
+                dirs = _escape_dirs(board, src)
+                src_escapes = escapes
+            else:
+                # No footprint to escape radially from: bare-coordinate
+                # anchors go straight into the path family.
+                dirs = []
+                src_escapes = (0.0,)
             for layer in sorted(src.layers):  # B.Cu first: pour-side is open
                 needs_via = layer not in tgt.layers
-                for esc_len in escapes:
-                    esc_pts = ([None] if esc_len == 0.0 else [
+                for esc_len in src_escapes:
+                    esc_pts = ([None] if esc_len == 0.0 or not dirs else [
                         (src.xy[0] + ux * esc_len, src.xy[1] + uy * esc_len)
                         for ux, uy in dirs
                     ])
@@ -367,9 +392,13 @@ def repair_unconnected_signals(
                             res = add_breakout_stubs(
                                 pcb_path,
                                 [BreakoutSpec(
-                                    ref=src.ref, pad=src.pad,
+                                    ref=src.ref or "track",
+                                    pad=(src.pad if src.pad is not None else
+                                         f"{src.xy[0]:.2f},{src.xy[1]:.2f}"),
                                     waypoints=path, layer=layer,
                                     via_at_end=needs_via, near_xy=src.xy,
+                                    start_xy=(None if src_is_pad else src.xy),
+                                    net=(None if src_is_pad else src.net),
                                 )],
                                 cfg=cfg,
                             )
@@ -387,11 +416,13 @@ def repair_unconnected_signals(
                 break
         summary["pruned"] += pruned
         if not tied:
-            # no_pad_anchor: nothing to even try (both endpoints anchorless).
-            # attempt_budget: ran out of STAMPING budget on plausible paths.
-            # no_clear_path: every candidate was screened out or rejected by
-            # the stamping guards -- with the pre-filter this again means
-            # "geometry says blocked", not "gave up early".
+            # no_pad_anchor: nothing to even try -- vestigial now that a
+            # track/via endpoint anchors as a free coordinate (every edge
+            # generates candidates), kept for the degenerate zero-candidate
+            # case. attempt_budget: ran out of STAMPING budget on plausible
+            # paths. no_clear_path: every candidate was screened out or
+            # rejected by the stamping guards -- with the pre-filter this
+            # again means "geometry says blocked", not "gave up early".
             reason = ("no_pad_anchor" if not attempts and not pruned
                       else "attempt_budget" if attempts >= max_attempts
                       else "no_clear_path")

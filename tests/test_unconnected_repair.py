@@ -105,6 +105,97 @@ def test_path_clear_prunes_crossing_and_forgives_endpoints():
     )
 
 
+def _empty_board_with_outline(pcbnew, path: str, w_mm: float, h_mm: float):
+    mm = pcbnew.FromMM
+    board = pcbnew.NewBoard(path)
+    corners = [(0, 0), (w_mm, 0), (w_mm, h_mm), (0, h_mm), (0, 0)]
+    for (x1, y1), (x2, y2) in zip(corners, corners[1:]):
+        seg = pcbnew.PCB_SHAPE(board)
+        seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        seg.SetStart(pcbnew.VECTOR2I(mm(x1), mm(y1)))
+        seg.SetEnd(pcbnew.VECTOR2I(mm(x2), mm(y2)))
+        seg.SetLayer(pcbnew.Edge_Cuts)
+        board.Add(seg)
+    return board
+
+
+def test_gap_cap_scales_to_board_diagonal(tmp_path):
+    """A fixed 60mm cap skipped every castellated fan-out edge (62-86mm on
+    run_10) as gap_over_cap; the default now scales to the board diagonal.
+    An explicit signal_repair_max_mm still wins, small boards keep the 60mm
+    floor."""
+    pcbnew = pytest.importorskip("pcbnew")
+    from kicraft.autoplacer.brain.unconnected_repair import _gap_cap_mm
+
+    small = _empty_board_with_outline(
+        pcbnew, str(tmp_path / "small.kicad_pcb"), 30.0, 20.0
+    )
+    assert _gap_cap_mm(small, {}) == pytest.approx(60.0)
+
+    big = _empty_board_with_outline(
+        pcbnew, str(tmp_path / "big.kicad_pcb"), 100.0, 70.0
+    )
+    assert _gap_cap_mm(big, {}) == pytest.approx((100**2 + 70**2) ** 0.5, rel=0.02)
+
+    assert _gap_cap_mm(big, {"signal_repair_max_mm": 45.0}) == 45.0
+
+
+def test_repair_ties_track_to_track_edge(tmp_path):
+    """C1 v2 track-endpoint anchors: an unconnected edge whose BOTH endpoints
+    are dangling track stubs (run_10's USB_DN/XIN signature) was skipped
+    no_pad_anchor under the pads-only rule; it must now tie from the bare
+    track coordinate."""
+    import shutil as _shutil
+
+    pcbnew = pytest.importorskip("pcbnew")
+    if not _shutil.which("kicad-cli"):
+        pytest.skip("kicad-cli unavailable (repair edges come from real DRC)")
+    from kicraft.autoplacer.brain.unconnected_repair import (
+        repair_unconnected_signals,
+    )
+
+    mm = pcbnew.FromMM
+    path = str(tmp_path / "tracks.kicad_pcb")
+    board = _empty_board_with_outline(pcbnew, path, 30.0, 30.0)
+    board.Add(pcbnew.NETINFO_ITEM(board, "SIG"))
+
+    def net(n):
+        return board.GetNetInfo().GetNetItem(n)
+
+    for ref, x in (("J1", 5.0), ("J2", 25.0)):
+        fp = pcbnew.FOOTPRINT(board)
+        fp.SetReference(ref)
+        fp.SetPosition(pcbnew.VECTOR2I(mm(x), mm(15.0)))
+        board.Add(fp)
+        pad = pcbnew.PAD(fp)
+        pad.SetSize(pcbnew.VECTOR2I(mm(1.0), mm(1.0)))
+        pad.SetPosition(pcbnew.VECTOR2I(mm(x), mm(15.0)))
+        pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        pad.SetLayerSet(pcbnew.PAD.SMDMask())
+        pad.SetNumber("1")
+        pad.SetNet(net("SIG"))
+        fp.Add(pad)
+
+    # Each pad carries a stub toward the middle; the closest pair of items
+    # across the two clusters is the two bare TRACK ends at x=12 / x=18, so
+    # the DRC edge is track<->track.
+    for x1, x2 in ((5.0, 12.0), (25.0, 18.0)):
+        t = pcbnew.PCB_TRACK(board)
+        t.SetStart(pcbnew.VECTOR2I(mm(x1), mm(15.0)))
+        t.SetEnd(pcbnew.VECTOR2I(mm(x2), mm(15.0)))
+        t.SetWidth(mm(0.25))
+        t.SetLayer(pcbnew.F_Cu)
+        t.SetNet(net("SIG"))
+        board.Add(t)
+    board.Save(path)
+
+    s = repair_unconnected_signals(path, {})
+
+    assert s["edges"] == 1
+    assert not any("no_pad_anchor" in sk for sk in s["skipped"]), s
+    assert s["tied"] == 1, f"track<->track edge not tied: {s}"
+
+
 def test_repair_ties_dogleg_around_partial_wall(tmp_path):
     """POSITIVE CONTROL for the candidate pre-filter: an edge that IS
     winnable (straight corridor walled by a foreign track, wide detour open)

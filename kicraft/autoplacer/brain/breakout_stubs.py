@@ -55,6 +55,14 @@ class BreakoutSpec:
         matching pad nearest this board point (mm) is used. Without it the
         first match wins -- which for a strand repair tied the wrong, already-
         connected pad and silently left the stranded one (run_01/run_03).
+    start_xy / net:
+        Free-coordinate anchor (C1 v2 track-endpoint anchors): start the tie
+        at this board point (mm) on ``net`` instead of at a pad -- the mode
+        for an unconnected edge whose endpoint is a dangling track/via stub
+        (``ref``/``pad`` then serve only as the skip-label). Requires
+        ``waypoints`` (there is no footprint to escape radially from); every
+        clearance/copper/via guard still applies, using the net's nearest
+        pad as the netclass stand-in.
     """
 
     ref: str
@@ -65,6 +73,8 @@ class BreakoutSpec:
     layer: str = "F.Cu"
     via_at_end: bool = False
     near_xy: tuple[float, float] | None = None
+    start_xy: tuple[float, float] | None = None
+    net: str | None = None
 
 
 def _find_pad(board: "pcbnew.BOARD", ref: str, pad_number: str,
@@ -82,6 +92,23 @@ def _find_pad(board: "pcbnew.BOARD", ref: str, pad_number: str,
                     + (pcbnew.ToMM(p.GetPosition().y) - near_xy[1]) ** 2))
             return fp, matches[0]
     return None, None
+
+
+def _nearest_same_net_pad(board: "pcbnew.BOARD", net_name: str,
+                          near_xy: tuple[float, float]):
+    """Any pad on *net_name*, nearest *near_xy*: the netclass/margin stand-in
+    for a tie anchored at bare track copper (the guard machinery is
+    pad-shaped, but the net's clearance rules are pad-independent)."""
+    best_fp, best_pad, best_d = None, None, None
+    for fp in board.GetFootprints():
+        for p in fp.Pads():
+            if p.GetNetname() != net_name:
+                continue
+            d = ((pcbnew.ToMM(p.GetPosition().x) - near_xy[0]) ** 2
+                 + (pcbnew.ToMM(p.GetPosition().y) - near_xy[1]) ** 2)
+            if best_d is None or d < best_d:
+                best_fp, best_pad, best_d = fp, p, d
+    return best_fp, best_pad
 
 
 def _foreign_pads(board: "pcbnew.BOARD", net_code: int, *, exclude=None) -> list:
@@ -812,10 +839,26 @@ def add_breakout_stubs(
         return pcbnew.VECTOR2I(pcbnew.FromMM(xy[0]), pcbnew.FromMM(xy[1]))
 
     for spec in specs:
-        fp, pad = _find_pad(board, spec.ref, spec.pad, spec.near_xy)
-        if pad is None:
-            summary["skipped"].append(f"{spec.ref}.{spec.pad}:pad_not_found")
-            continue
+        if spec.start_xy is not None:
+            # Free-coordinate anchor: the net's nearest pad stands in for
+            # netclass clearance / foreign-pad margins; geometry starts at
+            # start_xy. Waypoints are mandatory (no footprint to escape).
+            if not spec.waypoints:
+                summary["skipped"].append(
+                    f"{spec.ref}.{spec.pad}:free_anchor_needs_waypoints"
+                )
+                continue
+            fp, pad = _nearest_same_net_pad(
+                board, spec.net or "", spec.start_xy
+            )
+            if pad is None:
+                summary["skipped"].append(f"{spec.ref}.{spec.pad}:net_not_found")
+                continue
+        else:
+            fp, pad = _find_pad(board, spec.ref, spec.pad, spec.near_xy)
+            if pad is None:
+                summary["skipped"].append(f"{spec.ref}.{spec.pad}:pad_not_found")
+                continue
         net_code = pad.GetNetCode()
         if net_code == 0:
             summary["skipped"].append(f"{spec.ref}.{spec.pad}:no_net")
@@ -827,8 +870,13 @@ def add_breakout_stubs(
         width = pcbnew.FromMM(spec.width_mm if spec.width_mm else default_w)
         half_width_mm = pcbnew.ToMM(width) / 2.0
         src_cl_mm = _own_clearance_mm(pad, layer, floor_mm)
+        # A free-coordinate anchor does not start inside the stand-in pad's
+        # own row, so the same-footprint leniency is unjustified there: a
+        # USB_DN tie anchored at a track end grazed the stand-in footprint's
+        # USB_DP pad at 0.05 mm under the relaxed margins (run_10).
         path_obs, tip_obs = _foreign_pad_margins(
-            board, pad, floor_mm=floor_mm, half_width_mm=half_width_mm, layer_id=layer
+            board, pad, floor_mm=floor_mm, half_width_mm=half_width_mm,
+            layer_id=layer, strict_same_fp=spec.start_xy is not None,
         )
 
         def _conflicts_with_copper(points: list[tuple[float, float]]) -> bool:
@@ -881,8 +929,11 @@ def add_breakout_stubs(
                 for hx, hy, hr in holes
             )
 
-        pad_pos = pad.GetPosition()
-        start_mm = (pcbnew.ToMM(pad_pos.x), pcbnew.ToMM(pad_pos.y))
+        if spec.start_xy is not None:
+            start_mm = (float(spec.start_xy[0]), float(spec.start_xy[1]))
+        else:
+            pad_pos = pad.GetPosition()
+            start_mm = (pcbnew.ToMM(pad_pos.x), pcbnew.ToMM(pad_pos.y))
         if spec.waypoints:
             points = [start_mm, *spec.waypoints]
             # Hard invariant: never stamp a path that crosses a pad of another
