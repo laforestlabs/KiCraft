@@ -1,5 +1,12 @@
 # C1 v2 phase 3 — session handoff (grid A* + rip-up for the last-net repair pass)
 
+> **STATUS 2026-07-21: SHELVED, not next.** After critical discussion the
+> user ruled that building our own router contradicts KiCraft's core design
+> choice of outsourcing routing to freerouting. The active plan is
+> `docs/plans/power-first-routing-handoff.md` (power-first levers, then the
+> missing-repair-pass investigation). This document stays as the fallback
+> design if those levers prove insufficient.
+
 Written 2026-07-21 (session box-investigate). Fresh-session brief for
 implementing the phase-3 pathfinder. The authoritative technical design is
 `docs/plans/c1-v2-pathfinding-design.md` — read it in full before writing
