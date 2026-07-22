@@ -154,34 +154,34 @@ def _qualify_with_prefix(symbol_text: str, symbol_name: str, library: str) -> st
     )
 
 
-# Reference-designator prefixes for device classes whose `input` pins are an
-# easyeda2kicad import artifact, not a real logic input. Parts imported from
-# LCSC via easyeda2kicad inherit EasyEDA's careless pin metadata and routinely
-# arrive typed `input`. KiCad ERC then demands an Output driver for every
-# `input` pin and raises "Input pin not driven by any Output pins"
-# (pin_not_driven) on any net that isn't power-flagged. KiCad's own stock
-# libraries never type these contacts `input`, so we retype them at the embed
-# choke point. The *target* type depends on the class:
+# Reference-designator prefixes for device classes whose `input` pins can't be
+# meaningfully ERC-policed in KiCraft. Parts imported from LCSC via easyeda2kicad
+# inherit EasyEDA's careless pin metadata and routinely arrive typed `input`;
+# KiCad's own stock symbols type real logic inputs `input` too (a MOSFET gate, an
+# MCU RUN/RESET pin). KiCad ERC then demands an *Output* driver for every `input`
+# pin and raises "Input pin not driven by any Output pins" (pin_not_driven) on any
+# net that isn't power-flagged. But KiCraft types every driver pin Unspecified
+# (the curated-library convention) or `passive` (post-normalization
+# electromechanical parts), and KiCad counts NEITHER as an Output driver -- so a
+# legitimately-driven input (a reset button on RUN, a GPIO on a gate) trips the
+# check purely as an artifact of that convention. We retype `input` pins away at
+# the embed choke point, by device class:
 #
-#   * Connectors (below) are a boundary to a possibly-active off-board device --
-#     a socketed microSD card, a sensor module, a daughterboard. Their signal
-#     contacts carry live signals whose driver may be off-schematic, so modeling
-#     them `passive` would wrongly declare a hot bus inert and could MASK a
-#     genuinely floating host-driven line. KiCad's idiom for such a boundary is
-#     `bidirectional` (needs no driver, yet satisfies a connected input).
 #   * Truly passive / electromechanical parts (`_PASSIVE_DEVICE_REF_PREFIXES`)
-#     -- switches, discrete passives, relay coils, transducers -- have no logic
-#     input and neither drive nor are driven, so `passive` is correct and can
-#     never mask a real error.
+#     -- switches, discrete passives, relay coils, batteries, transducers -- have
+#     no logic input and neither drive nor are driven, so `passive` is correct.
+#   * Everything else -- connectors (a boundary to a possibly-active off-board
+#     bus) AND active devices (ICs U/Q, transistors, crystals) -- becomes
+#     `bidirectional`: it needs no driver yet satisfies a connected input, so it
+#     never wrongly declares a live bus inert the way `passive` would. This can't
+#     mask a genuinely floating pin -- a pin connected to nothing is caught by the
+#     §9.11 net-coverage gate (pin type is irrelevant there), and a
+#     wired-but-truly-undriven input is the electrical-review LLM's job, because
+#     KiCad's Output-driver check is a false positive under KiCraft's convention.
 #
-# Active devices (ICs: U/Q/...) and crystals/oscillators (Y/X, whose enable IS a
-# driven input) are deliberately excluded from both sets. The device class is
-# read from KiCraft's assigned instance refdes when available (authoritative:
-# easyeda fills the symbol's intrinsic Reference with arbitrary strings like
-# "Card"), falling back to the symbol's own Reference prefix otherwise.
-_CONNECTOR_REF_PREFIXES = frozenset({
-    "J", "P", "CN", "CON", "JP",               # connectors / headers / jumpers / sockets
-})
+# The device class is read from KiCraft's assigned instance refdes when available
+# (authoritative: easyeda fills the symbol's intrinsic Reference with arbitrary
+# strings like "Card"), falling back to the symbol's own Reference prefix.
 _PASSIVE_DEVICE_REF_PREFIXES = frozenset({
     "SW", "BTN", "PB", "KEY",                  # switches / buttons
     "R", "RN", "RV", "RT", "RP", "VR", "POT",  # resistors / networks / thermistors / pots
@@ -225,37 +225,41 @@ _SWITCH_NODE_PIN_RE = re.compile(
 def _normalize_passive_device_pins(
     symbol_text: str, ref_prefix: str | None = None
 ) -> str:
-    """Retype easyeda2kicad's bogus `input` pins by device class.
+    """Retype a symbol's stray `input` pins so they can't trip ERC pin_not_driven.
 
-    easyeda2kicad-imported switches, connectors, and discrete passives often
-    carry EasyEDA's bogus `input` pin type. KiCad ERC then flags those pins
-    ``pin_not_driven`` ("Input pin not driven by any Output pins") on every
-    non-power net, because an `input` pin requires an Output driver. KiCad's
-    stock libraries never type these contacts `input`, so we retype them here:
+    easyeda2kicad-imported parts (and stock KiCad symbols) type contacts `input`
+    that, in KiCraft's all-``Unspecified``/``passive`` driver convention, have no
+    Output driver on their net -- KiCad ERC then flags them ``pin_not_driven``
+    ("Input pin not driven by any Output pins") even though the schematic is
+    electrically fine. We retype them here, at the single embed choke point, by
+    device class:
 
-      * connectors (:data:`_CONNECTOR_REF_PREFIXES`) -> ``bidirectional`` -- a
-        connector is a boundary to a possibly-active off-board device, so its
-        contacts model a live bus, not an inert terminal;
       * passive / electromechanical parts (:data:`_PASSIVE_DEVICE_REF_PREFIXES`)
-        -> ``passive`` -- they neither drive nor are driven.
+        -> ``passive`` -- they neither drive nor are driven;
+      * everything else -- connectors and active devices (ICs U/Q, transistors,
+        crystals) -> ``bidirectional`` -- needs no driver, yet satisfies a
+        connected input (KiCad's idiom for a boundary / legitimately-driven pin).
+
+    Retyping active-device inputs is safe (KC-UFHJ42): a *truly* floating pin
+    (connected to nothing) is caught by the §9.11 net-coverage gate regardless of
+    pin type, and a wired-but-should-be-driven input is the electrical-review
+    LLM's job -- KiCad's Output-driver check is a false positive here because
+    KiCraft never types its drivers ``output``. See the module comment above.
 
     The device class is taken from KiCraft's assigned instance refdes
-    (``ref_prefix``, e.g. ``J2``) when supplied -- it is authoritative, where
+    (``ref_prefix``, e.g. ``U1``) when supplied -- it is authoritative, where
     easyeda fills the symbol's intrinsic ``Reference`` with arbitrary strings
     (a microSD socket arrives ``"Card"``). Falls back to the symbol's own
-    Reference prefix otherwise. Active devices (ICs: U/Q, crystals Y/X) are in
-    neither set, so this can never mask a real floating-input error on an IC.
-    A no-op on correctly-typed symbols (KiCad stock passives carry no `input`).
+    Reference prefix otherwise. Only ``(pin input`` is matched, so ``power_in``
+    pins (and the PWR_FLAG machinery that drives power nets) are never touched.
     """
     cls = _ref_alpha_prefix(ref_prefix)
     if cls is None:
         m = _REFERENCE_PROP_RE.search(symbol_text)
         cls = _ref_alpha_prefix(m.group(1)) if m else None
-    if cls in _CONNECTOR_REF_PREFIXES:
-        return _PIN_INPUT_RE.sub(r"\1bidirectional", symbol_text)
     if cls in _PASSIVE_DEVICE_REF_PREFIXES:
         return _PIN_INPUT_RE.sub(r"\1passive", symbol_text)
-    return symbol_text
+    return _PIN_INPUT_RE.sub(r"\1bidirectional", symbol_text)
 
 
 def _normalize_switch_node_pins(symbol_text: str) -> str:

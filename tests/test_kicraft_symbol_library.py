@@ -206,11 +206,13 @@ def test_connector_input_pins_retyped_bidirectional(tmp_path: Path) -> None:
 
 
 def test_assigned_refdes_overrides_bogus_intrinsic_reference(tmp_path: Path) -> None:
-    # KC-8DXUS6: easyeda fills a microSD socket's intrinsic Reference with the
-    # arbitrary string "Card", which is in neither device-class set, so the
-    # intrinsic-Reference path is a no-op and the `input` contacts survive into
-    # the schematic (ERC pin_not_driven on CMD/CLK). KiCraft's assigned refdes
-    # (J2) is authoritative and must classify it as a connector regardless.
+    # KC-8DXUS6: easyeda fills a part's intrinsic Reference with an arbitrary
+    # string ("Card" for a microSD socket) whose alpha prefix matches no device
+    # class, so the intrinsic path falls to the safe default (bidirectional --
+    # never a surviving `input`). KiCraft's assigned refdes is authoritative and
+    # must steer the part into the RIGHT bucket: a tactile switch assigned SW1 is
+    # a passive contact, so its `input` pins become `passive`, not the default
+    # bidirectional.
     lib = tmp_path / "Card.kicad_sym"
     lib.write_text(
         '(kicad_symbol_lib (version 20211014)\n'
@@ -218,24 +220,29 @@ def test_assigned_refdes_overrides_bogus_intrinsic_reference(tmp_path: Path) -> 
         '\t\t(property "Reference" "Card" (at 0 0 0))\n'
         '\t\t(symbol "TF_0_1"\n'
         '\t\t\t(pin input line (at -10 2.54 0) (length 5)'
-        ' (name "CMD") (number "3"))\n'
+        ' (name "A") (number "1"))\n'
         '\t\t)\n'
         '\t)\n'
         ')\n'
     )
-    # Without the assigned refdes: "Card" is unrecognized -> no-op (the bug).
-    untouched = extract_symbol_block("Card", "TF", stock_dir=tmp_path)
-    assert "(pin input" in untouched
-    # With the assigned refdes J2 -> connector -> bidirectional.
-    fixed = extract_symbol_block("Card", "TF", stock_dir=tmp_path, ref_prefix="J2")
+    # Unrecognized intrinsic "Card" -> safe default: bidirectional, never `input`.
+    default = extract_symbol_block("Card", "TF", stock_dir=tmp_path)
+    assert "(pin input" not in default
+    assert default.count("(pin bidirectional") == 1
+    # Assigned refdes SW1 -> switch -> passive, overriding the bogus intrinsic.
+    fixed = extract_symbol_block("Card", "TF", stock_dir=tmp_path, ref_prefix="SW1")
     assert "(pin input" not in fixed
-    assert fixed.count("(pin bidirectional") == 1
+    assert fixed.count("(pin passive") == 1
+    assert "(pin bidirectional" not in fixed
 
 
-def test_assigned_refdes_does_not_retype_ic_pins(tmp_path: Path) -> None:
-    # The assigned-refdes path must stay as conservative as the intrinsic one:
-    # an IC (refdes U3) keeps its `input` pins so a genuinely floating MCU input
-    # still trips ERC.
+def test_assigned_refdes_retypes_ic_pins_bidirectional(tmp_path: Path) -> None:
+    # KC-UFHJ42: an IC input pin (refdes U3) in KiCraft is driven by pins typed
+    # Unspecified (the curated-library convention), which KiCad does not count as
+    # an Output driver -- so a legitimately-wired input trips ERC pin_not_driven.
+    # The assigned-refdes path retypes it `bidirectional` (needs no driver, yet
+    # satisfies a connected input); a truly floating pin is caught by the
+    # net-coverage gate, not this check.
     lib = tmp_path / "Mcu.kicad_sym"
     lib.write_text(
         '(kicad_symbol_lib (version 20211014)\n'
@@ -249,13 +256,17 @@ def test_assigned_refdes_does_not_retype_ic_pins(tmp_path: Path) -> None:
         ')\n'
     )
     block = extract_symbol_block("Mcu", "MCU", stock_dir=tmp_path, ref_prefix="U3")
-    assert "(pin input" in block
+    assert "(pin input" not in block
+    assert block.count("(pin bidirectional") == 1
 
 
-def test_active_device_input_pins_preserved(tmp_path: Path) -> None:
-    # Active devices (Reference "U", "Q", ...) keep their `input` pins: a
-    # genuinely floating IC input SHOULD trip ERC, so the normalizer must not
-    # touch them. Guards against the retype being too broad.
+def test_active_device_input_pins_retyped_bidirectional(tmp_path: Path) -> None:
+    # KC-UFHJ42: active devices (Reference "U", "Q", ...) get their `input` pins
+    # retyped `bidirectional`. In KiCraft's Unspecified/passive driver convention
+    # KiCad never sees an Output driver, so an MCU RUN pin (fed by a reset button)
+    # or a MOSFET gate (fed by a GPIO) would otherwise fail ERC pin_not_driven.
+    # bidirectional needs no driver yet satisfies a connected input; a genuinely
+    # floating pin is caught by the §9.11 net-coverage gate, not by pin type.
     lib = tmp_path / "Ic.kicad_sym"
     lib.write_text(
         '(kicad_symbol_lib (version 20211014)\n'
@@ -269,7 +280,19 @@ def test_active_device_input_pins_preserved(tmp_path: Path) -> None:
         ')\n'
     )
     block = extract_symbol_block("Ic", "GATE", stock_dir=tmp_path)
-    assert "(pin input" in block
+    assert "(pin input" not in block
+    assert block.count("(pin bidirectional") == 1
+
+
+def test_stock_transistor_gate_retyped_bidirectional() -> None:
+    # KC-UFHJ42, real-symbol guard: a discrete MOSFET's gate is typed `input` in
+    # KiCad's stock Device library; driven by a GPIO typed Unspecified it fails
+    # ERC pin_not_driven (self-eval run 488, 8x Q_NMOS LED-channel gates). The
+    # embed choke point must retype the gate bidirectional while leaving the
+    # source/drain (passive) alone.
+    block = extract_symbol_block("Device", "Q_NMOS", ref_prefix="Q1")
+    assert "(pin input" not in block
+    assert "(pin bidirectional" in block
 
 
 @pytest.mark.parametrize("node", ["PH", "SW", "LX", "PHASE", "SWITCH"])
