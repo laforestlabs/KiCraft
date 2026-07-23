@@ -18,6 +18,7 @@ Edge assignments come from the project's ``component_zones`` (the
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,12 +33,50 @@ _SIDES = ("left", "right", "top", "bottom")
 # The edge zone itself stays -- placement still biases the part edgeward.
 _ACCESS_ONLY_REF_PREFIXES = frozenset({"BT"})
 
+# Debug / programming headers (SWD, JTAG, Cortex-Debug, ISP/ICSP, UPDI,
+# Tag-Connect). Like a coin cell these are ACCESS-only: a programmer ribbon
+# drops onto them from ABOVE, so they carry no off-board mating mouth. A design
+# that zones one edgeward (good practice -- easy probe access) must not then be
+# failed by the flush/stranded or mouth-facing gates, which measure a mating
+# contract these headers do not have (KC-69TGAP: an SWD 10-pin header sitting
+# 1.45mm inboard failed the build as ``connector_stranded`` + spammed a
+# "connector mouth unverifiable" warning). Their footprint is a generic pin
+# header, so the debug-ness lives in the symbol/Value ("SWD 10-pin") --
+# matched here against the board footprint's Value and library name. See the
+# synthesis-side ``validation._PROG_HEADER_RE`` precedent.
+_PROG_DEBUG_HEADER_RE = re.compile(
+    r"swd|swdio|swclk|jtag|\bicsp\b|updi|cortex[_\- ]?debug|tag[_\- ]?connect|tc2030|arm[_\- ]?debug",
+    re.I,
+)
+
 
 def _access_only_ref(ref: str) -> bool:
     """True for refs whose edge zone is an accessibility hint, not a mating
     contract (see ``_ACCESS_ONLY_REF_PREFIXES``)."""
     prefix = ref.rstrip("0123456789")
     return prefix.upper() in _ACCESS_ONLY_REF_PREFIXES
+
+
+def _prog_debug_header(fp) -> bool:
+    """True when the footprint is a debug/programming header (SWD/JTAG/ISP/...).
+    Identified from the board-available Value and library name, since the
+    footprint itself is a generic pin header (see ``_PROG_DEBUG_HEADER_RE``)."""
+    for getter in ("GetValue", "GetFPIDAsString"):
+        try:
+            text = getattr(fp, getter)()
+        except Exception:
+            continue
+        if text and _PROG_DEBUG_HEADER_RE.search(str(text)):
+            return True
+    return False
+
+
+def _access_only_connector(ref: str, fp) -> bool:
+    """True for edge-zoned parts whose zone is an accessibility hint, not an
+    off-board mating contract: coin cells (by ref) and debug/programming
+    headers (by footprint Value/name). The flush/stranded and mouth-facing
+    gates are skipped for these -- placement still biases them edgeward."""
+    return _access_only_ref(ref) or _prog_debug_header(fp)
 
 
 @dataclass(frozen=True)
@@ -141,10 +180,10 @@ def connector_edge_gaps(
         edge = (zone or {}).get("edge")
         if edge not in _SIDES:
             continue
-        if _access_only_ref(ref):
-            continue
         fp = fps.get(ref)
         if fp is None:
+            continue
+        if _access_only_connector(ref, fp):
             continue
         marker = _edge_marker_point(fp, pcbnew)
         if marker is not None:
@@ -223,10 +262,10 @@ def connector_facings(
         edge = (zone or {}).get("edge")
         if edge not in _SIDES:
             continue
-        if _access_only_ref(ref):
-            continue
         fp = fps.get(ref)
         if fp is None:
+            continue
+        if _access_only_connector(ref, fp):
             continue
         layer = Layer.BACK if fp.GetLayer() == pcbnew.B_Cu else Layer.FRONT
         outward = edge_outward_angle(layer, edge)

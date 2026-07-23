@@ -22,10 +22,68 @@ import pytest
 
 from kicraft.autoplacer.brain.connector_edge_gap import (
     EdgeGap,
+    _access_only_connector,
+    _prog_debug_header,
     connector_edge_gaps,
     edge_gap_mm,
     stranded,
 )
+
+
+class _FakeFP:
+    """Minimal footprint stub exposing the two text getters the debug-header
+    classifier reads (board Value + library FPID)."""
+
+    def __init__(self, value: str = "", fpid: str = ""):
+        self._value = value
+        self._fpid = fpid
+
+    def GetValue(self) -> str:  # noqa: N802 (pcbnew API name)
+        return self._value
+
+    def GetFPIDAsString(self) -> str:  # noqa: N802 (pcbnew API name)
+        return self._fpid
+
+
+@pytest.mark.parametrize(
+    "value, fpid, expected",
+    [
+        # Debug / programming headers -> access-only (skip mating gates).
+        ("SWD 10-pin", "Connector:PinHeader_2x05_P2.54mm_Vertical", True),
+        ("Cortex Debug", "x:Conn_ARM_JTAG_SWD_10", True),
+        ("JTAG", "x", True),
+        ("ICSP header", "x", True),
+        ("UPDI", "x", True),
+        ("", "Connector:Conn_ARM_JTAG_SWD_10", True),  # debug-ness in the FPID
+        # Real off-board mating connectors and unrelated parts -> NOT exempt.
+        ("USB-C", "x:USB_C_Receptacle", False),
+        ("Barrel jack", "x:BarrelJack", False),
+        ("Screw terminal", "x:screw-terminal-5mm-3p", False),
+        ("100nF", "Device:C", False),
+        ("Tactile switch", "kh-6x6x5h-stm:KH-6X6X5H-STM", False),
+        ("Conn_01x04", "Connector:PinHeader_1x04", False),  # generic I/O header
+    ],
+)
+def test_prog_debug_header_classifier(value, fpid, expected):
+    assert _prog_debug_header(_FakeFP(value, fpid)) is expected
+
+
+def test_access_only_connector_covers_coincell_and_debug_header():
+    # Coin cell by ref (existing behavior) ...
+    assert _access_only_connector("BT1", _FakeFP("CR2032 holder", "x:BS-CR2032")) is True
+    # ... and an SWD debug header by footprint Value (KC-69TGAP), whose generic
+    # 2x05 footprint is indistinguishable from an ordinary I/O header.
+    assert _access_only_connector("J1", _FakeFP("SWD 10-pin", "x:PinHeader_2x05")) is True
+    # A real edge connector stays subject to the stranding/facing gates.
+    assert _access_only_connector("J2", _FakeFP("USB-C", "x:USB_C_Receptacle")) is False
+
+
+def test_prog_debug_header_survives_missing_getters():
+    class _Bare:
+        pass
+
+    # Never raises even when the footprint lacks the getters entirely.
+    assert _prog_debug_header(_Bare()) is False
 
 FIXTURE = (
     Path(__file__).parent / "fixtures" / "replay_workspace" / "USB_PD_TRIGGER"
