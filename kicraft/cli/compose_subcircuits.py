@@ -2208,6 +2208,7 @@ def _compose_artifacts(
         via_count=composition.via_count,
         interconnect_net_count=len(composition.hierarchy_state.interconnect_nets),
         inferred_interconnect_net_count=len(composition.inferred_interconnect_nets),
+        interconnect_net_names=sorted(composition.hierarchy_state.interconnect_nets),
         preserved_child_trace_count=composition.trace_count,
         preserved_child_via_count=composition.via_count,
         expected_preserved_child_trace_count=composition.trace_count,

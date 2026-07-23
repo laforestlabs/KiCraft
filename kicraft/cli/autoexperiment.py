@@ -1399,9 +1399,19 @@ def _parent_rejected_refit_winner(parent_output_json: Path) -> bool:
 
 
 def _parent_rejected_unconnected(parent_output_json: Path) -> bool:
-    """True when this round's routed parent was rejected with unconnected
-    nets -- the congestion signal that feeds the scheduler's seed-overhead
-    growth valve (a cramped placement needs room, not another identical try)."""
+    """True when this round's routed parent was rejected with an unconnected
+    *parent-interconnect* net -- the only unconnected signal the scheduler's
+    seed-overhead growth valve can actually relieve (a cramped placement needs
+    room, not another identical try).
+
+    An unconnected net whose endpoints are all inside a single leaf is a
+    *leaf-internal* routing failure -- more parent seed area cannot connect it,
+    so growing the board just bloats it (92%-empty boards, copper-edge
+    ``illegal_routed_geometry``) while the leaf net stays open. Those must NOT
+    trip the valve. We gate on the composer's persisted ``interconnect_net_names``
+    (nets that cross a leaf boundary): the valve fires only when at least one
+    unconnected net is in that set. When the names are absent (older artifact),
+    fall back to the historical any-unconnected behavior so nothing regresses."""
     try:
         payload = _load_json(parent_output_json)
     except Exception:
@@ -1413,7 +1423,24 @@ def _parent_rejected_unconnected(parent_output_json: Path) -> bool:
     if not isinstance(validation, dict) or validation.get("accepted") is not False:
         return False
     drc = validation.get("drc")
-    return isinstance(drc, dict) and (drc.get("unconnected") or 0) > 0
+    if not isinstance(drc, dict) or (drc.get("unconnected") or 0) <= 0:
+        return False
+    interconnect_names = state.get("interconnect_net_names")
+    if not isinstance(interconnect_names, list) or not interconnect_names:
+        # No interconnect-net membership to classify against -- older artifact
+        # (missing), or a flat/single-leaf board (genuinely empty). Either way
+        # we cannot prove the unconnected nets are leaf-internal, so keep the
+        # historical behavior (any unconnected net grows the seed) rather than
+        # silently disabling the valve. The narrowing below applies only when we
+        # can POSITIVELY identify a cross-leaf net set to exclude against.
+        return True
+    unconnected_nets = drc.get("unconnected_nets")
+    if not isinstance(unconnected_nets, list) or not unconnected_nets:
+        # Count > 0 but no net names available: can't classify, so keep the
+        # historical grow-on-any behavior.
+        return True
+    interconnect_set = {str(n) for n in interconnect_names}
+    return any(str(net) in interconnect_set for net in unconnected_nets)
 
 
 def _discover_latest_parent_artifact_dir(project_dir: Path) -> Path | None:

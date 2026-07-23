@@ -69,6 +69,14 @@ class ParentCompositionState:
     via_count: int = 0
     interconnect_net_count: int = 0
     inferred_interconnect_net_count: int = 0
+    # Names of the parent-level interconnect nets (nets whose endpoints cross a
+    # leaf boundary). Persisted so the round scheduler can tell a *parent*
+    # routing failure (an interconnect net left unconnected -> a cramped
+    # placement that more seed area can relieve) apart from a *leaf-internal*
+    # routing failure (a net fully inside one leaf that no amount of parent area
+    # can fix). Without this split, the congestion-growth valve inflates the
+    # board chasing leaf-internal unconnected nets, bloating it for nothing.
+    interconnect_net_names: list[str] = field(default_factory=list)
     preserved_child_trace_count: int = 0
     preserved_child_via_count: int = 0
     expected_preserved_child_trace_count: int = 0
@@ -195,6 +203,7 @@ class ParentCompositionState:
             "via_count": self.via_count,
             "interconnect_net_count": self.interconnect_net_count,
             "inferred_interconnect_net_count": self.inferred_interconnect_net_count,
+            "interconnect_net_names": list(self.interconnect_net_names),
             "preserved_child_trace_count": self.preserved_child_trace_count,
             "preserved_child_via_count": self.preserved_child_via_count,
             "expected_preserved_child_trace_count": self.expected_preserved_child_trace_count,
