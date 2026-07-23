@@ -122,14 +122,17 @@ class PlacementScorer:
             return 100.0
 
         from kicraft.autoplacer.brain.leaf_tidiness import (
-            _ANCHOR_KINDS,
+            is_pin_anchor,
             pin_locality_for_passive,
         )
 
         comps = self.state.components
         idx = getattr(self, "_pin_locality_index", None)
         if idx is None:
-            anchor_refs = [r for r, c in comps.items() if (c.kind or "") in _ANCHOR_KINDS]
+            anchor_refs = [
+                r for r, c in comps.items()
+                if is_pin_anchor(c.kind or "", sum(1 for p in c.pads if p.net))
+            ]
             passive_refs = [
                 r for r, c in comps.items()
                 if (c.kind or "") == "passive" and not c.locked

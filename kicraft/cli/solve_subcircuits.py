@@ -124,6 +124,11 @@ from kicraft.autoplacer.brain.leaf_acceptance import (
     acceptance_config_from_dict,
     evaluate_leaf_acceptance,
 )
+from kicraft.autoplacer.brain.leaf_tidiness import (
+    DEFAULT_PLANE_NETS,
+    parts_from_components,
+    pin_distances_mm,
+)
 from kicraft.autoplacer.brain.placement_solver import PlacementSolver
 from kicraft.autoplacer.brain.leaf_routing import route_local_subcircuit
 from kicraft.autoplacer.brain.subcircuit_render_diagnostics import (
@@ -490,12 +495,61 @@ def _route_local_subcircuit(
     )
 
 
+# Round-failure reasons that mean "the placement handed the router hauls it
+# could not close", i.e. the class the place-quality gate and the seed-bbox
+# suppression are about. Any OTHER failure (a short, a courtyard overlap, a
+# routing exception) is worth re-rolling and re-routing at full budget.
+_ADJACENCY_FAILURE_REASONS = ("no_unconnected", "place_quality_gate")
+
+
+def _only_adjacency_failures(failure_reasons: list[str]) -> bool:
+    return all(r in _ADJACENCY_FAILURE_REASONS for r in failure_reasons)
+
+
+def _placement_diagnostics(
+    solver: PlacementSolver,
+    components: dict[str, Component],
+    cfg: dict[str, Any],
+) -> dict[str, Any]:
+    """Pin-adjacency evidence for one placed round.
+
+    ``median_pin_mm`` / ``max_pin_mm`` are the honest millimetres the router is
+    about to be handed (worst pad of each passive to its nearest same-net anchor
+    pad; a poured pad is via-reachable so it contributes 0). ``grid`` carries the
+    slot provisioning and the accept-if-better verdict. All three were invisible
+    before -- the dense-SoC leaf burned 12 rounds on 30 mm decap hauls with no
+    round record ever saying so.
+    """
+    plane_nets = set(DEFAULT_PLANE_NETS)
+    if cfg.get("gnd_zone_net"):
+        plane_nets.add(str(cfg["gnd_zone_net"]))
+    if cfg.get("power_plane_enabled"):
+        plane_nets.update(str(n) for n in (cfg.get("power_plane_nets") or []))
+    rows = pin_distances_mm(
+        parts_from_components(components), plane_nets=frozenset(plane_nets)
+    )
+    diag: dict[str, Any] = {"grid": dict(getattr(solver, "last_grid_stats", {}) or {})}
+    if rows:
+        dists = sorted(d for _ref, d in rows)
+        mid = len(dists) // 2
+        diag["scored_passives"] = len(dists)
+        diag["median_pin_mm"] = round(
+            dists[mid] if len(dists) % 2 else (dists[mid - 1] + dists[mid]) / 2.0, 2
+        )
+        diag["max_pin_mm"] = round(dists[-1], 2)
+        diag["worst_pins"] = [
+            {"ref": ref, "pin_mm": round(d, 2)} for ref, d in rows[:5]
+        ]
+    return diag
+
+
 def _solve_one_round(
     extraction: ExtractedSubcircuitBoard,
     cfg: dict[str, Any],
     seed: int,
     round_index: int,
     route: bool,
+    place_quality_best_mm: float | None = None,
 ) -> SolveRoundResult:
     round_timing: dict[str, float] = {}
     round_total_start = time.monotonic()
@@ -560,6 +614,72 @@ def _solve_one_round(
     round_timing["placement_scoring_s"] = round(
         max(0.0, time.monotonic() - placement_score_start), 3
     )
+
+    diagnostics = _placement_diagnostics(solver, solved_components, cfg)
+
+    # Place-quality gate: routing a placement whose decaps sit tens of mm from
+    # the pins they bridge burns 30-100 s to learn what the geometry already
+    # said. When the caller has another round coming, skip freerouting and
+    # re-place instead (dense-soc-leaf-unconnected-plan P2.8).
+    #
+    # A round that is the BEST placement seen so far always routes, however far
+    # off the target it is: on a leaf whose geometry simply cannot reach the
+    # threshold, an absolute gate alone would spend every round re-placing and
+    # leave exactly one routing attempt at the end.
+    gate_threshold = float(cfg.get("leaf_place_quality_max_pin_mm", 4.0))
+    median_pin = diagnostics.get("median_pin_mm")
+    if (
+        route
+        and place_quality_best_mm is not None
+        and gate_threshold > 0
+        and median_pin is not None
+        and median_pin > gate_threshold
+        and median_pin >= place_quality_best_mm
+    ):
+        print(
+            f"  place-quality gate: median pad->pin {median_pin:.1f}mm > "
+            f"{gate_threshold:.1f}mm and no better than the best round so far "
+            f"({place_quality_best_mm:.1f}mm) -- skipping freerouting for round "
+            f"{round_index} and re-placing"
+        )
+        diagnostics["place_quality_gate"] = "skipped_route"
+        round_timing["route_local_subcircuit_total_s"] = 0.0
+        round_timing["solve_one_round_total_s"] = round(
+            max(0.0, time.monotonic() - round_total_start), 3
+        )
+        return SolveRoundResult(
+            round_index=round_index,
+            seed=seed,
+            score=float("-inf"),
+            placement=placement,
+            components=solved_components,
+            routing={
+                "enabled": True,
+                "skipped": True,
+                "reason": "place_quality_gate",
+                "router": "freerouting",
+                "traces": 0,
+                "vias": 0,
+                "total_length_mm": 0.0,
+                "round_board_illegal_pre_stamp": "",
+                "round_board_pre_route": "",
+                "round_board_routed": "",
+                "routed_internal_nets": [],
+                "failed_internal_nets": list(sorted(extraction.internal_net_names)),
+                "_trace_segments": [],
+                "_via_objects": [],
+                "validation": {
+                    "accepted": False,
+                    "rejected": True,
+                    "rejection_stage": "place_quality_gate",
+                    "rejection_reasons": ["place_quality_gate"],
+                },
+                "failed": True,
+            },
+            routed=False,
+            timing_breakdown=round_timing,
+            placement_diagnostics=diagnostics,
+        )
 
     if route:
         try:
@@ -646,6 +766,7 @@ def _solve_one_round(
             routing=routing,
             routed=False,
             timing_breakdown=round_timing,
+            placement_diagnostics=diagnostics,
         )
     # Combine placement quality with routing success so an unrouted or shorted
     # leaf can never out-score a cleanly routed one. Placement contributes up to
@@ -673,6 +794,7 @@ def _solve_one_round(
         routing=routing,
         routed=bool(route and not routing.get("failed", False)),
         timing_breakdown=round_timing,
+        placement_diagnostics=diagnostics,
     )
 
 
@@ -868,6 +990,10 @@ def _solve_leaf_subcircuit(
     )
     _deadline_hit = False
 
+    # Best median pad->pin distance any round has produced so far; the
+    # place-quality gate never skips a round that beats it.
+    _place_quality_best = float("inf")
+
     canvas_attempts_run: list[str] = []
     for attempt_index, canvas_fill in enumerate(canvas_fills):
         if _deadline_hit and canvas_fill is not None:
@@ -955,7 +1081,30 @@ def _solve_leaf_subcircuit(
                         0.10,
                         float(round_cfg.get("orderedness", 0.25)) - 0.15,
                     )
-            result = _solve_one_round(extraction, round_cfg, seed, round_index, route)
+            # The place-quality gate may skip freerouting and re-place -- but
+            # only while another round is provably coming, so a leaf always ends
+            # with at least one real routing attempt to compose best-effort from.
+            # Once the deadline has fired the ladder is on its guaranteed
+            # seed-bbox round: that one always routes.
+            _rounds_left = (effective_rounds - 1 - local_round_index) + (
+                len(canvas_fills) - 1 - attempt_index
+            )
+            _gate_allowed = (
+                _rounds_left > 0
+                and not _deadline_hit
+                # Only for the failure class this is about: a leaf failing on
+                # shorts or courtyards deserves its full routing budget.
+                and _only_adjacency_failures(failure_reasons)
+            )
+            result = _solve_one_round(
+                extraction, round_cfg, seed, round_index, route,
+                place_quality_best_mm=(
+                    _place_quality_best if _gate_allowed else None
+                ),
+            )
+            _round_median = result.placement_diagnostics.get("median_pin_mm")
+            if _round_median is not None:
+                _place_quality_best = min(_place_quality_best, float(_round_median))
             result.timing_breakdown["leaf_extraction_s"] = extraction_elapsed_s
             result.timing_breakdown["local_solver_config_s"] = local_cfg_elapsed_s
             round_results.append(result)
@@ -1066,6 +1215,33 @@ def _solve_leaf_subcircuit(
         # to the seed-bbox fallback (N1); a deadline on the fallback itself
         # ends it (keeps best-so-far).
         if best is not None or (_deadline_hit and canvas_fill is None):
+            break
+
+        # ... with one exception: the ladder grows the canvas to buy ROOM, and a
+        # rung that failed purely on `no_unconnected` did not run out of room --
+        # it ran out of routing. A bigger board makes every haul longer, so the
+        # terminal seed-bbox rung is a guaranteed-slower repeat of the same
+        # failure (KC-69TGAP: 12 rounds across two canvases, the 0.28-utilization
+        # one failing identically to the seed-bbox one). Skip it and compose
+        # best-effort from the routed round we already have
+        # (dense-soc-leaf-unconnected-plan P2.9).
+        _next_is_seed_bbox = (
+            attempt_index + 1 < len(canvas_fills)
+            and canvas_fills[attempt_index + 1] is None
+        )
+        if (
+            _next_is_seed_bbox
+            and best_routed is not None
+            and failure_reasons
+            and cfg.get("leaf_canvas_skip_seedbbox_on_unconnected", True)
+            and _only_adjacency_failures(failure_reasons)
+        ):
+            print(
+                f"  canvas ladder: every failed round for "
+                f"{node.definition.id.instance_path} failed on no_unconnected "
+                f"(not on room); skipping the seed-bbox rung, which would only "
+                f"lengthen the hauls"
+            )
             break
 
     if best is None and best_routed is not None:

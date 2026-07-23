@@ -263,23 +263,54 @@ def local_solver_config(
     cfg["leaf_grid_assignment"] = bool(base_cfg.get("leaf_grid_assignment", True))
     cfg["leaf_grid_rings"] = int(base_cfg.get("leaf_grid_rings", 2))
     cfg["leaf_grid_lateral"] = int(base_cfg.get("leaf_grid_lateral", 1))
+    # Lane length for an ANCHOR-LESS passive array (no IC in the leaf).
     cfg["leaf_grid_overprovision"] = float(base_cfg.get("leaf_grid_overprovision", 10.0))
+    # Slots per gridable passive the anchored grid grows until it reaches (the
+    # honored target; `overprovision` above was aspirational and never checked).
+    # 23 passives were sharing 25 slots -- 1.1x, so the assignment had almost no
+    # choice and pin-adjacency was unreachable.
+    cfg["leaf_grid_min_provision"] = float(base_cfg.get("leaf_grid_min_provision", 3.0))
+    cfg["leaf_grid_max_rings"] = int(base_cfg.get("leaf_grid_max_rings", 6))
+    cfg["leaf_grid_max_lateral"] = int(base_cfg.get("leaf_grid_max_lateral", 3))
     cfg["leaf_grid_max_slots"] = int(base_cfg.get("leaf_grid_max_slots", 400))
     cfg["leaf_grid_orientation_policy"] = str(
         base_cfg.get("leaf_grid_orientation_policy", "auto")
     )
-    # Slot pitch gap defaults to the leaf placement clearance already computed
-    # above, so slots are courtyard-legal by construction.
+    # Slot pitch gap is a PAD/COURTYARD-legal gap, deliberately decoupled from
+    # the leaf placement clearance (~2.84 mm): a courtyard AABB already carries
+    # its clearance margin, so extent+0.5 mm slots are legal by construction,
+    # while the clearance-derived pitch put the rings 6-12 mm off the package --
+    # a grid that could not represent "decap 1-2 mm from its pins" at all
+    # (dense-soc-leaf-unconnected-plan P0.1).
     cfg["leaf_grid_pitch_gap_mm"] = float(
-        base_cfg.get("leaf_grid_pitch_gap_mm", cfg.get("placement_clearance_mm", 2.84))
+        base_cfg.get("leaf_grid_pitch_gap_mm", 0.5)
+    )
+    # Accept-if-better guard floor: how much shorter the median pad->pin hop must
+    # be to count as materially better adjacency, and how much total score a
+    # win on adjacency may give up (the buck-3a collapse was -22, well past 8).
+    cfg["leaf_grid_pin_floor_tol_mm"] = float(
+        base_cfg.get("leaf_grid_pin_floor_tol_mm", 0.5)
+    )
+    cfg["leaf_grid_pin_floor_score_slack"] = float(
+        base_cfg.get("leaf_grid_pin_floor_score_slack", 8.0)
     )
     if cfg["leaf_grid_assignment"]:
         # Pin-locality is the primary passive objective; the shared orderedness
         # pass (Step 8.5, kept for the parent path) is skipped for gridded leaves
         # since the grid already makes rows structural and it would fight the
         # assignment.
-        cfg["psw_pin_locality"] = float(base_cfg.get("leaf_psw_pin_locality", 0.25))
+        cfg["psw_pin_locality"] = float(base_cfg.get("leaf_psw_pin_locality", 0.6))
         cfg["orderedness"] = 0.0
+        # On a gridded leaf, "illegal" means the courtyards actually overlap --
+        # NOT that two parts are closer than the placement clearance. Spacing is
+        # structural here (slots are pre-spaced at a courtyard-legal pitch), so
+        # keeping the 2.84 mm routing-room heuristic as the legality rule made
+        # every pin-adjacent decap read as an overlap: the escape loop scattered
+        # the assignment (5.6 -> 14.4 mm median pad->pin) and the round was
+        # rejected `illegal_unrepaired_leaf_placement`.
+        cfg["legality_clearance_mm"] = float(
+            base_cfg.get("leaf_legality_clearance_mm", 0.2)
+        )
     else:
         cfg["psw_pin_locality"] = float(base_cfg.get("leaf_psw_pin_locality", 0.0))
 

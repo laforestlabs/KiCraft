@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 import random
 import time
 from contextlib import contextmanager
@@ -76,6 +77,12 @@ def _record_placed_extent(
         h = 0.0
     timings[f"{prefix}_placed_w_mm"] = w
     timings[f"{prefix}_placed_h_mm"] = h
+    if os.environ.get("KICRAFT_TRACE_PIN_LOCALITY"):
+        from .leaf_tidiness import median_pin_distance_mm, parts_from_components
+
+        med = median_pin_distance_mm(parts_from_components(comps_dict))
+        print(f"    [pin-trace] {prefix}: median pad->pin "
+              + ("n/a" if med is None else f"{med:.2f}mm"))
 from .geometry import rotate_component_in_place, rotate_vector
 from .placement_scorer import PlacementScorer
 from .placement_utils import (
@@ -115,6 +122,10 @@ class PlacementSolver:
         # None = off. Set in solve() when leaf_grid_assignment is enabled.
         self._grid_assignment_active: bool = False
         self._grid = None
+        # Slot-provisioning + accept-if-better telemetry from the last solve;
+        # the leaf round record carries it so starvation and a silent revert are
+        # visible without re-instrumenting (dense-soc plan P0.2/P0.4).
+        self.last_grid_stats: dict = {}
         self.k_attract = max(0.001, min(1.0, self.cfg.get("force_attract_k", 0.08)))
         self.k_repel = max(1.0, min(5000.0, self.cfg.get("force_repel_k", 40.0)))
         self.cooling = max(0.5, min(0.999, self.cfg.get("cooling_factor", 0.97)))
@@ -132,6 +143,18 @@ class PlacementSolver:
         # Falls back to clearance_mm for backwards compatibility, then 2.5mm.
         self.clearance = self.cfg.get(
             "placement_clearance_mm", self.cfg.get("clearance_mm", 2.5)
+        )
+        # What "illegal" MEANS, as opposed to how far apart the force loop likes
+        # to hold parts. Defaults to the placement clearance (unchanged for the
+        # parent and for classic leaves). The connectivity-first leaf path lowers
+        # it to a courtyard-touch test: there, inter-part spacing is structural
+        # (slots are pre-spaced at a courtyard-legal pitch), so applying the
+        # 2.84 mm routing-room heuristic as a legality rule declared every
+        # pin-adjacent decap illegal -- the escape loop then scattered the whole
+        # grid (5.6 -> 14.4 mm median pad->pin) and the leaf was rejected
+        # `illegal_unrepaired_leaf_placement` (dense-soc plan P0.1).
+        self.legality_clearance = float(
+            self.cfg.get("legality_clearance_mm", self.clearance)
         )
         self._seen_force_states: set[int] = set()
         # Aligned pairs: list of (ref_a, ref_b, axis) tuples.
@@ -438,10 +461,21 @@ class PlacementSolver:
                 grid_snap=self.grid_snap,
                 keepout_rects=keepouts,
                 pad_inset_mm=float(self.cfg.get("pad_inset_margin_mm", 0.3)),
+                min_provision=float(self.cfg.get("leaf_grid_min_provision", 3.0)),
+                max_rings=int(self.cfg.get("leaf_grid_max_rings", 6)),
+                max_lateral=int(self.cfg.get("leaf_grid_max_lateral", 3)),
             )
             if grid.slots:
                 self._grid = grid
                 self._grid_assignment_active = True
+                print(
+                    f"  grid: {grid.stats['slots_total']} slot(s) for "
+                    f"{grid.stats['gridable_passives']} passive(s) "
+                    f"({grid.stats['provisioning_ratio']}x, rings="
+                    f"{grid.stats['rings']} lateral={grid.stats['lateral']}, "
+                    f"ring step={grid.stats['ring_step_mm']}mm) over anchors "
+                    f"{','.join(grid.stats['anchors']) or '-'}"
+                )
 
         with _timed_phase(phase_t, "solve_sa_refine_ms", capture_comps=lambda: best_comps):
             # SA refinement: escape local minima after FD convergence
@@ -452,6 +486,14 @@ class PlacementSolver:
                     self._grid,
                     work_state,
                     scorer,
+                )
+                _gs = self._grid.stats
+                self.last_grid_stats = dict(_gs)
+                print(
+                    f"  grid assignment: {_gs.get('guard')} "
+                    f"(score {_gs.get('input_score')} -> {_gs.get('grid_score')}, "
+                    f"median pad->pin {_gs.get('input_pin_median_mm')}mm -> "
+                    f"{_gs.get('grid_pin_median_mm')}mm)"
                 )
             elif self.cfg.get("sa_refine_enabled", True):
                 self._seen_force_states.clear()
@@ -2626,6 +2668,10 @@ class PlacementSolver:
             swap_prob=float(self.cfg.get("grid_assignment_swap_prob", 0.4)),
             move_prob=float(self.cfg.get("grid_assignment_move_prob", 0.4)),
             no_improve_break=int(self.cfg.get("sa_refine_no_improve_break", 150)),
+            pin_floor_tol_mm=float(self.cfg.get("leaf_grid_pin_floor_tol_mm", 0.5)),
+            pin_floor_score_slack=float(
+                self.cfg.get("leaf_grid_pin_floor_score_slack", 8.0)
+            ),
         )
 
     def _accumulate_attraction(
@@ -3303,7 +3349,7 @@ class PlacementSolver:
         holder and the board boundary).
         """
         refs = list(comps.keys())
-        half_gap = self.clearance / 2.0
+        half_gap = self.legality_clearance / 2.0
         tl, br = self.state.board_outline
 
         def _clamp_comp_to_board(
@@ -3728,7 +3774,7 @@ class PlacementSolver:
     def legality_diagnostics(self, comps: dict[str, Component]) -> dict[str, object]:
         tl, br = self.state.board_outline
         inset = self.cfg.get("pad_inset_margin_mm", 0.3)
-        half_gap = self.clearance / 2.0
+        half_gap = self.legality_clearance / 2.0
         pads_outside: list[dict[str, object]] = []
         overlaps: list[dict[str, object]] = []
         refs = list(comps.keys())
@@ -3849,7 +3895,7 @@ class PlacementSolver:
 
         def _keep_out_of_pinned_edge_connectors():
             zones = self.cfg.get("component_zones", {})
-            half_gap = self.clearance / 2.0
+            half_gap = self.legality_clearance / 2.0
             pinned_connectors = []
             for ref, comp in comps.items():
                 zone_cfg = zones.get(ref, {})

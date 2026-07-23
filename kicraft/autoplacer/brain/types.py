@@ -616,6 +616,10 @@ class SolveRoundResult:
     routing: dict[str, Any] = field(default_factory=dict)
     routed: bool = False
     timing_breakdown: dict[str, float] = field(default_factory=dict)
+    # Placement-quality evidence for this round: the discrete grid's slot
+    # provisioning + accept-if-better verdict, and the honest median/max
+    # pad->pin distance the router was handed.
+    placement_diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         routing = {
@@ -641,6 +645,7 @@ class SolveRoundResult:
                 "aspect_ratio": self.placement.aspect_ratio,
             },
             "routing": routing,
+            "placement_diagnostics": dict(self.placement_diagnostics),
             "timing_breakdown": dict(self.timing_breakdown),
             "preview_paths": {
                 "pre_route_front": routing.get("round_preview_pre_route_front", ""),

@@ -34,6 +34,30 @@ from typing import Any, Iterable, Optional
 # Anchor kinds a passive can be grouped under (a passive's "functional home").
 _ANCHOR_KINDS = ("ic", "regulator", "connector")
 
+# Kinds that can never anchor a passive: passives themselves (they move via the
+# grid), holes (no pins), and the parent-side synthetic geometry.
+_NON_ANCHOR_KINDS = frozenset(
+    {"", "passive", "mounting_hole", "subcircuit", "poly", "text"}
+)
+
+
+def is_pin_anchor(kind: str, netted_pad_count: int) -> bool:
+    """Can a passive be placed to hug *this* part's pins?
+
+    Wider than :data:`_ANCHOR_KINDS` (which defines a passive's functional
+    *group*): a crystal's load caps, a button's debounce cap and a battery
+    holder's bulk cap must hug pins too, and those parts classify as
+    ``misc``/``battery`` because ``_classify_component`` keys off the ref prefix
+    (X1/SW1/BT1). With only ic/regulator/connector anchored, their companions
+    got no grid slots anywhere near them -- one of the three concrete causes of
+    the dense-SoC leaf's 8-51 mm decap hauls (dense-soc-leaf-unconnected-plan
+    P0.3). Any non-passive part with >= 2 netted pads qualifies; a 1-pad part
+    (test point, fiducial) has no pin pair to straddle.
+    """
+    if kind in _ANCHOR_KINDS:
+        return True
+    return kind not in _NON_ANCHOR_KINDS and netted_pad_count >= 2
+
 # Nets that are POURED (a copper plane), not routed point-to-point. A passive
 # pad on one of these reaches the plane through a via wherever it lands, so
 # pin-locality treats it as via-reachable (distance 0) rather than pulling the
@@ -638,16 +662,64 @@ def pin_locality_for_passive(
 def build_anchor_pad_index(
     parts: Iterable[PlacedPart],
 ) -> tuple[dict[str, list[tuple[float, float]]], list[tuple[float, float, frozenset[str]]]]:
-    """(anchor_pads_by_net, anchor_bodies) over the anchor parts in ``parts``."""
+    """(anchor_pads_by_net, anchor_bodies) over the anchor parts in ``parts``.
+
+    Uses :func:`is_pin_anchor`, so crystals/buttons/battery holders anchor their
+    companions here exactly as they do in the grid and the scorer -- metric and
+    optimized score read the same picture.
+    """
     anchor_pads_by_net: dict[str, list[tuple[float, float]]] = {}
     anchor_bodies: list[tuple[float, float, frozenset[str]]] = []
     for p in parts:
-        if p.kind not in _ANCHOR_KINDS:
+        if not is_pin_anchor(p.kind, len(p.pads)):
             continue
         for px, py, net in p.pads:
             anchor_pads_by_net.setdefault(net, []).append((px, py))
         anchor_bodies.append((p.cx, p.cy, frozenset(n for (_x, _y, n) in p.pads)))
     return anchor_pads_by_net, anchor_bodies
+
+
+def pin_distances_mm(
+    parts: Iterable[PlacedPart],
+    *,
+    plane_nets: frozenset[str] = DEFAULT_PLANE_NETS,
+) -> list[tuple[str, float]]:
+    """``(ref, worst-pad distance mm)`` per scorable passive, worst first.
+
+    The honest-millimetre view of pin-locality: what the placement *actually*
+    hands the router, in the units the acceptance target is written in (median
+    <= 2.5 mm, max <= 5 mm). Same kernel as the score, so the two never drift.
+    """
+    parts = list(parts)
+    anchor_pads_by_net, anchor_bodies = build_anchor_pad_index(parts)
+    rows: list[tuple[str, float]] = []
+    for p in parts:
+        if p.kind != "passive" or p.locked:
+            continue
+        res = pin_locality_for_passive(
+            list(p.pads), (p.cx, p.cy), anchor_pads_by_net, anchor_bodies,
+            plane_nets=plane_nets,
+        )
+        if res is None:
+            continue
+        rows.append((p.ref, res[1]))
+    rows.sort(key=lambda t: (-t[1], t[0]))
+    return rows
+
+
+def median_pin_distance_mm(
+    parts: Iterable[PlacedPart],
+    *,
+    plane_nets: frozenset[str] = DEFAULT_PLANE_NETS,
+) -> Optional[float]:
+    """Median worst-pad distance over scorable passives, or None if none are."""
+    dists = sorted(d for _ref, d in pin_distances_mm(parts, plane_nets=plane_nets))
+    if not dists:
+        return None
+    mid = len(dists) // 2
+    if len(dists) % 2:
+        return dists[mid]
+    return (dists[mid - 1] + dists[mid]) / 2.0
 
 
 def leaf_pin_locality(
@@ -726,7 +798,10 @@ __all__ = [
     "orientation_axis",
     "leaf_tidiness",
     "aggregate",
+    "is_pin_anchor",
     "pin_locality_for_passive",
+    "pin_distances_mm",
+    "median_pin_distance_mm",
     "build_anchor_pad_index",
     "leaf_pin_locality",
     "aggregate_pin_locality",

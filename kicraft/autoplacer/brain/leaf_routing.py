@@ -31,6 +31,27 @@ from kicraft.autoplacer.freerouting_runner import (
 from kicraft.autoplacer.hardware.adapter import KiCadAdapter
 
 
+def _internal_net_verdict(
+    validation: dict[str, Any],
+    extraction: ExtractedSubcircuitBoard,
+) -> tuple[list[str], list[str]]:
+    """``(routed_internal_nets, failed_internal_nets)`` from the DRC that just ran.
+
+    The success path used to HARDCODE "everything routed, nothing failed", so
+    per-net truth existed only inside the acceptance DRC and never reached the
+    round record -- the retry loop could not react per net, and the round log
+    said a net was routed while freerouting had silently added zero copper on it
+    (dense-soc-leaf-unconnected-plan P1.5). When the report has unconnected items
+    but no parsable net names (format drift), nothing is claimed either way.
+    """
+    internal = set(extraction.internal_net_names)
+    drc = validation.get("drc", {}) or {}
+    nets = {str(n) for n in (drc.get("unconnected_nets", []) or [])}
+    if not nets and int(drc.get("unconnected", 0) or 0) > 0:
+        return [], []
+    return sorted(internal - nets), sorted(internal & nets)
+
+
 def _resolve_breakout_specs(cfg: dict[str, Any]) -> list:
     """Build :class:`BreakoutSpec` objects from ``cfg['breakout_specs']``.
 
@@ -1052,6 +1073,51 @@ def route_local_subcircuit(
     route_timing["routed_validation_s"] = round(
         max(0.0, time.monotonic() - routed_validation_start), 3
     )
+
+    # Leaf-level C1 repair: a leaf a couple of guarded ties short of clean used
+    # to have no lever at all -- `repair_unconnected_signals` was wired into the
+    # parent compose only -- so the sole response to 1-5 residual opens was a
+    # whole new round on a fresh seed (dense-soc plan P1.6). Gated on the opens
+    # that must actually close IN this leaf (poured and interface nets close at
+    # compose), and contained by the same accept-or-revert the parent uses.
+    _repair_cap = int(cfg.get("leaf_signal_repair_max_open_nets", 6))
+    if cfg.get("leaf_signal_repair_enabled", True) and _repair_cap > 0:
+        from kicraft.autoplacer.brain.leaf_acceptance import (
+            acceptance_config_from_dict,
+            split_unconnected_nets,
+        )
+
+        _local_open, _, _ = split_unconnected_nets(
+            validation, acceptance_config_from_dict(cfg)
+        )
+        if _local_open and len(_local_open) <= _repair_cap:
+            from kicraft.autoplacer.brain.signal_repair_pass import (
+                attempt_signal_unconnected_repair,
+            )
+
+            _repair_start = time.monotonic()
+            print(
+                f"  leaf signal repair: {len(_local_open)} local open net(s) "
+                f"({', '.join(_local_open)}) -- attempting guarded ties"
+            )
+            validation = attempt_signal_unconnected_repair(
+                routed_board,
+                cfg,
+                validation,
+                anchor_names=[port.name for port in extraction.interface_ports],
+                required_anchor_names=[
+                    port.name for port in extraction.interface_ports if port.required
+                ],
+                label="leaf signal repair",
+            )
+            route_timing["leaf_signal_repair_s"] = round(
+                max(0.0, time.monotonic() - _repair_start), 3
+            )
+        elif _local_open:
+            validation["signal_unconnected_repair"] = {
+                "ran": False,
+                "reason": f"{len(_local_open)}_open_nets_over_cap_{_repair_cap}",
+            }
     if generate_diagnostics and render_intermediate:
         routed_render_start = time.monotonic()
         leaf_diagnostics = generate_leaf_diagnostic_artifacts(
@@ -1225,6 +1291,8 @@ def route_local_subcircuit(
         validation["drc"]["significant_violation_count"] = 0
         validation["drc"]["ignored_clearance_reason"] = _ignore_reason
 
+    routed_internal, failed_internal = _internal_net_verdict(validation, extraction)
+
     accepted = bool(validation.get("accepted", False))
     if not accepted:
         validation["accepted"] = False
@@ -1262,8 +1330,8 @@ def route_local_subcircuit(
                 "round_board_illegal_pre_stamp": round_board_illegal_pre_stamp,
                 "round_board_pre_route": round_board_pre_route,
                 "round_board_routed": round_board_routed,
-                "routed_internal_nets": [],
-                "failed_internal_nets": list(sorted(extraction.internal_net_names)),
+                "routed_internal_nets": routed_internal,
+                "failed_internal_nets": failed_internal,
                 "_trace_segments": [],
                 "_via_objects": [],
                 "validation": copy.deepcopy(validation),
@@ -1297,8 +1365,8 @@ def route_local_subcircuit(
             "round_board_illegal_pre_stamp": round_board_illegal_pre_stamp,
             "round_board_pre_route": round_board_pre_route,
             "round_board_routed": round_board_routed,
-            "routed_internal_nets": list(sorted(extraction.internal_net_names)),
-            "failed_internal_nets": [],
+            "routed_internal_nets": routed_internal,
+            "failed_internal_nets": failed_internal,
             "_trace_segments": [
                 copy.deepcopy(trace) for trace in imported_copper.get("traces", [])
             ],

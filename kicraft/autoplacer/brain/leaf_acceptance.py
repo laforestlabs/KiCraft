@@ -20,6 +20,7 @@ __all__ = [
     "LeafAcceptanceResult",
     "evaluate_leaf_acceptance",
     "acceptance_config_from_dict",
+    "split_unconnected_nets",
 ]
 
 
@@ -210,6 +211,27 @@ def _is_poured_net(net: str, cfg: LeafAcceptanceConfig) -> bool:
     return is_power_or_ground_name(net)
 
 
+def split_unconnected_nets(
+    validation: dict[str, Any],
+    cfg: LeafAcceptanceConfig,
+) -> tuple[list[str], list[str], list[str]]:
+    """``(local_signal, poured, interface)`` split of the leaf's unconnected nets.
+
+    The single definition of "which opens actually have to close inside this
+    leaf": power/ground (and configured *poured_nets*) close on the post-route
+    pour at compose, and interface (inter-sheet) nets are routed across the
+    *parent*. Shared by the acceptance gate and the leaf-level repair pass so
+    the repair is offered exactly the opens the gate would reject on.
+    """
+    drc = validation.get("drc", {})
+    nets = [str(n) for n in (drc.get("unconnected_nets", []) or [])]
+    interface = set(validation.get("interface_port_names", []) or [])
+    poured = [n for n in nets if _is_poured_net(n, cfg)]
+    iface = [n for n in nets if n in interface and not _is_poured_net(n, cfg)]
+    excluded = set(poured) | set(iface)
+    return [n for n in nets if n not in excluded], poured, iface
+
+
 def _gate_no_unconnected(
     validation: dict[str, Any],
     _anchor: dict[str, Any],
@@ -237,12 +259,7 @@ def _gate_no_unconnected(
             "unconnected_nets": nets,
         }
 
-    interface = set(validation.get("interface_port_names", []) or [])
-    poured = [n for n in nets if _is_poured_net(n, cfg)]
-    # Interface nets that are not already counted as poured/power.
-    iface = [n for n in nets if n in interface and not _is_poured_net(n, cfg)]
-    excluded = set(poured) | set(iface)
-    signal = [n for n in nets if n not in excluded]
+    signal, poured, iface = split_unconnected_nets(validation, cfg)
 
     # With net names available, gate on unrouted *local signal* nets only. If the
     # report had unconnected items but no parsable net names (format drift),

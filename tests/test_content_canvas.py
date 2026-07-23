@@ -322,7 +322,10 @@ def _run_ladder(monkeypatch, cfg, accept_plan, rounds=1):
     node = _FakeNode(leaf)
     calls: list[tuple[int, float, float]] = []
 
-    def fake_solve_one_round(extraction, round_cfg, seed, round_index, route):
+    def fake_solve_one_round(
+        extraction, round_cfg, seed, round_index, route,
+        place_quality_best_mm=None,
+    ):
         idx = len(calls)
         calls.append(
             (
@@ -451,7 +454,10 @@ class TestCanvasLadder:
         node = _FakeNode(leaf)
         calls = []
 
-        def fake_solve_one_round(extraction, round_cfg, seed, round_index, route):
+        def fake_solve_one_round(
+        extraction, round_cfg, seed, round_index, route,
+        place_quality_best_mm=None,
+    ):
             idx = len(calls)
             calls.append(extraction)
             routing = {

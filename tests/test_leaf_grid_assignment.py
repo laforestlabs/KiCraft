@@ -184,18 +184,27 @@ def test_slots_avoid_non_anchor_fixed_parts():
         )
 
 
-def test_assignment_sa_keeps_input_when_grid_is_not_better():
-    # Accept-if-better: when no grid assignment beats the input placement, the
-    # input is returned verbatim and the grid is neutralized (buck-3a regression:
-    # the search degraded 65.8 -> 43.4 and shipped the worse placement).
-    from types import SimpleNamespace
+class _CollapseScorer:
+    """Models the buck-3a regression: the input placement scores well, every
+    gridded arrangement scores far worse (crossings/packing collapse)."""
 
-    class _FlatScorer:
-        """Every placement scores identically, so gridding can never beat input."""
+    def __init__(self, state, home=(52.0, 52.0)):
+        self.state = state
+        self.home = home
 
-        def score(self):
-            return SimpleNamespace(total=0.0)
+    def score(self):
+        from types import SimpleNamespace
 
+        c = self.state.components["C1"]
+        at_home = (abs(c.body_center.x - self.home[0]) < 0.01
+                   and abs(c.body_center.y - self.home[1]) < 0.01)
+        return SimpleNamespace(total=80.0 if at_home else 40.0)
+
+
+def test_assignment_sa_keeps_input_when_score_collapses():
+    # Accept-if-better still holds for a score COLLAPSE: the buck-3a regression
+    # (65.8 -> 43.4 with +18 crossovers) must not ship even though gridding
+    # improves pin-adjacency. Input returned verbatim, grid neutralized.
     u1 = _ic_4pads()
     comps = {u1.ref: u1, "C1": _decap("C1", 52.0, 52.0)}
     state = _state(comps)
@@ -203,7 +212,8 @@ def test_assignment_sa_keeps_input_when_grid_is_not_better():
     assert grid.slots  # slots exist, so the guard (not the empty-grid path) fires
 
     best = grid_assignment_sa(
-        comps, grid, state, _FlatScorer(), rng=random.Random(0), max_iters=60,
+        comps, grid, state, _CollapseScorer(state), rng=random.Random(0),
+        max_iters=60,
     )
     # Input kept verbatim (C1 not moved onto a slot) ...
     assert best["C1"].body_center.x == 52.0
@@ -211,6 +221,64 @@ def test_assignment_sa_keeps_input_when_grid_is_not_better():
     # ... and the grid is neutralized so resnap_to_grid is a no-op.
     assert grid.occupied_by_ref == {}
     assert resnap_to_grid(best, grid) == 0
+    assert grid.stats["guard"] == "discard_score"
+    assert grid.stats["grid_discarded"] is True
+
+
+def test_pin_locality_floor_wins_a_score_tie():
+    # The pin-locality floor: when the total score cannot tell the two apart
+    # (it is a weighted average in which pin-locality holds ~18% of the vote),
+    # the arrangement that puts the decap on its pins wins. Silently reverting
+    # here is what left the dense-SoC leaf with 30 mm decap hauls.
+    from types import SimpleNamespace
+
+    class _FlatScorer:
+        def score(self):
+            return SimpleNamespace(total=0.0)
+
+    u1 = _ic_4pads()
+    comps = {u1.ref: u1, "C1": _decap("C1", 52.0, 52.0)}
+    state = _state(comps)
+    grid = build_anchor_grid(comps, board_outline=BOARD, pitch_gap_mm=1.0)
+
+    best = grid_assignment_sa(
+        comps, grid, state, _FlatScorer(), rng=random.Random(0), max_iters=60,
+    )
+    assert grid.stats["guard"] == "accept_pin_locality"
+    assert grid.stats["grid_pin_median_mm"] < grid.stats["input_pin_median_mm"]
+    assert "C1" in grid.occupied_by_ref
+    # and it physically moved onto a pin-adjacent slot
+    assert abs(best["C1"].body_center.x - 30.0) < 12.0
+    assert abs(best["C1"].body_center.y - 30.0) < 12.0
+
+
+def test_grid_build_stats_report_provisioning():
+    # P0.2: slot starvation (23 passives sharing 25 slots) was invisible.
+    u1 = _ic_4pads()
+    comps = {u1.ref: u1}
+    for i in range(4):
+        comps[f"C{i}"] = _decap(f"C{i}", 50.0, 40.0 + i * 3)
+    grid = build_anchor_grid(comps, board_outline=BOARD, pitch_gap_mm=0.5)
+    st = grid.stats
+    assert st["gridable_passives"] == 4
+    assert st["slots_total"] == len(grid.slots)
+    assert st["provisioning_ratio"] >= 3.0  # honored over-provisioning target
+    assert st["slots_per_anchor"]["U1"] > 0
+
+
+def test_crystal_and_button_anchor_their_companions():
+    # P0.3: X1/SW1/BT1 classify as misc/battery, so with only ic/regulator/
+    # connector anchored their companions got no slots anywhere near them.
+    u1 = _ic_4pads()
+    x1 = Component(
+        ref="X1", value="", pos=Point(45.0, 30.0), rotation=0.0, layer=Layer.FRONT,
+        width_mm=3.2, height_mm=2.5, kind="misc", body_center=Point(45.0, 30.0),
+        pads=[_pad("X1", "1", 44.0, 30.0, "OSC1"), _pad("X1", "2", 46.0, 30.0, "OSC2")],
+    )
+    comps = {u1.ref: u1, "X1": x1, "C1": _decap("C1", 10.0, 10.0, "OSC1", "GND")}
+    grid = build_anchor_grid(comps, board_outline=BOARD, pitch_gap_mm=0.5)
+    assert "X1" in grid.stats["anchors"]
+    assert any("OSC1" in s.nets for s in grid.slots)
 
 
 def test_resnap_is_idempotent():

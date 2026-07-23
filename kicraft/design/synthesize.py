@@ -200,6 +200,10 @@ def run(
         isolate_opposite_edge_connectors,
         normalize_array_decaps,
     )
+    from kicraft.design.synthesis.sheet_partition import (
+        split_dense_sheets_enabled,
+        split_dense_soc_sheets,
+    )
     # A decap-only ArraySpec (per-LED bypass caps mistakenly declared as their
     # own grid) would grid the caps on top of the LED array -> data ties blocked
     # -> doomed route. Drop it first so the caps become array companions.
@@ -219,6 +223,14 @@ def run(
     # (KC-58KPS3). Move the minority-edge connectors to their own sheet so
     # each leaf has compatible edge constraints.
     isolate_opposite_edge_connectors(state.bom, state.architecture)
+    # A whole MCU subsystem on one sheet is the #1 leaf place/route failure class
+    # by breadth. Move only DETACHABLE subfunctions (debug header, button,
+    # battery, RF chain) off it -- never a decoupling cap or a crystal, which
+    # must sit at the SoC's pins. OFF by default: it restructures every dense
+    # design's sheets, so it needs its own self-eval batch to be trusted (see
+    # docs/plans/dense-soc-leaf-unconnected-plan.md P3).
+    if split_dense_sheets_enabled():
+        split_dense_soc_sheets(state.bom, state.architecture)
     ensure_leaf_stems_distinct(state.project_stem, state.architecture.sheets)
 
     sheet_instances = build_sheet_instances(state.architecture, state.bom)
