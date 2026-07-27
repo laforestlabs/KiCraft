@@ -270,13 +270,38 @@ BOM_RECONCILE_TARGET = "bom"
 BOM_RECONCILE_MAX_PASSES = 3
 
 
+# A wiring deficit that asks for a swap, not an addition: "Replace U1
+# (ADuM1301ARWZ) with two ADuM1201ARZ ...". The add-only instruction below
+# actively forbade the drop ("do NOT drop any part already present"), so the
+# BOM stage obeyed the instruction over the deficit and recommitted an
+# identical BOM until the stuck-loop guard killed the run (self-eval
+# 2026-07-27 run_08).
+_REPLACE_ASK_RE = re.compile(
+    r"\breplace\s+(?:the\s+)?[A-Z]{1,4}\d+[A-Z0-9]*\b[\s\S]{0,120}?\bwith\b",
+    re.IGNORECASE,
+)
+
+
 def bom_reconcile_instruction(questions) -> str:
     """Turn wiring's ``reconcile_target="bom"`` deficit note(s) into a BOM-stage
-    instruction that adds the missing parts. Each question's text is already a
-    precise "add N of X for pins Y" statement (per the wiring spec)."""
+    instruction that applies them. Each question's text is already a precise
+    "add N of X for pins Y" (or "replace REF with ...") statement per the wiring
+    spec; the framing must permit exactly what the deficit asks -- add-only when
+    it only adds, replacement-permitting when it names a swap."""
     lines = [str(q.get("text", "")).strip()
              for q in questions if str(q.get("text", "")).strip()]
     body = "\n- ".join(lines)
+    if any(_REPLACE_ASK_RE.search(ln) for ln in lines):
+        return (
+            "The wiring stage could not finish because the BOM does not provide "
+            "the parts it needs. Apply the change(s) described below EXACTLY: "
+            "where a replacement is named, remove ONLY the named part(s) and add "
+            "the named successor(s) (fresh unique refs, correct value and "
+            "footprint, the same sheet as the IC each serves, ic_groups updated "
+            "to match); where an addition is named, add it the same way. Keep "
+            "every part the note does not name. Then re-emit the FULL BOM. Do "
+            "NOT ask the user:\n- " + body
+        )
     return (
         "The wiring stage could not finish because the BOM is missing supporting "
         "parts its ICs require. Add the parts described below: give each a fresh, "
@@ -310,6 +335,28 @@ _PASSIVE_ASK_RE = re.compile(
     r"[^.;,]*?\b(capacitor|resistor|inductor)s?\b",
     re.IGNORECASE,
 )
+# Kind-then-value supplement: "Add a bottom resistor (e.g., 3.9k, typical for
+# 3.3V output)" names the value AFTER the noun, which the value-first regex
+# above cannot see -- self-eval 2026-07-27 run_22 died with exactly this
+# single-resistor ask falling through to an LLM pass that never applied it.
+# Scanned ONLY inside sentences containing an ask-verb (see
+# ``_ASK_VERB_RE``), so descriptive prose like "the BOM has only a top
+# resistor R3 (12k)" can never provision a duplicate.
+_PASSIVE_KIND_VALUE_RE = re.compile(
+    r"(?:\b(a|an|one|two|three|four|\d+)\s+)?"
+    r"(?:[a-z-]+\s+){0,2}?(capacitor|resistor|inductor)s?\b"
+    r"[^.;]{0,40}?"
+    r"(\d+(?:\.\d+)?[\s-]?(?:[pnumµ]F|[kM](?:Ω|ohm)?\b|Ω|ohm\b|R\b))",
+    re.IGNORECASE,
+)
+_ASK_VERB_RE = re.compile(
+    r"\b(add|need(?:s|ed)?|require(?:s|d)?|missing|provision|include)\b",
+    re.IGNORECASE,
+)
+# "e.g."/"i.e." would break the sentence split below ("(e.g., 3.9k" spans two
+# periods); decimals are protected by the (?!\d) lookahead instead.
+_ABBREV_DOT_RE = re.compile(r"\b([ei])\.\s?([ge])\.,?", re.IGNORECASE)
+_SENTENCE_SPLIT_RE = re.compile(r"[;.](?!\d)")
 # Part nouns the deterministic passive-add can NEVER provision. When a deficit
 # note asks for one of these alongside parseable passives, "added something"
 # must not read as "added everything": board 639's note asked for a crystal +
@@ -319,11 +366,12 @@ _PASSIVE_ASK_RE = re.compile(
 _NON_PASSIVE_ASK_RE = re.compile(
     r"\b(crystal|oscillator|resonator|antenna|u\.?fl|connector|header|jack|"
     r"socket|receptacle|diode|led\b|transistor|mosfet|regulator|switch|"
-    r"button|fuse|ferrite|choke|varistor|tvs)\b",
+    r"button|fuse|ferrite|choke|varistor|tvs|test[ _-]?(?:point|pad)|"
+    r"screw[ _-]?terminals?|terminal[ _-]?blocks?)\b",
     re.IGNORECASE,
 )
 _QTY_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4}
-_SHEET_RE = re.compile(r"on the ([A-Z][A-Z0-9 _/-]*?) sheet\b")
+_SHEET_RE = re.compile(r"\b(?:on|to) the ([A-Z][A-Z0-9 _/-]*?) sheet\b")
 _KIND_PREFIX = {"capacitor": "C", "resistor": "R", "inductor": "L"}
 _KIND_SYMBOL = {"capacitor": "Device:C", "resistor": "Device:R",
                 "inductor": "Device:L"}
@@ -341,6 +389,17 @@ def _norm_value(v: str) -> str:
     return s
 
 
+def _ask_qty(qty_tok: str | None) -> int:
+    tok = (qty_tok or "a").lower()
+    qty = _QTY_WORDS.get(tok)
+    if qty is None:
+        try:
+            qty = max(1, min(8, int(tok)))
+        except ValueError:
+            qty = 1
+    return qty
+
+
 def parse_passive_deficits(texts: list[str]) -> list[dict]:
     """Extract fully-specified passive asks from deficit prose. Returns
     ``[{kind, value, qty, sheet}]``; anything the regex can't read with
@@ -356,20 +415,33 @@ def parse_passive_deficits(texts: list[str]) -> list[dict]:
             if m_sheet and " sheets" not in t
             else None
         )
+        seen: set[tuple[str, str]] = set()
         for m in _PASSIVE_ASK_RE.finditer(t):
-            qty_tok = (m.group(1) or "a").lower()
-            qty = _QTY_WORDS.get(qty_tok)
-            if qty is None:
-                try:
-                    qty = max(1, min(8, int(qty_tok)))
-                except ValueError:
-                    qty = 1
+            kind, value = m.group(3).lower(), m.group(2).strip()
+            seen.add((kind, _norm_value(value)))
             asks.append({
-                "kind": m.group(3).lower(),
-                "value": m.group(2).strip(),
-                "qty": qty,
+                "kind": kind,
+                "value": value,
+                "qty": _ask_qty(m.group(1)),
                 "sheet": sheet,
             })
+        # Kind-then-value supplement, scoped to ask-verb sentences and deduped
+        # against the value-first pass so the same ask never provisions twice.
+        for sent in _SENTENCE_SPLIT_RE.split(_ABBREV_DOT_RE.sub(r"\1\2", t)):
+            if not _ASK_VERB_RE.search(sent):
+                continue
+            for m in _PASSIVE_KIND_VALUE_RE.finditer(sent):
+                kind, value = m.group(2).lower(), m.group(3).strip()
+                key = (kind, _norm_value(value))
+                if key in seen:
+                    continue
+                seen.add(key)
+                asks.append({
+                    "kind": kind,
+                    "value": value,
+                    "qty": _ask_qty(m.group(1)),
+                    "sheet": sheet,
+                })
     return asks
 
 
@@ -513,6 +585,24 @@ def apply_deterministic_bom_adds(ws, deficits: list[dict]) -> list[str]:
     return added
 
 
+# Deficit identity for the stuck-loop test: the set of component refs the
+# note names plus the passive kinds it asks for. Models reword the same
+# deficit between passes ("3.3k to 4.7k" -> "3.9k, typical"), so raw-text
+# equality would misread a reworded repeat as a new deficit; refs+kinds are
+# stable across rewordings while genuinely different deficits (screw terminals
+# vs a BOOT0 strap) differ.
+_REF_TOKEN_RE = re.compile(r"\b[A-Z]{1,4}\d{1,4}\b")
+
+
+def _deficit_key(questions) -> tuple[frozenset, frozenset]:
+    texts = [str(q.get("text", "")) for q in (questions or [])]
+    refs = frozenset(
+        m.group(0) for t in texts for m in _REF_TOKEN_RE.finditer(t)
+    )
+    kinds = frozenset(a["kind"] for a in parse_passive_deficits(texts))
+    return (refs, kinds)
+
+
 def _bom_signature(ws) -> tuple[int, frozenset] | None:
     """Identity of the committed BOM (part count + ref set), for detecting a
     reconcile pass that changed nothing. ``None`` when the state is unreadable
@@ -609,10 +699,63 @@ def maybe_bom_reconcile(
     passes = reconcile_passes + 1
     after = _bom_signature(ws)
     if before is not None and after is not None and after == before:
+        # A changed-nothing pass is a stuck loop ONLY when wiring re-parks on
+        # the SAME deficit. When it re-parks on a NEW one the chain advanced
+        # (wiring revealed the next genuine need) and killing the whole budget
+        # here denies that new deficit even its deterministic-add attempt --
+        # self-eval 2026-07-27 run_24 died with a trivially clonable BOOT0
+        # strap ask exactly this way.
+        new_defs = bom_reconcile_deficits(rr)
+        if new_defs and _deficit_key(new_defs) != _deficit_key(deficits):
+            if progress is not None:
+                progress({"kind": "build_log",
+                          "text": "[bom-reconcile] the pass changed nothing in "
+                                  "the committed BOM, but wiring re-parked on a "
+                                  "DIFFERENT deficit -- treating as an advancing "
+                                  "chain, not a stuck loop"})
+        else:
+            if progress is not None:
+                progress({"kind": "build_log",
+                          "text": "[bom-reconcile] the pass changed nothing in the "
+                                  "committed BOM -- stopping reconcile (stuck loop, "
+                                  "not a deficit chain)"})
+            passes = BOM_RECONCILE_MAX_PASSES
+        return rr, passes
+    # The BOM changed; if wiring still re-parks on the SAME deficit, the model
+    # changed something irrelevant -- spend one pointed retry that quotes the
+    # unmet ask verbatim before the caller burns another generic pass
+    # (2026-07-27 run_22: two "ok" BOM passes never added the asked-for FB
+    # resistor).
+    new_defs = bom_reconcile_deficits(rr)
+    if (new_defs and passes < BOM_RECONCILE_MAX_PASSES
+            and _deficit_key(new_defs) == _deficit_key(deficits)):
         if progress is not None:
             progress({"kind": "build_log",
-                      "text": "[bom-reconcile] the pass changed nothing in the "
-                              "committed BOM -- stopping reconcile (stuck loop, "
-                              "not a deficit chain)"})
-        passes = BOM_RECONCILE_MAX_PASSES
+                      "text": f"[bom-reconcile] the pass changed the BOM but did "
+                              f"NOT resolve the deficit; pointed retry (pass "
+                              f"{passes + 1}/{BOM_RECONCILE_MAX_PASSES}) naming "
+                              "the unmet ask"})
+        before2 = after
+        rr = run_session(
+            ws, brief, ["bom", "wiring"],
+            instruction=(
+                "Your previous BOM pass changed the BOM but did NOT resolve the "
+                "deficit below -- the named part(s) are STILL missing. Apply the "
+                "note literally this time. "
+                + bom_reconcile_instruction(deficits)
+            ),
+            progress=progress, run_id=run_id, core_defaults=core_defaults,
+            client=client,
+        )
+        passes += 1
+        after2 = _bom_signature(ws)
+        retry_defs = bom_reconcile_deficits(rr)
+        if (before2 is not None and after2 is not None and after2 == before2
+                and retry_defs
+                and _deficit_key(retry_defs) == _deficit_key(deficits)):
+            if progress is not None:
+                progress({"kind": "build_log",
+                          "text": "[bom-reconcile] pointed retry changed nothing "
+                                  "either -- stopping reconcile (stuck loop)"})
+            passes = BOM_RECONCILE_MAX_PASSES
     return rr, passes

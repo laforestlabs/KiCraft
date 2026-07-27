@@ -93,6 +93,52 @@ def build_run_digest(project_dir, m, *, budget: int = 16000) -> str:
                 )
     except Exception:
         reg_line = ""
+    # Substitution ledger, surfaced deterministically (2026-07-27 fix-plan
+    # P2.5): the silent_substitution gate fires on UNSURFACED swaps, so the
+    # judge must see what IS on the record even when the state dump above is
+    # budget-truncated.
+    sub_line = ""
+    try:
+        bom = state.get("bom") if isinstance(state, dict) else None
+        subs = (bom or {}).get("substitutions") or []
+        if subs:
+            sub_line = (
+                "\n  substitutions (recorded by the design, NOT silent): "
+                + "; ".join(
+                    f"wanted {s.get('wanted')!r} -> shipped {s.get('got')!r}"
+                    + (f" ({s.get('reason')})" if s.get("reason") else "")
+                    for s in subs if isinstance(s, dict)
+                )
+            )
+        elif isinstance(bom, dict):
+            sub_line = "\n  substitutions ledger: empty (no recorded deviations)"
+    except Exception:
+        sub_line = ""
+    # MCU programming path, computed (not judged): the judge over-fired
+    # unprogrammable_mcu on boards §9.29 deliberately accepts (BOOTSEL+USB is
+    # the RP2040 ROM UF2 path; a UPDI TP pad satisfies a no-connectors brief)
+    # because the digest never carried the deterministic verdict (2026-07-27
+    # runs 10/31).
+    prog_line = ""
+    try:
+        from kicraft.design.models import BOM as _BOM
+        from kicraft.design.synthesis.validation import mcu_programming_facts
+        bom = state.get("bom") if isinstance(state, dict) else None
+        if isinstance(bom, dict):
+            facts = mcu_programming_facts(_BOM.model_validate(bom))
+            if facts:
+                verdict = ("PASS -- a workable first-flash path exists"
+                           if facts["access_ok"] and facts["path_ok"]
+                           else "GAPS: " + "; ".join(
+                               facts["access_problems"] + facts["path_problems"]))
+                prog_line = (
+                    "\n  MCU programming path (computed, authoritative): "
+                    f"{verdict}; MCU(s): {', '.join(facts['mcus'])}; "
+                    "programming-access parts: "
+                    + (", ".join(facts["access_parts"]) or "NONE")
+                )
+    except Exception:
+        prog_line = ""
     parts.append(
         "PIPELINE RESULT (deterministic facts):\n"
         f"  synthesized: {gen['synthesized']} (pcb={gen['pcb']} sch={gen['sch']})\n"
@@ -102,6 +148,8 @@ def build_run_digest(project_dir, m, *, budget: int = 16000) -> str:
         f"{tr.get('ask_questions')} clarifying question(s), crashes={tr.get('crashes')}"
         + silk_line
         + reg_line
+        + sub_line
+        + prog_line
     )
     return "\n\n".join(parts)
 
@@ -155,7 +203,9 @@ def evaluate_project(project_dir, client, *, rubric: dict | None = None,
         "target_mode": "web",
         "metrics": metrics_block(m),
         "dimensions": dims,
-        "gates": {"triggered": gates, "observer_todo": []},
+        "gates": {"triggered": gates,
+                  "observer_rejected": (judge or {}).get("gates_rejected") or [],
+                  "observer_todo": []},
         "judge": {
             "ran": judge is not None,
             "ok": (judge["ok"] if judge else None),

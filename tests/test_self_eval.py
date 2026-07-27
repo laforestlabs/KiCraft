@@ -87,9 +87,14 @@ def test_maybe_bom_reconcile_budget_cap_stops_redriving(monkeypatch):
 
 
 def test_maybe_bom_reconcile_chain_counts_passes(monkeypatch, tmp_path):
-    # N3: a deficit CHAIN (each pass genuinely adds parts) advances the
-    # counter one pass at a time up to the budget -- the old single-shot
-    # guard made every chain >= 2 unwinnable by construction.
+    # N3: a deficit CHAIN (each pass genuinely adds parts and wiring then
+    # surfaces the NEXT, different shortfall -- every real chain observed
+    # names a new part each link) advances the counter one pass at a time up
+    # to the budget -- the old single-shot guard made every chain >= 2
+    # unwinnable by construction. A pass that changes the BOM while the SAME
+    # deficit re-parks is no longer a chain link: that is run_22's
+    # added-something-irrelevant pathology, covered by the pointed-retry test
+    # in test_bom_reconcile_deterministic.py (2026-07-27 fix-plan P1).
     from kicraft.server import session
 
     ws = _ws_with_bom(tmp_path, ["U1"])
@@ -98,7 +103,10 @@ def test_maybe_bom_reconcile_chain_counts_passes(monkeypatch, tmp_path):
     def fake_run_session(w, brief, stages, **kw):
         n[0] += 1
         _ws_with_bom(tmp_path, ["U1"] + [f"C{i}" for i in range(n[0])])
-        return dict(_DEFICIT_PARK)  # wiring parks again on the NEXT deficit
+        park = dict(_DEFICIT_PARK)  # wiring parks again on the NEXT deficit
+        park["questions"] = [{"text": f"add a 1uF cap for U{n[0] + 1}",
+                              "reconcile_target": "bom", "blocking": True}]
+        return park
 
     monkeypatch.setattr(session, "run_session", fake_run_session)
     passes = 0

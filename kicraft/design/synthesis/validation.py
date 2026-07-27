@@ -1730,6 +1730,7 @@ def _programming_access_parts(bom) -> list:
 
 # Button/part identities for the family strap rules. Matched against
 # "symbol value sourcing_note" like _PROG_ACCESS_PART_RE.
+_STM32_FAMILY_RE = re.compile(r"stm32", re.I)
 _BOOT_BUTTON_RE = re.compile(r"boot|io0\b|gpio0\b|io9\b|download|flash.?mode", re.I)
 _RESET_BUTTON_RE = re.compile(r"reset|\brst\b|\ben\b|enable|\brun\b", re.I)
 _USB_UART_BRIDGE_RE = re.compile(
@@ -1777,6 +1778,23 @@ def _family_strap_gaps(bom, mcus, access) -> list[str]:
                     "bridge with DTR/RTS auto-reset, or TP pads on the "
                     "straps"
                 )
+        elif _STM32_FAMILY_RE.search(ident):
+            # STM32's ROM bootloader (USB-DFU and UART alike) is only entered
+            # with BOOT0 pulled HIGH at reset, so "has a USB connector" is not
+            # a programming story on its own -- self-eval 2026-07-27 run_24
+            # shipped an STM32F042 whose assumed path was native-USB DFU with
+            # no BOOT0 access part anywhere in the BOM (and died in reconcile
+            # asking for exactly that). One TP suffices: BOOT0 to a pad,
+            # reset by power cycle.
+            has_boot = any(_BOOT_BUTTON_RE.search(_ident(p)) for p in buttons)
+            if not (swd_access or bridge or has_boot or tps):
+                gaps.append(
+                    f"{part.ref} ({ident}): entering the STM32 ROM bootloader "
+                    "(USB-DFU/UART) needs BOOT0 pulled HIGH at reset and no "
+                    "other programming story exists -- add an SWD header "
+                    "(name 'SWD'/'DEBUG' in its value), a BOOT0 button/jumper "
+                    "(SW ref, named BOOT), or a TP test pad on BOOT0"
+                )
     return gaps
 
 
@@ -1809,6 +1827,10 @@ def check_mcu_programming_access(bom) -> CheckResult:
     * ESP32 family (run_30): entering download mode needs the BOOT strap +
       a reset, so the BOM must carry BOOT+EN/RESET buttons, or a USB-UART
       bridge (DTR/RTS auto-reset), or strap test pads.
+    * STM32 (2026-07-27 run_24): the ROM bootloader (USB-DFU/UART) is only
+      entered with BOOT0 HIGH at reset -- a BOM whose only story is native
+      USB must also carry a BOOT0 affordance (button/jumper/TP) or SWD
+      access.
     """
     mcus = [p for p in bom.parts if _is_mcu_part(p)]
     if not mcus:
@@ -1872,6 +1894,34 @@ def check_mcu_programming_access(bom) -> CheckResult:
         ),
         offenders=bad,
     )
+
+
+def mcu_programming_facts(bom) -> dict | None:
+    """Deterministic programming-path facts for the eval digest (2026-07-27
+    fix-plan P2.5).
+
+    The judge re-derived programmability from a digest that never carried the
+    §9.29/§9.21 verdicts and over-fired ``unprogrammable_mcu`` on boards those
+    checks deliberately accept (a BOOTSEL button + USB is the RP2040 ROM UF2
+    path; a UPDI TP pad satisfies a no-connectors brief). Handing the judge
+    the computed verdict pre-empts the guess, exactly like
+    ``regulator_vout_facts``. Returns ``None`` when the BOM has no MCU."""
+    mcus = [p for p in bom.parts if _is_mcu_part(p)]
+    if not mcus:
+        return None
+    access = _programming_access_parts(bom)
+    acc = check_mcu_programming_access(bom)
+    path = check_mcu_programming_path(bom)
+    return {
+        "mcus": [f"{p.ref} ({p.symbol} {p.value})".strip() for p in mcus],
+        "access_parts": [
+            f"{p.ref} ({(p.value or p.symbol).strip()})" for p in access
+        ],
+        "access_ok": acc.ok,
+        "access_problems": list(acc.offenders),
+        "path_ok": path.ok,
+        "path_problems": list(path.offenders),
+    }
 
 
 # ---------- §9.22 breakout / adapter intent (advisory) ----------
@@ -2408,6 +2458,191 @@ def check_named_part_substitutions(intent, bom) -> CheckResult:
         )
     return CheckResult(name=name, ok=True, message="all named parts match BOM")
 
+
+# ---------- §9.33 spec-named part accountability (hard) ----------
+#
+# The 2026-07-27 self-eval batch capped 6 runs on silent_substitution: an
+# architecture-named RECOM RP12-2412DA (~500 mA/rail) silently became a
+# WRA2412S-3WR2 (~125 mA/rail); a symbol-field STM32F103C8T6 shipped as a
+# CBT6. §9.23 above only covers intent.named_parts (advisory); the
+# spec/architecture free text is where the model itself commits to example
+# parts, and a BOM that quietly walks away from them is the gate's exact
+# condition. HARD at BOM commit: the model still has retries, and the fix is
+# always writable -- use the named part, or record the swap in
+# ``bom.substitutions`` (that ledger is the surfacing the gate demands; the
+# substitution itself is often a fine engineering call).
+#
+# The token regex is deliberately conservative (>= 2 letters, >= 2 digits,
+# total >= 6, protocol/package/pin-name stoplist): a missed family name like
+# "LM317" costs nothing (no enforcement), while a false positive would cost a
+# commit retry.
+
+_MPN_TOKEN_RE = re.compile(r"\b[A-Za-z]{2,4}[0-9]{2,}[A-Za-z0-9.\-]*")
+_MPN_STOPWORD_RE = re.compile(
+    r"^(?:USB|COM|GPIO|ADC|DAC|TIM|UART|USART|SPI|I2C|I2S|CAN|PWM|AIN|AOUT|"
+    r"EXTI|REV|VER|LQFP|TQFP|QFN|DFN|SOIC|SOP|SSOP|TSSOP|MSOP|SOT|DIP|PDIP|"
+    r"SOD|BGA|TO|IEC|ISO|AWG)[0-9]",
+    re.IGNORECASE,
+)
+
+
+def _spec_named_tokens(functional_spec, architecture) -> dict[str, str]:
+    """MPN-like tokens the spec/architecture free text commits to, keyed by
+    lowercase form (original casing kept for messages)."""
+    texts: list[str] = []
+    if architecture is not None:
+        texts += list(getattr(architecture, "assumptions", None) or [])
+        topo = getattr(architecture, "topologies", None) or {}
+        texts += [f"{k}: {v}" for k, v in topo.items()]
+        texts += [s.function or "" for s in (architecture.sheets or [])]
+    if functional_spec is not None:
+        texts += list(getattr(functional_spec, "assumptions", None) or [])
+        texts += [b.purpose or "" for b in (functional_spec.blocks or [])]
+    out: dict[str, str] = {}
+    for t in texts:
+        for m in _MPN_TOKEN_RE.finditer(str(t)):
+            tok = m.group(0).rstrip(".-")
+            if len(tok) < 6 or _MPN_STOPWORD_RE.match(tok):
+                continue
+            out.setdefault(tok.lower(), tok)
+    return out
+
+
+def check_spec_named_mpn_substitutions(functional_spec, architecture, bom) -> CheckResult:
+    """§9.33 (hard) -- every spec-named MPN is either in the BOM or in the
+    ``bom.substitutions`` ledger. See the section comment."""
+    name = "9.33 spec-named part accountability"
+    if bom is None or (functional_spec is None and architecture is None):
+        return CheckResult(name=name, ok=True, message="not applicable")
+    tokens = _spec_named_tokens(functional_spec, architecture)
+    if not tokens:
+        return CheckResult(name=name, ok=True,
+                           message="no spec-named MPNs to account for")
+    parts_text = " ".join(
+        f"{p.value} {p.mpn or ''} {p.sourcing_note or ''}"
+        for p in (bom.parts or [])
+    ).lower()
+    surfaced = " ".join(
+        [f"{s.wanted} {s.got} {s.reason}"
+         for s in (getattr(bom, "substitutions", None) or [])]
+        + list(bom.assumptions or [])
+    ).lower()
+    offenders = [
+        f"spec/architecture names {orig!r} but the BOM neither ships it nor "
+        f"records a substitution for it"
+        for low, orig in sorted(tokens.items())
+        if low not in parts_text and low not in surfaced
+    ]
+    if offenders:
+        return CheckResult(
+            name=name, ok=False,
+            message=(
+                f"{len(offenders)} spec-named part(s) silently missing from "
+                "the BOM -- either use the named part, or add a "
+                'bom.substitutions entry {"wanted": "<named part>", "got": '
+                '"<shipped part>", "reason": "<why>"} so the swap is '
+                "surfaced, not silent"
+            ),
+            offenders=offenders,
+        )
+    return CheckResult(name=name, ok=True,
+                       message="all spec-named parts shipped or ledgered")
+
+
+# ---------- §9.34 brief-stated mount type (hard) ----------
+#
+# 2026-07-27 run_20: the brief said "SMT I2C OLED" and the BOM shipped a
+# through-hole OLED (footprint OLED-TH_..._P2.54), unsurfaced -- a
+# silent_substitution cap. When the USER's own words pin a mount type to a
+# part, a contradicting footprint must be ledgered. Narrow by construction:
+# only fires on an explicit SMT/SMD/through-hole qualifier in the intent
+# text, only for parts the qualified noun actually matches, and only when
+# the footprint classifies unambiguously.
+
+_MOUNT_ASK_RE = re.compile(
+    r"\b(?P<mount>SMT|SMD|surface[- ]?mount(?:ed)?|through[- ]?hole|THT)\b"
+    r"[ ,]*(?P<noun>(?:[A-Za-z0-9/.+-]+ ?){1,3})",
+    re.IGNORECASE,
+)
+_TH_FOOTPRINT_RE = re.compile(
+    r"THT|(?:^|[_:-])TH(?:[_-])|Through.?Hole|_DIP|DIP-|Axial|Radial|P2\.54",
+    re.IGNORECASE,
+)
+_SMD_FOOTPRINT_RE = re.compile(
+    r"SMD|SMT|(?:^|[_:-])(?:0402|0603|0805|1206|1210|2512)(?:[_-]|$)|SOIC|"
+    r"QFN|LQFP|TQFP|SOT|SSOP|TSSOP|MSOP|BGA|WLCSP|PLCC",
+    re.IGNORECASE,
+)
+_MOUNT_NOUN_STOPWORDS = frozenset({
+    "the", "and", "with", "for", "from", "into", "that", "this", "over",
+    "under", "onto", "plus", "component", "components", "part", "parts",
+    "device", "devices", "package", "packages", "only", "all", "version",
+    "variant", "where", "possible", "preferred",
+})
+
+
+def _mount_class(footprint: str) -> str | None:
+    """"th" / "smd" / None (unclassifiable -- never judged)."""
+    th = bool(_TH_FOOTPRINT_RE.search(footprint or ""))
+    smd = bool(_SMD_FOOTPRINT_RE.search(footprint or ""))
+    if th == smd:
+        return None
+    return "th" if th else "smd"
+
+
+def check_mount_type_consistency(intent, bom) -> CheckResult:
+    """§9.34 (hard) -- a brief-stated SMT/through-hole qualifier must match
+    the shipped footprint, or be ledgered. See the section comment."""
+    name = "9.34 brief-stated mount type"
+    if intent is None or bom is None:
+        return CheckResult(name=name, ok=True, message="not applicable")
+    text = " ".join(
+        [getattr(intent, "goal", "") or ""]
+        + list(getattr(intent, "constraints", None) or [])
+        + list(getattr(intent, "named_parts", None) or [])
+    )
+    surfaced = " ".join(
+        [f"{s.wanted} {s.got} {s.reason}"
+         for s in (getattr(bom, "substitutions", None) or [])]
+        + list(bom.assumptions or [])
+    ).lower()
+    offenders: list[str] = []
+    for m in _MOUNT_ASK_RE.finditer(text):
+        wanted = ("smd" if m.group("mount")[:1].lower() == "s" else "th")
+        nouns = [
+            w.lower() for w in m.group("noun").split()
+            if len(w) >= 3 and w.lower() not in _MOUNT_NOUN_STOPWORDS
+        ]
+        if not nouns:
+            continue
+        for p in (bom.parts or []):
+            ident = (f"{p.value} {p.symbol} {p.footprint} "
+                     f"{p.sourcing_note or ''}").lower()
+            hit = [n for n in nouns if n in ident]
+            if not hit:
+                continue
+            got = _mount_class(p.footprint)
+            if got is None or got == wanted:
+                continue
+            if any(n in surfaced for n in hit) or p.ref.lower() in surfaced:
+                continue  # the deviation is on the record -- not silent
+            offenders.append(
+                f"{p.ref} ({p.value}): the brief asks for a "
+                f"{'surface-mount' if wanted == 'smd' else 'through-hole'} "
+                f"{' '.join(hit)} but footprint {p.footprint!r} is "
+                f"{'through-hole' if got == 'th' else 'surface-mount'} -- "
+                "use a matching footprint or record the deviation in "
+                "bom.substitutions"
+            )
+    if offenders:
+        return CheckResult(
+            name=name, ok=False,
+            message=(f"{len(offenders)} part(s) contradict a mount type the "
+                     "brief states explicitly"),
+            offenders=offenders,
+        )
+    return CheckResult(name=name, ok=True,
+                       message="no brief-stated mount-type contradictions")
 
 
 # ---------- §9.24 opposite-edge connector conflict ----------

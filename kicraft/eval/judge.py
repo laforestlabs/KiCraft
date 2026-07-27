@@ -21,6 +21,7 @@ closed (levels left null, an error recorded) rather than guessing a score.
 from __future__ import annotations
 
 import json
+import re
 
 _SYSTEM = (
     "You are a meticulous, skeptical hardware design reviewer. You grade a COMPLETED "
@@ -60,7 +61,10 @@ def _render_rubric_section(jdims: list[dict], ogates: list[dict]) -> str:
         out.append("Anchors:")
         for level in sorted(d["anchors"]):
             out.append(f"  {level}: {d['anchors'][level]}")
-    out.append("\nOBSERVER GATES (list in triggered_gates ONLY with concrete evidence):")
+    out.append(
+        "\nOBSERVER GATES (include a gate in triggered_gates ONLY if it FIRES, "
+        "with concrete evidence; do NOT enumerate gates that do not fire. If you "
+        "mention a gate at all, set its \"triggered\" field explicitly):")
     for g in ogates:
         out.append(f"  - {g['id']} (cap {g['cap']}): {g['condition']}")
     return "\n".join(out)
@@ -75,11 +79,14 @@ def _output_contract(jdims: list[dict]) -> str:
         '    "<dimension_id>": {"level": <integer 0-4>, "evidence": "<one or two sentences '
         'citing the digest>"}\n'
         "  },\n"
-        '  "triggered_gates": [ {"id": "<observer gate id>", "evidence": "<why it holds>"} ]\n'
+        '  "triggered_gates": [ {"id": "<observer gate id>", "triggered": true, '
+        '"evidence": "<why it holds>"} ]\n'
         "}\n"
         f"dimensions MUST contain exactly these keys: {ids}. "
         "Every level is an integer 0-4 per that dimension's anchors. "
-        "triggered_gates may be empty."
+        "triggered_gates may be empty; it is the list of gates that FIRE. An "
+        'entry with "triggered": false is ignored -- prefer omitting non-firing '
+        "gates entirely."
     )
 
 
@@ -140,33 +147,63 @@ def _coerce_level(lvl):
     return None
 
 
+# Self-negating gate evidence: the judge sometimes ENUMERATES observer gates
+# with a verdict in the evidence field instead of listing only firing ones
+# (2026-07-27 batch: run_34 was capped 73->50 by evidence literally ending
+# "Gate does not trigger."; run_17 capped 80.5->55 by "there is nothing to
+# silently substitute against"). Applied only to legacy entries that carry no
+# explicit "triggered" boolean; kept narrow so affirmative evidence that
+# happens to contain "not surfaced"/"no open_question" is never screened.
+_GATE_NEGATION_RE = re.compile(
+    r"(?:\b(?:does|do|did)\s*(?:not|n't)\s+(?:trigger|hold|apply|fire)\b"
+    r"|\bnot\s+triggered\b"
+    r"|\bnothing\s+to\s+(?:\w+\s+){0,4}substitut"
+    r"|\bno\s+(?:named|specific)\s+parts?\s+were\s+specified\b)",
+    re.IGNORECASE,
+)
+
+
 def _validate(verdict, jdims: list[dict], ogates: list[dict]):
-    """(ok, dims, gates, error). dims maps each J id -> {level, evidence}."""
+    """(ok, dims, gates, rejected, error). dims maps each J id ->
+    {level, evidence}; ``gates`` are the AFFIRMED observer gates, ``rejected``
+    the mentioned-but-not-firing ones (kept for the report, never applied)."""
     if not isinstance(verdict, dict):
-        return False, {}, [], "no JSON object found in reply"
+        return False, {}, [], [], "no JSON object found in reply"
     dverd = verdict.get("dimensions")
     if not isinstance(dverd, dict):
-        return False, {}, [], "missing 'dimensions' object"
+        return False, {}, [], [], "missing 'dimensions' object"
 
     dims = {}
     for d in jdims:
         did = d["id"]
         entry = dverd.get(did)
         if not isinstance(entry, dict):
-            return False, {}, [], f"dimension '{did}' missing or not an object"
+            return False, {}, [], [], f"dimension '{did}' missing or not an object"
         lvl = _coerce_level(entry.get("level"))
         if lvl is None:
-            return False, {}, [], f"dimension '{did}' level not an integer 0-4 (got {entry.get('level')!r})"
+            return False, {}, [], [], f"dimension '{did}' level not an integer 0-4 (got {entry.get('level')!r})"
         ev = entry.get("evidence")
         dims[did] = {"level": lvl, "evidence": str(ev) if ev is not None else ""}
 
     gate_caps = {g["id"]: g["cap"] for g in ogates}
-    gates = []
+    gates, rejected = [], []
     for g in (verdict.get("triggered_gates") or []):
-        if isinstance(g, dict) and g.get("id") in gate_caps:
-            gates.append({"id": g["id"], "cap": gate_caps[g["id"]], "by": "observer",
-                          "why": str(g.get("evidence") or g.get("why") or "")})
-    return True, dims, gates, None
+        if not (isinstance(g, dict) and g.get("id") in gate_caps):
+            continue
+        why = str(g.get("evidence") or g.get("why") or "")
+        rec = {"id": g["id"], "cap": gate_caps[g["id"]], "by": "observer",
+               "why": why}
+        trig = g.get("triggered")
+        if trig is False:
+            rec["rejected_because"] = "triggered: false"
+            rejected.append(rec)
+        elif trig is not True and _GATE_NEGATION_RE.search(why):
+            # Legacy entry (no explicit boolean) whose evidence refutes itself.
+            rec["rejected_because"] = "self-negating evidence"
+            rejected.append(rec)
+        else:
+            gates.append(rec)
+    return True, dims, gates, rejected, None
 
 
 def grade_class_j(client, digest: str, rubric: dict, *, model: str | None = None,
@@ -174,10 +211,12 @@ def grade_class_j(client, digest: str, rubric: dict, *, model: str | None = None
                   max_attempts: int = 2) -> dict:
     """Grade the five Class-J dimensions and detect observer gates with an LLM.
 
-    Returns ``{ok, dimensions, gates, cost_usd, error, raw}`` where ``dimensions``
-    maps each Class-J id to ``{level, evidence}`` (level is None on every dim when
-    ``ok`` is False) and ``gates`` is a list of triggered observer gates with caps.
-    Fails closed after ``max_attempts`` rather than inventing a score.
+    Returns ``{ok, dimensions, gates, gates_rejected, cost_usd, error, raw}``
+    where ``dimensions`` maps each Class-J id to ``{level, evidence}`` (level is
+    None on every dim when ``ok`` is False), ``gates`` is a list of AFFIRMED
+    observer gates with caps, and ``gates_rejected`` the gates the judge
+    mentioned but did not affirm (recorded, never applied). Fails closed after
+    ``max_attempts`` rather than inventing a score.
     """
     jdims = _class_j_dims(rubric)
     ogates = _observer_gates(rubric)
@@ -194,9 +233,11 @@ def grade_class_j(client, digest: str, rubric: dict, *, model: str | None = None
                           meta_ctx={"phase": "eval_judge", "stage": "judge", "attempt": attempt})
         last_text = res.get("text") or ""
         total_cost += float(res.get("cost_usd") or 0.0)
-        ok, dims, gates, error = _validate(_extract_json(last_text), jdims, ogates)
+        ok, dims, gates, rejected, error = _validate(
+            _extract_json(last_text), jdims, ogates)
         if ok:
             return {"ok": True, "dimensions": dims, "gates": gates,
+                    "gates_rejected": rejected,
                     "cost_usd": total_cost, "error": None, "raw": last_text}
         # Repair: state the concrete defect and ask exactly once more.
         messages.append({"role": "assistant", "content": last_text})
@@ -207,5 +248,5 @@ def grade_class_j(client, digest: str, rubric: dict, *, model: str | None = None
 
     return {"ok": False,
             "dimensions": {d["id"]: {"level": None, "evidence": ""} for d in jdims},
-            "gates": [], "cost_usd": total_cost,
+            "gates": [], "gates_rejected": [], "cost_usd": total_cost,
             "error": error or "judge produced no valid verdict", "raw": last_text}

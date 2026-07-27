@@ -345,10 +345,23 @@ class RoundScheduler:
 
     # -- loop bottom -----------------------------------------------------------
 
-    def observe_duration(self, duration_s: float) -> None:
-        """Fold this round's wall-duration into the EMA the budget gate reads."""
+    def observe_duration(
+        self, duration_s: float, *, crashed_route_s: float = 0.0
+    ) -> None:
+        """Fold this round's wall-duration into the EMA the budget gate reads.
+
+        ``crashed_route_s`` is the parent-route time of a round whose route
+        FAILED with the infra signature (FreeRouting crash / no SES output).
+        That time was spent in dead retry attempts, not in routing work a
+        placement mutation would repeat -- pricing it at face value starves
+        the budget gate: self-eval 2026-07-27 run_29's single 398s crashed
+        round priced the estimator out of ALL remaining rounds on a 648s
+        budget. Half the crashed time is still charged (the crash may well be
+        deterministic), so a second crash exhausts the budget honestly instead
+        of looping."""
+        effective = max(0.0, duration_s - 0.5 * max(0.0, crashed_route_s))
         self.ema_round_s = (
-            duration_s
+            effective
             if self.ema_round_s is None
-            else 0.5 * self.ema_round_s + 0.5 * duration_s
+            else 0.5 * self.ema_round_s + 0.5 * effective
         )

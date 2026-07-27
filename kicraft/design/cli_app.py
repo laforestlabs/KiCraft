@@ -91,6 +91,7 @@ from .synthesis.validation import (
     check_inter_sheet_nets_realized,
     check_mcu_programming_access,
     check_mcu_programming_path,
+    check_mount_type_consistency,
     check_net_coverage,
     check_no_dangling_signal_nets,
     check_pin_existence,
@@ -100,6 +101,7 @@ from .synthesis.validation import (
     check_rf_feed_isolation,
     check_sheets_have_parts,
     check_single_net_per_pin,
+    check_spec_named_mpn_substitutions,
     check_two_terminal_self_short,
     reconcile_inter_sheet_nets,
     split_cross_sheet_connections,
@@ -891,14 +893,18 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                 f"{part.ref}: MPN '{mpn}' not found in the LCSC catalog — "
                 f"likely not a real orderable part; resolve it with "
                 f"lookup_lcsc_id / add_part_from_lcsc, pick a core default, "
-                f"or drop the MPN and record the substitution in assumptions"
+                f"or drop the MPN and record the substitution in "
+                f"bom.substitutions ({{wanted, got, reason}})"
             )
         elif best is None:
             bad.append(
                 f"{part.ref}: no orderable variant of '{mpn}': "
                 + "; ".join(tried[:4])
                 + " — pick a different part (a pick must be in stock at BOTH "
-                  "JLCPCB assembly and the lcsc.com retail storefront)"
+                  "JLCPCB assembly and the lcsc.com retail storefront) and "
+                  "record the swap in bom.substitutions "
+                  '({"wanted": "' + str(mpn) + '", "got": "<new pick>", '
+                  '"reason": "not orderable"})'
             )
         else:
             part.sourcing_note = (f"{note} " if note else "") + f"LCSC {best['lcsc']}"
@@ -3744,7 +3750,17 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                            # connections are empty at BOM commit, so only the
                            # part check runs here; UPDI reachability gates the
                            # wiring commit below.
-                           check_mcu_programming_access(state.bom)]
+                           check_mcu_programming_access(state.bom),
+                           # §9.33/§9.34 (2026-07-27 fix-plan P2): a
+                           # spec-named MPN or brief-stated mount type the BOM
+                           # walks away from must be recorded in
+                           # bom.substitutions -- the silent_substitution gate
+                           # fires on the silence, not the swap.
+                           check_spec_named_mpn_substitutions(
+                               state.functional_spec, state.architecture,
+                               state.bom),
+                           check_mount_type_consistency(
+                               state.intent, state.bom)]
         if state.architecture is not None:
             identity_checks.append(
                 check_sheets_have_parts(state.architecture, state.bom)

@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import collections
 import glob
+import math
 import os
 import re
 import shutil
@@ -1157,6 +1158,100 @@ def _restrict_dsn_routing_to_nets(
         print(f"  warning: DSN route-only restriction skipped: {exc}")
 
 
+# FreeRouting 1.9.0 hangs FOREVER when a net's locked wiring forms a closed
+# loop: it logs "The normalization of net 'X' failed." and then makes no
+# further progress until the watchdog kills the JVM (rc=-1, no SES) --
+# indistinguishable from the Ω-DSN deadlock at the caller. Self-eval
+# 2026-07-27 run_29: the LED-ring leaf legitimately routed its 5V bus as a
+# closed ring; the parent locks that copper into the DSN, every route attempt
+# (power-first, single-phase, GND-skip) hung, and the board died rc6.
+#
+# Removing one edge of a cycle NEVER disconnects the net, so the fix is to
+# open each loop with a microscopic gap: retreat the loop-closing wire's
+# final point along its last segment by ~10% of the trace width. Only
+# FreeRouting's VIEW gets the gap -- the .kicad_pcb keeps its real, continuous
+# copper, and import_ses merges the session onto the original board. Purely
+# degenerate wires (every point identical) are dropped outright: they carry
+# no copper and can read as self-loops.
+_DSN_WIRE_ENTRY_RE = re.compile(
+    r"\(wire\s+\(path\s+(?P<layer>\S+)\s+(?P<width>[-\d.eE]+)"
+    r"(?P<coords>(?:\s+[-\d.eE]+)+)\s*\)"
+    r"\s*\(net\s+(?P<net>\"[^\"]+\"|[^\s()]+)\s*\)"
+    r"(?P<tail>(?:\s*\([^()]*\))*)\s*\)"
+)
+
+
+def _break_locked_wire_cycles(dsn_path: str) -> int:
+    """Open closed loops in the DSN's per-net locked wiring (see the comment
+    above). Returns the number of wire entries modified/dropped; best-effort
+    (any parse trouble leaves the DSN unchanged)."""
+    try:
+        with open(dsn_path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return 0
+
+    parent: dict[tuple, tuple] = {}
+
+    def _find(x: tuple) -> tuple:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _fmt(v: float) -> str:
+        return f"{v:.1f}".rstrip("0").rstrip(".")
+
+    edits: list[tuple[tuple[int, int], str]] = []
+    for m in _DSN_WIRE_ENTRY_RE.finditer(text):
+        try:
+            vals = [float(t) for t in m.group("coords").split()]
+            width = float(m.group("width"))
+        except ValueError:
+            continue
+        if len(vals) < 4 or len(vals) % 2:
+            continue
+        xy = list(zip(vals[::2], vals[1::2]))
+        if all(p == xy[0] for p in xy):
+            edits.append((m.span(), ""))  # zero-length wire: drop
+            continue
+        net = m.group("net")
+        a = (net, round(xy[0][0], 1), round(xy[0][1], 1))
+        b = (net, round(xy[-1][0], 1), round(xy[-1][1], 1))
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[ra] = rb
+            continue
+        # Loop-closing wire: retreat the final point along the last segment.
+        # The gap scales with the wire's own width so it is unit-agnostic
+        # (µm-unit DSN: 500-wide trace -> 50 gap; mm-unit: 0.5 -> 0.05).
+        (x1, y1), (x2, y2) = xy[-2], xy[-1]
+        seg = math.hypot(x2 - x1, y2 - y1)
+        if seg <= 0:
+            continue
+        gap = min(max(abs(width) / 10.0, seg * 0.01), seg / 2.0)
+        nx = x2 - (x2 - x1) / seg * gap
+        ny = y2 - (y2 - y1) / seg * gap
+        coord_s = "".join(f"  {_fmt(x)} {_fmt(y)}" for x, y in xy[:-1] + [(nx, ny)])
+        entry = (
+            f"(wire (path {m.group('layer')} {m.group('width')}"
+            f"{coord_s})(net {m.group('net')}){m.group('tail')})"
+        )
+        edits.append((m.span(), entry))
+
+    if not edits:
+        return 0
+    for (start, end), repl in sorted(edits, reverse=True):
+        text = text[:start] + repl + text[end:]
+    try:
+        with open(dsn_path, "w", encoding="utf-8") as f:
+            f.write(text)
+    except OSError:
+        return 0
+    return len(edits)
+
+
 def _propagate_sibling_pro(src_pcb_path: str, dst_pcb_path: str) -> None:
     """Copy ``src``'s sibling ``.kicad_pro`` onto ``dst``'s, when present.
 
@@ -1512,6 +1607,16 @@ def route_with_freerouting(
             _restrict_dsn_routing_to_nets(
                 dsn_path, config.get("freerouting_route_only_nets")
             )
+            # Locked wiring that forms a closed loop (an LED ring's power bus)
+            # hangs FR 1.9.0's net normalization forever -- open each loop with
+            # a microscopic, DSN-only gap. See _break_locked_wire_cycles.
+            n_opened = _break_locked_wire_cycles(dsn_path)
+            if n_opened:
+                print(
+                    f"  [dsn-sanitize] opened {n_opened} locked-wire "
+                    "cycle(s)/degenerate wire(s) (FreeRouting 1.9 net-"
+                    "normalization hang guard)"
+                )
 
             passes = max_passes if attempt == 0 else max(10, max_passes // 2)
             stats = run_freerouting(

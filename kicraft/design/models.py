@@ -587,6 +587,25 @@ class PlacementHint(BaseModel):
         return v
 
 
+class Substitution(BaseModel):
+    """One surfaced part substitution: the BOM deviates from a part the
+    spec/architecture named (or the user asked for) and says so.
+
+    The 2026-07-27 self-eval batch gated 6 runs on ``silent_substitution`` --
+    an architecture-named RECOM converter silently swapped for a quarter of
+    its output current, a brief-stated SMT OLED shipped as through-hole. The
+    substitution itself is often a fine engineering call; the defect is
+    silence. §9.33 enforces that a spec-named MPN missing from the BOM has a
+    ledger entry here, and the eval digest surfaces the ledger to the judge
+    and the user."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    wanted: str  # the part the spec/user named (MPN or description)
+    got: str     # the part the BOM ships instead
+    reason: str = ""
+
+
 class BOM(BaseModel):
     parts: list[BomPart]
     ic_groups: dict[str, list[str]] = Field(default_factory=dict)
@@ -597,6 +616,7 @@ class BOM(BaseModel):
     arrays: list[ArraySpec] = Field(default_factory=list)
     placement_hints: list[PlacementHint] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
+    substitutions: list[Substitution] = Field(default_factory=list)
     connections: list[NetConnection] = Field(default_factory=list)
     no_connect_pins: list[PinEndpoint] = Field(default_factory=list)
 

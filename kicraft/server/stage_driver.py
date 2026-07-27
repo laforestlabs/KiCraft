@@ -420,7 +420,9 @@ _WORKED_EXAMPLES = {
         '"thermal_refs": ["U1"], '
         '"signal_flow_order": ["U1"], '
         '"component_zones": {"J1": {"edge": "left"}}, '
-        '"assumptions": ["Input jack on the left edge (defaulted)"]}'
+        '"assumptions": ["Input jack on the left edge (defaulted)"], '
+        '"substitutions": [{"wanted": "LD1117-3.3", "got": "AMS1117-3.3", '
+        '"reason": "spec-named LDO out of retail stock; same pinout/dropout"}]}'
     ),
     "wiring": (
         '{"connections": ['

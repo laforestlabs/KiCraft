@@ -58,6 +58,28 @@ def test_ema_is_exponential_half_half():
     assert s.ema_round_s == 75.0
 
 
+def test_crashed_route_time_is_half_discounted_in_ema():
+    # self-eval 2026-07-27 run_29 (fix-plan P3.2): one 398s round whose parent
+    # route died in FreeRouting crash retries priced the estimator out of ALL
+    # remaining rounds on a 648s budget. Half the crashed route time is
+    # discounted, so the search gets exactly one more budget-bounded attempt.
+    s = RoundScheduler(rounds=3, max_wall_s=648.0)
+    s.observe_duration(398.0, crashed_route_s=397.7)
+    assert s.ema_round_s is not None and abs(s.ema_round_s - 199.15) < 0.01
+    # 398 elapsed + ~199 est <= 648 -> the next round RUNS.
+    assert isinstance(s.plan_next(elapsed_s=398, stop_requested=False), RoundPlan)
+    # A second crashed round exhausts the budget honestly.
+    s.observe_duration(398.0, crashed_route_s=397.7)
+    d = s.plan_next(elapsed_s=796, stop_requested=False)
+    assert isinstance(d, Finalize) and "[wall-budget]" in d.reason
+
+
+def test_crashed_route_discount_never_goes_negative():
+    s = RoundScheduler(rounds=3)
+    s.observe_duration(10.0, crashed_route_s=100.0)
+    assert s.ema_round_s == 0.0
+
+
 def test_wall_budget_rescue_round_fires_once_with_clamped_deadline():
     calls: list[int] = []
 

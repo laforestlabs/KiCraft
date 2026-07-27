@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:4d2919166b55a99e1dcf8b1ef8d60fea175cafe438ca0a102739b52491f2d87d",
+  "content_hash": "sha256:c9b817aacc873fde6153ed2d11b7a5b2eeb58ee519bd9335eb5102e1317ca24d",
   "datasheet_url": "https://www.lcsc.com/datasheet/C2913206.pdf",
   "description": "Espressif ESP32-S3-MINI-1 \u2014 dual-core Xtensa LX7 MCU module (240 MHz), 8MB flash, 2.4GHz Wi-Fi + Bluetooth 5 LE, native USB OTG. 27 GPIOs in a compact 15.8\u00d720.3mm PCB antenna module.",
   "footprint_name": "BULETM-SMD_ESP32-S3-MINI-1-N8",

@@ -145,6 +145,13 @@ def _valid_bom() -> dict:
         "signal_flow_order": [],
         "component_zones": {},
         "assumptions": [],
+        # §9.33: the architecture fixture names AP2112K, and this minimal BOM
+        # deliberately ships no LDO IC -- ledger the deviation the same way a
+        # real BOM must, so the accountability gate stays exercised end-to-end.
+        "substitutions": [
+            {"wanted": "AP2112K", "got": "no LDO IC in this minimal fixture",
+             "reason": "test fixture"},
+        ],
     }
 
 

@@ -89,7 +89,49 @@ def test_esp32_with_strap_test_pads_passes():
 
 
 def test_generic_mcu_with_usb_unchanged():
-    # Families outside the two strap rules keep the existing contract:
+    # Families outside the strap rules keep the existing contract:
     # any programming-access part (here USB) satisfies part presence.
-    r = check_mcu_programming_access(_bom(_part("U1", "STM32F103C8T6"), USB))
+    r = check_mcu_programming_access(_bom(_part("U1", "nRF52840 module"), USB))
+    assert r.ok, r.offenders
+
+
+# --- STM32 BOOT0 rule (2026-07-27 fix-plan P2.4, self-eval run_24) ----------
+#
+# STM32's ROM bootloader (USB-DFU and UART alike) is only entered with BOOT0
+# HIGH at reset. run_24 shipped an STM32F042 whose assumed programming path
+# was native-USB DFU with no BOOT0 access part anywhere -- and died in
+# reconcile asking for exactly the strap this rule now demands at BOM commit.
+
+def test_stm32_usb_only_fails():
+    r = check_mcu_programming_access(_bom(_part("U1", "STM32F042F6P6"), USB))
+    assert not r.ok
+    assert any("BOOT0" in o for o in r.offenders)
+
+
+def test_stm32_with_boot0_test_pad_passes():
+    r = check_mcu_programming_access(
+        _bom(_part("U1", "STM32F042F6P6"), USB, _part("TP1", "BOOT0 pad"))
+    )
+    assert r.ok, r.offenders
+
+
+def test_stm32_with_swd_header_passes():
+    r = check_mcu_programming_access(
+        _bom(_part("U1", "STM32F103C8T6"), USB, _part("J2", "SWD debug header"))
+    )
+    assert r.ok, r.offenders
+
+
+def test_stm32_with_boot_button_passes():
+    r = check_mcu_programming_access(
+        _bom(_part("U1", "STM32F042F6P6"), USB, _part("SW1", "BOOT0 button"))
+    )
+    assert r.ok, r.offenders
+
+
+def test_stm32_with_usb_uart_bridge_passes():
+    r = check_mcu_programming_access(
+        _bom(_part("U1", "STM32F103C8T6"), USB,
+             _part("U2", "CH340C USB-UART bridge"))
+    )
     assert r.ok, r.offenders

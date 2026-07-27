@@ -185,6 +185,12 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
 # across rounds and is left to keep retrying.
 _STRUCTURAL_UNROUTABLE_REASONS = frozenset({
     "routing_exception", "leaf_pre_stamp_legality_repair",
+    # A pad the escape planner found no legal exit for. This is a geometry
+    # constant of the footprint and the rule set -- re-placing the leaf cannot
+    # change it, so retrying is pure round budget (the KC-RYVSQV nRF52840
+    # signature: nine rounds, same four pads, every time). Aborting names the
+    # pad instead of reporting it as a router failure.
+    "escape_infeasible",
     # NOT here: "leaf_solve_deadline". A deadline expiry means the leaf was
     # merely SLOW, never that it is structurally unroutable -- the ladder jumps
     # to the reserved seed-bbox fallback on deadline (N1) and a later outer
@@ -2443,6 +2449,12 @@ def main(argv: list[str] | None = None) -> int:
     _initial_config = {**DEFAULT_CONFIG, **_base_project_config}
     _best_config = dict(_initial_config)
 
+    # Bring the project's DRC floors down to the fab capability before anything
+    # loads a board -- see _run_layout, which does the same for the fast engine.
+    from kicraft.autoplacer.fab_profile import stamp_fab_floors_for_project
+
+    stamp_fab_floors_for_project(project_dir, _initial_config)
+
     effective_search_space = dict(CONFIG_SEARCH_SPACE)
     param_ranges_path = args.param_ranges
     if param_ranges_path:
@@ -2901,6 +2913,7 @@ def main(argv: list[str] | None = None) -> int:
         parent_route_rc: int | None = None
         parent_route_stdout = ""
         parent_route_stderr = ""
+        parent_route_elapsed_s = 0.0
         parent_routed = False
         parent_copper_accounting: dict[str, int] = {}
         # Initialize the validation dict here so the --leaves-only branch
@@ -3386,8 +3399,21 @@ def main(argv: list[str] | None = None) -> int:
             f"[{'KEPT' if round_result.kept else 'discard'}]"
         )
 
-        # Fold this round's wall-duration into the EMA the wall-budget gate reads.
-        scheduler.observe_duration(max(0.0, time.monotonic() - _round_mono_start))
+        # Fold this round's wall-duration into the EMA the wall-budget gate
+        # reads. A parent route that died with the infra crash signature
+        # (FreeRouting crash / no SES) spent its time in dead retries, not in
+        # routing a mutation would repeat -- discount it so one crashed round
+        # cannot price the estimator out of every remaining round
+        # (self-eval 2026-07-27 run_29; fix-plan P3.2).
+        _route_crashed = (
+            parent_route_rc not in (None, 0)
+            and ("produced no SES output" in (parent_route_stderr or "")
+                 or "FreeRouting crash (rc=" in (parent_route_stdout or ""))
+        )
+        scheduler.observe_duration(
+            max(0.0, time.monotonic() - _round_mono_start),
+            crashed_route_s=parent_route_elapsed_s if _route_crashed else 0.0,
+        )
 
     phase = "done"
     if _check_stop_request(work_dir):
