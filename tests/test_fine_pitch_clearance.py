@@ -17,6 +17,7 @@ import pytest
 
 from kicraft.autoplacer import freerouting_runner as fr
 from kicraft.autoplacer.config import DEFAULT_CONFIG
+from kicraft.autoplacer.fab_profile import fab_floors
 
 # A minimal Specctra DSN rule block in the form KiCad's ExportSpecctraDSN emits.
 _DSN = """(pcb board
@@ -168,15 +169,20 @@ def test_resolve_rule_honors_explicit_override(monkeypatch):
     cfg = {**DEFAULT_CONFIG, "freerouting_clearance_mm": 0.12}
     clearance_um, width_um = fr._resolve_fine_pitch_rule("board.kicad_pcb", cfg)
     assert clearance_um == 120
-    assert width_um == 153  # min(0.2, fine_pitch_track 0.153) * 1000 (fab floor)
+    # min(0.2, freerouting_fine_pitch_track_mm) in whole um. The escape track
+    # follows the fab capability floor (autoplacer/fab_profile.py).
+    assert width_um == round(fab_floors()["track_mm"] * 1000)
 
 
 def test_resolve_rule_auto_detects_and_floors(monkeypatch):
-    # Densest gap 0.08mm is below the fab clearance floor -> clamp up to floor.
-    monkeypatch.setattr(fr, "min_intra_footprint_pad_gap_mm", lambda *_a, **_k: 0.08)
+    # Densest gap 0.05mm is below the fab clearance floor -> clamp up to floor.
+    monkeypatch.setattr(fr, "min_intra_footprint_pad_gap_mm", lambda *_a, **_k: 0.05)
     clearance_um, width_um = fr._resolve_fine_pitch_rule("b.kicad_pcb", dict(DEFAULT_CONFIG))
-    assert clearance_um == 153  # floored at freerouting_min_clearance_mm 0.153
-    assert width_um == 153
+    # The floor is the fab's real capability, not a hard-coded constant: the
+    # auto-lower may never route finer than the process can build.
+    assert clearance_um == round(fab_floors()["clearance_mm"] * 1000)
+    assert width_um == round(fab_floors()["track_mm"] * 1000)
+    assert clearance_um >= 100  # JLC 2-layer 1oz minimum, with margin
 
 
 def test_resolve_rule_noop_for_coarse_board(monkeypatch):

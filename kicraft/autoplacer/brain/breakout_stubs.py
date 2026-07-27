@@ -28,6 +28,15 @@ import pcbnew
 
 _LAYERS = {"F.Cu": pcbnew.F_Cu, "B.Cu": pcbnew.B_Cu}
 
+# Guard held ABOVE the resolved clearance rule by every margin this module
+# computes. The clearance here is enforced by sampled HitTest(margin) checks
+# whose geometry model can land a hair under KiCad DRC's exact measurement on
+# rotated pads (run_13 nRF52 aQFN: stubs at 0.1520 vs the 0.1530 rule, 1 um
+# short). The board still verifies at the true rule, so the guard can never
+# mask a violation -- but anything PLANNING copper for this module to stamp
+# must plan at rule + guard, or its output gets dropped here as too close.
+STAMP_CLEARANCE_GUARD_MM = 0.01
+
 
 @dataclass(slots=True)
 class BreakoutSpec:
@@ -49,6 +58,12 @@ class BreakoutSpec:
     via_at_end:
         Drop a layer-changing via at the final point (to escape onto the other
         layer when this one is congested).
+    via_size_mm / via_drill_mm:
+        Override the via geometry for THIS stub; ``None`` uses the board's
+        netclass via (``cfg['via_size_mm']``/``via_drill_mm``, 0.6/0.3). The
+        escape planner sets the smaller fanout class here: a 0.6 mm via has no
+        legal position beside a 0.5 mm-pitch inner ring at any clearance, so a
+        dog-bone out of a fine-pitch package is only expressible with it.
     near_xy:
         Disambiguates the pad when the footprint carries SEVERAL pads with the
         same number (ESP32-class modules number every ground pad "GND"): the
@@ -75,6 +90,8 @@ class BreakoutSpec:
     near_xy: tuple[float, float] | None = None
     start_xy: tuple[float, float] | None = None
     net: str | None = None
+    via_size_mm: float | None = None
+    via_drill_mm: float | None = None
 
 
 def _find_pad(board: "pcbnew.BOARD", ref: str, pad_number: str,
@@ -216,13 +233,11 @@ def _foreign_pad_margins(
     path: list = []
     tip: list = []
     for pad in _foreign_pads(board, src_pad.GetNetCode(), exclude=src_pad):
-        # +10 µm guard above the rule: the clearance here is enforced by
-        # sampled HitTest(margin) checks whose geometry model can land a hair
-        # under KiCad DRC's exact measurement on rotated pads (run_13 nRF52
-        # aQFN: stubs at 0.1520 vs the 0.1530 rule, 1 µm short). Same
-        # reasoning as freerouting_clearance_guard_um: the board still
-        # verifies at the true rule, so the guard can never mask a violation.
-        pair = 0.01 + max(floor_mm, src_cl, _own_clearance_mm(pad, layer_id, floor_mm))
+        # See STAMP_CLEARANCE_GUARD_MM: same reasoning as
+        # freerouting_clearance_guard_um.
+        pair = STAMP_CLEARANCE_GUARD_MM + max(
+            floor_mm, src_cl, _own_clearance_mm(pad, layer_id, floor_mm)
+        )
         same_fp = src_ref and _pad_ref(pad) == src_ref
         # Path margins bound the segment CENTERLINE, so the pair clearance
         # must be held from the copper EDGE: pair + half_width. Bare `pair`
@@ -760,6 +775,168 @@ def auto_signal_escape_specs(
     return specs
 
 
+def _planner_pads(fp) -> list:
+    """This footprint's pads as :class:`escape_planner.Pad` in BOARD mm.
+
+    Uses each pad's BOUNDING BOX, not its nominal size: it is already in board
+    coordinates and already accounts for rotation and shape, which is the
+    conservative input a clearance decision wants.
+    """
+    from kicraft.autoplacer.brain.escape_planner import Pad
+
+    out = []
+    for pad in fp.Pads():
+        bb = pad.GetBoundingBox()
+        ds = pad.GetDrillSize()
+        drill = max(pcbnew.ToMM(ds.x), pcbnew.ToMM(ds.y))
+        layers = (
+            frozenset({"F.Cu", "B.Cu"})
+            if drill > 0
+            else frozenset({"B.Cu" if pad.GetLayer() == pcbnew.B_Cu else "F.Cu"})
+        )
+        out.append(
+            Pad(
+                number=pad.GetNumber(),
+                net=pad.GetNetname() or "",
+                x=(pcbnew.ToMM(bb.GetLeft()) + pcbnew.ToMM(bb.GetRight())) / 2.0,
+                y=(pcbnew.ToMM(bb.GetTop()) + pcbnew.ToMM(bb.GetBottom())) / 2.0,
+                w=pcbnew.ToMM(bb.GetWidth()),
+                h=pcbnew.ToMM(bb.GetHeight()),
+                layers=layers,
+                drill=drill,
+            )
+        )
+    return out
+
+
+def escape_planner_specs(
+    board: "pcbnew.BOARD",
+    cfg: dict[str, Any] | None = None,
+) -> tuple[list[BreakoutSpec], dict[str, Any]]:
+    """Planned escapes for every dense footprint on the board.
+
+    Replaces :func:`auto_signal_escape_specs`'s lane-blind radial stamping on
+    the footprints it covers. For each footprint with at least
+    ``escape_planner_min_pads`` pads, ask
+    :mod:`~kicraft.autoplacer.brain.escape_planner` how each *inner* netted pad
+    gets out at the rules this board is actually built to, and turn the answer
+    into stubs:
+
+    * ``tie``/``lane`` -> a locked polyline, exactly as planned;
+    * ``via``          -> a dog-bone (short stub + fanout-class via);
+    * ``open``         -> nothing (the router escapes those unaided);
+    * ``infeasible``   -> **nothing**, recorded by name.
+
+    That last case is the point. Today's stamper answers "blocked" with the
+    farthest point it reached -- a 0.2 mm nub in a dead channel that connects
+    nothing, obstructs the router, and makes the board look partly routed. A pad
+    with no exit now says so at round 1 instead of surfacing as FreeRouting
+    exhaustion at round 9.
+
+    Returns ``(specs, report)``; *report* carries the per-footprint plan and the
+    ``escape_infeasible`` list for the leaf debug record and the acceptance gate.
+    """
+    cfg = cfg or {}
+    report: dict[str, Any] = {"enabled": False, "footprints": {}, "infeasible": []}
+    if not cfg.get("escape_planner_enabled", True):
+        return [], report
+
+    from kicraft.autoplacer.brain.escape_planner import (
+        Rules,
+        capability_rules_from_config,
+        plan_escapes,
+        planning_rules,
+    )
+    from kicraft.autoplacer.fab_profile import fanout_via
+
+    report["enabled"] = True
+    exclude = set(cfg.get("escape_planner_exclude_refs", []) or [])
+    min_pads = int(cfg.get("escape_planner_min_pads", 8))
+    search_r = float(cfg.get("escape_via_search_radius_mm", 0.75))
+    max_len = float(cfg.get("escape_max_len_mm", 2.5))
+    base_rules = planning_rules(cfg)
+    cap_rules = capability_rules_from_config(cfg)
+    via_dia, via_drill = fanout_via(cfg)
+    layer_name = cfg.get("signal_escape_layer", "F.Cu")
+    layer_id = _LAYERS.get(layer_name, pcbnew.F_Cu)
+
+    specs: list[BreakoutSpec] = []
+    for fp in board.GetFootprints():
+        ref = fp.GetReferenceAsString()
+        if ref in exclude:
+            continue
+        pads = list(fp.Pads())
+        if len(pads) < min_pads:
+            continue
+        # Plan against the clearance the board will actually be DRC'd at. KiCad
+        # resolves a pair as the LARGER of the two items' netclass constraints,
+        # so planning at the flat config floor would produce escapes the stamp
+        # guard then drops as too close to a Power-class pad -- silently, which
+        # is the failure mode this whole module exists to end.
+        measured = max(
+            (_own_clearance_mm(p, layer_id, 0.0) for p in pads), default=0.0
+        )
+        eff_clearance = max(
+            base_rules.clearance_mm, measured + STAMP_CLEARANCE_GUARD_MM
+        )
+        rules = Rules(
+            track_mm=base_rules.track_mm,
+            clearance_mm=eff_clearance,
+            via_diameter_mm=via_dia,
+            via_drill_mm=via_drill,
+            hole_to_hole_mm=base_rules.hole_to_hole_mm,
+            hole_clearance_mm=base_rules.hole_clearance_mm,
+        )
+        planner_pads = _planner_pads(fp)
+        plan = plan_escapes(
+            planner_pads,
+            rules,
+            via_search_radius_mm=search_r,
+            max_escape_len_mm=max_len,
+        )
+        if not plan.escapes:
+            continue
+        entry = plan.to_dict()
+        entry["clearance_mm"] = round(eff_clearance, 4)
+        entry["track_mm"] = round(rules.track_mm, 4)
+        entry["via"] = [via_dia, via_drill]
+        if plan.infeasible:
+            # Is it the rules or the package? Re-plan at the fab's own limits so
+            # the report distinguishes "our floors are too coarse" from "this
+            # part cannot be escaped on two layers at all" -- different fixes.
+            at_cap = plan_escapes(
+                planner_pads,
+                cap_rules,
+                via_search_radius_mm=search_r,
+                max_escape_len_mm=max_len,
+            )
+            entry["infeasible_at_capability"] = at_cap.infeasible
+            report["infeasible"].extend(
+                f"{ref}.{num}:{plan.escapes[num].net}" for num in plan.infeasible
+            )
+        report["footprints"][ref] = entry
+
+        for esc in plan.stampable:
+            waypoints = [tuple(pt) for pt in esc.polyline[1:]]
+            if not waypoints:
+                continue
+            specs.append(
+                BreakoutSpec(
+                    ref=ref,
+                    pad=esc.pad,
+                    waypoints=waypoints,
+                    width_mm=rules.track_mm,
+                    layer=layer_name,
+                    via_at_end=esc.kind == "via",
+                    via_size_mm=via_dia if esc.kind == "via" else None,
+                    via_drill_mm=via_drill if esc.kind == "via" else None,
+                    near_xy=(esc.polyline[0][0], esc.polyline[0][1]),
+                )
+            )
+    report["stubs_planned"] = len(specs)
+    return specs, report
+
+
 def add_breakout_stubs(
     pcb_path: str,
     specs: list[BreakoutSpec],
@@ -899,8 +1076,10 @@ def add_breakout_stubs(
         # board's hole-to-hole minimum. A spec whose via cannot land is
         # dropped whole BEFORE its segments stamp -- a stub with no plane via
         # is dead copper (the pour island it would join is removed).
-        via_r_mm = float(cfg.get("via_size_mm", 0.6)) / 2.0
-        via_drill_r_mm = float(cfg.get("via_drill_mm", 0.3)) / 2.0
+        via_size_mm = float(spec.via_size_mm or cfg.get("via_size_mm", 0.6))
+        via_drill_size_mm = float(spec.via_drill_mm or cfg.get("via_drill_mm", 0.3))
+        via_r_mm = via_size_mm / 2.0
+        via_drill_r_mm = via_drill_size_mm / 2.0
         via_obs = ([(p, m + int(pcbnew.FromMM(via_r_mm - half_width_mm)))
                     for p, m in tip_obs] if spec.via_at_end else [])
 
@@ -1037,11 +1216,11 @@ def add_breakout_stubs(
         if spec.via_at_end and not _via_redundant(points[-1]):
             via = pcbnew.PCB_VIA(board)
             via.SetPosition(_pt(points[-1]))
-            via.SetDrill(pcbnew.FromMM(float(cfg.get("via_drill_mm", 0.3))))
+            via.SetDrill(pcbnew.FromMM(via_drill_size_mm))
             try:
-                via.SetWidth(pcbnew.FromMM(float(cfg.get("via_size_mm", 0.6))))
+                via.SetWidth(pcbnew.FromMM(via_size_mm))
             except TypeError:
-                via.SetWidth(layer, pcbnew.FromMM(float(cfg.get("via_size_mm", 0.6))))
+                via.SetWidth(layer, pcbnew.FromMM(via_size_mm))
             via.SetNetCode(net_code)
             if lock:
                 via.SetLocked(True)

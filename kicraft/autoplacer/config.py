@@ -12,6 +12,17 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_CONFIG = {
+    # The fab the pipeline actually targets (JLCPCB 2-layer 1oz) and its
+    # published minimum feature sizes. Single source of truth -- see
+    # autoplacer/fab_profile.py for the provenance of every number, the
+    # deliberate margin above JLC's stated minimum, and the scope guard that
+    # keeps these FLOORS from touching the Default/Power netclasses.
+    "fab_capability": {
+        "min_track_mm": 0.127,
+        "min_clearance_mm": 0.127,
+        "min_via_diameter_mm": 0.36,  # the fanout/dog-bone via class only
+        "min_via_drill_mm": 0.15,
+    },
     # Trace + via floors match OSH Park 2-layer service:
     # https://docs.oshpark.com/services/two-layer/
     # Signal: 0.153mm, just above the 6 mil (0.1524mm) floor -- 0.1524 itself
@@ -358,11 +369,19 @@ DEFAULT_CONFIG = {
     # so a trace can escape. Set freerouting_clearance_mm to force a value.
     "freerouting_clearance_mm": None,
     # Floor for the fine-pitch clearance auto-lower. Must be >= the fab spacing
-    # floor (OSH Park 6 mil = 0.1524 mm). 0.1 let the auto-lower route the WHOLE
-    # board down to ~0.10 mm (sub-floor, unmanufacturable) just to escape the
-    # USB-C. 0.153 mm rounds to 153 µm in the DSN (>= 6 mil). USB-C pads tighter
-    # than this need a LOCAL clearance exception, not a global sub-floor drop.
-    "freerouting_min_clearance_mm": 0.153,
+    # floor. 0.1 let the auto-lower route the WHOLE board down to ~0.10 mm just
+    # to escape the USB-C; USB-C pads tighter than the floor need a LOCAL
+    # clearance exception, not a global sub-floor drop.
+    # 0.153 was the OSH Park 6 mil floor (0.1524 rounds to 152 µm in the DSN,
+    # under the 152.4 µm minimum -- hence the +0.5 µm). The fab this pipeline
+    # actually targets is JLC, whose 2-layer 1oz spacing minimum is 0.10 mm;
+    # 0.127 mm (5 mil) keeps a deliberate margin above that AND is exactly
+    # 127 µm, so the rounding trap 0.153 existed for does not apply. The
+    # 26 µm this buys is what lets two escapes share a 0.75 mm depopulated
+    # lane (0.635 vs 0.765) and a same-row diagonal carry one (0.381 vs 0.459).
+    # Floors only: the Default netclass still routes at 0.2/0.153.
+    # See autoplacer/fab_profile.py (fab_capability).
+    "freerouting_min_clearance_mm": 0.127,
     # FreeRouting's internal geometry (polygonal pad approximations, integer
     # DSN units) differs from KiCad's exact shapes by up to ~1 µm, so a wire FR
     # places exactly at the clearance rule can measure just UNDER it in KiCad
@@ -375,13 +394,15 @@ DEFAULT_CONFIG = {
     # 10 µm covers the observed tail with margin, still 6.5% of the rule.
     "freerouting_clearance_guard_um": 10,
     # Fine-pitch escape track width. It is written to the DSN as integer microns
-    # (int(round(mm*1000))), and KiCad's track-width DRC floor is
-    # min_track_width = 0.1524 mm (6 mil, the OSH Park 2-layer minimum). 0.15 mm
-    # rounds to 150 µm and 0.1524 mm rounds to 152 µm -- both BELOW the 152.4 µm
-    # floor, so every fine-pitch escape became a track_width violation. 0.153 mm
-    # rounds to 153 µm (>= floor, fab-legal) while staying narrower than the
-    # 0.2 mm default so it still escapes dense pad fields.
-    "freerouting_fine_pitch_track_mm": 0.153,
+    # (int(round(mm*1000))), which is why the historical 0.15 / 0.1524 values
+    # failed: they round to 150 / 152 µm, both under the then-current 152.4 µm
+    # min_track_width floor, so every fine-pitch escape became a track_width
+    # violation. 0.153 mm cleared it at 153 µm. The floor now follows the real
+    # fab (JLC 2-layer 1oz: 0.10 mm minimum, floored at 0.127 for margin), and
+    # 0.127 mm is exactly 127 µm -- no rounding trap -- so the escape track can
+    # finally be as fine as the fab allows. Still narrower than the 0.2 mm
+    # netclass default, which is unchanged.
+    "freerouting_fine_pitch_track_mm": 0.127,
     # Leaf nesting (shaped compose): a leaf whose occupied copper leaves a
     # large interior hole (an LED-ring annulus) may host a smaller leaf fully
     # INSIDE that hole -- see docs/plans/shaped-compose-leaf-nesting.md. The
@@ -458,6 +479,38 @@ DEFAULT_CONFIG = {
     "auto_signal_escape": True,
     "signal_escape_exclude_refs": [],
     "signal_escape_length_mm": 1.5,
+    # Escape planner (default on): before routing, work out per netted pad of a
+    # dense footprint HOW it gets out -- same-net tie, dog-bone fanout via, or
+    # on-layer lane -- and stamp exactly that (brain/escape_planner.py). This
+    # replaces the lane-blind radial stamper on the footprints it owns: a ring
+    # package (aQFN/QFN inner ring, ESP32 XTAL/EN, RP2040 XIN) has pads whose
+    # only exits are narrow designed lanes, and a fixed radial ray either
+    # happens to thread one or stamps a 0.2 mm nub in a dead channel -- copper
+    # that connects nothing, obstructs the router and reads as "partly routed".
+    # A pad with no legal exit is reported as escape_infeasible at round 1
+    # instead of surfacing as router exhaustion at round 9. Off = legacy
+    # radial-only stamping.
+    "escape_planner_enabled": True,
+    "escape_planner_exclude_refs": [],
+    # Only footprints with at least this many pads are analysed (a 2-pad
+    # passive has nothing to be trapped by).
+    "escape_planner_min_pads": 8,
+    # How far out from a pad a dog-bone via centre may be searched.
+    "escape_via_search_radius_mm": 0.75,
+    # Cap on a planned escape's length. Past a couple of millimetres the path
+    # has stopped LEAVING the pad field and started routing the net, which is
+    # FreeRouting's job -- and for a poured net whose same-net copper is nearby,
+    # an uncapped search will happily propose a 6 mm track straight across the
+    # exposed pad (same-net copper is not an obstacle).
+    "escape_max_len_mm": 2.5,
+    # Hole-to-copper minimum, mirroring the board's min_hole_clearance. On a
+    # small fanout via this, not the copper clearance, is what binds.
+    "hole_clearance_min_mm": 0.25,
+    # Fanout via class; None -> the fab capability profile's 0.4/0.2. NOT the
+    # netclass via (via_size_mm/via_drill_mm, 0.6/0.3), which is unchanged --
+    # a 0.6 mm via has no legal position beside a 0.5 mm-pitch inner ring.
+    "escape_via_size_mm": None,
+    "escape_via_drill_mm": None,
     "thermal_via_pitch_mm": 1.2,
     "thermal_via_inset_mm": 0.5,
     "thermal_pad_area_mm2": 4.0,

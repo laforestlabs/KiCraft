@@ -21,7 +21,25 @@ __all__ = [
     "evaluate_leaf_acceptance",
     "acceptance_config_from_dict",
     "split_unconnected_nets",
+    "escape_infeasible_nets",
 ]
+
+
+def escape_infeasible_nets(validation: dict[str, Any]) -> set[str]:
+    """Nets the escape planner declared unreachable on this leaf.
+
+    ``validation["escape_infeasible"]`` holds ``"REF.PAD:NET"`` entries written
+    by the pre-route escape planner. A net in this set cannot be closed by
+    re-placing anything: its pad has no legal exit at the board's rule set, so
+    the geometry is a constant across rounds. Separating it from a router
+    failure is what stops the search spending nine placement rounds on it.
+    """
+    out: set[str] = set()
+    for entry in validation.get("escape_infeasible", []) or []:
+        _, _, net = str(entry).partition(":")
+        if net:
+            out.add(net)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +288,13 @@ def _gate_no_unconnected(
         count = raw
     passed = count <= cfg.max_unconnected
 
-    return passed, {
+    # WHY it failed decides whether retrying is worth anything. A net whose pad
+    # the escape planner found no legal exit for is a geometry constant --
+    # invariant under placement mutation -- while a net the router merely could
+    # not finish may well close on the next seed.
+    escape_nets = escape_infeasible_nets(validation)
+    owned = sorted(set(signal) & escape_nets) if nets else sorted(escape_nets)
+    detail = {
         "passed": passed,
         "unconnected_total": raw,
         "unconnected_nets": nets,
@@ -278,7 +302,11 @@ def _gate_no_unconnected(
         "ignored_poured_nets": poured,
         "ignored_interface_nets": iface,
         "max_unconnected": cfg.max_unconnected,
+        "escape_infeasible_nets": owned,
     }
+    if not passed:
+        detail["failure_class"] = "escape_infeasible" if owned else "router_fail"
+    return passed, detail
 
 
 def _gate_no_illegal_geometry(
@@ -570,6 +598,12 @@ def evaluate_leaf_acceptance(
         if not passed:
             all_passed = False
             result.rejection_reasons.append(gate_name)
+            # An unconnected net owned by an unreachable pad gets its own
+            # reason token, so the search can tell "re-place and retry" from
+            # "this package cannot be escaped at these rules" -- the latter is
+            # invariant and aborts instead of burning the round budget.
+            if detail.get("failure_class") == "escape_infeasible":
+                result.rejection_reasons.append("escape_infeasible")
 
     # -- Build condensed summaries -------------------------------------------
     drc = validation.get("drc", {})

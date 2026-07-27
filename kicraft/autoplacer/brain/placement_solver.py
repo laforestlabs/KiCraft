@@ -437,7 +437,10 @@ class PlacementSolver:
             from kicraft.autoplacer.brain.leaf_compaction import (
                 _resolved_keepout_rects,
             )
-            from kicraft.autoplacer.brain.leaf_grid_assignment import build_anchor_grid
+            from kicraft.autoplacer.brain.leaf_grid_assignment import (
+                build_anchor_grid,
+                escape_landings,
+            )
 
             keepouts = [
                 (tl, br)
@@ -464,6 +467,9 @@ class PlacementSolver:
                 min_provision=float(self.cfg.get("leaf_grid_min_provision", 3.0)),
                 max_rings=int(self.cfg.get("leaf_grid_max_rings", 6)),
                 max_lateral=int(self.cfg.get("leaf_grid_max_lateral", 3)),
+                # Seat a trapped pad's companion where the net actually
+                # surfaces, not beside a pad it cannot leave from.
+                escape_landings=escape_landings(best_comps, self.cfg),
             )
             if grid.slots:
                 self._grid = grid

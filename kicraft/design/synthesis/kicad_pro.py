@@ -13,20 +13,37 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from kicraft.autoplacer.fab_profile import (
+    NETCLASS_CLEARANCE_MM,
+    fab_floors,
+    fanout_via,
+)
+
 from ..models import Architecture
 
 
-# Floors sit at 0.153 mm, just ABOVE the true 6 mil (0.1524 mm) fab limit:
-# 0.15 is under the limit outright, and 0.1524 itself is a rounding trap --
-# the DSN export rounds to whole µm, so 0.1524 becomes 152 µm < 152.4 µm and
-# every minimum-width track or clearance fails DRC. 0.153 rounds to 153 µm.
-# (Same reasoning as freerouting_min_clearance_mm / _fine_pitch_track_mm in
-# autoplacer/config.py.)
+# The DRC *floors* mirror the fab capability profile (autoplacer/fab_profile.py),
+# which is the single source of truth for what JLC can actually build. They used
+# to encode OSH Park's 6 mil (0.1524 mm) limit at 0.153 -- the +0.5 µm dodged the
+# DSN's whole-µm rounding, since 0.1524 exports as 152 µm and fails its own rule.
+# 0.127 mm (5 mil) is both inside JLC's 2-layer capability with margin and
+# exactly 127 µm, so no rounding dodge is needed. Lowering min_via_diameter to
+# the 0.4/0.2 fanout class is what makes a dog-bone escape out of a fine-pitch
+# inner ring legal at all; the netclasses below are unchanged, so ordinary
+# routing still happens at 0.2 mm track / 0.153 mm clearance / 0.6 mm via.
+_FLOORS = fab_floors()
+_FANOUT_VIA_DIA, _FANOUT_VIA_DRILL = fanout_via()
+
 DEFAULT_RULES = {
-    "min_clearance": 0.153,
-    "min_track_width": 0.153,
-    "min_via_diameter": 0.508,
-    "min_via_annular_width": 0.127,
+    "min_clearance": _FLOORS["clearance_mm"],
+    "min_track_width": _FLOORS["track_mm"],
+    "min_via_diameter": _FANOUT_VIA_DIA,
+    "min_via_annular_width": round((_FANOUT_VIA_DIA - _FANOUT_VIA_DRILL) / 2.0, 4),
+    # KiCad's "minimum through hole" gates VIA drills as well as PTH pads, and
+    # its 0.3 mm default is the netclass via's drill -- it would fail every
+    # fanout via by construction. Library PTH pads are held to the fab floor
+    # separately by validate-part/add-part (check 6).
+    "min_through_hole_diameter": _FANOUT_VIA_DRILL,
     "min_hole_to_hole": 0.127,
     # 0.2 mm = JLCPCB's routed board-edge-to-copper minimum. The old 0.381 mm
     # (15 mil) was overly conservative and failed boards whose routed tracks sit
@@ -44,7 +61,7 @@ DEFAULT_RULES = {
 
 DEFAULT_NETCLASS = {
     "bus_width": 12,
-    "clearance": 0.153,
+    "clearance": NETCLASS_CLEARANCE_MM,
     "diff_pair_gap": 0.25,
     "diff_pair_via_gap": 0.25,
     "diff_pair_width": 0.2,
@@ -69,7 +86,7 @@ DEFAULT_NETCLASS = {
 # 0.3 mm rule made its supply pads unreachable and un-DRC-able).
 POWER_NETCLASS = {
     "bus_width": 12,
-    "clearance": 0.153,
+    "clearance": NETCLASS_CLEARANCE_MM,
     "diff_pair_gap": 0.25,
     "diff_pair_via_gap": 0.25,
     "diff_pair_width": 0.2,
@@ -105,6 +122,11 @@ def write_kicad_pro(
                 "track_widths": [0.0, 0.2, 0.5],
                 "via_dimensions": [
                     {"diameter": 0.0, "drill": 0.0},
+                    # The escape/dog-bone class. Present so a stamped fanout via
+                    # round-trips through the DSN/SES and shows up in KiCad's via
+                    # dropdown; FreeRouting still places the netclass via, which
+                    # each class names in its own (use_via ...).
+                    {"diameter": _FANOUT_VIA_DIA, "drill": _FANOUT_VIA_DRILL},
                     {"diameter": 0.6, "drill": 0.3},
                     {"diameter": 0.8, "drill": 0.4},
                 ],

@@ -187,6 +187,74 @@ def _slot_extent(
 # --------------------------------------------------------------------------- #
 
 
+def escape_landings(
+    comps: dict[str, Component], cfg: dict[str, Any]
+) -> dict[tuple[str, str], Point]:
+    """``(ref, pad_id) -> where that pad's net actually reaches open copper``.
+
+    A trapped inner pad does not emerge at its own centre. On a fine-pitch ring
+    package its net leaves through a depopulated lane that can be most of the
+    package away -- or on the far side of a dog-bone via. Seating that pad's
+    decoupling companion relative to the PAD then puts it next to copper the net
+    never touches: on the witness board the DEC3 capacitor landed 5.9 mm away on
+    the congested north side while its net emerged to the south.
+
+    Only escapes that actually reach **open copper** are listed. A same-net tie
+    lands on the footprint's own exposed pad -- inward, under the die -- and
+    using that as a slot origin would push the companion into the anchor's
+    courtyard, where every slot is culled: it would delete slots rather than
+    relocate them. Ties are served by the pour, not by a neighbour. Everything
+    else keeps its pad centre (the caller's fallback), so a footprint with no
+    trapped pads produces no entries and nothing changes.
+    """
+    if not cfg.get("escape_planner_enabled", True):
+        return {}
+    try:
+        from kicraft.autoplacer.brain.escape_planner import (
+            Pad as EscapePad,
+            plan_escapes,
+            planning_rules,
+        )
+    except Exception:  # noqa: BLE001 -- a placement hint must never break placement
+        return {}
+
+    min_pads = int(cfg.get("escape_planner_min_pads", 8))
+    exclude = set(cfg.get("escape_planner_exclude_refs", []) or [])
+    rules = planning_rules(cfg)
+    out: dict[tuple[str, str], Point] = {}
+    for comp in sorted(comps.values(), key=lambda c: c.ref):
+        if comp.ref in exclude or len(comp.pads) < min_pads:
+            continue
+        pads = [
+            EscapePad(
+                number=p.pad_id,
+                net=p.net or "",
+                x=p.pos.x,
+                y=p.pos.y,
+                w=p.size_mm.x if p.size_mm else 0.0,
+                h=p.size_mm.y if p.size_mm else 0.0,
+            )
+            for p in comp.pads
+        ]
+        if any(p.w <= 0.0 for p in pads):
+            continue  # legacy artifact with no recorded pad sizes
+        try:
+            plan = plan_escapes(
+                pads,
+                rules,
+                via_search_radius_mm=float(cfg.get("escape_via_search_radius_mm", 0.75)),
+                max_escape_len_mm=float(cfg.get("escape_max_len_mm", 2.5)),
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        for esc in plan.stampable:
+            if esc.kind == "tie":
+                continue
+            end = esc.polyline[-1]
+            out[(comp.ref, esc.pad)] = Point(end[0], end[1])
+    return out
+
+
 def _gridable_passives(comps: dict[str, Component]) -> list[Component]:
     return [
         c for c in comps.values()
@@ -213,6 +281,7 @@ def build_anchor_grid(
     min_provision: float = 3.0,
     max_rings: int = 6,
     max_lateral: int = 3,
+    escape_landings: Optional[dict[tuple[str, str], Point]] = None,
 ) -> Grid:
     """Build the anchor-relative slot grid from the *placed* anchors.
 
@@ -226,6 +295,12 @@ def build_anchor_grid(
     keep-out, or off the board are culled. An anchor-less passive array (no IC in
     the leaf) instead gets one straight lane per chain-ordered cluster.
 
+    ``escape_landings`` (from :func:`escape_landings`) relocates the slot origin
+    for pads that do not emerge at their own centre: a trapped inner pad's net
+    surfaces at the far end of a lane or a dog-bone via, and its companion
+    belongs THERE, not beside copper the net never reaches. Pads absent from the
+    map keep their pad centre, so this is a no-op for ordinary footprints.
+
     ``min_provision`` is the *honored* over-provisioning target: slots per
     gridable passive. When the base (rings, lateral) under-provisions, the spread
     grows -- laterally first (stays pin-adjacent), then outward -- until the
@@ -234,6 +309,7 @@ def build_anchor_grid(
     (dense-soc-leaf-unconnected-plan P0.1/P0.2).
     """
     keepout_rects = keepout_rects or []
+    landings = escape_landings or {}
     tl, br = board_outline
     passives = _gridable_passives(placed_comps)
     if not passives:
@@ -317,11 +393,17 @@ def build_anchor_grid(
 
         for a in anchors:
             a_bc = _bc(a)
-            a_pads = [(pad.pos, pad.net, pad.pad_id) for pad in a.pads if pad.net]
+            # Where each pad's net actually surfaces -- its escape landing when
+            # it has one, else the pad itself.
+            def _origin(pd, _ref=a.ref):
+                return landings.get((_ref, pd.pad_id), pd.pos)
+
+            a_pads = [(_origin(pad), pad.net, pad.pad_id) for pad in a.pads if pad.net]
             for pad in a.pads:
                 if not pad.net:
                     continue
-                vx, vy = pad.pos.x - a_bc.x, pad.pos.y - a_bc.y
+                p_pos = _origin(pad)
+                vx, vy = p_pos.x - a_bc.x, p_pos.y - a_bc.y
                 if abs(vx) >= abs(vy):
                     nx, ny, side = (1.0 if vx >= 0 else -1.0), 0.0, ("E" if vx >= 0 else "W")
                     lat = (0.0, 1.0)  # spread vertically along the E/W edge
@@ -340,8 +422,8 @@ def build_anchor_grid(
                     out = out_base + k * out_step
                     for j in range(-n_lateral, n_lateral + 1):
                         spos = Point(
-                            _snap(pad.pos.x + nx * out + lat[0] * j * lat_step, grid_snap),
-                            _snap(pad.pos.y + ny * out + lat[1] * j * lat_step, grid_snap),
+                            _snap(p_pos.x + nx * out + lat[0] * j * lat_step, grid_snap),
+                            _snap(p_pos.y + ny * out + lat[1] * j * lat_step, grid_snap),
                         )
                         near = [(pn, pid) for (pd, pn, pid) in a_pads
                                 if _dist(pd, spos) <= reach] or [(pad.net, pad.pad_id)]
