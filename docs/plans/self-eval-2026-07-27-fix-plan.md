@@ -57,8 +57,62 @@
   (Also note for the shaped-nesting workstream: circumscription is computed
   from bbox CORNERS, which is maximally pessimistic for ring-shaped content
   whose actual copper sits at ~radius+LED size from center.)
-- P3.3 (A/B replay of the down-flips + run_29 shape check) and the re-batch:
-  pending, results to be appended below.
+- **P3.3 DONE — no systematic regression; branch committed.** A/B replays
+  (same frozen project, seed 0, sequential; B = clean 1638a27 via the
+  editable-finder stub): servo-driver-16 **2 vs 5** unconnected (working
+  tree BETTER), esp32-s3-sensor 1 vs 1 (tie), can-node 1 vs 0 (one-net cost
+  at this seed). The batch down-flips were design variance. run_29 shape
+  check: clean HEAD **also** rect-falls-back (63.5×64.6 vs A's 64.4×63.8) —
+  the ⌀60 mm non-conformance is the synthesized design's ring size, owned by
+  the shaped-nesting workstream, not the placement work. Extra P3.2
+  corroboration: on HEAD the hung parent round 1 priced out rounds 2-3,
+  which route fine when allowed to run. Committed as `62c4738` (placement
+  wave) + `a48563d` (this fix wave).
+- **P1/P2 re-drive VERIFIED (3 briefs, $0.18):** all three previously
+  reconcile-dead briefs now SYNTHESIZE (was 3/3 deaths), zero observer
+  gates, and the events show the new deterministic kind-then-value path
+  working ("deterministically provisioned R2 ... no model BOM pass" on
+  esp32-dual-motor's FB-resistor ask; daq-8ch's BOOT0 story resolves at BOM
+  commit under the new §9.29 rule instead of dying in reconcile).
+  rs485-terminal: fab-ready B/78 (baseline parity). esp32-dual-motor B/77
+  and daq-8ch C/68.5 route but keep 2 / 4 unconnected — the known
+  dense-board residue class, not reconcile. Synthesis-convergence target
+  met (3/3); fab-ready 1/3 (residue owns the rest).
+- **Full re-batch DONE (`logs/self_eval/20260727T151918Z`, $1.05, 5.7 h):**
+
+  | | 7-20 baseline | 7-27 pre-fix | 7-27 post-fix |
+  | --- | --- | --- | --- |
+  | fab-ready | 24/34 | 22/34 | 22/34 |
+  | mean / median | 75.3 / — | 68.1 / 72.8 | **75.8 / 78.8** |
+  | grades | 23B/9C/2D | 15B/7C/12D | **26B/4C/4D** |
+  | observer gates | 0 | 10 (2 false) | **2 (both verified legit)** |
+  | reconcile deaths | 0 | 3 | **0** |
+
+  Targets: mean ≥74 **HIT** (75.8, above baseline); 0 false gates **HIT**
+  (both applied gates verified: speaker-crossover's 39 µF/680 µH defaults
+  give a ~few-Hz crossover vs the asked 2 kHz; usb-c-full-breakout's 16-pin
+  receptacle physically lacks the SuperSpeed pairs the brief demanded);
+  ≤2 legit observer gates **HIT**; ≥26/34 fab-ready **MISSED** (22).
+  The whole gate architecture is working in the wild: 6 judge-refuted gates
+  recorded under `observer_rejected` with rationales quoting the new
+  SUBSTITUTIONS/PROGRAMMING-PATH digest lines ("explicitly recorded in
+  bom.substitutions ... not silent", "MCU programming path computed PASS
+  with J2 (SWD 4-pin header)"); dual-rail-supply — the pre-fix poster child
+  — ledgered its 1A→125 mA converter swap and scored B/75 instead of D/55;
+  unprogrammable_mcu went 4 → 0.
+
+  The fab-ready gap is now cleanly place/route-owned: 8 DRC-residue boards
+  (shorts=0 everywhere; rp2040-min 30 unc is the dense-SoC hard case,
+  the rest 1-9 unc), 2 leaf-acceptance/parent-route failures (nrf52-beacon,
+  gpio-expander — no crash signatures, ordinary variance), 1 ERC flap
+  (audio-jack-buffer), 1 synthesis death (round-led-ring §9.17 two-terminal
+  self-short — an honest early death, new variance class). Owners: the P4
+  dense-escape workstream (§ above) + the 1-3-unconnected tail as the
+  cheapest next fab-ready yield.
+
+  Commits: `62c4738` (placement wave) + `a48563d` (fix wave), branch
+  `placement-streamline`, NOT pushed / NOT deployed (deploy = restart both
+  web + build worker when it goes live).
 
 Batch: `logs/self_eval/20260727T045000Z` (34 briefs, design=deepseek-v4-flash,
 judge=minimax-m3, wall 6.5 h, $0.93). Ran on branch `placement-streamline`
