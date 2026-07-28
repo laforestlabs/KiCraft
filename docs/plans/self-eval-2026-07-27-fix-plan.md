@@ -1,5 +1,102 @@
 # Self-eval 2026-07-27 batch — analysis & fix plan
 
+## P4 RE-DIAGNOSIS + FIX (2026-07-28 session — critical analysis of this plan's own P4)
+
+**P4 as written was stale and mis-scoped; the re-batch artifacts point at one
+mechanism this plan never named.** Three findings against the plan itself:
+
+1. **P4's board list is the PRE-fix batch.** usb-c-full-breakout ("the only
+   remaining illegal_routed_geometry emitter") and stm32-min are **fab-ready in
+   the re-batch** this same document reports; the actual rc7 set is run_10, 12,
+   22, 23, 24, 26, 27, 30 (+ rc6 run_13, run_25). A plan that names target
+   boards must be refreshed from its own re-batch table.
+2. **"Dense-SoC escape residue" is no longer the owning class.** The dense-SoC
+   leaf work *worked*: on run_10 the leaves are 5/5 accepted in every round.
+   The residue moved UP: all 8 rc7 boards fail at the **parent** on
+   **interface pads** — a pad whose net crosses leaves has no on-leaf partner,
+   so leaf routing lays **zero copper** on it (verified: 25/26 bare GPIO
+   interconnect pads on run_10's accepted MCU leaf; CAN_TX/RX bare on both
+   run_23 leaves; SDA/SCL/ALERT_* bare on run_24's ADC leaves; IO4/IO7 bare on
+   run_30; USB_DN/DP + I2C bare on run_12's MCU leaf — while every
+   interconnect net that happened to have 2 on-leaf pads, e.g. run_27's MS1,
+   has copper). By parent time the bare pad sits behind the pin-adjacent
+   companion wall (the connectivity-first placement win made this structurally
+   worse) plus the leaf's locked traces: FreeRouting abandons it and the
+   repair pass reports `no_clear_path` on every edge (run_10:
+   `GPIO12:U1.15->J2.13:no_clear_path` × 26). The source is a documented,
+   now-falsified assumption in `auto_signal_escape_specs`: *"single-pad signal
+   nets … close at compose"* and *"ICs route fine without them"* — and the
+   escape planner deliberately scopes to non-outer-row pads, whose `open`
+   verdict ("router's job") is true at leaf scope and false at parent scope.
+3. **A second, compounding budget bug this plan's P3.2 didn't reach:** the
+   parent attempt-1 probe cap (`parent_gnd_plane_probe_timeout_s`, flat 120 s)
+   clamps BELOW the dense-interconnect budget the scaler just computed (180 s
+   for run_10's 39 nets). A timeout-killed FreeRouting that already wrote a
+   partial SES does not raise, so the GND-skip fallback never fires and the
+   round ends 26-30 unconnected. P3.2 fixed crash *pricing*; this is crash
+   *budgeting*.
+
+**Fixes implemented (branch `placement-streamline`):**
+
+- **Interface escapes** (owning fix, leaf-side): new
+  `escape_planner.plan_interface_escapes` — pure geometry, sweeps rays against
+  the PLACED environment (every other pad as obstacle, footprint bodies as
+  dead-end zones for endpoints), dog-bone fanout via fallback for fully walled
+  pads (run_10's GPIO21/22/23 class), honest `infeasible` (never a nub) —
+  plus `breakout_stubs.interface_escape_specs` (SMD-only, dense footprints
+  >= `interface_escape_min_pads`, single-pad interface nets only, GND/power
+  pour nets excluded) wired into `leaf_routing` after the escape planner with
+  the same no-silent-handoff stamp-skip recording; the per-pad verdict
+  travels in the leaf validation record as `interface_escapes`. Kill switch
+  `interface_escape_enabled` (default on). On run_10's MCU leaf: 35/35
+  cross-leaf pads escape (27 ray + 8 via at the tight canvas).
+- **Probe scaling**: `_compose_route._probe_timeout_s` — attempt-1 cap =
+  `min(route_budget, max(120, n_interconnect * parent_probe_s_per_interconnect))`
+  (default 5 s/net), so a hang is still caught fast on sparse parents and a
+  39-net fan-out is no longer starved.
+- Tests: `tests/test_interface_escapes.py` (12: geometry verdicts incl. the
+  walled/sideways/via/infeasible/courtyard/THT-exclusion cases + board-level
+  spec gen) and 4 probe-cap tests in `tests/test_parent_route_budget.py`.
+  Leaf-level A/B at rounds=1 seed=0 (same command, kill-switch off vs on):
+  baseline 4 unconnected / no accepted round, fix 3 / no accepted round —
+  parity within noise, with all 35 pads now carrying escape copper.
+
+**$0 A/B replays (same code both sides; baseline = kill switches in the
+project autoplacer.json; `--quality good --seed 0`, one replay per side, both
+sides measured by ONE script):**
+
+- **run_23 can-node (the 1-2-unc tail class): flipped decisively.** Baseline:
+  parent route succeeded 1 of 3 parent-phase rounds (rc0 only on the last
+  try); every CAN_TX/CAN_RX interface pad bare on both leaves. Fix: parent
+  route **3 of 3**, rc0, shorts=0 unconnected=0; every CAN interface pad
+  carries exactly one escape track. The batch's rc7 was this coin landing
+  tails — with the escapes it stops being a coin.
+- **run_10 rp2040-min (the 26-30-unc hard case): mechanism moved, board not
+  yet flipped.** Baseline round-1 board: copper on **2** of 35 interconnect
+  nets. Fix round-1 board: copper on **all 35** (598 segs, 61 vias, 0 bare
+  pads on the MCU leaf) but 27 still open — FreeRouting engaged every net and
+  was killed mid-route at the 180 s dense floor (both A/B sides were also
+  clipped by the harness' 25-min timeout after 1-2 parent rounds; the batch
+  itself gave this board 6 failed parent rounds, so the baseline verdict
+  stands). Bottleneck moved from *reachability* to *budget* → third fix:
+  `parent_s_per_interconnect` (8 s/net above the dense threshold; 39 nets →
+  312 s, <= 22-net parents unchanged). Untimed re-replay pending below.
+
+- **run_10 untimed full-stack replay (all 3 parent rounds, 312 s budgets):
+  still rc7 — 29 unc, shorts=0.** Every round: FreeRouting engages all
+  interconnects, completes ~10, abandons 23-29 (`no_clear_path` at repair on
+  every edge; now even VBUS/+3V3/GND appear among the opens). With
+  reachability (escapes) and budget (scalers) both removed as causes, what
+  remains is the **composition**: 26+ GPIO nets must flow from the MCU leaf
+  across the board into the 40-pin header leaf's wall, with the QSPI/USB/LDO
+  leaves in between — a corridor/mouth-alignment problem. Owner: the open
+  **N5b compose-level mouth-line alignment** workstream (place the MCU leaf's
+  GPIO mouth adjacent and pin-order-aligned to the header leaf), not more
+  routing budget and not an in-house router. The fix stack stays net-positive:
+  the tail class (can-node genre — also run_24/27/30's 1-9-unc shapes by
+  mechanism) flips, and run_10's failure is now attributable per pad from the
+  leaf record.
+
 ## RESULTS (implementation, 2026-07-27 — updated as items land)
 
 - **P0 SHIPPED.** Judge contract now demands per-gate `triggered: true|false`;

@@ -59,6 +59,7 @@ __all__ = [
     "Escape",
     "EscapePlan",
     "plan_escapes",
+    "plan_interface_escapes",
     "find_lanes",
     "via_fanout_center",
     "pads_from_dicts",
@@ -198,7 +199,7 @@ class Escape:
     @property
     def needs_stamp(self) -> bool:
         """``open`` pads are the router's job; everything feasible else is ours."""
-        return self.kind in ("tie", "via", "lane")
+        return self.kind in ("tie", "via", "lane", "ray")
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"pad": self.pad, "net": self.net, "kind": self.kind}
@@ -1010,6 +1011,178 @@ def plan_escapes(
             pad=p.number, net=p.net, kind="infeasible", reason=why
         )
     return plan
+
+
+# --------------------------------------------------------------------------- #
+# Interface escapes -- cross-leaf pads against the PLACED environment
+# --------------------------------------------------------------------------- #
+
+
+def plan_interface_escapes(
+    sources: Sequence[tuple[str, Pad, tuple[float, float]]],
+    all_pads: Sequence[Pad],
+    rules: Rules,
+    *,
+    courtyards: Sequence[_Rect] = (),
+    max_len_mm: float = 3.0,
+    min_len_mm: float = 0.6,
+    open_margin_mm: float = 0.6,
+    angle_step_deg: float = 10.0,
+    via_search_radius_mm: float = 0.75,
+) -> dict[str, Escape]:
+    """Plan an exit for each *interface* pad against its placed surroundings.
+
+    :func:`plan_escapes` answers "how does an inner pad leave its own pad
+    field" -- pure package geometry, one footprint at a time. This answers the
+    question the self-eval 2026-07-27 residue exposed one level up: a pad whose
+    net crosses into ANOTHER leaf has no partner on this board, so leaf routing
+    lays no copper on it, and by the time the parent router needs it the pad
+    sits behind the pin-adjacent companion wall and the leaf's locked traces --
+    ``no_clear_path`` from both FreeRouting and the repair pass. The obstacle
+    set here is therefore the PLACED environment: every other pad on the leaf,
+    not just the source footprint's own.
+
+    *sources* is ``(uid, pad, outward)`` per pad -- *outward* the unit direction
+    away from the pad's footprint centre, the classic escape bias. *courtyards*
+    are footprint body rects an escape ENDPOINT must not sit inside: a stub
+    ending under a chip or a neighbouring decap connects legally but dead-ends
+    the parent router exactly where it started.
+
+    Per pad, in order:
+
+    ``open``
+        A short outward ray already reaches open copper (clear of every foreign
+        pad by *open_margin_mm*, outside every courtyard). Nothing to stamp --
+        stamping there would only add an obstacle (the "stub is the obstacle"
+        lesson from the dense-SoC leaf plan).
+    ``ray``
+        The shortest straight ray -- swept at *angle_step_deg* over the full
+        circle, most-outward first on ties -- that clears every foreign pad and
+        every previously committed escape and ends in open copper.
+    ``via``
+        Dog-bone fallback when no on-layer ray exists (the fully walled pads:
+        run_10's GPIO21/22/23 class): a legal fanout-via centre beside the pad,
+        continuing on the far layer.
+    ``infeasible``
+        Nothing legal. Stamp NOTHING and report honestly.
+
+    Deterministic: sources are processed in the caller's order and every search
+    returns its first legal candidate under a total ordering; committed escapes
+    become obstacles for the ones after them, so the plan is internally legal
+    before a single track is stamped.
+    """
+    out: dict[str, Escape] = {}
+    if not sources:
+        return out
+    keep = rules.track_keepout_mm
+    reach = max_len_mm + keep + 1.0
+    taken_vias: list[tuple[str, float, float]] = []
+    taken_paths: list[tuple[str, tuple[float, float], tuple[float, float]]] = []
+
+    def _endpoint_open(ex: float, ey: float, rects: list[_Rect]) -> bool:
+        for r in rects:
+            if _dist_point_rect(ex, ey, r) < open_margin_mm:
+                return False
+        for c in courtyards:
+            if c[0] <= ex <= c[2] and c[1] <= ey <= c[3]:
+                return False
+        return True
+
+    n_ang = max(1, int(round(360.0 / angle_step_deg)))
+    for uid, src, outward in sources:
+        foreign_pads, _same = _track_obstacles(all_pads, src)
+        rects = _near(foreign_pads, src.x, src.y, reach)
+        base = math.atan2(outward[1], outward[0])
+
+        # Candidate rays: (length, |angular deviation from outward|, angle).
+        # Shortest first so the stub stays minimal; outward-most on ties so it
+        # points where an interconnect will actually be routed to.
+        candidates: list[tuple[float, float, float]] = []
+        for i in range(n_ang):
+            half = (i + 1) // 2
+            dev = half * angle_step_deg * (1 if i % 2 else -1)
+            ang = base + math.radians(dev)
+            length = min_len_mm
+            while length <= max_len_mm + 1e-9:
+                candidates.append((length, abs(dev), ang))
+                length += 0.3
+        candidates.sort(key=lambda t: (round(t[0], 4), t[1]))
+
+        chosen: tuple[tuple[float, float], tuple[float, float]] | None = None
+        trivially_open = False
+        for length, dev, ang in candidates:
+            ex = src.x + length * math.cos(ang)
+            ey = src.y + length * math.sin(ang)
+            a, b = (src.x, src.y), (ex, ey)
+            ok, _m = _segment_clears(rects, a, b, keep)
+            if not ok:
+                continue
+            if not _endpoint_open(ex, ey, rects):
+                continue
+            if not _path_clears_committed((a, b), taken_paths, taken_vias, rules, src.net):
+                continue
+            # A pad whose SHORT outward ray is already clear needs no help --
+            # the router escapes it unaided, and locked copper there would only
+            # obstruct the leaf's own routing.
+            if length <= min_len_mm + 1e-9 and dev <= 30.0 + 1e-9:
+                trivially_open = True
+            chosen = (a, b)
+            break
+
+        if trivially_open:
+            out[uid] = Escape(
+                pad=src.number,
+                net=src.net,
+                kind="open",
+                reason="short outward ray already reaches open copper",
+            )
+            continue
+        if chosen is not None:
+            out[uid] = Escape(
+                pad=src.number,
+                net=src.net,
+                kind="ray",
+                polyline=chosen,
+                reason="straight escape past the placed companion wall",
+            )
+            taken_paths.append((src.net, chosen[0], chosen[1]))
+            continue
+
+        # No on-layer ray -- the fully walled class. Dog-bone onto the far
+        # layer via the fanout class; the router continues from the via.
+        got = via_fanout_center(
+            src,
+            all_pads,
+            rules,
+            taken_vias=taken_vias,
+            taken_paths=taken_paths,
+            search_radius_mm=via_search_radius_mm,
+            prefer_outward_from=(src.x - outward[0], src.y - outward[1]),
+        )
+        if got is not None:
+            (vx, vy), _margin = got
+            out[uid] = Escape(
+                pad=src.number,
+                net=src.net,
+                kind="via",
+                polyline=((src.x, src.y), (vx, vy)),
+                via_center=(vx, vy),
+                reason=(
+                    f"no on-layer ray <= {max_len_mm:g} mm; dog-bone fanout "
+                    f"{rules.via_diameter_mm:g}/{rules.via_drill_mm:g}"
+                ),
+            )
+            taken_vias.append((src.net, vx, vy))
+            taken_paths.append((src.net, (src.x, src.y), (vx, vy)))
+            continue
+
+        out[uid] = Escape(
+            pad=src.number,
+            net=src.net,
+            kind="infeasible",
+            reason="no legal ray and no legal via centre in the placed environment",
+        )
+    return out
 
 
 # --------------------------------------------------------------------------- #

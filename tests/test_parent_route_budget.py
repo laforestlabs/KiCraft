@@ -29,6 +29,15 @@ def test_dense_parent_raises_passes_and_timeout():
     assert mp == 40 and to == 180          # bumped at/over the threshold
 
 
+def test_very_dense_parent_timeout_scales_per_interconnect():
+    # run_10's shape: 39 cross-leaf nets. 39 * 8 s = 312 s beats the flat
+    # 180 s dense floor; a 22-net parent stays on the floor.
+    mp, to = _scale_parent_route_budget(39, 29, _cfg())
+    assert to == 312
+    _mp, to22 = _scale_parent_route_budget(22, 29, _cfg())
+    assert to22 == 180
+
+
 def test_only_raises_never_lowers_a_hand_tuned_config():
     # A config already tuned higher than the dense defaults is preserved.
     mp, to = _scale_parent_route_budget(50, 5, _cfg(freerouting_max_passes=60,
@@ -73,10 +82,41 @@ def test_component_count_and_dense_interconnect_stack():
     assert to == max(200, 180)             # max(comp 200, dense 180) = 200
 
 
+# --- GND-plane probe cap (attempt 1) -----------------------------------------
+
+from kicraft.cli._compose_route import _probe_timeout_s
+
+
+def test_probe_cap_holds_for_sparse_parents():
+    # Few interconnects: the flat 120 s hang-detection cap applies.
+    assert _probe_timeout_s(4, 180, {}) == 120
+
+
+def test_probe_cap_scales_with_interconnect_count():
+    # run_10's shape: 39 cross-leaf nets. 39 * 5 s = 195 s beats the flat cap;
+    # the scaled parent budget still bounds it from above.
+    assert _probe_timeout_s(39, 180, {}) == 180
+    assert _probe_timeout_s(39, 300, {}) == 195
+
+
+def test_probe_cap_never_exceeds_the_route_budget():
+    assert _probe_timeout_s(100, 90, {}) == 90
+
+
+def test_probe_cap_is_configurable():
+    cfg = {"parent_gnd_plane_probe_timeout_s": 60,
+           "parent_probe_s_per_interconnect": 2.0}
+    assert _probe_timeout_s(10, 600, cfg) == 60      # 20 < 60 -> flat cap
+    assert _probe_timeout_s(50, 600, cfg) == 100     # 100 > 60 -> scaled
+
+
 # --- Config defaults ---------------------------------------------------------
 
 def test_default_config_carries_the_knobs():
     for k in ("parent_dense_interconnect_threshold", "parent_dense_max_passes",
               "parent_dense_timeout_s", "parent_freerouting_s_per_component",
-              "parent_freerouting_timeout_cap_s"):
+              "parent_freerouting_timeout_cap_s",
+              "parent_gnd_plane_probe_timeout_s",
+              "parent_probe_s_per_interconnect",
+              "parent_s_per_interconnect"):
         assert k in DEFAULT_CONFIG

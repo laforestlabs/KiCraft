@@ -22,7 +22,7 @@ places that part.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
 import pcbnew
 
@@ -933,6 +933,184 @@ def escape_planner_specs(
                     near_xy=(esc.polyline[0][0], esc.polyline[0][1]),
                 )
             )
+    report["stubs_planned"] = len(specs)
+    return specs, report
+
+
+def interface_escape_specs(
+    board: "pcbnew.BOARD",
+    cfg: dict[str, Any] | None = None,
+    interface_nets: Sequence[str] = (),
+) -> tuple[list[BreakoutSpec], dict[str, Any]]:
+    """Escapes for cross-leaf pads the leaf router will never touch.
+
+    A pad whose net crosses into another sheet has no partner on this leaf, so
+    leaf routing lays NO copper on it -- and by the time the parent router needs
+    it, the pad sits behind the pin-adjacent companion wall and the leaf's
+    locked internal traces. On the self-eval 2026-07-27 re-batch that was the
+    single residue class left on every rc7 board: ``no_clear_path`` on bare
+    interface pads (run_10's 26 GPIO fan-outs, run_23's CAN_TX/RX, run_24's
+    SDA/SCL/ALERT_*, run_30's IO4/IO7...).
+
+    For every netted pad on a dense footprint (>= ``interface_escape_min_pads``
+    pads) whose net is an interface net with exactly ONE pad on this board,
+    ask :func:`~kicraft.autoplacer.brain.escape_planner.plan_interface_escapes`
+    for an exit against the PLACED environment (every other pad as obstacle,
+    footprint bodies as dead ends) and stamp exactly that:
+
+    * ``open``       -> nothing (a short outward ray is already clear);
+    * ``ray``        -> a short locked straight escape into open copper;
+    * ``via``        -> a dog-bone onto the far layer (the fully walled class);
+    * ``infeasible`` -> **nothing**, recorded by name -- never a nub.
+
+    GND and poured power nets are excluded (the plane/pour machinery owns
+    them); pads the escape planner already decided are filtered by the caller.
+    """
+    cfg = cfg or {}
+    report: dict[str, Any] = {
+        "enabled": False, "sources": 0, "kinds": {}, "infeasible": []
+    }
+    if not cfg.get("interface_escape_enabled", True) or not interface_nets:
+        return [], report
+
+    from kicraft.autoplacer.brain.escape_planner import (
+        Rules,
+        plan_interface_escapes,
+        planning_rules,
+    )
+    from kicraft.autoplacer.fab_profile import fanout_via
+    from kicraft.design.models import is_power_or_ground_name
+
+    report["enabled"] = True
+    min_pads = int(cfg.get("interface_escape_min_pads", 8))
+    max_len = float(cfg.get("interface_escape_max_len_mm", 3.0))
+    open_margin = float(cfg.get("interface_escape_open_margin_mm", 0.6))
+    search_r = float(cfg.get("escape_via_search_radius_mm", 0.75))
+    exclude = set(cfg.get("signal_escape_exclude_refs", []) or [])
+    gnd_name = cfg.get("gnd_zone_net", "GND")
+    pour_nets = {gnd_name} | set(cfg.get("power_plane_nets") or [])
+    layer_name = cfg.get("signal_escape_layer", "F.Cu")
+    layer_id = _LAYERS.get(layer_name, pcbnew.F_Cu)
+    base_rules = planning_rules(cfg)
+    via_dia, via_drill = fanout_via(cfg)
+    iface = set(interface_nets)
+
+    # Whole-board pad soup (board mm) + per-net pad counts. The obstacle set is
+    # the PLACED environment, so everything is collected once, up front.
+    all_pads: list = []
+    pads_by_fp: dict[str, list] = {}
+    net_count: dict[str, int] = {}
+    fp_by_ref: dict[str, Any] = {}
+    for fp in board.GetFootprints():
+        ref = fp.GetReferenceAsString()
+        fp_by_ref[ref] = fp
+        rows = _planner_pads(fp)
+        pads_by_fp[ref] = rows
+        all_pads.extend(rows)
+        for p in rows:
+            if p.net:
+                net_count[p.net] = net_count.get(p.net, 0) + 1
+
+    # Footprint bodies: an escape ENDPOINT inside one is a dead end for the
+    # parent router even when the copper itself is legal.
+    courtyards: list[tuple[float, float, float, float]] = []
+    for fp in fp_by_ref.values():
+        try:
+            bb = fp.GetBoundingBox(False, False)
+        except TypeError:  # pcbnew API drift: older/newer arities
+            bb = fp.GetBoundingBox()
+        courtyards.append((
+            pcbnew.ToMM(bb.GetLeft()), pcbnew.ToMM(bb.GetTop()),
+            pcbnew.ToMM(bb.GetRight()), pcbnew.ToMM(bb.GetBottom()),
+        ))
+
+    # Plan at the clearance the board will actually be DRC'd at (see
+    # escape_planner_specs: KiCad resolves a pair as the LARGER of the two
+    # items' constraints, and a stamp the guard silently drops is this
+    # machinery's own failure mode).
+    measured = 0.0
+    for fp in fp_by_ref.values():
+        for pad in fp.Pads():
+            measured = max(measured, _own_clearance_mm(pad, layer_id, 0.0))
+    rules = Rules(
+        track_mm=base_rules.track_mm,
+        clearance_mm=max(base_rules.clearance_mm, measured + STAMP_CLEARANCE_GUARD_MM),
+        via_diameter_mm=via_dia,
+        via_drill_mm=via_drill,
+        hole_to_hole_mm=base_rules.hole_to_hole_mm,
+        hole_clearance_mm=base_rules.hole_clearance_mm,
+    )
+
+    sources: list[tuple[str, Any, tuple[float, float]]] = []
+    for ref, rows in sorted(pads_by_fp.items()):
+        if ref in exclude or len(rows) < min_pads:
+            continue
+        fp = fp_by_ref[ref]
+        pos = fp.GetPosition()
+        cx, cy = pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y)
+        for p in rows:
+            if not p.net or p.net not in iface:
+                continue
+            if net_count.get(p.net, 0) != 1:
+                continue  # has an on-leaf partner -> leaf routing covers it
+            if p.net in pour_nets or is_power_or_ground_name(p.net):
+                continue  # plane/pour machinery owns these
+            if p.drill > 0:
+                # A PTH pad (header, screw terminal) is already on BOTH copper
+                # layers -- the parent router reaches it from either side, and
+                # the measured no_clear_path class is exclusively SMD (QFN /
+                # module / SOIC pads behind the companion wall). An escape
+                # here would be copper for its own sake.
+                continue
+            ox, oy = p.x - cx, p.y - cy
+            n = (ox * ox + oy * oy) ** 0.5
+            outward = (ox / n, oy / n) if n > 1e-9 else (1.0, 0.0)
+            sources.append((f"{ref}.{p.number}", p, outward))
+
+    report["sources"] = len(sources)
+    if not sources:
+        return [], report
+
+    escapes = plan_interface_escapes(
+        sources,
+        all_pads,
+        rules,
+        courtyards=courtyards,
+        max_len_mm=max_len,
+        open_margin_mm=open_margin,
+        via_search_radius_mm=search_r,
+    )
+
+    specs: list[BreakoutSpec] = []
+    kinds: dict[str, int] = {}
+    detail: dict[str, str] = {}
+    for uid, esc in sorted(escapes.items()):
+        kinds[esc.kind] = kinds.get(esc.kind, 0) + 1
+        detail[uid] = f"{esc.net}:{esc.kind}"
+        if esc.kind == "infeasible":
+            report["infeasible"].append(f"{uid}:{esc.net}")
+            continue
+        if not esc.needs_stamp:
+            continue
+        ref, pad_num = uid.split(".", 1)
+        waypoints = [tuple(pt) for pt in esc.polyline[1:]]
+        if not waypoints:
+            continue
+        specs.append(
+            BreakoutSpec(
+                ref=ref,
+                pad=pad_num,
+                waypoints=waypoints,
+                width_mm=rules.track_mm,
+                layer=layer_name,
+                via_at_end=esc.kind == "via",
+                via_size_mm=via_dia if esc.kind == "via" else None,
+                via_drill_mm=via_drill if esc.kind == "via" else None,
+                near_xy=(esc.polyline[0][0], esc.polyline[0][1]),
+            )
+        )
+    report["kinds"] = kinds
+    report["escapes"] = detail
     report["stubs_planned"] = len(specs)
     return specs, report
 

@@ -50,8 +50,40 @@ def _scale_parent_route_budget(
     if n_interconnect >= threshold:
         timeout = max(timeout, int(cfg.get("parent_dense_timeout_s", 180)))
         base_passes = max(base_passes, int(cfg.get("parent_dense_max_passes", 40)))
+        # The flat dense floor is itself a starvation point past ~22 nets:
+        # run_10's 39-net GPIO fan-out engaged every net (copper on all 35
+        # once the interface escapes landed) and was still killed mid-route at
+        # 180 s, round after round -- each failed round costing MORE wall than
+        # a sufficient budget would have. Scale with the fan-out size; the
+        # component scaler above stays independent.
+        timeout = max(timeout, int(
+            n_interconnect * float(cfg.get("parent_s_per_interconnect", 8.0))
+        ))
 
     return base_passes, timeout
+
+
+def _probe_timeout_s(n_interconnect: int, route_timeout_s: int, cfg: dict) -> int:
+    """First-attempt (GND-plane-present) cap, scaled to interconnect count.
+
+    The probe exists to detect the filled-plane HANG quickly -- but a flat
+    120 s also starved legitimate routing on interconnect-heavy parents
+    (run_10 of the 2026-07-27 re-batch: 39 cross-leaf nets, FreeRouting killed
+    mid-route at the cap, its partial SES imported, the round ends 26-30
+    unconnected, and the GND-skip fallback never fires because a partial SES
+    is not an exception). A hang shows as ZERO progress, so giving a dense
+    parent its full scaled budget in attempt 1 costs nothing on the hang path
+    the crash-aware wall estimator does not already discount. The scaled
+    parent budget still bounds the probe from above.
+    """
+    return min(
+        int(route_timeout_s),
+        max(
+            int(cfg.get("parent_gnd_plane_probe_timeout_s", 120)),
+            int(n_interconnect
+                * float(cfg.get("parent_probe_s_per_interconnect", 5.0))),
+        ),
+    )
 
 
 def _route_parent_board(
@@ -231,14 +263,15 @@ def _route_parent_board(
                 power_first_stats = {"failed": str(exc), "nets": power_nets}
                 print(f"  parent route: power-first phase failed ({exc}); "
                       f"continuing single-phase", file=sys.stderr)
-        # Attempt 1: route with the GND plane present (clear_zones=False). Cap the
-        # timeout so a hang (the large-plane failure mode) is detected promptly
-        # and we fall back, rather than burning the full component-scaled budget.
+        # Attempt 1: route with the GND plane present (clear_zones=False). Cap
+        # the timeout so a hang (the large-plane failure mode) is detected
+        # promptly and we fall back -- but scaled to interconnect count, so the
+        # cap never starves legitimate routing on a fan-out-heavy parent (see
+        # _probe_timeout_s).
         route_cfg["freerouting_clear_zones"] = False
         probe_cfg = dict(route_cfg)
-        probe_cfg["freerouting_timeout_s"] = min(
-            int(route_cfg.get("freerouting_timeout_s", 60)),
-            int(cfg.get("parent_gnd_plane_probe_timeout_s", 120)),
+        probe_cfg["freerouting_timeout_s"] = _probe_timeout_s(
+            n_interconnect, int(route_cfg.get("freerouting_timeout_s", 60)), cfg
         )
         try:
             freerouting_stats = route_with_freerouting(

@@ -321,6 +321,20 @@ DEFAULT_CONFIG = {
     "parent_dense_interconnect_threshold": 10,
     "parent_dense_max_passes": 40,
     "parent_dense_timeout_s": 180,
+    # Above the threshold the timeout ALSO scales per interconnect net: the
+    # flat 180 s floor still starved a 39-net GPIO fan-out (run_10) that had
+    # engaged every net -- FreeRouting was killed mid-route round after
+    # round. 8 s/net leaves <= 22-net parents on the flat floor.
+    "parent_s_per_interconnect": 8.0,
+    # First-attempt (GND-plane-present) probe cap. The probe exists to detect
+    # the filled-plane HANG quickly; a flat 120 s also starved legitimate
+    # routing on interconnect-heavy parents (run_10: 39 nets, FreeRouting
+    # killed mid-route, partial SES imported, 26-30 unconnected, and no
+    # fallback -- a partial SES is not an exception). The cap therefore
+    # scales with interconnect count and the scaled parent budget still
+    # bounds it from above.
+    "parent_gnd_plane_probe_timeout_s": 120,
+    "parent_probe_s_per_interconnect": 5.0,
     # Power-first parent routing: freerouting 1.9.0 routes in board item-list
     # order with no net priority, so the wide power-class nets -- which need
     # the fattest clear corridor -- are effectively routed last and end up
@@ -511,6 +525,32 @@ DEFAULT_CONFIG = {
     # a 0.6 mm via has no legal position beside a 0.5 mm-pitch inner ring.
     "escape_via_size_mm": None,
     "escape_via_drill_mm": None,
+    # Interface escapes (default on): a pad whose net crosses into another
+    # sheet has no partner on this leaf, so leaf routing lays NO copper on it
+    # -- and at the parent stage it sits behind the pin-adjacent companion
+    # wall and the leaf's locked internal traces. Both FreeRouting and the
+    # signal repair then report no_clear_path (the whole rc7 residue class of
+    # the self-eval 2026-07-27 re-batch: run_10's 26 GPIO fan-outs, run_23's
+    # CAN_TX/RX, run_24's SDA/SCL/ALERT_*). Stamp a short locked escape into
+    # open copper for each such pad at leaf pre-route -- while the leaf still
+    # owns the space around it -- so the parent router starts from open
+    # copper instead of a walled-in bare pad. Pads whose short outward ray is
+    # already clear get NOTHING (a stub there is only an obstacle); fully
+    # walled pads get a dog-bone fanout via onto the far layer; a pad with no
+    # legal exit is recorded, never nubbed. Off = pre-2026-07-28 behaviour.
+    "interface_escape_enabled": True,
+    # Only footprints with at least this many pads get interface escapes: the
+    # walled-pad evidence is IC/module-class (QFN-56, ESP32 modules, SOIC/
+    # TSSOP transceivers); a 2-pad passive's interface pad is never boxed in
+    # by its own companion wall.
+    "interface_escape_min_pads": 8,
+    # Length cap for the escape ray. It only needs to clear the pin-adjacent
+    # companion wall (0.5-2 mm out); past that the stub is routing the net,
+    # which is FreeRouting's job.
+    "interface_escape_max_len_mm": 3.0,
+    # How much open copper the ray's ENDPOINT must have around it (distance to
+    # the nearest foreign pad) to count as "escaped".
+    "interface_escape_open_margin_mm": 0.6,
     "thermal_via_pitch_mm": 1.2,
     "thermal_via_inset_mm": 0.5,
     "thermal_pad_area_mm2": 4.0,
