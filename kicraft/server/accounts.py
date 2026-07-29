@@ -1447,6 +1447,15 @@ class AccountStore:
                 "status IN ('queued','running') LIMIT 1", (report_id,)
             ).fetchone() is not None
 
+    def investigations_created_since(self, iso_ts: str) -> int:
+        """How many investigations were queued since ``iso_ts`` (UTC ISO;
+        compares lexically). The error_auto auto-investigate daily cap reads
+        this so a bad deploy day cannot fan out unbounded LLM spend."""
+        with self._conn() as conn:
+            return int(conn.execute(
+                "SELECT COUNT(*) FROM support_investigations WHERE created_at >= ?",
+                (iso_ts,)).fetchone()[0])
+
     def latest_investigation(self, report_id: int) -> SupportInvestigation | None:
         with self._conn() as conn:
             row = conn.execute(

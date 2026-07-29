@@ -213,6 +213,8 @@ class ParentCompositionState:
             "added_parent_trace_count": self.added_parent_trace_count,
             "added_parent_via_count": self.added_parent_via_count,
             "packing_metadata": dict(self.packing_metadata),
+            "edge_constrained_refs": sorted(self.edge_constrained_refs),
+            "edge_zoned_outline_sides": sorted(self.edge_zoned_outline_sides),
             "geometry_validation": dict(self.geometry_validation),
             "routed_validation": dict(self.routed_validation),
             "stamp_drc": dict(self.stamp_drc),

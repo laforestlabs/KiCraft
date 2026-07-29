@@ -302,3 +302,66 @@ def test_auto_investigate_respects_toggle(swapped_store, monkeypatch):
     swapped_store.set_setting("support.auto_investigate", "0")
     web._auto_investigate_if_enabled(rid)          # off: no new enqueue
     assert calls == [rid]
+
+
+def test_auto_investigate_errors_off_by_default_and_capped(swapped_store, monkeypatch):
+    """error_auto rows only trigger headless triage when the dedicated toggle
+    is ON, and never past the daily cap (each run is real LLM spend)."""
+    calls = []
+    monkeypatch.setattr(ir, "enqueue_investigation",
+                        lambda store, report, **kw: calls.append(report.id))
+    rid = _user_report(swapped_store, board_code="KC-PQR789")
+
+    web._auto_investigate_error_if_enabled(rid)      # default: OFF
+    assert calls == []
+
+    swapped_store.set_setting("support.auto_investigate_errors", "1")
+    web._auto_investigate_error_if_enabled(rid)
+    assert calls == [rid]
+
+    # at the cap: no new enqueue
+    for _ in range(web._AUTO_ERROR_INVESTIGATE_DAILY_CAP):
+        swapped_store.create_investigation(report_id=rid, board_code="KC-PQR789")
+    web._auto_investigate_error_if_enabled(rid)
+    assert calls == [rid]
+
+    web._auto_investigate_error_if_enabled(None)     # no report id: no crash
+
+
+def test_investigations_created_since_counts(store):
+    rid = _user_report(store, board_code="KC-STU890")
+    assert store.investigations_created_since("2000-01-01T00:00:00") == 0
+    store.create_investigation(report_id=rid, board_code="KC-STU890")
+    store.create_investigation(report_id=rid, board_code="KC-STU890")
+    assert store.investigations_created_since("2000-01-01T00:00:00") == 2
+    assert store.investigations_created_since("2999-01-01T00:00:00") == 0
+
+
+def test_run_claude_sets_headless_env_and_model(store, monkeypatch, tmp_path):
+    """The headless run must advertise itself to the skill (the skill budgets
+    replays off KICRAFT_INVESTIGATE_HEADLESS) and pin an explicit model."""
+    seen = {}
+
+    class FakeProc:
+        stdout = iter(["report line\n"])
+        pid = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kw):
+        seen["cmd"] = cmd
+        seen["env"] = kw.get("env") or {}
+        return FakeProc()
+
+    monkeypatch.setattr(ir, "_claude_bin", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(ir.subprocess, "Popen", fake_popen)
+    rid = _user_report(store, board_code="KC-VWX901")
+    inv = store.create_investigation(report_id=rid, board_code="KC-VWX901")
+    rc, out = ir._run_claude(store, inv, "KC-VWX901")
+    assert rc == 0 and "report line" in out
+    assert seen["env"].get("KICRAFT_INVESTIGATE_HEADLESS") == "1"
+    assert "--model" in seen["cmd"]

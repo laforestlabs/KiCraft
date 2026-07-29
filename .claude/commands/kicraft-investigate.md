@@ -1,157 +1,59 @@
 ---
-description: Investigate why a KiCraft run failed — across BOTH the schematic (ERC) and the PCB placement/routing (DRC) — and audit design quality on every run (pass or fail). Locates the run, prints the build verdict, localizes the ERC/DRC failures, classifies systematic code/footprint bugs vs per-design model gaps across all runs, and recommends a generalizable fix. Also audits part-library provenance (curated default vs auto-fetched/unknown lib), BOM realness (real/in-stock vs hallucinated or wrong part, via the offline jlcparts catalog), and LLM thinking-trace wheel-spin (retry/tool/reasoning loops). Deliverable: a ranked pipeline-gap report — each finding deduped against known/deferred issues, replay-reproduced on current code, and mapped to its owning module and the gate that should have caught it.
+description: Investigate why a KiCraft run failed — across BOTH the schematic (ERC) and the PCB placement/routing (DRC) — and audit design quality on every run (pass or fail). Locates the run, prints the build verdict, localizes the ERC/DRC failures, classifies systematic code/footprint bugs vs per-design model gaps across all runs, and recommends a generalizable fix. Also audits part-library provenance, BOM realness + the substitution ledger, and LLM thinking-trace wheel-spin. Deliverable: a ranked pipeline-gap report — each finding deduped against known/deferred issues, replay-reproduced on current code, and mapped to its owning module and the gate that should have caught it.
 argument-hint: "[KC-XXXXXX board code | uid/pid | pid | /path/to/run] (optional; default: most recent run)"
 ---
 
 Investigate a failed KiCraft run and hand back a fast, accurate picture of **why** it failed and **whether the fix is generalizable** (a synthesis/layout-code or footprint-library bug that hits *every* design) **or per-design** (this design's model output). Target run: `$ARGUMENTS` (may be empty → most recent run).
 
-**The board is the witness, not the patient.** This skill exists to find **pipeline gaps** — the code/gate/library/prompt changes that improve every *future* board — not to hand-fix this board. A candidate finding from any section below is not reportable until it passes §9 (prior-art dedup + replay reproduction on current code) and lands in §10's gap contract with an owning module, the gate that should have caught it, and a verification recipe.
+**The board is the witness, not the patient.** This skill exists to find **pipeline gaps** — the code/gate/library/prompt changes that improve every *future* board — not to hand-fix this board. A candidate finding is not reportable until it passes §6 (prior-art dedup + replay reproduction on current code) and lands in §7's gap contract with an owning module, the gate that should have caught it, and a verification recipe.
 
-A KiCraft `build` is sequential: **synthesize+ERC → place leaves → compose+route parent → verify (DRC)**. The exit code tells you the stage it died at, so the investigation **branches**:
-
-| build rc | label | died at | investigate |
-|---|---|---|---|
-| 3 / 4 | incomplete / synth input | before ERC | §2 schematic |
-| 5 | ERC errors | the schematic gate | §2 schematic |
-| 6 | route/infra failed | placement/compose/route (no routable board produced) | §3 PCB |
-| 7 | not fab-ready (DRC) | the routed board is dirty (shorts/unconnected/clearance) | §3 PCB |
-| 0 | fab-ready | — | optional §3 to audit placement quality |
-
-A "run" lives under `<projects_dir>/<uid>/<pid>/` (web) **or** any self-eval `run_NN_*` dir (you can pass its full path). **The dir names are numeric uid/pid — a `KC-XXXXXX` board code is NOT a directory name**; it's `projects.board_code` in `<data_dir>/accounts.db`, which maps to the run via the `dir_path` column (the locator below resolves it automatically). The run's metadata dir is **always `.kicraft/`** (with the dot — build-in-place; there is no legacy no-dot `kicraft/`). Each run leaves `events.jsonl` (per-stage LLM stream — `reasoning_delta`/`answer_delta`/`tool`/`tool_result`/`retry` — plus `build_log`/`build_done` events), `.kicraft/state.json` (committed design incl. BOM), `.kicraft/synthesis_check.json` (the gate verdict), `.kicraft/build.log` (the full place/route build stdout — the primary build-log source, see §5), `.kicraft/bom_prices.json` (the resolved LCSC part number + live stock per part — see §7), a generated KiCad tree with an ERC report `generated/<stem>/<stem>_erc.rpt`, and — once the build reaches layout — a rich `generated/<stem>/.experiments/` tree (per-leaf solves, per-round parent compose/route, DRC sidecars, the routed board).
-
-Beyond *why it failed*, this skill also audits **design quality on every run, pass or fail** (§6–§8): did the BOM use the **curated default part library** or fall back to auto-fetched/unknown libs; are the chosen **part numbers real** (in the offline catalog) or hallucinated/wrong; and did the LLM agent **spin its wheels** (repeated retries / tool loops / circular reasoning) instead of making progress. These run independently of the build rc — a fab-ready board can still have a hallucinated part or a wheel-spinning synthesis.
-
-**Two coordinate conventions — do not mix them up:** ERC report `pos` is reported at **1/100 of real mm** (multiply by 100 — see `kicad-erc-report-coords-x100`). PCB/DRC coordinates (`x_mm`/`y_mm`, `inspect_parent` issue coords) are **already real mm — never ×100 them.**
-
-Print a one-line note before each step (visible reasoning); keep tool fan-out small.
-
-## 1. Locate the run + unified triage — one block
-
-Resolves the *same* projects dir the server uses, picks the run, and prints the full failure picture across schematic **and** PCB. Note the printed `RUN` / `PROJECTS` / `PY` — shell vars do **not** persist between Bash calls, so paste them literally into later steps. The last line routes you to §2 or §3.
+**The artifact-reading engine is `python -m kicraft.cli.triage`** (tested; `tests/test_triage_cli.py` pins it against artifact drift). Do NOT re-implement its readers inline — the previous inline version of this skill rotted silently for weeks. Every subcommand takes the same locator (`KC-XXXXXX | uid/pid | path | empty = latest`) and `--json`.
 
 ```bash
 REPO=$(git rev-parse --show-toplevel 2>/dev/null || echo "$HOME/KiCraft"); PY="$REPO/.venv/bin/python"
-PROJECTS="${KICRAFT_PROJECTS_DIR:-}"
-[ -z "$PROJECTS" ] && [ -f "$REPO/.env" ] && PROJECTS=$(grep -E '^KICRAFT_PROJECTS_DIR=' "$REPO/.env" | tail -1 | cut -d= -f2- | tr -d "\"' ")
-[ -z "$PROJECTS" ] && PROJECTS="$HOME/.kicraft/projects"
-ARG="$ARGUMENTS"
-DB="$(dirname "$PROJECTS")/accounts.db"; [ -f "$DB" ] || DB="$HOME/.kicraft/accounts.db"
-case "$ARG" in
-  KC-*|kc-*)  # board code (KC-XXXXXX): not a dir name — resolve via projects.board_code -> dir_path in accounts.db
-    RUN=$("$PY" -c "
-import sqlite3, sys
-row = sqlite3.connect(sys.argv[1]).execute(
-    'SELECT dir_path FROM projects WHERE upper(board_code)=upper(?)', (sys.argv[2],)).fetchone()
-print(row[0] if row and row[0] else '')" "$DB" "$ARG")
-    ;;
-  *)
-    if   [ -n "$ARG" ] && [ -d "$ARG" ]; then RUN="$ARG"                       # explicit path (web or self-eval run)
-    elif [ -n "$ARG" ] && [ -d "$PROJECTS/$ARG" ]; then RUN="$PROJECTS/$ARG"   # uid/pid
-    elif [ -n "$ARG" ]; then RUN=$(find "$PROJECTS" -mindepth 2 -maxdepth 2 -type d -path "*/$ARG" 2>/dev/null | head -1)
-    else RUN=$(find "$PROJECTS" -mindepth 2 -maxdepth 2 -type d -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-); fi
-    ;;
-esac
-[ -n "$RUN" ] && [ -d "$RUN" ] || { echo "ERROR: could not resolve run for '$ARG' (PROJECTS=$PROJECTS DB=$DB) — do NOT fall through to scanning the cwd; query accounts.db projects table by hand."; exit 2; }
-echo "RUN=$RUN"; echo "PROJECTS=$PROJECTS"; echo "PY=$PY"; echo "REPO=$REPO"
-"$PY" -c "
-import sqlite3, sys
-con = sqlite3.connect(sys.argv[1])
-row = con.execute('SELECT id, user_id, board_code, status, quality, created_at, brief FROM projects WHERE dir_path=?', (sys.argv[2],)).fetchone()
-if row: print('DB: pid=%s uid=%s code=%s status=%s quality=%s created=%s brief=%r' % row)
-" "$DB" "$RUN" 2>/dev/null
-"$PY" - "$RUN" <<'PY'
-import json, sys
-from pathlib import Path
-run = Path(sys.argv[1])
-print(f"\n=== {run.name}   ({run}) ===")
-# --- pipeline + build verdict ---
-ev = run / "events.jsonl"
-if ev.is_file():
-    lines = [json.loads(l) for l in ev.read_text().splitlines() if l.strip()]
-    stages = [e for e in lines if e.get("kind") == "stage_done"]
-    bd     = [e for e in lines if e.get("kind") == "build_done"]
-    blog   = [e for e in lines if e.get("kind") == "build_log"]
-    if stages:
-        print("stages:", [(e.get("stage"), "ok" if e.get("ok") else "FAIL") for e in stages])
-    print("build_done:", bd[-1] if bd else "(no build step reached)")
-    for e in blog[-12:]:
-        print("   build_log:", e.get("text"))
-else:
-    print("no events.jsonl (the run may not have started the pipeline)")
-sc = next(run.rglob("synthesis_check.json"), None)
-if sc:
-    d = json.loads(sc.read_text())
-    print(f"synthesis_check: status={d.get('status')}  failed_checks={d.get('failed_checks')}")
-# --- schematic: ERC errors (pos shown ×100 to match the .kicad_sch) ---
-erc = next(run.rglob("*_erc.rpt"), None)
-if erc:
-    d = json.loads(erc.read_text())
-    errs = [(sh["path"], v) for sh in d.get("sheets", [])
-            for v in sh.get("violations", []) if v.get("severity") == "error"]
-    print(f"\nERC errors: {len(errs)}   ({erc})")
-    for path, v in errs[:20]:
-        print(f"  [{path}] {v['type']}: {v['description']}")
-        for it in v.get("items", []):
-            pos = it.get("pos") or {}
-            xy = f"  @ x100=({pos.get('x',0)*100:.2f}, {pos.get('y',0)*100:.2f}) mm" if pos else ""
-            print(f"       - {it.get('description','')}{xy}")
-else:
-    print("\nNo ERC report — synthesis likely crashed before ERC ran (or never ran).")
-# --- PCB: placement/route triage (only present once the build reaches layout) ---
-exp = next((run/"generated").glob("*/.experiments"), None) if (run/"generated").is_dir() else None
-if exp:
-    def L(p):
-        try: return json.loads(Path(p).read_text())
-        except Exception: return {}
-    rs = L(exp/"run_status.json"); hs = L(exp/"hierarchical_summary.json")
-    routed = sorted(exp.glob("**/parent_routed.kicad_pcb"))
-    leaves = []
-    for dbg in sorted(exp.glob("subcircuits/*/debug.json")):
-        ex = L(dbg).get("extra", {})
-        la = ex.get("leaf_acceptance_structured") or ex.get("leaf_acceptance") or {}
-        leaves.append(bool(la.get("accepted")))
-    nacc = sum(leaves)
-    print(f"\nLAYOUT: top_level={rs.get('top_level_status')}  kept_a_fab_ready_round={hs.get('best_round') is not None}"
-          f"  leaves_accepted={nacc}/{len(leaves)}")
-    if routed:
-        print(f"   routed parent board EXISTS -> rc7 family (routed but DRC-dirty). Deep-dive: §3a then §3b.")
-        print(f"   {routed[-1]}")
-    else:
-        print(f"   NO routed parent board -> rc6 family (parent never produced a routable board). Deep-dive: §3a + build log (§5).")
-else:
-    print("\nLAYOUT: no .experiments tree -> build never reached layout (rc<=5). Investigate the schematic (§2).")
-PY
+"$PY" -m kicraft.cli.triage locate "$ARGUMENTS"    # RUN dir + accounts.db row (paste RUN into later steps)
+"$PY" -m kicraft.cli.triage run    "$ARGUMENTS"    # the unified failure verdict (start here)
+"$PY" -m kicraft.cli.triage audits "$ARGUMENTS"    # design-quality audits (run EVERY time, even rc0)
+"$PY" -m kicraft.cli.triage scan                   # cross-run systematic-vs-per-design ranking
 ```
 
-Read off: which stage failed, the ERC errors (×100 coords), and the LAYOUT line. **Route yourself:** ERC errors / rc≤5 → **§2**. `LAYOUT … routed board EXISTS` or `NO routed parent board` → **§3**. A `stage = FAIL` the journal shows as *"parked: awaiting a clarifying answer"* is the pipeline **waiting on the user**, not a crash.
+## 0. The map: exit codes, gates, and what `triage run` prints
 
-**Then — regardless of the build rc, and even for a fab-ready (rc0) board — run the design-quality audits §6 (part-library provenance), §7 (BOM realness), §8 (wheel-spin), and §8.5 (intent adherence — does the board match the brief?).** They surface a different, orthogonal class of defect (wrong/missing library, hallucinated or mis-chosen part, an LLM stage going in circles, or a board that is internally clean but **not what the user asked for** — the mechanical-form-factor case ERC/DRC can never see) that the ERC/DRC gates do **not** catch. Every candidate finding — from any section — must then pass §9 (dedup + replay) before it may appear in the §10 report.
+A `build` is sequential: **synthesize+ERC → place leaves → compose+route parent → verify (DRC) → promote+export**. Route yourself by the failure family `triage run` prints (its `VERDICT:` line; the `build_done` event and the `[build] 4/5 verify:` log line are authoritative over per-round artifacts — a dirty round can be superseded before the promote verify):
 
-## 2. Schematic deep-dive (ERC) — when the build died at/before the ERC gate
+| build rc | died at | investigate |
+|---|---|---|
+| 2 | state schema/read failure | the state.json itself (infra) |
+| 3 / 4 | incomplete state / synth input (incl. zero-pin `Mechanical:*` symbols killing stage-prep) | §1 schematic |
+| 5 | ERC errors | §1 schematic |
+| 6 | placement/compose/route produced **no routable board** — congestion, all-K candidates rejected, degenerate 0-leaf hierarchy, `FreeroutingUnavailableError`, stale board (not produced by this run) | §2 PCB |
+| 7 | routed board is dirty — **any of ~8 blockers**: shorts, unconnected, keepout intrusion, gross courtyard overlap, courtyard UNMEASURED (pcbnew absent), form-factor non-conformant, outline-shape non-conformant, `connector_misoriented`, missing component refs | §2 PCB |
+| 0 | fab-ready | §3 audits still run |
 
-**(a) Cross-run ERC scan** — is this error type unique to this design (a wiring/model gap) or hitting many runs (a synthesis-code bug)? Reuse `<PY>` / `<PROJECTS>`:
+Warn-only (do **not** fail the build, despite appearing in `rejection_reasons`): `connector_stranded:*`, minor courtyard clips, low utilization / high aspect, `silk_*`. Do not report these as fab-blockers.
+
+**rc6 promotes a partial board on purpose** (no-fallback-previews): `<stem>.kicad_pcb` on disk may be a placed/partial preview. `triage run` reads `<stem>.provenance.json` (`source_kind ∈ routed|placed|partial`, `fresh`) — never judge routing quality from a non-`routed` promote. The replayable seed for an rc6 run is `.experiments/pre_promote_seed.kicad_pcb`.
+
+**Two coordinate conventions:** ERC report `pos` is 1/100 real mm (`triage` already prints real mm); PCB/DRC coords are **already real mm — never ×100 them**.
+
+## 1. Schematic deep-dive (rc ≤ 5)
+
+`triage run` printed the ERC errors; `triage scan` printed each ERC error type's breadth (`>1 design = systematic synthesis-code bug`). Root-cause table:
+
+| ERC error type | Usual root cause | Where to look |
+|---|---|---|
+| `pin_to_pin` ("Power output … Power output") | PWR_FLAG added to a net already driven by a `power_out` pin | `emitter.py:_power_nets_with_driver`; confirm drivers with the power-net snippet below |
+| `power_pin_not_driven` | undriven rail missing PWR_FLAG, or the LLM left the feed pin unwired | below; if the net isn't in `bom.connections` at all → wiring stage (model) |
+| `wire_dangling` | trunk router emits a 2-endpoint trunk KiCad doesn't net | `router.py:_draw_trunk` |
+| `label_dangling` | net/hier label stub not landing on a wire/pin | `router.py` stub+label fallback / `emitter.py:_emit_root` |
+| `pin_not_connected` on one run | wiring stage (LLM) left a pin unwired | `state.json` `bom.connections` — model output |
+| "pin missing from netlist" on multi-unit parts | emitter dropped unit-B pins (N4, FIXED) — a fresh hit is a **regression** | `design/synthesis/emitter.py` multi-unit emission |
+| rc4 with no retry/park | zero-pin `Mechanical:*` symbol killed stage-prep (N3, FIXED) — fresh hit = regression | stage-prep wiring |
+
+Power-net driver resolution (the one inline snippet kept — a net with a `power_out` pin is driven and must NOT get a PWR_FLAG):
 
 ```bash
-"<PY>" - "<PROJECTS>" <<'PY'
-import json, sys, collections
-from pathlib import Path
-root = Path(sys.argv[1]); by_type = collections.Counter(); eg = collections.defaultdict(list)
-for erc in root.rglob("*_erc.rpt"):
-    try: d = json.loads(erc.read_text())
-    except Exception: continue
-    seen = {v["type"] for sh in d.get("sheets", []) for v in sh.get("violations", []) if v.get("severity") == "error"}
-    for t in seen:
-        by_type[t] += 1; eg[t].append(str(erc).split("/projects/")[-1].split("/generated")[0])
-print("ERC error type -> #runs affected (>1 = systematic synthesis-code bug; 1 = likely this design):")
-for t, n in by_type.most_common():
-    print(f"  {t}: {n} run(s)   e.g. {eg[t][:4]}")
-PY
-```
-
-**(b) Power-net errors** (`power_output_conflict` / `power_pin_not_driven`) — resolve which nets have a real driver. A net with a `power_out` pin is already driven and must **not** get a PWR_FLAG; a net with none **needs** one. Reuse `<PY>` / `<RUN>`:
-
-```bash
-"<PY>" - "<RUN>" <<'PY'
+"$PY" - "<RUN>" <<'PY'
 import json, sys
 from pathlib import Path
 from collections import defaultdict
@@ -170,584 +72,139 @@ def ptype(ref, pin):
 nets = defaultdict(list)
 for c in bom["connections"]:
     if is_power_or_ground_name(c["net_name"]): nets[(c.get("sheet"), c["net_name"])].append(c)
-print("power/ground nets — DRIVEN iff a power_out pin is present, else a PWR_FLAG is required:")
 for (sheet, net), cs in sorted(nets.items()):
     eps = [(ep["ref"], ep["pin"], ptype(ep["ref"], ep["pin"])) for c in cs for ep in c["endpoints"]]
     drv = [f"{r}.{pin}" for r, pin, t in eps if t == "power_out"]
     print(f"  [{sheet}] {net}: {'DRIVEN by ' + ', '.join(drv) if drv else 'no driver -> needs PWR_FLAG'}")
-    for r, pin, t in eps: print(f"       {r}.{pin} = {t}")
 PY
 ```
 
-Then gate the finding through §9 and report via §10 (the ERC root-cause lookup table lives there).
+## 2. PCB deep-dive (rc 6/7)
 
-## 3. PCB deep-dive (placement + routing) — when rc=6/7
+`triage run` already localized the failure layer: per-leaf acceptance (with the `no_unconnected` gate detail), the parent round (chosen by **`bool(routed_validation)`**, not the last attempted), `stamp_drc` (shorts>0 PRE-route = the composer stamped overlapping copper), repair evidence, and FreeRouting fingerprints.
 
-The board is built bottom-up: each sheet is solved+routed as its own **leaf** mini-board, then all leaves are **composed** into a parent and the parent is routed, then a **verify** gate (no shorts, no unconnected, DRC clean) decides fab-ready. Failures live at one of those three layers — this step localizes which.
-
-**(a) Layout verdict — per-leaf + parent.** Reuse `<PY>` / `<RUN>`:
-
-```bash
-"<PY>" - "<RUN>" <<'PY'
-import json, sys
-from pathlib import Path
-run = Path(sys.argv[1])
-exp = next((run/"generated").glob("*/.experiments"), None)
-def L(p):
-    try: return json.loads(Path(p).read_text())
-    except Exception: return {}
-if not exp:
-    print("no .experiments -> build never reached layout (rc<=5); investigate the schematic (§2)."); sys.exit()
-
-print("LEAVES (each sheet solved+routed as its own mini-board):")
-for dbg in sorted(exp.glob("subcircuits/*/debug.json")):
-    d = L(dbg); ex = d.get("extra", {})
-    la = ex.get("leaf_acceptance_structured") or ex.get("leaf_acceptance") or {}
-    fs = ex.get("failure_summary") or {}
-    nm = (ex.get("solve_summary", {}) or {}).get("sheet_name") or d.get("metadata", {}).get("sheet_name", "?")
-    gates = la.get("gate_results") or {}
-    failed = [g for g, r in gates.items() if isinstance(r, dict) and r.get("passed") is False]
-    print(f"  [{nm}] accepted={la.get('accepted')} reject={la.get('rejection_reasons')} "
-          f"failed_gates={failed or '-'} round_reasons={fs.get('unique_reasons')}")
-
-# Parent: the round that produced a routed board (if any), else the last attempted.
-pps = sorted(exp.glob("hierarchical_autoexperiment/round_*/parent_pipeline.json"))
-routed = [(pp, L(pp).get("state", {})) for pp in pps if (L(pp).get("state", {}) or {}).get("routed_validation") is not None]
-pp, st = routed[-1] if routed else ((pps[-1], L(pps[-1]).get("state", {})) if pps else (None, {}))
-print(f"\nPARENT (compose+route of all leaves) [{pp.parent.name if pp else 'none'}]:")
-cs = st.get("candidate_search") or {}; sd = st.get("stamp_drc") or {}; gv = st.get("geometry_validation") or {}
-print(f"  candidate_search: tried={cs.get('tried')} placement_accepted={cs.get('accepted')} rejected_for_drc={cs.get('rejected_drc')}")
-print(f"  stamp_drc (composer, PRE-route): shorts={sd.get('shorts')} clearance={sd.get('clearance')}"
-      f"   <- shorts>0 here = the composer STAMPED overlapping copper (composer bug, not the router)")
-print(f"  geometry: components_outside_outline={gv.get('outside_component_count')} pads_outside={gv.get('outside_pad_count')}")
-rv = st.get("routed_validation")
-if rv:
-    drc = rv.get("drc", {})
-    print(f"  routed_validation: accepted={rv.get('accepted')} reasons={rv.get('rejection_reasons')}")
-    print(f"     DRC (already real mm): shorts={drc.get('shorts')} unconnected={drc.get('unconnected')} "
-          f"clearance={drc.get('clearance')} annular={drc.get('annular_width')} padstack={drc.get('padstack')} "
-          f"on_footprints={drc.get('clearance_footprint_refs')}")
-    print(f"     unconnected nets: {drc.get('unconnected_nets')}")
-else:
-    print("  routed_validation: NONE -> the parent NEVER produced a routed board (rc6).")
-    print("     => freerouting could not route the composed board as placed, or compose/route raised.")
-    print("        Read stamp_drc + candidate_search above and the build log (§5) for an exception/SIGSEGV.")
-rb = sorted(exp.glob("**/parent_routed.kicad_pcb"))
-if rb:
-    print(f"\n  ROUTED BOARD: {rb[-1]}\n  -> localize its DRC freshly with inspect_parent (§3b).")
-PY
-```
-
-**(b) Localize the dirty routed board (rc=7).** When a `parent_routed.kicad_pcb` exists, re-run the *authoritative* gate + a localized DRC: `inspect_parent` re-runs `kicad-cli` DRC and **clusters every violation by footprint ref with real-mm coords**, prints a `BROKEN/WORKS` verdict, and flags packing/stacking waste. (The fresh DRC is authoritative — it can differ from the persisted `routed_validation`.) Reuse `<PY>` / `<RUN>`:
-
-```bash
-RB=$(find "<RUN>" -name parent_routed.kicad_pcb 2>/dev/null | sort | tail -1)
-if [ -n "$RB" ]; then
-  OUT=$(mktemp -d)
-  "<PY>" -m kicraft.cli.inspect_parent "$RB" --output-dir "$OUT" >/dev/null 2>&1 \
-    && sed -n '1,45p' "$OUT/summary.md" \
-    && echo "(full: $OUT/summary.md · annotated_top.png · report.json)"
-else
-  echo "no parent_routed.kicad_pcb -> rc6 (parent never routed); the failure is in §3a's parent block + the build log (§5)."
-fi
-```
-
-A DRC error clustered on one ref (e.g. `J1 … annular width … actual -0.0032 mm` / `PTH pad hole leaves no copper`) is a **footprint-library** problem, not a per-design one — confirm it recurs in §4. **Shorts/unconnected** are the only fab-blockers the verify gate enforces; `silk_over_copper` / `silk_overlap` are cosmetic warnings that do **not** fail the build.
-
-## 4. Systematic vs per-design — the generalizable-fix engine (cross-run PCB scan)
-
-This is the heart of the request: scan **every** run's layout artifacts and rank each failure mode by **how many distinct designs it hits**. >1 design = a **systematic** code/footprint bug whose one fix generalizes; exactly 1 = this design's model output. Reads only persisted JSON (no `kicad-cli`), so it's fast. Reuse `<PY>` / `<PROJECTS>`:
-
-```bash
-"<PY>" - "<PROJECTS>" "$HOME/.kicraft/self_eval" "$HOME/KiCraft/logs/self_eval" <<'PY'
-import json, re, sys, collections, datetime
-from pathlib import Path
-roots = [Path(a) for a in sys.argv[1:]]
-def L(p):
-    try: return json.loads(Path(p).read_text())
-    except Exception: return {}
-def norm(r):
-    # collapse per-instance payloads (refdes, mm offsets, edges) so ONE failure family
-    # counts as one row — 'connector_stranded:J1@-4.41mm(left)' -> 'connector_stranded:<ref>'
-    r = re.sub(r"@-?\d+(\.\d+)?mm(\((left|right|top|bottom)\))?", "", str(r))
-    return re.sub(r"\b[A-Z]{1,3}\d+\b", "<ref>", r)
-def verdict(exp):
-    pps = sorted(exp.glob("hierarchical_autoexperiment/round_*/parent_pipeline.json"))
-    routed = [L(pp).get("state", {}) for pp in pps if (L(pp).get("state", {}) or {}).get("routed_validation") is not None]
-    st = routed[-1] if routed else (L(pps[-1]).get("state", {}) if pps else {})
-    rb = sorted(exp.glob("**/parent_routed.kicad_pcb"))
-    leaves = []
-    for dbg in exp.glob("subcircuits/*/debug.json"):
-        ex = L(dbg).get("extra", {}); la = ex.get("leaf_acceptance_structured") or ex.get("leaf_acceptance") or {}
-        fs = ex.get("failure_summary") or {}
-        leaves.append((bool(la.get("accepted")), fs.get("unique_reasons") or []))
-    return rb, st.get("routed_validation"), leaves
-runs = sorted({exp.parent.parent.parent for root in roots if root.is_dir() for exp in root.rglob(".experiments")})
-tier = collections.Counter(); when = {}
-reject = collections.defaultdict(set); drc = collections.defaultdict(set); fp = collections.defaultdict(set)
-nets = collections.defaultdict(set); lreason = collections.defaultdict(set)
-for run in runs:
-    exp = next((run/"generated").glob("*/.experiments"), None)
-    if not exp: continue
-    tag = run.name; rb, rv, leaves = verdict(exp)
-    when[tag] = datetime.date.fromtimestamp(run.stat().st_mtime).isoformat()
-    tier["route_fail (no parent board, rc6)" if not rb else
-         ("dirty (routed, not fab-ready, rc7)" if rv and rv.get("accepted") is False else
-          ("clean (fab-ready)" if rv and rv.get("accepted") else "unknown"))] += 1
-    if rv:
-        for r in rv.get("rejection_reasons") or []: reject[norm(r)].add(tag)
-        d = rv.get("drc", {})
-        for k in ("shorts", "unconnected", "clearance", "annular_width", "padstack"):
-            if (d.get(k) or 0) > 0: drc[k].add(tag)
-        for ref in d.get("clearance_footprint_refs") or []: fp[ref].add(tag)
-        for net in d.get("unconnected_nets") or []: nets[net].add(tag)
-    for _acc, reasons in leaves:
-        for r in reasons: lreason[norm(r)].add(tag)
-print(f"=== CROSS-RUN PCB SCAN: {len(runs)} runs with layout artifacts ===")
-print("tiers:", dict(tier))
-def show(title, d):
-    rows = sorted(((k, len(v), max((when.get(t, "") for t in v), default="") or "?", sorted(v)[:3])
-                   for k, v in d.items()), key=lambda x: -x[1])
-    print(f"\n{title}  (-> #designs; >1 = SYSTEMATIC, fix generalizes; 1 = this design; latest = most recent affected run):")
-    for k, n, latest, eg in rows: print(f"  {k}: {n}  latest={latest}  e.g. {eg}")
-show("parent rejection reasons", reject)
-show("parent DRC error types", drc)
-show("clearance footprint refs (a recurring ref = footprint-library bug, one .kicad_mod fix)", fp)
-show("unconnected nets (a recurring net = a missing tie/pour rule for that net family)", nets)
-show("leaf failure reasons", lreason)
-PY
-```
-
-The output tells you, for each failure mode, the exact set of designs it hits. **A ref like `J1` or a net like `CC2`/`GND` recurring across many designs is your generalizable fix** — change the one footprint / add the one tie-or-pour rule and every affected board improves.
-
-**Read `latest=` before calling anything systematic.** Runs record no code version, and the scan mixes runs built across many code generations — a mode whose latest hit predates the relevant fix's merge/deploy date (check the auto-memory index and `git log`) is *stale evidence*, not a live gap; a mode still hitting **after** that date is a **regression**, which is a headline finding. Either way, §9's replay settles whether the gap is live on today's code.
-
-## 5. Build log around the run (per-run `.kicraft/build.log` first; journal as fallback)
-
-The `[build] N/5 …` stage lines, `error: …` (the exact rc cause), and any Python traceback / `freerouting` stderr / `SIGSEGV`. **The run writes its own full place/route stdout to `<RUN>/.kicraft/build.log`** — that is the primary, authoritative source and works for web *and* self-eval/offline runs (no journal access needed). Reuse `<RUN>`:
-
-```bash
-BL="<RUN>/.kicraft/build.log"
-if [ -s "$BL" ]; then
-  echo "=== .kicraft/build.log (tail) ==="; tail -80 "$BL"
-  echo "=== error / traceback / route lines ==="; grep -nEi 'error|traceback|freerout|segv|exception|drc|unconnected|route=fail|tier=' "$BL" | tail -40
-else
-  echo "no per-run build.log -> fall back to the systemd journal (deployed web runs):"
-  T=$(stat -c %Y "<RUN>")
-  S=$(date -d "@$((T-1500))" '+%Y-%m-%d %H:%M:%S'); U=$(date -d "@$((T+60))" '+%Y-%m-%d %H:%M:%S')
-  journalctl -u kicraft-web --no-pager -S "$S" -U "$U" 2>/dev/null | grep -iE 'build|error|freerout|segv|trace|route|drc' | tail -80 \
-    || echo "no journal access either (try sudo; or for a self-eval run read its run.log / the batch summary.json)"
-fi
-```
-
-Noise to ignore: `... kicraft.io/$$:0:$$ not found`, `/robots.txt`, `/ads.txt`, `cmd_sco` 404s are crawler hits, not the run's failure.
-
-## 6. Design-quality audit A — part-library provenance (run on EVERY investigation)
-
-Did each part come from the **curated default KiCraft library** (the vendored set under `kicraft/parts_library/<lib>/`), a **stock KiCad** library (fine for generic passives — `Device:`/`Resistor_SMD:`/…), an **auto-fetched** copy in the home cache `~/.kicraft/parts/<lib>/` (the curated library *didn't* cover this part — a coverage gap, not the curated default), or an **UNKNOWN/MISSING** library (the model named a library that resolves nowhere — a real bug; normally synthesis fails first, so a survivor here is worth a hard look)? Resolution honours tier precedence: project → curated(vendored) → home-fetched → `$KICRAFT_EXTRA_PARTS_DIRS` → stock-KiCad. Reuse `<PY>` / `<RUN>` / `<REPO>`:
-
-```bash
-"<PY>" - "<RUN>" "<REPO>" <<'PY'
-import json, os, sys, collections
-from pathlib import Path
-run, repo = Path(sys.argv[1]), Path(sys.argv[2]); home = Path.home()
-sf = run / ".kicraft" / "state.json"
-if not sf.is_file(): sf = next(run.rglob("state.json"), None)
-bom = (json.loads(sf.read_text()).get("bom") or {}); parts = bom.get("parts") or []
-gen = run / "generated"
-stem = next((p for p in gen.iterdir() if p.is_dir()), None) if gen.is_dir() else None
-extra = [Path(p) for p in os.environ.get("KICRAFT_EXTRA_PARTS_DIRS", "").split(os.pathsep) if p]
-def tier(lib, suffix, isdir):
-    # suffix=".kicad_sym" (file) for symbols, ".pretty" (dir) for footprints
-    cands = []
-    if stem: cands.append(("project", stem / ".kicraft" / "parts" / lib / f"{lib}{suffix}"))
-    cands.append(("curated-default", repo / "kicraft" / "parts_library" / lib / f"{lib}{suffix}"))
-    cands.append(("home-fetched", home / ".kicraft" / "parts" / lib / f"{lib}{suffix}"))
-    for e in extra: cands.append(("extra", e / lib / f"{lib}{suffix}"))
-    cands.append(("kicad-standard", Path("/usr/share/kicad/" + ("footprints" if isdir else "symbols")) / f"{lib}{suffix}"))
-    for t, p in cands:
-        if (p.is_dir() if isdir else p.is_file()): return t
-    return "UNKNOWN/MISSING"
-counts = collections.Counter(); flagged = []
-for p in parts:
-    sym = p.get("symbol") or ""; fp = p.get("footprint") or ""
-    slib = sym.split(":", 1)[0] if ":" in sym else ""
-    flib = fp.split(":", 1)[0] if ":" in fp else ""
-    st = tier(slib, ".kicad_sym", False) if slib else "none"
-    ft = tier(flib, ".pretty", True) if flib else "none"
-    counts[st] += 1; note = ""
-    if "UNKNOWN/MISSING" in (st, ft): note = " <-- LIBRARY NOT FOUND (hallucinated/missing — BUG)"; flagged.append((p["ref"], "missing-lib", slib or flib))
-    elif st == "home-fetched": note = " <-- auto-fetched (NOT the curated default — coverage gap)"; flagged.append((p["ref"], "home-fetched", slib))
-    elif st != ft and ft != "none": note = f" <-- symbol tier {st} != footprint tier {ft}"
-    print(f"  {p['ref']:5s} sym[{slib or '-'}]={st:16s} fp[{flib or '-'}]={ft:16s}{note}")
-print("\ntiers:", dict(counts))
-print("flagged:", flagged or "none (all parts from curated-default or stock-KiCad)")
-PY
-```
-
-**Read it:** all parts `curated-default`/`kicad-standard` → the board used the library correctly. A `home-fetched` part = the curated library lacks that part; if the same lib recurs across designs, the generalizable fix is to **vendor it** into the curated library (`add-part --from-lcsc <C#> --into vendored`, then `refresh_sample_previews.py`). An `UNKNOWN/MISSING` survivor = a resolver/validation hole — confirm the lib name in `state.json` and trace `_unresolved_symbols`/`_unresolved_footprints` in `design/cli_app.py`.
-
-## 7. Design-quality audit B — BOM realness (real vs hallucinated vs wrong part)
-
-Are the chosen part numbers **real** (present in the offline jlcparts catalog, `~/.kicraft/jlcparts/cache.sqlite3`, ~636k rows — or `$KICRAFT_JLCPARTS_DB`), **in stock**, and the part the model *meant*? Two passes: **Pass A** sweeps `.kicraft/bom_prices.json` — the pipeline's own authoritative record of the LCSC number + live stock it resolved for every priced part (`id:C#` = explicit, `kw:…` = generic passive, `mpn:…` = MPN search) — and checks each against the catalog. **Pass B** cross-checks each explicit-LCSC BOM part's catalog MPN/description vs the BOM's `mpn`/`value` to flag a *wrong* (real-but-mismatched) part. If the catalog is absent the check degrades to the `bom_prices.json` stock the resolver recorded. Reuse `<PY>` / `<RUN>`:
-
-```bash
-"<PY>" - "<RUN>" <<'PY'
-import json, os, re, sys, sqlite3
-from pathlib import Path
-run = Path(sys.argv[1]); home = Path.home()
-sf = run / ".kicraft" / "state.json"
-if not sf.is_file(): sf = next(run.rglob("state.json"), None)
-parts = (json.loads(sf.read_text()).get("bom") or {}).get("parts") or []
-db = Path(os.environ.get("KICRAFT_JLCPARTS_DB") or home / ".kicraft" / "jlcparts" / "cache.sqlite3")
-con = None
-if db.is_file():
-    import time
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True); con.row_factory = sqlite3.Row
-    age_d = (time.time() - db.stat().st_mtime) / 86400.0
-    print(f"catalog: {db} ({con.execute('SELECT count(*) FROM jlc_components').fetchone()[0]} rows; "
-          f"dump {age_d:.0f} days old — every REAL/stock verdict below is as-of that snapshot"
-          + (", STALE: spot-check resolved C#s on lcsc.com before trusting them" if age_d > 14 else ""))
-else:
-    print(f"catalog MISSING ({db}) — realness limited to bom_prices.json stock the resolver recorded")
-def cat(cnum):
-    if not con: return None
-    try: n = int(str(cnum).strip().upper().lstrip("C"))
-    except (ValueError, TypeError): return None
-    return con.execute("SELECT lcsc,mfr,stock,description FROM jlc_components WHERE lcsc=?", (n,)).fetchone()
-prices = {}
-pf = run / ".kicraft" / "bom_prices.json"
-if pf.is_file(): prices = (json.loads(pf.read_text()) or {}).get("prices", {})
-print(f"\nPass A — resolved part numbers in bom_prices.json ({len(prices)} keys):")
-susp = 0
-for key, e in sorted(prices.items()):
-    if not isinstance(e, dict): continue
-    cnum = e.get("lcsc"); row = cat(cnum)
-    if con is not None and row is None: v = "SUSPECT/HALLUCINATED (C# not in catalog)"; susp += 1
-    elif row is None: v = f"(no catalog) bom_prices stock={e.get('stock')}"
-    elif row["stock"]: v = f"REAL stock={row['stock']} mfr={row['mfr']!r}"
-    else: v = f"REAL-but-OUT-OF-STOCK mfr={row['mfr']!r}"
-    print(f"  {key:24s} {str(cnum):11s} {v}")
-if con: print(f"  -> {susp} resolved part number(s) NOT in catalog (hallucinated)")
-print("\nPass B — explicit-LCSC BOM parts: catalog MPN vs BOM mpn (wrong-part review):")
-def cnum_of(p):
-    for s in (p.get("symbol") or "", p.get("footprint") or ""):
-        m = re.search(r"(?<![A-Za-z0-9])C\d{4,}", s)
-        if m: return m.group(0)
-    m = re.search(r"\bC\d{4,}\b", p.get("sourcing_note") or ""); return m.group(0) if m else None
-any_b = False
-for p in parts:
-    c = cnum_of(p)
-    if not c: continue
-    any_b = True; row = cat(c); bm = (p.get("mpn") or "").strip()
-    if row is None:
-        print(f"  {p['ref']:5s} {c:11s} bom_mpn={bm!r} -> " + ("SUSPECT (not in catalog)" if con else "(no catalog)")); continue
-    cm = (row["mfr"] or "").strip()
-    tag = "MATCH" if bm and cm and (bm.upper() in cm.upper() or cm.upper() in bm.upper()) else ("MPN-MISMATCH — wrong part?" if bm else "no-bom-mpn")
-    print(f"  {p['ref']:5s} {c:11s} bom_mpn={bm!r} cat_mpn={cm!r} stock={row['stock']} [{tag}]")
-    print(f"        cat desc: {(row['description'] or '')[:88]}")
-if not any_b: print("  (no BOM part carries an explicit LCSC C# — all generic/keyword-resolved; rely on Pass A)")
-print("\nPass C — orphan parts (never priced, no explicit C#, unverified library LCSC):")
-# Build the set of refs already covered by Pass A (priced) or Pass B (explicit C#)
-covered = set(prices.keys())
-for p in parts:
-    if cnum_of(p):
-        covered.add(p["ref"])
-# Try to load the parts-library manifests to check library-bundled LCSC validity.
-try:
-    sys.path.insert(0, str(Path(os.environ.get("REPO", str(Path.home() / "KiCraft")))))
-    from kicraft.design.library import _load_library_parts
-    active, _broken = _load_library_parts(run)
-    manifest_by_name = {pm.manifest.name: pm.manifest for pm in active}
-    has_lib = True
-except Exception:
-    has_lib = False
-    manifest_by_name = {}
-    print("  (cannot load parts-library manifests from this run — Pass C limited)")
-orphans = 0
-fabricated = 0
-for p in parts:
-    ref = p.get("ref")
-    if ref in covered:
-        continue
-    sym = p.get("symbol") or ""
-    fp = p.get("footprint") or ""
-    lib = (sym.split(":", 1)[0] if ":" in sym else
-           (fp.split(":", 1)[0] if ":" in fp else ""))
-    if not lib:
-        orphans += 1
-        print(f"  {ref:5s} ORPHAN: no library prefix (symbol={sym!r} footprint={fp!r}) — never priced, no LCSC path")
-        continue
-    if not has_lib:
-        print(f"  {ref:5s} UNVERIFIED: library={lib} (cannot load parts library)")
-        continue
-    man = manifest_by_name.get(lib)
-    if not man:
-        print(f"  {ref:5s} NO MANIFEST: library={lib} — ORPHAN (no loaded manifest for this library)")
-        orphans += 1
-        continue
-    lcsc = (man.sourcing or {}).get("lcsc")
-    if not lcsc:
-        print(f"  {ref:5s} NO LCSC: library={lib} manifest has no sourcing.lcsc — ORPHAN")
-        orphans += 1
-        continue
-    row = cat(lcsc)
-    if row is not None:
-        tag = "REAL (verified)" if con else "UNVERIFIED (no catalog)"
-        print(f"  {ref:5s} LIBRARY-BUNDLE ({tag}): library={lib} lcsc={lcsc} stock={row['stock']} mfr={row['mfr']!r} — not yet priced, but sourceable")
-    elif con is not None:
-        fabricated += 1
-        print(f"  {ref:5s} FABRICATED LCSC: library={lib} claims {lcsc} which is NOT in the catalog — part has no real source")
-    else:
-        print(f"  {ref:5s} UNVERIFIED (no catalog): library={lib} lcsc={lcsc}")
-if orphans: print(f"  -> {orphans} orphan part(s) (no library manifest, no LCSC, never priced)")
-if fabricated: print(f"  -> {fabricated} fabricated LCSC(s) in library manifests (not in catalog)")
-if not orphans and not fabricated and not [p for p in parts if p.get("ref") not in covered]:
-    print("  (all parts covered by Pass A, Pass B, or have a verified library bundle)")
-if con: con.close()
-PY
-```
-**Read it:** Pass A `SUSPECT/HALLUCINATED` = a part number the pipeline priced but that does **not** exist in the catalog (a fabricated C# — investigate `parts_catalog.py`/`pricing.py` resolution, or an online-easyeda fallback that bypassed the offline catalog). `REAL-but-OUT-OF-STOCK` = orderable risk, not fab-blocking. Pass B `MPN-MISMATCH` or a `cat desc` unrelated to the part's intended role (compare against its `sheet`/function and `value`) = the model picked the **wrong real part** — a model-output defect, quote ref + both MPNs. Pass C `ORPHAN` = a part the pipeline never priced, carries no explicit LCSC in its BOM fields, and has no library manifest with a valid sourcing LCSC — a hole in part coverage. `FABRICATED LCSC` = a library manifest claims an LCSC that doesn't exist in the catalog — the bundled part has no real source; re-vendor it with a valid part number. `LIBRARY-BUNDLE (REAL)` = a part not yet priced but sourceable (the library manifest has a valid LCSC). All `REAL`/`MATCH` with stock > 0 = a clean BOM.
-
-## 8. Design-quality audit C — thinking-trace wheel-spin (is the agent going in circles?)
-
-Did an LLM design stage make progress, or **spin its wheels** — burn retries / loop the same tool / re-derive the same point in its reasoning — without converging? The five LLM stages (`intent → functional_spec → architecture → bom → wiring`) stream `reasoning_delta`/`answer_delta`/`tool`/`tool_result`/`retry` into `events.jsonl` between each `stage_start`/`stage_done`; `state.json` `stage_status[stage]` records `attempts` (commit-retry count, capped at `max_retries+1`; bom/wiring floor 4), `rounds` (BOM tool-loop rounds, cap 6), and `tool_calls`. This is the loop behind the wiring "whack-a-mole" and BOM tool-thrash. Reuse `<PY>` / `<RUN>`:
-
-```bash
-"<PY>" - "<RUN>" <<'PY'
-import json, sys, collections
-from pathlib import Path
-run = Path(sys.argv[1])
-sf = run / ".kicraft" / "state.json"
-if not sf.is_file(): sf = next(run.rglob("state.json"), None)
-ss = json.loads(sf.read_text()).get("stage_status", {})
-events = []
-ev = run / "events.jsonl"
-if ev.is_file():
-    for ln in ev.read_text().splitlines():
-        ln = ln.strip()
-        if ln:
-            try: events.append(json.loads(ln))
-            except Exception: pass
-STAGES = ["intent", "functional_spec", "architecture", "bom", "wiring"]
-buckets = {s: [] for s in STAGES}; cur = None
-for e in events:
-    k = e.get("kind")
-    if k == "stage_start": cur = e.get("stage")
-    elif k == "stage_done": cur = None
-    elif cur in buckets: buckets[cur].append(e)
-stuck = []
-for s in STAGES:
-    evs = buckets[s]; stat = ss.get(s, {})
-    if not evs and not stat: continue
-    attempts, rounds, tcalls = stat.get("attempts"), stat.get("rounds"), stat.get("tool_calls")
-    rtext = "".join(e.get("text", "") for e in evs if e.get("kind") == "reasoning_delta")
-    lines = [l.strip() for l in rtext.split("\n") if l.strip()]
-    rep = round(1 - len(set(lines)) / len(lines), 2) if lines else 0.0
-    tools = [(e.get("name"), json.dumps(e.get("args", {}), sort_keys=True)) for e in evs if e.get("kind") == "tool"]
-    top = collections.Counter(tools).most_common(1)
-    errc = collections.Counter(str(x)[:80] for e in evs if e.get("kind") == "retry" for x in (e.get("errors") or []))
-    recur = [x for x, n in errc.items() if n >= 2]
-    sig = []
-    if attempts and attempts >= (4 if s in ("bom", "wiring") else 3): sig.append(f"high_attempts({attempts})")
-    if top and top[0][1] >= 3: sig.append(f"tool_loop({top[0][0][0]}x{top[0][1]})")
-    if rep >= 0.4 and len(lines) > 20: sig.append(f"reasoning_repeat({rep})")
-    if recur: sig.append(f"recurring_error(x{len(recur)})")
-    if s == "bom" and rounds and rounds >= 6: sig.append(f"bom_rounds_maxed({rounds})")
-    if sig: stuck.append(s)
-    print(f"  {s:16s} attempts={attempts} rounds={rounds} tool_calls={tcalls} reasoning={len(rtext)}c repeat={rep} -> {', '.join(sig) or 'OK'}")
-    if recur:
-        for x in recur[:3]: print(f"        recurring: {x}")
-print("\nstuck stages:", stuck or "none (every stage converged on the first/early attempt)")
-PY
-```
-
-**Read it:** `high_attempts`/`recurring_error` = the stage kept failing commit-validation on the **same** error and re-prompting to exhaustion (the classic wiring whack-a-mole — e.g. an unwinnable inter-sheet contract from architecture; see the `wiring-unwinnable-intersheet-contract` memory). `bom_rounds_maxed`/`tool_loop` = BOM thrashed the part-lookup tools without converging (drives cost — see `pipeline-cost-bom-retries`). A high reasoning-char count with `recurring_error` is the strongest "stuck" signal; line-level `reasoning_repeat` is a weaker supplement (long stages aren't usually literally line-duplicated). **Many designs hitting the same stuck stage + same recurring error = a systematic prompt/validation-contract bug** (fix the stage spec or add an upstream reconcile/normalizer so the model is never handed an unwinnable task), not a per-design hiccup.
-
-## 8.5. Design-quality audit D — intent adherence (does the board match the BRIEF?)
-
-**The most important audit, and the one the ERC/DRC/BOM gates cannot do.** A board can be
-0-shorts/0-unconnected **fab-ready and still not be what the user asked for.** The other audits
-check that the board is *internally* well-formed; this one checks it against the *brief*. The
-sharpest recurring case is **mechanical form-factor intent**: a brief that names a standard
-("Arduino Uno shield", "Raspberry Pi HAT", "Feather", "Pi Zero", "mikroBUS", "M.2", or explicit
-"NN×NN mm" dimensions / "stacking headers" / "fits enclosure X") is stating a **hard mechanical
-contract** — a fixed board outline, fixed connector positions, often a fixed mounting-hole pattern.
-The pipeline today has **no field to carry any of that** (`IntentSlot.form_factor` is shape-only;
-the outline is always grown from the placed-part bbox — see `docs/plans/standard-form-factor-templates.md`),
-so it **silently free-places** and produces a mechanically non-conformant board. That is invisible
-to ERC and DRC. KC-99A9M8 ("Arduino-Uno-format prototyping shield") is the canonical case: the
-headers were free-placed (and the free column even overflowed the leaf canvas → build failure).
-
-Scan the brief for constraint signals the pipeline provably cannot honor, and confirm nothing
-downstream represents them. Reuse `<PY>` / `<RUN>`:
-
-```bash
-"<PY>" - "<RUN>" <<'PY'
-import json, re, sys
-from pathlib import Path
-run = Path(sys.argv[1])
-sf = run / ".kicraft" / "state.json"
-if not sf.is_file(): sf = next(run.rglob("state.json"), None)
-st = json.loads(sf.read_text())
-brief = (st.get("intent", {}) or {}).get("brief") or st.get("brief") or ""
-if not brief:
-    bf = run / "brief.txt"
-    brief = bf.read_text() if bf.is_file() else ""
-low = brief.lower()
-
-# Mechanical-standard / fixed-dimension signals in the brief.
-STANDARDS = ["arduino", "uno shield", "mega shield", " shield", "raspberry pi", "rpi ", " hat",
-             "feather", "featherwing", "pi zero", "mikrobus", "m.2", "pmod", "eurocard", "din rail",
-             "qwiic form", "stemma"]
-MECH = ["stacking", "stackable", "form factor", "form-factor", "mounting hole", "standoff",
-        "fits ", "enclosure", "faceplate", "front panel", "board outline", "keep within",
-        "must be exactly", "footprint of a"]
-DIM = re.findall(r'\b\d{1,3}\s?(?:\.\d+)?\s?(?:x|×|by)\s?\d{1,3}\s?(?:\.\d+)?\s?mm\b', low)
-hit_std = sorted({s.strip() for s in STANDARDS if s in low})
-hit_mech = sorted({s.strip() for s in MECH if s in low})
-
-# What did the pipeline actually capture / honor?
-ff = ((st.get("intent", {}) or {}).get("form_factor")) or st.get("form_factor") or {}
-ff_shape = (ff or {}).get("shape") if isinstance(ff, dict) else None
-ff_standard = (ff or {}).get("standard") if isinstance(ff, dict) else None  # not a field today
-# Promoted/parent board outline (real mm), if built.
-outline = None
-for pcb in list(run.rglob("*_routed.kicad_pcb")) + list((run/"generated").glob("*/*.kicad_pcb")):
-    try:
-        t = pcb.read_text()
-    except Exception:
-        continue
-    xs = [float(a) for a in re.findall(r'\(gr_line[^)]*\(start ([\-0-9.]+)', t)]
-    ys = [float(b) for b in re.findall(r'\(gr_line[^)]*\(start [\-0-9.]+ ([\-0-9.]+)', t)]
-    if xs and ys:
-        outline = (round(max(xs)-min(xs),1), round(max(ys)-min(ys),1)); break
-
-print(f"brief: {brief[:160]!r}")
-print(f"mechanical-standard signals : {hit_std or '-'}")
-print(f"mechanical-constraint signals: {hit_mech or '-'}")
-print(f"explicit dimensions in brief : {DIM or '-'}")
-print(f"captured form_factor.shape   : {ff_shape!r}   .standard: {ff_standard!r}")
-print(f"delivered board outline (mm) : {outline}")
-
-# When a standard was captured (or a known one is named) and a board exists, run
-# the mechanical-conformance check: geometry, not net names -- is each standard
-# header pad where the standard fixes it, and is the board the standard's size?
-from kicraft.form_factors import match_standard, get_template
-from kicraft.form_factors.conformance import board_local_pads, check_conformance
-template = get_template(ff_standard) or match_standard(brief)
-if template is not None:
-    pcb = next((p for p in list(run.rglob("parent_routed.kicad_pcb"))
-                + list(run.rglob("*_routed.kicad_pcb"))
-                + list((run/"generated").glob("*/*.kicad_pcb"))), None)
-    if pcb is not None:
-        pads, wh = board_local_pads(str(pcb))
-        rep = check_conformance(template, pads, wh)
-        print(f"conformance ({template.display_name}): {rep.summary()}")
-
-gap = (hit_std or hit_mech or DIM) and (ff_standard is None or (template is not None and pcb is not None and not rep.conformant))
-print("\nINTENT-ADHERENCE VERDICT:",
-      "GAP -- the brief states a mechanical/form-factor constraint the board does NOT satisfy"
-      " (free-placed / free-sized / non-conformant to the named standard; invisible to ERC/DRC)."
-      if gap else
-      "no unmet mechanical-constraint signal detected (still sanity-check interfaces/part-count vs brief by eye).")
-PY
-```
-
-**Read it:** a `GAP` verdict means the brief asked for a fixed mechanical form the board does not
-satisfy. Two flavors: (a) `.standard` is None → the pipeline did not even capture the form factor
-(detection gap — should be rare now that `kicraft.form_factors` matches named standards); (b) a
-standard WAS captured but the delivered board is `NON-CONFORMANT` (e.g. `4/32 standard header pins
-present, outline 121.9x45.2 != 68.58x53.34`) → placement did not honor it. This is a **systematic
-data-model/enforcement gap**, not a per-design miss, because *every* such brief hits it. Owning fix:
-`docs/plans/standard-form-factor-templates.md` (form-factor registry [done] + fixed-outline compose
-branch + a mechanical-conformance promote gate). Beyond the mechanical case,
-also eyeball the delivered BOM/architecture against the brief's **named interfaces and part
-intent** (did an "STM32 CAN node" actually get a CAN transceiver? did "four mounting holes" appear?)
-— a missing/again-and-again-wrong interface across designs is a synthesis prompt/contract gap, not
-a one-off. Report an intent-adherence gap even when the build is fab-ready (rc0).
-
-## 9. Gate every candidate finding — is it NEW, LIVE, and REPRODUCIBLE?
-
-Findings from §2–§8 are *candidates*. Three cheap checks stand between a candidate and the report. Skipping them is how an investigation re-reports a bug fixed last week against stale runs, or proposes a band-aid for a known walled-off cluster.
-
-**(a) Prior-art dedup.** Grep the auto-memory index and the plans for the failure signature (error type, footprint ref, net family, gate name, rejection reason):
-
-```bash
-grep -rli '<signature>' ~/.claude/projects/-home-kicraft-KiCraft/memory/ "<REPO>/docs/plans/" 2>/dev/null | head
-```
-
-- **KNOWN-FIXED** (a memory/plan says FIXED/MERGED/DEPLOYED): compare the fix's merge/deploy date to the affected runs' `latest=` dates (§4 prints them). All hits predate the fix → stale evidence; drop it from the gap list (one appendix line: "fixed, awaiting fresh runs"). Any hit **after** the fix deployed → a **REGRESSION** — headline finding; name the commit it regressed.
-- **KNOWN-DEFERRED / WALLED-OFF** (e.g. the `unconnected=1` `no_clear_path` cluster, routed-GND islands): report as "known-deferred, +N runs affected since <date>", cite the plan/memory, and do **NOT** invent a workaround — masking gates and post-route band-aids are rejected on principle here (fix-at-source feedback). The only new information worth reporting is growth in breadth/severity or a genuinely new lever on the root cause.
-- **NEW** → (b).
-
-**(b) Replay-reproduce on current code — $0, no LLM.** A single run's route verdict is noisy (routing is best-effort-stable; self-eval measured run-to-run deltas that cross grade buckets on identical input), and the run may predate a fix. Replay the frozen workspace under today's code:
+**(a) Localize a dirty routed board by footprint.** `inspect_parent` re-runs kicad-cli DRC (authoritative — can differ from the persisted `routed_validation`), clusters violations by ref with real-mm coords, and flags packing waste. `--baseline <old report.json>` diffs before/after a replay.
 
 ```bash
 STEM_DIR=$(find "<RUN>/generated" -maxdepth 1 -mindepth 1 -type d | head -1)
-WORK=$(mktemp -d); cp -a "$STEM_DIR" "$WORK/replay"   # replay REGENERATES .experiments in place — never burn the evidence
-"<PY>" -m kicraft.design.cli_app replay --project "$WORK/replay" --quality good --seed 0
-"<PY>" -m kicraft.design.cli_app artifacts --project "$WORK/replay"   # honest post-replay verdict + board paths
+RB=$("$PY" -m kicraft.design.cli_app artifacts --project "$STEM_DIR" --kind routed 2>/dev/null | grep -o '/[^ ]*parent_routed.kicad_pcb' | head -1)
+[ -z "$RB" ] && RB=$(find "<RUN>" -name parent_routed.kicad_pcb | sort | tail -1)
+OUT=$(mktemp -d); "$PY" -m kicraft.cli.inspect_parent "$RB" --output-dir "$OUT" >/dev/null 2>&1 && sed -n '1,45p' "$OUT/summary.md"
 ```
 
-Match `--quality` to the original run (`grep 'quality=' "<RUN>/.kicraft/build.log"`); use `--no-route` to isolate the fully deterministic placement layer from best-effort routing. Reproduces → the gap is **live**; report it. Doesn't reproduce → either fixed-since-run (recheck (a)) or route noise — replay 2–3× before claiming either. **Never compare artifacts across two separate replay runs** (cross-run contamination) — measure any leaf-vs-parent or before/after claim inside ONE replay.
+A DRC error clustered on one ref across designs (§ scan `clearance footprint refs`) is a **footprint-library** bug — one `.kicad_mod` fix improves every board using it.
 
-**(c) Name the gate that should have caught it.** For every defect that survived past its origin stage — and especially anything wrong on a "fab-ready" board — answer: which pipeline gate (the synthesis-side numbered checks 9.x at BOM/wiring commit, the wiring normalizers, leaf acceptance, composer stamp-DRC, promote verify, review clamp) could have **deterministically** caught it at the earliest stage where it was visible, and why did the existing one miss it? "Extend gate X to catch Y at stage Z" is the single most common shape of a shipped systemic fix in this pipeline; a finding with no gate answer is usually under-investigated.
+**(b) Unconnected nets — the decision order.** Work through these IN ORDER; "add a tie/pour rule" is the *last* resort, not the default story:
 
-## 10. Report — the ranked pipeline-gap contract (the deliverable)
+1. **Reachability** (was the pad ever escapable?): the leaf block of `triage run` shows `failure_class` — `escape_infeasible` is a **geometry constant** (the escape planner found no legal exit at the board's rule set; re-rolling seeds is worthless; the verdict is honest, not a bug). Check `interface_escapes` for **bare cross-leaf pads** (a leaf lays 0 copper on single-pad interface nets — the dominant rc7 residue class pre-`2d6329e`; kill switch `interface_escape_enabled`). A `no_clear_path` after escapes is a **PLACEMENT bug to fix KiCraft-side** — routing is FreeRouting's job; there is no in-house router coming (C1-v2/A* was scrapped, not shelved).
+2. **Budget** (did routing get its time?): watchdog-killed FR (`freerouting_returncode == -1`), a timeout that left a *partial SES* (does not raise → GND-skip fallback never fires → 26-30 unc), and the crash-priced scheduler ("only ONE parent round ran on a big budget" = a crashed round's cost extrapolated the next round over budget — a scheduler symptom, not placement). Budget knobs: `parent_s_per_interconnect`, `parent_probe_s_per_interconnect`, `parent_gnd_plane_probe_timeout_s`.
+3. **Composition** (leaves fine, parent geometry wrong): corridor/mouth misalignment between leaf mouths and the parent channel — dedup to the open **N5b compose mouth-line alignment** workstream before re-reporting. For strand/mouth findings, attribute to the leaf that **set** the edge, not the flagged ref (a foreign leaf's cap poking past another leaf's mouth line is the setter's fault).
 
-The report is a **ranked list of pipeline gaps, not a story about this board.** Rank by breadth (§2a/§4 #designs) × recency (`latest=`) × severity (fab-blocking > silently-wrong-board > quality > cost). Cap the ranked list at the **top 3** gaps; everything else gets one appendix line each. Every ranked gap must fill all six fields — a field you can't fill means the investigation isn't finished:
+The cross-leaf vs not-in-interconnect split `triage` prints uses `interconnect_net_names`; a net **in** it = parent-interconnect failure (seed growth can help), **not in** it = leaf-internal open **or** a bare cross-leaf pad that defeated interconnect *inference* (check `interface_escapes` before blaming the leaf). Artifacts predating the key can't be split — `triage` says so.
+
+**(c) FreeRouting failure signatures** (evidence tiers: `.kicraft/build.log` line → `.experiments/rounds/round_NNNN.json` stdout/stderr tails → parent-artifact `debug.json` `freerouting_stats.returncode`; `triage run` scans the last two):
+
+| signature | meaning | guard / fix |
+|---|---|---|
+| `The normalization of net 'X' failed.` then silence → rc −1 | FR 1.9 hangs FOREVER on a closed loop in LOCKED wiring | `_break_locked_wire_cycles` DSN sanitizer (`[dsn-sanitize]` line; fixture `tests/data/fr_hang_5v_loop.dsn`) — a fresh hang = regression or new loop source |
+| ~487s rounds + "no SES output (rc=-1)" with non-ASCII in DSN | FR deadlocks on 'Ω' etc. in PN fields | `_sanitize_dsn_part_numbers`; check the DSN for non-ASCII to separate from the loop hang |
+| `freerouting_returncode == -1` | watchdog SIGKILLed the JVM | which of the two hangs above — read the round tails |
+| `FreeRouting crash (rc=…)` / `produced no SES output after 2 attempts` | genuine crash; scheduler half-discounts the round cost | round tails + `commands.parent_route_exit_code` |
+| `fine-pitch routing rule (…)` | board-wide clearance auto-lowered from the densest intra-footprint gap, floored at `freerouting_min_clearance_mm` | **first suspect on USB-C B-row failures** (0.153 stamped where 0.127 needed — run_06/run_09 class); the stamped rays surface only as dangling *warnings* |
+| `power-first phase routed …` / `power_first: {failed}` | two-phase power-first route ran (or failed and fell back single-phase) | `routed_validation.power_first` |
+| repair lines (`gnd island repair`, `power strand repair`, `leaf signal repair`) | repair passes DID run — their records persist in `routed_validation` | absence of a record ≠ "never ran" only on pre-07-21 artifacts (compactor whitelist) |
+
+**(d) Other rc6/rc7 root causes:**
+
+| Symptom | Root cause | Where |
+|---|---|---|
+| rc6, leaves accepted, empty `routed_validation` every round | FR can't route the composed parent as placed | `_compose_route` + budget knobs; `_search/_rejected_candidates.json` when all K candidates were rejected |
+| rc6 degenerate 0-leaf | BOM chose an all-in-one SoC → architecture collapsed | architecture/BOM partition by IC domain |
+| rc7 `stamp_drc.shorts > 0` | composer stamped overlapping copper | `breakout_stubs.py` foreign-pad guard |
+| rc7 `illegal_routed_geometry` | usually REAL `clearance`/`copper_edge_clearance` violations — **not** copper outside the outline (that premise was disproven; 5/5 flagged boards had zero outline escapes) | `illegal_geometry_repair` record shows the rip pass verdict |
+| rc7 `connector_misoriented:<ref>(mouth …)` | connector mouth not facing its board edge | `cli_app._connector_misoriented` + facings gate; if the part is markerless, the `PCB Edge` Dwgs.User marker is the only reliable opening signal |
+| rc7 `form-factor non-conformant` / `outline-shape non-conformant` | delivered geometry violates the captured standard/shape | see §3 intent adherence — distinguish enforcement-off (advisory) from a gate regression |
+| rc7 `courtyard_unmeasured` | pcbnew absent at verify → BLOCKING (was a waiver) | build env |
+| leaf `place_quality_gate` / `grid_guard=discard_*` | connectivity-first grid assignment rejected/discarded | `leaf_grid_assignment` stats in the leaf's `placement_diagnostics` |
+
+## 3. Design-quality audits — `triage audits`, on EVERY run (even rc0)
+
+Orthogonal defect classes the ERC/DRC gates cannot see. Read each block:
+
+- **[A] library provenance:** all `curated-default`/`kicad-standard` = clean. `home-fetched` recurring across designs = vendor it (`add-part --from-lcsc <C#> --into vendored` + `refresh_sample_previews.py`; corpus-wide view: `python -m kicraft.cli.part_query_report`). `UNKNOWN/MISSING` surviving to a build = resolver/validation hole (`design/cli_app.py` `_unresolved_symbols`/`_unresolved_footprints`).
+- **[B] BOM realness:** Pass A `SUSPECT/HALLUCINATED` = a priced C# not in the offline catalog (resolution bug or an online fallback bypassing it). Pass B `MPN-MISMATCH` = real-but-wrong part **candidate** — the matcher already normalizes separators/zero-padding, but verify against the part's role before reporting. Pass C `FABRICATED-LCSC` = a library manifest claims a nonexistent part — re-vendor. **Pass D is the new one:** an MPN deviation from a spec/brief-named part **with an empty `bom.substitutions` ledger** is the `silent_substitution` class (gates §9.23/§9.33 should have forced a ledger entry — name which one missed). The MCU programming-path verdict is deterministic (`mcu_programming_facts`); don't re-derive it by eye, and don't report BOOTSEL+USB (RP2040) or a UPDI pad as "unprogrammable" — §9.29 deliberately accepts those.
+- **[C] wheel-spin:** `high_attempts`+`recurring_error` = commit-validation whack-a-mole (often an unwinnable upstream contract). `RECONCILE DEATH` lines = the 2026-07-27 class (`unresolved BOM deficit after N reconcile pass(es)`, byte-identical recommit) — remaining known-deferred: advancing-chain + crystal deterministic-donor. `bom_rounds_maxed`/`tool_loop` = part-lookup thrash (cost driver). Same stuck stage + same error across designs = prompt/validation-contract bug, not a per-design hiccup.
+- **[D] intent adherence:** the pipeline NOW captures + enforces mechanical standards (`FormFactor.standard`, form-factor + outline-shape promote gates — enforcement-mode-aware). The verdict distinguishes: standard **not captured** (detection gap) / non-conformant with **enforcement OFF** (advisory gap — invisible to ERC/DRC) / non-conformant while **enforced** (a **gate regression**, headline finding). Shaped boards: ring circumscription uses bbox corners (pessimal for circular content — known-deferred shaped-nesting item). Beyond mechanics, eyeball the BOM/architecture against the brief's named interfaces ("CAN node" → a CAN transceiver? "four mounting holes" → present?).
+- **[E] eval/report.json** (self-eval runs): before citing any historical "gate fired" claim, check `observer_rejected` — the judge used to affirm gates whose own evidence self-negated; screened entries are false positives.
+
+## 4. Build log
+
+`<RUN>/.kicraft/build.log` is the primary, authoritative place/route stdout (web AND self-eval runs). The stamp line `[build] code=<sha> branch=<branch>` (runs built ≥ 2026-07-29) dates the code exactly.
+
+```bash
+BL="<RUN>/.kicraft/build.log"
+tail -80 "$BL"
+grep -nEi 'error|traceback|freerout|segv|exception|unconnected|dsn-sanitize|power-first|no_clear_path|ESCAPE INFEASIBLE|Interface escapes|normalization of net|fine-pitch routing rule|island repair|strand repair|signal repair|code=' "$BL" | tail -50
+```
+
+Fallback for deployed web runs with no build.log: `journalctl -u kicraft-web` around the run's mtime. Ignore crawler noise (`/robots.txt`, `/ads.txt`, 404s).
+
+## 5. Cross-run: systematic vs per-design
+
+`triage scan` ranks every failure mode by #designs hit (`>1 = SYSTEMATIC`, fix generalizes; `1` = this design's model output) across the projects dir + self-eval batches. **Read `latest=` and `sha=` before calling anything systematic** — a mode whose last hit predates the owning fix's deploy date is stale evidence; a hit **after** it is a **regression** (headline). Runs without a `sha=` predate the build stamp; date them by `latest=` + the auto-memory fix dates.
+
+## 6. Gate every candidate finding — NEW, LIVE, REPRODUCIBLE?
+
+**(a) Prior-art dedup.** Grep the auto-memory index + plans for the failure signature:
+
+```bash
+grep -rli '<signature>' ~/.claude/projects/-home-kicraft-KiCraft/memory/ "$REPO/docs/plans/" 2>/dev/null | head
+```
+
+- **KNOWN-FIXED**: all affected runs predate the fix → stale, one appendix line. Any hit after → **REGRESSION**, name the commit.
+- **KNOWN-DEFERRED** (current live set: N5b mouth alignment / run_10 GPIO fan-out, GND strand (run_14), USB-C fine-pitch local override (run_06/09), reconcile advancing-chain + crystal-donor deaths, shaped-nesting bbox circumscription (run_29)): report "known-deferred, +N runs since <date>", cite the plan/memory, and do **NOT** invent a workaround — masking gates and post-route band-aids are rejected on principle (fix-at-source).
+- **NEW** → (b).
+
+**(b) Replay-reproduce on current code — $0, no LLM.** Single-run route verdicts are coin flips (deltas cross grade buckets on identical input) — N-of-3 before claiming a regression; ±3–6 pt judge deltas are noise.
+
+```bash
+STEM_DIR=$(find "<RUN>/generated" -maxdepth 1 -mindepth 1 -type d | head -1)
+WORK=$(mktemp -d); cp -a "$STEM_DIR" "$WORK/replay"     # NEVER replay in place — replay regenerates .experiments
+"$PY" -m kicraft.design.cli_app replay --project "$WORK/replay" --quality good --seed 0
+"$PY" -m kicraft.design.cli_app artifacts --project "$WORK/replay"   # honest post-replay verdict
+```
+
+Rules that keep replays honest:
+- Match `--quality` to the original (`grep 'quality=' <RUN>/.kicraft/build.log`). `--quality fast` **never enters the autoexperiment round loop** — a hook there is silently untested.
+- `rm -rf "$WORK/replay/.experiments"` for a cold replay; on **rc6** the replay seed is `.experiments/pre_promote_seed.kicad_pcb` (keep it — the promoted board is a partial).
+- `md5sum` the promoted board vs the best-round board when "what actually shipped" matters.
+- Replay **cannot verify synthesis-side or parts-library changes** (frozen seed) — use the offline `synthesize` subcommand for those.
+- A/B a fix with the project's `autoplacer.json` **kill switch**, same code both sides, and measure both sides in **ONE** script after one replay each — never compare artifacts across separately-scripted replay runs.
+- Never DRC/validate a board copied without its `.kicad_pro`/`.prl`/`*_autoplacer.json` — bare copies get default netclass rules stamped in and manufacture fake violations.
+- Bisection is legitimate (the FR loop-hang was pinned by bisecting 31 locked wires to one segment).
+
+**(c) Name the gate that should have caught it.** For every defect that survived past its origin stage: which deterministic gate (synthesis 9.x checks, wiring normalizers, leaf acceptance, composer stamp-DRC, promote verify incl. the form-factor/outline/facings gates, review clamp) could have caught it earliest, and why did the existing one miss (fail-open on None? warn-only? bbox-based and rotation-blind?). "Extend gate X to catch Y at stage Z" is the most common shape of a shipped fix; a finding with no gate answer is under-investigated.
+
+## 7. Report — the ranked pipeline-gap contract (the deliverable)
+
+Rank by breadth (scan #designs) × recency (`latest=`/`sha=`) × severity (fab-blocking > silently-wrong-board > quality > cost). Top 3 gaps max; everything else one appendix line. Every ranked gap fills all six fields:
 
 ```
 GAP <n>: <one-line name>                [code | footprint-library | gate-hole | prompt/contract | infra]
   evidence:  N/M designs, latest <date> — <≤4 run ids>; if N==1: replay-verified? y/n
-  detect:    earliest stage/gate that could have deterministically caught it + why the current one missed (§9c)
+  detect:    earliest stage/gate that could have deterministically caught it + why the current one missed
   source:    <file:func> — the single point that sets the bad value; fix THERE, never a downstream mask
   fix:       <the one change>; guard: <the test that keeps it fixed>
   verify:    replay <run(s)> → expect <specific delta, e.g. unconnected 2→0, rc7→rc0>
   prior-art: NEW | REGRESSION of <commit/memory> | KNOWN-DEFERRED <plan/memory> (+N runs since)
 ```
 
-After the gap list: a one-paragraph per-run verdict (failing stage, the specific failure, right coords — ERC ×100, DRC real-mm) and the §6–§8.5 audit findings **even when the build passed**. Pure per-design model output (a one-off wrong wire or part pick) goes in the appendix, not the gap list — *unless* the same model mistake recurs across designs, which makes it a prompt/validation-contract gap: the fix is the stage spec or an upstream reconcile-normalizer, and it belongs in the ranked list.
+After the gap list: one paragraph per-run verdict (failing stage, specific failure, right coords) and the §3 audit findings **even when the build passed**. Pure per-design model output goes in the appendix — unless the same mistake recurs across designs (then it's a prompt/contract gap and ranks).
 
-**Root-cause lookup tables** — symptom → owning module; use these to fill each gap's `source:` field.
+## 8. Headless mode (`KICRAFT_INVESTIGATE_HEADLESS=1` — the /admin/support runner)
 
-**Schematic (ERC) root causes** — the real KiCad `type` strings §1/§2a print:
-
-| ERC error type | Usual root cause | Where to look |
-|---|---|---|
-| `pin_to_pin` ("Power output … Power output are connected") | PWR_FLAG added to a net already driven by a `power_out` pin | `emitter.py:_power_nets_with_driver` (driver-aware; if it recurs, a driver pin wasn't classified `power_out` — confirm with §2b) |
-| `power_pin_not_driven` | undriven rail missing a PWR_FLAG, **or** the LLM left the feed pin unwired | §2b; if the net isn't in `bom.connections` at all → wiring stage (model) |
-| `wire_dangling` ("Wires not connected to anything") | trunk router emits a 2-endpoint trunk KiCad doesn't net to its end pins | `router.py:_draw_trunk` (systematic — check §2a) |
-| `label_dangling` | a net/hierarchical label whose stub doesn't land on a wire or pin | `router.py` stub+label fallback / `emitter.py:_emit_root` sheet-pin stubs (systematic — usually most common) |
-| `pin_not_connected`, or gate `9.11 net coverage` on one run | the wiring stage (LLM) left a pin unwired | `state.json` `bom.connections` — model output, not a code bug |
-
-**PCB (placement + routing) root causes** — from §3/§4 (DRC coords are real mm):
-
-| Symptom | Usual root cause | Bug class | Where to look / generalizable fix |
-|---|---|---|---|
-| rc6: `routed_validation = NONE`, leaves accepted, `candidate_search` placed but no routed board | freerouting can't route the composed parent as placed (congestion / parent interconnect), or compose/route raised | code (if §4 ≫1) | `compose_subcircuits._route_parent_board`, freerouting params; more spacing / routing channels; build log for exception/SIGSEGV (`parent-route-strip-segv`) |
-| rc6: `FreeroutingUnavailableError` in the log | Java / FreeRouting jar / xvfb missing | infra | install the toolchain (`build-fail-missing-freerouting-java`) |
-| rc6: degenerate hierarchy (0 leaves) | BOM chose an all-in-one SoC → architecture collapsed to no per-block sheets | model/arch | architecture/BOM partition by IC domain (`wiring-park-integrated-soc`, `reconcile-stage-plan`) |
-| rc7: `reasons=['unconnected_nets']`, the SAME nets (e.g. `GND`,`CC2`) recur in §4 | parent route leaves a power/CC net family untied; a tie-or-pour rule is missing for it | code (systematic) | `_route_parent_board` power pours + `breakout_stubs.py`; add the tie/pour for that net family (`usb-c-leaf-unrouted-accepted`) |
-| rc7: `clearance`/`annular_width`/`padstack` clustered on the SAME ref (e.g. `J1`) across designs | that part's **footprint** has a too-thin annular ring / pad-vs-hole / courtyard; DRC fails on every board using it | footprint-library | fix the `.kicad_mod` pad/annular/courtyard for that footprint — one fix → all boards (cf. the ESP32-mini antenna-keepout `.kicad_mod` fix) |
-| rc7: `stamp_drc.shorts > 0` | the composer stamped overlapping copper (e.g. a perimeter tie across a part's own pads) | code | `breakout_stubs.py` foreign-pad guard (`dense-leaf-route-fail`) |
-| leaf `reject=['no_unconnected']` / `leaf_routed_artifact_validation` recurring | the leaf couldn't route all its internal nets, or routed-artifact validation rejects it | code | `leaf_routing.py` / `leaf_acceptance.py`; the leaf's pour/stub strategy |
-| leaf `leaf_pre_stamp_legality_repair` / `illegal_unrepaired_leaf_placement` | placement couldn't be legalized (overlap / keepout) before routing | code | `placement_solver` legalize + keepouts (e.g. antenna keepout) |
-| `geometry: components_outside_outline > 0` | placement put parts outside the board outline | code | compose placement clamp / board-outline sizing |
-
-**Design-quality audit findings** — from §6/§7/§8/§8.5 (orthogonal to ERC/DRC; report even on a fab-ready board):
-
-| Audit finding | Meaning | Bug class | Where to look / generalizable fix |
-|---|---|---|---|
-| §6 part on `home-fetched` tier | curated default library lacks this part; the build auto-fetched it | coverage gap (not a failure) | if the lib recurs across designs, vendor it: `add-part --from-lcsc <C#> --into vendored` + `refresh_sample_previews.py` |
-| §6 `UNKNOWN/MISSING` library | the model named a symbol/footprint library that resolves in no tier | code (resolver/validation hole) | `design/cli_app.py` `_unresolved_symbols`/`_unresolved_footprints`; why did it survive the BOM-commit gate? |
-| §7 Pass A `SUSPECT/HALLUCINATED` | a priced part number that isn't in the offline catalog (fabricated C#) | code (resolution) | `server/parts_catalog.py`/`pricing.py`; an easyeda online fallback bypassing the offline catalog (`bom-component-pricing-waf`) |
-| §7 Pass A `REAL-but-OUT-OF-STOCK` | real part, 0 stock | orderable risk (not fab-blocking) | prefer in-stock / Basic parts at BOM selection |
-| §7 Pass B `MPN-MISMATCH` / unrelated `cat desc` | the model chose a real but **wrong** part vs its intended role/`value` | model output | the BOM stage's part choice for that ref — per-design unless it recurs |
-| §8 `high_attempts`/`recurring_error` on a stage | stage looped commit-validation on the same error to exhaustion (whack-a-mole) | code (prompt/validation contract) if many designs | fix the stage spec / add an upstream reconcile-normalizer (`wiring-unwinnable-intersheet-contract`, `reconcile-stage-plan`) |
-| §8 `bom_rounds_maxed`/`tool_loop` | BOM thrashed the part-lookup tools without converging | code/model (cost driver) | BOM tool-loop convergence; candidate suggestions on a miss (`pipeline-cost-bom-retries`) |
-| §8.5 intent-adherence `GAP` (mechanical form factor) | brief named a standard form factor / fixed dims / stacking headers the pipeline has no field to honor; board free-placed & free-sized (mechanically non-conformant, invisible to ERC/DRC) | code (data-model + gate hole) | `docs/plans/standard-form-factor-templates.md` — form-factor registry + fixed-outline compose branch + mechanical-conformance promote gate; `intent.form_factor` is shape-only today |
-| §8.5 missing/wrong interface vs brief | delivered BOM/architecture lacks an interface the brief named (no CAN transceiver on a "CAN node", no mounting holes on "four holes") | model output; prompt/contract gap if it recurs | the owning synthesis stage's spec; add an intent-coverage check at architecture/BOM commit |
-
-**Rule of thumb:** the failure's **breadth across designs (§2a for ERC, §4 for PCB, and a recurring §6/§8 finding) is the verdict — but only live, reproducible breadth counts (§9).** Many designs → a synthesis/layout **code** bug, a **footprint-library** bug, or a **gate hole** whose single fix generalizes (name it in a GAP block). One design → that design's **model** output (appendix), unless the same mistake recurs across designs — then it's a prompt/contract gap and belongs in the ranked list. Quote the offending ref + real-mm DRC coord (or ×100 ERC pos) so the next agent can open the board/schematic straight to the spot.
+- **Budget: ~25 min hard** (the runner kills at 30). Skip §6b replay for anything dense (>10 leaves or a >600s original route budget); mark those findings `PLAUSIBLE (replay not run — headless budget)` and include the exact replay command in the report so a human can run it.
+- **Only your final message survives** (`--output-format text` keeps the last assistant message; mid-run notes are discarded). The full §7 report — gap blocks, per-run verdict, audit findings — must be in that one final message, self-contained, no references to "above".
+- **Never launch a background replay or promise "I'll report back"** — the session ends with your final message and anything still running dies with it. Replay synchronously inside the budget, or skip it and mark the finding PLAUSIBLE with the exact command.
+- No user is present: never ask questions; make the conservative call and record the uncertainty in the report.
+- Stay read-only outside tempdirs: replay copies and `mktemp -d` outputs only; never modify the run dir, the repo, or memory.

@@ -463,6 +463,11 @@ def _route_parent_board(
             k: power_first_stats.get(k) for k in ("nets", "failed")
             if k in power_first_stats
         }
+    # FreeRouting's process returncode (-1 = watchdog-killed JVM, the hang
+    # fingerprint) — kept through _compact_routed_validation so a cross-run
+    # scan can count hung routes without opening the parent debug.json.
+    if isinstance(freerouting_stats, dict) and "returncode" in freerouting_stats:
+        validation["freerouting_returncode"] = freerouting_stats.get("returncode")
 
     # Illegal-geometry remediation (self-eval 2026-07-20 N2): freerouting
     # occasionally ships copper the fab gate must reject -- escaped past

@@ -2504,6 +2504,8 @@ def _compact_routed_validation(validation: dict[str, Any]) -> dict[str, Any]:
         "post_route_repairs",
         "signal_unconnected_repair",
         "illegal_geometry_repair",
+        # FR process returncode: -1 = watchdog-killed JVM (hang fingerprint)
+        "freerouting_returncode",
     ):
         if k in validation:
             out[k] = validation[k]

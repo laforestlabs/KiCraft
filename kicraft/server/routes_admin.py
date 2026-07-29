@@ -757,6 +757,27 @@ def admin_support_page():
                      "run — each is a real Claude Code session.") \
                 .classes("text-xs").style("color:#64748b")
 
+        with ui.row().classes("items-center gap-3"):
+            auto_err = ui.switch(
+                "Auto-investigate failed builds (error_auto, capped/day)",
+                value=(store.get_setting(
+                    "support.auto_investigate_errors", "0") == "1"))
+
+            def on_toggle_err(e) -> None:
+                if not guard():
+                    auto_err.value = (store.get_setting(
+                        "support.auto_investigate_errors", "0") == "1")
+                    return
+                store.set_setting("support.auto_investigate_errors",
+                                  "1" if e.value else "0")
+                ui.notify("Auto-investigate failed builds "
+                          + ("on" if e.value else "off"), color="positive")
+            auto_err.on_value_change(on_toggle_err)
+            ui.label("OFF by default: every failed build files an error_auto "
+                     "report; this triages them headlessly, capped per day "
+                     "(KICRAFT_INVESTIGATE_ERRORS_DAILY_CAP, default 6).") \
+                .classes("text-xs").style("color:#64748b")
+
         ui.separator().style("background:var(--kc-border);margin-top:4px")
 
         state = {"filter": "all"}   # all | user | new | reviewed

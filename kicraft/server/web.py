@@ -1464,6 +1464,7 @@ def _file_failure_report(state: dict) -> None:
             user_id=state.get("user_id"), project_id=state.get("project_id"),
             board_code=state.get("board_code"), kind="error_auto",
             diagnostics=_collect_support_diagnostics(state))
+        _auto_investigate_error_if_enabled(state.get("support_report_id"))
     except Exception:
         pass
 
@@ -1472,6 +1473,38 @@ def _investigation_log_dir() -> Path:
     """Where headless /kicraft-investigate runs tee their stdout: a sibling of
     the projects dir (not per-project, since a report may have no project)."""
     return _store().projects_dir.parent / "support_investigations"
+
+
+# Daily ceiling on error_auto-triggered headless investigations: each is a
+# real Claude Code session (LLM spend), so a bad deploy day (every build
+# failing) must not fan out unbounded.
+_AUTO_ERROR_INVESTIGATE_DAILY_CAP = int(
+    os.environ.get("KICRAFT_INVESTIGATE_ERRORS_DAILY_CAP", "6"))
+
+
+def _auto_investigate_error_if_enabled(report_id: int | None) -> None:
+    """Headless triage for the silent per-failure auto-filed reports. OFF by
+    default (`support.auto_investigate_errors`) and capped per day — unlike
+    user-filed reports (`support.auto_investigate`, on by default), error_auto
+    rows arrive for EVERY failed build. Best-effort: must never break the
+    build-failure path."""
+    if report_id is None:
+        return
+    try:
+        store = _store()
+        if store.get_setting("support.auto_investigate_errors", "0") != "1":
+            return
+        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)).isoformat()
+        if store.investigations_created_since(since) >= _AUTO_ERROR_INVESTIGATE_DAILY_CAP:
+            return
+        report = store.get_support_report(report_id)
+        if report is None:
+            return
+        from . import investigate_runner
+        investigate_runner.enqueue_investigation(
+            store, report, log_dir=_investigation_log_dir())
+    except Exception:
+        pass
 
 
 def _auto_investigate_if_enabled(report_id: int) -> None:

@@ -5506,6 +5506,30 @@ def _cmd_build(args: argparse.Namespace) -> int:
         return _cmd_build_impl(args)
 
 
+def _build_meta(args: argparse.Namespace) -> dict:
+    """Code-version stamp for this build. Runs used to record no code version,
+    so cross-run scans could not tell stale evidence (a mode fixed since the
+    run) from a live gap; triage/scan read this back."""
+    import subprocess
+    repo = Path(__file__).resolve().parents[2]
+    sha = branch = None
+    try:
+        sha = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5).stdout.strip() or None
+        branch = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return {
+        "git_sha": sha,
+        "git_branch": branch,
+        "quality": getattr(args, "quality", None),
+        "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
 def _cmd_build_impl(args: argparse.Namespace) -> int:
     state_path = Path(args.state)
     out_dir = Path(args.out_dir)
@@ -5517,6 +5541,15 @@ def _cmd_build_impl(args: argparse.Namespace) -> int:
     except (OSError, json.JSONDecodeError) as e:
         print(f"could not read {state_path}: {e}", file=sys.stderr)
         return 2
+
+    meta = _build_meta(args)
+    print(f"[build] code={(meta.get('git_sha') or '?')[:12]} "
+          f"branch={meta.get('git_branch') or '?'} quality={meta.get('quality')}")
+    try:
+        (state_path.parent / "build_meta.json").write_text(
+            json.dumps(meta, indent=2), encoding="utf-8")
+    except OSError:
+        pass  # stamp is diagnostics-only; never fail a build over it
 
     if state.bom is None or not state.bom.connections:
         print(

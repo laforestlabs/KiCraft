@@ -42,6 +42,10 @@ _slots = threading.Semaphore(_MAX_CONCURRENT)
 # reads several runs; generous, but never unbounded -> no wedged session).
 _TIMEOUT_S = float(os.environ.get("KICRAFT_INVESTIGATE_TIMEOUT_S", "1800"))
 
+# Explicit model pin so headless spend is deliberate, not whatever the CLI's
+# session default happens to be. Override via KICRAFT_INVESTIGATE_MODEL.
+_DEFAULT_MODEL = "claude-sonnet-5"
+
 
 def _log(msg: str) -> None:
     print(f"[investigate] {msg}", flush=True)
@@ -139,9 +143,8 @@ def _run_claude(store: AccountStore, inv_id: int, target: str):
     repo = _repo_dir()
     cmd = [claude, "-p", f"/kicraft-investigate {target}",
            "--output-format", "text", "--dangerously-skip-permissions"]
-    model = os.environ.get("KICRAFT_INVESTIGATE_MODEL")
-    if model:
-        cmd += ["--model", model]
+    model = os.environ.get("KICRAFT_INVESTIGATE_MODEL") or _DEFAULT_MODEL
+    cmd += ["--model", model]
     _log(f"inv {inv_id}: /kicraft-investigate {target} (cwd={repo})")
     chunks: list[str] = []
     logf = log_path.open("a", encoding="utf-8") if log_path else None
@@ -149,7 +152,13 @@ def _run_claude(store: AccountStore, inv_id: int, target: str):
         proc = subprocess.Popen(
             cmd, cwd=str(repo), stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, errors="replace",
-            bufsize=1, env={**os.environ}, start_new_session=True)
+            bufsize=1,
+            # The skill's headless section keys off this: budget inside the
+            # watchdog (skip dense replays, mark findings PLAUSIBLE) and put
+            # the whole report in the final message (only it survives
+            # --output-format text).
+            env={**os.environ, "KICRAFT_INVESTIGATE_HEADLESS": "1"},
+            start_new_session=True)
         # A silent hang (a wedged tool call) prints nothing, so a per-line check
         # would never fire; the watchdog enforces the wall clock regardless.
         wd = {"deadline": time.monotonic() + _TIMEOUT_S, "killed": False}
