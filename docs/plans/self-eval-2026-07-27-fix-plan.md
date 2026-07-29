@@ -97,6 +97,32 @@ sides measured by ONE script):**
   mechanism) flips, and run_10's failure is now attributable per pad from the
   leaf record.
 
+### Post-deploy batch 20260728T120442Z (34 briefs, $0.99, 5.6 h — first batch on `2d6329e`)
+
+| | 7-20 baseline | 7-27 re-batch | **7-28 post-escape** |
+| --- | --- | --- | --- |
+| fab-ready | 24/34 | 22/34 | **25/34 (new high)** |
+| mean / median | 75.3 / — | 75.8 / 78.8 | 73.7 / 75.8 |
+| grades | 23B/9C/2D | 26B/4C/4D | 21B/10C/2D/1F |
+| observer gates | 1 | 2 (legit) | 1 (run_13, dead build) |
+| synthesis deaths | 0 | 1 | **3** (13, 15, 18 — model-side) |
+
+**8 of the re-batch's 12 open boards flipped to fab-ready** (12, 22, 23, 25,
+26, 28, 29, 30) — six of them the interface-escape class exactly. Still open:
+run_10 (22 unc GPIO fan-out — N5b compose alignment, as predicted), run_24
+(9→5 unc; VBUS/GND pour + 2 signals), run_27 (2 unc, on-leaf-partnered nets),
+run_13 (moved to a synthesis death). New downs, all attributed: run_06 rc6 =
+USB-C receptacle footprint geometry at a 0.153 local override whose B-row
+pads need 0.127 (the escape plan's named "untested risk" knob; the stamped
+rays appear ONLY as expected dangling warnings, not in any error), run_09
+2 unc = J1.A6/A7 declared honestly `infeasible` by the planner (per-pad
+attribution working), run_14 1 unc GND = the known pour/strand class. The
+mean dip is the three deaths (model variance; the death briefs are ~$0.10 to
+re-drive); place/route pre-gate quality is flat-to-up. ≥26/34 target missed
+by one. Next owners: fine-pitch local-override selection (run_06+run_09, one
+mechanism), N5b mouth alignment (run_10), GND strand (run_14), reconcile
+advancing-chain + crystal deterministic-donor (the deaths).
+
 ## RESULTS (implementation, 2026-07-27 — updated as items land)
 
 - **P0 SHIPPED.** Judge contract now demands per-gate `triggered: true|false`;
