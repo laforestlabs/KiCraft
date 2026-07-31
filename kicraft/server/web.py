@@ -25,8 +25,6 @@ import ssl
 import subprocess
 import threading
 import time
-import types
-import typing
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -74,11 +72,9 @@ from .parts_catalog import (
 from .samples import SAMPLES_DIR, available_samples, featured_sample
 from .session import (
     bom_reconcile_deficits,
-    commit_slot,
     derive_stage_statuses,
     downstream_stages,
     maybe_bom_reconcile,
-    null_downstream,
     read_state,
     record_answers,
     remaining_stages,
@@ -90,7 +86,7 @@ from kicraft.build_slots import ACQUIRED_MARKER, slot_count
 
 from . import billing, notify
 from .build_worker import JOB_KIND_COMMANDS, _kill_build
-from .stage_driver import DESIGN_STAGES, SLOT_MODEL
+from .stage_driver import DESIGN_STAGES
 from .stagetabs import StageTabs, _build_substage, demo_events
 from . import stage_diagram
 from .storage import (
@@ -1632,60 +1628,6 @@ def _derived_statuses(ws: Path | None, sj: dict, project_status: str | None,
                                  pcb_ready=pcb, zip_ok=zip_ok)
 
 
-def _anno_kind(anno) -> tuple[str, list | None]:
-    """Classify a Pydantic field annotation for the structured slot editor: one of
-    'str' / 'bool' / 'list_str' / 'enum' / 'json' (the catch-all for nested types)."""
-    origin = typing.get_origin(anno)
-    args = typing.get_args(anno)
-    if origin in (typing.Union, types.UnionType):  # unwrap Optional[X]
-        non_none = [a for a in args if a is not type(None)]
-        if len(non_none) == 1:
-            return _anno_kind(non_none[0])
-    if anno is str:
-        return ("str", None)
-    if anno is bool:
-        return ("bool", None)
-    if origin is list and args and args[0] is str:
-        return ("list_str", None)
-    if origin is typing.Literal:
-        return ("enum", [str(a) for a in args])
-    return ("json", None)
-
-
-def _render_slot_form(model, slot: dict):
-    """Render one editable widget per model field; return getter() -> slot dict.
-    Simple fields (str / bool / list[str] / enum) get native widgets; nested
-    fields (lists of objects, dicts) fall back to a JSON box. The getter may raise
-    json.JSONDecodeError if a JSON field is left malformed."""
-    getters: dict = {}
-    for name, field in model.model_fields.items():
-        kind, choices = _anno_kind(field.annotation)
-        cur = slot.get(name)
-        with ui.row().classes("w-full items-start gap-2"):
-            ui.label(name).classes("text-xs w-40 pt-2").style("color:#94a3b8")
-            if kind == "str":
-                w = ui.input(value=("" if cur is None else str(cur))).classes("flex-grow")
-                getters[name] = lambda w=w: (w.value or "")
-            elif kind == "bool":
-                w = ui.switch(value=bool(cur))
-                getters[name] = lambda w=w: bool(w.value)
-            elif kind == "list_str":
-                ui.label("(one per line)").classes("text-xs pt-2").style("color:#64748b")
-                w = ui.textarea(value="\n".join(cur or [])).props("rows=3").classes("flex-grow")
-                getters[name] = lambda w=w: [s.strip() for s in (w.value or "").splitlines()
-                                             if s.strip()]
-            elif kind == "enum":
-                val = cur if cur in (choices or []) else (choices[0] if choices else None)
-                w = ui.select(choices or [], value=val).classes("flex-grow")
-                getters[name] = lambda w=w: w.value
-            else:  # nested model/list/dict -> JSON box
-                w = ui.textarea(value=(json.dumps(cur, indent=2) if cur is not None else "")) \
-                    .props("rows=4").classes("flex-grow text-xs")
-                getters[name] = lambda w=w: (json.loads(w.value) if (w.value or "").strip()
-                                             else None)
-    return lambda: {n: g() for n, g in getters.items()}
-
-
 # Live design runs, keyed by project id. A run's worker registers its state dict
 # here so a later page load (a reload, navigating back from /parts, a second tab)
 # can re-attach to the in-flight run and stream its progress, instead of landing
@@ -1994,15 +1936,15 @@ def _ensure_workspace(state: dict) -> Path | None:
     return pd
 
 
-def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
+def _run_design(state: dict, stages, answers=None) -> None:
     """Drive `stages` for this page's session, streaming progress into `state`,
     then (on success) run the deterministic build. Shared by the initial design,
-    resume/continue, edit-and-rerun, and answering a parked question.
+    resume/continue, and answering a parked question.
 
     The thread only mutates `state` (appends progress events, sets flags); every
     NiceGUI element update happens in the page render timer (elements must not be
-    touched off the UI context). `answers` / `instruction` apply to the first of
-    `stages` (the stage being resumed or edited).
+    touched off the UI context). `answers` apply to the first of `stages` (the
+    stage being resumed).
     """
     ws = (Path(state["ws"]) if state.get("ws")
           else _new_workspace("kicraft_web_"))
@@ -2030,7 +1972,7 @@ def _run_design(state: dict, stages, answers=None, instruction=None) -> None:
 
     try:
         res = run_session(ws, state.get("brief", ""), stages, answers=answers,
-                          instruction=instruction, progress=progress, run_id=run_id,
+                          progress=progress, run_id=run_id,
                           core_defaults=core_defaults)
         if res.get("guard"):
             state["spend"] = _project_spend_usd(state.get("project_id"))
@@ -4171,8 +4113,8 @@ _LANDING_FEATURES = [
      "Download a real .kicad_pro project plus Gerbers. Open it in KiCad, change "
      "anything, send it to any fab."),
     (_SVG_TUNE, "You stay in control",
-     "Edit any stage and re-run only what changed. KiCraft asks you when a design "
-     "choice is yours to make."),
+     "Rearrange the board yourself: drag and rotate circuit blocks, reshape the "
+     "outline, re-route. KiCraft asks you when a design choice is yours to make."),
 ]
 
 _LANDING_HOW = [
@@ -4421,7 +4363,6 @@ def index(prompt: str = "", project: str = ""):
         view.clear()
         view.update(rendered=0, build_lines=[], fab_done=False,
                     sch_view=None, pcb_view=None,
-                    sch_revealed=False, pcb_revealed=False,
                     pcb_mtime=None, state_mtime=None, run_mtime=None,
                     leaf_progress_sig=None, questions_rendered=None,
                     prices_rev_seen=0, prices_loaded_ws=None,
@@ -4780,21 +4721,28 @@ def index(prompt: str = "", project: str = ""):
         # (KiCanvas) and the download land in the build tabs.
         tabs = StageTabs(show_cost=is_admin(user), draft_spec=_draft_sections)
 
-        # A KiCanvas view built while its tab is hidden sizes its WebGL canvas to zero
-        # and never repaints; re-fit it the first time the user reveals that tab. The
-        # flag is reset when each view is (re)created (see the render loop below).
-        def _reveal_view(view_key: str, seen_flag: str) -> None:
+        # Rebuild a tab's KiCanvas embed EVERY time the user reveals that tab.
+        # The tab panels are keep-alive, so switching away detaches the panel's
+        # DOM -- and <kicanvas-embed> cannot survive that: its disconnectedCallback
+        # disposes the viewer, and re-attaching the same element throws in
+        # attachShadow (a shadow root already exists), leaving the canvas
+        # permanently blank. refresh() re-sets the innerHTML, which parses a
+        # fresh element -- the only reliable revival (see kicanvas.py docstring).
+        def _reveal_view(view_key: str) -> None:
             v = view.get(view_key)
-            if v is not None and not view.get(seen_flag):
-                view[seen_flag] = True
+            if v is not None:
                 v.refresh()
-        tabs.on_show("synthesize", lambda: _reveal_view("sch_view", "sch_revealed"))
-        tabs.on_show("place_route", lambda: _reveal_view("pcb_view", "pcb_revealed"))
+        tabs.on_show("synthesize", lambda: _reveal_view("sch_view"))
 
-        with ui.expansion("Edit a stage & re-run").classes("w-full mt-2") \
-                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
-            edit_box = ui.column().classes("w-full gap-2 p-2")
-        edit_ctx: dict = {"getter": None, "raw": None, "instr": None}
+        def _reveal_place_route() -> None:
+            if view.get("pcb_view") is not None:
+                view["pcb_view"].refresh()
+            elif not view.get("layout_editor"):
+                # Mid-build leaf/parent gallery: forget the run_status mtime so
+                # the next render tick rebuilds it (and the inspector's live
+                # board views) with fresh embeds.
+                view["run_mtime"] = None
+        tabs.on_show("place_route", _reveal_place_route)
 
         def build_question_panel():
             """(Re)build the clarifying-question panel for a parked run as a
@@ -4887,124 +4835,6 @@ def index(prompt: str = "", project: str = ""):
             status.text = f"Got it. Continuing from {stage} with your answer..."
             threading.Thread(target=_run_design, args=(state, runs),
                              kwargs={"answers": answers}, daemon=True).start()
-
-        def build_edit_panel():
-            """(Re)build the stage editor for the currently open design."""
-            edit_box.clear()
-            with edit_box:
-                read_root = Path(state["ws"]) if state.get("ws") else None  # durable root in view mode (ws=None)
-                if not read_root:
-                    ui.label("Open or run a design first, then edit a stage here.") \
-                        .classes("text-xs").style("color:#64748b")
-                    return
-                sj = read_state(read_root)
-                editable = [s for s in ("intent", "functional_spec", "architecture", "bom")
-                            if sj.get(s)]
-                if not editable:
-                    ui.label("No committed stages to edit yet.") \
-                        .classes("text-xs").style("color:#64748b")
-                    return
-                ui.label("Editing a stage re-runs the stages after it.") \
-                    .classes("text-xs").style("color:#94a3b8")
-                stage_sel = ui.select(editable, value=editable[0], label="Stage").classes("w-64")
-                form_holder = ui.column().classes("w-full gap-2")
-
-                def render_form():
-                    form_holder.clear()
-                    with form_holder:
-                        stg = stage_sel.value
-                        edit_ctx["getter"] = _render_slot_form(SLOT_MODEL[stg], sj.get(stg) or {})
-                        with ui.expansion("Advanced: raw slot JSON").classes("w-full"):
-                            edit_ctx["raw"] = ui.textarea(value=json.dumps(sj.get(stg), indent=2)) \
-                                .props("rows=8").classes("w-full text-xs")
-                        edit_ctx["instr"] = ui.textarea(
-                            "Or tell the agent what to change",
-                            placeholder="e.g. use a USB-C connector, not micro-USB") \
-                            .props("rows=2").classes("w-full")
-                        with ui.row().classes("gap-2 flex-wrap"):
-                            ui.button("Save form & re-run", icon="save",
-                                      on_click=lambda s=stg: _confirm_edit(s, "form")) \
-                                .props("color=primary")
-                            ui.button("Save JSON & re-run", icon="data_object",
-                                      on_click=lambda s=stg: _confirm_edit(s, "json")) \
-                                .props("outline color=white")
-                            ui.button("Ask agent & re-run", icon="auto_fix_high",
-                                      on_click=lambda s=stg: _confirm_edit(s, "instruction")) \
-                                .props("outline color=white")
-
-                stage_sel.on_value_change(render_form)
-                render_form()
-
-        def _confirm_edit(stage, mode):
-            slot_dict = None
-            instruction = None
-            try:
-                if mode == "form":
-                    slot_dict = edit_ctx["getter"]() if edit_ctx["getter"] else None
-                elif mode == "json":
-                    slot_dict = json.loads((edit_ctx["raw"].value if edit_ctx["raw"] else "") or "{}")
-                else:
-                    instruction = ((edit_ctx["instr"].value if edit_ctx["instr"] else "") or "").strip()
-                    if not instruction:
-                        ui.notify("Type an instruction first.", color="warning")
-                        return
-            except json.JSONDecodeError as e:
-                ui.notify(f"Invalid JSON: {e}", color="negative")
-                return
-            down = downstream_stages(stage)
-            runs = ([stage] + down) if instruction else down
-            verb = f"Re-draft {stage} and re-run " if instruction else "Re-run "
-            tail = ", ".join(down) if down else "nothing downstream"
-            with ui.dialog() as dlg, ui.card() \
-                    .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
-                ui.label("Re-run stages?").classes("text-lg font-bold text-white")
-                ui.label(verb + tail + ".") \
-                    .classes("text-sm").style("color:#94a3b8")
-                with ui.row().classes("gap-2 justify-end w-full"):
-                    ui.button("Cancel", on_click=dlg.close).props("flat color=white")
-                    ui.button("Confirm & run", color="primary",
-                              on_click=lambda: (dlg.close(),
-                                                _do_rerun(stage, slot_dict, instruction, runs)))
-            dlg.open()
-
-        def _do_rerun(stage, slot_dict, instruction, runs):
-            if _project_run_live(state):
-                ui.notify("A run is already in progress.", color="warning")
-                return
-            _ensure_workspace(state)  # rehydrate the durable project before the edit/rerun
-            ws = state["ws"]
-            if not ws:
-                ui.notify("No open design.", color="warning")
-                return
-            if slot_dict is not None:  # structured / raw-JSON edit: commit it first
-                sj = read_state(ws)
-                ok, out = commit_slot(ws, stage, slot_dict, brief=state.get("brief", ""),
-                                      project_stem=sj.get("project_stem"))
-                if not ok:
-                    ui.notify(f"Edit rejected: {out.get('errors')}", color="negative")
-                    return
-            null_downstream(ws, stage)
-            # The re-run stages' panels are invalid now: back to placeholders,
-            # and repaint every tab from the durable state (edited stage stays
-            # green, cleared downstream stages drop to pending, build phases
-            # drop to pending because the design is no longer complete).
-            for s in runs:
-                tabs.reset_stage(s)
-            sj = read_state(ws)
-            tabs.set_statuses(_derived_statuses(Path(ws), sj, None, False),
-                              sj.get("stage_status"))
-            if state["project_id"]:
-                _store().update_project_status(state["project_id"], "running")
-            state.update(running=True, done=False, ok=None, pcb_ready=False,
-                         awaiting_input=False, questions=[])
-            view.update(fab_done=False, account_refreshed=False, viewed_marked=False,
-                        sch_view=None, pcb_view=None, pcb_mtime=None,
-                        state_mtime=None, run_mtime=None, support_prompted=False)
-            continue_btn.set_visibility(False)
-            design_btn.disable()
-            status.text = "Re-running: " + " -> ".join(runs) + " ..."
-            threading.Thread(target=_run_design, args=(state, runs),
-                             kwargs={"instruction": instruction}, daemon=True).start()
 
         def _continue():
             """Run the stages still missing from the current (reopened) design."""
@@ -5129,14 +4959,15 @@ def index(prompt: str = "", project: str = ""):
                 status.text = ("Reopened. The PCB place/route did not finish "
                                "(it failed or timed out), so there is no routed "
                                "board to download. The schematic stages are "
-                               "complete -- edit a stage and rebuild to retry.")
+                               "complete -- use Rebuild board (Place/Route tab) "
+                               "to retry.")
             elif not zip_ok:
                 status.text = ("Reopened. Routing finished but no fab package "
-                               "was produced (not fab-ready). Edit a stage to "
-                               "revise, or rebuild.")
+                               "was produced (not fab-ready). Rebuild, or adjust "
+                               "the layout yourself in the Place/Route tab.")
             else:
-                status.text = ("Reopened. Design complete: download below, "
-                               "or edit a stage to revise.")
+                status.text = ("Reopened. Design complete: download below, or "
+                               "adjust the board layout in the Place/Route tab.")
             if p.status in ("ok", "failed"):
                 view["viewed_marked"] = True
                 _store().mark_viewed(p.id)
@@ -5161,7 +4992,6 @@ def index(prompt: str = "", project: str = ""):
                 design_btn.disable()
                 # A free unverified user has no quota story to upgrade past yet.
                 upgrade_link.set_visibility(False)
-                build_edit_panel()
                 return
             if q.get("unlimited"):
                 quota_label.text = f"{q['label']} tier: unlimited designs (staff)."
@@ -5182,7 +5012,6 @@ def index(prompt: str = "", project: str = ""):
                 if not state["running"]:
                     design_btn.enable()
                 quota_label.style("color:#94a3b8")
-            build_edit_panel()
 
         def start_fresh():
             """Detach from the open design and reset to a blank composer. A
@@ -5436,24 +5265,31 @@ def index(prompt: str = "", project: str = ""):
                            "No fab package was exported for this build.")
                     ).classes("text-xs").style("color:#fca5a5")
 
-        def _layout_editor_entry_row(label: str = "Edit layout") -> None:
-            """Buttons into the manual layout editor + placement rules (both
+        def _layout_editor_entry_row(label: str = "Edit board layout",
+                                     title: str | None = None) -> None:
+            """Toolbar into the manual layout editor + placement rules (both
             tier-gated visually; the open handlers and the panels' apply
             paths re-check server-side) + an ungated deterministic Rebuild
-            (same machinery as the original build, no LLM spend)."""
+            (same machinery as the original build, no LLM spend). Rendered
+            ABOVE the board viewer (which is near-fullscreen) so it is
+            visible without scrolling."""
             gated = not user_may_edit_layout(user)
-            with ui.row().classes("items-center gap-2 mt-1"):
+            with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                if title:
+                    ui.label(title).classes("text-xs font-medium") \
+                        .style("color:#94a3b8")
+                btn = ui.button(label, icon="design_services",
+                                on_click=_open_layout_editor) \
+                    .props("dense unelevated no-caps color=primary")
+                rules_btn = ui.button("Placement rules", icon="rule",
+                                      on_click=_open_rules_panel) \
+                    .props("dense outline no-caps")
                 ui.button("Rebuild board", icon="restart_alt",
-                          on_click=_start_rebuild).props("dense outline") \
+                          on_click=_start_rebuild).props("dense outline no-caps") \
                     .tooltip("Re-run the deterministic build on the current "
                              "design: synthesize, place, route, verify, "
                              "export. No AI step. Picks up pipeline fixes "
                              "deployed since the last build.")
-                btn = ui.button(label, icon="design_services",
-                                on_click=_open_layout_editor).props("dense outline")
-                rules_btn = ui.button("Placement rules", icon="rule",
-                                      on_click=_open_rules_panel) \
-                    .props("dense outline")
                 if gated:
                     btn.disable()
                     btn.tooltip("Manual layout editing (drag blocks, board "
@@ -5464,13 +5300,21 @@ def index(prompt: str = "", project: str = ""):
                                       "Pro/Max feature.")
                     ui.link("Upgrade", "/pricing").classes("text-xs") \
                         .style("color:#38bdf8")
-            # Manual-layout state chip: saved / last route outcome, so the
-            # manual flow stays visible after leaving the editor.
-            if state.get("project_dir"):
-                chip = manual_layout_status(Path(state["project_dir"]))
-                if chip:
-                    ui.label(chip).classes("text-xs mt-1") \
-                        .style("color:#94a3b8")
+                else:
+                    btn.tooltip("Rearrange the board by hand: drag and "
+                                "rotate the circuit blocks, change the "
+                                "board's size and shape, add mounting "
+                                "holes, then re-route.")
+                    ui.label("drag & rotate circuit blocks · board size "
+                             "& shape · mounting holes") \
+                        .classes("text-xs").style("color:#64748b")
+                # Manual-layout state chip: saved / last route outcome, so
+                # the manual flow stays visible after leaving the editor.
+                if state.get("project_dir"):
+                    chip = manual_layout_status(Path(state["project_dir"]))
+                    if chip:
+                        ui.label(chip).classes("text-xs ml-auto") \
+                            .style("color:#94a3b8")
 
         def _live_sig():
             # Includes the running flag so a run parking on a question (it stays
@@ -5591,9 +5435,6 @@ def index(prompt: str = "", project: str = ""):
                     with slot:
                         view["sch_view"] = _render_synth_view(
                             srcs, state["stem"], project_dir)
-                    # Painted already if synthesize is the visible tab now; otherwise
-                    # mark it for a re-fit when the user first reveals it.
-                    view["sch_revealed"] = tabs.active() == "synthesize"
 
             # Place/route: live progress bar (inspector) + KiCanvas board views
             # (view_slot) during the build, replaced by the final PCB when done.
@@ -5629,14 +5470,14 @@ def index(prompt: str = "", project: str = ""):
                         slot = tabs.view_slot("place_route")
                         slot.clear()  # drop the progress gallery; show the final board
                         with slot:
-                            ui.label("PCB").classes("text-xs font-medium").style("color:#94a3b8")
+                            # Toolbar first: below the near-fullscreen viewer
+                            # it sits under the fold and nobody finds the
+                            # layout editor. Click during a still-running
+                            # build is refused by the open handler.
+                            _layout_editor_entry_row(title="PCB")
                             view["pcb_view"] = KiCanvasView(
                                 [KiCanvasSource(pcb_url, pcb_name)],
                                 height="", style=_BUILD_VIEW_STYLE)
-                            view["pcb_revealed"] = tabs.active() == "place_route"
-                            # Click during a still-running build is refused
-                            # by the open handler with a notify.
-                            _layout_editor_entry_row()
                     else:
                         mt = _mtime(pcb_path)
                         if mt != view["pcb_mtime"]:

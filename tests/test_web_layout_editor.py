@@ -2,7 +2,7 @@
 
 Pure-helper tests plus NiceGUI User-simulation flows (same harness as
 test_web_index_autoopen): a pro user opening a finished project gets an
-"Edit layout" button on the place/route tab that swaps the slot to the
+"Edit board layout" button on the place/route tab that swaps the slot to the
 editor (canvas + outline/shape controls + mounting holes + save); a
 free user sees the button disabled with an upgrade link; a reopened
 FAILED project whose leaves routed gets the rescue CTA.
@@ -156,10 +156,10 @@ async def test_pro_user_opens_layout_editor(harness):
 
     await _login(u)  # auto-opens the unseen finished project
     await u.should_see("USB_BMP280_READER")
-    await u.should_see("Edit layout")
+    await u.should_see("Edit board layout")
 
     from nicegui import ui
-    u.find("Edit layout", kind=ui.button).click()
+    u.find("Edit board layout", kind=ui.button).click()
     await u.should_see("Manual layout")
     await u.should_see("Save & stamp preview")
     await u.should_see("Mounting Holes")
@@ -169,7 +169,7 @@ async def test_pro_user_opens_layout_editor(harness):
     # repainted by the page's 0.2 s render timer, so allow more retries
     # than the 3 x 0.1 s default.
     u.find("Back to board", kind=ui.button).click()
-    await u.should_see("Edit layout", retries=30)
+    await u.should_see("Edit board layout", retries=30)
 
 
 async def test_missing_leaf_banner_disables_save(harness):
@@ -191,10 +191,10 @@ async def test_missing_leaf_banner_disables_save(harness):
     }), encoding="utf-8")
 
     await _login(u)
-    await u.should_see("Edit layout")
+    await u.should_see("Edit board layout")
 
     from nicegui import ui
-    u.find("Edit layout", kind=ui.button).click()
+    u.find("Edit board layout", kind=ui.button).click()
     await u.should_see("Manual layout")
     await u.should_see("BROKEN SHEET", retries=30)
     save = u.find("Save & stamp preview", kind=ui.button).elements.pop()
@@ -219,10 +219,10 @@ async def test_failed_route_attempt_shows_diagnosis_card(harness):
     }), encoding="utf-8")
 
     await _login(u)
-    await u.should_see("Edit layout")
+    await u.should_see("Edit board layout")
 
     from nicegui import ui
-    u.find("Edit layout", kind=ui.button).click()
+    u.find("Edit board layout", kind=ui.button).click()
     await u.should_see("Manual layout")
     await u.should_see("failed verification", retries=30)
     await u.should_see("SDA, SCL", retries=10)
@@ -233,11 +233,11 @@ async def test_free_user_sees_upgrade_gate(harness):
     _persisted_project_with_board(store, acct.id)
 
     await _login(u)
-    await u.should_see("Edit layout")
+    await u.should_see("Edit board layout")
     await u.should_see("Upgrade")  # the /pricing link next to the disabled button
 
     from nicegui import ui
-    btn = u.find("Edit layout", kind=ui.button).elements.pop()
+    btn = u.find("Edit board layout", kind=ui.button).elements.pop()
     assert not btn.enabled
 
 

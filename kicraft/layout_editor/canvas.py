@@ -172,12 +172,17 @@ _CANVAS_HTML_TEMPLATE = """
   .ml-canvas-host {
     position: relative;
     width: 100%;
-    /* 180 px reserves room for: header (40), tab strip (50),
-       outline inputs (50), action buttons (50), gap padding (~20).
-       Anything left over goes to the canvas. min-height keeps the
-       canvas usable on tall narrow viewports. */
-    height: calc(100vh - 180px);
-    min-height: 600px;
+    /* 480 px reserves room for everything the web workspace stacks
+       around the canvas: page header + prompt + tab strip (~330 above)
+       plus the editor header, outline inputs and action buttons
+       (~150 below). Anything left over goes to the canvas. The budget
+       matters because the controls BELOW the canvas (outline size and
+       shape, save/route) must surface without scrolling -- a canvas
+       sized to the viewport buries them below the fold and users never
+       find them. min-height keeps the canvas usable on short
+       viewports (the page scrolls there). */
+    height: calc(100vh - 480px);
+    min-height: 420px;
     background: #0f172a;
     border: 1px solid #334155;
     border-radius: 6px;

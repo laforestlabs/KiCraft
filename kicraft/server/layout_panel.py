@@ -169,8 +169,9 @@ class LayoutEditorPanel:
                       on_click=self.on_exit).props("flat dense")
             ui.label("Manual layout").classes("text-sm font-medium") \
                 .style("color:#e2e8f0")
-            ui.label("drag · R rotate · arrows nudge (Shift = 1 mm) · "
-                     "wheel zoom · Ctrl+Z undo") \
+            ui.label("drag blocks · R rotates · drag a board edge to "
+                     "resize · arrows nudge (Shift = 1 mm) · wheel zoom · "
+                     "Ctrl+Z undo") \
                 .classes("text-xs").style("color:#64748b")
             # Live readouts the canvas controller writes into by DOM id
             # (updateCoordsLabel in layout_canvas.js): selected leaf's
@@ -320,27 +321,10 @@ class LayoutEditorPanel:
                         "(hover a red pin for details)."
                     ).classes("text-xs").style("color:#fca5a5")
 
-        ui.html(build_canvas_html(leaves, initial, self.canvas_id),
-                sanitize=False).classes("w-full")
-        ui.run_javascript(build_canvas_init_script(
-            leaves, initial, self.canvas_id,
-            asset_url=f"{DEFAULT_ASSET_MOUNT}/layout_canvas.js",
-            ratsnest=ratsnest,
-            parent_components=parent_components,
-        ))
-        if route_markers:
-            # The controller registers asynchronously (asset load); defer
-            # the push. The timer lives in the editor body, so leaving the
-            # editor cancels it instead of pushing at a dead canvas.
-            ui.timer(0.8, lambda: self._push_drc_markers(
-                {"violations": route_markers}), once=True)
-
-        outline_controls(self.canvas_id, initial)
-        selected_block_controls(self.canvas_id)
-        mounting_hole_panel(self.canvas_id, initial.get("mounting_holes") or [])
-        view_options_panel(self.canvas_id)
-
-        with ui.row().classes("w-full items-center gap-3 mt-2"):
+        # Actions ABOVE the canvas: the canvas fills most of the viewport,
+        # so anything after it needs scrolling to find -- and Save/Route is
+        # the commit path users must always see.
+        with ui.row().classes("w-full items-center gap-3"):
             self._save_btn = ui.button(
                 "Save & stamp preview", icon="save", color="primary",
                 on_click=self._on_save,
@@ -370,6 +354,26 @@ class LayoutEditorPanel:
                 "Stamping places your layout on the real board and runs "
                 "DRC (~20 s); routing commits it through the build queue."
             ).classes("text-xs").style("color:#64748b")
+
+        ui.html(build_canvas_html(leaves, initial, self.canvas_id),
+                sanitize=False).classes("w-full")
+        ui.run_javascript(build_canvas_init_script(
+            leaves, initial, self.canvas_id,
+            asset_url=f"{DEFAULT_ASSET_MOUNT}/layout_canvas.js",
+            ratsnest=ratsnest,
+            parent_components=parent_components,
+        ))
+        if route_markers:
+            # The controller registers asynchronously (asset load); defer
+            # the push. The timer lives in the editor body, so leaving the
+            # editor cancels it instead of pushing at a dead canvas.
+            ui.timer(0.8, lambda: self._push_drc_markers(
+                {"violations": route_markers}), once=True)
+
+        outline_controls(self.canvas_id, initial)
+        selected_block_controls(self.canvas_id)
+        mounting_hole_panel(self.canvas_id, initial.get("mounting_holes") or [])
+        view_options_panel(self.canvas_id)
 
         self._drc_card = ui.card().classes("w-full mt-3 hidden")
         self._preview_slot = ui.column().classes("w-full mt-3")

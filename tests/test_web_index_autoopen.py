@@ -2,7 +2,7 @@
 
 Reproduces the reported flow: a user kicks off a design, clicks away to
 /parts, and returns to "/". The index page must re-attach to the in-flight
-run (live status line + an Open button from the first second of the run),
+run (live "Designing ..." status line from the first second of the run),
 not land on a blank "new project" composer. Uses NiceGUI's User simulation --
 no real browser, no LLM, no build: the "run" is a state dict in
 web._LIVE_RUNS, exactly what a worker thread registers.
@@ -92,7 +92,10 @@ async def test_returning_to_index_attaches_to_live_run(harness):
 
     await _login(u)  # lands on "/" -- the return to the workspace
     await u.should_see("usb battery bank")  # attached to the run, not blank
-    await u.should_see("Open")  # list offers Open while the run is live
+    # The live status line, not a blank composer. (An earlier revision
+    # asserted "Open", which only ever matched placeholder text of the
+    # since-removed stage-edit panel -- the project list lives on /projects.)
+    await u.should_see("live progress is in")
 
 
 async def test_blank_composer_when_nothing_needs_attention(harness):

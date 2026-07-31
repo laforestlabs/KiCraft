@@ -297,6 +297,9 @@ def selected_block_controls(canvas_id: str) -> None:
             .classes("w-32").props("dense")
         rot_input = ui.number("Rotation (°)", step=90, format="%.1f") \
             .classes("w-28").props("dense")
+        rotate_btn = ui.button(icon="rotate_90_degrees_cw") \
+            .props("dense flat")
+        rotate_btn.tooltip("Rotate 90° (or press R)")
 
     def _apply() -> None:
         ip = current["ip"]
@@ -312,6 +315,16 @@ def selected_block_controls(canvas_id: str) -> None:
             canvas_id, "setPlacementCenter",
             f"{json.dumps(ip)}, {cx}, {cy}, {rot}",
         )
+
+    def _rotate90() -> None:
+        try:
+            rot = float(rot_input.value or 0.0)
+        except (TypeError, ValueError):
+            rot = 0.0
+        rot_input.set_value((rot + 90.0) % 360.0)
+        _apply()
+
+    rotate_btn.on_click(_rotate90)
 
     for inp in (x_input, y_input, rot_input):
         inp.on("blur", lambda _e: _apply())

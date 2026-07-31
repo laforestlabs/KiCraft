@@ -71,8 +71,9 @@ _RUN_EVENTS = {
         "heading": "Your run didn't finish",
         "preheader": "Open it to see how far it got and try again.",
         "lead": ("Your design “{title}” ended without a finished board. "
-                 "Open it to see how far it got and what failed; you can edit a "
-                 "stage and re-run from there, or adjust the brief and try again."),
+                 "Open it to see how far it got and what failed; you can rebuild "
+                 "it, lay out the board yourself, or adjust the brief and try "
+                 "again."),
         "cta": "Open your design",
     },
     "awaiting_input": {
