@@ -1130,6 +1130,118 @@ def _silk_sections(sj: dict, arts: dict) -> list[dict]:
     return secs
 
 
+def _pcb_error_section(
+    sj: dict,
+    project_dir: Path | None,
+    build_lines: list[str] | None = None,
+    token: str | None = None,
+) -> dict | None:
+    """Convert durable PCB errors into one bounded inspector section."""
+    arts = sj.get("artifacts") or {}
+    raw_errors = arts.get("pcb_errors") or []
+    errors = [item for item in raw_errors if isinstance(item, dict)]
+    legacy_failed = (
+        not errors
+        and (arts.get("status") == "failed" or any(
+            "error:" in str(line).lower() for line in (build_lines or [])
+        ))
+    )
+    if legacy_failed:
+        # Legacy projects predate pcb_errors. Preserve useful bounded evidence
+        # without pretending that a location exists.
+        lines = list(build_lines or [])[-12:]
+        return {
+            "type": "pcb_error",
+            "title": "PCB place/route failed",
+            "stage": "place_route",
+            "explanation": (
+                "This project failed before a structured PCB diagnostic was persisted. "
+                "No precise PCB location is available from the legacy evidence."
+            ),
+            "details": lines or ["No bounded place/route evidence was recorded."],
+            "counts": [],
+            "nets": [],
+            "footprint_refs": [],
+            "violations": [],
+            "next_action": "Use Rebuild or manual layout to retry the board.",
+            "overlay_url": None,
+        }
+    if not errors:
+        return None
+
+    first = errors[0]
+    stage = first.get("stage") if first.get("stage") in ("place_route", "verify") else "verify"
+    title = "PCB place/route failed" if stage == "place_route" else "PCB verification failed"
+    details: list[str] = []
+    nets: list[str] = []
+    refs: list[str] = []
+    counts: dict[str, int] = {}
+    violations: list[dict] = []
+    next_actions: list[str] = []
+    explanations: list[str] = []
+    for error in errors:
+        explanations.append(str(error.get("explanation") or "").strip())
+        details.extend(error.get("details") or [])
+        nets.extend(error.get("nets") or [])
+        refs.extend(error.get("footprint_refs") or [])
+        next_action = str(error.get("next_action") or "").strip()
+        if next_action:
+            next_actions.append(next_action)
+        for key, value in (error.get("counts") or {}).items():
+            try:
+                counts[key] = max(counts.get(key, 0), int(value))
+            except (TypeError, ValueError):
+                continue
+        for violation in error.get("violations") or []:
+            if isinstance(violation, dict):
+                violations.append(violation)
+
+    def unique(values, limit):
+        return list(dict.fromkeys(str(v).strip() for v in values if str(v).strip()))[:limit]
+
+    overlay_url = None
+    stored = next((error.get("overlay_path") for error in errors
+                   if error.get("overlay_path")), None)
+    if project_dir is not None and stored:
+        try:
+            base = project_dir.resolve()
+            candidate = Path(str(stored)).expanduser().resolve()
+            if (candidate.is_file() and candidate.suffix.lower() == ".png"
+                    and candidate.is_relative_to(base)):
+                rel = candidate.relative_to(base).as_posix()
+                use_token = token or _register_project_dir(base)
+                overlay_url = f"/project/{use_token}/render/{rel}?v={int(candidate.stat().st_mtime)}"
+        except (OSError, ValueError):
+            overlay_url = None
+
+    table = []
+    for violation in violations[:40]:
+        x, y = violation.get("x_mm"), violation.get("y_mm")
+        location = (f"{float(x):.3f}, {float(y):.3f} mm"
+                    if x is not None and y is not None else "location unavailable")
+        net_values = [violation.get("net1"), violation.get("net2")]
+        table.append([
+            violation.get("type", "unknown"),
+            location,
+            " / ".join(unique(net_values, 2)) or "—",
+            ", ".join(unique(violation.get("footprint_refs") or [], 12)) or "—",
+            str(violation.get("description") or "")[:240],
+        ])
+    return {
+        "type": "pcb_error",
+        "title": title,
+        "stage": stage,
+        "explanation": " ".join(unique(explanations, 8)),
+        "details": unique(details, 24),
+        "counts": sorted(counts.items()),
+        "nets": unique(nets, 12),
+        "footprint_refs": unique(refs, 40),
+        "violations": table,
+        "next_action": " ".join(unique(next_actions, 8)),
+        "overlay_url": overlay_url,
+    }
+
+
 def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | None,
                     build_lines: list[str], *, prices: dict | None = None) -> list[dict]:
     """Build the structured project-state spec for a stage's inspector window.
@@ -1290,6 +1402,9 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
 
     if stage == "place_route":
         secs = []
+        pcb_error = _pcb_error_section(sj, project_dir, build_lines)
+        if pcb_error:
+            secs.append(pcb_error)
         if run_status:
             leaf_prog = run_status.get("_leaf_progress") or []
             secs.append(_build_place_route_progress(run_status, leaf_prog))
@@ -1472,7 +1587,7 @@ def _investigation_log_dir() -> Path:
 
 
 # Daily ceiling on error_auto-triggered headless investigations: each is a
-# real Claude Code session (LLM spend), so a bad deploy day (every build
+# real OMP agent session (LLM spend), so a bad deploy day (every build
 # failing) must not fan out unbounded.
 _AUTO_ERROR_INVESTIGATE_DAILY_CAP = int(
     os.environ.get("KICRAFT_INVESTIGATE_ERRORS_DAILY_CAP", "6"))
@@ -4362,7 +4477,7 @@ def index(prompt: str = "", project: str = ""):
         live_sig = view.get("live_sig")  # page-level, survives project switches
         view.clear()
         view.update(rendered=0, build_lines=[], fab_done=False,
-                    sch_view=None, pcb_view=None,
+                    sch_view=None, pcb_view=None, pcb_overlay_url=None,
                     pcb_mtime=None, state_mtime=None, run_mtime=None,
                     leaf_progress_sig=None, questions_rendered=None,
                     prices_rev_seen=0, prices_loaded_ws=None,
@@ -5388,9 +5503,13 @@ def index(prompt: str = "", project: str = ""):
                         # slot was nulled by an edit (it used to stay stale).
                         # set_inspector keeps an in-progress live draft on screen.
                         for stg in ("intent", "functional_spec", "architecture",
-                                    "bom", "wiring"):
+                                    "bom", "wiring", "place_route"):
+                            inspector_dir = (
+                                Path(state["project_dir"])
+                                if state.get("project_dir") else None
+                            )
                             tabs.set_inspector(stg, _inspector_spec(
-                                stg, sj, {}, None, view["build_lines"]))
+                                stg, sj, {}, inspector_dir, view["build_lines"]))
                         # Live-price any BOM parts in the background (fills in the
                         # cost column + total once the fetch lands; cached parts
                         # are instant).
@@ -5465,16 +5584,32 @@ def index(prompt: str = "", project: str = ""):
                     pcb_name = f"{state['stem']}.kicad_pcb"
                     pcb_path = project_dir / pcb_name
                     pcb_url = f"/project/{state['token']}/{pcb_name}"
-                    if view["pcb_view"] is None:
+                    board_state = _read_state_json(read_root) if read_root else {}
+                    pcb_section = _pcb_error_section(
+                        board_state, project_dir, view["build_lines"], state["token"]
+                    )
+                    overlay_url = pcb_section.get("overlay_url") if pcb_section else None
+                    rebuild_board = (
+                        view["pcb_view"] is None
+                        or overlay_url != view.get("pcb_overlay_url")
+                    )
+                    if rebuild_board:
                         view["pcb_mtime"] = _mtime(pcb_path)
+                        view["pcb_overlay_url"] = overlay_url
                         slot = tabs.view_slot("place_route")
-                        slot.clear()  # drop the progress gallery; show the final board
+                        slot.clear()  # drop progress gallery or stale board view
                         with slot:
                             # Toolbar first: below the near-fullscreen viewer
                             # it sits under the fold and nobody finds the
                             # layout editor. Click during a still-running
                             # build is refused by the open handler.
                             _layout_editor_entry_row(title="PCB")
+                            if overlay_url:
+                                ui.label("Failure locations (red arrows)").classes(
+                                    "text-sm font-semibold mt-2").style("color:#fca5a5")
+                                ui.image(overlay_url).classes(
+                                    "w-full max-w-3xl rounded-borders q-mb-sm").style(
+                                        _BUILD_VIEW_STYLE)
                             view["pcb_view"] = KiCanvasView(
                                 [KiCanvasSource(pcb_url, pcb_name)],
                                 height="", style=_BUILD_VIEW_STYLE)

@@ -2464,11 +2464,22 @@ def _compact_routed_validation(validation: dict[str, Any]) -> dict[str, Any]:
     drc_slim: dict[str, Any] = {
         k: v for k, v in drc.items() if k != "report_text"
     }
+    raw_violations = drc.get("violations") or validation.get("violations") or []
+    drc_slim["violations"] = [
+        {
+            "type": item.get("type"),
+            "x_mm": item.get("x_mm"),
+            "y_mm": item.get("y_mm"),
+            "net1": item.get("net1"),
+            "net2": item.get("net2"),
+            "footprint_refs": list(item.get("footprint_refs") or [])[:20],
+            "description": str(item.get("description", ""))[:200],
+        }
+        for item in raw_violations[:120]
+        if isinstance(item, dict)
+    ]
     if report_text:
-        # Retain only the first few violation blocks for post-hoc analysis.
-        # A KiCad DRC report is line-oriented; "[category]" lines introduce
-        # each violation. Take the first 800 chars, which is usually enough
-        # to identify the dominant failure mode without bloating the JSON.
+        # Retain only a short excerpt for diagnostics; never persist full DRC.
         drc_slim["report_excerpt"] = report_text[:800]
     out = {
         "accepted": bool(validation.get("accepted", False)),
@@ -2483,28 +2494,27 @@ def _compact_routed_validation(validation: dict[str, Any]) -> dict[str, Any]:
         "anchor_summary": {
             k: v
             for k, v in (validation.get("anchor_summary", {}) or {}).items()
-            if k
-            in {
-                "expected_count",
-                "actual_count",
-                "required_count",
-                "all_required_present",
-            }
+            if k in {"expected_count", "actual_count", "required_count",
+                     "all_required_present"}
         },
         "drc": drc_slim,
     }
+    compact_refs = list(validation.get("footprint_refs") or [])
+    compact_refs.extend(
+        ref for item in drc_slim["violations"]
+        for ref in item["footprint_refs"]
+    )
+    if compact_refs:
+        out["footprint_refs"] = sorted(set(compact_refs))[:40]
     for k in (
         "footprint_internal_clearance_count",
         "footprint_internal_copper_edge_count",
-        # Repair/power-first evidence (small summaries): this whitelist is
-        # why 1/655's parent_pipeline.json showed NO trace of any repair
-        # pass -- the wrappers' records were compacted away and the question
-        # "did the repair even run?" was unanswerable (KC-ZRAUR7 B3).
+        # Repair/power-first evidence (small summaries) remains bounded.
         "power_first",
         "post_route_repairs",
         "signal_unconnected_repair",
         "illegal_geometry_repair",
-        # FR process returncode: -1 = watchdog-killed JVM (hang fingerprint)
+        # FR process returncode: -1 = watchdog-killed JVM.
         "freerouting_returncode",
     ):
         if k in validation:

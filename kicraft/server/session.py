@@ -82,29 +82,40 @@ def derive_stage_statuses(state: dict, *, project_status: str | None = None,
 
     design_complete = all(out[s] == "done" for s in DESIGN_STAGES)
     failed = project_status == "failed"
+    artifacts = state.get("artifacts") or {}
+    pcb_errors = artifacts.get("pcb_errors") or []
+    route_error = any(
+        isinstance(error, dict) and error.get("stage") == "place_route"
+        for error in pcb_errors
+    )
+    verify_error = any(
+        isinstance(error, dict) and error.get("stage") == "verify"
+        for error in pcb_errors
+    )
     synth_ok = design_complete and sheets_exist and not synth_checks_failed
     out["synthesize"] = ("done" if synth_ok
                          else "failed" if design_complete and failed
                          else "pending")
-    # A fab-acceptable board can still carry non-blocking warnings (e.g. a
-    # minor, fraction-of-a-mm courtyard clip): the build succeeded and exported
-    # the package + 3D model, but the gap is surfaced as a yellow 'warning'
-    # rather than a green 'done'.
-    has_warnings = bool((state.get("artifacts") or {}).get("build_warnings"))
-    # A produced board means place/route succeeded; a failed build localizes to
-    # the FAB gate, not here -- so "done"/"warning" (board exists) outrank
-    # "failed" exactly as the original done-first precedence did.
-    out["place_route"] = ("warning" if design_complete and pcb_ready and has_warnings
-                          else "done" if design_complete and pcb_ready
-                          else "failed" if synth_ok and failed
-                          else "pending")
+    # A produced board means place/route succeeded unless the durable payload
+    # explicitly records a place/route terminal error. A verify-only error keeps
+    # the produced candidate inspectable as done/warning here.
+    has_warnings = bool(artifacts.get("build_warnings"))
+    out["place_route"] = (
+        "failed" if design_complete and route_error
+        else "warning" if design_complete and pcb_ready and has_warnings
+        else "done" if design_complete and pcb_ready
+        else "failed" if synth_ok and failed
+        else "pending"
+    )
     # failed-with-a-board outranks zip_ok: after a failed (re)build the board
-    # on disk is the failed candidate, so any surviving zip from an earlier
-    # successful build is stale -- the tab must read failed, not done.
-    out["fab"] = ("failed" if design_complete and pcb_ready and failed
-                  else "warning" if design_complete and zip_ok and has_warnings
-                  else "done" if design_complete and zip_ok
-                  else "pending")
+    # on disk is the failed candidate, so any surviving zip is stale. Either
+    # terminal PCB error invalidates the fab package.
+    out["fab"] = (
+        "failed" if design_complete and pcb_ready and (failed or route_error or verify_error)
+        else "warning" if design_complete and zip_ok and has_warnings
+        else "done" if design_complete and zip_ok
+        else "pending"
+    )
     # Electrical review: the post-wiring review writes its durable outcome to
     # stage_status (like the design stages) and its findings to the top-level
     # review_findings slot (artifacts.review_findings on legacy projects). A

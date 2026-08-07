@@ -59,10 +59,13 @@ from .models import (
     ConversationState,
     FunctionalSpec,
     IntentSlot,
+    PcbError,
+    PcbViolation,
     Question,
     ReviewFinding,
     StageStatus,
 )
+
 from .synthesize import SynthesisInputError, run as run_synth
 from .synthesis.fab_export import extract_lcsc_pin
 from .synthesis.symbol_library import search_symbols
@@ -4476,6 +4479,307 @@ def _check_outline_shape_conformance(state, pcb: Path) -> dict | None:
         return None
 
 
+def _bounded_text(value: object, limit: int = 240) -> str:
+    """Return one safe, bounded diagnostic line."""
+    return " ".join(str(value or "").split())[:limit]
+
+
+def _unique_bounded(values, limit: int = 40) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    if isinstance(values, (str, bytes)):
+        values = [values]
+    for value in values or []:
+        text = _bounded_text(value, 120)
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _violation_from_dict(raw: object) -> PcbViolation | None:
+    if not isinstance(raw, dict):
+        return None
+    refs = _unique_bounded(raw.get("footprint_refs") or [], 20)
+    return PcbViolation(
+        type=_bounded_text(raw.get("type"), 80) or "unknown",
+        x_mm=(float(raw["x_mm"]) if raw.get("x_mm") is not None else None),
+        y_mm=(float(raw["y_mm"]) if raw.get("y_mm") is not None else None),
+        net1=_bounded_text(raw.get("net1"), 120) or None,
+        net2=_bounded_text(raw.get("net2"), 120) or None,
+        footprint_refs=refs,
+        description=_bounded_text(raw.get("description"), 240),
+    )
+
+
+def build_pcb_errors(summary: dict | None, *, stage: str) -> list[PcbError]:
+    """Normalize bounded verify/layout evidence into durable PCB diagnostics.
+
+    This is pure and accepts either full validation facts, compact parent
+    snapshots, or bounded subprocess evidence. Raw report text is never copied
+    into the persisted user-facing payload.
+    """
+    raw = summary if isinstance(summary, dict) else {}
+    drc = raw.get("drc") if isinstance(raw.get("drc"), dict) else {}
+    reasons = _unique_bounded(
+        raw.get("reasons") or raw.get("rejection_reasons") or [], 30
+    )
+    counts: dict[str, int] = {}
+    for key in ("shorts", "unconnected", "courtyard", "keepout", "clearance",
+                "copper_edge_clearance", "tracks_crossing"):
+        value = raw.get(key, drc.get(key, 0))
+        try:
+            counts[key] = max(0, int(value or 0))
+        except (TypeError, ValueError):
+            counts[key] = 0
+    nets = _unique_bounded(
+        raw.get("unconnected_nets") or drc.get("unconnected_nets") or
+        raw.get("nets") or [], 12
+    )
+    missing_refs = _unique_bounded(
+        raw.get("missing_refs") or raw.get("missing_component_refs") or [], 40
+    )
+    violations: list[PcbViolation] = []
+    for item in (raw.get("violations") or drc.get("violations") or [])[:120]:
+        try:
+            violation = _violation_from_dict(item)
+        except (TypeError, ValueError):
+            violation = None
+        if violation is not None:
+            violations.append(violation)
+    footprint_refs = _unique_bounded(
+        list(raw.get("footprint_refs") or []) +
+        [ref for v in violations for ref in v.footprint_refs] + missing_refs,
+        40,
+    )
+    errors: list[PcbError] = []
+
+    def add(code: str, title: str, explanation: str, details: list[str],
+            next_action: str, *, wanted_types: set[str] | None = None) -> None:
+        selected = (
+            [v for v in violations if v.type in wanted_types]
+            if wanted_types else list(violations)
+        )
+        errors.append(PcbError(
+            stage=stage if stage in ("place_route", "verify") else "verify",
+            code=code,
+            title=title,
+            explanation=_bounded_text(explanation, 500),
+            details=_unique_bounded(details, 12),
+            counts={k: v for k, v in counts.items() if v},
+            nets=nets,
+            footprint_refs=footprint_refs,
+            violations=selected[:120],
+            next_action=_bounded_text(next_action, 300),
+        ))
+
+    if counts["unconnected"] or nets:
+        net_text = ", ".join(nets) if nets else "the affected nets"
+        add(
+            "unconnected",
+            "Open connections remain",
+            f"Routing left {counts['unconnected'] or 1} open connection(s), so the board is not electrically complete.",
+            [f"Unconnected item(s): {counts['unconnected'] or 1}",
+             f"Nets: {net_text}"],
+            "Add routing room or spread the affected blocks, then route again.",
+            wanted_types={"unconnected_items"},
+        )
+    if counts["shorts"] or "shorts" in reasons or "tracks_crossing" in reasons:
+        net_pairs = [f"{v.net1} / {v.net2}" for v in violations
+                     if v.net1 and v.net2]
+        add(
+            "shorts",
+            "Different nets touch",
+            f"The routed copper contains {counts['shorts'] or 1} short(s): different nets touch and cannot be fabricated safely.",
+            [f"Short(s): {counts['shorts'] or 1}"] +
+            ([f"Nets: {', '.join(_unique_bounded(net_pairs, 12))}"] if net_pairs else []),
+            "Increase clearance or reroute the touching nets before retrying.",
+            wanted_types={"shorting_items", "tracks_crossing", "clearance", "hole_clearance"},
+        )
+    if counts["courtyard"] or "courtyards_overlap" in reasons:
+        add(
+            "courtyards_overlap",
+            "Footprint courtyards overlap",
+            "Footprint assembly courtyards overlap, so the components cannot be assembled in the produced placement.",
+            [f"Overlaps: {counts['courtyard'] or 1}"] +
+            ([f"Footprints: {', '.join(footprint_refs[:20])}"] if footprint_refs else []),
+            "Spread the referenced footprints apart and run place/route again.",
+            wanted_types={"courtyards_overlap"},
+        )
+    if counts["keepout"] or "keepout_intrusion" in reasons:
+        add(
+            "keepout_intrusion",
+            "Keep-out intrusion",
+            "Copper or a component intrudes into a keep-out area, violating the board's physical constraints.",
+            [f"Keep-out intrusion(s): {counts['keepout'] or 1}"],
+            "Move the offending copper or component outside the keep-out and retry.",
+            wanted_types={"items_not_allowed", "keepout_intrusion"},
+        )
+    if missing_refs:
+        add(
+            "missing_refs",
+            "Routed board is incomplete",
+            "The routed board is missing named footprints that were expected from the design.",
+            [f"Missing footprints: {', '.join(missing_refs)}"],
+            "Restore the missing components and rebuild the board.",
+        )
+
+    explicit = [
+        ("drc_timeout", "DRC timed out",
+         "KiCad's design-rule check timed out, so no trustworthy clean-board verdict or location is available.",
+         "Retry verification after confirming the board and KiCad toolchain are responsive."),
+        ("drc_unavailable", "DRC tooling unavailable",
+         "The KiCad DRC tool was unavailable, so this board cannot be treated as verified.",
+         "Install or repair the KiCad CLI, then rerun verification."),
+        ("drc_failed", "DRC tooling failed",
+         "KiCad's DRC command failed before producing trustworthy violation evidence.",
+         "Check the KiCad CLI error and board file, then rerun verification."),
+        ("malformed_board_geometry", "Board geometry is malformed",
+         "The produced board contains geometry that cannot be validated safely.",
+         "Fix the board outline or routed geometry and rerun place/route."),
+        ("empty_board", "Board contains no footprints",
+         "The produced PCB is empty, so it is not a usable routed board.",
+         "Rebuild the placement and confirm all design components are emitted."),
+        ("board_missing", "Routed board is missing",
+         "No current PCB file was produced, so there is no board to verify or inspect.",
+         "Retry place/route and inspect the routing toolchain output if it fails again."),
+    ]
+    for code, title, explanation, next_action in explicit:
+        if code in reasons:
+            add(code, title, explanation, [f"Evidence: {code}"], next_action)
+
+    if not errors:
+        evidence = raw.get("evidence") if isinstance(raw.get("evidence"), dict) else {}
+        evidence_lines = _unique_bounded(
+            list(evidence.values()) + [raw.get("report_excerpt"), raw.get("build_log_tail"),
+                                       raw.get("parent_route_stderr_tail"), raw.get("solve_stderr_tail")],
+            8,
+        )
+        add(
+            "layout_failure" if stage == "place_route" else "verification_failed",
+            "Routing/layout failed" if stage == "place_route" else "PCB verification failed",
+            ("The place/route pipeline failed before it produced a trustworthy DRC location. "
+             "No precise PCB location is available from the recorded evidence." if stage == "place_route"
+             else "PCB verification rejected the produced board, but the recorded evidence has no specific DRC category. "
+                  "No precise PCB location is available."),
+            evidence_lines or ["No bounded DRC location was recorded."],
+            ("Inspect the routing evidence, spread the blocks, and retry place/route."
+             if stage == "place_route" else
+             "Inspect the board and rerun verification after correcting the reported failure."),
+        )
+    return errors
+
+
+def _build_pcb_errors(summary: dict | None, *, stage: str) -> list[PcbError]:
+    """Private spelling for build-tail callers and tests."""
+    return build_pcb_errors(summary, stage=stage)
+
+def _persist_pcb_diagnostics(
+    state,
+    state_path: Path,
+    artifacts,
+    stem: str,
+    project_dir: Path,
+    *,
+    stage: str,
+    summary: dict | None = None,
+    pcb: Path | None = None,
+) -> list[PcbError]:
+    """Build, optionally render, and persist a terminal PCB diagnostic."""
+    errors = build_pcb_errors(summary, stage=stage)
+    overlay: Path | None = None
+    board = Path(pcb) if pcb is not None else None
+    if board is not None and board.is_file():
+        try:
+            from kicraft.cli.render_drc_overlay import render_overlay
+
+            output = (project_dir / f"{stem}_pcb_error_overlay.png").resolve()
+            output.unlink(missing_ok=True)
+            violations = [
+                violation.model_dump(mode="json")
+                for error in errors
+                for violation in error.violations
+            ]
+            if violations and render_overlay(str(board), violations, str(output)):
+                if output.is_file() and output.is_relative_to(project_dir.resolve()):
+                    overlay = output
+        except Exception as exc:  # noqa: BLE001 - diagnostic rendering is best effort
+            print(f"warning: PCB error overlay render failed: {exc}", file=sys.stderr)
+    if overlay is not None:
+        errors = [error.model_copy(update={"overlay_path": overlay}) for error in errors]
+    artifacts.pcb_errors = errors
+    artifacts.status = "failed"
+    artifacts.fab_zip = None
+    if board is not None and board.is_file():
+        artifacts.routed_pcb = board
+    _persist_artifacts(state, state_path, artifacts)
+    return errors
+
+
+
+def _latest_layout_failure_summary(project_dir: Path, state_path: Path | None = None) -> dict:
+    """Read newest bounded run snapshots without persisting raw report text."""
+    experiments = project_dir / ".experiments"
+    candidates = [
+        experiments / "run_status.json",
+        experiments / "hierarchical_summary.json",
+    ]
+    candidates.extend(experiments.glob("**/round_*.json"))
+    candidates.extend(experiments.glob("**/parent_pipeline.json"))
+    files = sorted({p for p in candidates if p.is_file()},
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    summary: dict = {"evidence": {}}
+
+    def absorb(obj: object) -> None:
+        if not isinstance(obj, dict):
+            return
+        for key in ("shorts", "unconnected", "courtyard", "keepout",
+                    "unconnected_nets", "missing_refs", "missing_component_refs",
+                    "footprint_refs", "violations", "reasons", "rejection_reasons"):
+            if key in obj and obj[key] not in (None, [], {}):
+                if isinstance(obj[key], list):
+                    summary[key] = obj[key]
+                elif key in ("reasons", "rejection_reasons"):
+                    summary.setdefault("reasons", []).extend(obj[key] if isinstance(obj[key], list) else [obj[key]])
+                else:
+                    summary[key] = obj[key]
+        for key in ("drc", "parent_routed_validation", "routed_validation", "validation"):
+            value = obj.get(key)
+            if isinstance(value, dict):
+                if key == "drc":
+                    summary["drc"] = {**summary.get("drc", {}), **value}
+                else:
+                    absorb(value)
+        logs = obj.get("logs")
+        if isinstance(logs, dict):
+            for key in ("parent_route_stderr_tail", "solve_stderr_tail",
+                        "parent_route_stdout_tail", "solve_stdout_tail"):
+                if logs.get(key):
+                    summary["evidence"][key] = _bounded_text(logs[key], 1200)
+        for key in ("parent_route_stderr_tail", "solve_stderr_tail", "stderr_tail"):
+            if obj.get(key):
+                summary["evidence"][key] = _bounded_text(obj[key], 1200)
+        state_obj = obj.get("state")
+        if isinstance(state_obj, dict):
+            absorb(state_obj)
+
+    for path in files[:40]:
+        try:
+            absorb(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    if state_path is not None:
+        try:
+            build_log = state_path.parent / "build.log"
+            if build_log.is_file():
+                summary["evidence"]["build_log_tail"] = _bounded_text(
+                    build_log.read_text(encoding="utf-8", errors="replace")[-4000:], 4000
+                )
+        except OSError:
+            pass
+    return summary
 def _verify_routed_board(pcb: Path) -> dict:
     """Acceptance gate: no shorts, no unconnected (connector-shield items waived),
     no physical-assembly blocker (courtyard overlap / antenna keep-out intrusion),
@@ -4596,9 +4900,13 @@ def _verify_routed_board(pcb: Path) -> dict:
         "reasons": reasons,
         "warnings": warnings,
         "tracks": v.get("track_summary", {}) or {},
-        # Positioned diagnosis for the manual-layout editor's failure
-        # overlay (board-frame mm; parsed from the DRC report blocks).
+        # Positioned diagnosis for the manual-layout editor and PCB overlay.
         "unconnected_nets": list(drc.get("unconnected_nets", []) or [])[:40],
+        "footprint_refs": sorted({
+            ref
+            for item in (drc.get("violations") or [])[:120]
+            for ref in (item.get("footprint_refs") or [])
+        })[:40],
         "violations": [
             {
                 "type": x.get("type"),
@@ -4606,6 +4914,7 @@ def _verify_routed_board(pcb: Path) -> dict:
                 "y_mm": x.get("y_mm"),
                 "net1": x.get("net1"),
                 "net2": x.get("net2"),
+                "footprint_refs": list(x.get("footprint_refs") or [])[:20],
                 "description": str(x.get("description", ""))[:200],
             }
             for x in (drc.get("violations") or [])[:120]
@@ -5105,6 +5414,14 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
             "Inspect .experiments/.../_search for rejected candidates.",
             file=sys.stderr,
         )
+        failure_summary = _latest_layout_failure_summary(project_dir, state_path)
+        if partial is not None and pcb.is_file():
+            failure_summary["board_path"] = str(pcb.resolve())
+        _persist_pcb_diagnostics(
+            state, state_path, artifacts, stem, project_dir,
+            stage="place_route", summary=failure_summary,
+            pcb=pcb if partial is not None and pcb.is_file() else None,
+        )
         return 6
     shutil.copy(routed, pcb)  # copy (not copy2) -> honest promote-time mtime
     artifact_paths.write_promote_provenance(
@@ -5266,6 +5583,21 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
         f"components={gate['tracks'].get('footprints', '?')}/{len(expected_refs) or '?'}"
         f"{_util_suffix}"
     )
+    verify_summary = {
+        "board_path": str(pcb.resolve()),
+        "shorts": gate.get("shorts", 0),
+        "unconnected": gate.get("unconnected", 0),
+        "courtyard": gate.get("courtyard", 0),
+        "keepout": gate.get("keepout", 0),
+        "reasons": list(gate.get("reasons", []) or []),
+        "unconnected_nets": list(gate.get("unconnected_nets", []) or []),
+        "footprint_refs": list(gate.get("footprint_refs", []) or []),
+        "violations": list(gate.get("violations", []) or []),
+        "missing_refs": list(missing_refs or []),
+    }
+    if verify_summary_out is not None:
+        verify_summary_out.update(verify_summary)
+
     if not gate.get("fab_acceptable", gate["ok"]) or missing_refs:
         print(
             f"[build]     kept failed board {pcb.name} for inspection "
@@ -5306,6 +5638,10 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
                 print(f"[build]     3D inspection render saved: {render_path.name}")
         except Exception:
             pass
+        _persist_pcb_diagnostics(
+            state, state_path, artifacts, stem, project_dir,
+            stage="verify", summary=verify_summary, pcb=pcb,
+        )
         return 7
 
     # 4a. Non-blocking warnings (a minor, fraction-of-a-mm courtyard clip on an
@@ -5598,6 +5934,12 @@ def _cmd_build_impl(args: argparse.Namespace) -> int:
     degenerate = _degenerate_hierarchy_error(root_sch)
     if degenerate:
         print(f"error: {degenerate}", file=sys.stderr)
+        _persist_pcb_diagnostics(
+            state, state_path, artifacts, stem, project_dir,
+            stage="place_route",
+            summary={"reasons": ["empty_board"],
+                     "evidence": {"layout": degenerate}},
+        )
         return 6
 
     # Preflight the routing toolchain (Java + FreeRouting jar) so a misconfigured
@@ -5612,6 +5954,12 @@ def _cmd_build_impl(args: argparse.Namespace) -> int:
         preflight_routing_toolchain()
     except FreeroutingUnavailableError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        _persist_pcb_diagnostics(
+            state, state_path, artifacts, stem, project_dir,
+            stage="place_route",
+            summary={"reasons": ["drc_unavailable"],
+                     "evidence": {"toolchain": str(exc)}},
+        )
         return 6
 
     # 2..5 saturate the host (parallel leaf solvers + FreeRouting JVMs), so they
@@ -5666,6 +6014,13 @@ def _layout_route_fab(args, state, state_path, artifacts, results,
         print(f"warning: leaf canvas pre-render failed: {e}", file=sys.stderr)
 
     if rc != 0:
+        failure_summary = _latest_layout_failure_summary(project_dir, state_path)
+        failure_summary.setdefault("evidence", {})["layout_exit_code"] = f"rc={rc}"
+        _persist_pcb_diagnostics(
+            state, state_path, artifacts, stem, project_dir,
+            stage="place_route", summary=failure_summary,
+            pcb=pcb if pcb.is_file() else None,
+        )
         print(f"error: layout/route engine exited {rc}", file=sys.stderr)
         return 6
 
@@ -5676,6 +6031,12 @@ def _layout_route_fab(args, state, state_path, artifacts, results,
         if placed is None:
             print("error: the layout engine produced no placed parent board "
                   "(parent compose failed).", file=sys.stderr)
+            summary = _latest_layout_failure_summary(project_dir, state_path)
+            summary.setdefault("evidence", {})["placement_only"] = "no placed parent board"
+            _persist_pcb_diagnostics(
+                state, state_path, artifacts, stem, project_dir,
+                stage="place_route", summary=summary,
+            )
             return 6
         # Freshness gate: the placed board is freshly re-stamped on every run, so
         # if it isn't from THIS run the stamp failed -- error loudly instead of
@@ -5684,6 +6045,13 @@ def _layout_route_fab(args, state, state_path, artifacts, results,
             placed, run_id=run_id, run_started_at=run_started_at
         ):
             print(_stale_board_msg("placed", placed, run_id), file=sys.stderr)
+            summary = _latest_layout_failure_summary(project_dir, state_path)
+            summary.setdefault("evidence", {})["placement_only"] = "placed board was stale"
+            _persist_pcb_diagnostics(
+                state, state_path, artifacts, stem, project_dir,
+                stage="place_route", summary=summary,
+                pcb=pcb if pcb.is_file() else None,
+            )
             return 6
         shutil.copy(placed, pcb)  # copy (not copy2) -> honest promote-time mtime
         artifact_paths.write_promote_provenance(

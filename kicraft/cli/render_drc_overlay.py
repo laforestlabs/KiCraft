@@ -40,6 +40,55 @@ from kicraft.render.edge_cuts import parse_edge_cuts_aabb
 _BASE_LAYERS = "F.Cu,B.Cu,F.SilkS,Edge.Cuts"
 
 
+def actionable_arrow_geometry(
+    violations: list[dict],
+    *,
+    board_x0: float,
+    board_y0: float,
+    scale: float,
+    ox: float,
+    oy: float,
+    limit: int = 20,
+) -> list[dict]:
+    """Serialize red-arrow geometry for located net/footprint failures.
+
+    Coordinates are transformed with the same Edge.Cuts AABB used by the
+    marker renderer. The endpoint is the transformed violation coordinate;
+    only the first ``limit`` actionable violations are returned.
+    """
+    arrows: list[dict] = []
+    for violation in violations:
+        if len(arrows) >= limit:
+            break
+        if violation.get("x_mm") is None or violation.get("y_mm") is None:
+            continue
+        if not (violation.get("net1") or violation.get("net2")
+                or violation.get("footprint_refs")):
+            continue
+        px = ox + (float(violation["x_mm"]) - board_x0) * scale
+        py = oy + (float(violation["y_mm"]) - board_y0) * scale
+        length = max(18.0, scale * 6.0)
+        # A consistent upper-left callout keeps arrows visible even when the
+        # marker is on a dense board; the endpoint remains exact.
+        arrows.append({
+            "x1": px - length,
+            "y1": py - length,
+            "x2": px,
+            "y2": py,
+            "head": [
+                (px, py),
+                (px - max(7.0, length * 0.38), py),
+                (px, py - max(7.0, length * 0.38)),
+            ],
+            "type": violation.get("type", ""),
+        })
+    return arrows
+
+
+def _arrow_polygon(points: list[tuple[float, float]]) -> str:
+    return " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
+
+
 def render_overlay(
     pcb_path: str,
     violations: list[dict],
@@ -64,9 +113,11 @@ def render_overlay(
     if not violations:
         return False
 
-    located = [v for v in violations if v.get("x_mm") is not None]
+    located = [v for v in violations
+               if v.get("x_mm") is not None and v.get("y_mm") is not None]
     if not located:
         return False
+
 
     # Read the true Edge.Cuts AABB; fall back to the caller's board_mm
     # only if the file has no Edge.Cuts geometry.
@@ -156,6 +207,33 @@ def render_overlay(
                     f"{label}: {count}",
                 ])
                 legend_y += font_size + 4
+        arrows = actionable_arrow_geometry(
+            violations,
+            board_x0=board_x0,
+            board_y0=board_y0,
+            scale=scale,
+            ox=ox,
+            oy=oy,
+        )
+        for arrow in arrows:
+            cmd.extend([
+                "-fill", "none", "-stroke", "red", "-strokewidth", "4",
+                "-draw", (
+                    f"line {arrow['x1']:.2f},{arrow['y1']:.2f} "
+                    f"{arrow['x2']:.2f},{arrow['y2']:.2f}"
+                ),
+                "-fill", "red", "-stroke", "red",
+                "-draw", f"polygon {_arrow_polygon(arrow['head'])}",
+            ])
+
+        if arrows:
+            cmd.extend([
+                "-fill", "red", "-stroke", "none",
+                "-gravity", "NorthEast", "-pointsize", str(font_size),
+                "-annotate", f"+10+{legend_y}",
+                f"FAILURE LOCATIONS (red arrows): {len(arrows)}",
+            ])
+            legend_y += font_size + 4
 
         cmd.append(output_png)
         subprocess.run(cmd, capture_output=True, check=True)

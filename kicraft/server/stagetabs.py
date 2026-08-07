@@ -544,7 +544,45 @@ def _render_section(sec: dict, accent: str) -> None:
         ui.label(title).classes("text-xs font-semibold uppercase tracking-wide") \
             .style(f"color:{accent}")
     kind = sec.get("type")
-    if kind == "kv":
+    if kind == "pcb_error":
+        with ui.element("div").classes("w-full rounded p-3").style(
+                "border:2px solid #b91c1c;background:#450a0a"):
+            ui.label(str(sec.get("title") or "PCB failure")).classes(
+                "text-base font-bold").style("color:#fecaca")
+            ui.label(str(sec.get("explanation") or "")).classes(
+                "text-sm leading-snug whitespace-pre-wrap mt-1").style("color:#fca5a5")
+            details = sec.get("details") or []
+            if details:
+                with ui.column().classes("w-full gap-0.5 mt-2"):
+                    for detail in details:
+                        ui.label(f"• {detail}").classes(
+                            "text-xs whitespace-pre-wrap").style("color:#fecaca")
+            rows = []
+            if sec.get("counts"):
+                rows.append(("counts", ", ".join(f"{k}={v}" for k, v in sec["counts"])))
+            if sec.get("nets"):
+                rows.append(("nets", ", ".join(sec["nets"])))
+            if sec.get("footprint_refs"):
+                rows.append(("footprints", ", ".join(sec["footprint_refs"])))
+            if rows:
+                with ui.column().classes("w-full gap-0.5 mt-2"):
+                    for key, value in rows:
+                        with ui.row().classes("w-full no-wrap gap-2 items-start"):
+                            ui.label(key).classes("text-xs font-mono shrink-0").style(
+                                "color:#fca5a5;min-width:6rem")
+                            ui.label(value).classes(
+                                "text-xs font-mono whitespace-pre-wrap min-w-0").style(
+                                "color:#fecaca")
+            violations = sec.get("violations") or []
+            if violations:
+                ui.html(_table_html(
+                    ["type", "location", "nets", "footprints", "description"],
+                    violations,
+                ), sanitize=False).classes("w-full mt-2")
+            if sec.get("next_action"):
+                ui.label(f"Next action: {sec['next_action']}").classes(
+                    "text-xs italic mt-2 whitespace-pre-wrap").style("color:#fcd34d")
+    elif kind == "kv":
         with ui.column().classes("w-full gap-0.5"):
             for k, v in sec.get("rows", []):
                 with ui.row().classes("w-full no-wrap gap-2 items-start"):

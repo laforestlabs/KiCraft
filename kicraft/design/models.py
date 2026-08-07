@@ -840,6 +840,33 @@ class ReviewFinding(BaseModel):
     issue: str
     suggestion: str = ""
 
+
+class PcbViolation(BaseModel):
+    """One bounded, coordinate-bearing PCB failure fact from a DRC report."""
+    type: str
+    x_mm: float | None = None
+    y_mm: float | None = None
+    net1: str | None = None
+    net2: str | None = None
+    footprint_refs: list[str] = Field(default_factory=list)
+    description: str = ""
+
+
+class PcbError(BaseModel):
+    """Durable explanation for one terminal place/route or verify failure."""
+    stage: Literal["place_route", "verify"]
+    code: str
+    title: str
+    explanation: str
+    details: list[str] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+    nets: list[str] = Field(default_factory=list)
+    footprint_refs: list[str] = Field(default_factory=list)
+    violations: list[PcbViolation] = Field(default_factory=list)
+    next_action: str
+    overlay_path: Path | None = None
+
+
 class ArtifactPaths(BaseModel):
     project_dir: Path
     project_stem: str
@@ -860,11 +887,12 @@ class ArtifactPaths(BaseModel):
     # Electrical-review findings persisted for the GUI inspector (structured,
     # with suggestions, vs the build_log lines which are bare text).
     review_findings: list[ReviewFinding] = Field(default_factory=list)
+    # PCB place/route and verify failures persisted for live/reopened diagnosis.
+    pcb_errors: list[PcbError] = Field(default_factory=list)
     # Silk-legend honesty: what the build-tail placer actually did. Placed ids
     # include "legend:N"; dropped entries are "id: reason" strings.
     silk_placed: list[str] = Field(default_factory=list)
     silk_dropped: list[str] = Field(default_factory=list)
-
 
 # ---------- Conversation state ----------
 

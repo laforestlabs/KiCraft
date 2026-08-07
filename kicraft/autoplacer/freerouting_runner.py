@@ -1848,10 +1848,8 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
             m = re.match(r"^\[(\w+)\]:", line)
             if not m:
                 # KiCad reports are block-oriented: the [type] header line
-                # carries the rule text, while the indented continuation
-                # lines carry the item positions and [Net N](NAME) refs.
-                # Complete the current violation from them -- FIRST position
-                # (the primary offending item) and first two distinct nets.
+                # carries the rule text, while indented continuation lines carry
+                # positions, nets, and the referenced footprint designators.
                 if current is not None and line[:1] in (" ", "\t"):
                     if current["x_mm"] is None:
                         loc_m = re.search(
@@ -1861,11 +1859,27 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
                         if loc_m:
                             current["x_mm"] = float(loc_m.group(1))
                             current["y_mm"] = float(loc_m.group(2))
-                    for net in re.findall(r"\[Net\s+\d+\]\(([^)]+)\)", line):
+                    net_tokens = re.findall(
+                        r"\[Net\s+\d+\]\(([^)]+)\)|\[([^\]]+)\]", line
+                    )
+                    for formatted, bare in net_tokens:
+                        net = (formatted or bare).strip()
+                        if (not net or re.match(r"(?i)^net\s+\d+$", net)
+                                or net.lower() in {"no net", "<no net>"}):
+                            continue
                         if current["net1"] is None:
                             current["net1"] = net
                         elif current["net2"] is None and net != current["net1"]:
                             current["net2"] = net
+                    refs = re.findall(
+                        r"\bFootprint\s+([A-Z][A-Z0-9_-]*)\b|"
+                        r"\b(?:of|from)\s+([A-Z][A-Z0-9_-]*)\b",
+                        line,
+                    )
+                    for first, second in refs:
+                        ref = first or second
+                        if ref and ref not in current["footprint_refs"]:
+                            current["footprint_refs"].append(ref)
                 continue
             vtype = m.group(1)
             counts["total"] += 1
@@ -1880,7 +1894,6 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
             net_matches = re.findall(r"\[Net\s+\d+\]\(([^)]+)\)", line)
             net1 = net_matches[0] if len(net_matches) > 0 else None
             net2 = net_matches[1] if len(net_matches) > 1 else None
-
             current = {
                 "type": vtype,
                 "description": line.strip(),
@@ -1888,8 +1901,10 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
                 "y_mm": y_mm,
                 "net1": net1,
                 "net2": net2,
+                "footprint_refs": [],
             }
-            counts["violations"].append(current)
+            if len(counts["violations"]) < 120:
+                counts["violations"].append(current)
 
             if vtype == "shorting_items":
                 counts["shorts"] += 1
@@ -1898,20 +1913,13 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
             elif vtype in ("clearance", "hole_clearance"):
                 counts["clearance"] += 1
                 # KiCad 9 reports copper-to-copper proximity violations as
-                # [clearance] (not [shorting_items]). A clearance violation
-                # with actual 0.0 mm is a genuine short — copper from one
-                # pad touching another pad — and must gate fab acceptance.
+                # [clearance]. A zero actual clearance is a genuine short.
                 actual_m = re.search(r"actual\s+([\d.]+)\s*mm", line)
                 if actual_m and float(actual_m.group(1)) <= 0.001:
                     counts["shorts"] += 1
             elif vtype == "copper_edge_clearance":
                 counts["copper_edge_clearance"] += 1
             elif vtype == "tracks_crossing":
-                # Two tracks on DIFFERENT nets physically crossing is a genuine
-                # short -- foreign copper touching, flagged by KiCad at error
-                # severity. Count it toward shorts or a board with a real
-                # different-net crossing (e.g. a straight pad-to-pad GND link
-                # laid across a signal track) ships past the shorts=0 fab gate (WS7).
                 counts["tracks_crossing"] += 1
                 counts["shorts"] += 1
             elif vtype == "courtyards_overlap":
@@ -1924,6 +1932,7 @@ def _run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, An
                 counts["padstack"] += 1
             elif vtype == "items_not_allowed":
                 counts["items_not_allowed"] += 1
+
     except subprocess.TimeoutExpired:
         counts["timed_out"] = True
     except FileNotFoundError:
