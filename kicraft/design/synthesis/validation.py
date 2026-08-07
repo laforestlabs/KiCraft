@@ -980,7 +980,7 @@ def check_no_dangling_signal_nets(architecture, bom) -> CheckResult:
 # *ground* common on DC-DC modules) are intentionally excluded; only unambiguous
 # supply names match, so the polarity check never trips on a correct connection.
 _POS_SUPPLY_PIN_RE = re.compile(
-    r"VDD|VCC"                        # VDD/VCC + AVDD/DVDD/VDDA/VDDIO/VCCIO (substring)
+    r"VDD(?!-)|VCC(?!-)"             # positive VDD/VCC + AVDD/DVDD/VDDA/VDDIO/VCCIO
     r"|^V(?:BAT|BUS|SYS|AA|IN|IO)$"   # exact supplies (VIN exact, not VIN-/VINP)
     r"|^V\+$|^VPLUS$",
     re.IGNORECASE,
@@ -989,7 +989,15 @@ _POS_SUPPLY_PIN_RE = re.compile(
 # 0-volt common used by isolated DC-DC modules and is ground, not a rail.
 _GND_PIN_RE = re.compile(
     r"GND|VSS"                        # GND/AGND/DGND/PGND + VSS/AVSS/VSSA (substring)
-    r"|^V-$|^VMINUS$|^VEE$|^0V$|^0\.0+V$",
+    r"|^V(?:CC|DD)-$|^V-$|^VMINUS$|^VEE$|^0V$|^0\.0+V$",
+    re.IGNORECASE,
+)
+
+# Negative supply net names are part of POWER_NET_PATTERNS because they must
+# remain recognized as power globally, but they are not positive rails for the
+# semantic polarity gate below.
+_NEGATIVE_RAIL_NET_RE = re.compile(
+    r"^(?:-\d+\.?\d*V|-\d+V\d+|VEE|VSS|VCC-|VDD-|VMINUS)$",
     re.IGNORECASE,
 )
 
@@ -1024,7 +1032,13 @@ def _net_is_ground(name: str) -> bool:
 
 def _net_is_positive_rail(name: str) -> bool:
     s = name.lstrip("/")
+    if _NEGATIVE_RAIL_NET_RE.fullmatch(s):
+        return False
     return any(p.search(s) for p in POWER_NET_PATTERNS)
+
+
+def _net_is_negative_rail(name: str) -> bool:
+    return bool(_NEGATIVE_RAIL_NET_RE.fullmatch(name.lstrip("/")))
 
 
 def _pin_info_by_ref(bom):
@@ -1078,7 +1092,8 @@ def check_power_pin_polarity(bom) -> CheckResult:
     for c in bom.connections:
         net_gnd = _net_is_ground(c.net_name)
         net_pos = _net_is_positive_rail(c.net_name)
-        if not (net_gnd or net_pos):
+        net_negative = _net_is_negative_rail(c.net_name)
+        if not (net_gnd or net_pos or net_negative):
             continue
         for ep in c.endpoints:
             pin = info.get(ep.ref, {}).get(ep.pin)
@@ -1093,6 +1108,11 @@ def check_power_pin_polarity(bom) -> CheckResult:
                 bad.append(
                     f"{ep.ref}.{ep.pin} (pin {nm!r}, a positive supply) is wired to "
                     f"ground net {c.net_name!r} -- power pins look reversed"
+                )
+            elif pos_pin and net_negative:
+                bad.append(
+                    f"{ep.ref}.{ep.pin} (pin {nm!r}, a positive supply) is wired to "
+                    f"negative rail {c.net_name!r} -- power pins look reversed"
                 )
             elif gnd_pin and net_pos:
                 bad.append(

@@ -649,6 +649,59 @@ def test_power_pin_polarity_passes_correct_supply(monkeypatch) -> None:
     ])
     assert check_power_pin_polarity(bom).ok
 
+def _fake_two_supply_bom(positive_net: str, negative_net: str) -> BOM:
+    return BOM(parts=[_bpart("U1", "Fake:OPAMP")], connections=[
+        NetConnection(net_name=positive_net, sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U1", pin="4")]),
+        NetConnection(net_name=negative_net, sheet="MCU",
+                      endpoints=[PinEndpoint(ref="U1", pin="11")]),
+    ])
+
+
+def _patch_fake_two_supply_lookup(monkeypatch) -> None:
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({
+        "Fake:OPAMP": [
+            ("4", "VCC+", "power_in"),
+            ("11", "VCC-", "power_in"),
+        ],
+    }))
+
+
+def test_power_pin_polarity_accepts_vcc_suffix_single_and_dual_supply(monkeypatch) -> None:
+    _patch_fake_two_supply_lookup(monkeypatch)
+    assert check_power_pin_polarity(
+        _fake_two_supply_bom("+5V", "GND")
+    ).ok
+    assert check_power_pin_polarity(
+        _fake_two_supply_bom("+12V", "-12V")
+    ).ok
+
+
+def test_power_pin_polarity_rejects_vcc_suffix_reversal(monkeypatch) -> None:
+    _patch_fake_two_supply_lookup(monkeypatch)
+    res = check_power_pin_polarity(_fake_two_supply_bom("GND", "+5V"))
+    assert not res.ok
+    assert len(res.offenders) == 2
+    assert any("U1.4" in offender and "ground net" in offender
+               for offender in res.offenders)
+    assert any("U1.11" in offender and "positive rail" in offender
+               for offender in res.offenders)
+
+
+@pytest.mark.parametrize("negative_net", ["VSS", "VEE", "-12V"])
+def test_power_pin_polarity_rejects_positive_pin_on_negative_net(
+    monkeypatch, negative_net: str,
+) -> None:
+    _patch_fake_two_supply_lookup(monkeypatch)
+    res = check_power_pin_polarity(
+        _fake_two_supply_bom(negative_net, "+5V")
+    )
+    assert not res.ok
+    assert any("U1.4" in offender and negative_net in offender
+               and "negative rail" in offender for offender in res.offenders)
+    assert any("U1.11" in offender and "positive rail" in offender
+               for offender in res.offenders)
+
 
 def test_power_pin_polarity_ignores_differential_input(monkeypatch) -> None:
     # A differential analog input (VIN-/VINP) must NOT be read as a supply.
