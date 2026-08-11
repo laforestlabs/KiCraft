@@ -627,3 +627,23 @@ def test_validate_routed_board_unresolved_outline_is_not_escaped_copper(
 
     assert validation["malformed_board_geometry"] is False
     assert "malformed_board_geometry" not in validation["rejection_reasons"]
+
+
+def test_parse_freerouting_output_keeps_tail_not_head():
+    """On a net-normalization hang FreeRouting prints the diagnosis LAST and
+    then goes silent, so the raw capture must keep the tail (the banner at
+    the head is worthless; the first-2000-char slice used to throw the
+    diagnosis away -- KC-Z879KB)."""
+    stdout = "Freerouting v1.9.0 banner line\n" + ("noise\n" * 500) + \
+        "The normalization of net 'VOUT_2' failed.\n"
+    stats = freerouting_runner.parse_freerouting_output(stdout, "", 0)
+    assert len(stats["_raw_stdout"]) <= 2000
+    assert stats["_raw_stdout"].endswith("The normalization of net 'VOUT_2' failed.\n")
+    assert "banner line" not in stats["_raw_stdout"]
+
+
+def test_last_output_line_prefers_stdout_and_skips_blanks():
+    assert freerouting_runner._last_output_line("a\nb\n", "") == "b"
+    assert freerouting_runner._last_output_line("", "\n  \nlast stderr") == "last stderr"
+    assert freerouting_runner._last_output_line("", "") == ""
+    assert freerouting_runner._last_output_line("stdout last", "stderr last") == "stdout last"

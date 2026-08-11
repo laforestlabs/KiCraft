@@ -47,6 +47,9 @@ DRC_COUNT_KEYS = (
 
 # Route-failure signatures worth flagging from per-round stdout/stderr tails.
 # (name, needle) — matched case-sensitively against the captured tails.
+# Shared with cli_app.build_pcb_errors (via fr_signature_hits /
+# match_fr_signature) so the failure card and the triage scanner can never
+# drift apart on what counts as a known FreeRouting failure.
 FR_SIGNATURES = (
     ("locked_wire_loop_hang", "The normalization of net"),
     ("dsn_sanitize_cycles", "[dsn-sanitize]"),
@@ -62,6 +65,27 @@ FR_SIGNATURES = (
     ("escape_infeasible", "ESCAPE INFEASIBLE"),
     ("interface_escapes", "Interface escapes"),
 )
+
+
+def fr_signature_hits(text: str) -> list[str]:
+    """Every FR_SIGNATURES name present in ``text`` (case-sensitive)."""
+    return [name for name, needle in FR_SIGNATURES if needle in text]
+
+
+def match_fr_signature(text: str) -> tuple[str, str] | None:
+    """First FreeRouting failure signature found in ``text``.
+
+    Returns ``(signature_name, matched_line)`` (the line containing the
+    needle, stripped) or ``None`` when no signature matches.
+    """
+    for name, needle in FR_SIGNATURES:
+        if needle not in text:
+            continue
+        for line in text.splitlines():
+            if needle in line:
+                return name, line.strip()
+        return name, ""
+    return None
 
 # The parent_pipeline.json state keys `run`/`scan` read. The drift-guard test
 # asserts these against a freshly serialized ParentCompositionState.to_dict()
@@ -478,7 +502,7 @@ def collect_fr_fingerprints(exp: Path) -> dict:
         logs = _jdict(rj).get("logs") or {}
         text = (logs.get("parent_route_stdout_tail") or "") + \
                (logs.get("parent_route_stderr_tail") or "")
-        hits = [name for name, needle in FR_SIGNATURES if needle in text]
+        hits = fr_signature_hits(text)
         if hits:
             per_round[rj.stem] = hits
         for line in text.splitlines():

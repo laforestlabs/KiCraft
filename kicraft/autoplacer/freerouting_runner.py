@@ -1158,27 +1158,259 @@ def _restrict_dsn_routing_to_nets(
         print(f"  warning: DSN route-only restriction skipped: {exc}")
 
 
-# FreeRouting 1.9.0 hangs FOREVER when a net's locked wiring forms a closed
-# loop: it logs "The normalization of net 'X' failed." and then makes no
-# further progress until the watchdog kills the JVM (rc=-1, no SES) --
-# indistinguishable from the Ω-DSN deadlock at the caller. Self-eval
-# 2026-07-27 run_29: the LED-ring leaf legitimately routed its 5V bus as a
-# closed ring; the parent locks that copper into the DSN, every route attempt
-# (power-first, single-phase, GND-skip) hung, and the board died rc6.
+# FreeRouting 1.9.0 hangs FOREVER when a net's locked wiring trips its net
+# normalization: it logs "The normalization of net 'X' failed." and then
+# makes no further progress until the watchdog kills the JVM (rc=-1, no
+# SES) -- indistinguishable from the Ω-DSN deadlock at the caller. Two
+# poison classes are confirmed against the jar (2026-08-11):
 #
-# Removing one edge of a cycle NEVER disconnects the net, so the fix is to
-# open each loop with a microscopic gap: retreat the loop-closing wire's
-# final point along its last segment by ~10% of the trace width. Only
-# FreeRouting's VIEW gets the gap -- the .kicad_pcb keeps its real, continuous
-# copper, and import_ses merges the session onto the original board. Purely
-# degenerate wires (every point identical) are dropped outright: they carry
-# no copper and can read as self-loops.
+# 1. A wire whose endpoints are within FreeRouting's ~0.2 µm merge epsilon
+#    collapses into a self-loop and kills normalization (KC-Z879KB run
+#    1/695: pass 1's own power routing left a 0.2 µm stub on VOUT_1/VOUT_2;
+#    the loop is a geometry constant of the input, so every attempt froze at
+#    the timeout and the board died rc6).
+# 2. A closed polygon ring of endpoint-exact wires (self-eval 2026-07-27
+#    run_29: the LED ring's 5V bus). FreeRouting DEDUPES a coincident wire
+#    pair (an exact or sub-µm 2-cycle routes cleanly), so only rings with
+#    >=3 distinct edges poison it.
+#
+# The fix: opening one edge of a cycle NEVER disconnects the net, so each
+# poison is opened with a microscopic, DSN-only gap -- retreat the
+# loop-closing wire's endpoint along its segment by ~10% of the trace width.
+# Only FreeRouting's VIEW gets the gap; the .kicad_pcb keeps its real,
+# continuous copper, and import_ses merges the session onto the original
+# board. Wires degenerate at FreeRouting's resolution (every point within
+# the epsilon) are dropped outright: they carry no copper the router can
+# see, and a collapsing stub is poison class 1.
+#
+# Pass 1's own output defeats an endpoint-only detector on class 1: on the
+# pass-1 -> board -> pass-2 round trip coordinates drift by ~0.2 µm, so the
+# same junction compares as two endpoints and the stub looks like a normal
+# wire. The graph below is therefore built per SEGMENT with near-coincident
+# points (within FreeRouting's own epsilon) snapped into one node; the
+# union-find then sees the collapsing stub as the degenerate it is and opens
+# any >=3-edge ring. Point-to-SEGMENT proximity is deliberately NOT snapped:
+# FreeRouting 1.9 normalizes wire endpoints lying up to 0.5 µm off another
+# wire's segment without complaint (verified), so those are not loops.
 _DSN_WIRE_ENTRY_RE = re.compile(
     r"\(wire\s+\(path\s+(?P<layer>\S+)\s+(?P<width>[-\d.eE]+)"
     r"(?P<coords>(?:\s+[-\d.eE]+)+)\s*\)"
     r"\s*\(net\s+(?P<net>\"[^\"]+\"|[^\s()]+)\s*\)"
     r"(?P<tail>(?:\s*\([^()]*\))*)\s*\)"
 )
+
+# Points closer than this (in mm) are the same junction, and a wire this
+# short is degenerate (its endpoints collapse to one node). The value is
+# FreeRouting 1.9's own merge epsilon, measured against the jar
+# (2026-08-11): a wire whose ends are 0.2 µm apart freezes normalization
+# ("The normalization of net 'X' failed." -- the KC-Z879KB stub) while
+# 0.1 µm and 0.5-5.0 µm separations route cleanly, so epsilon == 0.2 µm;
+# a 1 µm-separated junction pair (D5_DOUT) routes cleanly and a wire
+# endpoint 0.5 µm off another wire's segment (D2_DOUT) is NOT a junction,
+# so anything looser invents loops FreeRouting can't see. This tolerance is
+# far below the 10%-of-width snip gap (>=5 µm on a 50 µm trace), so a
+# gapped loop stays open.
+_SNAP_TOLERANCE_MM = 0.0002  # 0.2 µm, FreeRouting 1.9's merge epsilon
+
+# Point-to-SEGMENT ("T-junction") snapping tolerance. Measured against the
+# 1.9.0 jar: a wire endpoint lying EXACTLY on another wire's segment (0.0 µm
+# off -- round-2 VBUS on KC-Z879KB) IS a junction and closes a sliver loop
+# that freezes normalization, while endpoints 0.10-0.14 µm and 0.5 µm off a
+# segment (run_29's 5V branch, round-1 VBUS, D2_DOUT) normalize cleanly, so
+# FreeRouting's point-to-segment epsilon is below 0.1 µm. 0.05 µm (half the
+# DSN's 0.1 µm coordinate precision) admits exact junctions without inventing
+# off-segment ones.
+_TJUNCTION_TOLERANCE_MM = 0.00005  # 0.05 µm
+
+
+def _fmt(v: float) -> str:
+    return f"{v:.1f}".rstrip("0").rstrip(".")
+
+
+def _dsn_unit_factor_mm(text: str) -> float:
+    """mm per DSN coordinate unit, from the DSN's ``(unit ...)`` header."""
+    m = re.search(r"\(unit\s+(\w+)\)", text)
+    return {"um": 0.001, "mm": 1.0, "mil": 0.0254, "inch": 25.4}.get(
+        m.group(1) if m else "um", 0.001
+    )
+
+
+def _open_dsn_net_cycles(
+    net_wires: list[dict], tol: float, tj_tol: float
+) -> list[tuple[tuple[int, int], str]]:
+    """Open every loop in ONE net's locked wiring.
+
+    Returns ``(span, replacement)`` edits for the wires of ``net_wires``.
+    See :func:`_break_locked_wire_cycles` for the model; this is the
+    per-net half. ``tol`` is the point-snap radius and ``tj_tol`` the
+    point-to-segment junction radius, both in DSN units.
+    """
+    edits: list[tuple[tuple[int, int], str]] = []
+
+    # Phase 0: drop wires that are degenerate at FreeRouting's resolution
+    # (every point within the snap tolerance). They carry no copper the
+    # router can see -- FreeRouting merges their endpoints into a
+    # zero-length wire, which reads as the same self-loop bug class.
+    live: list[dict] = []
+    for w in net_wires:
+        x0, y0 = w["xy"][0]
+        if all(math.hypot(x - x0, y - y0) <= tol for x, y in w["xy"][1:]):
+            edits.append((w["span"], ""))
+        else:
+            live.append(w)
+    if not live:
+        return edits
+
+    # Phase 1: per-segment graph. Nodes are snapped points (a spatial hash
+    # keeps registration O(n)); edges carry the wire and segment they came
+    # from so a cycle can be attributed. T-junctions (a wire endpoint lying
+    # ON another wire's segment interior -- pass 1's own power routing
+    # branches from segment midpoints) split the segment into two graph
+    # edges meeting at the junction point, so a branch that starts
+    # mid-segment is a real node instead of an invisible endpoint. Only the
+    # graph splits; the DSN text never does. The junction tolerance is much
+    # tighter than the point snap (see _TJUNCTION_TOLERANCE_MM).
+    buckets: dict[tuple[int, int], list[int]] = {}
+    nodes: list[tuple[float, float]] = []
+
+    def _node_for(x: float, y: float) -> int:
+        bx, by = int(math.floor(x / tol)), int(math.floor(y / tol))
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for nid in buckets.get((bx + dx, by + dy), ()):
+                    nx, ny = nodes[nid]
+                    if math.hypot(nx - x, ny - y) <= tol:
+                        return nid
+        nid = len(nodes)
+        nodes.append((x, y))
+        buckets.setdefault((bx, by), []).append(nid)
+        return nid
+
+    # (wire index, local segment index, x1, y1, x2, y2); segment si of wire w
+    # connects DSN points si and si+1 of w's polyline.
+    segs: list[tuple[int, int, float, float, float, float]] = []
+    endpoints: list[tuple[float, float]] = []
+    for wi, w in enumerate(live):
+        for si, (p1, p2) in enumerate(zip(w["xy"], w["xy"][1:])):
+            segs.append((wi, si, p1[0], p1[1], p2[0], p2[1]))
+        endpoints.extend(w["xy"])
+
+    junctions: dict[tuple[int, int], list[tuple[float, tuple[float, float]]]] = {}
+    for ex, ey in endpoints:
+        for wi, si, x1, y1, x2, y2 in segs:
+            if ex < min(x1, x2) - tj_tol or ex > max(x1, x2) + tj_tol:
+                continue
+            if ey < min(y1, y2) - tj_tol or ey > max(y1, y2) + tj_tol:
+                continue
+            dx, dy = x2 - x1, y2 - y1
+            seg_len2 = dx * dx + dy * dy
+            if seg_len2 <= 0.0:
+                continue
+            t = ((ex - x1) * dx + (ey - y1) * dy) / seg_len2
+            if t <= 0.0 or t >= 1.0:
+                continue
+            px, py = x1 + t * dx, y1 + t * dy
+            if math.hypot(ex - px, ey - py) > tj_tol:
+                continue
+            # A projection within tolerance of a segment END is that end, not
+            # a junction: a wire's own endpoint projects onto its own last
+            # segment at t=1.0 minus float noise, and a phantom split there
+            # would create a self-edge that reads as a false cycle.
+            if math.hypot(px - x1, py - y1) <= tj_tol:
+                continue
+            if math.hypot(px - x2, py - y2) <= tj_tol:
+                continue
+            # A degenerate wire carries the same point twice; each duplicate
+            # endpoint would record the same junction and splice a zero-length
+            # edge into the chain (a phantom self-cycle). Keep one per spot.
+            if any(math.hypot(px - jx, py - jy) <= tj_tol for _t, (jx, jy)
+                   in junctions.get((wi, si), ())):
+                continue
+            junctions.setdefault((wi, si), []).append((t, (px, py)))
+
+    # (wire index, local segment index, node a, node b) per graph edge.
+    edges: list[tuple[int, int, int, int]] = []
+    for wi, si, x1, y1, x2, y2 in segs:
+        chain = [(x1, y1)] + [pt for _t, pt in sorted(junctions.get((wi, si), ()))]
+        chain.append((x2, y2))
+        for (ax, ay), (bx, by) in zip(chain, chain[1:]):
+            a = _node_for(ax, ay)
+            b = _node_for(bx, by)
+            if a == b:
+                continue  # zero-length DSN segment: no copper, no edge
+            edges.append((wi, si, a, b))
+
+    # Phase 2: union-find over the FULL graph. Every edge that closes a
+    # cycle marks its wire; the closing segment is kept so the snip can
+    # retreat exactly the edge that closed the loop.
+    parent: dict[int, int] = {}
+    seen_edges: dict[tuple[int, int], int] = {}
+
+    def _find(a: int) -> int:
+        parent.setdefault(a, a)
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    marked: set[int] = set()
+    closing_seg: dict[int, tuple[int, int]] = {}
+    for wi, si, a, b in edges:
+        key = (a, b) if a <= b else (b, a)
+        prev = seen_edges.get(key)
+        if prev is not None and prev != wi:
+            # A directly-duplicate edge from ANOTHER wire can only form a
+            # 2-cycle, which FreeRouting dedupes (verified against 1.9.0:
+            # VOUT_1's exact-coordinate 2-cycle and the sub-µm VOUT_2 pair
+            # both route cleanly once the collapsing stub is gone). Snipping
+            # it would only re-create near-coincident endpoints, so skip.
+            continue
+        seen_edges[key] = wi
+        ra, rb = _find(a), _find(b)
+        if ra == rb:
+            marked.add(wi)
+            closing_seg.setdefault(wi, (wi, si))
+        else:
+            parent[ra] = rb
+
+    # Resolve ONE marked wire per call (the caller loops to a fixpoint):
+    # gapping two collinear wires of the same sliver loop keeps their ends
+    # 0.2 µm apart forever, so only the first in DSN order is opened and the
+    # re-check decides whether more is needed. The snip moves the far DSN
+    # point of the closing segment -- the wire's final point when the loop
+    # closes on its last segment (the historical mechanics, byte-identical
+    # for that case), or the interior vertex when a middle segment closes.
+    if marked:
+        wi = min(marked, key=lambda w: live[w]["span"][0])
+        w = live[wi]
+        _cwi, csi = closing_seg[wi]
+        (x1, y1), (x2, y2) = w["xy"][csi], w["xy"][csi + 1]
+        seg = math.hypot(x2 - x1, y2 - y1)
+        if seg > 0:
+            # The gap scales with the wire's own width so it is unit-agnostic
+            # (µm-unit DSN: 500-wide trace -> 50 gap; mm-unit: 0.5 -> 0.05).
+            gap = min(max(abs(w["width"]) / 10.0, seg * 0.01), seg / 2.0)
+            if gap <= tol:
+                # Sliver closing segment: no room to retreat inside it, so
+                # push the end just past the snap radius (a fold-back; the
+                # wire stays an obstacle either way).
+                gap = 2.0 * tol
+            nx = x2 - (x2 - x1) / seg * gap
+            ny = y2 - (y2 - y1) / seg * gap
+            new_xy = w["xy"][: csi + 1] + [(nx, ny)] + w["xy"][csi + 2 :]
+            coord_s = "".join(f"  {_fmt(x)} {_fmt(y)}" for x, y in new_xy)
+            entry = (
+                f"(wire (path {w['layer']} {w['width']}"
+                f"{coord_s})(net {w['net']}){w['tail']})"
+            )
+            edits.append((w["span"], entry))
+    return edits
+
+
+# Cap on fixpoint passes. Each pass removes >=1 cycle-closing edge (or drops
+# a degenerate wire), so a real DSN needs only as many passes as it has
+# independent loops per net; the cap is a backstop for pathological input.
+_MAX_SNIP_PASSES = 16
 
 
 def _break_locked_wire_cycles(dsn_path: str) -> int:
@@ -1191,65 +1423,46 @@ def _break_locked_wire_cycles(dsn_path: str) -> int:
     except OSError:
         return 0
 
-    parent: dict[tuple, tuple] = {}
-
-    def _find(x: tuple) -> tuple:
-        parent.setdefault(x, x)
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def _fmt(v: float) -> str:
-        return f"{v:.1f}".rstrip("0").rstrip(".")
-
-    edits: list[tuple[tuple[int, int], str]] = []
-    for m in _DSN_WIRE_ENTRY_RE.finditer(text):
+    tol = _SNAP_TOLERANCE_MM / _dsn_unit_factor_mm(text)
+    tj_tol = _TJUNCTION_TOLERANCE_MM / _dsn_unit_factor_mm(text)
+    total = 0
+    for _ in range(_MAX_SNIP_PASSES):
         try:
-            vals = [float(t) for t in m.group("coords").split()]
-            width = float(m.group("width"))
+            wires = []
+            for m in _DSN_WIRE_ENTRY_RE.finditer(text):
+                vals = [float(t) for t in m.group("coords").split()]
+                width = float(m.group("width"))
+                if len(vals) < 4 or len(vals) % 2:
+                    continue
+                wires.append({
+                    "span": m.span(),
+                    "layer": m.group("layer"),
+                    "width": width,
+                    "net": m.group("net"),
+                    "tail": m.group("tail"),
+                    "xy": list(zip(vals[::2], vals[1::2])),
+                })
         except ValueError:
-            continue
-        if len(vals) < 4 or len(vals) % 2:
-            continue
-        xy = list(zip(vals[::2], vals[1::2]))
-        if all(p == xy[0] for p in xy):
-            edits.append((m.span(), ""))  # zero-length wire: drop
-            continue
-        net = m.group("net")
-        a = (net, round(xy[0][0], 1), round(xy[0][1], 1))
-        b = (net, round(xy[-1][0], 1), round(xy[-1][1], 1))
-        ra, rb = _find(a), _find(b)
-        if ra != rb:
-            parent[ra] = rb
-            continue
-        # Loop-closing wire: retreat the final point along the last segment.
-        # The gap scales with the wire's own width so it is unit-agnostic
-        # (µm-unit DSN: 500-wide trace -> 50 gap; mm-unit: 0.5 -> 0.05).
-        (x1, y1), (x2, y2) = xy[-2], xy[-1]
-        seg = math.hypot(x2 - x1, y2 - y1)
-        if seg <= 0:
-            continue
-        gap = min(max(abs(width) / 10.0, seg * 0.01), seg / 2.0)
-        nx = x2 - (x2 - x1) / seg * gap
-        ny = y2 - (y2 - y1) / seg * gap
-        coord_s = "".join(f"  {_fmt(x)} {_fmt(y)}" for x, y in xy[:-1] + [(nx, ny)])
-        entry = (
-            f"(wire (path {m.group('layer')} {m.group('width')}"
-            f"{coord_s})(net {m.group('net')}){m.group('tail')})"
-        )
-        edits.append((m.span(), entry))
+            break  # unparseable DSN: leave it alone (best-effort)
+        edits: list[tuple[tuple[int, int], str]] = []
+        for net in sorted({w["net"] for w in wires}):
+            edits.extend(_open_dsn_net_cycles(
+                [w for w in wires if w["net"] == net], tol, tj_tol
+            ))
+        if not edits:
+            break
+        total += len(edits)
+        for (start, end), repl in sorted(edits, reverse=True):
+            text = text[:start] + repl + text[end:]
 
-    if not edits:
+    if not total:
         return 0
-    for (start, end), repl in sorted(edits, reverse=True):
-        text = text[:start] + repl + text[end:]
     try:
         with open(dsn_path, "w", encoding="utf-8") as f:
             f.write(text)
     except OSError:
         return 0
-    return len(edits)
+    return total
 
 
 def _propagate_sibling_pro(src_pcb_path: str, dst_pcb_path: str) -> None:
@@ -1272,6 +1485,18 @@ def _propagate_sibling_pro(src_pcb_path: str, dst_pcb_path: str) -> None:
         pass
 
 
+def _last_output_line(stdout: str, stderr: str) -> str:
+    """FreeRouting's last non-empty output line (stdout preferred). On a
+    freeze the banner is worthless and the final lines are the diagnosis --
+    e.g. "The normalization of net 'VOUT_2' failed." -- so this is what the
+    hang message should quote."""
+    for stream in (stdout, stderr):
+        for line in reversed((stream or "").splitlines()):
+            if line.strip():
+                return line.strip()
+    return ""
+
+
 def parse_freerouting_output(stdout: str, stderr: str, returncode: int) -> dict[str, Any]:
     """Parse FreeRouting stdout/stderr for routing statistics."""
     stats: dict[str, Any] = {
@@ -1282,8 +1507,12 @@ def parse_freerouting_output(stdout: str, stderr: str, returncode: int) -> dict[
         "score": 0.0,
         "routing_seconds": 0.0,
         "optimization_seconds": 0.0,
-        "_raw_stdout": stdout[:2000] if stdout else "",
-        "_raw_stderr": stderr[:2000] if stderr else "",
+        # Keep the TAIL of the output, not the head: on a net-normalization
+        # hang the process prints the failure sentence and then goes silent,
+        # so only the end of the buffer explains what happened (KC-Z879KB:
+        # the first 2000 chars were the banner and the diagnosis was lost).
+        "_raw_stdout": stdout[-2000:] if stdout else "",
+        "_raw_stderr": stderr[-2000:] if stderr else "",
     }
 
     combined = stdout + "\n" + stderr
@@ -1431,6 +1660,12 @@ def run_freerouting(
             except OSError:
                 pass
             stdout, stderr = proc.communicate()
+        last = _last_output_line(stdout, stderr)
+        print(
+            f"  FreeRouting hung and was killed at the {timeout_s} s timeout"
+            + (f'; its last output was: "{last}"' if last else ""),
+            flush=True,
+        )
         return parse_freerouting_output(stdout, stderr, -1)
 
     return parse_freerouting_output(stdout, stderr, proc.returncode)
@@ -1654,9 +1889,24 @@ def route_with_freerouting(
                 )
                 continue
 
-            raise RuntimeError(
-                f"FreeRouting produced no SES output after 2 attempts (rc={stats.get('returncode', '?')})"
+            rc = stats.get("returncode", "?")
+            last = _last_output_line(
+                stats.get("_raw_stdout") or "", stats.get("_raw_stderr") or ""
             )
+            if rc == -1:
+                # rc=-1 means the watchdog killed a JVM that stopped
+                # progressing -- normally the net-normalization hang. Name
+                # that, and quote the sentence FreeRouting left behind, so
+                # the failure card has a real cause instead of a generic
+                # "no SES" (the diagnosis used to be captured and thrown
+                # away; see parse_freerouting_output).
+                message = (
+                    f"FreeRouting hung and was killed at the {timeout_s} s timeout"
+                    + (f'; its last output was: "{last}"' if last else "")
+                )
+            else:
+                message = f"FreeRouting produced no SES output after 2 attempts (rc={rc})"
+            raise RuntimeError(message)
 
     raise RuntimeError("FreeRouting routing failed")
 

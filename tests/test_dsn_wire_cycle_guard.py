@@ -24,6 +24,8 @@ from kicraft.autoplacer.freerouting_runner import (
 )
 
 FIXTURE = Path(__file__).parent / "data" / "fr_hang_5v_loop.dsn"
+SLIVER_FIXTURE = Path(__file__).parent / "data" / "fr_sliver_loop_vout2.dsn"
+MIDPOINT_FIXTURE = Path(__file__).parent / "data" / "fr_sliver_loop_vbus_midpoint.dsn"
 
 
 def _wire_graph_has_cycle(text: str, net: str) -> bool:
@@ -116,6 +118,67 @@ def test_acyclic_dsn_untouched(tmp_path):
   (wiring
     (wire (path F.Cu 500  0 0  1000 0)(net A)(type fix))
     (wire (path B.Cu 500  0 0  1000 0)(net B)(type fix))
+  )
+)
+"""
+    p = tmp_path / "b.dsn"
+    p.write_text(text)
+    assert _break_locked_wire_cycles(str(p)) == 0
+    assert p.read_text() == text
+
+
+def test_sliver_loop_with_float_drift_is_opened(tmp_path):
+    """KC-Z879KB pattern (tests/data/fr_sliver_loop_vout2.dsn, from the real
+    run): pass 1's own power routing leaves a hair-thin loop on VOUT_2. Wire
+    A (151819,-97032.7)->(152479,-97692.3) starts at the MIDPOINT of wire B's
+    last segment (151159,-96372.9)->(152479,-97692.5) -- a T-junction -- and
+    ends 0.2 um short of B's endpoint (float drift on the pass-1 -> board ->
+    pass-2 round trip), with a 0.2 um stub between them. The endpoint-only
+    detector saw neither the branch nor the drift and FreeRouting 1.9 froze
+    on the loop ("The normalization of net 'VOUT_2' failed.")."""
+    p = tmp_path / "board.dsn"
+    shutil.copy(SLIVER_FIXTURE, p)
+    # The poison is the 0.2 um stub (FreeRouting collapses its endpoints
+    # into a self-loop and normalization fails); it alone is dropped. The
+    # remaining A/B pair is a 2-cycle FreeRouting dedupes (verified against
+    # the 1.9.0 jar), so nothing else may be snipped.
+    assert _break_locked_wire_cycles(str(p)) == 1
+    out = p.read_text()
+    assert "(wire (path F.Cu 500  152479 -97692.3  152479 -97692.5)" not in out
+    assert not _wire_graph_has_cycle(out, "VOUT_2")
+    # Idempotent: the opened loop stays open on a second pass.
+    assert _break_locked_wire_cycles(str(p)) == 0
+
+
+def test_branch_on_segment_midpoint_sliver_is_opened(tmp_path):
+    """Round-2 VBUS class (KC-Z879KB replay): pass 1's own power routing left
+    a 1 um stub (160019,-130543)->(160018,-130543) branching from the EXACT
+    midpoint of wire A (160464,-130098)->(159574,-130988), with wire B
+    (160018,-130543)->(159574,-130988) closing the triangle. FreeRouting 1.9
+    splits A at the exact branch and normalization fails on the 3-edge
+    sliver loop; the branch is invisible to an endpoint-only detector."""
+    p = tmp_path / "board.dsn"
+    shutil.copy(MIDPOINT_FIXTURE, p)
+    assert _break_locked_wire_cycles(str(p)) == 1
+    out = p.read_text()
+    assert not _wire_graph_has_cycle(out, "VBUS")
+    assert _break_locked_wire_cycles(str(p)) == 0
+
+
+def test_coincident_pair_2cycle_is_not_snipped(tmp_path):
+    """The plan's literal sliver shape: wire A is a polyline J->N->K and wire
+    B is N->K' where K' is K + 0.2 um. The T-junction branch at A's INTERIOR
+    vertex N and the sub-micron drift at K make this a 2-cycle (two parallel
+    edges N->K) -- which FreeRouting 1.9 DEDUPES (verified against the jar:
+    an exact or sub-µm coincident wire pair routes cleanly; only a wire whose
+    endpoints collapse to zero length poisons normalization). The detector
+    must see the pair but leave it alone: snipping would only re-create
+    near-coincident endpoints."""
+    text = """(pcb t
+  (unit um)
+  (wiring
+    (wire (path F.Cu 500  0 0  1000 0  2000 0)(net SLIVER)(type fix))
+    (wire (path F.Cu 500  1000 0  2000 0.2)(net SLIVER)(type fix))
   )
 )
 """
