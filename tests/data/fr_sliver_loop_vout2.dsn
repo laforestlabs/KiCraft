@@ -1,0 +1,30 @@
+(pcb fr_sliver_loop_vout2
+  (parser
+    (string_quote ")
+    (space_in_quoted_tokens on)
+    (host_cad "KiCad's Pcbnew")
+    (host_version "9.0.9-9.0.9~ubuntu24.04.1")
+  )
+  (resolution um 10)
+  (unit um)
+  (structure
+    (layer F.Cu
+      (type signal)
+      (property
+        (index 0)
+      )
+    )
+    (boundary
+      (path pcb 0  24300 -59160  0 -59160  0 0  24300 0  24300 -59160)
+    )
+    (rule
+      (width 500)
+      (clearance 200)
+    )
+  )
+  (wiring
+    (wire (path F.Cu 500  151159 -91776.9  151159 -96372.9  152479 -97692.5)(net VOUT_2)(type fix))
+    (wire (path F.Cu 500  152479 -97692.3  152479 -97692.5)(net VOUT_2)(type fix))
+    (wire (path F.Cu 500  151819 -97032.7  152479 -97692.3)(net VOUT_2)(type fix))
+  )
+)

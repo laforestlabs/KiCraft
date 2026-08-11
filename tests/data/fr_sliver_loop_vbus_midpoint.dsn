@@ -1,0 +1,30 @@
+(pcb fr_sliver_loop_vbus_midpoint
+  (parser
+    (string_quote ")
+    (space_in_quoted_tokens on)
+    (host_cad "KiCad's Pcbnew")
+    (host_version "9.0.9-9.0.9~ubuntu24.04.1")
+  )
+  (resolution um 10)
+  (unit um)
+  (structure
+    (layer F.Cu
+      (type signal)
+      (property
+        (index 0)
+      )
+    )
+    (boundary
+      (path pcb 0  24300 -59160  0 -59160  0 0  24300 0  24300 -59160)
+    )
+    (rule
+      (width 500)
+      (clearance 200)
+    )
+  )
+  (wiring
+    (wire (path F.Cu 500  160464 -130098  159574 -130988)(net VBUS)(type fix))
+    (wire (path F.Cu 500  160019 -130543  160018 -130543)(net VBUS)(type fix))
+    (wire (path F.Cu 500  160018 -130543  159574 -130988)(net VBUS)(type fix))
+  )
+)
