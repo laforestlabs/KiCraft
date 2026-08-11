@@ -1272,6 +1272,18 @@ def _propagate_sibling_pro(src_pcb_path: str, dst_pcb_path: str) -> None:
         pass
 
 
+def _last_output_line(stdout: str, stderr: str) -> str:
+    """FreeRouting's last non-empty output line (stdout preferred). On a
+    freeze the banner is worthless and the final lines are the diagnosis --
+    e.g. "The normalization of net 'VOUT_2' failed." -- so this is what the
+    hang message should quote."""
+    for stream in (stdout, stderr):
+        for line in reversed((stream or "").splitlines()):
+            if line.strip():
+                return line.strip()
+    return ""
+
+
 def parse_freerouting_output(stdout: str, stderr: str, returncode: int) -> dict[str, Any]:
     """Parse FreeRouting stdout/stderr for routing statistics."""
     stats: dict[str, Any] = {
@@ -1282,8 +1294,12 @@ def parse_freerouting_output(stdout: str, stderr: str, returncode: int) -> dict[
         "score": 0.0,
         "routing_seconds": 0.0,
         "optimization_seconds": 0.0,
-        "_raw_stdout": stdout[:2000] if stdout else "",
-        "_raw_stderr": stderr[:2000] if stderr else "",
+        # Keep the TAIL of the output, not the head: on a net-normalization
+        # hang the process prints the failure sentence and then goes silent,
+        # so only the end of the buffer explains what happened (KC-Z879KB:
+        # the first 2000 chars were the banner and the diagnosis was lost).
+        "_raw_stdout": stdout[-2000:] if stdout else "",
+        "_raw_stderr": stderr[-2000:] if stderr else "",
     }
 
     combined = stdout + "\n" + stderr
@@ -1431,6 +1447,12 @@ def run_freerouting(
             except OSError:
                 pass
             stdout, stderr = proc.communicate()
+        last = _last_output_line(stdout, stderr)
+        print(
+            f"  FreeRouting hung and was killed at the {timeout_s} s timeout"
+            + (f'; its last output was: "{last}"' if last else ""),
+            flush=True,
+        )
         return parse_freerouting_output(stdout, stderr, -1)
 
     return parse_freerouting_output(stdout, stderr, proc.returncode)
@@ -1654,9 +1676,24 @@ def route_with_freerouting(
                 )
                 continue
 
-            raise RuntimeError(
-                f"FreeRouting produced no SES output after 2 attempts (rc={stats.get('returncode', '?')})"
+            rc = stats.get("returncode", "?")
+            last = _last_output_line(
+                stats.get("_raw_stdout") or "", stats.get("_raw_stderr") or ""
             )
+            if rc == -1:
+                # rc=-1 means the watchdog killed a JVM that stopped
+                # progressing -- normally the net-normalization hang. Name
+                # that, and quote the sentence FreeRouting left behind, so
+                # the failure card has a real cause instead of a generic
+                # "no SES" (the diagnosis used to be captured and thrown
+                # away; see parse_freerouting_output).
+                message = (
+                    f"FreeRouting hung and was killed at the {timeout_s} s timeout"
+                    + (f'; its last output was: "{last}"' if last else "")
+                )
+            else:
+                message = f"FreeRouting produced no SES output after 2 attempts (rc={rc})"
+            raise RuntimeError(message)
 
     raise RuntimeError("FreeRouting routing failed")
 

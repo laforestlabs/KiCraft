@@ -35,6 +35,7 @@ from typing import get_args
 from pydantic import ValidationError
 
 from kicraft.cli import artifact_paths
+from kicraft.cli.triage import match_fr_signature as _match_fr_signature
 from kicraft.fsutil import atomic_write_text
 from kicraft.parts_library import jlcparts, lcsc_retail
 # Pure candidate predicates, imported directly (not via the swappable
@@ -4484,6 +4485,80 @@ def _bounded_text(value: object, limit: int = 240) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+# wxWidgets/pcbnew debug spam that pollutes pcbnew-subprocess stderr tails
+# ("Adding duplicate image handler for 'GIF file'", ...). It says nothing
+# about the failure and must never reach a failure card.
+_EVIDENCE_NOISE = ("Adding duplicate image handler",)
+
+
+def _bounded_evidence_line(value: object, limit: int = 120) -> str:
+    """One bounded diagnostic line from a log tail: noise lines stripped,
+    never cut mid-word."""
+    lines = [
+        ln.strip()
+        for ln in str(value or "").splitlines()
+        if not any(noise in ln for noise in _EVIDENCE_NOISE)
+    ]
+    text = " ".join(lines)
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    if cut and (cut[-1].isalnum() or cut[-1] == "_"):
+        idx = cut.rfind(" ")
+        if idx > limit // 2:
+            cut = cut[:idx]
+    return cut
+
+
+def _unique_evidence_lines(values, limit: int = 8) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        text = _bounded_evidence_line(value)
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+            if len(out) >= limit:
+                break
+    return out
+
+
+# Violation families that cannot fail a build (KiCad reports them as
+# warnings; the fab gate's blocker set is shorts / unconnected /
+# courtyard-overlap / keep-out / copper-edge). Attaching them to a failure
+# card blames a different, unrelated board frame.
+def _fallback_violation_ok(
+    v: "PcbViolation",
+    outline: tuple[float, float, float, float] | None,
+) -> bool:
+    """Keep a violation on a failure card only if it can fail a build AND
+    sits on the failing board (not a leftover from another board frame)."""
+    if v.type.startswith("silk_"):
+        return False
+    if v.type.startswith("courtyard") and v.type != "courtyards_overlap":
+        return False
+    if outline is not None and v.x_mm is not None and v.y_mm is not None:
+        x0, y0, x1, y1 = outline
+        if not (x0 - 1.0 <= v.x_mm <= x1 + 1.0 and y0 - 1.0 <= v.y_mm <= y1 + 1.0):
+            return False
+    return True
+
+
+def _failure_board_outline_mm(
+    summary: dict,
+) -> tuple[float, float, float, float] | None:
+    """Edge.Cuts AABB of the failing board, when the summary names one."""
+    board_path = summary.get("board_path")
+    if not board_path:
+        return None
+    try:
+        from kicraft.render.edge_cuts import parse_edge_cuts_aabb
+
+        return parse_edge_cuts_aabb(Path(board_path))
+    except Exception:  # noqa: BLE001 -- best-effort; the card survives without it
+        return None
+
+
 def _unique_bounded(values, limit: int = 40) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -4652,23 +4727,87 @@ def build_pcb_errors(summary: dict | None, *, stage: str) -> list[PcbError]:
 
     if not errors:
         evidence = raw.get("evidence") if isinstance(raw.get("evidence"), dict) else {}
-        evidence_lines = _unique_bounded(
+        evidence_texts = (
             list(evidence.values()) + [raw.get("report_excerpt"), raw.get("build_log_tail"),
-                                       raw.get("parent_route_stderr_tail"), raw.get("solve_stderr_tail")],
-            8,
+                                       raw.get("parent_route_stderr_tail"), raw.get("solve_stderr_tail")]
         )
-        add(
-            "layout_failure" if stage == "place_route" else "verification_failed",
-            "Routing/layout failed" if stage == "place_route" else "PCB verification failed",
-            ("The place/route pipeline failed before it produced a trustworthy DRC location. "
-             "No precise PCB location is available from the recorded evidence." if stage == "place_route"
-             else "PCB verification rejected the produced board, but the recorded evidence has no specific DRC category. "
-                  "No precise PCB location is available."),
-            evidence_lines or ["No bounded DRC location was recorded."],
-            ("Inspect the routing evidence, spread the blocks, and retry place/route."
-             if stage == "place_route" else
-             "Inspect the board and rerun verification after correcting the reported failure."),
+        # A known FreeRouting failure signature names the REAL cause (the
+        # net-normalization hang, the watchdog kill, ...) instead of raw log
+        # fragments. The signature table lives in kicraft.cli.triage so the
+        # failure card and the triage scanner can never drift apart.
+        fr_hit = next(
+            (_match_fr_signature(str(ev)) for ev in evidence_texts if ev), None
         )
+        # Never attach foreign or warn-only violations to a failure card:
+        # silk_* / minor courtyard clips cannot fail a build, and a
+        # coordinate outside the failing board's outline is proof the
+        # violation belongs to a different board frame (KC-Z879KB: two silk
+        # clips on LED D1 at (145, 118) mm, physically off a 24x59 mm board).
+        outline = _failure_board_outline_mm(raw)
+        fallback_violations = [
+            v for v in violations if _fallback_violation_ok(v, outline)
+        ]
+        fallback_footprint_refs = _unique_bounded(
+            [ref for v in fallback_violations for ref in v.footprint_refs]
+            + missing_refs,
+            40,
+        )
+        if fr_hit is not None:
+            name, line = fr_hit
+            if name == "locked_wire_loop_hang":
+                net_m = re.search(r"net\s+['\"]([^'\"]+)['\"]", line) if line else None
+                explanation = (
+                    f"The autorouter froze while reading the locked power wiring "
+                    f"on net {net_m.group(1)} and was killed at the timeout. "
+                    f"This is a pipeline bug, not something wrong with the design."
+                    if net_m else
+                    "The autorouter froze while reading a net's locked wiring "
+                    "and was killed at the timeout. This is a pipeline bug, "
+                    "not something wrong with the design."
+                )
+            else:
+                explanation = (
+                    f"The autorouter failed with a known FreeRouting failure "
+                    f"signature ({name}). This is a pipeline bug, not something "
+                    f"wrong with the design."
+                )
+            details = [line] if line else [f"Evidence: {name}"]
+            next_action = (
+                "No design change is needed; this is a routing-toolchain failure. "
+                "Retry the build."
+            )
+        else:
+            explanation = (
+                "The place/route pipeline failed before it produced a trustworthy DRC location. "
+                "No precise PCB location is available from the recorded evidence."
+                if stage == "place_route" else
+                "PCB verification rejected the produced board, but the recorded evidence has no specific DRC category. "
+                "No precise PCB location is available."
+            )
+            evidence_lines = _unique_evidence_lines(evidence_texts, 8)
+            details = evidence_lines or ["No bounded DRC location was recorded."]
+            next_action = (
+                "Inspect the routing evidence and retry place/route."
+                if stage == "place_route" else
+                "Inspect the board and rerun verification after correcting the reported failure."
+            )
+        if violations and not fallback_violations:
+            # The only recorded violations were warn-only or off-board -- a
+            # foreign frame. Say so instead of showing a fake location.
+            details.append("No board location exists for this failure.")
+        errors.append(PcbError(
+            stage=stage if stage in ("place_route", "verify") else "verify",
+            code="layout_failure" if stage == "place_route" else "verification_failed",
+            title=("Routing/layout failed" if stage == "place_route"
+                   else "PCB verification failed"),
+            explanation=_bounded_text(explanation, 500),
+            details=_unique_bounded(details, 12),
+            counts={k: v for k, v in counts.items() if v},
+            nets=nets,
+            footprint_refs=fallback_footprint_refs,
+            violations=fallback_violations[:120],
+            next_action=_bounded_text(next_action, 300),
+        ))
     return errors
 
 
@@ -4688,9 +4827,13 @@ def _persist_pcb_diagnostics(
     pcb: Path | None = None,
 ) -> list[PcbError]:
     """Build, optionally render, and persist a terminal PCB diagnostic."""
+    board = Path(pcb) if pcb is not None else None
+    if summary is not None and board is not None and board.is_file():
+        # Name the failing board so the failure card can drop violations that
+        # fall outside its outline (evidence from a different board frame).
+        summary.setdefault("board_path", str(board.resolve()))
     errors = build_pcb_errors(summary, stage=stage)
     overlay: Path | None = None
-    board = Path(pcb) if pcb is not None else None
     if board is not None and board.is_file():
         try:
             from kicraft.cli.render_drc_overlay import render_overlay
@@ -5411,7 +5554,8 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
         print(
             "error: the layout engine produced no routed parent board -- the "
             "parent compose/route failed (board not routable as placed). "
-            "Inspect .experiments/.../_search for rejected candidates.",
+            "Inspect the boards under .experiments/ for what this run "
+            "actually produced.",
             file=sys.stderr,
         )
         failure_summary = _latest_layout_failure_summary(project_dir, state_path)

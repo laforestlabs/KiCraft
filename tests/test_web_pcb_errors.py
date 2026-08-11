@@ -80,6 +80,52 @@ def test_empty_layout_evidence_gets_explicit_explanation():
     assert errors[0].next_action
 
 
+def test_fr_hang_evidence_names_net_and_timeout():
+    """The rc6 failure card must name the REAL cause -- FreeRouting froze on
+    net VOUT_2 and was killed at the timeout -- instead of raw log fragments,
+    and must carry no foreign violations or placement blame."""
+    errors = build_pcb_errors({
+        "evidence": {
+            "parent_route_stderr_tail": (
+                "  FreeRouting crash (rc=-1), retrying with 10 passes...\n"
+                "  [dsn-sanitize] opened 7 locked-wire cycle(s)\n"
+                "error: parent routing failed: FreeRouting hung and was killed "
+                "at the 120 s timeout; its last output was: "
+                "\"The normalization of net 'VOUT_2' failed.\"\n"
+            ),
+        },
+    }, stage="place_route")
+    assert len(errors) == 1
+    err = errors[0]
+    assert err.code == "layout_failure"
+    assert "VOUT_2" in err.explanation
+    assert "timeout" in err.explanation
+    assert err.violations == []
+    assert err.footprint_refs == []
+    assert err.overlay_path is None
+    assert "spread" not in err.next_action and "placement" not in err.next_action
+
+
+def test_warn_only_silk_violations_never_attached():
+    """A summary whose only violations are warn-only silkscreen clips (the
+    KC-Z879KB case: two clips on LED D1 at (145, 118) mm, physically off the
+    24x59 mm board) must produce a card with zero violations attached."""
+    errors = build_pcb_errors({
+        "violations": [
+            {"type": "silk_clip", "x_mm": 145.0, "y_mm": 118.0,
+             "footprint_refs": ["D1"],
+             "description": "Silkscreen clipped by pad"},
+            {"type": "silk_overlap", "x_mm": 10.0, "y_mm": 10.0,
+             "footprint_refs": [], "description": "Silkscreen overlap"},
+        ],
+    }, stage="place_route")
+    assert len(errors) == 1
+    err = errors[0]
+    assert err.violations == []
+    assert err.footprint_refs == []
+    assert "No board location exists for this failure." in err.details
+
+
 def test_drc_parser_keeps_both_net_forms_and_footprints(monkeypatch, tmp_path):
     report = (
         "[shorting_items]: Items shorting two nets\n"
