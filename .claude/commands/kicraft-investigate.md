@@ -17,6 +17,22 @@ REPO=$(git rev-parse --show-toplevel 2>/dev/null || echo "$HOME/KiCraft"); PY="$
 "$PY" -m kicraft.cli.triage scan                   # cross-run systematic-vs-per-design ranking
 ```
 
+**Board-id → run-dir resolution (when the user hands you a `KC-XXXXXX` board code).** A board code is *not* a filename or a directory — it is the `projects.board_code` column in `accounts.db`. `triage locate` resolves it to a run dir:
+
+```bash
+sqlite3 "$HOME/.kicraft/accounts.db" \
+  "SELECT dir_path FROM projects WHERE upper(board_code)=upper('KC-XXXXXX');"
+```
+
+→ the run dir (normally `~/.kicraft/projects/<uid>/<pid>`; trust `dir_path` — it may live outside `projects/`). The run dir holds `.kicraft/build.log`, `.kicraft/state.json`, and `generated/<stem>/` (the workspace you hand to `inspect_parent` / `replay` / the power-net snippet).
+
+Gotchas (the previous version rotted here — `resolve_run` in `kicraft/cli/triage.py` only matches the literal `KC-` prefix):
+
+- Pass the **bare code** to every triage subcommand (`KC-6THC46`), never a phrase like `"failed board id KC-6THC46"` — that fails with `could not resolve … under …/projects`. `$ARGUMENTS` frequently *arrives* as natural language; strip it to the `KC-XXXXXX` token before the first triage call.
+- A code with no DB row → the build never persisted a board (or the id is wrong). Fall back to `triage locate` with no argument (= most recent run) and read the DB row's `brief`/`stem` to confirm it is the board you were asked about.
+- `dir_path` missing on disk → the row exists but the workspace was cleaned; report "board recorded but run dir gone", do not guess a path.
+
+
 ## 0. The map: exit codes, gates, and what `triage run` prints
 
 A `build` is sequential: **synthesize+ERC → place leaves → compose+route parent → verify (DRC) → promote+export**. Route yourself by the failure family `triage run` prints (its `VERDICT:` line; the `build_done` event and the `[build] 4/5 verify:` log line are authoritative over per-round artifacts — a dirty round can be superseded before the promote verify):
@@ -158,7 +174,7 @@ Fallback for deployed web runs with no build.log: `journalctl -u kicraft-web` ar
 **(a) Prior-art dedup.** Grep the auto-memory index + plans for the failure signature:
 
 ```bash
-grep -rli '<signature>' ~/.claude/projects/-home-kicraft-KiCraft/memory/ "$REPO/docs/plans/" 2>/dev/null | head
+grep -rli '<signature>' ~/.claude/projects/-home-kicraft-KiCraft/memory/ ~/.omp/agent/sessions/ "$REPO/docs/plans/" 2>/dev/null | head
 ```
 
 - **KNOWN-FIXED**: all affected runs predate the fix → stale, one appendix line. Any hit after → **REGRESSION**, name the commit.
@@ -204,7 +220,7 @@ After the gap list: one paragraph per-run verdict (failing stage, specific failu
 ## 8. Headless mode (`KICRAFT_INVESTIGATE_HEADLESS=1` — the /admin/support runner)
 
 - **Budget: ~25 min hard** (the runner kills at 30). Skip §6b replay for anything dense (>10 leaves or a >600s original route budget); mark those findings `PLAUSIBLE (replay not run — headless budget)` and include the exact replay command in the report so a human can run it.
-- **Only your final message survives** (`--output-format text` keeps the last assistant message; mid-run notes are discarded). The full §7 report — gap blocks, per-run verdict, audit findings — must be in that one final message, self-contained, no references to "above".
+- **Only your final message survives** (`omp -p` keeps the final assistant message; mid-run notes are discarded). The full §7 report — gap blocks, per-run verdict, audit findings — must be in that one final message, self-contained, no references to "above".
 - **Never launch a background replay or promise "I'll report back"** — the session ends with your final message and anything still running dies with it. Replay synchronously inside the budget, or skip it and mark the finding PLAUSIBLE with the exact command.
 - No user is present: never ask questions; make the conservative call and record the uncertainty in the report.
 - Stay read-only outside tempdirs: replay copies and `mktemp -d` outputs only; never modify the run dir, the repo, or memory.
