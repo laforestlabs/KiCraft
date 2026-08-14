@@ -343,17 +343,16 @@ def build_leaf_contact_sheet(
         result["errors"].append("no_input_images")
         return result
 
-    magick = shutil.which("magick")
-    if magick is None:
+    if shutil.which("magick") is not None:
+        montage_cmd = ["magick", "montage"]
+    elif shutil.which("montage") is not None:
+        montage_cmd = ["montage"]
+    else:
         result["errors"].append("imagemagick_unavailable")
         return result
 
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-
     cmd = [
-        magick,
-        "montage",
+        *montage_cmd,
         *existing,
         "-background",
         background,

@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -38,6 +39,21 @@ from kicraft.render.edge_cuts import parse_edge_cuts_aabb
 # background) so the white canvas underneath shows through outside
 # Edge.Cuts.
 _BASE_LAYERS = "F.Cu,B.Cu,F.SilkS,Edge.Cuts"
+
+
+def _imagemagick_bin() -> list[str]:
+    """ImageMagick CLI prefix: ``magick`` (IM 7) then ``convert`` (IM 6).
+
+    A board with located failures MUST get an overlay, so a missing
+    rasterizer is a hard, loud error -- never a silent ``return False``
+    that makes the failure locations look unrenderable."""
+    for name in ("magick", "convert"):
+        if shutil.which(name) is not None:
+            return [name]
+    raise RuntimeError(
+        "cannot render the DRC overlay: no ImageMagick binary on PATH "
+        "(need `magick` from ImageMagick 7 or `convert` from ImageMagick 6)"
+    )
 
 
 def actionable_arrow_geometry(
@@ -118,6 +134,16 @@ def render_overlay(
     if not located:
         return False
 
+    # A board with located failures MUST get an overlay, so a missing
+    # external tool is a hard, user-visible error -- not a silent "no
+    # overlay". This is the loud path that replaces the old swallowed
+    # ``FileNotFoundError`` when ``magick`` was absent.
+    if shutil.which("kicad-cli") is None:
+        raise RuntimeError(
+            "cannot render the DRC overlay: `kicad-cli` is not on PATH"
+        )
+    imagemagick = _imagemagick_bin()  # raises RuntimeError if neither binary exists
+
 
     # Read the true Edge.Cuts AABB; fall back to the caller's board_mm
     # only if the file has no Edge.Cuts geometry.
@@ -150,8 +176,7 @@ def render_overlay(
         # Composite the Edge.Cuts-clipped base PNG onto a white
         # canvas_px square, board scaled and centered, then draw the
         # violation markers on top.
-        cmd = [
-            "magick",
+        cmd = imagemagick + [
             "-size", f"{canvas_px}x{canvas_px}",
             "xc:white",
             "(",

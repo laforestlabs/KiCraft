@@ -17,7 +17,9 @@ import sys
 from pathlib import Path
 
 from kicraft.render import VIEWS, render_views
-from kicraft.render.pcb_renderer import DEFAULT_DPI, DEFAULT_MAX_PX
+from kicraft.render.pcb_renderer import (
+    DEFAULT_DPI, DEFAULT_MAX_PX, _rasterizer_available,
+)
 
 
 def _which_or_warn(name: str) -> str | None:
@@ -65,7 +67,14 @@ def main():
         os.path.dirname(args.pcb) or ".",
         "renders",
     )
-    if _which_or_warn("kicad-cli") is None or _which_or_warn("magick") is None:
+    if _which_or_warn("kicad-cli") is None:
+        sys.exit(1)
+    if not _rasterizer_available():
+        print(
+            "error: no rasterizer available on PATH (need ImageMagick 6/7 "
+            "`magick`/`convert`, or the cairosvg package)",
+            file=sys.stderr,
+        )
         sys.exit(1)
     print(f"Rendering {args.pcb}:")
     results = render_views(

@@ -206,6 +206,56 @@ def test_overlay_command_emits_arrows_and_legend(monkeypatch, tmp_path):
     assert sum(1 for item in command if str(item).startswith("polygon ")) == 2
     assert any("FAILURE LOCATIONS (red arrows): 2" in item for item in command)
 
+def test_overlay_raises_when_external_tool_missing(monkeypatch, tmp_path):
+    """A missing kicad-cli / ImageMagick is a loud error, never a silent no-overlay."""
+    violations = [{"type": "unconnected_items", "x_mm": 1.0, "y_mm": 2.0,
+                   "net1": "SDA", "footprint_refs": []}]
+
+    # kicad-cli present, but neither ImageMagick binary available.
+    monkeypatch.setattr(
+        render_drc_overlay.shutil, "which",
+        lambda n: "/usr/bin/kicad-cli" if n == "kicad-cli" else None)
+    with pytest.raises(RuntimeError, match="ImageMagick"):
+        render_drc_overlay.render_overlay(
+            str(tmp_path / "B.kicad_pcb"), violations, str(tmp_path / "o.png"))
+
+    # ImageMagick present, kicad-cli missing.
+    monkeypatch.setattr(
+        render_drc_overlay.shutil, "which",
+        lambda n: "/usr/bin/convert" if n == "convert" else None)
+    with pytest.raises(RuntimeError, match="kicad-cli"):
+        render_drc_overlay.render_overlay(
+            str(tmp_path / "B.kicad_pcb"), violations, str(tmp_path / "o.png"))
+
+
+def test_imagemagick_bin_prefers_magick_then_convert(monkeypatch):
+    from kicraft.cli.render_drc_overlay import _imagemagick_bin
+
+    monkeypatch.setattr(
+        render_drc_overlay.shutil, "which",
+        lambda n: "/x/magick" if n == "magick" else None)
+    assert _imagemagick_bin() == ["magick"]
+
+    monkeypatch.setattr(
+        render_drc_overlay.shutil, "which",
+        lambda n: "/x/convert" if n == "convert" else None)
+    assert _imagemagick_bin() == ["convert"]
+
+    monkeypatch.setattr(render_drc_overlay.shutil, "which", lambda n: None)
+    with pytest.raises(RuntimeError, match="ImageMagick"):
+        _imagemagick_bin()
+
+
+def test_pcb_renderer_magick_bin_recognizes_im6(monkeypatch):
+    from kicraft.render import pcb_renderer
+
+    monkeypatch.setattr(
+        pcb_renderer.shutil, "which",
+        lambda n: "/usr/bin/convert" if n == "convert" else None)
+    assert pcb_renderer.magick_bin() == ["convert"]
+    assert pcb_renderer._magick_available() is True
+
+
 
 def test_inspector_rejects_outside_or_non_png_overlay(tmp_path):
     outside = tmp_path.parent / "outside.png"

@@ -4845,11 +4845,40 @@ def _persist_pcb_diagnostics(
                 for error in errors
                 for violation in error.violations
             ]
-            if violations and render_overlay(str(board), violations, str(output)):
-                if output.is_file() and output.is_relative_to(project_dir.resolve()):
-                    overlay = output
+            if violations:
+                try:
+                    rendered = render_overlay(str(board), violations, str(output))
+                except RuntimeError as exc:
+                    # A missing external tool (kicad-cli / ImageMagick) is a
+                    # hard, user-visible failure. Persist it into the failure
+                    # card and print it loud -- never silently skip the overlay.
+                    message = str(exc)
+                    print(
+                        f"ERROR: PCB failure-location overlay skipped: {message}",
+                        file=sys.stderr,
+                    )
+                    errors.append(PcbError(
+                        stage=stage if stage in ("place_route", "verify") else "verify",
+                        code="overlay_unavailable",
+                        title="Failure-location overlay could not be rendered",
+                        explanation=(
+                            "The board has located failures, but the overlay "
+                            f"that marks them was skipped: {message}"
+                        ),
+                        details=[message],
+                        next_action=(
+                            "Install the missing external tool (kicad-cli and "
+                            "ImageMagick 6 or 7) and re-run the build so "
+                            "failure locations are annotated."
+                        ),
+                    ))
+                else:
+                    if (rendered and output.is_file()
+                            and output.is_relative_to(project_dir.resolve())):
+                        overlay = output
         except Exception as exc:  # noqa: BLE001 - diagnostic rendering is best effort
             print(f"warning: PCB error overlay render failed: {exc}", file=sys.stderr)
+
     if overlay is not None:
         errors = [error.model_copy(update={"overlay_path": overlay}) for error in errors]
     artifacts.pcb_errors = errors

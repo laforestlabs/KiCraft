@@ -155,8 +155,19 @@ def _svg_export(
     return True
 
 
+def magick_bin() -> list[str] | None:
+    """ImageMagick CLI prefix: ``magick`` (IM 7) then ``convert`` (IM 6).
+
+    Returns None only when neither binary is on PATH, so callers can fall
+    back to cairosvg/Pillow instead of silently failing on an IM6-only host."""
+    for name in ("magick", "convert"):
+        if shutil.which(name) is not None:
+            return [name]
+    return None
+
+
 def _magick_available() -> bool:
-    return shutil.which("magick") is not None
+    return magick_bin() is not None
 
 
 def _cairosvg_module():
@@ -195,10 +206,10 @@ def _rasterize_single(
     *,
     dpi: int,
 ) -> bool:
-    if not _magick_available():
+    magick = magick_bin()
+    if magick is None:
         return _rasterize_svg_cairo(svg_path, out_png, dpi=dpi)
-    cmd = [
-        "magick",
+    cmd = magick + [
         "-background", "none",
         "-density", str(dpi),
         str(svg_path),
@@ -275,12 +286,12 @@ def _rasterize_composite(
     obscure front detail. Same magick incantation as the legacy
     render_pcb.py pipeline -- the input SVGs are now Edge.Cuts-clipped
     so the resulting composite is clipped too."""
-    if not _magick_available():
+    magick = magick_bin()
+    if magick is None:
         return _rasterize_composite_cairo(
             svg_front, svg_back, out_png, dpi=dpi, back_opacity=back_opacity
         )
-    cmd = [
-        "magick",
+    cmd = magick + [
         "-background", "none",
         "-density", str(dpi),
         "(", str(svg_back),
@@ -405,10 +416,11 @@ def _apply_monitor_style(
     try:
         if not _build_substrate_masked_png(raw_png, masked_png, style.board_background):
             return False
-        if not _magick_available():
+        magick = magick_bin()
+        if magick is None:
             return _style_post_pillow(masked_png, out_png, style)
-        cmd = [
-            "magick", str(masked_png),
+        cmd = magick + [
+            str(masked_png),
             "-resize", f"{style.max_px}x{style.max_px}>",
             "-brightness-contrast",
             _brightness_contrast_arg(style.brightness, style.contrast),
