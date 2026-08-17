@@ -261,7 +261,7 @@ def test_enqueue_dedups_and_needs_a_locatable_target(store, tmp_path):
 
 def test_run_investigation_stores_report_and_status(store, monkeypatch):
     rid = _user_report(store, board_code="KC-GHI456")
-    monkeypatch.setattr(ir, "_run_claude",
+    monkeypatch.setattr(ir, "_run_omp",
                         lambda s, i, t: (0, "# Investigation\nlooks fine"))
     inv = store.create_investigation(report_id=rid, board_code="KC-GHI456")
     ir.run_investigation(store, inv, "KC-GHI456")
@@ -269,25 +269,25 @@ def test_run_investigation_stores_report_and_status(store, monkeypatch):
     assert got.status == "done" and got.rc == 0
     assert "Investigation" in got.report_md
 
-    monkeypatch.setattr(ir, "_run_claude", lambda s, i, t: (2, "route failed"))
+    monkeypatch.setattr(ir, "_run_omp", lambda s, i, t: (2, "route failed"))
     inv2 = store.create_investigation(report_id=rid, board_code="KC-GHI456")
     ir.run_investigation(store, inv2, "KC-GHI456")
     assert store.get_investigation(inv2).status == "failed"
 
     def boom(*_a):
         raise RuntimeError("subprocess exploded")
-    monkeypatch.setattr(ir, "_run_claude", boom)
+    monkeypatch.setattr(ir, "_run_omp", boom)
     inv3 = store.create_investigation(report_id=rid, board_code="KC-GHI456")
     ir.run_investigation(store, inv3, "KC-GHI456")  # crash must finalize the row
     assert store.get_investigation(inv3).status == "failed"
 
 
-def test_run_claude_reports_missing_binary(store, monkeypatch):
-    monkeypatch.setattr(ir, "_claude_bin", lambda: None)
+def test_run_omp_reports_missing_binary(store, monkeypatch):
+    monkeypatch.setattr(ir, "_omp_bin", lambda: None)
     rid = _user_report(store, board_code="KC-JKL567")
     inv = store.create_investigation(report_id=rid, board_code="KC-JKL567")
-    rc, out = ir._run_claude(store, inv, "KC-JKL567")
-    assert rc is None and "claude" in out.lower()
+    rc, out = ir._run_omp(store, inv, "KC-JKL567")
+    assert rc is None and "omp" in out.lower()
 
 
 def test_auto_investigate_respects_toggle(swapped_store, monkeypatch):
@@ -337,7 +337,7 @@ def test_investigations_created_since_counts(store):
     assert store.investigations_created_since("2999-01-01T00:00:00") == 0
 
 
-def test_run_claude_sets_headless_env_and_model(store, monkeypatch, tmp_path):
+def test_run_omp_sets_headless_env_and_model(store, monkeypatch, tmp_path):
     """The headless run must advertise itself to the skill (the skill budgets
     replays off KICRAFT_INVESTIGATE_HEADLESS) and pin an explicit model."""
     seen = {}
@@ -357,11 +357,12 @@ def test_run_claude_sets_headless_env_and_model(store, monkeypatch, tmp_path):
         seen["env"] = kw.get("env") or {}
         return FakeProc()
 
-    monkeypatch.setattr(ir, "_claude_bin", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(ir, "_omp_bin", lambda: "/usr/bin/omp")
     monkeypatch.setattr(ir.subprocess, "Popen", fake_popen)
     rid = _user_report(store, board_code="KC-VWX901")
     inv = store.create_investigation(report_id=rid, board_code="KC-VWX901")
-    rc, out = ir._run_claude(store, inv, "KC-VWX901")
+    rc, out = ir._run_omp(store, inv, "KC-VWX901")
     assert rc == 0 and "report line" in out
     assert seen["env"].get("KICRAFT_INVESTIGATE_HEADLESS") == "1"
     assert "--model" in seen["cmd"]
+    assert "-p" in seen["cmd"] and "--auto-approve" in seen["cmd"]

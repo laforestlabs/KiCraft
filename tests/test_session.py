@@ -7,11 +7,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from kicraft.server.session import (
     downstream_stages,
     null_downstream,
     read_state,
     record_answers,
+    set_routing_backend,
     remaining_stages,
     run_session,
 )
@@ -99,6 +102,26 @@ def test_record_answers_stamps_matching_stage(tmp_path):
 
 def test_read_state_missing_is_empty(tmp_path):
     assert read_state(tmp_path) == {}
+
+def test_set_routing_backend_preserves_state_and_canonicalizes(tmp_path):
+    _write_state(tmp_path, {"project_stem": "DEMO", "intent": {"goal": "x"}})
+
+    set_routing_backend(tmp_path, "krt")
+
+    assert read_state(tmp_path) == {
+        "project_stem": "DEMO",
+        "intent": {"goal": "x"},
+        "routing_backend": "kicad-routing-tools",
+    }
+
+
+def test_set_routing_backend_rejects_unknown_name(tmp_path):
+    _write_state(tmp_path, {"project_stem": "DEMO"})
+
+    with pytest.raises(ValueError, match="Unknown routing_backend"):
+        set_routing_backend(tmp_path, "not-a-router")
+    assert "routing_backend" not in read_state(tmp_path)
+
 
 
 # ---- park -> answer -> resume, end to end with a fake LLM (no network) ------

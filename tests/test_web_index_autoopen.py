@@ -106,6 +106,45 @@ async def test_blank_composer_when_nothing_needs_attention(harness):
     await u.should_see("Welcome to KiCraft")
 
 
+async def test_router_toggle_flows_into_new_run(harness, monkeypatch):
+    u, web, _store, _acct = harness
+    await _login(u)
+    await u.should_see("FreeRouting")
+    await u.should_see("KiCad Routing Tools")
+    captured = {}
+
+    def fake_design_worker(brief, state):
+        captured.update(brief=brief, routing_backend=state["routing_backend"])
+
+    class ImmediateThread:
+        def __init__(self, *, target, args=(), kwargs=None, **_):
+            self.target = target
+            self.args = args
+            self.kwargs = kwargs or {}
+
+        def start(self):
+            self.target(*self.args, **self.kwargs)
+
+        def join(self, *_args, **_kwargs):
+            return None
+
+        def is_alive(self):
+            return False
+
+    monkeypatch.setattr(web, "_design_worker", fake_design_worker)
+    monkeypatch.setattr(web.threading, "Thread", ImmediateThread)
+
+    u.find("Describe your board").type("an RP2040 status LED")
+    toggle = u.find(kind=web.ui.toggle)
+    element = next(iter(toggle.elements))
+    element.set_value(1)
+    u.find("Design").click()
+
+    assert captured == {
+        "brief": "an RP2040 status LED",
+        "routing_backend": "kicad-routing-tools",
+    }
+
 async def test_cloned_project_opens_with_bom(harness):
     """Reported: 'when i cloned a public project i couldnt see the BOM at all,
     just a blank screen.' A clone must land the user IN the cloned project

@@ -223,6 +223,7 @@ class StagePanel:
         self._draft_buf = ""
         self._draft_dirty = False
         self._committed = False
+        self._draft_structured = False
         self._saw_reasoning = False
         # Activity diagnostic line (model / elapsed / chars / tool calls).
         self._live = None
@@ -498,6 +499,7 @@ class StagePanel:
             if self._draft_buf and not self._committed:
                 return
             self._committed = False  # slot cleared (an upstream edit): a new
+            self._draft_structured = False
             self._insp.clear()       # run's draft may own the pane again
             with self._insp:
                 ui.label("No data committed for this stage yet.") \
@@ -506,6 +508,7 @@ class StagePanel:
         self._committed = True
         self._draft_buf = ""
         self._draft_dirty = False
+        self._draft_structured = False
         self._insp.clear()
         with self._insp:
             for sec in sections:
@@ -526,6 +529,10 @@ class StagePanel:
                 secs = self._draft_spec(self.key, obj) or []
             except Exception:
                 secs = []  # partial data the builder can't shape yet: text fallback
+        if secs:
+            self._draft_structured = True
+        elif self._draft_structured:
+            return
         self._insp.clear()
         with self._insp:
             ui.label(f"● writing {self.key} slot…  ·  {len(self._draft_buf):,} chars") \

@@ -77,6 +77,7 @@ from .session import (
     maybe_bom_reconcile,
     read_state,
     record_answers,
+    set_routing_backend,
     remaining_stages,
     run_session,
 )
@@ -1786,6 +1787,7 @@ def _fresh_run_state() -> dict:
         # manual-layout CTA keys on either signal.
         "failed": False,
         "user_id": None, "project_id": None, "brief": "",
+        "routing_backend": "freerouting",
         "status": None, "awaiting_input": False, "questions": [],
         "prices_rev": 0,
         # Support: the project's human-quotable id, and the auto-filed error
@@ -2089,6 +2091,9 @@ def _run_design(state: dict, stages, answers=None) -> None:
         res = run_session(ws, state.get("brief", ""), stages, answers=answers,
                           progress=progress, run_id=run_id,
                           core_defaults=core_defaults)
+        # Persist the per-design UI choice in state.json. Synthesis copies it
+        # into <stem>_autoplacer.json, the config every routing subprocess reads.
+        set_routing_backend(ws, state.get("routing_backend", "freerouting"))
         if res.get("guard"):
             state["spend"] = _project_spend_usd(state.get("project_id"))
 
@@ -4653,6 +4658,20 @@ def index(prompt: str = "", project: str = ""):
             placeholder="Describe your board, big or small. Be bold.") \
             .props("rows=4 stack-label").classes("w-full kc-brief")
 
+        with ui.row().classes("items-center gap-3 flex-wrap") as router_row:
+            ui.label("Router").classes("text-sm font-medium").style("color:#cbd5e1")
+            router_toggle = ui.toggle(
+                {
+                    0: "FreeRouting",
+                    1: "KiCad Routing Tools",
+                },
+                value=0,
+            ).props("dense no-caps")
+            router_toggle.tooltip(
+                "Choose the autorouter for this design. FreeRouting is the default; "
+                "KiCad Routing Tools routes directly in the KiCad board format."
+            )
+
         # One-click inspiration: "Surprise me" streams the vetted self-eval corpus
         # (the cycling placeholder in kc_onboarding.js supplies passive ideas).
         # Created here for position; its click handler is wired below once `start`
@@ -4707,7 +4726,7 @@ def index(prompt: str = "", project: str = ""):
             header's "New design" button now."""
             prompt_label.text = (prompt_text or "").strip()
             prompt_display.set_visibility(True)
-            for el in (welcome_card, brief, chips_row, notify_chk,
+            for el in (welcome_card, brief, router_row, chips_row, notify_chk,
                        design_btn, new_btn, arrow_hint):
                 if el is not None:
                     el.set_visibility(False)
@@ -4716,7 +4735,7 @@ def index(prompt: str = "", project: str = ""):
             """Back to a blank composer: restore the prompt box and its chrome."""
             prompt_display.set_visibility(False)
             prompt_label.text = ""
-            for el in (brief, chips_row, notify_chk, design_btn):
+            for el in (brief, router_row, chips_row, notify_chk, design_btn):
                 if el is not None:
                     el.set_visibility(True)
 
@@ -5034,10 +5053,14 @@ def index(prompt: str = "", project: str = ""):
                          ws=ws_str, stem=p.project_stem,
                          user_id=user.id, project_id=p.id, brief=p.brief or "",
                          board_code=p.board_code,
+                         routing_backend=sj.get("routing_backend", "freerouting"),
                          status=("awaiting_input" if p.status == "awaiting_input" else None),
                          awaiting_input=(p.status == "awaiting_input"),
                          questions=[q for q in (sj.get("open_questions") or [])
                                     if not q.get("answer")])
+            router_toggle.set_value(
+                1 if state["routing_backend"] == "kicad-routing-tools" else 0
+            )
             # Reopen the build timeline + LLM reasoning: events.jsonl is persisted at
             # finalize but was never read back, so the timeline rendered blank. The
             # render loop replays these into the tabs (display-only: tabs.push paints).
@@ -5136,7 +5159,7 @@ def index(prompt: str = "", project: str = ""):
             state = _fresh_run_state()
             _reset_view()
             tabs.reset()
-            brief.value = ""
+            router_toggle.set_value(0)
             status.text = ""
             spend.text = ""
             board_label.set_visibility(False)
@@ -5174,7 +5197,8 @@ def index(prompt: str = "", project: str = ""):
             proj = _store().get_project(pid)
             state = _fresh_run_state()
             state.update(running=True, user_id=u.id, project_id=pid,
-                         brief=brief.value,
+                         routing_backend=("kicad-routing-tools"
+                                          if router_toggle.value == 1 else "freerouting"),
                          board_code=(proj.board_code if proj else None))
             _reset_view()
             continue_btn.set_visibility(False)

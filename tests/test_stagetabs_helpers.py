@@ -10,6 +10,13 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+from nicegui.testing.user_simulation import user_simulation
+
+from kicraft.server.web import _draft_sections, _inspector_spec
+
+
+
 from kicraft.server.stagetabs import (
     StageTabs,
     _cell_html,
@@ -19,6 +26,10 @@ from kicraft.server.stagetabs import (
     _table_html,
     demo_events,
 )
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
 
 
 def test_loose_pretty_full_object():
@@ -119,6 +130,66 @@ def test_draft_sections_unshapeable_returns_empty():
     assert _draft_sections("synthesize", {"a": 1}) == []  # build stage: no draft
     assert _draft_sections("bom", {"parts": []}) == []    # nothing to show yet
 
+
+
+@pytest.mark.anyio
+async def test_stage_tabs_bom_preview_survives_invalid_partial():
+    holder = {}
+
+    def root():
+        holder["tabs"] = StageTabs(
+            draft_spec=lambda stg, obj: _draft_sections(stg, obj, prices={}))
+
+    async with user_simulation(root=root) as u:
+        await u.open("/")
+        tabs = holder["tabs"]
+
+        with u:
+            tabs.push({"kind": "stage_start", "stage": "bom", "model": "test"})
+            tabs.push({"kind": "reasoning_delta", "text": "reason"})
+            tabs.push({"kind": "answer_delta", "text": '{"parts": ['})
+            tabs.flush()
+        await u.should_see('"parts"')
+        await u.should_not_see("Parts")
+
+        with u:
+            tabs.push({"kind": "answer_delta", "text":
+                       '{"ref": "U1", "value": "TP4056", "symbol": '
+                       '"tp4056:TP4056_C725790", "footprint": "tp4056:ESOP-8", '
+                       '"sheet": "MAIN"}, {'})
+            tabs.flush()
+        await u.should_see("Parts")
+        await u.should_see("U1")
+
+        with u:
+            tabs.push({"kind": "answer_delta", "text": '"'})
+            tabs.flush()
+        await u.should_see("Parts")
+        await u.should_see("U1")
+        await u.should_not_see('"parts"')
+
+        with u:
+            tabs.push({"kind": "answer_delta", "text":
+                       'ref": "J1", "value": "USB-C", "symbol": '
+                       '"usb-c-16p:TYPE-C-31-M-12", "footprint": "usb-c-16p:TYPE-C", '
+                       '"sheet": "MAIN"}]}'})
+            tabs.flush()
+        await u.should_see("J1")
+
+        parts = [
+            {"ref": "U1", "value": "TP4056", "symbol": "tp4056:TP4056_C725790",
+             "footprint": "tp4056:ESOP-8", "sheet": "MAIN"},
+            {"ref": "J1", "value": "USB-C", "symbol": "usb-c-16p:TYPE-C-31-M-12",
+             "footprint": "usb-c-16p:TYPE-C", "sheet": "MAIN"},
+        ]
+        with u:
+            tabs.set_inspector(
+                "bom",
+                _inspector_spec("bom", {"bom": {"parts": parts}}, {}, None, [], prices={}),
+            )
+        await u.should_not_see("writing bom slot")
+        await u.should_see("U1")
+        await u.should_see("J1")
 
 # --------------------------------------------------- inspector tables (kc-table)
 

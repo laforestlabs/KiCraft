@@ -25,10 +25,10 @@ from kicraft.autoplacer.brain.subcircuit_render_diagnostics import (
 from kicraft.autoplacer.brain.types import Component, Point
 from kicraft.autoplacer.freerouting_runner import (
     import_routed_copper,
-    route_with_freerouting,
     validate_routed_board,
 )
 from kicraft.autoplacer.hardware.adapter import KiCadAdapter
+from kicraft.autoplacer.routing_backends import route_board, routing_backend
 
 
 def _internal_net_verdict(
@@ -165,10 +165,10 @@ def _deterministic_route_signature(
 ) -> str:
     """Stable hash of a leaf's placement + routing-relevant config.
 
-    Two solves of a deterministic leaf with the same grid placement and the
-    same routing knobs produce identical copper, so they share a cache key and
-    freerouting runs only once. ``freerouting_timeout_s`` is excluded — it only
-    bounds how long the router may run, not the result.
+    Two solves of a deterministic leaf with the same grid placement, backend,
+    and routing knobs produce identical copper, so they share a cache key and
+    the router runs only once. Router timeout settings are excluded because
+    they bound execution time without changing the requested result.
     """
     comps = sorted(board_state.components.values(), key=lambda c: c.ref)
     placement = [
@@ -179,14 +179,20 @@ def _deterministic_route_signature(
     tl, br = board_state.board_outline
     route_keys = {
         k: v for k, v in cfg.items()
-        if (("freerouting" in k and "timeout" not in k)
+        if ((("freerouting" in k or "kicad_routing_tools" in k)
+             and "timeout" not in k)
             or "clearance" in k or "track" in k)
     }
     blob = json.dumps(
-        [placement,
-         [round(tl.x, 3), round(tl.y, 3), round(br.x, 3), round(br.y, 3)],
-         Path(str(jar_path)).name, route_keys],
-        sort_keys=True, default=str,
+        [
+            placement,
+            [round(tl.x, 3), round(tl.y, 3), round(br.x, 3), round(br.y, 3)],
+            Path(str(jar_path)).name,
+            routing_backend(cfg),
+            route_keys,
+        ],
+        sort_keys=True,
+        default=str,
     )
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -240,6 +246,7 @@ def route_local_subcircuit(
     round_index: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, float]]:
     fast_smoke_mode = bool(cfg.get("subcircuit_fast_smoke_mode", False))
+    backend_name = routing_backend(cfg)
     # Intermediate per-round diagnostics: headless build/worker runs set
     # subcircuit_render_intermediate=False to skip per-round PNG/DRC renders;
     # the winning round's canonical renders are produced downstream and are
@@ -506,7 +513,7 @@ def route_local_subcircuit(
                 "enabled": True,
                 "skipped": True,
                 "reason": "illegal_unrepaired_leaf_placement",
-                "router": "freerouting",
+                "router": backend_name,
                 "traces": 0,
                 "vias": 0,
                 "total_length_mm": 0.0,
@@ -558,7 +565,7 @@ def route_local_subcircuit(
     )
 
     jar_path = cfg.get("freerouting_jar")
-    if not jar_path:
+    if backend_name == "freerouting" and not jar_path:
         raise RuntimeError(
             "Leaf FreeRouting requires 'freerouting_jar' to be configured"
         )
@@ -890,7 +897,7 @@ def route_local_subcircuit(
                 "enabled": True,
                 "skipped": True,
                 "reason": _reason,
-                "router": "freerouting",
+                "router": backend_name,
                 "traces": 0,
                 "vias": 0,
                 "total_length_mm": 0.0,
@@ -945,11 +952,11 @@ def route_local_subcircuit(
             "board (skipped freerouting)"
         )
     else:
-        freerouting_stats = route_with_freerouting(
+        freerouting_stats = route_board(
             str(pre_route_board),
             str(routed_board),
-            str(jar_path),
             leaf_routing_cfg,
+            jar_path=str(jar_path or ""),
         )
         if _cache_pcb is not None:
             _cache_dir.mkdir(parents=True, exist_ok=True)
@@ -958,6 +965,7 @@ def route_local_subcircuit(
     route_timing["freerouting_s"] = round(
         max(0.0, time.monotonic() - freerouting_start), 3
     )
+    route_timing["routing_s"] = route_timing["freerouting_s"]
 
     pre_route_validation_start = time.monotonic()
     pre_route_validation = validate_routed_board(
@@ -1434,7 +1442,7 @@ def route_local_subcircuit(
         validation["rejection_stage"] = "leaf_routed_artifact_validation"
         validation["routed_board_path"] = str(routed_board)
         validation["pre_route_board_path"] = str(pre_route_board)
-        validation["router"] = "freerouting"
+        validation["router"] = backend_name
         validation["internal_net_names"] = list(sorted(extraction.internal_net_names))
         validation["interface_port_names"] = [
             port.name for port in extraction.interface_ports
@@ -1457,7 +1465,7 @@ def route_local_subcircuit(
                 "enabled": True,
                 "skipped": True,
                 "reason": "routed_drc_rejection",
-                "router": "freerouting",
+                "router": backend_name,
                 "traces": int(imported_copper.get("trace_count", 0)),
                 "vias": int(imported_copper.get("via_count", 0)),
                 "total_length_mm": float(imported_copper.get("total_length_mm", 0.0)),
@@ -1470,6 +1478,7 @@ def route_local_subcircuit(
                 "_via_objects": [],
                 "validation": copy.deepcopy(validation),
                 "freerouting_stats": copy.deepcopy(freerouting_stats),
+                "routing_stats": copy.deepcopy(freerouting_stats),
                 "render_diagnostics": copy.deepcopy(leaf_diagnostics),
                 "routed_board_path": str(routed_board),
                 "pre_route_board_path": str(pre_route_board),
@@ -1492,7 +1501,7 @@ def route_local_subcircuit(
             "enabled": True,
             "skipped": False,
             "reason": "",
-            "router": "freerouting",
+            "router": backend_name,
             "traces": int(imported_copper.get("trace_count", 0)),
             "vias": int(imported_copper.get("via_count", 0)),
             "total_length_mm": float(imported_copper.get("total_length_mm", 0.0)),
@@ -1508,6 +1517,7 @@ def route_local_subcircuit(
                 copy.deepcopy(via) for via in imported_copper.get("vias", [])
             ],
             "freerouting_stats": freerouting_stats,
+            "routing_stats": freerouting_stats,
             "validation": validation,
             "gnd_pour_summary": copy.deepcopy(gnd_pour_summary),
             "render_diagnostics": copy.deepcopy(leaf_diagnostics),
@@ -1556,6 +1566,7 @@ def _stamp_trivial_leaf(
     ``pre_route_board_path``.
     """
     route_timing: dict[str, float] = {}
+    backend_name = routing_backend(cfg)
     route_total_start = time.monotonic()
 
     artifact_paths = resolve_artifact_paths(
@@ -1588,7 +1599,7 @@ def _stamp_trivial_leaf(
                 "enabled": True,
                 "skipped": True,
                 "reason": "no_internal_nets",
-                "router": "freerouting",
+                "router": backend_name,
                 "traces": 0,
                 "vias": 0,
                 "total_length_mm": 0.0,
@@ -1700,7 +1711,7 @@ def _stamp_trivial_leaf(
             "enabled": True,
             "skipped": True,
             "reason": "no_internal_nets",
-            "router": "freerouting",
+            "router": backend_name,
             "traces": 0,
             "vias": 0,
             "total_length_mm": 0.0,

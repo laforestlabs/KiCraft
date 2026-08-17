@@ -78,6 +78,7 @@ def write_autoplacer_json(
     library_leaves: dict[str, dict[str, Any]] | None = None,
     placement=None,
     form_factor=None,
+    routing_backend: str = "freerouting",
 ) -> Path:
     """Write `<project_stem>_autoplacer.json` to project_dir. Returns the path.
 
@@ -97,12 +98,14 @@ def write_autoplacer_json(
             Rules naming refs the BOM no longer carries are dropped with
             a warning (parts churn across BOM re-runs; a stale rule must
             not fail the §9.6 named-refs check).
+        routing_backend: canonical project router name persisted in state.json.
     """
     out = project_dir / f"{project_stem}_autoplacer.json"
     body: dict[str, object] = {
         "project_name": project_stem,
         "pcb_file": f"{project_stem}.kicad_pcb",
         "power_nets": sorted(set(architecture.power_nets)),
+        "routing_backend": routing_backend,
     }
 
     # Start with BOM-derived values; fold in library fragments additively.

@@ -917,6 +917,10 @@ class ConversationState(BaseModel):
     """Single mutable object passed to every stage and the orchestrator."""
 
     project_stem: str | None = None
+    # Project-level routing choice. Persisted in state.json so synthesis can
+    # carry the user's selection into the generated autoplacer config consumed
+    # by both the standalone build worker and the in-process fallback.
+    routing_backend: Literal["freerouting", "kicad-routing-tools"] = "freerouting"
     intent: IntentSlot | None = None
     functional_spec: FunctionalSpec | None = None
     architecture: Architecture | None = None

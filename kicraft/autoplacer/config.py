@@ -7,6 +7,7 @@ per-project JSON file (e.g. ``LLUPS_autoplacer.json``).  Use
 """
 
 import json
+import sys
 import os
 from pathlib import Path
 from typing import Any
@@ -304,6 +305,22 @@ DEFAULT_CONFIG = {
     # Thermal
     "thermal_refs": [],
     "thermal_radius_mm": 3.0,
+    # Routing backend. FreeRouting remains the production default; the direct
+    # KiCadRoutingTools adapter is experimental and avoids DSN/SES conversion.
+    "routing_backend": "freerouting",
+    # KiCadRoutingTools 0.20.2, pinned in routing_backends.py.
+    "kicad_routing_tools_path": os.environ.get(
+        "KICRAFT_KICAD_ROUTING_TOOLS_PATH", ""
+    ),
+    "kicad_routing_tools_python": os.environ.get(
+        "KICRAFT_KICAD_ROUTING_TOOLS_PYTHON", sys.executable
+    ),
+    "kicad_routing_tools_timeout_s": 120,
+    "kicad_routing_tools_max_iterations": 200000,
+    "kicad_routing_tools_max_ripup": 3,
+    "kicad_routing_tools_ordering": "mps",
+    "kicad_routing_tools_clearance_mm": None,
+    "kicad_routing_tools_layers": None,
     # FreeRouting
     "freerouting_jar": os.path.expanduser("~/.local/lib/freerouting-1.9.0.jar"),
     # Java runtime used to launch the FreeRouting jar. "java" resolves via PATH;

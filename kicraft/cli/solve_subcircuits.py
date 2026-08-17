@@ -174,6 +174,10 @@ from kicraft.autoplacer.brain.types import (
 from kicraft.autoplacer.config import DEFAULT_CONFIG, load_project_config
 from kicraft.autoplacer.hardware.adapter import KiCadAdapter, StampSubprocessError
 from kicraft.autoplacer.freerouting_runner import FreeroutingUnavailableError
+from kicraft.autoplacer.routing_backends import (
+    RoutingBackendUnavailableError,
+    routing_backend,
+)
 from kicraft.cli._leaf_replication import materialize_sibling, plan_leaf_replication
 
 
@@ -619,8 +623,8 @@ def _solve_one_round(
 
     # Place-quality gate: routing a placement whose decaps sit tens of mm from
     # the pins they bridge burns 30-100 s to learn what the geometry already
-    # said. When the caller has another round coming, skip freerouting and
-    # re-place instead (dense-soc-leaf-unconnected-plan P2.8).
+    # said. When the caller has another round coming, skip routing and re-place
+    # instead (dense-soc-leaf-unconnected-plan P2.8).
     #
     # A round that is the BEST placement seen so far always routes, however far
     # off the target it is: on a leaf whose geometry simply cannot reach the
@@ -639,7 +643,7 @@ def _solve_one_round(
         print(
             f"  place-quality gate: median pad->pin {median_pin:.1f}mm > "
             f"{gate_threshold:.1f}mm and no better than the best round so far "
-            f"({place_quality_best_mm:.1f}mm) -- skipping freerouting for round "
+            f"({place_quality_best_mm:.1f}mm) -- skipping routing for round "
             f"{round_index} and re-placing"
         )
         diagnostics["place_quality_gate"] = "skipped_route"
@@ -657,7 +661,7 @@ def _solve_one_round(
                 "enabled": True,
                 "skipped": True,
                 "reason": "place_quality_gate",
-                "router": "freerouting",
+                "router": routing_backend(cfg),
                 "traces": 0,
                 "vias": 0,
                 "total_length_mm": 0.0,
@@ -701,10 +705,10 @@ def _solve_one_round(
             # instead of degrading to routing_exception (which would
             # let cached on-disk leaves keep masquerading as accepted).
             raise
-        except FreeroutingUnavailableError:
-            # Missing Java/jar is a host misconfig, not a per-leaf routing
-            # failure -- re-raise so it surfaces as one clear hard failure
-            # instead of being masked as routing_exception on every leaf.
+        except (FreeroutingUnavailableError, RoutingBackendUnavailableError):
+            # A missing selected backend is a host misconfiguration, not a
+            # per-leaf routing failure. Surface one clear hard failure instead
+            # of masking the same issue on every leaf.
             raise
         except Exception as exc:
             print(f"  WARNING: unexpected routing error in round {round_index}: {exc}")
@@ -712,7 +716,7 @@ def _solve_one_round(
                 "enabled": True,
                 "skipped": True,
                 "reason": "routing_exception",
-                "router": "freerouting",
+                "router": routing_backend(cfg),
                 "traces": 0,
                 "vias": 0,
                 "total_length_mm": 0.0,

@@ -1465,24 +1465,28 @@ def _break_locked_wire_cycles(dsn_path: str) -> int:
     return total
 
 
-def _propagate_sibling_pro(src_pcb_path: str, dst_pcb_path: str) -> None:
-    """Copy ``src``'s sibling ``.kicad_pro`` onto ``dst``'s, when present.
+def propagate_sibling_project_rules(
+    src_pcb_path: str, dst_pcb_path: str
+) -> None:
+    """Carry authoritative project and custom rules beside a routed board.
 
-    pcbnew's ``board.Save()`` emits a *default* sidecar ``.kicad_pro`` (Default
-    netclass 0.20 mm), dropping the project's real netclasses. Carrying the
-    source project forward keeps the real netclass clearances/patterns on a
-    freshly-written board so post-route DRC validates against the same rules
-    FreeRouting was given. Best-effort.
+    pcbnew's ``board.Save()`` can emit a default ``.kicad_pro`` and omit the
+    project's real netclasses.  Copy both KiCad rule sidecars when present so
+    routing and post-route DRC use the same project configuration.  FreeRouting
+    keeps this best-effort behavior; stricter callers verify required outputs.
     """
-    src_pro = os.path.splitext(src_pcb_path)[0] + ".kicad_pro"
-    dst_pro = os.path.splitext(dst_pcb_path)[0] + ".kicad_pro"
-    try:
-        if os.path.isfile(src_pro) and os.path.abspath(src_pro) != os.path.abspath(
-            dst_pro
-        ):
-            shutil.copy2(src_pro, dst_pro)
-    except OSError:
-        pass
+    src_stem = os.path.splitext(src_pcb_path)[0]
+    dst_stem = os.path.splitext(dst_pcb_path)[0]
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        src_rules = src_stem + suffix
+        dst_rules = dst_stem + suffix
+        try:
+            if os.path.isfile(src_rules) and os.path.abspath(
+                src_rules
+            ) != os.path.abspath(dst_rules):
+                shutil.copy2(src_rules, dst_rules)
+        except OSError:
+            pass
 
 
 def _last_output_line(stdout: str, stderr: str) -> str:
@@ -1871,7 +1875,7 @@ def route_with_freerouting(
                 # import_ses saved a fresh board -> default sidecar .kicad_pro;
                 # carry the input board's project (real netclasses) forward so
                 # post-route DRC validates against the rules FR actually used.
-                _propagate_sibling_pro(kicad_pcb_path, output_path)
+                propagate_sibling_project_rules(kicad_pcb_path, output_path)
                 if preserve_existing_copper:
                     _unlock_traces(output_path)
                 if target_clearance_um is not None:

@@ -257,20 +257,41 @@ def test_leaf_is_fully_array_gate() -> None:
 
 
 def test_deterministic_route_signature() -> None:
-    # The route cache reuses a routed board only when placement + routing knobs
-    # match; the freerouting *timeout* must not affect the key.
+    # The route cache reuses a routed board only when placement, backend, and
+    # routing knobs match. Backend-specific timeout changes remain cache-neutral.
     from kicraft.autoplacer.brain.leaf_routing import _deterministic_route_signature
     comps = {f"D{i}": _comp(f"D{i}", "LED", 1.5, 1.5, 4) for i in range(1, 5)}
     place_array_leaves(
         comps, [{"refs": ["D1", "D2", "D3", "D4"], "rows": 2, "cols": 2,
                  "pitch_mm": 3.0}], {})
     state = BoardState(components=comps, nets={})
-    cfg = {"freerouting_max_passes": 4, "freerouting_timeout_s": 60}
+    cfg = {
+        "routing_backend": "freerouting",
+        "freerouting_max_passes": 4,
+        "freerouting_timeout_s": 60,
+    }
     sig = _deterministic_route_signature(state, cfg, "freerouting-1.9.0.jar")
-    # timeout-only change -> same key (does not affect copper)
     assert sig == _deterministic_route_signature(
         state, {**cfg, "freerouting_timeout_s": 999}, "freerouting-1.9.0.jar")
-    # routing-knob change -> different key
+    krt_cfg = {
+        **cfg,
+        "routing_backend": "krt",
+        "kicad_routing_tools_timeout_s": 60,
+    }
+    krt_sig = _deterministic_route_signature(
+        state, krt_cfg, "freerouting-1.9.0.jar"
+    )
+    assert sig != krt_sig
+    assert krt_sig == _deterministic_route_signature(
+        state,
+        {
+            **krt_cfg,
+            "freerouting_timeout_s": 999,
+            "kicad_routing_tools_timeout_s": 999,
+        },
+        "freerouting-1.9.0.jar",
+    )
+    # Routing-knob change -> different key.
     assert sig != _deterministic_route_signature(
         state, {**cfg, "freerouting_max_passes": 12}, "freerouting-1.9.0.jar")
     # placement change -> different key

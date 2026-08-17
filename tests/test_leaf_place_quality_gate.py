@@ -7,6 +7,7 @@ compose into a hard leaf failure.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -89,7 +90,7 @@ class _FakeNode:
 def _leaf_ladder(monkeypatch, medians, tmp_path):
     """Run the ladder with a solver whose rounds have the given medians; every
     round 'fails' on no_unconnected. Returns the list of (round, gate_arg)."""
-    from tests.test_content_canvas import _leaf_and_state
+    from test_content_canvas import _leaf_and_state
 
     leaf, state = _leaf_and_state(n_parts=4)
     seen: list[tuple[int, float | None]] = []
@@ -139,3 +140,66 @@ def test_last_round_of_the_ladder_always_routes(monkeypatch, tmp_path):
     assert seen, "the ladder must have run rounds"
     assert seen[-1][1] is None, "the last round must be ungated"
     assert solved.best_round is not None
+
+
+
+class _RoundSolver:
+    def __init__(self, state, cfg, seed):
+        self.state = state
+        self._edge_pinned_groups = []
+
+    def solve(self):
+        return self.state.components
+
+
+def _round_with_route_error(monkeypatch, error):
+    state = BoardState(components={"U1": _anchor()}, nets={})
+    extraction = SimpleNamespace(
+        local_state=state,
+        internal_net_names={"SIG"},
+    )
+    monkeypatch.setattr(ss, "PlacementSolver", _RoundSolver)
+    monkeypatch.setattr(
+        ss,
+        "_repair_leaf_placement_legality",
+        lambda extraction, components, cfg: (components, {"resolved": True}),
+    )
+    monkeypatch.setattr(
+        ss,
+        "_score_local_components",
+        lambda state, components, cfg: PlacementScore(),
+    )
+    monkeypatch.setattr(
+        ss,
+        "_placement_diagnostics",
+        lambda solver, components, cfg: {},
+    )
+
+    def fail_route(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(ss, "_route_local_subcircuit", fail_route)
+    return ss._solve_one_round(
+        extraction=extraction,
+        cfg={
+            "routing_backend": "kicad-routing-tools",
+            "connector_edge_companion_clearance_mm": 0,
+        },
+        seed=1,
+        round_index=0,
+        route=True,
+    )
+
+
+def test_krt_backend_unavailable_reraises(monkeypatch):
+    error = ss.RoutingBackendUnavailableError("native module unavailable")
+    with pytest.raises(ss.RoutingBackendUnavailableError) as caught:
+        _round_with_route_error(monkeypatch, error)
+    assert caught.value is error
+
+
+def test_generic_krt_route_failure_has_truthful_router_label(monkeypatch):
+    result = _round_with_route_error(monkeypatch, RuntimeError("route failed"))
+    assert result.routed is False
+    assert result.routing["reason"] == "routing_exception"
+    assert result.routing["router"] == "kicad-routing-tools"

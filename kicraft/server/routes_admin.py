@@ -754,7 +754,7 @@ def admin_support_page():
                           color="positive")
             auto.on_value_change(on_toggle)
             ui.label("A user report launches a headless /kicraft-investigate "
-                     "run — each is a real Claude Code session.") \
+                     "run — each is a real agent session (LLM spend).") \
                 .classes("text-xs").style("color:#64748b")
 
         with ui.row().classes("items-center gap-3"):

@@ -106,14 +106,17 @@ def _route_parent_board(
         validate_routed_board,
     )
 
+    from kicraft.autoplacer.routing_backends import route_board, routing_backend
+
     composition = state.composition
     if composition is None:
         raise RuntimeError("ParentCompositionState has no composition object")
 
     routed_pcb = stamped_pcb.parent / "parent_routed.kicad_pcb"
 
+    backend_name = routing_backend(cfg)
     jar_path = cfg.get("freerouting_jar", "")
-    if not jar_path:
+    if backend_name == "freerouting" and not jar_path:
         raise RuntimeError(
             "No FreeRouting JAR path configured; pass --jar or set "
             "freerouting_jar in project config"
@@ -217,89 +220,97 @@ def _route_parent_board(
     used_gnd_skip = False
     power_first_stats: dict[str, Any] | None = None
     try:
-        if gnd_net:
-            strip_net_copper(str(stamped_pcb), gnd_net)
-            add_gnd_pour_and_thermal_vias(str(stamped_pcb), cfg)
-            _stamp_shield_ties(str(stamped_pcb))
-        # Power-first phase 1: freerouting 1.9.0 has no net priority -- each
-        # pass collects incomplete items in board item-list order, so the wide
-        # power nets (fattest corridor needed) are structurally last-in-practice
-        # and end up walled off by earlier thin-net copper (KC-ZRAUR7: VBUS
-        # split across two islands 18 mm apart on a 55%-empty board). Route the
-        # power-class nets ALONE first -- every other net's pins are emptied in
-        # the DSN while its pads and locked wiring stay obstacles -- then let
-        # the main route below run on the result with the power copper locked,
-        # exactly like leaf copper. Any phase-1 failure falls through to
-        # today's single-phase behavior: this step may improve a board, never
-        # fail one.
-        power_nets = [
-            n for n in (cfg.get("power_nets") or []) if n and n != gnd_net
-        ]
-        if cfg.get("parent_power_first", True) and power_nets:
-            import shutil as _shutil
-
-            p1_cfg = dict(route_cfg)
-            p1_cfg["freerouting_clear_zones"] = False
-            p1_cfg["freerouting_route_only_nets"] = power_nets
-            p1_cfg["freerouting_timeout_s"] = min(
-                int(route_cfg.get("freerouting_timeout_s", 60)),
-                int(cfg.get("parent_power_first_timeout_s", 120)),
-            )
-            power_routed = stamped_pcb.parent / "parent_power_routed.kicad_pcb"
-            try:
-                power_first_stats = route_with_freerouting(
-                    kicad_pcb_path=str(stamped_pcb),
-                    output_path=str(power_routed),
-                    jar_path=jar_path,
-                    config=p1_cfg,
-                )
-                # Adopt the power-routed board as the main route's input; the
-                # phase-2 DSN export locks its copper like leaf copper.
-                _shutil.copy2(power_routed, stamped_pcb)
-                power_first_stats["nets"] = power_nets
-                print(f"  parent route: power-first phase routed "
-                      f"{', '.join(power_nets)} first")
-            except Exception as exc:
-                power_first_stats = {"failed": str(exc), "nets": power_nets}
-                print(f"  parent route: power-first phase failed ({exc}); "
-                      f"continuing single-phase", file=sys.stderr)
-        # Attempt 1: route with the GND plane present (clear_zones=False). Cap
-        # the timeout so a hang (the large-plane failure mode) is detected
-        # promptly and we fall back -- but scaled to interconnect count, so the
-        # cap never starves legitimate routing on a fan-out-heavy parent (see
-        # _probe_timeout_s).
-        route_cfg["freerouting_clear_zones"] = False
-        probe_cfg = dict(route_cfg)
-        probe_cfg["freerouting_timeout_s"] = _probe_timeout_s(
-            n_interconnect, int(route_cfg.get("freerouting_timeout_s", 60)), cfg
-        )
-        try:
-            freerouting_stats = route_with_freerouting(
-                kicad_pcb_path=str(stamped_pcb),
-                output_path=str(routed_pcb),
+        if backend_name == "kicad-routing-tools":
+            freerouting_stats = route_board(
+                str(stamped_pcb),
+                str(routed_pcb),
+                route_cfg,
                 jar_path=jar_path,
-                config=probe_cfg,
             )
-        except Exception as exc:
-            # The filled GND plane hung FreeRouting (large board). Fall back to
-            # GND-skip: strip every scrap of GND copper -- including the plane +
-            # vias we just poured; a stray one makes FreeRouting warn 'net not
-            # found' and could be crossed by a signal -- remove GND from the DSN,
-            # and rebuild it after routing.
-            print(f"  parent route: GND-plane route failed ({exc}); "
-                  f"retrying with GND skipped", file=sys.stderr)
+        else:
             if gnd_net:
                 strip_net_copper(str(stamped_pcb), gnd_net)
-                route_cfg["freerouting_clear_zones"] = True
-                route_cfg["freerouting_skip_nets"] = list(dict.fromkeys(
-                    [*route_cfg.get("freerouting_skip_nets", []), gnd_net]))
-            used_gnd_skip = True
-            freerouting_stats = route_with_freerouting(
-                kicad_pcb_path=str(stamped_pcb),
-                output_path=str(routed_pcb),
-                jar_path=jar_path,
-                config=route_cfg,
+                add_gnd_pour_and_thermal_vias(str(stamped_pcb), cfg)
+                _stamp_shield_ties(str(stamped_pcb))
+            # Power-first phase 1: freerouting 1.9.0 has no net priority -- each
+            # pass collects incomplete items in board item-list order, so the wide
+            # power nets (fattest corridor needed) are structurally last-in-practice
+            # and end up walled off by earlier thin-net copper (KC-ZRAUR7: VBUS
+            # split across two islands 18 mm apart on a 55%-empty board). Route the
+            # power-class nets ALONE first -- every other net's pins are emptied in
+            # the DSN while its pads and locked wiring stay obstacles -- then let
+            # the main route below run on the result with the power copper locked,
+            # exactly like leaf copper. Any phase-1 failure falls through to
+            # today's single-phase behavior: this step may improve a board, never
+            # fail one.
+            power_nets = [
+                n for n in (cfg.get("power_nets") or []) if n and n != gnd_net
+            ]
+            if cfg.get("parent_power_first", True) and power_nets:
+                import shutil as _shutil
+
+                p1_cfg = dict(route_cfg)
+                p1_cfg["freerouting_clear_zones"] = False
+                p1_cfg["freerouting_route_only_nets"] = power_nets
+                p1_cfg["freerouting_timeout_s"] = min(
+                    int(route_cfg.get("freerouting_timeout_s", 60)),
+                    int(cfg.get("parent_power_first_timeout_s", 120)),
+                )
+                power_routed = stamped_pcb.parent / "parent_power_routed.kicad_pcb"
+                try:
+                    power_first_stats = route_with_freerouting(
+                        kicad_pcb_path=str(stamped_pcb),
+                        output_path=str(power_routed),
+                        jar_path=jar_path,
+                        config=p1_cfg,
+                    )
+                    # Adopt the power-routed board as the main route's input; the
+                    # phase-2 DSN export locks its copper like leaf copper.
+                    _shutil.copy2(power_routed, stamped_pcb)
+                    power_first_stats["nets"] = power_nets
+                    print(f"  parent route: power-first phase routed "
+                          f"{', '.join(power_nets)} first")
+                except Exception as exc:
+                    power_first_stats = {"failed": str(exc), "nets": power_nets}
+                    print(f"  parent route: power-first phase failed ({exc}); "
+                          f"continuing single-phase", file=sys.stderr)
+            # Attempt 1: route with the GND plane present (clear_zones=False). Cap
+            # the timeout so a hang (the large-plane failure mode) is detected
+            # promptly and we fall back -- but scaled to interconnect count, so the
+            # cap never starves legitimate routing on a fan-out-heavy parent (see
+            # _probe_timeout_s).
+            route_cfg["freerouting_clear_zones"] = False
+            probe_cfg = dict(route_cfg)
+            probe_cfg["freerouting_timeout_s"] = _probe_timeout_s(
+                n_interconnect, int(route_cfg.get("freerouting_timeout_s", 60)), cfg
             )
+            try:
+                freerouting_stats = route_with_freerouting(
+                    kicad_pcb_path=str(stamped_pcb),
+                    output_path=str(routed_pcb),
+                    jar_path=jar_path,
+                    config=probe_cfg,
+                )
+            except Exception as exc:
+                # The filled GND plane hung FreeRouting (large board). Fall back to
+                # GND-skip: strip every scrap of GND copper -- including the plane +
+                # vias we just poured; a stray one makes FreeRouting warn 'net not
+                # found' and could be crossed by a signal -- remove GND from the DSN,
+                # and rebuild it after routing.
+                print(f"  parent route: GND-plane route failed ({exc}); "
+                      f"retrying with GND skipped", file=sys.stderr)
+                if gnd_net:
+                    strip_net_copper(str(stamped_pcb), gnd_net)
+                    route_cfg["freerouting_clear_zones"] = True
+                    route_cfg["freerouting_skip_nets"] = list(dict.fromkeys(
+                        [*route_cfg.get("freerouting_skip_nets", []), gnd_net]))
+                used_gnd_skip = True
+                freerouting_stats = route_with_freerouting(
+                    kicad_pcb_path=str(stamped_pcb),
+                    output_path=str(routed_pcb),
+                    jar_path=jar_path,
+                    config=route_cfg,
+                )
     except Exception as exc:
         return {
             "failed": True,
@@ -577,7 +588,9 @@ def _route_parent_board(
         "_trace_segments": copper.get("traces", []),
         "_via_objects": copper.get("vias", []),
         "validation": validation,
+        "backend": backend_name,
         "freerouting_stats": freerouting_stats,
+        "routing_stats": freerouting_stats,
     }
 
 

@@ -1,23 +1,27 @@
 """Run the /kicraft-investigate skill headlessly against a support report.
 
 The skill is a Claude Code slash command (an LLM agent procedure, no code
-entrypoint), so we drive the installed ``claude`` CLI in print mode::
+entrypoint), so we drive the installed ``omp`` CLI in print mode::
 
-    claude -p "/kicraft-investigate KC-XXXX" \
-        --output-format text --dangerously-skip-permissions
+    omp -p "/kicraft-investigate KC-XXXX" --auto-approve
 
 from the repo root (the skill's bash block resolves the run via ``git
 rev-parse`` + ``accounts.db``), capturing the Markdown deliverable into
-``support_investigations.report_md``. Both entry points -- the admin support
-page's on-demand button and the web app's auto-trigger on a user report -- go
-through :func:`enqueue_investigation`.
+``support_investigations.report_md``. OMP loads the Claude Code slash command
+from ``.claude/commands/`` via the ``claude`` discovery provider
+(``commands.enableClaudeProject=true``); auth comes from the kicraft OMP
+profile's stored credentials, not a Claude subscription. ``-p`` print mode
+emits only the final assistant message, which is what lands in
+``report_md``. Both entry points -- the admin support page's on-demand button
+and the web app's auto-trigger on a user report -- go through
+:func:`enqueue_investigation`.
 
-Each run is a real Claude Code session (LLM spend + minutes), so a module-level
+Each run is a real agent session (LLM spend + minutes), so a module-level
 semaphore bounds concurrency and :func:`enqueue_investigation` de-dups against
-any already queued/running investigation for the same report. The permission
-bypass is deliberate: this is admin/owner-triggered and the skill only runs
-read-only Bash/Read/Grep, but running headless still needs it (no TTY to
-approve tool calls).
+any already queued/running investigation for the same report. ``--auto-approve``
+is deliberate: this is admin/owner-triggered and the skill only runs read-only
+Bash/Read/Grep, but running headless still needs it (no TTY to approve tool
+calls).
 """
 from __future__ import annotations
 
@@ -44,17 +48,17 @@ _TIMEOUT_S = float(os.environ.get("KICRAFT_INVESTIGATE_TIMEOUT_S", "1800"))
 
 # Explicit model pin so headless spend is deliberate, not whatever the CLI's
 # session default happens to be. Override via KICRAFT_INVESTIGATE_MODEL.
-_DEFAULT_MODEL = "claude-sonnet-5"
+_DEFAULT_MODEL = "opencode-go/deepseek-v4-flash:high"
 
 
 def _log(msg: str) -> None:
     print(f"[investigate] {msg}", flush=True)
 
 
-def _claude_bin() -> str | None:
-    """The ``claude`` CLI, from an explicit override or PATH. None if absent so
+def _omp_bin() -> str | None:
+    """The ``omp`` CLI, from an explicit override or PATH. None if absent so
     the runner can fail the row with a clear message instead of crashing."""
-    return os.environ.get("KICRAFT_CLAUDE_BIN") or shutil.which("claude")
+    return os.environ.get("KICRAFT_OMP_BIN") or shutil.which("omp")
 
 
 def _repo_dir() -> Path:
@@ -85,10 +89,10 @@ def enqueue_investigation(store: AccountStore, report: SupportReport, *,
     thread. Returns the investigation id, or None if there is nothing to
     investigate or a run is already queued/running for this report. ``runner``
     is a test seam standing in for :func:`run_investigation` (so tests never
-    invoke ``claude``)."""
-    # Hard gate: never spawn a REAL headless `claude` from inside pytest.
+    invoke ``omp``)."""
+    # Hard gate: never spawn a REAL headless `omp` from inside pytest.
     # An unstubbed test path spawned one phantom investigation per suite run
-    # (real Anthropic-side spend, 30-min watchdog, orphaned to PID 1 -- 46
+    # (real LLM-side spend, 30-min watchdog, orphaned to PID 1 -- 46
     # phantoms between 2026-07-12 and 2026-07-20). The `runner=` seam stays
     # the way tests exercise this function.
     if runner is None and os.environ.get("PYTEST_CURRENT_TEST"):
@@ -110,14 +114,14 @@ def enqueue_investigation(store: AccountStore, report: SupportReport, *,
 
 
 def run_investigation(store: AccountStore, inv_id: int, target: str) -> None:
-    """Execute one investigation: shell out to ``claude -p`` and store the
+    """Execute one investigation: shell out to ``omp -p`` and store the
     Markdown report. Crash-safe -- any failure finalizes the row so it never
     wedges 'running'."""
     if not store.start_investigation(inv_id):
         return  # a duplicate runner won the guarded queued->running transition
     with _slots:
         try:
-            rc, out = _run_claude(store, inv_id, target)
+            rc, out = _run_omp(store, inv_id, target)
             status = "done" if rc == 0 else "failed"
             store.finish_investigation(inv_id, rc=rc, report_md=out, status=status)
             _log(f"inv {inv_id}: {status} rc={rc} ({len(out or '')} chars)")
@@ -129,20 +133,19 @@ def run_investigation(store: AccountStore, inv_id: int, target: str) -> None:
                           "see the server logs.")
 
 
-def _run_claude(store: AccountStore, inv_id: int, target: str):
+def _run_omp(store: AccountStore, inv_id: int, target: str):
     """Run the CLI, tee stdout to the row's log, enforce a wall-clock watchdog.
     Returns (rc, captured_markdown)."""
-    claude = _claude_bin()
-    if claude is None:
-        return None, ("The `claude` CLI is not installed or not on PATH for the "
+    omp = _omp_bin()
+    if omp is None:
+        return None, ("The `omp` CLI is not installed or not on PATH for the "
                       "web service user, so the investigate skill cannot run "
-                      "headlessly. Install Claude Code or set KICRAFT_CLAUDE_BIN, "
+                      "headlessly. Install Oh My Pi (omp) or set KICRAFT_OMP_BIN, "
                       "then retry.")
     inv = store.get_investigation(inv_id)
     log_path = Path(inv.log_path) if inv and inv.log_path else None
     repo = _repo_dir()
-    cmd = [claude, "-p", f"/kicraft-investigate {target}",
-           "--output-format", "text", "--dangerously-skip-permissions"]
+    cmd = [omp, "-p", f"/kicraft-investigate {target}", "--auto-approve"]
     model = os.environ.get("KICRAFT_INVESTIGATE_MODEL") or _DEFAULT_MODEL
     cmd += ["--model", model]
     _log(f"inv {inv_id}: /kicraft-investigate {target} (cwd={repo})")
@@ -155,8 +158,8 @@ def _run_claude(store: AccountStore, inv_id: int, target: str):
             bufsize=1,
             # The skill's headless section keys off this: budget inside the
             # watchdog (skip dense replays, mark findings PLAUSIBLE) and put
-            # the whole report in the final message (only it survives
-            # --output-format text).
+            # the whole report in the final message (only the final assistant
+            # message survives omp -p).
             env={**os.environ, "KICRAFT_INVESTIGATE_HEADLESS": "1"},
             start_new_session=True)
         # A silent hang (a wedged tool call) prints nothing, so a per-line check

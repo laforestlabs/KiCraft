@@ -267,6 +267,7 @@ def run(
         library_leaves=library_leaves or None,
         placement=getattr(state, "placement", None),
         form_factor=state.intent.form_factor if state.intent else None,
+        routing_backend=state.routing_backend,
     )
     # Build the artifact record BEFORE the PCB stub — the schematic files
     # exist on disk regardless of whether the stub or the §9 checks pass —

@@ -187,6 +187,19 @@ def _read_state_for_update(ws) -> dict | None:
     except (OSError, json.JSONDecodeError):
         return None
 
+def set_routing_backend(ws, backend: str) -> None:
+    """Persist a project's canonical router choice without disturbing its slots."""
+    from kicraft.autoplacer.routing_backends import routing_backend
+
+    state_path = _state_path(Path(ws))
+    sj = _read_state_for_update(ws)
+    if sj is None:
+        raise RuntimeError(f"state.json unreadable in {ws}; cannot select router")
+    sj["routing_backend"] = routing_backend({"routing_backend": backend})
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(state_path, json.dumps(sj, indent=2) + "\n")
+
+
 
 def record_answers(ws, stage: str, answers: list[dict]) -> None:
     """Stamp the user's answers onto the stage's open_questions in state.json (for
