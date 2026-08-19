@@ -699,6 +699,30 @@ def check_sheets_have_parts(architecture, bom) -> CheckResult:
         offenders=bad,
     )
 
+def bom_parts_on_unknown_sheets(architecture, bom) -> list[tuple[str, str]]:
+    """Return BOM parts whose sheet is absent from the architecture."""
+    sheet_names = {sheet.name for sheet in architecture.sheets}
+    return [
+        (part.ref, part.sheet)
+        for part in bom.parts
+        if part.sheet not in sheet_names
+    ]
+
+
+def check_bom_parts_reference_architecture_sheets(architecture, bom) -> CheckResult:
+    """§9.13 -- every BOM part belongs to a declared architecture sheet."""
+    bad = bom_parts_on_unknown_sheets(architecture, bom)
+    return CheckResult(
+        name="9.13 BOM sheet references",
+        ok=not bad,
+        message=(
+            "every BOM part references a declared architecture sheet"
+            if not bad
+            else "BOM part(s) reference undeclared architecture sheet(s)"
+        ),
+        offenders=[f"{ref} -> {sheet!r}" for ref, sheet in bad],
+    )
+
 
 def _reconciled_endpoints(sheets: set[str], declared) -> list[SheetPin]:
     """Endpoints for a reconciled inter-sheet net: declared sheets first (so

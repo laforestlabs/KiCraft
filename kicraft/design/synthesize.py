@@ -38,6 +38,7 @@ from .synthesis.models3d import stage_3d_models
 from .synthesis.validation import (
     CheckResult,
     SynthesisValidationError,
+    bom_parts_on_unknown_sheets,
     collect_validations,
     run_solve_subcircuits_smoke,
 )
@@ -64,9 +65,10 @@ def _require_state(state: ConversationState) -> None:
     if missing:
         raise SynthesisInputError(f"synthesis requires slots: {', '.join(missing)}")
 
-    sheet_names = {s.name for s in state.architecture.sheets}  # type: ignore[union-attr]
     bad = [
-        p.ref for p in state.bom.parts if p.sheet not in sheet_names  # type: ignore[union-attr]
+        ref for ref, _ in bom_parts_on_unknown_sheets(
+            state.architecture, state.bom
+        )
     ]
     if bad:
         raise SynthesisInputError(

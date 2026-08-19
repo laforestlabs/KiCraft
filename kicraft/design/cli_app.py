@@ -90,6 +90,7 @@ from .synthesis.validation import (
     check_fs_connections_mapped,
     check_capacitor_polarity_consistency,
     check_sheet_connector_edge_conflicts,
+    check_bom_parts_reference_architecture_sheets,
     check_named_part_substitutions,
     check_family_wiring_contracts,
     check_inter_sheet_nets_realized,
@@ -1103,12 +1104,17 @@ def _cmd_validate(args: argparse.Namespace) -> int:
                 return 3
 
     if state.architecture is not None and state.bom is not None:
-        sp = check_sheets_have_parts(state.architecture, state.bom)
-        if not sp.ok:
-            print(f"{sp.name}: {sp.message}", file=sys.stderr)
-            for o in sp.offenders[:20]:
-                print(f"  - {o}", file=sys.stderr)
-            return 3
+        for check in (
+            check_sheets_have_parts(state.architecture, state.bom),
+            check_bom_parts_reference_architecture_sheets(
+                state.architecture, state.bom
+            ),
+        ):
+            if not check.ok:
+                print(f"{check.name}: {check.message}", file=sys.stderr)
+                for o in check.offenders[:20]:
+                    print(f"  - {o}", file=sys.stderr)
+                return 3
 
     if state.bom is not None:
         sc = check_sheet_connector_edge_conflicts(state.bom)
@@ -3768,6 +3774,11 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         if state.architecture is not None:
             identity_checks.append(
                 check_sheets_have_parts(state.architecture, state.bom)
+            )
+            identity_checks.append(
+                check_bom_parts_reference_architecture_sheets(
+                    state.architecture, state.bom
+                )
             )
         failures: list[tuple[str, list[str]]] = [
             (f"{c.name}: {c.message}", list(c.offenders))

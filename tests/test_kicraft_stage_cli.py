@@ -681,6 +681,68 @@ def _commit_chain_through_arch(tmp_path, capsys) -> Path:
     return state_path
 
 
+def test_stage_commit_bom_rejects_unknown_architecture_sheet(tmp_path, capsys):
+    state_path = _commit_chain_through_arch(tmp_path, capsys)
+    bom = _valid_bom()
+    bom["parts"].append(
+        {
+            "ref": "H1",
+            "value": "M2.5 mounting hole",
+            "symbol": "Mechanical:MountingHole",
+            "footprint": "MountingHole:MountingHole_2.7mm_M2.5",
+            "sheet": "MOUNTING HOLES",
+        }
+    )
+    bom_slot = _write_slot(tmp_path, "bom", bom)
+
+    rc, payload = _run(
+        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
+        "--no-archive", str(state_path),
+    )
+
+    assert rc == 3
+    assert payload["ok"] is False
+    assert any(
+        "9.13 BOM sheet references" in error
+        for error in payload["errors"]
+    )
+    assert "H1 -> 'MOUNTING HOLES'" in payload["offenders"]
+    assert json.loads(state_path.read_text())["bom"] is None
+
+
+def test_validate_rejects_persisted_unknown_architecture_sheet(tmp_path, capsys):
+    state_path = _commit_chain_through_arch(tmp_path, capsys)
+    bom = _valid_bom()
+    bom["parts"].append(
+        {
+            "ref": "H1",
+            "value": "M2.5 mounting hole",
+            "symbol": "Mechanical:MountingHole",
+            "footprint": "MountingHole:MountingHole_2.7mm_M2.5",
+            "sheet": "MCU",
+        }
+    )
+    bom_slot = _write_slot(tmp_path, "bom", bom)
+    rc, payload = _run(
+        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
+        "--no-archive", str(state_path),
+    )
+    assert rc == 0, payload
+
+    data = json.loads(state_path.read_text())
+    next(p for p in data["bom"]["parts"] if p["ref"] == "H1")["sheet"] = (
+        "MOUNTING HOLES"
+    )
+    state_path.write_text(json.dumps(data))
+
+    rc = main(["validate", str(state_path)])
+    captured = capsys.readouterr()
+
+    assert rc == 3
+    assert "9.13 BOM sheet references" in captured.err
+    assert "H1 -> 'MOUNTING HOLES'" in captured.err
+
+
 @_footprints_installed
 def test_stage_commit_bom_rejects_unresolvable_footprint(tmp_path, capsys):
     state_path = _commit_chain_through_arch(tmp_path, capsys)

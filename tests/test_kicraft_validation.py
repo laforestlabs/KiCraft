@@ -35,6 +35,7 @@ from kicraft.design.synthesis.validation import (
     check_schematic_version,
     check_sheetfile_refs_resolve,
     check_sheets_have_parts,
+    check_bom_parts_reference_architecture_sheets,
     check_two_terminal_self_short,
     run_validations,
 )
@@ -373,6 +374,28 @@ def test_inter_sheet_realized_ignores_power_nets() -> None:
 def test_sheets_have_parts_passes_when_populated() -> None:
     arch, bom = _two_sheet_design()
     assert check_sheets_have_parts(arch, bom).ok
+
+
+def test_bom_sheet_references_pass_when_all_parts_use_declared_sheets() -> None:
+    arch, bom = _two_sheet_design()
+    result = check_bom_parts_reference_architecture_sheets(arch, bom)
+    assert result.ok
+    assert result.name == "9.13 BOM sheet references"
+
+
+def test_bom_sheet_references_flags_unknown_sheet_without_replacing_inverse_check() -> None:
+    arch, bom = _two_sheet_design()
+    bom.parts.append(_part("H1", "MOUNTING HOLES"))
+
+    result = check_bom_parts_reference_architecture_sheets(arch, bom)
+    assert not result.ok
+    assert result.name == "9.13 BOM sheet references"
+    assert result.offenders == ["H1 -> 'MOUNTING HOLES'"]
+    assert check_sheets_have_parts(arch, bom).ok
+
+    arch.sheets.append(Sheet(name="EMPTY", stem="EMPTY", function="unused"))
+    assert not check_sheets_have_parts(arch, bom).ok
+    assert result.offenders == ["H1 -> 'MOUNTING HOLES'"]
 
 
 def test_sheets_have_parts_flags_empty_sheet() -> None:
