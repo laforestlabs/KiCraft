@@ -1,7 +1,7 @@
 """Configurable PCB routing backends.
 
-FreeRouting remains the default.  KiCadRoutingTools is an experimental direct
-``.kicad_pcb`` backend, deliberately isolated from the DSN/SES transformations
+KiCadRoutingTools is the production default.  FreeRouting remains available as
+an alternate backend, deliberately isolated from the DSN/SES transformations
 in :mod:`freerouting_runner`.
 """
 from __future__ import annotations
@@ -39,7 +39,7 @@ class RoutingCopperPreservationError(RuntimeError):
 
 
 def routing_backend(config: dict[str, Any] | None = None) -> str:
-    name = str((config or {}).get("routing_backend", "freerouting")).strip().lower()
+    name = str((config or {}).get("routing_backend", "kicad-routing-tools")).strip().lower()
     aliases = {"kicadroutingtools": "kicad-routing-tools", "krt": "kicad-routing-tools"}
     name = aliases.get(name, name)
     if name not in SUPPORTED_BACKENDS:

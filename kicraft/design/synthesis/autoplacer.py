@@ -78,7 +78,7 @@ def write_autoplacer_json(
     library_leaves: dict[str, dict[str, Any]] | None = None,
     placement=None,
     form_factor=None,
-    routing_backend: str = "freerouting",
+    routing_backend: str = "kicad-routing-tools",
 ) -> Path:
     """Write `<project_stem>_autoplacer.json` to project_dir. Returns the path.
 

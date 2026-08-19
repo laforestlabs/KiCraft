@@ -305,9 +305,9 @@ DEFAULT_CONFIG = {
     # Thermal
     "thermal_refs": [],
     "thermal_radius_mm": 3.0,
-    # Routing backend. FreeRouting remains the production default; the direct
-    # KiCadRoutingTools adapter is experimental and avoids DSN/SES conversion.
-    "routing_backend": "freerouting",
+    # Routing backend. KiCadRoutingTools is the production default; FreeRouting
+    # remains available as an alternate backend.
+    "routing_backend": "kicad-routing-tools",
     # KiCadRoutingTools 0.20.2, pinned in routing_backends.py.
     "kicad_routing_tools_path": os.environ.get(
         "KICRAFT_KICAD_ROUTING_TOOLS_PATH", ""

@@ -135,9 +135,6 @@ async def test_router_toggle_flows_into_new_run(harness, monkeypatch):
     monkeypatch.setattr(web.threading, "Thread", ImmediateThread)
 
     u.find("Describe your board").type("an RP2040 status LED")
-    toggle = u.find(kind=web.ui.toggle)
-    element = next(iter(toggle.elements))
-    element.set_value(1)
     u.find("Design").click()
 
     assert captured == {

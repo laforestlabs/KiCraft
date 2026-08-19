@@ -1787,7 +1787,7 @@ def _fresh_run_state() -> dict:
         # manual-layout CTA keys on either signal.
         "failed": False,
         "user_id": None, "project_id": None, "brief": "",
-        "routing_backend": "freerouting",
+        "routing_backend": "kicad-routing-tools",
         "status": None, "awaiting_input": False, "questions": [],
         "prices_rev": 0,
         # Support: the project's human-quotable id, and the auto-filed error
@@ -2093,7 +2093,7 @@ def _run_design(state: dict, stages, answers=None) -> None:
                           core_defaults=core_defaults)
         # Persist the per-design UI choice in state.json. Synthesis copies it
         # into <stem>_autoplacer.json, the config every routing subprocess reads.
-        set_routing_backend(ws, state.get("routing_backend", "freerouting"))
+        set_routing_backend(ws, state.get("routing_backend", "kicad-routing-tools"))
         if res.get("guard"):
             state["spend"] = _project_spend_usd(state.get("project_id"))
 
@@ -4665,11 +4665,11 @@ def index(prompt: str = "", project: str = ""):
                     0: "FreeRouting",
                     1: "KiCad Routing Tools",
                 },
-                value=0,
+                value=1,
             ).props("dense no-caps")
             router_toggle.tooltip(
-                "Choose the autorouter for this design. FreeRouting is the default; "
-                "KiCad Routing Tools routes directly in the KiCad board format."
+                "Choose the autorouter for this design. KiCad Routing Tools is the default; "
+                "FreeRouting remains available as an alternate backend."
             )
 
         # One-click inspiration: "Surprise me" streams the vetted self-eval corpus
@@ -5053,7 +5053,7 @@ def index(prompt: str = "", project: str = ""):
                          ws=ws_str, stem=p.project_stem,
                          user_id=user.id, project_id=p.id, brief=p.brief or "",
                          board_code=p.board_code,
-                         routing_backend=sj.get("routing_backend", "freerouting"),
+                         routing_backend=sj.get("routing_backend", "kicad-routing-tools"),
                          status=("awaiting_input" if p.status == "awaiting_input" else None),
                          awaiting_input=(p.status == "awaiting_input"),
                          questions=[q for q in (sj.get("open_questions") or [])
@@ -5159,7 +5159,7 @@ def index(prompt: str = "", project: str = ""):
             state = _fresh_run_state()
             _reset_view()
             tabs.reset()
-            router_toggle.set_value(0)
+            router_toggle.set_value(1)
             status.text = ""
             spend.text = ""
             board_label.set_visibility(False)

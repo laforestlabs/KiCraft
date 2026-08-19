@@ -1,6 +1,8 @@
 # KiCadRoutingTools routing experiment
 
-This branch evaluates KiCadRoutingTools as an optional routing backend. FreeRouting remains the production default.
+This document records the KiCadRoutingTools routing evaluation. As of 2026-08-19,
+KiCadRoutingTools is the default router on kicraft.io; FreeRouting remains
+available as an alternate backend.
 
 ## Pinned upstream
 
@@ -25,7 +27,8 @@ Configure a checkout at the evaluated source commit:
 
 Preflight observes rather than assumes the runtime identity. It requires `VERSION=0.20.2`, Git `HEAD=3ceb...`, and a successful live `startup_checks.run_all_checks()` reporting native `0.20.1`. Successful checks are cached by resolved checkout and interpreter; failures are not cached.
 
-Use `"routing_backend": "freerouting"` or omit the key for the production route.
+Use `"routing_backend": "freerouting"` to opt into the alternate FreeRouting route;
+omitting the key selects the KRT production default.
 
 ## Integration behavior
 
@@ -130,7 +133,7 @@ The corrected adapter is materially safer and the representative replay was fast
 2. The full replay's child-copper verifier reported two missing traces and one missing via on the replicated leaf.
 3. The promoted KRT PCB did not byte-match the resolver-selected routed artifact or winning-round source.
 
-Do not weaken input-copper custody, re-enable upstream plane finalization, or force narrower geometry to obtain a green result. Keep `"routing_backend": "freerouting"` as the production default. A broader corpus is not justified until the clearance, end-to-end preservation, and promotion-identity failures are resolved.
+Do not weaken input-copper custody, re-enable upstream plane finalization, or force narrower geometry to obtain a green result. The experiment's original recommendation was to keep `"routing_backend": "freerouting"` as the production default; kicraft.io now intentionally selects KRT by product decision. A broader corpus is not justified until the clearance, end-to-end preservation, and promotion-identity failures are resolved.
 
 ## Recovered 34-prompt self-eval router A/B — completed 2026-08-17
 
@@ -205,9 +208,9 @@ The first two failures affect the FreeRouting control too, so they identify shar
 
 KRT adds a separate problem. In 39 cells, its adapter-level evidence did not prove that copper already present at the router boundary was retained. Both backends degraded the round LED ring to a rectangular outline in all three seeds.
 
-### Decision
+### Historical evaluation decision (2026-08-17)
 
-**Not viable as a production replacement. Keep FreeRouting as the default.**
+**Not viable as a production replacement based on this evaluation. Keep FreeRouting available as the alternate backend.**
 
 KRT is the better routing performer in this corpus by build completion and time. It cannot be promoted while adapter copper preservation, child-copper composition, final-artifact identity, and shaped-outline handling fail their hard gates. The control-arm failures also require repair before either backend's build-complete label can be treated as a trustworthy manufacturing verdict.
 

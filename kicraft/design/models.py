@@ -920,7 +920,7 @@ class ConversationState(BaseModel):
     # Project-level routing choice. Persisted in state.json so synthesis can
     # carry the user's selection into the generated autoplacer config consumed
     # by both the standalone build worker and the in-process fallback.
-    routing_backend: Literal["freerouting", "kicad-routing-tools"] = "freerouting"
+    routing_backend: Literal["freerouting", "kicad-routing-tools"] = "kicad-routing-tools"
     intent: IntentSlot | None = None
     functional_spec: FunctionalSpec | None = None
     architecture: Architecture | None = None

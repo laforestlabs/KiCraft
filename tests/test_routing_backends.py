@@ -9,8 +9,8 @@ import pytest
 from kicraft.autoplacer import routing_backends as rb
 
 
-def test_freerouting_is_default():
-    assert rb.routing_backend({}) == "freerouting"
+def test_krt_is_default():
+    assert rb.routing_backend({}) == "kicad-routing-tools"
 
 
 def test_backend_aliases_and_invalid_name():
