@@ -45,7 +45,12 @@ from kicraft.tuning.benchmark import BENCHMARK_PROMPTS
 # Shared web-app helpers (see module docstring). Resolved at request time; the
 # import-order contract is that web.py imports routes_admin (never the reverse first).
 from .web import (
+    _board_source,
+    _clone_project,
     _current_user,
+    _load_persisted_state,
+    _persisted_generated_dir,
+    _render_bom_table,
     _render_scorecard,
     _render_synth_view,
     _require_admin,
@@ -275,6 +280,9 @@ def _admin_header(active: str) -> None:
                 .props("flat dense no-caps color=white").classes("text-xs")
             ui.button("Users", icon="group",
                       on_click=lambda: ui.navigate.to("/admin/users")) \
+                .props("flat dense no-caps color=white").classes("text-xs")
+            ui.button("Projects", icon="folder_open",
+                      on_click=lambda: ui.navigate.to("/admin/projects")) \
                 .props("flat dense no-caps color=white").classes("text-xs")
             ui.button("Invites", icon="vpn_key",
                       on_click=lambda: ui.navigate.to("/admin/invites")) \
@@ -2137,6 +2145,210 @@ def admin_overview_page():
                         ui.badge("admin", color="purple")
                     ui.label(f"{r['project_count']} projects").style("color:#94a3b8")
                     ui.label(f"${r['spend_usd']:.2f}").style("color:#64748b")
+
+
+@ui.page("/admin/projects")
+def admin_projects_page():
+    """Admin-only, read-only browser for every stored project row."""
+    user, redirect = _require_admin()
+    if redirect is not None:
+        return redirect
+
+    store = _store()
+    rows = store.list_admin_projects()
+    ui.dark_mode().enable()
+    ui.query("body").style("background:var(--kc-bg)")
+    _admin_header("projects")
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1400px"):
+        ui.label("Project browser").classes("text-2xl font-bold text-white")
+        ui.label("Inspect stored projects without opening them in an editable workspace.") \
+            .classes("text-sm").style("color:#94a3b8")
+        search = ui.input(
+            placeholder="Filter by owner, stem, brief, or board code…") \
+            .props("dense clearable outlined dark").classes("w-full")
+        container = ui.column().classes("w-full gap-0")
+
+        def _matches(row: dict, needle: str) -> bool:
+            if not needle:
+                return True
+            fields = (row.get("owner_email"), row.get("project_stem"),
+                      row.get("brief"), row.get("board_code"))
+            return any(needle in str(value or "").lower() for value in fields)
+
+        def build_projects() -> None:
+            container.clear()
+            needle = (search.value or "").strip().lower()
+            visible = [row for row in rows if _matches(row, needle)]
+            with container:
+                if not rows:
+                    ui.label("No stored projects.").classes("text-sm") \
+                        .style("color:#94a3b8")
+                    return
+                if not visible:
+                    ui.label("No projects match.").classes("text-sm") \
+                        .style("color:#94a3b8")
+                    return
+                with ui.row().classes("w-full items-center gap-2 text-xs font-bold") \
+                        .style("color:#64748b;padding:2px 0"):
+                    ui.label("owner").style("width:220px")
+                    ui.label("project").style("width:180px")
+                    ui.label("brief").classes("flex-grow")
+                    ui.label("board").style("width:120px")
+                    ui.label("status").style("width:100px")
+                    ui.label("visibility").style("width:90px")
+                    ui.label("created").style("width:150px")
+                    ui.label("action").style("width:70px")
+                for row in visible:
+                    owner = row.get("owner_email") or "(deleted user)"
+                    stem = row.get("project_stem") or "(untitled)"
+                    brief = (row.get("brief") or "").strip()
+                    with ui.row().classes("w-full items-center gap-2 text-xs") \
+                            .style("border-top:1px solid var(--kc-border);padding:5px 0"):
+                        ui.label(owner).style("width:220px;color:#e2e8f0")
+                        ui.label(stem).style("width:180px;color:#cbd5e1")
+                        ui.label(brief or "—").classes("flex-grow").style(
+                            "color:#94a3b8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap")
+                        ui.label(row.get("board_code") or "—").style(
+                            "width:120px;color:#cbd5e1")
+                        ui.label(row.get("status") or "—").style("width:100px;color:#cbd5e1")
+                        ui.label("public" if row.get("is_public") else "private").style(
+                            "width:90px;color:#94a3b8")
+                        ui.label((row.get("created_at") or "")[:19]).style(
+                            "width:150px;color:#64748b")
+                        ui.button("View", on_click=lambda pid=row["id"]:
+                                  ui.navigate.to(f"/admin/projects/view?project={pid}")) \
+                            .props("flat dense no-caps").classes("text-xs admin-project-view") \
+                            .style("width:70px").mark("admin-project-view")
+
+        search.on_value_change(lambda: build_projects())
+        build_projects()
+
+
+@ui.page("/admin/projects/view")
+def admin_project_view_page(project: str = ""):
+    """Admin read-only detail page for any stored project row."""
+    user, redirect = _require_admin()
+    if redirect is not None:
+        return redirect
+
+    ui.dark_mode().enable()
+    ui.query("body").style("background:var(--kc-bg)")
+    kicanvas_head()
+    _admin_header("projects")
+
+    try:
+        project_id = int(project)
+    except (TypeError, ValueError):
+        project_id = None
+    source = _store().get_project(project_id) if project_id is not None else None
+    if source is None:
+        with ui.column().classes("w-full mx-auto p-8 gap-2 items-center") \
+                .style("max-width:760px"):
+            ui.icon("help_outline").style("color:#64748b;font-size:40px")
+            ui.label("Project unavailable.").classes("text-lg text-white")
+            ui.label("The project id is missing, invalid, or no longer exists.") \
+                .classes("text-sm").style("color:#94a3b8")
+            ui.button("Back to projects", icon="arrow_back",
+                      on_click=lambda: ui.navigate.to("/admin/projects")) \
+                .props("flat no-caps")
+        return
+
+    store = _store()
+    owner = store.get_user(source.user_id)
+    owner_email = owner.email if owner is not None else "(deleted user)"
+    stem = source.project_stem or "(untitled)"
+    gen = _persisted_generated_dir(source.dir_path, source.project_stem)
+    token = _register_project_dir(gen) if gen else None
+
+    def do_clone() -> None:
+        """Re-check admin access and source state immediately before cloning."""
+        if not is_admin(_current_user()):
+            ui.notify("Admin access required.", color="warning")
+            return
+        fresh = store.get_project(source.id)
+        if fresh is None:
+            ui.notify("The source project is no longer available.", color="negative")
+            return
+        if fresh.status != "ok":
+            ui.notify("Only completed projects can be cloned.", color="warning")
+            return
+        if not fresh.dir_path or not Path(fresh.dir_path).is_dir():
+            ui.notify("The source project's files are unavailable.", color="warning")
+            return
+        admin = _current_user()
+        if admin is None:
+            ui.notify("Admin access required.", color="warning")
+            return
+        try:
+            clone_id, error = _clone_project(fresh, admin, make_private=False)
+        except Exception:
+            clone_id, error = None, "copy_error"
+        if error == "quota":
+            ui.notify("Your design quota does not allow this clone.", color="warning")
+            return
+        if error == "missing":
+            ui.notify("The source project's files are unavailable.", color="warning")
+            return
+        if error == "copy_error":
+            ui.notify("The project files could not be copied; the source is unchanged.",
+                      color="negative")
+            return
+        if error is not None or clone_id is None:
+            ui.notify("Couldn't clone this project; the source is unchanged.",
+                      color="negative")
+            return
+        ui.notify("Cloned into your workspace.", color="positive")
+        ui.navigate.to(f"/?project={clone_id}")
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1200px"):
+        with ui.row().classes("w-full items-center justify-between gap-2"):
+            ui.label(stem).classes("text-2xl font-bold text-white")
+            ui.button("Back to projects", icon="arrow_back",
+                      on_click=lambda: ui.navigate.to("/admin/projects")) \
+                .props("flat dense no-caps color=white")
+        if (source.brief or "").strip():
+            ui.label(source.brief).classes("text-sm").style("color:#94a3b8")
+        with ui.card().classes("w-full gap-1") \
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
+            ui.label("Project metadata").classes("text-xs font-medium") \
+                .style("color:#94a3b8")
+            for label, value in (
+                    ("Owner", owner_email),
+                    ("Source project id", str(source.id)),
+                    ("Board code", source.board_code or "—"),
+                    ("Status", source.status),
+                    ("Visibility", "public" if source.is_public else "private"),
+                    ("Created", source.created_at or "—")):
+                with ui.row().classes("w-full items-center gap-2 text-xs"):
+                    ui.label(label).style("width:150px;color:#64748b")
+                    ui.label(value).classes("flex-grow").style("color:#e2e8f0")
+
+        previewed = False
+        if gen and token:
+            srcs = _schematic_sources(gen, source.project_stem or "", token)
+            if srcs:
+                with ui.card().classes("w-full") \
+                        .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
+                    _render_synth_view(srcs, source.project_stem or "", gen)
+                previewed = True
+            board = _board_source(gen, source.project_stem or "", token)
+            if board:
+                with ui.card().classes("w-full") \
+                        .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
+                    ui.label("Board").classes("text-xs font-medium") \
+                        .style("color:#94a3b8")
+                    KiCanvasView([KiCanvasSource(board[0], board[1])], height="h-[520px]")
+                previewed = True
+        if not previewed:
+            ui.label("This project's files aren't available to preview.") \
+                .classes("text-sm").style("color:#64748b")
+
+        _render_bom_table(_load_persisted_state(source.dir_path))
+        if source.status == "ok" and source.dir_path and Path(source.dir_path).is_dir():
+            ui.button("Clone to my workspace", icon="content_copy", on_click=do_clone) \
+                .props("color=primary unelevated no-caps") \
+                .classes("admin-project-clone").mark("admin-project-clone")
 
 
 @ui.page("/admin/users")

@@ -1301,6 +1301,18 @@ class AccountStore:
                 "SELECT * FROM projects WHERE user_id=? ORDER BY id DESC",
                 (user_id,)).fetchall()
         return [self._row_to_project(r) for r in rows]
+    def list_admin_projects(self) -> list[dict]:
+        """Return every stored project with its owner's email for admin views.
+
+        The left join intentionally preserves legacy project rows whose user was
+        deleted; callers can display those rows without inferring an owner.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT p.*, u.email AS owner_email FROM projects p "
+                "LEFT JOIN users u ON u.id = p.user_id ORDER BY p.id DESC"
+            ).fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
 
     def list_orphaned_running_projects(
             self, older_than_s: float = 120) -> list[Project]:

@@ -3493,10 +3493,13 @@ def _public_project_or_none(project_id):
 
 
 def _clone_project(source, cloner, make_private: bool):
-    """Copy a public project into `cloner`'s account as a new, re-runnable project.
+    """Copy a source project into ``cloner``'s account as a new, re-runnable project.
 
-    Returns (new_project_id, None) on success or (None, reason) on failure. Consumes
-    a quota slot like a normal design (it is an owned, re-runnable copy). The copied
+    The caller supplies the source visibility/completion gate. The public detail
+    page admits only ``_public_project_or_none`` results; the admin detail page
+    performs its own admin-side recheck and may admit private projects. Returns
+    (new_project_id, None) on success or (None, reason) on failure. Consumes a
+    quota slot like a normal design (it is an owned, re-runnable copy). The copied
     tree keeps the `.kicraft/` + `generated/` layout so the clone opens + rebuilds in
     place. events.jsonl is NOT copied: the clone starts a fresh history."""
     store = _store()
