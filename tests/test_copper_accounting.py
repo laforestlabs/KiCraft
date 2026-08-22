@@ -228,8 +228,8 @@ def test_build_manifest_single_child():
     assert entry.sheet_name == "CHILD_A"
     assert entry.trace_count == 1
     assert entry.via_count == 1
-    assert len(entry.trace_fingerprints) == 1
-    assert len(entry.via_fingerprints) == 1
+    assert len(entry.trace_coords) == 1
+    assert len(entry.via_coords) == 1
 
 
 def test_build_manifest_multiple_children():
@@ -410,6 +410,61 @@ def test_verify_many_new_parent_traces():
     assert result["matched_child_traces"] == 1
 
 
+def test_verify_parent_trace_below_child_min_after_translation():
+    """A parent trace before the child minimum must not shift child matches."""
+    t_child = _trace(20, 20, 24, 20)
+    v_child = _via(22, 20)
+    child = MockComposedChild("/c", "CHILD", traces=[t_child], vias=[v_child])
+    manifest = build_copper_manifest([child])
+
+    # Post-route board is the child translated uniformly by (+100, +50) plus a
+    # new parent interconnect placed lower than every child coordinate.
+    t_child_post = _trace(120, 70, 124, 70)
+    v_child_post = _via(122, 70)
+    t_parent = _trace(10, 10, 12, 11, net="INTERCONNECT")
+
+    result = verify_copper_preservation(
+        manifest, [t_child_post, t_parent], [v_child_post]
+    )
+
+    assert result["status"] == "PASS"
+    assert result["matched_child_traces"] == 1
+    assert result["matched_child_vias"] == 1
+    assert result["new_route_traces"] == 1
+    assert result["new_route_vias"] == 0
+    assert result["per_child"]["/c"]["trace_preservation"] == pytest.approx(1.0)
+    assert result["per_child"]["/c"]["via_preservation"] == pytest.approx(1.0)
+    assert result["chosen_translation_mm"] == {"x": 100.0, "y": 50.0}
+
+
+def test_verify_duplicate_geometry_consumed_once_per_child():
+    """Same-shape child geometry is attributed once and not double-counted."""
+    child_a = MockComposedChild(
+        "/a", "A", traces=[_trace(20, 20, 24, 20)], vias=[_via(22, 20)]
+    )
+    child_b = MockComposedChild(
+        "/b", "B", traces=[_trace(30, 20, 34, 20)], vias=[_via(32, 20)]
+    )
+    manifest = build_copper_manifest([child_a, child_b])
+
+    post_traces = [
+        _trace(120, 70, 124, 70),  # child A
+        _trace(130, 70, 134, 70),  # child B
+        _trace(120, 70, 124, 70, net="INTERCONNECT"),  # duplicate of child A
+    ]
+    post_vias = [_via(122, 70), _via(132, 70)]
+
+    result = verify_copper_preservation(manifest, post_traces, post_vias)
+
+    assert result["status"] == "PASS"
+    assert result["matched_child_traces"] == 2
+    assert result["matched_child_vias"] == 2
+    assert result["new_route_traces"] == 1
+    assert result["new_route_vias"] == 0
+    assert result["per_child"]["/a"]["matched_traces"] == 1
+    assert result["per_child"]["/b"]["matched_traces"] == 1
+
+
 # ---------------------------------------------------------------------------
 # CopperManifest.to_dict() serialization
 # ---------------------------------------------------------------------------
@@ -434,6 +489,7 @@ def test_manifest_to_dict_structure():
     assert "parent_interconnect_length_mm" in d
     assert "total_traces" in d
     assert "total_vias" in d
+    assert "origin" in d
 
     # Values
     assert d["total_child_traces"] == 1
@@ -443,6 +499,7 @@ def test_manifest_to_dict_structure():
     assert d["parent_interconnect_length_mm"] == pytest.approx(10.0)
     assert d["total_traces"] == 2
     assert d["total_vias"] == 1
+    assert d["origin"] == {"x": 0.0, "y": 0.0}
 
 
 def test_manifest_to_dict_per_child_entry():
@@ -457,9 +514,9 @@ def test_manifest_to_dict_per_child_entry():
     assert child_d["trace_count"] == 1
     assert child_d["via_count"] == 0
     assert child_d["total_length_mm"] == pytest.approx(10.0)
-    # Fingerprint lists are omitted in serialization for brevity
-    assert "trace_fingerprints" not in child_d
-    assert "via_fingerprints" not in child_d
+    # Raw coordinate lists are omitted in serialization for brevity
+    assert "trace_coords" not in child_d
+    assert "via_coords" not in child_d
 
 
 def test_manifest_to_dict_rounds_lengths():

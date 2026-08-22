@@ -1920,13 +1920,6 @@ def _compose_artifacts(
 
     copper_manifest = build_copper_manifest(
         composed_children=composition.composed_children,
-        final_child_bboxes={
-            loaded_artifacts[index].instance_path: (
-                (bbox[0].x, bbox[0].y),
-                (bbox[1].x, bbox[1].y),
-            )
-            for index, bbox in placed_child_bboxes.items()
-        },
     )
 
     for ref, comp in parent_local_solved.items():

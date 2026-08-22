@@ -10,6 +10,7 @@ Pure Python -- no pcbnew dependency.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,8 +40,16 @@ class ChildCopperEntry:
     trace_count: int
     via_count: int
     total_length_mm: float
-    trace_fingerprints: list[Fingerprint] = field(default_factory=list)
-    via_fingerprints: list[Fingerprint] = field(default_factory=list)
+    # Raw absolute coordinates (composition frame) as
+    # (x1, y1, x2, y2, layer, width) per trace.  Kept at full precision so
+    # verification can solve the exact board translation instead of matching
+    # against coordinates rounded to the fingerprint grid (0.01 mm), which is
+    # too coarse to recover a non-grid-aligned A4-centering offset.  Vias are
+    # (x, y, drill, size).
+    trace_coords: list[tuple[float, float, float, float, str, float]] = field(
+        default_factory=list
+    )
+    via_coords: list[tuple[float, float, float, float]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -58,6 +67,10 @@ class CopperManifest:
     parent_interconnect_traces: int = 0
     parent_interconnect_vias: int = 0
     parent_interconnect_length_mm: float = 0.0
+    # Minimum (x, y) across the composed child traces in the pre-stamp frame.
+    # Reference-only: verification solves the exact board translation, so this
+    # must never be recomputed from the post-route trace set.
+    origin: tuple[float, float] = (0.0, 0.0)
 
     @property
     def total_traces(self) -> int:
@@ -82,6 +95,7 @@ class CopperManifest:
             ),
             "total_traces": self.total_traces,
             "total_vias": self.total_vias,
+            "origin": {"x": self.origin[0], "y": self.origin[1]},
         }
 
 
@@ -91,10 +105,10 @@ class CopperManifest:
 
 
 def _trace_set_origin(traces: list[Any]) -> tuple[float, float]:
-    """Compute the minimum (x, y) across a set of traces, used to make
-    fingerprints translation-invariant so they survive A4-page centering
-    and other uniform coordinate shifts between manifest-build and
-    post-route verification time.
+    """Compute the minimum (x, y) across a set of traces.
+
+    Used only as a reference origin on the manifest; verification solves the
+    exact board translation rather than relying on this minimum.
     """
     min_x = min_y = float("inf")
     for t in traces:
@@ -125,7 +139,7 @@ def _trace_length(trace: Any) -> float:
 
 
 def _child_entry_to_dict(entry: ChildCopperEntry) -> dict[str, Any]:
-    """Serialize a ChildCopperEntry, omitting fingerprint lists for brevity."""
+    """Serialize a ChildCopperEntry, omitting raw coordinate lists for brevity."""
     return {
         "instance_path": entry.instance_path,
         "sheet_name": entry.sheet_name,
@@ -133,6 +147,76 @@ def _child_entry_to_dict(entry: ChildCopperEntry) -> dict[str, Any]:
         "via_count": entry.via_count,
         "total_length_mm": round(entry.total_length_mm, 3),
     }
+
+
+def _trace_raw(trace: Any) -> tuple[float, float, float, float, str, float]:
+    """Extract raw absolute trace coordinates as (x1, y1, x2, y2, layer, width)."""
+    if hasattr(trace, "start"):
+        return (
+            float(trace.start.x),
+            float(trace.start.y),
+            float(trace.end.x),
+            float(trace.end.y),
+            str(getattr(trace.layer, "name", trace.layer)),
+            float(trace.width_mm),
+        )
+    return (
+        float(trace.get("start_x", 0)),
+        float(trace.get("start_y", 0)),
+        float(trace.get("end_x", 0)),
+        float(trace.get("end_y", 0)),
+        str(trace.get("layer", "")),
+        float(trace.get("width", trace.get("width_mm", 0))),
+    )
+
+
+def _via_raw(via: Any) -> tuple[float, float, float, float]:
+    """Extract raw absolute via coordinates as (x, y, drill, size)."""
+    if hasattr(via, "pos"):
+        return (
+            float(via.pos.x),
+            float(via.pos.y),
+            float(via.drill_mm),
+            float(via.size_mm),
+        )
+    return (
+        float(via.get("x", 0)),
+        float(via.get("y", 0)),
+        float(via.get("drill", via.get("drill_mm", 0))),
+        float(via.get("size", via.get("size_mm", 0))),
+    )
+
+
+def _fingerprint_trace_coords(
+    coords: tuple[float, float, float, float, str, float],
+    shift: tuple[float, float] = (0.0, 0.0),
+) -> Fingerprint:
+    """Fingerprint raw trace coordinates, optionally shifted by a translation."""
+    sx, sy, ex, ey, layer, width = coords
+    tx, ty = shift
+    return (
+        round(sx + tx, 2),
+        round(sy + ty, 2),
+        round(ex + tx, 2),
+        round(ey + ty, 2),
+        layer,
+        round(width, 3),
+    )
+
+
+def _fingerprint_via_coords(
+    coords: tuple[float, float, float, float],
+    shift: tuple[float, float] = (0.0, 0.0),
+) -> Fingerprint:
+    """Fingerprint raw via coordinates, optionally shifted by a translation."""
+    x, y, drill, size = coords
+    tx, ty = shift
+    return (
+        round(x + tx, 2),
+        round(y + ty, 2),
+        round(drill, 3),
+        round(size, 3),
+    )
 
 
 def fingerprint_trace(trace: Any, origin: tuple[float, float] = (0.0, 0.0)) -> Fingerprint:
@@ -147,26 +231,7 @@ def fingerprint_trace(trace: Any, origin: tuple[float, float] = (0.0, 0.0)) -> F
     matching.  When *origin* is provided, coordinates are made relative to
     it so fingerprints survive uniform translation (A4 centering).
     """
-    ox, oy = origin
-    if hasattr(trace, "start"):
-        # TraceSegment object
-        return (
-            round(trace.start.x - ox, 2),
-            round(trace.start.y - oy, 2),
-            round(trace.end.x - ox, 2),
-            round(trace.end.y - oy, 2),
-            str(getattr(trace.layer, "name", trace.layer)),
-            round(trace.width_mm, 3),
-        )
-    # Dict fallback
-    return (
-        round(float(trace.get("start_x", 0)) - ox, 2),
-        round(float(trace.get("start_y", 0)) - oy, 2),
-        round(float(trace.get("end_x", 0)) - ox, 2),
-        round(float(trace.get("end_y", 0)) - oy, 2),
-        str(trace.get("layer", "")),
-        round(float(trace.get("width", trace.get("width_mm", 0))), 3),
-    )
+    return _fingerprint_trace_coords(_trace_raw(trace), shift=(-origin[0], -origin[1]))
 
 
 def fingerprint_via(via: Any, origin: tuple[float, float] = (0.0, 0.0)) -> Fingerprint:
@@ -175,22 +240,84 @@ def fingerprint_via(via: Any, origin: tuple[float, float] = (0.0, 0.0)) -> Finge
     Accepts either a ``Via`` object (with ``.pos``, ``.drill_mm``,
     ``.size_mm`` attributes) or a plain dict.
     """
-    ox, oy = origin
-    if hasattr(via, "pos"):
-        # Via object
-        return (
-            round(via.pos.x - ox, 2),
-            round(via.pos.y - oy, 2),
-            round(via.drill_mm, 3),
-            round(via.size_mm, 3),
-        )
-    # Dict fallback
-    return (
-        round(float(via.get("x", 0)) - ox, 2),
-        round(float(via.get("y", 0)) - oy, 2),
-        round(float(via.get("drill", via.get("drill_mm", 0))), 3),
-        round(float(via.get("size", via.get("size_mm", 0))), 3),
+    return _fingerprint_via_coords(_via_raw(via), shift=(-origin[0], -origin[1]))
+
+
+def _trace_shape(coords: tuple[float, float, float, float, str, float]) -> tuple[Any, ...]:
+    """Translation-invariant trace shape: layer, width, and segment delta."""
+    sx, sy, ex, ey, layer, width = coords
+    return (layer, round(width, 3), round(ex - sx, 2), round(ey - sy, 2))
+
+
+def _via_shape(coords: tuple[float, float, float, float]) -> tuple[float, float]:
+    """Translation-invariant via shape: drill and size."""
+    _x, _y, drill, size = coords
+    return (round(drill, 3), round(size, 3))
+
+
+def _solve_translation(
+    expected_traces: list[tuple[float, float, float, float, str, float]],
+    expected_vias: list[tuple[float, float, float, float]],
+    post_traces: list[tuple[float, float, float, float, str, float]],
+    post_vias: list[tuple[float, float, float, float]],
+) -> tuple[float, float]:
+    """Solve the uniform board translation mapping expected -> post copper.
+
+    Candidate translations come from pairing expected and post items whose
+    translation-invariant shape (layer/width/delta for traces, drill/size for
+    vias) matches; the chosen translation is the one that maximizes the number
+    of child trace + via fingerprints it can match (multiset intersection),
+    with a deterministic tie-break.  Returns (0.0, 0.0) when no child copper
+    exists to constrain the translation.
+    """
+    candidates: set[tuple[float, float]] = set()
+
+    post_trace_index: dict[tuple[Any, ...], list[tuple[float, float, float, float, str, float]]] = {}
+    for coords in post_traces:
+        post_trace_index.setdefault(_trace_shape(coords), []).append(coords)
+    for coords in expected_traces:
+        for post_coords in post_trace_index.get(_trace_shape(coords), []):
+            candidates.add(
+                (round(post_coords[0] - coords[0], 6), round(post_coords[1] - coords[1], 6))
+            )
+
+    post_via_index: dict[tuple[float, float], list[tuple[float, float, float, float]]] = {}
+    for coords in post_vias:
+        post_via_index.setdefault(_via_shape(coords), []).append(coords)
+    for coords in expected_vias:
+        for post_coords in post_via_index.get(_via_shape(coords), []):
+            candidates.add(
+                (round(post_coords[0] - coords[0], 6), round(post_coords[1] - coords[1], 6))
+            )
+
+    if not candidates:
+        return (0.0, 0.0)
+
+    post_trace_fps = Counter(
+        _fingerprint_trace_coords(coords) for coords in post_traces
     )
+    post_via_fps = Counter(
+        _fingerprint_via_coords(coords) for coords in post_vias
+    )
+
+    best: tuple[float, float] | None = None
+    best_matches = -1
+    for tx, ty in candidates:
+        shifted_trace_fps = Counter(
+            _fingerprint_trace_coords(coords, shift=(tx, ty))
+            for coords in expected_traces
+        )
+        shifted_via_fps = Counter(
+            _fingerprint_via_coords(coords, shift=(tx, ty))
+            for coords in expected_vias
+        )
+        matches = sum((shifted_trace_fps & post_trace_fps).values())
+        matches += sum((shifted_via_fps & post_via_fps).values())
+        if matches > best_matches or (matches == best_matches and (tx, ty) < best):
+            best_matches = matches
+            best = (tx, ty)
+
+    return best if best is not None else (0.0, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +329,6 @@ def build_copper_manifest(
     composed_children: list[Any],
     parent_traces: list[Any] | None = None,
     parent_vias: list[Any] | None = None,
-    final_child_bboxes: dict[str, tuple[tuple[float, float], tuple[float, float]]] | None = None,
 ) -> CopperManifest:
     """Build a manifest recording expected copper from composition.
 
@@ -223,28 +349,29 @@ def build_copper_manifest(
     Returns
     -------
     CopperManifest
-        Fully populated manifest with per-child fingerprints.
+        Fully populated manifest with per-child absolute copper coordinates.
+        The child trace-set minimum is recorded as ``origin`` for reference.
+        Verification solves the exact board translation, so parent copper
+        added later can never shift the child reference frame.
     """
     manifest = CopperManifest()
 
-    # Collect all child traces to compute a single origin so fingerprints
-    # are translation-invariant.  Each child is in the same coordinate
-    # space (pre-stamp parent composition), and the parent compose may
-    # later apply a uniform A4-page-centering translation before saving
-    # the board.  Fingerprints relative to the trace-set origin survive
-    # that translation.
+    # Record the pre-stamp child trace-set minimum as a reference origin.  It
+    # is deliberately NOT used to make fingerprints relative: verification
+    # solves the exact composition -> board translation instead, because the
+    # A4-centering offset is not grid-aligned to the 0.01 mm fingerprint grid.
     all_child_traces: list[Any] = []
     for child in composed_children:
         all_child_traces.extend(child.transformed.transformed_traces)
-    _origin = _trace_set_origin(all_child_traces)
+    manifest.origin = _trace_set_origin(all_child_traces)
 
     for child in composed_children:
         transformed = child.transformed
         traces = transformed.transformed_traces
         vias = transformed.transformed_vias
 
-        trace_fps = [fingerprint_trace(t, origin=_origin) for t in traces]
-        via_fps = [fingerprint_via(v, origin=_origin) for v in vias]
+        trace_coords = [_trace_raw(t) for t in traces]
+        via_coords = [_via_raw(v) for v in vias]
         total_length = sum(_trace_length(t) for t in traces)
 
         entry = ChildCopperEntry(
@@ -255,8 +382,8 @@ def build_copper_manifest(
             trace_count=len(traces),
             via_count=len(vias),
             total_length_mm=total_length,
-            trace_fingerprints=trace_fps,
-            via_fingerprints=via_fps,
+            trace_coords=trace_coords,
+            via_coords=via_coords,
         )
         manifest.per_child[entry.instance_path] = entry
         manifest.total_child_traces += len(traces)
@@ -286,8 +413,13 @@ def verify_copper_preservation(
 ) -> dict[str, Any]:
     """Compare expected child copper against post-route copper.
 
-    Uses geometric fingerprint matching to determine which child traces
-    survived the stamp + route pipeline.
+    The composed child copper and the post-route board may live in different
+    coordinate frames (the parent stamper centers the assembly on an A4 sheet
+    before saving).  A single uniform translation is solved from
+    translation-invariant copper shape (layer/width/delta for traces,
+    drill/size for vias) and applied once to every expected item, so parent
+    interconnect copper added before/after/between child coordinates can never
+    shift the child reference frame.
 
     Parameters
     ----------
@@ -303,24 +435,34 @@ def verify_copper_preservation(
     -------
     dict
         Structured verification report with ``status``, per-child
-        preservation rates, and any issues found.
+        preservation rates, the chosen board translation, and any issues
+        found.
     """
-    # Build fingerprint multisets from post-route copper, made relative
-    # to the post-route trace-set origin so they match the manifest's
-    # translation-invariant fingerprints.
-    _post_origin = _trace_set_origin(post_route_traces)
-    post_trace_fps: dict[Fingerprint, int] = {}
-    for t in post_route_traces:
-        fp = fingerprint_trace(t, origin=_post_origin)
-        post_trace_fps[fp] = post_trace_fps.get(fp, 0) + 1
+    post_trace_coords = [_trace_raw(t) for t in post_route_traces]
+    post_via_coords = [_via_raw(v) for v in post_route_vias]
 
-    post_via_fps: dict[Fingerprint, int] = {}
-    for v in post_route_vias:
-        fp = fingerprint_via(v, origin=_post_origin)
-        post_via_fps[fp] = post_via_fps.get(fp, 0) + 1
-    # Match against each child's expected copper.
-    # We consume from the multiset so a single post-route trace is not
-    # double-counted across multiple children.
+    expected_trace_coords: list[tuple[float, float, float, float, str, float]] = []
+    expected_via_coords: list[tuple[float, float, float, float]] = []
+    for child in manifest.per_child.values():
+        expected_trace_coords.extend(child.trace_coords)
+        expected_via_coords.extend(child.via_coords)
+
+    tx, ty = _solve_translation(
+        expected_trace_coords,
+        expected_via_coords,
+        post_trace_coords,
+        post_via_coords,
+    )
+
+    # Absolute post-route fingerprint multisets.  Expected fingerprints are
+    # shifted by the solved translation before matching, so both sides share
+    # the final-board frame.
+    post_trace_fps: Counter = Counter(
+        _fingerprint_trace_coords(c) for c in post_trace_coords
+    )
+    post_via_fps: Counter = Counter(
+        _fingerprint_via_coords(c) for c in post_via_coords
+    )
     remaining_trace_fps = dict(post_trace_fps)
     remaining_via_fps = dict(post_via_fps)
 
@@ -328,19 +470,27 @@ def verify_copper_preservation(
     total_matched_vias = 0
     per_child_results: dict[str, dict[str, Any]] = {}
     issues: list[str] = []
+    unmatched_expected_traces: list[Fingerprint] = []
+    unmatched_expected_vias: list[Fingerprint] = []
 
     for path, child in manifest.per_child.items():
         matched_traces = 0
-        for fp in child.trace_fingerprints:
+        for coords in child.trace_coords:
+            fp = _fingerprint_trace_coords(coords, shift=(tx, ty))
             if remaining_trace_fps.get(fp, 0) > 0:
                 matched_traces += 1
                 remaining_trace_fps[fp] -= 1
+            elif len(unmatched_expected_traces) < 5:
+                unmatched_expected_traces.append(fp)
 
         matched_vias = 0
-        for fp in child.via_fingerprints:
+        for coords in child.via_coords:
+            fp = _fingerprint_via_coords(coords, shift=(tx, ty))
             if remaining_via_fps.get(fp, 0) > 0:
                 matched_vias += 1
                 remaining_via_fps[fp] -= 1
+            elif len(unmatched_expected_vias) < 5:
+                unmatched_expected_vias.append(fp)
 
         trace_preservation = (
             matched_traces / child.trace_count if child.trace_count > 0 else 1.0
@@ -383,8 +533,8 @@ def verify_copper_preservation(
     )
 
     # Count new traces/vias added by parent routing (not matching any child)
-    new_route_traces = sum(max(0, v) for v in remaining_trace_fps.values())
-    new_route_vias = sum(max(0, v) for v in remaining_via_fps.values())
+    new_route_traces = sum(remaining_trace_fps.values())
+    new_route_vias = sum(remaining_via_fps.values())
 
     # Determine overall status
     status = "PASS"
@@ -405,4 +555,16 @@ def verify_copper_preservation(
         "new_route_vias": new_route_vias,
         "per_child": per_child_results,
         "issues": issues,
+        "reference_origin": {"x": manifest.origin[0], "y": manifest.origin[1]},
+        "chosen_translation_mm": {"x": tx, "y": ty},
+        "diagnostics": {
+            "unmatched_expected_trace_fps": [list(fp) for fp in unmatched_expected_traces],
+            "unmatched_expected_via_fps": [list(fp) for fp in unmatched_expected_vias],
+            "unmatched_routed_trace_fps": [
+                list(fp) for fp in list(remaining_trace_fps)[:5]
+            ],
+            "unmatched_routed_via_fps": [
+                list(fp) for fp in list(remaining_via_fps)[:5]
+            ],
+        },
     }
