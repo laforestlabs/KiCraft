@@ -3383,6 +3383,19 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         )
         return 3
 
+    # §9.11 net-coverage gate (and every wiring check) lives inside the
+    # ``state.bom.connections`` truthiness gate below, so an empty netlist would
+    # skip every check and commit ``ok: true`` -- which the build guard then
+    # rejects as unstaged. Reject it here, at wiring commit, so the model
+    # retries instead of burning a build attempt (self-eval 2026-08-22:
+    # KC-RUR8FR committed ``{"connections": [], "no_connect_pins": []}``).
+    if stage == "wiring" and state.bom is not None and not state.bom.connections:
+        print(json.dumps({
+            "ok": False,
+            "errors": ["9.11 net coverage: wiring produced no connections — every part pin is uncovered"],
+        }, indent=2))
+        return 3
+
     # Intent form-factor capture (deterministic; a safety net for the LLM). When
     # the brief unambiguously asks for a non-rectangular board and the model did
     # not already record one, classify the shape from the committed intent text

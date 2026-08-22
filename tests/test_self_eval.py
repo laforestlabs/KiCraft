@@ -24,7 +24,11 @@ from kicraft.eval import self_eval as se
 # --------------------------------------------------------------------------- #
 _DEFICIT_PARK = {
     "status": "awaiting_input", "last_stage": "wiring",
-    "questions": [{"text": "add a 2nd 1uF cap for U1",
+    # A NON-passive ask (crystal): the deterministic passive-add pass cannot
+    # provision it, so these orchestration tests exercise the LLM re-drive
+    # path (and its stuck-loop detection) rather than the deterministic
+    # wiring-only fast path.
+    "questions": [{"text": "add a 40MHz crystal (X2) for U1",
                    "reconcile_target": "bom", "blocking": True}],
 }
 

@@ -113,11 +113,13 @@ def test_apply_clones_donor_with_fresh_ref_and_target_sheet(tmp_path):
 
 
 def test_apply_skips_when_prior_add_still_unconsumed(tmp_path):
-    # An ungrouped same-value part means an earlier deterministic pass already
-    # provisioned this ask and wiring STILL parks -- do not add another copy.
+    # An ungrouped same-value part that a PRIOR reconcile pass added means the
+    # ask was already provisioned and wiring STILL parks -- do not add another
+    # copy. (A pre-existing part carries no `reconcile_added` marker and must
+    # NOT suppress the add; that is the 718/719 regression, covered separately.)
     ws = _ws_with_state(
         tmp_path,
-        [_donor(), _donor(ref="C2", sheet="RP2040")],
+        [_donor(), {**_donor(ref="C2", sheet="RP2040"), "reconcile_added": True}],
         ic_groups={"U2": ["C1"]},  # C2 is ungrouped = unconsumed
     )
     added = session.apply_deterministic_bom_adds(
@@ -336,3 +338,136 @@ def test_changed_but_unresolved_gets_one_pointed_retry(tmp_path, monkeypatch):
     assert len(calls) == 2, "exactly one pointed retry"
     assert "did NOT resolve" in calls[1]["instruction"]
     assert passes == 2
+
+
+# --------------------------------------------------------------------------- #
+# 2026-08-22 fix-plan (boards KC-YUMG54=718 / KC-RUR8FR=719): cap abbreviation,
+# and/or bridge crossing, pre-existing-part masking, and the empty-netlist
+# wiring commit. Deficit texts are VERBATIM from the two failed boards.
+# --------------------------------------------------------------------------- #
+
+RUN_718 = (
+    "The nRF52840 (U1) needs a decoupling capacitor on DCCH (pin AB2) and a "
+    "pull-up resistor on nRESET (pin AC13). The BOM lacks these components. "
+    "Add a 4.7uF 0402/0603 capacitor (C21) between DCCH (pin AB2) and VDD, "
+    "and a 10k resistor (R2) between nRESET (pin AC13) and VDD, on the MAIN "
+    "sheet."
+)
+RUN_719 = (
+    "Add a 10k resistor (R2) on MCU sheet for BOOT0 pull-down to GND, and "
+    "add a 1k resistor (R3) and 100nF cap (C13) on MCU sheet for sensor "
+    "input RC filter (series R from J3 pin1 to U2 PA0, cap from U2 PA0 to "
+    "GND)."
+)
+
+
+def test_parse_719_note_cap_is_capacitor_not_resistor():
+    # 719's "100nF cap" abbreviation must read as a capacitor, and the
+    # kind-then-value pass must NOT bridge across "and" to misread the 100nF
+    # cap's value as the 1k resistor's value (the phantom "resistor 100nF").
+    asks = session.parse_passive_deficits([RUN_719])
+    got = [(a["kind"], session._norm_value(a["value"])) for a in asks]
+    assert got == [
+        ("resistor", "10k"),
+        ("resistor", "1k"),
+        ("capacitor", "100nf"),
+    ]
+    assert ("resistor", "100nf") not in got
+
+
+def test_parse_718_note_both_asks():
+    # 718's note names a decoupling cap and a pull-up resistor; both must
+    # parse and nothing phantom may appear.
+    asks = session.parse_passive_deficits([RUN_718])
+    got = [(a["kind"], session._norm_value(a["value"])) for a in asks]
+    assert got == [("capacitor", "4.7uf"), ("resistor", "10k")]
+
+
+def test_apply_adds_despite_preexisting_same_value(tmp_path):
+    # 718/719 died because a pre-existing same-value part (R1=10k,
+    # reconcile_added=False) suppressed the new add via the skip heuristic. A
+    # pre-existing part must NOT mask a deficit: both the 10k resistor AND the
+    # 100nF cap get fresh refs.
+    ws = _ws_with_state(
+        tmp_path,
+        [
+            {"ref": "R1", "value": "10k", "symbol": "Device:R",
+             "footprint": "Resistor_SMD:R_0603_1608Metric", "sheet": "MCU",
+             "mpn": None, "datasheet": None, "sourcing_note": "LCSC R10K",
+             "side": None, "source_leaf": None},
+            {"ref": "C1", "value": "100nF", "symbol": "Device:C",
+             "footprint": "Capacitor_SMD:C_0603_1608Metric", "sheet": "MCU",
+             "mpn": None, "datasheet": None, "sourcing_note": "LCSC C100N",
+             "side": None, "source_leaf": None},
+        ],
+    )
+    added = session.apply_deterministic_bom_adds(
+        ws, [{"text": RUN_719, "reconcile_target": "bom"}]
+    )
+    assert "R2" in added, "pre-existing 10k must not suppress the new 10k ask"
+    assert "C2" in added, "the 100nF cap ask must still be provisioned"
+
+
+def test_reconcile_falls_through_on_unfulfilled_passive(tmp_path, monkeypatch):
+    # A deterministic pass that adds the cap but NOT the 10k resistor must
+    # still fall through to the LLM bom+wiring pass: the unfulfilled passive
+    # ask is real, and wiring-only would falsely claim "do NOT park again".
+    ws = _ws_with_state(
+        tmp_path,
+        [{**_donor(ref="C21", value="4.7uF"), "reconcile_added": True}],
+    )
+    calls = []
+
+    def _fake_run_session(w, brief, stages, **kw):
+        calls.append(list(stages))
+        return {"ok": True}
+
+    monkeypatch.setattr(session, "run_session", _fake_run_session)
+    monkeypatch.setattr(
+        session, "apply_deterministic_bom_adds", lambda w, d: ["C21"]
+    )
+    monkeypatch.setattr(
+        session, "bom_reconcile_deficits",
+        lambda res: [{"text": RUN_718}],
+    )
+    session.maybe_bom_reconcile(ws, "brief", {"ok": False})
+    assert ["wiring"] not in calls, "wiring-only would claim the deficit fulfilled"
+    assert ["bom", "wiring"] in calls, "the LLM pass owns the unfulfilled ask"
+
+
+# --- wiring stage-commit gate: empty netlist must not commit ok:true ---------
+
+from kicraft.design.cli_app import main  # noqa: E402
+
+
+def test_wiring_commit_rejects_empty_netlist(tmp_path, capsys):
+    # 719's death: the wiring stage committed {"connections": [],
+    # "no_connect_pins": []} as ok:true because every wiring check is gated
+    # behind a non-empty connections list. An empty netlist must now reject at
+    # wiring commit (retry), not at build time (rc3).
+    kdir = tmp_path / ".kicraft"
+    kdir.mkdir(parents=True, exist_ok=True)
+    state_path = kdir / "state.json"
+    state_path.write_text(json.dumps({
+        "bom": {
+            "parts": [{
+                "ref": "R1", "value": "10k", "symbol": "Device:R",
+                "footprint": "Resistor_SMD:R_0603_1608Metric", "sheet": "MAIN",
+                "mpn": None, "datasheet": None, "sourcing_note": None,
+                "side": None, "source_leaf": None,
+            }],
+        },
+    }))
+    slot = tmp_path / "wiring_slot.json"
+    slot.write_text(json.dumps({"connections": [], "no_connect_pins": []}))
+    rc = main([
+        "stage-commit", "wiring",
+        "--slot-file", str(slot),
+        "--no-archive",
+        str(state_path),
+    ])
+    out = capsys.readouterr().out
+    payload = json.loads(out) if out.strip() else {}
+    assert rc != 0
+    assert payload.get("ok") is False
+    assert "9.11 net coverage" in out

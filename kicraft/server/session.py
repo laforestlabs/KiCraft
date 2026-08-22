@@ -345,7 +345,7 @@ def bom_reconcile_deficits(res: dict) -> list[dict]:
 _PASSIVE_ASK_RE = re.compile(
     r"(?:\b(a|an|one|two|three|four|\d+)\s+)?"
     r"(\d+(?:\.\d+)?[\s-]?(?:[pnumµ]F|[kM](?:Ω|ohm)?\b|Ω|ohm\b|R\b))"
-    r"[^.;,]*?\b(capacitor|resistor|inductor)s?\b",
+    r"[^.;,]*?\b(cap(?:acitor)?|resistor|inductor)s?\b",
     re.IGNORECASE,
 )
 # Kind-then-value supplement: "Add a bottom resistor (e.g., 3.9k, typical for
@@ -357,8 +357,8 @@ _PASSIVE_ASK_RE = re.compile(
 # resistor R3 (12k)" can never provision a duplicate.
 _PASSIVE_KIND_VALUE_RE = re.compile(
     r"(?:\b(a|an|one|two|three|four|\d+)\s+)?"
-    r"(?:[a-z-]+\s+){0,2}?(capacitor|resistor|inductor)s?\b"
-    r"[^.;]{0,40}?"
+    r"(?:[a-z-]+\s+){0,2}?(cap(?:acitor)?|resistor|inductor)s?\b"
+    r"(?:(?!\b(?:and|or)\b)[^.;]){0,40}?"
     r"(\d+(?:\.\d+)?[\s-]?(?:[pnumµ]F|[kM](?:Ω|ohm)?\b|Ω|ohm\b|R\b))",
     re.IGNORECASE,
 )
@@ -386,6 +386,7 @@ _NON_PASSIVE_ASK_RE = re.compile(
 _QTY_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4}
 _SHEET_RE = re.compile(r"\b(?:on|to) the ([A-Z][A-Z0-9 _/-]*?) sheet\b")
 _KIND_PREFIX = {"capacitor": "C", "resistor": "R", "inductor": "L"}
+_KIND_ALIAS = {"cap": "capacitor"}
 _KIND_SYMBOL = {"capacitor": "Device:C", "resistor": "Device:R",
                 "inductor": "Device:L"}
 _KIND_FOOTPRINT = {
@@ -431,6 +432,7 @@ def parse_passive_deficits(texts: list[str]) -> list[dict]:
         seen: set[tuple[str, str]] = set()
         for m in _PASSIVE_ASK_RE.finditer(t):
             kind, value = m.group(3).lower(), m.group(2).strip()
+            kind = _KIND_ALIAS.get(kind, kind)
             seen.add((kind, _norm_value(value)))
             asks.append({
                 "kind": kind,
@@ -445,6 +447,7 @@ def parse_passive_deficits(texts: list[str]) -> list[dict]:
                 continue
             for m in _PASSIVE_KIND_VALUE_RE.finditer(sent):
                 kind, value = m.group(2).lower(), m.group(3).strip()
+                kind = _KIND_ALIAS.get(kind, kind)
                 key = (kind, _norm_value(value))
                 if key in seen:
                     continue
@@ -550,7 +553,8 @@ def apply_deterministic_bom_adds(ws, deficits: list[dict]) -> list[str]:
             and _norm_value(str(p.get("value", ""))) == want
         ]
         ungrouped = [p for p in same_value
-                     if str(p.get("ref")) not in grouped]
+                     if p.get("reconcile_added")
+                     and str(p.get("ref")) not in grouped]
         if len(ungrouped) >= ask["qty"]:
             continue
         donor = next(
@@ -567,6 +571,7 @@ def apply_deterministic_bom_adds(ws, deficits: list[dict]) -> list[str]:
             if donor is not None:
                 entry = dict(donor)
                 entry["ref"] = ref
+                entry["reconcile_added"] = True
                 if ask_sheet:
                     entry["sheet"] = ask_sheet
             else:
@@ -581,6 +586,7 @@ def apply_deterministic_bom_adds(ws, deficits: list[dict]) -> list[str]:
                     "sourcing_note": f"LCSC {pick.get('lcsc')}",
                     "side": None,
                     "source_leaf": None,
+                    "reconcile_added": True,
                 }
             parts.append(entry)
             added.append(ref)
@@ -596,6 +602,44 @@ def apply_deterministic_bom_adds(ws, deficits: list[dict]) -> list[str]:
     except Exception:
         return []
     return added
+
+
+def _unfulfilled_asks(ws, deficits) -> list[dict]:
+    """Parsed passive asks with no ``reconcile_added`` matching part committed.
+
+    Non-empty => the deterministic pass did not fully satisfy the deficit (an
+    ask has no ``reconcile_added`` same-kind/same-value part in the committed
+    BOM). Fails open: on any read error every parsed ask is returned, so the
+    caller falls through to the LLM bom+wiring pass rather than falsely
+    claiming the deficit was fulfilled."""
+    asks = parse_passive_deficits(
+        [str(q.get("text", "")) for q in (deficits or [])]
+    )
+    if not asks:
+        return []
+    try:
+        state = json.loads(_state_path(Path(ws)).read_text(encoding="utf-8"))
+        parts = (state.get("bom") or {}).get("parts")
+    except Exception:
+        return asks
+    if not isinstance(parts, list):
+        return asks
+    unfulfilled: list[dict] = []
+    for ask in asks:
+        prefix = _KIND_PREFIX.get(ask["kind"])
+        if prefix is None:
+            unfulfilled.append(ask)
+            continue
+        want = _norm_value(ask["value"])
+        if not any(
+            isinstance(p, dict)
+            and p.get("reconcile_added")
+            and str(p.get("ref", "")).startswith(prefix)
+            and _norm_value(str(p.get("value", ""))) == want
+            for p in parts
+        ):
+            unfulfilled.append(ask)
+    return unfulfilled
 
 
 # Deficit identity for the stuck-loop test: the set of component refs the
@@ -660,19 +704,35 @@ def maybe_bom_reconcile(
     added = apply_deterministic_bom_adds(ws, deficits)
     # Partial fulfillment guard: the deterministic pass only provisions
     # regex-parseable R/C/L asks. If the note ALSO names a part class it can
-    # never add (crystal, connector, ...), the wiring-only re-drive below
-    # would command "do NOT park on this deficit again" while the deficit is
-    # still real -- fall through to the LLM bom+wiring pass instead (the
+    # never add (crystal, connector, ...) OR a parseable passive ask was not
+    # actually provisioned (skipped by a pre-existing part, or an abbreviation
+    # the parser could not fully resolve), the wiring-only re-drive below would
+    # command "do NOT park on this deficit again" while the deficit is still
+    # real -- fall through to the LLM bom+wiring pass instead (the
     # already-added passives are committed and preserved).
     _texts = " ".join(str(q.get("text", "")) for q in deficits)
-    _unfulfilled = _NON_PASSIVE_ASK_RE.search(_texts)
-    if added and _unfulfilled:
+    _unfulfilled_nonpassive = _NON_PASSIVE_ASK_RE.search(_texts)
+    _unfulfilled_passive = _unfulfilled_asks(ws, deficits)
+    if added and (_unfulfilled_nonpassive or _unfulfilled_passive):
         if progress is not None:
+            _remainders = []
+            if _unfulfilled_nonpassive:
+                _remainders.append(
+                    f"non-passive part(s) ({_unfulfilled_nonpassive.group(0)!r})"
+                )
+            if _unfulfilled_passive:
+                _remainders.append(
+                    "unfulfilled passive ask(s) ("
+                    + ", ".join(
+                        f"{a['kind']} {a['value']}"
+                        for a in _unfulfilled_passive
+                    )
+                    + ")"
+                )
             progress({"kind": "build_log",
                       "text": f"[bom-reconcile] deterministically provisioned "
                               f"{', '.join(added)}, but the deficit also asks "
-                              f"for non-passive part(s) "
-                              f"({_unfulfilled.group(0)!r}) the deterministic "
+                              f"for {' and '.join(_remainders)} the deterministic "
                               "pass cannot add -- falling through to the LLM "
                               "bom+wiring pass for the remainder"})
         added = []

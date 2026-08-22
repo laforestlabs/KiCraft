@@ -384,6 +384,11 @@ class BomPart(BaseModel):
     # None for LLM-emitted parts. Synthesis applies the renumber map to
     # parts where this is set; LLM parts pass through unchanged.
     source_leaf: str | None = None
+    # Set True on parts the deterministic BOM-reconcile pass added (a cloned
+    # donor or an offline-catalog pick). Distinguishes a prior reconcile add
+    # that is still unconsumed from a pre-existing part of the same value:
+    # only the former may suppress a repeat add of the same ask.
+    reconcile_added: bool = False
 
     @field_validator("ref")
     @classmethod
