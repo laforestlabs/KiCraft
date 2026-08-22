@@ -213,15 +213,12 @@ def test_synthesis_power_nets_in_autoplacer(tmp_path, llups_like_state) -> None:
     cfg = json.loads((tmp_path / "DEMO33_autoplacer.json").read_text())
     assert set(cfg["power_nets"]) == {"VBUS", "+3V3", "GND"}
 
-def test_synthesis_persists_selected_router_in_autoplacer_config(
+def test_synthesis_omits_router_selector_from_autoplacer_config(
     tmp_path, llups_like_state
 ) -> None:
-    llups_like_state.routing_backend = "kicad-routing-tools"
-
     run(llups_like_state, tmp_path)
-
     cfg = json.loads((tmp_path / "DEMO33_autoplacer.json").read_text())
-    assert cfg["routing_backend"] == "kicad-routing-tools"
+    assert "routing_backend" not in cfg
 
 
 def test_synthesis_pin_directions_valid(tmp_path, llups_like_state) -> None:

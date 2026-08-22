@@ -182,8 +182,7 @@ def _round_with_route_error(monkeypatch, error):
     return ss._solve_one_round(
         extraction=extraction,
         cfg={
-            "routing_backend": "kicad-routing-tools",
-            "connector_edge_companion_clearance_mm": 0,
+                        "connector_edge_companion_clearance_mm": 0,
         },
         seed=1,
         round_index=0,
@@ -192,8 +191,8 @@ def _round_with_route_error(monkeypatch, error):
 
 
 def test_krt_backend_unavailable_reraises(monkeypatch):
-    error = ss.RoutingBackendUnavailableError("native module unavailable")
-    with pytest.raises(ss.RoutingBackendUnavailableError) as caught:
+    error = ss.KicadRoutingToolsUnavailableError("native module unavailable")
+    with pytest.raises(ss.KicadRoutingToolsUnavailableError) as caught:
         _round_with_route_error(monkeypatch, error)
     assert caught.value is error
 

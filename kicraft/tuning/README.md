@@ -3,7 +3,7 @@
 Tunes KiCraft's **global** `DEFAULT_CONFIG` (placement + routing-effort knobs) to
 maximize *routed* outcomes across a corpus of already-synthesized boards, using
 spare CPU. Every evaluation re-runs place+route on a frozen workspace — **$0 LLM
-cost**, placement byte-deterministic, only FreeRouting stochastic.
+cost**, placement byte-deterministic, only KiCad Routing Tools stochastic.
 
 This is the missing **outer** loop. `autoexperiment.py` already searches params
 *per build* (keeping the best by `PlacementScore`); this package optimizes the

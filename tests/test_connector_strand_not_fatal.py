@@ -82,7 +82,7 @@ def _patch_validate(monkeypatch, *, accepted, drc=None, reasons=None):
         }
 
     monkeypatch.setattr(
-        "kicraft.autoplacer.freerouting_runner.validate_routed_board", _fake
+        "kicraft.autoplacer.routing_board.validate_routed_board", _fake
     )
 
 def test_verify_gate_strand_is_warning_not_fail(monkeypatch, tmp_path):

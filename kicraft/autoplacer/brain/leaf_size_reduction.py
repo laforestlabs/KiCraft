@@ -319,7 +319,7 @@ def local_solver_config(
 
 _PRESERVED_BOARD_KEYS = (
     "routed_board_path",
-    "pre_route_board_path",
+    "leaf_placed_board",
     "round_board_routed",
     "round_board_pre_route",
 )
@@ -430,7 +430,7 @@ def attempt_leaf_size_reduction(
     # through _stamp_trivial_leaf which just re-stamps the placed board
     # with route_input_board.board_outline -- which IS the candidate's
     # reduced outline -- so shrinking trivial leaves is safe and the
-    # reroute is fast (no FreeRouting). The legality check still gates
+    # reroute is fast (no KiCad Routing Tools). The legality check still gates
     # acceptance: candidates that put pads outside the new outline are
     # rejected like for any other leaf. So the early-return is dropped
     # and trivial leaves go through the same loop as routed ones.

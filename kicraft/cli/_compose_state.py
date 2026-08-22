@@ -92,11 +92,11 @@ class ParentCompositionState:
     # so callers can diagnose why a routed board was rejected even when the
     # run exits non-zero.
     routed_validation: dict[str, Any] = field(default_factory=dict)
-    # Pre-route DRC summary: DRC counts on parent_pre_freerouting.kicad_pcb
-    # (i.e., the stamped board BEFORE FreeRouting runs). Distinguishes
+    # Pre-route DRC summary: DRC counts on parent_placed.kicad_pcb
+    # (i.e., the stamped board BEFORE the autorouter runs). Distinguishes
     # composer-introduced shorts (shorts>0 here) from router-introduced
     # shorts (shorts==0 here, but >0 after route). Without this split, every
-    # route failure looks like a FreeRouting clearance bug even when the
+    # route failure looks like a the autorouter clearance bug even when the
     # composer stamped two leaves' tracks on top of each other.
     stamp_drc: dict[str, Any] = field(default_factory=dict)
     score_total: float = 0.0
@@ -107,7 +107,7 @@ class ParentCompositionState:
     copper_manifest: CopperManifest | None = None
     # Keep-in rects around parent-local locked components (e.g. mounting
     # holes) that must be stamped onto the parent board as rule-area
-    # keep-outs so FreeRouting cannot route tracks or place vias through
+    # keep-outs so the autorouter cannot route tracks or place vias through
     # them. Units: mm, absolute parent-local coords.
     parent_local_keep_in_rects: list[tuple[Point, Point]] = field(default_factory=list)
     # Refs whose components are pinned to a board edge/corner. After the
@@ -164,7 +164,7 @@ class ParentCompositionState:
     # rotation, kind}, parent-board frame, x/y = geometry center.
     parent_local: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock per phase of a parent compose+route round. Keys (when
-    # populated): place_solve_ms, stamp_ms, stamp_drc_ms, freerouting_ms,
+    # populated): place_solve_ms, stamp_ms, stamp_drc_ms, routing_ms,
     # candidate_search_ms, plus solve_*_ms sub-phases from the solver.
     # Lets the harness see whether routing or layout dominates a round so
     # the layout-search budget can be tuned without re-instrumenting.

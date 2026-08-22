@@ -47,9 +47,9 @@ from typing import Literal
 
 # --- canonical artifact filenames (the ONLY place these literals are defined) --
 PARENT_ROUTED = "parent_routed.kicad_pcb"
-PARENT_PLACED = "parent_pre_freerouting.kicad_pcb"
+PARENT_PLACED = "parent_placed.kicad_pcb"
 LEAF_ROUTED = "leaf_routed.kicad_pcb"
-LEAF_PLACED = "leaf_pre_freerouting.kicad_pcb"
+LEAF_PLACED = "leaf_placed.kicad_pcb"
 LEAF_ILLEGAL = "leaf_illegal_pre_stamp.kicad_pcb"
 METADATA_JSON = "metadata.json"
 SEARCH_DIR = "_search"
@@ -132,7 +132,7 @@ def resolve_parent_board(
     """Resolve the parent board for an explicit INTENT.
 
     ``kind="routed"`` -> ``parent_routed.kicad_pcb`` only (else ``None``).
-    ``kind="placed"`` -> ``parent_pre_freerouting.kicad_pcb`` only; it NEVER
+    ``kind="placed"`` -> ``parent_placed.kicad_pcb`` only; it NEVER
         falls back to the routed board. This is the fix for the
         ``replay --no-route`` stale-board bug: a placement-only run asks for
         ``kind="placed"`` and therefore can never receive a routed board left
@@ -241,7 +241,7 @@ def produced_by_this_run(
        mismatch, because ``metadata.json`` (the run_id source) is not rewritten
        on a stamp-only ``--no-route`` run while the board itself IS re-saved.
     2. Otherwise fall back to mtime: ``board.mtime >= run_started_at``. Reliable
-       because every board write (``board.Save()``, FreeRouting save) refreshes
+       because every board write (``board.Save()``, KiCad Routing Tools save) refreshes
        the mtime. ``>=`` (not ``>``) tolerates a same-second boundary.
 
     With no run context at all (run_started_at is None and no run_id), returns

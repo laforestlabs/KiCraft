@@ -106,15 +106,15 @@ async def test_blank_composer_when_nothing_needs_attention(harness):
     await u.should_see("Welcome to KiCraft")
 
 
-async def test_router_toggle_flows_into_new_run(harness, monkeypatch):
+async def test_router_selector_is_absent_from_new_run(harness, monkeypatch):
     u, web, _store, _acct = harness
     await _login(u)
-    await u.should_see("FreeRouting")
-    await u.should_see("KiCad Routing Tools")
+    await u.should_not_see("Router")
+    await u.should_not_see("KiCad Routing Tools")
     captured = {}
 
     def fake_design_worker(brief, state):
-        captured.update(brief=brief, routing_backend=state["routing_backend"])
+        captured.update(brief=brief, state=dict(state))
 
     class ImmediateThread:
         def __init__(self, *, target, args=(), kwargs=None, **_):
@@ -133,14 +133,10 @@ async def test_router_toggle_flows_into_new_run(harness, monkeypatch):
 
     monkeypatch.setattr(web, "_design_worker", fake_design_worker)
     monkeypatch.setattr(web.threading, "Thread", ImmediateThread)
-
     u.find("Describe your board").type("an RP2040 status LED")
     u.find("Design").click()
-
-    assert captured == {
-        "brief": "an RP2040 status LED",
-        "routing_backend": "kicad-routing-tools",
-    }
+    assert captured["brief"] == "an RP2040 status LED"
+    assert "routing_backend" not in captured["state"]
 
 async def test_cloned_project_opens_with_bom(harness):
     """Reported: 'when i cloned a public project i couldnt see the BOM at all,

@@ -799,17 +799,37 @@ class SilkAnchor(BaseModel):
     prefer: Literal["above", "below", "left", "right"] | None = None
 
 
+class SilkPinText(BaseModel):
+    """One per-pin entry inside a ``pinout`` label. ``pin`` names a real
+    pad number on the anchor footprint; ``text`` is the short single-line
+    function label (e.g. ``VIN``, ``GND``, ``12V OUT``)."""
+
+    pin: str
+    text: str
+
+    @field_validator("pin")
+    @classmethod
+    def _pin_pattern(cls, v: str) -> str:
+        if not PIN_NUMBER_RE.match(v):
+            raise ValueError(
+                f"SilkPinText.pin {v!r} must match {PIN_NUMBER_RE.pattern}"
+            )
+        return v
+
+
 class SilkLabel(BaseModel):
     """One functional silkscreen text block (an IO rating, a DIP-switch
-    table, a usage note). Content is linted before commit: anchors must
-    exist in the BOM and numeric claims must be corroborated by the design
-    state — an uncorroborated voltage on silk is worse than none."""
+    table, a per-pin connector pinout, a usage note). Content is linted
+    before commit: anchors must exist in the BOM and numeric claims must be
+    corroborated by the design state — an uncorroborated voltage on silk is
+    worse than none."""
 
     id: str
-    kind: Literal["io", "table", "note"] = "note"
+    kind: Literal["io", "table", "note", "pinout"] = "note"
     text: str  # ASCII; '\n' separates lines
     anchor: SilkAnchor | None = None
     priority: int = Field(default=2, ge=1, le=3)  # 1 must-have .. 3 nice
+    pins: list[SilkPinText] = Field(default_factory=list)
 
 
 class SilkPlan(BaseModel):
@@ -825,6 +845,9 @@ class SilkPlan(BaseModel):
     # Lint honesty: labels the deterministic lint rejected, with reasons —
     # surfaced so a missing table is a visible decision, not a silent drop.
     dropped_at_lint: list[str] = Field(default_factory=list)
+    # Coverage report: IO connectors that got no label (visibility only —
+    # never auto-generated text). Surfaced in the web inspector.
+    uncovered_connectors: list[str] = Field(default_factory=list)
     author_model: str | None = None
     cost_usd: float = 0.0
 
@@ -917,10 +940,6 @@ class ConversationState(BaseModel):
     """Single mutable object passed to every stage and the orchestrator."""
 
     project_stem: str | None = None
-    # Project-level routing choice. Persisted in state.json so synthesis can
-    # carry the user's selection into the generated autoplacer config consumed
-    # by both the standalone build worker and the in-process fallback.
-    routing_backend: Literal["freerouting", "kicad-routing-tools"] = "kicad-routing-tools"
     intent: IntentSlot | None = None
     functional_spec: FunctionalSpec | None = None
     architecture: Architecture | None = None

@@ -32,7 +32,7 @@ monitor surfaces.
 
 | Basename | Producer | Consumer(s) | Freshness gate |
 |---|---|---|---|
-| `renders/routed_front_all.png` | `render_views` in `subcircuit_render_diagnostics.render_leaf_board_views` after FreeRouting | monitor leaf thumbnail (`RenderIndex.leaf_render`), manual layout fallback | `run_started_at` floor + pins bypass in `parents_only` |
+| `renders/routed_front_all.png` | `render_views` in `subcircuit_render_diagnostics.render_leaf_board_views` after KiCad Routing Tools | monitor leaf thumbnail (`RenderIndex.leaf_render`), manual layout fallback | `run_started_at` floor + pins bypass in `parents_only` |
 | `renders/routed_back_all.png` | Same | Same | Same |
 | `renders/routed_copper_both.png` | Same | Same | Same |
 | `renders/pre_route_front_all.png` | Same, stage='pre_route' before routing | Same fallback chain when routed is missing | Same |

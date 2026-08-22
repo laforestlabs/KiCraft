@@ -11,12 +11,15 @@ from kicraft.design.models import (
     BomPart,
     ConversationState,
     IntentSlot,
+    NetConnection,
+    PinEndpoint,
     Sheet,
 )
 from kicraft.design.synthesis.silk_plan import (
     build_corroboration_corpus,
     lint_labels,
     normalize_ascii,
+    uncovered_connectors,
 )
 
 
@@ -38,6 +41,8 @@ def _state() -> ConversationState:
                     footprint="dip-switch-3pos:SW-SMD", sheet="PD"),
             BomPart(ref="J2", value="OUT", symbol="Connector:Conn_01x02",
                     footprint="lib:fp", sheet="PD"),
+            BomPart(ref="J1", value="IN", symbol="Connector_Generic:Conn_01x03",
+                    footprint="Connector_Generic:Conn_01x03", sheet="PD"),
         ]),
     )
 
@@ -118,13 +123,74 @@ def test_empty_and_duplicate_labels_dropped():
 
 
 def test_label_cap_keeps_highest_priority():
+    # 12 labels: 5 priority-3, 7 priority-1. The cap (10) drops only the two
+    # lowest-priority labels; every must-have priority-1 label survives.
     labels = [
         {"id": f"l{i}", "text": "NOTE", "anchor": {"ref": "J2"},
-         "priority": 3 if i < 4 else 1}
-        for i in range(7)
+         "priority": 3 if i < 5 else 1}
+        for i in range(12)
     ]
     kept, dropped = _lint(labels)
-    assert len(kept) == 5
-    # all three priority-1 labels survive the cap
-    assert all(any(lb.id == f"l{i}" for lb in kept) for i in (4, 5, 6))
+    assert len(kept) == 10
+    assert all(any(lb.id == f"l{i}" for lb in kept) for i in range(5, 12))
     assert len([d for d in dropped if "cap" in d]) == 2
+
+
+def test_pinout_valid_pins_kept():
+    kept, dropped = _lint([
+        {"id": "j1-pins", "kind": "pinout", "anchor": {"ref": "J1"},
+         "pins": [{"pin": "1", "text": "VIN"}, {"pin": "2", "text": "GND"}]},
+    ])
+    assert dropped == []
+    assert [lb.id for lb in kept] == ["j1-pins"]
+    assert kept[0].kind == "pinout"
+    assert [(p.pin, p.text) for p in kept[0].pins] == [("1", "VIN"), ("2", "GND")]
+
+
+def test_pinout_unknown_pin_dropped():
+    kept, dropped = _lint([
+        {"id": "j1-pins", "kind": "pinout", "anchor": {"ref": "J1"},
+         "pins": [{"pin": "1", "text": "VIN"}, {"pin": "4", "text": "GND"}]},
+    ])
+    assert [lb.id for lb in kept] == ["j1-pins"]
+    assert [p.pin for p in kept[0].pins] == ["1"]
+    assert any("j1-pins:4" in d and "not in symbol" in d for d in dropped)
+
+
+def test_pinout_uncorroborated_claim_dropped():
+    # 48V is not in the _state() corpus (9/12/20 V only); the entry drops.
+    kept, dropped = _lint([
+        {"id": "p", "kind": "pinout", "anchor": {"ref": "J1"},
+         "pins": [{"pin": "1", "text": "48V"}, {"pin": "2", "text": "GND"}]},
+    ])
+    assert [lb.id for lb in kept] == ["p"]
+    assert [e.pin for e in kept[0].pins] == ["2"]
+    assert any("p:1" in d and "48V" in d for d in dropped)
+
+
+def test_pinout_empty_pins_dropped():
+    kept, dropped = _lint([
+        {"id": "p", "kind": "pinout", "anchor": {"ref": "J1"}, "pins": []},
+    ])
+    assert kept == []
+    assert any("no pins" in d for d in dropped)
+
+
+def test_pinout_text_truncated_to_max_pin_chars():
+    kept, dropped = _lint([
+        {"id": "p", "kind": "pinout", "anchor": {"ref": "J1"},
+         "pins": [{"pin": "1", "text": "CONNECTOR"}]},
+    ])
+    assert [lb.id for lb in kept] == ["p"]
+    assert kept[0].pins[0].text == "CONNECTO"  # 9 -> 8 chars
+
+
+def test_uncovered_connectors_reports_unlabeled_wired_connector():
+    state = _state()
+    state.bom.connections = [
+        NetConnection(net_name="VIN", sheet="PD",
+                      endpoints=[PinEndpoint(ref="J1", pin="1")]),
+    ]
+    # No kept label anchors to J1 -> it is reported. J2 is also a connector
+    # but is not wired, so it is not reported.
+    assert uncovered_connectors([], state) == ["J1"]

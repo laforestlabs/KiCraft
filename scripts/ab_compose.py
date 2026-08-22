@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic A/B: run PARENT compose on each self-eval workspace's FROZEN
 routed leaves and report rc + shorts + board size. Isolates parent-compose
-changes (RC1/RC2/RC3) from synthesis + freerouting noise. Usage:
+changes (RC1/RC2/RC3) from synthesis + routing noise. Usage:
 
     python scripts/ab_compose.py <self_eval_OUT_dir>
 
@@ -72,7 +72,7 @@ def _run_one(src: Path, stem: str, scratch: Path) -> dict:
         if src_abs in t:
             jf.write_text(t.replace(src_abs, dest_abs), encoding="utf-8")
     for p in glob.glob(str(dest / ".experiments" / "subcircuits"
-                           / "subcircuit__*" / "parent_pre_freerouting.kicad_pcb")):
+                           / "subcircuit__*" / "parent_placed.kicad_pcb")):
         os.remove(p)
     proc = subprocess.run(
         [sys.executable, "-m", "kicraft.cli.compose_subcircuits",

@@ -228,10 +228,10 @@ def write_empty_pcb(
 def _draw_board_outline(pcbnew_mod, board, footprints, *, margin_mm: float = 5.0) -> None:
     """Draw an Edge.Cuts rectangle enclosing every placed footprint + margin.
 
-    Downstream tools (``compose-subcircuits``, FreeRouting) require a non-zero
+    Downstream tools (``compose-subcircuits``, KiCad Routing Tools) require a non-zero
     board outline: without one the seed board's edge bbox is ``0×0`` and the
     parent composer under-sizes the board, leaving footprints outside the
-    edges so the router produces no SES. This is a *seed* outline — compose
+    edges so the router produces no routed session. This is a *seed* outline — compose
     re-sizes the parent properly; the stub only needs a valid enclosure so the
     geometry is well-formed at every stage.
     """

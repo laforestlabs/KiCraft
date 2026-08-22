@@ -1,7 +1,7 @@
 """Regression: a routed-but-gate-rejected leaf must be a best-effort fallback.
 
 The rc=1 "board-only leaf" bug: a leaf whose board routed but was rejected by
-validation (freerouting flags the round ``failed`` for residual opens) had
+validation (routing flags the round ``failed`` for residual opens) had
 ``result.routed == False``, so it was excluded from ``best_routed``, the
 no-accepted-round recovery never fired, nothing serialized, and the auto-pin
 safety net refused to compose -- dropping the whole block off-board and failing
@@ -28,7 +28,7 @@ def test_cleanly_routed_round_qualifies():
 
 
 def test_failed_round_with_board_on_disk_qualifies(tmp_path):
-    # THE FIX: freerouting flagged the round failed (routed=False) but a routed
+    # THE FIX: routing flagged the round failed (routed=False) but a routed
     # board was stamped -> it is a valid best-effort fallback.
     board = tmp_path / "leaf_routed.kicad_pcb"
     board.write_text("(kicad_pcb)")

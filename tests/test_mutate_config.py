@@ -168,11 +168,11 @@ class TestSearchSpaceContents:
     Board dimensions and fab/circuit constraints (signal/power widths, vias,
     zone fab limits, pad inset, thermal radius) are NOT optimization knobs —
     they're dictated by the fab and the schematic, and letting a sweep enlarge
-    boards or fatten traces would game the score. ``freerouting_timeout_s``
+    boards or fatten traces would game the score. ``routing_timeout_s``
     stays forbidden too: it's a hard wall-clock cap, not a quality dial.
 
-    The FreeRouting *pass counts* (``freerouting_max_passes`` /
-    ``leaf_freerouting_max_passes``) ARE searched (Phase 1): more passes trade
+    The the autorouter *pass counts* (``routing_max_passes`` /
+    ``leaf_routing_max_passes``) ARE searched (Phase 1): more passes trade
     routing quality against wall-time, and the reward weighs the wall-time axis
     directly, so they sit on the Pareto frontier. The original gaming worry
     (crank effort to "win" fab regardless of cost) is contained by (a) bounded
@@ -188,7 +188,7 @@ class TestSearchSpaceContents:
         "power_width_mm",
         "via_drill_mm",
         "via_size_mm",
-        "freerouting_timeout_s",
+        "routing_timeout_s",
         "zone_clearance_mm",
         "zone_min_thickness_mm",
         "zone_thermal_gap_mm",
@@ -204,12 +204,10 @@ class TestSearchSpaceContents:
             f"{sorted(present)}"
         )
 
-    def test_routing_effort_knobs_are_searchable(self):
-        """Phase 1: the routing-effort / routability knobs must stay searchable
-        (the fab-readiness bottleneck lives here, not in the spacing knobs)."""
-        for key in ("freerouting_max_passes", "leaf_freerouting_max_passes",
-                    "signal_escape_length_mm"):
-            assert key in CONFIG_SEARCH_SPACE, f"{key} should be searchable"
+    def test_router_independent_escape_knob_is_searchable(self):
+        assert "signal_escape_length_mm" in CONFIG_SEARCH_SPACE
+        assert "kicad_routing_tools_timeout_s" not in CONFIG_SEARCH_SPACE
+        assert "kicad_routing_tools_max_iterations" not in CONFIG_SEARCH_SPACE
 
     def test_board_size_excluded_even_when_enabled(self):
         """enable_board_size=True is now a no-op since board dims are not

@@ -35,8 +35,8 @@ sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-http
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
 sudo apt-get update && sudo apt-get install -y caddy
-# Optional, only if you later enable place/route (kicraft build): a JRE for FreeRouting
-# sudo apt-get install -y default-jre
+# Place/route also requires KiCad 9 plus the pinned KiCadRoutingTools checkout:
+# source 0.20.2, commit 3ceb773722bea67aa3685e7ee430c0c0d17ef38d, native 0.20.1.
 ```
 
 ## 3. Deploy the app (as the `kicraft` user)

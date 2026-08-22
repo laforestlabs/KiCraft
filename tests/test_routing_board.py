@@ -4,10 +4,10 @@ from collections import Counter
 
 import pytest
 
-from kicraft.autoplacer import freerouting_runner
+from kicraft.autoplacer import routing_board
 
 
-def test_run_kicad_cli_drc_counts_tracks_crossing_as_short(monkeypatch, tmp_path):
+def testrun_kicad_cli_drc_counts_tracks_crossing_as_short(monkeypatch, tmp_path):
     """WS7: a tracks_crossing (two DIFFERENT-net tracks physically crossing) is
     a genuine short and must gate fab acceptance -- rounded-c3-devboard shipped
     past shorts=0 with a real GND-over-TXD0 crossing before this."""
@@ -29,14 +29,14 @@ def test_run_kicad_cli_drc_counts_tracks_crossing_as_short(monkeypatch, tmp_path
             fh.write(report)
         return _FakeResult()
 
-    monkeypatch.setattr(freerouting_runner.subprocess, "run", _fake_run)
+    monkeypatch.setattr(routing_board.subprocess, "run", _fake_run)
 
-    counts = freerouting_runner._run_kicad_cli_drc(str(tmp_path / "board.kicad_pcb"))
+    counts = routing_board.run_kicad_cli_drc(str(tmp_path / "board.kicad_pcb"))
     assert counts["tracks_crossing"] == 1
     assert counts["shorts"] == 1
 
 
-def test_run_kicad_cli_drc_positions_from_continuation_lines(monkeypatch, tmp_path):
+def testrun_kicad_cli_drc_positions_from_continuation_lines(monkeypatch, tmp_path):
     """Real KiCad reports are block-oriented: the [type] header carries the
     rule text while indented continuation lines carry @(x mm, y mm) item
     positions and [Net N](NAME) refs. The parser must complete each
@@ -63,9 +63,9 @@ def test_run_kicad_cli_drc_positions_from_continuation_lines(monkeypatch, tmp_pa
             fh.write(report)
         return _FakeResult()
 
-    monkeypatch.setattr(freerouting_runner.subprocess, "run", _fake_run)
+    monkeypatch.setattr(routing_board.subprocess, "run", _fake_run)
 
-    counts = freerouting_runner._run_kicad_cli_drc(str(tmp_path / "board.kicad_pcb"))
+    counts = routing_board.run_kicad_cli_drc(str(tmp_path / "board.kicad_pcb"))
     short, courtyard = counts["violations"]
     # First continuation position wins (the primary offending item).
     assert (short["x_mm"], short["y_mm"]) == (120.5, 80.25)
@@ -86,7 +86,7 @@ def test_extract_clearance_footprint_refs_counts_refs_within_clearance_blocks():
     @(4.7800 mm, 3.3500 mm): PTH pad B5 [CC2] of J1
 """
 
-    refs = freerouting_runner._extract_clearance_footprint_refs(report)
+    refs = routing_board._extract_clearance_footprint_refs(report)
 
     assert refs == Counter({"J1": 4})
 
@@ -100,7 +100,7 @@ def test_extract_violation_footprint_refs_filters_by_violation_type():
     @(4.1000 mm, 4.1000 mm): Pad 2 [VBUS] of C1
 """
 
-    refs = freerouting_runner._extract_violation_footprint_refs(
+    refs = routing_board._extract_violation_footprint_refs(
         report,
         {"copper_edge_clearance"},
     )
@@ -113,13 +113,13 @@ def test_validate_routed_board_marks_single_footprint_clearance_as_internal(
     monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.setattr(
-        freerouting_runner,
+        routing_board,
         "count_board_tracks",
         lambda _path: {"traces": 0, "vias": 0, "total_length_mm": 0.0},
     )
     monkeypatch.setattr(
-        freerouting_runner,
-        "_run_kicad_cli_drc",
+        routing_board,
+        "run_kicad_cli_drc",
         lambda _path, timeout_s=30: {
             "report_text": """
 [clearance]: Clearance violation
@@ -144,7 +144,7 @@ def test_validate_routed_board_marks_single_footprint_clearance_as_internal(
     board_path = tmp_path / "fake_board.kicad_pcb"
     board_path.write_text("stub", encoding="utf-8")
 
-    validation = freerouting_runner.validate_routed_board(str(board_path))
+    validation = routing_board.validate_routed_board(str(board_path))
 
     assert validation["obviously_illegal_routed_geometry"] is False
     assert validation["footprint_internal_clearance_count"] == 2
@@ -159,13 +159,13 @@ def test_validate_routed_board_rejects_trackless_ride_along_clearance(
     # track-to-track violations that ride along in the same report (the
     # old aggregate-refs waiver let a broken board pass the gate).
     monkeypatch.setattr(
-        freerouting_runner,
+        routing_board,
         "count_board_tracks",
         lambda _path: {"traces": 0, "vias": 0, "total_length_mm": 0.0},
     )
     monkeypatch.setattr(
-        freerouting_runner,
-        "_run_kicad_cli_drc",
+        routing_board,
+        "run_kicad_cli_drc",
         lambda _path, timeout_s=30: {
             "report_text": """
 [clearance]: Clearance violation
@@ -190,7 +190,7 @@ def test_validate_routed_board_rejects_trackless_ride_along_clearance(
     board_path = tmp_path / "fake_board.kicad_pcb"
     board_path.write_text("stub", encoding="utf-8")
 
-    validation = freerouting_runner.validate_routed_board(str(board_path))
+    validation = routing_board.validate_routed_board(str(board_path))
 
     assert validation["obviously_illegal_routed_geometry"] is True
     assert validation["footprint_internal_clearance_count"] == 1
@@ -199,12 +199,15 @@ def test_validate_routed_board_rejects_trackless_ride_along_clearance(
 def test_classify_clearance_violations_per_block():
     report = """
 [clearance]: Clearance violation
+    Rule: board setup constraints clearance; error
     @(1.0 mm, 1.0 mm): Pad 1 [GND] of C1
     @(1.1 mm, 1.1 mm): Pad 2 [VBUS] of C1
 [clearance]: Clearance violation
+    Rule: board setup constraints clearance; error
     @(2.0 mm, 2.0 mm): Pad 1 [GND] of C1
     @(2.1 mm, 2.1 mm): Pad 3 [SIG] of R5
 [hole_clearance]: Hole clearance violation
+    Rule: board setup constraints hole; error
     @(3.0 mm, 3.0 mm): Track [SIG] on F.Cu
     @(3.1 mm, 3.1 mm): PTH pad 2 [SIG] of J1
 [silk_overlap]: Silkscreen overlap
@@ -212,12 +215,12 @@ def test_classify_clearance_violations_per_block():
 """
     # C1-internal waived; C1-vs-R5 (two footprints) genuine; track-vs-pad
     # (ref-less item) genuine; silk block ignored entirely.
-    verdict = freerouting_runner._classify_clearance_violations(report)
+    verdict = routing_board._classify_clearance_violations(report)
     assert verdict == {"waived": 1, "genuine": 2}
 
     # The ignorable escape hatch waives fully-named multi-footprint blocks
     # but never blocks containing ref-less (routed copper) items.
-    verdict = freerouting_runner._classify_clearance_violations(
+    verdict = routing_board._classify_clearance_violations(
         report, ignorable_refs={"C1", "R5", "J1"}
     )
     assert verdict == {"waived": 2, "genuine": 1}
@@ -245,13 +248,13 @@ _EDGE_CONN_DRC = {
 
 def _patch_edge_conn_drc(monkeypatch):
     monkeypatch.setattr(
-        freerouting_runner,
+        routing_board,
         "count_board_tracks",
         lambda _path: {"traces": 0, "vias": 0, "total_length_mm": 0.0},
     )
     monkeypatch.setattr(
-        freerouting_runner,
-        "_run_kicad_cli_drc",
+        routing_board,
+        "run_kicad_cli_drc",
         lambda _path, timeout_s=30: dict(_EDGE_CONN_DRC),
     )
 
@@ -268,7 +271,7 @@ def test_validate_routed_board_flags_edge_connector_copper_edge_clearance(
     board_path = tmp_path / "fake_board.kicad_pcb"
     board_path.write_text("stub", encoding="utf-8")
 
-    validation = freerouting_runner.validate_routed_board(
+    validation = routing_board.validate_routed_board(
         str(board_path),
         cfg={"component_zones": {"J1": {"edge": "left"}}},
     )
@@ -287,7 +290,7 @@ def test_validate_routed_board_waives_ignorable_copper_edge(
     board_path = tmp_path / "fake_board.kicad_pcb"
     board_path.write_text("stub", encoding="utf-8")
 
-    validation = freerouting_runner.validate_routed_board(
+    validation = routing_board.validate_routed_board(
         str(board_path),
         cfg={"ignorable_footprint_refs": ["J1"]},
     )
@@ -308,15 +311,15 @@ def test_validate_routed_board_rejects_empty_board(
     # A board with zero footprints has no shorts and no ratsnest, so a clean
     # DRC would otherwise accept it. The empty_board guard must reject it.
     monkeypatch.setattr(
-        freerouting_runner, "count_board_tracks",
+        routing_board, "count_board_tracks",
         lambda _p: {"traces": 0, "vias": 0, "total_length_mm": 0.0,
                     "footprints": 0, "pads": 0, "footprint_refs": []},
     )
-    monkeypatch.setattr(freerouting_runner, "_run_kicad_cli_drc", _clean_drc)
+    monkeypatch.setattr(routing_board, "run_kicad_cli_drc", _clean_drc)
     board_path = tmp_path / "empty.kicad_pcb"
     board_path.write_text("stub", encoding="utf-8")
 
-    v = freerouting_runner.validate_routed_board(str(board_path))
+    v = routing_board.validate_routed_board(str(board_path))
     assert v["accepted"] is False
     assert "empty_board" in v["rejection_reasons"]
 
@@ -326,15 +329,15 @@ def test_validate_routed_board_accepts_populated_clean_board(
 ):
     # The empty_board guard must be a no-op for a real, populated board.
     monkeypatch.setattr(
-        freerouting_runner, "count_board_tracks",
+        routing_board, "count_board_tracks",
         lambda _p: {"traces": 12, "vias": 2, "total_length_mm": 80.0,
                     "footprints": 3, "pads": 9, "footprint_refs": ["R1", "C1", "U1"]},
     )
-    monkeypatch.setattr(freerouting_runner, "_run_kicad_cli_drc", _clean_drc)
+    monkeypatch.setattr(routing_board, "run_kicad_cli_drc", _clean_drc)
     board_path = tmp_path / "ok.kicad_pcb"
     board_path.write_text("stub", encoding="utf-8")
 
-    v = freerouting_runner.validate_routed_board(str(board_path))
+    v = routing_board.validate_routed_board(str(board_path))
     assert v["accepted"] is True
     assert "empty_board" not in v["rejection_reasons"]
 
@@ -345,19 +348,19 @@ def test_validate_routed_board_unknown_footprint_count_not_empty(
     # A count-subprocess failure reports footprints=-1 (unknown); that must NOT
     # be misread as an empty board.
     monkeypatch.setattr(
-        freerouting_runner, "count_board_tracks",
+        routing_board, "count_board_tracks",
         lambda _p: {"traces": 0, "vias": 0, "total_length_mm": 0.0,
                     "footprints": -1, "pads": -1, "footprint_refs": []},
     )
-    monkeypatch.setattr(freerouting_runner, "_run_kicad_cli_drc", _clean_drc)
+    monkeypatch.setattr(routing_board, "run_kicad_cli_drc", _clean_drc)
     board_path = tmp_path / "unknown.kicad_pcb"
     board_path.write_text("stub", encoding="utf-8")
 
-    v = freerouting_runner.validate_routed_board(str(board_path))
+    v = routing_board.validate_routed_board(str(board_path))
     assert "empty_board" not in v["rejection_reasons"]
 
 
-def test_run_pcbnew_script_retries_transient_failed_to_load_board(
+def testrun_pcbnew_script_retries_transient_failed_to_load_board(
     monkeypatch: pytest.MonkeyPatch,
 ):
     calls: list[int] = []
@@ -372,15 +375,15 @@ def test_run_pcbnew_script_retries_transient_failed_to_load_board(
             )()
         return type("Result", (), {"returncode": 0, "stderr": ""})()
 
-    monkeypatch.setattr(freerouting_runner.subprocess, "run", _fake_run)
-    monkeypatch.setattr(freerouting_runner.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(routing_board.subprocess, "run", _fake_run)
+    monkeypatch.setattr(routing_board.time, "sleep", lambda _s: None)
 
-    freerouting_runner._run_pcbnew_script("print('ok')")
+    routing_board.run_pcbnew_script("print('ok')")
 
     assert len(calls) == 3
 
 
-def test_run_pcbnew_script_retries_up_to_six_attempts(
+def testrun_pcbnew_script_retries_up_to_six_attempts(
     monkeypatch: pytest.MonkeyPatch,
 ):
     calls: list[int] = []
@@ -395,15 +398,15 @@ def test_run_pcbnew_script_retries_up_to_six_attempts(
             )()
         return type("Result", (), {"returncode": 0, "stderr": ""})()
 
-    monkeypatch.setattr(freerouting_runner.subprocess, "run", _fake_run)
-    monkeypatch.setattr(freerouting_runner.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(routing_board.subprocess, "run", _fake_run)
+    monkeypatch.setattr(routing_board.time, "sleep", lambda _s: None)
 
-    freerouting_runner._run_pcbnew_script("print('ok')")
+    routing_board.run_pcbnew_script("print('ok')")
 
     assert len(calls) == 6
 
 
-def test_run_pcbnew_script_gives_up_after_six_failed_load_board(
+def testrun_pcbnew_script_gives_up_after_six_failed_load_board(
     monkeypatch: pytest.MonkeyPatch,
 ):
     calls: list[int] = []
@@ -419,65 +422,13 @@ def test_run_pcbnew_script_gives_up_after_six_failed_load_board(
             },
         )()
 
-    monkeypatch.setattr(freerouting_runner.subprocess, "run", _fake_run)
-    monkeypatch.setattr(freerouting_runner.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(routing_board.subprocess, "run", _fake_run)
+    monkeypatch.setattr(routing_board.time, "sleep", lambda _s: None)
 
     with pytest.raises(RuntimeError, match="Failed to load board"):
-        freerouting_runner._run_pcbnew_script("print('ok')")
+        routing_board.run_pcbnew_script("print('ok')")
 
     assert len(calls) == 6
-
-
-# ---------------------------------------------------------------------------
-# DSN non-ANSI sanitization (FreeRouting 1.9.0 hangs forever on non-ANSI
-# input -- run_01 rc-lowpass-bnc: 'Ω' in resistor values stalled every round)
-# ---------------------------------------------------------------------------
-
-_DSN_WITH_OMEGA = """(pcb board
-  (placement
-    (component R_0402 (place R1 62400 -30000 front 90 (PN 10kΩ)))
-    (component BNC (place J2 65540 -14262 front 90 (PN "BNC 50Ω")))
-    (component C_0402 (place C1 50000 -20000 front 0 (PN 10nF)))
-    (component POT (place RV1 46795 -22740 front -90 (PN 100kµF)))
-  )
-  (network (net VOUT (pins R1-2 C1-1)))
-)
-"""
-
-
-def test_sanitize_dsn_pn_transliterates_non_ansi(tmp_path):
-    p = tmp_path / "board.dsn"
-    p.write_text(_DSN_WITH_OMEGA, encoding="utf-8")
-    n = freerouting_runner._sanitize_dsn_part_numbers(str(p))
-    assert n == 3
-    text = p.read_text(encoding="utf-8")
-    assert "(PN 10kOhm)" in text                # GREEK CAPITAL OMEGA
-    assert '(PN "BNC 50Ohm")' in text           # OHM SIGN, quoted PN
-    assert "(PN 100kuF)" in text                # MICRO SIGN
-    assert "(PN 10nF)" in text                  # untouched ASCII PN
-    assert not any(ord(c) >= 128 for c in text)
-
-
-def test_sanitize_dsn_pn_noop_on_clean_input(tmp_path):
-    p = tmp_path / "board.dsn"
-    clean = _DSN_WITH_OMEGA.replace("Ω", "R").replace(
-        "Ω", "R").replace("µ", "u")
-    p.write_text(clean, encoding="utf-8")
-    before = p.stat().st_mtime_ns
-    assert freerouting_runner._sanitize_dsn_part_numbers(str(p)) == 0
-    assert p.stat().st_mtime_ns == before  # not rewritten
-
-
-def test_sanitize_dsn_warns_on_non_ansi_net_name(tmp_path, capsys):
-    # A non-ASCII NET name round-trips through the SES and cannot be
-    # rewritten here -- it must be surfaced loudly, not silently mangled.
-    p = tmp_path / "board.dsn"
-    p.write_text(
-        "(pcb (network (net VOUT_50Ω (pins R1-2))))\n", encoding="utf-8"
-    )
-    assert freerouting_runner._sanitize_dsn_part_numbers(str(p)) == 0
-    out = capsys.readouterr().out
-    assert "WARNING" in out and "non-ANSI" in out
 
 
 def test_validate_routed_board_rejects_on_drc_tool_failure(
@@ -487,13 +438,13 @@ def test_validate_routed_board_rejects_on_drc_tool_failure(
     # kicad-cli exited nonzero WITHOUT reporting violations: every zero count
     # is vacuous, so the board must not read as clean (2026-07-19 review §2.3).
     monkeypatch.setattr(
-        freerouting_runner,
+        routing_board,
         "count_board_tracks",
         lambda _path: {"traces": 10, "vias": 2, "total_length_mm": 100.0},
     )
     monkeypatch.setattr(
-        freerouting_runner,
-        "_run_kicad_cli_drc",
+        routing_board,
+        "run_kicad_cli_drc",
         lambda _path, timeout_s=30: {
             "report_text": "",
             "violations": [],
@@ -510,7 +461,7 @@ def test_validate_routed_board_rejects_on_drc_tool_failure(
     board_path = tmp_path / "fake_board.kicad_pcb"
     board_path.write_text("stub", encoding="utf-8")
 
-    validation = freerouting_runner.validate_routed_board(str(board_path))
+    validation = routing_board.validate_routed_board(str(board_path))
 
     assert validation["accepted"] is False
     assert "drc_failed" in validation["rejection_reasons"]
@@ -523,13 +474,13 @@ def test_validate_routed_board_keeps_verdict_on_nonzero_exit_with_violations(
     # Nonzero exit WITH parsed violations keeps the parsed verdict -- the
     # per-category gates act on it; no vacuous-clean hole to close.
     monkeypatch.setattr(
-        freerouting_runner,
+        routing_board,
         "count_board_tracks",
         lambda _path: {"traces": 10, "vias": 2, "total_length_mm": 100.0},
     )
     monkeypatch.setattr(
-        freerouting_runner,
-        "_run_kicad_cli_drc",
+        routing_board,
+        "run_kicad_cli_drc",
         lambda _path, timeout_s=30: {
             "report_text": "[courtyards_overlap]: x",
             "violations": [{"type": "courtyards_overlap"}],
@@ -547,7 +498,7 @@ def test_validate_routed_board_keeps_verdict_on_nonzero_exit_with_violations(
     board_path = tmp_path / "fake_board.kicad_pcb"
     board_path.write_text("stub", encoding="utf-8")
 
-    validation = freerouting_runner.validate_routed_board(str(board_path))
+    validation = routing_board.validate_routed_board(str(board_path))
 
     assert "drc_failed" not in validation["rejection_reasons"]
 
@@ -557,16 +508,16 @@ def test_validate_routed_board_flags_copper_outside_outline(
     monkeypatch: pytest.MonkeyPatch,
 ):
     # 2026-07-19 review §2.6: the malformed_board_geometry flag was dead --
-    # copper escaping Edge.Cuts (freerouting ignores the DSN boundary for
+    # copper escaping Edge.Cuts (routing ignores the router exchange input boundary for
     # wires) now sets it and rejects the board.
     monkeypatch.setattr(
-        freerouting_runner,
+        routing_board,
         "count_board_tracks",
         lambda _path: {"traces": 10, "vias": 2, "total_length_mm": 100.0},
     )
     monkeypatch.setattr(
-        freerouting_runner,
-        "_run_kicad_cli_drc",
+        routing_board,
+        "run_kicad_cli_drc",
         lambda _path, timeout_s=30: {
             "report_text": "", "violations": [], "shorts": 0,
             "unconnected": 0, "clearance": 0, "copper_edge_clearance": 0,
@@ -575,7 +526,7 @@ def test_validate_routed_board_flags_copper_outside_outline(
         },
     )
     monkeypatch.setattr(
-        freerouting_runner,
+        routing_board,
         "count_copper_outside_outline",
         lambda _path, tol_mm=0.05: {
             "ok": True, "outside_tracks": 3, "outside_vias": 1,
@@ -586,7 +537,7 @@ def test_validate_routed_board_flags_copper_outside_outline(
     board_path = tmp_path / "fake_board.kicad_pcb"
     board_path.write_text("stub", encoding="utf-8")
 
-    validation = freerouting_runner.validate_routed_board(str(board_path))
+    validation = routing_board.validate_routed_board(str(board_path))
 
     assert validation["malformed_board_geometry"] is True
     assert validation["accepted"] is False
@@ -598,13 +549,13 @@ def test_validate_routed_board_unresolved_outline_is_not_escaped_copper(
     monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.setattr(
-        freerouting_runner,
+        routing_board,
         "count_board_tracks",
         lambda _path: {"traces": 10, "vias": 2, "total_length_mm": 100.0},
     )
     monkeypatch.setattr(
-        freerouting_runner,
-        "_run_kicad_cli_drc",
+        routing_board,
+        "run_kicad_cli_drc",
         lambda _path, timeout_s=30: {
             "report_text": "", "violations": [], "shorts": 0,
             "unconnected": 0, "clearance": 0, "copper_edge_clearance": 0,
@@ -613,7 +564,7 @@ def test_validate_routed_board_unresolved_outline_is_not_escaped_copper(
         },
     )
     monkeypatch.setattr(
-        freerouting_runner,
+        routing_board,
         "count_copper_outside_outline",
         lambda _path, tol_mm=0.05: {
             "ok": False, "outside_tracks": -1, "outside_vias": -1,
@@ -623,27 +574,9 @@ def test_validate_routed_board_unresolved_outline_is_not_escaped_copper(
     board_path = tmp_path / "fake_board.kicad_pcb"
     board_path.write_text("stub", encoding="utf-8")
 
-    validation = freerouting_runner.validate_routed_board(str(board_path))
+    validation = routing_board.validate_routed_board(str(board_path))
 
     assert validation["malformed_board_geometry"] is False
     assert "malformed_board_geometry" not in validation["rejection_reasons"]
 
 
-def test_parse_freerouting_output_keeps_tail_not_head():
-    """On a net-normalization hang FreeRouting prints the diagnosis LAST and
-    then goes silent, so the raw capture must keep the tail (the banner at
-    the head is worthless; the first-2000-char slice used to throw the
-    diagnosis away -- KC-Z879KB)."""
-    stdout = "Freerouting v1.9.0 banner line\n" + ("noise\n" * 500) + \
-        "The normalization of net 'VOUT_2' failed.\n"
-    stats = freerouting_runner.parse_freerouting_output(stdout, "", 0)
-    assert len(stats["_raw_stdout"]) <= 2000
-    assert stats["_raw_stdout"].endswith("The normalization of net 'VOUT_2' failed.\n")
-    assert "banner line" not in stats["_raw_stdout"]
-
-
-def test_last_output_line_prefers_stdout_and_skips_blanks():
-    assert freerouting_runner._last_output_line("a\nb\n", "") == "b"
-    assert freerouting_runner._last_output_line("", "\n  \nlast stderr") == "last stderr"
-    assert freerouting_runner._last_output_line("", "") == ""
-    assert freerouting_runner._last_output_line("stdout last", "stderr last") == "stdout last"

@@ -7,7 +7,7 @@ ONE fixed direction -- radially out from the footprint centre -- and, when that
 direction is blocked, stamps the farthest legal point it reached. On a ring
 package that is a 0.2 mm nub inside a dead channel: it connects nothing, becomes
 a foreign-copper obstacle, and turns the DRC edge into ``Track [net] <-> Pad``.
-The pads were *geometrically unreachable before FreeRouting ever ran*, and
+The pads were *geometrically unreachable before KiCad Routing Tools ever ran*, and
 nothing said so -- the failure surfaced as router exhaustion at leaf round 9.
 
 This module answers the question the stamper never asked: **for this pad field
@@ -702,7 +702,7 @@ def _lane_escape(
 
     ``max_len_mm`` keeps an *escape* an escape: past a couple of millimetres the
     path has stopped leaving the pad field and started routing the net, which is
-    FreeRouting's job -- and, for a poured net whose same-net copper is nearby,
+    KiCad Routing Tools's job -- and, for a poured net whose same-net copper is nearby,
     an unbounded search will happily propose a 6 mm track straight across the
     exposed pad because same-net copper is not an obstacle.
     """
@@ -1038,7 +1038,7 @@ def plan_interface_escapes(
     net crosses into ANOTHER leaf has no partner on this board, so leaf routing
     lays no copper on it, and by the time the parent router needs it the pad
     sits behind the pin-adjacent companion wall and the leaf's locked traces --
-    ``no_clear_path`` from both FreeRouting and the repair pass. The obstacle
+    ``no_clear_path`` from both KiCad Routing Tools and the repair pass. The obstacle
     set here is therefore the PLACED environment: every other pad on the leaf,
     not just the source footprint's own.
 
@@ -1235,11 +1235,11 @@ def planning_rules(
         NETCLASS_CLEARANCE_MM if netclass_clearance_mm is None else netclass_clearance_mm
     )
     return Rules(
-        track_mm=float(cfg.get("freerouting_fine_pitch_track_mm", floors["track_mm"])),
+        track_mm=floors["track_mm"],
         clearance_mm=STAMP_CLEARANCE_GUARD_MM
         + max(
             netclass,
-            float(cfg.get("freerouting_min_clearance_mm", floors["clearance_mm"])),
+            floors["clearance_mm"],
         ),
         via_diameter_mm=via_d,
         via_drill_mm=via_dr,

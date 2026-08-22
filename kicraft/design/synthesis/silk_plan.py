@@ -21,28 +21,39 @@ import json
 import re
 import unicodedata
 
-from kicraft.design.models import SilkAnchor, SilkLabel
+from kicraft.design.models import SilkAnchor, SilkLabel, SilkPinText
 
 from .electrical_review import _extract_json
 
-_MAX_LABELS = 5
+_MAX_LABELS = 10
 _MAX_LINES = 5
 _MAX_LINE_CHARS = 30
 _TITLE_MAX = 26
+_MAX_PIN_CHARS = 8
+_MAX_PINS_PER_LABEL = 16
 
 _SYSTEM = (
     "You write the silkscreen text for a small PCB, so the person HOLDING the "
-    "physical board understands it without the schematic. From the design "
-    "digest, author at most "
     f"{_MAX_LABELS} short labels: connector IO roles and ratings (what goes "
     "IN, what comes OUT, at which voltage/current), configuration "
     "switch/jumper tables (which setting selects what — derive the mapping "
     "from the digest's netlist and part values, e.g. CFG resistor ladders), "
+    "per-pin pinout labels for multi-pin connectors (one short label beside "
+    "each pin whose function the netlist establishes — e.g. VIN, GND, "
+    "12V OUT), "
     "and at most one critical usage note. STRICT EVIDENCE RULE: every claim "
     "must be derivable from the digest; if the digest does not establish a "
-    "voltage/current/mapping, OMIT it rather than guess. Plain ASCII only. "
-    "Keep every line under "
+    "voltage/current/mapping/pin-function, OMIT it rather than guess. Plain "
+    "ASCII only. Keep every line under "
     f"{_MAX_LINE_CHARS} characters and every label under {_MAX_LINES} lines. "
+    "For every multi-pin connector whose pins carry identifiable functions "
+    "(power/ground/signal, from the netlist's ref.pin(function) entries), "
+    "author one 'pinout' label anchored to that connector with one "
+    "{pin, text} entry per derivable pin (each text a single line of at "
+    "most "
+    f"{_MAX_PIN_CHARS} characters); omit pins whose function the digest "
+    "does not establish, never guess. Every IO connector (input/output/"
+    "power) must get at least one label: a 'pinout', or an 'io' role label. "
     "Also produce a short human-readable board title (under "
     f"{_TITLE_MAX} characters). Respond with a single JSON object and no "
     "other text."
@@ -53,10 +64,14 @@ _OUTPUT_CONTRACT = (
     "{\n"
     '  "title": "<short board title>",\n'
     '  "labels": [\n'
-    '    {"id": "<kebab-slug>", "kind": "io|table|note", '
+    '    {"id": "<kebab-slug>", "kind": "io|table|note|pinout", '
     '"text": "<line1\\nline2...>", '
     '"anchor": {"ref": "<refdes near which this belongs, e.g. J1>", '
-    '"prefer": "above|below|left|right"}, "priority": 1}\n'
+    '"prefer": "above|below|left|right"}, "priority": 1},\n'
+    '    {"id": "j1-pins", "kind": "pinout", '
+    '"anchor": {"ref": "J1"}, '
+    '"pins": [{"pin": "1", "text": "VIN"}, {"pin": "2", "text": "GND"}], '
+    '"priority": 1}\n'
     "  ]\n"
     "}\n"
     "priority: 1 = must-have (the board is confusing without it), 2 = "
@@ -83,6 +98,10 @@ _ASCII_MAP = {"µ": "u", "μ": "u", "Ω": "ohm", "°": "deg", "±": "+/-",
 
 # Standalone small integers (switch-position indices) for the table guard.
 _POSITION_RE = re.compile(r"(?<![\w.])([1-8])(?![\w.])")
+
+# Connector/header ref prefixes for the coverage report — the SAME set as
+# ``array_decaps._CONNECTOR_PREFIXES`` (single source of truth).
+_CONNECTOR_PREFIXES = frozenset({"J", "CN", "P", "JP", "TB", "CONN"})
 
 
 def normalize_ascii(text: str) -> str:
@@ -176,11 +195,15 @@ def lint_labels(
             dropped.append(f"{label_id}: duplicate id")
             continue
 
+        kind = raw.get("kind")
+        if kind not in ("io", "table", "note", "pinout"):
+            kind = "note"
+
         text = normalize_ascii(str(raw.get("text") or ""))
         lines = [ln.rstrip()[:_MAX_LINE_CHARS] for ln in text.split("\n")]
         lines = [ln for ln in lines if ln.strip()][:_MAX_LINES]
         text = "\n".join(lines)
-        if not text.strip():
+        if kind != "pinout" and not text.strip():
             dropped.append(f"{label_id}: empty text")
             continue
 
@@ -201,7 +224,6 @@ def lint_labels(
             )
             continue
 
-        kind = raw.get("kind") if raw.get("kind") in ("io", "table", "note") else "note"
         if kind == "table" and ref is not None:
             positions = _switch_positions(parts_by_ref[ref], project_root)
             if positions is not None:
@@ -212,6 +234,74 @@ def lint_labels(
                         f"{ref} has {positions}"
                     )
                     continue
+
+        if kind == "pinout":
+            if ref is None:
+                dropped.append(f"{label_id}: pinout with no anchor ref")
+                continue
+            raw_pins = raw.get("pins")
+            if not isinstance(raw_pins, list) or not raw_pins:
+                dropped.append(f"{label_id}: pinout with no pins")
+                continue
+
+            pin_set: set[str] = set()
+            try:
+                from .symbol_pinout import SymbolNotFoundError, lookup_pins
+
+                info = lookup_pins(parts_by_ref[ref].symbol,
+                                   project_root=project_root)
+                pin_set = {p["number"] for p in info["pins"]}
+            except (SymbolNotFoundError, ValueError, TypeError):
+                pin_set = set()
+
+            pins: list[SilkPinText] = []
+            for j, entry in enumerate(raw_pins):
+                if not isinstance(entry, dict):
+                    dropped.append(f"{label_id}: pin[{j}] not an object")
+                    continue
+                pin = str(entry.get("pin") or "").strip()
+                pin_text = normalize_ascii(str(entry.get("text") or "")).strip()
+                pin_text = pin_text[:_MAX_PIN_CHARS]
+                if not pin_text:
+                    dropped.append(f"{label_id}:{pin or j}: empty pin text")
+                    continue
+                if pin not in pin_set:
+                    dropped.append(f"{label_id}:{pin}: pin not in symbol")
+                    continue
+                pclaims = _claim_tokens(pin_text)
+                punbacked = sorted(f"{n}{u}" for n, u in pclaims - corpus)
+                if punbacked:
+                    dropped.append(
+                        f"{label_id}:{pin}: uncorroborated claim(s) "
+                        f"{', '.join(punbacked)}"
+                    )
+                    continue
+                pins.append(SilkPinText(pin=pin, text=pin_text))
+
+            if not pins:
+                dropped.append(f"{label_id}: pinout with no valid pins")
+                continue
+
+            if len(pins) > _MAX_PINS_PER_LABEL:
+                for extra in pins[_MAX_PINS_PER_LABEL:]:
+                    dropped.append(
+                        f"{label_id}:{extra.pin}: over the "
+                        f"{_MAX_PINS_PER_LABEL}-pin cap"
+                    )
+                pins = pins[:_MAX_PINS_PER_LABEL]
+
+            try:
+                priority = min(3, max(1, int(raw.get("priority", 2))))
+            except (TypeError, ValueError):
+                priority = 2
+
+            seen_ids.add(label_id)
+            kept.append(SilkLabel(
+                id=label_id, kind="pinout", text=text,
+                anchor=SilkAnchor(ref=ref, prefer=None),
+                priority=priority, pins=pins,
+            ))
+            continue
 
         try:
             priority = min(3, max(1, int(raw.get("priority", 2))))
@@ -234,6 +324,33 @@ def lint_labels(
         kept = [lb for lb in kept if id(lb) not in cut]
 
     return kept, dropped
+
+
+def uncovered_connectors(kept: list[SilkLabel], state) -> list[str]:
+    """IO connectors that shipped with no silkscreen label.
+
+    A visibility report, never auto-generated text: the build still places
+    only what the lint kept. A ref is "uncovered" when (a) it has a
+    connector prefix, (b) it participates in at least one ``bom.connections``
+    endpoint (so it is actually wired, not a placeholder), and (c) no kept
+    label anchors to it.
+    """
+    bom = getattr(state, "bom", None)
+    parts = bom.parts if bom else []
+    connector_refs = {
+        p.ref for p in parts
+        if any(p.ref.startswith(prefix) for prefix in _CONNECTOR_PREFIXES)
+    }
+    wired_refs = {
+        ep.ref
+        for c in (bom.connections if bom else [])
+        for ep in (c.endpoints or [])
+    }
+    anchored_refs = {
+        lb.anchor.ref for lb in kept
+        if lb.anchor is not None and lb.anchor.ref is not None
+    }
+    return sorted(connector_refs & wired_refs - anchored_refs)
 
 
 def author_labels(
@@ -280,4 +397,5 @@ __all__ = [
     "lint_labels",
     "build_corroboration_corpus",
     "normalize_ascii",
+    "uncovered_connectors",
 ]

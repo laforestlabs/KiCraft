@@ -1,7 +1,7 @@
 """Configurable acceptance gate system for leaf subcircuits.
 
 This module consolidates acceptance logic that was previously scattered across
-``solve_subcircuits.py`` and ``freerouting_runner.py``.  Each gate evaluates a
+``solve_subcircuits.py`` and ``routing_board.py``.  Each gate evaluates a
 single aspect of the routed leaf result and produces a pass/fail verdict with
 structured detail.  The top-level :func:`evaluate_leaf_acceptance` function
 runs every gate in sequence and returns a single :class:`LeafAcceptanceResult`
@@ -573,7 +573,7 @@ def evaluate_leaf_acceptance(
     ----------
     validation:
         The dict returned by
-        ``freerouting_runner.validate_routed_board``.
+        ``routing_board.validate_routed_board``.
     anchor_validation:
         The dict returned by
         ``subcircuit_artifacts.build_anchor_validation``.

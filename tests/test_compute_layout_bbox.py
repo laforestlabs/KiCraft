@@ -9,7 +9,7 @@ their actual track copper overlaps by up to a full track width.
 
 In practice this manifests as GND/VSYS shorts at the seam between two
 neighboring leaves -- the tracks were stamped overlapping in
-``parent_pre_freerouting.kicad_pcb`` and FreeRouting (which sees them as
+``parent_placed.kicad_pcb`` and the autorouter (which sees them as
 locked pre-routes) cannot fix them.
 
 These tests lock the contract that ``_compute_layout_bbox`` inflates

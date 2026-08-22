@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kicraft.autoplacer import freerouting_runner
+from kicraft.autoplacer import routing_board
 from kicraft.cli import render_drc_overlay
 from kicraft.design.cli_app import build_pcb_errors
 from kicraft.design.models import ArtifactPaths, PcbError, PcbViolation
@@ -80,30 +80,6 @@ def test_empty_layout_evidence_gets_explicit_explanation():
     assert errors[0].next_action
 
 
-def test_fr_hang_evidence_names_net_and_timeout():
-    """The rc6 failure card must name the REAL cause -- FreeRouting froze on
-    net VOUT_2 and was killed at the timeout -- instead of raw log fragments,
-    and must carry no foreign violations or placement blame."""
-    errors = build_pcb_errors({
-        "evidence": {
-            "parent_route_stderr_tail": (
-                "  FreeRouting crash (rc=-1), retrying with 10 passes...\n"
-                "  [dsn-sanitize] opened 7 locked-wire cycle(s)\n"
-                "error: parent routing failed: FreeRouting hung and was killed "
-                "at the 120 s timeout; its last output was: "
-                "\"The normalization of net 'VOUT_2' failed.\"\n"
-            ),
-        },
-    }, stage="place_route")
-    assert len(errors) == 1
-    err = errors[0]
-    assert err.code == "layout_failure"
-    assert "VOUT_2" in err.explanation
-    assert "timeout" in err.explanation
-    assert err.violations == []
-    assert err.footprint_refs == []
-    assert err.overlay_path is None
-    assert "spread" not in err.next_action and "placement" not in err.next_action
 
 
 def test_warn_only_silk_violations_never_attached():
@@ -145,8 +121,8 @@ def test_drc_parser_keeps_both_net_forms_and_footprints(monkeypatch, tmp_path):
         Path(report_path).write_text(report, encoding="utf-8")
         return Result()
 
-    monkeypatch.setattr(freerouting_runner.subprocess, "run", fake_run)
-    parsed = freerouting_runner._run_kicad_cli_drc(str(tmp_path / "BOARD.kicad_pcb"))
+    monkeypatch.setattr(routing_board.subprocess, "run", fake_run)
+    parsed = routing_board.run_kicad_cli_drc(str(tmp_path / "BOARD.kicad_pcb"))
     short, unconnected = parsed["violations"]
     assert (short["x_mm"], short["y_mm"]) == (12.3, 8.4)
     assert (short["net1"], short["net2"]) == ("SDA", "SCL")

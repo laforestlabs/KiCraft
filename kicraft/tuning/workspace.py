@@ -67,7 +67,7 @@ def _detokenize(dest: Path, src: Path) -> None:
 
 
 def _drop_stale_parent_artifacts(dest: Path) -> None:
-    for name in ("parent_pre_freerouting.kicad_pcb", "parent_routed.kicad_pcb"):
+    for name in ("parent_placed.kicad_pcb", "parent_routed.kicad_pcb"):
         for p in glob.glob(
             str(dest / ".experiments" / "subcircuits" / "subcircuit__*" / name)
         ):

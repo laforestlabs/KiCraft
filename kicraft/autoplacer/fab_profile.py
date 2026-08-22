@@ -3,7 +3,7 @@
 KiCraft's minimum feature sizes were scattered as bare 0.153 constants across
 ``autoplacer/config.py``, ``design/synthesis/kicad_pro.py`` and the breakout
 stamper, all of them encoding the **OSH Park 6 mil** floor (0.1524 mm, raised to
-0.153 to clear the DSN's whole-micron rounding). The pipeline's actual fab
+0.153 to clear the router exchange input's whole-micron rounding). The pipeline's actual fab
 target is JLCPCB -- the BOM gates on JLC assembly plus LCSC retail -- and JLC's
 published 2-layer 1 oz capability is finer in every dimension that matters to a
 fine-pitch escape. The legacy floor is what closes the designed escape lanes of
@@ -21,7 +21,7 @@ Verified against JLCPCB's published capability page (2026-07-23):
 
 We deliberately floor at **0.127 mm (5 mil)**, one step *above* JLC's stated
 minimum, so a board that lands exactly on the floor still has fab margin -- and
-because 0.127 mm is exactly 127 um, so the DSN's integer-micron rounding trap
+because 0.127 mm is exactly 127 um, so the router exchange input's integer-micron rounding trap
 that motivated 0.153 does not exist there.
 
 The fanout via is **0.36 / 0.15 mm**. Two constraints pin it, pulling opposite
@@ -42,7 +42,7 @@ stamper's +10 um geometry guard, KiCad's 0.25 mm hole-to-copper minimum):
     via 0.36/0.15  37.6 um   <- chosen
     via 0.35/0.15  48 um
 
-*Lower bound -- the ANNULAR RING has to be wide enough.* FreeRouting only knows
+*Lower bound -- the ANNULAR RING has to be wide enough.* KiCad Routing Tools only knows
 the copper clearance; it has never heard of hole-to-copper. So a track it places
 at exactly the copper rule from a via's annulus is only ``clearance + ring`` from
 that via's HOLE -- and if the ring is thin, that is under the hole rule and KiCad
@@ -52,10 +52,10 @@ fails the board. The invariant is therefore
 
 which for 0.153 and 0.25 needs a ring of at least 0.097 mm. A 0.35/0.2 via
 (ring 0.075) misses it by 22 um -- and did, immediately: on the witness board
-FreeRouting ran a B.Cu track 0.2417 mm from the nRESET fanout hole against the
+KiCad Routing Tools ran a B.Cu track 0.2417 mm from the nRESET fanout hole against the
 0.25 mm rule, and an otherwise perfect zero-unconnected leaf round was thrown
 away for it. 0.36/0.15 gives a 0.105 mm ring: +8 um nominal, +18 um once
-FreeRouting's own clearance guard is counted. (Both bounds together force a
+KiCad Routing Tools's own clearance guard is counted. (Both bounds together force a
 drill of 0.18 mm or finer, which is why this class uses 0.15 -- JLC's stated
 2-layer minimum -- rather than a more comfortable 0.2.)
 
@@ -67,7 +67,7 @@ pad needs.
 
 **Scope guard.** Only the *floors* and the deterministically stamped escape
 copper move to capability values. The Default/Power netclasses stay at
-0.2 mm track / 0.153 mm clearance / 0.6 mm via, so FreeRouting's own routing
+0.2 mm track / 0.153 mm clearance / 0.6 mm via, so KiCad Routing Tools's own routing
 behaviour is unchanged and this cannot regress general routing.
 """
 from __future__ import annotations
@@ -182,10 +182,10 @@ def stamp_fab_floors_into_pro(pro_path: str | Path, cfg: dict[str, Any] | None =
     rules = settings.setdefault("rules", {})
     changed = False
     # Make the fanout class a first-class via of the project. KiCad's Specctra
-    # export emits one padstack per entry here and lists them all in the DSN's
+    # export emits one padstack per entry here and lists them all in the router exchange input's
     # (structure (via ...)) rule, so a stamped dog-bone round-trips through the
-    # SES intact -- and a human opening the board gets it in the via dropdown.
-    # It does NOT change what FreeRouting places: each netclass carries its own
+    # routed session intact -- and a human opening the board gets it in the via dropdown.
+    # It does NOT change what KiCad Routing Tools places: each netclass carries its own
     # (use_via ...) naming the netclass via, which stays 0.6/0.3 (scope guard).
     dims = settings.setdefault("via_dimensions", [])
     if isinstance(dims, list) and not any(

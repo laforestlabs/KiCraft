@@ -35,7 +35,7 @@ def _stamp_parent_board(
     5. Rebuilds connectivity and saves
 
     If ``output_pcb_path`` is provided, the stamped board is written there
-    instead of the canonical ``<artifact_dir>/parent_pre_freerouting.kicad_pcb``.
+    instead of the canonical ``<artifact_dir>/parent_placed.kicad_pcb``.
     The candidate-search loop uses this to stamp each trial to a distinct
     file under ``<artifact_dir>/_search/``.
 
@@ -47,7 +47,7 @@ def _stamp_parent_board(
 
     from kicraft.autoplacer.brain.subcircuit_artifacts import slugify_subcircuit_id
     from kicraft.autoplacer.brain.types import Layer
-    from kicraft.autoplacer.freerouting_runner import _run_pcbnew_script_file
+    from kicraft.autoplacer.routing_board import run_pcbnew_script_file
 
     composition = state.composition
     if composition is None:
@@ -62,7 +62,7 @@ def _stamp_parent_board(
         output_pcb = Path(output_pcb_path)
         output_pcb.parent.mkdir(parents=True, exist_ok=True)
     else:
-        output_pcb = artifact_dir / "parent_pre_freerouting.kicad_pcb"
+        output_pcb = artifact_dir / "parent_placed.kicad_pcb"
     shutil.copy2(str(pcb_path), str(output_pcb))
 
     # Serialize board state for the subprocess
@@ -133,7 +133,7 @@ def _stamp_parent_board(
     # the parent is rejected as illegal_routed_geometry. Repairing here (grow
     # only) makes geometry valid for every candidate, so the search judges
     # placements on quality (overlap/packing/net-distance) rather than on
-    # overflowing a too-small outline, and FreeRouting gets a valid board.
+    # overflowing a too-small outline, and KiCad Routing Tools gets a valid board.
     # MUTATING again since batch 20260716T011056Z: the Phase-3A verify-only
     # experiment assumed _compute_final_outline's bbox-level clamp covered all
     # geometry, but the clamp sees only child bboxes (no pads/traces/parent-
@@ -289,21 +289,15 @@ def _stamp_parent_board(
         with os.fdopen(tmp_fd, "w") as f:
             _json.dump(payload, f)
 
-        _run_pcbnew_script_file(_PARENT_STAMP_SCRIPT_PATH, tmp_path)
+        run_pcbnew_script_file(_PARENT_STAMP_SCRIPT_PATH, tmp_path)
     finally:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
 
-    # KiCad's board.Save() in the stamp subprocess emits a *default* sidecar
-    # .kicad_pro (Default netclass 0.20 mm), dropping the project's real
-    # netclasses (e.g. Power 0.30 mm). Overwrite it with the source project's
-    # .kicad_pro so the stamped board carries the true netclass clearances and
-    # patterns; otherwise FreeRouting routes power nets at the default clearance
-    # and the promoted board fails DRC against the real Power rule
-    # (illegal_routed_geometry). freerouting_runner._inject_netclass_clearances
-    # then carries these into the DSN handed to FreeRouting.
+    # board.Save() can emit a default project sidecar. Restore the authoritative
+    # source project so KRT and post-route DRC use the real netclass rules.
     try:
         src_pro = Path(pcb_path).with_suffix(".kicad_pro")
         if not src_pro.is_file():

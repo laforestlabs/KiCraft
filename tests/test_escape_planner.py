@@ -338,7 +338,7 @@ def test_planned_escapes_hold_clearance_from_each_other(aqfn_pads):
 
 
 def test_escapes_stay_short(aqfn_pads):
-    """An escape leaves the pad field; routing the net is FreeRouting's job."""
+    """An escape leaves the pad field; routing the net is the autorouter's job."""
     plan = plan_escapes(aqfn_pads, PLAN_RULES, max_escape_len_mm=2.5)
     for e in plan.escapes.values():
         length = sum(
@@ -365,9 +365,9 @@ def test_a_simple_two_pad_footprint_needs_no_plan():
 
 
 def test_fanout_via_ring_covers_the_hole_clearance_rule():
-    """The invariant that keeps FreeRouting from generating hole_clearance errors.
+    """The invariant that keeps the autorouter from generating hole_clearance errors.
 
-    FreeRouting only knows the COPPER clearance. A track it places at exactly the
+    the autorouter only knows the COPPER clearance. A track it places at exactly the
     copper rule from a fanout via's annulus sits ``clearance + ring`` from that
     via's HOLE, so unless
 
@@ -383,7 +383,7 @@ def test_fanout_via_ring_covers_the_hole_clearance_rule():
     hole_to_copper = Rules().hole_clearance_mm
     assert NETCLASS_CLEARANCE_MM + ring >= hole_to_copper, (
         f"fanout via {dia}/{drill} has a {ring:.4f} mm ring; it needs at least "
-        f"{hole_to_copper - NETCLASS_CLEARANCE_MM:.4f} mm or FreeRouting will "
+        f"{hole_to_copper - NETCLASS_CLEARANCE_MM:.4f} mm or the autorouter will "
         "route hole-clearance violations it cannot see"
     )
 
@@ -398,7 +398,7 @@ def test_capability_profile_is_within_the_verified_fab_limits():
     assert dia >= 0.25
     assert drill >= 0.15
     assert drill < dia
-    # 0.127 mm is exactly 127 um: no whole-micron DSN rounding trap.
+    # 0.127 mm is exactly 127 um: no whole-micron router exchange input rounding trap.
     assert round(floors["track_mm"] * 1000, 6) == 127.0
     assert round(floors["clearance_mm"] * 1000, 6) == 127.0
 
@@ -421,8 +421,7 @@ def test_autoplacer_defaults_track_the_capability_profile():
 
     assert DEFAULT_CONFIG["fab_capability"] == FAB_CAPABILITY
     floors = fab_floors()
-    assert DEFAULT_CONFIG["freerouting_min_clearance_mm"] == floors["clearance_mm"]
-    assert DEFAULT_CONFIG["freerouting_fine_pitch_track_mm"] == floors["track_mm"]
+    assert fab_floors(DEFAULT_CONFIG) == floors
     # Scope guard: the netclass via is NOT the fanout via.
     assert DEFAULT_CONFIG["via_size_mm"] == 0.6
     assert DEFAULT_CONFIG["via_drill_mm"] == 0.3

@@ -6,10 +6,10 @@ nothing on kicraft.io depends on it. The only thing that flows back to
 production is the winning `DEFAULT_CONFIG` (a tiny git commit you make yourself
 after reviewing the result).
 
-The container mirrors the production stack (Ubuntu 24.04 + KiCad 9.0 +
-FreeRouting 1.9.0 + Java + xvfb) so routing behaves identically, then clones the
-repo (code **and** the committed `tuning_corpus/`) into a mounted volume and runs
-`kicraft.tuning.cli run`.
+The container mirrors production: Ubuntu 24.04, KiCad 9, and KiCad Routing
+Tools source `0.20.2` at commit
+`3ceb773722bea67aa3685e7ee430c0c0d17ef38d` with native router `0.20.1`.
+It clones the KiCraft repo and runs `kicraft.tuning.cli run`.
 
 ## Prerequisites (unraid 6.12.6)
 - Docker (built in).
@@ -36,8 +36,8 @@ docker run -d --name kicraft-tune \
   -e GENS=40 -e SEEDS=0,1 -e POPSIZE=8 -e TIMEOUT=600 -e RUN_ID=i11 \
   kicraft-tune
 ```
-First start clones the repo, builds the venv, sanity-checks `pcbnew` + `cma`,
-then begins tuning. Watch it:
+First start clones KiCraft, builds its venv, preflights pcbnew, CMA-ES, and the
+pinned KRT checkout, then begins tuning. Watch it:
 ```sh
 docker logs -f kicraft-tune
 ```
@@ -61,8 +61,8 @@ docker compose logs -f
 | `SCAL` | `balanced` | objective weighting: `correctness` \| `balanced` \| `speed` |
 | `TIMEOUT` | 600 | per-eval cap (s); a board that can't route in this fails |
 | `RUN_ID` | `i11` | run name → `/data/runs/<RUN_ID>` |
-| `KICRAFT_BUILD_SLOTS` | cores/4 | concurrent evals (each is itself multi-threaded) |
-| `ACTIVE` | 8 spacing/clearance params | override the tuned param set |
+| `KICRAFT_BUILD_SLOTS` | 3/4 of host threads | concurrent evaluations |
+| `ACTIVE` | unset | optional override of the tuned parameter set |
 
 On a 16-core/24-thread i7, expect **minutes per generation** (vs hours on the
 cloud box) — so K=2 seeds and the full 16-board corpus are comfortable.
@@ -120,10 +120,7 @@ docker run --rm -v /mnt/user/appdata/kicraft-tune:/data kicraft-tune \
 ```
 
 ## Troubleshooting
-- **FreeRouting jar 404 on build** — the v1.9.0 asset URL changed; update it in
-  the Dockerfile (`freerouting/freerouting` releases).
-- **`pcbnew` import fails** — the KiCad PPA didn't install; check the build log
-  for the `add-apt-repository ppa:kicad/kicad-9.0-releases` step.
-- **Slow / timeouts** — raise `TIMEOUT`, or drop the 2-3 slowest boards by
-  setting a smaller corpus (point `--corpus` at a trimmed dir), or lower
-  FreeRouting effort. Each eval's wall-time shows in the admin "build time" chart.
+- **KRT preflight fails** — rebuild the image; the checkout must remain at
+  `3ceb773722bea67aa3685e7ee430c0c0d17ef38d`, source `0.20.2`, native `0.20.1`.
+- **`pcbnew` import fails** — verify the KiCad 9 PPA installation in the build log.
+- **Slow / timeouts** — raise `TIMEOUT` or use a smaller corpus.

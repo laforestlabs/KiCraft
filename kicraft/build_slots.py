@@ -2,7 +2,7 @@
 
 One `kicraft build` deliberately saturates the machine during place+route:
 autoexperiment fans out to min(cpu_count, 6) leaf-solver processes
-(kicraft/cli/autoexperiment.py), each launching a FreeRouting JVM with no heap
+(kicraft/cli/autoexperiment.py), each launching a KiCad Routing Tools JVM with no heap
 cap. Two unmetered builds therefore double-book every core and can OOM a small
 host. This module bounds that with N flock'd lockfiles shared by every build
 on the host (web runs, the build worker, admin self-eval batches, manual CLI

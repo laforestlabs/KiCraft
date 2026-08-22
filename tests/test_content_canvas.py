@@ -9,7 +9,7 @@ Covers:
 - the _solve_leaf_subcircuit canvas ladder: content-first, grow on failure,
   seed-bbox terminal fallback, array-leaf exemption, seed-bbox mode parity
 
-All synthetic data; no pcbnew, no FreeRouting.
+All synthetic data; no pcbnew, no the autorouter.
 """
 
 from __future__ import annotations
@@ -469,7 +469,7 @@ class TestCanvasLadder:
                 "_via_objects": [],
             }
             if idx == 0:
-                # freerouting "failed" but stamped a board -> best_routed
+                # routing "failed" but stamped a board -> best_routed
                 routing["routed_board_path"] = __file__  # any existing file
             return SolveRoundResult(
                 round_index=round_index,

@@ -35,7 +35,6 @@ from typing import get_args
 from pydantic import ValidationError
 
 from kicraft.cli import artifact_paths
-from kicraft.cli.triage import match_fr_signature as _match_fr_signature
 from kicraft.fsutil import atomic_write_text
 from kicraft.parts_library import jlcparts, lcsc_retail
 # Pure candidate predicates, imported directly (not via the swappable
@@ -4083,7 +4082,7 @@ def _run_layout(quality: str, root_sch: Path, pcb: Path,
     engines: solve-hierarchy to the leaf solver, autoexperiment as its master
     seed. `replay` always passes one, which is why it is reproducible.
 
-    ``route`` toggles FreeRouting. ``route=False`` (placement only) is honored by
+    ``route`` toggles KiCad Routing Tools. ``route=False`` (placement only) is honored by
     the solve-hierarchy (``fast``) engine -- the fast, deterministic path used to
     validate placement stability. The autoexperiment engines always route (their
     search scores rounds by routed DRC), so they ignore ``route=False``.
@@ -4187,7 +4186,7 @@ def _find_routed_parent(project_dir: Path) -> Path | None:
 
 
 def _find_placed_parent(project_dir: Path) -> Path | None:
-    """The PLACED parent board (``parent_pre_freerouting.kicad_pcb``) -- exactly
+    """The PLACED parent board (``parent_placed.kicad_pcb``) -- exactly
     what ``replay --no-route`` produces. Intent-based: it NEVER returns a routed
     board, so a placement-only run can't be handed a STALE routed board left over
     from a previous run (the bug that motivated ``artifact_paths.py``)."""
@@ -4742,13 +4741,7 @@ def build_pcb_errors(summary: dict | None, *, stage: str) -> list[PcbError]:
             list(evidence.values()) + [raw.get("report_excerpt"), raw.get("build_log_tail"),
                                        raw.get("parent_route_stderr_tail"), raw.get("solve_stderr_tail")]
         )
-        # A known FreeRouting failure signature names the REAL cause (the
-        # net-normalization hang, the watchdog kill, ...) instead of raw log
-        # fragments. The signature table lives in kicraft.cli.triage so the
-        # failure card and the triage scanner can never drift apart.
-        fr_hit = next(
-            (_match_fr_signature(str(ev)) for ev in evidence_texts if ev), None
-        )
+        # Never attach foreign or warn-only violations to a failure card.
         # Never attach foreign or warn-only violations to a failure card:
         # silk_* / minor courtyard clips cannot fail a build, and a
         # coordinate outside the failing board's outline is proof the
@@ -4763,45 +4756,20 @@ def build_pcb_errors(summary: dict | None, *, stage: str) -> list[PcbError]:
             + missing_refs,
             40,
         )
-        if fr_hit is not None:
-            name, line = fr_hit
-            if name == "locked_wire_loop_hang":
-                net_m = re.search(r"net\s+['\"]([^'\"]+)['\"]", line) if line else None
-                explanation = (
-                    f"The autorouter froze while reading the locked power wiring "
-                    f"on net {net_m.group(1)} and was killed at the timeout. "
-                    f"This is a pipeline bug, not something wrong with the design."
-                    if net_m else
-                    "The autorouter froze while reading a net's locked wiring "
-                    "and was killed at the timeout. This is a pipeline bug, "
-                    "not something wrong with the design."
-                )
-            else:
-                explanation = (
-                    f"The autorouter failed with a known FreeRouting failure "
-                    f"signature ({name}). This is a pipeline bug, not something "
-                    f"wrong with the design."
-                )
-            details = [line] if line else [f"Evidence: {name}"]
-            next_action = (
-                "No design change is needed; this is a routing-toolchain failure. "
-                "Retry the build."
-            )
-        else:
-            explanation = (
-                "The place/route pipeline failed before it produced a trustworthy DRC location. "
-                "No precise PCB location is available from the recorded evidence."
-                if stage == "place_route" else
-                "PCB verification rejected the produced board, but the recorded evidence has no specific DRC category. "
-                "No precise PCB location is available."
-            )
-            evidence_lines = _unique_evidence_lines(evidence_texts, 8)
-            details = evidence_lines or ["No bounded DRC location was recorded."]
-            next_action = (
-                "Inspect the routing evidence and retry place/route."
-                if stage == "place_route" else
-                "Inspect the board and rerun verification after correcting the reported failure."
-            )
+        explanation = (
+            "The place/route pipeline failed before it produced a trustworthy DRC location. "
+            "No precise PCB location is available from the recorded evidence."
+            if stage == "place_route" else
+            "PCB verification rejected the produced board, but the recorded evidence has no specific DRC category. "
+            "No precise PCB location is available."
+        )
+        evidence_lines = _unique_evidence_lines(evidence_texts, 8)
+        details = evidence_lines or ["No bounded DRC location was recorded."]
+        next_action = (
+            "Inspect the routing evidence and retry place/route."
+            if stage == "place_route" else
+            "Inspect the board and rerun verification after correcting the reported failure."
+        )
         if violations and not fallback_violations:
             # The only recorded violations were warn-only or off-board -- a
             # foreign frame. Say so instead of showing a fake location.
@@ -4980,7 +4948,7 @@ def _verify_routed_board(pcb: Path) -> dict:
         classify_courtyard_overlaps,
         measure_courtyard_overlaps,
     )
-    from kicraft.autoplacer.freerouting_runner import validate_routed_board
+    from kicraft.autoplacer.routing_board import validate_routed_board
 
     v = validate_routed_board(str(pcb), cfg=dict(DEFAULT_CONFIG))
     drc = v.get("drc", {}) or {}
@@ -5124,48 +5092,6 @@ def _missing_component_refs(expected_refs, board_refs) -> list[str]:
     return sorted(r for r in expected_refs if r not in board)
 
 
-def _lower_project_netclass_clearance(pro_path: Path, clearance_mm: float) -> bool:
-    """Cap every netclass clearance in a ``.kicad_pro`` at ``clearance_mm``.
-
-    kicad-cli DRC enforces netclass clearances from the project file (not the
-    board), so this is the store that must match the clearance the board was
-    routed to. Only lowers, never widens. Returns True if anything changed."""
-    try:
-        data = json.loads(pro_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    classes = (data.get("net_settings") or {}).get("classes") or []
-    changed = False
-    for c in classes:
-        if isinstance(c, dict) and float(c.get("clearance", 0) or 0) > clearance_mm:
-            c["clearance"] = clearance_mm
-            changed = True
-    if changed:
-        try:
-            pro_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        except OSError:
-            return False
-    return changed
-
-
-def _align_project_clearance_to_routing(project_dir: Path, stem: str, pcb: Path) -> None:
-    """Bring the project's netclass clearances down to the fine-pitch clearance
-    the board was routed to, so the verify gate's DRC validates against the same
-    rule FreeRouting used. No-op when the board did not need a fine-pitch lower
-    (``_resolve_fine_pitch_rule`` returns None). See freerouting_runner."""
-    try:
-        from kicraft.autoplacer.config import DEFAULT_CONFIG
-        from kicraft.autoplacer.freerouting_runner import _resolve_fine_pitch_rule
-
-        clearance_um, _ = _resolve_fine_pitch_rule(str(pcb), dict(DEFAULT_CONFIG))
-    except Exception:  # noqa: BLE001 -- best-effort; keep the original rule on error
-        return
-    if clearance_um is None:
-        return
-    clearance_mm = round(clearance_um / 1000.0, 4)
-    if _lower_project_netclass_clearance(project_dir / f"{stem}.kicad_pro", clearance_mm):
-        print(f"[build]     lowered project netclass clearance(s) to {clearance_mm} mm "
-              "to match the fine-pitch routing")
 
 
 def _maybe_electrical_review(state, project_dir: Path) -> dict:
@@ -5360,6 +5286,7 @@ def run_silk_plan_authoring(state_path: Path, project_dir: Path, progress,
     if state is None or state.bom is None or not state.bom.parts:
         return skipped
     from kicraft.design.models import SilkPlan
+    from kicraft.design.synthesis.silk_plan import uncovered_connectors
 
     t0 = time.monotonic()
     total_cost = 0.0
@@ -5400,10 +5327,11 @@ def run_silk_plan_authoring(state_path: Path, project_dir: Path, progress,
                 title = res["title"]
                 kept, dropped = lint_labels(res["labels"], state,
                                             project_root=project_dir)
-
+        uncovered = uncovered_connectors(kept, state)
         state.silk_plan = SilkPlan(
             title=title or None, board_code=board_code, labels=kept,
-            dropped_at_lint=dropped, author_model=author_model,
+            dropped_at_lint=dropped, uncovered_connectors=uncovered,
+            author_model=author_model,
             cost_usd=round(total_cost, 6),
         )
         state.stage_status["silk_plan"] = StageStatus(
@@ -5418,6 +5346,9 @@ def run_silk_plan_authoring(state_path: Path, project_dir: Path, progress,
         for reason in dropped:
             progress({"kind": "build_log",
                       "text": f"[build]     silk plan lint dropped {reason}"})
+        for ref in uncovered:
+            progress({"kind": "build_log",
+                      "text": f"[build]     silk plan: connector {ref} has no label"})
         return {"ran": llm_enabled, "labels": len(kept), "cost_usd": total_cost}
     except (Exception, SystemExit) as e:  # noqa: BLE001 - never block the build
         progress({"kind": "build_log",
@@ -5614,10 +5545,6 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     )
     print(f"[build] 3/5 promoted routed parent -> {pcb.name}")
 
-    # Align the project's netclass clearances with the (possibly fine-pitch
-    # lowered) clearance the board was routed to, so the verify gate validates
-    # against the rule FreeRouting actually used, not a wider declared one.
-    _align_project_clearance_to_routing(project_dir, stem, pcb)
 
     # 3a. Silkscreen legend + authored labels. Runs on the promoted board
     # AFTER routing/pour are final and BEFORE the verify gate, so the DRC
@@ -5888,6 +5815,24 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     return 0
 
 
+def _preflight_project_router(project_dir: Path) -> dict[str, str]:
+    """Preflight the pinned KRT runtime using the project's merged config."""
+    from kicraft.autoplacer.config import (
+        DEFAULT_CONFIG,
+        discover_project_config,
+        load_project_config,
+    )
+    from kicraft.autoplacer.kicad_routing_tools import (
+        preflight_kicad_routing_tools,
+    )
+
+    cfg = dict(DEFAULT_CONFIG)
+    config_path = discover_project_config(project_dir)
+    if config_path is not None:
+        cfg.update(load_project_config(config_path))
+    return preflight_kicad_routing_tools(cfg)
+
+
 def _cmd_manual_route(args: argparse.Namespace) -> int:
     """Route + promote a saved manual layout, end to end.
 
@@ -5953,8 +5898,14 @@ def _cmd_manual_route(args: argparse.Namespace) -> int:
             autoplacer_json=project_dir / f"{stem}_autoplacer.json",
         )
 
+    try:
+        _preflight_project_router(project_dir)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 6
+
     with build_slot(echo=lambda line: print(line, flush=True)):
-        print("[build] 2/5 route the saved manual layout (FreeRouting) -- "
+        print("[build] 2/5 autoroute the saved manual layout (KRT) -- "
               "may take minutes ...")
         cmd = [
             sys.executable, "-m", "kicraft.cli.compose_subcircuits",
@@ -5995,7 +5946,7 @@ def _write_manual_route_result(project_dir: Path, *, rc: int, stage: str,
 
     payload = {
         "rc": int(rc),
-        # 'route' = FreeRouting/compose failed; 'verify' = routed but the
+        # 'route' = KiCad Routing Tools/compose failed; 'verify' = routed but the
         # fab gate rejected it; 'ok' = fab-ready.
         "stage": stage,
         "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -6126,17 +6077,9 @@ def _cmd_build_impl(args: argparse.Namespace) -> int:
         )
         return 6
 
-    # Preflight the routing toolchain (Java + FreeRouting jar) so a misconfigured
-    # host fails immediately with an actionable message instead of after the
-    # minutes-long placement that then can't route ("board not routable as placed").
-    from kicraft.autoplacer.freerouting_runner import (
-        FreeroutingUnavailableError,
-        preflight_routing_toolchain,
-    )
-
     try:
-        preflight_routing_toolchain()
-    except FreeroutingUnavailableError as exc:
+        _preflight_project_router(project_dir)
+    except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         _persist_pcb_diagnostics(
             state, state_path, artifacts, stem, project_dir,
@@ -6146,8 +6089,8 @@ def _cmd_build_impl(args: argparse.Namespace) -> int:
         )
         return 6
 
-    # 2..5 saturate the host (parallel leaf solvers + FreeRouting JVMs), so they
-    # run under a host-wide build slot; the wait line below is the queue signal
+    # 2..5 saturate the host with parallel leaf solvers and router subprocesses,
+    # so they run under a host-wide build slot.
     # callers (build worker, web log tail) key their timeouts and UI off.
     from kicraft.build_slots import build_slot
 
@@ -6209,7 +6152,7 @@ def _layout_route_fab(args, state, state_path, artifacts, results,
         return 6
 
     if not route:
-        # Placement-only: promote the placed (pre-freerouting) parent so the
+        # Placement-only: promote the placed (pre-routing) parent so the
         # positions are inspectable, but skip the routed-board verify/fab tail.
         placed = _find_placed_parent(project_dir)
         if placed is None:
@@ -6283,7 +6226,7 @@ def _pin_deterministic_placement_env() -> None:
     the force solver. ``setdefault`` so an explicitly-set value (e.g. to probe
     salt-robustness) is honored. The placement runs in child processes that read
     these at startup, so setting them on the parent here is sufficient; routing
-    (FreeRouting) remains best-effort-stable regardless."""
+    (KiCad Routing Tools) remains best-effort-stable regardless."""
     os.environ.setdefault("PYTHONHASHSEED", "0")
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                 "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
@@ -6486,14 +6429,9 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     sch_before = root_sch.read_bytes()
 
     if args.route:
-        from kicraft.autoplacer.freerouting_runner import (
-            FreeroutingUnavailableError,
-            preflight_routing_toolchain,
-        )
-
         try:
-            preflight_routing_toolchain()
-        except FreeroutingUnavailableError as exc:
+            _preflight_project_router(project_dir)
+        except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 6
 
@@ -7091,7 +7029,7 @@ def main(argv: list[str] | None = None) -> int:
             "already-synthesized workspace WITHOUT re-running synthesis, so a "
             "code change produces a reproducible board against a frozen input. "
             "Determinism is guaranteed for placement (pinned --seed); routing "
-            "(FreeRouting) is best-effort-stable. Use --no-route for a fast, "
+            "(KiCad Routing Tools) is best-effort-stable. Use --no-route for a fast, "
             "fully deterministic placement-only check."
         ),
     )

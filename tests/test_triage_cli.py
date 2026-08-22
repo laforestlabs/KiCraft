@@ -145,27 +145,9 @@ def test_build_done_ok_wins_over_dirty_round(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# FreeRouting fingerprints
+# the autorouter fingerprints
 # ---------------------------------------------------------------------------
 
-def test_fr_watchdog_and_loop_hang_fingerprints(tmp_path):
-    _run, _sd, exp = make_run(tmp_path)
-    _write(exp / "rounds" / "round_0001.json", {"logs": {
-        "parent_route_stdout_tail":
-            "The normalization of net 'P5V' failed.\n"
-            "  [dsn-sanitize] opened 1 locked-wire cycle(s)\n"
-            "  fine-pitch routing rule (clearance 0.153mm from J7)\n",
-        "parent_route_stderr_tail": "",
-    }})
-    _write(exp / "subcircuits" / "subcircuit__deadbeef" / "debug.json",
-           {"routing_result": {"freerouting_stats": {
-               "returncode": -1, "_raw_stdout": "x" * 100}}})
-    fr = triage.collect_fr_fingerprints(exp)
-    assert fr["watchdog_killed"] is True
-    sigs = fr["round_signatures"]["round_0001"]
-    assert "locked_wire_loop_hang" in sigs
-    assert "dsn_sanitize_cycles" in sigs
-    assert fr["fine_pitch_rule_lines"] and "0.153" in fr["fine_pitch_rule_lines"][0]
 
 
 # ---------------------------------------------------------------------------
@@ -249,20 +231,14 @@ def test_compact_routed_validation_keeps_repair_evidence():
         "accepted": False,
         "rejection_reasons": ["unconnected_nets"],
         "drc": {"unconnected": 1, "report_text": "x" * 5000},
-        "power_first": {"nets": ["+5V"]},
         "post_route_repairs": {"gnd_islands": {}},
         "signal_unconnected_repair": {"ran": True},
         "illegal_geometry_repair": {"ran": True},
-        "freerouting_returncode": -1,
     }
     out = _compact_routed_validation(full)
-    for k in ("power_first", "post_route_repairs", "signal_unconnected_repair",
+    for k in ("post_route_repairs", "signal_unconnected_repair",
               "illegal_geometry_repair"):
         assert k in out, f"compactor dropped repair-evidence key {k}"
-    # the watchdog fingerprint must survive compaction (P3)
-    assert out.get("freerouting_returncode") == -1, (
-        "compactor dropped freerouting_returncode — scan can no longer count "
-        "watchdog-killed rounds corpus-wide")
     assert "report_text" not in out["drc"]
 
 

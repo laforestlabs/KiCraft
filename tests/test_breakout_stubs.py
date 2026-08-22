@@ -308,7 +308,7 @@ def test_perimeter_tie_direct_when_only_same_net_pads_between(tmp_path):
     # nothing foreign between the farthest pair. A same-net pad is a landing,
     # not an obstacle, so the tie must be the straight pad-to-pad segment --
     # not a perimeter walk (which, with the pad row near the board edge, used
-    # to stamp locked copper off the board and hang FreeRouting).
+    # to stamp locked copper off the board and hang the autorouter).
     path = str(tmp_path / "b.kicad_pcb")
     _board(
         path,
@@ -331,7 +331,7 @@ def test_perimeter_tie_walk_is_clamped_onto_the_board(tmp_path):
     # Power pads near the top board edge with a foreign pad between them: the
     # unclamped walk rectangle (pad field + margin) pokes past the outline, so
     # the old walk stamped locked copper off the board -- which hangs
-    # FreeRouting. The walk must instead be clamped inside the outline while
+    # the autorouter. The walk must instead be clamped inside the outline while
     # still clearing every pad.
     path = str(tmp_path / "b.kicad_pcb")
     _board(
@@ -367,7 +367,7 @@ def test_perimeter_tie_walk_is_clamped_onto_the_board(tmp_path):
 
 def test_waypoint_spec_leaving_board_is_dropped(tmp_path):
     # Hard invariant at the stamp choke point: locked copper outside the board
-    # outline hangs FreeRouting, so a spec with an off-board waypoint is
+    # outline hangs the autorouter, so a spec with an off-board waypoint is
     # skipped entirely -- whatever generated it.
     path = str(tmp_path / "b.kicad_pcb")
     _board(path, (5.0, 10.0), {"B5": ("CC2", 8.0, 10.0)})
@@ -795,6 +795,28 @@ def test_foreign_pad_margins_strict_same_fp(tmp_path):
                       _own_clearance_mm(pads["B5"], pcbnew.F_Cu, 0.153),
                       _own_clearance_mm(pads["B6"], pcbnew.F_Cu, 0.153))
     assert strict[0][1] == pcbnew.FromMM(pair + 0.0765) and pair > 0.163
+
+
+def test_foreign_pad_margins_cover_mechanical_hole_overhang(tmp_path):
+    from kicraft.autoplacer.brain.breakout_stubs import _foreign_pad_margins
+
+    path = str(tmp_path / "shield.kicad_pcb")
+    _shield_board(path)
+    board = pcbnew.LoadBoard(path)
+    pads = {p.GetNumber(): p for fp in board.GetFootprints() for p in fp.Pads()}
+    mechanical = pads["M"]
+    mechanical.SetSize(pcbnew.VECTOR2I(_mm(1.0), _mm(1.0)))
+    mechanical.SetDrillSize(pcbnew.VECTOR2I(_mm(1.2), _mm(1.2)))
+    obstacles, _ = _foreign_pad_margins(
+        board,
+        pads["A4"],
+        floor_mm=0.153,
+        half_width_mm=0.0765,
+        layer_id=pcbnew.F_Cu,
+        hole_clearance_mm=0.25,
+    )
+    margins = {pad.GetNumber(): margin for pad, margin in obstacles}
+    assert margins["M"] == pcbnew.FromMM(0.25 + 0.1 + 0.0765)
 
 
 def test_tip_via_near_same_net_via_is_skipped_or_blocked(tmp_path):

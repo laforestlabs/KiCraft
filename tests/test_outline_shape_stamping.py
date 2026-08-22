@@ -1,24 +1,13 @@
-"""Shaped board outlines must reach Edge.Cuts and the FreeRouting DSN.
+"""Shaped board outlines must reach native KiCad Edge.Cuts geometry.
 
-Drives the REAL parent stamp subprocess
-(``kicraft/cli/_parent_stamp_subprocess.py``) with a payload carrying
-an ``outline.polyline`` (the new non-rect branch) and asserts:
-
-1. the stamped board's Edge.Cuts is exactly that closed polyline (one
-   segment per vertex, endpoints chained);
-2. ``export_dsn`` (pcbnew.ExportSpecctraDSN) carries the polygonal
-   boundary through to FreeRouting -- the DSN boundary path has the
-   polyline's vertex count, not a rectangle's 4.
-
-Also pins the legacy default: no ``polyline`` key still stamps the
-4-segment rectangle.
+Drives the real parent stamp subprocess with polygonal and rectangular
+outlines and checks the persisted board geometry.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
 
 import pytest
@@ -26,10 +15,7 @@ import pytest
 pcbnew = pytest.importorskip("pcbnew")
 
 from kicraft.autoplacer.brain.types import Point  # noqa: E402
-from kicraft.autoplacer.freerouting_runner import (  # noqa: E402
-    _run_pcbnew_script_file,
-    export_dsn,
-)
+from kicraft.autoplacer.routing_board import run_pcbnew_script_file  # noqa: E402
 from kicraft.cli.compose_subcircuits import _PARENT_STAMP_SCRIPT_PATH  # noqa: E402
 from kicraft.layout_editor.outline import OutlineSpec  # noqa: E402
 
@@ -53,7 +39,7 @@ def _stamp(payload: dict) -> None:
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(payload, f)
-        _run_pcbnew_script_file(_PARENT_STAMP_SCRIPT_PATH, tmp)
+        run_pcbnew_script_file(_PARENT_STAMP_SCRIPT_PATH, tmp)
     finally:
         os.unlink(tmp)
 
@@ -138,32 +124,3 @@ def test_no_polyline_key_keeps_legacy_rectangle():
     assert len(segs) == 4
 
 
-def test_circle_boundary_reaches_dsn():
-    """The DSN boundary FreeRouting sees must be the circle polygon."""
-    spec = _circle_spec()
-    polyline = [[p.x, p.y] for p in spec.polyline()]
-    with tempfile.TemporaryDirectory() as d:
-        src = os.path.join(d, "src.kicad_pcb")
-        out = os.path.join(d, "circle.kicad_pcb")
-        _make_source_board(src)
-        payload = _base_payload(src, out)
-        payload["outline"] = {
-            "tl_x": 0.0, "tl_y": 0.0, "br_x": 50.0, "br_y": 50.0,
-            "polyline": polyline,
-        }
-        _stamp(payload)
-
-        dsn_path = os.path.join(d, "circle.dsn")
-        export_dsn(out, dsn_path)
-        dsn = open(dsn_path, encoding="utf-8").read()
-
-    m = re.search(r"\(boundary\s*\(path\s+pcb\s+[\d.]+([^)]*)\)", dsn)
-    assert m, "DSN has no boundary path"
-    coords = m.group(1).split()
-    n_vertices = len(coords) // 2
-    # A rectangle boundary would have ~5 vertices (closed); the circle
-    # polyline has dozens. Require well above rectangle count.
-    assert n_vertices >= len(polyline) // 2, (
-        f"DSN boundary has only {n_vertices} vertices; the circle "
-        f"polyline has {len(polyline)} -- the shape did not survive export"
-    )

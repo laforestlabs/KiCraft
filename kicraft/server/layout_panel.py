@@ -284,7 +284,7 @@ class LayoutEditorPanel:
                     "border:1px solid #b91c1c;background:#450a0a"):
                 if last_route.get("stage") == "route":
                     ui.label(
-                        "Last routing attempt failed: FreeRouting could not "
+                        "Last routing attempt failed: KiCad Routing Tools could not "
                         "route this arrangement. Give the connections more "
                         "room -- spread blocks apart along their net lines, "
                         "or grow the board outline."
@@ -343,7 +343,7 @@ class LayoutEditorPanel:
                 if self._missing_leaves or not self.saved_layout_path().is_file():
                     self._route_btn.disable()
                 self._route_btn.tooltip(
-                    "Routes the saved layout with FreeRouting through the "
+                    "Routes the saved layout with KiCad Routing Tools through the "
                     "build queue (minutes), then verifies it and rebuilds "
                     "the fab package."
                 )
@@ -522,7 +522,7 @@ class LayoutEditorPanel:
             return None
         candidates = [
             f for d in sub.iterdir() if d.is_dir()
-            for f in [d / "parent_pre_freerouting.kicad_pcb"] if f.is_file()
+            for f in [d / "parent_placed.kicad_pcb"] if f.is_file()
         ]
         if not candidates:
             return None

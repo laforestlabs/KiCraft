@@ -15,7 +15,7 @@ There is intentionally **no** `.kicraft/state.json` next to it, so the test
 drives the `replay --project DIR` discovery path (no state needed).
 
 The deterministic-placement test compares the per-leaf
-`leaf_pre_freerouting.kicad_pcb` boards across two runs — that is the placement
+`leaf_placed.kicad_pcb` boards across two runs — that is the placement
 output, which `replay` guarantees is reproducible (pinned seed + hash seed).
 
 ## `.experiments/subcircuits/` — frozen leaf artifacts (parent corpus)

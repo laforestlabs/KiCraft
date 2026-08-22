@@ -2,7 +2,7 @@
 
 Before the fix, ``write_empty_pcb`` populated footprints + nets but never
 drew ``Edge.Cuts``, so the seed board's edge bbox was ``0x0``. compose then
-under-sized the parent and FreeRouting produced no SES. This test asserts the
+under-sized the parent and the autorouter produced no routed session. This test asserts the
 synthesized PCB has a non-zero outline that encloses every footprint.
 
 Requires pcbnew + the KiCad stock footprint libraries (the repo .venv has

@@ -297,7 +297,7 @@ async def run_manual_compose(
             # The awaiting task was cancelled (layout_panel's wait_for stamp
             # timeout): kill the whole compose process group -- pcbnew /
             # kicad-cli children included -- or the orphan keeps writing
-            # parent_pre_freerouting.kicad_pcb / manual_stamped.json into the
+            # parent_placed.kicad_pcb / manual_stamped.json into the
             # workspace, racing the next save/stamp or queued build.
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)

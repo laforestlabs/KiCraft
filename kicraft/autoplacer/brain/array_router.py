@@ -2,7 +2,7 @@
 
 A dense, regular array -- e.g. a 5x10 grid of 1515 WS2812 LEDs at 3 mm pitch,
 daisy-chained DOUT -> DIN -- is the one case where handing the whole leaf to a
-gridless autorouter is the wrong tool. FreeRouting routes the array's data chain
+gridless autorouter is the wrong tool. KiCad Routing Tools routes the array's data chain
 net by net and, in the ~1.5 mm channels between neighbouring LEDs (which also
 carry power), abandons a handful of hops -- leaving the leaf with unconnected
 signal nets that fail the strict ``no_unconnected`` gate, a *different* few hops
@@ -12,8 +12,8 @@ But the chain is trivial geometry: ``ArraySpec.refs`` are listed in data-chain
 order and ``place_array_leaves`` fills the grid (serpentine) in that order, so
 every hop is between two physically adjacent members. This module emits one
 short, locked pad-to-pad tie per hop, reusing the proven ``breakout_stubs``
-stamping primitive and its foreign-pad / copper guards. A subsequent FreeRouting
-pass run with ``freerouting_preserve_existing_copper=True`` keeps those ties and
+stamping primitive and its foreign-pad / copper guards. A subsequent KiCad Routing Tools
+pass run with ``routing_preserve_existing_copper=True`` keeps those ties and
 only has to route what's left (the chain entry through the data resistor, the
 header), while the +5V / GND pours deliver power so the inter-LED channels carry
 only data.
@@ -89,7 +89,7 @@ def _turn_hop_spec(
     fp_a, fp_b, ref_a, pad_a, src_mm, tgt_mm, inner_box, layer, width, cfg,
 ) -> "BreakoutSpec | None":
     """An L/Z edge-channel tie for a serpentine row-turn hop, or ``None`` when
-    the board is too tight to route one (caller then leaves it to FreeRouting).
+    the board is too tight to route one (caller then leaves it to KiCad Routing Tools).
 
     The turn members sit in the same row-end column against a board edge, so a
     straight DOUT->DIN tie would graze the LEDs' own +5V/GND pads and the
@@ -98,7 +98,7 @@ def _turn_hop_spec(
     then back IN -- a path that clears every foreign pad.
     """
     if inner_box is None:
-        return None  # no outline: off-board locked copper hangs FreeRouting 1.9.0
+        return None  # no outline: off-board locked copper hangs KiCad Routing Tools 1.9.0
     bx1, by1, bx2, by2 = inner_box
     sx, sy = src_mm
     tx, ty = tgt_mm
@@ -107,14 +107,14 @@ def _turn_hop_spec(
     # The channel must clear not just the row-end LEDs' bodies but their GND/power
     # pad ESCAPE stubs, which reach ~1 mm into the edge margin -- hence a full-mm
     # default gap, not a hair past the courtyard (a tighter channel collides with
-    # those escapes and the hop falls back to FreeRouting).
+    # those escapes and the hop falls back to KiCad Routing Tools).
     gap = float(cfg.get("array_turn_channel_gap_mm", 1.0))
     offset = max(_fp_half_width_mm(fp_a), _fp_half_width_mm(fp_b)) + gap
     mid_x = (bx1 + bx2) / 2.0
     if col_x >= mid_x:  # row end against the RIGHT edge -> channel to the right
         channel_x = min(col_x + offset, bx2)
         if channel_x <= max(sx, tx):
-            return None  # no room to clear the pads -> hand to FreeRouting
+            return None  # no room to clear the pads -> hand to KiCad Routing Tools
     else:  # against the LEFT edge -> channel to the left
         channel_x = max(col_x - offset, bx1)
         if channel_x >= min(sx, tx):
@@ -140,7 +140,7 @@ def array_daisy_chain_specs(
     two distinct array members -- which, for an addressable-LED matrix, is
     exactly each ``Dn.DOUT -> D(n+1).DIN`` link. Power/ground nets are left to
     the pours; nets touching a non-member (the chain entry through the data
-    resistor, the header) are left to FreeRouting. The stamp-time guards in
+    resistor, the header) are left to KiCad Routing Tools. The stamp-time guards in
     :func:`breakout_stubs.add_breakout_stubs` drop any tie whose straight path
     would cross foreign copper, so a hop the geometry doesn't allow is simply
     handed back to the autorouter -- never shorted.
@@ -196,7 +196,7 @@ def array_daisy_chain_specs(
         # reverses the fill, so they share the row-end column against a board
         # edge). Its straight DOUT->DIN tie would graze the LEDs' own power pads
         # and get dropped -> route it round the edge channel instead so the data
-        # net is 100% kicraft-stamped (no FreeRouting vias on the chain).
+        # net is 100% kicraft-stamped (no KiCad Routing Tools vias on the chain).
         cols = cols_by_ref.get(ref_a) or cols_by_ref.get(ref_b)
         is_turn = bool(cols) and (order[ref_a] // cols) != (order[ref_b] // cols)
         if is_turn and turn_routing:
@@ -205,7 +205,7 @@ def array_daisy_chain_specs(
                 src_mm, tgt_mm, inner_box, layer, width, cfg,
             )
             if spec is None:
-                # No edge channel fits -> leave THIS hop to FreeRouting (do NOT
+                # No edge channel fits -> leave THIS hop to KiCad Routing Tools (do NOT
                 # stamp a straight tie that the guard would drop anyway). Logged
                 # below so the hand-off is never silent.
                 skipped_turns += 1
@@ -216,8 +216,8 @@ def array_daisy_chain_specs(
         # In-row hop: a short straight same-net tie across the inter-component
         # channel. The stamp-time guards in :func:`breakout_stubs.add_breakout_stubs`
         # drop any tie whose straight path would still cross a foreign pad,
-        # handing just that one back to FreeRouting -- never a short. Escapes were
-        # tried here and measurably HURT (locked clutter raised FreeRouting's
+        # handing just that one back to KiCad Routing Tools -- never a short. Escapes were
+        # tried here and measurably HURT (locked clutter raised KiCad Routing Tools's
         # abandoned-net count); ties-only is the validated win.
         ties.append((order[ref_a], BreakoutSpec(
             ref=ref_a, pad=pad_a.GetNumber(),
@@ -228,7 +228,7 @@ def array_daisy_chain_specs(
 
     if skipped_turns:
         print(
-            f"  array-router: {skipped_turns} row-turn hop(s) left to FreeRouting "
+            f"  array-router: {skipped_turns} row-turn hop(s) left to KiCad Routing Tools "
             "(no edge channel fits inside the board outline)"
         )
     ties.sort(key=lambda item: item[0])
@@ -247,17 +247,17 @@ def array_ring_power_specs(
     ``array_placement._place_ring_band_decaps``, which parks it exactly on the
     chord's sagitta radius) -- CLOSED, so one or two guard-dropped ties cannot
     disconnect the bus. Stamping it makes power deterministic and leaves
-    FreeRouting no reason to dip INTO the ring interior, which shaped-compose
+    KiCad Routing Tools no reason to dip INTO the ring interior, which shaped-compose
     nesting needs clear (docs/plans/shaped-compose-leaf-nesting.md, PR-N5).
     Each gap decap's GND pad also gets a short tangential stub with a via down
     to the B.Cu pour. Member GND ties are deliberately NOT stamped: LED GND
-    pads sit on the ring's outer corner, where FreeRouting's shortest paths
+    pads sit on the ring's outer corner, where KiCad Routing Tools's shortest paths
     never enter the interior, and the pours own GND.
 
     Returned SEPARATELY from the daisy-chain data ties so the array stamp
     gate keeps measuring in-row DATA hops only; the ``add_breakout_stubs``
     foreign-pad / copper guards stay the honesty layer (a tie they drop is
-    handed to FreeRouting, loudly, via the leaf_routing skipped log).
+    handed to KiCad Routing Tools, loudly, via the leaf_routing skipped log).
     """
     cfg = cfg or {}
     if not cfg.get("array_ring_power_bus", True):
@@ -371,7 +371,7 @@ def array_ring_power_specs(
                     width_mm=width, layer=layer, near_xy=dxy,
                 ))
                 # GND: a short tangential stub + via down to the pour, so the
-                # decap's ground never pulls FreeRouting into the interior.
+                # decap's ground never pulls KiCad Routing Tools into the interior.
                 gxy = _mm_xy(d_gnd.GetPosition())
                 t = math.radians(d_ang + 90.0)
                 specs.append(BreakoutSpec(

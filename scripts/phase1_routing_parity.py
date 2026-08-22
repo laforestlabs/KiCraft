@@ -5,7 +5,7 @@ N-of-3 medians, packer ON vs OFF, per design. $0 (no LLM). Leaf-level
 solve+route only (the packer touches leaf placement; parent compose is
 untouched). For each design we stage a fresh copy per variant, run
 ``solve_subcircuits.py --route`` at 3 seeds, and compare the MEDIAN total
-unconnected pads (and routed-leaf count) on vs off. FreeRouting is only
+unconnected pads (and routed-leaf count) on vs off. KiCad Routing Tools is only
 best-effort-stable, so the median across seeds is the honest signal — a single
 run is noise.
 

@@ -84,7 +84,7 @@ def test_best_leaf_tier_order(tmp_path):
     root = tmp_path / ".experiments" / "subcircuits"
     assert ap.resolve_best_leaf_board(tmp_path) is None
     _touch(root / "leafX" / ap.LEAF_ILLEGAL)
-    _touch(root / "leafX" / "round_0000_leaf_pre_freerouting.kicad_pcb")
+    _touch(root / "leafX" / "round_0000_leaf_placed.kicad_pcb")
     routed = _touch(root / "leafX" / "round_0000_leaf_routed.kicad_pcb")
     assert ap.resolve_best_leaf_board(tmp_path) == routed
 

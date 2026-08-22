@@ -1,7 +1,7 @@
 """Slow end-to-end check: a real replay eval on a committed fixture.
 
 Skipped unless ``KICRAFT_TUNING_INTEGRATION=1`` because it runs a full
-place+route (FreeRouting; minutes). It validates the subprocess plumbing the
+place+route (the autorouter; minutes). It validates the subprocess plumbing the
 whole tuner stands on: scratch prep, config-overlay injection, the replay
 subprocess, and routed-reward extraction.
 

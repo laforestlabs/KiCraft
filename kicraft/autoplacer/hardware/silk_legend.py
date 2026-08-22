@@ -78,6 +78,16 @@ def build_label_payload(state) -> list[dict]:
     out = []
     for lb in plan.labels:
         anchor = lb.anchor
+        if lb.kind == "pinout":
+            out.append({
+                "id": lb.id,
+                "kind": "pinout",
+                "ref": getattr(anchor, "ref", None) if anchor else None,
+                "pins": [{"pin": p.pin, "text": _ascii(p.text)} for p in lb.pins],
+                "priority": lb.priority,
+                "heights_mm": [0.8],
+            })
+            continue
         out.append({
             "id": lb.id,
             "text": _ascii(lb.text),
@@ -96,7 +106,7 @@ def apply_silk_legend(pcb_path: Path, state, *, today: str | None = None) -> dic
     on subprocess failure — the caller (build tail) treats silk as
     best-effort and must wrap this call.
     """
-    from kicraft.autoplacer.freerouting_runner import _run_pcbnew_script_file
+    from kicraft.autoplacer.routing_board import run_pcbnew_script_file
 
     payload = {
         "pcb_path": str(pcb_path),
@@ -111,7 +121,7 @@ def apply_silk_legend(pcb_path: Path, state, *, today: str | None = None) -> dic
         result_path = Path(td) / "result.json"
         payload["result_path"] = str(result_path)
         payload_path.write_text(json.dumps(payload))
-        _run_pcbnew_script_file(str(_SCRIPT), str(payload_path))
+        run_pcbnew_script_file(str(_SCRIPT), str(payload_path))
         if not result_path.is_file():
             raise RuntimeError("silk legend subprocess wrote no result")
         return json.loads(result_path.read_text())

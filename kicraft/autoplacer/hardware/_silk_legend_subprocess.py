@@ -18,7 +18,7 @@ Output: result JSON at ``payload["result_path"]`` with::
      "dropped": [{"id", "reason"}]}
 
 plus the ``__KICRAFT_PCBNEW_OK__`` sentinel on stdout after a successful
-board save (must match ``freerouting_runner._PCBNEW_OK_SENTINEL``).
+board save (must match ``routing_board._PCBNEW_OK_SENTINEL``).
 """
 
 from __future__ import annotations
@@ -226,6 +226,17 @@ class _Placer:
             "layer": "F.SilkS" if side == "F" else "B.SilkS",
         })
 
+    def _clamped(self, tx: float, ty: float, w: float, h: float):
+        # Overhang connectors put their courtyard/pad bbox partly OFF the
+        # board, pushing every bbox-relative alignment off with it. Slide the
+        # candidate back inside; the side semantics survive (a below-the-pin
+        # label stays below, shifted along the edge) and _spot_ok still
+        # rejects anything that truly clashes.
+        left, top, right, bottom = self.board_box
+        m = self.edge_margin
+        return (min(max(tx, left + m), right - m - w),
+                min(max(ty, top + m), bottom - m - h))
+
     # -- legend (edge-anchored block) ----------------------------------------
     def place_legend(self, lines: list[dict], gap_mm: float) -> bool:
         """Stack of text lines placed as one block along the bottom (then
@@ -353,6 +364,103 @@ class _Placer:
                         return
         self.dropped.append({"id": label_id, "reason": "no clear space on silk"})
 
+    def place_pinout(self, label: dict) -> None:
+        """One short text beside each pin of a connector. Each entry is placed
+        independently against its own pad bbox (outward from the body
+        centroid) and committed as its own obstacle, so later pins and labels
+        avoid it. A pin that cannot fit drops alone, never the whole label."""
+        label_id = label.get("id") or "label"
+        ref = label.get("ref")
+        fp = self.board.FindFootprintByReference(ref) if ref else None
+        if not ref or fp is None:
+            self.dropped.append(
+                {"id": label_id, "reason": f"anchor {ref or '(none)'} not on board"}
+            )
+            return
+
+        side = "B" if fp.GetLayer() == pcbnew.B_Cu else "F"
+        layer = pcbnew.B_SilkS if side == "B" else pcbnew.F_SilkS
+        mirrored = side == "B"
+
+        pads = {p.GetNumber(): p for p in fp.Pads()}
+        if not pads:
+            self.dropped.append({"id": label_id, "reason": "no pads"})
+            return
+
+        centers = [_mm_box(p.GetBoundingBox()) for p in pads.values()]
+        centroid_x = sum((b[0] + b[2]) / 2 for b in centers) / len(centers)
+        centroid_y = sum((b[1] + b[3]) / 2 for b in centers) / len(centers)
+
+        heights = [float(h) for h in (label.get("heights_mm") or [0.8])]
+        for entry in label.get("pins") or []:
+            pin = str(entry.get("pin") or "").strip()
+            text = str(entry.get("text") or "").strip()
+            pad = pads.get(pin)
+            if pad is None:
+                self.dropped.append(
+                    {"id": f"{label_id}:{pin}",
+                     "reason": f"anchor pad {pin} not found"}
+                )
+                continue
+
+            pb = _mm_box(pad.GetBoundingBox())
+            cx = (pb[0] + pb[2]) / 2
+            cy = (pb[1] + pb[3]) / 2
+            dx = cx - centroid_x
+            dy = cy - centroid_y
+            if dx >= abs(dy):
+                dominant = "right"
+            elif -dx > abs(dy):
+                dominant = "left"
+            elif dy > 0:
+                dominant = "below"
+            else:
+                dominant = "above"
+            dirs = [dominant] + [d for d in ("right", "left", "below", "above")
+                                 if d != dominant]
+
+            placed = False
+            for h in heights:
+                txt = _make_text(self.board, text, h, layer, mirrored)
+                w, th, ox, oy = self._measure(txt)
+                for tx, ty in self._pin_candidates(pb, cx, cy, w, th, dirs):
+                    box = (tx, ty, tx + w, ty + th)
+                    if self._spot_ok(side, box):
+                        self._commit(txt, side, tx, ty, ox, oy,
+                                     f"{label_id}:{pin}", h)
+                        placed = True
+                        break
+                if placed:
+                    break
+            if not placed:
+                self.dropped.append(
+                    {"id": f"{label_id}:{pin}", "reason": "no clear space on silk"}
+                )
+
+    def _pin_candidates(self, pb, cx: float, cy: float, w: float, h: float,
+                        dirs: list[str]):
+        """Candidate bbox top-lefts around one pad bbox, dominant side first —
+        the same four-side geometry as ``_label_candidates`` with the pad bbox
+        substituted for the courtyard bbox."""
+        for gap in (0.4, 1.0, 2.0, 3.5):
+            for d in dirs:
+                if d == "right":
+                    tx = pb[2] + gap
+                    for ty in (cy - h / 2, pb[1], pb[3] - h):
+                        yield self._clamped(tx, ty, w, h)
+                elif d == "left":
+                    tx = pb[0] - gap - w
+                    for ty in (cy - h / 2, pb[1], pb[3] - h):
+                        yield self._clamped(tx, ty, w, h)
+                elif d == "below":
+                    ty = pb[3] + gap
+                    for tx in (cx - w / 2, pb[0], pb[2] - w):
+                        yield self._clamped(tx, ty, w, h)
+                else:  # above
+                    ty = pb[1] - gap - h
+                    for tx in (cx - w / 2, pb[0], pb[2] - w):
+                        yield self._clamped(tx, ty, w, h)
+
     def _label_candidates(self, fp, w: float, h: float, prefer: str | None):
         """Candidate bbox top-lefts: rings around the anchor courtyard on the
         preferred side first, else a sweep of the free board area."""
@@ -379,36 +487,25 @@ class _Placer:
 
         cx = (court[0] + court[2]) / 2
         cy = (court[1] + court[3]) / 2
-        left, top, right, bottom = self.board_box
-        m = self.edge_margin
-
-        def _clamped(tx, ty):
-            # Overhang connectors put their courtyard bbox partly OFF the
-            # board, pushing every bbox-relative alignment off with it.
-            # Slide the candidate back inside; the side semantics survive
-            # (a below-the-connector label stays below, shifted along the
-            # edge) and _spot_ok still rejects anything that truly clashes.
-            return (min(max(tx, left + m), right - m - w),
-                    min(max(ty, top + m), bottom - m - h))
 
         for gap in (0.4, 1.0, 2.0, 3.5, 5.0, 7.0):
             for side_name in order:
                 if side_name == "right":
                     tx = court[2] + gap
                     for ty in (cy - h / 2, court[1], court[3] - h):
-                        yield _clamped(tx, ty)
+                        yield self._clamped(tx, ty, w, h)
                 elif side_name == "left":
                     tx = court[0] - gap - w
                     for ty in (cy - h / 2, court[1], court[3] - h):
-                        yield _clamped(tx, ty)
+                        yield self._clamped(tx, ty, w, h)
                 elif side_name == "below":
                     ty = court[3] + gap
                     for tx in (cx - w / 2, court[0], court[2] - w):
-                        yield _clamped(tx, ty)
+                        yield self._clamped(tx, ty, w, h)
                 else:  # above
                     ty = court[1] - gap - h
                     for tx in (cx - w / 2, court[0], court[2] - w):
-                        yield _clamped(tx, ty)
+                        yield self._clamped(tx, ty, w, h)
 
 
 def _steps(lo: float, hi: float, step: float):
@@ -440,7 +537,10 @@ def main(argv: list[str]) -> int:
                         str(lb.get("id", ""))),
     )
     for label in labels:
-        placer.place_label(label)
+        if label.get("kind") == "pinout":
+            placer.place_pinout(label)
+        else:
+            placer.place_label(label)
 
     legend = payload.get("legend") or {}
     lines = legend.get("lines") or []
@@ -454,7 +554,7 @@ def main(argv: list[str]) -> int:
         json.dump({"placed": placer.placed, "dropped": placer.dropped}, f, indent=1)
 
     board.Save(payload.get("output_path") or payload["pcb_path"])
-    # Success sentinel (matches freerouting_runner._PCBNEW_OK_SENTINEL) so a
+    # Success sentinel (matches routing_board._PCBNEW_OK_SENTINEL) so a
     # pcbnew/wx teardown SIGSEGV after the Save is not read as a failure.
     print("__KICRAFT_PCBNEW_OK__")
     sys.stdout.flush()

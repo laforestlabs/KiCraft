@@ -206,7 +206,7 @@ class BuildWorker:
                 _log(f"job {job.id}: tier quality override --quality {quality}")
         try:
             with log_path.open("a", encoding="utf-8") as logf:
-                # errors="replace": build tools (freerouting JVM, kicad-cli) can
+                # errors="replace": build tools (routing JVM, kicad-cli) can
                 # emit non-UTF-8 bytes; a strict decode would kill the reader
                 # loop mid-build.
                 proc = subprocess.Popen(
@@ -216,7 +216,7 @@ class BuildWorker:
                 with self._lock:
                     self._procs[job.id] = proc
                 # The watchdog enforces the wall clock even when the build goes
-                # silent (a hung FreeRouting prints nothing, so a per-line check
+                # silent (a hung KiCad Routing Tools prints nothing, so a per-line check
                 # would never fire and the job would wedge a queue slot forever).
                 wd = {"deadline": time.monotonic() + self.timeout_s, "killed": False}
 
@@ -256,11 +256,7 @@ class BuildWorker:
 
 
 def _kill_build(proc: subprocess.Popen) -> None:
-    """Kill the build and its whole process tree (leaf solvers, FreeRouting JVMs).
-    The build runs in its own session, but killing that group alone is not
-    enough: the FreeRouting JVM detaches into its OWN session
-    (freerouting_runner), so kill_tree walks the PPID tree and shoots every
-    group under the build -- otherwise timeouts strand orphan JVMs on init."""
+    """Kill the build and every leaf, router, and pcbnew subprocess group."""
     kill_tree(proc.pid)
     try:
         proc.kill()  # belt-and-braces for the direct child

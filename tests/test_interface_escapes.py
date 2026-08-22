@@ -4,7 +4,7 @@ The class under test is the whole rc7 residue of the self-eval 2026-07-27
 re-batch: a pad whose net crosses into another sheet has no partner on its
 leaf, so leaf routing lays NO copper on it, and at the parent stage it sits
 behind the pin-adjacent decap wall and the leaf's locked traces --
-``no_clear_path`` from FreeRouting AND the repair pass (run_10's 26 GPIO
+``no_clear_path`` from the autorouter AND the repair pass (run_10's 26 GPIO
 fan-outs to J2, run_23's CAN_TX/RX, run_24's SDA/SCL/ALERT_*, run_30's
 IO4/IO7). These tests pin the pure-geometry planner's verdicts on synthetic
 re-creations of that geometry, plus the board-level spec generation.

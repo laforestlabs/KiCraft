@@ -28,27 +28,23 @@ export PATH="$VENV/bin:$PATH"
 pip install -q --upgrade pip
 pip install -q -e "$REPO[design,tuning]"
 
-# Fail fast if the toolchain is broken, before burning time on a run.
+# Fail fast if pcbnew or the pinned router is unavailable.
 python - <<'PY'
 import pcbnew, cma
-print(f"[entrypoint] toolchain OK: pcbnew {pcbnew.GetBuildVersion()} | cma {cma.__version__}")
+from kicraft.autoplacer.kicad_routing_tools import preflight_kicad_routing_tools
+
+runtime = preflight_kicad_routing_tools()
+print(
+    f"[entrypoint] toolchain OK: pcbnew {pcbnew.GetBuildVersion()} | "
+    f"cma {cma.__version__} | KRT {runtime['version']} "
+    f"native {runtime['native_version']}"
+)
 PY
-test -s /root/.local/lib/freerouting-1.9.0.jar || { echo "[entrypoint] FreeRouting jar missing"; exit 1; }
-# FreeRouting is a Swing/AWT app run under xvfb; the headless JRE can't launch it
-# (no libawt_xawt) and boards come back unrouted. Fail loudly rather than silently.
-find /usr/lib/jvm -name 'libawt_xawt.so' 2>/dev/null | grep -q . \
-    || { echo "[entrypoint] ERROR: GUI-capable JRE missing (libawt_xawt.so) — FreeRouting can't run; rebuild the image (needs full default-jre)"; exit 1; }
-echo "[entrypoint] FreeRouting JRE OK"
 
 cores="$(nproc)"
-# Eval concurrency. In practice ONE eval ~= ONE core: placement is single-threaded
-# Python (numpy threads pinned for determinism) and FreeRouting is a ~single-
-# threaded JVM, so the old cores/4 left a 24-thread box ~75% idle. This container
-# is dedicated to tuning, so size for throughput: ~3/4 of threads, leaving headroom
-# for the OS + orchestrator + JVM GC. The eval pool is sized at slots-1
-# (see kicraft/tuning/runner.py:default_workers), so slots=18 -> 17 concurrent.
-# Override with KICRAFT_BUILD_SLOTS (lower it if you see the box swapping --
-# each eval is a pcbnew process + a FreeRouting JVM, roughly ~1 GB).
+# Eval concurrency. Placement and routing are CPU-bound subprocess workloads.
+# This container is dedicated to tuning, so use roughly three quarters of the
+# host threads and leave headroom for the OS and orchestration.
 if [ -z "${KICRAFT_BUILD_SLOTS:-}" ]; then
     KICRAFT_BUILD_SLOTS=$(( cores * 3 / 4 ))
     [ "$KICRAFT_BUILD_SLOTS" -lt 2 ] && KICRAFT_BUILD_SLOTS=2
@@ -63,9 +59,8 @@ if [ "${1:-tune}" = "tune" ]; then
     # Param-selection mode (mutually exclusive, ACTIVE wins):
     #   ACTIVE=<csv>  -> tune EXACTLY these, skip screening (legacy behavior)
     #   PIN=<csv>     -> always tune these, screening fills the rest up to TOPK
-    # Default: PIN the Phase 1-2 routing/scorer levers so a noisy single-param
-    # screen can't bury them; screening picks the remaining slots over all params.
-    PIN="${PIN:-freerouting_max_passes,leaf_freerouting_max_passes,signal_escape_length_mm,psw_bbox_packing,psw_aspect_ratio,psw_topology_structure}"
+    # Pin the highest-leverage scorer/escape controls; screening fills the rest.
+    PIN="${PIN:-signal_escape_length_mm,psw_bbox_packing,psw_aspect_ratio,psw_topology_structure}"
     sel=()
     if [ -n "${ACTIVE:-}" ]; then
         sel=(--active "$ACTIVE")

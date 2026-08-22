@@ -7,7 +7,7 @@ Current scope:
 - infer physical interface anchors from solved component pad positions
 - generate silkscreen outline and label elements for leaf boards
 
-Routing is handled exclusively by FreeRouting (see leaf_routing.py).
+Routing is handled exclusively by KiCad Routing Tools (see leaf_routing.py).
 Placement solving is handled by PlacementSolver (see placement_solver.py).
 
 Design notes:

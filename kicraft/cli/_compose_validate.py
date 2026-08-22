@@ -27,8 +27,8 @@ def _repair_parent_outline(
     The constraint-aware outline (``_compute_final_outline``) snaps
     edge-constrained sides to their anchor coordinate and can therefore come
     out *smaller* than the placed-content bbox, leaving footprints, pads or
-    stamped leaf copper outside ``Edge.Cuts``. FreeRouting cannot produce an
-    SES for a board with copper outside the outline (``rc=-1``), so we repair
+    stamped leaf copper outside ``Edge.Cuts``. KiCad Routing Tools cannot produce an
+    routed session for a board with copper outside the outline (``rc=-1``), so we repair
     the outline before validation/stamping.
 
     The required extent mirrors the rule enforced by

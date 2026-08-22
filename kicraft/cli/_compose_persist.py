@@ -163,7 +163,7 @@ def _persist_parent_artifact(
 
     # Write a metadata.json for the parent artifact
     renders_dir = artifact_dir / "renders"
-    parent_pre_route_board_path = artifact_dir / "parent_pre_freerouting.kicad_pcb"
+    parent_leaf_placed_board = artifact_dir / "parent_placed.kicad_pcb"
     parent_routed_board_path = artifact_dir / "parent_routed.kicad_pcb"
     parent_stamped_preview_path = renders_dir / "parent_stamped.png"
     parent_routed_preview_path = renders_dir / "parent_routed.png"
@@ -204,8 +204,8 @@ def _persist_parent_artifact(
         "artifact_paths": {
             "artifact_dir": str(artifact_dir),
             "renders_dir": str(renders_dir),
-            "parent_pre_freerouting_board": str(parent_pre_route_board_path)
-            if parent_pre_route_board_path.exists()
+            "parent_placed_board": str(parent_leaf_placed_board)
+            if parent_leaf_placed_board.exists()
             else "",
             "parent_routed_board": str(parent_routed_board_path)
             if parent_routed_board_path.exists()
@@ -237,8 +237,8 @@ def _persist_parent_artifact(
         "artifact_paths": {
             "artifact_dir": str(artifact_dir),
             "renders_dir": str(renders_dir),
-            "parent_pre_freerouting_board": str(parent_pre_route_board_path)
-            if parent_pre_route_board_path.exists()
+            "parent_placed_board": str(parent_leaf_placed_board)
+            if parent_leaf_placed_board.exists()
             else "",
             "parent_routed_board": str(parent_routed_board_path)
             if parent_routed_board_path.exists()
@@ -254,7 +254,7 @@ def _persist_parent_artifact(
             "routed_board_path": routing_result.get("routed_board_path", ""),
             "trace_count": len(all_traces),
             "via_count": len(all_vias),
-            "freerouting_stats": routing_result.get("freerouting_stats", {}),
+            "routing_stats": routing_result.get("routing_stats", {}),
             "preview_paths": {
                 "parent_stamped_preview": str(parent_stamped_preview_path)
                 if parent_stamped_preview_path.exists()
@@ -264,8 +264,8 @@ def _persist_parent_artifact(
                 else "",
             },
             "board_paths": {
-                "parent_pre_freerouting_board": str(parent_pre_route_board_path)
-                if parent_pre_route_board_path.exists()
+                "parent_placed_board": str(parent_leaf_placed_board)
+                if parent_leaf_placed_board.exists()
                 else "",
                 "parent_routed_board": str(parent_routed_board_path)
                 if parent_routed_board_path.exists()
@@ -301,8 +301,8 @@ def _persist_parent_artifact(
                 "parent_routed_preview": str(parent_routed_preview_path)
                 if parent_routed_preview_path.exists()
                 else "",
-                "parent_stamped_board": str(parent_pre_route_board_path)
-                if parent_pre_route_board_path.exists()
+                "parent_placed_board": str(parent_leaf_placed_board)
+                if parent_leaf_placed_board.exists()
                 else "",
                 "parent_routed_board": str(parent_routed_board_path)
                 if parent_routed_board_path.exists()

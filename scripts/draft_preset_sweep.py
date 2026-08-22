@@ -9,7 +9,7 @@ the fastest preset whose success rate holds up.
 Arms (effort ladder):
   good     baseline: autoexperiment 3 leaf rounds x 3 attempts, 3 parent rounds
   2x2      autoexperiment 2x2x2 (the proposed 'draft' shape)
-  2x2lite  2x2x2 + autoplacer.json effort cuts (freerouting passes, SA iters)
+  2x2lite  2x2x2 + autoplacer.json effort cuts (routing passes, SA iters)
   1x1      autoexperiment 1x1x1 (minimum optimized)
   1x1lite  1x1x1 + the same effort cuts
   fast     existing single-pass solve-hierarchy engine
@@ -19,7 +19,7 @@ Custom round counts ride the KICRAFT_QUALITY_PRESETS env override consumed by
 pre-seeded autoplacer.json in the project dir (discover_project_config).
 NOTE: the autoexperiment mutation search perturbs sa_refine_iterations /
 max_placement_iterations, so those lite cuts only bind in unmutated rounds;
-the freerouting pass caps are not mutated and always bind.
+the routing pass caps are not mutated and always bind.
 
 Usage:
   draft_preset_sweep.py                  # run the full matrix (resumable)
@@ -52,8 +52,8 @@ SOURCE_BATCH = REPO / "logs" / "self_eval" / "20260611T213618Z"
 
 # Effort cuts for the *lite arms. Keys must exist in autoplacer DEFAULT_CONFIG.
 LITE_OVERRIDES = {
-    "leaf_freerouting_max_passes": 6,   # default 12
-    "freerouting_max_passes": 10,       # default 20 (parent)
+    "leaf_routing_max_passes": 6,   # default 12
+    "routing_max_passes": 10,       # default 20 (parent)
     "sa_refine_iterations": 150,        # default 300 (mutation may override)
     "sa_refine_no_improve_break": 75,   # default 150
     "max_placement_iterations": 1600,   # default 3332 (mutation may override)
@@ -164,7 +164,7 @@ def done_cells(results_path: Path) -> set[str]:
 def stream_build(cmd, env, log_path: Path, timeout_s: float):
     """Run the build, tee output to log_path with elapsed-seconds prefixes,
     and return (rc, timed_out, marks, lines). Kills the whole process group on
-    timeout (freerouting JVMs are grandchildren)."""
+    timeout (routing JVMs are grandchildren)."""
     t0 = time.monotonic()
     marks: dict[str, float] = {}
     lines: list[str] = []
@@ -391,7 +391,7 @@ def summarize(batch_dir: Path) -> Path:
     lines += ["", "Decision rule (pre-registered): pick the fastest arm whose "
               "fab_ready count is within 1 of the `good` baseline across the "
               "same boards; tie-break on retry-aware E[wall]. Lite-arm SA "
-              "cuts can be overridden by the mutation search; freerouting "
+              "cuts can be overridden by the mutation search; routing "
               "pass caps always bind.", ""]
     out = batch_dir / "summary.md"
     out.write_text("\n".join(lines), encoding="utf-8")

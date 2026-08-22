@@ -138,7 +138,7 @@ class TestParamRangesMerging:
 
     def test_int_param_range_rounded(self):
         """Integer params are rounded after clamping (covers any int-typed
-        entry in CONFIG_SEARCH_SPACE; previously checked freerouting_timeout_s
+        entry in CONFIG_SEARCH_SPACE; previously checked routing_timeout_s
         which is no longer a search-space knob). The requested min 100 is below
         sa_refine_iterations' domain min (250), so it clamps up to 250."""
         result = normalize_bounds("sa_refine_iterations", 100.0, 5000.0)

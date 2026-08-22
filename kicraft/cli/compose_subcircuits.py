@@ -14,7 +14,7 @@ Current scope:
 - emit JSON and optional saved composition snapshot
 - support simple placement modes for initial composition experiments
 - stamp composition onto a real .kicad_pcb file (--stamp)
-- route parent interconnects via FreeRouting (--route)
+- route parent interconnects via the autorouter (--route)
 - persist parent-level solved layout artifacts
 
 This command does NOT yet:
@@ -453,7 +453,7 @@ def _seed_outline_dimensions(
 # board-setup edge clearance is 0.2 mm; anything the outline math emits below
 # this margin ships a guaranteed copper_edge_clearance DRC error (self-eval
 # 2026-07-17 batch: run_02/09/11 rejected at 0.0-0.18 mm actual). +0.1 mm
-# guard over the constraint, same philosophy as the DSN 10 um guards.
+# guard over the constraint, same philosophy as the router exchange input 10 um guards.
 _COPPER_EDGE_MARGIN_MM = 0.3
 
 
@@ -2154,7 +2154,7 @@ def _compose_artifacts(
     # Synthesized mounting holes have no attachment constraint, so they
     # get their keep-in rect here: a square reaching
     # mounting_holes.keepout.size_mm from the hole center (the config's
-    # documented semantic), stamped as a rule-area so FreeRouting can't
+    # documented semantic), stamped as a rule-area so the autorouter can't
     # route through the screw head.
     if synthesized_footprints:
         _mh_keepout_mm = float(
@@ -2515,7 +2515,6 @@ def _compact_routed_validation(validation: dict[str, Any]) -> dict[str, Any]:
         "signal_unconnected_repair",
         "illegal_geometry_repair",
         # FR process returncode: -1 = watchdog-killed JVM.
-        "freerouting_returncode",
     ):
         if k in validation:
             out[k] = validation[k]
@@ -2810,7 +2809,7 @@ def _search_best_layout(
     """
     from kicraft.autoplacer.brain.graph import total_ratsnest_length
     from kicraft.autoplacer.brain.placement_scorer import PlacementScorer
-    from kicraft.autoplacer.freerouting_runner import _run_kicad_cli_drc
+    from kicraft.autoplacer.routing_board import run_kicad_cli_drc
 
     base_cfg = dict(cfg or {})
     base_parent_placement = dict(base_cfg.get("parent_placement", {}))
@@ -2958,7 +2957,7 @@ def _search_best_layout(
                     state.phase_timings["stamp_ms"] = stamp_ms
 
                     t_drc = time.perf_counter()
-                    drc = _run_kicad_cli_drc(str(stamped), timeout_s=30) or {}
+                    drc = run_kicad_cli_drc(str(stamped), timeout_s=30) or {}
                     stamp_drc_ms = (time.perf_counter() - t_drc) * 1000.0
                     state.phase_timings["stamp_drc_ms"] = stamp_drc_ms
                     state.stamp_drc = dict(drc)
@@ -3105,7 +3104,7 @@ def _search_best_layout(
                 # are RECORDED on the CandidateRecord (geometry_accepted,
                 # outside_component_count, outside_pad_count) but no longer
                 # short-circuit the picker -- they're a guess at unfabricability
-                # that prevents FreeRouting from running and starves the search
+                # that prevents the autorouter from running and starves the search
                 # of real signal. Let routing run; a layout that violates
                 # geometry will produce a routed PNG showing exactly where the
                 # problem is, which is more actionable than "round aborted".
@@ -3275,7 +3274,7 @@ def _search_best_layout(
 
     # Winner strand screen (self-eval 2026-07-17 T3): connector stranding is a
     # STAMP-time property, so a would-be winner whose edge connector sits
-    # inboard is knowable before FreeRouting burns minutes routing a board the
+    # inboard is knowable before the autorouter burns minutes routing a board the
     # validation must reject (the re-fit re-solve strands connectors this way;
     # runs 14/30 + the run_02 repro). Demote and re-pick, bounded by the pool;
     # if EVERY candidate strands, keep the original best (the round fails
@@ -3460,11 +3459,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--route",
         action="store_true",
-        help="Route parent interconnects via FreeRouting (implies --stamp)",
-    )
-    parser.add_argument(
-        "--jar",
-        help="Path to FreeRouting JAR (overrides config)",
+        help="Route parent interconnects via the autorouter (implies --stamp)",
     )
     parser.add_argument(
         "--rounds",
@@ -3677,10 +3672,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
-        # Build config: DEFAULT_CONFIG base -> project config -> --config
-        # overlay -> --jar override. Seeding DEFAULT_CONFIG ensures
-        # freerouting_jar (and other defaults) are present so --route works
-        # without --jar, matching solve_subcircuits._load_config.
+        # Build config: defaults, discovered project config, then --config.
         from kicraft.autoplacer.config import (
             DEFAULT_CONFIG,
             discover_project_config,
@@ -3693,15 +3685,13 @@ def main(argv: list[str] | None = None) -> int:
             cfg.update(load_project_config(str(proj_cfg_path)))
         if args.config:
             cfg.update(load_project_config(args.config))
-        if args.jar:
-            cfg["freerouting_jar"] = args.jar
 
         try:
             # Grow the parent outline to enclose all placed geometry before
             # validating/stamping. The constraint-aware outline can snap
             # smaller than the placed-content bbox (edge-anchored sides),
-            # which leaves copper outside Edge.Cuts and makes FreeRouting
-            # return no SES (rc=-1). Repairing here keeps the in-memory state
+            # which leaves copper outside Edge.Cuts and makes the autorouter
+            # return no routed session (rc=-1). Repairing here keeps the in-memory state
             # and the stamped Edge.Cuts in sync.
             outline_repair = _repair_parent_outline(
                 state,
@@ -3759,7 +3749,7 @@ def main(argv: list[str] | None = None) -> int:
                 # was to return 1 here, which is the THIRD pre-route
                 # rejection gate that starved the search of signal:
                 # the stamped board exists, the user wants to see what
-                # came out, and FreeRouting can still produce a useful
+                # came out, and the autorouter can still produce a useful
                 # routed render even on a layout whose components extend
                 # past the auto-grown outline. Surface as a warning and
                 # let routing run.
@@ -3783,17 +3773,17 @@ def main(argv: list[str] | None = None) -> int:
             # Stamp-time DRC guard: kicad-cli DRC on the pre-route board so
             # composer-introduced shorts (two leaves' locked tracks stamped
             # on top of each other) are caught and labeled as such, instead
-            # of being misattributed to FreeRouting later. When shorts are
-            # detected, routing is skipped: FreeRouting cannot fix
+            # of being misattributed to the autorouter later. When shorts are
+            # detected, routing is skipped: the autorouter cannot fix
             # overlapping copper, and a 200 s+ routing pass on a known-bad
             # layout is wasted CPU. The composer-vs-router attribution is
             # recorded in state.stamp_drc and surfaces in the round JSON.
             stamp_shorts = 0
             stamp_clearance = 0
             try:
-                from kicraft.autoplacer.freerouting_runner import _run_kicad_cli_drc
+                from kicraft.autoplacer.routing_board import run_kicad_cli_drc
                 _t_stamp_drc = time.perf_counter()
-                _stamp_drc = _run_kicad_cli_drc(str(stamped_pcb), timeout_s=30)
+                _stamp_drc = run_kicad_cli_drc(str(stamped_pcb), timeout_s=30)
                 state.phase_timings["stamp_drc_ms"] = (
                     time.perf_counter() - _t_stamp_drc
                 ) * 1000.0
@@ -3824,14 +3814,14 @@ def main(argv: list[str] | None = None) -> int:
                 if stamp_shorts > 0:
                     print(
                         f"warning: stamp-time DRC found {stamp_shorts} shorts on "
-                        f"parent_pre_freerouting -- composer stamped overlapping "
-                        f"leaf tracks; skipping FreeRouting",
+                        f"parent_placed -- composer stamped overlapping "
+                        f"leaf tracks; skipping the autorouter",
                         file=sys.stderr,
                     )
             except Exception as drc_exc:
                 # kicad-cli failure or subprocess crash. Without a stamp
                 # DRC result we can't verify the placement is routable;
-                # proceeding to FreeRouting on an unverified board would
+                # proceeding to the autorouter on an unverified board would
                 # let composer-introduced shorts ship as routing failures
                 # without attribution. Persist what we know and re-raise
                 # so the round fails loudly.
@@ -3948,7 +3938,7 @@ def main(argv: list[str] | None = None) -> int:
                 routing_result = _route_parent_board(
                     stamped_pcb, state, project_dir, cfg
                 )
-                state.phase_timings["freerouting_ms"] = (
+                state.phase_timings["routing_ms"] = (
                     time.perf_counter() - _t_route
                 ) * 1000.0
                 if not routing_result.get("failed"):

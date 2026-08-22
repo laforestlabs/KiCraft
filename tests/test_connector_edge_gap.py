@@ -150,7 +150,7 @@ def _compose_and_measure(tmp_path: Path, fixture: Path = FIXTURE) -> dict[str, E
         if "__KICRAFT_PROJECT_DIR__" in t:
             jf.write_text(t.replace("__KICRAFT_PROJECT_DIR__", real), encoding="utf-8")
     for p in glob.glob(str(dest / ".experiments" / "subcircuits"
-                            / "subcircuit__*" / "parent_pre_freerouting.kicad_pcb")):
+                            / "subcircuit__*" / "parent_placed.kicad_pcb")):
         os.remove(p)
     env = {**os.environ, "PYTHONHASHSEED": "0", "OMP_NUM_THREADS": "1",
            "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
@@ -163,7 +163,7 @@ def _compose_and_measure(tmp_path: Path, fixture: Path = FIXTURE) -> dict[str, E
     ).returncode
     assert rc == 0, f"compose exited {rc}"
     board = sorted(glob.glob(str(dest / ".experiments" / "subcircuits"
-                                 / "subcircuit__*" / "parent_pre_freerouting.kicad_pcb")))[-1]
+                                 / "subcircuit__*" / "parent_placed.kicad_pcb")))[-1]
     return {g.ref: g for g in connector_edge_gaps(board, cfg["component_zones"])}
 
 

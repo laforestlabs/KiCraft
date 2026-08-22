@@ -9,7 +9,7 @@ the stamp subprocess loads a stock KiCad ``MountingHole.pretty``
 footprint onto the board.
 
 Only the plain (non-``_Pad``) NPTH variants are used: no copper, no
-net, so the netlist, DSN export, and connectivity are untouched; the
+net, so the netlist, router exchange input export, and connectivity are untouched; the
 keep-in rule area stamped around each hole is what protects routing.
 The stock footprints carry ``exclude_from_pos_files exclude_from_bom``
 so fab CPL/BOM exclusion is automatic.

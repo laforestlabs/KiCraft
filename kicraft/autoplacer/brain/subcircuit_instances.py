@@ -870,7 +870,7 @@ def _compute_layout_bbox(
     check. If this bbox were centerline-only, two leaves whose centerline
     bboxes touch could still have their actual copper overlap by a full
     track-width -- producing GND/VSYS shorts at the leaf seam that
-    FreeRouting never had a chance to avoid (it sees them as locked
+    KiCad Routing Tools never had a chance to avoid (it sees them as locked
     pre-routes).
     """
     min_x = float("inf")

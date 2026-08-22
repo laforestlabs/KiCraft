@@ -10,7 +10,7 @@ LLM.
 Each design is staged twice: ``classic`` (leaf_psw_tidiness=0, both hard-tidiness
 flags off) and ``soft`` (defaults — psw_tidiness=0.15). Both are solved+routed at
 each seed; placement (hence tidiness + renders) is deterministic per seed, while
-routing unconnected is reported as a per-seed list (FreeRouting is only
+routing unconnected is reported as a per-seed list (KiCad Routing Tools is only
 best-effort-stable — the rigorous routing verdict is the N-of-3 median).
 
 With no ``--out`` the gallery is written to ``logs/tidiness_ab/run-<UTC>/`` — the

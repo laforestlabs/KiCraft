@@ -6,7 +6,7 @@ the leaf's copper) across leaves by net name, so the canvas can draw
 live connection lines while the user drags. This is what turns manual
 placement from "arrange colored rectangles" into "place a circuit":
 routability is decided by which blocks talk to each other, and the
-anchors are the exact points FreeRouting will later have to join.
+anchors are the exact points KiCad Routing Tools will later have to join.
 
 Coordinate frames: ``interface_anchors`` are in the leaf solver's
 re-based local frame (board top-left at 0,0), while the canvas works

@@ -8,7 +8,7 @@ frozen corpus of synthesized boards — a signal nothing else targets.
 
 The premise is spare CPU: ``replay``/compose re-run place+route on an already
 synthesized project with **$0 LLM cost**, placement byte-deterministic, only
-FreeRouting stochastic (handled by seed replication). See the approved plan at
+KiCad Routing Tools stochastic (handled by seed replication). See the approved plan at
 .claude/plans/declarative-juggling-avalanche.md.
 
 Module map:

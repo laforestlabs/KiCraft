@@ -1,6 +1,6 @@
 """Compute-tier build storm: saturate the build queue + flock slots at $0.
 
-The place+route build is the real scaling bottleneck (CPU-bound FreeRouting +
+The place+route build is the real scaling bottleneck (CPU-bound KiCad Routing Tools +
 kicad-cli, gated by a host-wide flock; see kicraft/build_slots.py). This module
 stages N copies of an already-synthesized workspace, enqueues them as
 ``loadtest_replay`` build_jobs, and drives a real ``BuildWorker`` whose command
@@ -41,7 +41,7 @@ def replay_command(stem: str, *, route: bool = True, seed: int = 0,
                    quality: str = "fast") -> list[str]:
     """The per-job ``kicraft replay`` command (run with cwd = the job workspace).
 
-    ``route=False`` is the fast placement-only storm (no FreeRouting) for shaking
+    ``route=False`` is the fast placement-only storm (no KiCad Routing Tools) for shaking
     out queue/slot mechanics quickly; ``route=True`` is the heavy, realistic load.
     """
     cmd = [sys.executable, "-m", "kicraft.design.cli_app", "replay",

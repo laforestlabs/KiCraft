@@ -112,7 +112,7 @@ def _make_solved_leaf() -> SolvedLeafSubcircuit:
         net_partition=NetPartition(),
     )
     routing = {
-        "router": "freerouting",
+        "router": "routing",
         "routed_board_path": CANONICAL_PCB,
         "validation": {"accepted": True},
         "_trace_segments": [],

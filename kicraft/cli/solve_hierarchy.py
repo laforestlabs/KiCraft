@@ -4,10 +4,10 @@
 Orchestrates the full bottom-up subcircuit pipeline:
 1. Parse the schematic hierarchy
 2. Compute bottom-up levels (leaves -> parents -> grandparents -> root)
-3. Solve all leaf subcircuits (placement + FreeRouting)
+3. Solve all leaf subcircuits (placement + KiCad Routing Tools)
 4. For each subsequent level, compose children into parent(s)
 5. Stamp parent board with preserved child copper
-6. Route parent interconnect nets via FreeRouting
+6. Route parent interconnect nets via KiCad Routing Tools
 7. Persist the final routed parent artifact
 
 Supports arbitrary N-level hierarchies, not just 2-level (leaves -> root).
@@ -135,7 +135,7 @@ def _compose_and_route_parent(
     spacing_mm: float,
     route: bool,
 ) -> str:
-    """Compose leaves into parent and optionally route via FreeRouting."""
+    """Compose leaves into parent and optionally route via KiCad Routing Tools."""
     # Log constraints
     cmd = [
         sys.executable,
@@ -152,9 +152,6 @@ def _compose_and_route_parent(
     ]
     if route:
         cmd.append("--route")
-    jar = cfg.get("freerouting_jar")
-    if jar:
-        cmd.extend(["--jar", jar])
 
     print(f"  command: {' '.join(cmd)}")
     result = subprocess.run(
@@ -222,7 +219,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--route",
         action="store_true",
-        help="Enable FreeRouting for leaves and parent",
+        help="Enable KiCad Routing Tools for leaves and parent",
     )
     parser.add_argument(
         "--only",
@@ -247,10 +244,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Parent composition spacing in mm (default: 2.0)",
     )
     parser.add_argument(
-        "--jar",
-        help="FreeRouting JAR path override",
-    )
-    parser.add_argument(
         "--seed",
         type=int,
         default=0,
@@ -270,8 +263,6 @@ def main(argv: list[str] | None = None) -> int:
 
     project_dir = Path(args.schematic).resolve().parent
     cfg = _load_config(project_dir)
-    if args.jar:
-        cfg["freerouting_jar"] = args.jar
 
     # --- Parse hierarchy and compute levels ---
     from kicraft.autoplacer.brain.hierarchy_parser import parse_hierarchy
@@ -380,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  leaf_artifacts: {leaf_count}")
     if parent_artifact:
         routed_pcb = parent_artifact / "parent_routed.kicad_pcb"
-        pre_pcb = parent_artifact / "parent_pre_freerouting.kicad_pcb"
+        pre_pcb = parent_artifact / "parent_placed.kicad_pcb"
         solved = parent_artifact / "solved_layout.json"
         if routed_pcb.exists():
             print(f"  parent_routed : {routed_pcb}")

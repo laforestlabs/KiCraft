@@ -9,7 +9,7 @@ same points the policies used to sit inline:
 
     plan_next(...)        loop top: stop? rounds left? wall budget? rescue?
     observe_solve(...)    after the leaf solve: streak aborts
-    observe_parent(...)   after the parent route: cap-out stop
+    observe_parent(...)   after the parent route: generic backoff updates
     observe_round_end(..) after scoring: keep/best verdict
     observe_duration(...) loop bottom: wall-duration EMA the budget gate reads
 
@@ -130,7 +130,6 @@ class RoundScheduler:
     max_wall_s: float = 0.0
     unroutable_abort_rounds: int = 0
     quality_abort_rounds: int = 0
-    parent_capout_rounds: int = 2
     keep_threshold: float = 0.5
     # Wall-budget rescue round (N2a): spend an otherwise-wasted remaining
     # budget on ONE solve restricted to leaves with zero accepted artifacts.
@@ -149,7 +148,6 @@ class RoundScheduler:
     _quality_streak: dict[str, dict[str, Any]] = field(
         default_factory=dict, init=False
     )
-    _capout_streak: int = field(default=0, init=False)
     _rescue_attempted: bool = field(default=False, init=False)
     # Re-fit backoff (self-eval 2026-07-17 T3): once a round's ROUTED parent is
     # rejected with a re-fit candidate as the winner, the re-fit traded fab
@@ -292,38 +290,14 @@ class RoundScheduler:
     def observe_parent(
         self,
         *,
-        routed: bool,
-        elapsed_s: float,
-        cap_s: float,
         rejected_refit_winner: bool = False,
         rejected_unconnected: bool = False,
-    ) -> Finalize | None:
-        """Parent cap-out early stop: a parent route that ran up to its
-        FreeRouting timeout cap and still didn't complete won't be rescued by
-        mutating placement params. After ``parent_capout_rounds`` consecutive
-        capped-out rounds, finalize best-so-far (WS2).
-
-        ``rejected_refit_winner`` True (this round's routed parent was rejected
-        by validation AND its candidate-search winner was the pass-2 re-fit)
-        latches the re-fit backoff: every later round runs with
-        ``candidate_search.parent_refit=false`` so the pass-1 candidates -- the
-        designed congestion fallback -- actually get to compete."""
+    ) -> None:
+        """Update generic re-fit and congestion backoff state."""
         if rejected_refit_winner:
             self._refit_backoff = True
         if rejected_unconnected:
             self._congestion_rounds += 1
-        if (not routed) and elapsed_s >= 0.9 * cap_s:
-            self._capout_streak += 1
-        else:
-            self._capout_streak = 0
-        if self._capout_streak >= self.parent_capout_rounds:
-            return Finalize(
-                f"[parent-capout] parent route ran to its ~{cap_s:.0f}s "
-                f"FreeRouting timeout cap for {self._capout_streak} consecutive "
-                f"round(s) without completing -- placement mutation cannot rescue "
-                f"a router timeout; finalizing best-so-far."
-            )
-        return None
 
     # -- after scoring ----------------------------------------------------------
 
@@ -345,23 +319,11 @@ class RoundScheduler:
 
     # -- loop bottom -----------------------------------------------------------
 
-    def observe_duration(
-        self, duration_s: float, *, crashed_route_s: float = 0.0
-    ) -> None:
-        """Fold this round's wall-duration into the EMA the budget gate reads.
-
-        ``crashed_route_s`` is the parent-route time of a round whose route
-        FAILED with the infra signature (FreeRouting crash / no SES output).
-        That time was spent in dead retry attempts, not in routing work a
-        placement mutation would repeat -- pricing it at face value starves
-        the budget gate: self-eval 2026-07-27 run_29's single 398s crashed
-        round priced the estimator out of ALL remaining rounds on a 648s
-        budget. Half the crashed time is still charged (the crash may well be
-        deterministic), so a second crash exhausts the budget honestly instead
-        of looping."""
-        effective = max(0.0, duration_s - 0.5 * max(0.0, crashed_route_s))
+    def observe_duration(self, duration_s: float) -> None:
+        """Fold the observed round duration into the wall-budget EMA."""
+        duration_s = max(0.0, duration_s)
         self.ema_round_s = (
-            effective
+            duration_s
             if self.ema_round_s is None
-            else 0.5 * self.ema_round_s + 0.5 * effective
+            else 0.5 * self.ema_round_s + 0.5 * duration_s
         )

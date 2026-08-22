@@ -16,7 +16,7 @@ import sys
 
 import pytest
 
-from kicraft.autoplacer import freerouting_runner as fr
+from kicraft.autoplacer import routing_board as fr
 
 SENTINEL = fr._PCBNEW_OK_SENTINEL
 
@@ -69,13 +69,13 @@ def test_clean_exit_is_success():
     fr._retry_pcbnew_run(_cmd(body))  # rc 0 -> returns
 
 
-def test_run_pcbnew_script_appends_sentinel_and_survives_teardown_crash():
-    # End-to-end through _run_pcbnew_script: the body does its "work" (no
-    # explicit sentinel), _run_pcbnew_script appends the sentinel, and a
+def testrun_pcbnew_script_appends_sentinel_and_survives_teardown_crash():
+    # End-to-end through run_pcbnew_script: the body does its "work" (no
+    # explicit sentinel), run_pcbnew_script appends the sentinel, and a
     # teardown SIGSEGV registered by the body fires after it. Must not raise.
     script = (
         "import os, signal, atexit\n"
         "atexit.register(lambda: os.kill(os.getpid(), signal.SIGSEGV))\n"
         "# (pretend board.Save happened here)\n"
     )
-    fr._run_pcbnew_script(script)  # must not raise
+    fr.run_pcbnew_script(script)  # must not raise

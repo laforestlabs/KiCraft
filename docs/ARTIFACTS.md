@@ -30,9 +30,9 @@ measure it as if it were the engine's output.
     └── <slug>/                 # one dir per leaf or parent subcircuit
         ├── metadata.json       # parent: carries run_id + generated_at (routed compose only)
         ├── debug.json, solved_layout.json
-        ├── parent_pre_freerouting.kicad_pcb   # PLACED parent (what --no-route produces)
-        ├── parent_routed.kicad_pcb            # ROUTED parent (post-FreeRouting)
-        ├── leaf_pre_freerouting.kicad_pcb     # PLACED leaf
+        ├── parent_placed.kicad_pcb   # PLACED parent (what --no-route produces)
+        ├── parent_routed.kicad_pcb            # ROUTED parent (post-KiCad Routing Tools)
+        ├── leaf_placed.kicad_pcb     # PLACED leaf
         ├── leaf_routed.kicad_pcb              # ROUTED leaf
         ├── leaf_illegal_pre_stamp.kicad_pcb   # legality-REJECTED placement (rc6 preview only)
         ├── round_NNNN_*.kicad_pcb             # per-round snapshots (autoexperiment)
@@ -52,7 +52,7 @@ literals in new code — import them.
 | Want | Call | Returns |
 |---|---|---|
 | the routed parent | `resolve_parent_board(dir, kind="routed")` | `parent_routed.kicad_pcb` or `None` |
-| the **placed** parent | `resolve_parent_board(dir, kind="placed")` | `parent_pre_freerouting.kicad_pcb` only — **never** a routed board |
+| the **placed** parent | `resolve_parent_board(dir, kind="placed")` | `parent_placed.kicad_pcb` only — **never** a routed board |
 | an rc6 preview leaf | `resolve_best_leaf_board(dir)` | richest leaf (routed > placed > rejected) |
 
 `kind="placed"` **never** falls back to the routed board. That is the fix for the

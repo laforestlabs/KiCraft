@@ -1,6 +1,6 @@
 """Constrained bend/via repair for walled-off unconnected SIGNAL nets (C1).
 
-After freerouting, a few signal nets are sometimes left unrouted because the
+After routing, a few signal nets are sometimes left unrouted because the
 router walled itself off (no_clear_path — memory
 `kicraft-unconnected-1-cluster-walled-off-signal-power`). This pass closes
 each unconnected DRC edge of such a net with guarded copper, at the same
@@ -26,6 +26,8 @@ docs/plans/unconnected-signal-repair-c1-design.md.
 from __future__ import annotations
 
 import math
+
+from kicraft.autoplacer.fab_profile import fab_floors
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -132,7 +134,7 @@ def _candidate_paths(
 
     Straight, the two L-bends, then 3-segment doglegs whose midpoints are
     offset perpendicular to the straight line — the off-grid bend that
-    threads the corridor freerouting's grid-habit copper left open. Offsets
+    threads the corridor routing's grid-habit copper left open. Offsets
     scale with the gap so a 20 mm abandoned route explores real detours, not
     just millimetre wiggles. When *escape_pt* is given every path leaves the
     pad through it first.
@@ -327,9 +329,9 @@ def repair_unconnected_signals(
     )
     summary: dict[str, Any] = {"edges": 0, "tied": 0, "skipped": [], "pruned": 0}
 
-    from kicraft.autoplacer.freerouting_runner import _run_kicad_cli_drc
+    from kicraft.autoplacer.routing_board import run_kicad_cli_drc
 
-    drc = _run_kicad_cli_drc(pcb_path)
+    drc = run_kicad_cli_drc(pcb_path)
     edges = _parse_unconnected_edges(drc.get("report_text") or "")
     if not edges:
         return summary
@@ -344,10 +346,8 @@ def repair_unconnected_signals(
     # actually unroutable. Screening costs microseconds per candidate, so
     # the budget is spent only on paths that don't obviously cross copper.
     obstacles = _copper_obstacles(board)
-    pre_margin_mm = (
-        float(cfg.get("freerouting_min_clearance_mm", 0.153))
-        + float(cfg.get("freerouting_fine_pitch_track_mm", 0.153)) / 2.0
-    )
+    floors = fab_floors(cfg)
+    pre_margin_mm = floors["clearance_mm"] + floors["track_mm"] / 2.0
     edges = [e for e in edges if e[0].net not in pour]
     # Smallest gap first: cheap wins land before congested ones consume
     # stamped-copper budget (each stamped tie is an obstacle for the next).

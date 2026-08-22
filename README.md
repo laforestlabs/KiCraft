@@ -490,7 +490,7 @@ ranges). The only enforced cross-parameter constraint is physical:
 | Board Geometry | 6 | Dimensions, margins, grid snap, clearances |
 | Edge & Connectors | 6 | Courtyard, connector gaps, insets, pad margins |
 | SA Refinement | 6 | Temperature, cooling, move radius, swap/rotation |
-| Routing | 7 | Trace widths, via dimensions, zone margin, FreeRouting |
+| Routing | 7 | Trace widths, via dimensions, zone margin, KiCad Routing Tools |
 | Thermal | 1 | Keep-away radius around hot components |
 | Component Behavior | 1 | THT backside area threshold |
 | Zone Pour | 4 | Clearance, fill thickness, thermal relief |
@@ -562,7 +562,8 @@ kicraft/
 │   # Claude Code skill at .claude/skills/kicraft/ (not in this package).
 ├── autoplacer/          # Placement and routing engine
 │   ├── config.py        # Default config + project config loader
-│   ├── freerouting_runner.py
+│   ├── kicad_routing_tools.py  # pinned KRT adapter and copper custody
+│   ├── routing_board.py        # pcbnew/DRC/copper helpers
 │   ├── brain/           # Pure algorithms (no pcbnew dependency)
 │   └── hardware/        # KiCad pcbnew API adapter
 ├── scoring/             # Layout quality scoring checks
@@ -574,7 +575,8 @@ kicraft/
 
 - Python 3.10+
 - KiCad 9 with pcbnew Python bindings (on system PATH)
-- FreeRouting JAR (for automated routing)
+- KiCad Routing Tools source `0.20.2` at commit
+  `3ceb773722bea67aa3685e7ee430c0c0d17ef38d` with native router `0.20.1`
 
 ## License
 

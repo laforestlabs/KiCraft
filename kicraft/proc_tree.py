@@ -1,13 +1,8 @@
 """Kill an entire build process tree, including session-detached descendants.
 
-``os.killpg(os.getpgid(pid), SIGKILL)`` alone is NOT enough for KiCraft builds:
-the FreeRouting JVM is launched with ``start_new_session=True``
-(``freerouting_runner.run_freerouting``) so its OWN timeout can kill its group
-without shooting the caller. The cost is that the JVM escapes the build's
-process group, so an outer watchdog (self-eval harness, web build worker) that
-kills only the build's group strands the ``xvfb-run -> java`` grandchildren on
-init, each burning a core until someone notices
-(docs/plans/self-eval-2026-07-07-high-value-fixes.md FIX 1).
+Routing and pcbnew workloads spawn subprocess groups so their own timeouts can
+terminate children without signaling the caller. An outer watchdog therefore
+must walk the PPID tree rather than killing only the build's process group.
 
 The fix: snapshot the PPID tree under the build FIRST (via /proc), then SIGKILL
 every process group found in it, then any stragglers by pid. Killing parents
@@ -64,7 +59,7 @@ def descendants(pid: int) -> list[int]:
 
 def kill_tree(pid: int, sig: int = signal.SIGKILL) -> None:
     """Signal ``pid`` and every descendant, including ones that detached into
-    their own session/process group (the FreeRouting JVM case).
+    their own session/process group (the KiCad Routing Tools JVM case).
 
     Killing whole process groups (not just pids) also catches members spawned
     between the snapshot and the kill, since children inherit their parent's

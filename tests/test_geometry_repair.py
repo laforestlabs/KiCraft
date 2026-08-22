@@ -74,7 +74,7 @@ def test_geometry_wrapper_inline_scripts_match_return_contracts(
     repair's contract) raises AFTER the board mutated, and the wrapper's
     except-restore silently byte-reverts -- the no-op failure mode the
     signal wrapper shipped for a whole batch."""
-    from kicraft.autoplacer import freerouting_runner as fr
+    from kicraft.autoplacer import routing_board as fr
     from kicraft.autoplacer.brain import geometry_repair as gr
     from kicraft.autoplacer.brain import unconnected_repair as ur
     from kicraft.cli import _compose_route as cr
@@ -94,7 +94,7 @@ def test_geometry_wrapper_inline_scripts_match_return_contracts(
 
     monkeypatch.setattr(gr, "rip_illegal_copper", fake_rip)
     monkeypatch.setattr(ur, "repair_unconnected_signals", fake_sig)
-    monkeypatch.setattr(fr, "_run_pcbnew_script", lambda script: exec(script, {}))
+    monkeypatch.setattr(fr, "run_pcbnew_script", lambda script: exec(script, {}))
     improved = {"drc": {"unconnected": 0, "shorts": 0}}
     monkeypatch.setattr(fr, "validate_routed_board", lambda *a, **k: improved)
 
@@ -118,7 +118,7 @@ def test_geometry_wrapper_inline_scripts_match_return_contracts(
 def test_geometry_wrapper_reverts_when_flags_persist(tmp_path, monkeypatch):
     """If the re-validate still flags illegal geometry, the mutated board is
     byte-restored and the original validation returned."""
-    from kicraft.autoplacer import freerouting_runner as fr
+    from kicraft.autoplacer import routing_board as fr
     from kicraft.autoplacer.brain import geometry_repair as gr
     from kicraft.autoplacer.brain import unconnected_repair as ur
     from kicraft.cli import _compose_route as cr
@@ -139,7 +139,7 @@ def test_geometry_wrapper_reverts_when_flags_persist(tmp_path, monkeypatch):
         "repair_unconnected_signals",
         lambda path, cfg: {"edges": 0, "tied": 0, "skipped": [], "pruned": 0},
     )
-    monkeypatch.setattr(fr, "_run_pcbnew_script", lambda script: exec(script, {}))
+    monkeypatch.setattr(fr, "run_pcbnew_script", lambda script: exec(script, {}))
     still_bad = {
         "drc": {"unconnected": 2, "shorts": 0},
         "obviously_illegal_routed_geometry": True,

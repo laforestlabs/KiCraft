@@ -12,7 +12,7 @@ that. A :class:`BreakoutSpec` describes the escape for one pad as an explicit
 polyline (``waypoints``) and/or a *radial* escape (straight out from the
 footprint centre through the pad). :func:`add_breakout_stubs` lays the segments
 as **locked** tracks (optionally dropping a via at the end) so a subsequent
-FreeRouting pass run with ``freerouting_preserve_existing_copper=True`` keeps
+KiCad Routing Tools pass run with ``routing_preserve_existing_copper=True`` keeps
 them and routes the rest from the accessible breakout endpoints.
 
 Specs are footprint-relative-friendly: a curated connector entry stores the
@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Sequence
+
+from kicraft.autoplacer.fab_profile import fab_floors
 
 import pcbnew
 
@@ -52,7 +54,7 @@ class BreakoutSpec:
         Radial escape length when *waypoints* is empty: a single segment from
         the pad centre straight out from the footprint centre.
     width_mm:
-        Track width; ``None`` falls back to ``cfg['freerouting_fine_pitch_track_mm']``.
+        Track width; ``None`` falls back to the fabrication track floor.
     layer:
         Copper layer the stub is drawn on.
     via_at_end:
@@ -197,6 +199,23 @@ def _pad_ref(pad) -> str:
         return ""
 
 
+
+def _pad_hole_overhang_mm(pad) -> float | None:
+    """Hole radius beyond the pad's narrow copper radius, or no hole."""
+    try:
+        if pad.GetAttribute() not in (
+            pcbnew.PAD_ATTRIB_PTH,
+            pcbnew.PAD_ATTRIB_NPTH,
+        ):
+            return None
+        drill = pad.GetDrillSize()
+        size = pad.GetSize()
+        drill_r = max(pcbnew.ToMM(drill.x), pcbnew.ToMM(drill.y)) / 2.0
+        copper_r = min(pcbnew.ToMM(size.x), pcbnew.ToMM(size.y)) / 2.0
+    except Exception:
+        return None
+    return max(0.0, drill_r - copper_r)
+
 def _foreign_pad_margins(
     board: "pcbnew.BOARD",
     src_pad,
@@ -205,10 +224,11 @@ def _foreign_pad_margins(
     half_width_mm: float,
     layer_id,
     strict_same_fp: bool = False,
+    hole_clearance_mm: float = 0.25,
 ) -> tuple[list, list]:
     """Per-pad guard margins for copper on *src_pad*'s net: ``(path, tip)``.
 
-    KiCad and FreeRouting both resolve a pair clearance as the LARGER of the
+    KiCad and KiCad Routing Tools both resolve a pair clearance as the LARGER of the
     two items' constraints, so a stub held only to the flat config floor can
     end inside a Power-netclass pad's keep-out: legal to this module, illegal
     to the router, which then abandons the net exactly as if the stub were
@@ -221,11 +241,9 @@ def _foreign_pad_margins(
     final verify DRC does NOT waive footprint-internal pad-track violations
     (a stub grazing a same-footprint GND pad at 0.05 mm is a hard error, the
     KC-UXASHQ U1.5-vs-U1.6 signature) -- while False keeps the historical
-    collision-only margin for pads genuinely hemmed in by their own row
-    (pair clearance is unsatisfiable by construction inside a 0.5 mm pad
-    field). Callers try strict first and relax only when no direction
-    clears. *tip* margins are pair clearance + track half-width vs EVERY
-    foreign pad: the stub end is where FreeRouting must legally attach.
+    collision-only margin for pads genuinely hemmed in by their own row.
+    Hole-bearing pads always enforce hole-to-copper clearance, even when their
+    annulus is narrower than the drill. *tip* margins use the same rule.
     """
     src_cl = _own_clearance_mm(src_pad, layer_id, floor_mm)
     src_ref = _pad_ref(src_pad)
@@ -233,27 +251,29 @@ def _foreign_pad_margins(
     path: list = []
     tip: list = []
     for pad in _foreign_pads(board, src_pad.GetNetCode(), exclude=src_pad):
-        # See STAMP_CLEARANCE_GUARD_MM: same reasoning as
-        # freerouting_clearance_guard_um.
         pair = STAMP_CLEARANCE_GUARD_MM + max(
             floor_mm, src_cl, _own_clearance_mm(pad, layer_id, floor_mm)
         )
+        overhang = _pad_hole_overhang_mm(pad)
+        required = pair if overhang is None else max(
+            pair,
+            hole_clearance_mm + overhang,
+        )
         same_fp = src_ref and _pad_ref(pad) == src_ref
-        # Path margins bound the segment CENTERLINE, so the pair clearance
-        # must be held from the copper EDGE: pair + half_width. Bare `pair`
-        # let a diagonal radial escape pass the strict check while stamping
-        # copper only pair - half_width from a sibling pad (run_09: the U2
-        # LQFP USB_DP stub at 0.095 mm vs the 0.153 mm rule -- every routed
-        # round deterministically rejected). The via-obstacle derivation at
-        # the stamp site (`m + via_r - half_width`) has always assumed the
-        # half-width is included here.
+        # Margins bound the track centerline, so include half its width.
+        # Same-footprint leniency remains for dense SMD rows, but never relaxes
+        # the hole-to-copper rule of a PTH/NPTH pad.
         path_mm = (
-            collide_mm
+            (
+                collide_mm
+                if overhang is None
+                else max(collide_mm, hole_clearance_mm + overhang + half_width_mm)
+            )
             if (same_fp and not strict_same_fp)
-            else pair + half_width_mm
+            else required + half_width_mm
         )
         path.append((pad, int(pcbnew.FromMM(path_mm))))
-        tip.append((pad, int(pcbnew.FromMM(pair + half_width_mm))))
+        tip.append((pad, int(pcbnew.FromMM(required + half_width_mm))))
     return path, tip
 
 
@@ -329,7 +349,7 @@ def _radial_escape_end(
     step_mm: float = 0.05,
     inner_box: tuple[float, float, float, float] | None = None,
 ) -> tuple[float, float] | None:
-    """End point of a radial escape whose tip FreeRouting can legally attach to.
+    """End point of a radial escape whose tip KiCad Routing Tools can legally attach to.
 
     Marches outward sample by sample. The march stops at the first *path*
     collision (crossing a foreign pad is a short) or at the board's inner box.
@@ -441,8 +461,8 @@ def _board_inner_box_mm(
     """``(x1, y1, x2, y2)`` in mm that stamped copper must stay inside.
 
     The Edge.Cuts bounding box shrunk by the board's copper-to-edge clearance.
-    Locked copper outside the outline is fatal: FreeRouting 1.9.0 reads the
-    corner as "wire corner outside board" and hangs without producing a SES
+    Locked copper outside the outline is fatal: KiCad Routing Tools 1.9.0 reads the
+    corner as "wire corner outside board" and hangs without producing a routed session
     (the brief-2 VOLTAGE SELECT leaf burned its whole build budget this way).
     Exact for the rectangular outlines KiCraft generates; for a non-rectangular
     outline the bbox is larger than the board, so this check can only
@@ -561,10 +581,10 @@ def perimeter_tie_specs(
             continue
         # A pad field closer to the board edge than its margin puts part of the
         # walk rectangle off the board -- and stamping locked off-board copper
-        # hangs FreeRouting. Clamp the rectangle to the inner box; valid only
+        # hangs KiCad Routing Tools. Clamp the rectangle to the inner box; valid only
         # while the clamped border still clears every pad it must walk around
         # (the raw pad bbox plus clearance). When even that fails, skip the tie
-        # loudly: FreeRouting still routes the net, the pour just may fragment.
+        # loudly: KiCad Routing Tools still routes the net, the pour just may fragment.
         rx1, ry1, rx2, ry2 = _pads_bbox_mm(pads_all, 0.0)
         wx1, wy1, wx2, wy2 = x1, y1, x2, y2
         if inner_box is not None:
@@ -633,7 +653,7 @@ def auto_power_tie_specs(
                 ref,
                 net_names=sorted(power_nets),
                 margin_mm=margin,
-                clearance_mm=float(cfg.get("freerouting_min_clearance_mm", 0.153)),
+                clearance_mm=fab_floors(cfg)["clearance_mm"],
             )
         )
     return specs
@@ -723,7 +743,7 @@ def auto_signal_escape_specs(
     enough to need help -- the same signal ``auto_power_tie_specs`` keys on: a
     connector with >= 2 pads on a non-GND power rail (spread VBUS) -- this emits a
     short radial escape out of each *multi-pad signal* net's pad on that
-    footprint, so FreeRouting finishes from open copper. Excluded: power/ground
+    footprint, so KiCad Routing Tools finishes from open copper. Excluded: power/ground
     pads (left to the pour + perimeter tie), single-pad signal nets (an interface
     net with nothing to route to in-leaf -- it closes at compose), and refs in
     ``signal_escape_exclude_refs``. The collision guard in
@@ -830,7 +850,7 @@ def escape_planner_specs(
     That last case is the point. Today's stamper answers "blocked" with the
     farthest point it reached -- a 0.2 mm nub in a dead channel that connects
     nothing, obstructs the router, and makes the board look partly routed. A pad
-    with no exit now says so at round 1 instead of surfacing as FreeRouting
+    with no exit now says so at round 1 instead of surfacing as KiCad Routing Tools
     exhaustion at round 9.
 
     Returns ``(specs, report)``; *report* carries the per-footprint plan and the
@@ -1129,7 +1149,7 @@ def add_breakout_stubs(
     finishing step never fails the board.
     """
     cfg = cfg or {}
-    default_w = float(cfg.get("freerouting_fine_pitch_track_mm", 0.153))
+    default_w = fab_floors(cfg)["track_mm"]
     summary: dict[str, Any] = {
         "stubs": 0,
         "segments": 0,
@@ -1141,7 +1161,8 @@ def add_breakout_stubs(
 
     board = pcbnew.LoadBoard(pcb_path)
     inner_box = _board_inner_box_mm(board)
-    floor_mm = float(cfg.get("freerouting_min_clearance_mm", 0.153))
+    floor_mm = fab_floors(cfg)["clearance_mm"]
+    hole_clearance_mm = float(cfg.get("hole_clearance_min_mm", 0.25))
     # Copper stamped by THIS call, for mutual clearance between specs: a tie
     # and a later escape stub are stamped blind to each other, and two locked
     # tracks 0.05 mm apart are a violation no router pass can repair (and the
@@ -1232,6 +1253,7 @@ def add_breakout_stubs(
         path_obs, tip_obs = _foreign_pad_margins(
             board, pad, floor_mm=floor_mm, half_width_mm=half_width_mm,
             layer_id=layer, strict_same_fp=spec.start_xy is not None,
+            hole_clearance_mm=hole_clearance_mm,
         )
 
         def _conflicts_with_copper(points: list[tuple[float, float]]) -> bool:
@@ -1338,6 +1360,7 @@ def add_breakout_stubs(
             strict_path_obs, _ = _foreign_pad_margins(
                 board, pad, floor_mm=floor_mm, half_width_mm=half_width_mm,
                 layer_id=layer, strict_same_fp=True,
+                hole_clearance_mm=hole_clearance_mm,
             )
             points = None
             for path_set in (strict_path_obs, path_obs):
@@ -1370,7 +1393,7 @@ def add_breakout_stubs(
                 continue
 
         # Hard invariant: never stamp locked copper outside the board outline.
-        # FreeRouting 1.9.0 hangs (no SES, no error) on a locked wire corner
+        # KiCad Routing Tools 1.9.0 hangs (no routed session, no error) on a locked wire corner
         # off the board, burning the leaf's whole routing budget. The start is
         # exempt -- it is a placed pad's centre, the placement gate's job. The
         # box is convex, so in-box endpoints mean in-box segments.

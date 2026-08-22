@@ -274,7 +274,7 @@ def test_wrapper_inline_script_matches_repair_return_contract(
     pass into a no-op on all 9 rc7 boards of the 20260710 self-eval batch
     (the caller printed s['nets']/s['stranded']/s['unresolved'] against a
     {edges, tied, skipped} contract)."""
-    from kicraft.autoplacer import freerouting_runner as fr
+    from kicraft.autoplacer import routing_board as fr
     from kicraft.autoplacer.brain import unconnected_repair as ur
     from kicraft.cli import _compose_route as cr
 
@@ -289,7 +289,7 @@ def test_wrapper_inline_script_matches_repair_return_contract(
 
     monkeypatch.setattr(ur, "repair_unconnected_signals", fake_repair)
     # Run the inline script in-process so a contract mismatch raises here.
-    monkeypatch.setattr(fr, "_run_pcbnew_script", lambda script: exec(script, {}))
+    monkeypatch.setattr(fr, "run_pcbnew_script", lambda script: exec(script, {}))
     improved = {"drc": {"unconnected": 0, "shorts": 0}}
     monkeypatch.setattr(fr, "validate_routed_board", lambda *a, **k: improved)
 

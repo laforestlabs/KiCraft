@@ -290,10 +290,10 @@ def main(argv: list[str]) -> int:
             board.Add(_txt)
 
     # --- stamp parent-local rule-area keepouts (mounting holes etc.) ---
-    # Rule-area zones are what ExportSpecctraDSN emits as DSN (keepout)
-    # regions, so FreeRouting won't place a track or via inside them. They
-    # reach the DSN because the parent route preserves board zones
-    # (freerouting_clear_zones=False in compose_subcircuits); the leaf route's
+    # Rule-area zones are what ExportSpecctraDSN emits as router exchange input (keepout)
+    # regions, so KiCad Routing Tools won't place a track or via inside them. They
+    # reach the router exchange input because the parent route preserves board zones
+    # (routing_clear_zones=False in compose_subcircuits); the leaf route's
     # clear_zones() would strip board-level zones, but the parent route does
     # not call it. (Footprint-internal keep-outs are robust on either path:
     # they are not board zones, so clear_zones() never sees them.)
@@ -335,7 +335,7 @@ def main(argv: list[str]) -> int:
 
     board.BuildConnectivity()
     board.Save(_out_path)
-    # Success sentinel (must match freerouting_runner._PCBNEW_OK_SENTINEL) so a
+    # Success sentinel (must match routing_board._PCBNEW_OK_SENTINEL) so a
     # pcbnew/wx teardown SIGSEGV after this successful Save is not mistaken for
     # a stamping failure by _retry_pcbnew_run.
     print("__KICRAFT_PCBNEW_OK__")

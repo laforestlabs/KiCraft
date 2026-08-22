@@ -1,6 +1,6 @@
 """DRC-guided rip of illegal routed copper (self-eval 2026-07-20 N2).
 
-freerouting sometimes ships geometry the fab gate must reject: copper
+routing sometimes ships geometry the fab gate must reject: copper
 escaped past Edge.Cuts (``malformed_board_geometry``), tracks hugging the
 outline inside the copper-edge clearance, genuine track-to-track clearance
 violations, crossing tracks (all ``illegal_routed_geometry``). Rather than

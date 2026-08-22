@@ -14,14 +14,14 @@ It performs the following steps:
 
 Current scope:
 - leaf-only solving
-- placement search with optional FreeRouting-based routing
-- routing is handled exclusively by FreeRouting (see leaf_routing.py)
+- placement search with optional the autorouter-based routing
+- routing is handled exclusively by the autorouter (see leaf_routing.py)
 - parent/composite composition is handled by compose_subcircuits.py
 
 The goal is a stable bottom-up local solve loop extended with:
 - frozen subcircuit layout artifacts
 - parent-level rigid composition (compose_subcircuits.py)
-- final top-level assembly via FreeRouting
+- final top-level assembly via the autorouter
 
 Usage:
     python3 solve_subcircuits.py LLUPS.kicad_sch
@@ -173,11 +173,7 @@ from kicraft.autoplacer.brain.types import (
 )
 from kicraft.autoplacer.config import DEFAULT_CONFIG, load_project_config
 from kicraft.autoplacer.hardware.adapter import KiCadAdapter, StampSubprocessError
-from kicraft.autoplacer.freerouting_runner import FreeroutingUnavailableError
-from kicraft.autoplacer.routing_backends import (
-    RoutingBackendUnavailableError,
-    routing_backend,
-)
+from kicraft.autoplacer.kicad_routing_tools import KicadRoutingToolsUnavailableError
 from kicraft.cli._leaf_replication import materialize_sibling, plan_leaf_replication
 
 
@@ -661,7 +657,7 @@ def _solve_one_round(
                 "enabled": True,
                 "skipped": True,
                 "reason": "place_quality_gate",
-                "router": routing_backend(cfg),
+                "router": "kicad-routing-tools",
                 "traces": 0,
                 "vias": 0,
                 "total_length_mm": 0.0,
@@ -705,10 +701,9 @@ def _solve_one_round(
             # instead of degrading to routing_exception (which would
             # let cached on-disk leaves keep masquerading as accepted).
             raise
-        except (FreeroutingUnavailableError, RoutingBackendUnavailableError):
-            # A missing selected backend is a host misconfiguration, not a
-            # per-leaf routing failure. Surface one clear hard failure instead
-            # of masking the same issue on every leaf.
+        except KicadRoutingToolsUnavailableError:
+            # Missing KRT is a host misconfiguration, not a per-leaf failure.
+            # Surface one clear hard failure instead of masking every leaf.
             raise
         except Exception as exc:
             print(f"  WARNING: unexpected routing error in round {round_index}: {exc}")
@@ -716,7 +711,7 @@ def _solve_one_round(
                 "enabled": True,
                 "skipped": True,
                 "reason": "routing_exception",
-                "router": routing_backend(cfg),
+                "router": "kicad-routing-tools",
                 "traces": 0,
                 "vias": 0,
                 "total_length_mm": 0.0,
@@ -806,13 +801,13 @@ def _round_yielded_routed_board(result: SolveRoundResult) -> bool:
     """Whether a round produced a usable routed board.
 
     True for a cleanly routed round (``result.routed``) AND for a
-    freerouting-"failed" partial route that still stamped a ``routed_board_path``
+    routing-"failed" partial route that still stamped a ``routed_board_path``
     on disk -- the latter is a legitimate best-effort fallback: its residual
     unconnected nets close at parent route/pour. Only a genuine infrastructure
-    failure (freerouting produced no board) is excluded.
+    failure (routing produced no board) is excluded.
 
     Gating ``best_routed`` on ``result.routed`` alone (which is ``False`` for any
-    round freerouting flagged ``failed``) was the rc=1 "board-only leaf" bug: a
+    round routing flagged ``failed``) was the rc=1 "board-only leaf" bug: a
     leaf whose board routed but was gate-rejected had no ``best_routed``, so the
     no-accepted-round recovery never fired, nothing serialized, and the auto-pin
     safety net refused to compose -- dropping the whole block off-board.
@@ -971,7 +966,7 @@ def _solve_leaf_subcircuit(
     acceptance_cfg = acceptance_config_from_dict(cfg)
 
     # Per-leaf wall deadline: a pathological leaf can burn the WHOLE build inside
-    # its own ladder (12 rounds x 4 canvases, each up to a FreeRouting timeout),
+    # its own ladder (12 rounds x 4 canvases, each up to a the autorouter timeout),
     # so the outer autoexperiment never reaches a round boundary and the harness
     # watchdog SIGKILLs with zero artifacts. When the deadline trips on a
     # compaction rung, the ladder JUMPS straight to the terminal seed-bbox
@@ -1085,7 +1080,7 @@ def _solve_leaf_subcircuit(
                         0.10,
                         float(round_cfg.get("orderedness", 0.25)) - 0.15,
                     )
-            # The place-quality gate may skip freerouting and re-place -- but
+            # The place-quality gate may skip routing and re-place -- but
             # only while another round is provably coming, so a leaf always ends
             # with at least one real routing attempt to compose best-effort from.
             # Once the deadline has fired the ladder is on its guaranteed
@@ -1161,7 +1156,7 @@ def _solve_leaf_subcircuit(
             )
 
             # A routed round is a best-effort fallback (used when no round is
-            # accepted) -- including one freerouting marked "failed" for residual
+            # accepted) -- including one routing marked "failed" for residual
             # opens, as long as it stamped a board on disk. See
             # _round_yielded_routed_board.
             if _round_yielded_routed_board(result) and (
@@ -1336,8 +1331,8 @@ def _solve_leaf_subcircuit(
             reduced_best.timing_breakdown.get("route_local_subcircuit_total_s", 0.0)
             or 0.0
         ),
-        "freerouting_s": float(
-            reduced_best.timing_breakdown.get("freerouting_s", 0.0) or 0.0
+        "routing_s": float(
+            reduced_best.timing_breakdown.get("routing_s", 0.0) or 0.0
         ),
         "accepted_round_count": accepted_round_count,
         "failed_round_count": failed_round_count,
@@ -1377,7 +1372,7 @@ def _append_failed_rounds_to_debug(
 
     ``_solve_leaf_subcircuit`` only reaches ``_persist_solution`` when at
     least one round was accepted. When every round fails (parameter
-    sweep that strands a particular leaf, freerouting timeout on a dense
+    sweep that strands a particular leaf, routing timeout on a dense
     leaf, etc.), the function raises and ``_persist_solution`` never
     runs -- so the prior debug.json (from earlier exp_rounds in this
     same run) is left untouched and the monitor has no record this exp_
@@ -1567,7 +1562,7 @@ def _persist_solution(
             f"historically_trivial_candidate={bool(solved.scheduling_metadata.get('historically_trivial_candidate', False))}",
             f"leaf_total_s={float(solved.scheduling_metadata.get('leaf_total_s', 0.0) or 0.0):.3f}",
             f"route_total_s={float(solved.scheduling_metadata.get('route_total_s', 0.0) or 0.0):.3f}",
-            f"freerouting_s={float(solved.scheduling_metadata.get('freerouting_s', 0.0) or 0.0):.3f}",
+            f"routing_s={float(solved.scheduling_metadata.get('routing_s', 0.0) or 0.0):.3f}",
             f"size_reduction_attempted={size_reduction.get('attempted', False)}",
             f"size_reduction_passes={size_reduction.get('passes', 0)}",
             f"original_outline_width_mm={original_outline.get('width_mm', solved.extraction.local_state.board_width):.3f}",
@@ -1581,7 +1576,7 @@ def _persist_solution(
     metadata = build_artifact_metadata(
         extraction=extraction,
         config=cfg,
-        solver_version="subcircuits-m4-freerouting",
+        solver_version="subcircuits-m4-kicad-routing-tools",
     )
 
     routed_board_path = solved.best_round.routing.get("routed_board_path")
@@ -1870,7 +1865,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--route",
         action="store_true",
-        help="Run FreeRouting after placement to route internal leaf nets",
+        help="Run the autorouter after placement to route internal leaf nets",
     )
     parser.add_argument(
         "--workers",

@@ -82,7 +82,7 @@ def test_every_screw_table_footprint_exists_in_stock_lib():
 
 pcbnew = pytest.importorskip("pcbnew")
 
-from kicraft.autoplacer.freerouting_runner import _run_pcbnew_script_file  # noqa: E402
+from kicraft.autoplacer.routing_board import run_pcbnew_script_file  # noqa: E402
 from kicraft.cli.compose_subcircuits import _PARENT_STAMP_SCRIPT_PATH  # noqa: E402
 
 
@@ -109,7 +109,7 @@ def _stamp(payload: dict) -> None:
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(payload, f)
-        _run_pcbnew_script_file(_PARENT_STAMP_SCRIPT_PATH, tmp)
+        run_pcbnew_script_file(_PARENT_STAMP_SCRIPT_PATH, tmp)
     finally:
         os.unlink(tmp)
 

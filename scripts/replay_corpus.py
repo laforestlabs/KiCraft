@@ -10,7 +10,7 @@ changes any board is then a visible, located diff -- not a silent regression.
 Two modes (run both by default):
 
 * ``leaf``   -- ``replay --no-route`` on each workspace; diff the per-leaf
-  placement (``leaf_pre_freerouting.kicad_pcb``), which `replay` guarantees
+  placement (``leaf_placed.kicad_pcb``), which `replay` guarantees
   reproducible (pinned seed + hash seed). Snapshot: ``<name>.leaf.golden.json``.
 
 * ``parent`` -- compose-only on the workspace's COMMITTED, FROZEN leaf artifacts
@@ -96,7 +96,7 @@ def _leaf_geometry(project_dir: Path) -> dict[str, dict[str, list]]:
     for p in sorted(
         glob.glob(
             str(project_dir / ".experiments" / "subcircuits"
-                / "*" / "leaf_pre_freerouting.kicad_pcb")
+                / "*" / "leaf_placed.kicad_pcb")
         )
     ):
         geo[Path(p).parent.name] = _footprints(p)
@@ -152,7 +152,7 @@ def _run_parent(workspace: Path, stem: str, scratch: Path) -> dict:
     # Drop any stale parent artifact so compose regenerates it from the frozen
     # leaves; keep the leaf artifacts (the whole point of the parent gate).
     for p in glob.glob(str(dest / ".experiments" / "subcircuits"
-                            / "subcircuit__*" / "parent_pre_freerouting.kicad_pcb")):
+                            / "subcircuit__*" / "parent_placed.kicad_pcb")):
         os.remove(p)
     env = {**os.environ, **PINNED_ENV}
     rc = subprocess.run(
@@ -169,7 +169,7 @@ def _run_parent(workspace: Path, stem: str, scratch: Path) -> dict:
     from kicraft.cli.artifact_paths import resolve_parent_board
     board = resolve_parent_board(dest, kind="placed")
     if board is None:
-        raise RuntimeError("compose produced no parent_pre_freerouting board")
+        raise RuntimeError("compose produced no parent_placed board")
     return {"__parent__": _footprints(str(board))}
 
 

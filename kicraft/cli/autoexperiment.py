@@ -886,7 +886,7 @@ def _extract_leaf_timing_summary(solve_payload: dict[str, Any]) -> dict[str, Any
         instance_path = str(solved.get("instance_path", "") or "")
         leaf_total_s = float(timing.get("leaf_total_s", 0.0) or 0.0)
         route_total_s = float(timing.get("route_local_subcircuit_total_s", 0.0) or 0.0)
-        freerouting_s = float(timing.get("freerouting_s", 0.0) or 0.0)
+        routing_s = float(timing.get("routing_s", 0.0) or 0.0)
         render_total_s = float(
             (timing.get("pre_route_render_diagnostics_s", 0.0) or 0.0)
             + (timing.get("routed_render_diagnostics_s", 0.0) or 0.0)
@@ -919,7 +919,7 @@ def _extract_leaf_timing_summary(solve_payload: dict[str, Any]) -> dict[str, Any
                 "instance_path": instance_path,
                 "leaf_total_s": round(leaf_total_s, 3),
                 "route_total_s": round(route_total_s, 3),
-                "freerouting_s": round(freerouting_s, 3),
+                "routing_s": round(routing_s, 3),
                 "render_total_s": round(render_total_s, 3),
                 "placement_total_s": round(placement_total_s, 3),
                 "trace_count": trace_count,
@@ -1099,9 +1099,9 @@ def _leaf_schedule_order(
             float(merged.get("route_total_s", 0.0) or 0.0),
             float(row.get("route_total_s", 0.0) or 0.0),
         )
-        merged["freerouting_s"] = max(
-            float(merged.get("freerouting_s", 0.0) or 0.0),
-            float(row.get("freerouting_s", 0.0) or 0.0),
+        merged["routing_s"] = max(
+            float(merged.get("routing_s", 0.0) or 0.0),
+            float(row.get("routing_s", 0.0) or 0.0),
         )
         merged["trace_count"] = max(
             int(merged.get("trace_count", 0) or 0),
@@ -1175,7 +1175,7 @@ def _leaf_schedule_order(
         internal_net_count = int(metrics.get("internal_net_count", 0) or 0)
         leaf_total_s = float(metrics.get("leaf_total_s", 0.0) or 0.0)
         route_total_s = float(metrics.get("route_total_s", 0.0) or 0.0)
-        freerouting_s = float(metrics.get("freerouting_s", 0.0) or 0.0)
+        routing_s = float(metrics.get("routing_s", 0.0) or 0.0)
         failed_round_count = int(metrics.get("failed_round_count", 0) or 0)
         accepted_round_count = int(metrics.get("accepted_round_count", 0) or 0)
         had_failures = bool(metrics.get("had_failures", False))
@@ -1192,7 +1192,7 @@ def _leaf_schedule_order(
             failure_pressure += 15.0
 
         routing_pressure = (
-            leaf_total_s * 1.0 + route_total_s * 1.35 + freerouting_s * 1.75
+            leaf_total_s * 1.0 + route_total_s * 1.35 + routing_s * 1.75
         )
         topology_pressure = (
             trace_count * 0.35 + via_count * 0.8 + internal_net_count * 1.5
@@ -1220,7 +1220,7 @@ def _leaf_schedule_order(
                 "internal_net_count": internal_net_count,
                 "leaf_total_s": round(leaf_total_s, 3),
                 "route_total_s": round(route_total_s, 3),
-                "freerouting_s": round(freerouting_s, 3),
+                "routing_s": round(routing_s, 3),
                 "failed_round_count": failed_round_count,
                 "accepted_round_count": accepted_round_count,
                 "had_failures": had_failures,
@@ -1234,7 +1234,7 @@ def _leaf_schedule_order(
         scheduling_rows,
         key=lambda item: (
             -float(item.get("scheduling_score", 0.0) or 0.0),
-            -float(item.get("freerouting_s", 0.0) or 0.0),
+            -float(item.get("routing_s", 0.0) or 0.0),
             -float(item.get("route_total_s", 0.0) or 0.0),
             -float(item.get("leaf_total_s", 0.0) or 0.0),
             -int(item.get("trace_count", 0) or 0),
@@ -1545,7 +1545,7 @@ def _discover_live_preview_paths(
             renders_dir / "board_routed.png",
         ]
         stamped_board_candidates = [
-            latest_parent_dir / "parent_pre_freerouting.kicad_pcb",
+            latest_parent_dir / "parent_placed.kicad_pcb",
             latest_parent_dir / "parent_stamped.kicad_pcb",
         ]
         routed_board_candidates = [
@@ -1561,7 +1561,7 @@ def _discover_live_preview_paths(
                 break
         for candidate in stamped_board_candidates:
             if _ok(candidate):
-                previews["parent_stamped_board"] = str(candidate)
+                previews["parent_placed_board"] = str(candidate)
                 break
         for candidate in routed_board_candidates:
             if _ok(candidate):
@@ -1829,7 +1829,7 @@ def _write_live_status(
             "leaf_round_illegal_board",
             "leaf_round_pre_route_board",
             "leaf_round_routed_board",
-            "parent_stamped_board",
+            "parent_placed_board",
             "parent_routed_board",
         ]
         board_path_items = [
@@ -1958,8 +1958,8 @@ def _write_round_detail(
             "parent_copper_accounting": dict(parent_copper_accounting or {}),
             "parent_routed_validation": dict(parent_routed_validation or {}),
             "parent_board_paths": {
-                "parent_stamped_board": str(
-                    (preview_paths or {}).get("parent_stamped_board", "") or ""
+                "parent_placed_board": str(
+                    (preview_paths or {}).get("parent_placed_board", "") or ""
                 ),
                 "parent_routed_board": str(
                     (preview_paths or {}).get("parent_routed_board", "") or ""
@@ -2259,10 +2259,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--fast-smoke",
         action="store_true",
         help="Pass through fast smoke mode to leaf solving for faster routed verification rounds",
-    )
-    parser.add_argument(
-        "--jar",
-        help="Optional FreeRouting jar path passed through to parent routing",
     )
     parser.add_argument(
         "--seed",
@@ -2976,8 +2972,6 @@ def main(argv: list[str] | None = None) -> int:
                 "--seed",
                 str(round_seed),
             ]
-            if args.jar:
-                parent_route_cmd.extend(["--jar", args.jar])
             if current_round_config:
                 parent_route_cmd.extend(["--config", current_round_config])
             for selector in args.only:
@@ -3030,7 +3024,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             # Merge per-phase timings published by compose_subcircuits so
             # the round-level breakdown distinguishes layout (place_solve)
-            # from routing (freerouting). Lets the harness see whether a
+            # from routing (routing). Lets the harness see whether a
             # round is layout-bound or route-bound without re-instrumenting.
             try:
                 if parent_output_json and Path(parent_output_json).exists():
@@ -3048,17 +3042,7 @@ def main(argv: list[str] | None = None) -> int:
                 parent_output_json
             )
 
-            # Parent cap-out early stop: consecutive rounds at the FreeRouting
-            # timeout cap finalize best-so-far -- placement mutation cannot
-            # rescue a router timeout (WS2).
-            capout_verdict = scheduler.observe_parent(
-                routed=parent_routed,
-                elapsed_s=parent_route_elapsed_s,
-                cap_s=float(
-                    round_candidate_config.get(
-                        "parent_freerouting_timeout_cap_s", 600
-                    )
-                ),
+            scheduler.observe_parent(
                 rejected_refit_winner=_parent_rejected_refit_winner(
                     parent_output_json
                 ),
@@ -3066,9 +3050,6 @@ def main(argv: list[str] | None = None) -> int:
                     parent_output_json
                 ),
             )
-            if capout_verdict is not None:
-                print(capout_verdict.reason)
-                break
             _write_live_status(
                 status_json_path,
                 status_txt_path,
@@ -3158,7 +3139,7 @@ def main(argv: list[str] | None = None) -> int:
         #
         # Each canonical source PCB is freshness-gated against
         # round_wall_started_at: if compose for this round didn't
-        # produce an updated parent_pre_freerouting / parent_routed,
+        # produce an updated parent_placed / parent_routed,
         # the canonical files still carry a prior round's contents
         # and must NOT be tagged with this round's number. Otherwise
         # a failed round would pin its number onto someone else's
@@ -3168,7 +3149,7 @@ def main(argv: list[str] | None = None) -> int:
             parent_artifact_dir = _discover_latest_parent_artifact_dir(project_dir)
             if parent_artifact_dir is not None:
                 round_prefix = f"round_{round_num:04d}"
-                for canonical in ("parent_pre_freerouting", "parent_routed"):
+                for canonical in ("parent_placed", "parent_routed"):
                     src = parent_artifact_dir / f"{canonical}.kicad_pcb"
                     if src.exists() and _fresh_for_this_round(src):
                         dst = parent_artifact_dir / f"{round_prefix}_{canonical}.kicad_pcb"
@@ -3399,20 +3380,8 @@ def main(argv: list[str] | None = None) -> int:
             f"[{'KEPT' if round_result.kept else 'discard'}]"
         )
 
-        # Fold this round's wall-duration into the EMA the wall-budget gate
-        # reads. A parent route that died with the infra crash signature
-        # (FreeRouting crash / no SES) spent its time in dead retries, not in
-        # routing a mutation would repeat -- discount it so one crashed round
-        # cannot price the estimator out of every remaining round
-        # (self-eval 2026-07-27 run_29; fix-plan P3.2).
-        _route_crashed = (
-            parent_route_rc not in (None, 0)
-            and ("produced no SES output" in (parent_route_stderr or "")
-                 or "FreeRouting crash (rc=" in (parent_route_stdout or ""))
-        )
         scheduler.observe_duration(
-            max(0.0, time.monotonic() - _round_mono_start),
-            crashed_route_s=parent_route_elapsed_s if _route_crashed else 0.0,
+            max(0.0, time.monotonic() - _round_mono_start)
         )
 
     phase = "done"

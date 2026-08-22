@@ -26,9 +26,7 @@ DEFAULT_CONFIG = {
     },
     # Trace + via floors match OSH Park 2-layer service:
     # https://docs.oshpark.com/services/two-layer/
-    # Signal: 0.153mm, just above the 6 mil (0.1524mm) floor -- 0.1524 itself
-    # rounds to 152 µm in the DSN, below the 152.4 µm minimum (the same trap
-    # freerouting_fine_pitch_track_mm documents below).
+    # Signal: 0.153mm, just above the 6 mil (0.1524mm) floor.
     # Power: 0.5mm matches the Power netclass in LLUPS.kicad_pro.
     "signal_width_mm": 0.153,
     "power_width_mm": 0.5,
@@ -305,10 +303,7 @@ DEFAULT_CONFIG = {
     # Thermal
     "thermal_refs": [],
     "thermal_radius_mm": 3.0,
-    # Routing backend. KiCadRoutingTools is the production default; FreeRouting
-    # remains available as an alternate backend.
-    "routing_backend": "kicad-routing-tools",
-    # KiCadRoutingTools 0.20.2, pinned in routing_backends.py.
+    # Pinned KiCad Routing Tools runtime and route options.
     "kicad_routing_tools_path": os.environ.get(
         "KICRAFT_KICAD_ROUTING_TOOLS_PATH", ""
     ),
@@ -321,119 +316,6 @@ DEFAULT_CONFIG = {
     "kicad_routing_tools_ordering": "mps",
     "kicad_routing_tools_clearance_mm": None,
     "kicad_routing_tools_layers": None,
-    # FreeRouting
-    "freerouting_jar": os.path.expanduser("~/.local/lib/freerouting-1.9.0.jar"),
-    # Java runtime used to launch the FreeRouting jar. "java" resolves via PATH;
-    # the runner additionally searches ~/.local/lib and /usr/lib/jvm so a
-    # user-local JRE works even under the minimal PATH a systemd unit runs with.
-    # Set to an absolute path to pin a specific JRE.
-    "java_bin": "java",
-    "freerouting_timeout_s": 60,
-    "freerouting_max_passes": 20,
-    # Parent inter-leaf routing convergence (C2): a parent with many cross-leaf
-    # nets needs more passes + wall-time than the flat defaults, or the densest
-    # interconnects stay unrouted (the dominant parent-stage unconnected cause).
-    # When the parent's inferred_interconnect_net count reaches the threshold the
-    # PARENT route (only) is raised to these budgets. Bounded; only raises.
-    "parent_dense_interconnect_threshold": 10,
-    "parent_dense_max_passes": 40,
-    "parent_dense_timeout_s": 180,
-    # Above the threshold the timeout ALSO scales per interconnect net: the
-    # flat 180 s floor still starved a 39-net GPIO fan-out (run_10) that had
-    # engaged every net -- FreeRouting was killed mid-route round after
-    # round. 8 s/net leaves <= 22-net parents on the flat floor.
-    "parent_s_per_interconnect": 8.0,
-    # First-attempt (GND-plane-present) probe cap. The probe exists to detect
-    # the filled-plane HANG quickly; a flat 120 s also starved legitimate
-    # routing on interconnect-heavy parents (run_10: 39 nets, FreeRouting
-    # killed mid-route, partial SES imported, 26-30 unconnected, and no
-    # fallback -- a partial SES is not an exception). The cap therefore
-    # scales with interconnect count and the scaled parent budget still
-    # bounds it from above.
-    "parent_gnd_plane_probe_timeout_s": 120,
-    "parent_probe_s_per_interconnect": 5.0,
-    # Power-first parent routing: freerouting 1.9.0 routes in board item-list
-    # order with no net priority, so the wide power-class nets -- which need
-    # the fattest clear corridor -- are effectively routed last and end up
-    # walled off by thin-net copper (KC-ZRAUR7: VBUS split in two islands on a
-    # 55%-empty board). When enabled, the parent route runs an extra
-    # freerouting phase FIRST with only the power nets connectable (every
-    # other net's DSN pins emptied; pads/wiring stay obstacles), then the
-    # normal full route locks that power copper like leaf copper. A failed
-    # phase 1 falls through to the single-phase flow. Kill switch below.
-    "parent_power_first": True,
-    "parent_power_first_timeout_s": 120,
-    # Parent freerouting timeout scales with component count, mirroring the
-    # leaf budget at a lower rate (the parent starts from pre-routed leaf
-    # copper, so per-component cost is lower than routing from scratch).
-    # FreeRouting processes the ENTIRE board -- every component, every fixed
-    # leaf wire -- even when only a few interconnect nets remain unrouted, so
-    # wall-time scales with board size, not unrouted-net count. A 200-LED
-    # parent needs ~170 s (72 s routing + 94 s optimization) with only 3
-    # unrouted nets; the fixed 60 s default killed it mid-route (rc=-1).
-    # Budget is max(freerouting_timeout_s, n_components * s_per_component), capped.
-    "parent_freerouting_s_per_component": 1.0,
-    "parent_freerouting_timeout_cap_s": 600,
-    # Leaf freerouting timeout scales with component count: a large array leaf
-    # (e.g. a 200-LED matrix, ~600 nets) routes fine but takes minutes, and the
-    # fixed 60s default cut freerouting off mid-route. The leaf budget is
-    # max(freerouting_timeout_s, n_components * s_per_component), capped. Small
-    # leaves are unaffected (they finish in seconds well under the floor).
-    "leaf_freerouting_s_per_component": 4.0,
-    "leaf_freerouting_timeout_cap_s": 1200,
-    # Separate pass cap for leaf routing. Leaves are smaller and need
-    # less optimization than the parent board, so we keep this lower by
-    # default. When unset, leaves fall back to freerouting_max_passes.
-    "leaf_freerouting_max_passes": 12,
-    # Hide the FreeRouting Swing window. For 2.x this is passed as
-    # --gui.enabled=false. For 1.x the runner wraps the invocation in
-    # xvfb-run when xvfb-run is on PATH (install xorg-x11-server-Xvfb).
-    # If neither path is available the window still appears.
-    "freerouting_hide_window": True,
-    # Fine-pitch clearance handling. The DSN inherits the board's default
-    # 0.2 mm clearance, which is wider than a dense connector's pad gaps
-    # (USB-C ~0.10 mm), so the autorouter cannot escape its pad field. When
-    # freerouting_clearance_mm is None, the router auto-detects the densest
-    # different-net pad gap and, if it is below 0.2 mm, lowers the routing
-    # clearance to clear it -- floored at freerouting_min_clearance_mm for fab
-    # safety -- and reduces the track width to freerouting_fine_pitch_track_mm
-    # so a trace can escape. Set freerouting_clearance_mm to force a value.
-    "freerouting_clearance_mm": None,
-    # Floor for the fine-pitch clearance auto-lower. Must be >= the fab spacing
-    # floor. 0.1 let the auto-lower route the WHOLE board down to ~0.10 mm just
-    # to escape the USB-C; USB-C pads tighter than the floor need a LOCAL
-    # clearance exception, not a global sub-floor drop.
-    # 0.153 was the OSH Park 6 mil floor (0.1524 rounds to 152 µm in the DSN,
-    # under the 152.4 µm minimum -- hence the +0.5 µm). The fab this pipeline
-    # actually targets is JLC, whose 2-layer 1oz spacing minimum is 0.10 mm;
-    # 0.127 mm (5 mil) keeps a deliberate margin above that AND is exactly
-    # 127 µm, so the rounding trap 0.153 existed for does not apply. The
-    # 26 µm this buys is what lets two escapes share a 0.75 mm depopulated
-    # lane (0.635 vs 0.765) and a same-row diagonal carry one (0.381 vs 0.459).
-    # Floors only: the Default netclass still routes at 0.2/0.153.
-    # See autoplacer/fab_profile.py (fab_capability).
-    "freerouting_min_clearance_mm": 0.127,
-    # FreeRouting's internal geometry (polygonal pad approximations, integer
-    # DSN units) differs from KiCad's exact shapes by up to ~1 µm, so a wire FR
-    # places exactly at the clearance rule can measure just UNDER it in KiCad
-    # DRC (observed 0.1520-0.1522 vs 0.1530 on rotated pads;
-    # KC-9G4YPT/KC-CV4NE3/KC-HE2Q5T). Route with this guard ABOVE the DRC rule
-    # (applied to every clearance token in the DSN, after all other rewrites);
-    # the board keeps verifying at the real rule, so the guard can never mask a
-    # genuine violation. Was 5 µm, but batch 20260716T011056Z run_13 measured a
-    # 5.9 µm skew on a rotated aQFN pad (0.1521 vs 0.1530) -- just past it.
-    # 10 µm covers the observed tail with margin, still 6.5% of the rule.
-    "freerouting_clearance_guard_um": 10,
-    # Fine-pitch escape track width. It is written to the DSN as integer microns
-    # (int(round(mm*1000))), which is why the historical 0.15 / 0.1524 values
-    # failed: they round to 150 / 152 µm, both under the then-current 152.4 µm
-    # min_track_width floor, so every fine-pitch escape became a track_width
-    # violation. 0.153 mm cleared it at 153 µm. The floor now follows the real
-    # fab (JLC 2-layer 1oz: 0.10 mm minimum, floored at 0.127 for margin), and
-    # 0.127 mm is exactly 127 µm -- no rounding trap -- so the escape track can
-    # finally be as fine as the fab allows. Still narrower than the 0.2 mm
-    # netclass default, which is unchanged.
-    "freerouting_fine_pitch_track_mm": 0.127,
     # Leaf nesting (shaped compose): a leaf whose occupied copper leaves a
     # large interior hole (an LED-ring annulus) may host a smaller leaf fully
     # INSIDE that hole -- see docs/plans/shaped-compose-leaf-nesting.md. The
@@ -530,7 +412,7 @@ DEFAULT_CONFIG = {
     "escape_via_search_radius_mm": 0.75,
     # Cap on a planned escape's length. Past a couple of millimetres the path
     # has stopped LEAVING the pad field and started routing the net, which is
-    # FreeRouting's job -- and for a poured net whose same-net copper is nearby,
+    # KiCad Routing Tools's job -- and for a poured net whose same-net copper is nearby,
     # an uncapped search will happily propose a 6 mm track straight across the
     # exposed pad (same-net copper is not an obstacle).
     "escape_max_len_mm": 2.5,
@@ -545,7 +427,7 @@ DEFAULT_CONFIG = {
     # Interface escapes (default on): a pad whose net crosses into another
     # sheet has no partner on this leaf, so leaf routing lays NO copper on it
     # -- and at the parent stage it sits behind the pin-adjacent companion
-    # wall and the leaf's locked internal traces. Both FreeRouting and the
+    # wall and the leaf's locked internal traces. Both KiCad Routing Tools and the
     # signal repair then report no_clear_path (the whole rc7 residue class of
     # the self-eval 2026-07-27 re-batch: run_10's 26 GPIO fan-outs, run_23's
     # CAN_TX/RX, run_24's SDA/SCL/ALERT_*). Stamp a short locked escape into
@@ -563,7 +445,7 @@ DEFAULT_CONFIG = {
     "interface_escape_min_pads": 8,
     # Length cap for the escape ray. It only needs to clear the pin-adjacent
     # companion wall (0.5-2 mm out); past that the stub is routing the net,
-    # which is FreeRouting's job.
+    # which is KiCad Routing Tools's job.
     "interface_escape_max_len_mm": 3.0,
     # How much open copper the ray's ENDPOINT must have around it (distance to
     # the nearest foreign pad) to count as "escaped".
@@ -658,17 +540,9 @@ DEFAULT_CONFIG = {
 }
 
 
-# Only true layout/routing heuristics belong here. Fab/circuit constraints
-# (signal_width_mm, power_width_mm, via_drill_mm, via_size_mm, zone_*_mm,
-# pad_inset_margin_mm, thermal_radius_mm) are dictated by the fab's minimum
-# feature size and the schematic's current/voltage requirements -- they are
-# NOT optimization knobs. ``freerouting_timeout_s`` stays a runtime budget (a
-# cap, not a quality dial). ``freerouting_max_passes`` / ``leaf_freerouting_max_passes``
-# ARE searched: more passes trade routing quality (shorter, fewer vias, more
-# complete) against wall-time, and the reward weighs that wall-time axis directly,
-# so they sit on the Pareto frontier rather than being a fixed budget. Board
-# dimensions (board_width_mm, board_height_mm) are derived from leaf areas
-# and enclosure constraints, not searched.
+# Only true layout/routing heuristics belong here. Fab/circuit constraints are
+# fixed by fabrication capability and circuit requirements, while runtime
+# budgets are not optimization knobs.
 CONFIG_SEARCH_SPACE = {
     # --- Insensitive params: full original ranges retained ---
     # These showed |r| < 0.10 in both stages of the overnight sweep, so
@@ -737,14 +611,6 @@ CONFIG_SEARCH_SPACE = {
     # that violate the sum*0.6 / max-child + spacing safety floors;
     # 3.5 ceiling matches the legacy "lots of slack" upper end.
     "parent_seed_area_overhead": {"min": 1.5, "max": 3.5, "sigma": 0.2, "type": "float"},
-    # --- Phase 1: routing-effort / routability knobs ---
-    # These steer the autorouter and dense-connector escapes, NOT fab geometry.
-    # max_passes is the dominant route-quality lever (effort vs wall-time); the
-    # fab-readiness bottleneck (most boards don't route clean) lives here, not in
-    # the spacing knobs the earlier sweeps tuned. Defaults: parent 20 / leaf 12 /
-    # escape 1.5mm. Ranges centered on the defaults with room both ways.
-    "freerouting_max_passes": {"min": 8, "max": 40, "sigma": 5, "type": "int"},
-    "leaf_freerouting_max_passes": {"min": 6, "max": 30, "sigma": 4, "type": "int"},
     "signal_escape_length_mm": {"min": 0.5, "max": 3.0, "sigma": 0.3, "type": "float"},
     # --- Phase 2: PlacementScore sub-score weights ---
     # The objective the placer optimizes for IS these weights, so tuning them is

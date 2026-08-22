@@ -8,7 +8,7 @@ path incl. self-eval ``run_NN_*`` dirs, or nothing = the most recent run):
 
     locate  — resolve the run dir + its accounts.db row
     run     — unified per-run verdict: pipeline stages, ERC, leaves, parent,
-              unconnected-net classification, repair records, FreeRouting
+              unconnected-net classification, repair records, KiCad Routing Tools
               failure fingerprints, promote provenance
     scan    — cross-run failure-mode ranking (systematic vs per-design)
     audits  — design-quality audits: part-library provenance, BOM realness +
@@ -44,48 +44,6 @@ DRC_COUNT_KEYS = (
     "shorts", "unconnected", "clearance", "annular_width", "padstack",
     "copper_edge_clearance", "courtyard", "items_not_allowed",
 )
-
-# Route-failure signatures worth flagging from per-round stdout/stderr tails.
-# (name, needle) — matched case-sensitively against the captured tails.
-# Shared with cli_app.build_pcb_errors (via fr_signature_hits /
-# match_fr_signature) so the failure card and the triage scanner can never
-# drift apart on what counts as a known FreeRouting failure.
-FR_SIGNATURES = (
-    ("locked_wire_loop_hang", "The normalization of net"),
-    ("dsn_sanitize_cycles", "[dsn-sanitize]"),
-    ("non_ansi_dsn", "non-ANSI"),
-    ("power_first_phase", "power-first phase"),
-    ("no_ses_output", "produced no SES output"),
-    ("fr_crash_retry", "FreeRouting crash (rc="),
-    ("gnd_skip_fallback", "retrying with GND skipped"),
-    ("fine_pitch_rule", "fine-pitch routing rule"),
-    ("gnd_island_repair", "gnd island repair"),
-    ("power_strand_repair", "power strand repair"),
-    ("leaf_signal_repair", "leaf signal repair"),
-    ("escape_infeasible", "ESCAPE INFEASIBLE"),
-    ("interface_escapes", "Interface escapes"),
-)
-
-
-def fr_signature_hits(text: str) -> list[str]:
-    """Every FR_SIGNATURES name present in ``text`` (case-sensitive)."""
-    return [name for name, needle in FR_SIGNATURES if needle in text]
-
-
-def match_fr_signature(text: str) -> tuple[str, str] | None:
-    """First FreeRouting failure signature found in ``text``.
-
-    Returns ``(signature_name, matched_line)`` (the line containing the
-    needle, stripped) or ``None`` when no signature matches.
-    """
-    for name, needle in FR_SIGNATURES:
-        if needle not in text:
-            continue
-        for line in text.splitlines():
-            if needle in line:
-                return name, line.strip()
-        return name, ""
-    return None
 
 # The parent_pipeline.json state keys `run`/`scan` read. The drift-guard test
 # asserts these against a freshly serialized ParentCompositionState.to_dict()
@@ -483,50 +441,11 @@ def collect_parent(exp: Path) -> dict:
             "copper_edge_footprint_refs": drc.get("copper_edge_footprint_refs"),
             "drc_flags": {k: drc.get(k) for k in
                           ("timed_out", "missing_cli", "skipped_routing") if drc.get(k)},
-            "freerouting_returncode": rv.get("freerouting_returncode"),
             "repairs": {k: rv.get(k) for k in (
-                "power_first", "post_route_repairs", "signal_unconnected_repair",
+                "post_route_repairs", "signal_unconnected_repair",
                 "illegal_geometry_repair") if rv.get(k) is not None},
         }
     return out
-
-
-def collect_fr_fingerprints(exp: Path) -> dict:
-    """FreeRouting failure evidence: per-round stdout/stderr tail signatures
-    (.experiments/rounds/round_NNNN.json) + the parent artifact's
-    freerouting_stats.returncode (-1 = watchdog-killed JVM = the hang
-    fingerprint)."""
-    per_round: dict[str, list[str]] = {}
-    fine_pitch_lines: list[str] = []
-    for rj in sorted(exp.glob("rounds/round_*.json")):
-        logs = _jdict(rj).get("logs") or {}
-        text = (logs.get("parent_route_stdout_tail") or "") + \
-               (logs.get("parent_route_stderr_tail") or "")
-        hits = fr_signature_hits(text)
-        if hits:
-            per_round[rj.stem] = hits
-        for line in text.splitlines():
-            if "fine-pitch routing rule" in line:
-                fine_pitch_lines.append(line.strip())
-    stats = None
-    for _dbg, kind, payload in iter_subcircuit_debugs(exp):
-        if kind == "parent":
-            stats = (payload.get("routing_result") or {}).get("freerouting_stats")
-            break
-    if isinstance(stats, dict):
-        stats = {k: v for k, v in stats.items() if not k.startswith("_raw_")}
-        pf = stats.get("power_first")
-        if isinstance(pf, dict):
-            stats["power_first"] = {k: v for k, v in pf.items()
-                                    if not k.startswith("_raw_")}
-    rc = (stats or {}).get("returncode")
-    return {
-        "round_signatures": per_round or None,
-        "fine_pitch_rule_lines": sorted(set(fine_pitch_lines)) or None,
-        "parent_freerouting_returncode": rc,
-        "watchdog_killed": rc == -1,
-        "power_first_stats": (stats or {}).get("power_first"),
-    }
 
 
 def collect_promotion(run: Path) -> dict:
@@ -582,7 +501,6 @@ def collect_run(run: Path) -> dict:
         "erc": collect_erc(run),
         "leaves": collect_leaves(exp) if exp else [],
         "parent": collect_parent(exp) if exp else {"present": False},
-        "freerouting": collect_fr_fingerprints(exp) if exp else {},
         "promotion": collect_promotion(run),
     }
     data["verdict"] = _run_family(exp, data["parent"], data["promotion"], pipeline)
@@ -688,19 +606,6 @@ def print_run(d: dict) -> None:
     elif d["leaves"]:
         print("\nPARENT: no parent_pipeline.json round found (compose never ran)")
 
-    fr = d["freerouting"]
-    if fr:
-        if fr.get("watchdog_killed"):
-            print("\nFREEROUTING: watchdog-killed JVM (returncode=-1) — the FR-hang "
-                  "fingerprint (locked-wire loop or non-ANSI DSN; see round signatures)")
-        if fr.get("round_signatures"):
-            print("FR round signatures:", fr["round_signatures"])
-        if fr.get("fine_pitch_rule_lines"):
-            for ln in fr["fine_pitch_rule_lines"]:
-                print("  ", ln)
-        if fr.get("power_first_stats"):
-            print("  power_first phase stats:", json.dumps(fr["power_first_stats"])[:300])
-
     promo = d["promotion"]
     if promo.get("present"):
         prov = promo["provenance"]
@@ -767,7 +672,6 @@ def collect_scan(roots: list[Path]) -> dict:
     buckets = {k: collections.defaultdict(set) for k in
                ("erc_types", "reject", "drc", "fp_refs", "nets_cross_leaf",
                 "nets_leaf_internal", "nets_unclassified", "leaf_reasons")}
-    watchdog_runs: set[str] = set()
     for run in runs:
         tag = f"{run.parent.name}/{run.name}"
         try:
@@ -813,23 +717,18 @@ def collect_scan(roots: list[Path]) -> dict:
                 buckets["nets_leaf_internal"][net].add(tag)
             for net in cls["unclassified"]:
                 buckets["nets_unclassified"][net].add(tag)
-            if rv.get("freerouting_returncode") == -1:
-                watchdog_runs.add(tag)
         for lf in collect_leaves(exp):
             if lf.get("kind") != "leaf":
                 continue
             for r in lf.get("round_reasons") or []:
                 buckets["leaf_reasons"][norm_reason(r)].add(tag)
     return {"run_count": len(runs), "tiers": dict(tier), "when": when, "sha": sha,
-            "watchdog_killed_runs": sorted(watchdog_runs),
             **{k: {kk: sorted(vv) for kk, vv in v.items()} for k, v in buckets.items()}}
 
 
 def print_scan(d: dict) -> None:
     print(f"=== CROSS-RUN SCAN: {d['run_count']} runs with layout or ERC artifacts ===")
     print("tiers:", d["tiers"])
-    if d["watchdog_killed_runs"]:
-        print("watchdog-killed FreeRouting (hang fingerprint):", d["watchdog_killed_runs"])
     when, sha = d["when"], d["sha"]
 
     def show(title, bucket):

@@ -1,9 +1,4 @@
-"""Configurable PCB routing backends.
-
-KiCadRoutingTools is the production default.  FreeRouting remains available as
-an alternate backend, deliberately isolated from the DSN/SES transformations
-in :mod:`freerouting_runner`.
-"""
+"""Pinned KiCad Routing Tools adapter with strict copper custody."""
 from __future__ import annotations
 
 import json
@@ -20,14 +15,13 @@ from typing import Any
 
 KICAD_ROUTING_TOOLS_VERSION = "0.20.2"
 KICAD_ROUTING_TOOLS_COMMIT = "3ceb773722bea67aa3685e7ee430c0c0d17ef38d"
-SUPPORTED_BACKENDS = ("freerouting", "kicad-routing-tools")
 _KRT_NATIVE_VERSION = "0.20.1"
 _KRT_PREFLIGHT_CACHE: dict[tuple[str, str], dict[str, str]] = {}
 
 
 
-class RoutingBackendUnavailableError(RuntimeError):
-    """The selected routing backend is not installed or usable."""
+class KicadRoutingToolsUnavailableError(RuntimeError):
+    """The pinned KiCad Routing Tools runtime is not installed or usable."""
 
 
 class RoutingCopperPreservationError(RuntimeError):
@@ -38,16 +32,6 @@ class RoutingCopperPreservationError(RuntimeError):
         self.stats = stats
 
 
-def routing_backend(config: dict[str, Any] | None = None) -> str:
-    name = str((config or {}).get("routing_backend", "kicad-routing-tools")).strip().lower()
-    aliases = {"kicadroutingtools": "kicad-routing-tools", "krt": "kicad-routing-tools"}
-    name = aliases.get(name, name)
-    if name not in SUPPORTED_BACKENDS:
-        raise ValueError(
-            f"Unknown routing_backend {name!r}; choose one of {', '.join(SUPPORTED_BACKENDS)}"
-        )
-    return name
-
 
 def _krt_root(config: dict[str, Any]) -> Path:
     raw = config.get("kicad_routing_tools_path", "")
@@ -55,22 +39,17 @@ def _krt_root(config: dict[str, Any]) -> Path:
         raw = os.environ.get("KICRAFT_KICAD_ROUTING_TOOLS_PATH", "")
     raw = str(raw or "").strip()
     if not raw:
-        raise RoutingBackendUnavailableError(
+        raise KicadRoutingToolsUnavailableError(
             "KiCadRoutingTools is selected but kicad_routing_tools_path is unset. "
             f"Clone commit {KICAD_ROUTING_TOOLS_COMMIT} and configure its repository path."
         )
     return Path(os.path.expanduser(raw)).resolve()
 
 
-def preflight_routing_backend(config: dict[str, Any] | None = None) -> dict[str, str]:
+def preflight_kicad_routing_tools(config: dict[str, Any] | None = None) -> dict[str, str]:
     if config is None:
         from kicraft.autoplacer.config import DEFAULT_CONFIG
         config = DEFAULT_CONFIG
-    backend = routing_backend(config)
-    if backend == "freerouting":
-        from kicraft.autoplacer.freerouting_runner import preflight_routing_toolchain
-        java, jar = preflight_routing_toolchain(config)
-        return {"backend": backend, "java": java, "jar": jar}
     root = _krt_root(config)
     raw_python = config.get("kicad_routing_tools_python", sys.executable)
     if (not raw_python and "kicad_routing_tools_python" in config):
@@ -84,7 +63,7 @@ def preflight_routing_backend(config: dict[str, Any] | None = None) -> dict[str,
         if candidate.is_file() and os.access(candidate, os.X_OK):
             python = str(candidate.absolute())
     if python is None:
-        raise RoutingBackendUnavailableError(
+        raise KicadRoutingToolsUnavailableError(
             f"KiCadRoutingTools Python interpreter not found: {raw_python}"
         )
     # Keep a virtualenv's executable symlink intact: resolving it to the base
@@ -172,11 +151,11 @@ def preflight_routing_backend(config: dict[str, Any] | None = None) -> dict[str,
             )
 
     if problems:
-        raise RoutingBackendUnavailableError(
+        raise KicadRoutingToolsUnavailableError(
             "KiCadRoutingTools backend unavailable:\n  - " + "\n  - ".join(problems)
         )
     result = {
-        "backend": backend,
+        "backend": "kicad-routing-tools",
         "root": str(root),
         "python": python,
         "version": source_version,
@@ -262,6 +241,20 @@ def _krt_json_summaries(stdout: str, stderr: str) -> list[dict[str, Any]]:
     return summaries
 
 
+
+def _propagate_sibling_project_rules(src_pcb_path: str, dst_pcb_path: str) -> None:
+    """Carry authoritative KiCad project and custom-rule sidecars."""
+    src_stem = os.path.splitext(src_pcb_path)[0]
+    dst_stem = os.path.splitext(dst_pcb_path)[0]
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        src_rules = src_stem + suffix
+        dst_rules = dst_stem + suffix
+        try:
+            if os.path.isfile(src_rules) and os.path.abspath(src_rules) != os.path.abspath(dst_rules):
+                shutil.copy2(src_rules, dst_rules)
+        except OSError:
+            pass
+
 def route_with_kicad_routing_tools(
     kicad_pcb_path: str,
     output_path: str,
@@ -272,10 +265,7 @@ def route_with_kicad_routing_tools(
         fingerprint_trace,
         fingerprint_via,
     )
-    from kicraft.autoplacer.freerouting_runner import (
-        import_routed_copper,
-        propagate_sibling_project_rules,
-    )
+    from kicraft.autoplacer.routing_board import import_routed_copper
 
     input_board = Path(kicad_pcb_path).resolve()
     output_board = Path(output_path).resolve()
@@ -284,7 +274,7 @@ def route_with_kicad_routing_tools(
             "KiCadRoutingTools input and output board paths must be distinct"
         )
 
-    runtime = preflight_routing_backend(config)
+    runtime = preflight_kicad_routing_tools(config)
     root = Path(runtime["root"])
     output_board.unlink(missing_ok=True)
     input_copper = import_routed_copper(str(input_board))
@@ -305,7 +295,7 @@ def route_with_kicad_routing_tools(
         else next((path for path in candidates if path.is_file()), None)
     )
     if source_project is None:
-        raise RoutingBackendUnavailableError(
+        raise KicadRoutingToolsUnavailableError(
             "KiCadRoutingTools requires a sibling .kicad_pro before routing "
             f"{input_board}"
         )
@@ -315,22 +305,17 @@ def route_with_kicad_routing_tools(
         destination = input_board.with_suffix(suffix)
         if not destination.exists():
             temporary_sidecars.append(destination)
-    propagate_sibling_project_rules(
+    _propagate_sibling_project_rules(
         str(source_project.with_suffix(".kicad_pcb")), str(input_board)
     )
     if not expected_project.is_file():
-        raise RoutingBackendUnavailableError(
+        raise KicadRoutingToolsUnavailableError(
             "KiCadRoutingTools requires a sibling .kicad_pro; "
             f"could not stage {source_project} beside {input_board}"
         )
 
     command = _krt_command(str(input_board), str(output_board), config)
-    timeout_s = int(
-        config.get(
-            "kicad_routing_tools_timeout_s",
-            config.get("freerouting_timeout_s", 120),
-        )
-    )
+    timeout_s = int(config.get("kicad_routing_tools_timeout_s", 120))
     environment = os.environ.copy()
     environment["KICAD_RIP_PREEXISTING"] = "0"
     environment["KICAD_PLANE_FINALIZE"] = "0"
@@ -357,7 +342,7 @@ def route_with_kicad_routing_tools(
                 os.killpg(proc.pid, signal.SIGKILL)
                 stdout, stderr = proc.communicate()
         if output_board.is_file():
-            propagate_sibling_project_rules(str(input_board), str(output_board))
+            _propagate_sibling_project_rules(str(input_board), str(output_board))
     finally:
         for sidecar in temporary_sidecars:
             sidecar.unlink(missing_ok=True)
@@ -369,7 +354,7 @@ def route_with_kicad_routing_tools(
         detail = (stderr or stdout or "no output").strip()[-4000:]
         raise RuntimeError(f"KiCadRoutingTools failed (rc={proc.returncode}): {detail}")
     if not output_board.with_suffix(".kicad_pro").is_file():
-        raise RoutingBackendUnavailableError(
+        raise KicadRoutingToolsUnavailableError(
             "KiCadRoutingTools requires a sibling .kicad_pro on its routed output; "
             f"could not propagate project rules to {output_board}"
         )
@@ -421,25 +406,4 @@ def route_with_kicad_routing_tools(
             f"routed output retained at {output_board}",
             stats,
         )
-    return stats
-
-
-def route_board(
-    kicad_pcb_path: str,
-    output_path: str,
-    config: dict[str, Any],
-    *,
-    jar_path: str | None = None,
-) -> dict[str, Any]:
-    """Route using the configured backend and return normalized backend stats."""
-    backend = routing_backend(config)
-    if backend == "kicad-routing-tools":
-        return route_with_kicad_routing_tools(kicad_pcb_path, output_path, config)
-    from kicraft.autoplacer.freerouting_runner import route_with_freerouting
-    resolved_jar = jar_path or str(config.get("freerouting_jar", ""))
-    if not resolved_jar:
-        raise RoutingBackendUnavailableError("FreeRouting requires freerouting_jar")
-    stats = route_with_freerouting(kicad_pcb_path, output_path, resolved_jar, config)
-    stats = dict(stats or {})
-    stats.setdefault("backend", "freerouting")
     return stats

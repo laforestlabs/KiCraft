@@ -11,7 +11,7 @@ from kicraft.autoplacer.brain.leaf_acceptance import (
     acceptance_config_from_dict,
     evaluate_leaf_acceptance,
 )
-from kicraft.autoplacer.freerouting_runner import _parse_unconnected_nets
+from kicraft.autoplacer.routing_board import parse_unconnected_nets
 
 
 # Real kicad-cli text DRC report excerpt from the #38 USB-POWER leaf.
@@ -40,12 +40,12 @@ def _validation(unconnected: int, nets: list[str]) -> dict:
     }
 
 
-def test_parse_unconnected_nets_dedupes_and_orders():
-    assert _parse_unconnected_nets(_REPORT) == ["VBUS", "GND", "CC2"]
+def testparse_unconnected_nets_dedupes_and_orders():
+    assert parse_unconnected_nets(_REPORT) == ["VBUS", "GND", "CC2"]
 
 
-def test_parse_unconnected_nets_empty_when_clean():
-    assert _parse_unconnected_nets("** Found 0 unconnected pads **\n") == []
+def testparse_unconnected_nets_empty_when_clean():
+    assert parse_unconnected_nets("** Found 0 unconnected pads **\n") == []
 
 
 def test_signal_net_unconnected_is_rejected():

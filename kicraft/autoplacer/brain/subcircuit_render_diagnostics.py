@@ -135,7 +135,7 @@ def promote_to_round_snapshot(
 # metadata JSON. These are never trimmed.
 _KEEP_ROUND_SUFFIXES = frozenset({
     "leaf_routed.kicad_pcb",
-    "leaf_pre_freerouting.kicad_pcb",
+    "leaf_placed.kicad_pcb",
     "solved_layout.json",
     "debug.json",
     "metadata.json",
@@ -390,7 +390,7 @@ def build_leaf_contact_sheet(
 
 def _stage_prefix(stage: str) -> str:
     normalized = stage.strip().lower().replace("-", "_").replace(" ", "_")
-    if normalized in {"pre", "pre_route", "pre_freerouting"}:
+    if normalized in {"pre", "pre_route", "pre_routing"}:
         return "pre_route"
     if normalized in {"routed", "post_route", "post"}:
         return "routed"

@@ -121,7 +121,7 @@ def test_squeeze_preserve_restore_round_trips(tmp_path):
     routing = {
         "routed_board_path": str(routed),
         "round_board_routed": str(snapshot),
-        "pre_route_board_path": str(tmp_path / "missing.kicad_pcb"),  # tolerated
+        "leaf_placed_board": str(tmp_path / "missing.kicad_pcb"),  # tolerated
     }
 
     saved = _preserve_round_boards(routing)

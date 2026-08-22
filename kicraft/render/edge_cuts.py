@@ -22,7 +22,7 @@ from pathlib import Path
 # section token that can follow graphics EXCEPT ``(arc`` -- a gr_poly's
 # ``pts`` may legitimately embed ``(arc (start..) (mid..) (end..))``
 # points (which _POINT_RE's ``mid`` case parses), and KiCraft boards'
-# tracks are FreeRouting segments/vias, never leading track arcs.
+# tracks are KiCad Routing Tools segments/vias, never leading track arcs.
 _BLOCK_RE = re.compile(
     r'\(gr_(line|arc|rect|poly|circle)\s+(.*?)\)\s*'
     r'(?=\(gr_|\(footprint|\(segment|\(via|\(zone|\(group|\(dimension|\(image|\Z)',

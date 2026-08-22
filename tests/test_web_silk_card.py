@@ -66,3 +66,29 @@ def test_plan_without_table_has_no_verify_note():
     arts = {"status": "fab_ready", "silk_placed": ["legend:0", "p"], "silk_dropped": []}
     tbl = _by_title(web._silk_sections(sj, arts))["Board labels"]
     assert tbl.get("note") is None
+
+
+def test_pinout_text_and_uncovered_connectors_rendered():
+    sj = {"silk_plan": {
+        "version": 1, "title": "PD Trigger", "board_code": "KC-T", "rev": "1.0",
+        "labels": [
+            {"id": "j1-pins", "kind": "pinout", "anchor": {"ref": "J1"},
+             "priority": 1,
+             "pins": [{"pin": "1", "text": "VIN"}, {"pin": "2", "text": "GND"}]},
+        ],
+        "dropped_at_lint": [],
+        "uncovered_connectors": ["J1"],
+    }}
+    arts = {"status": "fab_ready", "silk_placed": ["legend:0"],
+            "silk_dropped": []}
+
+    secs = web._silk_sections(sj, arts)
+    by = _by_title(secs)
+
+    # pinout text cell renders per-pin, not the (empty) text field
+    tbl = by["Board labels"]
+    rows = {r[0]: r for r in tbl["rows"]}
+    assert rows["pinout"][1] == "1:VIN → 2:GND"
+    assert rows["pinout"][2] == "J1"
+
+    assert by["Uncovered IO connectors"]["items"] == ["J1"]

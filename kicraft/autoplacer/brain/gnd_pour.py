@@ -1,6 +1,6 @@
 """Ground-plane finishing for routed leaf and parent boards.
 
-After FreeRouting finishes *signal* routing, the GND/thermal pad of an IC or
+After KiCad Routing Tools finishes *signal* routing, the GND/thermal pad of an IC or
 module -- e.g. the exposed-pad (EP) array in the center of an ESP32-WROOM -- is
 boxed in by the surrounding pin ring with no surface escape on its own layer.
 The standard PCB fix is a dense **thermal-via array** dropping the pad to a
@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import math
 from typing import Any
+
+from kicraft.autoplacer.fab_profile import fab_floors
 
 import pcbnew
 
@@ -66,7 +68,7 @@ def _collect_keepout_zones(board: Any) -> list[Any]:
     and the ones embedded inside footprints (the ESP32-S3-MINI/WROOM antenna
     near-field ``antenna_keepout`` ships inside the module's .kicad_mod).
 
-    FreeRouting's DSN export already steers *signal* traces clear of these, but
+    KiCad Routing Tools's router exchange input export already steers *signal* traces clear of these, but
     the post-route GND finisher (in-pad/array thermal vias + small-pad escape
     stubs) had no such guard, so it stamped GND vias and 1 mm stubs straight into
     U1's antenna keep-out (the KC-S8PC37 signature: 30 items_not_allowed).
@@ -427,7 +429,7 @@ def repair_stranded_net(
     fragments around foreign tracks/pads, and a pad can end up on a tiny fill
     island with no path to the main cluster: no via to drop through, no
     same-net mate for a shield tie, no routed track (GND is never given to
-    FreeRouting; a fine-pitch part's supply pad may be unreachable for it --
+    KiCad Routing Tools; a fine-pitch part's supply pad may be unreachable for it --
     KC-Z57JEZ U1 +3V3). This post-pour pass finds every cluster of
     ``net_name`` isolated from the main one (geometric union-find over
     pads/vias/tracks/fill islands) and stamps a direct same-net track from a
@@ -596,7 +598,7 @@ def gnd_escape_specs(
     """Pre-route escape specs for fine-pitch GND pads that can't host a via.
 
     The post-route escape pass (in :func:`add_gnd_pour_and_thermal_vias`)
-    runs LAST, after the signal breakout stubs and FreeRouting have consumed
+    runs LAST, after the signal breakout stubs and KiCad Routing Tools have consumed
     every exit around a dense pad row -- so exactly the pads that most need a
     plane bond find no legal path (KC-UXASHQ U1.6: hemmed in by a signal stub
     and routed tracks, left unconnected). GND is never routed, so its escapes
@@ -688,7 +690,7 @@ def add_gnd_pour_and_thermal_vias(
     pitch = pcbnew.FromMM(float(cfg.get("thermal_via_pitch_mm", 1.2)))
     inset = pcbnew.FromMM(float(cfg.get("thermal_via_inset_mm", 0.5)))
     area_threshold = float(cfg.get("thermal_pad_area_mm2", 4.0))
-    floor_mm = float(cfg.get("freerouting_min_clearance_mm", 0.153))
+    floor_mm = fab_floors(cfg)["clearance_mm"]
     summary["thermal_vias_blocked"] = 0
     summary["escape_stitched"] = 0
 
@@ -696,7 +698,7 @@ def add_gnd_pour_and_thermal_vias(
 
     # GND-side clearance: KiCad resolves a pair as the LARGER of the two
     # items' netclass clearances, and GND rides the Power class (0.30 mm) on
-    # generated boards -- a via held only to the 0.153 freerouting floor can
+    # generated boards -- a via held only to the 0.153 routing floor can
     # pass this guard yet land 0.26 mm from a Default-class track, a hard
     # Power-netclass DRC error (the KC-UXASHQ escape-via signature).
     # Take the true max across ALL footprints' GND pads: the old early-break
@@ -1011,7 +1013,7 @@ def stamp_gnd_edge_spine(
         )
     except AttributeError:
         ecl = 0.3
-    floor_mm = float(cfg.get("freerouting_min_clearance_mm", 0.153))
+    floor_mm = fab_floors(cfg)["clearance_mm"]
     max_inset = float(cfg.get("gnd_edge_spine_max_inset_mm", 8.0))
 
     from kicraft.autoplacer.brain.breakout_stubs import (
@@ -1094,7 +1096,7 @@ def stamp_gnd_edge_spine(
         # corridor -> previous pad's jog -> previous pad CENTRE. Each link
         # lives on ONE copper layer but consecutive links may differ -- the
         # PTH barrels bridge them. That weave is what makes the corridor
-        # usable at all: FreeRouting typically runs a power daisy-chain
+        # usable at all: KiCad Routing Tools typically runs a power daisy-chain
         # through the same corridor, alternating layers stretch by stretch
         # (this board's 5V rail), so each GND link simply takes whichever
         # layer its own stretch leaves free. A link that fits neither layer
@@ -1217,7 +1219,7 @@ def repair_parent_gnd_islands(
         summary["error"] = f"net {gnd_name!r} not found"
         return summary
     gnd_code = gnd_net.GetNetCode()
-    floor_mm = float(cfg.get("freerouting_min_clearance_mm", 0.153))
+    floor_mm = fab_floors(cfg)["clearance_mm"]
     via_drill = pcbnew.FromMM(float(cfg.get("via_drill_mm", 0.3)))
     via_size = pcbnew.FromMM(float(cfg.get("via_size_mm", 0.6)))
     via_r_mm = pcbnew.ToMM(via_size) / 2.0

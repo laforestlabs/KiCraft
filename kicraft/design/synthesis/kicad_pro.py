@@ -25,7 +25,7 @@ from ..models import Architecture
 # The DRC *floors* mirror the fab capability profile (autoplacer/fab_profile.py),
 # which is the single source of truth for what JLC can actually build. They used
 # to encode OSH Park's 6 mil (0.1524 mm) limit at 0.153 -- the +0.5 µm dodged the
-# DSN's whole-µm rounding, since 0.1524 exports as 152 µm and fails its own rule.
+# router exchange input's whole-µm rounding, since 0.1524 exports as 152 µm and fails its own rule.
 # 0.127 mm (5 mil) is both inside JLC's 2-layer capability with margin and
 # exactly 127 µm, so no rounding dodge is needed. Lowering min_via_diameter to
 # the 0.4/0.2 fanout class is what makes a dog-bone escape out of a fine-pitch
@@ -47,8 +47,8 @@ DEFAULT_RULES = {
     "min_hole_to_hole": 0.127,
     # 0.2 mm = JLCPCB's routed board-edge-to-copper minimum. The old 0.381 mm
     # (15 mil) was overly conservative and failed boards whose routed tracks sit
-    # 0.2-0.38 mm from the edge -- fab-fine copper. FreeRouting 1.9.0 ignores the
-    # DSN boundary for wires, so this gate threshold (not a router setting) is the
+    # 0.2-0.38 mm from the edge -- fab-fine copper. KiCad Routing Tools 1.9.0 ignores the
+    # router exchange input boundary for wires, so this gate threshold (not a router setting) is the
     # only lever for those track-near-edge cases; genuinely-too-close copper
     # (< 0.2 mm or past the edge) still fails. Connector pad clearance is kept by
     # connector_edge_pad_clearance_mm in _repair_parent_outline.
@@ -123,8 +123,8 @@ def write_kicad_pro(
                 "via_dimensions": [
                     {"diameter": 0.0, "drill": 0.0},
                     # The escape/dog-bone class. Present so a stamped fanout via
-                    # round-trips through the DSN/SES and shows up in KiCad's via
-                    # dropdown; FreeRouting still places the netclass via, which
+                    # round-trips through the router exchange and shows up in KiCad's via
+                    # dropdown; KiCad Routing Tools still places the netclass via, which
                     # each class names in its own (use_via ...).
                     {"diameter": _FANOUT_VIA_DIA, "drill": _FANOUT_VIA_DRILL},
                     {"diameter": 0.6, "drill": 0.3},

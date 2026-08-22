@@ -166,7 +166,7 @@ def _locate_routed_board(dest: Path, stem: str, mode: str) -> Path | None:
         promoted = dest / f"{stem}.kicad_pcb"
         return promoted if promoted.exists() else None
     # compose: prefer the routed parent, fall back to the stamped pre-route board
-    for name in ("parent_routed.kicad_pcb", "parent_pre_freerouting.kicad_pcb"):
+    for name in ("parent_routed.kicad_pcb", "parent_placed.kicad_pcb"):
         hits = sorted(
             glob.glob(
                 str(dest / ".experiments" / "subcircuits" / "subcircuit__*" / name)

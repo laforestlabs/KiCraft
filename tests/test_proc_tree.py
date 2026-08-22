@@ -1,5 +1,5 @@
 """kill_tree must reap the WHOLE build tree, including grandchildren that
-detached into their own session — the FreeRouting-JVM orphan pattern of
+detached into their own session — the the autorouter-JVM orphan pattern of
 self-eval-2026-07-07 FIX 1 (proc.kill() on the direct child left xvfb-run/java
 reparented to init, burning a core for days)."""
 
@@ -21,7 +21,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 # A child that spawns a session-detached grandchild sleeper (mimicking
-# freerouting_runner's start_new_session JVM), prints the grandchild pid,
+# routing_board's start_new_session JVM), prints the grandchild pid,
 # then sleeps as the "build".
 _CHILD_SRC = """
 import subprocess, sys, time

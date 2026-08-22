@@ -245,7 +245,7 @@ def _after_run(exp: Path, c: _Cleaner) -> None:
         "round_renders",
         "workers",
         "hierarchical_parent_smoke",
-        "hierarchical_freerouting_demo",
+        "hierarchical_routing_demo",
     ):
         c.remove_dir(exp / name)
 

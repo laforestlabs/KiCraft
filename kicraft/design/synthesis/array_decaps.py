@@ -120,7 +120,7 @@ def drop_decap_only_arrays(bom: BOM) -> list[list[str]]:
     is not a placement array: the placer then grids those caps from the same
     origin as the LED grid, landing each cap *on top of* its LED, where its power
     pads block every inter-LED data tie (the array router skips them all and the
-    leaf falls through to a doomed FreeRouting run -- KC-NZXXEE).
+    leaf falls through to a doomed KiCad Routing Tools run -- KC-NZXXEE).
 
     A decap-only spec is dropped *only* when a real (non-decap) array shares its
     sheet, so the caps are then picked up as that array's companions and placed

@@ -1,9 +1,9 @@
-"""Regression tests for Defect 2: mounting-hole keep-outs must reach FreeRouting.
+"""Regression tests for Defect 2: mounting-hole keep-outs must reach the autorouter.
 
 The parent composition builds `parent_local_keep_in_rects` around locked
 parent-local components such as mounting holes. Before the D2 fix these rects
 only influenced placement but were never emitted as KiCad rule-area zones, so
-FreeRouting could lay tracks straight through H4/H86.
+the autorouter could lay tracks straight through H4/H86.
 
 These tests lock in the two contract points that were broken:
   1. The stamp subprocess script creates rule-area zones (not plain zones),
@@ -30,13 +30,13 @@ def test_parent_stamp_script_creates_rule_area_keepouts_on_both_copper_layers():
     """The stamp subprocess must emit rule-area zones on F.Cu AND B.Cu."""
     script = _stamp_script_source()
     assert "_KEEPOUT_LAYERS = [pcbnew.F_Cu, pcbnew.B_Cu]" in script, (
-        "Keepout zones must be stamped on both copper layers so FreeRouting "
+        "Keepout zones must be stamped on both copper layers so the autorouter "
         "cannot place a track or via on either side through a mounting hole."
     )
     assert "_zone.SetIsRuleArea(True)" in script, (
         "Keepout zones must be marked as rule areas: ExportSpecctraDSN emits "
-        "rule areas as DSN (keepout) regions, and the parent route preserves "
-        "board zones (freerouting_clear_zones=False) so they reach the DSN. "
+        "rule areas as router exchange input (keepout) regions, and the parent route preserves "
+        "board zones (routing_clear_zones=False) so they reach the router exchange input. "
         "See tests/test_dsn_keepout_survival.py."
     )
     # Pads are intentionally NOT disallowed: the keepout rect is bbox(comp)

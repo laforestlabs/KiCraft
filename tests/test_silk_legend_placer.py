@@ -13,7 +13,7 @@ import pytest
 
 pytest.importorskip("pcbnew")
 
-from kicraft.autoplacer.freerouting_runner import _run_pcbnew_script_file
+from kicraft.autoplacer.routing_board import run_pcbnew_script_file
 from kicraft.autoplacer.hardware.silk_geometry import bbox_inside_poly, boxes_overlap
 
 FIXTURE = (Path(__file__).parent / "fixtures" / "replay_workspace"
@@ -42,7 +42,7 @@ def _run(tmp_path: Path, labels: list[dict], legend_lines=None) -> tuple[dict, P
     }
     payload_path = tmp_path / "payload.json"
     payload_path.write_text(json.dumps(payload))
-    _run_pcbnew_script_file(str(SCRIPT), str(payload_path))
+    run_pcbnew_script_file(str(SCRIPT), str(payload_path))
     return json.loads(result_path.read_text()), board
 
 
@@ -123,3 +123,76 @@ def test_result_reports_positions_for_placed_labels(tmp_path):
     for p in result["placed"]:
         assert {"id", "x_mm", "y_mm", "height_mm", "layer"} <= set(p)
         assert p["layer"] in ("F.SilkS", "B.SilkS")
+
+
+def test_pinout_labels_placed_per_pin(tmp_path):
+    import pcbnew
+
+    from kicraft.autoplacer.hardware._silk_legend_subprocess import (
+        _collect_obstacles,
+        _mm_box,
+    )
+
+    # Pick the first footprint with >=4 real-numbered pads; a pinout label is
+    # only meaningful on a multi-pin part.
+    src = pcbnew.LoadBoard(str(FIXTURE))
+    fp = next(f for f in src.GetFootprints()
+              if len([p for p in f.Pads() if p.GetNumber().strip()]) >= 4)
+    ref = fp.GetReference()
+    pads = [p for p in fp.Pads() if p.GetNumber().strip()][:3]
+    texts = {p.GetNumber(): f"P{i + 1}" for i, p in enumerate(pads)}
+
+    label = {
+        "id": "pins", "kind": "pinout", "ref": ref,
+        "pins": [{"pin": p.GetNumber(), "text": texts[p.GetNumber()]}
+                 for p in pads],
+        "priority": 1, "heights_mm": [0.8],
+    }
+    result, board_path = _run(tmp_path, [label])
+
+    per_pin_ids = [p["id"] for p in result["placed"]
+                   if p["id"].startswith("pins:")]
+    assert len(per_pin_ids) >= 2
+
+    board, board_texts, poly, mm_box = _board_texts_and_geometry(board_path)
+    by_text = {t.GetText(): t for t in board_texts}
+    pad_centers = {
+        p.GetNumber(): ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+        for p in pads for b in [_mm_box(p.GetBoundingBox())]
+    }
+
+    placed_boxes = {}
+    for num, txt in texts.items():
+        t = by_text.get(txt)
+        if t is None:
+            continue  # a pin may drop individually on a dense board
+        box = mm_box(t.GetBoundingBox())
+        placed_boxes[num] = box
+        assert bbox_inside_poly(box, poly, 0.4)
+
+    assert len(placed_boxes) >= 2
+
+    # Every per-pin label clears courtyards/pads (the placer's own obstacle
+    # set, margin 0.1 is tighter than the placer's 0.25 clearance).
+    fresh = pcbnew.LoadBoard(str(FIXTURE))
+    for box in placed_boxes.values():
+        for ob in _collect_obstacles(fresh)["F"]:
+            assert not boxes_overlap(box, ob, 0.1)
+
+    # Distinct positions: per-pin placement, not one blob at the courtyard.
+    centers = [((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+               for b in placed_boxes.values()]
+    assert len({(round(c[0], 2), round(c[1], 2)) for c in centers}) >= 2
+
+    # Adjacency: each label sits nearest its OWN pad's center (the robust
+    # form of "within a few mm of its own pad" — the placer backs off to a
+    # larger gap when a tight gap would collide with a neighbour, so a fixed
+    # 2.0 mm radius is not guaranteed on a dense board).
+    def _dist(a, b):
+        return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+    for num, box in placed_boxes.items():
+        tc = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+        own = pad_centers[num]
+        assert all(_dist(tc, own) < _dist(tc, pad_centers[n])
+                   for n in pad_centers if n != num)

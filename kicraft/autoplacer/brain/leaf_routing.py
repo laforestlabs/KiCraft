@@ -23,12 +23,12 @@ from kicraft.autoplacer.brain.subcircuit_render_diagnostics import (
     promote_to_round_snapshot,
 )
 from kicraft.autoplacer.brain.types import Component, Point
-from kicraft.autoplacer.freerouting_runner import (
+from kicraft.autoplacer.routing_board import (
     import_routed_copper,
     validate_routed_board,
 )
 from kicraft.autoplacer.hardware.adapter import KiCadAdapter
-from kicraft.autoplacer.routing_backends import route_board, routing_backend
+from kicraft.autoplacer.kicad_routing_tools import route_with_kicad_routing_tools
 
 
 def _internal_net_verdict(
@@ -40,7 +40,7 @@ def _internal_net_verdict(
     The success path used to HARDCODE "everything routed, nothing failed", so
     per-net truth existed only inside the acceptance DRC and never reached the
     round record -- the retry loop could not react per net, and the round log
-    said a net was routed while freerouting had silently added zero copper on it
+    said a net was routed while routing had silently added zero copper on it
     (dense-soc-leaf-unconnected-plan P1.5). When the report has unconnected items
     but no parsable net names (format drift), nothing is claimed either way.
     """
@@ -160,16 +160,8 @@ def _center_on_leaf_page(
     return Point(dx, dy), (Point(tl.x + dx, tl.y + dy), Point(br.x + dx, br.y + dy))
 
 
-def _deterministic_route_signature(
-    board_state: Any, cfg: dict[str, Any], jar_path: Any
-) -> str:
-    """Stable hash of a leaf's placement + routing-relevant config.
-
-    Two solves of a deterministic leaf with the same grid placement, backend,
-    and routing knobs produce identical copper, so they share a cache key and
-    the router runs only once. Router timeout settings are excluded because
-    they bound execution time without changing the requested result.
-    """
+def _deterministic_route_signature(board_state: Any, cfg: dict[str, Any]) -> str:
+    """Stable hash of placement and non-timeout KRT routing options."""
     comps = sorted(board_state.components.values(), key=lambda c: c.ref)
     placement = [
         (c.ref, round(c.pos.x, 3), round(c.pos.y, 3),
@@ -178,17 +170,15 @@ def _deterministic_route_signature(
     ]
     tl, br = board_state.board_outline
     route_keys = {
-        k: v for k, v in cfg.items()
-        if ((("freerouting" in k or "kicad_routing_tools" in k)
-             and "timeout" not in k)
-            or "clearance" in k or "track" in k)
+        k: v
+        for k, v in cfg.items()
+        if k.startswith("kicad_routing_tools_") and "timeout" not in k
     }
     blob = json.dumps(
         [
             placement,
             [round(tl.x, 3), round(tl.y, 3), round(br.x, 3), round(br.y, 3)],
-            Path(str(jar_path)).name,
-            routing_backend(cfg),
+            "kicad-routing-tools:0.20.2@3ceb773722bea67aa3685e7ee430c0c0d17ef38d",
             route_keys,
         ],
         sort_keys=True,
@@ -202,7 +192,7 @@ def _array_inrow_stamp_stats(specs: list, skipped_keys: list) -> tuple[int, int]
 
     In-row hops are single straight ties (one waypoint); serpentine row-turn hops
     are L/Z routes (multiple waypoints) OR were never emitted at all (no edge
-    channel fit). Either way a turn may legitimately fall back to FreeRouting, so
+    channel fit). Either way a turn may legitimately fall back to the autorouter, so
     it must NOT count against the stamp gate -- only the in-row hops, which on a
     healthy oriented array essentially always stamp, are measured. ``skipped_keys``
     are the ``"ref.pad:reason"`` strings the stamp guard dropped.
@@ -217,11 +207,11 @@ def array_stamp_gate_tripped(specs: list, skipped_keys: list, cfg: dict[str, Any
     """True when an array leaf pre-stamped too few of its IN-ROW data hops.
 
     A healthy array leaf stamps almost every straight in-row DOUT->DIN hop, so
-    FreeRouting has next to nothing left. A collapsed in-row stamp rate means the
-    channel is obstructed (a foreign pad in the data lane) and FreeRouting will be
+    the autorouter has next to nothing left. A collapsed in-row stamp rate means the
+    channel is obstructed (a foreign pad in the data lane) and the autorouter will be
     handed the whole chain -- which it cannot finish on a dense array before the
     build's wall-clock cap kills it. Row-turn hops are excluded (they may
-    legitimately go to FreeRouting), and the gate is floored at a minimum in-row
+    legitimately go to the autorouter), and the gate is floored at a minimum in-row
     tie count, so a small array -- e.g. a 2x2 whose only un-stamped hop is its row
     turn -- never false-fails.
     """
@@ -246,7 +236,6 @@ def route_local_subcircuit(
     round_index: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, float]]:
     fast_smoke_mode = bool(cfg.get("subcircuit_fast_smoke_mode", False))
-    backend_name = routing_backend(cfg)
     # Intermediate per-round diagnostics: headless build/worker runs set
     # subcircuit_render_intermediate=False to skip per-round PNG/DRC renders;
     # the winning round's canonical renders are produced downstream and are
@@ -307,7 +296,7 @@ def route_local_subcircuit(
         Path(extraction.subcircuit.schematic_path).parent,
         extraction.subcircuit.id,
     )
-    pre_route_board = Path(artifact_paths.artifact_dir) / "leaf_pre_freerouting.kicad_pcb"
+    pre_route_board = Path(artifact_paths.artifact_dir) / "leaf_placed.kicad_pcb"
     routed_board = Path(artifact_paths.artifact_dir) / "leaf_routed.kicad_pcb"
     illegal_board = Path(artifact_paths.artifact_dir) / "leaf_illegal_pre_stamp.kicad_pcb"
 
@@ -359,7 +348,7 @@ def route_local_subcircuit(
 
     if not source_pcb.exists():
         raise RuntimeError(
-            "Leaf FreeRouting requires a real source PCB to stamp from; "
+            "Leaf the autorouter requires a real source PCB to stamp from; "
             f"could not resolve base board for {extraction.subcircuit.id.instance_path}"
         )
 
@@ -500,7 +489,7 @@ def route_local_subcircuit(
                 try:
                     shutil.copy2(
                         illegal_board,
-                        illegal_board.parent / f"{_round_prefix}_leaf_pre_freerouting{illegal_board.suffix}",
+                        illegal_board.parent / f"{_round_prefix}_leaf_placed{illegal_board.suffix}",
                     )
                 except OSError:
                     pass
@@ -513,7 +502,7 @@ def route_local_subcircuit(
                 "enabled": True,
                 "skipped": True,
                 "reason": "illegal_unrepaired_leaf_placement",
-                "router": backend_name,
+                "router": "kicad-routing-tools",
                 "traces": 0,
                 "vias": 0,
                 "total_length_mm": 0.0,
@@ -546,7 +535,7 @@ def route_local_subcircuit(
     route_input_board.components = copy.deepcopy(repaired_components)
     route_input_board.traces = []
     route_input_board.vias = []
-    # Silk is stamped post-route (after FreeRouting) so the rounded
+    # Silk is stamped post-route (after the autorouter) so the rounded
     # outline can hug the routed copper too -- not just courtyards and
     # pad copper. See the silk re-stamp block after import_routed_copper.
     route_input_board.silkscreen = []
@@ -564,39 +553,8 @@ def route_local_subcircuit(
         max(0.0, time.monotonic() - stamp_start), 3
     )
 
-    jar_path = cfg.get("freerouting_jar")
-    if backend_name == "freerouting" and not jar_path:
-        raise RuntimeError(
-            "Leaf FreeRouting requires 'freerouting_jar' to be configured"
-        )
-
-    freerouting_start = time.monotonic()
-    # Leaves can use a lower pass cap than the parent; fall back to the
-    # shared default if the leaf-specific knob isn't set.
-    leaf_routing_cfg = {
-        **cfg,
-        "pcb_path": str(source_pcb),
-        "freerouting_preserve_existing_copper": False,
-    }
-    leaf_passes = cfg.get("leaf_freerouting_max_passes")
-    if leaf_passes is not None:
-        leaf_routing_cfg["freerouting_max_passes"] = int(leaf_passes)
-    # Scale the leaf freerouting timeout with component count. A large array
-    # leaf (200-LED matrix, ~600 nets) routes successfully but takes minutes;
-    # the fixed default timeout killed freerouting mid-route (rc=-1). Small
-    # leaves keep the base timeout (they finish in seconds anyway).
-    _n_leaf_comps = len(route_input_board.components)
-    _base_timeout = int(cfg.get("freerouting_timeout_s", 120))
-    _per_comp = float(cfg.get("leaf_freerouting_s_per_component", 4.0))
-    _timeout_cap = int(cfg.get("leaf_freerouting_timeout_cap_s", 1200))
-    leaf_routing_cfg["freerouting_timeout_s"] = min(
-        _timeout_cap, max(_base_timeout, int(_n_leaf_comps * _per_comp))
-    )
-
-    # Deliberate breakout stubs (default off): pre-route locked escape traces for
-    # configured footprints -- fine-pitch connectors whose inner pins the
-    # autorouter can't escape its pad field. Added to the pre-route board and
-    # preserved through routing so FreeRouting finishes from the breakout points.
+    routing_start = time.monotonic()
+    leaf_routing_cfg = {**cfg, "pcb_path": str(source_pcb)}
     _breakout_specs = _resolve_breakout_specs(cfg)
     # Escape planner (default on): for every dense footprint, work out how each
     # INNER netted pad leaves its pad field -- same-net tie, on-layer lane, or
@@ -645,7 +603,7 @@ def route_local_subcircuit(
     # Interface escapes (default on): a pad whose net crosses into another
     # sheet has no partner on this leaf, so leaf routing lays no copper on it
     # -- and at the parent stage it sits behind the pin-adjacent companion
-    # wall and the leaf's locked traces (`no_clear_path` from FreeRouting AND
+    # wall and the leaf's locked traces (`no_clear_path` from the autorouter AND
     # the repair pass; the whole rc7 residue class of the 2026-07-27 re-batch).
     # Stamp a short locked escape into open copper for each such pad NOW,
     # while this leaf still owns the space around it.
@@ -745,7 +703,7 @@ def route_local_subcircuit(
             print(f"  WARNING: auto signal-escape spec gen failed: {exc}")
     # Array daisy-chain (default on): for an addressable-LED matrix or similar
     # regular array, deterministically stamp the short data hops (DOUT->DIN) as
-    # locked ties + pad escapes, so FreeRouting -- which abandons a few of these
+    # locked ties + pad escapes, so the autorouter -- which abandons a few of these
     # in the dense inter-component channels every run -- only has to finish from
     # open copper. Power is delivered by the +5V/GND pours, so the channels
     # carry only data. Keyed on the array spec, NOT leaf_is_fully_array (a 3-pin
@@ -768,7 +726,7 @@ def route_local_subcircuit(
     # Ring +5V bus (default on): for a ring array, deterministically stamp a
     # CLOSED loop of member->member (or member->decap->member) power ties at
     # the pad radius, plus a via stub tying each band decap's GND into the
-    # B.Cu pour -- FreeRouting then has no reason to dip into the ring
+    # B.Cu pour -- the autorouter then has no reason to dip into the ring
     # interior, which shaped-compose nesting needs clear (PR-N5). Kept as a
     # SEPARATE list from _arr_specs: the array stamp gate measures in-row
     # DATA hops only.
@@ -829,13 +787,13 @@ def route_local_subcircuit(
                         f"dropped at stamp: {', '.join(_if_skipped)}"
                     )
             if _bo["stubs"] > 0:
-                leaf_routing_cfg["freerouting_preserve_existing_copper"] = True
+                leaf_routing_cfg["routing_preserve_existing_copper"] = True
                 print(
                     f"  Breakout stubs: {_bo['stubs']} pad(s), "
                     f"{_bo['segments']} segment(s), {_bo['vias']} via(s)"
                 )
             # No-silent handoff: a data tie the stamp guards dropped goes to
-            # FreeRouting -- surface it so an incompletely-stamped chain is
+            # the autorouter -- surface it so an incompletely-stamped chain is
             # visible, not hidden behind a clean-looking "stubs" count.
             if _arr_specs:
                 _arr_keys = {f"{s.ref}.{s.pad}" for s in _arr_specs}
@@ -846,7 +804,7 @@ def route_local_subcircuit(
                 if _arr_stamp_skipped:
                     print(
                         f"  array-router: {len(_arr_stamp_skipped)}/{len(_arr_specs)} "
-                        f"data tie(s) left to FreeRouting: {', '.join(_arr_stamp_skipped)}"
+                        f"data tie(s) left to the autorouter: {', '.join(_arr_stamp_skipped)}"
                     )
             # Same no-silent-handoff rule for the ring power bus (its ties
             # are excluded from the stamp gate, so this log is the only
@@ -860,16 +818,16 @@ def route_local_subcircuit(
                 if _rp_skipped:
                     print(
                         f"  ring-power: {len(_rp_skipped)}/{len(_ring_pwr_specs)} "
-                        f"bus tie(s) left to FreeRouting: {', '.join(_rp_skipped)}"
+                        f"bus tie(s) left to the autorouter: {', '.join(_rp_skipped)}"
                     )
         except Exception as exc:  # finishing step must never fail the leaf
             print(f"  WARNING: breakout stub step failed: {exc}")
 
     # Layer-2 guardrail: a healthy array leaf pre-stamps almost its whole data
-    # chain so FreeRouting has next to nothing left. When the stamp rate collapses
+    # chain so the autorouter has next to nothing left. When the stamp rate collapses
     # (the inter-member channel is obstructed -- e.g. a foreign pad sitting in the
     # data lane, the KC-NZXXEE decaps-on-LEDs signature), the entire chain plus
-    # power falls to FreeRouting, which cannot finish a dense array before the
+    # power falls to the autorouter, which cannot finish a dense array before the
     # build's wall-clock cap kills it (30 min -> no board -> raw-component
     # preview). Reject the leaf fast and loud instead, naming the obstruction, so
     # the real cause surfaces in seconds rather than a silent timeout.
@@ -884,7 +842,7 @@ def route_local_subcircuit(
             f"  ARRAY GATE: only {_stamped}/{_n_inrow} in-row data ties stamped "
             f"({_rate:.0%} < {_min_rate:.0%}) -- the inter-member data channel "
             "is obstructed (a foreign pad in the data lane?). Rejecting the leaf "
-            "BEFORE FreeRouting rather than handing it a chain it cannot finish "
+            "BEFORE the autorouter rather than handing it a chain it cannot finish "
             "in time. Skipped: " + ", ".join(_arr_stamp_skipped[:12])
             + (" ..." if len(_arr_stamp_skipped) > 12 else "")
         )
@@ -897,7 +855,7 @@ def route_local_subcircuit(
                 "enabled": True,
                 "skipped": True,
                 "reason": _reason,
-                "router": backend_name,
+                "router": "kicad-routing-tools",
                 "traces": 0,
                 "vias": 0,
                 "total_length_mm": 0.0,
@@ -929,43 +887,35 @@ def route_local_subcircuit(
             },
             route_timing,
         )
-    # Route cache: a deterministic leaf (e.g. an array grid) has the same
-    # placement every round, so re-running freerouting on it is wasted minutes.
-    # Key a cache on the placement + routing-relevant config and reuse the
-    # routed board on a hit. Gated to deterministic leaves so normal (force/SA)
-    # leaves — whose placement varies each round by design — are unaffected.
+    # Route cache: deterministic array leaves reuse identical KRT output.
     _cache_pcb = None
     _cache_meta = None
     if leaf_is_fully_array(route_input_board.components, cfg.get("arrays", [])):
-        _sig = _deterministic_route_signature(
-            route_input_board, leaf_routing_cfg, jar_path
-        )
+        _sig = _deterministic_route_signature(route_input_board, leaf_routing_cfg)
         _cache_dir = Path(artifact_paths.artifact_dir) / "route_cache"
         _cache_pcb = _cache_dir / f"{_sig}.kicad_pcb"
         _cache_meta = _cache_dir / f"{_sig}.json"
     if _cache_pcb is not None and _cache_pcb.exists() and _cache_meta.exists():
         shutil.copyfile(_cache_pcb, routed_board)
-        freerouting_stats = json.loads(_cache_meta.read_text())
-        freerouting_stats["route_cache_hit"] = True
+        routing_stats = json.loads(_cache_meta.read_text())
+        routing_stats["route_cache_hit"] = True
         print(
             "  [route-cache] deterministic leaf unchanged -> reused routed "
-            "board (skipped freerouting)"
+            "board (skipped KRT)"
         )
     else:
-        freerouting_stats = route_board(
+        routing_stats = route_with_kicad_routing_tools(
             str(pre_route_board),
             str(routed_board),
             leaf_routing_cfg,
-            jar_path=str(jar_path or ""),
         )
         if _cache_pcb is not None:
             _cache_dir.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(routed_board, _cache_pcb)
-            _cache_meta.write_text(json.dumps(freerouting_stats))
-    route_timing["freerouting_s"] = round(
-        max(0.0, time.monotonic() - freerouting_start), 3
+            _cache_meta.write_text(json.dumps(routing_stats))
+    route_timing["routing_s"] = round(
+        max(0.0, time.monotonic() - routing_start), 3
     )
-    route_timing["routing_s"] = route_timing["freerouting_s"]
 
     pre_route_validation_start = time.monotonic()
     pre_route_validation = validate_routed_board(
@@ -981,7 +931,7 @@ def route_local_subcircuit(
     route_timing["pre_route_validation_s"] = round(
         max(0.0, time.monotonic() - pre_route_validation_start), 3
     )
-    # Pre-route DRC is informational only -- we let FreeRouting attempt routing
+    # Pre-route DRC is informational only -- we let the autorouter attempt routing
     # regardless of pre-route violations. The post-route DRC gate handles acceptance.
     pre_route_drc = pre_route_validation.get("drc", {})
     if pre_route_drc.get("violations"):
@@ -1362,7 +1312,7 @@ def route_local_subcircuit(
         "silk_edge_clearance",  # cosmetic
         "silk_over_copper",  # cosmetic
         "solder_mask_bridge",  # footprint-internal
-        "unconnected_items",  # FreeRouting may not route all nets
+        "unconnected_items",  # the autorouter may not route all nets
     }
     significant_violations = [
         violation
@@ -1441,8 +1391,8 @@ def route_local_subcircuit(
         validation["rejected"] = True
         validation["rejection_stage"] = "leaf_routed_artifact_validation"
         validation["routed_board_path"] = str(routed_board)
-        validation["pre_route_board_path"] = str(pre_route_board)
-        validation["router"] = backend_name
+        validation["leaf_placed_board"] = str(pre_route_board)
+        validation["router"] = "kicad-routing-tools"
         validation["internal_net_names"] = list(sorted(extraction.internal_net_names))
         validation["interface_port_names"] = [
             port.name for port in extraction.interface_ports
@@ -1452,7 +1402,7 @@ def route_local_subcircuit(
             "via_count": int(imported_copper.get("via_count", 0)),
             "total_length_mm": float(imported_copper.get("total_length_mm", 0.0)),
         }
-        validation["freerouting_stats"] = copy.deepcopy(freerouting_stats)
+        validation["routing_stats"] = copy.deepcopy(routing_stats)
         validation["rejection_message"] = "Leaf routed artifact rejected: " + ",".join(
             validation.get("rejection_reasons", [])
         )
@@ -1465,7 +1415,7 @@ def route_local_subcircuit(
                 "enabled": True,
                 "skipped": True,
                 "reason": "routed_drc_rejection",
-                "router": backend_name,
+                "router": "kicad-routing-tools",
                 "traces": int(imported_copper.get("trace_count", 0)),
                 "vias": int(imported_copper.get("via_count", 0)),
                 "total_length_mm": float(imported_copper.get("total_length_mm", 0.0)),
@@ -1477,11 +1427,10 @@ def route_local_subcircuit(
                 "_trace_segments": [],
                 "_via_objects": [],
                 "validation": copy.deepcopy(validation),
-                "freerouting_stats": copy.deepcopy(freerouting_stats),
-                "routing_stats": copy.deepcopy(freerouting_stats),
+                "routing_stats": copy.deepcopy(routing_stats),
                 "render_diagnostics": copy.deepcopy(leaf_diagnostics),
                 "routed_board_path": str(routed_board),
-                "pre_route_board_path": str(pre_route_board),
+                "leaf_placed_board": str(pre_route_board),
                 "round_preview_pre_route_front": round_preview_pre_route_front,
                 "round_preview_pre_route_back": round_preview_pre_route_back,
                 "round_preview_pre_route_copper": round_preview_pre_route_copper,
@@ -1501,7 +1450,7 @@ def route_local_subcircuit(
             "enabled": True,
             "skipped": False,
             "reason": "",
-            "router": backend_name,
+            "router": "kicad-routing-tools",
             "traces": int(imported_copper.get("trace_count", 0)),
             "vias": int(imported_copper.get("via_count", 0)),
             "total_length_mm": float(imported_copper.get("total_length_mm", 0.0)),
@@ -1516,14 +1465,13 @@ def route_local_subcircuit(
             "_via_objects": [
                 copy.deepcopy(via) for via in imported_copper.get("vias", [])
             ],
-            "freerouting_stats": freerouting_stats,
-            "routing_stats": freerouting_stats,
+            "routing_stats": routing_stats,
             "validation": validation,
             "gnd_pour_summary": copy.deepcopy(gnd_pour_summary),
             "render_diagnostics": copy.deepcopy(leaf_diagnostics),
             "leaf_legality_repair": copy.deepcopy(legality_repair),
             "routed_board_path": str(routed_board),
-            "pre_route_board_path": str(pre_route_board),
+            "leaf_placed_board": str(pre_route_board),
             "round_preview_pre_route_front": round_preview_pre_route_front,
             "round_preview_pre_route_back": round_preview_pre_route_back,
             "round_preview_pre_route_copper": round_preview_pre_route_copper,
@@ -1560,20 +1508,19 @@ def _stamp_trivial_leaf(
       every leaf.
 
     The resulting PCB is just the placed footprints; no traces, no
-    vias, no FreeRouting invocation. The returned routing dict
+    vias, no the autorouter invocation. The returned routing dict
     advertises ``traces=0, vias=0, reason="no_internal_nets"`` and
     ``routed_board_path`` set to the same file as
-    ``pre_route_board_path``.
+    ``leaf_placed_board``.
     """
     route_timing: dict[str, float] = {}
-    backend_name = routing_backend(cfg)
     route_total_start = time.monotonic()
 
     artifact_paths = resolve_artifact_paths(
         Path(extraction.subcircuit.schematic_path).parent,
         extraction.subcircuit.id,
     )
-    pre_route_board = Path(artifact_paths.artifact_dir) / "leaf_pre_freerouting.kicad_pcb"
+    pre_route_board = Path(artifact_paths.artifact_dir) / "leaf_placed.kicad_pcb"
     routed_board = Path(artifact_paths.artifact_dir) / "leaf_routed.kicad_pcb"
 
     legality_start = time.monotonic()
@@ -1599,7 +1546,7 @@ def _stamp_trivial_leaf(
                 "enabled": True,
                 "skipped": True,
                 "reason": "no_internal_nets",
-                "router": backend_name,
+                "router": "kicad-routing-tools",
                 "traces": 0,
                 "vias": 0,
                 "total_length_mm": 0.0,
@@ -1624,7 +1571,7 @@ def _stamp_trivial_leaf(
     route_input_board.components = copy.deepcopy(repaired_components)
     route_input_board.traces = []
     route_input_board.vias = []
-    # Trivial leaves skip FreeRouting, so the pre-route stamp is also the final
+    # Trivial leaves skip the autorouter, so the pre-route stamp is also the final
     # stamp. Apply the same shrink-and-center as the main-path silk re-stamp so the
     # rounded silk hugs Edge.Cuts and the standalone leaf opens centered on its A4
     # page (the parent composer re-bases each leaf on load, so this is placement-safe).
@@ -1657,7 +1604,7 @@ def _stamp_trivial_leaf(
         max(0.0, time.monotonic() - stamp_start), 3
     )
 
-    # No FreeRouting to run; the placed board IS the routed board.
+    # No the autorouter to run; the placed board IS the routed board.
     shutil.copy2(pre_route_board, routed_board)
 
     round_board_pre_route = ""
@@ -1665,14 +1612,14 @@ def _stamp_trivial_leaf(
     if round_index is not None:
         round_prefix = f"round_{int(round_index):04d}"
         for src_path, suffix in (
-            (pre_route_board, "leaf_pre_freerouting"),
+            (pre_route_board, "leaf_placed"),
             (routed_board, "leaf_routed"),
         ):
             if not src_path.exists():
                 continue
             dst = src_path.parent / f"{round_prefix}_{suffix}{src_path.suffix}"
             shutil.copy2(src_path, dst)
-            if suffix == "leaf_pre_freerouting":
+            if suffix == "leaf_placed":
                 round_board_pre_route = str(dst)
             else:
                 round_board_routed = str(dst)
@@ -1711,7 +1658,7 @@ def _stamp_trivial_leaf(
             "enabled": True,
             "skipped": True,
             "reason": "no_internal_nets",
-            "router": backend_name,
+            "router": "kicad-routing-tools",
             "traces": 0,
             "vias": 0,
             "total_length_mm": 0.0,
@@ -1733,7 +1680,7 @@ def _stamp_trivial_leaf(
             "render_diagnostics": diagnostics_payload,
             "leaf_legality_repair": copy.deepcopy(legality_repair),
             "routed_board_path": str(routed_board),
-            "pre_route_board_path": str(pre_route_board),
+            "leaf_placed_board": str(pre_route_board),
             "failed": False,
         },
         route_timing,

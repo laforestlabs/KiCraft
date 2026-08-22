@@ -1,46 +1,32 @@
-# KiCraft auto-tuning worker — runs the CPU-bound place+route tuning loop on a
-# beefy box (e.g. a homelab i7), at $0 LLM cost. Mirrors the production stack so
-# routing behaves identically: Ubuntu 24.04 + KiCad 9.0 + FreeRouting 1.9.0 +
-# Java + xvfb. The repo (code + committed tuning corpus) is cloned at RUN time
-# into the mounted /data volume, so updating is a restart, not a rebuild.
+# KiCraft auto-tuning worker with the production KiCad Routing Tools runtime.
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC PIP_ROOT_USER_ACTION=ignore
 
-# Toolchain: KiCad 9.0 (kicad-cli + pcbnew python), a JRE + xvfb for FreeRouting,
-# git/python for the repo + venv. The Check-Date/Valid-Until bypass keeps `apt`
-# working when the host clock is skewed (common on homelab boxes with a dead RTC
-# battery) — Ubuntu re-publishes its InRelease files constantly, so even a few
-# hours behind makes them look "not valid yet". Fix the host clock too.
 RUN printf 'Acquire::Check-Valid-Until "false";\nAcquire::Check-Date "false";\n' \
         > /etc/apt/apt.conf.d/99no-check-date \
  && apt-get update && apt-get install -y --no-install-recommends \
-        software-properties-common ca-certificates gnupg curl git \
+        software-properties-common ca-certificates gnupg git \
         python3 python3-venv python3-pip \
-        default-jre-headless xvfb xauth fonts-dejavu-core \
  && add-apt-repository -y ppa:kicad/kicad-9.0-releases \
  && apt-get update && apt-get install -y kicad \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# FreeRouting 1.9.0 at the path kicraft.autoplacer.config expects by default.
-RUN mkdir -p /root/.local/lib \
- && curl -fsSL -o /root/.local/lib/freerouting-1.9.0.jar \
-      https://github.com/freerouting/freerouting/releases/download/v1.9.0/freerouting-1.9.0.jar \
- && test -s /root/.local/lib/freerouting-1.9.0.jar
-
-# FreeRouting 1.9.0 is a Swing/AWT GUI app (run under xvfb), so it needs the FULL
-# JRE + X11/font libs — the headless JRE above cannot launch it (no libawt_xawt),
-# which leaves boards unrouted. Separate layer so the cached KiCad layer is reused.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        default-jre libxrender1 libxtst6 libxi6 libxext6 fontconfig \
- && apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN git clone https://github.com/drandyhaas/KiCadRoutingTools.git /opt/KiCadRoutingTools \
+ && git -C /opt/KiCadRoutingTools checkout 3ceb773722bea67aa3685e7ee430c0c0d17ef38d \
+ && python3 -m venv --system-site-packages /opt/krt-venv \
+ && /opt/krt-venv/bin/pip install --no-cache-dir -r /opt/KiCadRoutingTools/requirements.txt \
+ && cd /opt/KiCadRoutingTools \
+ && /opt/krt-venv/bin/python build_router.py --tag v0.20.2
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENV KICRAFT_REPO=https://codeberg.org/LaForestLabs/KiCraft.git \
     KICRAFT_BRANCH=main \
-    KICRAFT_DATA=/data
+    KICRAFT_DATA=/data \
+    KICRAFT_KICAD_ROUTING_TOOLS_PATH=/opt/KiCadRoutingTools \
+    KICRAFT_KICAD_ROUTING_TOOLS_PYTHON=/opt/krt-venv/bin/python
 VOLUME ["/data"]
 WORKDIR /data
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

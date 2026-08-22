@@ -30,8 +30,6 @@ _REPAIR_CFG_KEYS = (
     "signal_repair_max_targets",
     "signal_repair_max_attempts",
     "signal_repair_dogleg_offsets_mm",
-    "freerouting_min_clearance_mm",
-    "freerouting_fine_pitch_track_mm",
     "via_size_mm",
     "via_drill_mm",
 )
@@ -60,8 +58,8 @@ def attempt_signal_unconnected_repair(
     original validation unchanged. ``carry_keys`` name annotations on the
     incoming validation that must survive onto the fresh re-validate dict.
     """
-    from kicraft.autoplacer.freerouting_runner import (
-        _run_pcbnew_script,
+    from kicraft.autoplacer.routing_board import (
+        run_pcbnew_script,
         validate_routed_board,
     )
 
@@ -77,7 +75,7 @@ def attempt_signal_unconnected_repair(
     record: dict = {"ran": True, "kept": False}
     try:
         _sig_cfg = json.dumps({k: cfg[k] for k in _REPAIR_CFG_KEYS if k in cfg})
-        _run_pcbnew_script(
+        run_pcbnew_script(
             "import json\n"
             "from kicraft.autoplacer.brain.unconnected_repair import "
             "repair_unconnected_signals\n"

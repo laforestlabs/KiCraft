@@ -351,10 +351,8 @@ def run_build(rundir: Path, progress, *, timeout_s: int = 2400) -> int:
     # the watchdog leaves headroom to finalize + export.
     build_env = _build_env()
     build_env.setdefault("KICRAFT_BUILD_MAX_WALL_S", f"{max(60.0, timeout_s * 0.9):.0f}")
-    # start_new_session + kill_tree (NOT proc.kill): the build fans out to leaf
-    # solvers and FreeRouting JVMs, and the JVM detaches into its own session
-    # (freerouting_runner), so killing only the direct child stranded orphan
-    # JVMs burning cores for days (self-eval-2026-07-07 FIX 1).
+    # start_new_session + kill_tree (not proc.kill): builds fan out to leaf,
+    # router, and pcbnew subprocess groups that an outer watchdog must reap.
     proc = subprocess.Popen(_BUILD_CMD, cwd=str(rundir), text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             env=build_env, start_new_session=True)

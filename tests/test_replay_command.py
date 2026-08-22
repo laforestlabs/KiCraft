@@ -9,9 +9,9 @@ Two layers:
 * An opt-in end-to-end determinism test (``KICRAFT_REPLAY_E2E=1``): runs
   ``replay --project ... --no-route`` twice on the committed
   ``tests/fixtures/replay_workspace`` and asserts the per-leaf PLACEMENT
-  (``leaf_pre_freerouting.kicad_pcb``) is identical across runs. The composed
+  (``leaf_placed.kicad_pcb``) is identical across runs. The composed
   parent is intentionally NOT asserted byte-stable -- it consumes the routed
-  leaf boards and so inherits FreeRouting's best-effort nondeterminism.
+  leaf boards and so inherits the autorouter's best-effort nondeterminism.
 """
 
 from __future__ import annotations
@@ -196,6 +196,25 @@ def test_replay_never_calls_synth_and_threads_seed(tmp_path, monkeypatch):
     assert rec["no_fab"] is True
 
 
+def test_routed_replay_preflights_krt_once(tmp_path, monkeypatch):
+    d = _stub_workspace(tmp_path)
+    rec = {}
+    _patch_replay_seams(monkeypatch, rec)
+    calls = []
+    monkeypatch.setattr(
+        cli_app,
+        "_preflight_project_router",
+        lambda project_dir: calls.append(Path(project_dir)) or {},
+    )
+    args = SimpleNamespace(
+        project=str(d), state=None, out_dir=None, quality="fast",
+        seed=0, route=True, no_fab=True, no_archive=True,
+    )
+    assert cli_app._cmd_replay(args) == 0
+    assert calls == [d]
+    assert rec["route"] is True
+
+
 def test_replay_pins_deterministic_env(tmp_path, monkeypatch):
     d = _stub_workspace(tmp_path)
     monkeypatch.delenv("PYTHONHASHSEED", raising=False)
@@ -304,14 +323,14 @@ def test_build_namespace_preserves_engine_defaults(tmp_path, monkeypatch):
 
 
 def _leaf_placements(project_dir: Path) -> dict[str, dict]:
-    """Per-leaf footprint geometry from each ``leaf_pre_freerouting.kicad_pcb``
+    """Per-leaf footprint geometry from each ``leaf_placed.kicad_pcb``
     (the deterministic placement output), keyed by the leaf artifact dir name."""
     import pcbnew
 
     out: dict[str, dict] = {}
     for p in glob.glob(
         str(project_dir / ".experiments" / "subcircuits"
-            / "*" / "leaf_pre_freerouting.kicad_pcb")
+            / "*" / "leaf_placed.kicad_pcb")
     ):
         board = pcbnew.LoadBoard(p)
         out[Path(p).parent.name] = {

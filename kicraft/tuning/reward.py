@@ -7,7 +7,7 @@ Objective axes (the user's "Balanced / Pareto" choice):
   mean_area_mm2    (MINIMIZE)  mean Edge.Cuts bbox area across boards (board size)
   mean_orderedness (MAXIMIZE)  mean layout-quality sub-score 0-100 across boards
 
-Routing (FreeRouting) is only best-effort deterministic, so each (config, board)
+Routing (KiCad Routing Tools) is only best-effort deterministic, so each (config, board)
 is replicated over K seeds and averaged here; placement is byte-deterministic, so
 seed variance is purely routing noise. Use common random numbers (the same seed
 set across all configs in a generation) for low-variance paired ranking.

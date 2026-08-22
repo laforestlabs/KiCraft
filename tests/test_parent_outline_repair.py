@@ -1,8 +1,8 @@
 """Unit tests for compose's parent-outline repair (E2E Finding 1b).
 
 The constraint-aware outline can come out smaller than the placed-content
-bbox, leaving footprints/pads/copper outside ``Edge.Cuts`` so FreeRouting
-produces no SES. ``_repair_parent_outline`` grows the outline to enclose all
+bbox, leaving footprints/pads/copper outside ``Edge.Cuts`` so the autorouter
+produces no routed session. ``_repair_parent_outline`` grows the outline to enclose all
 placed geometry (matching ``_validate_parent_geometry``'s rule) before
 stamping, while preserving edge-connector body overhang and never shrinking
 an outline that already encloses everything.

@@ -176,7 +176,7 @@ def freeze_workspace(
     dir at eval time. The result is a board the tuner can re-place/re-route from
     any location at $0 LLM.
 
-    ``lean=True`` drops the bulky ``.experiments`` tree (routed leaves, DSN
+    ``lean=True`` drops the bulky ``.experiments`` tree (routed leaves, router exchange input
     files): in replay mode the tuner regenerates leaves from the schematic, so a
     lean freeze (schematics + seed PCB + project) is all it needs and is small
     enough to commit. Lean freezes need no tokenization (nothing references the

@@ -103,7 +103,7 @@ def _atomic_save_board(
     netclass values. When ``source_pro_path`` is supplied and exists, we
     overwrite the sibling with that file -- this propagates the project's
     real netclass / rules to anything that DRCs the freshly-saved PCB
-    (kicad-cli pcb drc, FreeRouting validators, etc.). Without this sync,
+    (kicad-cli pcb drc, KiCad Routing Tools validators, etc.). Without this sync,
     project edits like ``"clearance": 0.15`` are invisible at validation
     time and cause phantom clearance violations.
     """
@@ -182,7 +182,7 @@ class StampSubprocessError(RuntimeError):
     Distinguished from generic routing errors so callers can surface
     "the implementation is broken" loudly instead of letting the round
     quietly degrade to ``routing_exception`` like a recoverable
-    FreeRouting timeout. The exception text carries the rc / stderr /
+    KiCad Routing Tools timeout. The exception text carries the rc / stderr /
     stdout from ``_run_pcbnew_script_file`` for triage.
     """
 
@@ -666,7 +666,7 @@ class KiCadAdapter:
         to avoid SWIG memory corruption on repeated calls.
 
         This helper is intended for routed leaf subcircuits where the exported
-        board must be loadable by pcbnew/FreeRouting as a real KiCad board, not
+        board must be loadable by pcbnew/KiCad Routing Tools as a real KiCad board, not
         just a synthetic text snapshot.
 
         Behavior:
@@ -957,7 +957,7 @@ class KiCadAdapter:
                 # StampSubprocessError so the catch in solve_subcircuits
                 # / leaf_routing can distinguish "stamp script crashed"
                 # (implementation bug -- bubble up loudly) from
-                # "FreeRouting timed out" (recoverable, degrade the
+                # "KiCad Routing Tools timed out" (recoverable, degrade the
                 # round). Without this, a syntax / API regression in
                 # _stamp_subcircuit_subprocess.py silently turns into a
                 # routing_exception, the round is discarded with

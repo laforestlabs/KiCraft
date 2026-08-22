@@ -48,13 +48,13 @@ REPO = Path(__file__).resolve().parents[1]
 
 # A real composed parent board from the manual-runs fixtures. Locked to
 # a specific subcircuit hash so the test is reproducible -- the
-# autoexperiment writes parent_pre_freerouting.kicad_pcb here on every
+# autoexperiment writes parent_placed.kicad_pcb here on every
 # composed round and the file's positions are stable for a given seed.
 PARENT_PCB = (
     REPO
     / "tests/manual-runs/esp32motionsensor/generated/ESP32_MOTION_SENSOR"
     / ".experiments/subcircuits/subcircuit__8a5edab282"
-    / "parent_pre_freerouting.kicad_pcb"
+    / "parent_placed.kicad_pcb"
 )
 
 

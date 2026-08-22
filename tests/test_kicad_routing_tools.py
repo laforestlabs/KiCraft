@@ -6,17 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kicraft.autoplacer import routing_backends as rb
-
-
-def test_krt_is_default():
-    assert rb.routing_backend({}) == "kicad-routing-tools"
-
-
-def test_backend_aliases_and_invalid_name():
-    assert rb.routing_backend({"routing_backend": "krt"}) == "kicad-routing-tools"
-    with pytest.raises(ValueError, match="Unknown routing_backend"):
-        rb.routing_backend({"routing_backend": "unknown"})
+from kicraft.autoplacer import kicad_routing_tools as rb
 
 
 def test_krt_command_preserves_rules_and_existing_copper(tmp_path):
@@ -24,8 +14,7 @@ def test_krt_command_preserves_rules_and_existing_copper(tmp_path):
     (root / "py_router").mkdir(parents=True)
     (root / "py_router" / "route.py").write_text("# stub\n")
     cfg = {
-        "routing_backend": "kicad-routing-tools",
-        "kicad_routing_tools_path": str(root),
+                "kicad_routing_tools_path": str(root),
         "signal_width_mm": 0.25,
         "via_size_mm": 0.7,
         "via_drill_mm": 0.35,
@@ -40,32 +29,17 @@ def test_krt_command_preserves_rules_and_existing_copper(tmp_path):
         assert option not in cmd
 
 
-def test_dispatches_to_krt_without_freerouting(monkeypatch, tmp_path):
-    called = {}
-
-    def fake(source, output, config):
-        called.update(source=source, output=output, config=config)
-        return {"backend": "kicad-routing-tools"}
-
-    monkeypatch.setattr(rb, "route_with_kicad_routing_tools", fake)
-    cfg = {"routing_backend": "kicad-routing-tools"}
-    result = rb.route_board("in.kicad_pcb", "out.kicad_pcb", cfg)
-    assert result["backend"] == "kicad-routing-tools"
-    assert called["source"] == "in.kicad_pcb"
-
-
 def test_preflight_requires_configured_checkout():
-    with pytest.raises(rb.RoutingBackendUnavailableError, match="path is unset"):
-        rb.preflight_routing_backend({"routing_backend": "kicad-routing-tools"})
+    with pytest.raises(rb.KicadRoutingToolsUnavailableError, match="path is unset"):
+        rb.preflight_kicad_routing_tools({})
 
 
 def test_krt_preflight_uses_environment_defaults(monkeypatch, tmp_path):
     monkeypatch.setenv("KICRAFT_KICAD_ROUTING_TOOLS_PATH", "/tmp/KiCadRoutingTools")
     monkeypatch.setenv("KICRAFT_KICAD_ROUTING_TOOLS_PYTHON", "/tmp/krt-venv/bin/python")
 
-    result = rb.preflight_routing_backend({
-        "routing_backend": "kicad-routing-tools",
-        "kicad_routing_tools_path": "",
+    result = rb.preflight_kicad_routing_tools({
+                "kicad_routing_tools_path": "",
         "kicad_routing_tools_python": "",
     })
 
@@ -73,42 +47,25 @@ def test_krt_preflight_uses_environment_defaults(monkeypatch, tmp_path):
     assert result["root"] == "/tmp/KiCadRoutingTools"
     assert result["python"] == "/tmp/krt-venv/bin/python"
 
-def test_parent_krt_path_bypasses_freerouting_workarounds(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-    import kicraft.autoplacer.freerouting_runner as fr
-    import kicraft.autoplacer.routing_backends as backends
-    import kicraft.autoplacer.brain.gnd_pour as gnd_pour
+def test_parent_routes_stamped_board_once_with_krt(monkeypatch, tmp_path):
+    import kicraft.autoplacer.kicad_routing_tools as krt
+    import kicraft.autoplacer.routing_board as board_utils
     import kicraft.cli._compose_route as compose_route
 
     stamped = tmp_path / "parent_stamped.kicad_pcb"
     stamped.write_text("(kicad_pcb stamped)\n")
     events = []
 
-    def fake_route(source, output, config, *, jar_path=None):
-        events.append((source, dict(config)))
+    def fake_route(source, output, config):
+        events.append((source, output, dict(config)))
         Path(output).write_text("(kicad_pcb routed)\n")
         return {"backend": "kicad-routing-tools", "returncode": 0}
 
-    monkeypatch.setattr(backends, "route_board", fake_route)
-    monkeypatch.setattr(fr, "strip_net_copper", lambda *a, **k: pytest.fail("FR GND strip ran"))
-    monkeypatch.setattr(
-        fr,
-        "route_with_freerouting",
-        lambda *a, **k: pytest.fail("FreeRouting route ran"),
-    )
-    monkeypatch.setattr(
-        gnd_pour,
-        "add_gnd_pour_and_thermal_vias",
-        lambda *a, **k: pytest.fail("FreeRouting pre-route GND pour ran"),
-    )
-    monkeypatch.setattr(fr, "import_routed_copper", lambda p: {"traces": [], "vias": []})
-    monkeypatch.setattr(fr, "validate_routed_board", lambda *a, **k: {"accepted": True, "drc": {}})
-    state = SimpleNamespace(
-        composition=SimpleNamespace(inferred_interconnect_nets={"A": 1}),
-        component_count=2,
-    )
+    monkeypatch.setattr(krt, "route_with_kicad_routing_tools", fake_route)
+    monkeypatch.setattr(board_utils, "import_routed_copper", lambda p: {"traces": [], "vias": []})
+    monkeypatch.setattr(board_utils, "validate_routed_board", lambda *a, **k: {"accepted": True, "drc": {}})
+    state = SimpleNamespace(composition=SimpleNamespace())
     cfg = {
-        "routing_backend": "kicad-routing-tools",
         "gnd_zone_net": "",
         "power_plane_enabled": False,
         "signal_unconnected_repair_enabled": False,
@@ -116,9 +73,10 @@ def test_parent_krt_path_bypasses_freerouting_workarounds(monkeypatch, tmp_path)
     }
     result = compose_route._route_parent_board(stamped, state, tmp_path, cfg)
     assert len(events) == 1
+    assert events[0][0] == str(stamped)
     assert result["backend"] == "kicad-routing-tools"
     assert result["routing_stats"]["returncode"] == 0
-    assert result["routing_stats"]["backend"] == "kicad-routing-tools"
+    assert list(result).count("routing_stats") == 1
 
 
 def _runtime(root: Path) -> dict[str, str]:
@@ -181,13 +139,12 @@ def test_krt_preflight_observes_runtime_and_caches_success(monkeypatch, tmp_path
     monkeypatch.setattr(rb.subprocess, "run", fake_run)
     rb._KRT_PREFLIGHT_CACHE.clear()
     cfg = {
-        "routing_backend": "kicad-routing-tools",
-        "kicad_routing_tools_path": str(root),
+                "kicad_routing_tools_path": str(root),
         "kicad_routing_tools_python": "/configured/python",
     }
 
-    first = rb.preflight_routing_backend(cfg)
-    second = rb.preflight_routing_backend(cfg)
+    first = rb.preflight_kicad_routing_tools(cfg)
+    second = rb.preflight_kicad_routing_tools(cfg)
 
     assert first == second
     assert first["version"] == "0.20.2"
@@ -221,20 +178,19 @@ def test_krt_preflight_failures_are_not_cached(monkeypatch, tmp_path):
     monkeypatch.setattr(rb.subprocess, "run", fake_run)
     rb._KRT_PREFLIGHT_CACHE.clear()
     cfg = {
-        "routing_backend": "kicad-routing-tools",
-        "kicad_routing_tools_path": str(root),
+                "kicad_routing_tools_path": str(root),
     }
 
     for _ in range(2):
-        with pytest.raises(rb.RoutingBackendUnavailableError, match="startup checks"):
-            rb.preflight_routing_backend(cfg)
+        with pytest.raises(rb.KicadRoutingToolsUnavailableError, match="startup checks"):
+            rb.preflight_kicad_routing_tools(cfg)
     assert startup_calls == 2
 
 
 def test_krt_route_process_boundary_preserves_rules_and_summaries(
     monkeypatch, tmp_path
 ):
-    import kicraft.autoplacer.freerouting_runner as fr
+    import kicraft.autoplacer.routing_board as board_utils
 
     root = tmp_path / "krt"
     root.mkdir()
@@ -281,15 +237,14 @@ def test_krt_route_process_boundary_preserves_rules_and_summaries(
                 "diagnostic stderr",
             )
 
-    monkeypatch.setattr(rb, "preflight_routing_backend", fake_preflight)
+    monkeypatch.setattr(rb, "preflight_kicad_routing_tools", fake_preflight)
     monkeypatch.setattr(rb.subprocess, "Popen", FakeProcess)
-    monkeypatch.setattr(fr, "import_routed_copper", fake_import)
+    monkeypatch.setattr(board_utils, "import_routed_copper", fake_import)
     stats = rb.route_with_kicad_routing_tools(
         str(input_board),
         str(output_board),
         {
-            "routing_backend": "kicad-routing-tools",
-            "kicad_routing_tools_path": str(root),
+                        "kicad_routing_tools_path": str(root),
             "pcb_path": str(rules_board),
         },
     )
@@ -319,12 +274,12 @@ def test_krt_route_rejects_same_input_and_output(tmp_path):
         rb.route_with_kicad_routing_tools(
             str(board),
             str(board),
-            {"routing_backend": "kicad-routing-tools"},
+            {},
         )
 
 
 def test_krt_route_requires_project_rules_before_launch(monkeypatch, tmp_path):
-    import kicraft.autoplacer.freerouting_runner as fr
+    import kicraft.autoplacer.routing_board as board_utils
 
     root = tmp_path / "krt"
     root.mkdir()
@@ -338,20 +293,19 @@ def test_krt_route_requires_project_rules_before_launch(monkeypatch, tmp_path):
         launched = True
         pytest.fail("route launched without project rules")
 
-    monkeypatch.setattr(rb, "preflight_routing_backend", lambda _: _runtime(root))
+    monkeypatch.setattr(rb, "preflight_kicad_routing_tools", lambda _: _runtime(root))
     monkeypatch.setattr(rb.subprocess, "Popen", fail_launch)
-    monkeypatch.setattr(fr, "import_routed_copper", lambda _: _copper())
+    monkeypatch.setattr(board_utils, "import_routed_copper", lambda _: _copper())
 
     with pytest.raises(
-        rb.RoutingBackendUnavailableError,
+        rb.KicadRoutingToolsUnavailableError,
         match=r"^KiCadRoutingTools requires a sibling \.kicad_pro",
     ):
         rb.route_with_kicad_routing_tools(
             str(input_board),
             str(output_board),
             {
-                "routing_backend": "kicad-routing-tools",
-                "kicad_routing_tools_path": str(root),
+                                "kicad_routing_tools_path": str(root),
             },
         )
     assert launched is False
@@ -364,7 +318,7 @@ def test_krt_route_requires_project_rules_before_launch(monkeypatch, tmp_path):
 def test_krt_route_keeps_nonzero_and_no_output_failures(
     monkeypatch, tmp_path, returncode, create_output, match
 ):
-    import kicraft.autoplacer.freerouting_runner as fr
+    import kicraft.autoplacer.routing_board as board_utils
 
     root = tmp_path / "krt"
     root.mkdir()
@@ -384,23 +338,22 @@ def test_krt_route_keeps_nonzero_and_no_output_failures(
                 output_board.write_text("diagnostic output\n")
             return ("stdout", "stderr")
 
-    monkeypatch.setattr(rb, "preflight_routing_backend", lambda _: _runtime(root))
+    monkeypatch.setattr(rb, "preflight_kicad_routing_tools", lambda _: _runtime(root))
     monkeypatch.setattr(rb.subprocess, "Popen", FakeProcess)
-    monkeypatch.setattr(fr, "import_routed_copper", lambda _: _copper())
+    monkeypatch.setattr(board_utils, "import_routed_copper", lambda _: _copper())
 
     with pytest.raises(RuntimeError, match=match):
         rb.route_with_kicad_routing_tools(
             str(input_board),
             str(output_board),
             {
-                "routing_backend": "kicad-routing-tools",
-                "kicad_routing_tools_path": str(root),
+                                "kicad_routing_tools_path": str(root),
             },
         )
 
 
 def test_krt_route_timeout_behavior_is_unchanged(monkeypatch, tmp_path):
-    import kicraft.autoplacer.freerouting_runner as fr
+    import kicraft.autoplacer.routing_board as board_utils
 
     root = tmp_path / "krt"
     root.mkdir()
@@ -423,18 +376,17 @@ def test_krt_route_timeout_behavior_is_unchanged(monkeypatch, tmp_path):
                 raise subprocess.TimeoutExpired("krt", timeout)
             return ("partial stdout", "partial stderr")
 
-    monkeypatch.setattr(rb, "preflight_routing_backend", lambda _: _runtime(root))
+    monkeypatch.setattr(rb, "preflight_kicad_routing_tools", lambda _: _runtime(root))
     monkeypatch.setattr(rb.subprocess, "Popen", FakeProcess)
     monkeypatch.setattr(rb.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
-    monkeypatch.setattr(fr, "import_routed_copper", lambda _: _copper())
+    monkeypatch.setattr(board_utils, "import_routed_copper", lambda _: _copper())
 
     with pytest.raises(RuntimeError, match="timed out after 1s"):
         rb.route_with_kicad_routing_tools(
             str(input_board),
             str(output_board),
             {
-                "routing_backend": "kicad-routing-tools",
-                "kicad_routing_tools_path": str(root),
+                                "kicad_routing_tools_path": str(root),
                 "kicad_routing_tools_timeout_s": 1,
             },
         )
@@ -442,7 +394,7 @@ def test_krt_route_timeout_behavior_is_unchanged(monkeypatch, tmp_path):
 
 
 def test_krt_route_rejects_missing_input_copper(monkeypatch, tmp_path):
-    import kicraft.autoplacer.freerouting_runner as fr
+    import kicraft.autoplacer.routing_board as board_utils
 
     root = tmp_path / "krt"
     root.mkdir()
@@ -465,17 +417,16 @@ def test_krt_route_rejects_missing_input_copper(monkeypatch, tmp_path):
             output_board.write_text("routed but corrupt\n")
             return ('JSON_SUMMARY: {"successful": 1}\n', "")
 
-    monkeypatch.setattr(rb, "preflight_routing_backend", lambda _: _runtime(root))
+    monkeypatch.setattr(rb, "preflight_kicad_routing_tools", lambda _: _runtime(root))
     monkeypatch.setattr(rb.subprocess, "Popen", FakeProcess)
-    monkeypatch.setattr(fr, "import_routed_copper", fake_import)
+    monkeypatch.setattr(board_utils, "import_routed_copper", fake_import)
 
     with pytest.raises(rb.RoutingCopperPreservationError) as caught:
         rb.route_with_kicad_routing_tools(
             str(input_board),
             str(output_board),
             {
-                "routing_backend": "kicad-routing-tools",
-                "kicad_routing_tools_path": str(root),
+                                "kicad_routing_tools_path": str(root),
             },
         )
     assert caught.value.stats["preserved_existing_copper"] is False
