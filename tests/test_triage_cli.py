@@ -165,9 +165,7 @@ def test_leaves_classifies_replica_and_parent(tmp_path):
                 "unconnected_nets": ["A", "B"],
                 "signal_unconnected_nets": ["A"],
                 "ignored_interface_nets": ["B"],
-                "escape_infeasible_nets": ["A"],
-                "failure_class": "escape_infeasible"}}},
-            "leaf_acceptance": {"escape_infeasible": ["U1.5:A"]}},
+                "failure_class": "router_fail"}}}}
     })
     _write(exp / "subcircuits" / "leaf_b" / "debug.json",
            {"replicated_from": "/leaf_a", "sheet_name": "POWER 2"})
@@ -177,9 +175,7 @@ def test_leaves_classifies_replica_and_parent(tmp_path):
     kinds = sorted(lf["kind"] for lf in leaves)
     assert kinds == ["leaf", "replica"]  # the parent artifact is excluded
     leaf = next(lf for lf in leaves if lf["kind"] == "leaf")
-    assert leaf["unconnected"]["failure_class"] == "escape_infeasible"
     assert leaf["unconnected"]["signal"] == ["A"]
-    assert leaf["escape_infeasible"] == ["U1.5:A"]
 
 
 # ---------------------------------------------------------------------------
@@ -250,12 +246,11 @@ def test_leaf_gate_detail_contract():
     validation = {
         "drc": {"unconnected": 2, "unconnected_nets": ["A", "IFACE"]},
         "interface_port_names": ["IFACE"],
-        "escape_infeasible": ["U1.5:A"],
     }
     passed, detail = _gate_no_unconnected(
         validation, {}, LeafAcceptanceConfig(max_unconnected=0))
     assert passed is False
     for k in ("signal_unconnected_nets", "ignored_interface_nets",
-              "escape_infeasible_nets", "failure_class"):
+              "failure_class"):
         assert k in detail, f"gate detail lost key {k} triage reads"
-    assert detail["failure_class"] == "escape_infeasible"
+    assert detail["failure_class"] == "router_fail"

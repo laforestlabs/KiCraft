@@ -556,88 +556,6 @@ def route_local_subcircuit(
     routing_start = time.monotonic()
     leaf_routing_cfg = {**cfg, "pcb_path": str(source_pcb)}
     _breakout_specs = _resolve_breakout_specs(cfg)
-    # Escape planner (default on): for every dense footprint, work out how each
-    # INNER netted pad leaves its pad field -- same-net tie, on-layer lane, or
-    # dog-bone fanout via -- and stamp exactly that. FIRST in the spec order
-    # because these pads are the most constrained on the board: their exits are
-    # the package's designed lanes, and anything stamped earlier can take one.
-    # Pads it owns are removed from the legacy radial stampers below, so a pad
-    # it declares INFEASIBLE gets no copper at all rather than the 0.2 mm nub
-    # that used to stand in for "blocked".
-    _escape_plan: dict[str, Any] = {"enabled": False}
-    _planner_owned: set[tuple[str, str]] = set()
-    _planner_keys: set[str] = set()
-    _ep_specs: list = []
-    if cfg.get("escape_planner_enabled", True):
-        try:
-            import pcbnew
-
-            from kicraft.autoplacer.brain.breakout_stubs import escape_planner_specs
-
-            _ep_board = pcbnew.LoadBoard(str(pre_route_board))
-            _ep_specs, _escape_plan = escape_planner_specs(_ep_board, cfg)
-            del _ep_board
-            for _ref, _entry in (_escape_plan.get("footprints") or {}).items():
-                for _e in _entry.get("escapes", []):
-                    if _e.get("kind") != "open":
-                        _planner_owned.add((_ref, str(_e.get("pad"))))
-            _planner_keys = {f"{s.ref}.{s.pad}" for s in _ep_specs}
-            if _ep_specs or _escape_plan.get("infeasible"):
-                print(
-                    f"  Escape planner: {len(_ep_specs)} escape(s) planned across "
-                    f"{len(_escape_plan.get('footprints') or {})} footprint(s)"
-                )
-            for _inf in _escape_plan.get("infeasible", []):
-                print(
-                    f"  ESCAPE INFEASIBLE: {_inf} -- no legal exit at this rule "
-                    "set; stamping nothing (a nub would obstruct the router and "
-                    "read as progress)"
-                )
-        except Exception as exc:  # never fail the leaf on a finishing helper
-            print(f"  WARNING: escape planner failed: {exc}")
-
-    def _not_planner_owned(specs: list) -> list:
-        """Drop specs for pads the escape planner already decided."""
-        return [s for s in specs if (s.ref, s.pad) not in _planner_owned]
-
-    # Interface escapes (default on): a pad whose net crosses into another
-    # sheet has no partner on this leaf, so leaf routing lays no copper on it
-    # -- and at the parent stage it sits behind the pin-adjacent companion
-    # wall and the leaf's locked traces (`no_clear_path` from the autorouter AND
-    # the repair pass; the whole rc7 residue class of the 2026-07-27 re-batch).
-    # Stamp a short locked escape into open copper for each such pad NOW,
-    # while this leaf still owns the space around it.
-    _if_specs: list = []
-    _interface_escape_report: dict[str, Any] = {"enabled": False}
-    _iface_nets = sorted({p.name for p in extraction.interface_ports if p.name})
-    if cfg.get("interface_escape_enabled", True) and _iface_nets:
-        try:
-            import pcbnew
-
-            from kicraft.autoplacer.brain.breakout_stubs import (
-                interface_escape_specs,
-            )
-
-            _if_board = pcbnew.LoadBoard(str(pre_route_board))
-            _if_specs, _interface_escape_report = interface_escape_specs(
-                _if_board, cfg, _iface_nets
-            )
-            del _if_board
-            _if_specs = _not_planner_owned(_if_specs)
-            if _if_specs or _interface_escape_report.get("infeasible"):
-                _kinds = _interface_escape_report.get("kinds") or {}
-                print(
-                    f"  Interface escapes: {len(_if_specs)} stamped of "
-                    f"{_interface_escape_report.get('sources', 0)} cross-leaf "
-                    f"pad(s) ({', '.join(f'{k}={v}' for k, v in sorted(_kinds.items()))})"
-                )
-            for _inf in _interface_escape_report.get("infeasible", []):
-                print(
-                    f"  INTERFACE ESCAPE INFEASIBLE: {_inf} -- no legal exit "
-                    "in the placed environment; stamping nothing"
-                )
-        except Exception as exc:  # never fail the leaf on a finishing helper
-            print(f"  WARNING: interface escape spec gen failed: {exc}")
 
     # GND pre-escape (default on): plane-bond stubs for fine-pitch GND pads,
     # early in the spec order so they claim space before the signal escapes
@@ -650,9 +568,7 @@ def route_local_subcircuit(
             from kicraft.autoplacer.brain.gnd_pour import gnd_escape_specs
 
             _g_board = pcbnew.LoadBoard(str(pre_route_board))
-            _breakout_specs = (
-                _not_planner_owned(gnd_escape_specs(_g_board, cfg)) + _breakout_specs
-            )
+            _breakout_specs = gnd_escape_specs(_g_board, cfg) + _breakout_specs
             del _g_board
         except Exception as exc:  # never fail the leaf on a finishing helper
             print(f"  WARNING: gnd pre-escape spec gen failed: {exc}")
@@ -685,22 +601,6 @@ def route_local_subcircuit(
             del _sh_board
         except Exception as exc:  # never fail the leaf on a finishing helper
             print(f"  WARNING: shield tie spec gen failed: {exc}")
-    # Auto signal-escape (default on): radial escapes for the signal pads of a
-    # dense connector (USB-C CC pins etc.) the autorouter can't escape from the
-    # pad field. Same connector signature as the power-tie above.
-    if cfg.get("auto_signal_escape", True):
-        try:
-            import pcbnew
-
-            from kicraft.autoplacer.brain.breakout_stubs import auto_signal_escape_specs
-
-            _esc_board = pcbnew.LoadBoard(str(pre_route_board))
-            _breakout_specs = _breakout_specs + _not_planner_owned(
-                auto_signal_escape_specs(_esc_board, cfg)
-            )
-            del _esc_board
-        except Exception as exc:  # never fail the leaf on a finishing helper
-            print(f"  WARNING: auto signal-escape spec gen failed: {exc}")
     # Array daisy-chain (default on): for an addressable-LED matrix or similar
     # regular array, deterministically stamp the short data hops (DOUT->DIN) as
     # locked ties + pad escapes, so the autorouter -- which abandons a few of these
@@ -744,11 +644,6 @@ def route_local_subcircuit(
                 _breakout_specs = _breakout_specs + _ring_pwr_specs
         except Exception as exc:  # never fail the leaf on a finishing helper
             print(f"  WARNING: ring power-bus spec gen failed: {exc}")
-    # Planned escapes go FIRST: their pads are the most constrained on the
-    # board (their only exits are the package's designed lanes), so anything
-    # stamped before them could take one. Interface escapes come right after
-    # them -- their pads are the ones nothing else will ever route.
-    _breakout_specs = _ep_specs + _if_specs + _breakout_specs
     if _breakout_specs:
         try:
             from kicraft.autoplacer.brain.breakout_stubs import add_breakout_stubs
@@ -756,36 +651,6 @@ def route_local_subcircuit(
             _bo = add_breakout_stubs(
                 str(pre_route_board), _breakout_specs, cfg=cfg
             )
-            # No-silent-handoff: a planned escape the board-level stamp guards
-            # dropped (a neighbouring component's copper the per-footprint plan
-            # could not see) is a pad back to being trapped. Record it next to
-            # the honest infeasible list rather than letting a clean-looking
-            # stub count hide it.
-            if _planner_keys:
-                _ep_skipped = [
-                    s for s in _bo.get("skipped", [])
-                    if s.split(":", 1)[0] in _planner_keys
-                ]
-                if _ep_skipped:
-                    _escape_plan["stamp_skipped"] = _ep_skipped
-                    print(
-                        f"  escape planner: {len(_ep_skipped)}/{len(_planner_keys)} "
-                        f"planned escape(s) dropped at stamp: {', '.join(_ep_skipped)}"
-                    )
-            # Same rule for the interface escapes: a dropped stamp is a pad
-            # back to bare -- the exact parent-stage no_clear_path input.
-            if _if_specs:
-                _if_keys = {f"{s.ref}.{s.pad}" for s in _if_specs}
-                _if_skipped = [
-                    s for s in _bo.get("skipped", [])
-                    if s.split(":", 1)[0] in _if_keys
-                ]
-                if _if_skipped:
-                    _interface_escape_report["stamp_skipped"] = _if_skipped
-                    print(
-                        f"  interface escapes: {len(_if_skipped)}/{len(_if_keys)} "
-                        f"dropped at stamp: {', '.join(_if_skipped)}"
-                    )
             if _bo["stubs"] > 0:
                 leaf_routing_cfg["routing_preserve_existing_copper"] = True
                 print(
@@ -1150,18 +1015,6 @@ def route_local_subcircuit(
     validation["interface_port_names"] = [
         port.name for port in extraction.interface_ports
     ]
-    # The escape plan travels with the leaf record so an unconnected net can be
-    # attributed: a pad the planner declared INFEASIBLE is a geometry constant,
-    # invariant under re-placement, and re-rolling the round cannot fix it --
-    # which is exactly what autoexperiment used to spend nine rounds doing.
-    if _escape_plan.get("enabled"):
-        validation["escape_plan"] = copy.deepcopy(_escape_plan)
-        validation["escape_infeasible"] = list(_escape_plan.get("infeasible", []))
-    # Same observability rule for the interface escapes: a cross-leaf pad the
-    # planner could not free (or whose stamp the board guards dropped) must be
-    # attributable from the leaf record, not rediscovered at the parent DRC.
-    if _interface_escape_report.get("enabled"):
-        validation["interface_escapes"] = copy.deepcopy(_interface_escape_report)
     route_timing["routed_validation_s"] = round(
         max(0.0, time.monotonic() - routed_validation_start), 3
     )

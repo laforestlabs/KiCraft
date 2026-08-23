@@ -2615,61 +2615,6 @@ def _edge_marker_contradiction(loaded_fp) -> str | None:
     return None
 
 
-def _unescapable_pads(loaded_fp, pcbnew_mod, min_pads: int = 8) -> list[str]:
-    """Pad numbers of *loaded_fp* with no legal escape at the fab profile.
-
-    Runs the escape planner (``autoplacer/brain/escape_planner``) over the
-    footprint's pad field. A library footprint carries no nets, so each pad is
-    given its own: the pessimistic model in which no pad can be rescued by
-    landing on a same-net neighbour. That is the right bias for a lint -- it
-    asks "is this package escapable *on its own merits*" -- and it is quiet in
-    practice (all 44 vendored footprints with >= 8 pads pass).
-
-    Footprints below *min_pads* are skipped: a part with a handful of pads has
-    nothing to be trapped by. Returns ``[]`` on any failure; a lint must never
-    be the reason a part cannot be vendored.
-    """
-    try:
-        from kicraft.autoplacer.brain.escape_planner import (
-            Pad as _EscPad,
-            plan_escapes,
-            planning_rules,
-        )
-        from kicraft.autoplacer.config import DEFAULT_CONFIG
-    except Exception:  # noqa: BLE001
-        return []
-    try:
-        pads = list(loaded_fp.Pads())
-        if len(pads) < min_pads:
-            return []
-        model = []
-        for pad in pads:
-            bb = pad.GetBoundingBox()
-            ds = pad.GetDrillSize()
-            drill = max(pcbnew_mod.ToMM(ds.x), pcbnew_mod.ToMM(ds.y))
-            model.append(
-                _EscPad(
-                    number=pad.GetNumber(),
-                    net=f"lint_{pad.GetNumber()}",
-                    x=(pcbnew_mod.ToMM(bb.GetLeft()) + pcbnew_mod.ToMM(bb.GetRight())) / 2.0,
-                    y=(pcbnew_mod.ToMM(bb.GetTop()) + pcbnew_mod.ToMM(bb.GetBottom())) / 2.0,
-                    w=pcbnew_mod.ToMM(bb.GetWidth()),
-                    h=pcbnew_mod.ToMM(bb.GetHeight()),
-                    layers=(
-                        frozenset({"F.Cu", "B.Cu"})
-                        if drill > 0
-                        else frozenset(
-                            {"B.Cu" if pad.GetLayer() == pcbnew_mod.B_Cu else "F.Cu"}
-                        )
-                    ),
-                    drill=drill,
-                )
-            )
-        return plan_escapes(model, planning_rules(dict(DEFAULT_CONFIG))).infeasible
-    except Exception:  # noqa: BLE001
-        return []
-
-
 def _cmd_validate_part(args: argparse.Namespace) -> int:
     """Validate a parts-library directory: schema, files, content_hash.
 
@@ -2849,40 +2794,6 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 2
-
-        # (11) Pads with no legal escape at the fab profile. A fine-pitch
-        # package with an inner pad ring can ship positions whose only exits
-        # are narrower than the rules allow -- geometrically unreachable before
-        # the router ever starts. That is how KC-RYVSQV failed: nRF52840
-        # aQFN-73, the same four pads unrouted in all nine leaf rounds, across
-        # four self-eval batches, reported as router exhaustion.
-        #
-        # WARNING, not a failure, and the distinction is the point. A library
-        # footprint has no nets, so this runs the pessimistic model where no pad
-        # can be rescued by landing on a same-net neighbour -- it answers "is
-        # this POSITION escapable on its own merits", which is a fact about the
-        # package, not about any board. The real nRF52840 has four such
-        # positions and is a perfectly usable part: no design has ever netted
-        # them. Blocking the part on a hypothetical would be wrong. The hard
-        # gate lives where the facts are complete -- at the leaf, where
-        # ``escape_infeasible`` names a pad that actually carries a net and
-        # aborts the search instead of re-placing around a geometry constant.
-        if loaded_fp is not None:
-            trapped = _unescapable_pads(loaded_fp, _pcbnew)
-            if trapped:
-                print(
-                    f"WARNING {manifest.name}: pad(s) with no legal escape on "
-                    f"'{manifest.footprint_name}': "
-                    + ", ".join(trapped[:10])
-                    + (f" (+{len(trapped) - 10} more)" if len(trapped) > 10 else "")
-                    + ".\n  At the fab profile (autoplacer/fab_profile.py) these "
-                    "positions have no exit -- not on-layer through any gap in "
-                    "the pad field, and not via a dog-bone fanout beside the "
-                    "pad. The part is fine as long as no design nets them; a "
-                    "design that does will leave those nets unrouted on two "
-                    "layers and must go to four.",
-                    file=sys.stderr,
-                )
 
     # (10) Vendored .wrl and .step must sit in the SAME native frame: the
     # footprint's single (model ...) transform is applied to both (the fab

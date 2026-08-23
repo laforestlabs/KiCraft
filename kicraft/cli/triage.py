@@ -302,18 +302,6 @@ def collect_erc(run: Path) -> dict:
     return {"present": True, "path": str(rpt), "errors": errs}
 
 
-def _summarize_interface_escapes(rec) -> dict | None:
-    if not isinstance(rec, dict):
-        return None
-    return {
-        "enabled": rec.get("enabled"),
-        "kinds": rec.get("kinds"),
-        "infeasible": rec.get("infeasible"),
-        "stubs_planned": rec.get("stubs_planned"),
-        "stamp_skipped": rec.get("stamp_skipped"),
-    }
-
-
 def collect_leaves(exp: Path) -> list[dict]:
     leaves = []
     for dbg, kind, payload in iter_subcircuit_debugs(exp):
@@ -352,11 +340,7 @@ def collect_leaves(exp: Path) -> list[dict]:
                 "signal": nu.get("signal_unconnected_nets"),
                 "ignored_interface": nu.get("ignored_interface_nets"),
                 "ignored_poured": nu.get("ignored_poured_nets"),
-                "escape_infeasible": nu.get("escape_infeasible_nets"),
-                "failure_class": nu.get("failure_class"),
             } if nu else None,
-            "escape_infeasible": la_raw.get("escape_infeasible"),
-            "interface_escapes": _summarize_interface_escapes(la_raw.get("interface_escapes")),
             "signal_repair": la_raw.get("signal_unconnected_repair"),
             "placement": {
                 "median_pin_mm": pdiag.get("median_pin_mm"),
@@ -376,8 +360,8 @@ def classify_unconnected(nets, interconnect_names) -> dict:
     Caveat on the leaf-internal bucket: interconnects are INFERRED from leaf
     copper anchors, so a bare cross-leaf pad (a leaf laid 0 copper on a
     single-pad interface net) drops out of the inference and lands here too —
-    check the leaves' interface_escapes/escape_infeasible before concluding a
-    leaf shipped the open (the run_10 GPIO fan-out class, pre-2d6329e)."""
+    recall the bare cross-leaf pad class (run_10 GPIO fan-out, pre-2d6329e)
+    before concluding a leaf shipped the open."""
     nets = [str(n) for n in (nets or [])]
     if interconnect_names is None:
         return {"cross_leaf": None, "leaf_internal": None, "unclassified": nets,
@@ -552,17 +536,7 @@ def print_run(d: dict) -> None:
                 print(f"      unconnected: total={nu['total']} signal={nu['signal']} "
                       f"interface(compose-owned)={nu['ignored_interface']} "
                       f"poured={nu['ignored_poured']}")
-                if nu.get("failure_class"):
-                    note = ("geometry constant — re-rolling seeds cannot fix it"
-                            if nu["failure_class"] == "escape_infeasible"
-                            else "router residue — may close on another seed")
-                    print(f"      failure_class={nu['failure_class']}  ({note})")
-                if nu.get("escape_infeasible"):
-                    print(f"      escape_infeasible nets: {nu['escape_infeasible']}")
-            ie = lf["interface_escapes"]
-            if ie and (ie["kinds"] or ie["infeasible"] or ie["stamp_skipped"]):
-                print(f"      interface_escapes: kinds={ie['kinds']} "
-                      f"infeasible={ie['infeasible']} stamp_skipped={ie['stamp_skipped']}")
+                print("      router residue — may close on another seed")
             if lf["placement"]:
                 p = lf["placement"]
                 print(f"      placement: median_pin={p['median_pin_mm']}mm "
@@ -592,8 +566,7 @@ def print_run(d: dict) -> None:
                       + (f"  [{cls['note']}]" if cls.get("note") else ""))
                 if cls.get("leaf_internal"):
                     print("       (not-in-interconnect = leaf-internal open OR a bare "
-                          "cross-leaf pad that defeated interconnect inference — "
-                          "check the leaves' interface_escapes above)")
+                          "cross-leaf pad that defeated interconnect inference)")
             if rv["clearance_footprint_refs"]:
                 print(f"     clearance refs: {rv['clearance_footprint_refs']}")
             if rv["repairs"]:
@@ -750,8 +723,8 @@ def print_scan(d: dict) -> None:
     show("unconnected CROSS-LEAF nets (in interconnect_net_names: parent "
          "interconnect problem — escapes/corridors/budget)", d["nets_cross_leaf"])
     show("unconnected nets NOT in interconnect_net_names (leaf-internal open — "
-         "OR a bare cross-leaf pad that defeated interconnect inference; check "
-         "the leaf's interface_escapes)", d["nets_leaf_internal"])
+         "OR a bare cross-leaf pad that defeated interconnect inference)",
+         d["nets_leaf_internal"])
     show("unconnected nets (UNCLASSIFIED — artifact predates interconnect_net_names)",
          d["nets_unclassified"])
     show("leaf failure reasons", d["leaf_reasons"])

@@ -100,8 +100,7 @@ FAB_CAPABILITY: dict[str, float] = {
     "min_clearance_mm": 0.127,
     # The fanout-via class -- NOT the netclass via (which stays 0.6/0.3).
     # Sized by two opposing constraints; see the module docstring. Changing
-    # either number without re-deriving both is a board-breaking edit, which is
-    # why tests/test_escape_planner.py pins them from both directions.
+    # either number without re-deriving both is a board-breaking edit.
     "min_via_diameter_mm": 0.36,
     "min_via_drill_mm": 0.15,
 }

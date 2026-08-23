@@ -384,38 +384,6 @@ DEFAULT_CONFIG = {
     "auto_power_tie": True,
     "power_tie_margin_mm": 1.0,
     "power_tie_exclude_refs": [],
-    # Auto signal-escape (default on): before routing, pre-route short locked
-    # radial escapes out of the *signal* pads of a dense connector (the same
-    # >=2-spread-power-pad signature auto_power_tie uses) so the autorouter can
-    # finish nets like a USB-C CC pin -> its pulldown resistor from open copper
-    # instead of abandoning them boxed-in. Collision-guarded, so it never shorts.
-    "auto_signal_escape": True,
-    "signal_escape_exclude_refs": [],
-    "signal_escape_length_mm": 1.5,
-    # Escape planner (default on): before routing, work out per netted pad of a
-    # dense footprint HOW it gets out -- same-net tie, dog-bone fanout via, or
-    # on-layer lane -- and stamp exactly that (brain/escape_planner.py). This
-    # replaces the lane-blind radial stamper on the footprints it owns: a ring
-    # package (aQFN/QFN inner ring, ESP32 XTAL/EN, RP2040 XIN) has pads whose
-    # only exits are narrow designed lanes, and a fixed radial ray either
-    # happens to thread one or stamps a 0.2 mm nub in a dead channel -- copper
-    # that connects nothing, obstructs the router and reads as "partly routed".
-    # A pad with no legal exit is reported as escape_infeasible at round 1
-    # instead of surfacing as router exhaustion at round 9. Off = legacy
-    # radial-only stamping.
-    "escape_planner_enabled": True,
-    "escape_planner_exclude_refs": [],
-    # Only footprints with at least this many pads are analysed (a 2-pad
-    # passive has nothing to be trapped by).
-    "escape_planner_min_pads": 8,
-    # How far out from a pad a dog-bone via centre may be searched.
-    "escape_via_search_radius_mm": 0.75,
-    # Cap on a planned escape's length. Past a couple of millimetres the path
-    # has stopped LEAVING the pad field and started routing the net, which is
-    # KiCad Routing Tools's job -- and for a poured net whose same-net copper is nearby,
-    # an uncapped search will happily propose a 6 mm track straight across the
-    # exposed pad (same-net copper is not an obstacle).
-    "escape_max_len_mm": 2.5,
     # Hole-to-copper minimum, mirroring the board's min_hole_clearance. On a
     # small fanout via this, not the copper clearance, is what binds.
     "hole_clearance_min_mm": 0.25,
@@ -424,32 +392,6 @@ DEFAULT_CONFIG = {
     # a 0.6 mm via has no legal position beside a 0.5 mm-pitch inner ring.
     "escape_via_size_mm": None,
     "escape_via_drill_mm": None,
-    # Interface escapes (default on): a pad whose net crosses into another
-    # sheet has no partner on this leaf, so leaf routing lays NO copper on it
-    # -- and at the parent stage it sits behind the pin-adjacent companion
-    # wall and the leaf's locked internal traces. Both KiCad Routing Tools and the
-    # signal repair then report no_clear_path (the whole rc7 residue class of
-    # the self-eval 2026-07-27 re-batch: run_10's 26 GPIO fan-outs, run_23's
-    # CAN_TX/RX, run_24's SDA/SCL/ALERT_*). Stamp a short locked escape into
-    # open copper for each such pad at leaf pre-route -- while the leaf still
-    # owns the space around it -- so the parent router starts from open
-    # copper instead of a walled-in bare pad. Pads whose short outward ray is
-    # already clear get NOTHING (a stub there is only an obstacle); fully
-    # walled pads get a dog-bone fanout via onto the far layer; a pad with no
-    # legal exit is recorded, never nubbed. Off = pre-2026-07-28 behaviour.
-    "interface_escape_enabled": True,
-    # Only footprints with at least this many pads get interface escapes: the
-    # walled-pad evidence is IC/module-class (QFN-56, ESP32 modules, SOIC/
-    # TSSOP transceivers); a 2-pad passive's interface pad is never boxed in
-    # by its own companion wall.
-    "interface_escape_min_pads": 8,
-    # Length cap for the escape ray. It only needs to clear the pin-adjacent
-    # companion wall (0.5-2 mm out); past that the stub is routing the net,
-    # which is KiCad Routing Tools's job.
-    "interface_escape_max_len_mm": 3.0,
-    # How much open copper the ray's ENDPOINT must have around it (distance to
-    # the nearest foreign pad) to count as "escaped".
-    "interface_escape_open_margin_mm": 0.6,
     "thermal_via_pitch_mm": 1.2,
     "thermal_via_inset_mm": 0.5,
     "thermal_pad_area_mm2": 4.0,
@@ -611,7 +553,6 @@ CONFIG_SEARCH_SPACE = {
     # that violate the sum*0.6 / max-child + spacing safety floors;
     # 3.5 ceiling matches the legacy "lots of slack" upper end.
     "parent_seed_area_overhead": {"min": 1.5, "max": 3.5, "sigma": 0.2, "type": "float"},
-    "signal_escape_length_mm": {"min": 0.5, "max": 3.0, "sigma": 0.3, "type": "float"},
     # --- Phase 2: PlacementScore sub-score weights ---
     # The objective the placer optimizes for IS these weights, so tuning them is
     # the highest-leverage lever for orderedness/size/routability. Bounded [0, 0.4]

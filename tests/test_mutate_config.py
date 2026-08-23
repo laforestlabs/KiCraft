@@ -204,8 +204,7 @@ class TestSearchSpaceContents:
             f"{sorted(present)}"
         )
 
-    def test_router_independent_escape_knob_is_searchable(self):
-        assert "signal_escape_length_mm" in CONFIG_SEARCH_SPACE
+    def test_router_effort_knobs_not_searchable(self):
         assert "kicad_routing_tools_timeout_s" not in CONFIG_SEARCH_SPACE
         assert "kicad_routing_tools_max_iterations" not in CONFIG_SEARCH_SPACE
 

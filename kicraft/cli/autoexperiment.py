@@ -185,12 +185,6 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
 # across rounds and is left to keep retrying.
 _STRUCTURAL_UNROUTABLE_REASONS = frozenset({
     "routing_exception", "leaf_pre_stamp_legality_repair",
-    # A pad the escape planner found no legal exit for. This is a geometry
-    # constant of the footprint and the rule set -- re-placing the leaf cannot
-    # change it, so retrying is pure round budget (the KC-RYVSQV nRF52840
-    # signature: nine rounds, same four pads, every time). Aborting names the
-    # pad instead of reporting it as a router failure.
-    "escape_infeasible",
     # NOT here: "leaf_solve_deadline". A deadline expiry means the leaf was
     # merely SLOW, never that it is structurally unroutable -- the ladder jumps
     # to the reserved seed-bbox fallback on deadline (N1) and a later outer
