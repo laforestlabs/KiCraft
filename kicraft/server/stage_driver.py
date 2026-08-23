@@ -859,6 +859,39 @@ def _design_temperature(client) -> float:
     return float(getattr(getattr(client, "s", None), "design_temperature", 0.2))
 
 
+# A reasoning model can burn its whole output budget re-deriving one decision and
+# emit NO content (finish_reason="length" with empty text). That is not a truncated
+# JSON answer; it is a stuck reasoning loop. Doubling max_tokens only feeds the loop,
+# and greedy decoding (design_temperature=0.0) reproduces it identically next attempt.
+# Detect the signature and break it instead: keep the budget, raise temperature to
+# escape the deterministic cycle, tell the model to commit. (KC-B7MB7P: architecture
+# looped for thousands of tokens on the GND-sheet question.)
+_REASONING_LOOP_RETRY_MSG = (
+    "You spent your entire output budget reconsidering the same decision and "
+    "produced no JSON at all. Stop re-deriving it: commit to your first choice, "
+    "record any default in 'assumptions' ending '(defaulted)', and output ONLY the "
+    "slot JSON now."
+)
+
+
+def _json_failure_recovery(finish, had_content, cur_max_tokens, temperature):
+    """Return (user_message, new_max_tokens, new_temperature) after a failed JSON parse.
+
+    ``had_content`` True means the model emitted answer text (a truncated JSON answer);
+    False with finish=length means it looped in reasoning and wrote nothing.
+    """
+    if finish == "length" and not had_content:
+        return (_REASONING_LOOP_RETRY_MSG, cur_max_tokens,
+                max(temperature + 0.4, 0.4))
+    if finish == "length":
+        return ("Your reply was cut off at the output token limit, so the JSON was "
+                "truncated and invalid. The limit has been raised; output ONLY the "
+                "slot JSON and keep it compact.",
+                min(cur_max_tokens * 2, 32768), temperature)
+    return ("That was not a single valid JSON object. Output ONLY the slot JSON.",
+            cur_max_tokens, temperature)
+
+
 def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, max_retries=2,
                 progress=None, answers=None, instruction=None, meta_ctx=None,
                 core_defaults=None) -> dict:
@@ -968,30 +1001,25 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
             tool_calls_ct = r.get("tool_calls")
             finish = r.get("finish_reason")
             total_cost += r["cost_usd"]
+            had_content = bool(r["text"])
         else:
             res = client.chat(messages, max_tokens=cur_max_tokens, temperature=temperature,
                               progress=progress, meta_ctx=ctx)
-            raw, rounds = (res["text"] or res.get("reasoning") or ""), None
+            content_text = res.get("text") or ""
+            raw = content_text or res.get("reasoning") or ""
             finish = res.get("finish_reason")
+            rounds = None
             total_cost += res["cost_usd"]
+            had_content = bool(content_text)
 
         try:
             obj = _extract_json(raw)
         except (json.JSONDecodeError, ValueError):
             last = {"error": "no JSON in reply", "reply_head": (raw or "")[:200],
                     "rounds": rounds, "tool_calls": tool_calls_ct}
-            if finish == "length":
-                # The reply hit the output cap and came back as truncated, invalid
-                # JSON. A plain "try again" just truncates at the same spot, burning
-                # another full-context call; give it more room for the next attempt.
-                cur_max_tokens = min(cur_max_tokens * 2, 32768)
-                messages = _lean_retry(None,
-                                       "Your reply was cut off at the output token limit, so the "
-                                       "JSON was truncated and invalid. The limit has been raised; "
-                                       "output ONLY the slot JSON and keep it compact.")
-            else:
-                messages = _lean_retry(None,
-                                       "That was not a single valid JSON object. Output ONLY the slot JSON.")
+            retry_msg, cur_max_tokens, temperature = _json_failure_recovery(
+                finish, had_content, cur_max_tokens, temperature)
+            messages = _lean_retry(None, retry_msg)
             continue
 
         # A clarifying-question payload parks the stage (no slot this turn). No slot

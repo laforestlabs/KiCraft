@@ -10,6 +10,7 @@ import json
 from kicraft.server.stage_driver import (
     BOM_TOOLS,
     _attach_questions,
+    _json_failure_recovery,
     _normalize_questions,
     _retry_feedback,
     _stage_max_retries,
@@ -32,6 +33,33 @@ def test_retry_feedback_without_offenders_omits_that_line():
     msg = _retry_feedback({"ok": False, "errors": ["some other error"]})
     assert "some other error" in msg
     assert "offenders" not in msg               # no offenders line when none present
+
+
+def test_reasoning_loop_recovery_keeps_budget_and_bumps_temp():
+    # finish=length with NO content is a stuck reasoning loop, not a truncated
+    # JSON answer: keep the budget and raise temperature to break the greedy cycle.
+    msg, new_max, new_temp = _json_failure_recovery(
+        "length", had_content=False, cur_max_tokens=4096, temperature=0.0)
+    assert "reconsidering" in msg
+    assert new_max == 4096           # NOT doubled
+    assert new_temp == 0.4
+
+
+def test_truncated_json_recovery_still_doubles_budget():
+    # finish=length WITH content is a real truncated answer: still double the cap.
+    msg, new_max, new_temp = _json_failure_recovery(
+        "length", had_content=True, cur_max_tokens=4096, temperature=0.0)
+    assert new_max == 8192
+    assert "cut off" in msg
+    assert new_temp == 0.0
+
+
+def test_no_json_recovery_keeps_budget_and_temp():
+    msg, new_max, new_temp = _json_failure_recovery(
+        "stop", had_content=False, cur_max_tokens=4096, temperature=0.0)
+    assert "not a single valid JSON object" in msg
+    assert new_max == 4096
+    assert new_temp == 0.0
 
 
 def test_wiring_gets_more_retries_than_the_simple_stages():
@@ -113,6 +141,14 @@ def test_bom_prompt_demands_decoupling_completeness():
     sysmsg = build_system("bom")
     assert "Decoupling completeness" in sysmsg
     assert "per dedicated supply/decoupling pin" in sysmsg
+
+
+def test_architecture_spec_declares_power_rails_are_not_sheets():
+    # The architecture spec must resolve the power-block contradiction: a
+    # functional-spec block whose category is `power` is a net, never a sheet.
+    sysmsg = build_system("architecture")
+    assert "power/ground NETS" in sysmsg
+    assert "never emit a Sheet" in sysmsg
 
 
 def test_bom_reconcile_instruction_lists_the_missing_parts():
