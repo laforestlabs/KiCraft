@@ -228,6 +228,17 @@ def test_cell_html_renders_https_link_new_tab():
     assert ">C2687116</a>" in out
 
 
+def test_table_html_highlights_warn_rows():
+    # A cell dict {"text", "warn": True} marks its whole row (the BOM-tab
+    # footprint/part position mismatch highlight, KC-6DCV66 J3/J4).
+    h = _table_html(["ref", "value"],
+                    [["R1", "10k"],
+                     [{"text": "J3", "warn": True}, "jumper"]])
+    assert 'style="background:rgba(234,179,8,0.12)"' in h
+    # the warning marker is render-only: the cell still shows its text
+    assert "<td>J3</td>" in h
+
+
 def test_cell_html_drops_non_http_scheme():
     # javascript:/data: hrefs must never become a clickable link; text stays escaped.
     for bad in ("javascript:alert(1)", "data:text/html,<b>", "", "/relative"):

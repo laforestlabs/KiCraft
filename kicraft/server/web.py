@@ -1251,6 +1251,34 @@ def _pcb_error_section(
     }
 
 
+def _bom_position_mismatch_refs(parts: list, project_dir: Path | None) -> set[str]:
+    """Warn-only BOM-tab helper: refs whose ordered LCSC part has more pins
+    than their footprint has pads (a 40-position strip on a 2-pad jumper —
+    KC-6DCV66 J3/J4). Reuses the commit gate's detector on dict-derived parts.
+    Never raises — a partial draft or missing library just yields no flags."""
+    if not parts:
+        return set()
+    try:
+        from types import SimpleNamespace
+        from kicraft.design.cli_app import bom_position_mismatches
+
+        def _get(p, k):
+            return p.get(k) if isinstance(p, dict) else getattr(p, k, None)
+
+        ns_parts = [
+            SimpleNamespace(
+                ref=_get(p, "ref"),
+                footprint=_get(p, "footprint"),
+                symbol=_get(p, "symbol"),
+                sourcing_note=_get(p, "sourcing_note"),
+            )
+            for p in parts
+        ]
+        return {m["ref"] for m in bom_position_mismatches(ns_parts, project_dir)}
+    except Exception:
+        return set()
+
+
 def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | None,
                     build_lines: list[str], *, prices: dict | None = None) -> list[dict]:
     """Build the structured project-state spec for a stage's inspector window.
@@ -1332,6 +1360,7 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
         if not parts:
             return []
         rows, total, priced, pending, blocked = [], 0.0, 0, False, 0
+        mismatch_refs = _bom_position_mismatch_refs(parts, project_dir)
         for p in parts:
             key = _price_key(p)
             stock_cell = ""
@@ -1353,7 +1382,10 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
             else:
                 cost = "..."  # fetch in flight
                 pending = True
-            rows.append([p.get("ref"), p.get("value"), cost, stock_cell,
+            ref_cell = p.get("ref")
+            if ref_cell in mismatch_refs:
+                ref_cell = {"text": ref_cell, "warn": True}
+            rows.append([ref_cell, p.get("value"), cost, stock_cell,
                          _vendor_cell(p, prices),
                          p.get("footprint"), p.get("sheet"), p.get("symbol")])
         if pending and priced == 0:
@@ -1367,6 +1399,9 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
                 note = f"fetching live LCSC prices... ({priced}/{len(parts)} so far)"
             elif blocked:
                 note += f"; {blocked} unavailable (live qty-break vendor API blocked)"
+        if mismatch_refs:
+            note += (f"; ⚠ {len(mismatch_refs)} part(s) ordered with more pins than "
+                     f"their footprint pads: {', '.join(sorted(mismatch_refs))}")
         secs = [{"type": "kv", "title": "Summary", "rows": [("parts", len(parts))]},
                 {"type": "table", "title": "Parts",
                  "columns": ["ref", "value", "cost", "stock (JLC/retail)",

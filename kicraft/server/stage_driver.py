@@ -21,6 +21,7 @@ import json
 import os
 import re
 import resource
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,8 +32,10 @@ from kicraft.design import models
 from kicraft.fsutil import atomic_write_text
 from kicraft.parts_library import jlcparts, lcsc_retail
 
-from .client import make_client
+from .client import CappedOpenRouterClient, make_client
+from .config import Settings
 from .pricing import _stock_floor
+from .spend_guard import BudgetExceeded, SpendGuard
 
 
 def _bundle_sourcing_lcsc(bundle: str) -> str:
@@ -276,6 +279,11 @@ def _stage_extra(stage: str) -> str:
             "- Put genuinely-unused pins (USB-C SBU1/SBU2, shield, spare CC) in no_connect_pins.\n"
             "- net_name should match an architecture power_net or inter_sheet_net verbatim "
             "where applicable; connection.sheet must equal a bom part's sheet.\n"
+            "- PULL-UP / PULL-DOWN: a pull resistor has TWO pins. Wire its signal-side pin "
+            "on a signal net alongside the IC pin it serves, and its rail-side pin on the "
+            "power/ground net (use +3V3/GND/... as connection.net_name). A power/ground "
+            "connection MAY hold a single endpoint -- that lone rail pin is NOT \"dangling\". "
+            "Never write a rail name into an endpoint.ref (refs are part refs like \"R1\").\n"
             "- BOM SHORTFALL = SELF-REPAIR, NOT A USER QUESTION: if the ONLY thing preventing "
             "full net coverage is that the BOM lacks a supporting passive an IC requires (a "
             "decoupling/bypass cap for a dedicated DEC/VDD/AVDD/bypass pin, a mandatory pull-up, "
@@ -412,6 +420,10 @@ _WORKED_EXAMPLES = {
         '"footprint": "Capacitor_SMD:C_0603_1608Metric", "sheet": "POWER"}, '
         '{"ref": "C2", "value": "100nF", "symbol": "Device:C", '
         '"footprint": "Capacitor_SMD:C_0603_1608Metric", "sheet": "POWER"}, '
+        '{"ref": "R1", "value": "10k", "symbol": "Device:R", '
+        '"footprint": "Resistor_SMD:R_0603_1608Metric", "sheet": "POWER"}, '
+        '{"ref": "R2", "value": "10k", "symbol": "Device:R", '
+        '"footprint": "Resistor_SMD:R_0603_1608Metric", "sheet": "POWER"}, '
         '{"ref": "J1", "value": "DC barrel jack", '
         '"symbol": "Connector:Barrel_Jack_Switch", '
         '"footprint": "Connector_BarrelJack:BarrelJack_Horizontal", '
@@ -430,10 +442,16 @@ _WORKED_EXAMPLES = {
         '[{"ref": "J1", "pin": "1"}, {"ref": "U1", "pin": "3"}, '
         '{"ref": "C1", "pin": "1"}]}, '
         '{"net_name": "+3V3", "sheet": "POWER", "endpoints": '
-        '[{"ref": "U1", "pin": "2"}, {"ref": "C2", "pin": "1"}]}, '
+        '[{"ref": "U1", "pin": "2"}, {"ref": "C2", "pin": "1"}, '
+        '{"ref": "R1", "pin": "1"}]}, '
         '{"net_name": "GND", "sheet": "POWER", "endpoints": '
         '[{"ref": "J1", "pin": "2"}, {"ref": "U1", "pin": "1"}, '
-        '{"ref": "C1", "pin": "2"}, {"ref": "C2", "pin": "2"}]}], '
+        '{"ref": "C1", "pin": "2"}, {"ref": "C2", "pin": "2"}, '
+        '{"ref": "R2", "pin": "1"}]}, '
+        '{"net_name": "NRST", "sheet": "POWER", "endpoints": '
+        '[{"ref": "R1", "pin": "2"}, {"ref": "U1", "pin": "4"}]}, '
+        '{"net_name": "BOOT0", "sheet": "POWER", "endpoints": '
+        '[{"ref": "R2", "pin": "2"}, {"ref": "U1", "pin": "5"}]}], '
         '"no_connect_pins": [{"ref": "J1", "pin": "3"}]}'
     ),
 }
@@ -817,6 +835,27 @@ def _retry_feedback(out: dict, *, stage: str | None = None,
                 "IC pins it serves; the pipeline will add it and re-run wiring.")
         if valid_refs:
             msg += f" The only refs you may reference are: {valid_refs}."
+    # A power/ground NAME written as an endpoint ref (the model wiring '+3V3'
+    # / 'GND' as a pin's ref instead of a connection.net_name) fails the REF_RE
+    # pattern. The raw Pydantic text names a regex, not the fix: rails are
+    # net_name values, and a power/ground connection MAY hold a single endpoint
+    # (a pull resistor's rail-side pin). Point it at the correct shape instead
+    # of letting it thrash (KC-6DCV66 wired +3V3/GND as refs and died).
+    if stage == "wiring":
+        errs = json.dumps(out.get("errors") or "")
+        rails = {
+            m.group(1)
+            for m in re.finditer(r"PinEndpoint\.ref '([^']+)' must match", errs)
+            if models.is_power_or_ground_name(m.group(1))
+        }
+        if rails:
+            msg += (" NOTE: " + ", ".join(sorted(rails))
+                    + " is a power/ground NET NAME, not a component ref. Wire a "
+                    "rail by setting connection.net_name to it and listing the part "
+                    "pins as endpoints -- never put a rail name in endpoint.ref (refs "
+                    "are part refs like \"R1\"). A power/ground connection MAY hold a "
+                    "single endpoint (a pull-up/pull-down resistor's rail-side pin); "
+                    "it is not dangling.")
     return msg
 
 
@@ -1172,31 +1211,195 @@ def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_sta
     return results, client.guard.status(), str(state_path)
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Drive KiCraft stages via the capped gateway.")
-    ap.add_argument("--workspace", required=True, help="project dir (holds .kicraft/state.json)")
-    ap.add_argument("--brief", required=True, help="the user's project description")
-    ap.add_argument("--stages", default="intent",
-                    help="comma-separated stages in order (default: intent)")
-    ap.add_argument("--max-tokens", type=int, default=4096)
-    ap.add_argument("--max-retries", type=int, default=2,
-                    help="self-correction attempts per stage after a rejected commit")
-    args = ap.parse_args(argv)
+class _BudgetGuard:
+    """Wrap a SpendGuard with a per-run USD ceiling on top of the global ones.
 
+    ``preflight()`` (called before every model completion) refuses once this
+    run's delta past the snapshot reaches ``budget_usd``. Granularity is one
+    completion, so a run may overshoot by at most a single call. Everything
+    else (record / record_stage / status / spent_*) delegates to the base.
+    """
+
+    def __init__(self, base: SpendGuard, budget_usd: float):
+        self._base = base
+        self._budget = float(budget_usd)
+        self._start = base.spent_total()
+
+    def _delta(self) -> float:
+        return self._base.spent_total() - self._start
+
+    def preflight(self) -> None:
+        self._base.preflight()
+        if self._delta() >= self._budget:
+            raise BudgetExceeded(
+                f"run budget ${self._budget:.2f} exhausted "
+                f"(spent ${self._delta():.4f})"
+            )
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+
+def make_budget_client(budget_usd: float = 0.25):
+    """A client whose guard additionally refuses once THIS run spends
+    ``budget_usd`` (on top of the global daily/total ceilings). Mock/replay
+    mode spends $0 and returns the plain mock client (no budget needed)."""
+    if os.environ.get("KICRAFT_LLM_MODE", "live").strip().lower() in ("mock", "replay"):
+        return make_client()
+    settings = Settings.from_env()
+    guard = SpendGuard(settings)
+    if budget_usd and budget_usd > 0:
+        guard = _BudgetGuard(guard, budget_usd)
+    return CappedOpenRouterClient(settings, guard=guard)
+
+
+def run_pipeline(brief, workspace, stages=DESIGN_STAGES, budget_usd=0.25,
+                 max_tokens=4096, max_retries=2, build=True, quality="good",
+                 progress=None, core_defaults=None, client=None) -> dict:
+    """Full end-to-end run: drive the LLM design stages (budget-capped), then —
+    if every stage committed — run the deterministic build. This is the harness
+    for testing LLM-prompt / guardrail changes against a real board."""
+    client = client or make_budget_client(budget_usd)
+    results, guard, state_path = drive_chain(
+        list(stages), brief, workspace, max_tokens=max_tokens,
+        max_retries=max_retries, client=client, progress=progress,
+        core_defaults=core_defaults)
+    all_committed = (
+        len(results) == len(stages)
+        and all(r.get("commit_ok") for r in results)
+    )
+    build_rc = None
+    if build and all_committed:
+        build_rc = _run(
+            KICRAFT + ["build", ".kicraft/state.json", "generated",
+                       "--no-archive", "--quality", quality],
+            cwd=Path(workspace),
+        ).returncode
+    return {
+        "stages": results,
+        "all_committed": all_committed,
+        "guard": guard,
+        "state_path": str(state_path),
+        "build_rc": build_rc,
+    }
+
+
+def drive_replay(state_path, stage, budget_usd=0.25, max_retries=2,
+                 progress=None, core_defaults=None, client=None) -> dict:
+    """Re-run ONE design stage from a frozen, already-committed state.json — the
+    LLM-side repro harness for prompt/guardrail changes (mirrors ``cli_app
+    replay`` for the deterministic place/route stages). Copies the state into a
+    temp workspace (the source is never mutated), reads the brief from it, and
+    drives ``stage`` with a budget-capped client."""
+    src = Path(state_path).expanduser().resolve()
+    if not src.is_file():
+        return {"error": f"state.json not found: {src}"}
+    try:
+        state = json.loads(src.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return {"error": f"could not read {src}: {e}"}
+    brief = ((state.get("intent") or {}).get("goal") or "").strip()
+    if not brief:
+        brief_txt = src.parent.parent / "brief.txt"
+        if brief_txt.is_file():
+            brief = brief_txt.read_text(encoding="utf-8").strip()
+    if not brief:
+        return {"error": f"no brief recoverable from {src} (intent.goal or brief.txt)"}
+    if stage not in SUPPORTED_STAGES:
+        return {"error": f"unsupported stage {stage!r}; supported: {list(SUPPORTED_STAGES)}"}
+
+    tmp = Path(tempfile.mkdtemp(prefix="kc-replay-"))
+    (tmp / ".kicraft").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, tmp / ".kicraft" / "state.json")
+
+    client = client or make_budget_client(budget_usd)
+    results, guard, spath = drive_chain(
+        [stage], brief, tmp, max_retries=max_retries,
+        client=client, progress=progress, core_defaults=core_defaults)
+    return {
+        "brief": brief,
+        "workspace": str(tmp),
+        "state_path": str(spath),
+        "stage": results[0] if results else None,
+        "guard": guard,
+        "all_committed": bool(results) and results[0].get("commit_ok"),
+    }
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="kicraft.stage_driver",
+        description="Drive KiCraft design stages through the capped gateway.",
+    )
+    sub = ap.add_subparsers(dest="command", required=True)
+
+    p_run = sub.add_parser(
+        "run", help="drive the LLM design stages (optionally + build) from a brief")
+    p_run.add_argument("--brief", required=True, help="the user's project description")
+    p_run.add_argument("--workspace", required=True,
+                       help="project dir (holds .kicraft/state.json)")
+    p_run.add_argument("--stages", default=",".join(DESIGN_STAGES),
+                       help="comma-separated stages in order")
+    p_run.add_argument("--max-tokens", type=int, default=4096)
+    p_run.add_argument("--max-retries", type=int, default=2,
+                       help="self-correction attempts per stage after a rejected commit")
+    p_run.add_argument("--budget", type=float, default=0.25,
+                       help="per-run USD cap on LLM spend (default $0.25)")
+    p_run.add_argument("--no-build", action="store_true",
+                       help="stop after the LLM stages (skip the deterministic build)")
+    p_run.add_argument("--quality", choices=["fast", "draft", "good", "best"],
+                       default="good")
+    p_run.set_defaults(func=_cmd_run)
+
+    p_replay = sub.add_parser(
+        "replay", help="re-run ONE LLM stage from a frozen, committed state.json")
+    p_replay.add_argument("--state", required=True,
+                          help="path to a committed state.json")
+    p_replay.add_argument("--stage", required=True,
+                          help=f"stage to re-drive; one of {list(SUPPORTED_STAGES)}")
+    p_replay.add_argument("--max-retries", type=int, default=2)
+    p_replay.add_argument("--budget", type=float, default=0.25)
+    p_replay.set_defaults(func=_cmd_replay)
+
+    args = ap.parse_args(argv)
+    return args.func(args)
+
+
+def _cmd_run(args) -> int:
     stages = [s.strip() for s in args.stages.split(",") if s.strip()]
     bad = [s for s in stages if s not in SUPPORTED_STAGES]
     if bad:
-        ap.error(f"unsupported stage(s): {bad}; supported: {list(SUPPORTED_STAGES)}")
-
-    print(f"driving {stages} for: {args.brief!r}\n")
-    results, guard, state_path = drive_chain(
-        stages, args.brief, Path(args.workspace), args.max_tokens, args.max_retries)
-    done = [r["stage"] for r in results if r.get("commit_ok")]
-    print(f"\ncommitted stages: {done}")
+        print(f"unsupported stage(s): {bad}; supported: {list(SUPPORTED_STAGES)}",
+              file=sys.stderr)
+        return 2
+    print(f"driving {stages} (LLM budget ${args.budget:.2f}) for: {args.brief!r}\n")
+    out = run_pipeline(
+        args.brief, Path(args.workspace), stages=stages,
+        budget_usd=args.budget, max_tokens=args.max_tokens,
+        max_retries=args.max_retries, build=not args.no_build,
+        quality=args.quality)
+    guard = out["guard"]
+    print(f"\ncommitted stages: {'all' if out['all_committed'] else 'partial/failed'}")
+    print(f"build rc: {out['build_rc'] if out['build_rc'] is not None else 'skipped'}")
     print(f"total spent: ${guard['spent_total_usd']:.6f}  "
-          f"(today remaining ${guard['daily_remaining_usd']:.4f} of ${guard['daily_ceiling_usd']})")
-    print(f"state: {state_path}")
-    return 0 if results and all(r.get("commit_ok") for r in results) else 1
+          f"(today remaining ${guard['daily_remaining_usd']:.4f})")
+    print(f"state: {out['state_path']}")
+    return 0 if out["all_committed"] else 1
+
+
+def _cmd_replay(args) -> int:
+    print(f"replaying stage {args.stage!r} from {args.state!r} "
+          f"(LLM budget ${args.budget:.2f})\n")
+    out = drive_replay(args.state, args.stage,
+                       budget_usd=args.budget, max_retries=args.max_retries)
+    if "error" in out:
+        print(f"replay failed: {out['error']}", file=sys.stderr)
+        return 2
+    # drive_chain already printed the per-stage [ok/FAIL] line; only add the
+    # replay-specific footer here.
+    print(f"\nworkspace: {out['workspace']}  (source state untouched)")
+    print(f"state: {out['state_path']}")
+    return 0 if out["all_committed"] else 1
 
 
 if __name__ == "__main__":

@@ -182,6 +182,28 @@ def test_retry_feedback_no_reconcile_note_for_non_wiring_stage():
     assert "reconcile_target" not in msg
 
 
+def test_retry_feedback_power_name_as_ref_teaches_net_name_shape():
+    # KC-6DCV66: the model wrote '+3V3'/'GND' as an endpoint.ref and got a raw
+    # Pydantic regex dump. Feedback must name the fix (rails are net_name values,
+    # not component refs), not just echo the regex.
+    err = ("slot validation failed: 2 validation errors for BOM\n"
+           "connections.7.endpoints.1.ref\n"
+           "  Value error, PinEndpoint.ref '+3V3' must match ^[A-Z]+[0-9]+[A-Z0-9_-]*$ "
+           "[type=value_error, input_value='+3V3', input_type=str]\n"
+           "connections.9.endpoints.1.ref\n"
+           "  Value error, PinEndpoint.ref 'GND' must match ^[A-Z]+[0-9]+[A-Z0-9_-]*$ "
+           "[type=value_error, input_value='GND', input_type=str]")
+    msg = _retry_feedback({"ok": False, "errors": [err]}, stage="wiring")
+    assert "is a power/ground NET NAME, not a component ref" in msg
+    assert "+3V3" in msg and "GND" in msg
+
+
+def test_retry_feedback_power_name_as_ref_skipped_for_other_stages():
+    err = ("PinEndpoint.ref '+3V3' must match ^[A-Z]+[0-9]+[A-Z0-9_-]*$")
+    msg = _retry_feedback({"ok": False, "errors": [err]}, stage="bom")
+    assert "not a component ref" not in msg  # wiring-only guidance
+
+
 def test_attach_questions_writes_open_questions(tmp_path):
     sp = tmp_path / ".kicraft" / "state.json"  # not yet created (a first-stage question)
     qs = _normalize_questions([{"text": "Q1", "blocking": True}], "intent")

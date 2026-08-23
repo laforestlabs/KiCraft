@@ -715,7 +715,9 @@ def _table_html(cols: list, rows: list, foot: list | None = None) -> str:
     text is HTML-escaped; only hrefs the page supplies -- vendor URLs we build
     ourselves in web._vendor_cell -- become links."""
     def trow(r):
-        return "<tr>" + "".join(f"<td>{_cell_html(c)}</td>" for c in r) + "</tr>"
+        warn = any(isinstance(c, dict) and c.get("warn") for c in r)
+        style = ' style="background:rgba(234,179,8,0.12)"' if warn else ""
+        return f"<tr{style}>" + "".join(f"<td>{_cell_html(c)}</td>" for c in r) + "</tr>"
     head = "".join(f"<th>{escape(str(c))}</th>" for c in cols)
     body = "".join(trow(r) for r in rows)
     tfoot = f"<tfoot>{''.join(trow(r) for r in foot)}</tfoot>" if foot else ""

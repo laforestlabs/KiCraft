@@ -13,7 +13,7 @@ from kicraft.server.stage_driver import _WORKED_EXAMPLES, build_system
 def test_bom_example_validates_against_the_model():
     slot = json.loads(_WORKED_EXAMPLES["bom"])
     bom = models.BOM.model_validate(slot)
-    assert [p.ref for p in bom.parts] == ["U1", "C1", "C2", "J1"]
+    assert [p.ref for p in bom.parts] == ["U1", "C1", "C2", "R1", "R2", "J1"]
     assert bom.ic_groups["U1"] == ["C1", "C2"]
 
 
@@ -26,7 +26,7 @@ def test_wiring_example_validates_as_bom_wiring_fields():
     base["no_connect_pins"] = slot["no_connect_pins"]
     bom = models.BOM.model_validate(base)
     nets = {c.net_name for c in bom.connections}
-    assert nets == {"VIN", "+3V3", "GND"}
+    assert nets == {"VIN", "+3V3", "GND", "NRST", "BOOT0"}
 
 
 def test_examples_ride_the_system_prompt():

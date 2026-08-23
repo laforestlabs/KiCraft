@@ -194,10 +194,29 @@ Rules that keep replays honest:
 - Match `--quality` to the original (`grep 'quality=' <RUN>/.kicraft/build.log`). `--quality fast` **never enters the autoexperiment round loop** — a hook there is silently untested.
 - `rm -rf "$WORK/replay/.experiments"` for a cold replay; on **rc6** the replay seed is `.experiments/pre_promote_seed.kicad_pcb` (keep it — the promoted board is a partial).
 - `md5sum` the promoted board vs the best-round board when "what actually shipped" matters.
-- Replay **cannot verify synthesis-side or parts-library changes** (frozen seed) — use the offline `synthesize` subcommand for those.
+- Replay **cannot verify synthesis-side, parts-library, or LLM-prompt/guardrail changes** (frozen seed, no LLM) — use the offline `synthesize` subcommand for synthesis code, and **§6(b.1) `stage_driver replay`** for wiring/prompt/guardrail changes.
 - A/B a fix with the project's `autoplacer.json` **kill switch**, same code both sides, and measure both sides in **ONE** script after one replay each — never compare artifacts across separately-scripted replay runs.
 - Never DRC/validate a board copied without its `.kicad_pro`/`.prl`/`*_autoplacer.json` — bare copies get default netclass rules stamped in and manufacture fake violations.
 - Bisection is legitimate (the FR loop-hang was pinned by bisecting 31 locked wires to one segment).
+
+**(b.1) LLM-stage replay — prompt / guardrail / wiring changes (live LLM, budget-capped $0.25).** The deterministic `cli_app replay` above can't exercise the LLM design stages, so a prompt or commit-validation change was previously unverifiable — it fell to a human. `stage_driver` now drives those stages live against the run's frozen `state.json`:
+
+```bash
+# Re-run ONE LLM stage (e.g. the failed wiring stage) from a frozen state.json
+"$PY" -m kicraft.server.stage_driver replay \
+  --state "$RUN/.kicraft/state.json" --stage wiring --budget 0.25
+
+# Full end-to-end: a brief through ALL LLM stages + the deterministic build
+"$PY" -m kicraft.server.stage_driver run \
+  --brief "<brief text>" --workspace "$(mktemp -d)" --budget 0.25 [--no-build --quality good]
+```
+
+Rules:
+- `replay` copies `state.json` into a fresh temp workspace (the run dir is **never** mutated) and recovers the brief from `intent.goal` (fallback `brief.txt`). Output: `[ok/FAIL] <stage> cost=… attempts=…` then the workspace + state path. On `ok`, inspect `<workspace>/.kicraft/state.json` `bom.connections` to confirm the netlist is *correct*, not merely gate-passing (e.g. a pull resistor's rail pin really landed on `+3V3`/`GND`).
+- `run` drives `intent→functional_spec→architecture→bom→wiring` then `cli_app build` (skip with `--no-build`). This is the harness for "does the whole pipeline still work after a change" — run a known-good brief, not the regression target.
+- The budget (`--budget`, default $0.25) is a **hard per-run cap**: `_BudgetGuard.preflight()` refuses before any completion that would cross it, on top of the global daily/total ceilings. Granularity is one completion.
+- The API key loads from `$REPO/.env` via `Settings.from_env()` — run with cwd = the repo (or export `OPENROUTER_API_KEY`); `KICRAFT_LLM_MODE=mock` runs the same path at $0 (fails at the mock transcript if none is recorded).
+- LLM verdicts are stochastic (temperature > 0): **N-of-3** before claiming a prompt/guardrail change fixed or regressed anything — a single `ok`/`FAIL` is a coin flip, exactly like the route verdicts in §6(b).
 
 **(c) Name the gate that should have caught it.** For every defect that survived past its origin stage: which deterministic gate (synthesis 9.x checks, wiring normalizers, leaf acceptance, composer stamp-DRC, promote verify incl. the form-factor/outline/facings gates, review clamp) could have caught it earliest, and why did the existing one miss (fail-open on None? warn-only? bbox-based and rotation-blind?). "Extend gate X to catch Y at stage Z" is the most common shape of a shipped fix; a finding with no gate answer is under-investigated.
 

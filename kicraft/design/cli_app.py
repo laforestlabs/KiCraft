@@ -490,6 +490,51 @@ def _check_passive_array_mismatch(bom, project_root: Path) -> list[str]:
     return bad
 
 
+def bom_position_mismatches(bom_parts, project_root: Path) -> list[dict]:
+    """Warn-only: a part whose LCSC pin count (``joints``) exceeds its
+    footprint's pad count cannot land — a 40-position breakaway strip pinned
+    to a 2-pad jumper (KC-6DCV66 J3/J4, C44526). Non-blocking: extra footprint
+    pads (thermal/shield/mounting) are normal, so only MORE pins than pads is
+    flagged. Multi-element arrays are hard-rejected by §9.28 first; this catches
+    the non-array excess (wrong-size connector strips/headers).
+
+    ``bom_parts`` is any iterable of objects exposing ``ref`` / ``footprint`` /
+    ``symbol`` / ``sourcing_note`` (Pydantic ``BomPart`` or a compatible
+    namespace) so the web UI can call it with dict-derived parts.
+
+    Returns ``[{"ref", "message"}]`` — never blocks the build.
+    """
+    if not jlcparts.available():
+        return []
+    active, _ = _load_library_parts(project_root)
+    manifest_by_name = {p.manifest.name: p.manifest for p in active}
+    out: list[dict] = []
+    for part in bom_parts:
+        fp = getattr(part, "footprint", None) or ""
+        pads = _footprint_pad_numbers(fp, project_root)
+        if pads is None:  # footprint unresolvable — owned by _unresolved_footprints
+            continue
+        cid = _resolve_part_lcsc(part, manifest_by_name)
+        if cid is None:
+            continue
+        hit = jlcparts.lookup(cid)
+        if hit is None:
+            continue
+        joints = hit.get("joints") or 0
+        if joints > len(pads):
+            ref = getattr(part, "ref", "?")
+            out.append({
+                "ref": ref,
+                "message": (
+                    f"{ref}: footprint {fp!r} has {len(pads)} pad(s) but LCSC "
+                    f"{cid} is a {joints}-pin part ({hit.get('package') or ''}) "
+                    "-- the ordered part will not land; pick a part matching "
+                    "the footprint's pad count"
+                ),
+            })
+    return out
+
+
 # --- §9.26 identity cross-check (KC-9EZE3S) --------------------------------
 # A pinned C# that IS real and IS in stock can still be the wrong part
 # entirely: KC-9EZE3S shipped a "fab-ready" board whose RV1 (trimmer symbol
@@ -3810,6 +3855,15 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                 )
             )
             return 3
+
+    # Warn-only (never a rejection): a part whose LCSC pin count exceeds its
+    # footprint's pad count can't land — a 40-position strip on a 2-pad jumper
+    # (KC-6DCV66 J3/J4). Surfaced on the BOM tab, not a build blocker.
+    if stage == "bom" and state.bom is not None:
+        for m in bom_position_mismatches(
+            state.bom.parts, state_path.resolve().parent.parent
+        ):
+            bom_warnings.append(m["message"])
 
     state_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
