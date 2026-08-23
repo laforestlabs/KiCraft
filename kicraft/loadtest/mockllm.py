@@ -179,7 +179,8 @@ class MockClient:
                 "cost_usd": 0.0, "guard": self.guard.status()}
 
     def chat_with_tools(self, messages, tools, executor, model=None, max_tokens=None,
-                        temperature=0.2, max_rounds=12, progress=None, meta_ctx=None) -> dict:
+                        temperature=0.2, max_rounds=12, progress=None, meta_ctx=None,
+                        reasoning=None) -> dict:
         text = self._text_for(meta_ctx)
         # Optionally exercise the real parts-lookup subprocess once so the BOM
         # tool path contributes to load (off by default for max throughput).

@@ -10,6 +10,7 @@ import json
 from kicraft.server.stage_driver import (
     BOM_TOOLS,
     _attach_questions,
+    _design_reasoning,
     _json_failure_recovery,
     _normalize_questions,
     _retry_feedback,
@@ -17,6 +18,7 @@ from kicraft.server.stage_driver import (
     _stage_max_tokens,
     build_system,
 )
+from kicraft.server.session import run_session
 
 
 def test_retry_feedback_includes_errors_and_offenders():
@@ -225,3 +227,71 @@ def test_bom_prompt_mentions_search_budget():
     msg = build_system("bom")
     assert "SEARCH BUDGET" in msg
     assert "STOP searching" in msg
+
+
+# ---- in-stream reasoning-loop breakout (KC-VWW5X7) -------------------------
+
+class _LoopGuard:
+    def status(self):
+        return {"spent_total_usd": 0.0}
+
+
+class _LoopClient:
+    """First N chat replies are a reasoning-loop abort; the next is a valid
+    intent slot. Records the `reasoning` policy each call received."""
+    def __init__(self, loop_replies, ok_json):
+        self.loop_replies = loop_replies
+        self.ok_json = ok_json
+        self.reasoning_seen = []
+        self.guard = _LoopGuard()
+        self._n = 0
+
+    def chat(self, messages, max_tokens=4096, temperature=0.2, progress=None,
+             meta_ctx=None, reasoning=None):
+        self.reasoning_seen.append(reasoning)
+        self._n += 1
+        if self._n <= self.loop_replies:
+            return {"text": "", "reasoning": "x" * 600, "finish_reason": "reasoning_loop",
+                    "loop_detected": True, "cost_usd": 0.0}
+        return {"text": self.ok_json, "reasoning": "", "finish_reason": "stop",
+                "loop_detected": False, "cost_usd": 0.0}
+
+
+_OK_INTENT = json.dumps({
+    "goal": "a USB-powered LED", "constraints": [], "named_parts": [],
+    "inferred_expertise": "intermediate", "assumptions": [],
+    "project_stem": "USB_LED",
+})
+
+
+def test_loop_detected_retries_reasoning_disabled_then_commits(tmp_path):
+    client = _LoopClient(loop_replies=1, ok_json=_OK_INTENT)
+    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert res["status"] == "ok"
+    assert len(client.reasoning_seen) == 2
+    assert client.reasoning_seen[1] == {"enabled": False}  # loop retry drops reasoning
+
+
+def test_second_loop_fails_with_reasoning_loop_label(tmp_path):
+    client = _LoopClient(loop_replies=99, ok_json=_OK_INTENT)
+    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert res["status"] == "failed"
+    last = res["results"][-1]
+    assert last.get("error") == "reasoning_loop"
+    assert len(client.reasoning_seen) == 2  # one initial + one anti-loop retry, then give up
+
+
+def test_design_reasoning_policy_selection():
+    class _S:
+        def design_reasoning(self, stage):
+            if stage in ("intent", "functional_spec"):
+                return {"enabled": False}
+            return {"max_tokens": 2048}
+
+    class _C:
+        s = _S()
+
+    assert _design_reasoning(_C(), "intent") == {"enabled": False}
+    assert _design_reasoning(_C(), "functional_spec") == {"enabled": False}
+    assert _design_reasoning(_C(), "architecture") == {"max_tokens": 2048}
+    assert _design_reasoning(object(), "intent") is None  # mock: no .s policy

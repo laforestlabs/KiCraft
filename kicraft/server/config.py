@@ -93,6 +93,26 @@ class Settings:
     # making real regressions legible. KICRAFT_DESIGN_TEMPERATURE.
     design_temperature: float = 0.0
 
+    # --- Design-stage reasoning budget + in-stream loop breaker ---------------
+    # Reasoning budget for the design stages. Intent/functional_spec (small,
+    # serialization-critical, and the observed loop site) always run with the
+    # reasoning channel DISABLED; the topology/part/netlist stages get a small
+    # budget so deliberation is bounded. 0 disables reasoning for ALL design
+    # stages. KICRAFT_DESIGN_REASONING_TOKENS.
+    design_reasoning_tokens: int = 2048
+    # Hard per-call reasoning ceiling enforced IN-STREAM by the client (provider-
+    # independent): a reasoning-only stream that exceeds this many tokens with no
+    # answer content is aborted. max_tokens does NOT bound DeepSeek's reasoning
+    # channel, so this is the real stop on an unbounded reasoning loop.
+    # KICRAFT_REASONING_MAX_TOKENS.
+    reasoning_max_tokens: int = 4096
+    # Repetition fingerprint: the trailing window (chars) that, when seen this
+    # many times verbatim in the recent reasoning buffer, marks a stuck loop
+    # before it reaches the token ceiling. KICRAFT_REASONING_REPEAT_WINDOW /
+    # KICRAFT_REASONING_REPEAT_THRESHOLD.
+    reasoning_repeat_window: int = 256
+    reasoning_repeat_threshold: int = 3
+
     # --- Outbound email + public URL (password-reset delivery) ---------------
     # public_url is the externally reachable origin (e.g. https://kicraft.io); it
     # is used to build absolute reset links so they never depend on a request's
@@ -247,6 +267,14 @@ class Settings:
                 os.environ.get("KICRAFT_LLM_RETRY_BACKOFF_S", cls.llm_retry_backoff_s)),
             design_temperature=float(
                 os.environ.get("KICRAFT_DESIGN_TEMPERATURE", cls.design_temperature)),
+            design_reasoning_tokens=int(
+                os.environ.get("KICRAFT_DESIGN_REASONING_TOKENS", cls.design_reasoning_tokens)),
+            reasoning_max_tokens=int(
+                os.environ.get("KICRAFT_REASONING_MAX_TOKENS", cls.reasoning_max_tokens)),
+            reasoning_repeat_window=int(
+                os.environ.get("KICRAFT_REASONING_REPEAT_WINDOW", cls.reasoning_repeat_window)),
+            reasoning_repeat_threshold=int(
+                os.environ.get("KICRAFT_REASONING_REPEAT_THRESHOLD", cls.reasoning_repeat_threshold)),
             public_url=os.environ.get(
                 "KICRAFT_PUBLIC_URL", cls.public_url).strip().rstrip("/") or cls.public_url,
             email_from=(os.environ.get("KICRAFT_EMAIL_FROM", "").strip()
@@ -330,6 +358,20 @@ class Settings:
         if self.review_reasoning_tokens:
             return {"max_tokens": self.review_reasoning_tokens}
         return None
+
+    def design_reasoning(self, stage: str) -> dict | None:
+        """OpenRouter reasoning control for a design stage.
+
+        Intent and functional_spec are small serialization tasks where the
+        reasoning channel adds only a loop risk (KC-VWW5X7): disable it. The
+        larger stages get a bounded budget; design_reasoning_tokens=0 disables
+        reasoning for ALL design stages.
+        """
+        if stage in ("intent", "functional_spec"):
+            return {"enabled": False}
+        if self.design_reasoning_tokens <= 0:
+            return {"enabled": False}
+        return {"max_tokens": self.design_reasoning_tokens}
 
     @property
     def billing_enabled(self) -> bool:

@@ -314,7 +314,8 @@ class _TruncThenOkClient:
                         "daily_ceiling_usd": 5.0}
         self.guard = _G()
 
-    def chat(self, messages, max_tokens=4096, temperature=0.2, progress=None, meta_ctx=None):
+    def chat(self, messages, max_tokens=4096, temperature=0.2, progress=None, meta_ctx=None,
+             reasoning=None):
         self.max_tokens_seen.append(max_tokens)
         self._n += 1
         if self._n == 1:
@@ -476,3 +477,83 @@ def test_stream_gives_up_after_max_retries(monkeypatch):
     )
     with pytest.raises(requests.exceptions.ChunkedEncodingError):
         c._stream({"messages": [{"role": "user", "content": "x"}]})
+
+
+# ---- in-stream reasoning-loop breaker (KC-VWW5X7) --------------------------
+
+def test_reasoning_loop_ceiling_signal():
+    # Reasoning-only stream over the token ceiling with no content -> loop.
+    s = Settings(api_key="k", reasoning_repeat_window=1_000_000)  # isolate ceiling
+    c = CappedOpenRouterClient(s, guard=_RecordingGuard())
+    assert c._reasoning_loop(20_000, 0, "x" * 20_000, client_mod.time.monotonic()) is True
+    assert c._reasoning_loop(1_000, 0, "x" * 1_000, client_mod.time.monotonic()) is False
+
+
+def test_reasoning_loop_repetition_signal():
+    # A 256-char block repeated 4x -> repetition, even below the ceiling.
+    s = Settings(api_key="k", reasoning_max_tokens=1_000_000)  # isolate repetition
+    c = CappedOpenRouterClient(s, guard=_RecordingGuard())
+    block = "a" * 255 + "Z"
+    assert c._reasoning_loop(len(block) * 4, 0, block * 4,
+                             client_mod.time.monotonic()) is True
+    assert c._reasoning_loop(len(block), 0, block,
+                             client_mod.time.monotonic()) is False
+
+
+def test_reasoning_loop_stall_signal():
+    # Reasoning flowing, no content, wall clock past the timeout -> stall.
+    s = Settings(api_key="k", reasoning_max_tokens=1_000_000,
+                 reasoning_repeat_window=1_000_000)
+    c = CappedOpenRouterClient(s, guard=_RecordingGuard())
+    assert c._reasoning_loop(100, 0, "x" * 100,
+                             client_mod.time.monotonic() - 999) is True
+
+
+def test_reasoning_loop_never_fires_with_content():
+    # Any content token gates every signal off.
+    c = CappedOpenRouterClient(Settings(api_key="k"), guard=_RecordingGuard())
+    assert c._reasoning_loop(99_999, 1, "y" * 99_999,
+                             client_mod.time.monotonic() - 999) is False
+
+
+def test_stream_aborts_reasoning_ceiling(monkeypatch):
+    def fake_post(url, headers=None, json=None, timeout=None, stream=None):
+        return _FakeResp([{"choices": [{"delta": {"reasoning": "x" * 20_000}}]}])
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    c = CappedOpenRouterClient(Settings(api_key="k"), guard=_RecordingGuard())
+    msg, cost = c._stream({"messages": [{"role": "user", "content": "x"}]})
+    assert msg["loop_detected"] is True
+    assert msg["finish_reason"] == "reasoning_loop"
+    assert msg["content"] is None
+    assert cost > 0.0  # partial stream still recorded against the guard
+
+
+def test_stream_aborts_reasoning_repetition(monkeypatch):
+    block = "a" * 255 + "Z"
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=None):
+        return _FakeResp([{"choices": [{"delta": {"reasoning": block * 4}}]}])
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    c = CappedOpenRouterClient(Settings(api_key="k"), guard=_RecordingGuard())
+    msg, _ = c._stream({"messages": [{"role": "user", "content": "x"}]})
+    assert msg["loop_detected"] is True
+    assert msg["finish_reason"] == "reasoning_loop"
+
+
+def test_stream_content_stream_is_not_aborted(monkeypatch):
+    def fake_post(url, headers=None, json=None, timeout=None, stream=None):
+        return _FakeResp([
+            {"choices": [{"delta": {"reasoning": "thinking here"}}]},
+            {"choices": [{"delta": {"content": '{"x":1}'}}]},
+            {"choices": [{"finish_reason": "stop", "delta": {}}]},
+            _usage_chunk(),
+        ])
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    c = CappedOpenRouterClient(Settings(api_key="k"), guard=_RecordingGuard())
+    msg, _ = c._stream({"messages": [{"role": "user", "content": "x"}]})
+    assert not msg.get("loop_detected")
+    assert msg["finish_reason"] == "stop"
+    assert msg["content"] == '{"x":1}'

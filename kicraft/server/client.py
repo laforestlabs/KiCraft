@@ -42,6 +42,14 @@ _FALLBACK_DEFAULT = (10.0, 30.0)  # unknown model: assume expensive
 _MAX_REDUNDANT_TOOL_CALLS = 3
 _MAX_TOTAL_TOOL_CALLS = 16
 
+# Reasoning-loop breaker: a reasoning model can burn its whole output budget
+# re-deriving one decision and emit NO content. max_tokens does NOT bound
+# DeepSeek's reasoning channel, so the client enforces its own in-stream ceiling
+# and repetition fingerprint. See docs/plans/reasoning-loop-breaker.md.
+# Recent-buffer size (chars) used for the repetition fingerprint: large enough to
+# hold several copies of the ~700-char block a stuck model repeats verbatim.
+_REASONING_RECENT_CHARS = 4096
+
 
 def make_client(settings: Settings | None = None):
     """Construct the active chat client, honoring ``KICRAFT_LLM_MODE``.
@@ -152,6 +160,28 @@ class CappedOpenRouterClient:
                     raise
                 time.sleep(backoff * (2 ** attempt))
 
+    def _reasoning_loop(self, reasoning_chars: int, content_chars: int,
+                        reasoning_recent: str, stream_t0: float) -> bool:
+        """Detect a stuck reasoning loop from the streamed state.
+
+        All three signals are gated on "no answer content yet" (a model that is
+        writing JSON is not looping). Any one aborts:
+          1. hard ceiling -- reasoning-only stream exceeded the token budget;
+          2. verbatim repetition -- the trailing window repeats >= threshold;
+          3. wall-clock stall -- reasoning flowing, no answer, past the timeout.
+        """
+        if content_chars:
+            return False
+        s = self.s
+        if reasoning_chars > int(s.reasoning_max_tokens) * 4:
+            return True
+        if (time.monotonic() - stream_t0) > int(s.request_timeout_s):
+            return True
+        window = max(1, int(s.reasoning_repeat_window))
+        threshold = max(2, int(s.reasoning_repeat_threshold))
+        return (len(reasoning_recent) >= window
+                and reasoning_recent.count(reasoning_recent[-window:]) >= threshold)
+
     def _stream(self, body: dict, on_delta=None) -> tuple[dict, float]:
         """One capped streaming completion (SSE).
 
@@ -191,6 +221,11 @@ class CappedOpenRouterClient:
             finish = None
             provider = None
             usage: dict = {}
+            aborted_loop = False
+            reasoning_chars = 0
+            content_chars = 0
+            reasoning_recent = ""
+            stream_t0 = time.monotonic()
             try:
                 resp = self._open_stream(payload)
                 with resp:
@@ -214,10 +249,13 @@ class CappedOpenRouterClient:
                             delta = ch.get("delta") or {}
                             if delta.get("reasoning"):
                                 reasoning.append(delta["reasoning"])
+                                reasoning_chars += len(delta["reasoning"])
+                                reasoning_recent = (reasoning_recent + delta["reasoning"])[-_REASONING_RECENT_CHARS:]
                                 if on_delta:
                                     on_delta({"reasoning": delta["reasoning"]})
                             if delta.get("content"):
                                 content.append(delta["content"])
+                                content_chars += len(delta["content"])
                                 if on_delta:
                                     on_delta({"content": delta["content"]})
                             for tcd in delta.get("tool_calls") or []:
@@ -231,14 +269,25 @@ class CappedOpenRouterClient:
                                     slot["name"] = fn["name"]
                                 if fn.get("arguments"):
                                     slot["args"] += fn["arguments"]
-                break  # stream completed cleanly
+                            if self._reasoning_loop(reasoning_chars, content_chars,
+                                                    reasoning_recent, stream_t0):
+                                aborted_loop = True
+                                break
+                        if aborted_loop:
+                            break
             except _RETRY_NETWORK_EXC:
                 if stream_attempt >= max_stream_retries:
                     raise
                 time.sleep(stream_backoff * (2 ** stream_attempt))
+                continue
+            break  # stream ended: either cleanly or by loop abort
 
+        if aborted_loop:
+            finish = "reasoning_loop"
         msg = {"role": "assistant", "content": "".join(content) or None,
                "reasoning": "".join(reasoning) or None, "finish_reason": finish}
+        if aborted_loop:
+            msg["loop_detected"] = True
         if tool_calls:
             msg["tool_calls"] = [
                 {"id": tc["id"], "type": "function",
@@ -246,12 +295,19 @@ class CappedOpenRouterClient:
                 for tc in (tool_calls[i] for i in sorted(tool_calls))]
 
         in_tok, out_tok = usage.get("prompt_tokens"), usage.get("completion_tokens")
+        if aborted_loop:
+            # No final usage chunk arrived: estimate output from chars so the
+            # spend guard does not under-count the partial stream already paid for.
+            in_tok = in_tok or 0
+            out_tok = out_tok or max(1, (reasoning_chars + content_chars) // 4)
         cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
         cost = float(usage.get("cost") or 0.0)
         if cost <= 0.0:  # never record 0 for real spend, or the ceiling under-counts
             cost = estimate_cost(payload["model"], in_tok, out_tok)
         rec_meta = {"phase": meta_phase, "provider": provider, "finish_reason": finish,
-                    "cached_tokens": int(cached or 0), **meta_ctx}
+                    "cached_tokens": int(cached or 0),
+                    "loop_detected": bool(aborted_loop),
+                    "reasoning_chars": reasoning_chars, **meta_ctx}
         self.guard.record(payload["model"], in_tok, out_tok, cost, meta=rec_meta)
         return msg, cost
 
@@ -284,10 +340,12 @@ class CappedOpenRouterClient:
         msg, cost = self._stream(body, on_delta=self._delta_progress(progress))
         return {"text": msg.get("content") or "", "reasoning": msg.get("reasoning"),
                 "finish_reason": msg.get("finish_reason"), "model": None,
-                "usage": {}, "cost_usd": cost, "guard": self.guard.status()}
+                "usage": {}, "cost_usd": cost, "guard": self.guard.status(),
+                "loop_detected": bool(msg.get("loop_detected"))}
 
     def chat_with_tools(self, messages, tools, executor, model=None, max_tokens=None,
-                        temperature=0.2, max_rounds=12, progress=None, meta_ctx=None) -> dict:
+                        temperature=0.2, max_rounds=12, progress=None, meta_ctx=None,
+                        reasoning=None) -> dict:
         """Tool-use loop. `tools` = OpenAI tool specs; `executor(name, args) -> str`.
 
         Mutates `messages` in place (appends each assistant turn and the tool
@@ -322,6 +380,8 @@ class CappedOpenRouterClient:
                 body["model"] = model
             if max_tokens:
                 body["max_tokens"] = max_tokens
+            if reasoning:
+                body["reasoning"] = reasoning
             msg, cost = self._stream(body, on_delta=on_delta)
             total_cost += cost
 
@@ -331,11 +391,19 @@ class CappedOpenRouterClient:
                 assistant["tool_calls"] = tcs
             messages.append(assistant)
 
+            if msg.get("loop_detected"):
+                # Reasoning loop in a tool round: stop tools, drop reasoning, and
+                # force the final JSON on the next round.
+                force_final = True
+                reasoning = {"enabled": False}
+                continue
+
             if not tcs:
                 return {"text": msg.get("content") or "", "cost_usd": total_cost,
                         "rounds": rnd + 1, "tool_calls": n_tool_calls,
                         "finish_reason": msg.get("finish_reason"),
-                        "guard": self.guard.status()}
+                        "guard": self.guard.status(),
+                        "loop_detected": bool(msg.get("loop_detected"))}
 
             for tc in tcs:
                 n_tool_calls += 1
@@ -401,6 +469,8 @@ class CappedOpenRouterClient:
             body["model"] = model
         if max_tokens:
             body["max_tokens"] = max_tokens
+        if reasoning:
+            body["reasoning"] = reasoning
         msg, cost = self._stream(body, on_delta=on_delta)
         total_cost += cost
         messages.append({"role": "assistant", "content": msg.get("content")})
@@ -408,4 +478,5 @@ class CappedOpenRouterClient:
                 "rounds": max_rounds, "tool_calls": n_tool_calls,
                 "finish_reason": msg.get("finish_reason"),
                 "guard": self.guard.status(), "max_rounds_hit": True,
-                "forced_final": True}
+                "forced_final": True,
+                "loop_detected": bool(msg.get("loop_detected"))}

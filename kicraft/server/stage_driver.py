@@ -690,7 +690,7 @@ def _commit(stage, slot, state_path, brief, project_stem=None, workspace=None) -
 
 def _stamp_stage_status(state_path, stage: str, ok: bool, *,
                         cost_usd=None, attempts=None, rounds=None,
-                        tool_calls=None, wall_s=None, cpu_s=None) -> None:
+                        tool_calls=None, wall_s=None, cpu_s=None, error=None) -> None:
     """Record a stage's durable outcome in state.json's stage_status block (a real
     ConversationState field, so the CLI's load/validate/dump round-trip preserves
     it). This is what lets a reopened project restore its pipeline progress
@@ -719,6 +719,8 @@ def _stamp_stage_status(state_path, stage: str, ok: bool, *,
         entry["rounds"] = int(rounds)
     if tool_calls is not None:
         entry["tool_calls"] = int(tool_calls)
+    if error is not None:
+        entry["error"] = str(error)
     block = sj.get("stage_status") or {}
     block[stage] = entry
     sj["stage_status"] = block
@@ -731,6 +733,13 @@ def _stamp_stage_status(state_path, stage: str, ok: bool, *,
 # passes than the simpler, smaller-slot stages, so they floor higher (BOM must
 # also resolve every symbol/footprint to a real library entry within its budget).
 _STAGE_MIN_RETRIES = {"wiring": 4, "bom": 4}
+
+# In-stream reasoning-loop breakout budget: when the client aborts a completion
+# (finish_reason="reasoning_loop"), retry once with reasoning disabled + higher
+# temperature to escape the deterministic cycle. A second loop in a row means the
+# model cannot serialize even without reasoning -- fail with an explicit
+# "reasoning_loop" label rather than "no JSON in reply".
+_MAX_LOOP_RETRIES = 1
 
 
 def _stage_max_retries(stage: str, default: int) -> int:
@@ -857,6 +866,13 @@ def _design_temperature(client) -> float:
     a client carries no settings, e.g. the mock). Lowering it toward 0 cuts the
     run-to-run variance that makes self-eval regressions hard to read."""
     return float(getattr(getattr(client, "s", None), "design_temperature", 0.2))
+
+def _design_reasoning(client, stage: str) -> dict | None:
+    """OpenRouter reasoning control for a design stage, from the client settings.
+    A mock (or a settings object without the policy method) yields None = no
+    reasoning control, which is also safe."""
+    fn = getattr(getattr(client, "s", None), "design_reasoning", None)
+    return fn(stage) if callable(fn) else None
 
 
 # A reasoning model can burn its whole output budget re-deriving one decision and
@@ -989,6 +1005,8 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
     last: dict = {}
     cur_max_tokens = max_tokens
     temperature = _design_temperature(client)
+    reasoning = _design_reasoning(client, stage)
+    loop_retries = 0
     for attempt in range(max_retries + 1):
         ctx = {**(meta_ctx or {}), "stage": stage, "attempt": attempt}
         tool_calls_ct = None
@@ -996,21 +1014,38 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
             r = client.chat_with_tools(messages, tools, executor, max_tokens=cur_max_tokens,
                                        temperature=temperature,
                                        max_rounds=_BOM_MAX_ROUNDS, progress=progress,
-                                       meta_ctx=ctx)
+                                       meta_ctx=ctx, reasoning=reasoning)
             raw, rounds = r["text"], r.get("rounds")
             tool_calls_ct = r.get("tool_calls")
             finish = r.get("finish_reason")
             total_cost += r["cost_usd"]
             had_content = bool(r["text"])
+            loop_detected = bool(r.get("loop_detected"))
         else:
             res = client.chat(messages, max_tokens=cur_max_tokens, temperature=temperature,
-                              progress=progress, meta_ctx=ctx)
+                              progress=progress, meta_ctx=ctx, reasoning=reasoning)
             content_text = res.get("text") or ""
             raw = content_text or res.get("reasoning") or ""
             finish = res.get("finish_reason")
             rounds = None
             total_cost += res["cost_usd"]
             had_content = bool(content_text)
+            loop_detected = bool(res.get("loop_detected"))
+
+        # In-stream reasoning-loop abort: retry once with reasoning disabled and a
+        # higher temperature to escape the deterministic cycle, then fail honestly.
+        if loop_detected:
+            last = {"error": "reasoning_loop", "reply_head": (raw or "")[:200]}
+            if progress:
+                progress({"kind": "retry", "stage": stage,
+                          "errors": ["reasoning loop detected — retrying with reasoning disabled"]})
+            if loop_retries >= _MAX_LOOP_RETRIES:
+                break
+            loop_retries += 1
+            reasoning = {"enabled": False}
+            temperature = max(temperature + 0.4, 0.4)
+            messages = _lean_retry(None, _REASONING_LOOP_RETRY_MSG)
+            continue
 
         try:
             obj = _extract_json(raw)
@@ -1082,7 +1117,7 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
     _stamp_stage_status(state_path, stage, False,
                         cost_usd=total_cost, attempts=max_retries + 1,
                         rounds=rounds, tool_calls=tool_calls_ct,
-                        wall_s=_wall, cpu_s=_cpu)
+                        wall_s=_wall, cpu_s=_cpu, error=last.get("error"))
     _record_stage_ledger(client, run_id=run_id, stage=stage, ok=False,
                          attempts=max_retries + 1, rounds=rounds,
                          tool_calls=tool_calls_ct, wall_s=_wall, cpu_s=_cpu,
