@@ -60,6 +60,40 @@ def _env_bool_default(name: str, default: bool) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+# Fixed output cap (tokens) for the serialization recovery call per design
+# stage: one plain, tool-free, reasoning-disabled re-emission of the slot
+# after a parse failure. The model re-serializes content it already drafted,
+# so the cap is roughly double the normal floor — finite, and NEVER doubled
+# dynamically (KC-7FVTPW: truncation used to double the cap up to 32,768 and
+# still produced no JSON). The big-slot stages (bom/wiring) get headroom; the
+# small ones stay cheap.
+STAGE_SERIALIZATION_MAX_TOKENS = {
+    "intent": 8192,
+    "functional_spec": 8192,
+    "architecture": 16384,
+    "bom": 32768,
+    "wiring": 32768,
+}
+
+
+@dataclass(frozen=True)
+class StageResponsePolicy:
+    """Immutable response policy for one design-stage drive.
+
+    One value per stage so the normal output cap, the normal reasoning payload,
+    and the serialization recovery cap/retry budget travel together. The
+    serialization retry count is fixed at one for design stages: a parse
+    failure may trigger at most one plain, tool-free, reasoning-disabled
+    completion at the fixed serialization cap — never repeated tool loops and
+    never dynamic cap growth.
+    """
+
+    normal_max_tokens: int
+    normal_reasoning: dict | None
+    serialization_max_tokens: int
+    serialization_retries: int = 1
+
+
 @dataclass
 class Settings:
     """Resolved server configuration. Build with `Settings.from_env()`."""
@@ -92,6 +126,16 @@ class Settings:
     # 0.2; lowering toward 0 cuts run-to-run variance (the self-eval noise floor),
     # making real regressions legible. KICRAFT_DESIGN_TEMPERATURE.
     design_temperature: float = 0.0
+    # Serialization recovery budget per stage drive: after the first
+    # truncated_json / invalid_json, exactly one plain, tool-free,
+    # reasoning-disabled completion at `serialization_max_tokens[stage]` is
+    # allowed; a second malformed reply is terminal. Fixed at one for design
+    # stages. KICRAFT_SERIALIZATION_RETRIES.
+    serialization_retries: int = 1
+    # Fixed output cap for that serialization call, per stage (see
+    # STAGE_SERIALIZATION_MAX_TOKENS). Never doubled dynamically.
+    serialization_max_tokens: dict = field(
+        default_factory=lambda: dict(STAGE_SERIALIZATION_MAX_TOKENS))
 
     # --- Design-stage reasoning budget + in-stream loop breaker ---------------
     # Reasoning budget for the design stages. Intent/functional_spec (small,
@@ -267,6 +311,9 @@ class Settings:
                 os.environ.get("KICRAFT_LLM_RETRY_BACKOFF_S", cls.llm_retry_backoff_s)),
             design_temperature=float(
                 os.environ.get("KICRAFT_DESIGN_TEMPERATURE", cls.design_temperature)),
+            serialization_retries=int(
+                os.environ.get("KICRAFT_SERIALIZATION_RETRIES", cls.serialization_retries)),
+            serialization_max_tokens=dict(STAGE_SERIALIZATION_MAX_TOKENS),
             design_reasoning_tokens=int(
                 os.environ.get("KICRAFT_DESIGN_REASONING_TOKENS", cls.design_reasoning_tokens)),
             reasoning_max_tokens=int(
@@ -372,6 +419,23 @@ class Settings:
         if self.design_reasoning_tokens <= 0:
             return {"enabled": False}
         return {"max_tokens": self.design_reasoning_tokens}
+
+    def design_stage_policy(self, stage: str, normal_max_tokens: int) -> StageResponsePolicy:
+        """Immutable response policy for one design-stage drive.
+
+        ``normal_max_tokens`` is the caller's already-floored normal output cap;
+        the serialization cap is the stage's fixed value from
+        ``serialization_max_tokens`` (never doubled). The normal reasoning
+        payload comes from :meth:`design_reasoning`, the compatibility source.
+        """
+        return StageResponsePolicy(
+            normal_max_tokens=int(normal_max_tokens),
+            normal_reasoning=self.design_reasoning(stage),
+            serialization_max_tokens=int(
+                self.serialization_max_tokens.get(stage)
+                or STAGE_SERIALIZATION_MAX_TOKENS.get(stage, 8192)),
+            serialization_retries=max(0, int(self.serialization_retries)),
+        )
 
     @property
     def billing_enabled(self) -> bool:

@@ -66,18 +66,24 @@ def test_failed_bom_records_wall_cpu_rounds_to_all_three_sinks(tmp_path):
     assert r["wall_s"] is not None and r["wall_s"] >= 0.0
     assert r["cpu_s"] is not None and r["cpu_s"] >= 0.0
     assert r["rounds"] == 1 and r["tool_calls"] == 0
+    # the terminal classification and ACTUAL call count (normal + one
+    # serialization call) reach the returned result
+    assert r["failure_kind"] == "invalid_json"
+    assert r["attempts"] == 2
     # durable state.json stage_status
     sj = json.loads(sp.read_text(encoding="utf-8"))
     e = sj["stage_status"]["bom"]
     assert e["ok"] is False
     assert e["wall_s"] == r["wall_s"] and e["cpu_s"] == r["cpu_s"]
     assert e["rounds"] == 1 and e["tool_calls"] == 0
+    assert e["failure_kind"] == "invalid_json" and e["attempts"] == 2
     # ledger stage_runs
     with sqlite3.connect(g.path) as c:
         row = c.execute("SELECT stage, ok, rounds, tool_calls, wall_s, cpu_s, "
-                        "cost_usd, run_id FROM stage_runs").fetchone()
+                        "cost_usd, run_id, failure_kind FROM stage_runs").fetchone()
     assert row[0] == "bom" and row[1] == 0 and row[2] == 1 and row[3] == 0
     assert row[4] == r["wall_s"] and row[6] == 0.0 and row[7] == "p7-1"
+    assert row[8] == "invalid_json"
 
 
 def test_failed_intent_records_wall_cpu_but_null_rounds(tmp_path):

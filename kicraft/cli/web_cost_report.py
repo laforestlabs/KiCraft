@@ -191,41 +191,54 @@ def format_report(summary, by="run") -> str:
 def load_stage_runs(db_path, since=None) -> list[dict]:
     """Per-stage resource rows from the ledger's ``stage_runs`` table (a stage's
     wall_s/cpu_s/rounds/tool_calls/cost, one row per completed stage). Older
-    ledgers predate the table -> returns []."""
+    ledgers predate the table -> returns []; ledgers that predate the
+    ``failure_kind`` column return rows with ``failure_kind`` unset (legacy
+    rows stay readable as unclassified)."""
     conn = sqlite3.connect(str(db_path))
     try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(stage_runs)")}
+        if not cols:  # no stage_runs table on this ledger
+            return []
+        has_kind = "failure_kind" in cols
         q = ("SELECT ts, run_id, stage, ok, attempts, rounds, tool_calls, "
-             "wall_s, cpu_s, cost_usd FROM stage_runs")
+             "wall_s, cpu_s, cost_usd" + (", failure_kind" if has_kind else "")
+             + " FROM stage_runs")
         params: tuple = ()
         if since:
             q += " WHERE ts >= ?"
             params = (since,)
         q += " ORDER BY ts"
-        try:
-            cur = conn.execute(q, params)
-        except sqlite3.OperationalError:  # no stage_runs table on this ledger
-            return []
+        cur = conn.execute(q, params)
         rows = []
-        for ts, run_id, stage, ok, att, rnd, tc, wall, cpu, cost in cur.fetchall():
+        for row in cur.fetchall():
+            ts, run_id, stage, ok, att, rnd, tc, wall, cpu, cost = row[:10]
+            kind = row[10] if has_kind else None
             rows.append({
                 "ts": ts, "run_id": run_id, "stage": stage, "ok": bool(ok),
                 "attempts": att, "rounds": rnd, "tool_calls": tc,
                 "wall_s": wall, "cpu_s": cpu, "cost_usd": cost,
+                "failure_kind": kind,
             })
         return rows
+    except sqlite3.OperationalError:  # no stage_runs table on this ledger
+        return []
     finally:
         conn.close()
 
 
 def summarize_stage_runs(rows) -> dict:
     """Aggregate stage_runs into per-stage {n, wall_s, cpu_s, cost, rounds,
-    tool_calls, attempts, fails}. This is the resource breakdown that lets you
-    see which stages burn wall time vs CPU vs LLM tokens side by side."""
+    tool_calls, attempts, fails, failure_kinds}. This is the resource breakdown
+    that lets you see which stages burn wall time vs CPU vs LLM tokens side by
+    side, plus the terminal failure-kind distribution (why stages fail:
+    invalid_json vs truncated_json vs commit_rejected vs ...). Legacy rows
+    without a failure_kind contribute to fails but not to any kind bucket."""
     agg: dict[str, dict] = {}
     for r in rows:
         s = agg.setdefault(r["stage"], {
             "n": 0, "wall_s": 0.0, "cpu_s": 0.0, "cost": 0.0,
-            "rounds": 0, "tool_calls": 0, "attempts": 0, "fails": 0})
+            "rounds": 0, "tool_calls": 0, "attempts": 0, "fails": 0,
+            "failure_kinds": {}})
         s["n"] += 1
         s["wall_s"] += r["wall_s"] or 0.0
         s["cpu_s"] += r["cpu_s"] or 0.0
@@ -235,6 +248,9 @@ def summarize_stage_runs(rows) -> dict:
         s["attempts"] += r["attempts"] or 0
         if not r["ok"]:
             s["fails"] += 1
+            kind = r.get("failure_kind")
+            if kind:
+                s["failure_kinds"][kind] = s["failure_kinds"].get(kind, 0) + 1
     return agg
 
 
@@ -253,6 +269,10 @@ def format_stage_runs(rows) -> str:
             s["rounds"] or "-", s["tool_calls"] or "-", s["fails"]))
         out.append("      {:<14} cpu/wall {:.0f}%  mean wall {:.1f}s".format(
             "", cpu_pct, (s["wall_s"] / s["n"]) if s["n"] else 0.0))
+        kinds = s["failure_kinds"]
+        if kinds:
+            out.append("      {:<14} failure kinds: {}".format(
+                "", ", ".join(f"{k}={v}" for k, v in sorted(kinds.items()))))
     out.append("    note: cpu_s is process-global (RUSAGE_CHILDREN) and reliable "
                "only when designs run serially; wall_s is always accurate.")
     return "\n".join(out)

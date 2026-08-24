@@ -293,6 +293,16 @@ class CappedOpenRouterClient:
                 {"id": tc["id"], "type": "function",
                  "function": {"name": tc["name"], "arguments": tc["args"]}}
                 for tc in (tool_calls[i] for i in sorted(tool_calls))]
+        # Completion telemetry for chat()/chat_with_tools() callers: provider
+        # usage fields when supplied, content/reasoning character counts, the
+        # requested max_tokens, and the selected reasoning policy. Null-safe
+        # for mocks and legacy providers (None is the "not supplied" value).
+        msg["provider"] = provider
+        msg["usage"] = dict(usage) if usage else None
+        msg["content_chars"] = content_chars
+        msg["reasoning_chars"] = reasoning_chars
+        msg["requested_max_tokens"] = payload.get("max_tokens")
+        msg["reasoning_policy"] = payload.get("reasoning")
 
         in_tok, out_tok = usage.get("prompt_tokens"), usage.get("completion_tokens")
         if aborted_loop:
@@ -307,7 +317,11 @@ class CappedOpenRouterClient:
         rec_meta = {"phase": meta_phase, "provider": provider, "finish_reason": finish,
                     "cached_tokens": int(cached or 0),
                     "loop_detected": bool(aborted_loop),
-                    "reasoning_chars": reasoning_chars, **meta_ctx}
+                    "reasoning_chars": reasoning_chars,
+                    "content_chars": content_chars,
+                    "max_tokens": payload.get("max_tokens"),
+                    "reasoning_policy": payload.get("reasoning"),
+                    **meta_ctx}
         self.guard.record(payload["model"], in_tok, out_tok, cost, meta=rec_meta)
         return msg, cost
 
@@ -340,8 +354,13 @@ class CappedOpenRouterClient:
         msg, cost = self._stream(body, on_delta=self._delta_progress(progress))
         return {"text": msg.get("content") or "", "reasoning": msg.get("reasoning"),
                 "finish_reason": msg.get("finish_reason"), "model": None,
-                "usage": {}, "cost_usd": cost, "guard": self.guard.status(),
-                "loop_detected": bool(msg.get("loop_detected"))}
+                "usage": msg.get("usage") or {}, "cost_usd": cost, "guard": self.guard.status(),
+                "loop_detected": bool(msg.get("loop_detected")),
+                "provider": msg.get("provider"),
+                "max_tokens": msg.get("requested_max_tokens"),
+                "reasoning_policy": msg.get("reasoning_policy"),
+                "content_chars": msg.get("content_chars"),
+                "reasoning_chars": msg.get("reasoning_chars")}
 
     def chat_with_tools(self, messages, tools, executor, model=None, max_tokens=None,
                         temperature=0.2, max_rounds=12, progress=None, meta_ctx=None,
@@ -403,7 +422,13 @@ class CappedOpenRouterClient:
                         "rounds": rnd + 1, "tool_calls": n_tool_calls,
                         "finish_reason": msg.get("finish_reason"),
                         "guard": self.guard.status(),
-                        "loop_detected": bool(msg.get("loop_detected"))}
+                        "loop_detected": bool(msg.get("loop_detected")),
+                        "provider": msg.get("provider"),
+                        "usage": msg.get("usage") or {},
+                        "max_tokens": msg.get("requested_max_tokens"),
+                        "reasoning_policy": msg.get("reasoning_policy"),
+                        "content_chars": msg.get("content_chars"),
+                        "reasoning_chars": msg.get("reasoning_chars")}
 
             for tc in tcs:
                 n_tool_calls += 1
@@ -479,4 +504,10 @@ class CappedOpenRouterClient:
                 "finish_reason": msg.get("finish_reason"),
                 "guard": self.guard.status(), "max_rounds_hit": True,
                 "forced_final": True,
-                "loop_detected": bool(msg.get("loop_detected"))}
+                "loop_detected": bool(msg.get("loop_detected")),
+                "provider": msg.get("provider"),
+                "usage": msg.get("usage") or {},
+                "max_tokens": msg.get("requested_max_tokens"),
+                "reasoning_policy": msg.get("reasoning_policy"),
+                "content_chars": msg.get("content_chars"),
+                "reasoning_chars": msg.get("reasoning_chars")}

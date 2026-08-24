@@ -75,8 +75,16 @@ class SpendGuard:
                 "tool_calls INTEGER,"
                 "wall_s REAL,"
                 "cpu_s REAL,"
-                "cost_usd REAL)"
+                "cost_usd REAL,"
+                "failure_kind TEXT)"
             )
+            # Backward-compatible migration: ledgers created before failure_kind
+            # existed keep their rows and gain the column via ALTER TABLE --
+            # CREATE TABLE IF NOT EXISTS alone cannot add a column to an
+            # existing table, and the production ledger predates this field.
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(stage_runs)")}
+            if "failure_kind" not in cols:
+                conn.execute("ALTER TABLE stage_runs ADD COLUMN failure_kind TEXT")
 
     def _sum(self, where: str = "", params: tuple = ()) -> float:
         with self._conn() as conn:
@@ -165,13 +173,17 @@ class SpendGuard:
 
     def record_stage(self, *, run_id: str | None, stage: str, ok: bool,
                      attempts: int | None, rounds: int | None, tool_calls: int | None,
-                     wall_s: float | None, cpu_s: float | None, cost_usd: float) -> None:
+                     wall_s: float | None, cpu_s: float | None, cost_usd: float,
+                     failure_kind: str | None = None) -> None:
         """Append one completed stage to ``stage_runs`` — the durable per-stage
         resource record. ``wall_s``/``cpu_s`` are the gap metrics: a stage's
         wall-clock duration and child-CPU seconds (LLM latency + subprocess tool
         calls). ``cost_usd`` mirrors the summed LLM spend for the side-by-side
         report; it is intentionally NOT added to the ``spend`` ceiling (the
-        per-call rows there already enforce it).
+        per-call rows there already enforce it). ``failure_kind`` is the terminal
+        classification of a failed stage (reasoning_loop / truncated_json /
+        invalid_json / commit_rejected / provider_error / transport_error);
+        None for a committed stage or a legacy row.
 
         Note: ``cpu_s`` comes from RUSAGE_CHILDREN, which is per-process, so it
         is only trustworthy when designs run serially — concurrent stages in the
@@ -180,12 +192,14 @@ class SpendGuard:
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO stage_runs (ts, run_id, stage, ok, attempts, rounds, "
-                "tool_calls, wall_s, cpu_s, cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "tool_calls, wall_s, cpu_s, cost_usd, failure_kind) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (_utcnow_iso(), run_id, stage, int(bool(ok)),
                  int(attempts) if attempts is not None else None,
                  int(rounds) if rounds is not None else None,
                  int(tool_calls) if tool_calls is not None else None,
                  float(wall_s) if wall_s is not None else None,
                  float(cpu_s) if cpu_s is not None else None,
-                 float(cost_usd or 0.0)),
+                 float(cost_usd or 0.0),
+                 str(failure_kind) if failure_kind is not None else None),
             )

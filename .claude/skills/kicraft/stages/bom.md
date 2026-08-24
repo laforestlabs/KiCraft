@@ -4,7 +4,7 @@ Given the `architecture` (available in the `state` field of stage-prep's output)
 
 **Programming interface.** Reflect the architecture's programming decision:
 
-- **Native-USB MCU** (an ESP32-S3 / C3 / S2 / C6, the default): no bridge part. The MCU's native USB pins connect to the board's USB connector (wiring handles it); nothing extra to add here beyond the MCU itself.
+- **Native-USB MCU** (an ESP32-S3 / C3 / S2 / C6, the default): native USB means **no USB-UART bridge** — it does NOT mean no programming-support parts. Follow the architecture decision and include ONE complete recovery/programming mechanism per §9.29: BOOT and EN/RESET buttons or jumpers; labeled test pads reaching the required boot strap (IO0/GPIO0) and EN/reset signals; or another architecture-approved reset/strap mechanism. A USB connector alone is NOT sufficient for first download and recovery — without a boot-strap path the board is one bad firmware away from a brick. Include the required pull components from the selected module's datasheet (e.g. EN and GPIO0 pull-ups/pull-downs as specified). Put the controls on the MCU sheet and include the supporting passives in the MCU's `ic_groups` entry so placement keeps them together.
 - **Classic ESP32 with a USB-UART bridge**: include the bridge chosen by the architecture stage (the core-defaults `usb-uart-bridge` row — the vendored `ch340c` bundle, CH340C / C84681), two small-signal NPN transistors + base resistors for the DTR/RTS auto-reset to EN/IO0, and the bridge's decoupling. Cluster them with the bridge in `ic_groups`.
 
 Either way the wiring stage connects the path, so no programming question reaches it.

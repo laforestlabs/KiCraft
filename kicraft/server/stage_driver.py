@@ -28,14 +28,29 @@ import tempfile
 import time
 from pathlib import Path
 
+import requests
+
 from kicraft.design import models
 from kicraft.fsutil import atomic_write_text
 from kicraft.parts_library import jlcparts, lcsc_retail
 
 from .client import CappedOpenRouterClient, make_client
-from .config import Settings
+from .config import STAGE_SERIALIZATION_MAX_TOKENS, Settings, StageResponsePolicy
 from .pricing import _stock_floor
 from .spend_guard import BudgetExceeded, SpendGuard
+
+
+# Provider/transport failure families that survive the client's own bounded
+# transport retries and surface here as terminal stage failures. JSON recovery
+# never sees them, and BudgetExceeded / KillSwitchEngaged (budget failures
+# owned by SpendGuard) are deliberately NOT caught — they propagate to the
+# guard/caller path.
+_TRANSPORT_FAILURE_EXC = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
+_PROVIDER_FAILURE_EXC = (requests.exceptions.HTTPError,)
 
 
 def _bundle_sourcing_lcsc(bundle: str) -> str:
@@ -499,15 +514,26 @@ def build_system(stage: str) -> str:
 
 
 def _extract_json(text: str) -> dict:
+    """Parse exactly ONE complete JSON object from ``text``.
+
+    Tolerates optional markdown fences and leading/trailing whitespace, but NOT
+    trailing prose or a second object: a complete object followed by
+    non-whitespace is a malformed answer (the caller classifies it
+    ``invalid_json``), never a silent success that drops content
+    (bom-stage-programming-and-json-gaps plan).
+    """
     text = (text or "").strip()
     m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
     if m:
         text = m.group(1)
-    else:
-        a, b = text.find("{"), text.rfind("}")
-        if a != -1 and b > a:
-            text = text[a:b + 1]
-    return json.loads(text)
+    a = text.find("{")
+    if a == -1:
+        raise json.JSONDecodeError("no JSON object in reply", text, 0)
+    obj, end = json.JSONDecoder().raw_decode(text[a:])
+    if text[a + end:].strip():
+        raise json.JSONDecodeError(
+            "trailing content after JSON object", text, a + end)
+    return obj
 
 
 def _fallback_stem(brief: str) -> str:
@@ -708,16 +734,19 @@ def _commit(stage, slot, state_path, brief, project_stem=None, workspace=None) -
 
 def _stamp_stage_status(state_path, stage: str, ok: bool, *,
                         cost_usd=None, attempts=None, rounds=None,
-                        tool_calls=None, wall_s=None, cpu_s=None, error=None) -> None:
+                        tool_calls=None, wall_s=None, cpu_s=None, error=None,
+                        failure_kind=None) -> None:
     """Record a stage's durable outcome in state.json's stage_status block (a real
     ConversationState field, so the CLI's load/validate/dump round-trip preserves
     it). This is what lets a reopened project restore its pipeline progress
     without the ephemeral event stream. wall_s/cpu_s/rounds/tool_calls fill the
     prior measurement gap: how long a stage took, how much child CPU it burned,
     and how many tool rounds it cost (the written ledger records the same for the
-    cross-run report). Tolerates a missing state.json (a first-stage failure
-    before any commit). Atomic write: the web render timer reads this file
-    concurrently."""
+    cross-run report). failure_kind is the terminal classification of a failed
+    stage (one of reasoning_loop / truncated_json / invalid_json /
+    commit_rejected / provider_error / transport_error). Tolerates a missing
+    state.json (a first-stage failure before any commit). Atomic write: the web
+    render timer reads this file concurrently."""
     p = Path(state_path)
     try:
         sj = json.loads(p.read_text(encoding="utf-8"))
@@ -739,6 +768,8 @@ def _stamp_stage_status(state_path, stage: str, ok: bool, *,
         entry["tool_calls"] = int(tool_calls)
     if error is not None:
         entry["error"] = str(error)
+    if failure_kind is not None:
+        entry["failure_kind"] = str(failure_kind)
     block = sj.get("stage_status") or {}
     block[stage] = entry
     sj["stage_status"] = block
@@ -929,22 +960,65 @@ _REASONING_LOOP_RETRY_MSG = (
 )
 
 
-def _json_failure_recovery(finish, had_content, cur_max_tokens, temperature):
-    """Return (user_message, new_max_tokens, new_temperature) after a failed JSON parse.
+def _classify_parse_failure(finish, had_content) -> str:
+    """Classify a failed JSON parse into a ``failure_kind`` (no recovery decision).
 
-    ``had_content`` True means the model emitted answer text (a truncated JSON answer);
-    False with finish=length means it looped in reasoning and wrote nothing.
+    ``finish="length"`` with NO answer content is provider reasoning/output
+    exhaustion, not a truncated JSON answer: it follows the reasoning-recovery
+    path (KC-B7MB7P) and is labeled ``reasoning_loop``, never ``invalid_json``.
+    ``finish="length"`` with content is a genuinely truncated answer
+    (``truncated_json``). Any other malformed/empty normal stop is
+    ``invalid_json``.
     """
     if finish == "length" and not had_content:
-        return (_REASONING_LOOP_RETRY_MSG, cur_max_tokens,
-                max(temperature + 0.4, 0.4))
+        return "reasoning_loop"
     if finish == "length":
-        return ("Your reply was cut off at the output token limit, so the JSON was "
-                "truncated and invalid. The limit has been raised; output ONLY the "
-                "slot JSON and keep it compact.",
-                min(cur_max_tokens * 2, 32768), temperature)
-    return ("That was not a single valid JSON object. Output ONLY the slot JSON.",
-            cur_max_tokens, temperature)
+        return "truncated_json"
+    return "invalid_json"
+
+
+# Human-readable error strings DERIVED from the durable failure_kind (UI
+# compatibility); the classification itself is never free-form. commit_rejected
+# carries no error string — the `commit` dict names the gate errors.
+_FAILURE_KIND_ERROR = {
+    "reasoning_loop": "reasoning_loop",
+    "truncated_json": "truncated JSON at the output token limit",
+    "invalid_json": "no JSON in reply",
+    "provider_error": "provider error",
+    "transport_error": "transport error",
+}
+
+
+# Serialization recovery instruction: rebuild the pristine stage task/state and
+# demand ONE compact slot object, no tools, no markdown, no prose. The reply is
+# bounded by the stage's fixed serialization cap (never doubled dynamically).
+_SERIALIZATION_RETRY_MSG = (
+    "Your previous reply was not a single complete JSON object (it was truncated "
+    "or malformed), so nothing was committed. Do NOT call any tools. Re-emit the "
+    "complete slot as ONE compact JSON object now: no markdown fences, no prose, "
+    "no explanations. Omit null fields and keep every item on a single line so "
+    "the whole slot fits the output budget."
+)
+
+
+def _response_policy(client, stage: str, normal_max_tokens: int) -> StageResponsePolicy:
+    """The stage's immutable response policy: normal cap + reasoning, plus the
+    fixed serialization cap and retry budget (see Settings.design_stage_policy).
+    Clients whose settings expose the policy method get it; mocks and legacy
+    settings fall back to safe defaults: the floored normal cap, the existing
+    design_reasoning payload, the fixed serialization cap, one serialization
+    retry."""
+    fn = getattr(getattr(client, "s", None), "design_stage_policy", None)
+    if callable(fn):
+        pol = fn(stage, int(normal_max_tokens))
+        if isinstance(pol, StageResponsePolicy):
+            return pol
+    return StageResponsePolicy(
+        normal_max_tokens=_stage_max_tokens(stage, normal_max_tokens),
+        normal_reasoning=_design_reasoning(client, stage),
+        serialization_max_tokens=STAGE_SERIALIZATION_MAX_TOKENS.get(stage, 8192),
+        serialization_retries=1,
+    )
 
 
 def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, max_retries=2,
@@ -1042,39 +1116,77 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
 
     total_cost = 0.0
     last: dict = {}
-    cur_max_tokens = max_tokens
+    policy = _response_policy(client, stage, max_tokens)
+    normal_cap = int(policy.normal_max_tokens)
+    serialization_cap = int(policy.serialization_max_tokens)
+    serialization_budget = max(0, int(policy.serialization_retries))
     temperature = _design_temperature(client)
-    reasoning = _design_reasoning(client, stage)
+    reasoning = policy.normal_reasoning
+    # Recovery budgets are independent: reasoning recovery gets ONE
+    # reasoning-disabled retry, serialization recovery gets exactly ONE plain
+    # tool-free call at the fixed cap, and commit correction gets the normal
+    # `max_retries + 1` attempts. `attempts` counts ACTUAL provider calls made
+    # (never the configured maximum), and every call carries a finite cap.
     loop_retries = 0
+    serialization_calls = 0
+    attempts = 0
+    rounds = None
+    tool_calls_ct = None
+
     for attempt in range(max_retries + 1):
         ctx = {**(meta_ctx or {}), "stage": stage, "attempt": attempt}
         tool_calls_ct = None
-        if tools:
-            r = client.chat_with_tools(messages, tools, executor, max_tokens=cur_max_tokens,
-                                       temperature=temperature,
-                                       max_rounds=_BOM_MAX_ROUNDS, progress=progress,
-                                       meta_ctx=ctx, reasoning=reasoning)
-            raw, rounds = r["text"], r.get("rounds")
-            tool_calls_ct = r.get("tool_calls")
-            finish = r.get("finish_reason")
-            total_cost += r["cost_usd"]
-            had_content = bool(r["text"])
-            loop_detected = bool(r.get("loop_detected"))
-        else:
-            res = client.chat(messages, max_tokens=cur_max_tokens, temperature=temperature,
-                              progress=progress, meta_ctx=ctx, reasoning=reasoning)
-            content_text = res.get("text") or ""
-            raw = content_text or res.get("reasoning") or ""
-            finish = res.get("finish_reason")
-            rounds = None
-            total_cost += res["cost_usd"]
-            had_content = bool(content_text)
-            loop_detected = bool(res.get("loop_detected"))
+        raw = ""
+        finish = None
+        had_content = False
+        loop_detected = False
+        attempts += 1  # a call IS attempted even when it raises below
+        try:
+            if tools:
+                r = client.chat_with_tools(messages, tools, executor, max_tokens=normal_cap,
+                                           temperature=temperature,
+                                           max_rounds=_BOM_MAX_ROUNDS, progress=progress,
+                                           meta_ctx=ctx, reasoning=reasoning)
+                raw, rounds = r["text"], r.get("rounds")
+                tool_calls_ct = r.get("tool_calls")
+                finish = r.get("finish_reason")
+                had_content = bool(r["text"])
+                loop_detected = bool(r.get("loop_detected"))
+            else:
+                res = client.chat(messages, max_tokens=normal_cap, temperature=temperature,
+                                  progress=progress, meta_ctx=ctx, reasoning=reasoning)
+                content_text = res.get("text") or ""
+                raw = content_text or res.get("reasoning") or ""
+                finish = res.get("finish_reason")
+                rounds = None
+                had_content = bool(content_text)
+                loop_detected = bool(res.get("loop_detected"))
+            total_cost += (r if tools else res)["cost_usd"]
+        except _TRANSPORT_FAILURE_EXC:
+            # Transport retries exhausted: terminal, never sent through JSON
+            # recovery (BudgetExceeded is NOT caught — it propagates to the
+            # guard/caller path).
+            last = {"failure_kind": "transport_error", "error": "transport error",
+                    "reply_head": (raw or "")[:200], "rounds": rounds,
+                    "tool_calls": tool_calls_ct}
+            break
+        except _PROVIDER_FAILURE_EXC:
+            last = {"failure_kind": "provider_error", "error": "provider error",
+                    "reply_head": (raw or "")[:200], "rounds": rounds,
+                    "tool_calls": tool_calls_ct}
+            break
 
-        # In-stream reasoning-loop abort: retry once with reasoning disabled and a
-        # higher temperature to escape the deterministic cycle, then fail honestly.
-        if loop_detected:
-            last = {"error": "reasoning_loop", "reply_head": (raw or "")[:200]}
+        # Reasoning recovery: the in-stream loop detector aborted, the client
+        # reported finish_reason="reasoning_loop", OR an empty length completion
+        # (reasoning/output exhaustion with no answer text — that is NOT a
+        # truncated JSON answer and must never be labeled invalid_json). Retry
+        # once with reasoning disabled + a higher temperature to escape the
+        # deterministic cycle, then fail honestly as reasoning_loop.
+        if loop_detected or finish == "reasoning_loop" \
+                or (finish == "length" and not had_content):
+            last = {"error": "reasoning_loop", "failure_kind": "reasoning_loop",
+                    "reply_head": (raw or "")[:200], "rounds": rounds,
+                    "tool_calls": tool_calls_ct}
             if progress:
                 progress({"kind": "retry", "stage": stage,
                           "errors": ["reasoning loop detected — retrying with reasoning disabled"]})
@@ -1089,12 +1201,59 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         try:
             obj = _extract_json(raw)
         except (json.JSONDecodeError, ValueError):
-            last = {"error": "no JSON in reply", "reply_head": (raw or "")[:200],
-                    "rounds": rounds, "tool_calls": tool_calls_ct}
-            retry_msg, cur_max_tokens, temperature = _json_failure_recovery(
-                finish, had_content, cur_max_tokens, temperature)
-            messages = _lean_retry(None, retry_msg)
-            continue
+            kind = _classify_parse_failure(finish, had_content)
+            last = {"failure_kind": kind, "reply_head": (raw or "")[:200],
+                    "rounds": rounds, "tool_calls": tool_calls_ct,
+                    "error": _FAILURE_KIND_ERROR.get(kind, kind)}
+            if progress:
+                progress({"kind": "retry", "stage": stage, "errors": [last["error"]],
+                          "failure_kind": kind})
+            if serialization_calls >= serialization_budget:
+                break  # serialization budget exhausted -> terminal
+            # Serialization recovery: exactly ONE plain, tool-free,
+            # reasoning-disabled completion at the fixed serialization cap,
+            # rebuilt from the pristine base messages + the serialization
+            # instruction (never the BOM tool transcript, never a doubled cap).
+            serialization_calls += 1
+            attempts += 1  # the serialization completion is a provider call too
+            sctx = {**ctx, "serialization": True}
+            smessages = list(base_messages)
+            smessages.append({"role": "user", "content": _SERIALIZATION_RETRY_MSG})
+            try:
+                sres = client.chat(smessages, max_tokens=serialization_cap,
+                                   temperature=temperature, progress=progress,
+                                   meta_ctx=sctx, reasoning={"enabled": False})
+                total_cost += sres["cost_usd"]
+            except _TRANSPORT_FAILURE_EXC:
+                last = {"failure_kind": "transport_error", "error": "transport error",
+                        "reply_head": (raw or "")[:200], "rounds": rounds,
+                        "tool_calls": tool_calls_ct}
+                break
+            except _PROVIDER_FAILURE_EXC:
+                last = {"failure_kind": "provider_error", "error": "provider error",
+                        "reply_head": (raw or "")[:200], "rounds": rounds,
+                        "tool_calls": tool_calls_ct}
+                break
+            sraw = sres.get("text") or ""
+            sfinish = sres.get("finish_reason")
+            try:
+                obj = _extract_json(sraw)
+            except (json.JSONDecodeError, ValueError):
+                # The single serialization retry failed: terminal, classified by
+                # the serialization result's OWN signature (a second truncation
+                # is truncated_json; an empty length after reasoning was disabled
+                # is reasoning_loop). Never re-serialized.
+                skind = ("reasoning_loop" if sres.get("loop_detected")
+                         else _classify_parse_failure(sfinish, bool(sraw)))
+                last = {"failure_kind": skind,
+                        "error": _FAILURE_KIND_ERROR.get(skind, skind),
+                        "reply_head": (sraw or "")[:200], "rounds": rounds,
+                        "tool_calls": tool_calls_ct}
+                break
+            # Parseable serialization output: the commit path owns it from here.
+            # A commit rejection may still use remaining commit-correction
+            # attempts at the normal stage/tool policy.
+            raw = sraw
 
         # A clarifying-question payload parks the stage (no slot this turn). No slot
         # model has a top-level "questions" key, so the shape is unambiguous. Never
@@ -1113,7 +1272,7 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
                 if progress:
                     progress({"kind": "question", "stage": stage, "questions": qs})
                 return {"stage": stage, "commit_ok": False, "needs_input": True,
-                        "questions": qs, "cost_usd": total_cost, "attempts": attempt + 1}
+                        "questions": qs, "cost_usd": total_cost, "attempts": attempts}
             messages = _lean_retry(None,
                                    "Do not ask more questions. Apply sensible defaults (record each "
                                    "in assumptions, ending '(defaulted)') and output ONLY the slot "
@@ -1126,18 +1285,18 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
             _wall = round(time.monotonic() - t0, 3)
             _cpu = round(_child_cpu_s() - cpu0, 3)
             _stamp_stage_status(state_path, stage, True,
-                                cost_usd=total_cost, attempts=attempt + 1,
+                                cost_usd=total_cost, attempts=attempts,
                                 rounds=rounds, tool_calls=tool_calls_ct,
                                 wall_s=_wall, cpu_s=_cpu)
             _record_stage_ledger(client, run_id=run_id, stage=stage, ok=True,
-                                 attempts=attempt + 1, rounds=rounds,
+                                 attempts=attempts, rounds=rounds,
                                  tool_calls=tool_calls_ct, wall_s=_wall,
                                  cpu_s=_cpu, cost_usd=total_cost)
             if progress:
                 progress({"kind": "stage_done", "stage": stage, "ok": True,
-                          "cost": total_cost, "attempts": attempt + 1})
+                          "cost": total_cost, "attempts": attempts})
             return {"stage": stage, "commit_ok": True, "cost_usd": total_cost,
-                    "attempts": attempt + 1, "rounds": rounds, "tool_calls": tool_calls_ct,
+                    "attempts": attempts, "rounds": rounds, "tool_calls": tool_calls_ct,
                     "wall_s": _wall, "cpu_s": _cpu, "commit": out, "slot": obj}
         last = {"commit": out}
         if progress:
@@ -1151,20 +1310,26 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         _valid_refs = _committed_bom_refs(state_path) if stage == "wiring" else None
         messages = _lean_retry(raw, _retry_feedback(out, stage=stage, valid_refs=_valid_refs))
 
+    # Terminal failure: a stage whose JSON parsed but every commit gate
+    # rejected it classifies as commit_rejected (never mislabeled a parse
+    # failure); every other terminal path already carries its failure_kind.
+    if "failure_kind" not in last and last.get("commit") is not None:
+        last["failure_kind"] = "commit_rejected"
     _wall = round(time.monotonic() - t0, 3)
     _cpu = round(_child_cpu_s() - cpu0, 3)
     _stamp_stage_status(state_path, stage, False,
-                        cost_usd=total_cost, attempts=max_retries + 1,
+                        cost_usd=total_cost, attempts=attempts,
                         rounds=rounds, tool_calls=tool_calls_ct,
-                        wall_s=_wall, cpu_s=_cpu, error=last.get("error"))
+                        wall_s=_wall, cpu_s=_cpu, error=last.get("error"),
+                        failure_kind=last.get("failure_kind"))
     _record_stage_ledger(client, run_id=run_id, stage=stage, ok=False,
-                         attempts=max_retries + 1, rounds=rounds,
+                         attempts=attempts, rounds=rounds,
                          tool_calls=tool_calls_ct, wall_s=_wall, cpu_s=_cpu,
-                         cost_usd=total_cost)
+                         cost_usd=total_cost, failure_kind=last.get("failure_kind"))
     if progress:
         progress({"kind": "stage_done", "stage": stage, "ok": False, "cost": total_cost})
     return {"stage": stage, "commit_ok": False, "cost_usd": total_cost,
-            "attempts": max_retries + 1, "rounds": rounds, "tool_calls": tool_calls_ct,
+            "attempts": attempts, "rounds": rounds, "tool_calls": tool_calls_ct,
             "wall_s": _wall, "cpu_s": _cpu, **last}
 
 

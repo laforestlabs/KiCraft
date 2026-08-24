@@ -7,11 +7,15 @@ from __future__ import annotations
 
 import json
 
+import pytest
+import requests
+
 from kicraft.server.stage_driver import (
     BOM_TOOLS,
     _attach_questions,
+    _classify_parse_failure,
     _design_reasoning,
-    _json_failure_recovery,
+    _extract_json,
     _normalize_questions,
     _retry_feedback,
     _stage_max_retries,
@@ -37,31 +41,30 @@ def test_retry_feedback_without_offenders_omits_that_line():
     assert "offenders" not in msg               # no offenders line when none present
 
 
-def test_reasoning_loop_recovery_keeps_budget_and_bumps_temp():
-    # finish=length with NO content is a stuck reasoning loop, not a truncated
-    # JSON answer: keep the budget and raise temperature to break the greedy cycle.
-    msg, new_max, new_temp = _json_failure_recovery(
-        "length", had_content=False, cur_max_tokens=4096, temperature=0.0)
-    assert "reconsidering" in msg
-    assert new_max == 4096           # NOT doubled
-    assert new_temp == 0.4
+def test_parse_failure_classification_distinguishes_the_three_kinds():
+    # finish=length with NO content is provider exhaustion (reasoning_loop),
+    # finish=length WITH content is a truncated answer, any normal stop is
+    # invalid_json — the durable taxonomy, never collapsed into one label.
+    assert _classify_parse_failure("length", had_content=False) == "reasoning_loop"
+    assert _classify_parse_failure("length", had_content=True) == "truncated_json"
+    assert _classify_parse_failure("stop", had_content=True) == "invalid_json"
+    assert _classify_parse_failure("stop", had_content=False) == "invalid_json"
+    assert _classify_parse_failure(None, had_content=True) == "invalid_json"
 
 
-def test_truncated_json_recovery_still_doubles_budget():
-    # finish=length WITH content is a real truncated answer: still double the cap.
-    msg, new_max, new_temp = _json_failure_recovery(
-        "length", had_content=True, cur_max_tokens=4096, temperature=0.0)
-    assert new_max == 8192
-    assert "cut off" in msg
-    assert new_temp == 0.0
+def test_extract_json_rejects_trailing_prose_and_second_object():
+    # A complete object followed by non-whitespace is invalid_json, not a
+    # silent success that drops content (bom-stage-json-gaps plan).
+    with pytest.raises(ValueError):
+        _extract_json('{"a": 1} some prose')
+    with pytest.raises(ValueError):
+        _extract_json('{"a": 1} {"b": 2}')
+    # fences and a leading preamble are still tolerated; braces inside strings
+    # and nested objects parse correctly
+    assert _extract_json('```json\n{"a": 1}\n```') == {"a": 1}
+    assert _extract_json('here is the slot: {"a": 1}') == {"a": 1}
+    assert _extract_json('{"a": "}", "b": {"c": 1}}') == {"a": "}", "b": {"c": 1}}
 
-
-def test_no_json_recovery_keeps_budget_and_temp():
-    msg, new_max, new_temp = _json_failure_recovery(
-        "stop", had_content=False, cur_max_tokens=4096, temperature=0.0)
-    assert "not a single valid JSON object" in msg
-    assert new_max == 4096
-    assert new_temp == 0.0
 
 
 def test_wiring_gets_more_retries_than_the_simple_stages():
@@ -317,3 +320,257 @@ def test_design_reasoning_policy_selection():
     assert _design_reasoning(_C(), "functional_spec") == {"enabled": False}
     assert _design_reasoning(_C(), "architecture") == {"max_tokens": 2048}
     assert _design_reasoning(object(), "intent") is None  # mock: no .s policy
+
+
+# ---- serialization recovery (bom-stage-programming-and-json-gaps) ---------
+
+class _ScriptedClient:
+    """Replies in order, one dict per completion; records (max_tokens,
+    reasoning, serialization-flag) per call so the tests can assert the exact
+    recovery contract: one plain tool-free call at the fixed cap."""
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = []
+
+        class _G:
+            def status(self):
+                return {"spent_total_usd": 0.0}
+        self.guard = _G()
+
+    def chat(self, messages, max_tokens=4096, temperature=0.2, progress=None,
+             meta_ctx=None, reasoning=None):
+        self.calls.append({"max_tokens": max_tokens, "reasoning": reasoning,
+                           "serialization": bool((meta_ctx or {}).get("serialization"))})
+        return dict(self.replies.pop(0))
+
+    def chat_with_tools(self, messages, tools, executor, max_tokens=4096,
+                        temperature=0.2, max_rounds=6, progress=None, meta_ctx=None,
+                        reasoning=None):
+        self.calls.append({"max_tokens": max_tokens, "reasoning": reasoning,
+                           "serialization": bool((meta_ctx or {}).get("serialization"))})
+        r = dict(self.replies.pop(0))
+        r.setdefault("rounds", 1)
+        r.setdefault("tool_calls", 0)
+        return r
+
+
+def _ok_intent_reply():
+    return {"text": _OK_INTENT, "reasoning": "", "finish_reason": "stop",
+            "cost_usd": 0.0}
+
+
+def test_truncated_json_triggers_one_plain_tool_free_serialization_call(tmp_path):
+    # finish=length WITH content -> truncated_json -> exactly ONE serialization
+    # call: tool-free (plain chat), reasoning disabled, FIXED cap (never the
+    # old cap-doubling), then the parseable result commits.
+    client = _ScriptedClient([
+        {"text": '{"goal": "x", truncated', "reasoning": "", "finish_reason": "length",
+         "cost_usd": 0.0},
+        _ok_intent_reply(),
+    ])
+    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert res["status"] == "ok"
+    assert len(client.calls) == 2
+    first, serial = client.calls
+    assert first["serialization"] is False
+    assert serial["serialization"] is True
+    assert serial["reasoning"] == {"enabled": False}
+    assert serial["max_tokens"] == 8192            # fixed serialization cap for intent
+    assert serial["max_tokens"] == 2 * first["max_tokens"]  # ... which is 2x the 4096 normal
+    # the cap is the policy's fixed value, never doubled AGAIN: a truncated
+    # serialization result would go terminal, not raise to 16384.
+
+
+def test_second_truncated_serialization_result_terminates_as_truncated_json(tmp_path):
+    client = _ScriptedClient([
+        {"text": '{"goal": "x", truncated', "reasoning": "", "finish_reason": "length",
+         "cost_usd": 0.0},
+        {"text": '{"goal": "y", still', "reasoning": "", "finish_reason": "length",
+         "cost_usd": 0.0},
+    ])
+    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert res["status"] == "failed"
+    last = res["results"][-1]
+    assert len(client.calls) == 2                    # normal + ONE serialization, no more
+    assert last["failure_kind"] == "truncated_json"  # classified by its own signature
+    assert last["attempts"] == 2                     # actual calls, not max_retries+1
+
+
+def test_malformed_normal_stop_terminates_as_invalid_json_after_one_serialization(tmp_path):
+    client = _ScriptedClient([
+        {"text": "not json at all", "reasoning": "", "finish_reason": "stop",
+         "cost_usd": 0.0},
+        {"text": "still not json", "reasoning": "", "finish_reason": "stop",
+         "cost_usd": 0.0},
+    ])
+    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert res["status"] == "failed"
+    last = res["results"][-1]
+    assert len(client.calls) == 2
+    assert last["failure_kind"] == "invalid_json"
+    assert last["attempts"] == 2
+
+
+def test_serialization_available_once_across_commit_corrections(tmp_path):
+    # The single serialization retry is per drive_stage(), NOT per
+    # commit-correction attempt: a malformed commit-correction response after
+    # the serialization call consumed the budget goes terminal.
+    # Call 1 (normal): truncated -> serialization (call 2) returns `{}` which
+    # PARSES but stage-commit rejects (missing fields) -> commit-correction
+    # attempt 1 (call 3) returns malformed -> serialization exhausted ->
+    # terminal invalid_json. Exactly 3 calls proves the parseable serialization
+    # output reached _commit (otherwise the stage would have ended at 2).
+    client = _ScriptedClient([
+        {"text": '{"goal": "x", truncated', "reasoning": "", "finish_reason": "length",
+         "cost_usd": 0.0},
+        {"text": "{}", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+        {"text": "malformed again", "reasoning": "", "finish_reason": "stop",
+         "cost_usd": 0.0},
+    ])
+    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert res["status"] == "failed"
+    last = res["results"][-1]
+    assert len(client.calls) == 3                    # normal + serialization + correction
+    assert sum(1 for c in client.calls if c["serialization"]) == 1  # only once
+    assert last["failure_kind"] == "invalid_json"
+
+
+def test_serialization_goes_through_chat_even_for_bom(tmp_path):
+    # Serialization recovery must route through plain client.chat() for the BOM
+    # stage too — never chat_with_tools, so no tool rounds and no transcript
+    # resend. The normal attempt is the tool loop (chat_with_tools).
+    client = _ScriptedClient([
+        {"text": '{"parts": [trunc', "reasoning": "", "finish_reason": "length",
+         "cost_usd": 0.0},
+        {"text": "also bad", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+    ])
+    res = run_session(tmp_path, "a USB-powered LED", ["bom"], client=client)
+    assert res["status"] == "failed"
+    assert len(client.calls) == 2
+    assert client.calls[0]["serialization"] is False   # chat_with_tools (tool loop)
+    assert client.calls[1]["serialization"] is True    # plain chat for serialization
+    assert client.calls[1]["max_tokens"] == 32768      # bom serialization cap
+    assert client.calls[1]["reasoning"] == {"enabled": False}
+    assert res["results"][-1]["failure_kind"] == "invalid_json"
+
+
+def test_empty_length_takes_reasoning_recovery_not_invalid_json(tmp_path):
+    # finish=length with NO content is provider exhaustion (even without the
+    # client loop detector firing): reasoning is disabled for the retry, and
+    # the failure is NEVER mislabeled invalid_json.
+    client = _ScriptedClient([
+        {"text": "", "reasoning": "x" * 600, "finish_reason": "length",
+         "cost_usd": 0.0},
+        _ok_intent_reply(),
+    ])
+    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert res["status"] == "ok"
+    assert client.calls[0]["serialization"] is False
+    assert client.calls[1]["reasoning"] == {"enabled": False}  # reasoning-disabled retry
+    assert sum(1 for c in client.calls if c["serialization"]) == 0  # no serialization call
+
+
+def test_empty_length_twice_fails_as_reasoning_loop(tmp_path):
+    client = _ScriptedClient([
+        {"text": "", "reasoning": "x" * 600, "finish_reason": "length",
+         "cost_usd": 0.0},
+        {"text": "", "reasoning": "y" * 600, "finish_reason": "length",
+         "cost_usd": 0.0},
+    ])
+    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert res["status"] == "failed"
+    last = res["results"][-1]
+    assert last["failure_kind"] == "reasoning_loop"   # never invalid_json
+    assert last["error"] == "reasoning_loop"
+    assert len(client.calls) == 2
+
+
+def test_failure_kind_reaches_stage_status(tmp_path):
+    client = _ScriptedClient([
+        {"text": "not json", "reasoning": "", "finish_reason": "stop",
+         "cost_usd": 0.0},
+        {"text": "not json either", "reasoning": "", "finish_reason": "stop",
+         "cost_usd": 0.0},
+    ])
+    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    last = res["results"][-1]
+    sp = tmp_path / ".kicraft" / "state.json"
+    sj = json.loads(sp.read_text(encoding="utf-8"))
+    entry = sj["stage_status"]["intent"]
+    assert entry["failure_kind"] == "invalid_json"
+    assert entry["attempts"] == last["attempts"] == 2
+
+
+# ---- provider/transport failures never enter JSON recovery -----------------
+
+class _RaisingClient:
+    """Raises the configured exception on every completion call."""
+
+    def __init__(self, exc):
+        self.exc = exc
+        self.calls = 0
+
+        class _G:
+            def status(self):
+                return {"spent_total_usd": 0.0}
+        self.guard = _G()
+
+    def chat(self, messages, max_tokens=4096, temperature=0.2, progress=None,
+             meta_ctx=None, reasoning=None):
+        self.calls += 1
+        raise self.exc
+
+
+def test_provider_failure_is_terminal_and_not_sent_through_json_recovery(tmp_path):
+    client = _RaisingClient(requests.exceptions.HTTPError("402 Payment Required"))
+    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert res["status"] == "failed"
+    last = res["results"][-1]
+    assert last["failure_kind"] == "provider_error"
+    assert last["attempts"] == 1
+    assert client.calls == 1     # terminal: NO serialization retry, NO re-parse
+
+
+def test_transport_failure_is_terminal_and_not_sent_through_json_recovery(tmp_path):
+    client = _RaisingClient(requests.exceptions.ConnectionError("connection reset"))
+    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert res["status"] == "failed"
+    last = res["results"][-1]
+    assert last["failure_kind"] == "transport_error"
+    assert client.calls == 1
+
+
+def test_budget_exceeded_propagates_and_is_not_classified(tmp_path):
+    from kicraft.server.spend_guard import BudgetExceeded
+
+    class _BrokeClient(_RaisingClient):
+        def __init__(self):
+            super().__init__(BudgetExceeded("run budget exhausted"))
+    with pytest.raises(BudgetExceeded):
+        run_session(tmp_path, "a USB-powered LED", ["intent"], client=_BrokeClient())
+
+
+def test_response_policy_falls_back_for_mock_clients():
+    from kicraft.server.config import StageResponsePolicy
+    from kicraft.server.stage_driver import _response_policy
+    # a settings-less mock client: floored normal cap, no reasoning control
+    # (no design_reasoning), the fixed serialization cap, one serialization retry
+    pol = _response_policy(object(), "bom", 4096)
+    assert isinstance(pol, StageResponsePolicy)
+    assert pol.normal_max_tokens == 16384        # caller 4096 floored up for bom
+    assert pol.normal_reasoning is None          # no .s -> no reasoning control
+    assert pol.serialization_max_tokens == 32768
+    assert pol.serialization_retries == 1
+    # a HIGHER caller cap is preserved (never floored down)
+    assert _response_policy(object(), "bom", 20000).normal_max_tokens == 20000
+    # a settings object WITH the policy method drives the values
+    class _S:
+        def design_stage_policy(self, stage, normal_max_tokens):
+            return StageResponsePolicy(normal_max_tokens, {"enabled": False}, 12345, 1)
+
+    class _C:
+        s = _S()
+    pol2 = _response_policy(_C(), "bom", 4096)
+    assert pol2.serialization_max_tokens == 12345
+    assert pol2.normal_reasoning == {"enabled": False}

@@ -939,6 +939,11 @@ class StageStatus(BaseModel):
     cpu_s: float | None = None
     rounds: int | None = None  # BOM tool-loop rounds (None for single-shot stages)
     tool_calls: int | None = None  # total BOM tool calls (None for non-BOM stages)
+    # Terminal failure classification for a failed stage: one of
+    # reasoning_loop / truncated_json / invalid_json / commit_rejected /
+    # provider_error / transport_error. None for a committed stage or a legacy
+    # project written before the field existed. Derived, never free-form.
+    failure_kind: str | None = None
 
 
 class ConversationState(BaseModel):

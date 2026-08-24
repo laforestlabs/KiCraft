@@ -15,6 +15,7 @@ Covers the changes that cut web-KiCraft LLM cost:
 from __future__ import annotations
 
 import json
+import types
 
 import pytest
 import requests
@@ -302,9 +303,10 @@ def test_web_cost_report_legacy_rows_cluster_by_time(tmp_path):
 
 class _TruncThenOkClient:
     """First reply is truncated at the output cap; second is a valid intent slot.
-    Records the max_tokens it was asked for on each call."""
+    Records the max_tokens and reasoning policy it was asked for on each call."""
     def __init__(self, ok_reply):
         self.max_tokens_seen = []
+        self.reasoning_seen = []
         self._ok = ok_reply
         self._n = 0
 
@@ -317,6 +319,7 @@ class _TruncThenOkClient:
     def chat(self, messages, max_tokens=4096, temperature=0.2, progress=None, meta_ctx=None,
              reasoning=None):
         self.max_tokens_seen.append(max_tokens)
+        self.reasoning_seen.append(reasoning)
         self._n += 1
         if self._n == 1:
             return {"text": '{ "goal": "x", truncated', "cost_usd": 0.0,
@@ -324,7 +327,7 @@ class _TruncThenOkClient:
         return {"text": self._ok, "cost_usd": 0.0, "reasoning": "", "finish_reason": "stop"}
 
 
-def test_truncated_reply_raises_max_tokens_then_commits(tmp_path):
+def test_truncated_reply_triggers_one_fixed_cap_serialization_call(tmp_path):
     ok = json.dumps({"goal": "a USB-powered LED", "constraints": [], "named_parts": [],
                      "inferred_expertise": "intermediate", "assumptions": [],
                      "project_stem": "USB_LED"})
@@ -332,7 +335,102 @@ def test_truncated_reply_raises_max_tokens_then_commits(tmp_path):
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     assert res["status"] == "ok"                                 # recovered, committed
     assert len(client.max_tokens_seen) == 2
-    assert client.max_tokens_seen[1] > client.max_tokens_seen[0]  # cap was raised, not re-tried flat
+    # the serialization retry uses the policy's FIXED cap (never the old
+    # cap-doubling) and disables reasoning
+    assert client.max_tokens_seen[1] == 8192
+    assert client.max_tokens_seen[1] > client.max_tokens_seen[0]  # still more headroom
+    assert client.reasoning_seen[1] == {"enabled": False}
+
+
+# ---- completion metadata flows through chat / tool rounds / forced final ----
+
+def test_stream_records_cap_and_reasoning_policy_in_ledger_meta(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=None):
+        captured["payload"] = json
+        return _FakeResp([
+            {"choices": [{"delta": {"content": '{"x":1}'}}]},
+            {"choices": [{"finish_reason": "stop", "delta": {}}]},
+            _usage_chunk(cached=800),
+        ])
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    c = CappedOpenRouterClient(Settings(api_key="k"), guard=_RecordingGuard())
+    c.chat([{"role": "user", "content": "hi"}], max_tokens=8192,
+           reasoning={"enabled": False})
+    rec = c.guard.records[-1]
+    assert rec["meta"]["max_tokens"] == 8192
+    assert rec["meta"]["reasoning_policy"] == {"enabled": False}
+    assert rec["meta"]["content_chars"] == len('{"x":1}')
+    # the payload carries the control keys only, never _meta/_meta_ctx
+    assert "_meta" not in captured["payload"] and "_meta_ctx" not in captured["payload"]
+
+
+def test_chat_returns_completion_telemetry(monkeypatch):
+    def fake_post(url, headers=None, json=None, timeout=None, stream=None):
+        return _FakeResp([
+            {"choices": [{"delta": {"content": '{"x":1}'}}]},
+            {"choices": [{"finish_reason": "stop", "delta": {}}]},
+            _usage_chunk(cached=800),
+        ])
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    c = CappedOpenRouterClient(Settings(api_key="k"), guard=_RecordingGuard())
+    r = c.chat([{"role": "user", "content": "hi"}], max_tokens=4096,
+               reasoning={"max_tokens": 2048})
+    assert r["provider"] == "DeepSeek"
+    assert r["usage"]["prompt_tokens"] == 1000
+    assert r["usage"]["completion_tokens"] == 50
+    assert r["max_tokens"] == 4096
+    assert r["reasoning_policy"] == {"max_tokens": 2048}
+    assert r["content_chars"] == len('{"x":1}')
+    assert r["finish_reason"] == "stop"
+
+
+def test_chat_with_tools_rounds_carry_telemetry(monkeypatch):
+    client = CappedOpenRouterClient(
+        settings=types.SimpleNamespace(),
+        guard=types.SimpleNamespace(status=lambda: {}))
+
+    def fake_stream(body, on_delta=None):
+        return ({"role": "assistant", "content": '{"ok": true}',
+                 "finish_reason": "stop", "provider": "DeepSeek",
+                 "usage": {"prompt_tokens": 5},
+                 "requested_max_tokens": body.get("max_tokens"),
+                 "reasoning_policy": body.get("reasoning")}, 0.0)
+
+    monkeypatch.setattr(client, "_stream", fake_stream)
+    r = client.chat_with_tools([{"role": "user", "content": "go"}], tools=[],
+                               executor=lambda n, a: "ok", max_rounds=1,
+                               max_tokens=16384, reasoning={"enabled": False})
+    assert r["provider"] == "DeepSeek"
+    assert r["usage"] == {"prompt_tokens": 5}
+    assert r["max_tokens"] == 16384
+    assert r["reasoning_policy"] == {"enabled": False}
+    assert r["finish_reason"] == "stop"
+
+
+def test_chat_with_tools_forced_final_carries_telemetry(monkeypatch):
+    client = CappedOpenRouterClient(
+        settings=types.SimpleNamespace(),
+        guard=types.SimpleNamespace(status=lambda: {}))
+
+    def fake_stream(body, on_delta=None):
+        return ({"role": "assistant", "content": None, "finish_reason": "tool_calls",
+                 "tool_calls": [{"id": "t1", "type": "function",
+                                 "function": {"name": "list_parts", "arguments": "{}"}}],
+                 "requested_max_tokens": body.get("max_tokens"),
+                 "reasoning_policy": body.get("reasoning")}, 0.0)
+
+    monkeypatch.setattr(client, "_stream", fake_stream)
+    r = client.chat_with_tools([{"role": "user", "content": "go"}], tools=[],
+                               executor=lambda n, a: "ok", max_rounds=1,
+                               max_tokens=16384, reasoning=None)
+    assert r.get("forced_final") is True          # budget exhausted -> cold final
+    assert r["max_tokens"] == 16384               # the final round still carries the cap
+    assert r["reasoning_policy"] is None
+    assert r["finish_reason"] == "tool_calls"
 
 
 # ---- ERC-recovery offender parsing (web) ----------------------------------

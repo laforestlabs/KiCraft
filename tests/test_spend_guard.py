@@ -70,8 +70,51 @@ def test_record_stage_writes_resource_row(guard):
     with sqlite3.connect(guard.path) as c:
         row = c.execute(
             "SELECT run_id, stage, ok, attempts, rounds, tool_calls, wall_s, cpu_s, "
-            "cost_usd FROM stage_runs").fetchone()
-    assert row == ("p1-1", "bom", 1, 1, 4, 12, 33.7, 1.8, 0.04)
+            "cost_usd, failure_kind FROM stage_runs").fetchone()
+    assert row == ("p1-1", "bom", 1, 1, 4, 12, 33.7, 1.8, 0.04, None)
+
+
+def test_record_stage_classifies_failures(guard):
+    guard.record_stage(run_id="p1-1", stage="bom", ok=False, attempts=2,
+                       rounds=6, tool_calls=8, wall_s=20.0, cpu_s=0.5,
+                       cost_usd=0.02, failure_kind="invalid_json")
+    guard.record_stage(run_id="p1-1", stage="wiring", ok=False, attempts=5,
+                       rounds=None, tool_calls=None, wall_s=30.0, cpu_s=0.9,
+                       cost_usd=0.03, failure_kind="commit_rejected")
+    with sqlite3.connect(guard.path) as c:
+        kinds = c.execute(
+            "SELECT stage, failure_kind FROM stage_runs ORDER BY stage").fetchall()
+    assert kinds == [("bom", "invalid_json"), ("wiring", "commit_rejected")]
+
+
+def test_stage_runs_schema_migrates_legacy_ledger_and_keeps_rows(tmp_path):
+    # A ledger created BEFORE the failure_kind column must gain it via ALTER
+    # TABLE (CREATE TABLE IF NOT EXISTS alone cannot), keep its old rows, and
+    # accept classified rows alongside them — all readable by the cost report.
+    db = tmp_path / "ledger.db"
+    with sqlite3.connect(db) as c:
+        c.execute(
+            "CREATE TABLE stage_runs ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, run_id TEXT, "
+            "stage TEXT NOT NULL, ok INTEGER, attempts INTEGER, rounds INTEGER, "
+            "tool_calls INTEGER, wall_s REAL, cpu_s REAL, cost_usd REAL)")
+        c.execute(
+            "INSERT INTO stage_runs (ts, run_id, stage, ok, attempts, wall_s, "
+            "cost_usd) VALUES ('2026-07-01T00:00:00+00:00', 'p9-1', 'bom', 0, 4, "
+            "10.0, 0.01)")
+    SpendGuard(SimpleNamespace(ledger_path=str(db)))  # init runs the migration
+    guard = SpendGuard(SimpleNamespace(ledger_path=str(db)))
+    guard.record_stage(run_id="p9-2", stage="bom", ok=False, attempts=2,
+                       rounds=6, tool_calls=8, wall_s=20.0, cpu_s=0.5,
+                       cost_usd=0.02, failure_kind="invalid_json")
+    from kicraft.cli.web_cost_report import load_stage_runs
+    rows = load_stage_runs(str(db))
+    assert len(rows) == 2
+    legacy = next(r for r in rows if r["run_id"] == "p9-1")
+    classified = next(r for r in rows if r["run_id"] == "p9-2")
+    assert legacy["failure_kind"] is None        # old row stays readable, unclassified
+    assert classified["failure_kind"] == "invalid_json"
+    assert classified["attempts"] == 2
 
 
 def test_record_stage_nulls_rounds_for_single_shot_stages(guard):
