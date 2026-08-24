@@ -1,5 +1,11 @@
 # Parts-Library Coverage Gap: vendor missing high-use parts + standing worklist
 
+**Status: SHIPPED 2026-08-24 (commit `294955b`)** — Part A bundles vendored (`pj-320d`,
+`mcp6004`, `pj-320a`, `pj-320a-4p`, `tl074`, `dc005-barrel-jack`), Part B blocks registered in
+`kicraft/parts_library/core_blocks.json`, Part C scan bucket live (`triage scan` "home-fetched
+libraries", `_LIB_FLAG_BUCKETS` in `kicraft/cli/triage.py`). The §7 open questions (core-block
+steering strength) still stand.
+
 ## 1. Problem
 
 The curated library (`kicraft/parts_library/`) has no canonical bundle for the

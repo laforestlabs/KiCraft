@@ -1,6 +1,6 @@
 # Identical-subcircuit leaf reuse (isomorphic dedup)
 
-**Status:** IN PROGRESS 2026-07-17 (`placement-streamline`). User directive: boards with
+**Status:** SHIPPED (2026-08): `solve_subcircuits.py` drives `plan_leaf_replication` / `materialize_sibling` and `autoexperiment.py` runs `finalize_leaf_replication` after pinning (kill switch `cfg['leaf_replication']`, default on). History: IN PROGRESS 2026-07-17 on `placement-streamline`. User directive: boards with
 repeated identical functionality (KC-AXHQTP: OPTO CH1–4, RELAY CH1–4) must place the **exact
 same leaf** for every instance — solve the best version once, duplicate it identically so all
 instances function identically. See [[kicraft-identical-leaf-reuse]].

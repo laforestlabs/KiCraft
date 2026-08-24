@@ -1,5 +1,12 @@
 # KiCadRoutingTools exploration handoff
 
+> **SUPERSEDED (2026-08-24):** this session handoff ends with "Not viable yet / FreeRouting
+> remains the default", but the follow-up cutover reversed that decision: commit `3464ec5`
+> made KRT the default router and `a25e039` (2026-08-22) removed FreeRouting entirely, leaving
+> KiCad Routing Tools as the sole router. Current state lives in
+> `docs/kicad-routing-tools-experiment.md`; treat everything below as the historical
+> exploration record.
+
 Last updated: 2026-08-12
 
 ## Execution status

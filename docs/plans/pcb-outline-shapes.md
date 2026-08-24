@@ -1,3 +1,5 @@
+> **HISTORICAL — FreeRouting era.** FreeRouting was removed from the codebase on commit `a25e039` (2026-08-22); KiCad Routing Tools is the sole router (`kicraft/autoplacer/kicad_routing_tools.py`). File paths, `freerouting_*` config keys, `*_pre_freerouting.kicad_pcb` artifacts, and routing-behavior claims below describe the removed router — re-verify against the KRT adapter before relying on them.
+
 # Plan: arbitrary PCB outline shapes (incl. compound shapes like a snowman)
 
 **Status:** proposed (2026-06-30, rev 2)

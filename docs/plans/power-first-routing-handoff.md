@@ -1,5 +1,12 @@
 # Power-first routing — research + fix handoff (then: the missing repair pass)
 
+> **SUPERSEDED (2026-08-22):** the shipped two-phase power-first routing was removed with
+> FreeRouting (commit `a25e039`); KiCad Routing Tools is the sole router and has no
+> power-first phase (net-order knob: `kicad_routing_tools_ordering`, default `mps`). The DSN
+> tricks, `freerouting_*` knobs, and `_restrict_dsn_routing_to_nets` machinery below no longer
+> exist; the power/GND pour + strand-repair tail described in §A3 remains live
+> (`kicraft/autoplacer/brain/gnd_pour.py`).
+
 ## RESULTS (2026-07-21, session after the handoff — read this first)
 
 **Shipped: A2 (two-phase freerouting), user-selected over A1.** Phase 1

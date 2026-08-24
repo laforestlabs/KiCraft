@@ -97,7 +97,7 @@ PY
 
 ## 2. PCB deep-dive (rc 6/7)
 
-`triage run` already localized the failure layer: per-leaf acceptance (with the `no_unconnected` gate detail), the parent round (chosen by **`bool(routed_validation)`**, not the last attempted), `stamp_drc` (shorts>0 PRE-route = the composer stamped overlapping copper), repair evidence, and FreeRouting fingerprints.
+`triage run` already localized the failure layer: per-leaf acceptance (with the `no_unconnected` gate detail), the parent round (chosen by **`bool(routed_validation)`**, not the last attempted), `stamp_drc` (shorts>0 PRE-route = the composer stamped overlapping copper), repair evidence, and KRT fingerprints (`backend` / `successful_nets` / `failed_nets` / `input_copper_preservation` in the routing stats).
 
 **(a) Localize a dirty routed board by footprint.** `inspect_parent` re-runs kicad-cli DRC (authoritative — can differ from the persisted `routed_validation`), clusters violations by ref with real-mm coords, and flags packing waste. `--baseline <old report.json>` diffs before/after a replay.
 
@@ -112,29 +112,29 @@ A DRC error clustered on one ref across designs (§ scan `clearance footprint re
 
 **(b) Unconnected nets — the decision order.** Work through these IN ORDER; "add a tie/pour rule" is the *last* resort, not the default story:
 
-1. **Reachability** (was the pad ever escapable?): the leaf block of `triage run` shows `failure_class` — `escape_infeasible` is a **geometry constant** (the escape planner found no legal exit at the board's rule set; re-rolling seeds is worthless; the verdict is honest, not a bug). Check `interface_escapes` for **bare cross-leaf pads** (a leaf lays 0 copper on single-pad interface nets — the dominant rc7 residue class pre-`2d6329e`; kill switch `interface_escape_enabled`). A `no_clear_path` after escapes is a **PLACEMENT bug to fix KiCraft-side** — routing is FreeRouting's job; there is no in-house router coming (C1-v2/A* was scrapped, not shelved).
-2. **Budget** (did routing get its time?): watchdog-killed FR (`freerouting_returncode == -1`), a timeout that left a *partial SES* (does not raise → GND-skip fallback never fires → 26-30 unc), and the crash-priced scheduler ("only ONE parent round ran on a big budget" = a crashed round's cost extrapolated the next round over budget — a scheduler symptom, not placement). Budget knobs: `parent_s_per_interconnect`, `parent_probe_s_per_interconnect`, `parent_gnd_plane_probe_timeout_s`.
+1. **Reachability** (was the pad ever escapable?): the leaf block of `triage run` shows `failure_class` — `escape_infeasible` is a **geometry constant** (the escape planner found no legal exit at the board's rule set; re-rolling seeds is worthless; the verdict is honest, not a bug). Check `interface_escapes` for **bare cross-leaf pads** (a leaf lays 0 copper on single-pad interface nets — the dominant rc7 residue class pre-`2d6329e`; kill switch `interface_escape_enabled`). A `no_clear_path` after escapes is a **PLACEMENT bug to fix KiCraft-side** — routing is KRT's job (sole router since `a25e039`); there is no in-house router (C1-v2/A* was scrapped, not shelved).
+2. **Budget** (did routing get its time?): `KiCadRoutingTools timed out after Ns` = the route hit `kicad_routing_tools_timeout_s` (default 120) and the attempt failed loudly (a timed-out attempt never yields a board — no partial-output acceptance). `KiCadRoutingTools failed (rc=N)` carries the last 4000 chars of router output. The crash-priced scheduler symptom ("only ONE parent round ran on a big budget" = a crashed round's cost extrapolated the next round over budget) is a scheduler symptom, not placement. Knobs: `kicad_routing_tools_timeout_s`, `kicad_routing_tools_max_iterations`, `kicad_routing_tools_max_ripup`.
 3. **Composition** (leaves fine, parent geometry wrong): corridor/mouth misalignment between leaf mouths and the parent channel — dedup to the open **N5b compose mouth-line alignment** workstream before re-reporting. For strand/mouth findings, attribute to the leaf that **set** the edge, not the flagged ref (a foreign leaf's cap poking past another leaf's mouth line is the setter's fault).
 
 The cross-leaf vs not-in-interconnect split `triage` prints uses `interconnect_net_names`; a net **in** it = parent-interconnect failure (seed growth can help), **not in** it = leaf-internal open **or** a bare cross-leaf pad that defeated interconnect *inference* (check `interface_escapes` before blaming the leaf). Artifacts predating the key can't be split — `triage` says so.
 
-**(c) FreeRouting failure signatures** (evidence tiers: `.kicraft/build.log` line → `.experiments/rounds/round_NNNN.json` stdout/stderr tails → parent-artifact `debug.json` `freerouting_stats.returncode`; `triage run` scans the last two):
+**(c) KRT failure signatures** (evidence tiers: `.kicraft/build.log` line → `.experiments/subcircuits/<slug>/debug.json` `routed_validation` + routing stats — `triage run` iterates these debug files):
 
 | signature | meaning | guard / fix |
 |---|---|---|
-| `The normalization of net 'X' failed.` then silence → rc −1 | FR 1.9 hangs FOREVER on a closed loop in LOCKED wiring | `_break_locked_wire_cycles` DSN sanitizer (`[dsn-sanitize]` line; fixture `tests/data/fr_hang_5v_loop.dsn`) — a fresh hang = regression or new loop source |
-| ~487s rounds + "no SES output (rc=-1)" with non-ASCII in DSN | FR deadlocks on 'Ω' etc. in PN fields | `_sanitize_dsn_part_numbers`; check the DSN for non-ASCII to separate from the loop hang |
-| `freerouting_returncode == -1` | watchdog SIGKILLed the JVM | which of the two hangs above — read the round tails |
-| `FreeRouting crash (rc=…)` / `produced no SES output after 2 attempts` | genuine crash; scheduler half-discounts the round cost | round tails + `commands.parent_route_exit_code` |
-| `fine-pitch routing rule (…)` | board-wide clearance auto-lowered from the densest intra-footprint gap, floored at `freerouting_min_clearance_mm` | **first suspect on USB-C B-row failures** (0.153 stamped where 0.127 needed — run_06/run_09 class); the stamped rays surface only as dangling *warnings* |
-| `power-first phase routed …` / `power_first: {failed}` | two-phase power-first route ran (or failed and fell back single-phase) | `routed_validation.power_first` |
-| repair lines (`gnd island repair`, `power strand repair`, `leaf signal repair`) | repair passes DID run — their records persist in `routed_validation` | absence of a record ≠ "never ran" only on pre-07-21 artifacts (compactor whitelist) |
+| `KiCadRoutingTools unavailable: …` (preflight) | host misconfiguration: unset `kicad_routing_tools_path`, wrong source version (≠`0.20.2`) / commit (≠`3ceb773…`) / native (≠`0.20.1`), or no sibling `.kicad_pro` | `solve_subcircuits` escalates as ONE hard failure, not per-leaf. Re-provision per `docs/kicad-routing-tools-experiment.md` |
+| `KiCadRoutingTools timed out after Ns` | route exceeded `kicad_routing_tools_timeout_s`; process group killed; no board accepted | raise budget or fix placement (reachability first, §2b) |
+| `KiCadRoutingTools failed (rc=N): <tail>` | nonzero exit or no output board; last 4000 chars of router stdout/stderr are in the message | read the tail — it names the net/rule that failed |
+| `failed to preserve input copper (missing traces=N, vias=M)` | `RoutingCopperPreservationError`: KRT dropped stamped/locked copper | routed output retained at its path for diagnosis — inspect it, never accept the board |
+| repair lines (`gnd island repair`, `power strand repair`, `leaf signal repair`) | repair passes DID run — records persist in `routed_validation` (router-independent, still live) | absence of a record ≠ "never ran" only on pre-07-21 artifacts (compactor whitelist) |
+
+Routing stats are `backend: "kicad-routing-tools"` plus `successful_nets` / `failed_nets` / `elapsed_s` / `input_copper_preservation` / `json_summaries` (the first `JSON_SUMMARY` backs the scalar counters).
 
 **(d) Other rc6/rc7 root causes:**
 
 | Symptom | Root cause | Where |
 |---|---|---|
-| rc6, leaves accepted, empty `routed_validation` every round | FR can't route the composed parent as placed | `_compose_route` + budget knobs; `_search/_rejected_candidates.json` when all K candidates were rejected |
+| rc6, leaves accepted, empty `routed_validation` every round | KRT can't route the composed parent as placed | `_compose_route` + budget knobs; `_search/_rejected_candidates.json` when all K candidates were rejected |
 | rc6 degenerate 0-leaf | BOM chose an all-in-one SoC → architecture collapsed | architecture/BOM partition by IC domain |
 | rc7 `stamp_drc.shorts > 0` | composer stamped overlapping copper | `breakout_stubs.py` foreign-pad guard |
 | rc7 `illegal_routed_geometry` | usually REAL `clearance`/`copper_edge_clearance` violations — **not** copper outside the outline (that premise was disproven; 5/5 flagged boards had zero outline escapes) | `illegal_geometry_repair` record shows the rip pass verdict |
@@ -160,7 +160,7 @@ Orthogonal defect classes the ERC/DRC gates cannot see. Read each block:
 ```bash
 BL="<RUN>/.kicraft/build.log"
 tail -80 "$BL"
-grep -nEi 'error|traceback|freerout|segv|exception|unconnected|dsn-sanitize|power-first|no_clear_path|ESCAPE INFEASIBLE|Interface escapes|normalization of net|fine-pitch routing rule|island repair|strand repair|signal repair|code=' "$BL" | tail -50
+grep -nEi 'error|traceback|KiCadRoutingTools|segv|exception|unconnected|no_clear_path|ESCAPE INFEASIBLE|Interface escapes|island repair|strand repair|signal repair|code=' "$BL" | tail -50
 ```
 
 Fallback for deployed web runs with no build.log: `journalctl -u kicraft-web` around the run's mtime. Ignore crawler noise (`/robots.txt`, `/ads.txt`, 404s).
@@ -178,7 +178,7 @@ grep -rli '<signature>' ~/.claude/projects/-home-kicraft-KiCraft/memory/ ~/.omp/
 ```
 
 - **KNOWN-FIXED**: all affected runs predate the fix → stale, one appendix line. Any hit after → **REGRESSION**, name the commit.
-- **KNOWN-DEFERRED** (current live set: N5b mouth alignment / run_10 GPIO fan-out, GND strand (run_14), USB-C fine-pitch local override (run_06/09), reconcile advancing-chain + crystal-donor deaths, shaped-nesting bbox circumscription (run_29)): report "known-deferred, +N runs since <date>", cite the plan/memory, and do **NOT** invent a workaround — masking gates and post-route band-aids are rejected on principle (fix-at-source).
+- **KNOWN-DEFERRED** (current live set: N5b mouth alignment / run_10 GPIO fan-out, GND strand (run_14), reconcile advancing-chain + crystal-donor deaths, shaped-nesting bbox circumscription (run_29)): report "known-deferred, +N runs since <date>", cite the plan/memory, and do **NOT** invent a workaround — masking gates and post-route band-aids are rejected on principle (fix-at-source).
 - **NEW** → (b).
 
 **(b) Replay-reproduce on current code — $0, no LLM.** Single-run route verdicts are coin flips (deltas cross grade buckets on identical input) — N-of-3 before claiming a regression; ±3–6 pt judge deltas are noise.
@@ -197,7 +197,7 @@ Rules that keep replays honest:
 - Replay **cannot verify synthesis-side, parts-library, or LLM-prompt/guardrail changes** (frozen seed, no LLM) — use the offline `synthesize` subcommand for synthesis code, and **§6(b.1) `stage_driver replay`** for wiring/prompt/guardrail changes.
 - A/B a fix with the project's `autoplacer.json` **kill switch**, same code both sides, and measure both sides in **ONE** script after one replay each — never compare artifacts across separately-scripted replay runs.
 - Never DRC/validate a board copied without its `.kicad_pro`/`.prl`/`*_autoplacer.json` — bare copies get default netclass rules stamped in and manufacture fake violations.
-- Bisection is legitimate (the FR loop-hang was pinned by bisecting 31 locked wires to one segment).
+- Bisection is legitimate (a FreeRouting-era loop-hang was once pinned by bisecting 31 locked wires to one segment).
 
 **(b.1) LLM-stage replay — prompt / guardrail / wiring changes (live LLM, budget-capped $0.25).** The deterministic `cli_app replay` above can't exercise the LLM design stages, so a prompt or commit-validation change was previously unverifiable — it fell to a human. `stage_driver` now drives those stages live against the run's frozen `state.json`:
 

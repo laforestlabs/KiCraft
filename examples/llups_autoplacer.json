@@ -104,7 +104,6 @@
         "U4",
         "U5"
     ],
-    "freerouting_jar": "/home/jason/.local/lib/freerouting-1.9.0.jar",
     "project_name": "LLUPS",
     "pcb_file": "LLUPS.kicad_pcb",
     "parent_placement": {

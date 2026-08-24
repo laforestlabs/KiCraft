@@ -5,6 +5,8 @@
 > gate at the promote sites + honest promote mtime (`shutil.copy`) + run-id
 > provenance + the `kicraft artifacts` query. The canonical contract now lives in
 > **`docs/ARTIFACTS.md`**. This file is kept for the investigation history.
+> (FreeRouting removed 2026-08-22, commit `a25e039`: the `parent_pre_freerouting.kicad_pcb`
+> artifact named below is now `parent_placed.kicad_pcb`; routing-behavior claims are historical.)
 
 **Severity:** high (silent) — it makes the codebase's own deterministic placement-iteration
 tool show a board the current run did not produce. It cost a multi-hour debugging session
