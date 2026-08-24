@@ -1,0 +1,1848 @@
+(kicad_sch
+	(version 20250114)
+	(generator "eeschema")
+	(generator_version "9.0")
+	(uuid "4693ba5a-90fa-4334-a060-88ddb9fda4fb")
+	(paper "A4")
+
+	(lib_symbols
+		(symbol "al8860mp:AL8860MP-13"
+    (in_bom yes)
+    (on_board yes)
+    (property
+      "Reference"
+      "U"
+      (id 0)
+      (at 0 10.16 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Value"
+      "AL8860MP-13"
+      (id 1)
+      (at 0 -10.16 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Footprint"
+      "al8860mp:MSOP-8_L3.0-W3.0-P0.65-LS4.9-BL-EP1.8"
+      (id 2)
+      (at 0 -12.70 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Datasheet"
+      "https://www.lcsc.com/datasheet/C500782.pdf"
+      (id 3)
+      (at 0 -15.24 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Manufacturer"
+      "DIODES(美台)"
+      (id 4)
+      (at 0 -17.78 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "MPN"
+      "AL8860MP-13"
+      (id 5)
+      (at 0 -20.32 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "LCSC Part"
+      "C500782"
+      (id 6)
+      (at 0 -22.86 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "ki_keywords"
+      "LED Drivers"
+      (id 8)
+      (at 0 -25.40 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (symbol "AL8860MP-13_0_1"
+      (rectangle
+        (start -7.62 7.62)
+        (end 7.62 -7.62)
+        (stroke (width 0) (type default))
+        (fill (type background))
+      )
+      (circle
+        (center -6.35 6.35)
+        (radius 0.38)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (pin unspecified line
+        (at -10.16 2.54 0)
+        (length 2.54)
+        (name "SET" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -10.16 -0.00 0)
+        (length 2.54)
+        (name "GND" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -10.16 -2.54 0)
+        (length 2.54)
+        (name "GND" (effects (font (size 1.27 1.27))))
+        (number "3" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -10.16 -5.08 0)
+        (length 2.54)
+        (name "CTRL" (effects (font (size 1.27 1.27))))
+        (number "4" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 10.16 -5.08 180)
+        (length 2.54)
+        (name "SW" (effects (font (size 1.27 1.27))))
+        (number "5" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 10.16 -2.54 180)
+        (length 2.54)
+        (name "SW" (effects (font (size 1.27 1.27))))
+        (number "6" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 10.16 -0.00 180)
+        (length 2.54)
+        (name "NC" (effects (font (size 1.27 1.27))))
+        (number "7" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 10.16 2.54 180)
+        (length 2.54)
+        (name "VIN" (effects (font (size 1.27 1.27))))
+        (number "8" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 10.16 5.08 180)
+        (length 2.54)
+        (name "EP" (effects (font (size 1.27 1.27))))
+        (number "9" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )
+		(symbol "Device:L"
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 1.016)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "L"
+			(at -1.27 0 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "L"
+			(at 1.905 0 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Inductor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "inductor choke coil reactor magnetic"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_fp_filters" "Choke_* *Coil* Inductor_* L_*"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "L_0_1"
+			(arc
+				(start 0 2.54)
+				(mid 0.6323 1.905)
+				(end 0 1.27)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(arc
+				(start 0 1.27)
+				(mid 0.6323 0.635)
+				(end 0 0)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(arc
+				(start 0 0)
+				(mid 0.6323 -0.635)
+				(end 0 -1.27)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(arc
+				(start 0 -1.27)
+				(mid 0.6323 -1.905)
+				(end 0 -2.54)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "L_1_1"
+			(pin passive line
+				(at 0 3.81 270)
+				(length 1.27)
+				(name "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 0 -3.81 90)
+				(length 1.27)
+				(name "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+		(symbol "ss14:SS14"
+    (in_bom yes)
+    (on_board yes)
+    (property
+      "Reference"
+      "D"
+      (id 0)
+      (at 0 5.08 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Value"
+      "SS14"
+      (id 1)
+      (at 0 -5.08 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Footprint"
+      "ss14:SMA_L4.3-W2.6-LS5.0-RD"
+      (id 2)
+      (at 0 -7.62 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Datasheet"
+      "https://www.lcsc.com/datasheet/C2837270.pdf"
+      (id 3)
+      (at 0 -10.16 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Manufacturer"
+      "JSMSEMI(杰盛微)"
+      (id 4)
+      (at 0 -12.70 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "MPN"
+      "SS14"
+      (id 5)
+      (at 0 -15.24 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "LCSC Part"
+      "C2837270"
+      (id 6)
+      (at 0 -17.78 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "ki_keywords"
+      "Super Barrier Rectifier (SBR)"
+      (id 8)
+      (at 0 -20.32 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (symbol "SS14_0_1"
+      (polyline
+        (pts
+          (xy 1.27 1.52) (xy -1.27 -0.00) (xy 1.27 -1.78) (xy 1.27 1.52)
+        )
+        (stroke (width 0) (type default))
+        (fill (type background))
+      )
+      (polyline
+        (pts
+          (xy -1.27 2.03) (xy -1.27 -2.03)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (pin unspecified line
+        (at -5.08 -0.00 0)
+        (length 3.81)
+        (name "C" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 5.08 -0.00 180)
+        (length 3.81)
+        (name "A" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )
+		(symbol "Device:R"
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "R"
+			(at 2.032 0 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "R"
+			(at 0 0 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at -1.778 0 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "R res resistor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_fp_filters" "R_*"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "R_0_1"
+			(rectangle
+				(start -1.016 -2.54)
+				(end 1.016 2.54)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "R_1_1"
+			(pin passive line
+				(at 0 3.81 270)
+				(length 1.27)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 0 -3.81 90)
+				(length 1.27)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+		(symbol "Device:C"
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0.254)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "C"
+			(at 0.635 2.54 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "C"
+			(at 0.635 -2.54 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" ""
+			(at 0.9652 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Unpolarized capacitor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "cap capacitor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_fp_filters" "C_*"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "C_0_1"
+			(polyline
+				(pts
+					(xy -2.032 0.762) (xy 2.032 0.762)
+				)
+				(stroke
+					(width 0.508)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy -2.032 -0.762) (xy 2.032 -0.762)
+				)
+				(stroke
+					(width 0.508)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "C_1_1"
+			(pin passive line
+				(at 0 3.81 270)
+				(length 2.794)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 0 -3.81 90)
+				(length 2.794)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+		(symbol "jnj-led:JNJ-LTJW0115W120_63MIL_6500-7000K"
+    (in_bom yes)
+    (on_board yes)
+    (property
+      "Reference"
+      "U"
+      (id 0)
+      (at 0 6.35 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Value"
+      "JNJ-LTJW0115W120/63MIL/6500-7000K"
+      (id 1)
+      (at 0 -6.35 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Footprint"
+      "jnj-led:LED-SMD_3P-L3.5-W3.5-RD-C"
+      (id 2)
+      (at 0 -8.89 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Datasheet"
+      "https://www.lcsc.com/datasheet/C19185884.pdf"
+      (id 3)
+      (at 0 -11.43 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Manufacturer"
+      "JNJOPTO(强生光电)"
+      (id 4)
+      (at 0 -13.97 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "MPN"
+      "JNJ-LTJW0115W120/63MIL/6500-7000K"
+      (id 5)
+      (at 0 -16.51 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "LCSC Part"
+      "C19185884"
+      (id 6)
+      (at 0 -19.05 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "ki_keywords"
+      "Light Emitting Diodes (LED)"
+      (id 8)
+      (at 0 -21.59 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (symbol "JNJ-LTJW0115W120_63MIL_6500-7000K_0_1"
+      (polyline
+        (pts
+          (xy 1.27 2.79) (xy -1.27 1.27) (xy 1.27 -0.51) (xy 1.27 2.79)
+        )
+        (stroke (width 0) (type default))
+        (fill (type background))
+      )
+      (polyline
+        (pts
+          (xy -1.27 3.05) (xy -1.27 -0.51)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (text "-"
+        (at -3.30 -1.39 0)
+        (effects (font (size 3.17 3.17)))
+      )
+      (text "+"
+        (at 5.08 -1.14 0)
+        (effects (font (size 3.17 3.17)))
+      )
+      (pin unspecified line
+        (at -5.08 1.27 0)
+        (length 3.81)
+        (name "Cathode" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 5.08 1.27 180)
+        (length 3.81)
+        (name "Anode" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -5.08 -1.27 0)
+        (length 3.81)
+        (name "3" (effects (font (size 1.27 1.27))))
+        (number "3" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )
+		(symbol "power:GND"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -6.35 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "GND_0_1"
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 -1.27) (xy 1.27 -1.27) (xy 0 -2.54) (xy -1.27 -1.27) (xy 0 -1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "GND_1_1"
+			(pin power_in line
+				(at 0 0 270)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+		(symbol "power:VBUS"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "VBUS"
+			(at 0 3.556 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"VBUS\""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "VBUS_0_1"
+			(polyline
+				(pts
+					(xy -0.762 1.27) (xy 0 2.54)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0 2.54) (xy 0.762 1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 2.54)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "VBUS_1_1"
+			(pin power_in line
+				(at 0 0 90)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+	)
+
+	(symbol
+		(lib_id "al8860mp:AL8860MP-13")
+		(at 116.84 118.11 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "923304e4-b384-50a4-8ecb-cdb8feb79df9")
+		(property "Reference" "U1"
+			(at 116.84 110.49 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "AL8860MP-13"
+			(at 116.84 107.95 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "al8860mp:MSOP-8_L3.0-W3.0-P0.65-LS4.9-BL-EP1.8"
+			(at 116.84 125.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 116.84 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C500782, buck LED driver 1A"
+			(at 116.84 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "U1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:L")
+		(at 92.71 115.57 270)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "1a55b552-be0d-5f3b-bc6d-6825f499bd7f")
+		(property "Reference" "L1"
+			(at 87.122 114.3 90)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "47uH"
+			(at 87.122 116.84 90)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Footprint" "Inductor_SMD:L_7.3x7.3_H3.5"
+			(at 92.71 122.57 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 92.71 115.57 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C167974, 47uH 1.15A shielded power inductor"
+			(at 92.71 115.57 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "L1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "ss14:SS14")
+		(at 203.2 116.84 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "c31b993f-f842-50ae-8734-6a8f4660c1a9")
+		(property "Reference" "D2"
+			(at 196.342 115.57 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "SS14"
+			(at 196.342 118.11 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Footprint" "ss14:SMA_L4.3-W2.6-LS5.0-RD"
+			(at 203.2 123.84 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 203.2 116.84 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C2837270, Schottky 40V 1A"
+			(at 203.2 116.84 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "D2")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 140.97 120.65 90)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "bde5bf44-db37-5582-9b88-c61335b8d23d")
+		(property "Reference" "R3"
+			(at 135.382 119.38 270)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "0.1"
+			(at 135.382 121.92 270)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Footprint" "Resistor_SMD:R_1206_3216Metric"
+			(at 140.97 127.65 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 140.97 120.65 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "1A sense: 0.1V/0.1R=1A LCSC C136889"
+			(at 140.97 120.65 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "R3")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 127 93.98 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "4a70e82d-6d65-531e-9ecc-443e6bfe8dca")
+		(property "Reference" "C2"
+			(at 122.682 92.71 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "100nF"
+			(at 122.682 95.25 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+			(at 127 100.98 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 127 93.98 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C14663"
+			(at 127 93.98 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "C2")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 106.68 93.98 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "f24fdf9b-7148-52c8-8a1d-a5881b84433c")
+		(property "Reference" "C3"
+			(at 110.998 92.71 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "10uF"
+			(at 110.998 95.25 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Capacitor_SMD:C_0805_2012Metric"
+			(at 106.68 100.98 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 106.68 93.98 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C3039694, 10uF 25V X7R 0805"
+			(at 106.68 93.98 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "C3")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 139.7 93.98 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "7a29d402-d2f6-5b61-aa4d-00e1ae97d2a2")
+		(property "Reference" "C4"
+			(at 144.018 92.71 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "1uF"
+			(at 144.018 95.25 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+			(at 139.7 100.98 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 139.7 93.98 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C5199872"
+			(at 139.7 93.98 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "C4")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "jnj-led:JNJ-LTJW0115W120_63MIL_6500-7000K")
+		(at 182.88 118.11 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "98ba58f5-b2d7-5e75-8880-e8b02bc55eda")
+		(property "Reference" "LED1"
+			(at 182.88 114.3 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "JNJ-LTJW0115W120/63MIL"
+			(at 182.88 111.76 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "jnj-led:LED-SMD_3P-L3.5-W3.5-RD-C"
+			(at 182.88 125.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 182.88 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C19185884, 1A power LED 3535"
+			(at 182.88 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "LED1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:VBUS")
+		(at 127 87.63 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "25aa166a-2f3a-5804-b0ca-b09f13e3831d")
+		(property "Reference" "#PWR59136"
+			(at 127 84.63 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "VBUS"
+			(at 127 90.63 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "#PWR59136")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:VBUS")
+		(at 106.68 87.63 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "2afe6dbf-5183-5409-9e72-8c74d3593a95")
+		(property "Reference" "#PWR01287"
+			(at 106.68 84.63 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "VBUS"
+			(at 106.68 90.63 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "#PWR01287")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:VBUS")
+		(at 139.7 87.63 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "0f0b930c-bc5b-5725-9183-9d558fd247a4")
+		(property "Reference" "#PWR15262"
+			(at 139.7 84.63 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "VBUS"
+			(at 139.7 90.63 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "#PWR15262")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:VBUS")
+		(at 129.54 113.03 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "023641b8-a6a0-54a0-8482-0cdee7b5818f")
+		(property "Reference" "#PWR11574"
+			(at 129.54 110.03 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "VBUS"
+			(at 129.54 116.03 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "#PWR11574")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:VBUS")
+		(at 104.14 120.65 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "494d5ff5-a761-56c3-93e8-1fb3ad04da84")
+		(property "Reference" "#PWR23591"
+			(at 104.14 117.65 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "VBUS"
+			(at 104.14 123.65 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "#PWR23591")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 127 100.33 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "f1b77717-06b6-5c52-883c-65f48544591e")
+		(property "Reference" "#PWR17052"
+			(at 127 97.33 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 127 103.33 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "#PWR17052")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 106.68 100.33 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "85480ff9-2cf6-5da6-9d56-478d6c2da862")
+		(property "Reference" "#PWR70431"
+			(at 106.68 97.33 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 106.68 103.33 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "#PWR70431")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 139.7 100.33 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "9aa2312c-0738-5e66-888d-9aaea817367f")
+		(property "Reference" "#PWR47635"
+			(at 139.7 97.33 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 139.7 103.33 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "#PWR47635")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 104.14 118.11 90)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "12e48a15-571f-5b65-913b-929032f84503")
+		(property "Reference" "#PWR22793"
+			(at 104.14 115.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 104.14 121.11 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "#PWR22793")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 105.41 120.65 90)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "053c67cd-64df-5285-a3ed-28e7603610d8")
+		(property "Reference" "#PWR39562"
+			(at 105.41 117.65 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 105.41 123.65 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "#PWR39562")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 128.27 113.03 270)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "071366d6-6c20-50fc-b0cb-67722718c2de")
+		(property "Reference" "#PWR42628"
+			(at 128.27 110.03 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 128.27 116.03 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "#PWR42628")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 147.32 123.19 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "3ee6c51e-996d-5207-b050-19b30ced1076")
+		(property "Reference" "#PWR85862"
+			(at 147.32 120.19 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 147.32 126.19 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "#PWR85862")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 175.26 121.92 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "5ff8b796-5dcb-5e0b-8f36-c1e1029905b2")
+		(property "Reference" "#PWR08392"
+			(at 175.26 118.92 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 175.26 124.92 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "#PWR08392")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 210.82 119.38 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "f6ff6ecf-49d9-58bf-8d02-a6d8a3c45d3f")
+		(property "Reference" "#PWR24854"
+			(at 210.82 116.38 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 210.82 122.38 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "LED_CC_DRIVER"
+				(path "/4693ba5a-90fa-4334-a060-88ddb9fda4fb"
+					(reference "#PWR24854")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(wire
+		(pts (xy 127 123.19) (xy 129.54 123.19))
+		(stroke (width 0) (type default))
+		(uuid "411e5add-aff4-5001-92f5-b972c226291d")
+	)
+	(wire
+		(pts (xy 127 120.65) (xy 129.54 120.65))
+		(stroke (width 0) (type default))
+		(uuid "322e47a6-8a67-528c-9aec-98f39ffccce1")
+	)
+	(wire
+		(pts (xy 96.52 115.57) (xy 99.06 115.57))
+		(stroke (width 0) (type default))
+		(uuid "cd7bd016-d711-552c-bc5e-06b1af483406")
+	)
+	(wire
+		(pts (xy 88.9 115.57) (xy 86.36 115.57))
+		(stroke (width 0) (type default))
+		(uuid "4caaa28f-7d40-51a4-8931-ab1f806d128f")
+	)
+	(wire
+		(pts (xy 198.12 116.84) (xy 195.58 116.84))
+		(stroke (width 0) (type default))
+		(uuid "cdb3553b-504a-5578-968c-587c12e038b7")
+	)
+	(wire
+		(pts (xy 187.96 116.84) (xy 190.5 116.84))
+		(stroke (width 0) (type default))
+		(uuid "380af83c-5a54-53f9-8f26-af6332827ddb")
+	)
+	(wire
+		(pts (xy 106.68 115.57) (xy 104.14 115.57))
+		(stroke (width 0) (type default))
+		(uuid "ca1007b0-d5de-5101-a00f-fe89a32532b7")
+	)
+	(wire
+		(pts (xy 137.16 120.65) (xy 134.62 120.65))
+		(stroke (width 0) (type default))
+		(uuid "10752683-52df-5f8d-ace7-2dd25dfa49da")
+	)
+	(wire
+		(pts (xy 127 90.17) (xy 127 87.63))
+		(stroke (width 0) (type default))
+		(uuid "0d196edd-c528-52b0-868f-23f6d81208db")
+	)
+	(wire
+		(pts (xy 106.68 90.17) (xy 106.68 87.63))
+		(stroke (width 0) (type default))
+		(uuid "853e29e6-ab96-57c4-bbc2-d7f34acc66d5")
+	)
+	(wire
+		(pts (xy 139.7 90.17) (xy 139.7 87.63))
+		(stroke (width 0) (type default))
+		(uuid "5e3344a9-37df-58a4-aed4-a43a1b606948")
+	)
+	(wire
+		(pts (xy 127 115.57) (xy 129.54 115.57))
+		(stroke (width 0) (type default))
+		(uuid "d18d3e32-57fb-5359-bba3-df50c21fbc6f")
+	)
+	(wire
+		(pts (xy 129.54 115.57) (xy 129.54 113.03))
+		(stroke (width 0) (type default))
+		(uuid "f24ee7de-ecc0-59ea-9965-d702a163223c")
+	)
+	(wire
+		(pts (xy 106.68 123.19) (xy 104.14 123.19))
+		(stroke (width 0) (type default))
+		(uuid "ed9564db-7c7e-5c6f-8f6f-2c2616d711b2")
+	)
+	(wire
+		(pts (xy 104.14 123.19) (xy 104.14 120.65))
+		(stroke (width 0) (type default))
+		(uuid "8655eb64-def1-598f-a7e0-87feee888e10")
+	)
+	(wire
+		(pts (xy 177.8 116.84) (xy 175.26 116.84))
+		(stroke (width 0) (type default))
+		(uuid "7e28b479-8a5f-58a8-987a-937adfc77c6b")
+	)
+	(wire
+		(pts (xy 177.8 119.38) (xy 175.26 119.38))
+		(stroke (width 0) (type default))
+		(uuid "b62dc8dc-b3d6-5115-ab60-c415b2334981")
+	)
+	(wire
+		(pts (xy 175.26 116.84) (xy 175.26 119.38))
+		(stroke (width 0) (type default))
+		(uuid "9918463a-462d-5362-9df5-db7db1f9add8")
+	)
+	(wire
+		(pts (xy 127 97.79) (xy 127 100.33))
+		(stroke (width 0) (type default))
+		(uuid "ef80ffa2-ca40-5832-bc03-d337b579e8fb")
+	)
+	(wire
+		(pts (xy 106.68 97.79) (xy 106.68 100.33))
+		(stroke (width 0) (type default))
+		(uuid "17fc8184-c364-565b-9eda-fe761f723ead")
+	)
+	(wire
+		(pts (xy 139.7 97.79) (xy 139.7 100.33))
+		(stroke (width 0) (type default))
+		(uuid "ad426edb-1917-5d89-b4ad-b14dd970aa25")
+	)
+	(wire
+		(pts (xy 106.68 118.11) (xy 104.14 118.11))
+		(stroke (width 0) (type default))
+		(uuid "eb69d3a6-cf19-5288-887a-29ca8655d81e")
+	)
+	(wire
+		(pts (xy 106.68 120.65) (xy 105.41 120.65))
+		(stroke (width 0) (type default))
+		(uuid "45486e92-56d0-5244-aa18-e7d64c8ce784")
+	)
+	(wire
+		(pts (xy 127 113.03) (xy 128.27 113.03))
+		(stroke (width 0) (type default))
+		(uuid "ca5ce877-db5c-5c15-88bd-e31e4389ccdc")
+	)
+	(wire
+		(pts (xy 144.78 120.65) (xy 147.32 120.65))
+		(stroke (width 0) (type default))
+		(uuid "3e07e9a7-3fbb-5c7f-8825-9c73e0eb753a")
+	)
+	(wire
+		(pts (xy 147.32 120.65) (xy 147.32 123.19))
+		(stroke (width 0) (type default))
+		(uuid "1365f648-a113-5311-9c6a-394feb57295c")
+	)
+	(wire
+		(pts (xy 175.26 119.38) (xy 175.26 121.92))
+		(stroke (width 0) (type default))
+		(uuid "c32e2b1e-0fa7-56a6-9de5-e5da655bb706")
+	)
+	(wire
+		(pts (xy 208.28 116.84) (xy 210.82 116.84))
+		(stroke (width 0) (type default))
+		(uuid "07890ca2-0fa8-50dd-8ab9-c71f510c37c4")
+	)
+	(wire
+		(pts (xy 210.82 116.84) (xy 210.82 119.38))
+		(stroke (width 0) (type default))
+		(uuid "5adca41d-5c45-5479-9b25-0e9da99a1605")
+	)
+	(wire
+		(pts (xy 104.14 115.57) (xy 101.6 115.57))
+		(stroke (width 0) (type default))
+		(uuid "3d83018f-e69e-52d0-aa06-33224f1f69b0")
+	)
+	(label "SW"
+		(at 129.54 123.19 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "df780d16-871c-5fce-8e27-e7bf200fb96c")
+	)
+	(label "SW"
+		(at 129.54 120.65 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "80d7007b-3f41-5ee9-9206-da2b03b5ec1e")
+	)
+	(label "SW"
+		(at 99.06 115.57 180)
+		(effects (font (size 1.27 1.27)) (justify right))
+		(uuid "3988be23-2a8a-56cd-b512-68b685d0f7ca")
+	)
+	(label "LED_ANODE"
+		(at 86.36 115.57 180)
+		(effects (font (size 1.27 1.27)) (justify right))
+		(uuid "200a8fe0-45aa-5310-8375-ef94aac84645")
+	)
+	(label "LED_ANODE"
+		(at 195.58 116.84 180)
+		(effects (font (size 1.27 1.27)) (justify right))
+		(uuid "d60fa1a7-b2fe-5f98-9631-ae3689a871e7")
+	)
+	(label "LED_ANODE"
+		(at 190.5 116.84 0)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "32781e3a-e420-5bf2-aa61-61b64c0eb352")
+	)
+	(label "SET"
+		(at 101.6 115.57 180)
+		(effects (font (size 1.27 1.27)) (justify right))
+		(uuid "6bb6e48d-6d31-5f98-9777-8607c19ba7de")
+	)
+	(label "SET"
+		(at 134.62 120.65 180)
+		(effects (font (size 1.27 1.27)) (justify right))
+		(uuid "894abdd6-df40-5507-98b0-2d374c042cc7")
+	)
+	(no_connect
+		(at 127 118.11)
+		(uuid "c0a4ec74-847c-5c0e-9fe6-18563440be52")
+	)
+
+	(sheet_instances
+		(path "/942522b5-675c-4432-9255-2d932bf58c25"
+			(page "LED_DRIVER")
+		)
+	)
+)

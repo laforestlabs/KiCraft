@@ -1,0 +1,554 @@
+(kicad_sch
+	(version 20250114)
+	(generator "eeschema")
+	(generator_version "9.0")
+	(uuid "9589d7eb-77f0-4bd5-bf0b-3b51a91456f2")
+	(paper "A4")
+
+	(lib_symbols
+		(symbol "db9-male-right-angle:DMR-9P"
+    (in_bom yes)
+    (on_board yes)
+    (property
+      "Reference"
+      "DSub"
+      (id 0)
+      (at 0 15.24 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Value"
+      "DMR-9P"
+      (id 1)
+      (at 0 -15.24 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Footprint"
+      "db9-male-right-angle:DSUB-TH_DMR-9P"
+      (id 2)
+      (at 0 -17.78 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Datasheet"
+      "https://lcsc.com/product-detail/D-Sub-Connectors_DMR-XP-9P_C141880.html"
+      (id 3)
+      (at 0 -20.32 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Manufacturer"
+      "Ckmtw(灿科盟)"
+      (id 4)
+      (at 0 -22.86 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "MPN"
+      "D-DMR009PM-D002"
+      (id 5)
+      (at 0 -25.40 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "LCSC Part"
+      "C141880"
+      (id 6)
+      (at 0 -27.94 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "ki_keywords"
+      "D-Sub/DVI/HDMI Connectors"
+      (id 8)
+      (at 0 -30.48 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (symbol "DMR-9P_0_1"
+      (circle
+        (center 1.27 -7.62)
+        (radius 0.76)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (circle
+        (center 1.27 -2.54)
+        (radius 0.76)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (circle
+        (center 1.27 2.54)
+        (radius 0.76)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (circle
+        (center 1.27 7.62)
+        (radius 0.76)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (circle
+        (center -1.27 -10.16)
+        (radius 0.76)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (circle
+        (center -1.27 -5.08)
+        (radius 0.76)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (circle
+        (center -1.27 -0.00)
+        (radius 0.76)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (circle
+        (center -1.27 5.08)
+        (radius 0.76)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (circle
+        (center -1.27 10.16)
+        (radius 0.76)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (arc
+        (start 2.89 11.38)
+        (mid 3.55 10.92)
+        (end 3.81 10.16)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (arc
+        (start -3.80 11.85)
+        (mid -3.41 12.54)
+        (end -2.42 12.65)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (arc
+        (start 3.81 -10.16)
+        (mid 3.55 -10.93)
+        (end 2.87 -11.39)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (arc
+        (start -2.42 -12.65)
+        (mid -3.41 -12.54)
+        (end -3.80 -11.85)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy -2.03 5.08) (xy -3.81 5.08)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy -2.03 10.16) (xy -3.81 10.16)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy -2.03 -0.00) (xy -3.81 -0.00)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy -3.81 7.62) (xy 0.51 7.62)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy -2.03 -5.08) (xy -3.81 -5.08)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy -3.81 2.54) (xy 0.51 2.54)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy -2.03 -10.16) (xy -3.81 -10.16)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy -3.81 -2.54) (xy 0.51 -2.54)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy -3.81 -7.62) (xy 0.51 -7.62)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy -3.81 -10.16) (xy -3.81 10.16)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 3.81 -10.16) (xy 3.81 10.16)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy -3.81 11.94) (xy -3.81 10.16)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 2.79 11.43) (xy -2.54 12.70)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy -3.81 -11.94) (xy -3.81 -10.16)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 2.79 -11.43) (xy -2.54 -12.70)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (pin bidirectional line
+        (at -8.89 10.16 0)
+        (length 5.08)
+        (name "5" (effects (font (size 1.27 1.27))))
+        (number "5" (effects (font (size 1.27 1.27))))
+      )
+      (pin bidirectional line
+        (at -8.89 5.08 0)
+        (length 5.08)
+        (name "4" (effects (font (size 1.27 1.27))))
+        (number "4" (effects (font (size 1.27 1.27))))
+      )
+      (pin bidirectional line
+        (at -8.89 -0.00 0)
+        (length 5.08)
+        (name "3" (effects (font (size 1.27 1.27))))
+        (number "3" (effects (font (size 1.27 1.27))))
+      )
+      (pin bidirectional line
+        (at -8.89 -5.08 0)
+        (length 5.08)
+        (name "2" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27))))
+      )
+      (pin bidirectional line
+        (at -8.89 -10.16 0)
+        (length 5.08)
+        (name "1" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))
+      )
+      (pin bidirectional line
+        (at -8.89 7.62 0)
+        (length 5.08)
+        (name "9" (effects (font (size 1.27 1.27))))
+        (number "9" (effects (font (size 1.27 1.27))))
+      )
+      (pin bidirectional line
+        (at -8.89 2.54 0)
+        (length 5.08)
+        (name "8" (effects (font (size 1.27 1.27))))
+        (number "8" (effects (font (size 1.27 1.27))))
+      )
+      (pin bidirectional line
+        (at -8.89 -2.54 0)
+        (length 5.08)
+        (name "7" (effects (font (size 1.27 1.27))))
+        (number "7" (effects (font (size 1.27 1.27))))
+      )
+      (pin bidirectional line
+        (at -8.89 -7.62 0)
+        (length 5.08)
+        (name "6" (effects (font (size 1.27 1.27))))
+        (number "6" (effects (font (size 1.27 1.27))))
+      )
+      (pin bidirectional line
+        (at 8.89 2.54 180)
+        (length 5.08)
+        (name "MH2" (effects (font (size 1.27 1.27))))
+        (number "11" (effects (font (size 1.27 1.27))))
+      )
+      (pin bidirectional line
+        (at 8.89 -2.54 180)
+        (length 5.08)
+        (name "MH1" (effects (font (size 1.27 1.27))))
+        (number "10" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )
+		(symbol "power:GND"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -6.35 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "GND_0_1"
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 -1.27) (xy 1.27 -1.27) (xy 0 -2.54) (xy -1.27 -1.27) (xy 0 -1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "GND_1_1"
+			(pin power_in line
+				(at 0 0 270)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+	)
+
+	(symbol
+		(lib_id "db9-male-right-angle:DMR-9P")
+		(at 149.86 105.41 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "e13591a8-1bbe-57c6-99b8-db9fbd6234ba")
+		(property "Reference" "J2"
+			(at 149.86 92.71 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "D-DMR009PM-D002"
+			(at 149.86 90.17 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "db9-male-right-angle:DSUB-TH_DMR-9P"
+			(at 149.86 112.41 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 149.86 105.41 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C141880"
+			(at 149.86 105.41 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "CAN_BUS_NODE"
+				(path "/9589d7eb-77f0-4bd5-bf0b-3b51a91456f2"
+					(reference "J2")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 138.43 105.41 90)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(dnp no)
+		(uuid "729684ca-27a3-5893-835c-9d3a08f4ba16")
+		(property "Reference" "#PWR63451"
+			(at 138.43 102.41 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "GND"
+			(at 138.43 108.41 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(instances
+			(project "CAN_BUS_NODE"
+				(path "/9589d7eb-77f0-4bd5-bf0b-3b51a91456f2"
+					(reference "#PWR63451")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(wire
+		(pts (xy 140.97 110.49) (xy 138.43 110.49))
+		(stroke (width 0) (type default))
+		(uuid "0f7a7545-c613-5eb3-84a4-74de6d8429c1")
+	)
+	(wire
+		(pts (xy 140.97 107.95) (xy 138.43 107.95))
+		(stroke (width 0) (type default))
+		(uuid "2932ec68-4fca-57b7-9d8d-3ce165a1cef6")
+	)
+	(wire
+		(pts (xy 140.97 105.41) (xy 138.43 105.41))
+		(stroke (width 0) (type default))
+		(uuid "127c2914-e890-560b-aea6-eecf866d8b3b")
+	)
+	(no_connect
+		(at 140.97 115.57)
+		(uuid "61f4a97c-ed8f-5510-b9f2-2c72e62c7404")
+	)
+	(no_connect
+		(at 140.97 100.33)
+		(uuid "88db8493-c3bc-50ee-a6df-ff4ffeb724e9")
+	)
+	(no_connect
+		(at 140.97 95.25)
+		(uuid "4a2a4355-17ef-54b5-b053-eb3f112cb7da")
+	)
+	(no_connect
+		(at 140.97 113.03)
+		(uuid "96b23cfc-b551-5aef-8b38-0097e7fcf8a5")
+	)
+	(no_connect
+		(at 140.97 102.87)
+		(uuid "5d8d8805-cbc4-5f2f-9838-3e3fc9918ab2")
+	)
+	(no_connect
+		(at 140.97 97.79)
+		(uuid "46951f5a-9c8a-5d08-b76a-72b91b3cc00d")
+	)
+	(no_connect
+		(at 158.75 107.95)
+		(uuid "01d18628-c05f-5635-a681-aaaaf1e89455")
+	)
+	(no_connect
+		(at 158.75 102.87)
+		(uuid "21605e84-73dd-5298-9fc2-a5dd73ed02ab")
+	)
+	(hierarchical_label "CANH" (shape bidirectional)
+		(at 138.43 110.49 180)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "141ce93c-3d19-5c36-b799-8bc8c66b7f67")
+	)
+	(hierarchical_label "CANL" (shape bidirectional)
+		(at 138.43 107.95 180)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "6de2ea9f-aa11-5fb5-a444-c4889615849d")
+	)
+
+	(sheet_instances
+		(path "/2fcc755f-c545-4eac-9e50-ed83b2d5fc61"
+			(page "CAN_BUS_CONNECTOR")
+		)
+	)
+)

@@ -1,11 +1,11 @@
 """Curated, prebuilt KiCraft sample projects for the web showcase.
 
 Single source of truth, reused two ways (mirrors how ``examples.py`` feeds the
-prompt box): the public landing page (``web._render_landing``) shows an
-interactive 3D model of each board (a ``<model-viewer>`` of ``board.glb``, with the
-rendered ``board.png`` as poster / no-JS fallback) and the brief that produced it,
-and the logged-in explorer (``web.samples_page``) opens the real KiCad files in
-KiCanvas.
+prompt box): the public landing page (``web._render_landing``) shows a static
+board render and links to each public ``/examples/<id>`` detail page. Those detail
+pages show the interactive ``<model-viewer>`` of ``board.glb`` with the rendered
+``board.png`` as poster / no-JS fallback; the logged-in explorer
+(``web.samples_page``) opens the same real KiCad files in KiCanvas.
 
 Every sample is a *finished* KiCraft output: a hierarchical schematic, real parts,
 and a placed-and-routed board, curated from a real build into
@@ -138,33 +138,36 @@ class Sample:
 # brief yields a design like the one shown.
 SAMPLES: list[Sample] = [
     Sample(
-        id="usb-pd-trigger",
-        title="USB-C PD trigger",
-        blurb="A USB-C Power Delivery trigger that outputs a switch-selectable "
-              "9 V, 12 V, or 20 V.",
-        prompt="A USB-C PD trigger board that outputs a switch-selectable 9 V, "
-               "12 V, or 20 V.",
-        stem="USB_PD_TRIGGER",
-        sheets=2, parts=12, featured=True,
+        id="esp32-hub75-controller",
+        title="ESP32 HUB75 controller",
+        blurb="USB-C PD-powered ESP32-S3 controller for a HUB75 display, addressable LED string, and speaker.",
+        prompt="An ESP32-S3 HUB75 display controller with USB-C PD 5 V input, an addressable LED output, and a small speaker output.",
+        stem="USBPD_ESP32_HUB75",
+        sheets=7, parts=40, featured=True,
     ),
     Sample(
-        id="weather-sensor",
-        title="BMP280 weather sensor",
-        blurb="A barometric pressure and temperature sensor on a Qwiic/STEMMA bus, "
-              "USB-C powered.",
-        prompt="A BMP280 barometric weather sensor on a Qwiic/STEMMA bus, USB-C.",
-        stem="BMP280_QWIIC_USB_C",
+        id="esp32-robot-controller",
+        title="ESP32 robot controller",
+        blurb="ESP32-S3 robot controller with dual motor drivers, 2S battery regulation, and motor terminals.",
+        prompt="An ESP32-S3 robot controller with two DRV8833 motor drivers, a buck regulator from a 2S battery, and motor screw terminals.",
+        stem="ESP32_S3_ROBOT_CONTROLLER",
+        sheets=6, parts=36,
+    ),
+    Sample(
+        id="can-bus-node",
+        title="CAN bus node",
+        blurb="STM32 CAN node with transceiver, DB9 connector, and switchable bus termination.",
+        prompt="A CAN bus node: an STM32 MCU, an SN65HVD230 transceiver, a DB9 connector, and a switchable bus terminator.",
+        stem="CAN_BUS_NODE",
+        sheets=6, parts=20,
+    ),
+    Sample(
+        id="led-current-driver",
+        title="1 A LED current driver",
+        blurb="USB-C powered constant-current LED driver with a heatsink copper area.",
+        prompt="A 1 A constant-current driver for a single power LED, USB-C input, with a heatsink copper area, no microcontroller.",
+        stem="LED_CC_DRIVER",
         sheets=3, parts=13,
-    ),
-    Sample(
-        id="bench-breakout",
-        title="USB-C bench breakout",
-        blurb="Bench power from USB-C: regulated 3.3 V and 5 V rails with status "
-              "LEDs.",
-        prompt="A bench breakout: USB-C in, regulated 3.3 V and 5 V rails with "
-               "status LEDs.",
-        stem="BENCH_BREAKOUT",
-        sheets=5, parts=19,
     ),
 ]
 

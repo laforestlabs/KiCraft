@@ -1,18 +1,14 @@
-"""Showcase sample-project manifest: asset integrity + the no-LLM-before-signup gate.
+"""Showcase sample-project manifest: asset integrity and public detail routes.
 
 The public landing page and the in-app explorer both render the curated samples in
-``kicraft.server.samples``. Two things must hold:
-
-  * every advertised sample is actually present on disk (board, preview render, and
-    all schematic sheets), so neither surface shows a broken image or a dead viewer;
-  * every public call-to-action routes through ``/signup``. The hard product rule is
-    that no model runs before a valid email signup, so the showcase must be pure
-    static assets and its links must never trigger a design run.
+``kicraft.server.samples``. The landing cards open a public detail page containing
+the static 3D model, schematic, and routed board; only the action to build a new
+design remains signup-gated.
 """
 from __future__ import annotations
 
+import inspect
 import re
-from urllib.parse import quote
 
 from kicraft.server import samples as S
 from kicraft.server import web
@@ -80,13 +76,30 @@ def test_exactly_one_featured_sample():
     assert S.featured_sample() is featured[0]
 
 
-def test_landing_cards_route_through_signup_only():
-    """The gate: a public sample card links to /signup with the brief prefilled, and
-    never to a route that could start a design (no /?prompt=, no run trigger)."""
+def test_landing_cards_open_public_example_pages():
+    """Landing cards must open static public example pages, not start a build."""
     for s in S.SAMPLES:
         card = web._landing_sample_card(s)
-        assert f'href="/signup?prompt={quote(s.prompt)}"' in card
+        assert f'href="/examples/{s.id}"' in card
         assert s.board_png_url in card
-        # No public path may deep-link into the workspace (which can spend tokens).
+        assert "/signup?prompt=" not in card
         assert "/?prompt=" not in card
-        assert "href=\"/\"" not in card
+        assert 'href="/"' not in card
+
+
+def test_public_example_detail_page_is_3d_and_not_login_gated():
+    """Each public detail page exposes the curated 3D viewer without auth."""
+    routes = [getattr(route, "path", "") for route in web.app.routes]
+    assert "/examples/{sample_id}" in routes
+    src = inspect.getsource(web.sample_detail_page)
+    assert "_current_user" not in src
+    assert "_render_sample_3d(sample)" in src
+    assert "/signup?prompt=" in src
+
+
+def test_landing_card_keeps_prompt_as_display_only():
+    """The card displays the brief but leaves build navigation to the detail CTA."""
+    for s in S.SAMPLES:
+        card = web._landing_sample_card(s)
+        assert s.prompt in card
+        assert "/signup?prompt=" not in card

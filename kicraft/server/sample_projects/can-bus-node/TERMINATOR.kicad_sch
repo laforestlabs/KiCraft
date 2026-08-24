@@ -1,0 +1,453 @@
+(kicad_sch
+	(version 20250114)
+	(generator "eeschema")
+	(generator_version "9.0")
+	(uuid "654e5172-58f9-445b-b823-8ea0965a14c2")
+	(paper "A4")
+
+	(lib_symbols
+		(symbol "slide-switch-spdt-smd:MST-12D18G2SMDSLIDESWITCH"
+    (in_bom yes)
+    (on_board yes)
+    (property
+      "Reference"
+      "SW"
+      (id 0)
+      (at 0 8.89 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Value"
+      "MST-12D18G2 SMD SLIDE SWITCH"
+      (id 1)
+      (at 0 -1.27 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Footprint"
+      "slide-switch-spdt-smd:SW-SMD_3P-L9.1-W3.5-P2.50_MST-12D18G2"
+      (id 2)
+      (at 0 -3.81 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Datasheet"
+      "https://www.lcsc.com/datasheet/C49023765.pdf"
+      (id 3)
+      (at 0 -6.35 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Manufacturer"
+      "SHOU HAN(首韩)"
+      (id 4)
+      (at 0 -8.89 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "MPN"
+      "MST-12D18G2 SMD Slide Switch"
+      (id 5)
+      (at 0 -11.43 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "LCSC Part"
+      "C49023765"
+      (id 6)
+      (at 0 -13.97 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (symbol "MST-12D18G2SMDSLIDESWITCH_0_1"
+      (polyline
+        (pts
+          (xy -5.08 1.27) (xy -2.54 1.27) (xy -2.54 -0.00) (xy -5.08 -0.00) (xy -5.08 1.27)
+        )
+        (stroke (width 0) (type default))
+        (fill (type background))
+      )
+      (polyline
+        (pts
+          (xy 0.00 1.27) (xy 2.54 1.27) (xy 2.54 -0.00) (xy 0.00 -0.00) (xy 0.00 1.27)
+        )
+        (stroke (width 0) (type default))
+        (fill (type background))
+      )
+      (polyline
+        (pts
+          (xy 5.08 1.27) (xy 7.62 1.27) (xy 7.62 -0.00) (xy 5.08 -0.00) (xy 5.08 1.27)
+        )
+        (stroke (width 0) (type default))
+        (fill (type background))
+      )
+      (polyline
+        (pts
+          (xy -3.81 -0.00) (xy -3.81 -2.54) (xy 1.27 -2.54)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 1.27 -0.00) (xy 1.27 -0.51)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 1.27 -1.02) (xy 1.27 -1.27) (xy 1.27 -1.52)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 1.27 -2.54) (xy 1.27 -2.03)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 1.27 -3.05) (xy 1.27 -3.56)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 1.27 -4.06) (xy 1.78 -4.06)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 2.29 -4.06) (xy 2.79 -4.06)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 3.30 -4.06) (xy 3.81 -4.06)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 4.57 -4.06) (xy 5.08 -4.06)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 5.84 -4.06) (xy 6.35 -4.06)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 6.35 -4.06) (xy 6.35 -3.56)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 6.35 -3.05) (xy 6.35 -2.54)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 6.35 -1.78) (xy 6.35 -1.27)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (polyline
+        (pts
+          (xy 6.35 -0.51) (xy 6.35 -0.00)
+        )
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (pin passive line
+        (at -3.81 3.81 270)
+        (length 2.54)
+        (name "1" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))
+      )
+      (pin passive line
+        (at 1.27 3.81 270)
+        (length 2.54)
+        (name "2" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27))))
+      )
+      (pin passive line
+        (at 6.35 3.81 270)
+        (length 2.54)
+        (name "3" (effects (font (size 1.27 1.27))))
+        (number "3" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )
+		(symbol "Device:R"
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "R"
+			(at 2.032 0 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "R"
+			(at 0 0 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at -1.778 0 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "R res resistor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_fp_filters" "R_*"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "R_0_1"
+			(rectangle
+				(start -1.016 -2.54)
+				(end 1.016 2.54)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "R_1_1"
+			(pin passive line
+				(at 0 3.81 270)
+				(length 1.27)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 0 -3.81 90)
+				(length 1.27)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+	)
+
+	(symbol
+		(lib_id "slide-switch-spdt-smd:MST-12D18G2SMDSLIDESWITCH")
+		(at 147.32 119.38 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "f64b6a31-2e66-55a1-8c49-0bcf6629505a")
+		(property "Reference" "SW1"
+			(at 147.32 113.03 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "MSK12C02"
+			(at 147.32 110.49 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "slide-switch-spdt-smd:SW-SMD_3P-L9.1-W3.5-P2.50_MST-12D18G2"
+			(at 147.32 126.38 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 147.32 119.38 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" ""
+			(at 147.32 119.38 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "CAN_BUS_NODE"
+				(path "/654e5172-58f9-445b-b823-8ea0965a14c2"
+					(reference "SW1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 143.51 101.6 180)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "94c309d5-8525-52ac-b675-caaa9556a1f7")
+		(property "Reference" "R5"
+			(at 145.288 100.33 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "120R"
+			(at 145.288 102.87 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+			(at 143.51 108.6 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" ""
+			(at 143.51 101.6 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "LCSC C4142287"
+			(at 143.51 101.6 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(instances
+			(project "CAN_BUS_NODE"
+				(path "/654e5172-58f9-445b-b823-8ea0965a14c2"
+					(reference "R5")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(wire
+		(pts (xy 143.51 115.57) (xy 143.51 113.03))
+		(stroke (width 0) (type default))
+		(uuid "a1feb734-51ba-57d1-ac79-630d6912f581")
+	)
+	(wire
+		(pts (xy 143.51 105.41) (xy 143.51 107.95))
+		(stroke (width 0) (type default))
+		(uuid "5c141cee-be0c-5dd6-b89e-c75058d9f0bb")
+	)
+	(wire
+		(pts (xy 153.67 115.57) (xy 153.67 113.03))
+		(stroke (width 0) (type default))
+		(uuid "573c744c-b1ed-515e-af24-d099c78f66e2")
+	)
+	(wire
+		(pts (xy 143.51 97.79) (xy 143.51 95.25))
+		(stroke (width 0) (type default))
+		(uuid "880fd890-9da4-51e0-9e36-a6246e07af6e")
+	)
+	(no_connect
+		(at 148.59 115.57)
+		(uuid "f1c8aea2-6df2-5429-9c09-5d2664d42d6b")
+	)
+	(hierarchical_label "CANH" (shape bidirectional)
+		(at 143.51 113.03 90)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "c7da2a57-5011-52c7-9962-564dac8f2612")
+	)
+	(hierarchical_label "CANH" (shape bidirectional)
+		(at 143.51 107.95 270)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "c7da2a57-5011-52c7-9962-564dac8f2612")
+	)
+	(hierarchical_label "CANL" (shape bidirectional)
+		(at 153.67 113.03 90)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "b7c9d96f-e2bd-5e00-91dd-cbc3a0d8b476")
+	)
+	(hierarchical_label "CANL" (shape bidirectional)
+		(at 143.51 95.25 90)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "b7c9d96f-e2bd-5e00-91dd-cbc3a0d8b476")
+	)
+
+	(sheet_instances
+		(path "/cf61f6f0-373b-4ecc-bac9-65aae7e77509"
+			(page "TERMINATOR")
+		)
+	)
+)

@@ -3935,14 +3935,7 @@ def samples_page():
                 ui.label(s.blurb).classes("text-sm").style("color:#94a3b8")
                 # Interactive 3D board first (the show-off view), then the real
                 # schematic and routed board in KiCanvas.
-                if s.has_3d():
-                    with ui.card().classes("w-full") \
-                            .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
-                        ui.label("3D model").classes("text-xs font-medium") \
-                            .style("color:#94a3b8")
-                        # sanitize=False: NiceGUI would strip the custom element.
-                        ui.html(_sample_model_viewer(s), sanitize=False) \
-                            .classes("w-full")
+                _render_sample_3d(s)
                 # Schematic and board are both rendered visible (not in tabs/dialogs):
                 # a KiCanvas WebGL canvas built inside a hidden container can size to
                 # zero and never repaint, so keeping both on-screen avoids that.
@@ -3970,6 +3963,60 @@ def samples_page():
                         .classes("text-xs").style("color:#64748b")
                     ui.label(s.blurb).classes("text-xs").style("color:#94a3b8")
                 card.on("click", lambda ss=s: open_sample(ss))
+
+@ui.page("/examples/{sample_id}")
+def sample_detail_page(sample_id: str):
+    """Public detail view for one curated example board.
+
+    The files are prebuilt static assets, so logged-out visitors can inspect the
+    3D model, schematic, and routed board without starting a model run. The CTA
+    still sends visitors through signup before creating their own design.
+    """
+    sample = next((s for s in available_samples() if s.id == sample_id), None)
+    if sample is None:
+        return PlainTextResponse("Example board not found.\n", status_code=404)
+
+    ui.dark_mode().enable()
+    ui.query("body").style("background:var(--kc-bg)")
+    kicanvas_head()
+    _mobile_head()
+    if sample.has_3d():
+        ui.add_head_html(
+            '<script type="module" src="/static/model-viewer.min.js"></script>')
+
+    with ui.header().classes("items-center justify-between") \
+            .style("background:var(--kc-surface);border-bottom:1px solid var(--kc-border)"):
+        with ui.row().classes("items-center gap-2"):
+            ui.label("KiCraft").classes("text-xl font-bold text-white")
+            ui.label("example board").classes("text-sm kc-tagline").style("color:#94a3b8")
+        ui.button("Back to examples", icon="arrow_back",
+                  on_click=lambda: ui.navigate.to("/")) \
+            .props("flat dense no-caps color=white").classes("text-xs")
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1200px"):
+        with ui.row().classes("w-full items-center justify-between gap-2"):
+            ui.label(sample.title).classes("text-2xl font-bold text-white")
+            ui.button("Use this design as a starting point", icon="bolt",
+                      on_click=lambda: ui.navigate.to(
+                          f"/signup?prompt={quote(sample.prompt)}")) \
+                .props("color=primary unelevated")
+        ui.label(sample.blurb).classes("text-sm").style("color:#94a3b8")
+        ui.label(f"{sample.sheets} sheets / {sample.parts} parts / routed") \
+            .classes("text-xs font-mono").style("color:#64748b")
+
+        # The public page gets the same interactive 3D model as the logged-in
+        # explorer, with the generated still as an immediate poster fallback.
+        _render_sample_3d(sample)
+
+        with ui.card().classes("w-full") \
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
+            _render_synth_view(sample.schematic_sources(), sample.stem, sample.dir)
+        with ui.card().classes("w-full") \
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
+            ui.label("Board").classes("text-xs font-medium").style("color:#94a3b8")
+            url, name = sample.board_source()
+            KiCanvasView([KiCanvasSource(url, name)], height="h-[520px]")
+
 
 
 def _mobile_head() -> None:
@@ -4299,7 +4346,7 @@ def _sample_media(s, *, hero: bool = False) -> str:
     """A static, high-quality isometric render of the board. The landing page is
     all stills now — the hero and every gallery card — so it paints instantly and
     shows the board the way the renderer drew it. The interactive 3D model lives
-    on the logged-in explorer instead (see ``_sample_model_viewer``)."""
+    on the public detail page and the logged-in explorer instead."""
     alt = f"{s.title} board, designed by KiCraft"
     if hero:
         # The featured board's dedicated hero render (hero.png, else board.png).
@@ -4309,7 +4356,7 @@ def _sample_media(s, *, hero: bool = False) -> str:
 
 
 def _sample_model_viewer(s) -> str:
-    """Interactive 3D ``<model-viewer>`` of the board's GLB, for the explorer.
+    """Interactive 3D ``<model-viewer>`` of a curated example board.
     Orbit/zoom enabled and gently auto-rotating, grounded with a soft shadow; the
     static render is the poster so it paints instantly before the GLB streams in.
     Starts at a flat, mostly-top-down angle to match the landing stills."""
@@ -4323,10 +4370,22 @@ def _sample_model_viewer(s) -> str:
         f'style="width:100%;height:520px;background:transparent;'
         f'--poster-color:transparent;"></model-viewer>')
 
+def _render_sample_3d(s) -> None:
+    """Render the trusted interactive 3D model card for a sample board."""
+    if not s.has_3d():
+        return
+    with ui.card().classes("w-full") \
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
+        ui.label("3D model").classes("text-xs font-medium") \
+            .style("color:#94a3b8")
+        # sanitize=False: NiceGUI would strip the custom element. The input is a
+        # curated Sample, never a user-submitted brief.
+        ui.html(_sample_model_viewer(s), sanitize=False).classes("w-full")
+
 
 def _landing_sample_card(s) -> str:
     badge = '<span class="kc-badge">Featured</span>' if s.featured else ""
-    href = f"/signup?prompt={quote(s.prompt)}"
+    href = f"/examples/{s.id}"
     return (
         f'<a class="kc-sample kc-reveal" href="{href}">'
         f'<div class="kc-sample-art">{badge}{_sample_media(s)}</div>'
@@ -4343,9 +4402,8 @@ def _landing_sample_card(s) -> str:
 
 def _render_landing() -> None:
     """The public marketing page at / for logged-out visitors: a hero, the pipeline,
-    feature cards, a gallery of real boards KiCraft designed, and CTAs that route to
-    signup. Pure static content: the showcase boards are prebuilt assets, so nothing
-    here calls a model (no token spend before a valid email signup)."""
+    feature cards, a gallery of real boards KiCraft designed, and public detail-page
+    links. Use-design CTAs still route through signup; no model runs here."""
     ui.dark_mode().enable()
     ui.query("body").style("background:var(--kc-bg)")
     ui.add_head_html('<link rel="stylesheet" href="/static/kc_landing.css">')
@@ -4357,8 +4415,8 @@ def _render_landing() -> None:
     samples = available_samples()
     hero = featured_sample()
     # The landing page is all static renders now — no <model-viewer> and no
-    # model-viewer bundle loaded here. The interactive 3D board lives on the
-    # logged-in explorer (samples_page), which pulls the bundle in itself.
+    # model-viewer bundle loaded here. Public detail pages and the logged-in
+    # explorer load the interactive 3D board when a visitor opens a sample.
 
     pipeline = "".join(
         f'<div class="kc-step{" kc-step-build" if b else ""}">'

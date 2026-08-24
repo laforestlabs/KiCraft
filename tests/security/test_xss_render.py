@@ -49,12 +49,9 @@ def test_model_viewer_sink_consumes_curated_samples_only():
 
 
 def test_landing_card_consumes_only_curated_sample_fields():
-    """The landing/explorer cards interpolate Sample attributes (`s.title`,
-    `s.prompt`, ...) -- curated showcase content from samples.py, not user briefs.
-    Assert the helper builds purely from `s.` attributes (the trust boundary)."""
+    """Landing cards route by curated sample ID and render curated metadata."""
     web = _web()
     src = inspect.getsource(web._landing_sample_card)
-    # user-facing routing of the prompt goes through quote() (URL-encoded), and the
-    # card itself only reads curated Sample attributes
-    assert "quote(s.prompt)" in src
-    assert "s.title" in src and "s.blurb" in src
+    assert 'f"/examples/{s.id}"' in src
+    assert "s.id" in src and "s.title" in src and "s.blurb" in src
+    assert "s.prompt" in src

@@ -19,13 +19,8 @@ from __future__ import annotations
 
 # Full briefs the animated placeholder cycles through.
 EXAMPLE_PROMPTS = [
-    "An ESP32-S3 plant monitor: soil moisture + BME280 temp/humidity, a small OLED, USB-C power.",
-    "A USB-C PD trigger board that outputs a switch-selectable 9 V, 12 V, or 20 V.",
-    "An 8-channel addressable WS2812 LED driver running off 5 V USB-C.",
-    "A BMP280 barometric weather sensor on a Qwiic/STEMMA bus, USB-C.",
-    "A USB-C rechargeable 18650 flashlight: boost driver, three white LEDs, no microcontroller.",
-    "An ESP32-S3 automatic cat feeder: stepper-driven auger, load-cell food sensor, USB-C.",
-    "A bench breakout: USB-C in, regulated 3.3 V and 5 V rails with status LEDs.",
-    "An ESP32-S3 environmental logger: BME280 + ambient light sensor + microSD, USB-C.",
-    "A motion-activated USB-C night light with a PIR sensor and warm-white LEDs.",
+    "An ESP32-S3 HUB75 display controller with USB-C PD 5 V input, an addressable LED output, and a small speaker output.",
+    "An ESP32-S3 robot controller with two DRV8833 motor drivers, a buck regulator from a 2S battery, and motor screw terminals.",
+    "A CAN bus node: an STM32 MCU, an SN65HVD230 transceiver, a DB9 connector, and a switchable bus terminator.",
+    "A 1 A constant-current driver for a single power LED, USB-C input, with a heatsink copper area, no microcontroller.",
 ]
