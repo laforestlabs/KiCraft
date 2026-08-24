@@ -9,6 +9,7 @@ next compactor/serializer change breaks a test here instead of the skill.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,47 @@ def test_scan_tiers_never_routed_as_route_fail(tmp_path):
     assert data["run_count"] == 1
     assert data["tiers"] == {"route_fail (no routed parent, rc6 family)": 1}
     assert run  # silence unused
+
+def test_scan_home_fetched_buckets(tmp_path, monkeypatch):
+    """Provenance flags aggregate into the cross-run library-coverage
+    buckets, keyed by slug with the run tags that emitted them."""
+    run, _sd, exp = make_run(tmp_path)
+    make_parent_round(exp, 1, {"routed_validation": {}})
+    monkeypatch.setattr(triage, "collect_library_provenance", lambda _r: {
+        "rows": [], "tiers": {}, "flagged": [
+            ("J1", "home-fetched", "pj-320d"),
+            ("U7", "missing-lib", "tl074x"),
+        ]})
+    data = triage.collect_scan([tmp_path])
+    assert data["home_fetched"] == {"pj-320d": ["1/999"]}
+    assert data["missing_libs"] == {"tl074x": ["1/999"]}
+    assert run  # silence unused
+
+
+def test_scan_home_fetched_ranked_by_designs_then_latest(tmp_path, monkeypatch):
+    """Bucket order: most designs first, ties broken by most-recent run."""
+    for pid, mtime in ((998, 0), (999, 86400)):
+        run = tmp_path / "1" / str(pid)
+        sd = run / "generated" / "BOARD"
+        exp = sd / ".experiments"
+        exp.mkdir(parents=True)
+        _write(exp / "hierarchical_autoexperiment" / "round_0001"
+               / "parent_pipeline.json",
+               {"state": {"routed_validation": {}}})
+        os.utime(run, (mtime, mtime))
+
+    def fake_prov(run: Path):
+        if run.name == "998":
+            return {"rows": [], "tiers": {}, "flagged": [
+                ("J1", "home-fetched", "older-slug"),
+                ("J2", "home-fetched", "shared-slug")]}
+        return {"rows": [], "tiers": {}, "flagged": [
+            ("J1", "home-fetched", "shared-slug"),
+            ("J2", "home-fetched", "newer-slug")]}
+
+    monkeypatch.setattr(triage, "collect_library_provenance", fake_prov)
+    data = triage.collect_scan([tmp_path])
+    assert list(data["home_fetched"]) == ["shared-slug", "newer-slug", "older-slug"]
 
 
 # ---------------------------------------------------------------------------

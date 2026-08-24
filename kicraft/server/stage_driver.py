@@ -306,7 +306,7 @@ def _format_core_defaults_block(rows) -> str | None:
     default part per common functional block (repo catalog core_blocks.json,
     synced into /admin/core-components). The notes and price/stock snapshots
     are deliberately dropped; this table rides the user prompt through every
-    BOM tool round, so it must stay small (~6KB for 43 rows). Rows the admin
+    BOM tool round, so it must stay small (~6.5KB for 49 rows). Rows the admin
     disabled are skipped, and rows whose default C# is missing or below the
     JLC stock floor in the current offline catalog are omitted (with a caveat
     line) so the model never adopts a dry default — no live retail lookup

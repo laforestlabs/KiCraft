@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:bb42f8534fba8da851faa33d63bd831fcb6cbb6550fd0fdc15a12ec6c3dd0ee5",
+  "datasheet_url": "https://lcsc.com/product-detail/FET-InputAmplifiers_TI_TL074IDR_TL074IDR_C6964.html",
+  "description": "Quad Low-Noise JFET-Input General-Purpose Operational Amplifier, 7 to 36 V, -40 to 85 degC, 14-pin SOIC (D14), Green (RoHS  no SbBr)",
+  "footprint_name": "SOIC-14_L8.7-W3.9-P1.27-LS6.0-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "TL074IDR",
+  "name": "tl074",
+  "provenance": {
+    "added_at": "2026-08-24T01:26:11Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C6964"
+  },
+  "symbol_name": "TL074IDR",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

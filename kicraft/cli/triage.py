@@ -628,6 +628,10 @@ def default_scan_roots() -> list[Path]:
             REPO_ROOT / "logs" / "self_eval"]
 
 
+# provenance flag kind -> scan bucket name (library-coverage worklist)
+_LIB_FLAG_BUCKETS = {"home-fetched": "home_fetched", "missing-lib": "missing_libs"}
+
+
 def collect_scan(roots: list[Path]) -> dict:
     run_dirs: set[Path] = set()
     for root in roots:
@@ -644,7 +648,8 @@ def collect_scan(roots: list[Path]) -> dict:
     sha: dict[str, str] = {}
     buckets = {k: collections.defaultdict(set) for k in
                ("erc_types", "reject", "drc", "fp_refs", "nets_cross_leaf",
-                "nets_leaf_internal", "nets_unclassified", "leaf_reasons")}
+                "nets_leaf_internal", "nets_unclassified", "leaf_reasons",
+                "home_fetched", "missing_libs")}
     for run in runs:
         tag = f"{run.parent.name}/{run.name}"
         try:
@@ -657,6 +662,15 @@ def collect_scan(roots: list[Path]) -> dict:
         erc = collect_erc(run)
         for e in erc.get("errors") or []:
             buckets["erc_types"][e["type"]].add(tag)
+        # Library-coverage worklist: the same tier resolution the audits
+        # block [A] uses, tallied across every run. A slug vendored after
+        # the run drops out of home_fetched (curated tier now shadows the
+        # home cache), so a stale hit is distinguishable via latest=/sha=.
+        prov = collect_library_provenance(run)
+        for _ref, kind, slug in prov.get("flagged") or []:
+            bucket = _LIB_FLAG_BUCKETS.get(kind)
+            if bucket and slug:
+                buckets[bucket][slug].add(tag)
         exp = experiments_dir(run)
         if exp is None:
             tier["no layout (rc<=5 family: synth/ERC)"] += 1
@@ -695,6 +709,17 @@ def collect_scan(roots: list[Path]) -> dict:
                 continue
             for r in lf.get("round_reasons") or []:
                 buckets["leaf_reasons"][norm_reason(r)].add(tag)
+    # Rank the library-coverage buckets by #designs, ties by most-recent
+    # run, so the printed worklist leads with the most repeated / current
+    # gaps (show() re-sorts by count and keeps this order for ties).
+    for key in _LIB_FLAG_BUCKETS.values():
+        ranked = sorted(
+            buckets[key].items(),
+            key=lambda kv: max((when.get(t, "") for t in kv[1]), default=""),
+            reverse=True,
+        )
+        buckets[key] = {k: v for k, v in
+                        sorted(ranked, key=lambda kv: -len(kv[1]))}
     return {"run_count": len(runs), "tiers": dict(tier), "when": when, "sha": sha,
             **{k: {kk: sorted(vv) for kk, vv in v.items()} for k, v in buckets.items()}}
 
@@ -720,6 +745,11 @@ def print_scan(d: dict) -> None:
     show("parent rejection reasons", d["reject"])
     show("parent DRC error types", d["drc"])
     show("clearance footprint refs (recurring ref = footprint-library bug)", d["fp_refs"])
+    show("home-fetched libraries (VENDOR IT to close the coverage gap; a hit "
+         "that predates a later vendor is stale — check latest=/sha=)",
+         d["home_fetched"])
+    show("missing libraries (hallucinated/missing slug — resolver hole)",
+         d["missing_libs"])
     show("unconnected CROSS-LEAF nets (in interconnect_net_names: parent "
          "interconnect problem — escapes/corridors/budget)", d["nets_cross_leaf"])
     show("unconnected nets NOT in interconnect_net_names (leaf-internal open — "

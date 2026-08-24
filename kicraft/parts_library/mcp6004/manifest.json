@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:cd7f533c07cab28e74dc5fad15dc7eee70c52647706db034a66c50733fb38d92",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C1346056.pdf",
+  "description": "MICROCHIP(\u7f8e\u56fd\u5fae\u82af) MCP6004-I/SL",
+  "footprint_name": "SOIC-14_L8.7-W3.9-P1.27-LS6.0-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "MCP6004-I/SL",
+  "name": "mcp6004",
+  "provenance": {
+    "added_at": "2026-08-24T01:25:53Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C1346056"
+  },
+  "symbol_name": "MCP6004-I_SL",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:52f83481788c48a3c32df9a6b048651444b35a1bd5f380b6370ca02b234f18e2",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C18185602.pdf",
+  "description": "SHOU HAN(\u9996\u97e9) PJ-320A-4P DIP",
+  "footprint_name": "AUDIO-TH_PJ-320A-4P-DIP",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "PJ-320A-4P DIP",
+  "name": "pj-320a-4p",
+  "provenance": {
+    "added_at": "2026-08-24T01:26:03Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C18185602"
+  },
+  "symbol_name": "PJ-320A-4PDIP",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

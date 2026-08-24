@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:7df484853bbad6ed5006f5600b96af059447af58c00737dc1f26dd8bdc7e5f98",
+  "datasheet_url": "https://lcsc.com/product-detail/Power-Connectors_SHOU-HAN-DC005_C431533.html",
+  "description": "SHOU HAN(\u9996\u97e9) DC005",
+  "footprint_name": "DC-IN-TH_DC005",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "DC005",
+  "name": "dc005-barrel-jack",
+  "provenance": {
+    "added_at": "2026-08-24T01:26:11Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C431533"
+  },
+  "symbol_name": "DC005_C431533",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:e561500a4d493c5428870af780a5c95a0356b974e28395cc7ea103629768f1e9",
+  "datasheet_url": "https://lcsc.com/product-detail/Audio-Video-Connectors_SHOU-HAN-PJ-320D_C431535.html",
+  "description": "SHOU HAN(\u9996\u97e9) PJ-320D",
+  "footprint_name": "AUDIO-SMD_PJ-320D-1",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "PJ-320D",
+  "name": "pj-320d",
+  "provenance": {
+    "added_at": "2026-08-24T01:25:45Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C431535"
+  },
+  "symbol_name": "PJ-320D",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

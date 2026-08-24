@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:d8769183e1326e4b808984d8a402d25521ee83acc1a48f1f84e1c221377cb5e4",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C2884926.pdf",
+  "description": "XKB Connection(\u4e2d\u56fd\u661f\u5764) PJ-320A",
+  "footprint_name": "AUDIO-TH_XKB_PJ-320A",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "PJ-320A",
+  "name": "pj-320a",
+  "provenance": {
+    "added_at": "2026-08-24T01:26:04Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2884926"
+  },
+  "symbol_name": "PJ-320A",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

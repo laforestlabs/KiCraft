@@ -482,6 +482,26 @@
       "selection_notes": "The part class for SMT I2C OLED panel briefs — NOT a bare 1x4 pin header standing in for the module (self-eval 2026-07-07 run_20 silent substitution).",
       "sort_order": 460,
       "bundle": "hs96l03w2c03"
+    },
+    {
+      "function_key": "audio-jack-3-5mm",
+      "display_name": "3.5mm TRS audio jack",
+      "category": "interface",
+      "qualifier": "SMD, tip/ring/sleeve + detect",
+      "package": "PJ-320D SMD",
+      "selection_notes": "C431535 PJ-320D (SHOU HAN, SMD, ~50K stock). Legacy runs also picked PJ-320A (C2884926) and PJ-320A-4P (C18185602); the vendored pj-320a / pj-320a-4p bundles shadow those slugs if the model falls back.",
+      "sort_order": 470,
+      "bundle": "pj-320d"
+    },
+    {
+      "function_key": "opamp-quad-general",
+      "display_name": "Quad op-amp (general/unity-gain buffer)",
+      "category": "drivers",
+      "qualifier": "rail-to-rail, 1MHz GBW, single supply",
+      "package": "SOIC-14",
+      "selection_notes": "C1346056 MCP6004-I/SL. For higher slew/low-noise use TL074 (C6964; vendored tl074 bundle) — pick per the design's signal requirement.",
+      "sort_order": 280,
+      "bundle": "mcp6004"
     }
   ]
 }
